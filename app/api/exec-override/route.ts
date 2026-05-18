@@ -47,6 +47,15 @@ type DecisionBody = {
 };
 
 export async function GET(req: NextRequest) {
+  // GET leaks raw command + reason strings from blocked exec-guard requests
+  // — operationally sensitive. middleware lists /api/exec-override as a
+  // public prefix because the POST path is HMAC-gated for the external
+  // approve/deny path, but that exception applied to POST only. Gate GET
+  // behind a session check so unauthenticated callers can't enumerate
+  // recently-blocked commands. (Codex adversarial pass 4, 2026-05-18.)
+  const user = await (await import("@/lib/supabase-server")).getSessionUser().catch(() => null);
+  if (!user) return bad(401, "unauthorized");
+
   const url = new URL(req.url);
   const sinceHours = Math.min(
     Math.max(parseInt(url.searchParams.get("since_hours") || "24", 10) || 24, 1),

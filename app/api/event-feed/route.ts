@@ -14,13 +14,24 @@
  */
 
 import { NextRequest, NextResponse } from "next/server";
-import { getServiceSupabase } from "@/lib/supabase-server";
+import { getServiceSupabase, getSessionUser } from "@/lib/supabase-server";
 import { bad } from "@/lib/api-helpers";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
 export async function GET(req: NextRequest) {
+  // Auth gate (Codex adversarial pass 4, 2026-05-18): this endpoint
+  // was in middleware PUBLIC_PATH_PREFIXES under the "proof of life
+  // for OASIS Town" rationale, but the response includes raw
+  // agent_events.payload — which can carry record IDs, lead context,
+  // command summaries, error details. Unauthenticated read = cross-
+  // tenant scrape. Require a session; payload still spans tenants
+  // (that's the empire-wide nature of agent_events) but the access
+  // surface is no longer the open internet.
+  const user = await getSessionUser().catch(() => null);
+  if (!user) return bad(401, "unauthorized");
+
   const url = new URL(req.url);
   const sinceMinutes = Math.min(
     Math.max(parseInt(url.searchParams.get("since_minutes") || "60", 10) || 60, 1),

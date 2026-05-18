@@ -113,6 +113,18 @@ export async function POST(req: NextRequest) {
     }
     link = sigResult.payload;
   } else if (body.anonymous_init?.tenant_slug && body.anonymous_init?.form_slug) {
+    // Anonymous_init is ONLY valid on step 0 — without this guard an
+    // attacker could POST anonymous_init with step_index=N (final
+    // step) and an empty payload, instantly creating a lead and
+    // bumping it to on_complete_stage. Lock the entry point to step 0
+    // and rely on the minted_token + per-step sequential check below
+    // for the rest of the funnel. (Codex pass 4, 2026-05-18.)
+    if (Number(body.step_index) !== 0) {
+      return NextResponse.json(
+        { ok: false, error: "anonymous_init_requires_step_0" },
+        { status: 400 },
+      );
+    }
     // Pre-create rate limit on the anonymous_init path. The token-bucket
     // BELOW keys on lead_id, which is freshly minted here — so without
     // this gate every anonymous request would land in its own bucket and
@@ -254,6 +266,67 @@ export async function POST(req: NextRequest) {
       { ok: false, error: "step_index_out_of_range", max: steps.length - 1 },
       { status: 400 },
     );
+  }
+
+  // Sequential-progress + required-field enforcement (Codex pass 4,
+  // 2026-05-18). Without these checks an attacker with a valid token
+  // (stolen or anonymous-init'd) could POST step_index=N (final) with
+  // an empty payload and trigger on_complete_stage immediately,
+  // bumping the lead to 'submitted' without any actual data.
+  //
+  // 1. Step N requires that submissions exist for steps 0..N-1 of the
+  //    same (form_id, lead_id). Step 0 is exempt.
+  // 2. Required fields on the SUBMITTED step must be present in the
+  //    payload (string fields non-empty; file_upload fields either in
+  //    inlineFiles or referenced as already-uploaded storage_path).
+  if (stepIndex > 0) {
+    const priorQ = await db
+      .from("form_submissions")
+      .select("step_index")
+      .eq("form_id", form.id)
+      .eq("lead_id", link.lead_id);
+    const completedSteps = new Set(
+      (priorQ.data || []).map((r) => Number((r as { step_index: number }).step_index)),
+    );
+    for (let i = 0; i < stepIndex; i++) {
+      if (!completedSteps.has(i)) {
+        return NextResponse.json(
+          { ok: false, error: "prior_step_incomplete", missing_step: i },
+          { status: 400 },
+        );
+      }
+    }
+  }
+  const currentStep = steps[stepIndex];
+  const inlineFileNames = new Set(inlineFiles.map((f) => f.fieldName));
+  for (const field of currentStep.fields) {
+    if (!field.required) continue;
+    const v = payload[field.name];
+    if (field.type === "file_upload") {
+      // Either an inline file in THIS request OR a previously-uploaded
+      // storage_path reference would satisfy the field.
+      const hasInline = inlineFileNames.has(field.name);
+      const hasStoragePath =
+        v && typeof v === "object" && typeof (v as { storage_path?: unknown }).storage_path === "string";
+      if (!hasInline && !hasStoragePath) {
+        return NextResponse.json(
+          { ok: false, error: "missing_required_file", field: field.name },
+          { status: 400 },
+        );
+      }
+    } else {
+      const present =
+        (typeof v === "string" && v.trim().length > 0) ||
+        (typeof v === "number" && !Number.isNaN(v)) ||
+        (Array.isArray(v) && v.length > 0) ||
+        (typeof v === "boolean");
+      if (!present) {
+        return NextResponse.json(
+          { ok: false, error: "missing_required_field", field: field.name },
+          { status: 400 },
+        );
+      }
+    }
   }
 
   // Insert the submission row. service-role write — RLS doesn't see this

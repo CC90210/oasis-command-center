@@ -336,7 +336,12 @@ export async function POST(req: NextRequest) {
   // read_only members). One row read; failure silently drops the block
   // so a transient DB hiccup never breaks chat.
   let operatorBlock = "";
-  let operatorRole = "member";
+  // Fail CLOSED on role lookup failure (Codex pass 4, 2026-05-18). If
+  // user_profiles lookup throws or returns nothing, default to
+  // read_only — refuses writes via the role-gates filter below. A
+  // transient DB hiccup gives the operator a read-only chat experience,
+  // not a write-bypass.
+  let operatorRole = "read_only";
   try {
     const opRow = await service
       .from("user_profiles")
@@ -353,14 +358,18 @@ export async function POST(req: NextRequest) {
       | null;
     if (op) {
       const name = op.display_name || op.full_name || op.email || "Operator";
-      operatorRole = op.team_role || "member";
+      // Trust the DB row's team_role — if the column is null on a
+      // valid profile, that operator was never assigned a role, so
+      // read_only is the right default for them too.
+      operatorRole = op.team_role || "read_only";
       operatorBlock =
         `\n\n---\nOPERATOR CONTEXT\n` +
         `You are talking to ${name} (team_role: ${operatorRole}). Address them by name when natural. ` +
         `Respect their role: owner/admin can do anything; loan_officer/processor/member can read everything but should confirm with an admin before destructive actions; read_only sees only — refuse writes.\n---`;
     }
+    // If op is null, operatorRole stays "read_only" (fail-closed).
   } catch {
-    // Best-effort; an operator name lookup failure shouldn't block chat.
+    // operatorRole stays "read_only" — failure → safe default.
   }
   // Server-side enforcement of read_only — the persona text above is
   // advisory (the model can ignore it on a jailbreak). Hard-strip

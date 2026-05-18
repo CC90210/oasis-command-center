@@ -30,6 +30,50 @@ export async function GET(
   if (!/^[a-z0-9][a-z0-9_-]{1,62}$/.test(normalised)) {
     return NextResponse.json({ ok: false, error: "invalid slug" }, { status: 400 });
   }
+  // Tenant-preview access gate (Codex pass 4, 2026-05-18). The
+  // /t/[slug] pages call requireTenantPreviewAccess; this API GET
+  // was bypassing the same gate. Any authenticated tenant could
+  // GET /api/manifest/sun and read SunBiz's full manifest including
+  // nav, brand, data_model, agent palettes. Same access policy now
+  // applies to the API surface.
+  const { canPreviewTenantSlug } = await import("@/lib/tenant-access");
+  const user = await getSessionUser().catch(() => null);
+  if (!user) {
+    return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
+  }
+  const db = getServiceSupabase();
+  const profile = await db
+    .from("user_profiles")
+    .select("email, tenant_id")
+    .eq("auth_user_id", user.id)
+    .maybeSingle();
+  const tenantId = (profile.data as { tenant_id: string | null } | null)?.tenant_id || null;
+  let callerTenantSlug: string | null = null;
+  let callerCommandSlug: string | null = null;
+  if (tenantId) {
+    const t = await db
+      .from("tenants")
+      .select("slug, custom_fields")
+      .eq("id", tenantId)
+      .maybeSingle();
+    callerTenantSlug = (t.data?.slug as string | undefined) ?? null;
+    const custom = (t.data?.custom_fields || {}) as Record<string, unknown>;
+    const cf = custom.command_center_profile_slug;
+    callerCommandSlug = typeof cf === "string" ? cf : null;
+  }
+  const allowed = canPreviewTenantSlug(
+    {
+      email: profile.data?.email ?? user.email,
+      tenant_slug: callerTenantSlug,
+      command_center_profile_slug: callerCommandSlug,
+    },
+    normalised,
+  );
+  if (!allowed) {
+    // Collapse "exists but you can't see" and "doesn't exist" into a
+    // single 404 so the response can't be used to enumerate tenants.
+    return NextResponse.json({ ok: false, error: "unknown tenant" }, { status: 404 });
+  }
   if (!(await manifestExists(normalised))) {
     return NextResponse.json({ ok: false, error: "unknown tenant" }, { status: 404 });
   }

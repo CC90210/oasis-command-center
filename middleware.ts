@@ -27,9 +27,12 @@ const PUBLIC_PATH_PREFIXES = [
   "/api/download/desktop", // public OS-aware desktop download redirect
   "/api/bridge",           // local-bridge daemon heartbeat (Bearer token gated inside)
   "/api/integrations/registry",  // canonical service+env_key list — used by the bridge to decide what to ping; non-sensitive (names only, no values), 5min Cache-Control
-  "/api/exec-override",    // external caller fallback for override approvals (HMAC auth inside)
+  "/api/exec-override",    // POST = external HMAC fallback for override approvals; GET is now session-gated inside the route (Codex pass 4, 2026-05-18).
   "/api/outbound/log",     // outbound logging from local backend (HMAC auth inside)
-  "/api/event-feed",       // OASIS Town poller reads recent agent_events (read-only, no secrets in payloads). Option B "public for proof-of-life" per 2026-05-10 directive; HMAC hardening deferred.
+  // /api/event-feed removed from public allowlist 2026-05-18 (Codex
+  // pass 4): payloads carry record IDs / lead context / command
+  // summaries — not safe for unauthenticated callers. Route now
+  // requires a session.
   "/api/quests",           // OASIS Town Quest Log polls ACTIVE_TASKS.md mirror. Read-only, public for Phase 5 proof-of-life.
   "/api/track",            // Email-open tracking pixel (Phase 19 SunBiz CRM, 2026-05-17). Must be public — mail clients fetch the pixel without a session. Route resolves tenant_id by lookup against the interaction row (never trusts the URL parameter) and always returns a 1x1 GIF, so 401-gating it would silently break every operator's open-rate tracking. Migration 050 dedupes by (outbound_message_id, ip_hash) so a known reservation_id can't be replayed to inflate row counts.
   "/api/health",           // Liveness probe — Docker healthcheck, the desktop wizard's "dashboard reachable?" check, any external uptime monitor. The route returns a static JSON status with no sensitive payload, so 401-gating it would silently break health monitoring across the deploy.
