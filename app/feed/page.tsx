@@ -95,7 +95,7 @@ export default async function FeedPage() {
     <div className="space-y-6 animate-fade-in">
       <PageHeader
         title="Event Feed"
-        subtitle="V6 cross-agent event-bus tape. The event_router daemon projects every agent_events row to state/event_router.log on CC's machine; this page is the cloud-side view of the same stream."
+        subtitle="Cross-agent event-bus tape. Every agent action appears here in real time — outbound sends, status changes, lead activity, chat tool calls."
         action={
           <div className="flex items-center gap-2">
             <Tag tone="accent">{rows.length} events / 1h</Tag>

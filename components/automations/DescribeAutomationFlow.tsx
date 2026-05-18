@@ -194,7 +194,7 @@ export function DescribeAutomationFlow() {
         <div>
           <div className="text-sm text-fg font-bold">Drafting your automation...</div>
           <div className="text-[11px] text-fg-muted mt-0.5">
-            Bravo is writing the script + picking a schedule. ~10 seconds.
+            Your agent is writing the script + picking a schedule. ~10 seconds.
           </div>
         </div>
       </div>

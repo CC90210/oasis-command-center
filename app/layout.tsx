@@ -19,8 +19,15 @@ import {
 import { SEED_MANIFESTS } from "@/lib/manifest/seeds";
 import { canPreviewTenantSlug } from "@/lib/tenant-access";
 
+// Default metadata — tenant-neutral. Individual pages override via
+// generateMetadata (forms, leads, etc.) with their own titles. Keeping
+// the default brand-neutral avoids the browser tab leaking
+// "OASIS AI · Agent Command Center" to a SunBiz / Suga / future-client
+// operator who's browsing a page that doesn't set its own title.
+// The OASIS brand is still surfaced for the OASIS tenant's own UI
+// (sidebar, footer); this is just the browser-tab fallback.
 export const metadata: Metadata = {
-  title: "OASIS AI · Agent Command Center",
+  title: "Command Center",
   description:
     "The operating system for your AI agents. Outbound, inbound, decisions, pipeline, and the daily ops plan — all in one place.",
 };

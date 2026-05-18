@@ -298,7 +298,7 @@ function AiScoreChip({ score }: { score: number }) {
           : "border-status-hot/40 bg-status-hot/10 text-status-hot";
   return (
     <span
-      title="AI lead score (0-100). Tap the lead to see Bravo's reasoning."
+      title="AI lead score (0-100). Tap the lead to see your agent's reasoning."
       className={`shrink-0 inline-flex items-center justify-center w-9 h-9 rounded-full border text-sm font-bold ${toneClass}`}
     >
       {score}

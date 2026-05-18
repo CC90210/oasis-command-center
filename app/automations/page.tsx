@@ -128,7 +128,7 @@ export default async function AutomationsPage() {
             <span className="text-fg font-bold">Making your own.</span> Type what you want
             in the &quot;Describe an automation&quot; box below — &quot;Every Monday at 9am,
             text me a summary of last week&apos;s funded deals,&quot; that kind of thing.
-            Bravo writes the script, shows you what it does, and saves it switched-off so
+            Your agent writes the script, shows you what it does, and saves it switched-off so
             nothing fires until you&apos;ve read it.
           </p>
           <p>

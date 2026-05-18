@@ -180,7 +180,7 @@ export default function DownloadPage() {
               <li><span className="text-accent font-bold">4.</span> Health check finishes, Command Center loads. Done.</li>
             </ol>
             <p className="text-[11px] text-fg-dim mt-3 leading-relaxed">
-              No terminal. No <code>bravo setup</code>. Everything the CLI wizard used to do is in the app now.
+              No terminal, no CLI setup commands. Everything the old wizard used to do is in the app now.
             </p>
           </Panel>
           <Panel title="Chrome Extension?" icon={<XCircle className="h-5 w-5" />}>
