@@ -34,16 +34,25 @@ export default async function RootLayout({
   // sidebar shell. The pathname is set as a header by middleware.ts.
   const hdrs = await headers();
   const pathname = hdrs.get("x-pathname") || hdrs.get("x-invoke-path") || "";
-  const isFullBleed =
-    pathname.startsWith("/welcome") ||
-    pathname.startsWith("/download") ||
-    pathname.startsWith("/configure") ||
-    pathname.startsWith("/login") ||
-    pathname.startsWith("/signup") ||
-    pathname.startsWith("/forgot-password") ||
-    pathname.startsWith("/auth/callback") ||
-    pathname.startsWith("/auth/reset-password") ||
-    pathname.startsWith("/onboarding");
+  // Paths that render edge-to-edge (no operator sidebar, no footer, no
+  // tenant manifest resolution). Anything aimed at a prospect / pre-auth
+  // visitor or a fresh signup walks through here. Mirrors middleware.ts
+  // PUBLIC_PATH_PREFIXES — kept as a separate list because middleware
+  // also lists API routes that aren't page-rendered.
+  const FULL_BLEED_PREFIXES = [
+    "/welcome",
+    "/download",
+    "/configure",
+    "/login",
+    "/signup",
+    "/forgot-password",
+    "/auth/callback",
+    "/auth/reset-password",
+    "/onboarding",
+    "/f/",        // public form pages (anonymous + personalized)
+    "/invite/",   // pre-signup invite landing
+  ];
+  const isFullBleed = FULL_BLEED_PREFIXES.some((p) => pathname.startsWith(p));
 
   let profile = null;
   let primaryAgentLive = false;

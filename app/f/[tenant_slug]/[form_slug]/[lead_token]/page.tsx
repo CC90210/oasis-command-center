@@ -12,6 +12,7 @@
  * tenant-slug mismatch) render a clean error page instead of 500.
  */
 
+import type { Metadata } from "next";
 import { notFound } from "next/navigation";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { verifyFormLink } from "@/lib/form-links";
@@ -30,6 +31,21 @@ export const dynamic = "force-dynamic";
 // caching one prospect's render and serving it to another would be a
 // data-leak vector even if the HMAC verification still gates submits.
 export const revalidate = 0;
+
+/** Tab title = the form's slug, not the dashboard's default. noindex,nofollow
+ *  to keep per-tenant intake URLs out of Google. */
+export async function generateMetadata({
+  params,
+}: {
+  params: Promise<RouteParams>;
+}): Promise<Metadata> {
+  const { tenant_slug, form_slug } = await params;
+  const title = decodeURIComponent(form_slug).replace(/-/g, " ");
+  return {
+    title: tenant_slug ? `${title} · ${tenant_slug}` : title,
+    robots: { index: false, follow: false },
+  };
+}
 
 type RouteParams = {
   tenant_slug: string;
