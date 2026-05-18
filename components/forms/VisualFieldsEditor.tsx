@@ -61,24 +61,35 @@ const SUNBIZ_DOC_PRESETS: Array<{
   label: string;
   help: string;
   accept: string[];
+  required: boolean;
 }> = [
   {
     name: "bank_statements_3mo",
     label: "Last 3 months of bank statements",
     help: "PDF preferred. One file per month is fine.",
     accept: ["application/pdf", "image/*"],
+    required: true,
   },
   {
     name: "drivers_license",
     label: "Photo of your driver's license",
     help: "Front of card, clear and readable.",
     accept: ["image/*", "application/pdf"],
+    required: true,
+  },
+  {
+    name: "void_cheque",
+    label: "Void cheque",
+    help: "A voided cheque from the business bank account funding will be deposited to.",
+    accept: ["application/pdf", "image/*"],
+    required: true,
   },
   {
     name: "proof_of_ownership",
-    label: "Proof of business ownership",
-    help: "Articles of incorporation, EIN letter, or business license.",
+    label: "Proof of business ownership (optional)",
+    help: "Articles of incorporation, EIN letter, or business license. Optional — speeds up underwriting if you have it ready.",
     accept: ["application/pdf", "image/*"],
+    required: false,
   },
 ];
 
@@ -193,7 +204,7 @@ export function VisualFieldsEditor({ steps, onChange }: Props) {
       label: preset.label,
       help: preset.help,
       type: "file_upload" as const,
-      required: true,
+      required: preset.required,
       accept: preset.accept,
     }));
     const key = `documents_${steps.length + 1}`;
