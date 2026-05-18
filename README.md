@@ -32,57 +32,36 @@ No third-party auth libraries, no client-side state management.
 
 ## Local dev
 
-See [[apps/command-center/ENV_SETUP]] for the full environment variable reference.
+See [ENV_SETUP.md](ENV_SETUP.md) for the full environment variable reference.
 
 ```bash
-cd apps/command-center
+git clone https://github.com/CC90210/oasis-command-center.git
+cd oasis-command-center
 npm install
-# Set BRAVO_SUPABASE_URL + BRAVO_SUPABASE_SERVICE_ROLE_KEY + OPERATOR_EMAIL
-# (.env.local in this folder, or pull from .env.agents at repo root)
+# Create .env.local with at minimum BRAVO_SUPABASE_URL,
+# BRAVO_SUPABASE_SERVICE_ROLE_KEY, BRAVO_SUPABASE_ANON_KEY, and one of
+# BRAVO_ANTHROPIC_API_KEY / ANTHROPIC_API_KEY.
 npm run dev
 # Open http://localhost:3100
 ```
 
-## Deploy to Vercel — one command
+## Deploy to Vercel
 
-The repo's `.env.agents` already has `VERCEL_TOKEN` and Supabase credentials.
-The deploy script handles everything: link, env vars, deploy, verify.
+Production lives on the Vercel project `agent-dashboard` (org `cc90210`),
+aliased at https://agent-dashboard-cc90210.vercel.app. The project is wired
+to this GitHub repo — every push to `main` auto-deploys.
 
-```bash
-python scripts/deploy_command_center.py
-```
-
-What that does (idempotent — safe to re-run):
-1. Links `apps/command-center/` to the Vercel project `cc90210/agent-dashboard`
-2. Syncs production env vars from `.env.agents`:
-   - `BRAVO_SUPABASE_URL`
-   - `BRAVO_SUPABASE_SERVICE_ROLE_KEY`
-   - `OPERATOR_EMAIL` (defaults to `conaugh@oasisai.work`)
-3. Runs `vercel deploy --prod`
-4. Curls the live URL to confirm it's reachable (200 or 401-SSO-gate)
-
-Aliased URL: `https://agent-dashboard-cc90210.vercel.app`
-
-### Variants
+For first-time setup on a new machine:
 
 ```bash
-# Just sync env vars, skip the build (fast iteration after editing .env.agents)
-python scripts/deploy_command_center.py --env-only
-
-# Just link the local folder to Vercel (first-time setup on a new machine)
-python scripts/deploy_command_center.py --link-only
-
-# Skip the post-deploy curl verification
-python scripts/deploy_command_center.py --no-verify
+npm i -g vercel
+vercel link --project agent-dashboard
+vercel pull                 # pulls production env into .vercel/.env.production.local
+vercel --prod               # manual production deploy (rarely needed)
 ```
 
-## Auto-deploy on `git push`
-
-The Vercel project's GitHub integration may or may not be wired — check
-**Vercel → agent-dashboard → Settings → Git**. If it shows the repo
-connected to `main`, every push auto-deploys. If not, use the script above.
-
-The script is the source of truth either way; auto-deploy is a convenience.
+All production env vars live in **Vercel → agent-dashboard → Settings →
+Environment Variables**. The dashboard never reads any `.env.agents` file.
 
 ## ISR — how fresh is the data?
 
@@ -127,9 +106,15 @@ it uses Node's `crypto` for the SHA-256 secret hashing.
 
 ## Related backend
 
-- **Migration**: `database/017_user_profiles.sql` — `user_profiles`, `daily_plans`, `n8n_webhook_secrets`, `integrations_health`, RPCs
-- **Profile seeder**: `python scripts/seed_profile.py` — seeds operator + today's plan
-- **n8n bridge**: `python scripts/n8n_webhook_secret.py issue --profile-email <email>` — issue secrets
-- **n8n setup**: `docs/N8N_INBOUND_WEBHOOK.md` — copy-paste guide
-- **Bridge smoke test**: `python scripts/test_n8n_inbound_rpc.py` — 8-step end-to-end verify
+The Supabase schema, n8n bridge scripts, seeder, and setup wizard live in the
+[Business-Empire-Agent](https://github.com/CC90210/CEO-Agent) repo:
+
+- **Migrations**: `database/*.sql` — `user_profiles`, `daily_plans`, `n8n_webhook_secrets`, `integrations_health`, RPCs
+- **Profile seeder**: `python scripts/seed_profile.py`
+- **n8n bridge**: `python scripts/n8n_webhook_secret.py issue --profile-email <email>`
+- **n8n setup doc**: `docs/N8N_INBOUND_WEBHOOK.md`
+- **Bridge smoke test**: `python scripts/test_n8n_inbound_rpc.py`
 - **Setup wizard hook**: `python install/bootstrap.py --create-command-center-account --email X --full-name Y`
+
+This dashboard reads from the same Supabase project the rest of the empire
+writes to (RLS-scoped per tenant).
