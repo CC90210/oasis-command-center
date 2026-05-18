@@ -39,17 +39,21 @@ export function canPreviewTenantSlug(
 }
 
 /**
- * Server-side gate for /t/<slug> pages and /demo/sun. Looks up the signed-in
- * operator's tenant, applies canPreviewTenantSlug, and redirects when access
- * is denied. Throws via Next's redirect() — callers don't need to handle
- * the negative case.
+ * Build a TenantAccessProfile from the signed-in user. Single source of
+ * truth — pages call requireTenantPreviewAccess (which uses this +
+ * redirect), API routes call this directly + return their own
+ * 401/404 envelope. Both layers see the same fields so the access
+ * policy can't drift.
+ *
+ * Returns null when there's no signed-in user. Returns a partially-
+ * populated profile (email only, tenant slugs null) when the user has
+ * no user_profiles row yet — empire operators on a fresh OAuth still
+ * get full access through canPreviewTenantSlug's isOperatorEmail
+ * short-circuit.
  */
-export async function requireTenantPreviewAccess(slug: string): Promise<void> {
-  const target = slug.toLowerCase();
+export async function resolveCallerTenantAccess(): Promise<TenantAccessProfile | null> {
   const user = await getSessionUser().catch(() => null);
-  if (!user) {
-    redirect(`/login?next=${encodeURIComponent(`/t/${target}`)}`);
-  }
+  if (!user) return null;
   const db = getServiceSupabase();
   const profile = await db
     .from("user_profiles")
@@ -70,13 +74,26 @@ export async function requireTenantPreviewAccess(slug: string): Promise<void> {
     const cf = custom.command_center_profile_slug;
     commandSlug = typeof cf === "string" ? cf : null;
   }
-  const allowed = canPreviewTenantSlug(
-    {
-      email: profile.data?.email ?? user.email,
-      tenant_slug: tenantSlug,
-      command_center_profile_slug: commandSlug,
-    },
-    target,
-  );
-  if (!allowed) redirect("/");
+  return {
+    email: profile.data?.email ?? user.email,
+    tenant_slug: tenantSlug,
+    command_center_profile_slug: commandSlug,
+  };
+}
+
+/**
+ * Server-side gate for /t/<slug> pages and /demo/sun. Looks up the signed-in
+ * operator's tenant, applies canPreviewTenantSlug, and redirects when access
+ * is denied. Throws via Next's redirect() — callers don't need to handle
+ * the negative case.
+ */
+export async function requireTenantPreviewAccess(slug: string): Promise<void> {
+  const target = slug.toLowerCase();
+  const access = await resolveCallerTenantAccess();
+  if (!access) {
+    redirect(`/login?next=${encodeURIComponent(`/t/${target}`)}`);
+  }
+  if (!canPreviewTenantSlug(access, target)) {
+    redirect("/");
+  }
 }

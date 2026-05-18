@@ -1,5 +1,6 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { getSessionUser, getServiceSupabase } from "@/lib/supabase-server";
+import { canPreviewTenantSlug, resolveCallerTenantAccess } from "@/lib/tenant-access";
 import { getManifest, manifestExists } from "@/lib/manifest/loader";
 import { SEED_MANIFESTS } from "@/lib/manifest/seeds";
 import { applyMutations, type MutationArgs, ManifestMutationError } from "@/lib/manifest/mutators";
@@ -35,46 +36,15 @@ export async function GET(
   // was bypassing the same gate. Any authenticated tenant could
   // GET /api/manifest/sun and read SunBiz's full manifest including
   // nav, brand, data_model, agent palettes. Same access policy now
-  // applies to the API surface.
-  const { canPreviewTenantSlug } = await import("@/lib/tenant-access");
-  const user = await getSessionUser().catch(() => null);
-  if (!user) {
+  // applies to the API surface via the shared resolveCallerTenantAccess
+  // + canPreviewTenantSlug helper.
+  const access = await resolveCallerTenantAccess();
+  if (!access) {
     return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
   }
-  const db = getServiceSupabase();
-  const profile = await db
-    .from("user_profiles")
-    .select("email, tenant_id")
-    .eq("auth_user_id", user.id)
-    .maybeSingle();
-  const tenantId = (profile.data as { tenant_id: string | null } | null)?.tenant_id || null;
-  let callerTenantSlug: string | null = null;
-  let callerCommandSlug: string | null = null;
-  if (tenantId) {
-    const t = await db
-      .from("tenants")
-      .select("slug, custom_fields")
-      .eq("id", tenantId)
-      .maybeSingle();
-    callerTenantSlug = (t.data?.slug as string | undefined) ?? null;
-    const custom = (t.data?.custom_fields || {}) as Record<string, unknown>;
-    const cf = custom.command_center_profile_slug;
-    callerCommandSlug = typeof cf === "string" ? cf : null;
-  }
-  const allowed = canPreviewTenantSlug(
-    {
-      email: profile.data?.email ?? user.email,
-      tenant_slug: callerTenantSlug,
-      command_center_profile_slug: callerCommandSlug,
-    },
-    normalised,
-  );
-  if (!allowed) {
+  if (!canPreviewTenantSlug(access, normalised) || !(await manifestExists(normalised))) {
     // Collapse "exists but you can't see" and "doesn't exist" into a
     // single 404 so the response can't be used to enumerate tenants.
-    return NextResponse.json({ ok: false, error: "unknown tenant" }, { status: 404 });
-  }
-  if (!(await manifestExists(normalised))) {
     return NextResponse.json({ ok: false, error: "unknown tenant" }, { status: 404 });
   }
   const manifest = await getManifest(normalised);

@@ -31,7 +31,7 @@
  */
 
 import { NextRequest, NextResponse } from "next/server";
-import { getServiceSupabase } from "@/lib/supabase-server";
+import { getServiceSupabase, getSessionUser } from "@/lib/supabase-server";
 import { bad, sha256 } from "@/lib/api-helpers";
 
 export const dynamic = "force-dynamic";
@@ -53,7 +53,7 @@ export async function GET(req: NextRequest) {
   // approve/deny path, but that exception applied to POST only. Gate GET
   // behind a session check so unauthenticated callers can't enumerate
   // recently-blocked commands. (Codex adversarial pass 4, 2026-05-18.)
-  const user = await (await import("@/lib/supabase-server")).getSessionUser().catch(() => null);
+  const user = await getSessionUser().catch(() => null);
   if (!user) return bad(401, "unauthorized");
 
   const url = new URL(req.url);
