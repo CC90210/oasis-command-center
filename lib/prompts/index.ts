@@ -1,15 +1,16 @@
 /**
- * Single source of truth for AI prompts shared between the dashboard
- * (lib/ai-*.ts) and the Python cron scripts (scripts/auto_score_leads.py
- * and friends).
+ * Single source of truth for AI prompts used by the dashboard
+ * (lib/ai-*.ts). Each prompt lives in its own .txt file in this directory.
  *
- * Each prompt lives in its own .txt file in this directory. Both
- * runtimes read the same file:
- *   - TypeScript: this module reads at process startup via fs.readFileSync
- *     and exports the string. Next.js's outputFileTracing picks up the
- *     .txt file at build time so the bundle on Vercel includes them.
- *   - Python: scripts/auto_score_leads.py reads
- *     apps/command-center/lib/prompts/oasis-lead-scoring.txt directly.
+ * This module reads at process startup via fs.readFileSync and exports
+ * the string. Next.js's outputFileTracing picks up the .txt file at build
+ * time so the bundle on Vercel includes them.
+ *
+ * The Python cron scripts in the Business-Empire-Agent repo
+ * (scripts/auto_score_leads.py and friends) need their own copy of these
+ * prompts — they used to read this directory directly when the dashboard
+ * was a subfolder of that repo. Sync prompt edits across both repos until
+ * the Python side fetches from a shared store.
  *
  * Editing only one runtime's copy now means git status flags the diff.
  * Prior pattern (literal duplicate string in two files with a "Keep in

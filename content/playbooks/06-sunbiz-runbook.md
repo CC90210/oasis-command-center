@@ -75,7 +75,7 @@ This is the longest phase. Replace OASIS demo data with the client's real data.
 The wizard's "Dashboard pairing" step auto-opens the client's browser to `/settings/devices`. Click "Install Claude Code CLI bridge" → copy the 9-char code → paste into terminal. The wizard exchanges it via `/api/auth/pair-code/redeem` and saves `BRIDGE_PAIRING_TOKEN` to `.env.agents` + `~/.oasis/bridge_token`.
 
 ### Brand assets
-- Logo: Place their company logo at `apps/command-center/public/sunbiz/<client-slug>-logo.png`. The dashboard reads this if present, otherwise falls back to the gold sun.
+- Logo: Place their company logo at `public/sunbiz/<client-slug>-logo.png` in the oasis-command-center repo. The dashboard reads this if present, otherwise falls back to the gold sun.
 - Colors: SunBiz tenants get the existing amber palette by default. If the client wants a custom accent, edit `lib/client-profiles.ts:SUN_PROFILE.colorRgb` and rebuild (next session — too risky in the live deployment).
 
 ### Demo data → real data

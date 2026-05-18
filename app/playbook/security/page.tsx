@@ -88,7 +88,7 @@ const SECTIONS: Section[] = [
           . Stored in <code className="text-accent">agent_model_config.encrypted_api_key</code>.
         </p>
         <p className="text-xs text-fg-dim">
-          File: <code className="text-accent">apps/command-center/lib/field-encryption.ts</code>.
+          File: <code className="text-accent">lib/field-encryption.ts</code>.
           Rotating BRAVO_FIELD_ENCRYPTION_KEY orphans every stored
           ciphertext — treated as a master secret, set once.
         </p>
@@ -273,7 +273,7 @@ python scripts/audit_mcp_secrets.py
 grep -lE "ENABLE ROW LEVEL SECURITY" database/*.sql
 
 # Pair endpoint uses constant-time compare
-grep -n "timingSafeEqual" apps/command-center/app/api/auth/pair/route.ts
+grep -n "timingSafeEqual" app/api/auth/pair/route.ts
 
 # Migration 030 applied (try inserting a duplicate — should fail with 23505)
 python -c "

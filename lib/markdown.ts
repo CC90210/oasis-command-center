@@ -3,12 +3,11 @@
  * messages anywhere in the app.
  *
  * Two render targets share this:
- *   - Chat bubble (apps/command-center/components/ChatWidget.tsx) — was
- *     plain text + fenced code only; now headings/bold/italic/lists/
- *     blockquotes/links render the same as the export so what you see
- *     equals what you download.
- *   - Download menu (apps/command-center/components/chat/MessageDownloadMenu.tsx)
- *     for HTML / PDF export.
+ *   - Chat bubble (components/ChatWidget.tsx) — was plain text + fenced
+ *     code only; now headings/bold/italic/lists/blockquotes/links render
+ *     the same as the export so what you see equals what you download.
+ *   - Download menu (components/chat/MessageDownloadMenu.tsx) for HTML /
+ *     PDF export.
  *
  * SECURITY: this is the only place an agent message becomes HTML in
  * the app. The input is HTML-escaped FIRST, then markdown patterns are

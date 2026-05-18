@@ -98,11 +98,11 @@ export const CC_NAV: NavItem[] = [
   //                      plan was never implemented — that path doesn't exist.)
   //
   // Routes reachable by direct URL but intentionally NOT in this sidebar:
-  //   /integrations  — apps/command-center/app/integrations/page.tsx exists
-  //                    and is functional, but it's setup-time work (paste a
-  //                    Stripe key once), not daily. Reach via direct URL or
-  //                    deep-link from /settings.
-  //   /feed          — apps/command-center/app/feed/page.tsx exists and
+  //   /integrations  — app/integrations/page.tsx exists and is functional,
+  //                    but it's setup-time work (paste a Stripe key once),
+  //                    not daily. Reach via direct URL or deep-link from
+  //                    /settings.
+  //   /feed          — app/feed/page.tsx exists and
   //                    renders the agent_events stream. /operations shows
   //                    the same stream styled as an Activity Tape; CC reads
   //                    that one, so /feed stays URL-only.

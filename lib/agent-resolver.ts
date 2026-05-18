@@ -16,10 +16,10 @@
  * Callers:
  *   - bravo_cli/bridge_chat_server.py — resolves the model + key per
  *     incoming chat request (passes auth user_id when present).
- *   - apps/command-center/components/settings/MyAgentsCard.tsx — reads
- *     to render the operator's current personal override.
- *   - apps/command-center/components/settings/AgentConfigEditor.tsx —
- *     reads to render the tenant default.
+ *   - components/settings/MyAgentsCard.tsx — reads to render the
+ *     operator's current personal override.
+ *   - components/settings/AgentConfigEditor.tsx — reads to render the
+ *     tenant default.
  */
 
 import { getServiceSupabase } from "@/lib/supabase-server";

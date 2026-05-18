@@ -1,7 +1,7 @@
 /**
  * Playbook markdown loader.
  *
- * Server-only. Reads files from apps/command-center/content/playbooks/<slug>.md,
+ * Server-only. Reads files from content/playbooks/<slug>.md,
  * extracts the H1 title (first line starting with "# "), and returns the body
  * for client-side rendering via <ReactMarkdown remarkPlugins={[remarkGfm]}>.
  *
