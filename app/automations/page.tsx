@@ -13,6 +13,8 @@ import { DescribeAutomationFlow } from "@/components/automations/DescribeAutomat
 import { getActiveProfile, getBridgeOnline } from "@/lib/queries";
 import { chatAgentKeys } from "@/lib/agent-personas";
 import { safe } from "@/lib/api-helpers";
+import { isOperatorEmail } from "@/lib/operator-credentials";
+import { getSessionUser } from "@/lib/supabase-server";
 import { Clock, Cpu, Cloud, Download } from "lucide-react";
 import Link from "next/link";
 
@@ -25,6 +27,13 @@ export default async function AutomationsPage() {
     getBridgeOnline(profile?.tenant_id || null),
     false,
   );
+  // Background-workers panel exposes empire-machine daemons (Skool engine,
+  // Telegram bridge, lender-response classifier, etc.) — none of which are
+  // tenant-scoped or meaningful to a SunBiz operator. Gating to the empire
+  // operator avoids brand leaks like "Skool daemon — posts/replies in CC's
+  // Skool community" appearing in a tenant view.
+  const user = await getSessionUser().catch(() => null);
+  const isOperator = isOperatorEmail(user?.email || undefined);
 
   return (
     <div className="space-y-6 animate-fade-in">
@@ -141,9 +150,11 @@ export default async function AutomationsPage() {
               (profile.agents_enabled || chatAgentKeys()).includes(k),
             )}
           />
-          <div className="border-t border-bg-border pt-6">
-            <BackgroundWorkersPanel />
-          </div>
+          {isOperator && (
+            <div className="border-t border-bg-border pt-6">
+              <BackgroundWorkersPanel />
+            </div>
+          )}
         </>
       ) : (
         <div className="rounded-xl border border-bg-border bg-bg-elev/40 p-8 text-center text-fg-muted">

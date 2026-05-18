@@ -6,9 +6,10 @@
  * toggle, and (for file_upload) accepted MIME types. The state stays as
  * a FormStep[] so parseFormSteps still validates on save.
  *
- * "Add SunBiz docs step" stamps out the standard 3-document intake (bank
- * statements / ID / proof of ownership) since that's the overwhelming
- * default for funding applications.
+ * "Add SunBiz docs step" stamps out the canonical underwriting intake:
+ * bank statements (3mo) + driver's license + void cheque are required;
+ * proof of business ownership is optional (speeds up underwriting when
+ * present but funding can proceed without it).
  */
 
 import { useState } from "react";
@@ -367,7 +368,7 @@ export function VisualFieldsEditor({ steps, onChange }: Props) {
           type="button"
           onClick={addSunBizDocsStep}
           className="inline-flex items-center gap-2 rounded-lg border border-accent/40 bg-accent/10 px-3 py-1.5 text-xs font-bold text-accent hover:bg-accent/20"
-          title="Adds a 3-file upload step (bank statements, ID, proof of ownership)"
+          title="Adds the SunBiz underwriting docs step: bank statements + driver's license + void cheque (required) and proof of ownership (optional)"
         >
           <Wand2 className="w-3.5 h-3.5" />
           Add SunBiz docs step

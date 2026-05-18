@@ -32,9 +32,11 @@ function todayStamp(): string {
 // Starter template — every new form ships with a file-upload step out of
 // the box so SunBiz operators don't have to remember to add one. The
 // document field names (bank_statements_3mo / drivers_license /
-// proof_of_ownership) match the doc_type classifier in migration 049 so
-// submit-side storage keys land in the right bucket without a second
-// pass. Branding is sourced from the sunbiz_standard theme so the picker
+// void_cheque / proof_of_ownership) match the doc_type classifier in
+// migration 049 so submit-side storage keys land in the right bucket
+// without a second pass. proof_of_ownership is required:false — it
+// speeds up underwriting when present but funding can proceed without
+// it. Branding is sourced from the sunbiz_standard theme so the picker
 // highlights it as active immediately and the two sources can't drift.
 function starterBranding(tenantLogoUrl: string | null) {
   const base = getFormTheme("sunbiz_standard")!.branding;
