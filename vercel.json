@@ -8,10 +8,6 @@
     {
       "path": "/api/cron/materialize-plans",
       "schedule": "0 3 * * *"
-    },
-    {
-      "path": "/api/cron/snapshot-mrr",
-      "schedule": "0 4 * * *"
     }
   ]
 }
