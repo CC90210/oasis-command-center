@@ -17,10 +17,12 @@
  *     workers: Array<{
  *       service: string,             // "pm2.sequence-runner", "skool_engine"
  *       label: string,               // operator-friendly name
- *       status: "healthy" | "degraded" | "down" | "unconfigured",
+ *       status: "healthy" | "degraded" | "down" | "unconfigured" | "archived",
  *       metadata: Record<string, unknown>,
  *       last_ping_at: string | null,
  *       purpose: string,             // 1-line "what this daemon does"
+ *       archived_on?: string,        // ISO date if status === "archived"
+ *       archived_reason?: string,    // short why-archived if status === "archived"
  *     }>,
  *   }
  *
@@ -44,6 +46,8 @@ const EXPECTED_WORKERS: Array<{
   service: string;
   label: string;
   purpose: string;
+  archived_on?: string;
+  archived_reason?: string;
 }> = [
   {
     service: "pm2.bravo-scheduler",
@@ -88,7 +92,9 @@ const EXPECTED_WORKERS: Array<{
   {
     service: "skool_engine",
     label: "Skool daemon",
-    purpose: "Standalone (NOT in PM2 — owns its own lock). Posts/replies in CC's Skool community.",
+    purpose: "Standalone (NOT in PM2 — owns its own lock). Posts/replies in a Skool community.",
+    archived_on: "2026-05-18",
+    archived_reason: "Paused — operator no longer manages the community it was posting into. Code preserved at scripts/_archive/skool/ for revival when the operator launches their own community.",
   },
 ];
 
@@ -150,14 +156,21 @@ export async function GET() {
   }
 
   const workers = EXPECTED_WORKERS.map((w) => {
-    const h = healthMap.get(w.service);
+    const archived = Boolean(w.archived_on);
+    const h = archived ? undefined : healthMap.get(w.service);
     return {
       service: w.service,
       label: w.label,
       purpose: w.purpose,
-      status: (h?.status as "healthy" | "degraded" | "down" | "unconfigured") || "unconfigured",
+      status: archived
+        ? ("archived" as const)
+        : ((h?.status as "healthy" | "degraded" | "down" | "unconfigured") || "unconfigured"),
       metadata: h?.metadata || {},
       last_ping_at: h?.last_ping_at || null,
+      ...(archived && {
+        archived_on: w.archived_on,
+        archived_reason: w.archived_reason,
+      }),
     };
   });
 

@@ -27,11 +27,12 @@ export default async function AutomationsPage() {
     getBridgeOnline(profile?.tenant_id || null),
     false,
   );
-  // Background-workers panel exposes empire-machine daemons (Skool engine,
-  // Telegram bridge, lender-response classifier, etc.) — none of which are
-  // tenant-scoped or meaningful to a SunBiz operator. Gating to the empire
-  // operator avoids brand leaks like "Skool daemon — posts/replies in CC's
-  // Skool community" appearing in a tenant view.
+  // Background-workers panel exposes empire-machine daemons (Telegram bridge,
+  // lender-response classifier, etc.) — none of which are tenant-scoped or
+  // meaningful to a SunBiz operator. Gating to the empire operator avoids
+  // operator-specific labels and archived-daemon notes from leaking into
+  // tenant views. The Skool daemon entry is preserved here as "Archived
+  // 2026-05-18" so the operator can see it's no longer running.
   const user = await getSessionUser().catch(() => null);
   const isOperator = isOperatorEmail(user?.email || undefined);
 

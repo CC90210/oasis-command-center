@@ -16,15 +16,17 @@
  */
 
 import { useEffect, useState } from "react";
-import { Cpu, CheckCircle2, AlertCircle, MinusCircle, HelpCircle, Activity } from "lucide-react";
+import { Cpu, CheckCircle2, AlertCircle, MinusCircle, HelpCircle, Activity, Archive } from "lucide-react";
 
 type Worker = {
   service: string;
   label: string;
   purpose: string;
-  status: "healthy" | "degraded" | "down" | "unconfigured";
+  status: "healthy" | "degraded" | "down" | "unconfigured" | "archived";
   metadata: Record<string, unknown>;
   last_ping_at: string | null;
+  archived_on?: string;
+  archived_reason?: string;
 };
 
 type ApiResponse = {
@@ -78,8 +80,9 @@ export function BackgroundWorkersPanel() {
     );
   }
 
-  const healthy = data.workers.filter((w) => w.status === "healthy").length;
-  const total = data.workers.length;
+  const active = data.workers.filter((w) => w.status !== "archived");
+  const healthy = active.filter((w) => w.status === "healthy").length;
+  const total = active.length;
 
   return (
     <div className="space-y-3">
@@ -116,6 +119,31 @@ export function BackgroundWorkersPanel() {
 }
 
 function WorkerRow({ worker }: { worker: Worker }) {
+  if (worker.status === "archived") {
+    return (
+      <div
+        className="rounded-lg border border-bg-border bg-bg-deep/30 p-3 opacity-60"
+        title={`Archived ${worker.archived_on || ""}`}
+      >
+        <div className="flex items-start gap-2">
+          <Archive className="w-4 h-4 shrink-0 mt-0.5 text-fg-dim" />
+          <div className="flex-1 min-w-0">
+            <div className="flex items-center gap-2">
+              <div className="font-bold text-sm text-fg-muted truncate line-through">
+                {worker.label}
+              </div>
+              <span className="text-[10px] uppercase tracking-wider text-fg-dim border border-bg-border rounded-full px-1.5 py-0.5">
+                Archived{worker.archived_on ? ` ${worker.archived_on}` : ""}
+              </span>
+            </div>
+            <div className="text-[11px] text-fg-dim mt-1 leading-relaxed">
+              {worker.archived_reason || "Not currently running or live."}
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
   const Icon =
     worker.status === "healthy"
       ? CheckCircle2
