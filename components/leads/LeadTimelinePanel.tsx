@@ -26,6 +26,7 @@
  */
 
 import { useEffect, useState } from "react";
+import { relTime } from "@/lib/format-helpers";
 
 type TimelineEvent = {
   source: string;
@@ -51,21 +52,6 @@ const SOURCE_STYLES: Record<string, { dot: string; label: string }> = {
   system: { dot: "bg-fg-dim", label: "System" },
   alert: { dot: "bg-red-400", label: "Alert" },
 };
-
-function relTime(iso: string): string {
-  const t = new Date(iso).getTime();
-  if (Number.isNaN(t)) return iso;
-  const diff = Date.now() - t;
-  const sec = Math.round(diff / 1000);
-  if (sec < 60) return `${sec}s ago`;
-  const min = Math.round(sec / 60);
-  if (min < 60) return `${min}m ago`;
-  const hr = Math.round(min / 60);
-  if (hr < 48) return `${hr}h ago`;
-  const day = Math.round(hr / 24);
-  if (day < 30) return `${day}d ago`;
-  return new Date(iso).toLocaleDateString();
-}
 
 function absTime(iso: string): string {
   try {

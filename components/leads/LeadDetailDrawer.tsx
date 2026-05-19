@@ -20,10 +20,11 @@ import { useCallback, useEffect, useRef, useState } from "react";
 // useRef intentionally imported for the file-input ref in DocumentsTab.
 import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
-import { X, FileText, ImageIcon } from "lucide-react";
+import { X, FileText, ImageIcon, Phone, Mail } from "lucide-react";
 import { LeadTimelinePanel } from "./LeadTimelinePanel";
 import { humanLeadDocSize, leadDocTypeLabel, LEAD_DOC_TYPES } from "@/lib/lead-doc-display";
 import { LEAD_PIPELINE_STAGES, OPPORTUNITY_PIPELINE_STAGES, type StageMeta } from "@/lib/sunbiz-stage-meta";
+import { formatMoney, relTime } from "@/lib/format-helpers";
 
 type DocRow = {
   id: string;
@@ -475,30 +476,13 @@ function BankTab({ record }: { record: Record<string, unknown> }) {
           <dd className="text-fg text-[13px] font-medium text-right">{r.value}</dd>
         </div>
       ))}
-      <div className="pt-3">
-        <a
-          href="#"
-          className="text-[11px] text-accent hover:underline inline-flex items-center gap-1"
-          onClick={(e) => e.preventDefault()}
-        >
-          Open underwriter brief ↗
-        </a>
-      </div>
     </div>
   );
 }
 
-function fmtMoney(v: unknown): string {
-  const n = typeof v === "number" ? v : typeof v === "string" ? Number(v) : NaN;
-  if (Number.isFinite(n)) {
-    return n.toLocaleString("en-US", {
-      style: "currency",
-      currency: "USD",
-      maximumFractionDigits: 0,
-    });
-  }
-  return String(v);
-}
+// Money formatting moved to lib/format-helpers (shared with timeline +
+// integrations panel). Local alias kept for in-file callers.
+const fmtMoney = formatMoney;
 
 type NoteRow = {
   id: string;
@@ -1308,10 +1292,16 @@ function OwnerAssignedRow({ record }: { record: Record<string, unknown> }) {
         </div>
         <div className="text-[13px] font-medium text-fg">{ownerName}</div>
         {ownerPhone && (
-          <div className="text-[11px] text-fg-muted mt-0.5">📞 {ownerPhone}</div>
+          <div className="text-[11px] text-fg-muted mt-0.5 inline-flex items-center gap-1">
+            <Phone className="w-3 h-3" />
+            {ownerPhone}
+          </div>
         )}
         {ownerEmail && (
-          <div className="text-[11px] text-fg-muted truncate">✉ {ownerEmail}</div>
+          <div className="text-[11px] text-fg-muted truncate inline-flex items-center gap-1">
+            <Mail className="w-3 h-3" />
+            {ownerEmail}
+          </div>
         )}
       </div>
       <div>
@@ -1319,30 +1309,15 @@ function OwnerAssignedRow({ record }: { record: Record<string, unknown> }) {
           Assigned to
         </div>
         <div className="text-[13px] font-medium text-fg">{assignedName || "Unassigned"}</div>
-        <div className="text-[10.5px] text-fg-dim mt-0.5">change owner</div>
         {lastTouchIso && (
           <div className="text-[10.5px] text-fg-dim mt-1.5">
             <span className="uppercase tracking-wider mr-1">Last touch</span>
-            {relTimeShort(lastTouchIso)}
+            {relTime(lastTouchIso)}
           </div>
         )}
       </div>
     </div>
   );
-}
-
-function relTimeShort(iso: string): string {
-  const t = new Date(iso).getTime();
-  if (Number.isNaN(t)) return iso;
-  const sec = Math.round((Date.now() - t) / 1000);
-  if (sec < 60) return `${sec}s ago`;
-  const min = Math.round(sec / 60);
-  if (min < 60) return `${min}m ago`;
-  const hr = Math.round(min / 60);
-  if (hr < 48) return `${hr}h ago`;
-  const day = Math.round(hr / 24);
-  if (day < 30) return `${day}d ago`;
-  return new Date(iso).toLocaleDateString();
 }
 
 /* -------------------------------------------------------------------------- */

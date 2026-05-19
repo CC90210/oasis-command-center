@@ -16,6 +16,7 @@ import { useCallback, useEffect, useState } from "react";
 import { CheckCircle2, AlertCircle, KeyRound, Trash2, Loader2 } from "lucide-react";
 import { Card } from "@/components/Card";
 import { INTEGRATION_SCHEMAS } from "@/lib/tenant-integration-schemas";
+import { relTime } from "@/lib/format-helpers";
 
 type StatusRow = {
   service: string;
@@ -34,18 +35,9 @@ function k(service: string, fieldKey: string): string {
   return `${service}::${fieldKey}`;
 }
 
-function relTime(iso: string | null): string {
-  if (!iso) return "";
-  const t = new Date(iso).getTime();
-  const diff = Date.now() - t;
-  const sec = Math.round(diff / 1000);
-  if (sec < 60) return `${sec}s ago`;
-  const min = Math.round(sec / 60);
-  if (min < 60) return `${min}m ago`;
-  const hr = Math.round(min / 60);
-  if (hr < 48) return `${hr}h ago`;
-  return new Date(iso).toLocaleDateString();
-}
+// relTime moved to lib/format-helpers (shared with LeadTimelinePanel +
+// LeadDetailDrawer header). Single source of truth for the
+// "5m ago / 2h ago / 3d ago" shape.
 
 export function IntegrationKeysPanel({
   canManage,
