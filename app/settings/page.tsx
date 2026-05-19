@@ -61,9 +61,27 @@ export default async function SettingsPage() {
   // (OASIS) see everything including platform infra (Vercel, Cloudflare,
   // GitHub, etc.). Client tenants only see what their agent mix exposes —
   // re-enable an agent later and the integrations grow back.
-  const enabledAgents = (profile?.agents_enabled || []).map(resolveAgentKey);
+  // Tenant agent gate. Source of truth precedence:
+  //   1. profile.agents_enabled (operator's saved selection)
+  //   2. manifest.agents (tenant's seeded agent palette)
+  //   3. chatAgentKeys() (empire-wide chat list — last-resort fallback)
+  // Previously this line did `profile?.agents_enabled || chatAgentKeys()`
+  // which fell straight to the empire-wide list when the profile field
+  // was empty — that was the cross-tenant bleed: SunBiz operators with
+  // an unset agents_enabled saw the full {bravo, atlas, maven, aura,
+  // hermes, lumen} list as if they were OASIS.
+  const manifestAgentKeys = (manifest?.agents || [])
+    .filter((a) => a.enabled !== false)
+    .map((a) => a.slug.toLowerCase());
+  const effectiveAgentKeys =
+    profile?.agents_enabled && profile.agents_enabled.length > 0
+      ? profile.agents_enabled
+      : manifestAgentKeys.length > 0
+        ? manifestAgentKeys
+        : chatAgentKeys();
+  const enabledAgents = effectiveAgentKeys.map(resolveAgentKey);
   const enabledChatAgentKeys = chatAgentKeys().filter((k) =>
-    ((profile?.agents_enabled || chatAgentKeys()).map(resolveAgentKey)).includes(k),
+    enabledAgents.includes(k),
   );
   const isOperator = isOperatorEmail(user?.email || undefined);
   const teamProfile = profile as (typeof profile & { is_owner?: boolean; team_role?: string }) | null;
@@ -112,22 +130,24 @@ export default async function SettingsPage() {
               </div>
             }
           >
-            <ProfileEditor
-              profile={profile}
-              tenantAgents={(manifest?.agents || [])
-                .filter((a) => a.enabled !== false)
-                .map((a) => a.slug)}
-            />
+            <SafeBoundary label="Profile editor">
+              <ProfileEditor
+                profile={profile}
+                tenantAgents={manifestAgentKeys}
+              />
+            </SafeBoundary>
           </Card>
 
           <Card
             title="Branding"
             subtitle="Your logo is applied to every new form, public application page, and anywhere else the dashboard shows your brand."
           >
-            <BrandLogoCard
-              initialLogoUrl={tenant?.logo_url ?? null}
-              canManage={canManageTenant}
-            />
+            <SafeBoundary label="Branding">
+              <BrandLogoCard
+                initialLogoUrl={tenant?.logo_url ?? null}
+                canManage={canManageTenant}
+              />
+            </SafeBoundary>
           </Card>
 
           <SafeBoundary label="Integration keys">
@@ -147,7 +167,9 @@ export default async function SettingsPage() {
                 </a>
               }
             >
-              <QuickInviteCard />
+              <SafeBoundary label="Team invites">
+                <QuickInviteCard />
+              </SafeBoundary>
               <p className="text-[11px] text-fg-dim leading-relaxed mt-3">
                 Invitees land on /invite/&lt;token&gt;, sign up, and join
                 this tenant automatically. Solara recognizes them by name
@@ -157,7 +179,9 @@ export default async function SettingsPage() {
           )}
 
           <Card title="Password" subtitle="Change your sign-in password">
-            <ChangePasswordForm />
+            <SafeBoundary label="Password form">
+              <ChangePasswordForm />
+            </SafeBoundary>
           </Card>
 
           {/* Devices — operator/admin can pair THEIR machine to run the
@@ -178,7 +202,9 @@ export default async function SettingsPage() {
                 </Link>
               }
             >
-              <DevicesEditor />
+              <SafeBoundary label="Devices">
+                <DevicesEditor />
+              </SafeBoundary>
             </Card>
           )}
 
@@ -198,18 +224,24 @@ export default async function SettingsPage() {
                 : "These are the team's AI accounts. Your admin connects them once — your chats will route through whichever account they pick."
             }
           >
-            <ProviderAccountsCard
-              connectedServices={connectedAiSet}
-              bridgeOnline={bridgeOnline}
-              canManageTeam={canManageTenant}
-            />
+            <SafeBoundary label="AI provider accounts">
+              <ProviderAccountsCard
+                connectedServices={connectedAiSet}
+                bridgeOnline={bridgeOnline}
+                canManageTeam={canManageTenant}
+              />
+            </SafeBoundary>
           </Card>
 
           {/* Local CLI detection probes the bridge daemon which is
               machine-specific. For tenant operators it surfaces the
               operator's (CC's) machine state, which is both confusing
               and a leak. Empire-only. */}
-          {isOperator && <LocalCliProvidersCard />}
+          {isOperator && (
+            <SafeBoundary label="Local CLI providers">
+              <LocalCliProvidersCard />
+            </SafeBoundary>
+          )}
 
           <Card
             id="agents"
@@ -222,53 +254,57 @@ export default async function SettingsPage() {
             }
           >
             {canManageTenant ? (
-              <AgentConfigEditor
-                agentKeys={enabledChatAgentKeys}
-                bridgeOnline={bridgeOnline}
-                agentPalettes={Object.fromEntries(
-                  (manifest?.agents || []).map((a) => [
-                    a.slug.toLowerCase(),
-                    a.tool_palette,
-                  ])
-                )}
-                manifestSlug={manifestSlug}
-                // Slim catalog for the per-agent palette editor. Server-side
-                // TOOL_DEFINITIONS contains the full input_schema JSON which
-                // the client UI doesn't need; we pass name + description +
-                // defer flag (for grouping into Cloud vs Bridge sections).
-                toolCatalog={TOOL_DEFINITIONS.map((t) => ({
-                  name: t.name,
-                  description: t.description,
-                  defer: !!t.defer,
-                }))}
-              />
+              <SafeBoundary label="Per-agent overrides">
+                <AgentConfigEditor
+                  agentKeys={enabledChatAgentKeys}
+                  bridgeOnline={bridgeOnline}
+                  agentPalettes={Object.fromEntries(
+                    (manifest?.agents || []).map((a) => [
+                      a.slug.toLowerCase(),
+                      a.tool_palette,
+                    ])
+                  )}
+                  manifestSlug={manifestSlug}
+                  toolCatalog={TOOL_DEFINITIONS.map((t) => ({
+                    name: t.name,
+                    description: t.description,
+                    defer: !!t.defer,
+                  }))}
+                />
+              </SafeBoundary>
             ) : (
               <EmptyState message="Team-wide model defaults are managed by an owner or admin. Scroll down to 'Use my own AI keys (just for me)' if you'd rather plug in your own AI account." />
             )}
           </Card>
 
-          <MyAgentsCard
-            enabledAgentKeys={enabledChatAgentKeys}
-            agentLabels={Object.fromEntries(
-              (manifest?.agents || []).map((a) => [
-                a.slug.toLowerCase(),
-                a.display_name || a.slug,
-              ]),
-            )}
-          />
+          <SafeBoundary label="My agents">
+            <MyAgentsCard
+              enabledAgentKeys={enabledChatAgentKeys}
+              agentLabels={Object.fromEntries(
+                (manifest?.agents || []).map((a) => [
+                  a.slug.toLowerCase(),
+                  a.display_name || a.slug,
+                ]),
+              )}
+            />
+          </SafeBoundary>
 
           <Card
             title="Weekday template"
             subtitle="Monday–Friday recurring schedule. Materializes nightly via cron."
           >
-            <PlanTemplateEditor kind="weekday" existing={weekday} />
+            <SafeBoundary label="Weekday template">
+              <PlanTemplateEditor kind="weekday" existing={weekday} />
+            </SafeBoundary>
           </Card>
 
           <Card
             title="Weekend template"
             subtitle="Saturday + Sunday recurring schedule"
           >
-            <PlanTemplateEditor kind="weekend" existing={weekend} />
+            <SafeBoundary label="Weekend template">
+              <PlanTemplateEditor kind="weekend" existing={weekend} />
+            </SafeBoundary>
           </Card>
 
           <Card
