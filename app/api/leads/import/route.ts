@@ -1,29 +1,10 @@
 /**
- * POST /api/leads/import — bulk-insert leads from a parsed CSV (or any
- * JSON array of {name,email,phone,company,...}). Dedupes against
- * existing leads in the same tenant by email or phone (case-insensitive
- * for email, digits-only for phone) so re-uploads don't create
- * duplicates — the most common operator complaint with naive CSV
- * importers.
+ * POST /api/leads/import
  *
- * Operator flow:
- *   1. /import page parses the operator's CSV/paste client-side and
- *      shows a preview.
- *   2. Operator confirms → POSTs { rows: [...], dedup_by: [...] } here.
- *   3. We resolve the operator's tenant, fetch existing leads for that
- *      tenant (capped — see DEDUP_LOOKBACK), build a Set of normalized
- *      keys, then for each incoming row decide insert / skip-duplicate
- *      / skip-malformed.
- *   4. Surviving rows go through a single `.insert([...])` call so we
- *      pay one round-trip even on a 1k-lead upload.
- *
- * Response:
- *   { ok, inserted: N, skipped_duplicate: M, skipped_malformed: K,
- *     duplicate_keys: [], errors: [] }
- *
- * Hard caps: 5,000 rows per request (anything bigger should be a
- * background job — Phase 13). Operator gets a clean 413 with a hint
- * if they exceed it.
+ * Bulk-insert parsed CSV leads into tenant_records(entity_type='lead').
+ * This route expects the client to send already-mapped rows, but it still
+ * normalizes stages, money values, dedupe keys, and optional SunBiz fields
+ * server-side so pasted messy board exports do not corrupt the pipeline.
  */
 
 import { NextRequest, NextResponse } from "next/server";
@@ -33,23 +14,22 @@ import { LEAD_PIPELINE_STAGES } from "@/lib/sunbiz-stage-meta";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-// Whitelisted stage values for CSV `stage` columns. CC's mockup leads
-// import already-classified rows ("Hot Lead", "Missing Info", etc.) so
-// the importer accepts both the canonical key (hot_lead) AND the
-// display label ("Hot Lead", case-insensitive) and normalises to the
-// key. Unknown values fall back to "imported".
 const STAGE_KEY_SET = new Set(LEAD_PIPELINE_STAGES.map((s) => s.key));
 const STAGE_LABEL_MAP = new Map(
   LEAD_PIPELINE_STAGES.map((s) => [s.label.toLowerCase(), s.key]),
 );
+
 function normalizeStage(raw: string | null | undefined): string {
-  const v = (raw || "").trim();
-  if (!v) return "imported";
-  const lower = v.toLowerCase();
+  const value = (raw || "").trim();
+  if (!value) return "imported";
+  const lower = value.toLowerCase();
   if (STAGE_KEY_SET.has(lower)) return lower;
   const labelHit = STAGE_LABEL_MAP.get(lower);
   if (labelHit) return labelHit;
-  // Common operator shorthands → canonical key.
+
+  if (lower === "application in" || lower === "app in") return "imported";
+  if (lower === "shopping" || lower === "shop" || lower === "shop out") return "submitted";
+  if (lower === "approved open offers" || lower === "open offers") return "approved";
   if (lower === "hot") return "hot_lead";
   if (lower === "missing") return "missing_info";
   if (lower === "followup" || lower === "follow up") return "follow_up";
@@ -60,16 +40,62 @@ function normalizeStage(raw: string | null | undefined): string {
 function parseMoney(v: unknown): number | null {
   if (v == null || v === "") return null;
   if (typeof v === "number") return Number.isFinite(v) ? v : null;
-  const s = String(v).replace(/[$,\s]/g, "");
-  const n = Number(s);
-  return Number.isFinite(n) ? n : null;
+  const raw = String(v)
+    .trim()
+    .replace(/[,$]/g, "")
+    .replace(/[–—]/g, "-")
+    .toLowerCase();
+  if (!raw) return null;
+
+  const matches = Array.from(raw.matchAll(/(\d+(?:\.\d+)?)\s*([km])?/g));
+  if (matches.length === 0) return null;
+  const lastSuffix = matches.findLast((m) => m[2])?.[2] || "";
+  const values = matches
+    .map((m) => {
+      const base = Number(m[1]);
+      if (!Number.isFinite(base)) return null;
+      const suffix = m[2] || lastSuffix;
+      if (suffix === "k") return base * 1_000;
+      if (suffix === "m") return base * 1_000_000;
+      return base;
+    })
+    .filter((n): n is number => n != null && Number.isFinite(n));
+
+  if (values.length === 0) return null;
+  const value =
+    values.length > 1 ? values.reduce((sum, n) => sum + n, 0) / values.length : values[0];
+  return Number.isFinite(value) ? value : null;
+}
+
+function normEmail(s: string | null | undefined): string | null {
+  const e = (s || "").trim().toLowerCase();
+  return e || null;
+}
+
+function normPhone(s: string | null | undefined): string | null {
+  const digits = (s || "").replace(/\D+/g, "");
+  if (digits.length === 11 && digits.startsWith("1")) return digits.slice(1);
+  return digits || null;
+}
+
+function normBusiness(s: string | null | undefined): string | null {
+  const v = (s || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, " ")
+    .replace(/\b(llc|inc|corp|corporation|ltd|co|company)\b/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  return v || null;
+}
+
+function cleanString(v: unknown, max = 500): string | null {
+  if (typeof v !== "string") return null;
+  const s = v.trim();
+  return s ? s.slice(0, max) : null;
 }
 
 const MAX_ROWS = 5_000;
-// Existing-leads window for dedup. We don't scan every lead the tenant
-// has ever owned (could be 100k); we scan the most recent
-// DEDUP_LOOKBACK by updated_at. Beyond that the dedup is the next
-// daily nurture-sweep's problem.
 const DEDUP_LOOKBACK = 20_000;
 
 type IncomingRow = {
@@ -82,33 +108,35 @@ type IncomingRow = {
   source?: string | null;
   notes?: string | null;
   tags?: string[] | null;
-  // SunBiz-specific (optional). The importer threads these through into
-  // tenant_records.data so the pipeline view + drawer render them on
-  // re-load. Unknown values fall back to "—" downstream.
   stage?: string | null;
   state?: string | null;
   monthly_revenue?: number | string | null;
   paper_grade?: string | null;
   time_in_business?: string | null;
   assigned_to?: string | null;
+  date_submitted?: string | null;
+  lender_list?: string | null;
+  dba?: string | null;
+  business_address?: string | null;
+  business_city?: string | null;
+  business_zip?: string | null;
+  website?: string | null;
+  entity_type?: string | null;
+  industry?: string | null;
+  title?: string | null;
+  ownership_pct?: string | null;
+  product_service?: string | null;
+  annual_revenue?: number | string | null;
+  requested_amount?: number | string | null;
+  application_url?: string | null;
+  bank_statement_urls?: string | null;
+  dl_vc_urls?: string | null;
 };
-
-function normEmail(s: string | null | undefined): string | null {
-  const e = (s || "").trim().toLowerCase();
-  return e || null;
-}
-
-function normPhone(s: string | null | undefined): string | null {
-  const digits = (s || "").replace(/\D+/g, "");
-  // 11-digit US numbers starting with "1" → 10-digit form so
-  // "+1 555 123 4567" matches "5551234567" matches "(555) 123-4567".
-  if (digits.length === 11 && digits.startsWith("1")) return digits.slice(1);
-  return digits || null;
-}
 
 export async function POST(req: NextRequest) {
   const user = await getSessionUser();
   if (!user) return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
+
   const db = getServiceSupabase();
   const profileRes = await db
     .from("user_profiles")
@@ -126,9 +154,7 @@ export async function POST(req: NextRequest) {
   }
 
   const rows = Array.isArray(body.rows) ? body.rows : [];
-  if (rows.length === 0) {
-    return NextResponse.json({ ok: false, error: "no_rows" }, { status: 400 });
-  }
+  if (rows.length === 0) return NextResponse.json({ ok: false, error: "no_rows" }, { status: 400 });
   if (rows.length > MAX_ROWS) {
     return NextResponse.json(
       {
@@ -140,23 +166,12 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  const dedupBy = Array.isArray(body.dedup_by) && body.dedup_by.length > 0
-    ? body.dedup_by.filter((k): k is string => typeof k === "string")
-    : ["email", "phone"];
+  const dedupBy =
+    Array.isArray(body.dedup_by) && body.dedup_by.length > 0
+      ? body.dedup_by.filter((k): k is string => typeof k === "string")
+      : ["email", "phone", "business"];
   const defaultSource = body.default_source || "csv_import";
 
-  // Dedup against the SAME table we're writing to. Imports go to
-  // tenant_records (entity_type='lead') so they show up on the
-  // manifest-driven Kanban + drill-down detail routes that every
-  // tenant's UI consumes. Pre-2026-05-15 we wrote to a dedicated
-  // public.leads table, but that diverged from the manifest reads
-  // and silently hid imported leads from the operator's view.
-  //
-  // tenant_records.data is JSONB; the dedup query extracts the
-  // email + phone fields server-side via the ->> operator. We pull
-  // a denormalized projection (record id stays in id, email/phone
-  // come out as top-level columns) so the dedup logic stays
-  // shape-identical to the prior dedicated-table version.
   const existingRes = await db
     .from("tenant_records")
     .select("data")
@@ -170,22 +185,28 @@ export async function POST(req: NextRequest) {
       { status: 500 },
     );
   }
+
   const existingEmails = new Set<string>();
   const existingPhones = new Set<string>();
+  const existingBusinesses = new Set<string>();
   for (const r of (existingRes.data || []) as Array<{ data: Record<string, unknown> | null }>) {
     const d = r.data || {};
-    const e = normEmail(typeof d.email === "string" ? d.email : null);
-    if (e) existingEmails.add(e);
-    const p = normPhone(typeof d.phone === "string" ? d.phone : null);
-    if (p) existingPhones.add(p);
+    const email = normEmail(typeof d.email === "string" ? d.email : null);
+    if (email) existingEmails.add(email);
+    const phone = normPhone(typeof d.phone === "string" ? d.phone : null);
+    if (phone) existingPhones.add(phone);
+    const business = normBusiness(
+      typeof d.business_name === "string"
+        ? d.business_name
+        : typeof d.company === "string"
+          ? d.company
+          : typeof d.name === "string"
+            ? d.name
+            : null,
+    );
+    if (business) existingBusinesses.add(business);
   }
 
-  // tenant_records insert shape — each row carries tenant_id +
-  // entity_type ('lead') + the full lead profile in data JSONB. The
-  // manifest's data_model.lead.fields determines which keys land
-  // where; we send the operator-visible columns + a few sensible
-  // defaults (stage='imported', score=0, status='new' for back-compat
-  // with anything still reading the legacy status field).
   const toInsert: Array<{
     tenant_id: string;
     entity_type: string;
@@ -195,41 +216,52 @@ export async function POST(req: NextRequest) {
   let skippedMalformed = 0;
   const duplicateKeys: string[] = [];
   const errors: string[] = [];
-
-  // Track within-batch duplicates too — if the operator's CSV has the
-  // same email twice we only insert once.
   const seenEmails = new Set<string>();
   const seenPhones = new Set<string>();
+  const seenBusinesses = new Set<string>();
 
   for (const [i, raw] of rows.entries()) {
-    const name = (raw.name || "").trim().slice(0, 200) || null;
+    const name = cleanString(raw.name, 200);
     const email = normEmail(raw.email);
     const phone = normPhone(raw.phone);
-    // SunBiz schema's primary lead name is `business_name`. Accept that
-    // header directly + fall back to the legacy `company` column +
-    // finally to `name` so older CSVs keep importing.
     const businessName =
-      (raw.business_name || "").trim().slice(0, 200) ||
-      (raw.company || "").trim().slice(0, 200) ||
-      (raw.name || "").trim().slice(0, 200) ||
-      null;
-    const contactName =
-      (raw.contact_name || "").trim().slice(0, 200) ||
-      (raw.name || "").trim().slice(0, 200) ||
-      null;
-    const company = (raw.company || "").trim().slice(0, 200) || null;
-    const notes = (raw.notes || "").trim().slice(0, 2000) || null;
-    const source = (raw.source || "").trim().slice(0, 64) || defaultSource;
-    const tags = Array.isArray(raw.tags) ? raw.tags.filter((t) => typeof t === "string").slice(0, 12) : null;
+      cleanString(raw.business_name, 200) ||
+      cleanString(raw.company, 200) ||
+      cleanString(raw.dba, 200) ||
+      cleanString(raw.name, 200);
+    const contactName = cleanString(raw.contact_name, 200) || cleanString(raw.name, 200);
+    const company = cleanString(raw.company, 200) || businessName;
+    const notes = cleanString(raw.notes, 2_000);
+    const source = cleanString(raw.source, 64) || defaultSource;
+    const tags = Array.isArray(raw.tags)
+      ? raw.tags.filter((t) => typeof t === "string").slice(0, 12)
+      : null;
     const stage = normalizeStage(raw.stage);
-    const state = (raw.state || "").trim().slice(0, 80) || null;
+    const state = cleanString(raw.state, 80);
     const monthlyRevenue = parseMoney(raw.monthly_revenue);
-    const paperGrade = (raw.paper_grade || "").trim().slice(0, 8) || null;
-    const tib = (raw.time_in_business || "").trim().slice(0, 32) || null;
-    const assignedTo = (raw.assigned_to || "").trim().slice(0, 120) || null;
+    const paperGrade = cleanString(raw.paper_grade, 8);
+    const timeInBusiness = cleanString(raw.time_in_business, 80);
+    const assignedTo = cleanString(raw.assigned_to, 120);
+    const businessKey = normBusiness(businessName);
 
-    // Need at least one identifier — otherwise we can't dedup the
-    // import on its second run and the row is functionally useless.
+    const dateSubmitted = cleanString(raw.date_submitted, 80);
+    const lenderList = cleanString(raw.lender_list, 1_000);
+    const dba = cleanString(raw.dba, 200);
+    const businessAddress = cleanString(raw.business_address, 240);
+    const businessCity = cleanString(raw.business_city, 120);
+    const businessZip = cleanString(raw.business_zip, 32);
+    const website = cleanString(raw.website, 240);
+    const entityType = cleanString(raw.entity_type, 80);
+    const industry = cleanString(raw.industry, 180);
+    const title = cleanString(raw.title, 80);
+    const ownershipPct = cleanString(raw.ownership_pct, 32);
+    const productService = cleanString(raw.product_service, 240);
+    const annualRevenue = parseMoney(raw.annual_revenue);
+    const requestedAmount = parseMoney(raw.requested_amount);
+    const applicationUrl = cleanString(raw.application_url, 1_000);
+    const bankStatementUrls = cleanString(raw.bank_statement_urls, 2_000);
+    const dlVcUrls = cleanString(raw.dl_vc_urls, 2_000);
+
     if (!email && !phone && !name && !businessName) {
       skippedMalformed += 1;
       errors.push(`row ${i + 1}: no name, email, phone, or business_name`);
@@ -250,6 +282,12 @@ export async function POST(req: NextRequest) {
         dupeKey = phone;
       }
     }
+    if (!isDupe && dedupBy.includes("business") && businessKey) {
+      if (existingBusinesses.has(businessKey) || seenBusinesses.has(businessKey)) {
+        isDupe = true;
+        dupeKey = `business:${businessKey}`;
+      }
+    }
     if (isDupe) {
       skippedDuplicate += 1;
       if (duplicateKeys.length < 50) duplicateKeys.push(dupeKey);
@@ -258,6 +296,7 @@ export async function POST(req: NextRequest) {
 
     if (email) seenEmails.add(email);
     if (phone) seenPhones.add(phone);
+    if (businessKey) seenBusinesses.add(businessKey);
 
     toInsert.push({
       tenant_id: tenantId,
@@ -269,24 +308,32 @@ export async function POST(req: NextRequest) {
         company,
         source,
         notes,
-        // SunBiz canonical fields. Pipeline view + drawer read these
-        // first; legacy {name, company} are kept above for back-compat
-        // with anything still reading the older shape.
         business_name: businessName,
         contact_name: contactName,
         ...(state ? { state } : {}),
         ...(monthlyRevenue != null ? { monthly_revenue: monthlyRevenue } : {}),
         ...(paperGrade ? { paper_grade: paperGrade } : {}),
-        ...(tib ? { time_in_business: tib } : {}),
+        ...(timeInBusiness ? { time_in_business: timeInBusiness } : {}),
         ...(assignedTo ? { assigned_to: assignedTo } : {}),
+        ...(dateSubmitted ? { date_submitted: dateSubmitted } : {}),
+        ...(lenderList ? { lender_list: lenderList } : {}),
+        ...(dba ? { dba } : {}),
+        ...(businessAddress ? { business_address: businessAddress } : {}),
+        ...(businessCity ? { business_city: businessCity } : {}),
+        ...(businessZip ? { business_zip: businessZip } : {}),
+        ...(website ? { website } : {}),
+        ...(entityType ? { entity_type: entityType } : {}),
+        ...(industry ? { industry } : {}),
+        ...(title ? { title } : {}),
+        ...(ownershipPct ? { ownership_pct: ownershipPct } : {}),
+        ...(productService ? { product_service: productService } : {}),
+        ...(annualRevenue != null ? { annual_revenue: annualRevenue } : {}),
+        ...(requestedAmount != null ? { requested_amount: requestedAmount } : {}),
+        ...(applicationUrl ? { application_url: applicationUrl } : {}),
+        ...(bankStatementUrls ? { bank_statement_urls: bankStatementUrls } : {}),
+        ...(dlVcUrls ? { dl_vc_urls: dlVcUrls } : {}),
         ...(tags && tags.length > 0 ? { tags } : {}),
-        // Stage from CSV when present (normalized + validated above);
-        // 'imported' when blank or unknown. Operator can edit any
-        // imported lead's stage from the drawer.
         stage,
-        // Legacy status field — kept for back-compat with anything
-        // still reading status. Phase 2 reconciled stage as the
-        // canonical pipeline field.
         status: "new",
         score: 0,
       },
@@ -295,9 +342,6 @@ export async function POST(req: NextRequest) {
 
   let inserted = 0;
   if (toInsert.length > 0) {
-    // Single bulk insert into tenant_records. The kanban + table
-    // primitives read from this same table via listRecords() so
-    // imported leads appear on /t/<slug>/leads immediately.
     const insRes = await db.from("tenant_records").insert(toInsert).select("id");
     if (insRes.error) {
       return NextResponse.json(
@@ -305,8 +349,6 @@ export async function POST(req: NextRequest) {
           ok: false,
           error: "insert_failed",
           detail: insRes.error.message,
-          // Surface the partial counts so the operator knows how many
-          // were skipped vs failed BEFORE the insert exploded.
           would_have_inserted: toInsert.length,
           skipped_duplicate: skippedDuplicate,
           skipped_malformed: skippedMalformed,
@@ -326,3 +368,4 @@ export async function POST(req: NextRequest) {
     errors: errors.slice(0, 20),
   });
 }
+

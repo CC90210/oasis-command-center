@@ -147,7 +147,7 @@ export function IntegrationKeysPanel({
         <div>
           <h3 className="text-sm font-bold text-fg flex items-center gap-2">
             <KeyRound className="w-4 h-4" />
-            Business integration keys
+            Business app keys
           </h3>
           <p className="text-[11.5px] text-fg-muted leading-relaxed mt-1">
             Outbound channels your agents use to reach leads — Twilio (SMS),
@@ -155,7 +155,8 @@ export function IntegrationKeysPanel({
             from AI provider keys above (those power the agents&apos; reasoning;
             these power what they send out). Values are encrypted at rest
             (AES-256-GCM) and decrypted only inside server-side send paths —
-            never returned to the browser.
+            never returned to the browser. The Integration health card lower
+            on this page is status-only; this is where credentials are saved.
           </p>
         </div>
       </div>

@@ -244,7 +244,7 @@ export function LocalCliProvidersCard() {
   return (
     <Card
       title="Local AI CLIs"
-      subtitle="Install + sign in to Claude Code, Codex, or Gemini directly from here. The bridge runs the install on this machine; the CLI handles its own OAuth in your browser. Click Refresh after sign-in to flip the card to Ready."
+      subtitle="Install + sign in to Claude Code, Codex, or Gemini directly from here. Once a CLI is Ready, use the chat header's CLI selector to choose which local subscription powers that conversation."
       action={
         <button
           type="button"

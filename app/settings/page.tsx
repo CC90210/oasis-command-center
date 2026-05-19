@@ -94,7 +94,10 @@ export default async function SettingsPage() {
 
   return (
     <div className="space-y-6 animate-fade-in">
-      <PageHeader title="Settings" subtitle="Profile, password, plan templates, integrations." />
+      <PageHeader
+        title="Settings"
+        subtitle="Profile, AI setup, business app keys, team controls, and read-only integration health."
+      />
 
       {!profile ? (
         <Card title="No profile loaded">
@@ -330,11 +333,11 @@ export default async function SettingsPage() {
           </Card>
 
           <Card
-            title="Integrations"
+            title="Integration health"
             subtitle={
               isOperator
-                ? "Health across every connected system (operator view — includes platform infra). Open the Integrations page for the full setup grid."
-                : "Health across the systems your enabled agents actually use. Enable more agents to unlock additional integrations."
+                ? "Read-only status across every connected system (operator view - includes platform infra). Save business app keys in the Business app keys card above."
+                : "Read-only status across the systems your enabled agents actually use. Save credentials in Business app keys; enable more agents to unlock additional integrations."
             }
           >
             <div className="grid sm:grid-cols-2 gap-3">

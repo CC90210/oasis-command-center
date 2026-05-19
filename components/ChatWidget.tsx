@@ -87,6 +87,16 @@ const LEGACY_CHAT_MODE_STORAGE_KEY = "oasis.chat.mode.v2";
 const isChatMode = (s: unknown): s is ChatMode =>
   s === "auto" || s === "cli" || s === "cloud_only" || s === "cloud_bridge_tools";
 
+type CliRuntime = "claude" | "codex" | "gemini";
+const CLI_RUNTIME_STORAGE_KEY = "oasis.chat.cliRuntime.v1";
+const isCliRuntime = (s: unknown): s is CliRuntime =>
+  s === "claude" || s === "codex" || s === "gemini";
+const CLI_RUNTIME_LABELS: Record<CliRuntime, string> = {
+  claude: "Claude Code",
+  codex: "Codex CLI",
+  gemini: "Gemini CLI",
+};
+
 /**
  * One-shot migration from the v2 vocabulary to the v3 vocabulary.
  *
@@ -337,6 +347,7 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
   // initializer (always returns "auto" on the server, then localStorage
   // hydration runs in the mount effect below).
   const [chatMode, setChatModeState] = useState<ChatMode>("auto");
+  const [cliRuntime, setCliRuntimeState] = useState<CliRuntime>("claude");
   // Tracks which routing mode the most recent FAILED message used. Powers
   // the "Retry on the other mode" affordance on the error banner. Null
   // while everything is healthy or after a successful turn.
@@ -352,6 +363,17 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
         window.localStorage.setItem(CHAT_MODE_STORAGE_KEY, next);
       } catch {
         // localStorage quota / privacy mode — fine, mode is in-memory.
+      }
+    }
+  }
+  function setCliRuntime(next: CliRuntime) {
+    setCliRuntimeState(next);
+    setSessionId(null);
+    if (typeof window !== "undefined") {
+      try {
+        window.localStorage.setItem(CLI_RUNTIME_STORAGE_KEY, next);
+      } catch {
+        // localStorage quota / privacy mode - fine, runtime is in-memory.
       }
     }
   }
@@ -567,6 +589,16 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
     }
   }, []);
 
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    try {
+      const stored = window.localStorage.getItem(CLI_RUNTIME_STORAGE_KEY);
+      if (isCliRuntime(stored)) setCliRuntimeState(stored);
+    } catch {
+      // Privacy mode / disabled storage - leave default "claude".
+    }
+  }, []);
+
   // Probe the local bridge on mount + every 30s. When the operator runs
   // `pm2 restart claude-bridge`, this flips true and desktop-enabled runtimes can
   // target their machine instead of /api/chat.
@@ -603,12 +635,13 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
   const [prewarmEpoch, setPrewarmEpoch] = useState(0);
   useEffect(() => {
     if (bridgeOnline !== true) return;
+    if (cliRuntime !== "claude") return;
     void fetch(`${BRIDGE_CHAT_BASE}/prewarm`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ agent, tab_id: tabId }),
     }).catch(() => null);
-  }, [bridgeOnline, agent, tabId, prewarmEpoch]);
+  }, [bridgeOnline, agent, tabId, prewarmEpoch, cliRuntime]);
 
   useEffect(() => {
     if (awayFromBottom) return;
@@ -654,28 +687,6 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
   const cloudProviderReachable = cfg?.provider !== "ollama";
   const cloudReady = configsLoaded && (hasOwnKey || isAdmin) && cloudProviderReachable;
   const bridgeReady = bridgeOnline === true;
-  // Routing self-selects now: desktop bridge when paired + online, else the
-  // per-agent API key. The Auto/Cloud/Desktop picker is gone — see the
-  // header render block + commit 150a124.
-  const desktopBridgeActive = bridgeReady;
-  const ready = bridgeReady || cloudReady;
-  const providerStatus = (() => {
-    if (desktopBridgeActive && cfg?.provider === "ollama") {
-      return `Provider: ${cfg.provider} · ${cfg.model} · local desktop`;
-    }
-    if (desktopBridgeActive) return "Provider: Claude Code subscription (desktop bridge)";
-    if (cfg?.provider === "ollama") return "Provider: local model (Desktop required)";
-    if (cfg) return `Provider: ${cfg.provider} · ${cfg.model} · saved key`;
-    if (isAdmin) return "Provider: OASIS platform default";
-    return configsLoaded ? "Provider: not connected" : "Provider: loading...";
-  })();
-  // Resolve the actual route the next /send will take, given the picker.
-  // The 4-mode union collapses into 3 "where does the work happen" buckets:
-  //   - cli                : bridge owns LLM + tools (subscription billing)
-  //   - cloud_only         : cloud LLM, ONLY the 11 cloud tools, no bridge
-  //   - cloud_bridge_tools : cloud LLM (API key), bridge for tool execution
-  // "auto" picks cli when the bridge is ready, otherwise cloud_bridge_tools
-  // (which degrades gracefully to cloud-only when the bridge isn't there).
   const effectiveMode: "cli" | "cloud_only" | "cloud_bridge_tools" =
     chatMode === "cli"
       ? "cli"
@@ -686,19 +697,37 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
           : bridgeReady
             ? "cli"
             : "cloud_bridge_tools";
+  // Routing self-selects now: desktop bridge when paired + online, else the
+  // per-agent API key. The Auto/Cloud/Desktop picker is gone — see the
+  // header render block + commit 150a124.
+  const desktopBridgeActive = effectiveMode === "cli" && bridgeReady;
+  const ready = bridgeReady || cloudReady;
+  const providerStatus = (() => {
+    if (desktopBridgeActive && cfg?.provider === "ollama" && cliRuntime === "claude") {
+      return `Provider: ${cfg.provider} · ${cfg.model} · local desktop`;
+    }
+    if (desktopBridgeActive) {
+      return `Provider: ${CLI_RUNTIME_LABELS[cliRuntime]} subscription (desktop bridge)`;
+    }
+    if (cfg?.provider === "ollama") return "Provider: local model (Desktop required)";
+    if (cfg) return `Provider: ${cfg.provider} · ${cfg.model} · saved key`;
+    if (isAdmin) return "Provider: OASIS platform default";
+    return configsLoaded ? "Provider: not connected" : "Provider: loading...";
+  })();
+  // Resolve the actual route the next /send will take, given the picker.
   const accessStatus =
     effectiveMode === "cli"
-      ? "Access: this desktop · local tools + files"
+      ? `Access: this desktop - ${CLI_RUNTIME_LABELS[cliRuntime]}`
       : effectiveMode === "cloud_only"
-        ? "Access: cloud workspace · cloud tools only"
+        ? "Access: cloud workspace - cloud tools only"
         : bridgeReady
-          ? "Access: cloud workspace (Anthropic API) · local tool execution (bridge)"
-          : "Access: cloud workspace · tool_use loop";
+          ? "Access: cloud workspace (Anthropic API) - local tool execution (bridge)"
+          : "Access: cloud workspace - tool_use loop";
   const accessTitle =
     chatMode === "auto"
       ? "Auto: bridge if paired + online, otherwise API key with bridge tools when available."
       : chatMode === "cli"
-        ? "CLI: pinned to the local Claude Code bridge. Uses your Claude subscription, full repo + every Claude Code tool. Errors loud if the bridge isn't running."
+        ? `CLI: pinned to the local ${CLI_RUNTIME_LABELS[cliRuntime]} bridge runtime. Errors loud if the bridge isn't running.`
         : chatMode === "cloud_only"
           ? "Cloud-only: pinned to /api/chat with your API key. ONLY the 11 cloud tools (records, http, integrations) — no bridge tools even if it's online. Pick this when you don't want the LLM running bash / edit_file on your machine."
           : "API + local tools: LLM on your Anthropic API key, tools executed by the bridge (read_file, write_file, bash, send_email, send_sms). Best of both worlds — paid LLM, free local tools.";
@@ -721,7 +750,7 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
         headers: { "content-type": "application/json" },
         // tab_id is the canonical pool key; session_id sent for legacy
         // fallback path on older bridge builds.
-        body: JSON.stringify({ agent, tab_id: tabId, session_id: sessionId }),
+        body: JSON.stringify({ agent, tab_id: tabId, session_id: sessionId, cli_provider: cliRuntime }),
       }).catch(() => null);
       // Bump the prewarm epoch so the prewarm effect re-fires and
       // spawns a fresh warm process for the next chat. Without this,
@@ -816,7 +845,7 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
       //           body field below — the URL is the same.
       const isOllama = cfg?.provider === "ollama";
       const useBridge = wantsBridge;
-      const useLocalChat = useBridge && isOllama;
+      const useLocalChat = useBridge && isOllama && cliRuntime === "claude";
       const url = useLocalChat
         ? `${BRIDGE_CHAT_BASE}/local-chat`
         : useBridge
@@ -838,6 +867,7 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
               agent,
               messages: newMessages,
               session_id: sessionId,
+              cli_provider: cliRuntime,
               tab_id: tabId,  // warm pool key — stable across the widget's lifetime
             }
           : {
@@ -1448,6 +1478,23 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
                   ? "Mode: API + local tools (checking…)"
                   : "Mode: API + local tools (bridge offline)"}
             </option>
+          </select>
+        )}
+        {bridgeReady && effectiveMode === "cli" && (
+          <select
+            value={cliRuntime}
+            onChange={(e) => {
+              const v = e.target.value;
+              if (isCliRuntime(v)) setCliRuntime(v);
+            }}
+            disabled={streaming}
+            className="bg-bg-elev border border-bg-border rounded-lg px-2 py-2 text-[11px] text-fg-muted focus:outline-none focus:border-accent transition-colors cursor-pointer disabled:opacity-60"
+            aria-label="Local CLI runtime"
+            title="Choose which local CLI the desktop bridge uses for this chat. This is separate from API-key provider overrides."
+          >
+            <option value="claude">CLI: Claude Code</option>
+            <option value="codex">CLI: Codex</option>
+            <option value="gemini">CLI: Gemini</option>
           </select>
         )}
         {usage && (
