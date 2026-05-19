@@ -139,9 +139,9 @@ export function LeadDetailDrawer({
         type="button"
         aria-label="Close drawer"
         onClick={close}
-        className="flex-1 bg-black/50 cursor-default"
+        className="flex-1 bg-black/60 backdrop-blur-sm cursor-default"
       />
-      <aside className="relative w-full sm:w-[480px] h-full bg-bg-deep border-l border-bg-border flex flex-col">
+      <aside className="relative w-full sm:w-[480px] h-full bg-bg-elev border-l border-bg-border shadow-[-12px_0_32px_-8px_rgba(0,0,0,0.6)] flex flex-col">
         <header className="flex items-start gap-3 px-4 py-3 border-b border-bg-border">
           <div className="min-w-0 flex-1">
             <h2 className="text-sm font-bold text-fg truncate">{title}</h2>
@@ -193,7 +193,7 @@ export function LeadDetailDrawer({
           {data && activeTab === "activity" && <LeadTimelinePanel leadId={recordId} />}
           {data && activeTab === "lenders" && <LendersTab application={data.application} />}
           {data && activeTab === "bank" && <BankTab record={data.record.data} />}
-          {data && activeTab === "notes" && <NotesTabStub />}
+          {data && activeTab === "notes" && <NotesTab leadId={recordId} />}
           {data && activeTab === "documents" && <DocumentsTab docs={data.documents} />}
         </div>
 
@@ -297,11 +297,119 @@ function BankTab({ record }: { record: Record<string, unknown> }) {
   );
 }
 
-function NotesTabStub() {
+type NoteRow = {
+  id: string;
+  content_preview: string | null;
+  created_at: string;
+  metadata: Record<string, unknown> | null;
+};
+
+function NotesTab({ leadId }: { leadId: string }) {
+  const [notes, setNotes] = useState<NoteRow[] | null>(null);
+  const [draft, setDraft] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [pending, setPending] = useState(false);
+
+  const reload = useCallback(async () => {
+    setError(null);
+    try {
+      const r = await fetch(`/api/leads/${leadId}/notes`, { credentials: "include" });
+      const j = await r.json();
+      if (!j.ok) {
+        setError(j.error || "load_failed");
+        setNotes([]);
+        return;
+      }
+      setNotes((j.notes || []) as NoteRow[]);
+    } catch (e) {
+      setError(String((e as Error).message || e));
+      setNotes([]);
+    }
+  }, [leadId]);
+
+  useEffect(() => {
+    reload();
+  }, [reload]);
+
+  const save = async () => {
+    if (!draft.trim()) return;
+    setPending(true);
+    setError(null);
+    try {
+      const r = await fetch(`/api/leads/${leadId}/notes`, {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ note: draft }),
+      });
+      const j = await r.json();
+      if (!j.ok) {
+        setError(j.error || `failed_${r.status}`);
+        return;
+      }
+      setDraft("");
+      await reload();
+    } catch (e) {
+      setError(String((e as Error).message || e));
+    } finally {
+      setPending(false);
+    }
+  };
+
   return (
-    <div className="text-xs text-fg-dim italic py-6 text-center">
-      Notes are coming soon. For now, log lead notes in the Activity timeline
-      via SMS / email — they show up there with full context.
+    <div className="space-y-3">
+      <div className="space-y-2">
+        <textarea
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          placeholder="Write a note about this lead…"
+          rows={3}
+          maxLength={4000}
+          className="w-full text-xs px-2 py-1.5 rounded-md bg-bg-deep border border-bg-border text-fg resize-none"
+        />
+        <div className="flex items-center justify-between">
+          <div className="text-[11px] text-fg-dim">
+            {error ? <span className="text-red-400">{error}</span> : `${draft.length}/4000`}
+          </div>
+          <button
+            type="button"
+            disabled={pending || !draft.trim()}
+            onClick={save}
+            className="text-[12px] font-semibold px-3 py-1.5 rounded-md bg-accent text-bg-deep disabled:opacity-50"
+          >
+            {pending ? "Saving…" : "Save note"}
+          </button>
+        </div>
+      </div>
+      <div className="border-t border-bg-border pt-3">
+        {notes === null ? (
+          <div className="text-xs text-fg-dim italic">Loading…</div>
+        ) : notes.length === 0 ? (
+          <div className="text-xs text-fg-dim italic py-3 text-center">
+            No notes yet. Your first one will land at the top.
+          </div>
+        ) : (
+          <ul className="space-y-2.5">
+            {notes.map((n) => {
+              const author =
+                n.metadata && typeof n.metadata === "object"
+                  ? (n.metadata as Record<string, unknown>).author_email
+                  : null;
+              return (
+                <li key={n.id} className="rounded-md bg-bg-deep/60 border border-bg-border p-2.5">
+                  <div className="text-[13px] text-fg whitespace-pre-wrap leading-relaxed">
+                    {n.content_preview}
+                  </div>
+                  <div className="text-[10.5px] text-fg-dim mt-1.5">
+                    {typeof author === "string" ? `${author} · ` : ""}
+                    {new Date(n.created_at).toLocaleString()}
+                  </div>
+                </li>
+              );
+            })}
+          </ul>
+        )}
+      </div>
     </div>
   );
 }
@@ -463,6 +571,7 @@ function DrawerFooter({
 }
 
 function EmailComposer({
+  recordId,
   entity,
   toEmail,
   onClose,
@@ -472,6 +581,10 @@ function EmailComposer({
   toEmail: string | null;
   onClose: () => void;
 }) {
+  const [subject, setSubject] = useState("");
+  const [body, setBody] = useState("");
+  const [status, setStatus] = useState<string | null>(null);
+  const [pending, setPending] = useState(false);
   if (!toEmail) {
     return (
       <ComposerShell title="Email" onClose={onClose}>
@@ -479,24 +592,67 @@ function EmailComposer({
       </ComposerShell>
     );
   }
-  // Direct in-drawer send is shipping next — outbound email today goes
-  // through the chat agent so it can choose the right persona + log
-  // properly through send_gateway. Pre-fills via `mailto:` as a
-  // bridge so the operator isn't blocked.
+  // POSTs to /api/leads/[id]/email which queues the send via
+  // lead_interactions(status=queued) + emits the dashboard-queued event
+  // for send_gateway.py to pick up. The drawer is fully decoupled from
+  // SMTP credentials — the daemon side does the actual delivery.
   return (
     <ComposerShell title={`Email · ${toEmail}`} onClose={onClose}>
-      <div className="text-[11px] text-fg-dim leading-relaxed">
-        Direct in-drawer send is shipping next. Outbound email today goes
-        through the chat agent — ask it to draft and send, and it&apos;ll log
-        the thread under this {entity}.
-      </div>
-      <div className="flex items-center justify-end">
-        <a
-          href={`mailto:${toEmail}`}
-          className="text-[12px] font-semibold px-3 py-1.5 rounded-md bg-bg-elev border border-bg-border text-fg"
+      <input
+        type="text"
+        value={subject}
+        onChange={(e) => setSubject(e.target.value)}
+        placeholder="Subject"
+        maxLength={200}
+        className="w-full text-xs px-2 py-1.5 rounded-md bg-bg-deep border border-bg-border text-fg"
+      />
+      <textarea
+        value={body}
+        onChange={(e) => setBody(e.target.value)}
+        placeholder="Message"
+        rows={5}
+        maxLength={32000}
+        className="w-full text-xs px-2 py-1.5 rounded-md bg-bg-deep border border-bg-border text-fg resize-none"
+      />
+      <div className="flex items-center justify-between">
+        <div className="text-[11px] text-fg-dim">
+          {status ? status : `${body.length}/32000 · queues for send_gateway`}
+        </div>
+        <button
+          type="button"
+          disabled={pending || !subject.trim() || !body.trim()}
+          onClick={async () => {
+            setPending(true);
+            setStatus(null);
+            try {
+              const r = await fetch(`/api/leads/${recordId}/email`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                credentials: "include",
+                body: JSON.stringify({
+                  to_email: toEmail,
+                  subject,
+                  body,
+                }),
+              });
+              const j = await r.json().catch(() => ({}));
+              if (r.ok && j.ok) {
+                setStatus("Queued");
+                setSubject("");
+                setBody("");
+              } else {
+                setStatus(j.error || `Failed (${r.status})`);
+              }
+            } catch (e) {
+              setStatus(String((e as Error).message || e));
+            } finally {
+              setPending(false);
+            }
+          }}
+          className="text-[12px] font-semibold px-3 py-1.5 rounded-md bg-accent text-bg-deep disabled:opacity-50"
         >
-          Open in mail client
-        </a>
+          {pending ? "Queueing…" : "Queue send"}
+        </button>
       </div>
     </ComposerShell>
   );
@@ -568,6 +724,8 @@ function SmsComposer({
   );
 }
 
+type SequenceOption = { id: string; name: string; enabled: boolean };
+
 function TextTorrentPicker({
   leadId,
   onClose,
@@ -575,6 +733,36 @@ function TextTorrentPicker({
   leadId: string | null;
   onClose: () => void;
 }) {
+  const [sequences, setSequences] = useState<SequenceOption[] | null>(null);
+  const [selected, setSelected] = useState<string>("");
+  const [status, setStatus] = useState<string | null>(null);
+  const [pending, setPending] = useState(false);
+
+  useEffect(() => {
+    let alive = true;
+    fetch("/api/sequences", { credentials: "include" })
+      .then((r) => r.json())
+      .then((j) => {
+        if (!alive) return;
+        const list = Array.isArray(j.sequences) ? j.sequences : [];
+        setSequences(
+          list
+            .map((s: Record<string, unknown>) => ({
+              id: String(s.id ?? ""),
+              name: String(s.name ?? "Untitled sequence"),
+              enabled: s.enabled !== false,
+            }))
+            .filter((s: SequenceOption) => s.id && s.enabled),
+        );
+      })
+      .catch(() => {
+        if (alive) setSequences([]);
+      });
+    return () => {
+      alive = false;
+    };
+  }, []);
+
   if (!leadId) {
     return (
       <ComposerShell title="Text Torrent" onClose={onClose}>
@@ -584,24 +772,70 @@ function TextTorrentPicker({
       </ComposerShell>
     );
   }
-  // Manual enrollment endpoint is shipping next. Sequences today fire
-  // on stage transitions via the BRAVO_RECORD_STATUS_CHANGED event the
-  // drip engine listens for. Linking out to /sequences keeps the
-  // operator unblocked.
+
   return (
-    <ComposerShell title="Text Torrent" onClose={onClose}>
-      <div className="text-[11px] text-fg-dim leading-relaxed">
-        Manual enroll is shipping next. Sequences today fire on lead-stage
-        changes — change this lead&apos;s stage to trigger the matching
-        cadence, or open the sequences page to manage them directly.
-      </div>
-      <div className="flex items-center justify-end">
-        <Link
-          href="/sequences"
-          className="text-[12px] font-semibold px-3 py-1.5 rounded-md bg-bg-elev border border-bg-border text-fg"
+    <ComposerShell title="Text Torrent · enroll" onClose={onClose}>
+      {sequences === null ? (
+        <div className="text-xs text-fg-dim italic">Loading sequences…</div>
+      ) : sequences.length === 0 ? (
+        <div className="text-xs text-fg-dim italic leading-relaxed">
+          No enabled sequences. Build one at{" "}
+          <Link href="/sequences" className="underline text-fg-muted hover:text-fg">
+            /sequences
+          </Link>{" "}
+          and toggle it on first.
+        </div>
+      ) : (
+        <select
+          value={selected}
+          onChange={(e) => setSelected(e.target.value)}
+          className="w-full text-xs px-2 py-1.5 rounded-md bg-bg-deep border border-bg-border text-fg"
         >
-          Open sequences
-        </Link>
+          <option value="">Choose a sequence…</option>
+          {sequences.map((s) => (
+            <option key={s.id} value={s.id}>
+              {s.name}
+            </option>
+          ))}
+        </select>
+      )}
+      <div className="flex items-center justify-between">
+        <div className="text-[11px] text-fg-dim">{status}</div>
+        <button
+          type="button"
+          disabled={pending || !selected}
+          onClick={async () => {
+            setPending(true);
+            setStatus(null);
+            try {
+              const r = await fetch(`/api/sequences/${selected}/enroll`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                credentials: "include",
+                body: JSON.stringify({ lead_id: leadId }),
+              });
+              const j = await r.json().catch(() => ({}));
+              if (r.ok && j.ok) {
+                setStatus(
+                  j.scheduled_for
+                    ? `Enrolled — fires ${new Date(j.scheduled_for).toLocaleString()}`
+                    : "Enrolled",
+                );
+              } else if (r.status === 409 && j.error === "already_enrolled") {
+                setStatus("Already enrolled (one-per-lead)");
+              } else {
+                setStatus(j.error || `Failed (${r.status})`);
+              }
+            } catch (e) {
+              setStatus(String((e as Error).message || e));
+            } finally {
+              setPending(false);
+            }
+          }}
+          className="text-[12px] font-semibold px-3 py-1.5 rounded-md bg-accent text-bg-deep disabled:opacity-50"
+        >
+          {pending ? "Enrolling…" : "Enroll"}
+        </button>
       </div>
     </ComposerShell>
   );

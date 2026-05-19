@@ -58,41 +58,48 @@ export async function GET(
 
   // 1. lead_interactions — both directions; the table mixes them via a
   //    direction column. Table name varies across legacy migrations; try
-  //    lead_interactions first, then interactions.
+  //    lead_interactions first, then interactions. Record EACH failure
+  //    so the drawer's "Partial: …" message names the real cause
+  //    instead of silently swallowing the lead_interactions error and
+  //    only surfacing the "interactions doesn't exist" fallback.
+  let interactionLoaded = false;
   for (const table of ["lead_interactions", "interactions"]) {
+    if (interactionLoaded) break;
     try {
       const { data, error } = await db
         .from(table)
-        .select("id, channel, direction, subject, content_preview, action_type, created_at, sent_at, to_email, to_phone")
+        .select("id, channel, direction, subject, content_preview, created_at, sent_at, to_email, to_phone, metadata")
         .eq("tenant_id", tenantId)
         .eq("lead_id", leadId)
         .order("created_at", { ascending: false })
         .limit(150);
       if (error) throw error;
+      interactionLoaded = true;
       for (const row of data || []) {
         const at = (row as any).sent_at || (row as any).created_at;
         if (!at) continue;
         const direction = (row as any).direction || "outbound";
         const channel = (row as any).channel || "unknown";
+        const isNote = channel === "note";
         events.push({
-          source: "interaction",
-          type: `${channel}_${direction}`,
+          source: isNote ? "interaction" : "interaction",
+          type: isNote ? "note" : `${channel}_${direction}`,
           at,
-          title: `${direction === "outbound" ? "Sent" : "Received"} ${channel}${(row as any).subject ? `: ${(row as any).subject}` : ""}`,
+          title: isNote
+            ? "📝 Note"
+            : `${direction === "outbound" ? "Sent" : "Received"} ${channel}${(row as any).subject ? `: ${(row as any).subject}` : ""}`,
           body: (row as any).content_preview || undefined,
           meta: {
             id: (row as any).id,
-            action_type: (row as any).action_type,
+            channel,
             to_email: (row as any).to_email,
             to_phone: (row as any).to_phone,
+            metadata: (row as any).metadata,
           },
         });
       }
-      break; // only one of the two tables exists per deploy
     } catch (e: any) {
-      // If both fail we'll record the second failure below; first
-      // failure may just be "table not found" which is expected.
-      if (table === "interactions") errors.push({ feed: table, message: String(e?.message || e) });
+      errors.push({ feed: table, message: String(e?.message || e) });
     }
   }
 
