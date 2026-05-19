@@ -16,6 +16,7 @@ import { BrandLogoCard } from "@/components/settings/BrandLogoCard";
 import { QuickInviteCard } from "@/components/settings/QuickInviteCard";
 import { PlanTemplateEditor } from "@/components/settings/PlanTemplateEditor";
 import { AgentConfigEditor } from "@/components/settings/AgentConfigEditor";
+import { IntegrationKeysPanel } from "@/components/settings/IntegrationKeysPanel";
 import { MyAgentsCard } from "@/components/settings/MyAgentsCard";
 import { DevicesEditor } from "@/components/settings/DevicesEditor";
 import { ProviderAccountsCard } from "@/components/settings/ProviderAccountsCard";
@@ -122,6 +123,8 @@ export default async function SettingsPage() {
               canManage={canManageTenant}
             />
           </Card>
+
+          <IntegrationKeysPanel canManage={canManageTenant} />
 
           {canManageTenant && (
             <Card
