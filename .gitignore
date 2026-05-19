@@ -27,3 +27,5 @@ next-env.d.ts
 Thumbs.db
 
 .vercel
+.env*.local
+.env.preview
