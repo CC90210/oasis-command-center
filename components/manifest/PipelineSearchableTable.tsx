@@ -17,7 +17,11 @@
 
 import Link from "next/link";
 import type { StageMeta } from "@/lib/sunbiz-stage-meta";
-import { formatPipelineCell, type PipelineColumn } from "@/lib/pipeline-display";
+import {
+  formatPipelineCell,
+  pipelineRowHref,
+  type PipelineColumn,
+} from "@/lib/pipeline-display";
 
 type Row = { id: string; data: Record<string, unknown> };
 
@@ -31,15 +35,15 @@ type Props = {
    * serializes across the server/client boundary cleanly.
    */
   stageMap: Record<string, StageMeta>;
-  /** href base for record-detail links. */
-  linkBase: string;
   /**
-   * Optional query-param name used to build row hrefs as
-   * `${linkBase}?${rowQueryParam}=<id>` instead of `${linkBase}/<id>`.
-   * SunBiz uses this to open the right-side drawer; other tenants
-   * leave it undefined for path-based navigation.
+   * Tenant slug + entity name — fed to pipelineRowHref so SunBiz row
+   * clicks open the right-side drawer via `?lead=<id>` while every
+   * other tenant keeps the `/leads/<id>` path-based navigation.
+   * Single source of truth for the link shape lives in
+   * lib/pipeline-display.ts.
    */
-  rowQueryParam?: string | null;
+  tenantSlug: string;
+  entityName: string;
   /** Stage filter label rendered in the empty-state message. */
   activeStageLabel: string;
   /** Active search query (for the empty-state copy only). */
@@ -52,15 +56,12 @@ export function PipelineSearchableTable({
   rows,
   columns,
   stageMap,
-  linkBase,
-  rowQueryParam,
+  tenantSlug,
+  entityName,
   activeStageLabel,
   query,
 }: Props) {
-  const rowHref = (id: string) =>
-    rowQueryParam
-      ? `${linkBase}?${rowQueryParam}=${encodeURIComponent(id)}`
-      : `${linkBase}/${id}`;
+  const rowHref = (id: string) => pipelineRowHref(tenantSlug, entityName, id);
   if (rows.length === 0) {
     const hasQuery = !!(query && query.trim());
     return (

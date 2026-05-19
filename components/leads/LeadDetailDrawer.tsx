@@ -21,6 +21,7 @@ import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { X, FileText, ImageIcon } from "lucide-react";
 import { LeadTimelinePanel } from "./LeadTimelinePanel";
+import { humanLeadDocSize, leadDocTypeLabel } from "@/lib/lead-doc-display";
 
 type DocRow = {
   id: string;
@@ -434,7 +435,7 @@ function DocumentsTab({ docs }: { docs: DocRow[] }) {
             <div className="min-w-0 flex-1">
               <div className="text-fg truncate">{d.filename}</div>
               <div className="text-[11px] text-fg-dim">
-                {docTypeLabel(d.doc_type)} · {humanSize(d.size_bytes)} ·{" "}
+                {leadDocTypeLabel(d.doc_type)} · {humanLeadDocSize(d.size_bytes)} ·{" "}
                 {new Date(d.uploaded_at).toLocaleDateString()}
               </div>
             </div>
@@ -476,34 +477,6 @@ function DocDownloadButton({ id, filename }: { id: string; filename: string }) {
       {pending ? "…" : "View"}
     </button>
   );
-}
-
-function humanSize(bytes: number | null): string {
-  if (!bytes || bytes <= 0) return "—";
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-}
-
-function docTypeLabel(t: string): string {
-  switch (t) {
-    case "bank_statements_3mo":
-      return "Bank statements (3 mo)";
-    case "drivers_license":
-      return "Driver's license";
-    case "proof_of_ownership":
-      return "Proof of ownership";
-    case "void_cheque":
-      return "Void cheque";
-    case "business_license":
-      return "Business license";
-    case "tax_returns":
-      return "Tax returns";
-    case "unclassified":
-      return "Other";
-    default:
-      return t.replace(/_/g, " ");
-  }
 }
 
 /* -------------------------------------------------------------------------- */

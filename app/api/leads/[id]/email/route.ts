@@ -23,6 +23,7 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { resolveSessionContext } from "@/lib/api-auth";
+import { publishAgentEvent } from "@/lib/manifest/events";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -98,20 +99,20 @@ export async function POST(
   // Emit an agent_event so send_gateway's event-bus listener picks it
   // up immediately instead of waiting for its next poll cycle.
   // Failure to emit is non-fatal — the daemon's polling fallback will
-  // still find the row.
-  await db
-    .from("agent_events")
-    .insert({
-      tenant_id: sess.tenantId,
-      event_type: "BRAVO_OUTBOUND_QUEUED_FROM_DASHBOARD",
-      payload: {
-        lead_id: leadId,
-        interaction_id: ins.data.id,
-        channel: "email",
-        to_email: toEmail,
-      },
-    })
-    .then(() => undefined, () => undefined);
+  // still find the row. Uses the canonical publishAgentEvent helper so
+  // the schema (correlation_id, publisher_agent, severity) is right.
+  await publishAgentEvent({
+    eventType: "BRAVO_OUTBOUND_QUEUED_FROM_DASHBOARD",
+    tenantId: sess.tenantId,
+    publisher: "dashboard",
+    targetAgent: "send_gateway",
+    payload: {
+      lead_id: leadId,
+      interaction_id: ins.data.id,
+      channel: "email",
+      to_email: toEmail,
+    },
+  });
 
   return NextResponse.json({
     ok: true,

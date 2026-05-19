@@ -56,6 +56,41 @@ export type StatusChangePublish = {
  * Postgres blip. Errors are logged via console so they show up in the
  * server log without paging anyone.
  */
+/**
+ * Generic agent_event publisher — for events that aren't a status
+ * change (e.g., BRAVO_OUTBOUND_QUEUED_FROM_DASHBOARD). Honors the
+ * agent_events schema: no `tenant_id` column exists, tenant scope
+ * lives in `correlation_id` (text). Callers that pass `tenantId`
+ * automatically get correlation_id stamped.
+ *
+ * Best-effort: emission failure is logged but doesn't throw, so the
+ * caller's primary write path never depends on the bus being up.
+ */
+export type AgentEventPublish = {
+  eventType: string;
+  tenantId: string;
+  publisher?: string;
+  severity?: "info" | "warn" | "error" | "critical";
+  targetAgent?: string;
+  payload?: Record<string, unknown>;
+};
+
+export async function publishAgentEvent(input: AgentEventPublish): Promise<void> {
+  try {
+    const db = getServiceSupabase();
+    await db.from("agent_events").insert({
+      event_type: input.eventType,
+      publisher_agent: input.publisher || "dashboard",
+      severity: input.severity || "info",
+      target_agent: input.targetAgent || null,
+      payload: { ...(input.payload || {}), tenant_id: input.tenantId },
+      correlation_id: input.tenantId,
+    });
+  } catch (err) {
+    console.error("[manifest.events.publishAgentEvent]", err);
+  }
+}
+
 export async function publishStatusChange(input: StatusChangePublish): Promise<void> {
   try {
     const db = getServiceSupabase();

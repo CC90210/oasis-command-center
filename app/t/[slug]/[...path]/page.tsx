@@ -18,8 +18,6 @@ import { LeadDetailDrawer } from "@/components/leads/LeadDetailDrawer";
 import {
   PIPELINE_COLUMNS,
   formatPipelineCell,
-  pipelineLinkBase,
-  pipelineRowQueryParam,
   pipelineRowHref,
 } from "@/lib/pipeline-display";
 import { filterRowsByQuery } from "@/lib/search-filter";
@@ -662,41 +660,22 @@ async function PipelineSuperview({
             {stageFilter ? `${leadVisible.length} in ${findStage("lead", stageFilter)?.label || stageFilter}` : `${leadRowsRes.rows.length} total`}
           </div>
         </div>
-        {slug === "sun" ? (
-          <div className="grid grid-cols-1 lg:grid-cols-[260px_1fr] gap-4">
-            <StageRail
-              tenantSlug={slug}
-              stages={LEAD_PIPELINE_STAGES}
-              activeKey={stageFilter}
-              basePath={`/t/${slug}/${page.path}`}
-              counts={leadCounts}
-            />
-            <PipelineRecordList
-              slug={slug}
-              entityName={leadName}
-              stageField={leadStageField}
-              rows={leadVisible}
-              activeStageLabel={stageFilter ? findStage("lead", stageFilter)?.label || stageFilter : "All stages"}
-            />
-          </div>
-        ) : (
-          <>
-            <StageRail
-              tenantSlug={slug}
-              stages={LEAD_PIPELINE_STAGES}
-              activeKey={stageFilter}
-              basePath={`/t/${slug}/${page.path}`}
-              counts={leadCounts}
-            />
-            <PipelineRecordList
-              slug={slug}
-              entityName={leadName}
-              stageField={leadStageField}
-              rows={leadVisible}
-              activeStageLabel={stageFilter ? findStage("lead", stageFilter)?.label || stageFilter : "All stages"}
-            />
-          </>
-        )}
+        <PipelineLayout vertical={slug === "sun"}>
+          <StageRail
+            tenantSlug={slug}
+            stages={LEAD_PIPELINE_STAGES}
+            activeKey={stageFilter}
+            basePath={`/t/${slug}/${page.path}`}
+            counts={leadCounts}
+          />
+          <PipelineRecordList
+            slug={slug}
+            entityName={leadName}
+            stageField={leadStageField}
+            rows={leadVisible}
+            activeStageLabel={stageFilter ? findStage("lead", stageFilter)?.label || stageFilter : "All stages"}
+          />
+        </PipelineLayout>
       </section>
 
       <section className="space-y-4">
@@ -706,43 +685,23 @@ async function PipelineSuperview({
             {oppStageFilter ? `${oppVisible.length} in ${findStage(oppName, oppStageFilter)?.label || oppStageFilter}` : `${oppRowsRes.rows.length} total`}
           </div>
         </div>
-        {slug === "sun" ? (
-          <div className="grid grid-cols-1 lg:grid-cols-[260px_1fr] gap-4">
-            <StageRail
-              tenantSlug={slug}
-              stages={OPPORTUNITY_PIPELINE_STAGES}
-              activeKey={oppStageFilter}
-              basePath={`/t/${slug}/${page.path}`}
-              counts={oppCounts}
-              paramName="opp_stage"
-            />
-            <PipelineRecordList
-              slug={slug}
-              entityName={oppName}
-              stageField={oppStageField}
-              rows={oppVisible}
-              activeStageLabel={oppStageFilter ? findStage(oppName, oppStageFilter)?.label || oppStageFilter : "All opportunities"}
-            />
-          </div>
-        ) : (
-          <>
-            <StageRail
-              tenantSlug={slug}
-              stages={OPPORTUNITY_PIPELINE_STAGES}
-              activeKey={oppStageFilter}
-              basePath={`/t/${slug}/${page.path}`}
-              counts={oppCounts}
-              paramName="opp_stage"
-            />
-            <PipelineRecordList
-              slug={slug}
-              entityName={oppName}
-              stageField={oppStageField}
-              rows={oppVisible}
-              activeStageLabel={oppStageFilter ? findStage(oppName, oppStageFilter)?.label || oppStageFilter : "All opportunities"}
-            />
-          </>
-        )}
+        <PipelineLayout vertical={slug === "sun"}>
+          <StageRail
+            tenantSlug={slug}
+            stages={OPPORTUNITY_PIPELINE_STAGES}
+            activeKey={oppStageFilter}
+            basePath={`/t/${slug}/${page.path}`}
+            counts={oppCounts}
+            paramName="opp_stage"
+          />
+          <PipelineRecordList
+            slug={slug}
+            entityName={oppName}
+            stageField={oppStageField}
+            rows={oppVisible}
+            activeStageLabel={oppStageFilter ? findStage(oppName, oppStageFilter)?.label || oppStageFilter : "All opportunities"}
+          />
+        </PipelineLayout>
       </section>
     </div>
   );
@@ -896,16 +855,10 @@ async function SingleEntityPipeline({
     ? findStage(entity.name, stageFilter)?.label || stageFilter
     : `All ${entity.label.toLowerCase()}s`;
 
-  // Resolve display columns + link base from the shared
-  // lib/pipeline-display module so adding a column or tweaking a
-  // formatter is one edit, not three (was duplicated across
-  // PipelineRecordList and this component prior to 2026-05-17 cleanup).
   const localCols = PIPELINE_COLUMNS[entity.name] || [];
-  const localLinkBase = pipelineLinkBase(slug, entity.name);
-  // Build a plain stage_key -> StageMeta map for the client component.
-  // Cannot pass `findStage` directly because functions are not
-  // serializable across the Next.js server/client boundary — that's
-  // what crashed every pipeline page on the prior deploy.
+  // Plain stage_key -> StageMeta map — functions can't cross the
+  // server/client boundary, so this is what PipelineSearchableTable
+  // gets instead of findStage.
   const stageMap: Record<string, typeof stages[number]> = Object.fromEntries(
     stages.map((s) => [s.key, s]),
   );
@@ -921,51 +874,54 @@ async function SingleEntityPipeline({
           ? `${visible.length} match${visible.length === 1 ? "" : "es"} for "${query}"${stageFilter ? ` in ${activeLabel}` : ""}`
           : stageFilter ? `${visible.length} in ${activeLabel}` : `${rowsRes.rows.length} total`}
       </div>
-      {slug === "sun" ? (
-        <div className="grid grid-cols-1 lg:grid-cols-[260px_1fr] gap-4">
-          <StageRail
-            tenantSlug={slug}
-            stages={stages}
-            activeKey={stageFilter}
-            basePath={`/t/${slug}/${page.path}`}
-            counts={counts}
-          />
-          <PipelineSearchableTable
-            entityLabel={entity.label}
-            stageField={stageField}
-            rows={visible}
-            columns={localCols}
-            stageMap={stageMap}
-            linkBase={localLinkBase}
-            rowQueryParam={pipelineRowQueryParam(slug, entity.name)}
-            activeStageLabel={activeLabel}
-            query={query}
-          />
-        </div>
-      ) : (
-        <>
-          <StageRail
-            tenantSlug={slug}
-            stages={stages}
-            activeKey={stageFilter}
-            basePath={`/t/${slug}/${page.path}`}
-            counts={counts}
-          />
-          <PipelineSearchableTable
-            entityLabel={entity.label}
-            stageField={stageField}
-            rows={visible}
-            columns={localCols}
-            stageMap={stageMap}
-            linkBase={localLinkBase}
-            rowQueryParam={pipelineRowQueryParam(slug, entity.name)}
-            activeStageLabel={activeLabel}
-            query={query}
-          />
-        </>
-      )}
+      <PipelineLayout vertical={slug === "sun"}>
+        <StageRail
+          tenantSlug={slug}
+          stages={stages}
+          activeKey={stageFilter}
+          basePath={`/t/${slug}/${page.path}`}
+          counts={counts}
+        />
+        <PipelineSearchableTable
+          entityLabel={entity.label}
+          stageField={stageField}
+          rows={visible}
+          columns={localCols}
+          stageMap={stageMap}
+          tenantSlug={slug}
+          entityName={entity.name}
+          activeStageLabel={activeLabel}
+          query={query}
+        />
+      </PipelineLayout>
     </div>
   );
+}
+
+/**
+ * PipelineLayout — wraps a StageRail + record list. Renders as a
+ * 2-column grid (rail-left, list-right) when `vertical` is true (SunBiz
+ * uses this shape), or as a stacked column otherwise (every other
+ * tenant keeps the horizontal chevron-above-table layout).
+ *
+ * Exists to kill the previous "branch on slug, duplicate the children"
+ * pattern that sat at three call sites.
+ */
+function PipelineLayout({
+  vertical,
+  children,
+}: {
+  vertical: boolean;
+  children: React.ReactNode;
+}) {
+  if (vertical) {
+    return (
+      <div className="grid grid-cols-1 lg:grid-cols-[260px_1fr] gap-4">
+        {children}
+      </div>
+    );
+  }
+  return <>{children}</>;
 }
 
 function UnknownPath({ slug, subPath }: { slug: string; subPath: string }) {

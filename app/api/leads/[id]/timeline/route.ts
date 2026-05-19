@@ -157,21 +157,25 @@ export async function GET(
     errors.push({ feed: "lead_documents", message: String(e?.message || e) });
   }
 
-  // 4. agent_events — stage transitions and lifecycle events.
+  // 4. agent_events — stage transitions and lifecycle events. Note
+  //    that agent_events has NO tenant_id column (migration 006) —
+  //    tenant scope is carried by correlation_id (text). Filtering by
+  //    `.eq("tenant_id", …)` was the bug that surfaced as the
+  //    persistent "Partial: couldn't read agent_events" in the drawer.
   try {
     const { data, error } = await db
       .from("agent_events")
-      .select("id, event_type, payload, created_at")
-      .eq("tenant_id", tenantId)
+      .select("id, event_type, payload, published_at, created_at")
+      .eq("correlation_id", tenantId)
       .contains("payload", { lead_id: leadId })
-      .order("created_at", { ascending: false })
+      .order("published_at", { ascending: false })
       .limit(50);
     if (error) throw error;
     for (const row of data || []) {
       events.push({
         source: "system",
         type: (row as any).event_type,
-        at: (row as any).created_at,
+        at: (row as any).published_at || (row as any).created_at,
         title: humanizeEventType((row as any).event_type),
         meta: (row as any).payload || {},
       });

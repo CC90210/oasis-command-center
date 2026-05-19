@@ -11,6 +11,7 @@
 import { FileText, ImageIcon } from "lucide-react";
 import { Card } from "@/components/Card";
 import { getServiceSupabase } from "@/lib/supabase-server";
+import { humanLeadDocSize, leadDocTypeLabel } from "@/lib/lead-doc-display";
 import { LeadDocumentDownloadButton } from "./LeadDocumentDownloadButton";
 
 type LeadDocumentRow = {
@@ -22,35 +23,6 @@ type LeadDocumentRow = {
   uploaded_by: string | null;
   uploaded_at: string;
 };
-
-function humanSize(bytes: number | null): string {
-  if (!bytes || bytes <= 0) return "—";
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-}
-
-function docTypeLabel(docType: string): string {
-  // Mirrors the classifier enum in database/049 §lead_documents.
-  switch (docType) {
-    case "bank_statements_3mo":
-      return "Bank statements (3 months)";
-    case "drivers_license":
-      return "Driver's license";
-    case "proof_of_ownership":
-      return "Proof of ownership";
-    case "void_cheque":
-      return "Void cheque";
-    case "business_license":
-      return "Business license";
-    case "tax_returns":
-      return "Tax returns";
-    case "unclassified":
-      return "Other / unclassified";
-    default:
-      return docType.replace(/_/g, " ");
-  }
-}
 
 export async function LeadDocumentsPanel({
   tenantId,
@@ -110,7 +82,7 @@ export async function LeadDocumentsPanel({
                 <div className="min-w-0 flex-1">
                   <div className="text-fg truncate">{doc.filename}</div>
                   <div className="text-[11px] text-fg-dim">
-                    {docTypeLabel(doc.doc_type)} · {humanSize(doc.size_bytes)} ·{" "}
+                    {leadDocTypeLabel(doc.doc_type)} · {humanLeadDocSize(doc.size_bytes)} ·{" "}
                     {new Date(doc.uploaded_at).toLocaleString()}
                     {doc.uploaded_by ? ` · ${doc.uploaded_by}` : ""}
                   </div>
