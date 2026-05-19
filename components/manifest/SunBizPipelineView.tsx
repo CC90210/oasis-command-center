@@ -169,10 +169,35 @@ export function SunBizPipelineView({
 
       {/* ── D. Empty state ────────────────────────────────────────── */}
       {rows.length === 0 && (
-        <div className="rounded-2xl border border-bg-border bg-bg-deep/30 p-8 text-center text-sm text-fg-dim italic">
-          {query
-            ? `No ${entityLabel.toLowerCase()}s match "${query}".`
-            : `No ${entityLabel.toLowerCase()}s yet. Import a CSV or create a new one.`}
+        <div className="rounded-2xl border border-bg-border bg-bg-deep/30 p-6 space-y-4">
+          <div className="text-center text-sm text-fg-dim italic">
+            {query
+              ? `No ${entityLabel.toLowerCase()}s match "${query}".`
+              : `No ${entityLabel.toLowerCase()}s yet. Import a CSV or create a new one — each lead lands in its stage automatically.`}
+          </div>
+          {!query && (
+            <div>
+              <div className="text-[10px] uppercase tracking-wider text-fg-dim font-semibold mb-2 text-center">
+                Stages in this pipeline
+              </div>
+              <div className="flex flex-wrap gap-1.5 justify-center">
+                {stages.map((s) => (
+                  <span
+                    key={s.key}
+                    className="inline-block px-2 py-0.5 rounded text-[10.5px] font-semibold"
+                    style={{ background: s.bg, color: s.fg }}
+                  >
+                    {s.label}
+                  </span>
+                ))}
+              </div>
+              <div className="text-center text-[10.5px] text-fg-dim mt-3">
+                Use a <code className="text-fg-muted">Stage</code> column in your CSV
+                (any of the labels above) to land leads directly in the right
+                section.
+              </div>
+            </div>
+          )}
         </div>
       )}
 

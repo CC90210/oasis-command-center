@@ -43,6 +43,16 @@ type ParsedRow = {
   company: string | null;
   source: string | null;
   notes: string | null;
+  // SunBiz-aware columns. All optional — only forwarded when present
+  // in the CSV. Server-side import endpoint honours each one.
+  business_name: string | null;
+  contact_name: string | null;
+  stage: string | null;
+  state: string | null;
+  monthly_revenue: string | null;
+  paper_grade: string | null;
+  time_in_business: string | null;
+  assigned_to: string | null;
 };
 
 type ImportResult = {
@@ -56,9 +66,10 @@ type ImportResult = {
   error?: string;
 };
 
-const SAMPLE = `Name,Email,Phone,Company,Source,Notes
-Hunter Smith,hunter@hunterconstruction.com,+1 555 123 4567,Hunter Construction,linkedin_outreach,Roofing co — 18 months in biz
-Mike Reyes,mike@reyesmotors.net,(727) 555-9911,Reyes Motors,referral,Used cars dealer
+const SAMPLE = `Business Name,Owner,Email,Phone,State,Monthly Revenue,Stage,Source,Notes
+Velocity Logistics LLC,Carlos Mejia,carlos@velocity-log.com,(214) 555-0118,TX,48000,Hot Lead,linkedin_outreach,Roofing co — 18 months
+Reyes Motors,Mike Reyes,mike@reyesmotors.net,(727) 555-9911,FL,72000,Missing Info,referral,Used cars dealer
+Pinnacle HVAC,Renee Patterson,renee@pinnaclehvac.com,(484) 555-0149,GA,31000,Sent Application,csv,Needs 4th statement
 `;
 
 /** Map operator-typed header → our canonical field name. Lowercase
@@ -69,9 +80,15 @@ function mapHeader(h: string): keyof ParsedRow | null {
   switch (n) {
     case "name":
     case "fullname":
+      return "name";
     case "contact":
     case "contactname":
-      return "name";
+    case "owner":
+    case "ownername":
+    case "signer":
+    case "signername":
+    case "primarycontact":
+      return "contact_name";
     case "email":
     case "emailaddress":
     case "e-mail":
@@ -82,14 +99,17 @@ function mapHeader(h: string): keyof ParsedRow | null {
     case "mobile":
     case "tel":
       return "phone";
-    case "company":
     case "business":
     case "businessname":
     case "merchant":
-    case "businessname2":
+    case "merchantname":
+    case "legal":
+    case "legalname":
+    case "dba":
+      return "business_name";
+    case "company":
       return "company";
     case "source":
-    case "lead source":
     case "leadsource":
     case "channel":
       return "source";
@@ -98,6 +118,33 @@ function mapHeader(h: string): keyof ParsedRow | null {
     case "comment":
     case "comments":
       return "notes";
+    case "stage":
+    case "pipelinestage":
+    case "leadstage":
+    case "status":
+      return "stage";
+    case "state":
+    case "region":
+      return "state";
+    case "revenue":
+    case "monthlyrevenue":
+    case "monthlyrev":
+    case "revmo":
+    case "avgmonthlyrevenue":
+    case "monthlyrevenueusd":
+      return "monthly_revenue";
+    case "paper":
+    case "papergrade":
+    case "grade":
+      return "paper_grade";
+    case "timeinbusiness":
+    case "tib":
+    case "monthsinbusiness":
+      return "time_in_business";
+    case "assignedto":
+    case "agent":
+    case "owner_user":
+      return "assigned_to";
     default:
       return null;
   }
@@ -176,6 +223,14 @@ export function LeadsImportClient() {
         company: null,
         source: null,
         notes: null,
+        business_name: null,
+        contact_name: null,
+        stage: null,
+        state: null,
+        monthly_revenue: null,
+        paper_grade: null,
+        time_in_business: null,
+        assigned_to: null,
       };
       cells.forEach((val, idx) => {
         const k = colMap[idx];
@@ -244,9 +299,12 @@ export function LeadsImportClient() {
             Paste your CSV (or drop a file)
           </div>
           <p className="text-xs text-fg-muted mt-1 leading-relaxed">
-            Expected columns: Name, Email, Phone, Company, Source, Notes. Header
-            names are matched loosely — &quot;Full Name&quot;, &quot;business&quot;, &quot;cell&quot; all
-            work. Unknown columns are dropped silently.
+            Recognised columns: <strong>Business Name</strong>, Owner / Contact,
+            Email, Phone, State, Monthly Revenue, <strong>Stage</strong> (any
+            label from your pipeline — &quot;Hot Lead&quot;, &quot;Missing Info&quot;,
+            etc.), Paper Grade, Time in Business, Assigned To, Source, Notes.
+            Header names match loosely. Unknown columns are dropped silently.
+            Leads missing a recognised stage land in <em>Imported</em>.
           </p>
         </header>
 

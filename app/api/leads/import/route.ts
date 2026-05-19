@@ -28,9 +28,42 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { getSessionUser, getServiceSupabase } from "@/lib/supabase-server";
+import { LEAD_PIPELINE_STAGES } from "@/lib/sunbiz-stage-meta";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+
+// Whitelisted stage values for CSV `stage` columns. CC's mockup leads
+// import already-classified rows ("Hot Lead", "Missing Info", etc.) so
+// the importer accepts both the canonical key (hot_lead) AND the
+// display label ("Hot Lead", case-insensitive) and normalises to the
+// key. Unknown values fall back to "imported".
+const STAGE_KEY_SET = new Set(LEAD_PIPELINE_STAGES.map((s) => s.key));
+const STAGE_LABEL_MAP = new Map(
+  LEAD_PIPELINE_STAGES.map((s) => [s.label.toLowerCase(), s.key]),
+);
+function normalizeStage(raw: string | null | undefined): string {
+  const v = (raw || "").trim();
+  if (!v) return "imported";
+  const lower = v.toLowerCase();
+  if (STAGE_KEY_SET.has(lower)) return lower;
+  const labelHit = STAGE_LABEL_MAP.get(lower);
+  if (labelHit) return labelHit;
+  // Common operator shorthands → canonical key.
+  if (lower === "hot") return "hot_lead";
+  if (lower === "missing") return "missing_info";
+  if (lower === "followup" || lower === "follow up") return "follow_up";
+  if (lower === "sent app" || lower === "app sent") return "sent_application";
+  return "imported";
+}
+
+function parseMoney(v: unknown): number | null {
+  if (v == null || v === "") return null;
+  if (typeof v === "number") return Number.isFinite(v) ? v : null;
+  const s = String(v).replace(/[$,\s]/g, "");
+  const n = Number(s);
+  return Number.isFinite(n) ? n : null;
+}
 
 const MAX_ROWS = 5_000;
 // Existing-leads window for dedup. We don't scan every lead the tenant
@@ -44,9 +77,20 @@ type IncomingRow = {
   email?: string | null;
   phone?: string | null;
   company?: string | null;
+  business_name?: string | null;
+  contact_name?: string | null;
   source?: string | null;
   notes?: string | null;
   tags?: string[] | null;
+  // SunBiz-specific (optional). The importer threads these through into
+  // tenant_records.data so the pipeline view + drawer render them on
+  // re-load. Unknown values fall back to "—" downstream.
+  stage?: string | null;
+  state?: string | null;
+  monthly_revenue?: number | string | null;
+  paper_grade?: string | null;
+  time_in_business?: string | null;
+  assigned_to?: string | null;
 };
 
 function normEmail(s: string | null | undefined): string | null {
@@ -161,16 +205,34 @@ export async function POST(req: NextRequest) {
     const name = (raw.name || "").trim().slice(0, 200) || null;
     const email = normEmail(raw.email);
     const phone = normPhone(raw.phone);
+    // SunBiz schema's primary lead name is `business_name`. Accept that
+    // header directly + fall back to the legacy `company` column +
+    // finally to `name` so older CSVs keep importing.
+    const businessName =
+      (raw.business_name || "").trim().slice(0, 200) ||
+      (raw.company || "").trim().slice(0, 200) ||
+      (raw.name || "").trim().slice(0, 200) ||
+      null;
+    const contactName =
+      (raw.contact_name || "").trim().slice(0, 200) ||
+      (raw.name || "").trim().slice(0, 200) ||
+      null;
     const company = (raw.company || "").trim().slice(0, 200) || null;
     const notes = (raw.notes || "").trim().slice(0, 2000) || null;
     const source = (raw.source || "").trim().slice(0, 64) || defaultSource;
     const tags = Array.isArray(raw.tags) ? raw.tags.filter((t) => typeof t === "string").slice(0, 12) : null;
+    const stage = normalizeStage(raw.stage);
+    const state = (raw.state || "").trim().slice(0, 80) || null;
+    const monthlyRevenue = parseMoney(raw.monthly_revenue);
+    const paperGrade = (raw.paper_grade || "").trim().slice(0, 8) || null;
+    const tib = (raw.time_in_business || "").trim().slice(0, 32) || null;
+    const assignedTo = (raw.assigned_to || "").trim().slice(0, 120) || null;
 
     // Need at least one identifier — otherwise we can't dedup the
     // import on its second run and the row is functionally useless.
-    if (!email && !phone && !name) {
+    if (!email && !phone && !name && !businessName) {
       skippedMalformed += 1;
-      errors.push(`row ${i + 1}: no name, email, or phone`);
+      errors.push(`row ${i + 1}: no name, email, phone, or business_name`);
       continue;
     }
 
@@ -207,15 +269,24 @@ export async function POST(req: NextRequest) {
         company,
         source,
         notes,
+        // SunBiz canonical fields. Pipeline view + drawer read these
+        // first; legacy {name, company} are kept above for back-compat
+        // with anything still reading the older shape.
+        business_name: businessName,
+        contact_name: contactName,
+        ...(state ? { state } : {}),
+        ...(monthlyRevenue != null ? { monthly_revenue: monthlyRevenue } : {}),
+        ...(paperGrade ? { paper_grade: paperGrade } : {}),
+        ...(tib ? { time_in_business: tib } : {}),
+        ...(assignedTo ? { assigned_to: assignedTo } : {}),
         ...(tags && tags.length > 0 ? { tags } : {}),
-        // Salesforce-parity Lead Pipeline starts at 'imported' (per
-        // SUN_SEED, 2026-05-17 rework). Bulk-imported leads land here;
-        // operator promotes to hot_lead / follow_up / etc.
-        stage: "imported",
-        // Legacy status field — kept for backward-compat with any
-        // code path still reading status. Phase 2 reconciled
-        // stage as the canonical pipeline field; remove this once
-        // every reader migrates.
+        // Stage from CSV when present (normalized + validated above);
+        // 'imported' when blank or unknown. Operator can edit any
+        // imported lead's stage from the drawer.
+        stage,
+        // Legacy status field — kept for back-compat with anything
+        // still reading status. Phase 2 reconciled stage as the
+        // canonical pipeline field.
         status: "new",
         score: 0,
       },
