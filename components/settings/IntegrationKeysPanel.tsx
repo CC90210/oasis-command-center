@@ -147,12 +147,15 @@ export function IntegrationKeysPanel({
         <div>
           <h3 className="text-sm font-bold text-fg flex items-center gap-2">
             <KeyRound className="w-4 h-4" />
-            Integration keys
+            Business integration keys
           </h3>
           <p className="text-[11.5px] text-fg-muted leading-relaxed mt-1">
-            Paste your API keys here. Values are encrypted at rest (AES-256-GCM)
-            and decrypted only inside the server-side send paths. Operators
-            never see stored values back — only "set / verified / failed".
+            Outbound channels your agents use to reach leads — Twilio (SMS),
+            Gmail / SMTP (email), TextTorrent, n8n, Stripe, Telegram. Distinct
+            from AI provider keys above (those power the agents&apos; reasoning;
+            these power what they send out). Values are encrypted at rest
+            (AES-256-GCM) and decrypted only inside server-side send paths —
+            never returned to the browser.
           </p>
         </div>
       </div>
