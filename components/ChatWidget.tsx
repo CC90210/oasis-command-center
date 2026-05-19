@@ -315,6 +315,11 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
       : `tab-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
   );
   const [error, setError] = useState<string | null>(null);
+  // Structured error code surfaced by /api/chat (lib/chat-auth.ts).
+  // When set, the error render branch picks the matching friendly UI
+  // copy instead of dumping the raw `error` string. Currently used for
+  // "key_decrypt_failed" → Replace-key deep link.
+  const [errorCode, setErrorCode] = useState<string | null>(null);
   const [actions, setActions] = useState<
     Array<{
       ok: boolean;
@@ -859,6 +864,7 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
       if (!res.ok || !res.body) {
         const errBody = await safeReadJson(res);
         setError(errBody?.error || `http_${res.status}`);
+        setErrorCode(typeof errBody?.code === "string" ? errBody.code : null);
         setLastFailedMode(useBridge ? "cli" : "cloud");
         setStreaming(false);
         setMessages((m) => m.slice(0, -1));
@@ -1672,7 +1678,18 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
           <div className="flex items-start gap-2 rounded-lg border border-status-warm/40 bg-status-warm/10 p-3 text-sm text-status-warm">
             <AlertCircle className="w-4 h-4 mt-0.5 flex-shrink-0" />
             <div className="space-y-1 min-w-0 flex-1">
-              {error.startsWith("provider_temporarily_unavailable") ? (
+              {errorCode === "key_decrypt_failed" ? (
+                <>
+                  <div className="font-bold">Your saved AI key needs a refresh.</div>
+                  <div className="text-xs text-fg-muted font-sans">
+                    The encryption envelope on your stored provider key has changed since you last saved it, so it can no longer be decrypted. Open{" "}
+                    <Link href="/settings#providers" className="text-accent underline">
+                      Settings → AI setup
+                    </Link>{" "}
+                    and click <strong>Replace key</strong> on the affected provider — paste the same value, save, and you&apos;re back. Takes 30 seconds.
+                  </div>
+                </>
+              ) : error.startsWith("provider_temporarily_unavailable") ? (
                 <>
                   <div className="font-bold">Provider had a hiccup.</div>
                   <div className="text-xs text-fg-muted font-sans">

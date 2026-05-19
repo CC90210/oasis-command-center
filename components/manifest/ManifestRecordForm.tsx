@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
-import { ArrowLeft, CheckCircle2, Loader2, Save, AlertCircle, Plus, X, Code2 } from "lucide-react";
+import { ArrowLeft, CheckCircle2, Loader2, Save, AlertCircle, Plus, X } from "lucide-react";
 import Link from "next/link";
 import type { ManifestEntityDef, ManifestEntityField } from "@/lib/manifest/schema";
 import { humanize } from "@/lib/manifest/humanize";
@@ -121,18 +121,11 @@ export function ManifestRecordForm({
       } else if (f.type === "boolean") {
         out[f.name] = !!raw;
       } else if (f.type === "json") {
-        // JSON fields accept either an object (from the key-value editor)
-        // or a string (raw-JSON Advanced mode). Object → pass through;
-        // string → parse with a friendly error.
-        if (typeof raw === "object") {
-          out[f.name] = raw;
-        } else {
-          try {
-            out[f.name] = JSON.parse(String(raw));
-          } catch {
-            errs[f.name] = "Invalid JSON — try the simple editor instead";
-          }
-        }
+        // JSON fields produce an object from the key-value editor. The
+        // prior Advanced (raw JSON) mode is gone (2026-05-19 turnkey
+        // pass) — any non-object value reaching this branch is legacy
+        // data, pass it through unchanged.
+        out[f.name] = raw;
       } else {
         out[f.name] = raw;
       }
@@ -392,15 +385,14 @@ function FieldInput({
 }
 
 /**
- * Editor for `type: "json"` fields. Default surface is a key/value list
- * (one row per top-level key, value is a plain text input). An "Advanced
- * (raw JSON)" toggle reveals a monospace textarea for operators who need
- * nested structures.
+ * Editor for `type: "json"` fields. Turnkey key/value editor — one row
+ * per top-level key, plain text inputs. The committed value is always
+ * an object (the form serializes to JSON on submit).
  *
- * The committed value is always an object — the consuming form serializes
- * it as JSON on submit. If the operator pastes invalid JSON in the
- * Advanced view, the parent form catches it during buildPayload() and
- * surfaces an inline error.
+ * The prior implementation had a Simple/Advanced toggle that revealed
+ * a raw-JSON textarea for nested structures. Removed in the 2026-05-19
+ * turnkey UX pass — operators who legitimately need nested structures
+ * use the AI editor (Reasoning surface) instead.
  */
 function JsonField({
   label,
@@ -417,10 +409,8 @@ function JsonField({
   baseClass: string;
   errorNode: React.ReactNode;
 }) {
-  // Normalize the current value to a row list. The form may hand us an
-  // object (the common case), a string (legacy / Advanced-mode draft),
-  // an array (rare — manifest fields are typically objects, but
-  // defensive), or nothing.
+  // Normalize the current value to a row list. Handles objects (the
+  // common case) and falls back to an empty list for anything else.
   const initialRows = (() => {
     if (value && typeof value === "object" && !Array.isArray(value)) {
       return Object.entries(value as Record<string, unknown>).map(([k, v]) => ({
@@ -431,23 +421,7 @@ function JsonField({
     return [] as { key: string; value: string }[];
   })();
   const [rows, setRows] = useState(initialRows);
-  // Default to Simple (key/value) mode for object values; Advanced (raw
-  // JSON) for arrays + non-empty strings + anything else the simple
-  // editor can't represent losslessly. Without this, an operator
-  // clicking "Add field" in Simple mode on an array value would
-  // silently overwrite the array with a new object.
-  const valueLooksStructured =
-    Array.isArray(value) ||
-    (typeof value === "string" && value.trim().length > 0 && !value.includes(":")) ||
-    (typeof value === "object" && value !== null && Array.isArray(value));
-  const [rawMode, setRawMode] = useState(valueLooksStructured);
-  const [rawText, setRawText] = useState(() => {
-    if (typeof value === "string") return value;
-    if (value && typeof value === "object") return JSON.stringify(value, null, 2);
-    return "";
-  });
 
-  /** Serialize the row list back to a JSON object (drops empty keys). */
   function rowsToObject(list: { key: string; value: string }[]): Record<string, string> {
     const obj: Record<string, string> = {};
     for (const r of list) {
@@ -462,78 +436,9 @@ function JsonField({
     onChange(rowsToObject(next));
   }
 
-  /** Switch to Advanced (raw JSON) — seed the textarea from current rows
-   *  so the operator's in-progress Simple edits don't disappear. */
-  function enterRawMode() {
-    setRawText(JSON.stringify(rowsToObject(rows), null, 2));
-    setRawMode(true);
-  }
-
-  /** Switch back to Simple — re-parse the current rawText into rows so
-   *  edits made in Advanced view show up. If the JSON is malformed,
-   *  keep rows as-is (operator will see the parse error on submit). */
-  function exitRawMode() {
-    try {
-      const parsed = JSON.parse(rawText);
-      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-        const next = Object.entries(parsed as Record<string, unknown>).map(([k, v]) => ({
-          key: k,
-          value: typeof v === "string" ? v : JSON.stringify(v),
-        }));
-        setRows(next);
-        onChange(parsed);
-      }
-    } catch {
-      // Malformed JSON — leave rows alone; operator can fix in Advanced.
-    }
-    setRawMode(false);
-  }
-
-  if (rawMode) {
-    return (
-      <label className="block">
-        <div className="flex items-center justify-between mb-1">
-          {label}
-          <button
-            type="button"
-            onClick={exitRawMode}
-            className="text-[10px] uppercase tracking-wider text-fg-dim hover:text-fg inline-flex items-center gap-1"
-          >
-            <X className="h-3 w-3" /> Simple
-          </button>
-        </div>
-        <textarea
-          rows={4}
-          value={rawText}
-          onChange={(e) => {
-            setRawText(e.target.value);
-            // Keep the parent's value in sync as a string — buildPayload
-            // will parse it. This lets the operator type incomplete JSON
-            // without us erroring on every keystroke.
-            onChange(e.target.value);
-          }}
-          disabled={disabled}
-          placeholder='{"key":"value"}'
-          className={`${baseClass} font-mono`}
-        />
-        {errorNode}
-      </label>
-    );
-  }
-
   return (
     <div className="block">
-      <div className="flex items-center justify-between mb-1">
-        {label}
-        <button
-          type="button"
-          onClick={enterRawMode}
-          className="text-[10px] uppercase tracking-wider text-fg-dim hover:text-fg inline-flex items-center gap-1"
-          title="Switch to raw JSON for nested structures"
-        >
-          <Code2 className="h-3 w-3" /> Advanced
-        </button>
-      </div>
+      <div className="mb-1">{label}</div>
       <div className="space-y-2">
         {rows.map((row, idx) => (
           <div key={idx} className="flex items-center gap-2">

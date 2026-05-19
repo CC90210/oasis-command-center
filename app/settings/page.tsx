@@ -217,11 +217,11 @@ export default async function SettingsPage() {
               paste-key UX is one click away (anchor #agents). */}
           <Card
             id="providers"
-            title="AI provider accounts"
+            title="AI setup"
             subtitle={
               canManageTenant
-                ? "Connect at least one AI account so your agents can think. OpenRouter is the easiest — one key powers every model. Anthropic Direct, OpenAI Direct, and Google Gemini are the per-vendor paths if you prefer."
-                : "These are the team's AI accounts. Your admin connects them once — your chats will route through whichever account they pick."
+                ? "Connect one AI account here — every agent uses it by default. OpenRouter is the easiest (one key powers every model). Anthropic, OpenAI, and Google are the per-vendor alternatives."
+                : "These are the team's AI accounts. Your admin connects them once — your chats route through whichever account they pick."
             }
           >
             <SafeBoundary label="AI provider accounts">
@@ -245,8 +245,8 @@ export default async function SettingsPage() {
 
           <Card
             id="agents"
-            title="Per-agent overrides"
-            subtitle="Optional. By default every enabled agent uses the team AI provider account from above. Use this card only if a specific agent needs a different model or its OWN key (e.g., Solara on Claude Sonnet but Helios on GPT-5). Leave a row alone to inherit the team default."
+            title="Override an agent's provider"
+            subtitle="Optional. Each agent uses the workspace default from AI setup above unless you set a specific provider here. Edit a row to switch which provider that agent uses."
             action={
               <Tag tone={bridgeOnline ? "engaged" : "neutral"}>
                 {bridgeOnline ? "Tool access: bridge online" : "Tool access: cloud only"}
@@ -254,7 +254,7 @@ export default async function SettingsPage() {
             }
           >
             {canManageTenant ? (
-              <SafeBoundary label="Per-agent overrides">
+              <SafeBoundary label="Override an agent's provider">
                 <AgentConfigEditor
                   agentKeys={enabledChatAgentKeys}
                   bridgeOnline={bridgeOnline}
@@ -273,21 +273,43 @@ export default async function SettingsPage() {
                 />
               </SafeBoundary>
             ) : (
-              <EmptyState message="Team-wide model defaults are managed by an owner or admin. Scroll down to 'Use my own AI keys (just for me)' if you'd rather plug in your own AI account." />
+              <EmptyState message="Team-wide AI setup is managed by an owner or admin. Expand 'Just-for-me overrides' below if you'd rather plug in your own AI account." />
             )}
           </Card>
 
-          <SafeBoundary label="My agents">
-            <MyAgentsCard
-              enabledAgentKeys={enabledChatAgentKeys}
-              agentLabels={Object.fromEntries(
-                (manifest?.agents || []).map((a) => [
-                  a.slug.toLowerCase(),
-                  a.display_name || a.slug,
-                ]),
-              )}
-            />
-          </SafeBoundary>
+          {/* Just-for-me overrides — collapsed by default. Most operators
+              don't need this; the workspace AI setup above plus the
+              per-agent override card handle 95% of cases. A junior
+              teammate with their own GPT key uses this. Wrapped in a
+              <details> so it's one click away without cluttering the
+              main Settings flow. */}
+          <details className="rounded-2xl border border-bg-border bg-bg-elev/30 overflow-hidden group">
+            <summary className="cursor-pointer select-none px-5 py-3 flex items-center justify-between gap-3 hover:bg-bg-elev/50">
+              <div>
+                <div className="text-sm font-bold text-fg">
+                  Just-for-me overrides{" "}
+                  <span className="text-fg-dim font-normal text-xs">(rarely needed)</span>
+                </div>
+                <div className="text-[11.5px] text-fg-muted mt-0.5">
+                  Use your own AI account for chats — only affects you, not your team.
+                </div>
+              </div>
+              <span className="text-fg-dim text-xs group-open:rotate-90 transition-transform">▸</span>
+            </summary>
+            <div className="px-5 pb-5">
+              <SafeBoundary label="My agents">
+                <MyAgentsCard
+                  enabledAgentKeys={enabledChatAgentKeys}
+                  agentLabels={Object.fromEntries(
+                    (manifest?.agents || []).map((a) => [
+                      a.slug.toLowerCase(),
+                      a.display_name || a.slug,
+                    ]),
+                  )}
+                />
+              </SafeBoundary>
+            </div>
+          </details>
 
           <Card
             title="Weekday template"

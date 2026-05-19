@@ -26,7 +26,7 @@
  */
 
 import { useEffect, useState } from "react";
-import { Loader2, CheckCircle2, AlertCircle, Terminal, ExternalLink, RefreshCw } from "lucide-react";
+import { Loader2, CheckCircle2, AlertCircle, Terminal, RefreshCw } from "lucide-react";
 import { Card, Tag } from "@/components/Card";
 import { BRIDGE_CHAT_BASE } from "@/lib/agent-roots";
 
@@ -230,23 +230,17 @@ export function LocalCliProvidersCard() {
                 )}
                 {!info.installed && (
                   <div className="space-y-1.5">
+                    <p className="text-[11px] text-fg-muted leading-relaxed">
+                      Install in your terminal, then click Refresh:
+                    </p>
                     <div className="text-[10px] font-mono text-fg-dim bg-bg-deep px-2 py-1 rounded break-all">
                       {card.install_command}
                     </div>
-                    <a
-                      href={card.install_url}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="inline-flex items-center gap-1 text-[11px] text-accent hover:underline"
-                    >
-                      Install guide
-                      <ExternalLink className="w-3 h-3" />
-                    </a>
                   </div>
                 )}
                 {info.installed && !info.authenticated && (
-                  <div className="text-[11px] text-status-warm">
-                    Run the CLI&apos;s login command on this machine, then refresh.
+                  <div className="text-[11px] text-status-warm leading-relaxed">
+                    Installed but needs sign-in. Run the CLI&apos;s login command on this machine, then click Refresh.
                   </div>
                 )}
               </div>

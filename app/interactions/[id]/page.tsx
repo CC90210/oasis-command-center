@@ -286,15 +286,6 @@ export default async function InteractionDetailPage({
               );
             })}
         </dl>
-        <details className="mt-4">
-          <summary className="text-xs text-fg-dim hover:text-accent cursor-pointer select-none inline-flex items-center gap-1">
-            <span className="inline-block">▸</span>
-            Inspect raw JSON
-          </summary>
-          <pre className="mt-2 text-[11px] text-fg-faint font-mono leading-relaxed overflow-x-auto bg-bg-deep p-3 rounded">
-            {JSON.stringify({ ...interaction, content: undefined }, null, 2)}
-          </pre>
-        </details>
       </Card>
 
       {!interaction.content && !classification.summary && (

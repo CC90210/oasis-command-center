@@ -14,7 +14,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
-import { AlertCircle, CheckCircle2, Loader2, Save, Trash2, Plus, X, Code2, ListTree, MessageSquare, Mail } from "lucide-react";
+import { AlertCircle, CheckCircle2, Loader2, Save, Trash2, Plus, X, MessageSquare, Mail } from "lucide-react";
 import {
   parseDripSteps,
   parseDripTriggerFilter,
@@ -59,8 +59,9 @@ export function SequenceBuilderClient({ initialSequence }: Props) {
   const [filterJson, setFilterJson] = useState(() =>
     JSON.stringify(initialSequence.trigger_filter, null, 2),
   );
-  const [stepsMode, setStepsMode] = useState<"structured" | "raw">("structured");
-  const [filterMode, setFilterMode] = useState<"structured" | "raw">("structured");
+  // Structured-only editors (2026-05-19 turnkey pass). Raw JSON modes
+  // for filter + steps were removed; the StepsEditor + FilterEditor
+  // sub-components are the only editing surface.
 
   type ParseState = {
     steps: DripStep[] | null;
@@ -283,99 +284,24 @@ export function SequenceBuilderClient({ initialSequence }: Props) {
             />
           </div>
           <div>
-            <div className="flex items-center justify-between mb-1">
-              <label className="block text-[11px] uppercase tracking-wider font-bold text-fg-dim">
-                Filter
-              </label>
-              <button
-                type="button"
-                onClick={() => {
-                  // Re-serialize when leaving structured mode so the
-                  // textarea picks up whatever the operator clicked in.
-                  if (filterMode === "structured" && parsed.filter) {
-                    setFilterJson(JSON.stringify(parsed.filter, null, 2));
-                  }
-                  setFilterMode(filterMode === "structured" ? "raw" : "structured");
-                }}
-                className="text-[10px] uppercase tracking-wider text-fg-dim hover:text-fg inline-flex items-center gap-1"
-              >
-                {filterMode === "structured" ? (
-                  <><Code2 className="h-3 w-3" /> Advanced</>
-                ) : (
-                  <><ListTree className="h-3 w-3" /> Simple</>
-                )}
-              </button>
-            </div>
-            {filterMode === "structured" ? (
-              <FilterEditor
-                filter={parsed.filter || {}}
-                onChange={(next) => setFilterJson(JSON.stringify(next, null, 2))}
-              />
-            ) : (
-              <>
-                <textarea
-                  value={filterJson}
-                  onChange={(e) => setFilterJson(e.target.value)}
-                  className="w-full rounded-md border border-bg-border bg-bg-deep px-3 py-2 font-mono text-[11px] text-fg min-h-[5rem]"
-                  spellCheck={false}
-                />
-                <p className="text-[11px] text-fg-dim mt-1 leading-relaxed">
-                  Common shapes:
-                  <br />
-                  <code className="text-fg-muted">{`{ "entity": "lead", "field": "stage", "to": "viewed_application" }`}</code>
-                </p>
-              </>
-            )}
+            <label className="block text-[11px] uppercase tracking-wider font-bold text-fg-dim mb-1">
+              Filter
+            </label>
+            <FilterEditor
+              filter={parsed.filter || {}}
+              onChange={(next) => setFilterJson(JSON.stringify(next, null, 2))}
+            />
           </div>
         </section>
 
         <section className="space-y-3 rounded-xl border border-bg-border bg-bg-elev/40 p-4">
-          <div className="flex items-center justify-between">
-            <h3 className="text-xs font-bold uppercase tracking-wider text-fg-muted">
-              Steps
-            </h3>
-            <button
-              type="button"
-              onClick={() => {
-                if (stepsMode === "structured" && parsed.steps) {
-                  setStepsJson(JSON.stringify(parsed.steps, null, 2));
-                }
-                setStepsMode(stepsMode === "structured" ? "raw" : "structured");
-              }}
-              className="text-[10px] uppercase tracking-wider text-fg-dim hover:text-fg inline-flex items-center gap-1"
-            >
-              {stepsMode === "structured" ? (
-                <><Code2 className="h-3 w-3" /> Advanced (raw JSON)</>
-              ) : (
-                <><ListTree className="h-3 w-3" /> Simple</>
-              )}
-            </button>
-          </div>
-          {stepsMode === "structured" ? (
-            <StepsEditor
-              steps={parsed.steps || []}
-              onChange={(next) => setStepsJson(JSON.stringify(next, null, 2))}
-            />
-          ) : (
-            <>
-              <p className="text-[11px] text-fg-dim leading-relaxed">
-                Each step:{" "}
-                <code className="text-fg-muted">
-                  {`{ "channel": "sms" | "email", "delay_minutes": N, "subject"?: "...", "body": "..." }`}
-                </code>
-                <br />
-                Subject required when channel is email. Body supports{" "}
-                <code className="text-fg-muted">{`{{lead.first_name}}`}</code> mustache
-                substitution.
-              </p>
-              <textarea
-                value={stepsJson}
-                onChange={(e) => setStepsJson(e.target.value)}
-                className="w-full rounded-md border border-bg-border bg-bg-deep px-3 py-2 font-mono text-[11px] text-fg min-h-[20rem]"
-                spellCheck={false}
-              />
-            </>
-          )}
+          <h3 className="text-xs font-bold uppercase tracking-wider text-fg-muted">
+            Steps
+          </h3>
+          <StepsEditor
+            steps={parsed.steps || []}
+            onChange={(next) => setStepsJson(JSON.stringify(next, null, 2))}
+          />
         </section>
 
         <div className="flex items-center gap-3">
