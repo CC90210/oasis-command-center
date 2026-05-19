@@ -27,6 +27,29 @@ export function formatMoney(v: unknown): string {
 }
 
 /**
+ * Narrow an unknown to a non-empty trimmed string, or null. Used
+ * across the drawer + pipeline view for jsonb-field display where
+ * "" should be treated as missing.
+ */
+export function nonEmptyString(v: unknown): string | null {
+  return typeof v === "string" && v.trim() ? v : null;
+}
+
+/**
+ * Two-letter initials for an avatar/chip. "Velocity Logistics LLC"
+ * → "VL"; "Carlos" → "C". Strips whitespace and empties.
+ */
+export function initialsOf(name: string): string {
+  return name
+    .split(/\s+/)
+    .filter(Boolean)
+    .slice(0, 2)
+    .map((s) => s[0])
+    .join("")
+    .toUpperCase();
+}
+
+/**
  * Relative-time formatter — "5m ago", "2h ago", "3d ago", or
  * the absolute date once beyond 30 days. Used by every timeline-
  * adjacent surface (LeadTimelinePanel, LeadDetailDrawer header,

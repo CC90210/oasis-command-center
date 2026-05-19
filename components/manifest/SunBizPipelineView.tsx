@@ -13,11 +13,11 @@
  */
 
 import Link from "next/link";
-import { Filter, ArrowUpDown, Layers, Columns3, Table2, Plus, Download } from "lucide-react";
+import { Plus } from "lucide-react";
 import type { StageMeta } from "@/lib/sunbiz-stage-meta";
 import { PageSearchBar } from "@/components/manifest/PageSearchBar";
 import { pipelineRowHref } from "@/lib/pipeline-display";
-import { formatMoney, relTime } from "@/lib/format-helpers";
+import { formatMoney, relTime, nonEmptyString, initialsOf } from "@/lib/format-helpers";
 import {
   STAGE_SLA_DAYS,
   ACTIVE_STAGES,
@@ -116,50 +116,24 @@ export function SunBizPipelineView({
             <span className="text-emerald-300 font-semibold">{ready}</span> ready to advance
           </div>
         </div>
-        <div className="flex items-center gap-2">
-          <button
-            type="button"
-            disabled
-            title="CSV export — coming next"
-            className="inline-flex items-center gap-1.5 text-[11px] uppercase tracking-wider px-3 py-1.5 rounded-md bg-bg-elev border border-bg-border text-fg-muted opacity-60 cursor-not-allowed"
-          >
-            <Download className="w-3.5 h-3.5" />
-            Export
-          </button>
-          <Link
-            href={newHref}
-            className="inline-flex items-center gap-1.5 text-[11px] uppercase tracking-wider px-3 py-1.5 rounded-md bg-accent text-bg-deep font-semibold hover:bg-accent-bright"
-          >
-            <Plus className="w-3.5 h-3.5" />
-            New {isLeads ? "merchant" : "application"}
-          </Link>
-        </div>
+        <Link
+          href={newHref}
+          className="inline-flex items-center gap-1.5 text-[11px] uppercase tracking-wider px-3 py-1.5 rounded-md bg-accent text-bg-deep font-semibold hover:bg-accent-bright"
+        >
+          <Plus className="w-3.5 h-3.5" />
+          New {isLeads ? "merchant" : "application"}
+        </Link>
       </div>
 
-      {/* ── B. Toolbar row ────────────────────────────────────────── */}
-      <div className="flex items-center gap-2 flex-wrap">
+      {/* ── B. Toolbar row — search + grouping indicator ─────────── */}
+      <div className="flex items-center gap-3 flex-wrap">
         <div className="flex-1 min-w-[280px]">
           <PageSearchBar entityLabel={entityLabel} />
         </div>
-        <ToolbarButton icon={<Filter className="w-3.5 h-3.5" />} label="Filter" disabled />
-        <ToolbarButton icon={<ArrowUpDown className="w-3.5 h-3.5" />} label="Sort" disabled />
-        <ToolbarButton
-          icon={<Layers className="w-3.5 h-3.5" />}
-          label="Group by Stage"
-          badge={visibleStages.length}
-          active
-        />
-        <ToolbarButton
-          icon={<Columns3 className="w-3.5 h-3.5" />}
-          label="Hide columns"
-          disabled
-        />
-        <ToolbarButton
-          icon={<Table2 className="w-3.5 h-3.5" />}
-          label="View: Table"
-          disabled
-        />
-        <div className="text-[10.5px] text-fg-dim font-mono ml-auto whitespace-nowrap">
+        <div className="text-[10.5px] text-fg-dim whitespace-nowrap">
+          Grouped by stage · {visibleStages.length} active
+        </div>
+        <div className="text-[10.5px] text-fg-dim font-mono whitespace-nowrap">
           updated{" "}
           {mostRecentUpdate > 0
             ? relTime(new Date(mostRecentUpdate).toISOString())
@@ -224,50 +198,6 @@ export function SunBizPipelineView({
 }
 
 /* -------------------------------------------------------------------------- */
-/* Toolbar button                                                              */
-/* -------------------------------------------------------------------------- */
-
-function ToolbarButton({
-  icon,
-  label,
-  badge,
-  disabled,
-  active,
-}: {
-  icon: React.ReactNode;
-  label: string;
-  badge?: number;
-  disabled?: boolean;
-  active?: boolean;
-}) {
-  const tooltip = disabled ? `${label} — coming next` : label;
-  return (
-    <button
-      type="button"
-      disabled={disabled}
-      title={tooltip}
-      className={`inline-flex items-center gap-1.5 text-[11px] px-2.5 py-1.5 rounded-md border ${
-        active
-          ? "bg-accent/15 border-accent/40 text-accent"
-          : "bg-bg-elev border-bg-border text-fg-muted hover:text-fg"
-      } ${disabled ? "opacity-60 cursor-not-allowed" : ""}`}
-    >
-      {icon}
-      <span>{label}</span>
-      {typeof badge === "number" && (
-        <span
-          className={`inline-flex items-center justify-center min-w-[16px] h-[16px] px-1 rounded-full text-[9.5px] font-mono ${
-            active ? "bg-accent/30 text-accent" : "bg-bg-deep text-fg-dim"
-          }`}
-        >
-          {badge}
-        </span>
-      )}
-    </button>
-  );
-}
-
-/* -------------------------------------------------------------------------- */
 /* Stage section — header + wide table                                         */
 /* -------------------------------------------------------------------------- */
 
@@ -316,10 +246,7 @@ function StageSection({
         <table className="w-full text-[12px] min-w-[1100px]">
           <thead>
             <tr className="text-left text-fg-dim border-b border-bg-border bg-bg-deep/40">
-              <Th sticky="left-0">
-                <input type="checkbox" disabled className="opacity-40" />
-              </Th>
-              <Th sticky="left-[44px]">{isLeads ? "Merchant" : "Application"}</Th>
+              <Th sticky="left-0">{isLeads ? "Merchant" : "Application"}</Th>
               <Th>Owner</Th>
               <Th>Phone</Th>
               <Th>S</Th>
@@ -408,10 +335,7 @@ function Row({
 
   return (
     <tr className={`border-b border-bg-border/40 last:border-b-0 ${rowHover}`}>
-      <td className="px-3 py-2.5 sticky left-0 bg-bg-deep/40">
-        <input type="checkbox" disabled className="opacity-40" />
-      </td>
-      <td className="px-3 py-2.5 sticky left-[44px] bg-bg-deep/40 min-w-[220px]">
+      <td className="px-3 py-2.5 sticky left-0 bg-bg-deep/40 min-w-[220px]">
         <Link href={href} className="flex items-center gap-2.5 group">
           <span className="shrink-0 inline-flex items-center justify-center w-7 h-7 rounded-md bg-bg-elev border border-bg-border text-[10px] font-bold text-fg-muted uppercase">
             {initials(businessName)}
@@ -471,22 +395,12 @@ function Row({
 }
 
 /* -------------------------------------------------------------------------- */
-/* Helpers                                                                     */
+/* Helpers — small re-exports of shared format helpers under the names this    */
+/* file already uses, so the substitution stays a one-line swap.               */
 /* -------------------------------------------------------------------------- */
 
-function str(v: unknown): string | null {
-  return typeof v === "string" && v.trim() ? v : null;
-}
-
-function initials(name: string): string {
-  return name
-    .split(/\s+/)
-    .filter(Boolean)
-    .slice(0, 2)
-    .map((s) => s[0])
-    .join("")
-    .toUpperCase();
-}
+const str = nonEmptyString;
+const initials = initialsOf;
 
 type TouchFirst = {
   id: string;

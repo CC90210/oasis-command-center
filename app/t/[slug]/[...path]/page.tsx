@@ -893,26 +893,24 @@ async function SingleEntityPipeline({
           ? `${visible.length} match${visible.length === 1 ? "" : "es"} for "${query}"${stageFilter ? ` in ${activeLabel}` : ""}`
           : stageFilter ? `${visible.length} in ${activeLabel}` : `${rowsRes.rows.length} total`}
       </div>
-      <PipelineLayout vertical={false}>
-        <StageRail
-          tenantSlug={slug}
-          stages={stages}
-          activeKey={stageFilter}
-          basePath={`/t/${slug}/${page.path}`}
-          counts={counts}
-        />
-        <PipelineSearchableTable
-          entityLabel={entity.label}
-          stageField={stageField}
-          rows={visible}
-          columns={localCols}
-          stageMap={stageMap}
-          tenantSlug={slug}
-          entityName={entity.name}
-          activeStageLabel={activeLabel}
-          query={query}
-        />
-      </PipelineLayout>
+      <StageRail
+        tenantSlug={slug}
+        stages={stages}
+        activeKey={stageFilter}
+        basePath={`/t/${slug}/${page.path}`}
+        counts={counts}
+      />
+      <PipelineSearchableTable
+        entityLabel={entity.label}
+        stageField={stageField}
+        rows={visible}
+        columns={localCols}
+        stageMap={stageMap}
+        tenantSlug={slug}
+        entityName={entity.name}
+        activeStageLabel={activeLabel}
+        query={query}
+      />
     </div>
   );
 }
