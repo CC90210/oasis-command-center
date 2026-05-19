@@ -1,0 +1,358 @@
+import { LEAD_PIPELINE_STAGES } from "./sunbiz-stage-meta";
+import { getServiceSupabase } from "./supabase-server";
+
+const STAGE_KEY_SET = new Set(LEAD_PIPELINE_STAGES.map((s) => s.key));
+const STAGE_LABEL_MAP = new Map(
+  LEAD_PIPELINE_STAGES.map((s) => [s.label.toLowerCase(), s.key]),
+);
+
+const MAX_ROWS = 5_000;
+const DEDUP_LOOKBACK = 20_000;
+
+export type IncomingLeadImportRow = {
+  name?: string | null;
+  email?: string | null;
+  phone?: string | null;
+  company?: string | null;
+  business_name?: string | null;
+  contact_name?: string | null;
+  source?: string | null;
+  notes?: string | null;
+  tags?: string[] | null;
+  stage?: string | null;
+  state?: string | null;
+  monthly_revenue?: number | string | null;
+  paper_grade?: string | null;
+  time_in_business?: string | null;
+  assigned_to?: string | null;
+  date_submitted?: string | null;
+  lender_list?: string | null;
+  dba?: string | null;
+  business_address?: string | null;
+  business_city?: string | null;
+  business_zip?: string | null;
+  website?: string | null;
+  entity_type?: string | null;
+  industry?: string | null;
+  title?: string | null;
+  ownership_pct?: string | null;
+  product_service?: string | null;
+  annual_revenue?: number | string | null;
+  requested_amount?: number | string | null;
+  application_url?: string | null;
+  bank_statement_urls?: string | null;
+  dl_vc_urls?: string | null;
+};
+
+export type LeadImportResult = {
+  ok: true;
+  inserted: number;
+  skipped_duplicate: number;
+  skipped_malformed: number;
+  duplicate_keys: string[];
+  errors: string[];
+};
+
+export type LeadImportFailure = {
+  ok: false;
+  error: string;
+  message?: string;
+  detail?: string;
+  would_have_inserted?: number;
+  skipped_duplicate?: number;
+  skipped_malformed?: number;
+};
+
+export async function importLeadsForTenant(input: {
+  tenantId: string;
+  rows: IncomingLeadImportRow[];
+  dedupBy?: string[];
+  defaultSource?: string;
+}): Promise<LeadImportResult | LeadImportFailure> {
+  const rows = Array.isArray(input.rows) ? input.rows : [];
+  if (rows.length === 0) return { ok: false, error: "no_rows" };
+  if (rows.length > MAX_ROWS) {
+    return {
+      ok: false,
+      error: "too_many_rows",
+      message: `Max ${MAX_ROWS.toLocaleString()} rows per import. Split the file.`,
+    };
+  }
+
+  const dedupBy =
+    Array.isArray(input.dedupBy) && input.dedupBy.length > 0
+      ? input.dedupBy.filter((k): k is string => typeof k === "string")
+      : ["email", "phone", "business"];
+  const defaultSource = input.defaultSource || "csv_import";
+  const db = getServiceSupabase();
+
+  const existingRes = await db
+    .from("tenant_records")
+    .select("data")
+    .eq("tenant_id", input.tenantId)
+    .eq("entity_type", "lead")
+    .order("updated_at", { ascending: false })
+    .limit(DEDUP_LOOKBACK);
+  if (existingRes.error) {
+    return {
+      ok: false,
+      error: "dedup_lookup_failed",
+      detail: existingRes.error.message,
+    };
+  }
+
+  const existingEmails = new Set<string>();
+  const existingPhones = new Set<string>();
+  const existingBusinesses = new Set<string>();
+  for (const r of (existingRes.data || []) as Array<{ data: Record<string, unknown> | null }>) {
+    const d = r.data || {};
+    const email = normEmail(typeof d.email === "string" ? d.email : null);
+    if (email) existingEmails.add(email);
+    const phone = normPhone(typeof d.phone === "string" ? d.phone : null);
+    if (phone) existingPhones.add(phone);
+    const business = normBusiness(
+      typeof d.business_name === "string"
+        ? d.business_name
+        : typeof d.company === "string"
+          ? d.company
+          : typeof d.name === "string"
+            ? d.name
+            : null,
+    );
+    if (business) existingBusinesses.add(business);
+  }
+
+  const toInsert: Array<{
+    tenant_id: string;
+    entity_type: string;
+    data: Record<string, unknown>;
+  }> = [];
+  let skippedDuplicate = 0;
+  let skippedMalformed = 0;
+  const duplicateKeys: string[] = [];
+  const errors: string[] = [];
+  const seenEmails = new Set<string>();
+  const seenPhones = new Set<string>();
+  const seenBusinesses = new Set<string>();
+
+  for (const [i, raw] of rows.entries()) {
+    const name = cleanString(raw.name, 200);
+    const email = normEmail(raw.email);
+    const phone = normPhone(raw.phone);
+    const businessName =
+      cleanString(raw.business_name, 200) ||
+      cleanString(raw.company, 200) ||
+      cleanString(raw.dba, 200) ||
+      cleanString(raw.name, 200);
+    const contactName = cleanString(raw.contact_name, 200) || cleanString(raw.name, 200);
+    const company = cleanString(raw.company, 200) || businessName;
+    const notes = cleanString(raw.notes, 2_000);
+    const source = cleanString(raw.source, 64) || defaultSource;
+    const tags = Array.isArray(raw.tags)
+      ? raw.tags.filter((t) => typeof t === "string").slice(0, 12)
+      : null;
+    const stage = normalizeStage(raw.stage);
+    const state = cleanString(raw.state, 80);
+    const monthlyRevenue = parseMoney(raw.monthly_revenue);
+    const paperGrade = cleanString(raw.paper_grade, 8);
+    const timeInBusiness = cleanString(raw.time_in_business, 80);
+    const assignedTo = cleanString(raw.assigned_to, 120);
+    const businessKey = normBusiness(businessName);
+
+    const dateSubmitted = cleanString(raw.date_submitted, 80);
+    const lenderList = cleanString(raw.lender_list, 1_000);
+    const dba = cleanString(raw.dba, 200);
+    const businessAddress = cleanString(raw.business_address, 240);
+    const businessCity = cleanString(raw.business_city, 120);
+    const businessZip = cleanString(raw.business_zip, 32);
+    const website = cleanString(raw.website, 240);
+    const entityType = cleanString(raw.entity_type, 80);
+    const industry = cleanString(raw.industry, 180);
+    const title = cleanString(raw.title, 80);
+    const ownershipPct = cleanString(raw.ownership_pct, 32);
+    const productService = cleanString(raw.product_service, 240);
+    const annualRevenue = parseMoney(raw.annual_revenue);
+    const requestedAmount = parseMoney(raw.requested_amount);
+    const applicationUrl = cleanString(raw.application_url, 1_000);
+    const bankStatementUrls = cleanString(raw.bank_statement_urls, 2_000);
+    const dlVcUrls = cleanString(raw.dl_vc_urls, 2_000);
+
+    if (!email && !phone && !name && !businessName) {
+      skippedMalformed += 1;
+      errors.push(`row ${i + 1}: no name, email, phone, or business_name`);
+      continue;
+    }
+
+    let isDupe = false;
+    let dupeKey = "";
+    if (dedupBy.includes("email") && email) {
+      if (existingEmails.has(email) || seenEmails.has(email)) {
+        isDupe = true;
+        dupeKey = email;
+      }
+    }
+    if (!isDupe && dedupBy.includes("phone") && phone) {
+      if (existingPhones.has(phone) || seenPhones.has(phone)) {
+        isDupe = true;
+        dupeKey = phone;
+      }
+    }
+    if (!isDupe && dedupBy.includes("business") && businessKey) {
+      if (existingBusinesses.has(businessKey) || seenBusinesses.has(businessKey)) {
+        isDupe = true;
+        dupeKey = `business:${businessKey}`;
+      }
+    }
+    if (isDupe) {
+      skippedDuplicate += 1;
+      if (duplicateKeys.length < 50) duplicateKeys.push(dupeKey);
+      continue;
+    }
+
+    if (email) seenEmails.add(email);
+    if (phone) seenPhones.add(phone);
+    if (businessKey) seenBusinesses.add(businessKey);
+
+    toInsert.push({
+      tenant_id: input.tenantId,
+      entity_type: "lead",
+      data: {
+        name,
+        email,
+        phone,
+        company,
+        source,
+        notes,
+        business_name: businessName,
+        contact_name: contactName,
+        ...(state ? { state } : {}),
+        ...(monthlyRevenue != null ? { monthly_revenue: monthlyRevenue } : {}),
+        ...(paperGrade ? { paper_grade: paperGrade } : {}),
+        ...(timeInBusiness ? { time_in_business: timeInBusiness } : {}),
+        ...(assignedTo ? { assigned_to: assignedTo } : {}),
+        ...(dateSubmitted ? { date_submitted: dateSubmitted } : {}),
+        ...(lenderList ? { lender_list: lenderList } : {}),
+        ...(dba ? { dba } : {}),
+        ...(businessAddress ? { business_address: businessAddress } : {}),
+        ...(businessCity ? { business_city: businessCity } : {}),
+        ...(businessZip ? { business_zip: businessZip } : {}),
+        ...(website ? { website } : {}),
+        ...(entityType ? { entity_type: entityType } : {}),
+        ...(industry ? { industry } : {}),
+        ...(title ? { title } : {}),
+        ...(ownershipPct ? { ownership_pct: ownershipPct } : {}),
+        ...(productService ? { product_service: productService } : {}),
+        ...(annualRevenue != null ? { annual_revenue: annualRevenue } : {}),
+        ...(requestedAmount != null ? { requested_amount: requestedAmount } : {}),
+        ...(applicationUrl ? { application_url: applicationUrl } : {}),
+        ...(bankStatementUrls ? { bank_statement_urls: bankStatementUrls } : {}),
+        ...(dlVcUrls ? { dl_vc_urls: dlVcUrls } : {}),
+        ...(tags && tags.length > 0 ? { tags } : {}),
+        stage,
+        status: "new",
+        score: 0,
+      },
+    });
+  }
+
+  let inserted = 0;
+  if (toInsert.length > 0) {
+    const insRes = await db.from("tenant_records").insert(toInsert).select("id");
+    if (insRes.error) {
+      return {
+        ok: false,
+        error: "insert_failed",
+        detail: insRes.error.message,
+        would_have_inserted: toInsert.length,
+        skipped_duplicate: skippedDuplicate,
+        skipped_malformed: skippedMalformed,
+      };
+    }
+    inserted = (insRes.data || []).length;
+  }
+
+  return {
+    ok: true,
+    inserted,
+    skipped_duplicate: skippedDuplicate,
+    skipped_malformed: skippedMalformed,
+    duplicate_keys: duplicateKeys,
+    errors: errors.slice(0, 20),
+  };
+}
+
+function normalizeStage(raw: string | null | undefined): string {
+  const value = (raw || "").trim();
+  if (!value) return "imported";
+  const lower = value.toLowerCase();
+  if (STAGE_KEY_SET.has(lower)) return lower;
+  const labelHit = STAGE_LABEL_MAP.get(lower);
+  if (labelHit) return labelHit;
+
+  if (lower === "application in" || lower === "app in") return "imported";
+  if (lower === "shopping" || lower === "shop" || lower === "shop out") return "submitted";
+  if (lower === "approved open offers" || lower === "open offers") return "approved";
+  if (lower === "hot") return "hot_lead";
+  if (lower === "missing") return "missing_info";
+  if (lower === "followup" || lower === "follow up") return "follow_up";
+  if (lower === "sent app" || lower === "app sent") return "sent_application";
+  return "imported";
+}
+
+function parseMoney(v: unknown): number | null {
+  if (v == null || v === "") return null;
+  if (typeof v === "number") return Number.isFinite(v) ? v : null;
+  const raw = String(v)
+    .trim()
+    .replace(/[,$]/g, "")
+    .replace(/[\u2013\u2014]/g, "-")
+    .toLowerCase();
+  if (!raw) return null;
+
+  const matches = Array.from(raw.matchAll(/(\d+(?:\.\d+)?)\s*([km])?/g));
+  if (matches.length === 0) return null;
+  const lastSuffix = matches.findLast((m) => m[2])?.[2] || "";
+  const values = matches
+    .map((m) => {
+      const base = Number(m[1]);
+      if (!Number.isFinite(base)) return null;
+      const suffix = m[2] || lastSuffix;
+      if (suffix === "k") return base * 1_000;
+      if (suffix === "m") return base * 1_000_000;
+      return base;
+    })
+    .filter((n): n is number => n != null && Number.isFinite(n));
+
+  if (values.length === 0) return null;
+  const value =
+    values.length > 1 ? values.reduce((sum, n) => sum + n, 0) / values.length : values[0];
+  return Number.isFinite(value) ? value : null;
+}
+
+function normEmail(s: string | null | undefined): string | null {
+  const e = (s || "").trim().toLowerCase();
+  return e || null;
+}
+
+function normPhone(s: string | null | undefined): string | null {
+  const digits = (s || "").replace(/\D+/g, "");
+  if (digits.length === 11 && digits.startsWith("1")) return digits.slice(1);
+  return digits || null;
+}
+
+function normBusiness(s: string | null | undefined): string | null {
+  const v = (s || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, " ")
+    .replace(/\b(llc|inc|corp|corporation|ltd|co|company)\b/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  return v || null;
+}
+
+function cleanString(v: unknown, max = 500): string | null {
+  if (typeof v !== "string") return null;
+  const s = v.trim();
+  return s ? s.slice(0, max) : null;
+}

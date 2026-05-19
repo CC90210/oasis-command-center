@@ -44,6 +44,9 @@ import {
 import { runAction } from "./agent-actions";
 import { CLOUD_TOOLS } from "./cloud-tools";
 import { parseSSE, safeText } from "./sse-parser";
+import { downloadChatAttachmentText } from "./chat-attachments";
+import { parseLeadImportCsv } from "./leads-import-parser";
+import { importLeadsForTenant } from "./leads-import-service";
 
 const ANTHROPIC_VERSION = "2023-06-01";
 const MAX_TOOL_ITERATIONS = 8; // safety cap — prevents runaway tool loops
@@ -262,6 +265,25 @@ export const TOOL_DEFINITIONS: ToolDef[] = [
         },
       },
       required: ["lead_id"],
+    },
+  },
+  {
+    name: "import_leads_from_attachment",
+    description:
+      "Parse a CSV file uploaded through the chat attachment button and import recognized SunBiz leads into tenant_records(entity_type='lead') with the same hardened parser, stage normalization, and dedupe rules as the Import page. Use only when the operator explicitly asks you to import/sync/update the CRM from an attached lead CSV. If they only ask you to inspect it, use dry_run=true.",
+    input_schema: {
+      type: "object",
+      properties: {
+        attachment_id: {
+          type: "string",
+          description: "UUID of the chat attachment. The prompt lists attachment_id for each uploaded file.",
+        },
+        dry_run: {
+          type: "boolean",
+          description: "When true, parse and summarize without inserting records. Default false when the operator explicitly asks to import.",
+        },
+      },
+      required: ["attachment_id"],
     },
   },
 
@@ -576,6 +598,8 @@ async function dispatch(
     }
     case "list_lead_documents":
       return await toolListLeadDocuments(input, ctx);
+    case "import_leads_from_attachment":
+      return await toolImportLeadsFromAttachment(input, ctx);
     default:
       throw new Error(`unknown_tool:${name}`);
   }
@@ -693,6 +717,56 @@ async function toolListLeadDocuments(
       // field still missing".
       form_field: ((d.metadata || {}) as Record<string, unknown>).field_name ?? null,
     })),
+  };
+}
+
+async function toolImportLeadsFromAttachment(
+  input: Record<string, unknown>,
+  ctx: ToolContext,
+) {
+  const attachmentId = String(input.attachment_id || "").trim();
+  if (!attachmentId) throw new Error("attachment_id_required");
+  const dryRun = input.dry_run === true;
+  const { row, text } = await downloadChatAttachmentText({
+    tenantId: ctx.tenantId,
+    userId: ctx.userId,
+    attachmentId,
+  });
+  const parsed = parseLeadImportCsv(text);
+  const recognizedColumns = parsed.colMap.filter(Boolean).length;
+  if (recognizedColumns === 0 || parsed.mapped.length === 0) {
+    throw new Error("no_recognized_leads_in_attachment");
+  }
+  if (dryRun) {
+    return {
+      dry_run: true,
+      attachment_id: attachmentId,
+      filename: row.filename,
+      recognized_columns: recognizedColumns,
+      parsed_rows: parsed.mapped.length,
+      header_row_index: parsed.headerRowIndex,
+      skipped_noise_rows: parsed.skippedNoiseRows,
+      section_labels: parsed.sectionLabels,
+      sample: parsed.mapped.slice(0, 5),
+    };
+  }
+
+  const result = await importLeadsForTenant({
+    tenantId: ctx.tenantId,
+    rows: parsed.mapped,
+    defaultSource: `chat_attachment:${row.filename}`,
+  });
+  if (!result.ok) throw new Error(`${result.error}${result.detail ? `: ${result.detail}` : ""}`);
+  return {
+    attachment_id: attachmentId,
+    filename: row.filename,
+    recognized_columns: recognizedColumns,
+    parsed_rows: parsed.mapped.length,
+    inserted: result.inserted,
+    skipped_duplicate: result.skipped_duplicate,
+    skipped_malformed: result.skipped_malformed,
+    duplicate_keys: result.duplicate_keys.slice(0, 10),
+    errors: result.errors.slice(0, 10),
   };
 }
 
@@ -969,6 +1043,12 @@ function humanSummary(name: string, input: Record<string, unknown>, data: unknow
       return `listed open leads`;
     case "integration_status":
       return `checked integrations`;
+    case "import_leads_from_attachment": {
+      const d = data as { inserted?: number; parsed_rows?: number; dry_run?: boolean };
+      return d.dry_run
+        ? `parsed ${d.parsed_rows || 0} lead rows from attachment`
+        : `imported ${d.inserted || 0} lead rows from attachment`;
+    }
     default:
       return name;
   }

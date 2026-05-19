@@ -60,6 +60,12 @@ import { isOperatorEmail } from "@/lib/operator-credentials";
 import { getTenantManifestForUser } from "@/lib/manifest/tenant-scope";
 import { redactAll } from "@/lib/secret-redaction";
 import { persistAssistantTurn } from "@/lib/chat-persistence";
+import {
+  formatAttachmentContext,
+  injectAttachmentContextIntoMessages,
+  linkChatAttachmentsToSession,
+  loadChatAttachmentsForTurn,
+} from "@/lib/chat-attachments";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -96,6 +102,7 @@ const SAFE_TENANT_TOOL_PALETTE: string[] = [
   "update_record",
   "lookup_lead_by_name",
   "list_open_leads",
+  "import_leads_from_attachment",
   "integration_status",
   // HTTP — fetchWithCap enforces an SSRF block list (see cloud-tool-
   // runner.ts after the 2026-05-16 hardening). Tenants can hit public
@@ -141,6 +148,7 @@ type IncomingPayload = {
    * Omitted/unknown → treated as "bridge_proxy" (current default).
    */
   tool_routing?: "bridge_proxy" | "cloud_only";
+  attachments?: Array<{ id?: string }>;
 };
 
 export async function POST(req: NextRequest) {
@@ -171,6 +179,21 @@ export async function POST(req: NextRequest) {
   }
   const { tenantId, provider, model, apiKey, cfgOverride, cfgScope } = ctxResult;
   const service = getServiceSupabase();
+  const attachmentIds = Array.isArray(payload.attachments)
+    ? payload.attachments
+        .map((a) => (a && typeof a.id === "string" ? a.id : ""))
+        .filter(Boolean)
+    : [];
+  const turnAttachments = await loadChatAttachmentsForTurn({
+    tenantId,
+    userId: user.id,
+    attachmentIds,
+  });
+  if (attachmentIds.length > 0 && turnAttachments.length !== Array.from(new Set(attachmentIds)).length) {
+    return jsonError(400, "attachments_not_found");
+  }
+  const attachmentContext = formatAttachmentContext(turnAttachments);
+  const messagesForModel = injectAttachmentContextIntoMessages(messages, attachmentContext);
 
   // Per-tenant token bucket: 30 turns burst, refill at 1/turn-per-15s
   // (= 4/min steady state). Protects the platform key on operator-fallback;
@@ -216,13 +239,26 @@ export async function POST(req: NextRequest) {
     if (createErr || !created) return jsonError(500, "session_create_failed");
     sessionId = created.id as string;
   }
+  if (sessionId && turnAttachments.length > 0) {
+    await linkChatAttachmentsToSession({
+      tenantId,
+      userId: user.id,
+      sessionId,
+      attachmentIds: turnAttachments.map((a) => a.id),
+    });
+  }
 
   // ---- Persist incoming user message --------------------------------------
+  const persistedUserContent = attachmentContext
+    ? `${lastUserMsg.content}\n\n[attached_files: ${turnAttachments
+        .map((a) => `${a.filename} (${a.id})`)
+        .join(", ")}]`
+    : lastUserMsg.content;
   await service.from("chat_messages").insert({
     session_id: sessionId,
     tenant_id: tenantId,
     role: "user",
-    content: lastUserMsg.content,
+    content: persistedUserContent,
   });
 
   const personaBase = getPersona(agentKey, cfgOverride);
@@ -456,7 +492,7 @@ export async function POST(req: NextRequest) {
           // tool_result, done, error} which we forward to the SSE client.
           // The operator sees a "tool call: NAME" chip in the chat while the
           // loop is running.
-          const stripped = messages.filter((m) => m.role !== "system") as Array<{
+          const stripped = messagesForModel.filter((m) => m.role !== "system") as Array<{
             role: "user" | "assistant";
             content: string;
           }>;
@@ -561,7 +597,7 @@ export async function POST(req: NextRequest) {
             apiKey: isOllama ? "" : apiKey,
             baseUrl: isOllama ? apiKey : undefined,
             system: persona,
-            messages,
+            messages: messagesForModel,
           })) {
             if (ev.type === "delta") {
               assistantText += ev.text;

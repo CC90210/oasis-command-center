@@ -28,12 +28,15 @@ import {
   Check,
   ChevronRight,
   Clipboard,
+  FileText,
   // FileText / Pencil / Terminal / Search / Globe / X / Brain moved to
   // components/chat/ToolTimelineList.tsx along with the timeline that
   // used them. Database stays — used by the cloud-tool result pill below.
   Database,
   Maximize2,
   Minimize2,
+  Paperclip,
+  X,
 } from "lucide-react";
 import Link from "next/link";
 import { useSearchParams, useRouter, usePathname } from "next/navigation";
@@ -41,7 +44,15 @@ import { getAgentInfo } from "@/lib/agents";
 import { BRIDGE_CHAT_BASE } from "@/lib/agent-roots";
 
 type Role = "user" | "assistant" | "system";
-type Msg = { role: Role; content: string; at: number };
+type ChatAttachmentSummary = {
+  id: string;
+  filename: string;
+  mime_type: string | null;
+  size_bytes: number;
+  parser: string;
+  text_excerpt?: string | null;
+};
+type Msg = { role: Role; content: string; at: number; attachments?: ChatAttachmentSummary[] };
 
 // Legacy localStorage keys from the FIRST Auto/Cloud/Desktop picker (removed
 // 2026-05-13). The one-shot cleanup effect below clears them. Nothing else
@@ -457,7 +468,11 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
   const [elapsedTick, setElapsedTick] = useState(0);
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const activeWelcomeMessage = welcomeMessages?.[agent]?.trim() || "";
+  const [pendingAttachments, setPendingAttachments] = useState<ChatAttachmentSummary[]>([]);
+  const [uploadingAttachments, setUploadingAttachments] = useState(false);
+  const [attachmentError, setAttachmentError] = useState<string | null>(null);
 
   // Tick elapsed time every second while a request is mid-flight.
   useEffect(() => {
@@ -662,6 +677,8 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
     setExpandedRuns(new Set());
     setThinking(false);
     setAwayFromBottom(false);
+    setPendingAttachments([]);
+    setAttachmentError(null);
     // Conversation-boundary reset — drop the "last failed mode" tracker
     // so the Retry button doesn't carry over from a previous chat or a
     // previous agent. The button hides anyway when error=null, but
@@ -770,6 +787,8 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
     setExpandedRuns(new Set());
     setThinking(false);
     setAwayFromBottom(false);
+    setPendingAttachments([]);
+    setAttachmentError(null);
     // Conversation-boundary reset — drop the "last failed mode" tracker
     // so the Retry button doesn't carry over from a previous chat or a
     // previous agent. The button hides anyway when error=null, but
@@ -783,11 +802,57 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
     setTimeout(() => inputRef.current?.focus(), 50);
   }
 
+  async function attachFiles(fileList: FileList | null) {
+    const files = Array.from(fileList || []);
+    if (files.length === 0) return;
+    setAttachmentError(null);
+    const remainingSlots = Math.max(0, 5 - pendingAttachments.length);
+    if (remainingSlots <= 0) {
+      setAttachmentError("Maximum 5 files per turn.");
+      return;
+    }
+    const selected = files.slice(0, remainingSlots);
+    const form = new FormData();
+    selected.forEach((file) => form.append("files", file));
+    form.append("agent_key", agent);
+    if (sessionId) form.append("session_id", sessionId);
+
+    setUploadingAttachments(true);
+    try {
+      const res = await fetch("/api/chat/attachments", { method: "POST", body: form });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.ok) {
+        setAttachmentError(data?.error || `upload_failed_${res.status}`);
+        return;
+      }
+      const uploaded = Array.isArray(data.attachments)
+        ? (data.attachments as ChatAttachmentSummary[])
+        : [];
+      setPendingAttachments((prev) => [...prev, ...uploaded].slice(0, 5));
+    } catch (err) {
+      setAttachmentError(err instanceof Error ? err.message : "upload_failed");
+    } finally {
+      setUploadingAttachments(false);
+      if (fileInputRef.current) fileInputRef.current.value = "";
+    }
+  }
+
+  function removePendingAttachment(id: string) {
+    setPendingAttachments((prev) => prev.filter((att) => att.id !== id));
+  }
+
   async function send() {
-    const text = input.trim();
-    if (!text || streaming) return;
+    const attachmentsForTurn = pendingAttachments;
+    const text =
+      input.trim() ||
+      (attachmentsForTurn.length > 0
+        ? "Please review the attached file(s) and update the CRM if appropriate."
+        : "");
+    if ((!text && attachmentsForTurn.length === 0) || streaming || uploadingAttachments) return;
     setInput("");
-    return submitText(text);
+    setPendingAttachments([]);
+    setAttachmentError(null);
+    return submitText(text, undefined, attachmentsForTurn);
   }
 
   /**
@@ -797,12 +862,33 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
    * passes a modeOverride so we route to the alternate path WITHOUT
    * having to wait for setChatMode to flush before reading state.
    */
-  async function submitText(text: string, modeOverride?: ChatMode) {
+  async function submitText(
+    text: string,
+    modeOverride?: ChatMode,
+    attachmentsForTurn: ChatAttachmentSummary[] = [],
+  ) {
     if (!text || streaming) return;
     setError(null);
     setErrorCode(null);
     const now = Date.now();
-    const newMessages: Msg[] = [...messages, { role: "user", content: text, at: now }];
+    const newMessages: Msg[] = [
+      ...messages,
+      {
+        role: "user",
+        content: text,
+        at: now,
+        attachments: attachmentsForTurn.length > 0 ? attachmentsForTurn : undefined,
+      },
+    ];
+    const outboundMessages = newMessages.map((m) => ({ role: m.role, content: m.content }));
+    const attachmentPayload = attachmentsForTurn.map((att) => ({
+      id: att.id,
+      filename: att.filename,
+      mime_type: att.mime_type,
+      size_bytes: att.size_bytes,
+      parser: att.parser,
+      text_excerpt: att.text_excerpt || null,
+    }));
     setMessages(newMessages);
     setMessages((m) => [...m, { role: "assistant", content: "", at: Date.now() }]);
     setStreaming(true);
@@ -860,20 +946,23 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
             // unencrypted on the client side. System prompt is built
             // by the bridge from agent_roots like the Claude Code path.
             model: cfg?.model || "llama3.3",
-            messages: newMessages,
+            messages: outboundMessages,
+            attachments: attachmentPayload,
           }
         : useBridge
           ? {
               agent,
-              messages: newMessages,
+              messages: outboundMessages,
               session_id: sessionId,
               cli_provider: cliRuntime,
+              attachments: attachmentPayload,
               tab_id: tabId,  // warm pool key — stable across the widget's lifetime
             }
           : {
               agent_key: agent,
               session_id: sessionId,
-              messages: newMessages,
+              messages: outboundMessages,
+              attachments: attachmentPayload,
               // Hint to /api/chat which cloud-tool surface to use. "tools"
               // gives the native Anthropic tool_use loop; route will fall
               // back to "markers" automatically for non-Anthropic providers.
@@ -1595,6 +1684,7 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
                 role={m.role}
                 agent={agent}
                 content={stripActionMarkers(m.content)}
+                attachments={m.attachments}
                 at={m.at}
                 streaming={streaming && isLastAssistant}
               />
@@ -1848,7 +1938,7 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
                       // Update the persisted picker too so subsequent turns
                       // default to the working path.
                       setChatMode(otherMode);
-                      void submitText(text, otherMode);
+                      void submitText(text, otherMode, lastUser.attachments || []);
                     }}
                     className="mt-2 inline-flex items-center gap-1 px-3 py-1.5 rounded-md border border-accent/40 bg-accent/10 hover:bg-accent/20 text-accent text-xs font-bold transition-colors"
                   >
@@ -1878,27 +1968,75 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
           e.preventDefault();
           send();
         }}
-        className="border-t border-bg-border px-5 py-4 flex gap-2 relative z-10 bg-bg-panel/40 backdrop-blur"
+        className="border-t border-bg-border px-5 py-4 relative z-10 bg-bg-panel/40 backdrop-blur space-y-2"
       >
-        <textarea
-          ref={inputRef}
-          value={input}
-          onChange={(e) => setInput(e.target.value)}
-          onKeyDown={onKeyDown}
-          placeholder={composerPlaceholder}
-          disabled={!ready || streaming}
-          rows={1}
-          className="flex-1 bg-bg-elev border border-bg-border rounded-lg px-3.5 py-2.5 text-sm text-fg placeholder-fg-dim focus:outline-none focus:border-accent disabled:opacity-50 resize-none max-h-32"
-          style={{ minHeight: "2.75rem" }}
-        />
-        <button
-          type="submit"
-          disabled={!ready || streaming || !input.trim()}
-          className="btn-send"
-        >
-          {streaming ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
-          {streaming ? "" : "Send"}
-        </button>
+        {(pendingAttachments.length > 0 || attachmentError) && (
+          <div className="flex flex-wrap gap-1.5 text-[11px]">
+            {pendingAttachments.map((att) => (
+              <span
+                key={att.id}
+                className="inline-flex items-center gap-1 rounded-md border border-accent/25 bg-accent/10 px-2 py-1 text-accent"
+                title={att.filename}
+              >
+                <FileText className="h-3 w-3" />
+                <span className="max-w-[18rem] truncate">{att.filename}</span>
+                <span className="text-fg-dim">{formatBytes(att.size_bytes)}</span>
+                <button
+                  type="button"
+                  onClick={() => removePendingAttachment(att.id)}
+                  className="rounded p-0.5 hover:bg-accent/15"
+                  title="Remove attachment"
+                >
+                  <X className="h-3 w-3" />
+                </button>
+              </span>
+            ))}
+            {attachmentError && (
+              <span className="inline-flex items-center gap-1 rounded-md border border-status-warm/30 bg-status-warm/10 px-2 py-1 text-status-warm">
+                <AlertCircle className="h-3 w-3" />
+                {attachmentError}
+              </span>
+            )}
+          </div>
+        )}
+        <div className="flex gap-2">
+          <input
+            ref={fileInputRef}
+            type="file"
+            multiple
+            className="hidden"
+            accept=".csv,.txt,.md,.json,.pdf,.doc,.docx,.xls,.xlsx,image/*"
+            onChange={(e) => attachFiles(e.target.files)}
+          />
+          <button
+            type="button"
+            disabled={!ready || streaming || uploadingAttachments}
+            onClick={() => fileInputRef.current?.click()}
+            className="h-11 w-11 inline-flex items-center justify-center rounded-lg border border-bg-border bg-bg-elev hover:border-accent/50 hover:text-accent disabled:opacity-50 transition-colors"
+            title="Attach files"
+          >
+            {uploadingAttachments ? <Loader2 className="w-4 h-4 animate-spin" /> : <Paperclip className="w-4 h-4" />}
+          </button>
+          <textarea
+            ref={inputRef}
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            onKeyDown={onKeyDown}
+            placeholder={composerPlaceholder}
+            disabled={!ready || streaming}
+            rows={1}
+            className="flex-1 bg-bg-elev border border-bg-border rounded-lg px-3.5 py-2.5 text-sm text-fg placeholder-fg-dim focus:outline-none focus:border-accent disabled:opacity-50 resize-none max-h-32"
+            style={{ minHeight: "2.75rem" }}
+          />
+          <button
+            type="submit"
+            disabled={!ready || streaming || uploadingAttachments || (!input.trim() && pendingAttachments.length === 0)}
+            className="btn-send"
+          >
+            {streaming ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
+            {streaming ? "" : "Send"}
+          </button>
+        </div>
       </form>
     </div>
   );
@@ -1999,12 +2137,14 @@ function Bubble({
   role,
   agent,
   content,
+  attachments,
   at,
   streaming,
 }: {
   role: Role;
   agent: string;
   content: string;
+  attachments?: ChatAttachmentSummary[];
   at: number;
   streaming: boolean;
 }) {
@@ -2037,6 +2177,21 @@ function Bubble({
           ) : streaming ? (
             <div className="typing-dots"><span /><span /><span /></div>
           ) : null}
+          {attachments && attachments.length > 0 && (
+            <div className="mt-2 flex flex-wrap gap-1.5">
+              {attachments.map((att) => (
+                <span
+                  key={att.id}
+                  className="inline-flex max-w-full items-center gap-1 rounded-md border border-bg-border/70 bg-bg-deep/30 px-2 py-1 text-[11px] text-fg-muted"
+                  title={att.filename}
+                >
+                  <FileText className="h-3 w-3 shrink-0" />
+                  <span className="truncate">{att.filename}</span>
+                  <span className="text-fg-dim">{formatBytes(att.size_bytes)}</span>
+                </span>
+              ))}
+            </div>
+          )}
         </div>
         <div className="flex items-center gap-2 px-1 opacity-0 group-hover:opacity-100 transition-opacity text-[10px] text-fg-dim">
           <span className="font-mono">{_relTime(at)}</span>
@@ -2334,6 +2489,13 @@ function _relTime(at: number): string {
   if (diff < 60_000) return `${Math.floor(diff / 1000)}s ago`;
   if (diff < 3_600_000) return `${Math.floor(diff / 60_000)}m ago`;
   return `${Math.floor(diff / 3_600_000)}h ago`;
+}
+
+function formatBytes(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) return "0 B";
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 /**

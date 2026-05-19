@@ -26,6 +26,9 @@
  */
 
 import { getServiceSupabase } from "./supabase-server";
+import { downloadChatAttachmentText } from "./chat-attachments";
+import { parseLeadImportCsv } from "./leads-import-parser";
+import { importLeadsForTenant } from "./leads-import-service";
 
 export type CloudToolContext = {
   tenantId: string;
@@ -172,6 +175,73 @@ const integrationStatus: CloudTool = {
   },
 };
 
+const importLeadsFromAttachment: CloudTool = {
+  name: "import_leads_from_attachment",
+  description:
+    "Parse a CSV uploaded through chat and import recognized SunBiz leads into the CRM with dedupe. Use only when the operator explicitly asks to import/sync/update leads from an attached CSV; use dry_run=true when they only ask you to inspect it.",
+  args: {
+    attachment_id: "UUID shown in the ATTACHED FILES block.",
+    dry_run: "Optional boolean. true parses and previews without inserting.",
+  },
+  async execute(input, ctx) {
+    const attachmentId = String(input.attachment_id || "").trim();
+    if (!attachmentId) return { ok: false, name: "import_leads_from_attachment", error: "attachment_id_required" };
+    const dryRun = input.dry_run === true;
+    const { row, text } = await downloadChatAttachmentText({
+      tenantId: ctx.tenantId,
+      userId: ctx.userId,
+      attachmentId,
+    });
+    const parsed = parseLeadImportCsv(text);
+    const recognizedColumns = parsed.colMap.filter(Boolean).length;
+    if (recognizedColumns === 0 || parsed.mapped.length === 0) {
+      return { ok: false, name: "import_leads_from_attachment", error: "no_recognized_leads_in_attachment" };
+    }
+    if (dryRun) {
+      return {
+        ok: true,
+        name: "import_leads_from_attachment",
+        data: {
+          dry_run: true,
+          filename: row.filename,
+          recognized_columns: recognizedColumns,
+          parsed_rows: parsed.mapped.length,
+          section_labels: parsed.sectionLabels,
+          sample: parsed.mapped.slice(0, 5),
+        },
+        summary: `Parsed ${parsed.mapped.length} lead rows from ${row.filename}.`,
+      };
+    }
+    const result = await importLeadsForTenant({
+      tenantId: ctx.tenantId,
+      rows: parsed.mapped,
+      defaultSource: `chat_attachment:${row.filename}`,
+    });
+    if (!result.ok) {
+      return {
+        ok: false,
+        name: "import_leads_from_attachment",
+        error: `${result.error}${result.detail ? `: ${result.detail}` : ""}`,
+      };
+    }
+    return {
+      ok: true,
+      name: "import_leads_from_attachment",
+      data: {
+        filename: row.filename,
+        recognized_columns: recognizedColumns,
+        parsed_rows: parsed.mapped.length,
+        inserted: result.inserted,
+        skipped_duplicate: result.skipped_duplicate,
+        skipped_malformed: result.skipped_malformed,
+        duplicate_keys: result.duplicate_keys.slice(0, 10),
+        errors: result.errors.slice(0, 10),
+      },
+      summary: `Imported ${result.inserted} leads from ${row.filename}; skipped ${result.skipped_duplicate} duplicates.`,
+    };
+  },
+};
+
 // ============================================================================
 // Registry
 // ============================================================================
@@ -180,6 +250,7 @@ export const CLOUD_TOOLS: Record<string, CloudTool> = {
   [lookupLeadByName.name]: lookupLeadByName,
   [listOpenLeads.name]: listOpenLeads,
   [integrationStatus.name]: integrationStatus,
+  [importLeadsFromAttachment.name]: importLeadsFromAttachment,
 };
 
 // ============================================================================
