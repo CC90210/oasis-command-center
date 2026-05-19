@@ -131,8 +131,15 @@ function statusFor(info: CliInfo): { label: string; tone: "engaged" | "warm" | "
   return { label: "Not installed", tone: "neutral", icon: <Terminal className="w-3.5 h-3.5" /> };
 }
 
+type Busy =
+  | { kind: "idle" }
+  | { kind: "installing"; provider: keyof CliStatusResponse }
+  | { kind: "authing"; provider: keyof CliStatusResponse };
+
 export function LocalCliProvidersCard() {
   const [state, setState] = useState<ProbeState>({ kind: "loading" });
+  const [busy, setBusy] = useState<Busy>({ kind: "idle" });
+  const [actionMessage, setActionMessage] = useState<{ kind: "ok" | "err"; text: string } | null>(null);
 
   async function refresh() {
     setState({ kind: "loading" });
@@ -144,15 +151,85 @@ export function LocalCliProvidersCard() {
     setState(next);
   }
 
+  /**
+   * Invoke a bridge tool with a {provider} payload and return the
+   * parsed result. Shared by Install + Sign-in buttons.
+   */
+  async function runBridgeTool(toolName: "install_cli" | "cli_auth_start", provider: keyof CliStatusResponse) {
+    const ctl = new AbortController();
+    // npm install can take up to 5 minutes on first run; auth_start
+    // returns immediately. 5.5 min ceiling covers both.
+    const timer = setTimeout(() => ctl.abort(), 330_000);
+    try {
+      const r = await fetch(`${BRIDGE_CHAT_BASE}/exec-tool`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ tool_name: toolName, input: { provider } }),
+        signal: ctl.signal,
+      });
+      const body = (await r.json().catch(() => ({}))) as { output?: string; is_error?: boolean };
+      if (!r.ok || body.is_error) {
+        return { ok: false as const, text: body.output || `http_${r.status}` };
+      }
+      return { ok: true as const, text: body.output || "" };
+    } catch (err) {
+      if ((err as Error).name === "AbortError") {
+        return { ok: false as const, text: "Bridge call timed out." };
+      }
+      return { ok: false as const, text: (err as Error).message };
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  async function handleInstall(provider: keyof CliStatusResponse) {
+    setBusy({ kind: "installing", provider });
+    setActionMessage(null);
+    const res = await runBridgeTool("install_cli", provider);
+    setActionMessage({ kind: res.ok ? "ok" : "err", text: res.text });
+    setBusy({ kind: "idle" });
+    // Re-probe so the card flips to Ready / Needs auth automatically.
+    await refresh();
+  }
+
+  async function handleSignIn(provider: keyof CliStatusResponse) {
+    setBusy({ kind: "authing", provider });
+    setActionMessage(null);
+    const res = await runBridgeTool("cli_auth_start", provider);
+    setActionMessage({ kind: res.ok ? "ok" : "err", text: res.text });
+    setBusy({ kind: "idle" });
+    // After auth start, poll cli_status every 3s for up to 2 minutes.
+    // The CLI's OAuth roundtrip is operator-driven (they click "Sign in"
+    // in the browser), so we don't know when it'll complete.
+    if (res.ok) {
+      const startMs = Date.now();
+      const poll = async () => {
+        if (Date.now() - startMs > 120_000) return;
+        const next = await probeCliStatus(new AbortController().signal);
+        setState(next);
+        if (
+          next.kind === "ok" &&
+          next.data[provider]?.installed &&
+          next.data[provider]?.authenticated
+        ) {
+          setActionMessage({ kind: "ok", text: `${provider} is ready.` });
+          return;
+        }
+        setTimeout(() => void poll(), 3_000);
+      };
+      setTimeout(() => void poll(), 3_000);
+    }
+  }
+
   useEffect(() => {
     void refresh();
-     
+
   }, []);
 
   return (
     <Card
-      title="Local CLI status (detection)"
-      subtitle="Detects which AI CLIs are installed + authenticated on this machine. Chat currently always routes through Claude Code (the bridge); per-agent provider switching to Codex / Gemini ships next phase."
+      title="Local AI CLIs"
+      subtitle="Install + sign in to Claude Code, Codex, or Gemini directly from here. The bridge runs the install on this machine; the CLI handles its own OAuth in your browser. Click Refresh after sign-in to flip the card to Ready."
       action={
         <button
           type="button"
@@ -197,6 +274,18 @@ export function LocalCliProvidersCard() {
         </div>
       )}
 
+      {actionMessage && (
+        <div
+          className={`mb-3 rounded-md border p-2.5 text-[11.5px] leading-relaxed whitespace-pre-wrap ${
+            actionMessage.kind === "ok"
+              ? "border-status-engaged/30 bg-status-engaged/10 text-status-engaged"
+              : "border-status-warm/30 bg-status-warm/10 text-status-warm"
+          }`}
+        >
+          {actionMessage.text}
+        </div>
+      )}
+
       {state.kind === "ok" && (
         <div className="grid sm:grid-cols-3 gap-3">
           {CARDS.map((card) => {
@@ -231,16 +320,45 @@ export function LocalCliProvidersCard() {
                 {!info.installed && (
                   <div className="space-y-1.5">
                     <p className="text-[11px] text-fg-muted leading-relaxed">
-                      Install in your terminal, then click Refresh:
+                      Click Install — bridge runs <code className="text-fg-dim">{card.install_command}</code> on this machine.
                     </p>
-                    <div className="text-[10px] font-mono text-fg-dim bg-bg-deep px-2 py-1 rounded break-all">
-                      {card.install_command}
-                    </div>
+                    <button
+                      type="button"
+                      disabled={busy.kind !== "idle"}
+                      onClick={() => void handleInstall(card.key)}
+                      className="w-full inline-flex items-center justify-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider px-2.5 py-1.5 rounded-md bg-accent text-bg-deep hover:bg-accent-bright disabled:opacity-50"
+                    >
+                      {busy.kind === "installing" && busy.provider === card.key ? (
+                        <>
+                          <Loader2 className="w-3 h-3 animate-spin" />
+                          Installing…
+                        </>
+                      ) : (
+                        <>Install</>
+                      )}
+                    </button>
                   </div>
                 )}
                 {info.installed && !info.authenticated && (
-                  <div className="text-[11px] text-status-warm leading-relaxed">
-                    Installed but needs sign-in. Run the CLI&apos;s login command on this machine, then click Refresh.
+                  <div className="space-y-1.5">
+                    <p className="text-[11px] text-status-warm leading-relaxed">
+                      Installed. Click Sign in — your browser opens for the OAuth flow.
+                    </p>
+                    <button
+                      type="button"
+                      disabled={busy.kind !== "idle"}
+                      onClick={() => void handleSignIn(card.key)}
+                      className="w-full inline-flex items-center justify-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider px-2.5 py-1.5 rounded-md bg-status-warm/20 text-status-warm border border-status-warm/40 hover:bg-status-warm/30 disabled:opacity-50"
+                    >
+                      {busy.kind === "authing" && busy.provider === card.key ? (
+                        <>
+                          <Loader2 className="w-3 h-3 animate-spin" />
+                          Waiting for sign-in…
+                        </>
+                      ) : (
+                        <>Sign in</>
+                      )}
+                    </button>
                   </div>
                 )}
               </div>
