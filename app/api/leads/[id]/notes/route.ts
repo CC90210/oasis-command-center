@@ -89,10 +89,16 @@ export async function POST(
     .insert({
       tenant_id: sess.tenantId,
       lead_id: id,
+      // type is NOT NULL in the schema — set explicitly. `channel` is
+      // the medium (note, email, sms, phone, etc.); `type` is the
+      // higher-level category. Existing rows use {email_sent,
+      // email_received, call, note} for type.
+      type: "note",
       channel: "note",
       direction: "internal",
       agent_source: "operator_note",
-      content_preview: note,
+      content: note,
+      content_preview: note.length > 1024 ? note.slice(0, 1024) : note,
       metadata: {
         author_email: sess.email,
         author_profile_id: sess.profileId,

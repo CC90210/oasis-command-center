@@ -78,14 +78,19 @@ export async function POST(
     .insert({
       tenant_id: sess.tenantId,
       lead_id: leadId,
+      // type is NOT NULL — explicit. 'email_queued' distinguishes
+      // dashboard-queued rows from daemon-sent rows ('email_sent')
+      // so send_gateway can pick them up without re-sending the
+      // existing 275 historical 'email_sent' rows.
+      type: "email_queued",
       channel: "email",
       direction: "outbound",
       agent_source: "dashboard_drawer",
       subject: truncatedSubject,
+      content: truncatedBody,
       content_preview: truncatedBody.slice(0, 1024),
       to_email: toEmail,
       metadata: {
-        full_body: truncatedBody,
         requested_by_profile_id: sess.profileId,
         requested_by_email: sess.email,
         status: "queued",
