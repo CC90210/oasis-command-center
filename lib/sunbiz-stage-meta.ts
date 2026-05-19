@@ -1,16 +1,23 @@
 /**
- * Stage metadata for the SunBiz tenant — colors + display labels for the
- * Lead Pipeline and Opportunity Pipeline arrow-bar.
+ * Stage metadata for the SunBiz tenant — colors + display labels for
+ * the Lead Pipeline and Opportunity Pipeline rail.
  *
- * Verbatim from Adon's 2026-05-16 Salesforce screenshots so the rebuilt
- * UI matches the colors his team already pattern-matches against. When
- * Adon changes a stage name on his side (which he won't until the
- * migration completes), update both this file and SUN_SEED's enum_values.
+ * Palette (2026-05-18 v2): refined from the original Salesforce-Lightning
+ * hex set, which read as bright + saturated against the dashboard's
+ * dark theme. The new palette is desaturated, deeper, and tonally
+ * consistent — readable on `bg-bg-deep` (#0f1115) without screaming.
  *
- * Color choices map to the actual Salesforce Lightning hex codes where
- * possible; close approximations elsewhere. Background = solid fill on
- * the arrow chevron; text = readable foreground (white for dark fills,
- * dark navy for the yellow stages).
+ * Design principles:
+ *   - Lower saturation than Salesforce Lightning (no #FFB81C / #E91A86).
+ *   - Stage semantics preserved: warm progression for active stages,
+ *     muted neutrals for paused, deep wine for declined / dead.
+ *   - White foreground on every chip so contrast stays predictable.
+ *   - Each chip stands distinct in a vertical rail without competing
+ *     for attention; the active stage's underline does the highlighting.
+ *
+ * When Adon's team needs the legacy bright palette back (compatibility
+ * with their Salesforce reports), branch on tenant_id rather than
+ * editing in place.
  */
 
 export type StageMeta = {
@@ -21,28 +28,28 @@ export type StageMeta = {
 };
 
 export const LEAD_PIPELINE_STAGES: StageMeta[] = [
-  { key: "imported",            label: "Imported",            bg: "#E96F2D", fg: "#FFFFFF" },
-  { key: "not_interested",      label: "Not Interested",      bg: "#2C5F6E", fg: "#FFFFFF" },
-  { key: "hot_lead",            label: "Hot Lead",            bg: "#FFB81C", fg: "#1A1A1A" },
-  { key: "missing_info",        label: "Missing Info",        bg: "#0070D2", fg: "#FFFFFF" },
-  { key: "declined",            label: "Declined",            bg: "#C23934", fg: "#FFFFFF" },
-  { key: "follow_up",           label: "Follow Up",           bg: "#706E6B", fg: "#FFFFFF" },
-  { key: "sent_application",    label: "Sent Application",    bg: "#E91A86", fg: "#FFFFFF" },
-  { key: "viewed_application",  label: "Viewed Application",  bg: "#04844B", fg: "#FFFFFF" },
-  { key: "signed_application",  label: "Signed Application",  bg: "#0099A8", fg: "#FFFFFF" },
-  { key: "default",             label: "Default",             bg: "#7D7022", fg: "#FFFFFF" },
-  { key: "submitted",           label: "Submitted",           bg: "#5C5121", fg: "#FFFFFF" },
-  { key: "approved",            label: "Approved",            bg: "#3BA755", fg: "#FFFFFF" },
+  { key: "imported",            label: "Imported",            bg: "#4A5568", fg: "#FFFFFF" },
+  { key: "not_interested",      label: "Not Interested",      bg: "#2D3142", fg: "#E5E7EB" },
+  { key: "hot_lead",            label: "Hot Lead",            bg: "#A87534", fg: "#FFFFFF" },
+  { key: "missing_info",        label: "Missing Info",        bg: "#4A6FA5", fg: "#FFFFFF" },
+  { key: "declined",            label: "Declined",            bg: "#7C3036", fg: "#FFFFFF" },
+  { key: "follow_up",           label: "Follow Up",           bg: "#5B5550", fg: "#FFFFFF" },
+  { key: "sent_application",    label: "Sent Application",    bg: "#6B4E8C", fg: "#FFFFFF" },
+  { key: "viewed_application",  label: "Viewed Application",  bg: "#3D7A87", fg: "#FFFFFF" },
+  { key: "signed_application",  label: "Signed Application",  bg: "#3C7E68", fg: "#FFFFFF" },
+  { key: "default",             label: "Default",             bg: "#735F3F", fg: "#FFFFFF" },
+  { key: "submitted",           label: "Submitted",           bg: "#4D5C6E", fg: "#FFFFFF" },
+  { key: "approved",            label: "Approved",            bg: "#3F6F55", fg: "#FFFFFF" },
 ];
 
 export const OPPORTUNITY_PIPELINE_STAGES: StageMeta[] = [
-  { key: "submitted_to_underwriting", label: "Submitted To Underwriting", bg: "#54698D", fg: "#FFFFFF" },
-  { key: "approved_open_offers",      label: "Approved Open Offers",      bg: "#04844B", fg: "#FFFFFF" },
-  { key: "contracts_ordered",         label: "Contracts Ordered",         bg: "#794500", fg: "#FFFFFF" },
-  { key: "funded",                    label: "Funded",                    bg: "#0070D2", fg: "#FFFFFF" },
-  { key: "approved_never_funded",     label: "Approved Never Funded",     bg: "#E96F2D", fg: "#FFFFFF" },
-  { key: "no_offers_available",       label: "No Offers Available",       bg: "#706E6B", fg: "#FFFFFF" },
-  { key: "dead_file",                 label: "Dead File",                 bg: "#BA0517", fg: "#FFFFFF" },
+  { key: "submitted_to_underwriting", label: "Submitted To Underwriting", bg: "#4D5C6E", fg: "#FFFFFF" },
+  { key: "approved_open_offers",      label: "Approved Open Offers",      bg: "#3C7E68", fg: "#FFFFFF" },
+  { key: "contracts_ordered",         label: "Contracts Ordered",         bg: "#856537", fg: "#FFFFFF" },
+  { key: "funded",                    label: "Funded",                    bg: "#3F6F55", fg: "#FFFFFF" },
+  { key: "approved_never_funded",     label: "Approved Never Funded",     bg: "#A87534", fg: "#FFFFFF" },
+  { key: "no_offers_available",       label: "No Offers Available",       bg: "#5B5550", fg: "#FFFFFF" },
+  { key: "dead_file",                 label: "Dead File",                 bg: "#7C3036", fg: "#FFFFFF" },
 ];
 
 export function getStageMeta(entityName: string): StageMeta[] {

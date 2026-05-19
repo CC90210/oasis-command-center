@@ -17,6 +17,7 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
+// useRef intentionally imported for the file-input ref in DocumentsTab.
 import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { X, FileText, ImageIcon } from "lucide-react";
@@ -117,12 +118,13 @@ export function LeadDetailDrawer({
     };
   }, [recordId, entity]);
 
+  const shortId = recordId.slice(0, 8);
   const title = data
-    ? resolveTitle(data.record.data)
+    ? resolveTitle(data.record.data, entity, shortId)
     : entity === "application"
-      ? "Application"
-      : "Lead";
-  const subtitle = data ? resolveSubtitle(data.record.data) : recordId.slice(0, 8);
+      ? `Application ${shortId}`
+      : `Lead ${shortId}`;
+  const subtitle = data ? resolveSubtitle(data.record.data) : shortId;
 
   const editHref =
     entity === "application"
@@ -195,7 +197,9 @@ export function LeadDetailDrawer({
           {data && activeTab === "lenders" && <LendersTab application={data.application} />}
           {data && activeTab === "bank" && <BankTab record={data.record.data} />}
           {data && activeTab === "notes" && <NotesTab leadId={recordId} />}
-          {data && activeTab === "documents" && <DocumentsTab docs={data.documents} />}
+          {data && activeTab === "documents" && (
+            <DocumentsTab leadId={recordId} initialDocs={data.documents} />
+          )}
         </div>
 
         <DrawerFooter
@@ -208,13 +212,17 @@ export function LeadDetailDrawer({
   );
 }
 
-function resolveTitle(d: Record<string, unknown>): string {
+function resolveTitle(
+  d: Record<string, unknown>,
+  entity: "lead" | "application",
+  shortId: string,
+): string {
   return (
     str(d.business_name) ||
     str(d.name) ||
     str(d.contact_name) ||
     str(d.title) ||
-    "Untitled"
+    `${entity === "application" ? "Application" : "Lead"} ${shortId}`
   );
 }
 
@@ -415,35 +423,134 @@ function NotesTab({ leadId }: { leadId: string }) {
   );
 }
 
-function DocumentsTab({ docs }: { docs: DocRow[] }) {
-  if (docs.length === 0) {
-    return (
-      <div className="text-xs text-fg-dim italic py-6 text-center">
-        No documents yet. Files uploaded through the application form land here.
-      </div>
-    );
-  }
+const DOC_TYPE_PRESETS: { value: string; label: string }[] = [
+  { value: "bank_statements_3mo", label: "Bank statements (3 mo)" },
+  { value: "drivers_license", label: "Driver's license" },
+  { value: "void_cheque", label: "Void cheque" },
+  { value: "proof_of_ownership", label: "Proof of ownership" },
+  { value: "business_license", label: "Business license" },
+  { value: "tax_returns", label: "Tax returns" },
+  { value: "unclassified", label: "Other / unclassified" },
+];
+
+function DocumentsTab({
+  leadId,
+  initialDocs,
+}: {
+  leadId: string;
+  initialDocs: DocRow[];
+}) {
+  const [docs, setDocs] = useState<DocRow[]>(initialDocs);
+  const [docType, setDocType] = useState<string>("bank_statements_3mo");
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [stageNotice, setStageNotice] = useState<string | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const refresh = useCallback(async () => {
+    try {
+      const r = await fetch(`/api/leads/${leadId}/documents`, { credentials: "include" });
+      const j = await r.json();
+      if (j.ok) setDocs((j.documents || []) as DocRow[]);
+    } catch {
+      /* keep previous list */
+    }
+  }, [leadId]);
+
+  const upload = async (file: File) => {
+    setPending(true);
+    setError(null);
+    setStageNotice(null);
+    try {
+      const fd = new FormData();
+      fd.append("file", file);
+      fd.append("doc_type", docType);
+      const r = await fetch(`/api/leads/${leadId}/documents`, {
+        method: "POST",
+        credentials: "include",
+        body: fd,
+      });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok || !j.ok) {
+        setError(j.error || `upload_failed_${r.status}`);
+        return;
+      }
+      if (j.stage_bumped) {
+        setStageNotice(`Stage advanced to ${j.stage_bumped} — all required docs received.`);
+      }
+      await refresh();
+    } catch (e) {
+      setError(String((e as Error).message || e));
+    } finally {
+      setPending(false);
+      if (fileInputRef.current) fileInputRef.current.value = "";
+    }
+  };
+
   return (
-    <ul className="divide-y divide-bg-border">
-      {docs.map((d) => {
-        const isImage = (d.mime_type || "").startsWith("image/");
-        return (
-          <li key={d.id} className="flex items-center gap-3 py-2.5 text-sm">
-            <div className="shrink-0 text-fg-dim">
-              {isImage ? <ImageIcon className="w-4 h-4" /> : <FileText className="w-4 h-4" />}
-            </div>
-            <div className="min-w-0 flex-1">
-              <div className="text-fg truncate">{d.filename}</div>
-              <div className="text-[11px] text-fg-dim">
-                {leadDocTypeLabel(d.doc_type)} · {humanLeadDocSize(d.size_bytes)} ·{" "}
-                {new Date(d.uploaded_at).toLocaleDateString()}
-              </div>
-            </div>
-            <DocDownloadButton id={d.id} filename={d.filename} />
-          </li>
-        );
-      })}
-    </ul>
+    <div className="space-y-3">
+      <div className="rounded-md border border-bg-border bg-bg-deep/60 p-3 space-y-2">
+        <label className="text-[11px] uppercase tracking-wider text-fg-muted">
+          Upload a document
+        </label>
+        <select
+          value={docType}
+          onChange={(e) => setDocType(e.target.value)}
+          className="w-full text-xs px-2 py-1.5 rounded-md bg-bg-elev border border-bg-border text-fg"
+        >
+          {DOC_TYPE_PRESETS.map((p) => (
+            <option key={p.value} value={p.value}>
+              {p.label}
+            </option>
+          ))}
+        </select>
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept="image/*,application/pdf,.doc,.docx,.txt,.csv"
+          disabled={pending}
+          onChange={(e) => {
+            const f = e.target.files?.[0];
+            if (f) upload(f);
+          }}
+          className="block w-full text-xs text-fg-muted file:mr-2 file:py-1 file:px-2 file:rounded-md file:border file:border-bg-border file:bg-bg-elev file:text-fg file:text-[11px] file:font-semibold file:cursor-pointer disabled:opacity-50"
+        />
+        {pending && <div className="text-[11px] text-fg-dim">Uploading…</div>}
+        {error && (
+          <div className="text-[11px] text-red-300">{error}</div>
+        )}
+        {stageNotice && (
+          <div className="text-[11px] text-emerald-300">{stageNotice}</div>
+        )}
+      </div>
+
+      {docs.length === 0 ? (
+        <div className="text-xs text-fg-dim italic py-4 text-center">
+          No documents yet. Upload one above or wait for the form intake.
+        </div>
+      ) : (
+        <ul className="divide-y divide-bg-border">
+          {docs.map((d) => {
+            const isImage = (d.mime_type || "").startsWith("image/");
+            return (
+              <li key={d.id} className="flex items-center gap-3 py-2.5 text-sm">
+                <div className="shrink-0 text-fg-dim">
+                  {isImage ? <ImageIcon className="w-4 h-4" /> : <FileText className="w-4 h-4" />}
+                </div>
+                <div className="min-w-0 flex-1">
+                  <div className="text-fg truncate">{d.filename}</div>
+                  <div className="text-[11px] text-fg-dim">
+                    {leadDocTypeLabel(d.doc_type)} · {humanLeadDocSize(d.size_bytes)} ·{" "}
+                    {new Date(d.uploaded_at).toLocaleDateString()}
+                  </div>
+                </div>
+                <DocDownloadButton id={d.id} filename={d.filename} />
+              </li>
+            );
+          })}
+        </ul>
+      )}
+    </div>
   );
 }
 
