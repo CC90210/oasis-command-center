@@ -40,7 +40,8 @@ import {
 } from "@/lib/forms/types";
 import { rateLimit } from "@/lib/rate-limit";
 import { createRecord, updateRecord, RecordsError } from "@/lib/manifest/data";
-import { sanitizeStorageFilename } from "@/lib/storage-helpers";
+import { uploadLeadDocument } from "@/lib/lead-documents";
+import { recordLeadStageEvent } from "@/lib/lead-stage-engine";
 import { resolvePublicForm } from "@/lib/forms/public-resolver";
 import { createHash } from "node:crypto";
 
@@ -431,21 +432,31 @@ export async function POST(req: NextRequest) {
       );
     }
     try {
-      const cleanName = sanitizeStorageFilename(file.filename);
-      // Use the field name as doc_type so it lines up with the classifier
-      // enum in migration 049 (bank_statements_3mo / drivers_license /
-      // proof_of_ownership / …). Anything else falls under "unclassified".
+      // Use the field name as doc_type so it lines up with the
+      // classifier enum in migration 049. uploadLeadDocument owns
+      // storage path shape + sanitization + metadata insert + cleanup,
+      // shared with the operator-side drawer upload at
+      // /api/leads/[id]/documents.
       const docType = fieldName.replace(/[^a-z0-9_]/gi, "_").toLowerCase()
         || "unclassified";
-      const storagePath = `${form.tenant_id}/${link.lead_id}/${Date.now()}_${cleanName}`;
-      const upload = await db.storage
-        .from("lead-documents")
-        .upload(storagePath, bytes, {
-          contentType: file.mime_type,
-          upsert: false,
-        });
-      if (upload.error) {
-        uploadWarnings.push({ field_name: fieldName, reason: upload.error.message });
+      const result = await uploadLeadDocument({
+        tenantId: form.tenant_id,
+        leadId: link.lead_id,
+        filename: file.filename,
+        mimeType: file.mime_type,
+        bytes,
+        sizeBytes: file.size_bytes,
+        docType,
+        uploadedBy: "form_intake",
+        source: "form_intake",
+        extraMetadata: {
+          form_id: form.id,
+          field_name: fieldName,
+          step_index: stepIndex,
+        },
+      });
+      if (!result.ok) {
+        uploadWarnings.push({ field_name: fieldName, reason: result.error });
         continue;
       }
       // Strip the bytes from the payload now that they're persisted —
@@ -454,37 +465,15 @@ export async function POST(req: NextRequest) {
         filename: file.filename,
         mime_type: file.mime_type,
         size_bytes: file.size_bytes,
-        storage_path: storagePath,
+        storage_path: result.document.storage_path,
       };
-      const docInsert = await db
-        .from("lead_documents")
-        .insert({
-          tenant_id: form.tenant_id,
-          lead_id: link.lead_id,
-          filename: cleanName,
-          storage_path: storagePath,
-          mime_type: file.mime_type,
-          size_bytes: file.size_bytes,
-          doc_type: docType,
-          uploaded_by: "form_intake",
-          metadata: { form_id: form.id, field_name: fieldName, step_index: stepIndex },
-        })
-        .select("id")
-        .single();
-      if (docInsert.error) {
-        uploadWarnings.push({
-          field_name: fieldName,
-          reason: `metadata_insert_failed: ${docInsert.error.message}`,
-        });
-        continue;
-      }
       uploadedDocs.push({
         field_name: fieldName,
-        storage_path: storagePath,
-        filename: cleanName,
-        mime_type: file.mime_type,
-        size_bytes: file.size_bytes,
-        doc_type: docType,
+        storage_path: result.document.storage_path,
+        filename: result.document.filename,
+        mime_type: result.document.mime_type,
+        size_bytes: result.document.size_bytes,
+        doc_type: result.document.doc_type,
       });
     } catch (err) {
       uploadWarnings.push({
@@ -492,6 +481,19 @@ export async function POST(req: NextRequest) {
         reason: err instanceof Error ? err.message : "unknown",
       });
     }
+  }
+
+  // After all uploads for this step, evaluate stage progression once.
+  // The engine checks "all required SunBiz docs present?" against the
+  // canonical doc-type set; partial uploads stay in missing_info,
+  // complete uploads advance to hot_lead.
+  if (uploadedDocs.length > 0) {
+    await recordLeadStageEvent({
+      type: "doc_uploaded",
+      tenantId: form.tenant_id,
+      leadId: link.lead_id,
+      docType: uploadedDocs[uploadedDocs.length - 1].doc_type,
+    });
   }
 
   // form_submissions.file_attachments is derived SOLELY from

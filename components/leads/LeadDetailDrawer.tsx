@@ -23,6 +23,7 @@ import Link from "next/link";
 import { X, FileText, ImageIcon } from "lucide-react";
 import { LeadTimelinePanel } from "./LeadTimelinePanel";
 import { humanLeadDocSize, leadDocTypeLabel, LEAD_DOC_TYPES } from "@/lib/lead-doc-display";
+import { LEAD_PIPELINE_STAGES, OPPORTUNITY_PIPELINE_STAGES, type StageMeta } from "@/lib/sunbiz-stage-meta";
 
 type DocRow = {
   id: string;
@@ -68,6 +69,17 @@ export function LeadDetailDrawer({
   const [error, setError] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<TabKey>("activity");
   const closeBtnRef = useRef<HTMLButtonElement>(null);
+
+  const reload = useCallback(async () => {
+    const url = `/api/leads/${recordId}/detail${entity === "application" ? "?entity=application" : ""}`;
+    try {
+      const r = await fetch(url, { credentials: "include", cache: "no-store" });
+      const j = await r.json();
+      if (j.ok) setData(j as DetailPayload);
+    } catch {
+      /* keep prior data */
+    }
+  }, [recordId, entity]);
 
   const close = useCallback(() => {
     const next = new URLSearchParams(searchParams?.toString() || "");
@@ -118,6 +130,19 @@ export function LeadDetailDrawer({
     };
   }, [recordId, entity]);
 
+  // Resolve the stage chip for the header. Leads use LEAD_PIPELINE_STAGES;
+  // applications use OPPORTUNITY_PIPELINE_STAGES and key off `status` not
+  // `stage`. Returns null when there's no current stage value so the chip
+  // hides instead of showing "Unknown".
+  const stageChip: StageMeta | null = (() => {
+    if (!data) return null;
+    const d = data.record.data as Record<string, unknown>;
+    const key = String(entity === "application" ? d.status || "" : d.stage || "");
+    if (!key) return null;
+    const list = entity === "application" ? OPPORTUNITY_PIPELINE_STAGES : LEAD_PIPELINE_STAGES;
+    return list.find((s) => s.key === key) || null;
+  })();
+
   const shortId = recordId.slice(0, 8);
   const title = data
     ? resolveTitle(data.record.data, entity, shortId)
@@ -149,6 +174,16 @@ export function LeadDetailDrawer({
           <div className="min-w-0 flex-1">
             <h2 className="text-sm font-bold text-fg truncate">{title}</h2>
             <div className="text-[11px] text-fg-dim truncate">{subtitle}</div>
+            {stageChip && (
+              <div className="mt-1.5">
+                <span
+                  className="inline-block px-2 py-0.5 rounded text-[10.5px] font-semibold uppercase tracking-wider"
+                  style={{ background: stageChip.bg, color: stageChip.fg }}
+                >
+                  {stageChip.label}
+                </span>
+              </div>
+            )}
           </div>
           <Link
             href={editHref}
@@ -198,7 +233,11 @@ export function LeadDetailDrawer({
           {data && activeTab === "bank" && <BankTab record={data.record.data} />}
           {data && activeTab === "notes" && <NotesTab leadId={recordId} />}
           {data && activeTab === "documents" && (
-            <DocumentsTab leadId={recordId} initialDocs={data.documents} />
+            <DocumentsTab
+              leadId={recordId}
+              initialDocs={data.documents}
+              onChange={reload}
+            />
           )}
         </div>
 
@@ -206,6 +245,7 @@ export function LeadDetailDrawer({
           recordId={recordId}
           entity={entity}
           recordData={data?.record.data || {}}
+          onChange={reload}
         />
       </aside>
     </div>
@@ -426,9 +466,11 @@ function NotesTab({ leadId }: { leadId: string }) {
 function DocumentsTab({
   leadId,
   initialDocs,
+  onChange,
 }: {
   leadId: string;
   initialDocs: DocRow[];
+  onChange?: () => void | Promise<void>;
 }) {
   const [docs, setDocs] = useState<DocRow[]>(initialDocs);
   const [docType, setDocType] = useState<string>("bank_statements_3mo");
@@ -469,6 +511,7 @@ function DocumentsTab({
         setStageNotice(`Stage advanced to ${j.stage_bumped} — all required docs received.`);
       }
       await refresh();
+      if (onChange) await onChange();
     } catch (e) {
       setError(String((e as Error).message || e));
     } finally {
@@ -587,10 +630,12 @@ function DrawerFooter({
   recordId,
   entity,
   recordData,
+  onChange,
 }: {
   recordId: string;
   entity: "lead" | "application";
   recordData: Record<string, unknown>;
+  onChange?: () => void | Promise<void>;
 }) {
   const [mode, setMode] = useState<ComposerMode>(null);
   return (
@@ -625,11 +670,14 @@ function DrawerFooter({
           entity={entity}
           toEmail={str(recordData.email)}
           onClose={() => setMode(null)}
+          onChange={onChange}
         />
       ) : mode === "sms" ? (
         <SmsComposer
+          recordId={recordId}
           toPhone={str(recordData.phone)}
           onClose={() => setMode(null)}
+          onChange={onChange}
         />
       ) : (
         <TextTorrentPicker
@@ -646,11 +694,13 @@ function EmailComposer({
   entity,
   toEmail,
   onClose,
+  onChange,
 }: {
   recordId: string;
   entity: "lead" | "application";
   toEmail: string | null;
   onClose: () => void;
+  onChange?: () => void | Promise<void>;
 }) {
   const [subject, setSubject] = useState("");
   const [body, setBody] = useState("");
@@ -708,9 +758,14 @@ function EmailComposer({
               });
               const j = await r.json().catch(() => ({}));
               if (r.ok && j.ok) {
-                setStatus("Queued");
+                setStatus(
+                  j.stage_bumped
+                    ? `Queued · stage → ${j.stage_bumped}`
+                    : "Queued",
+                );
                 setSubject("");
                 setBody("");
+                if (onChange) await onChange();
               } else {
                 setStatus(j.error || `Failed (${r.status})`);
               }
@@ -730,11 +785,15 @@ function EmailComposer({
 }
 
 function SmsComposer({
+  recordId,
   toPhone,
   onClose,
+  onChange,
 }: {
+  recordId: string;
   toPhone: string | null;
   onClose: () => void;
+  onChange?: () => void | Promise<void>;
 }) {
   const [body, setBody] = useState("");
   const [status, setStatus] = useState<string | null>(null);
@@ -775,8 +834,20 @@ function SmsComposer({
               });
               const j = await r.json().catch(() => ({}));
               if (r.ok && j.ok !== false) {
+                // Fire-and-forget the stage transition. /api/sms/send
+                // doesn't yet emit it server-side; we publish from the
+                // client so SMS counts as outbound contact same as
+                // queued email. Safe even if the lead is past
+                // sent_application — engine guards block re-entry.
+                fetch(`/api/leads/${recordId}/stage-event`, {
+                  method: "POST",
+                  credentials: "include",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({ type: "outbound_email_sent" }),
+                }).catch(() => undefined);
                 setStatus("Sent");
                 setBody("");
+                if (onChange) await onChange();
               } else {
                 setStatus(j.error || `Failed (${r.status})`);
               }

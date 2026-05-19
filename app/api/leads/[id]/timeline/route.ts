@@ -224,8 +224,11 @@ export async function GET(
 
 function humanizeEventType(t: string): string {
   if (!t) return "Event";
-  if (t === "BRAVO_RECORD_STATUS_CHANGED") return "Stage changed";
-  if (t === "BRAVO_EMAIL_OPENED") return "Email opened";
-  if (t === "BRAVO_LEAD_MISSING_INFO") return "Missing info detected";
+  if (t === "BRAVO_RECORD_STATUS_CHANGED") return "🔄 Stage changed";
+  if (t === "BRAVO_LEAD_AUTO_BUMPED") return "🔄 Stage auto-advanced";
+  if (t === "BRAVO_EMAIL_OPENED") return "👁 Email opened";
+  if (t === "BRAVO_OUTBOUND_QUEUED_FROM_DASHBOARD") return "📤 Email queued";
+  if (t === "BRAVO_LEAD_MISSING_INFO") return "⚠ Missing info detected";
+  if (t === "BRAVO_OUTBOUND_SENT") return "✉ Outbound sent";
   return t.replace(/^BRAVO_/, "").replace(/_/g, " ").toLowerCase().replace(/^./, (c) => c.toUpperCase());
 }

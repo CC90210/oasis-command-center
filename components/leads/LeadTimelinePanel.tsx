@@ -75,6 +75,25 @@ function absTime(iso: string): string {
   }
 }
 
+/**
+ * Stage transition events (BRAVO_RECORD_STATUS_CHANGED + BRAVO_LEAD_AUTO_BUMPED)
+ * carry `from`, `to`, `field`, and `reason` in payload. Surface them as a
+ * compact "old → new (reason)" line so operators see WHY a lead moved.
+ */
+function renderStageMetaLine(meta: Record<string, unknown> | undefined) {
+  if (!meta) return null;
+  const from = typeof meta.from === "string" ? meta.from : null;
+  const to = typeof meta.to === "string" ? meta.to : null;
+  const reason = typeof meta.reason === "string" ? meta.reason : null;
+  if (!from && !to) return null;
+  return (
+    <div className="mt-1 text-[11px] text-fg-dim font-mono break-words">
+      {from || "—"} → <span className="text-fg-muted">{to || "—"}</span>
+      {reason && <span className="ml-2 text-fg-dim">· {reason.replace(/_/g, " ")}</span>}
+    </div>
+  );
+}
+
 export function LeadTimelinePanel({ leadId }: { leadId: string }) {
   const [events, setEvents] = useState<TimelineEvent[] | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -179,6 +198,7 @@ export function LeadTimelinePanel({ leadId }: { leadId: string }) {
                       {e.body}
                     </div>
                   )}
+                  {e.source === "system" && renderStageMetaLine(e.meta)}
                 </div>
               </li>
             );

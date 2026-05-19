@@ -28,6 +28,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { bad, sha256 } from "@/lib/api-helpers";
+import { recordLeadStageEvent } from "@/lib/lead-stage-engine";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs"; // service role + sha256 → Node, not edge
@@ -101,6 +102,42 @@ export async function POST(req: NextRequest) {
       return bad(401, "invalid secret");
     }
     return bad(500, r.error.message || "rpc failed");
+  }
+
+  // Engine wiring: if the classifier flagged the reply as negative
+  // (sentiment=negative, intent=opt_out / unsubscribe), advance the
+  // lead to `not_interested`. Best-effort — looks up tenant + lead
+  // from the freshly-inserted interaction row and fires the rule.
+  // Lookup failure or RPC-returned id mismatch silently no-ops; the
+  // primary inbound write has already succeeded by this point and we
+  // must not regress that on a stage-event hiccup.
+  const interactionId = r.data;
+  const classification = (body.classification || {}) as Record<string, unknown>;
+  const sentiment = String(classification.sentiment || "").toLowerCase();
+  const intent = String(classification.intent || "").toLowerCase();
+  const isNegative =
+    sentiment === "negative" ||
+    intent === "opt_out" ||
+    intent === "unsubscribe" ||
+    intent === "not_interested";
+  if (interactionId && isNegative) {
+    try {
+      const lookup = await db
+        .from("lead_interactions")
+        .select("tenant_id, lead_id")
+        .eq("id", interactionId)
+        .maybeSingle();
+      const row = lookup.data as { tenant_id?: string; lead_id?: string } | null;
+      if (row?.tenant_id && row?.lead_id) {
+        await recordLeadStageEvent({
+          type: "lead_replied_negative",
+          tenantId: row.tenant_id,
+          leadId: row.lead_id,
+        });
+      }
+    } catch {
+      /* best-effort */
+    }
   }
 
   return NextResponse.json({
