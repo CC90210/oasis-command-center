@@ -13,6 +13,7 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { resolveSessionContext } from "@/lib/api-auth";
 import { getServiceSupabase } from "@/lib/supabase-server";
+import { canManageTeam, type TeamRole } from "@/lib/team";
 import {
   setTenantIntegrationValue,
   deleteTenantIntegrationValue,
@@ -24,6 +25,9 @@ import {
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
+// Re-uses the canonical `canManageTeam` helper from lib/team so the
+// owner+admin gate stays in lockstep with the rest of the dashboard
+// (Team management, Plan templates, Branding all use the same shape).
 async function canManageTenant(tenantId: string, userId: string): Promise<boolean> {
   const db = getServiceSupabase();
   const r = await db
@@ -32,10 +36,10 @@ async function canManageTenant(tenantId: string, userId: string): Promise<boolea
     .eq("auth_user_id", userId)
     .eq("tenant_id", tenantId)
     .maybeSingle();
-  const row = r.data as { team_role: string | null; is_owner: boolean | null } | null;
+  const row = r.data as { team_role: TeamRole | null; is_owner: boolean | null } | null;
   if (!row) return false;
   if (row.is_owner) return true;
-  return row.team_role === "owner" || row.team_role === "admin";
+  return canManageTeam(row.team_role || "member");
 }
 
 export async function GET() {

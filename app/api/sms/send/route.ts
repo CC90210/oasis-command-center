@@ -7,6 +7,10 @@ import {
   resolveClientProfileSlug,
 } from "@/lib/client-profiles";
 import { getActiveProfile, getTenant } from "@/lib/queries";
+import {
+  tenantHasDirectTwilio,
+  sendSmsDirectTwilio,
+} from "@/lib/sms-direct-twilio";
 import { cookies } from "next/headers";
 
 /**
@@ -81,6 +85,35 @@ export async function POST(req: Request) {
       { ok: false, error: "body exceeds 1600 chars", status: "validation_error" },
       { status: 400 }
     );
+  }
+
+  // Per-tenant direct-Twilio path. When the operator has pasted
+  // (account_sid + auth_token + from_number) into Settings →
+  // Integration Keys, skip the hosted-client-agent indirection and
+  // POST straight to Twilio's Messages API. Profile.tenant_id is
+  // guaranteed present at this point — we resolved it above.
+  if (profile.tenant_id && (await tenantHasDirectTwilio(profile.tenant_id))) {
+    const direct = await sendSmsDirectTwilio({
+      tenantId: profile.tenant_id,
+      to,
+      body,
+    });
+    if (direct.ok) {
+      return NextResponse.json(
+        {
+          ok: true,
+          status: "sent",
+          provider: direct.provider,
+          message_sid: direct.message_sid,
+          twilio_status: direct.status,
+        },
+        { status: 200 },
+      );
+    }
+    // Direct path failed — log and fall through to the hosted
+    // dispatch so the operator isn't blocked if (say) Twilio's API
+    // is having a moment but the hosted gateway is up.
+    console.error("[sms/send] direct twilio failed, falling back to client-agent", direct.error);
   }
 
   const result = await dispatchSmsThroughClientAgent({

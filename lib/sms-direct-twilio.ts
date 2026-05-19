@@ -1,0 +1,111 @@
+/**
+ * lib/sms-direct-twilio.ts — direct Twilio Messages API dispatch.
+ *
+ * The PRIMARY SMS path runs through `dispatchSmsThroughClientAgent`
+ * (lib/client-agent.ts) which hands off to a hosted client-agent
+ * HTTP endpoint. That model fits multi-tenant SaaS deployments where
+ * each client has their own Twilio sub-account behind a managed
+ * gateway.
+ *
+ * For SunBiz and other tenants that pasted their own Twilio creds
+ * into Settings → Integration Keys, we skip the indirection and call
+ * the Twilio REST API directly using the per-tenant stored values.
+ * This is the consumer-side payoff for the
+ * tenant_integration_credentials work — credentials live in the DB,
+ * the dashboard reads them, sends land on the lead's phone.
+ *
+ * Reads creds via getTenantIntegrationBundle (DB-first, env fallback)
+ * so a fresh tenant with no env vars + a pasted (sid, token, from)
+ * just works. No env config required.
+ */
+
+import "server-only";
+import { getTenantIntegrationBundle } from "./tenant-integration-store";
+
+export type DirectTwilioResult =
+  | {
+      ok: true;
+      provider: "twilio_direct";
+      message_sid: string;
+      status: string;
+    }
+  | {
+      ok: false;
+      provider: "twilio_direct";
+      error: string;
+      http_status: number;
+    };
+
+/**
+ * Returns true when the tenant has the minimum set of Twilio creds
+ * (account_sid + auth_token + from_number) to dispatch via the
+ * direct path. The route uses this to decide whether to try
+ * direct dispatch before falling through to the hosted-agent path.
+ */
+export async function tenantHasDirectTwilio(tenantId: string): Promise<boolean> {
+  const b = await getTenantIntegrationBundle(tenantId, "twilio");
+  return !!(b.account_sid && b.auth_token && b.from_number);
+}
+
+export async function sendSmsDirectTwilio(input: {
+  tenantId: string;
+  to: string;
+  body: string;
+}): Promise<DirectTwilioResult> {
+  const creds = await getTenantIntegrationBundle(input.tenantId, "twilio");
+  const sid = creds.account_sid;
+  const token = creds.auth_token;
+  const from = creds.from_number;
+  if (!sid || !token || !from) {
+    return {
+      ok: false,
+      provider: "twilio_direct",
+      error: "missing_twilio_credentials",
+      http_status: 503,
+    };
+  }
+  const url = `https://api.twilio.com/2010-04-01/Accounts/${encodeURIComponent(sid)}/Messages.json`;
+  const form = new URLSearchParams();
+  form.set("To", input.to);
+  form.set("From", from);
+  form.set("Body", input.body);
+
+  try {
+    const r = await fetch(url, {
+      method: "POST",
+      headers: {
+        Authorization: "Basic " + Buffer.from(`${sid}:${token}`).toString("base64"),
+        "Content-Type": "application/x-www-form-urlencoded",
+        Accept: "application/json",
+      },
+      body: form.toString(),
+    });
+    const j = (await r.json().catch(() => ({}))) as {
+      sid?: string;
+      status?: string;
+      message?: string;
+      code?: number;
+    };
+    if (r.status >= 200 && r.status < 300 && j.sid) {
+      return {
+        ok: true,
+        provider: "twilio_direct",
+        message_sid: j.sid,
+        status: j.status || "queued",
+      };
+    }
+    return {
+      ok: false,
+      provider: "twilio_direct",
+      error: j.message || `twilio_http_${r.status}`,
+      http_status: r.status,
+    };
+  } catch (err) {
+    return {
+      ok: false,
+      provider: "twilio_direct",
+      error: `network_error: ${(err as Error).message}`,
+      http_status: 502,
+    };
+  }
+}

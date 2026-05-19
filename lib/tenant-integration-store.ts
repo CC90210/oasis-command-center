@@ -47,8 +47,22 @@ export type IntegrationSetResult =
   | { ok: false; error: string };
 
 /**
- * Per-service env-var fallbacks. Unregistered (service, field_key)
- * pairs DB-only — no env-var leakage path.
+ * Per-service env-var fallbacks.
+ *
+ * Relationship to lib/integrations-registry.ts: that file's `env_key`
+ * field is single-valued — one env var per service — because the
+ * legacy paste modal at /integrations only ever wrote one key. This
+ * table is field-key-aware: Twilio has three env vars (sid + token +
+ * from), SMTP has five. We keep both because the registry powers the
+ * /integrations marketplace UI (signup_url, api_key_url, category,
+ * agent membership) while ENV_FALLBACKS powers the per-tenant
+ * resolver. The registry's single env_key matches the most important
+ * field's env-name (e.g. "TWILIO_AUTH_TOKEN" for service=twilio); the
+ * registry's `env_key` is informational, ENV_FALLBACKS is the
+ * resolver's source of truth.
+ *
+ * Unregistered (service, field_key) pairs DB-only — no env-var
+ * leakage path.
  */
 const ENV_FALLBACKS: Record<string, Record<string, string>> = {
   twilio: {
