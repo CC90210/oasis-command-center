@@ -24,6 +24,7 @@ import { NextResponse, type NextRequest } from "next/server";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { resolveSessionContext } from "@/lib/api-auth";
 import { publishAgentEvent } from "@/lib/manifest/events";
+import { recordLeadStageEvent } from "@/lib/lead-stage-engine";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -114,9 +115,19 @@ export async function POST(
     },
   });
 
+  // Engine moves the lead forward through the sales motion. Queueing
+  // an application email maps to sent_application — fires only when
+  // the lead is in an earlier stage (engine guards manual overrides).
+  const stageEvent = await recordLeadStageEvent({
+    type: "outbound_email_queued",
+    tenantId: sess.tenantId,
+    leadId,
+  });
+
   return NextResponse.json({
     ok: true,
     interaction_id: ins.data.id,
     queued_at: ins.data.created_at,
+    stage_bumped: stageEvent.fired ? stageEvent.to : null,
   });
 }

@@ -34,6 +34,8 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { getServiceSupabase } from "@/lib/supabase-server";
+import { publishAgentEvent } from "@/lib/manifest/events";
+import { recordLeadStageEvent } from "@/lib/lead-stage-engine";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -147,21 +149,36 @@ export async function GET(
     // handler needed in the daemon. Suspicious prefetches are flagged
     // in payload so drip authors can filter them out via
     // trigger_filter if desired.
-    try {
-      await sb.from("agent_events").insert({
-        tenant_id: tenantId,
-        event_type: "BRAVO_EMAIL_OPENED",
-        payload: {
-          tenant_id: tenantId,
-          entity: "lead",
-          record_id: leadId,
-          lead_id: leadId,
-          outbound_message_id: id,
-          suspicious_prefetch: suspicious,
-        },
+    // Canonical agent_events shape: no tenant_id column on the table
+    // (migration 006) — tenant scope rides in correlation_id. The
+    // shared publishAgentEvent helper stamps publisher_agent +
+    // severity + correlation_id correctly so this insert no longer
+    // silently fails (which is what was happening before — the route
+    // looked fine but agent_events.insert errored every call).
+    await publishAgentEvent({
+      eventType: "BRAVO_EMAIL_OPENED",
+      tenantId,
+      publisher: "track_open",
+      payload: {
+        entity: "lead",
+        record_id: leadId,
+        lead_id: leadId,
+        outbound_message_id: id,
+        suspicious_prefetch: suspicious,
+      },
+    });
+
+    // Engine: real (non-prefetch) opens advance the lead from
+    // sent_application → viewed_application. Prefetches are filtered
+    // out so APMP noise doesn't promote a lead that hasn't actually
+    // engaged. Engine guards the from-stage so an open against a
+    // lead already past viewed_application is a no-op.
+    if (!suspicious && leadId) {
+      await recordLeadStageEvent({
+        type: "email_opened",
+        tenantId,
+        leadId,
       });
-    } catch {
-      // event-bus optional
     }
   } catch (err) {
     // Best-effort — log + serve pixel.

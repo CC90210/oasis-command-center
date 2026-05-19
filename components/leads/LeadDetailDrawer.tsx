@@ -22,7 +22,7 @@ import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { X, FileText, ImageIcon } from "lucide-react";
 import { LeadTimelinePanel } from "./LeadTimelinePanel";
-import { humanLeadDocSize, leadDocTypeLabel } from "@/lib/lead-doc-display";
+import { humanLeadDocSize, leadDocTypeLabel, LEAD_DOC_TYPES } from "@/lib/lead-doc-display";
 
 type DocRow = {
   id: string;
@@ -423,16 +423,6 @@ function NotesTab({ leadId }: { leadId: string }) {
   );
 }
 
-const DOC_TYPE_PRESETS: { value: string; label: string }[] = [
-  { value: "bank_statements_3mo", label: "Bank statements (3 mo)" },
-  { value: "drivers_license", label: "Driver's license" },
-  { value: "void_cheque", label: "Void cheque" },
-  { value: "proof_of_ownership", label: "Proof of ownership" },
-  { value: "business_license", label: "Business license" },
-  { value: "tax_returns", label: "Tax returns" },
-  { value: "unclassified", label: "Other / unclassified" },
-];
-
 function DocumentsTab({
   leadId,
   initialDocs,
@@ -498,9 +488,10 @@ function DocumentsTab({
           onChange={(e) => setDocType(e.target.value)}
           className="w-full text-xs px-2 py-1.5 rounded-md bg-bg-elev border border-bg-border text-fg"
         >
-          {DOC_TYPE_PRESETS.map((p) => (
-            <option key={p.value} value={p.value}>
+          {LEAD_DOC_TYPES.map((p) => (
+            <option key={p.key} value={p.key}>
               {p.label}
+              {p.required ? " *" : ""}
             </option>
           ))}
         </select>
