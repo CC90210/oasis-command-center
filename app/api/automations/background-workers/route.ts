@@ -129,7 +129,7 @@ export async function GET() {
   // integrations_health is keyed (profile_id, service). When the bridge
   // hasn't pushed (no profile_id, or no rows), fall back to "unconfigured".
   const services = EXPECTED_WORKERS.map((w) => w.service);
-  let healthMap = new Map<
+  const healthMap = new Map<
     string,
     { status: string; metadata: Record<string, unknown>; last_ping_at: string | null }
   >();
