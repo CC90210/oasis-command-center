@@ -45,8 +45,23 @@ export const PIPELINE_COLUMNS: Record<string, PipelineColumn[]> = {
   ],
 };
 
+/**
+ * Money-keyed cells that the SunBiz pipeline view + other money
+ * formatters should recognise. Mirror of MONEY_KEYS below — exported
+ * so the SunBiz view can pass arbitrary jsonb fields through
+ * formatPipelineCell consistently.
+ */
+export const MONEY_FIELD_KEYS = new Set<string>([
+  "amount",
+  "requested_amount",
+  "monthly_revenue",
+  "avg_monthly_revenue",
+  "avg_daily_balance",
+  "best_offer",
+]);
+
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const MONEY_KEYS = new Set(["amount", "requested_amount", "monthly_revenue"]);
+const MONEY_KEYS = MONEY_FIELD_KEYS;
 const DATE_KEYS = new Set(["submitted_at", "funded_at"]);
 const SHORT_UUID_KEYS = new Set(["lead_id", "lender_id"]);
 

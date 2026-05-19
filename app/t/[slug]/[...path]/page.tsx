@@ -14,6 +14,7 @@ import { LeadDocumentsPanel } from "@/components/leads/LeadDocumentsPanel";
 import { StageRail } from "@/components/manifest/StageRail";
 import { PipelineSearchableTable } from "@/components/manifest/PipelineSearchableTable";
 import { PageSearchBar } from "@/components/manifest/PageSearchBar";
+import { SunBizPipelineView } from "@/components/manifest/SunBizPipelineView";
 import { LeadDetailDrawer } from "@/components/leads/LeadDetailDrawer";
 import {
   PIPELINE_COLUMNS,
@@ -863,6 +864,24 @@ async function SingleEntityPipeline({
     stages.map((s) => [s.key, s]),
   );
 
+  // SunBiz gets the redesigned grouped-by-stage view from CC's
+  // mockups. Other tenants keep the rail + flat table.
+  if (slug === "sun" && (entity.name === "lead" || entity.name === "application")) {
+    return (
+      <SunBizPipelineView
+        slug={slug}
+        entityName={entity.name as "lead" | "application"}
+        entityLabel={entity.label}
+        stages={stages}
+        stageField={stageField}
+        rows={visible}
+        stageFilter={stageFilter}
+        query={query}
+        basePath={page.path}
+      />
+    );
+  }
+
   return (
     <div className="space-y-4">
       <PageSearchBar
@@ -874,7 +893,7 @@ async function SingleEntityPipeline({
           ? `${visible.length} match${visible.length === 1 ? "" : "es"} for "${query}"${stageFilter ? ` in ${activeLabel}` : ""}`
           : stageFilter ? `${visible.length} in ${activeLabel}` : `${rowsRes.rows.length} total`}
       </div>
-      <PipelineLayout vertical={slug === "sun"}>
+      <PipelineLayout vertical={false}>
         <StageRail
           tenantSlug={slug}
           stages={stages}
