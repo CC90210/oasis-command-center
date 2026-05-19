@@ -14,8 +14,8 @@ import { resolveSessionContext } from "@/lib/api-auth";
 import {
   getTenantIntegrationBundle,
   recordIntegrationTest,
-  findIntegrationSchema,
 } from "@/lib/tenant-integration-store";
+import { findIntegrationSchema } from "@/lib/tenant-integration-schemas";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";

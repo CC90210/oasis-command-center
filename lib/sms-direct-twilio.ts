@@ -17,6 +17,34 @@
  * Reads creds via getTenantIntegrationBundle (DB-first, env fallback)
  * so a fresh tenant with no env vars + a pasted (sid, token, from)
  * just works. No env config required.
+ *
+ * ── Per-tenant direct-dispatch template ───────────────────────────
+ * This module is the prototype for any future per-service direct
+ * dispatcher (email-direct-smtp, email-direct-gmail, push-direct-
+ * apns, etc.). New dispatchers should follow the same shape so the
+ * route-side logic stays uniform:
+ *
+ *   1. Named result types:
+ *        Result =
+ *          | { ok: true;  provider: "<name>"; ...providerFields }
+ *          | { ok: false; provider: "<name>"; error: string; http_status }
+ *
+ *   2. `tenantHas<Service>(tenantId): Promise<boolean>` —
+ *      returns true when getTenantIntegrationBundle resolves the
+ *      minimum required field set. Route-side gate: "try direct
+ *      first?".
+ *
+ *   3. `send<Service>({tenantId, ...payload}): Promise<Result>` —
+ *      fetches the bundle, calls the provider's HTTP API, returns
+ *      a typed Result. NEVER throws on network errors; returns
+ *      `{ok: false, error, http_status}` so the route can decide
+ *      to fall through to a hosted gateway path.
+ *
+ *   4. Cred resolution lives ONLY in getTenantIntegrationBundle.
+ *      No `process.env.*` reads in dispatcher modules — that path
+ *      goes through the store so ENV_FALLBACKS stays the single
+ *      authority on which envs are honored.
+ * ──────────────────────────────────────────────────────────────────
  */
 
 import "server-only";

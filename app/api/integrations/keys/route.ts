@@ -18,9 +18,11 @@ import {
   setTenantIntegrationValue,
   deleteTenantIntegrationValue,
   listTenantIntegrationStatus,
+} from "@/lib/tenant-integration-store";
+import {
   findIntegrationSchema,
   validateIntegrationValue,
-} from "@/lib/tenant-integration-store";
+} from "@/lib/tenant-integration-schemas";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";

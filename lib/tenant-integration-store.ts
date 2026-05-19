@@ -277,14 +277,7 @@ export async function recordIntegrationTest(input: {
     .eq("field_key", input.fieldKey);
 }
 
-// Pure types + INTEGRATION_SCHEMAS + validateIntegrationValue live in
-// lib/tenant-integration-schemas (no "server-only", safe in client
-// bundles). Re-exported here so existing server-side callers don't
-// need to know about the split.
-export {
-  INTEGRATION_SCHEMAS,
-  findIntegrationSchema,
-  validateIntegrationValue,
-  type IntegrationFieldDef,
-  type IntegrationSchema,
-} from "./tenant-integration-schemas";
+// Field-shape constants + validator live in
+// lib/tenant-integration-schemas (no "server-only" marker, safe in
+// client bundles). Import them directly from there — this server-only
+// store owns DB CRUD and decryption only.
