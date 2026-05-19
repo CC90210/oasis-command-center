@@ -198,13 +198,26 @@ export function LocalCliProvidersCard() {
     const res = await runBridgeTool("cli_auth_start", provider);
     setActionMessage({ kind: res.ok ? "ok" : "err", text: res.text });
     setBusy({ kind: "idle" });
-    // After auth start, poll cli_status every 3s for up to 2 minutes.
-    // The CLI's OAuth roundtrip is operator-driven (they click "Sign in"
-    // in the browser), so we don't know when it'll complete.
-    if (res.ok) {
-      const startMs = Date.now();
-      const poll = async () => {
-        if (Date.now() - startMs > 120_000) return;
+    // Claude Code has no auth subcommand — the bridge returns guidance
+    // text only and there's no OAuth flow to poll for. Polling cli_status
+    // every 3s for 2 minutes would just burn cycles waiting for an event
+    // that requires the operator to manually run `claude /login` first.
+    // Skip the polling loop entirely; operator clicks Refresh when done.
+    if (!res.ok || provider === "claude") return;
+
+    // Codex + Gemini: OAuth round-trip is operator-driven (they click
+    // "Sign in" in their browser tab). Poll cli_status every 3s, in-
+    // flight guarded so a slow probe doesn't stack with the next tick.
+    const startMs = Date.now();
+    let probeInFlight = false;
+    const poll = async () => {
+      if (Date.now() - startMs > 120_000) return;
+      if (probeInFlight) {
+        setTimeout(() => void poll(), 3_000);
+        return;
+      }
+      probeInFlight = true;
+      try {
         const next = await probeCliStatus(new AbortController().signal);
         setState(next);
         if (
@@ -215,10 +228,12 @@ export function LocalCliProvidersCard() {
           setActionMessage({ kind: "ok", text: `${provider} is ready.` });
           return;
         }
-        setTimeout(() => void poll(), 3_000);
-      };
+      } finally {
+        probeInFlight = false;
+      }
       setTimeout(() => void poll(), 3_000);
-    }
+    };
+    setTimeout(() => void poll(), 3_000);
   }
 
   useEffect(() => {
