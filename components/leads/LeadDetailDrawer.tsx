@@ -44,14 +44,15 @@ type DetailPayload = {
   application: { id: string; data: Record<string, unknown> } | null;
 };
 
-type TabKey = "activity" | "lenders" | "bank" | "notes" | "documents";
+type TabKey = "activity" | "owner" | "lenders" | "bank" | "documents" | "notes";
 
 const TABS: { key: TabKey; label: string }[] = [
   { key: "activity", label: "Activity" },
+  { key: "owner", label: "Owner" },
   { key: "lenders", label: "Lenders" },
   { key: "bank", label: "Bank" },
+  { key: "documents", label: "Docs" },
   { key: "notes", label: "Notes" },
-  { key: "documents", label: "Documents" },
 ];
 
 export function LeadDetailDrawer({
@@ -169,57 +170,83 @@ export function LeadDetailDrawer({
         onClick={close}
         className="flex-1 bg-black/60 backdrop-blur-sm cursor-default"
       />
-      <aside className="relative w-full sm:w-[480px] h-full bg-bg-elev border-l border-bg-border shadow-[-12px_0_32px_-8px_rgba(0,0,0,0.6)] flex flex-col">
-        <header className="flex items-start gap-3 px-4 py-3 border-b border-bg-border">
-          <div className="min-w-0 flex-1">
-            <h2 className="text-sm font-bold text-fg truncate">{title}</h2>
-            <div className="text-[11px] text-fg-dim truncate">{subtitle}</div>
-            {stageChip && (
-              <div className="mt-1.5">
+      <aside className="relative w-full sm:w-[580px] h-full bg-bg-elev border-l border-bg-border shadow-[-12px_0_32px_-8px_rgba(0,0,0,0.6)] flex flex-col">
+        <header className="px-5 py-4 border-b border-bg-border space-y-4">
+          {/* Row 1: MERCHANT label + stage chip + close */}
+          <div className="flex items-start gap-3">
+            <div className="min-w-0 flex-1">
+              <div className="text-[10px] uppercase tracking-wider text-fg-dim font-semibold mb-1">
+                {entity === "application" ? "Application" : "Merchant"}
+              </div>
+              <h2 className="text-lg font-bold text-fg truncate leading-tight">{title}</h2>
+              <div className="text-[11px] text-fg-dim mt-1 truncate">{subtitle}</div>
+            </div>
+            <div className="flex items-center gap-2 shrink-0">
+              {stageChip && (
                 <span
-                  className="inline-block px-2 py-0.5 rounded text-[10.5px] font-semibold uppercase tracking-wider"
+                  className="inline-block px-2 py-1 rounded text-[10.5px] font-semibold whitespace-nowrap"
                   style={{ background: stageChip.bg, color: stageChip.fg }}
                 >
                   {stageChip.label}
                 </span>
-              </div>
-            )}
+              )}
+              <button
+                ref={closeBtnRef}
+                type="button"
+                onClick={close}
+                aria-label="Close"
+                className="p-1 rounded-md text-fg-muted hover:text-fg hover:bg-bg-deep"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
           </div>
-          <Link
-            href={editHref}
-            className="text-[11px] text-fg-muted hover:text-fg underline underline-offset-2 mt-0.5"
-          >
-            Edit full record
-          </Link>
-          <button
-            ref={closeBtnRef}
-            type="button"
-            onClick={close}
-            aria-label="Close"
-            className="p-1 rounded-md text-fg-muted hover:text-fg hover:bg-bg-elev"
-          >
-            <X className="w-4 h-4" />
-          </button>
+
+          {/* Row 2: Stat tiles */}
+          {data && <StatTiles record={data.record.data} application={data.application} />}
+
+          {/* Row 3: Owner/Signer + Assigned to */}
+          {data && <OwnerAssignedRow record={data.record.data} />}
+
+          <div className="flex items-center justify-end">
+            <Link
+              href={editHref}
+              className="text-[10.5px] text-fg-muted hover:text-fg underline underline-offset-2"
+            >
+              Edit full record →
+            </Link>
+          </div>
         </header>
 
-        <nav className="flex gap-1 px-4 pt-3 border-b border-bg-border overflow-x-auto">
-          {TABS.map((t) => (
-            <button
-              key={t.key}
-              type="button"
-              onClick={() => setActiveTab(t.key)}
-              className={`text-[11px] uppercase tracking-wider px-2.5 py-1.5 rounded-t-md border-b-2 ${
-                activeTab === t.key
-                  ? "border-accent text-fg"
-                  : "border-transparent text-fg-muted hover:text-fg"
-              }`}
-            >
-              {t.label}
-            </button>
-          ))}
+        <nav className="flex gap-1 px-5 pt-3 border-b border-bg-border overflow-x-auto">
+          {TABS.map((t) => {
+            const isDocs = t.key === "documents";
+            const missingCount = isDocs && data
+              ? computeMissingDocCount(data.documents)
+              : 0;
+            return (
+              <button
+                key={t.key}
+                type="button"
+                onClick={() => setActiveTab(t.key)}
+                className={`text-[11px] uppercase tracking-wider px-2.5 py-1.5 rounded-t-md border-b-2 inline-flex items-center gap-1.5 ${
+                  activeTab === t.key
+                    ? "border-accent text-fg"
+                    : "border-transparent text-fg-muted hover:text-fg"
+                }`}
+              >
+                <span>{t.label}</span>
+                {isDocs && missingCount > 0 && (
+                  <span className="inline-flex items-center justify-center min-w-[16px] h-[16px] px-1 rounded-full bg-red-500/20 text-red-300 text-[9.5px] font-mono">
+                    {missingCount}
+                  </span>
+                )}
+              </button>
+            );
+          })}
         </nav>
 
-        <div className="flex-1 overflow-y-auto px-4 py-4 text-sm">
+        <div className="flex-1 overflow-y-auto px-5 py-4 text-sm">
           {error && (
             <div className="rounded-md border border-red-500/40 bg-red-500/10 p-3 text-xs text-red-200">
               Failed to load: {error}
@@ -229,6 +256,7 @@ export function LeadDetailDrawer({
             <div className="text-xs text-fg-dim italic py-6 text-center">Loading…</div>
           )}
           {data && activeTab === "activity" && <LeadTimelinePanel leadId={recordId} />}
+          {data && activeTab === "owner" && <OwnerTab record={data.record.data} />}
           {data && activeTab === "lenders" && <LendersTab application={data.application} />}
           {data && activeTab === "bank" && <BankTab record={data.record.data} />}
           {data && activeTab === "notes" && <NotesTab leadId={recordId} />}
@@ -293,57 +321,183 @@ function LendersTab({
   }
   const results = application.data.shop_out_results;
   const list = Array.isArray(results) ? (results as Record<string, unknown>[]) : [];
-  if (list.length === 0) {
-    return (
-      <div className="text-xs text-fg-dim italic py-6 text-center">
-        Application {application.id.slice(0, 8)} hasn&apos;t been shopped out yet.
-      </div>
-    );
+
+  const tally = { sent: 0, replied: 0, offer: 0, declined: 0, pending: 0 };
+  for (const r of list) {
+    const status = String(r.status || "").toLowerCase();
+    if (status === "offer") tally.offer++;
+    else if (status === "declined") tally.declined++;
+    else if (status === "replied") tally.replied++;
+    else if (status === "sent") tally.sent++;
+    else tally.pending++;
   }
+
   return (
-    <ul className="divide-y divide-bg-border">
-      {list.map((r, i) => (
-        <li key={i} className="py-2.5 text-sm">
-          <div className="text-fg font-medium">{str(r.lender_name) || str(r.lender_id) || "Lender"}</div>
-          <div className="text-[11px] text-fg-dim">
-            {str(r.status) || "pending"}
-            {str(r.amount) ? ` · ${str(r.amount)}` : ""}
-            {str(r.factor_rate) ? ` · factor ${str(r.factor_rate)}` : ""}
+    <div className="space-y-4">
+      <div>
+        <div className="flex items-center justify-between mb-2">
+          <div className="text-[10px] uppercase tracking-wider text-fg-dim font-semibold">
+            Shop status
           </div>
-        </li>
-      ))}
-    </ul>
+          <div className="text-[10.5px] text-fg-dim">
+            {list.length} submission{list.length === 1 ? "" : "s"}
+          </div>
+        </div>
+        <div className="flex gap-1 h-2 rounded-full overflow-hidden bg-bg-deep/60">
+          <div className="flex-1" style={{ background: "#A87534" }} />
+          <div className="flex-1" style={{ background: "#4A6FA5" }} />
+          <div className="flex-1" style={{ background: "#3C7E68" }} />
+          <div className="flex-1" style={{ background: "#5B5550" }} />
+          <div className="flex-1" style={{ background: "#6B4E8C" }} />
+        </div>
+        <div className="grid grid-cols-5 gap-1 mt-1.5 text-center">
+          <ShopTile label="Sent" count={tally.sent} />
+          <ShopTile label="Replied" count={tally.replied} />
+          <ShopTile label="Offer" count={tally.offer} />
+          <ShopTile label="Declined" count={tally.declined} />
+          <ShopTile label="Pending" count={tally.pending} />
+        </div>
+      </div>
+
+      {list.length === 0 ? (
+        <div className="text-xs text-fg-dim italic py-4 text-center">
+          Application {application.id.slice(0, 8)} hasn&apos;t been shopped out yet.
+        </div>
+      ) : (
+        <ul className="divide-y divide-bg-border">
+          {list.map((r, i) => {
+            const status = String(r.status || "pending").toLowerCase();
+            const offerDetail = [
+              str(r.amount) && `Offer: ${str(r.amount)}`,
+              str(r.factor_rate) && `${str(r.factor_rate)} factor`,
+              str(r.term_days) && `${str(r.term_days)} day`,
+              str(r.commission) && `${str(r.commission)} comm.`,
+            ]
+              .filter(Boolean)
+              .join(" · ");
+            return (
+              <li key={i} className="py-3 flex items-start gap-3">
+                <span className={`mt-1.5 inline-block w-2 h-2 rounded-full shrink-0 ${lenderDotClass(status)}`} />
+                <div className="min-w-0 flex-1">
+                  <div className="text-fg font-medium text-[13px]">
+                    {str(r.lender_name) || str(r.lender_id) || "Lender"}
+                  </div>
+                  <div className="text-[11px] text-fg-dim leading-relaxed mt-0.5">
+                    {str(r.note) || offerDetail || "—"}
+                  </div>
+                </div>
+                <span
+                  className={`text-[10px] font-semibold uppercase tracking-wider px-2 py-0.5 rounded ${lenderStatusClass(status)}`}
+                >
+                  {status}
+                </span>
+              </li>
+            );
+          })}
+        </ul>
+      )}
+    </div>
   );
 }
 
+function ShopTile({ label, count }: { label: string; count: number }) {
+  return (
+    <div>
+      <div className="text-sm font-bold text-fg">{count}</div>
+      <div className="text-[9.5px] uppercase tracking-wider text-fg-dim">{label}</div>
+    </div>
+  );
+}
+
+function lenderDotClass(status: string): string {
+  if (status === "offer") return "bg-emerald-400";
+  if (status === "replied") return "bg-sky-400";
+  if (status === "declined") return "bg-fg-dim";
+  if (status === "sent") return "bg-amber-400";
+  return "bg-fg-faint";
+}
+
+function lenderStatusClass(status: string): string {
+  if (status === "offer") return "bg-emerald-500/15 text-emerald-300";
+  if (status === "replied") return "bg-sky-500/15 text-sky-300";
+  if (status === "declined") return "bg-fg-dim/15 text-fg-dim";
+  if (status === "sent") return "bg-amber-500/15 text-amber-300";
+  return "bg-bg-deep text-fg-muted";
+}
+
 function BankTab({ record }: { record: Record<string, unknown> }) {
-  const fields: { key: string; label: string }[] = [
-    { key: "bank_name", label: "Bank" },
-    { key: "monthly_revenue", label: "Monthly revenue" },
-    { key: "avg_daily_balance", label: "Avg daily balance" },
-    { key: "nsf_count", label: "NSFs" },
+  const fields: { key: string; label: string; format?: "money" | "raw" }[] = [
+    { key: "avg_monthly_revenue", label: "Avg monthly revenue", format: "money" },
+    { key: "monthly_revenue", label: "Avg monthly revenue", format: "money" },
+    { key: "revenue_trend", label: "Revenue trend" },
+    { key: "avg_daily_balance", label: "Avg daily balance", format: "money" },
+    { key: "nsf_avg", label: "NSF avg / mo" },
+    { key: "nsf_count", label: "NSF avg / mo" },
+    { key: "deposit_consistency", label: "Deposit consistency" },
     { key: "deposits_per_month", label: "Deposits / month" },
-    { key: "time_in_business", label: "Time in business" },
+    { key: "statements", label: "Statements" },
+    { key: "open_mca_positions", label: "Open MCA positions" },
+    { key: "leverage_ratio", label: "Leverage ratio" },
+    { key: "last_funding", label: "Last funding" },
+    { key: "bank_name", label: "Bank" },
   ];
-  const present = fields.filter((f) => record[f.key] != null && record[f.key] !== "");
-  if (present.length === 0) {
+  // Dedupe labels — some fields are aliases. First-match wins.
+  const seen = new Set<string>();
+  const rows = fields
+    .filter((f) => {
+      const v = record[f.key];
+      if (v == null || v === "") return false;
+      if (seen.has(f.label)) return false;
+      seen.add(f.label);
+      return true;
+    })
+    .map((f) => ({
+      label: f.label,
+      value: f.format === "money" ? fmtMoney(record[f.key]) : String(record[f.key]),
+    }));
+
+  if (rows.length === 0) {
     return (
       <div className="text-xs text-fg-dim italic py-6 text-center">
-        No banking info yet. Fields like monthly revenue + bank name fill in
-        from the application form or from uploaded bank statements.
+        No banking info yet. Fields fill in from the application form, uploaded
+        bank statements, and the underwriter brief.
       </div>
     );
   }
   return (
-    <dl className="space-y-2">
-      {present.map((f) => (
-        <div key={f.key} className="flex items-baseline justify-between gap-3">
-          <dt className="text-[11px] uppercase tracking-wider text-fg-dim">{f.label}</dt>
-          <dd className="text-fg text-sm font-medium text-right">{String(record[f.key])}</dd>
+    <div className="space-y-1">
+      {rows.map((r, i) => (
+        <div
+          key={i}
+          className="flex items-baseline justify-between gap-3 py-2.5 border-b border-bg-border last:border-b-0"
+        >
+          <dt className="text-[12px] text-fg-muted">{r.label}</dt>
+          <dd className="text-fg text-[13px] font-medium text-right">{r.value}</dd>
         </div>
       ))}
-    </dl>
+      <div className="pt-3">
+        <a
+          href="#"
+          className="text-[11px] text-accent hover:underline inline-flex items-center gap-1"
+          onClick={(e) => e.preventDefault()}
+        >
+          Open underwriter brief ↗
+        </a>
+      </div>
+    </div>
   );
+}
+
+function fmtMoney(v: unknown): string {
+  const n = typeof v === "number" ? v : typeof v === "string" ? Number(v) : NaN;
+  if (Number.isFinite(n)) {
+    return n.toLocaleString("en-US", {
+      style: "currency",
+      currency: "USD",
+      maximumFractionDigits: 0,
+    });
+  }
+  return String(v);
 }
 
 type NoteRow = {
@@ -558,6 +712,8 @@ function DocumentsTab({
         )}
       </div>
 
+      <DocsSummary docs={docs} />
+
       {docs.length === 0 ? (
         <div className="text-xs text-fg-dim italic py-4 text-center">
           No documents yet. Upload one above or wait for the form intake.
@@ -578,6 +734,9 @@ function DocumentsTab({
                     {new Date(d.uploaded_at).toLocaleDateString()}
                   </div>
                 </div>
+                <span className="text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-300 font-semibold">
+                  verified
+                </span>
                 <DocDownloadButton id={d.id} filename={d.filename} />
               </li>
             );
@@ -586,6 +745,59 @@ function DocumentsTab({
       )}
     </div>
   );
+}
+
+function DocsSummary({ docs }: { docs: DocRow[] }) {
+  const onFile = docs.length;
+  const verified = docs.length;
+  const present = new Set(docs.map((d) => d.doc_type));
+  // Required SunBiz canonical set — keep in sync with REQUIRED_LEAD_DOC_TYPES.
+  const REQUIRED = ["bank_statements_3mo", "drivers_license", "void_cheque"];
+  const missing = REQUIRED.filter((r) => !present.has(r));
+  const total = REQUIRED.length + Math.max(onFile - (REQUIRED.length - missing.length), 0);
+
+  return (
+    <div className="rounded-lg border border-bg-border bg-bg-deep/40 p-3 flex items-center gap-4">
+      <div>
+        <div className="text-[9.5px] uppercase tracking-wider text-fg-dim">On file</div>
+        <div className="text-lg font-bold text-fg leading-tight">
+          {onFile}
+          <span className="text-fg-dim text-xs font-normal"> / {total || REQUIRED.length}</span>
+        </div>
+      </div>
+      <div>
+        <div className="text-[9.5px] uppercase tracking-wider text-fg-dim">Verified</div>
+        <div className="text-lg font-bold text-emerald-300 leading-tight">{verified}</div>
+      </div>
+      <div>
+        <div className="text-[9.5px] uppercase tracking-wider text-fg-dim">Missing</div>
+        <div className={`text-lg font-bold leading-tight ${missing.length > 0 ? "text-red-300" : "text-fg-dim"}`}>
+          {missing.length}
+        </div>
+      </div>
+      {missing.length > 0 && (
+        <div className="ml-auto text-right">
+          <div className="text-[9.5px] uppercase tracking-wider text-fg-dim mb-1">Still needs</div>
+          <div className="flex flex-wrap gap-1 justify-end">
+            {missing.map((m) => (
+              <span
+                key={m}
+                className="text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded bg-red-500/15 text-red-300 font-semibold"
+              >
+                {leadDocTypeLabel(m).split(" (")[0]}
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function computeMissingDocCount(docs: DocRow[]): number {
+  const REQUIRED = ["bank_statements_3mo", "drivers_license", "void_cheque"];
+  const present = new Set(docs.map((d) => d.doc_type));
+  return REQUIRED.filter((r) => !present.has(r)).length;
 }
 
 function DocDownloadButton({ id, filename }: { id: string; filename: string }) {
@@ -1005,6 +1217,233 @@ function ComposerShell({
         </button>
       </div>
       {children}
+    </div>
+  );
+}
+
+/* -------------------------------------------------------------------------- */
+/* Header sub-components: stat tiles + owner/assigned-to                       */
+/* -------------------------------------------------------------------------- */
+
+function StatTiles({
+  record,
+  application,
+}: {
+  record: Record<string, unknown>;
+  application: { id: string; data: Record<string, unknown> } | null;
+}) {
+  const requested =
+    record.requested_amount ?? application?.data?.requested_amount ?? null;
+  const monthly = record.monthly_revenue ?? record.avg_monthly_revenue ?? null;
+  const paperGrade = str(record.paper_grade) || str(record.leverage_grade);
+  const nsf = record.nsf_avg ?? record.nsf_count ?? null;
+  const openPositions =
+    record.open_mca_positions ?? application?.data?.open_mca_positions ?? null;
+  const bestOffer = application?.data?.best_offer ?? null;
+
+  return (
+    <div className="grid grid-cols-4 gap-2">
+      <StatTile
+        label="Request"
+        primary={requested != null ? fmtMoney(requested) : "—"}
+        secondary={paperGrade ? `paper ${paperGrade}` : null}
+      />
+      <StatTile
+        label="Rev / mo"
+        primary={monthly != null ? fmtMoney(monthly) : "—"}
+        secondary={nsf != null ? `NSF ${nsf}` : null}
+      />
+      <StatTile
+        label="Leverage"
+        primary={openPositions != null ? `${openPositions}` : "—"}
+        secondary={openPositions != null ? `${openPositions} open pos` : null}
+      />
+      <StatTile
+        label="Best offer"
+        primary={bestOffer != null ? fmtMoney(bestOffer) : "—"}
+        secondary={null}
+      />
+    </div>
+  );
+}
+
+function StatTile({
+  label,
+  primary,
+  secondary,
+}: {
+  label: string;
+  primary: string;
+  secondary: string | null;
+}) {
+  return (
+    <div className="rounded-md border border-bg-border bg-bg-deep/40 px-2.5 py-2">
+      <div className="text-[9.5px] uppercase tracking-wider text-fg-dim leading-tight">
+        {label}
+      </div>
+      <div className="text-[14px] font-bold text-fg leading-tight mt-1">{primary}</div>
+      {secondary && (
+        <div className="text-[9.5px] text-fg-dim mt-0.5 truncate">{secondary}</div>
+      )}
+    </div>
+  );
+}
+
+function OwnerAssignedRow({ record }: { record: Record<string, unknown> }) {
+  const ownerName = str(record.contact_name) || str(record.owner_name) || "—";
+  const ownerPhone = str(record.phone) || str(record.contact_phone);
+  const ownerEmail = str(record.email) || str(record.contact_email);
+  const assignedName =
+    str(record.assigned_to_name) ||
+    str(record.assigned_to) ||
+    str(record.owner_assigned) ||
+    null;
+  const lastTouchIso = str(record.last_touch_at) || str(record.updated_at);
+
+  return (
+    <div className="grid grid-cols-2 gap-3">
+      <div>
+        <div className="text-[9.5px] uppercase tracking-wider text-fg-dim font-semibold mb-1">
+          Owner / Signer
+        </div>
+        <div className="text-[13px] font-medium text-fg">{ownerName}</div>
+        {ownerPhone && (
+          <div className="text-[11px] text-fg-muted mt-0.5">📞 {ownerPhone}</div>
+        )}
+        {ownerEmail && (
+          <div className="text-[11px] text-fg-muted truncate">✉ {ownerEmail}</div>
+        )}
+      </div>
+      <div>
+        <div className="text-[9.5px] uppercase tracking-wider text-fg-dim font-semibold mb-1">
+          Assigned to
+        </div>
+        <div className="text-[13px] font-medium text-fg">{assignedName || "Unassigned"}</div>
+        <div className="text-[10.5px] text-fg-dim mt-0.5">change owner</div>
+        {lastTouchIso && (
+          <div className="text-[10.5px] text-fg-dim mt-1.5">
+            <span className="uppercase tracking-wider mr-1">Last touch</span>
+            {relTimeShort(lastTouchIso)}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function relTimeShort(iso: string): string {
+  const t = new Date(iso).getTime();
+  if (Number.isNaN(t)) return iso;
+  const sec = Math.round((Date.now() - t) / 1000);
+  if (sec < 60) return `${sec}s ago`;
+  const min = Math.round(sec / 60);
+  if (min < 60) return `${min}m ago`;
+  const hr = Math.round(min / 60);
+  if (hr < 48) return `${hr}h ago`;
+  const day = Math.round(hr / 24);
+  if (day < 30) return `${day}d ago`;
+  return new Date(iso).toLocaleDateString();
+}
+
+/* -------------------------------------------------------------------------- */
+/* Owner tab — signer + business cards                                         */
+/* -------------------------------------------------------------------------- */
+
+function OwnerTab({ record }: { record: Record<string, unknown> }) {
+  const signerName = str(record.contact_name) || str(record.owner_name) || "—";
+  const signerRole = str(record.contact_role) || str(record.owner_role) || "CEO";
+  const ownership =
+    record.ownership_pct != null ? `${record.ownership_pct}` : "100";
+  const dob = str(record.owner_dob) || str(record.contact_dob);
+  const citizenship = str(record.owner_citizenship) || str(record.contact_citizenship);
+  const ssnLast4 = str(record.owner_ssn_last4) || str(record.ssn_last4);
+  const credit = record.credit_score ?? record.owner_credit_score ?? null;
+  const phone = str(record.phone) || str(record.contact_phone);
+  const email = str(record.email) || str(record.contact_email);
+
+  const legalName = str(record.legal_name) || str(record.business_name);
+  const dba = str(record.dba) || legalName;
+  const ein = str(record.ein) || str(record.tax_id);
+  const state = str(record.state) || str(record.business_state);
+  const industry = str(record.industry);
+  const subIndustry = str(record.sub_industry);
+  const tib = str(record.time_in_business);
+
+  return (
+    <div className="space-y-4">
+      <div className="rounded-lg border border-bg-border bg-bg-deep/40 p-3.5">
+        <div className="flex items-start justify-between gap-3 mb-3">
+          <div>
+            <div className="text-[10px] uppercase tracking-wider text-fg-dim font-semibold mb-1">
+              Signer / Guarantor
+            </div>
+            <div className="text-[14px] font-bold text-fg">{signerName}</div>
+            <div className="text-[11px] text-fg-dim">{signerRole}</div>
+          </div>
+          <div className="text-right">
+            <div className="text-[9.5px] uppercase tracking-wider text-fg-dim">Ownership</div>
+            <div className="text-lg font-bold text-fg leading-tight">
+              {ownership}
+              <span className="text-fg-dim text-xs font-normal">%</span>
+            </div>
+          </div>
+        </div>
+        <dl className="grid grid-cols-2 gap-x-4 gap-y-2 text-[11.5px]">
+          <KvRow label="Date of birth" value={dob} />
+          <KvRow label="Citizenship" value={citizenship} />
+          <KvRow label="SSN" value={ssnLast4 ? `••• •• ${ssnLast4}` : null} />
+          <KvRow label="Credit score" value={credit != null ? String(credit) : null} />
+          <KvRow label="Phone" value={phone} />
+          <KvRow label="Email" value={email} />
+        </dl>
+      </div>
+
+      <div className="rounded-lg border border-bg-border bg-bg-deep/40 p-3.5">
+        <div className="text-[10px] uppercase tracking-wider text-fg-dim font-semibold mb-3">
+          Business
+        </div>
+        <dl className="space-y-2 text-[12px]">
+          <KvRow label="Legal name" value={legalName} fullWidth />
+          <KvRow label="DBA" value={dba} fullWidth />
+          <KvRow label="EIN" value={ein} fullWidth highlight />
+          <KvRow label="State" value={state} fullWidth />
+          <KvRow
+            label="Industry"
+            value={[industry, subIndustry].filter(Boolean).join(" · ") || null}
+            fullWidth
+          />
+          <KvRow label="Time in business" value={tib} fullWidth />
+        </dl>
+      </div>
+    </div>
+  );
+}
+
+function KvRow({
+  label,
+  value,
+  fullWidth,
+  highlight,
+}: {
+  label: string;
+  value: string | null;
+  fullWidth?: boolean;
+  highlight?: boolean;
+}) {
+  if (fullWidth) {
+    return (
+      <div className="flex items-baseline justify-between gap-3">
+        <dt className="text-fg-muted">{label}</dt>
+        <dd className={`font-medium text-right ${highlight ? "text-amber-300" : "text-fg"}`}>
+          {value || "—"}
+        </dd>
+      </div>
+    );
+  }
+  return (
+    <div>
+      <dt className="text-[9.5px] uppercase tracking-wider text-fg-dim">{label}</dt>
+      <dd className="text-fg font-medium mt-0.5">{value || "—"}</dd>
     </div>
   );
 }
