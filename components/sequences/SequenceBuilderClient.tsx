@@ -1,15 +1,21 @@
 "use client";
 
 /**
- * SequenceBuilderClient — JSON-schema editor + token-reference helper
+ * SequenceBuilderClient — structured editor + token-reference helper
  * for /sequences/[id]/edit (Phase 4.4 of SunBiz CRM).
  *
- * Same pattern as FormBuilderClient: left pane is monospace JSON for
- * the steps array + trigger_filter object; right pane is a token
- * reference showing every {{path}} the steps body uses, with hints
- * about which paths actually resolve against the runtime context.
- * Live preview of an actual send isn't possible (we'd need a real
- * lead to render against) so we settle for the token-list view.
+ * Left pane: structured editors for trigger filter + steps (one card
+ * per step, with channel, subject, body, delay). Right pane: token
+ * reference showing every {{path}} the steps body uses.
+ *
+ * The internal data model still uses the serialized JSON strings as
+ * source of truth (stepsJson / filterJson) — structured editors write
+ * back via setStepsJson / setFilterJson on every change. This lets us
+ * keep the same parseDripSteps / parseDripTriggerFilter validation
+ * pipeline regardless of how the operator edited.
+ *
+ * 2026-05-19 turnkey pass: dropped the Simple / Advanced (raw JSON)
+ * toggles entirely. Structured editing is the only surface.
  */
 
 import { useEffect, useMemo, useState } from "react";
@@ -47,21 +53,17 @@ export function SequenceBuilderClient({ initialSequence }: Props) {
   const [enabled, setEnabled] = useState(initialSequence.enabled);
   const [onePerLead, setOnePerLead] = useState(initialSequence.one_per_lead);
   const [triggerEvent, setTriggerEvent] = useState(initialSequence.trigger_event);
-  // Two editor modes for the steps body — structured (one card per step,
-  // operator-friendly default) and raw (monospace JSON for advanced
-  // operators or shapes the structured editor doesn't cover). Same goes
-  // for the trigger filter. The serialized JSON strings remain the source
-  // of truth feeding `parsed` below; the structured editor writes back
-  // through the same setStepsJson / setFilterJson hooks on every edit.
+  // Serialized JSON strings remain the source of truth feeding the
+  // `parsed` memo below. The structured StepsEditor + FilterEditor
+  // sub-components write back through setStepsJson / setFilterJson
+  // on every edit — same validation pipeline as before, no raw-JSON
+  // textarea surface (2026-05-19 turnkey pass).
   const [stepsJson, setStepsJson] = useState(() =>
     JSON.stringify(initialSequence.steps, null, 2),
   );
   const [filterJson, setFilterJson] = useState(() =>
     JSON.stringify(initialSequence.trigger_filter, null, 2),
   );
-  // Structured-only editors (2026-05-19 turnkey pass). Raw JSON modes
-  // for filter + steps were removed; the StepsEditor + FilterEditor
-  // sub-components are the only editing surface.
 
   type ParseState = {
     steps: DripStep[] | null;

@@ -619,6 +619,7 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
     setMessages(seedMessagesForAgent(agent, welcomeMessages));
     setSessionId(null);
     setError(null);
+    setErrorCode(null);
     setActions([]);
     setCloudResults([]);
     setToolReads([]);
@@ -730,6 +731,7 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
     setMessages(seedMessagesForAgent(agent, welcomeMessages));
     setSessionId(null);
     setError(null);
+    setErrorCode(null);
     setActions([]);
     setCloudResults([]);
     setToolReads([]);
@@ -769,6 +771,7 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
   async function submitText(text: string, modeOverride?: ChatMode) {
     if (!text || streaming) return;
     setError(null);
+    setErrorCode(null);
     const now = Date.now();
     const newMessages: Msg[] = [...messages, { role: "user", content: text, at: now }];
     setMessages(newMessages);
@@ -1785,6 +1788,7 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
                       const text = lastUser.content;
                       setLastFailedMode(null);
                       setError(null);
+    setErrorCode(null);
                       // Pop the trailing user message so submitText doesn't
                       // print it twice when it re-pushes its own copy.
                       setMessages((m) => {
