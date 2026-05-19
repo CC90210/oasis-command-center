@@ -17,6 +17,7 @@ import { QuickInviteCard } from "@/components/settings/QuickInviteCard";
 import { PlanTemplateEditor } from "@/components/settings/PlanTemplateEditor";
 import { AgentConfigEditor } from "@/components/settings/AgentConfigEditor";
 import { IntegrationKeysPanel } from "@/components/settings/IntegrationKeysPanel";
+import { SafeBoundary } from "@/components/SafeBoundary";
 import { MyAgentsCard } from "@/components/settings/MyAgentsCard";
 import { DevicesEditor } from "@/components/settings/DevicesEditor";
 import { ProviderAccountsCard } from "@/components/settings/ProviderAccountsCard";
@@ -111,7 +112,12 @@ export default async function SettingsPage() {
               </div>
             }
           >
-            <ProfileEditor profile={profile} />
+            <ProfileEditor
+              profile={profile}
+              tenantAgents={(manifest?.agents || [])
+                .filter((a) => a.enabled !== false)
+                .map((a) => a.slug)}
+            />
           </Card>
 
           <Card
@@ -124,7 +130,9 @@ export default async function SettingsPage() {
             />
           </Card>
 
-          <IntegrationKeysPanel canManage={canManageTenant} />
+          <SafeBoundary label="Integration keys">
+            <IntegrationKeysPanel canManage={canManageTenant} />
+          </SafeBoundary>
 
           {canManageTenant && (
             <Card

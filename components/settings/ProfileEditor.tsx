@@ -5,7 +5,21 @@ import { useRouter } from "next/navigation";
 import type { UserProfile } from "@/lib/supabase";
 import { FAMILY_AGENT_KEYS, AGENT_REGISTRY, resolveAgentKey } from "@/lib/agents";
 
-export function ProfileEditor({ profile }: { profile: UserProfile }) {
+/**
+ * `tenantAgents` — slugs of agents the tenant manifest enables. When
+ * provided, the agent palette renders THIS list; otherwise we fall
+ * back to the empire-wide FAMILY_AGENT_KEYS (Bravo / Atlas / Maven /
+ * Aura / Hermes / Lumen). Fixes the cross-tenant bleed where a SunBiz
+ * operator opened OASIS Settings and saw their SunBiz agents mixed
+ * into the OASIS family list.
+ */
+export function ProfileEditor({
+  profile,
+  tenantAgents,
+}: {
+  profile: UserProfile;
+  tenantAgents?: string[];
+}) {
   const router = useRouter();
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
@@ -22,10 +36,23 @@ export function ProfileEditor({ profile }: { profile: UserProfile }) {
   const [enabled, setEnabled] = useState<Set<string>>(
     new Set((profile.agents_enabled || []).map(resolveAgentKey)),
   );
+  // Tenant-aware palette. SunBiz operators see Solara + Helios; OASIS
+  // operators see the family agents. The currently-checked agents in
+  // profile.agents_enabled and the primary_agent are ALWAYS kept in
+  // the list so an operator can see + un-check a stale value (e.g.
+  // a SunBiz agent that's still on an OASIS profile from prior
+  // testing). Otherwise it'd render as a permanent invisible flag.
+  const tenantBase =
+    tenantAgents && tenantAgents.length > 0
+      ? tenantAgents.map(resolveAgentKey)
+      : FAMILY_AGENT_KEYS;
   const availableAgentKeys = Array.from(
     new Set(
-      [...FAMILY_AGENT_KEYS, ...(profile.agents_enabled || []).map(resolveAgentKey), resolveAgentKey(profile.primary_agent)]
-        .filter((key): key is string => typeof key === "string" && key.length > 0),
+      [
+        ...tenantBase,
+        ...(profile.agents_enabled || []).map(resolveAgentKey),
+        resolveAgentKey(profile.primary_agent),
+      ].filter((key): key is string => typeof key === "string" && key.length > 0),
     ),
   );
 

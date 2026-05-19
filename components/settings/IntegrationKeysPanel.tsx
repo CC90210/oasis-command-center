@@ -59,11 +59,24 @@ export function IntegrationKeysPanel({
   const [testing, setTesting] = useState<Record<string, boolean>>({});
   const [loaded, setLoaded] = useState(false);
 
+  const [loadError, setLoadError] = useState<string | null>(null);
+
   const reload = useCallback(async () => {
     try {
       const r = await fetch("/api/integrations/keys", { credentials: "include" });
-      const j = await r.json();
-      if (j.ok) setStatus(j.rows || []);
+      const j = await r.json().catch(() => ({}));
+      if (r.ok && j.ok) {
+        setStatus(j.rows || []);
+        setLoadError(null);
+      } else {
+        // Most common cause pre-deploy: migration 058 hasn't been
+        // applied yet, so the table doesn't exist. Surface the
+        // diagnostic inline so the operator sees what to do instead
+        // of staring at an indefinite "Loading…" spinner.
+        setLoadError(j.error || `http ${r.status}`);
+      }
+    } catch (e) {
+      setLoadError((e as Error).message || "network_error");
     } finally {
       setLoaded(true);
     }
@@ -160,6 +173,19 @@ export function IntegrationKeysPanel({
 
       {!loaded ? (
         <div className="text-xs text-fg-dim italic py-3 text-center">Loading…</div>
+      ) : loadError ? (
+        <div className="rounded-md border border-amber-300/30 bg-amber-300/10 p-3 text-xs text-amber-200 leading-relaxed">
+          <div className="font-semibold mb-1">Integration store not initialised</div>
+          <div className="font-mono text-[10.5px] text-amber-200/80 break-all">
+            {loadError}
+          </div>
+          <div className="mt-1.5 text-amber-200/80">
+            Apply migration 058 to enable paste-and-save:{" "}
+            <code className="text-amber-100">
+              python scripts/apply_migration.py database/058_tenant_integration_credentials.sql
+            </code>
+          </div>
+        </div>
       ) : (
         <div className="space-y-5">
           {INTEGRATION_SCHEMAS.map((schema) => {
