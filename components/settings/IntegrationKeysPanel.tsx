@@ -15,7 +15,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { CheckCircle2, AlertCircle, KeyRound, Trash2, Loader2 } from "lucide-react";
 import { Card } from "@/components/Card";
-import { INTEGRATION_SCHEMAS } from "@/lib/tenant-integration-store";
+import { INTEGRATION_SCHEMAS } from "@/lib/tenant-integration-schemas";
 
 type StatusRow = {
   service: string;
