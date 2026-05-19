@@ -33,6 +33,13 @@ type Props = {
   stageMap: Record<string, StageMeta>;
   /** href base for record-detail links. */
   linkBase: string;
+  /**
+   * Optional query-param name used to build row hrefs as
+   * `${linkBase}?${rowQueryParam}=<id>` instead of `${linkBase}/<id>`.
+   * SunBiz uses this to open the right-side drawer; other tenants
+   * leave it undefined for path-based navigation.
+   */
+  rowQueryParam?: string | null;
   /** Stage filter label rendered in the empty-state message. */
   activeStageLabel: string;
   /** Active search query (for the empty-state copy only). */
@@ -46,9 +53,14 @@ export function PipelineSearchableTable({
   columns,
   stageMap,
   linkBase,
+  rowQueryParam,
   activeStageLabel,
   query,
 }: Props) {
+  const rowHref = (id: string) =>
+    rowQueryParam
+      ? `${linkBase}?${rowQueryParam}=${encodeURIComponent(id)}`
+      : `${linkBase}/${id}`;
   if (rows.length === 0) {
     const hasQuery = !!(query && query.trim());
     return (
@@ -80,7 +92,7 @@ export function PipelineSearchableTable({
                 {columns.map((c, idx) => (
                   <td key={c.key} className={`px-3 py-2 ${idx === 0 ? "font-medium text-fg" : "text-fg-muted"}`}>
                     {idx === 0 ? (
-                      <Link href={`${linkBase}/${r.id}`} className="hover:underline">
+                      <Link href={rowHref(r.id)} className="hover:underline">
                         {formatPipelineCell(r.data[c.key], c.key)}
                       </Link>
                     ) : (

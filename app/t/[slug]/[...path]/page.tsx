@@ -11,10 +11,17 @@ import { ManifestReasoning } from "@/components/manifest/ManifestReasoning";
 import { LeadsImportClient } from "@/components/leads/LeadsImportClient";
 import { LeadTimelinePanel } from "@/components/leads/LeadTimelinePanel";
 import { LeadDocumentsPanel } from "@/components/leads/LeadDocumentsPanel";
-import { StagePipelineBar } from "@/components/manifest/StagePipelineBar";
+import { StageRail } from "@/components/manifest/StageRail";
 import { PipelineSearchableTable } from "@/components/manifest/PipelineSearchableTable";
 import { PageSearchBar } from "@/components/manifest/PageSearchBar";
-import { PIPELINE_COLUMNS, formatPipelineCell, pipelineLinkBase } from "@/lib/pipeline-display";
+import { LeadDetailDrawer } from "@/components/leads/LeadDetailDrawer";
+import {
+  PIPELINE_COLUMNS,
+  formatPipelineCell,
+  pipelineLinkBase,
+  pipelineRowQueryParam,
+  pipelineRowHref,
+} from "@/lib/pipeline-display";
 import { filterRowsByQuery } from "@/lib/search-filter";
 import { LEAD_PIPELINE_STAGES, OPPORTUNITY_PIPELINE_STAGES, findStage } from "@/lib/sunbiz-stage-meta";
 import { humanize } from "@/lib/manifest/humanize";
@@ -46,7 +53,14 @@ export default async function TenantCatchAllPage({
   searchParams,
 }: {
   params: Promise<{ slug: string; path: string[] }>;
-  searchParams?: Promise<{ view?: string; stage?: string; opp_stage?: string; q?: string }>;
+  searchParams?: Promise<{
+    view?: string;
+    stage?: string;
+    opp_stage?: string;
+    q?: string;
+    lead?: string;
+    application?: string;
+  }>;
 }) {
   const { slug, path } = await params;
   const sp = (await searchParams) || {};
@@ -55,6 +69,14 @@ export default async function TenantCatchAllPage({
   const stageFilter = typeof sp.stage === "string" && sp.stage ? sp.stage : null;
   const oppStageFilter = typeof sp.opp_stage === "string" && sp.opp_stage ? sp.opp_stage : null;
   const query = typeof sp.q === "string" && sp.q ? sp.q : null;
+  // SunBiz lead-drawer triggers. Only honored on the SunBiz slug; the
+  // catch-all silently ignores them on other tenants so an OASIS URL
+  // with ?lead= in it doesn't pop a drawer that doesn't belong there.
+  const UUID_RE_DRAWER = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  const rawLead = typeof sp.lead === "string" ? sp.lead : null;
+  const rawApp = typeof sp.application === "string" ? sp.application : null;
+  const drawerLeadId = rawLead && UUID_RE_DRAWER.test(rawLead) ? rawLead : null;
+  const drawerAppId = rawApp && UUID_RE_DRAWER.test(rawApp) ? rawApp : null;
   const normalised = slug.toLowerCase();
   if (!(await manifestExists(normalised))) notFound();
 
@@ -317,6 +339,12 @@ export default async function TenantCatchAllPage({
         oppStageFilter={oppStageFilter}
         query={query}
       />
+      {normalised === "sun" && drawerLeadId && (
+        <LeadDetailDrawer tenantSlug={normalised} recordId={drawerLeadId} entity="lead" />
+      )}
+      {normalised === "sun" && !drawerLeadId && drawerAppId && (
+        <LeadDetailDrawer tenantSlug={normalised} recordId={drawerAppId} entity="application" />
+      )}
     </div>
   );
 }
@@ -634,19 +662,41 @@ async function PipelineSuperview({
             {stageFilter ? `${leadVisible.length} in ${findStage("lead", stageFilter)?.label || stageFilter}` : `${leadRowsRes.rows.length} total`}
           </div>
         </div>
-        <StagePipelineBar
-          stages={LEAD_PIPELINE_STAGES}
-          activeKey={stageFilter}
-          basePath={`/t/${slug}/${page.path}`}
-          counts={leadCounts}
-        />
-        <PipelineRecordList
-          slug={slug}
-          entityName={leadName}
-          stageField={leadStageField}
-          rows={leadVisible}
-          activeStageLabel={stageFilter ? findStage("lead", stageFilter)?.label || stageFilter : "All stages"}
-        />
+        {slug === "sun" ? (
+          <div className="grid grid-cols-1 lg:grid-cols-[260px_1fr] gap-4">
+            <StageRail
+              tenantSlug={slug}
+              stages={LEAD_PIPELINE_STAGES}
+              activeKey={stageFilter}
+              basePath={`/t/${slug}/${page.path}`}
+              counts={leadCounts}
+            />
+            <PipelineRecordList
+              slug={slug}
+              entityName={leadName}
+              stageField={leadStageField}
+              rows={leadVisible}
+              activeStageLabel={stageFilter ? findStage("lead", stageFilter)?.label || stageFilter : "All stages"}
+            />
+          </div>
+        ) : (
+          <>
+            <StageRail
+              tenantSlug={slug}
+              stages={LEAD_PIPELINE_STAGES}
+              activeKey={stageFilter}
+              basePath={`/t/${slug}/${page.path}`}
+              counts={leadCounts}
+            />
+            <PipelineRecordList
+              slug={slug}
+              entityName={leadName}
+              stageField={leadStageField}
+              rows={leadVisible}
+              activeStageLabel={stageFilter ? findStage("lead", stageFilter)?.label || stageFilter : "All stages"}
+            />
+          </>
+        )}
       </section>
 
       <section className="space-y-4">
@@ -656,20 +706,43 @@ async function PipelineSuperview({
             {oppStageFilter ? `${oppVisible.length} in ${findStage(oppName, oppStageFilter)?.label || oppStageFilter}` : `${oppRowsRes.rows.length} total`}
           </div>
         </div>
-        <StagePipelineBar
-          stages={OPPORTUNITY_PIPELINE_STAGES}
-          activeKey={oppStageFilter}
-          basePath={`/t/${slug}/${page.path}`}
-          counts={oppCounts}
-          paramName="opp_stage"
-        />
-        <PipelineRecordList
-          slug={slug}
-          entityName={oppName}
-          stageField={oppStageField}
-          rows={oppVisible}
-          activeStageLabel={oppStageFilter ? findStage(oppName, oppStageFilter)?.label || oppStageFilter : "All opportunities"}
-        />
+        {slug === "sun" ? (
+          <div className="grid grid-cols-1 lg:grid-cols-[260px_1fr] gap-4">
+            <StageRail
+              tenantSlug={slug}
+              stages={OPPORTUNITY_PIPELINE_STAGES}
+              activeKey={oppStageFilter}
+              basePath={`/t/${slug}/${page.path}`}
+              counts={oppCounts}
+              paramName="opp_stage"
+            />
+            <PipelineRecordList
+              slug={slug}
+              entityName={oppName}
+              stageField={oppStageField}
+              rows={oppVisible}
+              activeStageLabel={oppStageFilter ? findStage(oppName, oppStageFilter)?.label || oppStageFilter : "All opportunities"}
+            />
+          </div>
+        ) : (
+          <>
+            <StageRail
+              tenantSlug={slug}
+              stages={OPPORTUNITY_PIPELINE_STAGES}
+              activeKey={oppStageFilter}
+              basePath={`/t/${slug}/${page.path}`}
+              counts={oppCounts}
+              paramName="opp_stage"
+            />
+            <PipelineRecordList
+              slug={slug}
+              entityName={oppName}
+              stageField={oppStageField}
+              rows={oppVisible}
+              activeStageLabel={oppStageFilter ? findStage(oppName, oppStageFilter)?.label || oppStageFilter : "All opportunities"}
+            />
+          </>
+        )}
       </section>
     </div>
   );
@@ -708,7 +781,7 @@ function PipelineRecordList({
   // PipelineSearchableTable. Adding a column once propagates to both
   // the searchable variant and the unsearchable superview-side list.
   const cols = PIPELINE_COLUMNS[entityName] || [];
-  const linkBase = pipelineLinkBase(slug, entityName);
+  const rowHref = (id: string) => pipelineRowHref(slug, entityName, id);
 
   return (
     <div className="overflow-x-auto rounded-2xl border border-bg-border bg-bg-deep/30">
@@ -730,7 +803,7 @@ function PipelineRecordList({
                 {cols.map((c, idx) => (
                   <td key={c.key} className={`px-3 py-2 ${idx === 0 ? "font-medium text-fg" : "text-fg-muted"}`}>
                     {idx === 0 ? (
-                      <Link href={`${linkBase}/${r.id}`} className="hover:underline">
+                      <Link href={rowHref(r.id)} className="hover:underline">
                         {formatPipelineCell(r.data[c.key], c.key)}
                       </Link>
                     ) : (
@@ -848,22 +921,49 @@ async function SingleEntityPipeline({
           ? `${visible.length} match${visible.length === 1 ? "" : "es"} for "${query}"${stageFilter ? ` in ${activeLabel}` : ""}`
           : stageFilter ? `${visible.length} in ${activeLabel}` : `${rowsRes.rows.length} total`}
       </div>
-      <StagePipelineBar
-        stages={stages}
-        activeKey={stageFilter}
-        basePath={`/t/${slug}/${page.path}`}
-        counts={counts}
-      />
-      <PipelineSearchableTable
-        entityLabel={entity.label}
-        stageField={stageField}
-        rows={visible}
-        columns={localCols}
-        stageMap={stageMap}
-        linkBase={localLinkBase}
-        activeStageLabel={activeLabel}
-        query={query}
-      />
+      {slug === "sun" ? (
+        <div className="grid grid-cols-1 lg:grid-cols-[260px_1fr] gap-4">
+          <StageRail
+            tenantSlug={slug}
+            stages={stages}
+            activeKey={stageFilter}
+            basePath={`/t/${slug}/${page.path}`}
+            counts={counts}
+          />
+          <PipelineSearchableTable
+            entityLabel={entity.label}
+            stageField={stageField}
+            rows={visible}
+            columns={localCols}
+            stageMap={stageMap}
+            linkBase={localLinkBase}
+            rowQueryParam={pipelineRowQueryParam(slug, entity.name)}
+            activeStageLabel={activeLabel}
+            query={query}
+          />
+        </div>
+      ) : (
+        <>
+          <StageRail
+            tenantSlug={slug}
+            stages={stages}
+            activeKey={stageFilter}
+            basePath={`/t/${slug}/${page.path}`}
+            counts={counts}
+          />
+          <PipelineSearchableTable
+            entityLabel={entity.label}
+            stageField={stageField}
+            rows={visible}
+            columns={localCols}
+            stageMap={stageMap}
+            linkBase={localLinkBase}
+            rowQueryParam={pipelineRowQueryParam(slug, entity.name)}
+            activeStageLabel={activeLabel}
+            query={query}
+          />
+        </>
+      )}
     </div>
   );
 }

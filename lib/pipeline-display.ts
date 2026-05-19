@@ -87,3 +87,31 @@ const ENTITY_TO_PATH: Record<string, string> = {
 export function pipelineLinkBase(slug: string, entityName: string): string {
   return `/t/${slug}/${ENTITY_TO_PATH[entityName] || entityName}`;
 }
+
+/**
+ * For SunBiz, row clicks open the right-side LeadDetailDrawer via a
+ * `?lead=<id>` / `?application=<id>` query param on the list page
+ * itself instead of navigating to `/t/sun/leads/<id>` and full-page
+ * loading the ManifestRecordForm. Returns null for tenants that
+ * should keep the path-based navigation.
+ */
+export function pipelineRowQueryParam(
+  slug: string,
+  entityName: string,
+): string | null {
+  if (slug !== "sun") return null;
+  if (entityName === "lead") return "lead";
+  if (entityName === "application") return "application";
+  if (entityName === "offer") return "offer";
+  return null;
+}
+
+export function pipelineRowHref(
+  slug: string,
+  entityName: string,
+  recordId: string,
+): string {
+  const base = pipelineLinkBase(slug, entityName);
+  const q = pipelineRowQueryParam(slug, entityName);
+  return q ? `${base}?${q}=${encodeURIComponent(recordId)}` : `${base}/${recordId}`;
+}
