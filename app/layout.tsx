@@ -212,6 +212,8 @@ export default async function RootLayout({
     ? demoProfileSlug
     : pathOverrideSlug ?? tenantProfileSlug;
   const manifest = isFullBleed ? null : await getManifest(manifestSlug);
+  const isCrmWideShell = /^\/t\/[a-z0-9_-]+\/(leads|applications|pipeline)(?:\/|$)/i.test(pathname);
+  const contentWidthClass = isCrmWideShell ? "max-w-none" : "max-w-7xl";
 
   return (
     <html lang="en">
@@ -242,8 +244,10 @@ export default async function RootLayout({
               demoLabel={`${manifest.brand.name} demo`}
             />
             <main className="ml-0 md:ml-60 min-h-screen relative z-10 pt-14 md:pt-0">
-              <div className="mx-auto max-w-7xl px-4 md:px-8 py-6 md:py-8">{children}</div>
-              <footer className="mx-auto max-w-7xl px-8 py-6 text-xs text-fg-faint">
+              <div className={`mx-auto ${contentWidthClass} px-4 md:px-8 py-6 md:py-8`}>
+                {children}
+              </div>
+              <footer className={`mx-auto ${contentWidthClass} px-8 py-6 text-xs text-fg-faint`}>
                 <div className="border-t border-bg-border pt-4 flex justify-between">
                   <span>{manifest.brand.footer_label}</span>
                   <span>{manifest.brand.footer_tagline}</span>

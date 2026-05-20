@@ -43,13 +43,23 @@ export const LEAD_PIPELINE_STAGES: StageMeta[] = [
 ];
 
 export const OPPORTUNITY_PIPELINE_STAGES: StageMeta[] = [
+  { key: "application_in",             label: "Application In",             bg: "#4D5C6E", fg: "#FFFFFF" },
+  { key: "shopping",                   label: "Shopping",                   bg: "#5A6E85", fg: "#FFFFFF" },
+  { key: "missing_info",               label: "Missing Info",               bg: "#4A6FA5", fg: "#FFFFFF" },
+  { key: "approved",                   label: "Approved",                   bg: "#3F6F55", fg: "#FFFFFF" },
+  { key: "selling",                    label: "Selling",                    bg: "#6B4E8C", fg: "#FFFFFF" },
+  { key: "requested_docs",             label: "Requested Docs",             bg: "#856537", fg: "#FFFFFF" },
+  { key: "docs_out",                   label: "Docs Out",                   bg: "#3D7A87", fg: "#FFFFFF" },
+  { key: "login",                      label: "Login",                      bg: "#5B5550", fg: "#FFFFFF" },
+  { key: "funded",                     label: "Funded",                     bg: "#3C7E68", fg: "#FFFFFF" },
+  { key: "follow_ups",                 label: "Follow Ups",                 bg: "#A87534", fg: "#FFFFFF" },
+  { key: "declined",                   label: "Declined",                   bg: "#7C3036", fg: "#FFFFFF" },
+  { key: "dead_file",                  label: "Dead",                       bg: "#5D252A", fg: "#FFFFFF" },
   { key: "submitted_to_underwriting", label: "Submitted To Underwriting", bg: "#4D5C6E", fg: "#FFFFFF" },
   { key: "approved_open_offers",      label: "Approved Open Offers",      bg: "#3C7E68", fg: "#FFFFFF" },
   { key: "contracts_ordered",         label: "Contracts Ordered",         bg: "#856537", fg: "#FFFFFF" },
-  { key: "funded",                    label: "Funded",                    bg: "#3F6F55", fg: "#FFFFFF" },
   { key: "approved_never_funded",     label: "Approved Never Funded",     bg: "#A87534", fg: "#FFFFFF" },
   { key: "no_offers_available",       label: "No Offers Available",       bg: "#5B5550", fg: "#FFFFFF" },
-  { key: "dead_file",                 label: "Dead File",                 bg: "#7C3036", fg: "#FFFFFF" },
 ];
 
 export function getStageMeta(entityName: string): StageMeta[] {

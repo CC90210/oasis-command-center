@@ -874,7 +874,7 @@ async function SingleEntityPipeline({
         entityLabel={entity.label}
         stages={stages}
         stageField={stageField}
-        rows={visible}
+        rows={searched}
         stageFilter={stageFilter}
         query={query}
         basePath={page.path}

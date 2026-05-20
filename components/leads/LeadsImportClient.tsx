@@ -9,7 +9,7 @@
  */
 
 import { useMemo, useState } from "react";
-import { useRouter } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 import Link from "next/link";
 import {
   Upload,
@@ -39,6 +39,8 @@ type ImportResult = {
 
 export function LeadsImportClient() {
   const router = useRouter();
+  const pathname = usePathname();
+  const tenantPrefix = pathname.startsWith("/t/") ? pathname.split("/").slice(0, 3).join("/") : "";
   const [csv, setCsv] = useState("");
   const [defaultSource, setDefaultSource] = useState("csv_import");
   const [dedupEmail, setDedupEmail] = useState(true);
@@ -327,7 +329,7 @@ export function LeadsImportClient() {
           </button>
           {result?.ok && (
             <Link
-              href="/leads"
+              href={tenantPrefix ? `${tenantPrefix}/leads` : "/leads"}
               className="btn-secondary inline-flex items-center gap-1.5 !px-3 !py-1.5 text-xs"
             >
               View leads

@@ -313,7 +313,7 @@ export const SUN_SEED: TenantManifest = {
         //                               (revival drip eligible)
         //   no_offers_available       — every lender declined
         //   dead_file                 — client killed the deal
-        { name: "status", type: "enum", enum_values: ["submitted_to_underwriting", "approved_open_offers", "contracts_ordered", "funded", "approved_never_funded", "no_offers_available", "dead_file"], required: true },
+        { name: "status", type: "enum", enum_values: ["application_in", "shopping", "missing_info", "approved", "selling", "requested_docs", "docs_out", "login", "funded", "follow_ups", "declined", "dead_file", "submitted_to_underwriting", "approved_open_offers", "contracts_ordered", "approved_never_funded", "no_offers_available"], required: true },
       ],
     },
     {
@@ -344,7 +344,7 @@ export const SUN_SEED: TenantManifest = {
         //   dead_file                 — file was good but client killed
         //                               it (took a competitor's offer,
         //                               lost contact, changed plans)
-        { name: "stage", type: "enum", enum_values: ["submitted_to_underwriting", "approved_open_offers", "contracts_ordered", "funded", "approved_never_funded", "no_offers_available", "dead_file"], required: true },
+        { name: "stage", type: "enum", enum_values: ["application_in", "shopping", "missing_info", "approved", "selling", "requested_docs", "docs_out", "login", "funded", "follow_ups", "declined", "dead_file", "submitted_to_underwriting", "approved_open_offers", "contracts_ordered", "approved_never_funded", "no_offers_available"], required: true },
       ],
     },
     {

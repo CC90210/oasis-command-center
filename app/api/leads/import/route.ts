@@ -1,7 +1,7 @@
 /**
  * POST /api/leads/import
  *
- * Bulk-insert parsed CSV leads into tenant_records(entity_type='lead').
+ * Bulk-insert parsed CSV leads/applications into tenant_records.
  * This route expects the client to send already-mapped rows, but it still
  * normalizes stages, money values, dedupe keys, and optional SunBiz fields
  * server-side so pasted messy board exports do not corrupt the pipeline.
@@ -9,33 +9,10 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { getSessionUser, getServiceSupabase } from "@/lib/supabase-server";
-import { LEAD_PIPELINE_STAGES } from "@/lib/sunbiz-stage-meta";
+import { routeSunBizImportStage } from "@/lib/sunbiz-stage-routing";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
-
-const STAGE_KEY_SET = new Set(LEAD_PIPELINE_STAGES.map((s) => s.key));
-const STAGE_LABEL_MAP = new Map(
-  LEAD_PIPELINE_STAGES.map((s) => [s.label.toLowerCase(), s.key]),
-);
-
-function normalizeStage(raw: string | null | undefined): string {
-  const value = (raw || "").trim();
-  if (!value) return "imported";
-  const lower = value.toLowerCase();
-  if (STAGE_KEY_SET.has(lower)) return lower;
-  const labelHit = STAGE_LABEL_MAP.get(lower);
-  if (labelHit) return labelHit;
-
-  if (lower === "application in" || lower === "app in") return "imported";
-  if (lower === "shopping" || lower === "shop" || lower === "shop out") return "submitted";
-  if (lower === "approved open offers" || lower === "open offers") return "approved";
-  if (lower === "hot") return "hot_lead";
-  if (lower === "missing") return "missing_info";
-  if (lower === "followup" || lower === "follow up") return "follow_up";
-  if (lower === "sent app" || lower === "app sent") return "sent_application";
-  return "imported";
-}
 
 function parseMoney(v: unknown): number | null {
   if (v == null || v === "") return null;
@@ -122,6 +99,7 @@ type IncomingRow = {
   business_zip?: string | null;
   website?: string | null;
   entity_type?: string | null;
+  record_type?: string | null;
   industry?: string | null;
   title?: string | null;
   ownership_pct?: string | null;
@@ -174,9 +152,9 @@ export async function POST(req: NextRequest) {
 
   const existingRes = await db
     .from("tenant_records")
-    .select("data")
+    .select("entity_type, data")
     .eq("tenant_id", tenantId)
-    .eq("entity_type", "lead")
+    .in("entity_type", ["lead", "application", "funded_deal"])
     .order("updated_at", { ascending: false })
     .limit(DEDUP_LOOKBACK);
   if (existingRes.error) {
@@ -189,7 +167,7 @@ export async function POST(req: NextRequest) {
   const existingEmails = new Set<string>();
   const existingPhones = new Set<string>();
   const existingBusinesses = new Set<string>();
-  for (const r of (existingRes.data || []) as Array<{ data: Record<string, unknown> | null }>) {
+  for (const r of (existingRes.data || []) as Array<{ entity_type: string; data: Record<string, unknown> | null }>) {
     const d = r.data || {};
     const email = normEmail(typeof d.email === "string" ? d.email : null);
     if (email) existingEmails.add(email);
@@ -236,7 +214,6 @@ export async function POST(req: NextRequest) {
     const tags = Array.isArray(raw.tags)
       ? raw.tags.filter((t) => typeof t === "string").slice(0, 12)
       : null;
-    const stage = normalizeStage(raw.stage);
     const state = cleanString(raw.state, 80);
     const monthlyRevenue = parseMoney(raw.monthly_revenue);
     const paperGrade = cleanString(raw.paper_grade, 8);
@@ -261,6 +238,19 @@ export async function POST(req: NextRequest) {
     const applicationUrl = cleanString(raw.application_url, 1_000);
     const bankStatementUrls = cleanString(raw.bank_statement_urls, 2_000);
     const dlVcUrls = cleanString(raw.dl_vc_urls, 2_000);
+    const originalStage = cleanString(raw.stage, 80);
+    const hasApplicationEvidence = Boolean(
+      dateSubmitted ||
+        lenderList ||
+        requestedAmount != null ||
+        applicationUrl ||
+        bankStatementUrls ||
+        dlVcUrls,
+    );
+    const { stage, entityType: rowEntityType } = routeSunBizImportStage(raw.stage, {
+      explicitRecordType: raw.record_type,
+      hasApplicationEvidence,
+    });
 
     if (!email && !phone && !name && !businessName) {
       skippedMalformed += 1;
@@ -300,7 +290,7 @@ export async function POST(req: NextRequest) {
 
     toInsert.push({
       tenant_id: tenantId,
-      entity_type: "lead",
+      entity_type: rowEntityType,
       data: {
         name,
         email,
@@ -315,7 +305,7 @@ export async function POST(req: NextRequest) {
         ...(paperGrade ? { paper_grade: paperGrade } : {}),
         ...(timeInBusiness ? { time_in_business: timeInBusiness } : {}),
         ...(assignedTo ? { assigned_to: assignedTo } : {}),
-        ...(dateSubmitted ? { date_submitted: dateSubmitted } : {}),
+        ...(dateSubmitted ? { date_submitted: dateSubmitted, submitted_at: dateSubmitted } : {}),
         ...(lenderList ? { lender_list: lenderList } : {}),
         ...(dba ? { dba } : {}),
         ...(businessAddress ? { business_address: businessAddress } : {}),
@@ -333,8 +323,9 @@ export async function POST(req: NextRequest) {
         ...(bankStatementUrls ? { bank_statement_urls: bankStatementUrls } : {}),
         ...(dlVcUrls ? { dl_vc_urls: dlVcUrls } : {}),
         ...(tags && tags.length > 0 ? { tags } : {}),
+        ...(originalStage ? { original_stage: originalStage } : {}),
         stage,
-        status: "new",
+        status: rowEntityType === "application" ? stage : "new",
         score: 0,
       },
     });
@@ -368,4 +359,3 @@ export async function POST(req: NextRequest) {
     errors: errors.slice(0, 20),
   });
 }
-

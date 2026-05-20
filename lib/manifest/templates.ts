@@ -173,7 +173,7 @@ export const BUSINESS_FUNDING_TEMPLATE: TenantManifest = {
         { name: "lender_id", type: "string" },
         { name: "requested_amount", type: "number" },
         { name: "submitted_at", type: "datetime" },
-        { name: "status", type: "enum", enum_values: ["submitted_to_underwriting", "approved_open_offers", "contracts_ordered", "funded", "approved_never_funded", "no_offers_available", "dead_file"], required: true },
+        { name: "status", type: "enum", enum_values: ["application_in", "shopping", "missing_info", "approved", "selling", "requested_docs", "docs_out", "login", "funded", "follow_ups", "declined", "dead_file", "submitted_to_underwriting", "approved_open_offers", "contracts_ordered", "approved_never_funded", "no_offers_available"], required: true },
       ],
     },
     {
@@ -187,7 +187,7 @@ export const BUSINESS_FUNDING_TEMPLATE: TenantManifest = {
         { name: "amount", type: "number" },
         { name: "term_months", type: "number" },
         { name: "factor_rate", type: "number" },
-        { name: "stage", type: "enum", enum_values: ["submitted_to_underwriting", "approved_open_offers", "contracts_ordered", "funded", "approved_never_funded", "no_offers_available", "dead_file"], required: true },
+        { name: "stage", type: "enum", enum_values: ["application_in", "shopping", "missing_info", "approved", "selling", "requested_docs", "docs_out", "login", "funded", "follow_ups", "declined", "dead_file", "submitted_to_underwriting", "approved_open_offers", "contracts_ordered", "approved_never_funded", "no_offers_available"], required: true },
       ],
     },
     {

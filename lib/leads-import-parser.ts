@@ -21,6 +21,7 @@ export type ParsedLeadImportRow = {
   business_zip: string | null;
   website: string | null;
   entity_type: string | null;
+  record_type: string | null;
   industry: string | null;
   title: string | null;
   ownership_pct: string | null;
@@ -105,6 +106,11 @@ export function mapLeadImportHeader(header: string): LeadImportField | null {
     case "stage":
     case "pipelinestage":
     case "leadstage":
+    case "phase":
+    case "pipelinephase":
+    case "group":
+    case "section":
+    case "boardsection":
     case "status":
       return "stage";
     case "state":
@@ -169,6 +175,12 @@ export function mapLeadImportHeader(header: string): LeadImportField | null {
     case "typeofentity":
     case "entitytype":
       return "entity_type";
+    case "recordtype":
+    case "recordentity":
+    case "rowtype":
+    case "objecttype":
+    case "crmtype":
+      return "record_type";
     case "typeofbusiness":
     case "businesstype":
     case "industry":
@@ -226,6 +238,7 @@ function emptyRow(): ParsedLeadImportRow {
     business_zip: null,
     website: null,
     entity_type: null,
+    record_type: null,
     industry: null,
     title: null,
     ownership_pct: null,
@@ -433,4 +446,3 @@ export function parseLeadImportCsv(text: string): LeadImportParseResult {
     sectionLabels: Array.from(sections),
   };
 }
-
