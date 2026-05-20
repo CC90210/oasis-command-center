@@ -8,7 +8,8 @@
     "build": "next build",
     "start": "next start --port 3100",
     "lint": "eslint .",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test:sunbiz": "tsx tests/sunbiz-import-routing.test.ts"
   },
   "dependencies": {
     "@libsql/client": "^0.17.3",
@@ -32,6 +33,7 @@
     "eslint-config-next": "^15.5.18",
     "postcss": "^8.5.12",
     "tailwindcss": "^3.4.14",
+    "tsx": "^4.22.3",
     "typescript": "^5.6.3"
   },
   "overrides": {

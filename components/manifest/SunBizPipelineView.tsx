@@ -89,10 +89,10 @@ export function SunBizPipelineView({
     : stages;
   const touchFirst = pickTouchFirst(renderedRows, stageField, stages);
 
-  function toggleStage(stageKey: string) {
+  function toggleStage(stageKey: string, defaultCollapsed = false) {
     setCollapsedStages((current) => ({
       ...current,
-      [stageKey]: !(current[stageKey] ?? false),
+      [stageKey]: !(current[stageKey] ?? defaultCollapsed),
     }));
   }
 
@@ -109,14 +109,14 @@ export function SunBizPipelineView({
           </h1>
           <div className="mt-1.5 text-[12px] text-fg-muted">
             <span className="font-semibold text-fg">{stats.active}</span> active
-            <span className="mx-1.5 text-fg-dim">·</span>
+            <span className="mx-1.5 text-fg-dim">/</span>
             <span className="font-semibold text-amber-300">{stats.hot}</span> hot
-            <span className="mx-1.5 text-fg-dim">·</span>
+            <span className="mx-1.5 text-fg-dim">/</span>
             <span className={stats.cold > 0 ? "font-semibold text-red-300" : "text-fg-muted"}>
               {stats.cold}
             </span>{" "}
             going cold
-            <span className="mx-1.5 text-fg-dim">·</span>
+            <span className="mx-1.5 text-fg-dim">/</span>
             <span className="font-semibold text-emerald-300">{stats.ready}</span> ready to advance
           </div>
         </div>
@@ -125,7 +125,7 @@ export function SunBizPipelineView({
           className="inline-flex items-center gap-1.5 rounded-md bg-accent px-3 py-1.5 text-[11px] font-semibold uppercase tracking-wider text-bg-deep hover:bg-accent/90"
         >
           <Plus className="h-3.5 w-3.5" />
-          New {isLeads ? "merchant" : "application"}
+          New {entityLabel.toLowerCase()}
         </Link>
       </div>
 
@@ -134,7 +134,7 @@ export function SunBizPipelineView({
           <PageSearchBar entityLabel={entityLabel} />
         </div>
         <div className="whitespace-nowrap text-[10.5px] text-fg-dim">
-          Grouped by stage · {visibleStages.length} active
+          {stages.length} stages / {renderedRows.length} visible
         </div>
         <div className="whitespace-nowrap font-mono text-[10.5px] text-fg-dim">
           updated{" "}
@@ -147,13 +147,13 @@ export function SunBizPipelineView({
       <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-6">
         {stages.map((stage) => {
           const count = stats.stageCounts[stage.key] || 0;
-          const collapsed = collapsedStages[stage.key] ?? false;
+          const collapsed = collapsedStages[stage.key] ?? (count === 0);
           const selected = stageFilter === stage.key;
           return (
             <button
               key={stage.key}
               type="button"
-              onClick={() => toggleStage(stage.key)}
+              onClick={() => toggleStage(stage.key, count === 0)}
               className={`min-w-0 rounded-md border px-3 py-2 text-left transition-colors ${
                 selected
                   ? "border-accent bg-accent/10"
@@ -192,7 +192,7 @@ export function SunBizPipelineView({
             </span>
             {touchFirst.potentialUsd != null && (
               <span className="text-[12px] text-amber-200/90">
-                · {formatMoney(touchFirst.potentialUsd)} potential
+                / {formatMoney(touchFirst.potentialUsd)} potential
               </span>
             )}
             <span className="ml-auto text-[11px] text-accent">Open</span>
@@ -217,8 +217,8 @@ export function SunBizPipelineView({
             entityName={entityName}
             stage={stage}
             rows={stageRows}
-            collapsed={collapsedStages[stage.key] ?? stageRows.length === 0}
-            onToggle={() => toggleStage(stage.key)}
+            collapsed={collapsedStages[stage.key] ?? (stageRows.length === 0)}
+            onToggle={() => toggleStage(stage.key, stageRows.length === 0)}
           />
         );
       })}

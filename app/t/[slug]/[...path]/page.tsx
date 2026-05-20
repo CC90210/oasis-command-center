@@ -627,10 +627,10 @@ async function PipelineSuperview({
   // gives us accurate counts for the chevron badges in the same query.
   const [leadRowsRes, oppRowsRes] = await Promise.all([
     tenantId
-      ? listRecords({ tenant_id: tenantId, entity: leadName, limit: 500 }).catch(() => ({ rows: [], total: 0 }))
+      ? listRecords({ tenant_id: tenantId, entity: leadName, limit: 2_000 }).catch(() => ({ rows: [], total: 0 }))
       : Promise.resolve({ rows: [], total: 0 }),
     tenantId
-      ? listRecords({ tenant_id: tenantId, entity: oppName, limit: 500 }).catch(() => ({ rows: [], total: 0 }))
+      ? listRecords({ tenant_id: tenantId, entity: oppName, limit: 2_000 }).catch(() => ({ rows: [], total: 0 }))
       : Promise.resolve({ rows: [], total: 0 }),
   ]);
 
@@ -832,7 +832,7 @@ async function SingleEntityPipeline({
   }
 
   const rowsRes = tenantId
-    ? await listRecords({ tenant_id: tenantId, entity: entity.name, limit: 500 }).catch(() => ({ rows: [], total: 0 }))
+    ? await listRecords({ tenant_id: tenantId, entity: entity.name, limit: 2_000 }).catch(() => ({ rows: [], total: 0 }))
     : { rows: [], total: 0 };
 
   // Apply ?q= search filter FIRST so the chevron stage counts reflect
@@ -864,9 +864,10 @@ async function SingleEntityPipeline({
     stages.map((s) => [s.key, s]),
   );
 
-  // SunBiz gets the redesigned grouped-by-stage view from CC's
-  // mockups. Other tenants keep the rail + flat table.
-  if (slug === "sun" && (entity.name === "lead" || entity.name === "application")) {
+  // CRM entities get the grouped-by-stage command view across tenants.
+  // SunBiz is the first full implementation, but the mechanics are the
+  // standard leads/applications surface for Oasis and future tenants too.
+  if (entity.name === "lead" || entity.name === "application") {
     return (
       <SunBizPipelineView
         slug={slug}

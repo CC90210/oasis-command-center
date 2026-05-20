@@ -20,7 +20,7 @@ function parseMoney(v: unknown): number | null {
   const raw = String(v)
     .trim()
     .replace(/[,$]/g, "")
-    .replace(/[–—]/g, "-")
+    .replace(/[\u2013\u2014]/g, "-")
     .toLowerCase();
   if (!raw) return null;
 

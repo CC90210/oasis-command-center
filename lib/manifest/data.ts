@@ -45,6 +45,7 @@ export type TenantRecord = {
 };
 
 const ENTITY_RE = /^[a-z][a-z0-9_]{0,62}$/;
+const MAX_RECORD_LIST_LIMIT = 2_000;
 
 function assertEntity(entity: string): void {
   if (!ENTITY_RE.test(entity)) {
@@ -73,7 +74,7 @@ export type ListRecordsResult = {
 
 export async function listRecords(input: ListRecordsInput): Promise<ListRecordsResult> {
   assertEntity(input.entity);
-  const limit = Math.max(1, Math.min(input.limit ?? 100, 500));
+  const limit = Math.max(1, Math.min(input.limit ?? 100, MAX_RECORD_LIST_LIMIT));
   const offset = Math.max(0, input.offset ?? 0);
   const db = getServiceSupabase();
 
