@@ -90,6 +90,21 @@ const EXPECTED_WORKERS: Array<{
     purpose: "Polls Gmail threads for shop-out replies, classifies via Claude Haiku 4.5.",
   },
   {
+    service: "pm2.dashboard-email-consumer",
+    label: "Dashboard email sender",
+    purpose: "Sends emails queued from the Command Center's lead-drawer composer. Polls lead_interactions every 10s.",
+  },
+  {
+    service: "pm2.atlas-telegram",
+    label: "Atlas CFO Telegram",
+    purpose: "Bridges Telegram messages to Atlas (CFO Agent) for financial queries and trading alerts.",
+  },
+  {
+    service: "pm2.maven-telegram",
+    label: "Maven CMO Telegram",
+    purpose: "Bridges Telegram messages to Maven (CMO Agent) for content and marketing operations.",
+  },
+  {
     service: "skool_engine",
     label: "Skool daemon",
     purpose: "Standalone (NOT in PM2 — owns its own lock). Posts/replies in a Skool community.",
