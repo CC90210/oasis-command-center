@@ -60,8 +60,7 @@ export async function LeadDocumentsPanel({
       </div>
       {docs.length === 0 ? (
         <div className="text-xs text-fg-dim italic py-3 text-center">
-          No documents yet. Files uploaded through the application form will
-          show up here.
+          No documents yet. Uploaded files will show up here.
         </div>
       ) : (
         <ul className="divide-y divide-bg-border">

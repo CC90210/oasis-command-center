@@ -2,10 +2,23 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
-import { ArrowLeft, CheckCircle2, Loader2, Save, AlertCircle, Plus, X } from "lucide-react";
+import {
+  ArrowLeft,
+  CheckCircle2,
+  Loader2,
+  Save,
+  AlertCircle,
+  Plus,
+  X,
+  Paperclip,
+  Trash2,
+  FileText,
+  Image as ImageIcon,
+} from "lucide-react";
 import Link from "next/link";
 import type { ManifestEntityDef, ManifestEntityField } from "@/lib/manifest/schema";
 import { humanize } from "@/lib/manifest/humanize";
+import { LEAD_DOC_TYPES, humanLeadDocSize } from "@/lib/lead-doc-display";
 
 type Props = {
   tenantSlug: string;
@@ -22,6 +35,12 @@ type Props = {
   initial?: Record<string, unknown>;
   /** Optional record id for edit mode (Phase 5.1). */
   editId?: string;
+};
+
+type PendingDocument = {
+  id: string;
+  file: File;
+  docType: string;
 };
 
 /**
@@ -68,6 +87,14 @@ function placeholderFor(field: ManifestEntityField): string {
   if (n === "business_name" || n === "company") return "Hunter Construction Inc.";
   return "";
 }
+
+function newPendingDocumentId(): string {
+  if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
+    return crypto.randomUUID();
+  }
+  return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
 export function ManifestRecordForm({
   tenantSlug,
   entity,
@@ -83,8 +110,13 @@ export function ManifestRecordForm({
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
   const [formError, setFormError] = useState<string | null>(null);
   const [flash, setFlash] = useState<string | null>(null);
+  const [createdRecordId, setCreatedRecordId] = useState<string | null>(null);
+  const [defaultDocType, setDefaultDocType] = useState("unclassified");
+  const [pendingDocs, setPendingDocs] = useState<PendingDocument[]>([]);
 
-  const isEdit = !!editId;
+  const persistedRecordId = editId || createdRecordId;
+  const isEdit = !!persistedRecordId;
+  const supportsDocuments = entity.name === "lead" || entity.name === "application";
 
   function setField(name: string, value: unknown) {
     setValues((v) => ({ ...v, [name]: value }));
@@ -134,6 +166,54 @@ export function ManifestRecordForm({
     return { payload: out };
   }
 
+  function queueDocuments(files: FileList | null) {
+    if (!files || files.length === 0) return;
+    const next = Array.from(files).map((file) => ({
+      id: newPendingDocumentId(),
+      file,
+      docType: defaultDocType,
+    }));
+    setPendingDocs((docs) => [...docs, ...next]);
+  }
+
+  function updatePendingDocument(id: string, docType: string) {
+    setPendingDocs((docs) =>
+      docs.map((doc) => (doc.id === id ? { ...doc, docType } : doc)),
+    );
+  }
+
+  function removePendingDocument(id: string) {
+    setPendingDocs((docs) => docs.filter((doc) => doc.id !== id));
+  }
+
+  async function uploadQueuedDocuments(
+    recordId: string,
+  ): Promise<{ error: string | null; uploadedIds: string[] }> {
+    if (!supportsDocuments || pendingDocs.length === 0) return { error: null, uploadedIds: [] };
+    const qs = entity.name === "application" ? "?entity=application" : "";
+    const uploadedIds: string[] = [];
+    for (const doc of pendingDocs) {
+      const fd = new FormData();
+      fd.append("file", doc.file);
+      fd.append("doc_type", doc.docType);
+      fd.append("source", "record_form_upload");
+      const res = await fetch(`/api/leads/${recordId}/documents${qs}`, {
+        method: "POST",
+        credentials: "include",
+        body: fd,
+      });
+      const data = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string };
+      if (!res.ok || !data.ok) {
+        return {
+          error: `${doc.file.name}: ${data.error || `upload_failed_${res.status}`}`,
+          uploadedIds,
+        };
+      }
+      uploadedIds.push(doc.id);
+    }
+    return { error: null, uploadedIds };
+  }
+
   async function submit(e: React.FormEvent) {
     e.preventDefault();
     if (saving) return;
@@ -152,7 +232,7 @@ export function ManifestRecordForm({
 
     try {
       const url = isEdit
-        ? `/api/manifest/${tenantSlug}/records/${entity.name}?id=${encodeURIComponent(editId!)}`
+        ? `/api/manifest/${tenantSlug}/records/${entity.name}?id=${encodeURIComponent(persistedRecordId!)}`
         : `/api/manifest/${tenantSlug}/records/${entity.name}`;
       const res = await fetch(url, {
         method: isEdit ? "PATCH" : "POST",
@@ -167,7 +247,24 @@ export function ManifestRecordForm({
         setSaving(false);
         return;
       }
-      setFlash("Saved. Redirecting...");
+      const savedId = data.record.id;
+      if (!editId && savedId) setCreatedRecordId(savedId);
+
+      const uploadedCount = pendingDocs.length;
+      const uploadResult = await uploadQueuedDocuments(savedId);
+      if (uploadResult.error) {
+        setPendingDocs((docs) => docs.filter((doc) => !uploadResult.uploadedIds.includes(doc.id)));
+        setFlash("Record saved.");
+        setFormError(`File upload failed: ${uploadResult.error}`);
+        setSaving(false);
+        router.refresh();
+        return;
+      }
+
+      setPendingDocs([]);
+      setFlash(uploadedCount > 0
+        ? `Saved and uploaded ${uploadedCount} file${uploadedCount === 1 ? "" : "s"}. Redirecting...`
+        : "Saved. Redirecting...");
       router.push(resolvedBackHref);
       router.refresh();
     } catch (err) {
@@ -188,6 +285,19 @@ export function ManifestRecordForm({
           disabled={saving}
         />
       ))}
+
+      {supportsDocuments && (
+        <DocumentQueue
+          entityLabel={entity.label}
+          defaultDocType={defaultDocType}
+          pendingDocs={pendingDocs}
+          disabled={saving}
+          onDefaultDocTypeChange={setDefaultDocType}
+          onQueueDocuments={queueDocuments}
+          onUpdateDocType={updatePendingDocument}
+          onRemove={removePendingDocument}
+        />
+      )}
 
       {flash && (
         <div className="rounded-xl border border-emerald-400/30 bg-emerald-400/10 px-3 py-2 text-sm text-emerald-100 inline-flex items-start gap-2">
@@ -385,14 +495,142 @@ function FieldInput({
 }
 
 /**
- * Editor for `type: "json"` fields. Turnkey key/value editor — one row
- * per top-level key, plain text inputs. The committed value is always
- * an object (the form serializes to JSON on submit).
+ * Staged document/photo queue for lead and application records. Files
+ * upload after the manifest record is saved.
  *
- * The prior implementation had a Simple/Advanced toggle that revealed
- * a raw-JSON textarea for nested structures. Removed in the 2026-05-19
- * turnkey UX pass — operators who legitimately need nested structures
- * use the AI editor (Reasoning surface) instead.
+ * New records and edits use the same lead_documents backend path as
+ * the drawer, which keeps document state in sync across both surfaces.
+ */
+function DocumentQueue({
+  entityLabel,
+  defaultDocType,
+  pendingDocs,
+  disabled,
+  onDefaultDocTypeChange,
+  onQueueDocuments,
+  onUpdateDocType,
+  onRemove,
+}: {
+  entityLabel: string;
+  defaultDocType: string;
+  pendingDocs: PendingDocument[];
+  disabled?: boolean;
+  onDefaultDocTypeChange: (docType: string) => void;
+  onQueueDocuments: (files: FileList | null) => void;
+  onUpdateDocType: (id: string, docType: string) => void;
+  onRemove: (id: string) => void;
+}) {
+  return (
+    <section className="border-t border-bg-border pt-4">
+      <div className="mb-3 flex flex-wrap items-end justify-between gap-3">
+        <div>
+          <h3 className="text-xs font-bold uppercase tracking-wider text-fg-muted">
+            Documents &amp; photos
+          </h3>
+          <div className="mt-1 font-mono text-[11px] text-fg-dim">
+            {pendingDocs.length} queued for this {entityLabel.toLowerCase()}
+          </div>
+        </div>
+        <div className="flex flex-wrap items-end gap-2">
+          <label className="block min-w-[220px]">
+            <span className="mb-1 block text-[10px] font-bold uppercase tracking-wider text-fg-dim">
+              Type
+            </span>
+            <select
+              value={defaultDocType}
+              onChange={(e) => onDefaultDocTypeChange(e.target.value)}
+              disabled={disabled}
+              className="w-full rounded-xl border border-bg-border bg-bg-deep/80 px-3 py-2 text-sm text-fg focus:border-accent/50 focus:outline-none disabled:opacity-50"
+            >
+              {LEAD_DOC_TYPES.map((docType) => (
+                <option key={docType.key} value={docType.key}>
+                  {docType.label}
+                  {docType.required ? " *" : ""}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="inline-flex h-[38px] cursor-pointer items-center gap-1.5 rounded-xl border border-bg-border bg-bg-elev px-3 text-sm font-semibold text-fg hover:border-fg-dim hover:bg-bg-deep/80">
+            <Paperclip className="h-4 w-4" />
+            Add files
+            <input
+              type="file"
+              multiple
+              accept="image/*,application/pdf,.doc,.docx,.txt,.csv"
+              disabled={disabled}
+              className="sr-only"
+              onChange={(e) => {
+                onQueueDocuments(e.currentTarget.files);
+                e.currentTarget.value = "";
+              }}
+            />
+          </label>
+        </div>
+      </div>
+
+      {pendingDocs.length === 0 ? (
+        <div className="rounded-xl border border-dashed border-bg-border bg-bg-deep/30 px-3 py-3 text-center text-xs italic text-fg-dim">
+          No files queued.
+        </div>
+      ) : (
+        <ul className="space-y-2">
+          {pendingDocs.map((doc) => {
+            const isImage = doc.file.type.startsWith("image/");
+            return (
+              <li
+                key={doc.id}
+                className="grid gap-2 rounded-xl border border-bg-border bg-bg-deep/40 p-2 sm:grid-cols-[minmax(0,1fr)_minmax(180px,240px)_auto] sm:items-center"
+              >
+                <div className="flex min-w-0 items-center gap-2">
+                  <span className="shrink-0 text-fg-dim">
+                    {isImage ? <ImageIcon className="h-4 w-4" /> : <FileText className="h-4 w-4" />}
+                  </span>
+                  <div className="min-w-0">
+                    <div className="truncate text-sm font-medium text-fg" title={doc.file.name}>
+                      {doc.file.name}
+                    </div>
+                    <div className="font-mono text-[10.5px] text-fg-dim">
+                      {humanLeadDocSize(doc.file.size)}
+                    </div>
+                  </div>
+                </div>
+                <select
+                  value={doc.docType}
+                  onChange={(e) => onUpdateDocType(doc.id, e.target.value)}
+                  disabled={disabled}
+                  aria-label={`Document type for ${doc.file.name}`}
+                  className="w-full rounded-lg border border-bg-border bg-bg-elev px-2 py-1.5 text-xs text-fg focus:border-accent/50 focus:outline-none disabled:opacity-50"
+                >
+                  {LEAD_DOC_TYPES.map((docType) => (
+                    <option key={docType.key} value={docType.key}>
+                      {docType.label}
+                      {docType.required ? " *" : ""}
+                    </option>
+                  ))}
+                </select>
+                <button
+                  type="button"
+                  onClick={() => onRemove(doc.id)}
+                  disabled={disabled}
+                  className="inline-flex items-center justify-center rounded-lg border border-bg-border bg-bg-elev px-2 py-1.5 text-fg-dim hover:text-red-300 disabled:opacity-50"
+                  title="Remove file"
+                  aria-label={`Remove ${doc.file.name}`}
+                >
+                  <Trash2 className="h-4 w-4" />
+                </button>
+              </li>
+            );
+          })}
+        </ul>
+      )}
+    </section>
+  );
+}
+
+/**
+ * Editor for `type: "json"` fields. Turnkey key/value editor -- one row
+ * per top-level key, plain text inputs. The committed value is always
+ * an object.
  */
 function JsonField({
   label,

@@ -3,10 +3,13 @@
  * SunBiz pipeline view.
  *
  * The SLA defines "how long can a lead sit in this stage before it
- * counts as overdue". The pipeline view uses it three ways:
- *   1. Section-header "SLA 2D" badge per stage.
- *   2. Per-row "going cold" red-text on the LAST TOUCH column.
- *   3. Counter strip "{N} going cold" calculation.
+ * counts as overdue". The pipeline view uses it for:
+ *   1. Per-row "going cold" red-text on the LAST TOUCH column.
+ *   2. Counter strip "{N} going cold" calculation.
+ *
+ * UI labels are intentionally narrower than this map: terminal,
+ * archival, and lender-lifecycle stages can have backend windows that
+ * should not be shown as operator-facing "SLA 30D" noise.
  *
  * Tunable later via a manifest entry per tenant. v1 values from CC's
  * mockup + SunBiz Adon-team standard cadence.
@@ -67,6 +70,27 @@ export const ACTIVE_STAGES = new Set<string>([
   "approved_never_funded",
 ]);
 
+export const VISIBLE_TARGET_STAGES = new Set<string>([
+  "imported",
+  "hot_lead",
+  "missing_info",
+  "follow_up",
+  "sent_application",
+  "viewed_application",
+  "signed_application",
+  "submitted",
+  "application_in",
+  "shopping",
+  "selling",
+  "requested_docs",
+  "docs_out",
+  "login",
+  "follow_ups",
+  "submitted_to_underwriting",
+  "approved_open_offers",
+  "contracts_ordered",
+]);
+
 /** Stages where the operator should be advancing the deal NOW. */
 export const READY_TO_ADVANCE_STAGES = new Set<string>([
   "viewed_application",
@@ -81,6 +105,13 @@ export const READY_TO_ADVANCE_STAGES = new Set<string>([
 
 export function slaDaysFor(stage: string): number {
   return STAGE_SLA_DAYS[stage] ?? 7;
+}
+
+export function stageTargetLabel(stage: string): string | null {
+  if (!VISIBLE_TARGET_STAGES.has(stage)) return null;
+  const days = slaDaysFor(stage);
+  if (!Number.isFinite(days) || days >= 999) return null;
+  return `${days}d target`;
 }
 
 export function daysSince(iso: string | null | undefined): number {

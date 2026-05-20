@@ -51,9 +51,10 @@ export async function GET(
   const docLeadId =
     entity === "lead"
       ? id
-      : typeof (record.data as Record<string, unknown>).lead_id === "string"
+      : typeof (record.data as Record<string, unknown>).lead_id === "string" &&
+          UUID_RE.test((record.data as Record<string, unknown>).lead_id as string)
         ? ((record.data as Record<string, unknown>).lead_id as string)
-        : null;
+        : id;
 
   const db = getServiceSupabase();
   const docsRes = docLeadId

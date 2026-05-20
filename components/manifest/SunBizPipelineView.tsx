@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useMemo, useState, type CSSProperties, type ReactNode } from "react";
+import { useEffect, useMemo, useState, type CSSProperties, type ReactNode } from "react";
 import { ChevronDown, ChevronRight, Plus } from "lucide-react";
 import type { StageMeta } from "@/lib/sunbiz-stage-meta";
 import { PageSearchBar } from "@/components/manifest/PageSearchBar";
@@ -18,7 +18,7 @@ import {
   STAGE_SLA_DAYS,
   daysSince,
   isGoingCold,
-  slaDaysFor,
+  stageTargetLabel,
 } from "@/lib/sunbiz-sla";
 
 type Row = { id: string; data: Record<string, unknown>; updated_at?: string; created_at?: string };
@@ -89,10 +89,14 @@ export function SunBizPipelineView({
     : stages;
   const touchFirst = pickTouchFirst(renderedRows, stageField, stages);
 
-  function toggleStage(stageKey: string, defaultCollapsed = false) {
+  useEffect(() => {
+    setCollapsedStages({});
+  }, [entityName, basePath]);
+
+  function toggleStage(stageKey: string) {
     setCollapsedStages((current) => ({
       ...current,
-      [stageKey]: !(current[stageKey] ?? defaultCollapsed),
+      [stageKey]: !(current[stageKey] ?? true),
     }));
   }
 
@@ -147,14 +151,14 @@ export function SunBizPipelineView({
       <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-6">
         {stages.map((stage) => {
           const count = stats.stageCounts[stage.key] || 0;
-          const collapsed = collapsedStages[stage.key] ?? (count === 0);
+          const collapsed = collapsedStages[stage.key] ?? true;
           const selected = stageFilter === stage.key;
           return (
             <button
               key={stage.key}
               type="button"
-              onClick={() => toggleStage(stage.key, count === 0)}
-              className={`min-w-0 rounded-md border px-3 py-2 text-left transition-colors ${
+              onClick={() => toggleStage(stage.key)}
+              className={`min-h-[56px] min-w-0 rounded-md border px-3 py-2 text-left transition-colors ${
                 selected
                   ? "border-accent bg-accent/10"
                   : "border-bg-border bg-bg-deep/45 hover:border-fg-dim hover:bg-bg-elev/40"
@@ -162,7 +166,7 @@ export function SunBizPipelineView({
             >
               <div className="flex items-center gap-2">
                 <span className="h-2 w-2 shrink-0 rounded-full" style={{ background: stage.bg }} />
-                <span className="min-w-0 flex-1 truncate text-[11px] font-bold uppercase tracking-wide text-fg-muted">
+                <span className="min-w-0 flex-1 text-[11px] font-bold uppercase leading-tight tracking-wide text-fg-muted">
                   {stage.label}
                 </span>
                 {collapsed ? (
@@ -217,8 +221,8 @@ export function SunBizPipelineView({
             entityName={entityName}
             stage={stage}
             rows={stageRows}
-            collapsed={collapsedStages[stage.key] ?? (stageRows.length === 0)}
-            onToggle={() => toggleStage(stage.key, stageRows.length === 0)}
+            collapsed={collapsedStages[stage.key] ?? true}
+            onToggle={() => toggleStage(stage.key)}
           />
         );
       })}
@@ -241,7 +245,7 @@ function StageSection({
   collapsed: boolean;
   onToggle: () => void;
 }) {
-  const sla = slaDaysFor(stage.key);
+  const targetLabel = stageTargetLabel(stage.key);
   return (
     <section
       className="overflow-hidden rounded-lg border border-bg-border bg-bg-deep/30"
@@ -264,9 +268,9 @@ function StageSection({
           </span>
           <span className="font-mono text-[11px] text-fg-dim">{rows.length}</span>
         </div>
-        {sla < 999 && (
+        {targetLabel && (
           <span className="shrink-0 rounded bg-bg-deep/60 px-1.5 py-0.5 text-[9.5px] font-bold uppercase tracking-wider text-fg-dim">
-            SLA {sla}D
+            {targetLabel}
           </span>
         )}
       </button>

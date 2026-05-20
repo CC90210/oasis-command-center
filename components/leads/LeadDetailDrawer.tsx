@@ -263,7 +263,8 @@ export function LeadDetailDrawer({
           {data && activeTab === "notes" && <NotesTab leadId={recordId} />}
           {data && activeTab === "documents" && (
             <DocumentsTab
-              leadId={recordId}
+              recordId={recordId}
+              entity={entity}
               initialDocs={data.documents}
               onChange={reload}
             />
@@ -602,11 +603,13 @@ function NotesTab({ leadId }: { leadId: string }) {
 }
 
 function DocumentsTab({
-  leadId,
+  recordId,
+  entity,
   initialDocs,
   onChange,
 }: {
-  leadId: string;
+  recordId: string;
+  entity: "lead" | "application";
   initialDocs: DocRow[];
   onChange?: () => void | Promise<void>;
 }) {
@@ -619,13 +622,14 @@ function DocumentsTab({
 
   const refresh = useCallback(async () => {
     try {
-      const r = await fetch(`/api/leads/${leadId}/documents`, { credentials: "include" });
+      const qs = entity === "application" ? "?entity=application" : "";
+      const r = await fetch(`/api/leads/${recordId}/documents${qs}`, { credentials: "include" });
       const j = await r.json();
       if (j.ok) setDocs((j.documents || []) as DocRow[]);
     } catch {
       /* keep previous list */
     }
-  }, [leadId]);
+  }, [recordId, entity]);
 
   const upload = async (file: File) => {
     setPending(true);
@@ -635,7 +639,9 @@ function DocumentsTab({
       const fd = new FormData();
       fd.append("file", file);
       fd.append("doc_type", docType);
-      const r = await fetch(`/api/leads/${leadId}/documents`, {
+      fd.append("source", "drawer_upload");
+      const qs = entity === "application" ? "?entity=application" : "";
+      const r = await fetch(`/api/leads/${recordId}/documents${qs}`, {
         method: "POST",
         credentials: "include",
         body: fd,

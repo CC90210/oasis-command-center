@@ -1,11 +1,12 @@
 /**
  * lib/lead-documents.ts — canonical lead-document upload helper.
  *
- * Two surfaces upload to lead_documents today:
+ * Three surfaces upload to lead_documents today:
  *   1. /api/forms/submit (public form intake; HMAC-authed)
  *   2. /api/leads/[id]/documents (operator-side drawer; session-authed)
+ *   3. ManifestRecordForm's full-record create/edit upload queue
  *
- * Both surfaces share the same storage bucket, same path shape, same
+ * All surfaces share the same storage bucket, same path shape, same
  * metadata-row schema, and the same downstream stage-engine call.
  * This helper centralises that pipeline so adding a future upload
  * surface (mobile app, Telegram-attached doc forwarder, etc.) is a

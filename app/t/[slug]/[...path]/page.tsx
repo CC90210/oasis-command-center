@@ -178,6 +178,12 @@ export default async function TenantCatchAllPage({
         (typeof record.data.title === "string" && record.data.title) ||
         (typeof record.data.business_name === "string" && record.data.business_name) ||
         `${entity.label} ${recordDetailId.slice(0, 8)}`;
+      const documentLeadId =
+        entity.name === "application" &&
+        typeof (record.data as Record<string, unknown>).lead_id === "string" &&
+        UUID_RE.test((record.data as Record<string, unknown>).lead_id as string)
+          ? ((record.data as Record<string, unknown>).lead_id as string)
+          : recordDetailId;
       return (
         <div className="space-y-4 animate-fade-in">
           <PageHeader
@@ -233,7 +239,7 @@ export default async function TenantCatchAllPage({
             dataTenantId && (
               <LeadDocumentsPanel
                 tenantId={dataTenantId}
-                leadId={recordDetailId!}
+                leadId={documentLeadId}
               />
             )}
         </div>

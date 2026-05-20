@@ -1,9 +1,9 @@
 /**
  * /api/leads/[id]/documents — operator-facing document management.
  *
- *   GET  — list documents for the drawer's Documents tab.
+ *   GET  — list documents for the drawer's Documents tab and full-record pages.
  *   POST — multipart upload via uploadLeadDocument (shared with the
- *          public form intake). After insert, the engine evaluates
+ *          public form intake and full-record forms). After insert, the engine evaluates
  *          whether to auto-progress lead.stage.
  *
  * Auth: session-cookie → tenant via resolveSessionContext.
@@ -13,6 +13,7 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { resolveSessionContext } from "@/lib/api-auth";
+import { getRecord } from "@/lib/manifest/data";
 import {
   uploadLeadDocument,
   OPERATOR_ALLOWED_DOC_MIME,
@@ -25,8 +26,44 @@ export const dynamic = "force-dynamic";
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+type DocumentTarget = {
+  documentLeadId: string;
+  stageLeadId: string | null;
+  entity: "lead" | "application";
+};
+
+async function resolveDocumentTarget(
+  tenantId: string,
+  id: string,
+  entityParam: string | null,
+): Promise<DocumentTarget | null> {
+  const entity = entityParam === "application" ? "application" : "lead";
+  if (entity === "lead") {
+    const lead = await getRecord({ tenant_id: tenantId, entity: "lead", id }).catch(() => null);
+    if (!lead) return null;
+    return { documentLeadId: id, stageLeadId: id, entity };
+  }
+
+  const application = await getRecord({
+    tenant_id: tenantId,
+    entity: "application",
+    id,
+  }).catch(() => null);
+  if (!application) return null;
+
+  const linkedLeadId = (application.data as Record<string, unknown>).lead_id;
+  const stageLeadId =
+    typeof linkedLeadId === "string" && UUID_RE.test(linkedLeadId) ? linkedLeadId : null;
+
+  return {
+    documentLeadId: stageLeadId || id,
+    stageLeadId,
+    entity,
+  };
+}
+
 export async function GET(
-  _req: NextRequest,
+  req: NextRequest,
   ctx: { params: Promise<{ id: string }> },
 ) {
   const { id } = await ctx.params;
@@ -37,12 +74,20 @@ export async function GET(
   if (!sess.ok) {
     return NextResponse.json({ ok: false, error: sess.reason }, { status: 401 });
   }
+  const target = await resolveDocumentTarget(
+    sess.tenantId,
+    id,
+    req.nextUrl.searchParams.get("entity"),
+  );
+  if (!target) {
+    return NextResponse.json({ ok: false, error: "record_not_found" }, { status: 404 });
+  }
   const db = getServiceSupabase();
   const r = await db
     .from("lead_documents")
     .select("id, filename, mime_type, size_bytes, doc_type, uploaded_by, uploaded_at")
     .eq("tenant_id", sess.tenantId)
-    .eq("lead_id", id)
+    .eq("lead_id", target.documentLeadId)
     .order("uploaded_at", { ascending: false });
   if (r.error) {
     return NextResponse.json({ ok: false, error: r.error.message }, { status: 500 });
@@ -54,13 +99,21 @@ export async function POST(
   req: NextRequest,
   ctx: { params: Promise<{ id: string }> },
 ) {
-  const { id: leadId } = await ctx.params;
-  if (!UUID_RE.test(leadId)) {
+  const { id } = await ctx.params;
+  if (!UUID_RE.test(id)) {
     return NextResponse.json({ ok: false, error: "invalid_id" }, { status: 400 });
   }
   const sess = await resolveSessionContext();
   if (!sess.ok) {
     return NextResponse.json({ ok: false, error: sess.reason }, { status: 401 });
+  }
+  const target = await resolveDocumentTarget(
+    sess.tenantId,
+    id,
+    req.nextUrl.searchParams.get("entity"),
+  );
+  if (!target) {
+    return NextResponse.json({ ok: false, error: "record_not_found" }, { status: 404 });
   }
 
   let form: FormData;
@@ -97,20 +150,29 @@ export async function POST(
     typeof rawDocType === "string" && rawDocType
       ? rawDocType.replace(/[^a-z0-9_]/gi, "_").toLowerCase()
       : "unclassified";
+  const rawSource = form.get("source");
+  const source =
+    typeof rawSource === "string" && /^[a-z0-9_:-]{1,40}$/i.test(rawSource)
+      ? rawSource
+      : "drawer_upload";
 
   const buffer = Buffer.from(await fileObj.arrayBuffer());
 
   const result = await uploadLeadDocument({
     tenantId: sess.tenantId,
-    leadId,
+    leadId: target.documentLeadId,
     filename: fileObj.name,
     mimeType: mime,
     bytes: buffer,
     sizeBytes: fileObj.size,
     docType,
     uploadedBy: sess.email || "operator",
-    source: "drawer_upload",
-    extraMetadata: { profile_id: sess.profileId },
+    source,
+    extraMetadata: {
+      profile_id: sess.profileId,
+      entity: target.entity,
+      record_id: id,
+    },
   });
   if (!result.ok) {
     const status = result.error.startsWith("upload_failed") ? 500 : 500;
@@ -120,16 +182,18 @@ export async function POST(
   // Engine evaluates whether this upload completes the required-doc
   // set and bumps the lead's stage if so. Best-effort: a failure
   // here doesn't reject the document insert.
-  const stageEvent = await recordLeadStageEvent({
-    type: "doc_uploaded",
-    tenantId: sess.tenantId,
-    leadId,
-    docType,
-  });
+  const stageEvent = target.stageLeadId
+    ? await recordLeadStageEvent({
+        type: "doc_uploaded",
+        tenantId: sess.tenantId,
+        leadId: target.stageLeadId,
+        docType,
+      })
+    : null;
 
   return NextResponse.json({
     ok: true,
     document: result.document,
-    stage_bumped: stageEvent.fired ? stageEvent.to : null,
+    stage_bumped: stageEvent?.fired ? stageEvent.to : null,
   });
 }
