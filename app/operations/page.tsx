@@ -20,7 +20,7 @@ import { ALL_AGENT_KEYS, FAMILY_AGENT_KEYS, getAgentInfo, resolveAgentKey } from
 import { getTenantEnabledAgents } from "@/lib/manifest/tenant-scope";
 import { isOperatorEmail } from "@/lib/operator-credentials";
 import { timeAgo, truncate } from "@/lib/fmt";
-import { projectEvent } from "@/lib/event-projection";
+import { buildRecordResolver, projectEvent } from "@/lib/event-projection";
 import { WarmPoolPanel } from "@/components/WarmPoolPanel";
 
 export const dynamic = "force-dynamic";
@@ -213,6 +213,17 @@ export default async function OperationsPage({
   ]);
   const snapByName = new Map(snaps.map((s) => [s.agent_name, s] as const));
 
+  // Resolve lead/record UUIDs in event payloads to human names in one batch
+  // query. Without this the Activity Tape renders lines like
+  // "lead_id=ff7dcd57-87b5-4823-8a31-…" which is meaningless to an operator.
+  // Falls back to first-8-char UUID prefix on miss so the row is still
+  // identifiable.
+  const recordResolver = await safe(
+    "operations.record_resolver",
+    buildRecordResolver(db, events, { tenantId }),
+    new Map<string, string>(),
+  );
+
   // Show only the agents this tenant has actually enabled (manifest
   // first, profile fallback). Codex is filtered via the family-only check
   // since it's a backend executor, not a standalone persona.
@@ -382,7 +393,8 @@ export default async function OperationsPage({
               // tag and ad-hoc subject extraction with a single label +
               // summary line. Wire format (BRAVO_RECORD_STATUS_CHANGED, etc.)
               // stays available in a dim line for the developer-debug case.
-              const p = projectEvent(e);
+              // The resolver swaps lead_id UUIDs for "Bennett Agency" etc.
+              const p = projectEvent(e, recordResolver);
               return (
                 <li key={e.id} className="py-2.5">
                   <div className="flex items-center justify-between gap-3">

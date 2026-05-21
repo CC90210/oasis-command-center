@@ -45,6 +45,12 @@ export const EVENT_TYPE_LABELS: Record<string, string> = {
   "outbound.recorded": "Outbound logged",
   BRAVO_OUTBOUND_FAILED: "Outbound failed",
 
+  // Email-engagement (n8n webhook fires these when SendGrid reports open/click).
+  BRAVO_EMAIL_OPENED: "Email opened",
+  BRAVO_EMAIL_CLICKED: "Email clicked",
+  BRAVO_EMAIL_BOUNCED: "Email bounced",
+  BRAVO_EMAIL_REPLIED: "Email replied",
+
   // Record lifecycle (leads / applications / offers / funded deals).
   BRAVO_RECORD_STATUS_CHANGED: "Record status changed",
   BRAVO_RECORD_CREATED: "Record created",
@@ -88,6 +94,23 @@ function toneFor(eventType: string, severity: string | null | undefined): EventT
 }
 
 /**
+ * Optional resolver: map of record_id (lead or application UUID) → human label.
+ * Operations page batch-resolves these via Supabase before projecting; without
+ * a resolver, the projector falls back to a truncated UUID.
+ */
+export type RecordResolver = Map<string, string>;
+
+function resolveRecordLabel(id: unknown, resolver?: RecordResolver): string {
+  if (!id || typeof id !== "string") return "";
+  if (resolver) {
+    const name = resolver.get(id);
+    if (name) return name;
+  }
+  // Fallback: short prefix so the row is still identifiable / dedupable.
+  return id.slice(0, 8);
+}
+
+/**
  * Build a one-line summary string from the payload — the same field
  * preview-extraction the on-host event_router uses, but more discerning
  * about which fields actually narrate a business event.
@@ -99,8 +122,20 @@ function toneFor(eventType: string, severity: string | null | undefined): EventT
  *     → "lead · cold → follow_up"
  *   outbound.recorded { subject: "Re: Funded deal", channel: "email" }
  *     → "email · Re: Funded deal"
+ *   BRAVO_EMAIL_OPENED { lead_id: "ff7dcd..." } + resolver
+ *     → "Bennett Agency"
  */
-function buildSummary(eventType: string, payload: Record<string, unknown>): string {
+function buildSummary(
+  eventType: string,
+  payload: Record<string, unknown>,
+  resolver?: RecordResolver,
+): string {
+  // Email-engagement events: identify by the lead, not the wire-format UUID.
+  if (eventType.startsWith("BRAVO_EMAIL_")) {
+    const label = resolveRecordLabel(payload.lead_id || payload.record_id, resolver);
+    if (label) return label;
+  }
+
   // Status-change events get arrow notation.
   const from = payload.from || payload.from_stage || payload.previous_stage;
   const to = payload.to || payload.to_stage || payload.new_stage || payload.stage;
@@ -135,6 +170,8 @@ function buildSummary(eventType: string, payload: Record<string, unknown>): stri
   if (payload.kind && payload.agent) return `${payload.agent} · ${payload.kind}`;
 
   // Fallback: a compact key=value sweep over the most-informative fields.
+  // lead_id is resolved through the resolver when supplied so the operator
+  // sees "Bennett Agency" instead of "ff7dcd57-87b5-4823-…".
   const PREVIEW_KEYS = ["agent", "kind", "lead_id", "client", "platform",
                         "amount_cad", "amount_usd", "net_mrr_usd",
                         "session_id", "invoice_id"];
@@ -142,7 +179,12 @@ function buildSummary(eventType: string, payload: Record<string, unknown>): stri
   for (const k of PREVIEW_KEYS) {
     const v = payload[k];
     if (v === undefined || v === null || v === "") continue;
-    parts.push(`${k}=${String(v).slice(0, 40)}`);
+    let rendered = String(v).slice(0, 40);
+    if (k === "lead_id") {
+      const resolved = resolveRecordLabel(v, resolver);
+      if (resolved) rendered = resolved;
+    }
+    parts.push(`${k}=${rendered}`);
     if (parts.length >= 3) break;
   }
   return parts.join(" ") || "—";
@@ -164,17 +206,20 @@ function fallbackLabel(eventType: string): string {
  * Main projector. Always returns a renderable shape — never throws on
  * malformed payloads.
  */
-export function projectEvent(raw: {
-  id: string;
-  event_type: string;
-  payload?: unknown;
-  severity?: string | null;
-  source_agent?: string | null;
-  publisher_agent?: string | null;
-  target_agent?: string | null;
-  published_at?: string | null;
-  created_at?: string | null;
-}): ProjectedEvent {
+export function projectEvent(
+  raw: {
+    id: string;
+    event_type: string;
+    payload?: unknown;
+    severity?: string | null;
+    source_agent?: string | null;
+    publisher_agent?: string | null;
+    target_agent?: string | null;
+    published_at?: string | null;
+    created_at?: string | null;
+  },
+  resolver?: RecordResolver,
+): ProjectedEvent {
   // Normalise payload to a dict.
   let payload: Record<string, unknown> = {};
   if (raw.payload && typeof raw.payload === "object" && !Array.isArray(raw.payload)) {
@@ -196,11 +241,59 @@ export function projectEvent(raw: {
     id: raw.id,
     event_type: raw.event_type,
     label,
-    summary: buildSummary(raw.event_type, payload),
+    summary: buildSummary(raw.event_type, payload, resolver),
     tone: toneFor(raw.event_type, severity),
     severity,
     source_agent: raw.source_agent || raw.publisher_agent || "unknown",
     target_agent: raw.target_agent || "broadcast",
     published_at: raw.published_at || raw.created_at || null,
   };
+}
+
+/**
+ * Build a RecordResolver from a list of events by batch-querying tenant_records
+ * for every lead_id that appears in any payload. Returns a Map keyed by record
+ * UUID with the best-available human label (business_name → contact_name → email).
+ *
+ * Pass a Supabase service client that already scopes by tenant. If the events
+ * list is empty or contains no lead_ids, returns an empty Map.
+ */
+export async function buildRecordResolver(
+  db: { from: (table: string) => unknown },
+  events: Array<{ payload?: unknown }>,
+  options: { tenantId: string | null },
+): Promise<RecordResolver> {
+  const ids = new Set<string>();
+  for (const e of events) {
+    if (!e.payload || typeof e.payload !== "object") continue;
+    const p = e.payload as Record<string, unknown>;
+    const candidate = p.lead_id || p.record_id;
+    if (typeof candidate === "string" && candidate.length >= 20) ids.add(candidate);
+  }
+  if (ids.size === 0 || !options.tenantId) return new Map();
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const query = (db.from("tenant_records") as any)
+    .select("id, data")
+    .eq("tenant_id", options.tenantId)
+    .in("id", Array.from(ids));
+  const result = await query;
+  if (result.error || !Array.isArray(result.data)) return new Map();
+
+  // OASIS leads use {name, company, email}; Sun Biz leads use
+  // {business_name, contact_name, email}. The resolver looks at both
+  // shapes so the Activity Tape works for either tenant unchanged.
+  const map = new Map<string, string>();
+  for (const row of result.data as Array<{ id: string; data: unknown }>) {
+    const d = (row.data && typeof row.data === "object" ? row.data : {}) as Record<string, unknown>;
+    const label =
+      (typeof d.business_name === "string" && d.business_name) ||
+      (typeof d.company === "string" && d.company) ||
+      (typeof d.name === "string" && d.name) ||
+      (typeof d.contact_name === "string" && d.contact_name) ||
+      (typeof d.email === "string" && d.email) ||
+      "";
+    if (label) map.set(row.id, label as string);
+  }
+  return map;
 }
