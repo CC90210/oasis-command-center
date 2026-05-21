@@ -101,12 +101,22 @@ async function loadHealth(tenantId: string, enabledAgents: string[]) {
     : Promise.resolve<ErrorEvent[]>([]);
 
   // 2a + 2b. Failed crons across both registries.
+  //
+  // Empire crons run on CC's local box (cron_engine.py polling SEED_JOBS).
+  // A cron that errored months ago and was never retried will still match
+  // last_result LIKE 'ERROR%' forever — flooding the Health page with stale
+  // phantom failures (e.g. the Atlas Pulse Refresh "script not found" entry
+  // from a one-off config typo months ago). Scope to the last 24h so the
+  // page reflects "what's broken right now," not "what ever broke."
+  // last_run_at IS NULL means the cron never ran — keep those visible too
+  // (a cron that's enabled but never fired is a legit health signal).
   const empireFailedPromise = db
     .from("cron_jobs")
     .select("id, name, schedule, last_run_at, last_result")
     .or(
       "last_result.like.ERROR%,last_result.like.FAILED%,last_result.like.unknown_action_type%",
     )
+    .gte("last_run_at", dayAgoIso)
     .order("last_run_at", { ascending: false })
     .limit(20);
   const tenantFailedPromise = db
