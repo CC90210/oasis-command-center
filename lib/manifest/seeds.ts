@@ -68,19 +68,49 @@ export const OASIS_SEED: TenantManifest = {
         { name: "email", type: "string" },
         { name: "phone", type: "string" },
         { name: "source", type: "enum", enum_values: ["referral", "inbound", "outbound", "event", "cold_outreach", "other"] },
-        // OASIS lead stages (operator-side sales funnel for AI agent
-        // builds + retainers). Different shape from SUN_SEED's funding
-        // funnel — these are the stages CC moves a prospect through when
-        // selling an OASIS agent.
+        // OASIS lead lifecycle (AI agency client funnel). 11 stages cover
+        // every state a prospect or client can be in — from first contact
+        // through active retainer and beyond. Stage metadata (colours,
+        // labels) lives in lib/oasis-stage-meta.ts → OASIS_LEAD_STAGES.
+        // Keep this enum in lock-step with that file; the StageRail reads
+        // the meta but the Supabase column validates against this enum.
         //
-        //   new          — fresh lead, hasn't been contacted yet
-        //   contacted    — first touch sent (cold email / DM / call)
-        //   qualified    — replied with intent, fits the ICP
-        //   proposal     — SOW / proposal sent
-        //   negotiation  — back-and-forth on scope or price
-        //   won          — signed, project kicked off
-        //   lost         — passed, ghosted, or not a fit
-        { name: "stage", type: "enum", enum_values: ["new", "contacted", "qualified", "proposal", "negotiation", "won", "lost"], required: true },
+        //   new_contact    — fresh lead, no outreach sent
+        //   outreach       — first touch sent (cold email / DM / call)
+        //   discovery      — discovery call scheduled or completed
+        //   qualified      — replied with intent and confirmed as a fit
+        //   proposal       — SOW / proposal delivered, awaiting response
+        //   negotiation    — back-and-forth on scope, terms, or price
+        //   onboarding     — deal closed, client being onboarded
+        //   active_client  — live retainer / project in delivery
+        //   churned        — was an active client, now departed
+        //   lost           — never closed (passed, ghosted, not a fit)
+        //   archived       — permanently inactive (no follow-up expected)
+        //
+        // Migration from the prior 7-stage shape (see
+        // database/047_oasis_lead_lifecycle_v2.sql for the SQL):
+        //   new        → new_contact
+        //   contacted  → outreach
+        //   won        → active_client
+        //   qualified / proposal / negotiation / lost → same key (no-op)
+        {
+          name: "stage",
+          type: "enum",
+          enum_values: [
+            "new_contact",
+            "outreach",
+            "discovery",
+            "qualified",
+            "proposal",
+            "negotiation",
+            "onboarding",
+            "active_client",
+            "churned",
+            "lost",
+            "archived",
+          ],
+          required: true,
+        },
         { name: "score", type: "number" },
         { name: "value_estimate", type: "number" },
         { name: "last_contacted_at", type: "date" },
