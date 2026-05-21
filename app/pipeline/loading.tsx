@@ -1,8 +1,13 @@
 /**
- * /pipeline loading skeleton — header + funnel-chart placeholder + chevron-
- * bar placeholder + table-skeleton, matching the real page's shape so the
- * layout doesn't jump when the data arrives.
+ * /pipeline loading skeleton — header + funnel-chart placeholder +
+ * LeadsTableClient skeleton (shared with /leads via
+ * components/leads/LeadsTableClientSkeleton.tsx) + recent inbound /
+ * outbound placeholders. Matches the real page's DOM so the swap from
+ * skeleton → data doesn't reflow.
  */
+
+import { LeadsTableClientSkeleton } from "@/components/leads/LeadsTableClientSkeleton";
+
 export default function PipelineLoading() {
   return (
     <div className="space-y-6 animate-fade-in" aria-busy="true" aria-live="polite">
@@ -13,30 +18,12 @@ export default function PipelineLoading() {
       </div>
       {/* Funnel chart card */}
       <div className="h-48 rounded-xl border border-bg-border bg-bg-elev/40 animate-pulse-slow" />
-      {/* Chevron bar — eleven slim chips */}
-      <div className="flex items-stretch gap-0">
-        {Array.from({ length: 11 }).map((_, i) => (
-          <div
-            key={i}
-            className="h-9 w-24 rounded-md bg-bg-elev animate-pulse-slow -ml-[1px]"
-          />
-        ))}
-      </div>
-      {/* View-toggle pills */}
-      <div className="flex gap-2">
-        <div className="h-7 w-16 rounded-md bg-bg-elev/60 animate-pulse-slow" />
-        <div className="h-7 w-16 rounded-md bg-bg-elev/60 animate-pulse-slow" />
-      </div>
-      {/* Table */}
-      <div className="rounded-xl border border-bg-border bg-bg-elev/40 overflow-hidden">
-        <div className="h-10 border-b border-bg-border bg-bg-elev/60 animate-pulse-slow" />
-        {Array.from({ length: 6 }).map((_, i) => (
-          <div
-            key={i}
-            className="h-12 border-b border-bg-border last:border-0 animate-pulse-slow"
-            style={{ animationDelay: `${i * 80}ms` }}
-          />
-        ))}
+      {/* The actual leads table (shared skeleton). 11-stage strip for OASIS. */}
+      <LeadsTableClientSkeleton stageCount={11} rowCount={6} />
+      {/* Recent inbound / outbound — 2-column grid below the table */}
+      <div className="grid lg:grid-cols-2 gap-6">
+        <div className="h-56 rounded-xl border border-bg-border bg-bg-elev/40 animate-pulse-slow" />
+        <div className="h-56 rounded-xl border border-bg-border bg-bg-elev/40 animate-pulse-slow" />
       </div>
     </div>
   );
