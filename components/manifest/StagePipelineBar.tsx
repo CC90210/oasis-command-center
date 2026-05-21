@@ -38,12 +38,17 @@ export function StagePipelineBar({ stages, activeKey, basePath, counts, paramNam
   return (
     <nav
       aria-label="Pipeline stages"
-      className="w-full overflow-x-auto pb-1"
+      // Mobile polish (B.1): touch-action allows native momentum scrolling on
+      // iOS Safari; the right-edge mask fades the last chevron's edge so an
+      // overflowing bar visually telegraphs "more to the right." On viewports
+      // ≥640px the content fits — the mask becomes a no-op because the row
+      // ends before the fade region begins.
+      className="w-full overflow-x-auto pb-1 [-webkit-overflow-scrolling:touch] [touch-action:pan-x] [scrollbar-width:thin] [mask-image:linear-gradient(to_right,black_calc(100%-32px),transparent)] sm:[mask-image:none]"
     >
       <ul className="flex items-stretch gap-0 min-w-max">
-        {/* "All" pill — first; renders without the chevron shape so the
-            arrow chain visually starts at the first stage. */}
-        <li className="shrink-0">
+        {/* "All" pill — sticky-left on overflow so the operator can always
+            tap "All" to escape a filter without scrolling the bar back. */}
+        <li className="shrink-0 sticky left-0 z-10 bg-bg-deep">
           <Link
             href={basePath}
             className={`inline-flex items-center px-3 h-9 text-[12px] font-semibold uppercase tracking-wider rounded-l-md border border-r-0 border-bg-border ${

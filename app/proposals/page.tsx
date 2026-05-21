@@ -81,6 +81,11 @@ export default async function ProposalsPage({
           linkBase="/proposals"
           where={where}
           canCreate
+          emptyStateMessage={
+            stageFilter
+              ? `No proposals in ${stageFilter.replace(/_/g, " ")} yet. Proposals land here as you send them; tracking pixels and signed contracts move them through the lifecycle automatically.`
+              : "No proposals yet. A proposal tracks the lifecycle of a single client deal — Draft → Sent → Viewed → Signed (or Declined / Expired). Click \"+ New proposal\" to start one for an existing lead."
+          }
         />
       ) : (
         <Card>

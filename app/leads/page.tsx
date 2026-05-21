@@ -88,7 +88,13 @@ export default async function LeadsPage() {
       />
 
       {tenantId || demoMode ? (
-        <LeadsTableClient initialLeads={leads} stages={stages} />
+        <LeadsTableClient
+          initialLeads={leads}
+          stages={stages}
+          // OASIS lead detail lives at /pipeline/[id], not /leads/[id]
+          // (no /leads/[id] route exists). SunBiz keeps the default.
+          detailBase={isOasis ? "/pipeline" : "/leads"}
+        />
       ) : (
         <div className="rounded-xl border border-bg-border bg-bg-elev/40 p-8 text-center text-fg-muted">
           Sign in to see your leads.

@@ -64,6 +64,14 @@ type Props = {
    * operator can spot stale legacy values without losing them.
    */
   stages?: LeadsTableStage[];
+  /**
+   * Tenant-specific lead-detail URL base. SunBiz lead detail lives at
+   * /leads/<id> (resolved by the tenant catch-all). OASIS doesn't have
+   * an /leads/[id] route — it shares the lead-detail surface with
+   * /pipeline/[id]. Default `"/leads"` keeps the SunBiz callers working;
+   * app/leads/page.tsx passes `"/pipeline"` for OASIS.
+   */
+  detailBase?: string;
 };
 
 /** SunBiz Lead Pipeline tabs — Salesforce-parity rework 2026-05-17.
@@ -89,8 +97,9 @@ type SortDir = "asc" | "desc";
 
 const PAGE_SIZE = 50;
 
-export function LeadsTableClient({ initialLeads, stages }: Props) {
+export function LeadsTableClient({ initialLeads, stages, detailBase }: Props) {
   const STAGES = stages && stages.length > 0 ? stages : SUNBIZ_STAGES;
+  const effectiveDetailBase = detailBase || "/leads";
   const [search, setSearch] = useState("");
   const [stage, setStage] = useState<string>("all");
   const [sortKey, setSortKey] = useState<SortKey>("last_touch");
@@ -318,7 +327,7 @@ export function LeadsTableClient({ initialLeads, stages }: Props) {
           </thead>
           <tbody>
             {paginated.map((lead) => (
-              <LeadRow key={lead.id} lead={lead} stageLabel={STAGES.find((s) => s.value === leadStage(lead))?.label} stageTone={STAGES.find((s) => s.value === leadStage(lead))?.tone} />
+              <LeadRow key={lead.id} lead={lead} stageLabel={STAGES.find((s) => s.value === leadStage(lead))?.label} stageTone={STAGES.find((s) => s.value === leadStage(lead))?.tone} detailBase={effectiveDetailBase} />
             ))}
           </tbody>
         </table>
@@ -396,10 +405,12 @@ function LeadRow({
   lead,
   stageLabel,
   stageTone,
+  detailBase,
 }: {
   lead: Lead;
   stageLabel?: string;
   stageTone?: string;
+  detailBase: string;
 }) {
   const initials =
     (lead.name || "")
@@ -414,7 +425,7 @@ function LeadRow({
   return (
     <tr className="border-b border-bg-border last:border-0 hover:bg-bg-elev/30 transition-colors cursor-pointer">
       <td className="px-4 py-3">
-        <Link href={`/leads/${lead.id}`} className="flex items-center gap-3">
+        <Link href={`${detailBase}/${lead.id}`} className="flex items-center gap-3">
           <div className="w-9 h-9 rounded-full bg-bg-deep border border-bg-border flex items-center justify-center text-[11px] font-bold text-fg-muted shrink-0">
             {initials}
           </div>

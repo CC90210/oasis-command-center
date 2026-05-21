@@ -118,6 +118,11 @@ export default async function PipelinePage({
               linkBase="/pipeline"
               where={where}
               canCreate
+              emptyStateMessage={
+                stageFilter && activeStageLabel
+                  ? `No leads in ${activeStageLabel} yet. Leads land here as they progress through the pipeline — click "All" above to see every stage, or click "+ New lead" to drop one directly into this stage.`
+                  : "Add your first lead to start building your pipeline. New leads land in New Contact and move through Outreach, Discovery, Qualified, and so on as you (or the agents) act on them."
+              }
             />
           ) : (
             <ManifestKanban

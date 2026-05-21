@@ -37,6 +37,14 @@ type Props = {
    * one (see StageRail in app/pipeline/page.tsx).
    */
   where?: Record<string, string | null>;
+  /**
+   * Operator-friendly override for the empty-state copy. When provided,
+   * replaces the default "No <entity> records yet..." message. Callers
+   * pass tenant-specific language here (e.g. OASIS /pipeline → "Add
+   * your first lead to start building your pipeline") so the empty
+   * state never reads like developer placeholder.
+   */
+  emptyStateMessage?: string;
 };
 
 // rowMatchesQuery moved to lib/search-filter.ts.
@@ -61,6 +69,7 @@ export async function ManifestTable({
   linkBase,
   query,
   where,
+  emptyStateMessage,
 }: Props) {
   const effectiveLinkBase = linkBase ?? `/t/${tenantSlug}/${page.path}`;
   // Read either from DB (real tenant) or the supplied demo set. When
@@ -108,9 +117,22 @@ export async function ManifestTable({
         <div className="p-5">
           <EmptyState
             message={
-              tenantId
-                ? `No ${entity.label.toLowerCase()} records yet. Use the AI editor to add seed data or hook up an integration.`
-                : `This is a preview of how the ${entity.label.toLowerCase()} table will render once your tenant is provisioned.`
+              emptyStateMessage
+                ? emptyStateMessage
+                : tenantId
+                  ? `No ${entity.label.toLowerCase()} records yet. Use the AI editor to add seed data or hook up an integration.`
+                  : `This is a preview of how the ${entity.label.toLowerCase()} table will render once your tenant is provisioned.`
+            }
+            cta={
+              canCreate && tenantId ? (
+                <Link
+                  href={`${effectiveLinkBase}/new`}
+                  className="btn-primary inline-flex items-center gap-1.5 text-xs"
+                >
+                  <Plus className="h-3.5 w-3.5" />
+                  New {entity.label.toLowerCase()}
+                </Link>
+              ) : undefined
             }
           />
         </div>
