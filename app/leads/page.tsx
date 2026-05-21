@@ -17,33 +17,10 @@ import { safe } from "@/lib/api-helpers";
 import { cookies } from "next/headers";
 import { DEMO_CLIENT_PROFILE_COOKIE } from "@/lib/client-profiles";
 import { SUNBIZ_DEMO_LEADS } from "@/lib/sunbiz-demo-data";
-import { LeadsTableClient, type LeadsTableStage } from "@/components/leads/LeadsTableClient";
-import { OASIS_LEAD_STAGES } from "@/lib/oasis-stage-meta";
+import { LeadsTableClient } from "@/components/leads/LeadsTableClient";
+import { OASIS_LEAD_STAGE_TABS } from "@/lib/oasis-stage-meta";
 
 export const dynamic = "force-dynamic";
-
-// Tone hints for OASIS stages — maps stage semantics to the same Tailwind
-// classes the SunBiz tabs use, keeping the visual language consistent
-// across tenants. Mirrors the bg/fg colour intent in lib/oasis-stage-meta.
-const OASIS_STAGE_TONES: Record<string, string> = {
-  new_contact:   "text-fg-dim",
-  outreach:      "text-status-info",
-  discovery:     "text-status-info",
-  qualified:     "text-status-engaged",
-  proposal:      "text-accent",
-  negotiation:   "text-accent",
-  onboarding:    "text-status-warm",
-  active_client: "text-status-engaged",
-  churned:       "text-status-warm",
-  lost:          "text-status-warm",
-  archived:      "text-fg-dim",
-};
-
-const OASIS_STAGES: LeadsTableStage[] = OASIS_LEAD_STAGES.map((s) => ({
-  value: s.key,
-  label: s.label,
-  tone: OASIS_STAGE_TONES[s.key] || "text-fg-muted",
-}));
 
 export default async function LeadsPage() {
   const profile = await safe("leads.profile", getActiveProfile(), null);
@@ -62,7 +39,7 @@ export default async function LeadsPage() {
     : null;
   const tenantSlug = (tenant?.slug || "").toLowerCase();
   const isOasis = tenantSlug.startsWith("oasis");
-  const stages = isOasis ? OASIS_STAGES : undefined; // undefined → SunBiz default
+  const stages = isOasis ? OASIS_LEAD_STAGE_TABS : undefined; // undefined → SunBiz default
 
   const leads = demoMode
     ? SUNBIZ_DEMO_LEADS

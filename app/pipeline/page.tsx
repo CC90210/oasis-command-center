@@ -1,3 +1,22 @@
+/**
+ * /pipeline — OASIS lead pipeline.
+ *
+ * 2026-05-21 rewrite: this page now uses LeadsTableClient — the SAME
+ * component Sun Biz's /leads page uses. Same horizontal pill-tab strip,
+ * same search input, same sortable table, same row click → detail
+ * drawer behaviour. The only OASIS-specific bits are:
+ *
+ *   - 11-stage list passed via the `stages` prop (lib/oasis-stage-meta)
+ *     instead of SunBiz's 12-stage funding funnel.
+ *   - detailBase="/pipeline" so row clicks land on /pipeline/[id]
+ *     (OASIS lead detail) instead of /leads/[id] (SunBiz catch-all).
+ *
+ * Funnel chart at the top and the Recent Inbound / Recent Outbound
+ * cards at the bottom stay — they're OASIS-only daily-ops surfaces.
+ * Everything in the middle (stage tabs + table) is the literal Sun Biz
+ * UI, so there's no second-implementation drift to maintain.
+ */
+
 import Link from "next/link";
 import { Card, PageHeader, Tag, EmptyState } from "@/components/Card";
 import { PipelineFunnel } from "@/components/charts/PipelineFunnel";
@@ -7,56 +26,34 @@ import {
   recentOutbound,
   recentInbound,
   getActiveProfile,
+  getLeadsForTenant,
 } from "@/lib/queries";
 import { safe } from "@/lib/api-helpers";
-import { ManifestKanban } from "@/components/manifest/ManifestKanban";
-import { ManifestTable } from "@/components/manifest/ManifestTable";
-import { StageRail } from "@/components/manifest/StageRail";
-import { OASIS_SEED } from "@/lib/manifest/seeds";
-import { OASIS_LEAD_STAGES, findOasisStage } from "@/lib/oasis-stage-meta";
+import { LeadsTableClient } from "@/components/leads/LeadsTableClient";
+import { OASIS_LEAD_STAGE_TABS } from "@/lib/oasis-stage-meta";
 
 export const dynamic = "force-dynamic";
 
-export default async function PipelinePage({
-  searchParams,
-}: {
-  searchParams?: Promise<{ view?: string; stage?: string }>;
-}) {
-  const sp = (await searchParams) || {};
-  // Default view is now "table" — matches the Sun Biz pipeline shape and
-  // surfaces the chevron-bar + scrollable lead list every other CRM uses.
-  // Kanban stays as an opt-in for the column-view fans.
-  const view: "kanban" | "table" = sp.view === "kanban" ? "kanban" : "table";
-  const stageFilter = typeof sp.stage === "string" && sp.stage.trim() ? sp.stage.trim() : null;
-  const activeStageLabel = stageFilter ? findOasisStage("lead", stageFilter)?.label || stageFilter : null;
-
+export default async function PipelinePage() {
   const profile = await safe("pipeline.profile", getActiveProfile(), null);
   const tenantId = profile?.tenant_id || "";
 
-  const [pipeline, outbound, inbound] = await Promise.all([
-    safe("pipeline.breakdown", pipelineBreakdown(tenantId, true), { stages: {} as Record<string, number>, total: 0, sources: {} as Record<string, number> }),
+  const [pipeline, outbound, inbound, leads] = await Promise.all([
+    safe(
+      "pipeline.breakdown",
+      pipelineBreakdown(tenantId, true),
+      { stages: {} as Record<string, number>, total: 0, sources: {} as Record<string, number> },
+    ),
     safe("pipeline.recent_outbound", recentOutbound(tenantId, 20), []),
     safe("pipeline.recent_inbound", recentInbound(tenantId, 20), []),
+    safe("pipeline.leads", tenantId ? getLeadsForTenant(tenantId, 500) : Promise.resolve([]), []),
   ]);
-
-  // OASIS Pipeline: chevron-bar across the top (Sun Biz parity), filterable
-  // table below. Stage counts come from pipelineBreakdown which already
-  // groups by `data->>stage` — same source the funnel chart reads, so the
-  // two surfaces can't disagree. Stages missing from the breakdown render
-  // as 0 in the chevron, which is intentional: empty stages stay visible
-  // so the operator can drop a lead INTO them.
-  const leadEntity = OASIS_SEED.data_model?.find((e) => e.name === "lead");
-  const where = stageFilter ? { stage: stageFilter } : undefined;
 
   return (
     <div className="space-y-6 animate-fade-in">
       <PageHeader
         title="Pipeline"
-        subtitle={
-          stageFilter
-            ? `${pipeline.stages[stageFilter] || 0} lead${(pipeline.stages[stageFilter] || 0) === 1 ? "" : "s"} in ${activeStageLabel}`
-            : `${pipeline.total} lead${pipeline.total === 1 ? "" : "s"} across the funnel`
-        }
+        subtitle={`${pipeline.total} lead${pipeline.total === 1 ? "" : "s"} across the funnel`}
       />
 
       <section>
@@ -65,86 +62,15 @@ export default async function PipelinePage({
         </Card>
       </section>
 
-      {leadEntity ? (
-        <>
-          {/* Chevron-bar across the top — clicking a stage filters the
-              table below to that stage. "All" pill returns to the
-              unfiltered view. Mirrors the Sun Biz /leads pattern. */}
-          <StageRail
-            tenantSlug="oasis"
-            stages={OASIS_LEAD_STAGES}
-            activeKey={stageFilter}
-            basePath="/pipeline"
-            counts={pipeline.stages}
-          />
-
-          {/* View toggle (table default, kanban opt-in). Stays below the
-              chevron so the chevron is the dominant navigation. The
-              stage param is preserved across view switches. */}
-          <div className="flex items-center gap-1">
-            <Link
-              href={`/pipeline?view=table${stageFilter ? `&stage=${stageFilter}` : ""}`}
-              className={`text-[10px] uppercase tracking-wider px-2.5 py-1 rounded-md border ${
-                view === "table"
-                  ? "border-accent/50 bg-accent/10 text-accent"
-                  : "border-bg-border bg-bg-elev/40 text-fg-muted hover:text-fg"
-              }`}
-            >
-              Table
-            </Link>
-            <Link
-              href={`/pipeline?view=kanban${stageFilter ? `&stage=${stageFilter}` : ""}`}
-              className={`text-[10px] uppercase tracking-wider px-2.5 py-1 rounded-md border ${
-                view === "kanban"
-                  ? "border-accent/50 bg-accent/10 text-accent"
-                  : "border-bg-border bg-bg-elev/40 text-fg-muted hover:text-fg"
-              }`}
-            >
-              Kanban
-            </Link>
-          </div>
-
-          {view === "table" ? (
-            <ManifestTable
-              tenantSlug="oasis"
-              tenantId={tenantId || null}
-              entity={leadEntity}
-              page={{
-                path: "pipeline",
-                label: stageFilter && activeStageLabel ? `Pipeline · ${activeStageLabel}` : "Pipeline",
-                kind: "table",
-                entity: "lead",
-              }}
-              linkBase="/pipeline"
-              where={where}
-              canCreate
-              emptyStateMessage={
-                stageFilter && activeStageLabel
-                  ? `No leads in ${activeStageLabel} yet. Leads land here as they progress through the pipeline — click "All" above to see every stage, or click "+ New lead" to drop one directly into this stage.`
-                  : "Add your first lead to start building your pipeline. New leads land in New Contact and move through Outreach, Discovery, Qualified, and so on as you (or the agents) act on them."
-              }
-            />
-          ) : (
-            <ManifestKanban
-              tenantSlug="oasis"
-              tenantId={tenantId || null}
-              entity={leadEntity}
-              page={{
-                path: "pipeline",
-                label: stageFilter && activeStageLabel ? `Pipeline · ${activeStageLabel}` : "Pipeline",
-                kind: "kanban",
-                entity: "lead",
-                config: { group_by: "stage" },
-              }}
-              linkBase="/pipeline"
-              sortBy="ai_score"
-              where={where}
-            />
-          )}
-        </>
+      {tenantId ? (
+        <LeadsTableClient
+          initialLeads={leads}
+          stages={OASIS_LEAD_STAGE_TABS}
+          detailBase="/pipeline"
+        />
       ) : (
         <Card>
-          <EmptyState message="OASIS lead entity not defined in the manifest. Open the AI editor at /t/oasis/editor to add it." />
+          <EmptyState message="Sign in to see your pipeline." />
         </Card>
       )}
 

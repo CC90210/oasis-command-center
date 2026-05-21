@@ -51,6 +51,37 @@ export const OASIS_LEAD_STAGES: StageMeta[] = [
 
 export const OASIS_LEAD_STAGE_KEYS = OASIS_LEAD_STAGES.map((s) => s.key);
 
+/**
+ * LeadsTableClient stage-tab descriptor for OASIS. Same component
+ * Sun Biz's /leads uses; this is the shape it expects for the
+ * `stages` prop. Tone classes map per-stage semantics to the
+ * dashboard's status palette (engaged / info / warm / fg-dim) so
+ * the active-tab text colour reads consistently with the rest of
+ * the UI. Imported by app/pipeline/page.tsx + app/leads/page.tsx —
+ * single source of truth so the two surfaces can't drift apart.
+ */
+export type OasisStageTab = { value: string; label: string; tone: string };
+
+const OASIS_STAGE_TONES: Record<string, string> = {
+  new_contact:   "text-fg-dim",
+  outreach:      "text-status-info",
+  discovery:     "text-status-info",
+  qualified:     "text-status-engaged",
+  proposal:      "text-accent",
+  negotiation:   "text-accent",
+  onboarding:    "text-status-warm",
+  active_client: "text-status-engaged",
+  churned:       "text-status-warm",
+  lost:          "text-status-warm",
+  archived:      "text-fg-dim",
+};
+
+export const OASIS_LEAD_STAGE_TABS: OasisStageTab[] = OASIS_LEAD_STAGES.map((s) => ({
+  value: s.key,
+  label: s.label,
+  tone: OASIS_STAGE_TONES[s.key] || "text-fg-muted",
+}));
+
 export function getOasisStageMeta(entityName: string): StageMeta[] {
   if (entityName === "lead") return OASIS_LEAD_STAGES;
   // Proposals/clients share the lead stages today (proposal entity is
