@@ -19,17 +19,29 @@
 
 import { NextResponse, type NextRequest } from "next/server";
 import { resolveSessionContext } from "@/lib/api-auth";
-import { dispatchLeadStageEvent } from "@/lib/lead-stage-dispatcher";
+import { dispatchLeadStageEvent, dispatchOasisOnlyEvent } from "@/lib/lead-stage-dispatcher";
+import type { OasisLeadStageEvent } from "@/lib/oasis-lead-stage-engine";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-const OPERATOR_TRIGGERABLE = new Set<string>([
+const COMMON_OPERATOR_TRIGGERABLE = new Set<string>([
   "outbound_email_sent",
   "outbound_email_queued",
   "form_signed",
+]);
+
+const OASIS_OPERATOR_TRIGGERABLE = new Set<OasisLeadStageEvent["type"]>([
+  "discovery_call_scheduled",
+  "lead_qualified",
+  "proposal_sent",
+  "proposal_viewed",
+  "contract_signed",
+  "onboarding_complete",
+  "lead_replied_negative",
+  "contract_ended",
 ]);
 
 export async function POST(
@@ -52,18 +64,24 @@ export async function POST(
     return NextResponse.json({ ok: false, error: "invalid_json" }, { status: 400 });
   }
   const type = typeof body.type === "string" ? body.type : "";
-  if (!OPERATOR_TRIGGERABLE.has(type)) {
+  if (!COMMON_OPERATOR_TRIGGERABLE.has(type) && !OASIS_OPERATOR_TRIGGERABLE.has(type as OasisLeadStageEvent["type"])) {
     return NextResponse.json(
       { ok: false, error: "event_type_not_allowed", type },
       { status: 400 },
     );
   }
 
-  const result = await dispatchLeadStageEvent({
-    type: type as "outbound_email_sent" | "outbound_email_queued" | "form_signed",
-    tenantId: sess.tenantId,
-    leadId,
-  });
+  const result = OASIS_OPERATOR_TRIGGERABLE.has(type as OasisLeadStageEvent["type"])
+    ? await dispatchOasisOnlyEvent({
+        type: type as OasisLeadStageEvent["type"],
+        tenantId: sess.tenantId,
+        leadId,
+      })
+    : await dispatchLeadStageEvent({
+        type: type as "outbound_email_sent" | "outbound_email_queued" | "form_signed",
+        tenantId: sess.tenantId,
+        leadId,
+      });
 
   return NextResponse.json({
     ok: true,

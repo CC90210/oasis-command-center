@@ -1,9 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { resolveSessionContext } from "@/lib/api-auth";
 import {
-  CHAT_ATTACHMENT_ALLOWED_MIME,
-  MAX_CHAT_ATTACHMENT_BYTES,
   MAX_CHAT_ATTACHMENTS_PER_TURN,
+  normalizeAttachmentMimeType,
   summarizeAttachment,
   uploadChatAttachment,
 } from "@/lib/chat-attachments";
@@ -44,24 +43,7 @@ export async function POST(req: NextRequest) {
     if (file.size <= 0) {
       return NextResponse.json({ ok: false, error: "empty_file", filename: file.name }, { status: 400 });
     }
-    if (file.size > MAX_CHAT_ATTACHMENT_BYTES) {
-      return NextResponse.json(
-        {
-          ok: false,
-          error: "file_too_large",
-          filename: file.name,
-          max_bytes: MAX_CHAT_ATTACHMENT_BYTES,
-        },
-        { status: 413 },
-      );
-    }
-    const mime = (file.type || mimeFromName(file.name) || "application/octet-stream").toLowerCase();
-    if (!CHAT_ATTACHMENT_ALLOWED_MIME.has(mime)) {
-      return NextResponse.json(
-        { ok: false, error: "unsupported_mime_type", filename: file.name, mime },
-        { status: 415 },
-      );
-    }
+    const mime = normalizeAttachmentMimeType(file.name, file.type);
 
     const row = await uploadChatAttachment({
       tenantId: sess.tenantId,
@@ -77,22 +59,4 @@ export async function POST(req: NextRequest) {
   }
 
   return NextResponse.json({ ok: true, attachments: uploaded });
-}
-
-function mimeFromName(name: string): string | null {
-  const lower = name.toLowerCase();
-  if (lower.endsWith(".csv")) return "text/csv";
-  if (lower.endsWith(".txt")) return "text/plain";
-  if (lower.endsWith(".md")) return "text/markdown";
-  if (lower.endsWith(".json")) return "application/json";
-  if (lower.endsWith(".pdf")) return "application/pdf";
-  if (lower.endsWith(".doc")) return "application/msword";
-  if (lower.endsWith(".docx")) {
-    return "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
-  }
-  if (lower.endsWith(".xls")) return "application/vnd.ms-excel";
-  if (lower.endsWith(".xlsx")) {
-    return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
-  }
-  return null;
 }

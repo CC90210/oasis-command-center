@@ -143,7 +143,7 @@ export function LeadTimelinePanel({ leadId }: { leadId: string }) {
 
       {!loading && events && events.length === 0 && (
         <div className="text-sm text-fg-dim italic py-6 text-center">
-          No activity yet. Send a drip or upload a doc and it&apos;ll appear here.
+          No activity yet. Send a message or upload a doc and it&apos;ll appear here.
         </div>
       )}
 

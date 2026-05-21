@@ -14,7 +14,7 @@
  */
 
 import { fetchWithRetry } from "./retry";
-import { parseSSE, safeText } from "./sse-parser";
+import { asSSEArray, asSSERecord, parseSSE, safeText } from "./sse-parser";
 
 export type ChatRole = "system" | "user" | "assistant";
 export type ChatMessage = { role: ChatRole; content: string };
@@ -308,15 +308,15 @@ async function* streamOllama(req: ChatRequest): AsyncGenerator<StreamEvent> {
   let inputTokens = 0;
   let outputTokens = 0;
   for await (const event of parseSSE(res.body)) {
-    const data = event.data;
-    if (!data || data === "[DONE]") continue;
-    if (typeof data === "string") continue;
-    const choice = data.choices?.[0];
-    const delta = choice?.delta?.content;
+    const data = asSSERecord(event.data);
+    if (!data) continue;
+    const choice = firstSSERecord(data.choices);
+    const delta = asSSERecord(choice?.delta)?.content;
     if (typeof delta === "string" && delta.length) yield { type: "delta", text: delta };
-    if (data.usage) {
-      inputTokens = data.usage.prompt_tokens ?? inputTokens;
-      outputTokens = data.usage.completion_tokens ?? outputTokens;
+    const usage = asSSERecord(data.usage);
+    if (usage) {
+      inputTokens = numberOr(usage.prompt_tokens, inputTokens);
+      outputTokens = numberOr(usage.completion_tokens, outputTokens);
     }
   }
   yield { type: "done", inputTokens, outputTokens };
@@ -361,15 +361,15 @@ async function* streamOpenRouter(req: ChatRequest): AsyncGenerator<StreamEvent> 
   let inputTokens = 0;
   let outputTokens = 0;
   for await (const event of parseSSE(res.body)) {
-    const data = event.data;
-    if (!data || data === "[DONE]") continue;
-    if (typeof data === "string") continue;
-    const choice = data.choices?.[0];
-    const delta = choice?.delta?.content;
+    const data = asSSERecord(event.data);
+    if (!data) continue;
+    const choice = firstSSERecord(data.choices);
+    const delta = asSSERecord(choice?.delta)?.content;
     if (typeof delta === "string" && delta.length) yield { type: "delta", text: delta };
-    if (data.usage) {
-      inputTokens = data.usage.prompt_tokens ?? inputTokens;
-      outputTokens = data.usage.completion_tokens ?? outputTokens;
+    const usage = asSSERecord(data.usage);
+    if (usage) {
+      inputTokens = numberOr(usage.prompt_tokens, inputTokens);
+      outputTokens = numberOr(usage.completion_tokens, outputTokens);
     }
   }
   yield { type: "done", inputTokens, outputTokens };
@@ -411,15 +411,17 @@ async function* streamAnthropic(req: ChatRequest): AsyncGenerator<StreamEvent> {
   let inputTokens = 0;
   let outputTokens = 0;
   for await (const event of parseSSE(res.body)) {
+    const data = asSSERecord(event.data);
+    if (!data) continue;
     if (event.event === "message_start") {
-      const usage = event.data?.message?.usage;
-      if (usage) inputTokens = usage.input_tokens ?? 0;
+      const usage = asSSERecord(asSSERecord(data.message)?.usage);
+      if (usage) inputTokens = numberOr(usage.input_tokens, 0);
     } else if (event.event === "content_block_delta") {
-      const text = event.data?.delta?.text;
+      const text = asSSERecord(data.delta)?.text;
       if (typeof text === "string") yield { type: "delta", text };
     } else if (event.event === "message_delta") {
-      const usage = event.data?.usage;
-      if (usage?.output_tokens) outputTokens = usage.output_tokens;
+      const usage = asSSERecord(data.usage);
+      if (typeof usage?.output_tokens === "number") outputTokens = usage.output_tokens;
     } else if (event.event === "message_stop") {
       break;
     }
@@ -464,14 +466,15 @@ async function* streamOpenAI(req: ChatRequest): AsyncGenerator<StreamEvent> {
   let inputTokens = 0;
   let outputTokens = 0;
   for await (const event of parseSSE(res.body)) {
-    const data = event.data;
-    if (!data || data === "[DONE]") continue;
-    const choice = data.choices?.[0];
-    const delta = choice?.delta?.content;
+    const data = asSSERecord(event.data);
+    if (!data) continue;
+    const choice = firstSSERecord(data.choices);
+    const delta = asSSERecord(choice?.delta)?.content;
     if (typeof delta === "string" && delta.length) yield { type: "delta", text: delta };
-    if (data.usage) {
-      inputTokens = data.usage.prompt_tokens ?? inputTokens;
-      outputTokens = data.usage.completion_tokens ?? outputTokens;
+    const usage = asSSERecord(data.usage);
+    if (usage) {
+      inputTokens = numberOr(usage.prompt_tokens, inputTokens);
+      outputTokens = numberOr(usage.completion_tokens, outputTokens);
     }
   }
   yield { type: "done", inputTokens, outputTokens };
@@ -524,22 +527,33 @@ async function* streamGoogle(req: ChatRequest): AsyncGenerator<StreamEvent> {
   let inputTokens = 0;
   let outputTokens = 0;
   for await (const event of parseSSE(res.body)) {
-    const data = event.data;
+    const data = asSSERecord(event.data);
     if (!data) continue;
-    const parts = data.candidates?.[0]?.content?.parts;
+    const candidate = firstSSERecord(data.candidates);
+    const parts = asSSEArray(asSSERecord(candidate?.content)?.parts);
     if (Array.isArray(parts)) {
       for (const p of parts) {
-        if (typeof p?.text === "string" && p.text.length) {
-          yield { type: "delta", text: p.text };
+        const part = asSSERecord(p);
+        if (typeof part?.text === "string" && part.text.length) {
+          yield { type: "delta", text: part.text };
         }
       }
     }
-    if (data.usageMetadata) {
-      inputTokens = data.usageMetadata.promptTokenCount ?? inputTokens;
-      outputTokens = data.usageMetadata.candidatesTokenCount ?? outputTokens;
+    const usageMetadata = asSSERecord(data.usageMetadata);
+    if (usageMetadata) {
+      inputTokens = numberOr(usageMetadata.promptTokenCount, inputTokens);
+      outputTokens = numberOr(usageMetadata.candidatesTokenCount, outputTokens);
     }
   }
   yield { type: "done", inputTokens, outputTokens };
+}
+
+function firstSSERecord(value: unknown): Record<string, unknown> | null {
+  return asSSERecord(asSSEArray(value)[0]);
+}
+
+function numberOr(value: unknown, fallback: number): number {
+  return typeof value === "number" ? value : fallback;
 }
 
 // SSE parser + safeText now live in lib/sse-parser.ts (shared with

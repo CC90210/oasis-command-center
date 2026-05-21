@@ -18,12 +18,21 @@
  */
 
 // `data` is either a parsed JSON value, the raw string when JSON parse
-// fails, or the literal "[DONE]" sentinel. `any` is deliberate here so
+// fails, or the literal "[DONE]" sentinel. Callers narrow data locally so
 // every provider integration that consumes this generator can read
 // shape-specific fields (choices, delta, usageMetadata) without each
 // site re-narrowing — the SSE wire is genuinely untyped at the source.
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-export type SSEFrame = { event: string; data: any };
+export type SSEFrame = { event: string; data: unknown };
+
+export function asSSERecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+export function asSSEArray(value: unknown): unknown[] {
+  return Array.isArray(value) ? value : [];
+}
 
 export async function* parseSSE(
   body: ReadableStream<Uint8Array>

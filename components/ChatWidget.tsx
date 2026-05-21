@@ -42,6 +42,7 @@ import Link from "next/link";
 import { useSearchParams, useRouter, usePathname } from "next/navigation";
 import { getAgentInfo } from "@/lib/agents";
 import { BRIDGE_CHAT_BASE } from "@/lib/agent-roots";
+import { getBrowserSupabase } from "@/lib/supabase-browser";
 
 type Role = "user" | "assistant" | "system";
 type ChatAttachmentSummary = {
@@ -107,6 +108,13 @@ const CLI_RUNTIME_LABELS: Record<CliRuntime, string> = {
   codex: "Codex CLI",
   gemini: "Gemini CLI",
 };
+const MAX_ATTACHMENTS_PER_TURN = 5;
+const TEXT_ATTACHMENT_READ_BYTES = 512 * 1024;
+const MAX_ATTACHMENT_EXCERPT_CHARS = 120_000;
+const CHAT_FETCH_TIMEOUT_MS = 90_000;
+const BRIDGE_TOOL_TIMEOUT_MS = 120_000;
+const RESUME_FETCH_TIMEOUT_MS = 90_000;
+const SSE_INACTIVITY_TIMEOUT_MS = 75_000;
 
 /**
  * One-shot migration from the v2 vocabulary to the v3 vocabulary.
@@ -806,30 +814,87 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
     const files = Array.from(fileList || []);
     if (files.length === 0) return;
     setAttachmentError(null);
-    const remainingSlots = Math.max(0, 5 - pendingAttachments.length);
+    const remainingSlots = Math.max(0, MAX_ATTACHMENTS_PER_TURN - pendingAttachments.length);
     if (remainingSlots <= 0) {
       setAttachmentError("Maximum 5 files per turn.");
       return;
     }
     const selected = files.slice(0, remainingSlots);
-    const form = new FormData();
-    selected.forEach((file) => form.append("files", file));
-    form.append("agent_key", agent);
-    if (sessionId) form.append("session_id", sessionId);
+    const uploaded: ChatAttachmentSummary[] = [];
 
     setUploadingAttachments(true);
     try {
-      const res = await fetch("/api/chat/attachments", { method: "POST", body: form });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok || !data.ok) {
-        setAttachmentError(data?.error || `upload_failed_${res.status}`);
-        return;
+      const signRes = await fetchWithTimeout("/api/chat/attachments/sign", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          agent_key: agent,
+          session_id: sessionId,
+          files: selected.map((file) => ({
+            filename: file.name,
+            mime_type: file.type || null,
+            size_bytes: file.size,
+          })),
+        }),
+        timeoutMs: CHAT_FETCH_TIMEOUT_MS,
+      });
+      const signBody = asRecord(await safeReadJson(signRes));
+      if (!signRes.ok || signBody?.ok !== true) {
+        throw new Error(getString(signBody?.error) || `upload_sign_failed_${signRes.status}`);
       }
-      const uploaded = Array.isArray(data.attachments)
-        ? (data.attachments as ChatAttachmentSummary[])
-        : [];
-      setPendingAttachments((prev) => [...prev, ...uploaded].slice(0, 5));
+      const uploads = Array.isArray(signBody.uploads) ? signBody.uploads : [];
+      if (uploads.length !== selected.length) throw new Error("upload_sign_count_mismatch");
+
+      const supabase = getBrowserSupabase();
+      for (let i = 0; i < selected.length; i += 1) {
+        const file = selected[i];
+        const upload = asRecord(uploads[i]);
+        const storagePath = getString(upload?.storage_path);
+        const uploadToken = getString(upload?.upload_token);
+        const completionToken = getString(upload?.completion_token);
+        const mimeType = getString(upload?.mime_type) || file.type || "application/octet-stream";
+        if (!storagePath || !uploadToken || !completionToken) {
+          throw new Error("upload_sign_payload_invalid");
+        }
+
+        const storage = await supabase.storage
+          .from("chat-attachments")
+          .uploadToSignedUrl(storagePath, uploadToken, file, {
+            contentType: mimeType,
+            upsert: false,
+          });
+        if (storage.error) throw new Error(`upload_failed: ${storage.error.message}`);
+
+        const excerpt = await readAttachmentExcerpt(file, mimeType);
+        const completeRes = await fetchWithTimeout("/api/chat/attachments/complete", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            completion_token: completionToken,
+            parser: excerpt.parser,
+            text_excerpt: excerpt.text,
+            truncated: excerpt.truncated,
+          }),
+          timeoutMs: CHAT_FETCH_TIMEOUT_MS,
+        });
+        const completeBody = asRecord(await safeReadJson(completeRes));
+        if (!completeRes.ok || completeBody?.ok !== true) {
+          throw new Error(getString(completeBody?.error) || `upload_complete_failed_${completeRes.status}`);
+        }
+        const summary = normalizeAttachmentSummary(completeBody.attachment);
+        if (!summary) throw new Error("upload_complete_payload_invalid");
+        uploaded.push(summary);
+      }
+      if (uploaded.length > 0) {
+        setPendingAttachments((prev) => [...prev, ...uploaded].slice(0, MAX_ATTACHMENTS_PER_TURN));
+      }
+      if (files.length > selected.length) {
+        setAttachmentError(`Attached ${selected.length}; maximum 5 files per turn.`);
+      }
     } catch (err) {
+      if (uploaded.length > 0) {
+        setPendingAttachments((prev) => [...prev, ...uploaded].slice(0, MAX_ATTACHMENTS_PER_TURN));
+      }
       setAttachmentError(err instanceof Error ? err.message : "upload_failed");
     } finally {
       setUploadingAttachments(false);
@@ -978,15 +1043,16 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
                   ? ("cloud_only" as const)
                   : ("bridge_proxy" as const),
             };
-      const res = await fetch(url, {
+      const res = await fetchWithTimeout(url, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify(body),
+        timeoutMs: CHAT_FETCH_TIMEOUT_MS,
       });
       if (!res.ok || !res.body) {
-        const errBody = await safeReadJson(res);
-        setError(errBody?.error || `http_${res.status}`);
-        setErrorCode(typeof errBody?.code === "string" ? errBody.code : null);
+        const errBody = asRecord(await safeReadJson(res));
+        setError(getString(errBody?.error) || `http_${res.status}`);
+        setErrorCode(getString(errBody?.code));
         setLastFailedMode(useBridge ? "cli" : "cloud");
         setStreaming(false);
         setMessages((m) => m.slice(0, -1));
@@ -1027,8 +1093,25 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
         const reader = stream.body.getReader();
         const decoder = new TextDecoder();
         let buf = "";
+        const readWithWatchdog = (): Promise<ReadableStreamReadResult<Uint8Array>> =>
+          new Promise((resolve, reject) => {
+            const timer = window.setTimeout(
+              () => reject(new Error("stream_inactivity_timeout")),
+              SSE_INACTIVITY_TIMEOUT_MS,
+            );
+            reader.read().then(
+              (result) => {
+                window.clearTimeout(timer);
+                resolve(result);
+              },
+              (err) => {
+                window.clearTimeout(timer);
+                reject(err);
+              },
+            );
+          });
       while (true) {
-        const { done, value } = await reader.read();
+        const { done, value } = await readWithWatchdog();
         if (done) break;
         buf += decoder.decode(value, { stream: true });
         let idx;
@@ -1047,14 +1130,14 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
           // reads its own shape-specific fields, so the wire-level type
           // is genuinely any here — narrowing at this seam would cascade
           // through every provider branch below.
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          let parsed: any;
+          let parsed: Record<string, unknown> | null;
           try {
-            parsed = JSON.parse(data);
+            parsed = asRecord(JSON.parse(data));
           } catch {
             continue;
           }
-          if (event === "session" && parsed.session_id) setSessionId(parsed.session_id);
+          if (!parsed) continue;
+          if (event === "session" && typeof parsed.session_id === "string") setSessionId(parsed.session_id);
           else if (event === "agent_status") {
             // Phases the bridge emits:
             //   "spawning"    — before claude subprocess is up (cold path)
@@ -1107,10 +1190,7 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
                 id: entryId,
                 kind: toolName,
                 label: toolName,
-                detail:
-                  parsed.input && typeof parsed.input === "object"
-                    ? truncateJson(parsed.input)
-                    : undefined,
+                detail: asRecord(parsed.input) ? truncateJson(asRecord(parsed.input)!) : undefined,
                 createdAt: Date.now(),
               },
             ]);
@@ -1131,7 +1211,7 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
                 if (next[i].kind === toolName && next[i].output === undefined && !next[i].completedAt) {
                   next[i] = {
                     ...next[i],
-                    output: parsed.summary || undefined,
+                    output: getString(parsed.summary) || undefined,
                     error: !parsed.ok,
                     completedAt: Date.now(),
                   };
@@ -1146,8 +1226,8 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
                 uid: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
                 ok: !!parsed.ok,
                 name: toolName,
-                summary: parsed.summary,
-                error: parsed.error,
+                summary: getString(parsed.summary) || undefined,
+                error: getString(parsed.error) || undefined,
                 data: parsed.data,
               },
             ]);
@@ -1161,7 +1241,7 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
             pendingToolUse = {
               tool_use_id: String(parsed.tool_use_id || ""),
               name: String(parsed.name || "tool"),
-              input: (parsed.input && typeof parsed.input === "object") ? parsed.input : {},
+              input: asRecord(parsed.input) || {},
               resume_state: parsed.resume_state,
               // Phase H signature — opaque to the browser, must echo
               // verbatim on the resume POST so the server can verify
@@ -1193,8 +1273,8 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
               {
                 ok: !!parsed.ok,
                 type: String(parsed.type || "?"),
-                summary: parsed.summary,
-                error: parsed.error,
+                summary: getString(parsed.summary) || undefined,
+                error: getString(parsed.error) || undefined,
                 uid: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
               },
             ]);
@@ -1357,13 +1437,14 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
         let toolOutput = "";
         let toolIsError = false;
         try {
-          const bridgeRes = await fetch(`${BRIDGE_CHAT_BASE}/exec-tool`, {
+          const bridgeRes = await fetchWithTimeout(`${BRIDGE_CHAT_BASE}/exec-tool`, {
             method: "POST",
             headers: { "content-type": "application/json" },
             body: JSON.stringify({
               tool_name: pending.name,
               input: pending.input,
             }),
+            timeoutMs: BRIDGE_TOOL_TIMEOUT_MS,
           });
           const bridgePayload = await bridgeRes.json().catch(() => null);
           if (!bridgeRes.ok || !bridgePayload?.ok) {
@@ -1401,7 +1482,7 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
         //    (Phase H) MUST be passed verbatim — the server signs on
         //    tool_use_pending emit and verifies here. Without it the
         //    route returns resume_signature_missing_signature.
-        const resumeRes = await fetch("/api/chat/resume", {
+        const resumeRes = await fetchWithTimeout("/api/chat/resume", {
           method: "POST",
           headers: { "content-type": "application/json" },
           body: JSON.stringify({
@@ -1412,10 +1493,11 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
             tool_use_id: pending.tool_use_id,
             tool_result: { content: toolOutput, is_error: toolIsError },
           }),
+          timeoutMs: RESUME_FETCH_TIMEOUT_MS,
         });
         if (!resumeRes.ok || !resumeRes.body) {
-          const e = await safeReadJson(resumeRes);
-          setError(e?.error || `resume_http_${resumeRes.status}`);
+          const e = asRecord(await safeReadJson(resumeRes));
+          setError(getString(e?.error) || `resume_http_${resumeRes.status}`);
           break;
         }
         await consumeStream(resumeRes);
@@ -1458,7 +1540,13 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
       }
     } catch (e) {
       setError(e instanceof Error ? e.message : "request_failed");
-      setMessages((m) => m.slice(0, -1));
+      setMessages((m) => {
+        const last = m[m.length - 1];
+        if (last && last.role === "assistant" && last.content.trim().length === 0) {
+          return m.slice(0, -1);
+        }
+        return m;
+      });
     } finally {
       setStreaming(false);
       setThinking(false);
@@ -2011,7 +2099,6 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
             type="file"
             multiple
             className="hidden"
-            accept=".csv,.txt,.md,.json,.pdf,.doc,.docx,.xls,.xlsx,image/*"
             onChange={(e) => attachFiles(e.target.files)}
           />
           <button
@@ -2550,10 +2637,98 @@ function stripActionMarkers(text: string): string {
     .trim();
 }
 
-// Wire-level any: callers read shape-specific fields (error / code /
-// message) where the upstream provider determines the shape at runtime.
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-async function safeReadJson(r: Response): Promise<any> {
+type FetchWithTimeoutInit = RequestInit & { timeoutMs?: number };
+
+async function fetchWithTimeout(input: RequestInfo | URL, init: FetchWithTimeoutInit = {}): Promise<Response> {
+  const { timeoutMs = CHAT_FETCH_TIMEOUT_MS, signal, ...rest } = init;
+  const controller = new AbortController();
+  let signalListener: (() => void) | null = null;
+  const timer = window.setTimeout(() => controller.abort(), timeoutMs);
+  if (signal) {
+    signalListener = () => controller.abort();
+    if (signal.aborted) controller.abort();
+    else signal.addEventListener("abort", signalListener, { once: true });
+  }
+  try {
+    return await fetch(input, { ...rest, signal: controller.signal });
+  } catch (err) {
+    if (controller.signal.aborted && !(signal?.aborted)) {
+      throw new Error(`request_timeout_${Math.round(timeoutMs / 1000)}s`);
+    }
+    throw err;
+  } finally {
+    window.clearTimeout(timer);
+    if (signal && signalListener) signal.removeEventListener("abort", signalListener);
+  }
+}
+
+async function readAttachmentExcerpt(file: File, mimeType: string): Promise<{
+  parser: "csv_text" | "plain_text" | "metadata_only";
+  text: string | null;
+  truncated: boolean;
+}> {
+  if (!isTextLikeAttachment(file.name, mimeType)) {
+    return { parser: "metadata_only", text: null, truncated: false };
+  }
+  const sample = file.slice(0, TEXT_ATTACHMENT_READ_BYTES);
+  const decoded = (await sample.text()).replace(/\u0000/g, "").trim();
+  if (!decoded) return { parser: "metadata_only", text: null, truncated: false };
+  const text =
+    decoded.length > MAX_ATTACHMENT_EXCERPT_CHARS
+      ? decoded.slice(0, MAX_ATTACHMENT_EXCERPT_CHARS)
+      : decoded;
+  const lowerName = file.name.toLowerCase();
+  const lowerMime = mimeType.toLowerCase();
+  return {
+    parser: lowerName.endsWith(".csv") || lowerMime.includes("csv") ? "csv_text" : "plain_text",
+    text,
+    truncated: file.size > sample.size || decoded.length > MAX_ATTACHMENT_EXCERPT_CHARS,
+  };
+}
+
+function isTextLikeAttachment(filename: string, mimeType: string): boolean {
+  const lowerName = filename.toLowerCase();
+  const lowerMime = mimeType.toLowerCase();
+  return (
+    lowerMime.startsWith("text/") ||
+    lowerMime.includes("json") ||
+    lowerMime.includes("xml") ||
+    lowerName.endsWith(".csv") ||
+    lowerName.endsWith(".txt") ||
+    lowerName.endsWith(".md") ||
+    lowerName.endsWith(".json") ||
+    lowerName.endsWith(".xml")
+  );
+}
+
+function normalizeAttachmentSummary(value: unknown): ChatAttachmentSummary | null {
+  const row = asRecord(value);
+  if (!row) return null;
+  const id = getString(row.id);
+  const filename = getString(row.filename);
+  const sizeBytes = typeof row.size_bytes === "number" ? row.size_bytes : Number(row.size_bytes);
+  if (!id || !filename || !Number.isFinite(sizeBytes)) return null;
+  return {
+    id,
+    filename,
+    mime_type: getString(row.mime_type),
+    size_bytes: Math.max(0, Math.trunc(sizeBytes)),
+    parser: getString(row.parser) || "metadata_only",
+    text_excerpt: getString(row.text_excerpt),
+  };
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+function getString(value: unknown): string | null {
+  return typeof value === "string" ? value : null;
+}
+
+async function safeReadJson(r: Response): Promise<unknown> {
   try {
     return await r.json();
   } catch {

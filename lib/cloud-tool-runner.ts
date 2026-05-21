@@ -43,7 +43,7 @@ import {
 } from "./manifest/data";
 import { runAction } from "./agent-actions";
 import { CLOUD_TOOLS } from "./cloud-tools";
-import { parseSSE, safeText } from "./sse-parser";
+import { asSSERecord, parseSSE, safeText } from "./sse-parser";
 import { downloadChatAttachmentText } from "./chat-attachments";
 import { parseLeadImportCsv } from "./leads-import-parser";
 import { importLeadsForTenant } from "./leads-import-service";
@@ -1361,19 +1361,16 @@ async function* runIterationLoop(
     let iterOut = 0;
 
     for await (const ev of parseSSE(res.body)) {
-      // Anthropic streaming-tools SSE event shapes (message_start,
       // content_block_*, message_delta, etc.) — each branch reads
-      // its own discriminated fields. Wire-level any is the honest
-      // type here; narrowing would cascade through every event branch.
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const data: any = ev.data;
+      const data = asSSERecord(ev.data);
       if (!data) continue;
       if (ev.event === "message_start") {
-        const usage = data.message?.usage;
-        if (usage) totalIn += usage.input_tokens ?? 0;
+        const usage = asSSERecord(asSSERecord(data.message)?.usage);
+        if (usage) totalIn += typeof usage.input_tokens === "number" ? usage.input_tokens : 0;
       } else if (ev.event === "content_block_start") {
-        const block = data.content_block;
-        const idx = data.index as number;
+        const block = asSSERecord(data.content_block);
+        const idx = typeof data.index === "number" ? data.index : -1;
+        if (idx < 0) continue;
         if (block?.type === "text") {
           blockBuffers.set(idx, { kind: "text", partial: "" });
           blocks[idx] = { type: "text", text: "" };
@@ -1381,16 +1378,16 @@ async function* runIterationLoop(
           blockBuffers.set(idx, { kind: "tool_use", partial: "" });
           blocks[idx] = {
             type: "tool_use",
-            id: block.id,
-            name: block.name,
+            id: typeof block.id === "string" ? block.id : "",
+            name: typeof block.name === "string" ? block.name : "",
             input: {},
           };
         }
       } else if (ev.event === "content_block_delta") {
-        const idx = data.index as number;
+        const idx = typeof data.index === "number" ? data.index : -1;
         const buf = blockBuffers.get(idx);
         if (!buf) continue;
-        const delta = data.delta;
+        const delta = asSSERecord(data.delta);
         if (delta?.type === "text_delta" && typeof delta.text === "string") {
           buf.partial += delta.text;
           const b = blocks[idx];
@@ -1400,7 +1397,7 @@ async function* runIterationLoop(
           buf.partial += delta.partial_json;
         }
       } else if (ev.event === "content_block_stop") {
-        const idx = data.index as number;
+        const idx = typeof data.index === "number" ? data.index : -1;
         const buf = blockBuffers.get(idx);
         if (!buf) continue;
         if (buf.kind === "tool_use") {
@@ -1416,11 +1413,13 @@ async function* runIterationLoop(
         }
         blockBuffers.delete(idx);
       } else if (ev.event === "message_delta") {
-        if (data.delta?.stop_reason) stopReason = String(data.delta.stop_reason);
+        const delta = asSSERecord(data.delta);
+        if (delta?.stop_reason) stopReason = String(delta.stop_reason);
         // Cumulative for THIS message — overwrite, don't add. Final
         // message_delta has the total; we add to totalOut after the loop.
-        if (typeof data.usage?.output_tokens === "number") {
-          iterOut = data.usage.output_tokens;
+        const usage = asSSERecord(data.usage);
+        if (typeof usage?.output_tokens === "number") {
+          iterOut = usage.output_tokens;
         }
       } else if (ev.event === "message_stop") {
         break;

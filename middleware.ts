@@ -7,6 +7,7 @@
 
 import { NextResponse, type NextRequest } from "next/server";
 import { createServerClient } from "@supabase/ssr";
+import { matchesPathPrefix } from "./lib/path-prefix";
 
 const PUBLIC_PATH_PREFIXES = [
   "/welcome",              // public marketing landing
@@ -84,16 +85,8 @@ const PUBLIC_FILE_EXTENSIONS = [
  * the exact-match case still hits and the prefix+`/` case is identical
  * to the original startsWith for those entries.
  */
-function matchesPrefix(pathname: string, prefix: string): boolean {
-  if (pathname === prefix) return true;
-  // For prefixes that already end in `/`, startsWith is exact-enough.
-  if (prefix.endsWith("/")) return pathname.startsWith(prefix);
-  // Otherwise require a path separator immediately after.
-  return pathname.startsWith(prefix + "/");
-}
-
 function isPublic(pathname: string): boolean {
-  if (PUBLIC_PATH_PREFIXES.some((p) => matchesPrefix(pathname, p))) return true;
+  if (PUBLIC_PATH_PREFIXES.some((p) => matchesPathPrefix(pathname, p))) return true;
   const lower = pathname.toLowerCase();
   return PUBLIC_FILE_EXTENSIONS.some((ext) => lower.endsWith(ext));
 }

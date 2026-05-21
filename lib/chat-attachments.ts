@@ -1,32 +1,12 @@
-import { randomUUID } from "crypto";
+import { createHmac, randomUUID, timingSafeEqual } from "crypto";
 import { getServiceSupabase } from "./supabase-server";
 import { sanitizeStorageFilename } from "./storage-helpers";
 
 export const CHAT_ATTACHMENT_BUCKET = "chat-attachments";
-export const MAX_CHAT_ATTACHMENT_BYTES = 20 * 1024 * 1024;
 export const MAX_CHAT_ATTACHMENTS_PER_TURN = 5;
 export const MAX_ATTACHMENT_PROMPT_CHARS = 24_000;
 export const MAX_ATTACHMENT_TEXT_CHARS = 120_000;
-
-export const CHAT_ATTACHMENT_ALLOWED_MIME = new Set<string>([
-  "text/plain",
-  "text/csv",
-  "text/markdown",
-  "application/json",
-  "application/xml",
-  "text/xml",
-  "application/pdf",
-  "application/msword",
-  "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-  "application/vnd.ms-excel",
-  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-  "image/jpeg",
-  "image/png",
-  "image/gif",
-  "image/webp",
-  "image/heic",
-  "image/heif",
-]);
+export const CHAT_ATTACHMENT_SIGNED_TOKEN_TTL_SECONDS = 30 * 60;
 
 export type ChatAttachmentRow = {
   id: string;
@@ -65,10 +45,45 @@ export type UploadChatAttachmentInput = {
   sizeBytes: number;
 };
 
+type SignedUploadTokenPayload = {
+  v: 1;
+  exp: number;
+  nonce: string;
+  tenant_id: string;
+  auth_user_id: string;
+  storage_path: string;
+  filename: string;
+  mime_type: string;
+  size_bytes: number;
+  agent_key: string | null;
+  session_id: string | null;
+};
+
+export type CreateChatAttachmentSignedUploadInput = {
+  tenantId: string;
+  userId: string;
+  agentKey?: string | null;
+  sessionId?: string | null;
+  filename: string;
+  mimeType?: string | null;
+  sizeBytes: number;
+};
+
+export type ChatAttachmentSignedUpload = {
+  filename: string;
+  storage_path: string;
+  mime_type: string;
+  size_bytes: number;
+  signed_url: string;
+  upload_token: string;
+  completion_token: string;
+  expires_at: string;
+};
+
 export async function uploadChatAttachment(input: UploadChatAttachmentInput): Promise<ChatAttachmentRow> {
   const db = getServiceSupabase();
   const cleanName = sanitizeStorageFilename(input.filename);
-  const safeMime = (input.mimeType || "application/octet-stream").toLowerCase();
+  const safeMime = normalizeAttachmentMimeType(cleanName, input.mimeType);
   const extracted = extractAttachmentText(cleanName, safeMime, input.bytes);
   const storagePath = `${input.tenantId}/${input.userId}/${Date.now()}_${randomUUID()}_${cleanName}`;
 
@@ -104,6 +119,106 @@ export async function uploadChatAttachment(input: UploadChatAttachmentInput): Pr
 
   if (inserted.error || !inserted.data) {
     await db.storage.from(CHAT_ATTACHMENT_BUCKET).remove([storagePath]);
+    throw new Error(`metadata_insert_failed: ${inserted.error?.message || "missing_row"}`);
+  }
+
+  return inserted.data as ChatAttachmentRow;
+}
+
+export async function createChatAttachmentSignedUpload(
+  input: CreateChatAttachmentSignedUploadInput,
+): Promise<ChatAttachmentSignedUpload> {
+  const db = getServiceSupabase();
+  const cleanName = sanitizeStorageFilename(input.filename || "attachment");
+  const safeMime = normalizeAttachmentMimeType(cleanName, input.mimeType);
+  const sizeBytes = normalizeSizeBytes(input.sizeBytes);
+  const storagePath = `${input.tenantId}/${input.userId}/${Date.now()}_${randomUUID()}_${cleanName}`;
+  const expiresAtSeconds = Math.floor(Date.now() / 1000) + CHAT_ATTACHMENT_SIGNED_TOKEN_TTL_SECONDS;
+
+  const signed = await db.storage.from(CHAT_ATTACHMENT_BUCKET).createSignedUploadUrl(storagePath, {
+    upsert: false,
+  });
+  if (signed.error || !signed.data?.token) {
+    throw new Error(`signed_upload_failed: ${signed.error?.message || "missing_token"}`);
+  }
+
+  const payload: SignedUploadTokenPayload = {
+    v: 1,
+    exp: expiresAtSeconds,
+    nonce: randomUUID(),
+    tenant_id: input.tenantId,
+    auth_user_id: input.userId,
+    storage_path: storagePath,
+    filename: cleanName,
+    mime_type: safeMime,
+    size_bytes: sizeBytes,
+    agent_key: input.agentKey || null,
+    session_id: input.sessionId || null,
+  };
+
+  return {
+    filename: cleanName,
+    storage_path: storagePath,
+    mime_type: safeMime,
+    size_bytes: sizeBytes,
+    signed_url: signed.data.signedUrl,
+    upload_token: signed.data.token,
+    completion_token: signUploadCompletionToken(payload),
+    expires_at: new Date(expiresAtSeconds * 1000).toISOString(),
+  };
+}
+
+export async function completeChatAttachmentUpload(input: {
+  tenantId: string;
+  userId: string;
+  completionToken: string;
+  parser?: string | null;
+  textExcerpt?: string | null;
+  truncated?: boolean | null;
+}): Promise<ChatAttachmentRow> {
+  const payload = verifyUploadCompletionToken(input.completionToken);
+  if (payload.tenant_id !== input.tenantId || payload.auth_user_id !== input.userId) {
+    throw new Error("completion_token_context_mismatch");
+  }
+
+  const db = getServiceSupabase();
+  const objectInfo = await db.storage.from(CHAT_ATTACHMENT_BUCKET).info(payload.storage_path);
+  if (objectInfo.error || !objectInfo.data) {
+    throw new Error(`uploaded_object_not_found: ${objectInfo.error?.message || "missing_blob"}`);
+  }
+
+  const textExcerpt = normalizeTextExcerpt(input.textExcerpt);
+  const parser =
+    textExcerpt && textExcerpt.trim()
+      ? normalizeParser(input.parser, payload.filename, payload.mime_type)
+      : "metadata_only";
+
+  const inserted = await db
+    .from("chat_attachments")
+    .insert({
+      tenant_id: payload.tenant_id,
+      auth_user_id: payload.auth_user_id,
+      session_id: payload.session_id,
+      agent_key: payload.agent_key,
+      filename: payload.filename,
+      storage_bucket: CHAT_ATTACHMENT_BUCKET,
+      storage_path: payload.storage_path,
+      mime_type: payload.mime_type,
+      size_bytes: payload.size_bytes,
+      parser,
+      text_excerpt: textExcerpt,
+      metadata: {
+        original_filename: payload.filename,
+        direct_upload: true,
+        truncated: Boolean(input.truncated),
+        storage_info: objectInfo.data,
+      },
+    })
+    .select("*")
+    .single();
+
+  if (inserted.error || !inserted.data) {
+    await db.storage.from(CHAT_ATTACHMENT_BUCKET).remove([payload.storage_path]);
     throw new Error(`metadata_insert_failed: ${inserted.error?.message || "missing_row"}`);
   }
 
@@ -237,6 +352,12 @@ export async function downloadChatAttachmentText(input: {
   return { row, text: extracted.text };
 }
 
+export function normalizeAttachmentMimeType(filename: string, mimeType?: string | null): string {
+  const supplied = (mimeType || "").trim().toLowerCase();
+  if (supplied && supplied !== "application/octet-stream") return supplied;
+  return mimeFromName(filename) || supplied || "application/octet-stream";
+}
+
 function extractAttachmentText(
   filename: string,
   mimeType: string,
@@ -268,4 +389,111 @@ function extractAttachmentText(
 
 function isUuid(v: string): boolean {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(v);
+}
+
+function normalizeSizeBytes(sizeBytes: number): number {
+  if (!Number.isFinite(sizeBytes) || sizeBytes < 0) return 0;
+  return Math.trunc(sizeBytes);
+}
+
+function normalizeTextExcerpt(value?: string | null): string | null {
+  if (typeof value !== "string") return null;
+  const cleaned = value.replace(/\u0000/g, "").trim();
+  if (!cleaned) return null;
+  return cleaned.length > MAX_ATTACHMENT_TEXT_CHARS
+    ? cleaned.slice(0, MAX_ATTACHMENT_TEXT_CHARS)
+    : cleaned;
+}
+
+function normalizeParser(parser: string | null | undefined, filename: string, mimeType: string): string {
+  if (parser === "csv_text" || parser === "plain_text") return parser;
+  const lowerName = filename.toLowerCase();
+  const lowerMime = mimeType.toLowerCase();
+  return lowerName.endsWith(".csv") || lowerMime.includes("csv") ? "csv_text" : "plain_text";
+}
+
+function mimeFromName(name: string): string | null {
+  const lower = name.toLowerCase();
+  if (lower.endsWith(".csv")) return "text/csv";
+  if (lower.endsWith(".txt")) return "text/plain";
+  if (lower.endsWith(".md")) return "text/markdown";
+  if (lower.endsWith(".json")) return "application/json";
+  if (lower.endsWith(".xml")) return "application/xml";
+  if (lower.endsWith(".pdf")) return "application/pdf";
+  if (lower.endsWith(".doc")) return "application/msword";
+  if (lower.endsWith(".docx")) {
+    return "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+  }
+  if (lower.endsWith(".xls")) return "application/vnd.ms-excel";
+  if (lower.endsWith(".xlsx")) {
+    return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+  }
+  if (lower.endsWith(".jpg") || lower.endsWith(".jpeg")) return "image/jpeg";
+  if (lower.endsWith(".png")) return "image/png";
+  if (lower.endsWith(".gif")) return "image/gif";
+  if (lower.endsWith(".webp")) return "image/webp";
+  if (lower.endsWith(".heic")) return "image/heic";
+  if (lower.endsWith(".heif")) return "image/heif";
+  return null;
+}
+
+function signUploadCompletionToken(payload: SignedUploadTokenPayload): string {
+  const body = base64UrlEncode(JSON.stringify(payload));
+  const sig = createHmac("sha256", attachmentSigningKey()).update(body).digest("base64url");
+  return `${body}.${sig}`;
+}
+
+function verifyUploadCompletionToken(token: string): SignedUploadTokenPayload {
+  const [body, sig] = token.split(".");
+  if (!body || !sig) throw new Error("invalid_completion_token");
+  const expected = createHmac("sha256", attachmentSigningKey()).update(body).digest("base64url");
+  if (!safeEqual(sig, expected)) throw new Error("invalid_completion_token_signature");
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(Buffer.from(body, "base64url").toString("utf8"));
+  } catch {
+    throw new Error("invalid_completion_token_payload");
+  }
+  if (!isSignedUploadTokenPayload(parsed)) throw new Error("invalid_completion_token_payload");
+  if (parsed.exp < Math.floor(Date.now() / 1000)) throw new Error("completion_token_expired");
+  return parsed;
+}
+
+function isSignedUploadTokenPayload(value: unknown): value is SignedUploadTokenPayload {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const v = value as Record<string, unknown>;
+  return (
+    v.v === 1 &&
+    typeof v.exp === "number" &&
+    typeof v.nonce === "string" &&
+    typeof v.tenant_id === "string" &&
+    typeof v.auth_user_id === "string" &&
+    typeof v.storage_path === "string" &&
+    typeof v.filename === "string" &&
+    typeof v.mime_type === "string" &&
+    typeof v.size_bytes === "number" &&
+    (typeof v.agent_key === "string" || v.agent_key === null) &&
+    (typeof v.session_id === "string" || v.session_id === null)
+  );
+}
+
+function base64UrlEncode(value: string): string {
+  return Buffer.from(value, "utf8").toString("base64url");
+}
+
+function safeEqual(a: string, b: string): boolean {
+  const left = Buffer.from(a);
+  const right = Buffer.from(b);
+  return left.length === right.length && timingSafeEqual(left, right);
+}
+
+function attachmentSigningKey(): string {
+  const key =
+    process.env.CHAT_ATTACHMENT_HMAC_KEY ||
+    process.env.CHAT_RESUME_HMAC_KEY ||
+    process.env.OASIS_OUTBOUND_HMAC_SECRET ||
+    process.env.BRAVO_SUPABASE_SERVICE_ROLE_KEY;
+  if (!key) throw new Error("attachment_signing_key_missing");
+  return key;
 }

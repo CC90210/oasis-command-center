@@ -64,9 +64,9 @@ async function pingProvider(provider: Provider, key: string): Promise<PingResult
     }
 
     // 7s budget — every endpoint above is single-region, so anything slower
-    // than that is effectively broken from the operator's POV.
+    // than that is treated as unavailable from the operator's POV.
     const ctl = new AbortController();
-    const timer = setTimeout(() => ctl.abort(), 7_000);
+    const timer = setTimeout(() => ctl.abort(), 15_000);
     let res: Response;
     try {
       res = await fetch(url, { method: "GET", headers, signal: ctl.signal });
@@ -97,7 +97,7 @@ async function pingProvider(provider: Provider, key: string): Promise<PingResult
     };
   } catch (err) {
     if ((err as Error).name === "AbortError") {
-      return { ok: false, message: "Provider didn't respond within 7 seconds." };
+      return { ok: false, message: "Provider didn't respond within 15 seconds." };
     }
     return { ok: false, message: (err as Error).message || "network_error" };
   }

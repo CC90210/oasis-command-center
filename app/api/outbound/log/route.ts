@@ -36,6 +36,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { bad, sha256 } from "@/lib/api-helpers";
+import { dispatchLeadStageEvent } from "@/lib/lead-stage-dispatcher";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -112,7 +113,31 @@ export async function POST(req: NextRequest) {
     return bad(500, r.error.message || "rpc failed");
   }
 
-  return NextResponse.json({ ok: true, interaction_id: r.data });
+  const interactionId = typeof r.data === "string" ? r.data : null;
+  let stageBumped: string | null = null;
+  if (interactionId && (body.status || "sent") === "sent" && (body.channel || "email") === "email") {
+    try {
+      const interaction = await db
+        .from("lead_interactions")
+        .select("tenant_id, lead_id")
+        .eq("id", interactionId)
+        .maybeSingle();
+      const tenantId = typeof interaction.data?.tenant_id === "string" ? interaction.data.tenant_id : null;
+      const leadId = typeof interaction.data?.lead_id === "string" ? interaction.data.lead_id : null;
+      if (tenantId && leadId) {
+        const stageEvent = await dispatchLeadStageEvent({
+          type: "outbound_email_sent",
+          tenantId,
+          leadId,
+        });
+        stageBumped = stageEvent.fired ? stageEvent.to : null;
+      }
+    } catch (err) {
+      console.error("[api.outbound.log.stage_event]", err);
+    }
+  }
+
+  return NextResponse.json({ ok: true, interaction_id: r.data, stage_bumped: stageBumped });
 }
 
 export async function GET() {

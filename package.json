@@ -9,7 +9,7 @@
     "start": "next start --port 3100",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",
-    "test:sunbiz": "tsx tests/sunbiz-import-routing.test.ts && tsx tests/auth-routing.test.ts"
+    "test:sunbiz": "tsx tests/sunbiz-import-routing.test.ts && tsx tests/auth-routing.test.ts && tsx tests/middleware-prefix.test.ts"
   },
   "dependencies": {
     "@libsql/client": "^0.17.3",
