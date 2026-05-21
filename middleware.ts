@@ -78,16 +78,13 @@ export async function middleware(req: NextRequest) {
   const { pathname } = req.nextUrl;
 
   // Phase 6b/7 — redirect routes still folded into bigger surfaces.
-  // Reasoning + Health + Overrides came back to top-level nav in
-  // Phase 7 (CC found the Phase 2 trim too aggressive). The remaining
-  // three really are merged elsewhere and shouldn't be reachable at
-  // their old URLs:
+  // /playbook was restored in V6.8.5 (app/playbook/page.tsx is daily-use,
+  // not reference) so it no longer redirects. The remaining two really
+  // are merged elsewhere and shouldn't be reachable at their old URLs:
   //   /feed → /operations         (Activity Tape is the same stream)
-  //   /playbook → /settings       (reference under Settings)
   //   /integrations → /settings   (setup under Settings)
   const REDIRECT_MAP: Record<string, string> = {
     "/feed": "/operations",
-    "/playbook": "/settings",
     "/integrations": "/settings",
   };
   if (pathname in REDIRECT_MAP) {
