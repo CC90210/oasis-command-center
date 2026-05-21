@@ -1,3 +1,6 @@
+/* eslint-disable @typescript-eslint/no-require-imports -- next.config.js
+   is a CommonJS module by convention; `import` would require renaming
+   the file to .mjs which breaks the Vercel + standalone-build pipeline. */
 const path = require("path");
 
 // The browser client checks NEXT_PUBLIC_* env vars. If the operator only sets

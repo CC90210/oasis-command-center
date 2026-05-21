@@ -18,7 +18,7 @@
  * bank-statement step gets first-class treatment.
  */
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { CheckCircle2, AlertCircle } from "lucide-react";
 import { FormRenderer } from "./FormRenderer";
 import type { FormStep, FormBranding } from "@/lib/forms/types";
@@ -109,7 +109,13 @@ export function FormPublicClient({
   }, [token]);
 
   const step = steps[currentStep];
-  const values = stepValues[currentStep] || {};
+  // Memoise so `values` is stable across renders when stepValues[currentStep]
+  // hasn't changed — keeps the validate() useCallback below from re-creating
+  // every render and re-triggering downstream effects.
+  const values = useMemo(
+    () => stepValues[currentStep] || {},
+    [stepValues, currentStep],
+  );
 
   const setFieldValue = useCallback(
     (name: string, value: unknown) => {

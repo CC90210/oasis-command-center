@@ -2,7 +2,6 @@ import { NextResponse, type NextRequest } from "next/server";
 import { getSessionUser, getServiceSupabase } from "@/lib/supabase-server";
 import { canPreviewTenantSlug, resolveCallerTenantAccess } from "@/lib/tenant-access";
 import { getManifest, manifestExists } from "@/lib/manifest/loader";
-import { SEED_MANIFESTS } from "@/lib/manifest/seeds";
 import { applyMutations, type MutationArgs, ManifestMutationError } from "@/lib/manifest/mutators";
 import { diffManifests } from "@/lib/manifest/diff";
 import {

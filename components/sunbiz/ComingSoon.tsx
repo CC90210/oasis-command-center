@@ -37,7 +37,7 @@ export function ComingSoon({
               <div className="text-fg text-base font-semibold mb-1">Coming Soon</div>
               <p className="text-fg-muted text-sm">
                 This page is ready in the Sun Biz Funding Command Center.
-                Solara's deeper workflow for this area is queued next, and the links below are the parts your team can use today.
+                Solara&apos;s deeper workflow for this area is queued next, and the links below are the parts your team can use today.
               </p>
             </div>
 

@@ -1361,6 +1361,11 @@ async function* runIterationLoop(
     let iterOut = 0;
 
     for await (const ev of parseSSE(res.body)) {
+      // Anthropic streaming-tools SSE event shapes (message_start,
+      // content_block_*, message_delta, etc.) — each branch reads
+      // its own discriminated fields. Wire-level any is the honest
+      // type here; narrowing would cascade through every event branch.
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const data: any = ev.data;
       if (!data) continue;
       if (ev.event === "message_start") {

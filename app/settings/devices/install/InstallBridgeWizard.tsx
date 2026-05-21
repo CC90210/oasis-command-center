@@ -133,7 +133,7 @@ export function InstallBridgeWizard() {
               </span>
             </div>
             <div className="text-[11px] text-fg-dim mt-1.5">
-              Need to run it on a different machine? The pair code works from any terminal as long as it's redeemed before it expires.
+              Need to run it on a different machine? The pair code works from any terminal as long as it&apos;s redeemed before it expires.
             </div>
           </div>
 
@@ -158,7 +158,7 @@ export function InstallBridgeWizard() {
               <div className="font-bold text-fg">Bridge is online.</div>
               <div className="text-sm text-fg-muted mt-1">
                 Open any agent chat. The mode picker in the chat header will start defaulting to{" "}
-                <span className="text-accent font-mono">CLI (bridge)</span> on Auto. Your chat now runs through this machine's Claude subscription with full file + script access.
+                <span className="text-accent font-mono">CLI (bridge)</span> on Auto. Your chat now runs through this machine&apos;s Claude subscription with full file + script access.
               </div>
             </div>
           </div>

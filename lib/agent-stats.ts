@@ -89,7 +89,12 @@ const CACHE_MS = 30_000;
  * canonical prefix). Today we report this repo's totals for every slug
  * since each sibling repo runs the same dashboard concept.
  */
+// agentSlug is kept on the signature for future per-agent filtering (each
+// sibling agent eventually getting its own repo scope); today every slug
+// returns the same empire-wide totals. Underscore prefix tells eslint
+// the param is intentionally unused.
 export async function getAgentStats(_agentSlug: string): Promise<AgentStats> {
+  void _agentSlug;
   if (_cached && Date.now() - _cached.at < CACHE_MS) return _cached.stats;
 
   const scriptsDir = path.join(REPO_ROOT, "scripts");

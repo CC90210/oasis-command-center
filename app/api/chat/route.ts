@@ -24,7 +24,7 @@
  */
 
 import { NextRequest } from "next/server";
-import { getAuthedSupabase, getServiceSupabase, getSessionUser } from "@/lib/supabase-server";
+import { getServiceSupabase, getSessionUser } from "@/lib/supabase-server";
 import {
   streamChat,
   type ChatMessage,
@@ -46,14 +46,13 @@ import {
   cloudToolsPromptBlock,
   extractCloudToolMarkers,
   runCloudTool,
-  stripCloudToolMarkers,
 } from "@/lib/cloud-tools";
 import {
   cloudToolsPromptBlockV2,
   streamAnthropicWithTools,
 } from "@/lib/cloud-tool-runner";
 import { resolveChatContext } from "@/lib/chat-auth";
-import { getBridgeOnline, getBridgeToolCapabilities } from "@/lib/queries";
+import { getBridgeToolCapabilities } from "@/lib/queries";
 import { signResumeState } from "@/lib/resume-hmac";
 import { getAgentInfo } from "@/lib/agents";
 import { isOperatorEmail } from "@/lib/operator-credentials";

@@ -15,7 +15,6 @@ import type { TenantManifest } from "@/lib/manifest/schema";
  */
 export function ManifestReasoning({
   manifest,
-  tenantSlug,
 }: {
   manifest: TenantManifest;
   tenantSlug: string;

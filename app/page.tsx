@@ -2,14 +2,12 @@ import Link from "next/link";
 import { cookies } from "next/headers";
 import { Card, Stat, EmptyState, PageHeader, Tag } from "@/components/Card";
 import { MRRProgressChart } from "@/components/charts/MRRProgressChart";
-import { PipelineFunnel } from "@/components/charts/PipelineFunnel";
 import { TodayBlockToggle } from "@/components/TodayBlockToggle";
 import { TodayBlockEditableField } from "@/components/TodayBlockEditableField";
 import { FinalizeDayButton } from "@/components/FinalizeDayButton";
 import { LiveClock } from "@/components/LiveClock";
 import { timeAgo, truncate, formatTimeRange } from "@/lib/fmt";
 import {
-  formatOperatorDate,
   operatorDateKey,
   operatorIsWeekend,
 } from "@/lib/dates";
@@ -104,11 +102,6 @@ export default async function TodayPage() {
   const gap = Math.max(0, mrr.target - mrr.current);
 
   const todayKey = operatorDateKey();
-  const todayLabel = formatOperatorDate({
-    weekday: "long",
-    month: "long",
-    day: "numeric",
-  });
   const isWeekend = operatorIsWeekend();
   const missionLine =
     plan?.mission ||

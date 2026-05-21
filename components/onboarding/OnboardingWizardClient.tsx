@@ -1,7 +1,6 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import { useRouter } from "next/navigation";
 import Link from "next/link";
 import {
   AlertCircle,
@@ -104,7 +103,6 @@ function slugifyClient(name: string): string {
 }
 
 export function OnboardingWizardClient({ userEmail }: { userEmail?: string }) {
-  const router = useRouter();
   const [step, setStep] = useState<Step>("industry");
   // Tenant slug returned by /api/onboarding/wizard on successful create.
   // The done step uses this to link directly to the new tenant's dashboard
@@ -709,7 +707,7 @@ export function OnboardingWizardClient({ userEmail }: { userEmail?: string }) {
               <Sparkles className="h-4 w-4 text-accent shrink-0 mt-0.5" />
               <div>
                 <span className="text-fg font-bold">Next: connect an AI provider.</span>{" "}
-                After this you'll land on your Command Center.
+                After this you&apos;ll land on your Command Center.
                 Open <span className="font-mono text-accent">Settings → AI provider accounts</span>{" "}
                 and connect an Anthropic, OpenRouter, OpenAI, or Google key — one click applies it to every enabled agent.
                 Anthropic unlocks the native tool_use loop (records read/write, http, integrations).

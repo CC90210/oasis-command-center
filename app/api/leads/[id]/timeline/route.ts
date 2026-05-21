@@ -41,6 +41,63 @@ type TimelineEvent = {
   meta?: Record<string, unknown>;
 };
 
+// Per-feed row shapes — narrow types match the columns each select
+// statement requests. Optional everywhere because legacy migrations
+// may have left some columns null on historic rows.
+type InteractionRow = {
+  id: string;
+  channel: string | null;
+  direction: string | null;
+  subject: string | null;
+  content_preview: string | null;
+  created_at: string | null;
+  sent_at: string | null;
+  to_email: string | null;
+  to_phone: string | null;
+  metadata: Record<string, unknown> | null;
+};
+type EmailOpenRow = {
+  id: string;
+  outbound_message_id: string | null;
+  opened_at: string | null;
+  suspicious_prefetch: boolean | null;
+  user_agent: string | null;
+};
+type DocumentRow = {
+  id: string;
+  filename: string;
+  doc_type: string | null;
+  uploaded_by: string | null;
+  uploaded_at: string | null;
+  size_bytes: number | null;
+};
+type AgentEventRow = {
+  id: string;
+  event_type: string;
+  payload: Record<string, unknown> | null;
+  published_at: string | null;
+  created_at: string | null;
+};
+type AgentAlertRow = {
+  id: string;
+  alert_type: string;
+  severity: string | null;
+  title: string;
+  body: string | null;
+  created_at: string | null;
+  resolved_at: string | null;
+};
+
+function errMessage(e: unknown): string {
+  if (e instanceof Error) return e.message;
+  if (typeof e === "string") return e;
+  try {
+    return JSON.stringify(e);
+  } catch {
+    return String(e);
+  }
+}
+
 const HARD_CAP = 250; // events returned per request — drawer paginates further if ever needed
 
 export async function GET(
@@ -75,31 +132,31 @@ export async function GET(
         .limit(150);
       if (error) throw error;
       interactionLoaded = true;
-      for (const row of data || []) {
-        const at = (row as any).sent_at || (row as any).created_at;
+      for (const row of (data || []) as InteractionRow[]) {
+        const at = row.sent_at || row.created_at;
         if (!at) continue;
-        const direction = (row as any).direction || "outbound";
-        const channel = (row as any).channel || "unknown";
+        const direction = row.direction || "outbound";
+        const channel = row.channel || "unknown";
         const isNote = channel === "note";
         events.push({
-          source: isNote ? "interaction" : "interaction",
+          source: "interaction",
           type: isNote ? "note" : `${channel}_${direction}`,
           at,
           title: isNote
             ? "📝 Note"
-            : `${direction === "outbound" ? "Sent" : "Received"} ${channel}${(row as any).subject ? `: ${(row as any).subject}` : ""}`,
-          body: (row as any).content_preview || undefined,
+            : `${direction === "outbound" ? "Sent" : "Received"} ${channel}${row.subject ? `: ${row.subject}` : ""}`,
+          body: row.content_preview || undefined,
           meta: {
-            id: (row as any).id,
+            id: row.id,
             channel,
-            to_email: (row as any).to_email,
-            to_phone: (row as any).to_phone,
-            metadata: (row as any).metadata,
+            to_email: row.to_email,
+            to_phone: row.to_phone,
+            metadata: row.metadata,
           },
         });
       }
-    } catch (e: any) {
-      errors.push({ feed: table, message: String(e?.message || e) });
+    } catch (e: unknown) {
+      errors.push({ feed: table, message: errMessage(e) });
     }
   }
 
@@ -113,20 +170,21 @@ export async function GET(
       .order("opened_at", { ascending: false })
       .limit(50);
     if (error) throw error;
-    for (const row of data || []) {
+    for (const row of (data || []) as EmailOpenRow[]) {
+      if (!row.opened_at) continue;
       events.push({
         source: "email_open",
-        type: (row as any).suspicious_prefetch ? "open_prefetch" : "open",
-        at: (row as any).opened_at,
-        title: (row as any).suspicious_prefetch ? "📨 Email open (prefetch)" : "👁 Email opened",
+        type: row.suspicious_prefetch ? "open_prefetch" : "open",
+        at: row.opened_at,
+        title: row.suspicious_prefetch ? "📨 Email open (prefetch)" : "👁 Email opened",
         meta: {
-          outbound_message_id: (row as any).outbound_message_id,
-          user_agent: (row as any).user_agent,
+          outbound_message_id: row.outbound_message_id,
+          user_agent: row.user_agent,
         },
       });
     }
-  } catch (e: any) {
-    errors.push({ feed: "email_open_events", message: String(e?.message || e) });
+  } catch (e: unknown) {
+    errors.push({ feed: "email_open_events", message: errMessage(e) });
   }
 
   // 3. lead_documents
@@ -139,22 +197,23 @@ export async function GET(
       .order("uploaded_at", { ascending: false })
       .limit(50);
     if (error) throw error;
-    for (const row of data || []) {
+    for (const row of (data || []) as DocumentRow[]) {
+      if (!row.uploaded_at) continue;
       events.push({
         source: "document",
         type: "uploaded",
-        at: (row as any).uploaded_at,
-        title: `📎 Document: ${(row as any).filename}`,
-        body: (row as any).doc_type !== "unclassified" ? `Classified as ${(row as any).doc_type}` : undefined,
+        at: row.uploaded_at,
+        title: `📎 Document: ${row.filename}`,
+        body: row.doc_type && row.doc_type !== "unclassified" ? `Classified as ${row.doc_type}` : undefined,
         meta: {
-          id: (row as any).id,
-          uploaded_by: (row as any).uploaded_by,
-          size_bytes: (row as any).size_bytes,
+          id: row.id,
+          uploaded_by: row.uploaded_by,
+          size_bytes: row.size_bytes,
         },
       });
     }
-  } catch (e: any) {
-    errors.push({ feed: "lead_documents", message: String(e?.message || e) });
+  } catch (e: unknown) {
+    errors.push({ feed: "lead_documents", message: errMessage(e) });
   }
 
   // 4. agent_events — stage transitions and lifecycle events. Note
@@ -171,17 +230,19 @@ export async function GET(
       .order("published_at", { ascending: false })
       .limit(50);
     if (error) throw error;
-    for (const row of data || []) {
+    for (const row of (data || []) as AgentEventRow[]) {
+      const at = row.published_at || row.created_at;
+      if (!at) continue;
       events.push({
         source: "system",
-        type: (row as any).event_type,
-        at: (row as any).published_at || (row as any).created_at,
-        title: humanizeEventType((row as any).event_type),
-        meta: (row as any).payload || {},
+        type: row.event_type,
+        at,
+        title: humanizeEventType(row.event_type),
+        meta: row.payload || {},
       });
     }
-  } catch (e: any) {
-    errors.push({ feed: "agent_events", message: String(e?.message || e) });
+  } catch (e: unknown) {
+    errors.push({ feed: "agent_events", message: errMessage(e) });
   }
 
   // 5. agent_alerts — missing_info + future operator-side notifications.
@@ -195,21 +256,22 @@ export async function GET(
       .order("created_at", { ascending: false })
       .limit(50);
     if (error) throw error;
-    for (const row of data || []) {
+    for (const row of (data || []) as AgentAlertRow[]) {
+      if (!row.created_at) continue;
       events.push({
         source: "alert",
-        type: (row as any).alert_type,
-        at: (row as any).created_at,
-        title: `⚠ ${(row as any).title}`,
-        body: (row as any).body || undefined,
+        type: row.alert_type,
+        at: row.created_at,
+        title: `⚠ ${row.title}`,
+        body: row.body || undefined,
         meta: {
-          severity: (row as any).severity,
-          resolved_at: (row as any).resolved_at,
+          severity: row.severity,
+          resolved_at: row.resolved_at,
         },
       });
     }
-  } catch (e: any) {
-    errors.push({ feed: "agent_alerts", message: String(e?.message || e) });
+  } catch (e: unknown) {
+    errors.push({ feed: "agent_alerts", message: errMessage(e) });
   }
 
   events.sort((a, b) => (a.at < b.at ? 1 : a.at > b.at ? -1 : 0));

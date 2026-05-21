@@ -1042,6 +1042,12 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
             else if (line.startsWith("data:")) data = line.slice(5).trim();
           }
           if (!data) continue;
+          // SSE data field is provider-shape-dependent (Anthropic delta vs
+          // OpenAI choices vs Gemini candidates). Each downstream branch
+          // reads its own shape-specific fields, so the wire-level type
+          // is genuinely any here — narrowing at this seam would cascade
+          // through every provider branch below.
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
           let parsed: any;
           try {
             parsed = JSON.parse(data);
@@ -1859,7 +1865,7 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
               )}
               {error === "no_api_key" && (
                 <div className="text-xs text-fg-muted font-sans">
-                  This agent's provider row exists but has no key. Open{" "}
+                  This agent&apos;s provider row exists but has no key. Open{" "}
                   <Link href="/settings#providers" className="text-accent underline">
                     Settings → AI provider accounts
                   </Link>{" "}
@@ -2544,6 +2550,9 @@ function stripActionMarkers(text: string): string {
     .trim();
 }
 
+// Wire-level any: callers read shape-specific fields (error / code /
+// message) where the upstream provider determines the shape at runtime.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
 async function safeReadJson(r: Response): Promise<any> {
   try {
     return await r.json();

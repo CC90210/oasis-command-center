@@ -12,7 +12,7 @@
  * manifest would use, so the cutover in 1b is a no-op for the renderer.
  */
 
-import { CC_NAV, SUGA_NAV, SUN_NAV, type NavItem } from "../nav-config";
+import { CC_NAV, type NavItem } from "../nav-config";
 import {
   MANIFEST_SCHEMA_VERSION,
   type ManifestNavItem,

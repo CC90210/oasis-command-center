@@ -10,10 +10,7 @@ import {
   Zap,
   Handshake,
 } from "lucide-react";
-import {
-  PROMPTS_LIBRARY,
-  type PromptCategory,
-} from "@/lib/prompts-library";
+import { PROMPTS_LIBRARY } from "@/lib/prompts-library";
 
 export const dynamic = "force-dynamic";
 

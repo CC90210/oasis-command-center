@@ -4,7 +4,6 @@ import {
   PROMPT_CATEGORIES,
   PROMPTS_LIBRARY,
   type PromptCategory,
-  type PromptAudience,
 } from "@/lib/prompts-library";
 import { ArrowRight, ShieldAlert, User as UserIcon, Users } from "lucide-react";
 

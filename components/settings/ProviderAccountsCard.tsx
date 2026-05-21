@@ -249,7 +249,7 @@ export function ProviderAccountsCard({
           <AlertCircle className="w-4 h-4 text-status-warm shrink-0 mt-0.5" />
           <div className="flex-1">
             <span className="font-bold">No provider wired yet.</span> Your
-            agents can't think until you connect at least one — connect a
+            agents can&apos;t think until you connect at least one — connect a
             cloud provider above (recommended for client tenants) OR{" "}
             <Link
               href="/settings/devices/install"

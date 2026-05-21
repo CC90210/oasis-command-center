@@ -227,8 +227,8 @@ export default async function OverridesPage({
             Approve to let the agent retry the exact same command (single-use,
             tied to the command hash). Deny to keep it blocked. The local
             consumer daemon picks up your decision within ~5 seconds and
-            relays it back to the calling agent. If you see "No pending
-            override requests" the empire is clean.
+            relays it back to the calling agent. If you see &ldquo;No pending
+            override requests&rdquo; the empire is clean.
           </div>
         </div>
       </Card>
@@ -260,7 +260,7 @@ export default async function OverridesPage({
       {pending.length === 0 && inFlight.length === 0 && !error && (
         <Card>
           <div className="text-sm text-fg-muted p-2">
-            No pending override requests. exec_guard hasn't blocked anything that
+            No pending override requests. exec_guard hasn&apos;t blocked anything that
             needs your sign-off in the last 48h.
           </div>
         </Card>

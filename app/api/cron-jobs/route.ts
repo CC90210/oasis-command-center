@@ -186,9 +186,9 @@ export async function POST(req: NextRequest) {
   if (!tenantId) return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
   const userId = await resolveUserId();
 
-  let body: any;
+  let body: Record<string, unknown>;
   try {
-    body = await req.json();
+    body = (await req.json()) as Record<string, unknown>;
   } catch {
     return NextResponse.json({ ok: false, error: "invalid_json" }, { status: 400 });
   }
@@ -211,7 +211,10 @@ export async function POST(req: NextRequest) {
       { status: 400 },
     );
   }
-  const actionPayload = body?.action_payload && typeof body.action_payload === "object" ? body.action_payload : {};
+  const actionPayload: Record<string, unknown> =
+    body?.action_payload && typeof body.action_payload === "object" && !Array.isArray(body.action_payload)
+      ? (body.action_payload as Record<string, unknown>)
+      : {};
 
   // Per-type payload validation. Keeps malformed payloads from reaching the
   // bridge where they'd just error silently in cron_engine.

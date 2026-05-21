@@ -8,7 +8,6 @@ import {
   Clock3,
   MessageSquareText,
   RefreshCcw,
-  ShieldCheck,
   SunMedium,
   Workflow,
 } from "lucide-react";

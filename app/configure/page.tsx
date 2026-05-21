@@ -12,7 +12,7 @@
 
 import Link from "next/link";
 import { redirect } from "next/navigation";
-import { ArrowRight, Sparkles, ShieldCheck } from "lucide-react";
+import { Sparkles, ShieldCheck } from "lucide-react";
 import { getSessionUser } from "@/lib/supabase-server";
 import { ConfigureFlow } from "@/components/landing/ConfigureFlow";
 import { OasisLogo } from "@/components/brand/OasisLogo";

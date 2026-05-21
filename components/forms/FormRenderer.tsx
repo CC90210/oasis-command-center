@@ -302,7 +302,6 @@ function renderInput(
     }
 
     case "file_upload": {
-      const fileVal = value as File | null;
       return (
         <input
           id={inputId}

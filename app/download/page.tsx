@@ -1,6 +1,5 @@
 import Link from "next/link";
 import {
-  ArrowRight,
   CheckCircle2,
   Cloud,
   Cpu,

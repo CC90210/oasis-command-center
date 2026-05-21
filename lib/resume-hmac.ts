@@ -112,11 +112,14 @@ export function signResumeState(state: unknown, binding?: ResumeBinding): string
     }
     // Dev without a key — emit a one-time warning so the operator knows
     // the protection isn't active, but don't block local development.
-    if (!(globalThis as any).__resumeHmacWarned) {
+    // One-shot warn flag stashed on globalThis (Node + edge both expose it).
+    // Cast through `unknown` so we don't need explicit any for the augmentation.
+    const g = globalThis as unknown as { __resumeHmacWarned?: boolean };
+    if (!g.__resumeHmacWarned) {
       console.warn(
         `[resume-hmac] ${HMAC_ENV_VAR} not set; resume_state signing is DISABLED. Set it before any production deploy.`
       );
-      (globalThis as any).__resumeHmacWarned = true;
+      g.__resumeHmacWarned = true;
     }
     return "";
   }

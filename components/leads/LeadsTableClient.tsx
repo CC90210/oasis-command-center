@@ -181,7 +181,7 @@ export function LeadsTableClient({ initialLeads, stages, detailBase }: Props) {
       else counts.uncategorized += 1;
     }
     return counts;
-  }, [initialLeads]);
+  }, [initialLeads, STAGES]);
 
   function toggleSort(key: SortKey) {
     if (sortKey === key) {
@@ -217,38 +217,43 @@ export function LeadsTableClient({ initialLeads, stages, detailBase }: Props) {
 
   return (
     <div className="space-y-4">
-      {/* ── Stage tabs ───────────────────────────────────────────── */}
-      <div className="overflow-x-auto -mx-2 px-2">
-        <div className="flex items-center gap-1 min-w-max">
+      {/* ── Stage tabs ───────────────────────────────────────────────
+          2026-05-21: switched from overflow-x-auto + min-w-max (which
+          forced a horizontal scroll on narrow viewports — operator
+          complaint: "I have to use the scroll bar at the bottom to see
+          the last stage") to flex-wrap so every stage is visible at
+          once on every viewport. Tabs wrap to a second row when they
+          don't all fit. Applies to both OASIS (11 stages) and SunBiz
+          (12 stages) leads. */}
+      <div className="flex flex-wrap items-center gap-1">
+        <StageTab
+          label="All"
+          value="all"
+          count={stageCounts.all}
+          active={stage === "all"}
+          onClick={() => changeStage("all")}
+        />
+        {STAGES.map((s) => (
           <StageTab
-            label="All"
-            value="all"
-            count={stageCounts.all}
-            active={stage === "all"}
-            onClick={() => changeStage("all")}
+            key={s.value}
+            label={s.label}
+            value={s.value}
+            count={stageCounts[s.value] || 0}
+            tone={s.tone}
+            active={stage === s.value}
+            onClick={() => changeStage(s.value)}
           />
-          {STAGES.map((s) => (
-            <StageTab
-              key={s.value}
-              label={s.label}
-              value={s.value}
-              count={stageCounts[s.value] || 0}
-              tone={s.tone}
-              active={stage === s.value}
-              onClick={() => changeStage(s.value)}
-            />
-          ))}
-          {stageCounts.uncategorized > 0 && (
-            <StageTab
-              label="Uncategorized"
-              value="uncategorized"
-              count={stageCounts.uncategorized}
-              tone="text-fg-dim"
-              active={stage === "uncategorized"}
-              onClick={() => changeStage("uncategorized")}
-            />
-          )}
-        </div>
+        ))}
+        {stageCounts.uncategorized > 0 && (
+          <StageTab
+            label="Uncategorized"
+            value="uncategorized"
+            count={stageCounts.uncategorized}
+            tone="text-fg-dim"
+            active={stage === "uncategorized"}
+            onClick={() => changeStage("uncategorized")}
+          />
+        )}
       </div>
 
       {/* ── Search ───────────────────────────────────────────────── */}

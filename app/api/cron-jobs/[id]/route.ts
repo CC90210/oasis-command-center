@@ -28,9 +28,9 @@ export async function PATCH(
   if (!tenantId) return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
   const { id } = await ctx.params;
 
-  let body: any;
+  let body: Record<string, unknown>;
   try {
-    body = await req.json();
+    body = (await req.json()) as Record<string, unknown>;
   } catch {
     return NextResponse.json({ ok: false, error: "invalid_json" }, { status: 400 });
   }

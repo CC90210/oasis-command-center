@@ -152,7 +152,8 @@ export function LeadTimelinePanel({ leadId }: { leadId: string }) {
           {events.map((e, i) => {
             const style = SOURCE_STYLES[e.source] || SOURCE_STYLES.system;
             const dimmed =
-              e.source === "email_open" && (e.meta as any)?.suspicious_prefetch;
+              e.source === "email_open" &&
+              !!(e.meta as { suspicious_prefetch?: boolean } | undefined)?.suspicious_prefetch;
             return (
               <li key={i} className="ml-5 relative">
                 <span

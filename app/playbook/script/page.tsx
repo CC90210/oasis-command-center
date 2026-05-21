@@ -117,7 +117,7 @@ export default function ScriptPage() {
             Objection Handlers
           </h2>
           <p className="text-xs text-fg-muted mt-1">
-            Universal rule: question, don't answer. The objection is rarely the real reason.
+            Universal rule: question, don&apos;t answer. The objection is rarely the real reason.
           </p>
         </header>
         <table className="w-full">
@@ -138,7 +138,7 @@ export default function ScriptPage() {
                 className="border-b border-bg-border last:border-0 hover:bg-bg-hover/30 transition-colors"
               >
                 <td className="px-5 py-4 align-top">
-                  <span className="text-status-hot font-medium text-sm">"{o.trigger}"</span>
+                  <span className="text-status-hot font-medium text-sm">&ldquo;{o.trigger}&rdquo;</span>
                 </td>
                 <td className="px-5 py-4 text-fg text-sm leading-relaxed">{o.response}</td>
               </tr>

@@ -304,7 +304,7 @@ export function LocalCliProvidersCard() {
               The CLI cards need the local bridge running on this machine to probe installed
               CLIs. Start the local bridge on this machine (use the <strong className="text-fg">Install Claude Code CLI bridge</strong> button
               in Devices above) and refresh.
-              Until then the dashboard can't tell which CLIs are installed.
+              Until then the dashboard can&apos;t tell which CLIs are installed.
             </p>
           </div>
         </div>

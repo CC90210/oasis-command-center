@@ -159,7 +159,7 @@ export function InstallBridgeModal({ onClose }: { onClose: () => void }) {
                   </span>
                 </div>
                 <div className="text-[11px] text-fg-dim mt-1.5">
-                  Need to run it on a different machine? The pair code works from any terminal as long as it's redeemed before it expires.
+                  Need to run it on a different machine? The pair code works from any terminal as long as it&apos;s redeemed before it expires.
                 </div>
               </div>
             </>
@@ -174,7 +174,7 @@ export function InstallBridgeModal({ onClose }: { onClose: () => void }) {
                   <div className="text-sm text-fg-muted mt-1">
                     Refresh the chat header on /agents — the agent badge should flip to{" "}
                     <span className="text-accent font-mono">local bridge · Claude Code CLI</span>.
-                    Your chat now runs through your machine's Claude subscription, with full file + script access.
+                    Your chat now runs through your machine&apos;s Claude subscription, with full file + script access.
                   </div>
                 </div>
               </div>

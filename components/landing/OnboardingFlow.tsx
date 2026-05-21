@@ -256,7 +256,7 @@ export function OnboardingFlow({ userEmail }: Props) {
       {step === 3 && (
         <Card title="Connect your Claude Code CLI — optional" icon={<Monitor className="w-4 h-4" />}>
           <p className="text-sm text-fg-muted mb-4">
-            For full file-system access AND to power your chat with your local Claude Code subscription instead of the API key you just pasted, install the OASIS bridge on this machine. <strong className="text-fg">Skip if you'd rather use cloud mode</strong> — chat works fine either way, and you can install later from Settings → Devices.
+            For full file-system access AND to power your chat with your local Claude Code subscription instead of the API key you just pasted, install the OASIS bridge on this machine. <strong className="text-fg">Skip if you&apos;d rather use cloud mode</strong> — chat works fine either way, and you can install later from Settings → Devices.
           </p>
           <div className="rounded-lg border border-bg-border bg-bg-elev p-4 space-y-3">
             <div className="flex items-center gap-2 text-xs text-fg-muted">

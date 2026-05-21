@@ -63,9 +63,9 @@ export async function POST(req: NextRequest) {
   const bridge = await resolveBridge(req);
   if (!bridge) return bad(401, "invalid_or_revoked_bridge_token");
 
-  let body: any;
+  let body: Record<string, unknown>;
   try {
-    body = await req.json();
+    body = (await req.json()) as Record<string, unknown>;
   } catch {
     return bad(400, "invalid_json");
   }

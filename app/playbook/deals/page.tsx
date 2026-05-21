@@ -191,11 +191,11 @@ export default function DealArchitecturePage() {
 
       <Card title="Partner pitch - verbatim">
         <blockquote className="bg-accent-soft border-l-2 border-accent rounded-r-md px-4 py-4 text-fg leading-relaxed">
-          "I'm building a partner network around OASIS - basically, people who already have trust in their market
-          and want a no-friction way to bring AI into their book of business. I don't sell into your clients without
+          &ldquo;I&apos;m building a partner network around OASIS - basically, people who already have trust in their market
+          and want a no-friction way to bring AI into their book of business. I don&apos;t sell into your clients without
           you. You stay the relationship owner. We plug in the AI piece, and if you actively bring and help close the
           deal, you get half of net revenue for the lifetime of that client. If it is just a casual intro, I keep that
-          simpler with a small close fee or short-term commission. Worth a quick chat to see if it fits?"
+          simpler with a small close fee or short-term commission. Worth a quick chat to see if it fits?&rdquo;
         </blockquote>
       </Card>
     </div>

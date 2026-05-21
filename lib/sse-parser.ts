@@ -17,6 +17,12 @@
  * or the literal `"[DONE]"` sentinel.
  */
 
+// `data` is either a parsed JSON value, the raw string when JSON parse
+// fails, or the literal "[DONE]" sentinel. `any` is deliberate here so
+// every provider integration that consumes this generator can read
+// shape-specific fields (choices, delta, usageMetadata) without each
+// site re-narrowing — the SSE wire is genuinely untyped at the source.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
 export type SSEFrame = { event: string; data: any };
 
 export async function* parseSSE(

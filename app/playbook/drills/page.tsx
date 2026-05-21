@@ -339,7 +339,7 @@ export default function DrillsPage() {
 
       <Card title="Why this works when nothing else has" subtitle="The 90-day rule, restated">
         <p className="text-fg leading-relaxed">
-          Ten drills. Five every day, five on cadence. Most people quit at week 3 because the early data is bad. The data turns at week 5 and is incredible by week 9. The only thing standing between you and $5K MRR is daily, boring, dashboard-anchored discipline. <span className="text-accent font-medium">Every drill links to a chat prompt or a live dashboard page</span> — they're not paper exercises. The system runs them with you.
+          Ten drills. Five every day, five on cadence. Most people quit at week 3 because the early data is bad. The data turns at week 5 and is incredible by week 9. The only thing standing between you and $5K MRR is daily, boring, dashboard-anchored discipline. <span className="text-accent font-medium">Every drill links to a chat prompt or a live dashboard page</span> — they&apos;re not paper exercises. The system runs them with you.
         </p>
       </Card>
     </div>

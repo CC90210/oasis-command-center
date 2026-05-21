@@ -293,7 +293,7 @@ export default async function HealthPage() {
         subtitle="Scheduled jobs whose last run errored — either the script failed, the handler is missing, or an upstream service was down. Either fix it or pause the job from /automations."
       >
         {failedCrons.length === 0 ? (
-          <div className="text-sm text-fg-muted">Every cron's last run completed cleanly.</div>
+          <div className="text-sm text-fg-muted">Every cron&apos;s last run completed cleanly.</div>
         ) : (
           <ul className="space-y-2 text-sm">
             {failedCrons.map((c) => (

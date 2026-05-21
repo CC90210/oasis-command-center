@@ -99,9 +99,15 @@ export async function GET(
         .eq("id", id)
         .maybeSingle();
       if (!error && data) {
-        tenantId = (data as any).tenant_id || null;
-        leadId = (data as any).lead_id || null;
-        const ts = (data as any).sent_at || (data as any).created_at;
+        const row = data as {
+          tenant_id: string | null;
+          lead_id: string | null;
+          created_at: string | null;
+          sent_at: string | null;
+        };
+        tenantId = row.tenant_id || null;
+        leadId = row.lead_id || null;
+        const ts = row.sent_at || row.created_at;
         if (ts) sentAtMs = new Date(ts).getTime();
         break;
       }
