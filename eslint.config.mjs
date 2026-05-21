@@ -12,7 +12,20 @@ const eslintConfig = [
   {
     rules: {
       "@typescript-eslint/no-explicit-any": "warn",
-      "@typescript-eslint/no-unused-vars": "warn",
+      // Standard TypeScript convention: a leading underscore on a
+      // parameter or local declares it intentionally unused (preserved
+      // on the signature for callers, future use, or destructuring).
+      // Without the patterns the rule fires on every `_req`, `_unused`,
+      // `_agentSlug` etc. and forces noisy workarounds.
+      "@typescript-eslint/no-unused-vars": [
+        "warn",
+        {
+          argsIgnorePattern: "^_",
+          varsIgnorePattern: "^_",
+          caughtErrorsIgnorePattern: "^_",
+          destructuredArrayIgnorePattern: "^_",
+        },
+      ],
       "@typescript-eslint/no-require-imports": "warn",
       "react/no-unescaped-entities": "warn",
       "react-hooks/exhaustive-deps": "warn",

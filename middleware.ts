@@ -68,8 +68,32 @@ const PUBLIC_FILE_EXTENSIONS = [
   ".woff", ".woff2", ".ttf",                  // fonts
 ];
 
+/**
+ * Match `pathname` against the prefix set.
+ *
+ * IMPORTANT: a naive `pathname.startsWith(prefix)` over-matches. The
+ * 2026-05-21 audit caught `"/api/cron"` letting `/api/cron-jobs/*`
+ * through because "cron-jobs" starts with "cron". The route's own
+ * resolveTenantId() check still 401'd unauthenticated callers, but
+ * the middleware-level defence-in-depth was silently disabled for
+ * every cron-jobs sub-path. The matcher now requires either an exact
+ * match OR the prefix followed by `/`, so `"/api/cron"` matches
+ * `/api/cron` and `/api/cron/whatever` but NOT `/api/cron-jobs`.
+ *
+ * Prefixes that intentionally end in `/` (like `/f/`) keep working —
+ * the exact-match case still hits and the prefix+`/` case is identical
+ * to the original startsWith for those entries.
+ */
+function matchesPrefix(pathname: string, prefix: string): boolean {
+  if (pathname === prefix) return true;
+  // For prefixes that already end in `/`, startsWith is exact-enough.
+  if (prefix.endsWith("/")) return pathname.startsWith(prefix);
+  // Otherwise require a path separator immediately after.
+  return pathname.startsWith(prefix + "/");
+}
+
 function isPublic(pathname: string): boolean {
-  if (PUBLIC_PATH_PREFIXES.some((p) => pathname.startsWith(p))) return true;
+  if (PUBLIC_PATH_PREFIXES.some((p) => matchesPrefix(pathname, p))) return true;
   const lower = pathname.toLowerCase();
   return PUBLIC_FILE_EXTENSIONS.some((ext) => lower.endsWith(ext));
 }
