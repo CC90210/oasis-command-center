@@ -1,153 +1,101 @@
 /**
  * /pipeline — OASIS lead pipeline.
  *
- * 2026-05-21 rewrite: this page now uses LeadsTableClient — the SAME
- * component Sun Biz's /leads page uses. Same horizontal pill-tab strip,
- * same search input, same sortable table, same row click → detail
- * drawer behaviour. The only OASIS-specific bits are:
+ * 2026-05-21 rewrite (third pass): this page renders the *literal*
+ * SunBizPipelineView component now — the same one Sun Biz's catch-all
+ * uses at /t/sun/leads. Only difference vs the SunBiz render is the
+ * `variant="oasis"` prop, which swaps:
+ *   - the column set (6 OASIS columns vs 13 SunBiz columns)
+ *   - the row-model (reads d.name / d.company / d.ai_score etc.)
+ *   - the SLA config (lib/oasis-sla.ts)
  *
- *   - 11-stage list passed via the `stages` prop (lib/oasis-stage-meta)
- *     instead of SunBiz's 12-stage funding funnel.
- *   - detailBase="/pipeline" so row clicks land on /pipeline/[id]
- *     (OASIS lead detail) instead of /leads/[id] (SunBiz catch-all).
- *
- * Funnel chart at the top and the Recent Inbound / Recent Outbound
- * cards at the bottom stay — they're OASIS-only daily-ops surfaces.
- * Everything in the middle (stage tabs + table) is the literal Sun Biz
- * UI, so there's no second-implementation drift to maintain.
+ * Layout: stage-card grid up top, "touch first" overdue callout,
+ * collapsible per-stage sections with detail rows underneath. The
+ * dashboard chrome that lived around the old /pipeline rewrite
+ * (funnel chart + recent inbound/outbound) is gone — CC's brief was
+ * explicit that /pipeline must render exactly what Sun Biz renders.
+ * The funnel + recent surfaces still exist on /today (the dashboard
+ * home), so they aren't lost — just stop competing for screen real
+ * estate on the lead-list view.
  */
 
-import Link from "next/link";
-import { Card, PageHeader, Tag, EmptyState } from "@/components/Card";
-import { PipelineFunnel } from "@/components/charts/PipelineFunnel";
-import { timeAgo, truncate } from "@/lib/fmt";
-import {
-  pipelineBreakdown,
-  recentOutbound,
-  recentInbound,
-  getActiveProfile,
-  getLeadsForTenant,
-} from "@/lib/queries";
+import { PageHeader, Card, EmptyState } from "@/components/Card";
+import { getActiveProfile } from "@/lib/queries";
+import { listRecords, type TenantRecord } from "@/lib/manifest/data";
 import { safe } from "@/lib/api-helpers";
-import { LeadsTableClient } from "@/components/leads/LeadsTableClient";
-import { OASIS_LEAD_STAGE_TABS } from "@/lib/oasis-stage-meta";
+import { SunBizPipelineView } from "@/components/manifest/SunBizPipelineView";
+import { OASIS_LEAD_STAGES } from "@/lib/oasis-stage-meta";
 
 export const dynamic = "force-dynamic";
 
-export default async function PipelinePage() {
+export default async function PipelinePage({
+  searchParams,
+}: {
+  searchParams?: Promise<{ stage?: string; q?: string }>;
+}) {
+  const sp = (await searchParams) || {};
+  const stageFilter = typeof sp.stage === "string" && sp.stage.trim() ? sp.stage.trim() : null;
+  const query = typeof sp.q === "string" && sp.q.trim() ? sp.q.trim() : null;
+
   const profile = await safe("pipeline.profile", getActiveProfile(), null);
   const tenantId = profile?.tenant_id || "";
 
-  const [pipeline, outbound, inbound, leads] = await Promise.all([
-    safe(
-      "pipeline.breakdown",
-      pipelineBreakdown(tenantId, true),
-      { stages: {} as Record<string, number>, total: 0, sources: {} as Record<string, number> },
-    ),
-    safe("pipeline.recent_outbound", recentOutbound(tenantId, 20), []),
-    safe("pipeline.recent_inbound", recentInbound(tenantId, 20), []),
-    safe("pipeline.leads", tenantId ? getLeadsForTenant(tenantId, 500) : Promise.resolve([]), []),
-  ]);
+  if (!tenantId) {
+    return (
+      <div className="space-y-6 animate-fade-in">
+        <PageHeader title="Pipeline" subtitle="Sign in to see your pipeline." />
+        <Card>
+          <EmptyState message="No tenant on this session. Finish onboarding to connect this workspace." />
+        </Card>
+      </div>
+    );
+  }
+
+  // Fetch every OASIS lead row in the canonical shape SunBizPipelineView
+  // expects ({ id, data, updated_at, created_at }). listRecords returns
+  // exactly that. Query-filter is applied client-side in the component
+  // via PageSearchBar; stage filter is applied server-side here so the
+  // initial render doesn't ship rows we're going to discard.
+  const allRows: TenantRecord[] = await safe(
+    "pipeline.rows",
+    listRecords({ tenant_id: tenantId, entity: "lead", limit: 500 }).then((r) => r.rows),
+    [] as TenantRecord[],
+  );
+
+  // Optional ?q= filter — match across the operator-relevant fields.
+  // Kept server-side so /pipeline?q=acme returns ~5 rows instead of
+  // shipping 500 and filtering in the browser.
+  const rows = query
+    ? allRows.filter((r) => {
+        const d = r.data;
+        const hay = [
+          d.name,
+          d.company,
+          d.email,
+          d.phone,
+          d.notes,
+        ]
+          .filter((v): v is string => typeof v === "string")
+          .join(" ")
+          .toLowerCase();
+        return hay.includes(query.toLowerCase());
+      })
+    : allRows;
 
   return (
-    <div className="space-y-6 animate-fade-in">
-      <PageHeader
-        title="Pipeline"
-        subtitle={`${pipeline.total} lead${pipeline.total === 1 ? "" : "s"} across the funnel`}
+    <div className="animate-fade-in">
+      <SunBizPipelineView
+        slug="oasis"
+        entityName="lead"
+        entityLabel="Lead"
+        stages={OASIS_LEAD_STAGES}
+        stageField="stage"
+        rows={rows}
+        stageFilter={stageFilter}
+        query={query}
+        basePath="/pipeline"
+        variant="oasis"
       />
-
-      <section>
-        <Card title="Funnel" subtitle="By stage">
-          <PipelineFunnel stages={pipeline.stages} />
-        </Card>
-      </section>
-
-      {tenantId ? (
-        <LeadsTableClient
-          initialLeads={leads}
-          stages={OASIS_LEAD_STAGE_TABS}
-          detailBase="/pipeline"
-        />
-      ) : (
-        <Card>
-          <EmptyState message="Sign in to see your pipeline." />
-        </Card>
-      )}
-
-      <section className="grid lg:grid-cols-2 gap-6">
-        <Card title="Recent outbound" subtitle={`${outbound.length} most recent`}>
-          {outbound.length === 0 ? (
-            <EmptyState message="No sends through gateway today." />
-          ) : (
-            <ul className="divide-y divide-bg-border">
-              {outbound.map((o) => {
-                const meta = (o.metadata || {}) as Record<string, unknown>;
-                return (
-                  <li key={o.id} className="py-1">
-                    <Link
-                      href={`/interactions/${o.id}`}
-                      className="flex items-start gap-3 py-2 px-2 -mx-2 rounded-md hover:bg-bg-elev transition-colors"
-                    >
-                      <Tag tone="info">{o.channel}</Tag>
-                      <div className="flex-1 min-w-0">
-                        <div className="text-fg text-sm truncate">
-                          {truncate(o.subject || "(no subject)", 70)}
-                        </div>
-                        <div className="text-xs text-fg-dim mt-0.5">
-                          {(meta.brand as string) || "—"} · {o.agent_source || "—"} · {timeAgo(o.created_at)}
-                        </div>
-                      </div>
-                    </Link>
-                  </li>
-                );
-              })}
-            </ul>
-          )}
-        </Card>
-
-        <Card title="Recent inbound" subtitle={`${inbound.length} most recent`}>
-          {inbound.length === 0 ? (
-            <EmptyState message="No inbound today. Wire n8n via Settings → Integrations." />
-          ) : (
-            <ul className="divide-y divide-bg-border">
-              {inbound.map((i) => {
-                const meta = (i.metadata || {}) as Record<string, unknown>;
-                const cls = (meta.classification || {}) as Record<string, unknown>;
-                const intent = (cls.intent as string) || "—";
-                const summary = (cls.summary as string) || "";
-                const tone =
-                  intent === "hot_lead" || intent === "frustrated"
-                    ? "hot"
-                    : intent === "sales" || intent === "business_opportunity" || intent === "partnership" || intent === "booking"
-                      ? "engaged"
-                      : intent === "strategic" || intent === "pricing_question"
-                        ? "accent"
-                        : intent === "ambiguous" || intent === "security"
-                          ? "warm"
-                          : "neutral";
-                return (
-                  <li key={i.id} className="py-1">
-                    <Link
-                      href={`/interactions/${i.id}`}
-                      className="flex items-start gap-3 py-2 px-2 -mx-2 rounded-md hover:bg-bg-elev transition-colors"
-                    >
-                      <Tag tone={tone}>{intent}</Tag>
-                      <div className="flex-1 min-w-0">
-                        <div className="text-fg text-sm truncate">{truncate(i.subject, 70)}</div>
-                        <div className="text-xs text-fg-dim mt-0.5 truncate">
-                          {summary
-                            ? truncate(summary, 100)
-                            : `${(meta.from_identity as string) || "—"} · ${timeAgo(i.created_at)}`}
-                        </div>
-                      </div>
-                    </Link>
-                  </li>
-                );
-              })}
-            </ul>
-          )}
-        </Card>
-      </section>
     </div>
   );
 }

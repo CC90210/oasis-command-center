@@ -13,15 +13,29 @@ import {
   relTime,
 } from "@/lib/format-helpers";
 import {
-  ACTIVE_STAGES,
-  READY_TO_ADVANCE_STAGES,
-  STAGE_SLA_DAYS,
+  ACTIVE_STAGES as SUN_ACTIVE_STAGES,
+  READY_TO_ADVANCE_STAGES as SUN_READY_TO_ADVANCE_STAGES,
+  STAGE_SLA_DAYS as SUN_STAGE_SLA_DAYS,
+  VISIBLE_TARGET_STAGES as SUN_VISIBLE_TARGET_STAGES,
   daysSince,
-  isGoingCold,
-  stageTargetLabel,
+  isGoingCold as isGoingColdSun,
 } from "@/lib/sunbiz-sla";
+import {
+  OASIS_ACTIVE_STAGES,
+  OASIS_READY_TO_ADVANCE_STAGES,
+  OASIS_STAGE_SLA_DAYS,
+  OASIS_VISIBLE_TARGET_STAGES,
+} from "@/lib/oasis-sla";
 
 type Row = { id: string; data: Record<string, unknown>; updated_at?: string; created_at?: string };
+
+/**
+ * Pipeline variant. `sunbiz` keeps the legacy 13-column funding-funnel
+ * grid; `oasis` swaps in the AI-agency 6-column grid + OASIS SLA
+ * constants so the same component drives both /t/sun/leads and
+ * /pipeline. See lib/oasis-sla.ts for the OASIS stage windows.
+ */
+export type PipelineVariant = "sunbiz" | "oasis";
 
 type Props = {
   slug: string;
@@ -33,12 +47,67 @@ type Props = {
   stageFilter: string | null;
   query: string | null;
   basePath: string;
+  /** Default `"sunbiz"` so every existing caller works unchanged. */
+  variant?: PipelineVariant;
 };
 
-const GRID_STYLE: CSSProperties = {
+const SUN_GRID_STYLE: CSSProperties = {
   gridTemplateColumns:
     "minmax(150px,1.6fr) minmax(92px,.9fr) minmax(78px,.7fr) 30px 56px 38px minmax(104px,1fr) 68px 112px 34px 42px 76px 58px",
 };
+
+const OASIS_GRID_STYLE: CSSProperties = {
+  gridTemplateColumns:
+    "minmax(160px,1.6fr) minmax(140px,1.2fr) minmax(110px,1fr) 56px 100px 88px",
+};
+
+// Tenant-variant config struct picked at the top of the component.
+type VariantConfig = {
+  active: Set<string>;
+  readyToAdvance: Set<string>;
+  slaDays: Record<string, number>;
+  visibleTargetStages: Set<string>;
+  gridStyle: CSSProperties;
+};
+
+function variantConfig(v: PipelineVariant): VariantConfig {
+  if (v === "oasis") {
+    return {
+      active: OASIS_ACTIVE_STAGES,
+      readyToAdvance: OASIS_READY_TO_ADVANCE_STAGES,
+      slaDays: OASIS_STAGE_SLA_DAYS,
+      visibleTargetStages: OASIS_VISIBLE_TARGET_STAGES,
+      gridStyle: OASIS_GRID_STYLE,
+    };
+  }
+  return {
+    active: SUN_ACTIVE_STAGES,
+    readyToAdvance: SUN_READY_TO_ADVANCE_STAGES,
+    slaDays: SUN_STAGE_SLA_DAYS,
+    visibleTargetStages: SUN_VISIBLE_TARGET_STAGES,
+    gridStyle: SUN_GRID_STYLE,
+  };
+}
+
+function slaDaysForVariant(cfg: VariantConfig, stage: string): number {
+  return cfg.slaDays[stage] ?? 7;
+}
+
+function isGoingColdVariant(
+  cfg: VariantConfig,
+  stage: string,
+  lastTouchIso: string | null | undefined,
+): boolean {
+  if (!cfg.active.has(stage)) return false;
+  return daysSince(lastTouchIso) > slaDaysForVariant(cfg, stage);
+}
+
+function stageTargetLabelVariant(cfg: VariantConfig, stage: string): string | null {
+  if (!cfg.visibleTargetStages.has(stage)) return null;
+  const days = slaDaysForVariant(cfg, stage);
+  if (!Number.isFinite(days) || days >= 999) return null;
+  return `${days}d target`;
+}
 
 export function SunBizPipelineView({
   slug,
@@ -50,11 +119,22 @@ export function SunBizPipelineView({
   stageFilter,
   query,
   basePath,
+  variant = "sunbiz",
 }: Props) {
   const [collapsedStages, setCollapsedStages] = useState<Record<string, boolean>>({});
+  const cfg = useMemo(() => variantConfig(variant), [variant]);
   const isLeads = entityName === "lead";
   const titleText = isLeads ? "Lead Pipeline" : "Opportunity Pipeline";
-  const newHref = `/t/${slug}/${basePath.split("/").pop() || ""}/new`;
+  // For OASIS the route is empire-side (/pipeline/new); for SunBiz it
+  // lives under the tenant catch-all (/t/sun/leads/new).
+  const newHref =
+    variant === "oasis"
+      ? `${basePath}/new`
+      : `/t/${slug}/${basePath.split("/").pop() || ""}/new`;
+  // "hot" semantics differ per tenant: SunBiz tracks an explicit
+  // hot_lead stage; OASIS has no equivalent, so we surface
+  // "discovery" (mid-funnel active intent) as the closest proxy.
+  const hotStageKey = variant === "oasis" ? "discovery" : "hot_lead";
 
   const stats = useMemo(() => {
     const stageCounts: Record<string, number> = {};
@@ -67,19 +147,19 @@ export function SunBizPipelineView({
     for (const r of rows) {
       const s = String(r.data[stageField] || "");
       stageCounts[s] = (stageCounts[s] || 0) + 1;
-      if (ACTIVE_STAGES.has(s)) active++;
-      if (s === "hot_lead") hot++;
-      if (READY_TO_ADVANCE_STAGES.has(s)) ready++;
+      if (cfg.active.has(s)) active++;
+      if (s === hotStageKey) hot++;
+      if (cfg.readyToAdvance.has(s)) ready++;
 
       const lastTouch = r.data.last_touch_at || r.updated_at || r.created_at;
-      if (typeof lastTouch === "string" && isGoingCold(s, lastTouch)) cold++;
+      if (typeof lastTouch === "string" && isGoingColdVariant(cfg, s, lastTouch)) cold++;
 
       const t = r.updated_at ? new Date(r.updated_at).getTime() : 0;
       if (t > mostRecentUpdate) mostRecentUpdate = t;
     }
 
     return { stageCounts, active, hot, cold, ready, mostRecentUpdate };
-  }, [rows, stageField]);
+  }, [rows, stageField, cfg, hotStageKey]);
 
   const renderedRows = stageFilter
     ? rows.filter((r) => String(r.data[stageField] || "") === stageFilter)
@@ -87,7 +167,7 @@ export function SunBizPipelineView({
   const visibleStages = stageFilter
     ? stages.filter((s) => s.key === stageFilter)
     : stages;
-  const touchFirst = pickTouchFirst(renderedRows, stageField, stages);
+  const touchFirst = pickTouchFirst(renderedRows, stageField, stages, cfg);
 
   useEffect(() => {
     setCollapsedStages({});
@@ -223,6 +303,9 @@ export function SunBizPipelineView({
             rows={stageRows}
             collapsed={collapsedStages[stage.key] ?? true}
             onToggle={() => toggleStage(stage.key)}
+            variant={variant}
+            cfg={cfg}
+            basePath={basePath}
           />
         );
       })}
@@ -237,6 +320,9 @@ function StageSection({
   rows,
   collapsed,
   onToggle,
+  variant,
+  cfg,
+  basePath,
 }: {
   slug: string;
   entityName: "lead" | "application";
@@ -244,8 +330,11 @@ function StageSection({
   rows: Row[];
   collapsed: boolean;
   onToggle: () => void;
+  variant: PipelineVariant;
+  cfg: VariantConfig;
+  basePath: string;
 }) {
-  const targetLabel = stageTargetLabel(stage.key);
+  const targetLabel = stageTargetLabelVariant(cfg, stage.key);
   return (
     <section
       className="overflow-hidden rounded-lg border border-bg-border bg-bg-deep/30"
@@ -284,30 +373,61 @@ function StageSection({
           <div className="hidden lg:block">
             <div
               className="grid border-b border-bg-border bg-bg-deep/55 text-left text-[10px] uppercase tracking-wider text-fg-dim"
-              style={GRID_STYLE}
+              style={cfg.gridStyle}
             >
-              <HeaderCell>Merchant</HeaderCell>
-              <HeaderCell>Owner</HeaderCell>
-              <HeaderCell>Phone</HeaderCell>
-              <HeaderCell>S</HeaderCell>
-              <HeaderCell>Submit</HeaderCell>
-              <HeaderCell>Day</HeaderCell>
-              <HeaderCell>Agent</HeaderCell>
-              <HeaderCell>Last Touch</HeaderCell>
-              <HeaderCell>Stage</HeaderCell>
-              <HeaderCell>PA</HeaderCell>
-              <HeaderCell>Level</HeaderCell>
-              <HeaderCell align="right">M Rev/Month</HeaderCell>
-              <HeaderCell>Years</HeaderCell>
+              {variant === "oasis" ? (
+                <>
+                  <HeaderCell>Lead</HeaderCell>
+                  <HeaderCell>Email</HeaderCell>
+                  <HeaderCell>Phone</HeaderCell>
+                  <HeaderCell>Score</HeaderCell>
+                  <HeaderCell>Last Touch</HeaderCell>
+                  <HeaderCell>Created</HeaderCell>
+                </>
+              ) : (
+                <>
+                  <HeaderCell>Merchant</HeaderCell>
+                  <HeaderCell>Owner</HeaderCell>
+                  <HeaderCell>Phone</HeaderCell>
+                  <HeaderCell>S</HeaderCell>
+                  <HeaderCell>Submit</HeaderCell>
+                  <HeaderCell>Day</HeaderCell>
+                  <HeaderCell>Agent</HeaderCell>
+                  <HeaderCell>Last Touch</HeaderCell>
+                  <HeaderCell>Stage</HeaderCell>
+                  <HeaderCell>PA</HeaderCell>
+                  <HeaderCell>Level</HeaderCell>
+                  <HeaderCell align="right">M Rev/Month</HeaderCell>
+                  <HeaderCell>Years</HeaderCell>
+                </>
+              )}
             </div>
             {rows.map((r) => (
-              <DesktopRow key={r.id} slug={slug} entityName={entityName} row={r} stage={stage} />
+              <DesktopRow
+                key={r.id}
+                slug={slug}
+                entityName={entityName}
+                row={r}
+                stage={stage}
+                variant={variant}
+                cfg={cfg}
+                basePath={basePath}
+              />
             ))}
           </div>
 
           <div className="divide-y divide-bg-border/50 lg:hidden">
             {rows.map((r) => (
-              <MobileRow key={r.id} slug={slug} entityName={entityName} row={r} stage={stage} />
+              <MobileRow
+                key={r.id}
+                slug={slug}
+                entityName={entityName}
+                row={r}
+                stage={stage}
+                variant={variant}
+                cfg={cfg}
+                basePath={basePath}
+              />
             ))}
           </div>
         </>
@@ -321,19 +441,28 @@ function DesktopRow({
   entityName,
   row,
   stage,
+  variant,
+  cfg,
+  basePath,
 }: {
   slug: string;
   entityName: "lead" | "application";
   row: Row;
   stage: StageMeta;
+  variant: PipelineVariant;
+  cfg: VariantConfig;
+  basePath: string;
 }) {
+  if (variant === "oasis") {
+    return <OasisDesktopRow row={row} stage={stage} cfg={cfg} basePath={basePath} />;
+  }
   const model = rowModel(row, stage);
   const href = pipelineRowHref(slug, entityName, row.id);
   return (
     <Link
       href={href}
       className="grid border-b border-bg-border/40 text-[11px] transition-colors last:border-b-0 hover:bg-bg-elev/40"
-      style={GRID_STYLE}
+      style={cfg.gridStyle}
     >
       <Cell>
         <div className="flex min-w-0 items-center gap-2.5">
@@ -390,12 +519,21 @@ function MobileRow({
   entityName,
   row,
   stage,
+  variant,
+  cfg,
+  basePath,
 }: {
   slug: string;
   entityName: "lead" | "application";
   row: Row;
   stage: StageMeta;
+  variant: PipelineVariant;
+  cfg: VariantConfig;
+  basePath: string;
 }) {
+  if (variant === "oasis") {
+    return <OasisMobileRow row={row} stage={stage} cfg={cfg} basePath={basePath} />;
+  }
   const model = rowModel(row, stage);
   const href = pipelineRowHref(slug, entityName, row.id);
   return (
@@ -419,6 +557,134 @@ function MobileRow({
             <MiniMetric label="Last" value={model.lastTouchLabel} />
             <MiniMetric label="M Rev" value={model.monthlyRev} />
             <MiniMetric label="Years" value={model.years} mono />
+          </div>
+        </div>
+      </div>
+    </Link>
+  );
+}
+
+// ============================================================================
+// OASIS variant: 6-column desktop grid, AI-agency row model
+// ============================================================================
+
+function oasisRowModel(row: Row, cfg: VariantConfig, stage: StageMeta) {
+  const d = row.data;
+  // OASIS lead shape (lib/manifest/seeds.ts → OASIS_SEED.data_model.lead):
+  //   name, company, email, phone, source, stage, score, value_estimate,
+  //   last_contacted_at, notes, ai_score, ai_reasoning, ai_scored_at, ...
+  const name = str(d.name) || str(d.contact_name) || `Untitled ${row.id.slice(0, 6)}`;
+  const company = str(d.company) || str(d.business_name) || "";
+  const email = str(d.email) || "";
+  const phone = formatPhone(str(d.phone) || "");
+  const aiScoreRaw = typeof d.ai_score === "number" ? d.ai_score : null;
+  const scoreRaw = typeof d.score === "number" ? d.score : null;
+  const scoreNum = aiScoreRaw ?? scoreRaw;
+  const lastTouchIso =
+    str(d.last_contacted_at) || str(d.last_touch_at) || row.updated_at || row.created_at || null;
+  const cold = isGoingColdVariant(cfg, stage.key, lastTouchIso);
+  const lastTouchLabel = lastTouchIso ? relTime(lastTouchIso) : "-";
+  const createdIso = row.created_at || null;
+  const createdLabel = createdIso ? formatShortDate(createdIso) : "-";
+  return {
+    name,
+    company,
+    email,
+    phone,
+    score: scoreNum,
+    cold,
+    lastTouchLabel,
+    createdLabel,
+  };
+}
+
+function OasisDesktopRow({
+  row,
+  stage,
+  cfg,
+  basePath,
+}: {
+  row: Row;
+  stage: StageMeta;
+  cfg: VariantConfig;
+  basePath: string;
+}) {
+  const m = oasisRowModel(row, cfg, stage);
+  return (
+    <Link
+      href={`${basePath}/${row.id}`}
+      className="grid border-b border-bg-border/40 text-[11px] transition-colors last:border-b-0 hover:bg-bg-elev/40"
+      style={cfg.gridStyle}
+    >
+      <Cell>
+        <div className="flex min-w-0 items-center gap-2.5">
+          <span className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md border border-bg-border bg-bg-elev text-[10px] font-bold uppercase text-fg-muted">
+            {initialsOf(m.name)}
+          </span>
+          <span className="min-w-0">
+            <span className="block truncate font-semibold text-fg" title={m.name}>
+              {m.name}
+            </span>
+            {m.company && (
+              <span className="block truncate text-[10px] text-fg-dim" title={m.company}>
+                {m.company}
+              </span>
+            )}
+          </span>
+        </div>
+      </Cell>
+      <Cell title={m.email}>{m.email || "-"}</Cell>
+      <Cell title={m.phone} mono>{m.phone || "-"}</Cell>
+      <Cell>
+        {m.score != null ? (
+          <span
+            className="inline-flex h-6 min-w-[28px] items-center justify-center rounded-full bg-accent/15 px-1.5 font-mono text-[10px] font-bold text-accent"
+            title="AI score (0-100)"
+          >
+            {m.score}
+          </span>
+        ) : (
+          "-"
+        )}
+      </Cell>
+      <Cell className={m.cold ? "font-semibold text-red-300" : ""}>{m.lastTouchLabel}</Cell>
+      <Cell>{m.createdLabel}</Cell>
+    </Link>
+  );
+}
+
+function OasisMobileRow({
+  row,
+  stage,
+  cfg,
+  basePath,
+}: {
+  row: Row;
+  stage: StageMeta;
+  cfg: VariantConfig;
+  basePath: string;
+}) {
+  const m = oasisRowModel(row, cfg, stage);
+  return (
+    <Link href={`${basePath}/${row.id}`} className="block px-4 py-3 transition-colors hover:bg-bg-elev/40">
+      <div className="flex items-start gap-3">
+        <span className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-bg-border bg-bg-elev text-[10px] font-bold uppercase text-fg-muted">
+          {initialsOf(m.name)}
+        </span>
+        <div className="min-w-0 flex-1">
+          <div className="flex items-start justify-between gap-2">
+            <div className="min-w-0">
+              <div className="truncate text-sm font-semibold text-fg">{m.name}</div>
+              <div className="truncate text-[11px] text-fg-dim">{m.company || m.email || "-"}</div>
+            </div>
+            <StageChip stage={stage} />
+          </div>
+          <div className="mt-2 grid grid-cols-2 gap-x-3 gap-y-1 text-[11px] text-fg-muted">
+            <MiniMetric label="Email" value={m.email || "-"} />
+            <MiniMetric label="Phone" value={m.phone || "-"} mono />
+            <MiniMetric label="Score" value={m.score != null ? String(m.score) : "-"} mono />
+            <MiniMetric label="Last touch" value={m.lastTouchLabel} />
+            <MiniMetric label="Created" value={m.createdLabel} />
           </div>
         </div>
       </div>
@@ -508,7 +774,7 @@ function rowModel(row: Row, stage: StageMeta) {
   const agentFull = str(d.assigned_to_name) || str(d.assigned_to) || "-";
   const agentLabel = compactAgent(agentFull);
   const lastTouchIso = str(d.last_touch_at) || row.updated_at || row.created_at || null;
-  const cold = isGoingCold(stage.key, lastTouchIso);
+  const cold = isGoingColdSun(stage.key, lastTouchIso);
   const lastTouchLabel = lastTouchIso ? relTime(lastTouchIso) : "-";
   const paper = str(d.paper_grade) || str(d.leverage_grade) || "-";
   const leverage = d.leverage != null ? String(d.leverage) : str(d.leverage_ratio) || "-";
@@ -545,26 +811,40 @@ type TouchFirst = {
   potentialUsd: number | null;
 };
 
-function pickTouchFirst(rows: Row[], stageField: string, stages: StageMeta[]): TouchFirst | null {
+function pickTouchFirst(
+  rows: Row[],
+  stageField: string,
+  stages: StageMeta[],
+  cfg: VariantConfig,
+): TouchFirst | null {
   let best: TouchFirst | null = null;
   for (const r of rows) {
     const stageKey = String(r.data[stageField] || "");
-    if (!ACTIVE_STAGES.has(stageKey)) continue;
+    if (!cfg.active.has(stageKey)) continue;
     const lastTouch = (r.data.last_touch_at as string) || r.updated_at || r.created_at || null;
-    if (!isGoingCold(stageKey, lastTouch)) continue;
-    const days = daysSince(lastTouch) - (STAGE_SLA_DAYS[stageKey] ?? 7);
+    if (!isGoingColdVariant(cfg, stageKey, lastTouch)) continue;
+    const days = daysSince(lastTouch) - (cfg.slaDays[stageKey] ?? 7);
+    // SunBiz uses requested_amount/best_offer/monthly_revenue; OASIS
+    // tracks value_estimate. Both are read here so either tenant's
+    // "biggest stale lead" surfaces in the Touch-first callout.
     const potential =
       typeof r.data.requested_amount === "number"
         ? r.data.requested_amount
         : typeof r.data.best_offer === "number"
           ? r.data.best_offer
-          : typeof r.data.monthly_revenue === "number"
-            ? r.data.monthly_revenue
-            : null;
+          : typeof r.data.value_estimate === "number"
+            ? r.data.value_estimate
+            : typeof r.data.monthly_revenue === "number"
+              ? r.data.monthly_revenue
+              : null;
     if (!best || (potential ?? 0) > (best.potentialUsd ?? 0)) {
       best = {
         id: r.id,
-        name: str(r.data.business_name) || str(r.data.contact_name) || "Untitled",
+        name:
+          str(r.data.business_name) ||
+          str(r.data.name) ||
+          str(r.data.contact_name) ||
+          "Untitled",
         stageLabel: stages.find((s) => s.key === stageKey)?.label || stageKey.replace(/_/g, " "),
         daysOverdue: days,
         potentialUsd: potential,
