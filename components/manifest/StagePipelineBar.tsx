@@ -38,54 +38,47 @@ export function StagePipelineBar({ stages, activeKey, basePath, counts, paramNam
   return (
     <nav
       aria-label="Pipeline stages"
-      // Mobile polish (B.1): touch-action allows native momentum scrolling on
-      // iOS Safari; the right-edge mask fades the last chevron's edge so an
-      // overflowing bar visually telegraphs "more to the right." On viewports
-      // ≥640px the content fits — the mask becomes a no-op because the row
-      // ends before the fade region begins.
-      className="w-full overflow-x-auto pb-1 [-webkit-overflow-scrolling:touch] [touch-action:pan-x] [scrollbar-width:thin] [mask-image:linear-gradient(to_right,black_calc(100%-32px),transparent)] sm:[mask-image:none]"
+      // 2026-05-21 redesign: prior layout kept all chips on a single row
+      // with overflow-x-auto + clip-path chevrons, which forced operators
+      // with 11+ stages to horizontally scroll to see the last few. CC's
+      // explicit ask: "all 11 stages need to be listed horizontally,
+      // exactly the same as sunbiz, no scroll." The new layout uses
+      // flex-wrap pills (no chevron clip-path) so every stage is visible
+      // at once — wraps to a second row on narrower viewports instead
+      // of disappearing off-screen. Matches the pill-tab pattern Sun Biz
+      // uses on /leads (LeadsTableClient.tsx).
+      className="w-full"
     >
-      <ul className="flex items-stretch gap-0 min-w-max">
-        {/* "All" pill — sticky-left on overflow so the operator can always
-            tap "All" to escape a filter without scrolling the bar back. */}
-        <li className="shrink-0 sticky left-0 z-10 bg-bg-deep">
+      <ul className="flex flex-wrap items-stretch gap-1.5">
+        {/* "All" pill — first; un-coloured so it's distinct from the
+            stage chips. Acts as the "clear filter" affordance. */}
+        <li>
           <Link
             href={basePath}
-            className={`inline-flex items-center px-3 h-9 text-[12px] font-semibold uppercase tracking-wider rounded-l-md border border-r-0 border-bg-border ${
+            className={`inline-flex items-center justify-center h-8 px-3 text-[11.5px] font-semibold uppercase tracking-wider rounded-md border transition-colors ${
               activeKey === null
-                ? "bg-bg-elev text-fg"
-                : "bg-bg-deep/40 text-fg-muted hover:text-fg"
+                ? "border-accent bg-accent/10 text-accent"
+                : "border-bg-border bg-bg-elev/40 text-fg-muted hover:text-fg hover:border-accent/40"
             }`}
-            style={{ minWidth: "60px" }}
           >
             All
           </Link>
         </li>
-        {stages.map((stage, i) => {
+        {stages.map((stage) => {
           const isActive = stage.key === activeKey;
-          const isFirst = false; // visual chain — first chevron is "All" above
-          const isLast = i === stages.length - 1;
           const count = counts?.[stage.key];
-          // Chevron polygon: cuts the right edge into a point, and notches
-          // the left edge to receive the previous chevron's point.
-          const clip = isLast
-            ? "polygon(0 0, calc(100% - 0px) 0, 100% 50%, calc(100% - 0px) 100%, 0 100%, 12px 50%)"
-            : "polygon(0 0, calc(100% - 12px) 0, 100% 50%, calc(100% - 12px) 100%, 0 100%, 12px 50%)";
           return (
-            <li key={stage.key} className="shrink-0 -ml-[1px]">
+            <li key={stage.key}>
               <Link
                 href={`${basePath}?${paramName}=${encodeURIComponent(stage.key)}`}
-                className="relative inline-flex items-center justify-center gap-2 h-9 px-5 text-[12.5px] font-semibold whitespace-nowrap transition-transform hover:translate-y-[-1px]"
+                aria-current={isActive ? "page" : undefined}
+                className="inline-flex items-center gap-1.5 h-8 px-3 rounded-md text-[11.5px] font-semibold whitespace-nowrap transition-transform hover:translate-y-[-1px]"
                 style={{
                   background: stage.bg,
                   color: stage.fg,
-                  clipPath: clip,
-                  WebkitClipPath: clip,
-                  opacity: activeKey === null || isActive ? 1 : 0.78,
-                  paddingLeft: isFirst ? "16px" : "22px",
-                  paddingRight: isLast ? "16px" : "22px",
+                  opacity: activeKey === null || isActive ? 1 : 0.82,
+                  boxShadow: isActive ? `0 0 0 2px ${stage.bg}, 0 0 0 3px var(--accent, #5eb1ff)` : "none",
                 }}
-                aria-current={isActive ? "page" : undefined}
               >
                 <span className={isActive ? "underline underline-offset-4 decoration-2" : ""}>
                   {stage.label}
