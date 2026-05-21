@@ -24,7 +24,7 @@ import { NextResponse, type NextRequest } from "next/server";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { resolveSessionContext } from "@/lib/api-auth";
 import { publishAgentEvent } from "@/lib/manifest/events";
-import { recordLeadStageEvent } from "@/lib/lead-stage-engine";
+import { dispatchLeadStageEvent } from "@/lib/lead-stage-dispatcher";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -120,10 +120,11 @@ export async function POST(
     },
   });
 
-  // Engine moves the lead forward through the sales motion. Queueing
-  // an application email maps to sent_application — fires only when
-  // the lead is in an earlier stage (engine guards manual overrides).
-  const stageEvent = await recordLeadStageEvent({
+  // Engine moves the lead forward through the sales motion. For SunBiz
+  // that's imported → sent_application; for OASIS that's new_contact →
+  // outreach. The dispatcher picks the right rules based on tenant.
+  // Engine guards manual overrides so an operator-set stage isn't yanked.
+  const stageEvent = await dispatchLeadStageEvent({
     type: "outbound_email_queued",
     tenantId: sess.tenantId,
     leadId,

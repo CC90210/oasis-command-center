@@ -346,17 +346,25 @@ export async function pipelineBreakdown(tenantId: string, includeArchived = fals
     .eq("tenant_id", tenantId)
     .eq("entity_type", "lead");
   if (r.error || !r.data) return { stages: {}, total: 0, sources: {} };
-  const stages: Record<string, number> = {
-    new: 0, contacted: 0, qualified: 0, proposal: 0, won: 0, lost: 0,
-  };
+  // Don't pre-allocate stage keys — the prior shape hard-coded the legacy
+  // OASIS 6-stage names (new/contacted/qualified/proposal/won/lost), which
+  // polluted both the funnel chart and the chevron-bar counts with phantom
+  // zeros after the 11-stage migration (and never matched SunBiz's keys at
+  // all). Let the |= accumulator below build the dict naturally so the
+  // result reflects only stages that actually have data.
+  const stages: Record<string, number> = {};
   const sources: Record<string, number> = {};
   let total = 0;
   for (const row of r.data as Array<{ data: Record<string, unknown> | null }>) {
     const d = row.data || {};
+    // Prefer `stage` (the post-migration field) over `status` (legacy).
+    // Falls back to "new_contact" only when both are missing, matching the
+    // first stage of the canonical OASIS lifecycle so unset rows still
+    // show somewhere meaningful in the funnel.
     const status =
-      (typeof d.status === "string" ? d.status : null) ||
       (typeof d.stage === "string" ? d.stage : null) ||
-      "new";
+      (typeof d.status === "string" ? d.status : null) ||
+      "new_contact";
     if (!includeArchived && status === "archived") continue;
     stages[status] = (stages[status] || 0) + 1;
     const src = typeof d.source === "string" ? d.source : "unknown";

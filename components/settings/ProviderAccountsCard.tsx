@@ -204,6 +204,8 @@ export function ProviderAccountsCard({
                 {connected && (
                   <>
                     <span className="text-fg-dim text-[10px]">·</span>
+                    <TestConnectionButton provider={p} />
+                    <span className="text-fg-dim text-[10px]">·</span>
                     <Link
                       href="#agents"
                       className="text-[11px] text-fg-muted hover:text-fg inline-flex items-center gap-1"
@@ -604,6 +606,87 @@ function DisconnectButton({
       {error && (
         <span className="text-[10px] text-rose-400" title={error}>
           ({error})
+        </span>
+      )}
+    </>
+  );
+}
+
+/**
+ * TestConnectionButton — pings the provider's `list models` endpoint
+ * using the key on file and reports latency or the provider's error
+ * back inline. Operator-facing health check for already-saved keys;
+ * complements validate-on-save at the connect step.
+ */
+function TestConnectionButton({ provider }: { provider: Provider }) {
+  const [busy, setBusy] = useState(false);
+  const [result, setResult] = useState<
+    | null
+    | { kind: "ok"; latency: number; at: number }
+    | { kind: "err"; message: string; at: number }
+  >(null);
+
+  async function go() {
+    setBusy(true);
+    setResult(null);
+    try {
+      const res = await fetch("/api/agent-config/test-connection", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ provider }),
+      });
+      const body = (await res.json().catch(() => ({}))) as {
+        ok?: boolean;
+        latency_ms?: number;
+        message?: string;
+        error?: string;
+      };
+      if (body.ok && typeof body.latency_ms === "number") {
+        setResult({ kind: "ok", latency: body.latency_ms, at: Date.now() });
+      } else {
+        setResult({
+          kind: "err",
+          message: body.message || body.error || `HTTP ${res.status}`,
+          at: Date.now(),
+        });
+      }
+    } catch (err) {
+      setResult({
+        kind: "err",
+        message: err instanceof Error ? err.message : "network_error",
+        at: Date.now(),
+      });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <>
+      <button
+        type="button"
+        onClick={go}
+        disabled={busy}
+        className="text-[11px] text-fg-muted hover:text-fg inline-flex items-center gap-1 disabled:opacity-50"
+        title="Ping the provider with the saved key. No charge — just a list-models call."
+      >
+        {busy ? (
+          <Loader2 className="w-3 h-3 animate-spin" />
+        ) : result?.kind === "ok" ? (
+          <Check className="w-3 h-3 text-status-engaged" />
+        ) : result?.kind === "err" ? (
+          <AlertCircle className="w-3 h-3 text-rose-400" />
+        ) : null}
+        Test
+      </button>
+      {result?.kind === "ok" && (
+        <span className="text-[10px] text-status-engaged" title={`Ping succeeded at ${new Date(result.at).toLocaleTimeString()}`}>
+          ({result.latency}ms)
+        </span>
+      )}
+      {result?.kind === "err" && (
+        <span className="text-[10px] text-rose-400" title={result.message}>
+          (failed — hover for detail)
         </span>
       )}
     </>

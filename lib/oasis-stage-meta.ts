@@ -27,14 +27,22 @@ import type { StageMeta } from "./sunbiz-stage-meta";
 
 export type { StageMeta };
 
+// Palette is tuned so every stage chip clears WCAG AA contrast (>=4.5:1
+// for normal text against white). Three stages were darkened from the
+// initial palette during the V6.9 ribbon-pass contrast audit:
+//   discovery  #2E8392 → #2B7C8A  (was 4.40:1, now 4.82:1)
+//   qualified  #2F8A78 → #2C8372  (was 4.18:1, now 4.57:1)
+//   onboarding #C0842F → #996925  (was 3.19:1, now 4.77:1)
+// Lowest contrast in the set is now ~4.5:1 (outreach), highest is ~10:1
+// (lost). Recompute with scripts/audit_contrast.py before adjusting.
 export const OASIS_LEAD_STAGES: StageMeta[] = [
   { key: "new_contact",   label: "New Contact",   bg: "#5E6B82", fg: "#FFFFFF" },
   { key: "outreach",      label: "Outreach",      bg: "#3978BE", fg: "#FFFFFF" },
-  { key: "discovery",     label: "Discovery",     bg: "#2E8392", fg: "#FFFFFF" },
-  { key: "qualified",     label: "Qualified",     bg: "#2F8A78", fg: "#FFFFFF" },
+  { key: "discovery",     label: "Discovery",     bg: "#2B7C8A", fg: "#FFFFFF" },
+  { key: "qualified",     label: "Qualified",     bg: "#2C8372", fg: "#FFFFFF" },
   { key: "proposal",      label: "Proposal",      bg: "#5167B0", fg: "#FFFFFF" },
   { key: "negotiation",   label: "Negotiation",   bg: "#7057A7", fg: "#FFFFFF" },
-  { key: "onboarding",    label: "Onboarding",    bg: "#C0842F", fg: "#FFFFFF" },
+  { key: "onboarding",    label: "Onboarding",    bg: "#996925", fg: "#FFFFFF" },
   { key: "active_client", label: "Active Client", bg: "#357A55", fg: "#FFFFFF" },
   { key: "churned",       label: "Churned",       bg: "#9B5566", fg: "#FFFFFF" },
   { key: "lost",          label: "Lost",          bg: "#6F2D34", fg: "#FFFFFF" },
