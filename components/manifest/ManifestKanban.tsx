@@ -41,6 +41,14 @@ type Props = {
    * get a search box for free.
    */
   query?: string;
+  /**
+   * Optional WHERE clause forwarded to listRecords for server-side
+   * filtering before the rows arrive. Used by the OASIS /pipeline page
+   * to scope the Kanban to a single stage when the chevron-bar selects
+   * one (see StageRail in app/pipeline/page.tsx). When omitted, the
+   * full unfiltered list is fetched (current behaviour).
+   */
+  where?: Record<string, string | null>;
 };
 
 // rowMatchesQuery + filterRowsByQuery moved to lib/search-filter.ts.
@@ -81,6 +89,7 @@ export async function ManifestKanban({
   linkBase,
   sortBy,
   query,
+  where,
 }: Props) {
   const effectiveLinkBase = linkBase ?? `/t/${tenantSlug}/${page.path}`;
   // Two ways to pick the grouping key:
@@ -107,6 +116,7 @@ export async function ManifestKanban({
         tenant_id: tenantId,
         entity: entity.name,
         limit: 500,
+        where,
       }).catch(() => ({ rows: [], total: 0 }))).rows
     : demoRows || [];
 

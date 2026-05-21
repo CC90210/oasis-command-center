@@ -30,6 +30,13 @@ type Props = {
    * (same matcher as ManifestKanban + PipelineSearchableTable).
    */
   query?: string;
+  /**
+   * Optional WHERE clause forwarded to listRecords for server-side
+   * filtering before the rows arrive. Used by the OASIS /pipeline page
+   * to scope the table to a single stage when the chevron-bar selects
+   * one (see StageRail in app/pipeline/page.tsx).
+   */
+  where?: Record<string, string | null>;
 };
 
 // rowMatchesQuery moved to lib/search-filter.ts.
@@ -53,6 +60,7 @@ export async function ManifestTable({
   canCreate,
   linkBase,
   query,
+  where,
 }: Props) {
   const effectiveLinkBase = linkBase ?? `/t/${tenantSlug}/${page.path}`;
   // Read either from DB (real tenant) or the supplied demo set. When
@@ -63,6 +71,7 @@ export async function ManifestTable({
         tenant_id: tenantId,
         entity: entity.name,
         limit: 200,
+        where,
       }).catch(() => ({ rows: [], total: 0 }))).rows
     : demoRows || [];
   const rows = filterRowsByQuery(fetchedRows, query);

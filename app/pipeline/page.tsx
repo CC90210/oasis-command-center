@@ -11,42 +11,52 @@ import {
 import { safe } from "@/lib/api-helpers";
 import { ManifestKanban } from "@/components/manifest/ManifestKanban";
 import { ManifestTable } from "@/components/manifest/ManifestTable";
+import { StageRail } from "@/components/manifest/StageRail";
 import { OASIS_SEED } from "@/lib/manifest/seeds";
+import { OASIS_LEAD_STAGES, findOasisStage } from "@/lib/oasis-stage-meta";
 
 export const dynamic = "force-dynamic";
 
 export default async function PipelinePage({
   searchParams,
 }: {
-  searchParams?: Promise<{ view?: string }>;
+  searchParams?: Promise<{ view?: string; stage?: string }>;
 }) {
   const sp = (await searchParams) || {};
-  const view: "kanban" | "table" = sp.view === "table" ? "table" : "kanban";
+  // Default view is now "table" — matches the Sun Biz pipeline shape and
+  // surfaces the chevron-bar + scrollable lead list every other CRM uses.
+  // Kanban stays as an opt-in for the column-view fans.
+  const view: "kanban" | "table" = sp.view === "kanban" ? "kanban" : "table";
+  const stageFilter = typeof sp.stage === "string" && sp.stage.trim() ? sp.stage.trim() : null;
+  const activeStageLabel = stageFilter ? findOasisStage("lead", stageFilter)?.label || stageFilter : null;
+
   const profile = await safe("pipeline.profile", getActiveProfile(), null);
   const tenantId = profile?.tenant_id || "";
-  // Phase 4: kanban-first pipeline. The legacy ?show=all toggle is gone —
-  // the kanban exposes lost/won as their own columns instead of hiding
-  // them. Funnel chart matches the kanban's stage breakdown so counts
-  // can't disagree across the two surfaces.
+
   const [pipeline, outbound, inbound] = await Promise.all([
     safe("pipeline.breakdown", pipelineBreakdown(tenantId, true), { stages: {} as Record<string, number>, total: 0, sources: {} as Record<string, number> }),
     safe("pipeline.recent_outbound", recentOutbound(tenantId, 20), []),
     safe("pipeline.recent_inbound", recentInbound(tenantId, 20), []),
   ]);
 
-  // Phase 4: OASIS Pipeline becomes a full CRM. Source of stages + card
-  // fields is OASIS_SEED.data_model.lead, which the same ManifestKanban
-  // SunBiz uses already understands. `linkBase="/pipeline"` swaps the
-  // default `/t/oasis/pipeline/<id>` URL shape (which 404s — OASIS isn't
-  // a tenant_manifests row) for `/pipeline/<id>` which routes to the
-  // empire-side detail + new pages built alongside this.
+  // OASIS Pipeline: chevron-bar across the top (Sun Biz parity), filterable
+  // table below. Stage counts come from pipelineBreakdown which already
+  // groups by `data->>stage` — same source the funnel chart reads, so the
+  // two surfaces can't disagree. Stages missing from the breakdown render
+  // as 0 in the chevron, which is intentional: empty stages stay visible
+  // so the operator can drop a lead INTO them.
   const leadEntity = OASIS_SEED.data_model?.find((e) => e.name === "lead");
+  const where = stageFilter ? { stage: stageFilter } : undefined;
 
   return (
     <div className="space-y-6 animate-fade-in">
       <PageHeader
         title="Pipeline"
-        subtitle={`${pipeline.total} lead${pipeline.total === 1 ? "" : "s"} across the funnel`}
+        subtitle={
+          stageFilter
+            ? `${pipeline.stages[stageFilter] || 0} lead${(pipeline.stages[stageFilter] || 0) === 1 ? "" : "s"} in ${activeStageLabel}`
+            : `${pipeline.total} lead${pipeline.total === 1 ? "" : "s"} across the funnel`
+        }
       />
 
       <section>
@@ -57,19 +67,23 @@ export default async function PipelinePage({
 
       {leadEntity ? (
         <>
+          {/* Chevron-bar across the top — clicking a stage filters the
+              table below to that stage. "All" pill returns to the
+              unfiltered view. Mirrors the Sun Biz /leads pattern. */}
+          <StageRail
+            tenantSlug="oasis"
+            stages={OASIS_LEAD_STAGES}
+            activeKey={stageFilter}
+            basePath="/pipeline"
+            counts={pipeline.stages}
+          />
+
+          {/* View toggle (table default, kanban opt-in). Stays below the
+              chevron so the chevron is the dominant navigation. The
+              stage param is preserved across view switches. */}
           <div className="flex items-center gap-1">
             <Link
-              href="/pipeline?view=kanban"
-              className={`text-[10px] uppercase tracking-wider px-2.5 py-1 rounded-md border ${
-                view === "kanban"
-                  ? "border-accent/50 bg-accent/10 text-accent"
-                  : "border-bg-border bg-bg-elev/40 text-fg-muted hover:text-fg"
-              }`}
-            >
-              Kanban
-            </Link>
-            <Link
-              href="/pipeline?view=table"
+              href={`/pipeline?view=table${stageFilter ? `&stage=${stageFilter}` : ""}`}
               className={`text-[10px] uppercase tracking-wider px-2.5 py-1 rounded-md border ${
                 view === "table"
                   ? "border-accent/50 bg-accent/10 text-accent"
@@ -78,35 +92,48 @@ export default async function PipelinePage({
             >
               Table
             </Link>
+            <Link
+              href={`/pipeline?view=kanban${stageFilter ? `&stage=${stageFilter}` : ""}`}
+              className={`text-[10px] uppercase tracking-wider px-2.5 py-1 rounded-md border ${
+                view === "kanban"
+                  ? "border-accent/50 bg-accent/10 text-accent"
+                  : "border-bg-border bg-bg-elev/40 text-fg-muted hover:text-fg"
+              }`}
+            >
+              Kanban
+            </Link>
           </div>
-          {view === "kanban" ? (
-            <ManifestKanban
-              tenantSlug="oasis"
-              tenantId={tenantId || null}
-              entity={leadEntity}
-              page={{
-                path: "pipeline",
-                label: "Pipeline",
-                kind: "kanban",
-                entity: "lead",
-                config: { group_by: "stage" },
-              }}
-              linkBase="/pipeline"
-              sortBy="ai_score"
-            />
-          ) : (
+
+          {view === "table" ? (
             <ManifestTable
               tenantSlug="oasis"
               tenantId={tenantId || null}
               entity={leadEntity}
               page={{
                 path: "pipeline",
-                label: "Pipeline",
+                label: stageFilter && activeStageLabel ? `Pipeline · ${activeStageLabel}` : "Pipeline",
                 kind: "table",
                 entity: "lead",
               }}
               linkBase="/pipeline"
+              where={where}
               canCreate
+            />
+          ) : (
+            <ManifestKanban
+              tenantSlug="oasis"
+              tenantId={tenantId || null}
+              entity={leadEntity}
+              page={{
+                path: "pipeline",
+                label: stageFilter && activeStageLabel ? `Pipeline · ${activeStageLabel}` : "Pipeline",
+                kind: "kanban",
+                entity: "lead",
+                config: { group_by: "stage" },
+              }}
+              linkBase="/pipeline"
+              sortBy="ai_score"
+              where={where}
             />
           )}
         </>
