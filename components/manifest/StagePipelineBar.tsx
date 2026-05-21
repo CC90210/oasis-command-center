@@ -67,22 +67,27 @@ export function StagePipelineBar({ stages, activeKey, basePath, counts, paramNam
         {stages.map((stage) => {
           const isActive = stage.key === activeKey;
           const count = counts?.[stage.key];
+          // Active-state highlight uses Tailwind's ring + ring-offset
+          // utilities against the dashboard accent (OASIS blue #3b82f6
+          // from tailwind.config.ts). Earlier draft used a CSS variable
+          // that doesn't exist in this codebase — the fallback resolved
+          // to a generic sky blue that didn't match the brand.
+          const activeRing = "ring-2 ring-accent ring-offset-2 ring-offset-bg-deep";
           return (
             <li key={stage.key}>
               <Link
                 href={`${basePath}?${paramName}=${encodeURIComponent(stage.key)}`}
                 aria-current={isActive ? "page" : undefined}
-                className="inline-flex items-center gap-1.5 h-8 px-3 rounded-md text-[11.5px] font-semibold whitespace-nowrap transition-transform hover:translate-y-[-1px]"
+                className={`inline-flex items-center gap-1.5 h-8 px-3 rounded-md text-[11.5px] font-semibold whitespace-nowrap transition-transform hover:translate-y-[-1px] ${
+                  isActive ? activeRing : ""
+                }`}
                 style={{
                   background: stage.bg,
                   color: stage.fg,
                   opacity: activeKey === null || isActive ? 1 : 0.82,
-                  boxShadow: isActive ? `0 0 0 2px ${stage.bg}, 0 0 0 3px var(--accent, #5eb1ff)` : "none",
                 }}
               >
-                <span className={isActive ? "underline underline-offset-4 decoration-2" : ""}>
-                  {stage.label}
-                </span>
+                {stage.label}
                 {typeof count === "number" && (
                   <span
                     className="inline-flex items-center justify-center min-w-[18px] h-[18px] px-1 rounded-full text-[10.5px] font-mono"
