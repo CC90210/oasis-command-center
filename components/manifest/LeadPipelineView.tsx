@@ -109,7 +109,7 @@ function stageTargetLabelVariant(cfg: VariantConfig, stage: string): string | nu
   return `${days}d target`;
 }
 
-export function SunBizPipelineView({
+export function LeadPipelineView({
   slug,
   entityName,
   entityLabel,
@@ -131,10 +131,13 @@ export function SunBizPipelineView({
     variant === "oasis"
       ? `${basePath}/new`
       : `/t/${slug}/${basePath.split("/").pop() || ""}/new`;
-  // "hot" semantics differ per tenant: SunBiz tracks an explicit
-  // hot_lead stage; OASIS has no equivalent, so we surface
-  // "discovery" (mid-funnel active intent) as the closest proxy.
-  const hotStageKey = variant === "oasis" ? "discovery" : "hot_lead";
+  // "Hot" semantics differ per tenant. SunBiz has an explicit
+  // hot_lead stage and a "hot" label that operators recognise. OASIS
+  // doesn't — the closest analog is the `qualified` stage (confirmed
+  // fit, ready to send proposal). Both label + key swap with the
+  // variant so the counter reads naturally for either tenant.
+  const hotStageKey = variant === "oasis" ? "qualified" : "hot_lead";
+  const hotStageLabel = variant === "oasis" ? "qualified" : "hot";
 
   const stats = useMemo(() => {
     const stageCounts: Record<string, number> = {};
@@ -194,7 +197,7 @@ export function SunBizPipelineView({
           <div className="mt-1.5 text-[12px] text-fg-muted">
             <span className="font-semibold text-fg">{stats.active}</span> active
             <span className="mx-1.5 text-fg-dim">/</span>
-            <span className="font-semibold text-amber-300">{stats.hot}</span> hot
+            <span className="font-semibold text-amber-300">{stats.hot}</span> {hotStageLabel}
             <span className="mx-1.5 text-fg-dim">/</span>
             <span className={stats.cold > 0 ? "font-semibold text-red-300" : "text-fg-muted"}>
               {stats.cold}

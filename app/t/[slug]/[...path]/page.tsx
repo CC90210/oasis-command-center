@@ -14,7 +14,7 @@ import { LeadDocumentsPanel } from "@/components/leads/LeadDocumentsPanel";
 import { StageRail } from "@/components/manifest/StageRail";
 import { PipelineSearchableTable } from "@/components/manifest/PipelineSearchableTable";
 import { PageSearchBar } from "@/components/manifest/PageSearchBar";
-import { SunBizPipelineView } from "@/components/manifest/SunBizPipelineView";
+import { LeadPipelineView } from "@/components/manifest/LeadPipelineView";
 import { LeadDetailDrawer } from "@/components/leads/LeadDetailDrawer";
 import {
   PIPELINE_COLUMNS,
@@ -875,7 +875,7 @@ async function SingleEntityPipeline({
   // standard leads/applications surface for Oasis and future tenants too.
   if (entity.name === "lead" || entity.name === "application") {
     return (
-      <SunBizPipelineView
+      <LeadPipelineView
         slug={slug}
         entityName={entity.name as "lead" | "application"}
         entityLabel={entity.label}

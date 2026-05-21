@@ -23,7 +23,7 @@ import { PageHeader, Card, EmptyState } from "@/components/Card";
 import { getActiveProfile } from "@/lib/queries";
 import { listRecords, type TenantRecord } from "@/lib/manifest/data";
 import { safe } from "@/lib/api-helpers";
-import { SunBizPipelineView } from "@/components/manifest/SunBizPipelineView";
+import { LeadPipelineView } from "@/components/manifest/LeadPipelineView";
 import { OASIS_LEAD_STAGES } from "@/lib/oasis-stage-meta";
 
 export const dynamic = "force-dynamic";
@@ -84,7 +84,7 @@ export default async function PipelinePage({
 
   return (
     <div className="animate-fade-in">
-      <SunBizPipelineView
+      <LeadPipelineView
         slug="oasis"
         entityName="lead"
         entityLabel="Lead"
