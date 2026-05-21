@@ -266,7 +266,17 @@ export function LeadPipelineView({
 
       {touchFirst && (
         <Link
-          href={`?${entityName === "application" ? "application" : "lead"}=${touchFirst.id}`}
+          // OASIS lead detail lives at /pipeline/<id> (not a query-param
+          // drawer); SunBiz uses ?lead=<id> for its in-page drawer. The
+          // prior shape used the SunBiz pattern for both tenants, so
+          // clicking "Open" on the OASIS Touch-first callout silently
+          // appended ?lead=<id> to the URL and did nothing (no drawer
+          // on this page).
+          href={
+            variant === "oasis"
+              ? `${basePath}/${touchFirst.id}`
+              : `?${entityName === "application" ? "application" : "lead"}=${touchFirst.id}`
+          }
           className="block rounded-lg border border-amber-300/30 bg-amber-300/10 px-4 py-2.5 transition-colors hover:bg-amber-300/15"
         >
           <div className="flex flex-wrap items-center gap-3">
