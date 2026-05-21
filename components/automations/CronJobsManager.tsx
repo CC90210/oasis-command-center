@@ -28,6 +28,7 @@ import {
   X,
   PlayCircle,
   XCircle,
+  Loader2,
 } from "lucide-react";
 
 type ActionType = "script_run" | "snapshot_run" | "agent_prompt" | "webhook_post";
@@ -142,6 +143,12 @@ export function CronJobsManager({ agentKeys }: Props) {
   }>(null);
   const [creating, setCreating] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
+  // Toggle-UX state — Phase 1.5/4.2: real feedback on click so the toggle
+  // doesn't look broken when the network round-trip takes a beat or the
+  // local cron daemon's 60s poll is the actual gate.
+  const [pendingId, setPendingId] = useState<string | null>(null);
+  const [toggleError, setToggleError] = useState<string | null>(null);
+  const [recentlyToggled, setRecentlyToggled] = useState<{ id: string; ts: number } | null>(null);
 
   async function refresh() {
     try {
@@ -184,16 +191,41 @@ export function CronJobsManager({ agentKeys }: Props) {
 
   async function toggleEnabled(job: CronJob) {
     const next = !job.enabled;
-    // Optimistic update
+    // Optimistic update — paint the new state instantly so the operator
+    // sees a click → state-change cause-and-effect even when the network
+    // round-trip takes a beat. Track the pending id so the row can show a
+    // spinner over the toggle until the PATCH returns.
+    setPendingId(job.id);
+    setToggleError(null);
     setJobs((prev) => prev?.map((j) => (j.id === job.id ? { ...j, enabled: next } : j)) ?? null);
-    const res = await fetch(`/api/cron-jobs/${job.id}`, {
-      method: "PATCH",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ enabled: next }),
-    });
-    if (!res.ok) {
-      // Revert on failure
+    try {
+      const res = await fetch(`/api/cron-jobs/${job.id}`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ enabled: next }),
+      });
+      if (!res.ok) {
+        // Revert on failure + surface the error so the operator knows the
+        // toggle didn't stick. Reading the response body for the error
+        // message makes the toast actionable instead of a generic "failed".
+        const body = await res.json().catch(() => ({}));
+        setJobs((prev) => prev?.map((j) => (j.id === job.id ? { ...j, enabled: !next } : j)) ?? null);
+        setToggleError(`Couldn't ${next ? "enable" : "disable"} "${job.name}": ${body?.error || `http_${res.status}`}`);
+      } else {
+        // Success — show a transient "Takes effect within 60s" hint on
+        // this row so the operator understands the local bridge poll
+        // cadence and doesn't think the toggle is broken when the cron
+        // fires one last time before the bridge picks up the new state.
+        setRecentlyToggled({ id: job.id, ts: Date.now() });
+        setTimeout(() => {
+          setRecentlyToggled((cur) => (cur?.id === job.id ? null : cur));
+        }, 6_000);
+      }
+    } catch (err) {
       setJobs((prev) => prev?.map((j) => (j.id === job.id ? { ...j, enabled: !next } : j)) ?? null);
+      setToggleError(`Couldn't reach the dashboard API (${(err as Error).message || "unknown"}).`);
+    } finally {
+      setPendingId((cur) => (cur === job.id ? null : cur));
     }
   }
 
@@ -228,6 +260,20 @@ export function CronJobsManager({ agentKeys }: Props) {
         <div className="rounded-lg border border-status-warm/40 bg-status-warm/10 p-3 text-sm text-status-warm flex items-start gap-2">
           <AlertCircle className="w-4 h-4 mt-0.5 shrink-0" />
           <span>Couldn&apos;t load automations: {loadError}</span>
+        </div>
+      )}
+      {toggleError && (
+        <div className="rounded-lg border border-status-warm/40 bg-status-warm/10 p-3 text-sm text-status-warm flex items-start gap-2">
+          <AlertCircle className="w-4 h-4 mt-0.5 shrink-0" />
+          <span className="flex-1">{toggleError}</span>
+          <button
+            type="button"
+            onClick={() => setToggleError(null)}
+            className="text-status-warm/70 hover:text-status-warm shrink-0"
+            aria-label="Dismiss"
+          >
+            <X className="w-4 h-4" />
+          </button>
         </div>
       )}
 
@@ -304,6 +350,8 @@ export function CronJobsManager({ agentKeys }: Props) {
                       onToggle={() => toggleEnabled(job)}
                       onEdit={() => setEditingId(job.id)}
                       onDelete={() => deleteJob(job.id)}
+                      isPending={pendingId === job.id}
+                      justToggled={recentlyToggled?.id === job.id}
                     />
                   ),
                 )}
@@ -324,6 +372,8 @@ export function CronJobsManager({ agentKeys }: Props) {
                     onToggle={() => toggleEnabled(job)}
                     onEdit={() => {/* empire schedule + action_config remain read-only */}}
                     onDelete={() => {/* empire rows can be disabled, not deleted */}}
+                    isPending={pendingId === job.id}
+                    justToggled={recentlyToggled?.id === job.id}
                   />
                 ))}
               </div>
@@ -340,11 +390,15 @@ function JobRow({
   onToggle,
   onEdit,
   onDelete,
+  isPending,
+  justToggled,
 }: {
   job: CronJob;
   onToggle: () => void;
   onEdit: () => void;
   onDelete: () => void;
+  isPending?: boolean;
+  justToggled?: boolean;
 }) {
   const friendlySchedule = humanizeCron(job.schedule);
   const showRawSchedule = friendlySchedule !== job.schedule;
@@ -375,7 +429,8 @@ function JobRow({
           <button
             type="button"
             onClick={onToggle}
-            className="flex flex-col items-center gap-0.5 group"
+            disabled={isPending}
+            className="flex flex-col items-center gap-0.5 group disabled:opacity-70"
             title={
               isEmpire
                 ? job.enabled
@@ -386,13 +441,15 @@ function JobRow({
                   : "Click to enable"
             }
           >
-            {job.enabled ? (
+            {isPending ? (
+              <Loader2 className="w-7 h-7 text-accent animate-spin" />
+            ) : job.enabled ? (
               <ToggleRight className="w-7 h-7 text-status-engaged group-hover:scale-110 transition-transform" />
             ) : (
               <ToggleLeft className="w-7 h-7 text-fg-dim group-hover:text-fg group-hover:scale-110 transition-all" />
             )}
-            <span className={`text-[9px] uppercase tracking-wider font-bold ${job.enabled ? "text-status-engaged" : "text-fg-faint"}`}>
-              {job.enabled ? "On" : "Off"}
+            <span className={`text-[9px] uppercase tracking-wider font-bold ${isPending ? "text-accent" : job.enabled ? "text-status-engaged" : "text-fg-faint"}`}>
+              {isPending ? "Saving" : job.enabled ? "On" : "Off"}
             </span>
           </button>
         </div>
@@ -418,6 +475,14 @@ function JobRow({
           </div>
           {job.description && (
             <div className="text-sm text-fg-muted mt-2 leading-snug">{job.description}</div>
+          )}
+          {justToggled && (
+            <div className="mt-2 text-[11px] text-accent inline-flex items-center gap-1">
+              <Clock className="w-3 h-3" />
+              {job.enabled
+                ? "Enabled — first fire within ~60 seconds (next bridge poll)."
+                : "Disabled — stops firing within ~60 seconds (next bridge poll)."}
+            </div>
           )}
 
           {/* Schedule + last run live on one row so the eye reads
