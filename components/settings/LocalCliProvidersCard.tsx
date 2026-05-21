@@ -136,10 +136,41 @@ type Busy =
   | { kind: "installing"; provider: keyof CliStatusResponse }
   | { kind: "authing"; provider: keyof CliStatusResponse };
 
+// Shared storage key with ChatWidget — flipping this radio updates the
+// chat header CLI dropdown on next render, and vice versa. Keep the
+// string in lock-step with components/ChatWidget.tsx CLI_RUNTIME_STORAGE_KEY
+// (it's intentionally not exported from there because it's an internal
+// persistence detail; the value sync is the contract).
+const CLI_RUNTIME_STORAGE_KEY = "oasis.chat.cliRuntime.v1";
+type CliRuntime = "claude" | "codex" | "gemini";
+
+function readActiveCli(): CliRuntime {
+  if (typeof window === "undefined") return "claude";
+  const raw = window.localStorage.getItem(CLI_RUNTIME_STORAGE_KEY);
+  if (raw === "claude" || raw === "codex" || raw === "gemini") return raw;
+  return "claude";
+}
+
 export function LocalCliProvidersCard() {
   const [state, setState] = useState<ProbeState>({ kind: "loading" });
   const [busy, setBusy] = useState<Busy>({ kind: "idle" });
   const [actionMessage, setActionMessage] = useState<{ kind: "ok" | "err"; text: string } | null>(null);
+  // Persistent CLI selection — same key the ChatWidget reads. Selecting
+  // a CLI here flips the chat header dropdown on next render too.
+  const [activeCli, setActiveCli] = useState<CliRuntime>("claude");
+  useEffect(() => {
+    setActiveCli(readActiveCli());
+  }, []);
+
+  function chooseCli(next: CliRuntime) {
+    setActiveCli(next);
+    try {
+      window.localStorage.setItem(CLI_RUNTIME_STORAGE_KEY, next);
+    } catch {
+      // Storage may be disabled (private mode, quota); the in-memory
+      // state still updates so the radio shows the click as committed.
+    }
+  }
 
   async function refresh() {
     setState({ kind: "loading" });
@@ -302,6 +333,55 @@ export function LocalCliProvidersCard() {
       )}
 
       {state.kind === "ok" && (
+        <>
+          {/* Active CLI picker — surfaces the same selection the chat
+              header dropdown shows. Operator picks here once and every
+              chat session uses that subscription until they change it.
+              Disabled options (not installed / not auth'd) still render
+              as radios so the operator sees the full set + can click
+              Install on the card below. */}
+          <div className="mb-3 rounded-lg border border-bg-border bg-bg-elev/30 p-3">
+            <div className="flex items-center justify-between gap-3 flex-wrap">
+              <div>
+                <div className="text-xs font-bold uppercase tracking-wider text-fg">
+                  Active CLI
+                </div>
+                <div className="text-[11px] text-fg-muted mt-0.5 leading-snug">
+                  Which local CLI powers the chat when you talk to an agent in
+                  local-bridge mode. This also drives the dropdown in the chat
+                  header.
+                </div>
+              </div>
+              <div role="radiogroup" aria-label="Active CLI" className="flex flex-wrap gap-1.5">
+                {CARDS.map((card) => {
+                  const info = state.data[card.key];
+                  const ready = info.installed && info.authenticated;
+                  const selected = activeCli === card.key;
+                  return (
+                    <button
+                      key={card.key}
+                      type="button"
+                      role="radio"
+                      aria-checked={selected}
+                      onClick={() => chooseCli(card.key)}
+                      disabled={!ready}
+                      title={ready ? `Use ${card.label} for chat` : `${card.label} isn't ready yet`}
+                      className={`text-[11px] font-semibold px-2.5 py-1.5 rounded-md border transition-colors ${
+                        selected
+                          ? "border-accent bg-accent/15 text-accent"
+                          : ready
+                            ? "border-bg-border bg-bg-deep/60 text-fg-muted hover:text-fg hover:border-accent/40"
+                            : "border-bg-border bg-bg-deep/30 text-fg-faint opacity-60 cursor-not-allowed"
+                      }`}
+                    >
+                      {card.label}
+                      {selected && <span className="ml-1.5">✓</span>}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          </div>
         <div className="grid sm:grid-cols-3 gap-3">
           {CARDS.map((card) => {
             const info = state.data[card.key];
@@ -380,6 +460,7 @@ export function LocalCliProvidersCard() {
             );
           })}
         </div>
+        </>
       )}
     </Card>
   );
