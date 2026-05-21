@@ -28,9 +28,18 @@ export async function applyClientProvisioningProfile({
     .maybeSingle();
   if (tenantRes.error) throw tenantRes.error;
 
+  const existingCustomFields = (tenantRes.data?.custom_fields || {}) as Record<string, unknown>;
+  const existingProfileSlug =
+    typeof existingCustomFields.command_center_profile_slug === "string"
+      ? existingCustomFields.command_center_profile_slug.trim().toLowerCase()
+      : null;
+  if (existingProfileSlug) {
+    return { clientProfileSlug: existingProfileSlug, primaryAgent: null };
+  }
+
   const isDedicated = clientProfileSlug === "sun" || clientProfileSlug === "suga";
   const customFields = {
-    ...((tenantRes.data?.custom_fields || {}) as Record<string, unknown>),
+    ...existingCustomFields,
     command_center_profile_slug: clientProfileSlug,
     data_backend: isDedicated ? "turso" : "supabase",
     deployment_mode: isDedicated ? "dedicated" : "shared",

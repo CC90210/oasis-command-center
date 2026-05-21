@@ -53,7 +53,7 @@ export function LoginForm() {
         router.refresh();
         return;
       }
-      router.push(next);
+      router.push(`/auth/land?next=${encodeURIComponent(next)}`);
       router.refresh();
     } catch (ex: unknown) {
       setErr(ex instanceof Error ? ex.message : "Sign in failed");

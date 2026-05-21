@@ -26,7 +26,7 @@ export default async function LoginPage({
     const next = typeof params.next === "string" && params.next.startsWith("/")
       ? params.next
       : "/";
-    redirect(next);
+    redirect(`/auth/land?next=${encodeURIComponent(next)}`);
   }
   return <LoginForm />;
 }

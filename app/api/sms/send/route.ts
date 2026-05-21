@@ -37,7 +37,8 @@ export async function POST(req: Request) {
   }
   const tenant = profile.tenant_id ? await getTenant(profile.tenant_id).catch(() => null) : null;
   const tenantProfileSlug = resolveClientProfileSlug(tenant);
-  const demoProfileSlug = (await cookies()).get(DEMO_CLIENT_PROFILE_COOKIE)?.value || null;
+  const rawDemoProfileSlug = (await cookies()).get(DEMO_CLIENT_PROFILE_COOKIE)?.value || null;
+  const demoProfileSlug = profile.tenant_id ? null : rawDemoProfileSlug;
   const demoProfile = getClientCommandCenterProfileById(demoProfileSlug);
   const clientProfile =
     demoProfile.id === "default"

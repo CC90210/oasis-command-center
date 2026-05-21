@@ -13,6 +13,8 @@ import { createServerClient } from "@supabase/ssr";
 import { provisionAuthenticatedUser } from "@/lib/auth-provisioning";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { redeemInvite } from "@/lib/team";
+import { DEMO_CLIENT_PROFILE_COOKIE } from "@/lib/client-profiles";
+import { resolvePostLoginRedirect } from "@/lib/auth-routing";
 
 const PENDING_INVITE_COOKIE = "pending_invite_token";
 
@@ -49,6 +51,7 @@ export async function GET(req: NextRequest) {
       `${origin}/login?err=${encodeURIComponent(error?.message || "session_failed")}`,
     );
   }
+  res.cookies.set({ name: DEMO_CLIENT_PROFILE_COOKIE, value: "", maxAge: 0, path: "/" });
 
   const pendingInviteToken = inviteHint || req.cookies.get(PENDING_INVITE_COOKIE)?.value;
   if (pendingInviteToken) {
@@ -74,5 +77,12 @@ export async function GET(req: NextRequest) {
     // Don't block sign-in if provisioning hiccups; Settings can re-trigger.
   }
 
+  const postLoginPath = await resolvePostLoginRedirect({
+    db: getServiceSupabase(),
+    authUserId: data.user.id,
+    email: data.user.email,
+    requestedNext: next,
+  }).catch(() => "/");
+  res.headers.set("Location", `${origin}${postLoginPath}`);
   return res;
 }

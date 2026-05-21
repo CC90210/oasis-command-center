@@ -19,9 +19,11 @@ import { LeadsTableClient } from "@/components/leads/LeadsTableClient";
 export const dynamic = "force-dynamic";
 
 export default async function LeadsPage() {
-  const demoProfile = (await cookies()).get(DEMO_CLIENT_PROFILE_COOKIE)?.value || null;
-  const demoMode = demoProfile === "sun";
   const profile = await safe("leads.profile", getActiveProfile(), null);
+  const demoProfile = profile?.tenant_id
+    ? null
+    : (await cookies()).get(DEMO_CLIENT_PROFILE_COOKIE)?.value || null;
+  const demoMode = demoProfile === "sun";
   const tenantId = demoMode ? "" : profile?.tenant_id || "";
 
   // Pull up to 500 leads — the client component paginates locally at

@@ -47,12 +47,14 @@ export async function getActiveProfile(): Promise<UserProfile | null> {
 
   // Prefer authed user; fall back to OPERATOR_EMAIL (CC's legacy single-tenant default)
   if (user?.id) {
-    const r = await db.from("user_profiles").select("*").eq("auth_user_id", user.id).maybeSingle();
-    if (r.data) return r.data as UserProfile;
+    const r = await db.from("user_profiles").select("*").eq("auth_user_id", user.id).limit(20);
+    const rows = ((r.data || []) as ActiveUserProfile[]) || [];
+    if (rows.length > 0) return chooseActiveProfile(rows, user.email);
     // Auth user exists but no profile yet — try by email (post-migration link case)
     if (user.email) {
-      const e = await db.from("user_profiles").select("*").eq("email", user.email).maybeSingle();
-      if (e.data) return e.data as UserProfile;
+      const e = await db.from("user_profiles").select("*").eq("email", user.email).limit(20);
+      const emailRows = ((e.data || []) as ActiveUserProfile[]) || [];
+      if (emailRows.length > 0) return chooseActiveProfile(emailRows, user.email);
     }
   }
 
@@ -60,6 +62,30 @@ export async function getActiveProfile(): Promise<UserProfile | null> {
   const r = await db.from("user_profiles").select("*").eq("email", fallbackEmail).maybeSingle();
   if (r.error || !r.data) return null;
   return r.data as UserProfile;
+}
+
+type ActiveUserProfile = UserProfile & {
+  is_owner?: boolean | null;
+  onboarding_completed_at?: string | null;
+};
+
+function chooseActiveProfile(rows: ActiveUserProfile[], email: string | null | undefined): UserProfile {
+  if (rows.length === 1) return rows[0];
+  const normalizedEmail = (email || "").trim().toLowerCase();
+  const exactEmail = normalizedEmail
+    ? rows.filter((row) => (row.email || "").trim().toLowerCase() === normalizedEmail)
+    : [];
+  const candidates = exactEmail.length > 0 ? exactEmail : rows;
+  return (
+    candidates.find((row) => {
+      const brand = (row.brand || "").toLowerCase();
+      return row.is_owner && row.primary_agent === "bravo" && brand.includes("oasis");
+    }) ||
+    candidates.find((row) => row.is_owner && row.onboarding_completed_at) ||
+    candidates.find((row) => row.onboarding_completed_at) ||
+    candidates.find((row) => row.is_owner) ||
+    candidates[0]
+  );
 }
 
 export async function getTenant(tenantId: string): Promise<Tenant | null> {

@@ -54,7 +54,8 @@ export default async function TodayPage() {
   }
 
   const tenantId = profile.tenant_id || "";
-  const demoProfileSlug = (await cookies()).get(DEMO_CLIENT_PROFILE_COOKIE)?.value || null;
+  const rawDemoProfileSlug = (await cookies()).get(DEMO_CLIENT_PROFILE_COOKIE)?.value || null;
+  const demoProfileSlug = profile.tenant_id ? null : rawDemoProfileSlug;
   const demoProfile = getClientCommandCenterProfileById(demoProfileSlug);
   const tenantProfileSlug =
     demoProfile.id !== "default"

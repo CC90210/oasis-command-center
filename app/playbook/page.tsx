@@ -125,7 +125,8 @@ const SUN_MANUAL_META: Record<string, { eyebrow: string; summary: string }> = {
 export default async function PlaybookIndex() {
   const operatingManual = await listPlaybooks();
   const profile = await safe("playbook.profile", getActiveProfile(), null);
-  const demoProfileSlug = (await cookies()).get(DEMO_CLIENT_PROFILE_COOKIE)?.value || null;
+  const rawDemoProfileSlug = (await cookies()).get(DEMO_CLIENT_PROFILE_COOKIE)?.value || null;
+  const demoProfileSlug = profile?.tenant_id ? null : rawDemoProfileSlug;
   const demoProfile = getClientCommandCenterProfileById(demoProfileSlug);
   const tenantProfileSlug =
     demoProfile.id !== "default"

@@ -72,9 +72,11 @@ function groupRows(rows: FundedDealRow[]): { label: string; rows: FundedDealRow[
 }
 
 export default async function RenewalsPage() {
-  const demoProfile = (await cookies()).get(DEMO_CLIENT_PROFILE_COOKIE)?.value || null;
-  const demoMode = demoProfile === "sun";
   const profile = await safe("renewals.profile", getActiveProfile(), null);
+  const demoProfile = profile?.tenant_id
+    ? null
+    : (await cookies()).get(DEMO_CLIENT_PROFILE_COOKIE)?.value || null;
+  const demoMode = demoProfile === "sun";
   const tenantId = demoMode ? "" : profile?.tenant_id || "";
 
   const [summary, rows] = demoMode

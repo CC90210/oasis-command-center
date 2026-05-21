@@ -9,6 +9,16 @@ type ProvisionInput = {
   db: SupabaseClient;
 };
 
+type ProvisionProfileRow = {
+  id: string;
+  tenant_id: string | null;
+  email?: string | null;
+  brand?: string | null;
+  primary_agent?: string | null;
+  is_owner?: boolean | null;
+  onboarding_completed_at?: string | null;
+};
+
 export type ProvisionResult = {
   ok: true;
   tenant_id: string;
@@ -28,23 +38,27 @@ export async function provisionAuthenticatedUser({
 }: ProvisionInput): Promise<ProvisionResult> {
   const existing = await db
     .from("user_profiles")
-    .select("id, tenant_id")
+    .select("id, tenant_id, email, brand, primary_agent, is_owner, onboarding_completed_at")
     .eq("auth_user_id", authUserId)
-    .maybeSingle();
+    .limit(20);
 
-  if (existing.data) {
+  const existingRow = chooseProvisioningRow(
+    ((existing.data || []) as ProvisionProfileRow[]),
+    email,
+  );
+  if (existingRow) {
     const client = await applyClientProvisioningProfile({
       db,
-      tenantId: existing.data.tenant_id,
-      profileId: existing.data.id,
-      brand,
-      email,
+      tenantId: existingRow.tenant_id,
+      profileId: existingRow.id,
+      brand: existingRow.brand || brand,
+      email: existingRow.email || email,
     });
     return {
       ok: true,
       already_provisioned: true,
-      tenant_id: existing.data.tenant_id,
-      profile_id: existing.data.id,
+      tenant_id: existingRow.tenant_id,
+      profile_id: existingRow.id,
       client_profile_slug: client.clientProfileSlug,
       primary_agent: client.primaryAgent,
     };
@@ -52,24 +66,28 @@ export async function provisionAuthenticatedUser({
 
   const byEmail = await db
     .from("user_profiles")
-    .select("id, tenant_id")
+    .select("id, tenant_id, email, brand, primary_agent, is_owner, onboarding_completed_at")
     .eq("email", email)
-    .maybeSingle();
+    .limit(20);
 
-  if (byEmail.data) {
-    await db.from("user_profiles").update({ auth_user_id: authUserId }).eq("id", byEmail.data.id);
+  const emailRow = chooseProvisioningRow(
+    ((byEmail.data || []) as ProvisionProfileRow[]),
+    email,
+  );
+  if (emailRow) {
+    await db.from("user_profiles").update({ auth_user_id: authUserId }).eq("id", emailRow.id);
     const client = await applyClientProvisioningProfile({
       db,
-      tenantId: byEmail.data.tenant_id,
-      profileId: byEmail.data.id,
-      brand,
-      email,
+      tenantId: emailRow.tenant_id,
+      profileId: emailRow.id,
+      brand: emailRow.brand || brand,
+      email: emailRow.email || email,
     });
     return {
       ok: true,
       already_provisioned: true,
-      tenant_id: byEmail.data.tenant_id,
-      profile_id: byEmail.data.id,
+      tenant_id: emailRow.tenant_id,
+      profile_id: emailRow.id,
       client_profile_slug: client.clientProfileSlug,
       primary_agent: client.primaryAgent,
     };
@@ -101,4 +119,34 @@ export async function provisionAuthenticatedUser({
     client_profile_slug: client.clientProfileSlug,
     primary_agent: client.primaryAgent,
   };
+}
+
+function chooseProvisioningRow<T extends {
+  id: string;
+  tenant_id: string | null;
+  email?: string | null;
+  brand?: string | null;
+  primary_agent?: string | null;
+  is_owner?: boolean | null;
+  onboarding_completed_at?: string | null;
+}>(
+  rows: T[],
+  email: string,
+): (T & { tenant_id: string }) | null {
+  const scopedRows = rows.filter((row): row is T & { tenant_id: string } => !!row.tenant_id);
+  if (scopedRows.length === 0) return null;
+  if (scopedRows.length === 1) return scopedRows[0];
+  const normalizedEmail = email.trim().toLowerCase();
+  const exactEmail = scopedRows.filter((row) => (row.email || "").trim().toLowerCase() === normalizedEmail);
+  const candidates = exactEmail.length > 0 ? exactEmail : scopedRows;
+  return (
+    candidates.find((row) => {
+      const brand = (row.brand || "").toLowerCase();
+      return row.is_owner && row.primary_agent === "bravo" && brand.includes("oasis");
+    }) ||
+    candidates.find((row) => row.is_owner && row.onboarding_completed_at) ||
+    candidates.find((row) => row.onboarding_completed_at) ||
+    candidates.find((row) => row.is_owner) ||
+    candidates[0]
+  );
 }
