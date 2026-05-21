@@ -35,7 +35,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { publishAgentEvent } from "@/lib/manifest/events";
-import { recordLeadStageEvent } from "@/lib/lead-stage-engine";
+import { dispatchLeadStageEvent } from "@/lib/lead-stage-dispatcher";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -174,7 +174,7 @@ export async function GET(
     // engaged. Engine guards the from-stage so an open against a
     // lead already past viewed_application is a no-op.
     if (!suspicious && leadId) {
-      await recordLeadStageEvent({
+      await dispatchLeadStageEvent({
         type: "email_opened",
         tenantId,
         leadId,

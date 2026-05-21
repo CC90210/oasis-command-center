@@ -358,13 +358,15 @@ export async function pipelineBreakdown(tenantId: string, includeArchived = fals
   for (const row of r.data as Array<{ data: Record<string, unknown> | null }>) {
     const d = row.data || {};
     // Prefer `stage` (the post-migration field) over `status` (legacy).
-    // Falls back to "new_contact" only when both are missing, matching the
-    // first stage of the canonical OASIS lifecycle so unset rows still
-    // show somewhere meaningful in the funnel.
+    // Falls back to "unset" (not an OASIS or SunBiz key) when both are
+    // missing, so the funnel chart shows the row without misattributing
+    // it to either tenant's canonical first stage. The 2026-05-21 self-
+    // review caught the prior fallback ("new_contact") silently
+    // polluting SunBiz's distribution with OASIS-only labels.
     const status =
       (typeof d.stage === "string" ? d.stage : null) ||
       (typeof d.status === "string" ? d.status : null) ||
-      "new_contact";
+      "unset";
     if (!includeArchived && status === "archived") continue;
     stages[status] = (stages[status] || 0) + 1;
     const src = typeof d.source === "string" ? d.source : "unknown";

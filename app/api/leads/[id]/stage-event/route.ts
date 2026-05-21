@@ -19,7 +19,7 @@
 
 import { NextResponse, type NextRequest } from "next/server";
 import { resolveSessionContext } from "@/lib/api-auth";
-import { recordLeadStageEvent } from "@/lib/lead-stage-engine";
+import { dispatchLeadStageEvent } from "@/lib/lead-stage-dispatcher";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -59,7 +59,7 @@ export async function POST(
     );
   }
 
-  const result = await recordLeadStageEvent({
+  const result = await dispatchLeadStageEvent({
     type: type as "outbound_email_sent" | "outbound_email_queued" | "form_signed",
     tenantId: sess.tenantId,
     leadId,

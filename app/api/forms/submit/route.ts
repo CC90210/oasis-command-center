@@ -41,7 +41,7 @@ import {
 import { rateLimit } from "@/lib/rate-limit";
 import { createRecord, updateRecord, RecordsError } from "@/lib/manifest/data";
 import { uploadLeadDocument } from "@/lib/lead-documents";
-import { recordLeadStageEvent } from "@/lib/lead-stage-engine";
+import { dispatchLeadStageEvent } from "@/lib/lead-stage-dispatcher";
 import { resolvePublicForm } from "@/lib/forms/public-resolver";
 import { createHash } from "node:crypto";
 
@@ -488,7 +488,7 @@ export async function POST(req: NextRequest) {
   // canonical doc-type set; partial uploads stay in missing_info,
   // complete uploads advance to hot_lead.
   if (uploadedDocs.length > 0) {
-    await recordLeadStageEvent({
+    await dispatchLeadStageEvent({
       type: "doc_uploaded",
       tenantId: form.tenant_id,
       leadId: link.lead_id,

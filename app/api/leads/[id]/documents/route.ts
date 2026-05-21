@@ -19,7 +19,7 @@ import {
   OPERATOR_ALLOWED_DOC_MIME,
   MAX_LEAD_DOC_BYTES,
 } from "@/lib/lead-documents";
-import { recordLeadStageEvent } from "@/lib/lead-stage-engine";
+import { dispatchLeadStageEvent } from "@/lib/lead-stage-dispatcher";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -183,7 +183,7 @@ export async function POST(
   // set and bumps the lead's stage if so. Best-effort: a failure
   // here doesn't reject the document insert.
   const stageEvent = target.stageLeadId
-    ? await recordLeadStageEvent({
+    ? await dispatchLeadStageEvent({
         type: "doc_uploaded",
         tenantId: sess.tenantId,
         leadId: target.stageLeadId,

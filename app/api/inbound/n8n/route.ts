@@ -28,7 +28,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { bad, sha256 } from "@/lib/api-helpers";
-import { recordLeadStageEvent } from "@/lib/lead-stage-engine";
+import { dispatchLeadStageEvent } from "@/lib/lead-stage-dispatcher";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs"; // service role + sha256 → Node, not edge
@@ -129,7 +129,7 @@ export async function POST(req: NextRequest) {
         .maybeSingle();
       const row = lookup.data as { tenant_id?: string; lead_id?: string } | null;
       if (row?.tenant_id && row?.lead_id) {
-        await recordLeadStageEvent({
+        await dispatchLeadStageEvent({
           type: "lead_replied_negative",
           tenantId: row.tenant_id,
           leadId: row.lead_id,
