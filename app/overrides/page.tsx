@@ -209,6 +209,30 @@ export default async function OverridesPage({
           {pending.length} pending
         </Tag>}
       />
+
+      {/* Operator-facing explainer — added 2026-05-20 because non-technical
+          visitors landing on /overrides had no way to tell what the page
+          was for. The exec_guard / single-use / command-hash language in
+          the subtitle assumes the reader already knows the V6 safety
+          substrate; this box restates it in plain terms. */}
+      <Card>
+        <div className="flex items-start gap-3 p-1">
+          <ShieldAlert size={18} className="text-accent shrink-0 mt-0.5" />
+          <div className="text-sm text-fg-muted leading-relaxed">
+            <span className="font-semibold text-fg">What this is.</span>{" "}
+            When an AI agent on this empire tries to run a command that the
+            safety guard (<code className="text-fg-dim">exec_guard.py</code>)
+            blocked — typically a destructive shell op or a write to a
+            sensitive path — the request lands here as a pending row.
+            Approve to let the agent retry the exact same command (single-use,
+            tied to the command hash). Deny to keep it blocked. The local
+            consumer daemon picks up your decision within ~5 seconds and
+            relays it back to the calling agent. If you see "No pending
+            override requests" the empire is clean.
+          </div>
+        </div>
+      </Card>
+
       <div className="text-xs text-fg-faint">
         {showAllWorkspaces ? (
           <a href="/overrides" className="text-accent hover:underline">
