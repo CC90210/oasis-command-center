@@ -75,14 +75,15 @@ export type NavItem = {
  */
 export const CC_NAV: NavItem[] = [
   // Operations group — daily-use pages CC opens to run the business.
+  // /pipeline stays here (the funnel overview is a daily-ops glance);
+  // the focused /leads + /proposals tables live under the new Pipeline
+  // group below per CC's V6.9.1 spec.
   { group: "Operations", href: "/", label: "Today", icon: "LayoutDashboard" },
+  { group: "Operations", href: "/pipeline", label: "Pipeline", icon: "GitBranch" },
   { group: "Operations", href: "/agents", label: "Agents", icon: "Bot" },
   { group: "Operations", href: "/reasoning", label: "Reasoning", icon: "Brain" },
   { group: "Operations", href: "/playbook", label: "Playbook", icon: "BookOpen" },
-  // Pipeline group — CRM views (V6.9.1 2026-05-20: lifted out of
-  // Operations to match Sun Biz's nav pattern; OASIS now has a true
-  // Leads + Proposals split alongside the master Pipeline view).
-  { group: "Pipeline", href: "/pipeline", label: "Pipeline", icon: "GitBranch" },
+  // Pipeline group — CRM sub-views split out of Operations 2026-05-20.
   { group: "Pipeline", href: "/leads", label: "Leads", icon: "Users" },
   { group: "Pipeline", href: "/proposals", label: "Proposals", icon: "FileText" },
   // System group — observability + control surfaces.
