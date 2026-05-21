@@ -50,16 +50,26 @@ import {
 } from "lucide-react";
 import type { Lead } from "@/lib/supabase";
 
+export type LeadsTableStage = { value: string; label: string; tone: string };
+
 type Props = {
   initialLeads: Lead[];
+  /**
+   * Tenant-specific stage tabs. Defaults to the SunBiz Lead Pipeline
+   * (Salesforce-parity, 12 stages) so existing call sites keep working.
+   * OASIS passes its own 11-stage list (see app/leads/page.tsx).
+   *
+   * Any lead whose stage value isn't in this list falls into
+   * "Uncategorized" — visible at the right end of the tab strip so the
+   * operator can spot stale legacy values without losing them.
+   */
+  stages?: LeadsTableStage[];
 };
 
 /** SunBiz Lead Pipeline tabs — Salesforce-parity rework 2026-05-17.
  *  Must stay in sync with SUN_SEED.data_model.lead.stage in
- *  lib/manifest/seeds.ts AND the colors in lib/sunbiz-stage-meta.ts.
- *  Any drift means a stage value won't have a tab here and gets
- *  bucketed under "Uncategorized". */
-const STAGES: { value: string; label: string; tone: string }[] = [
+ *  lib/manifest/seeds.ts AND the colors in lib/sunbiz-stage-meta.ts. */
+const SUNBIZ_STAGES: LeadsTableStage[] = [
   { value: "imported",           label: "Imported",           tone: "text-fg-dim" },
   { value: "not_interested",     label: "Not interested",     tone: "text-status-warm" },
   { value: "hot_lead",           label: "Hot lead",           tone: "text-accent" },
@@ -79,7 +89,8 @@ type SortDir = "asc" | "desc";
 
 const PAGE_SIZE = 50;
 
-export function LeadsTableClient({ initialLeads }: Props) {
+export function LeadsTableClient({ initialLeads, stages }: Props) {
+  const STAGES = stages && stages.length > 0 ? stages : SUNBIZ_STAGES;
   const [search, setSearch] = useState("");
   const [stage, setStage] = useState<string>("all");
   const [sortKey, setSortKey] = useState<SortKey>("last_touch");

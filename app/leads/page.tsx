@@ -1,22 +1,49 @@
 /**
- * /leads — operator-facing pipeline view.
+ * /leads — operator-facing lead list.
  *
- * 2026-05-15 rebuild: the prior static table couldn't handle scale.
- * LeadsTableClient adds stage tabs, search, sortable columns,
- * pagination — built for thousands of rows, not dozens. Per CC's
- * post-meeting feedback ("boxes too small, build proper
- * infrastructure for thousands of leads").
+ * Originally built for the SunBiz tenant (LeadsTableClient with the
+ * 12-stage Lead Pipeline). 2026-05-20: extended for OASIS too — the
+ * client component now accepts a `stages` prop so both tenants share
+ * the same table machinery but render their own stage tabs.
+ *
+ * Tenant detection: getActiveProfile() returns the tenant for the
+ * signed-in operator. The demo cookie keeps the SunBiz demo path
+ * working for unauthenticated visits.
  */
 
 import { PageHeader } from "@/components/Card";
-import { getActiveProfile, getLeadsForTenant } from "@/lib/queries";
+import { getActiveProfile, getLeadsForTenant, getTenant } from "@/lib/queries";
 import { safe } from "@/lib/api-helpers";
 import { cookies } from "next/headers";
 import { DEMO_CLIENT_PROFILE_COOKIE } from "@/lib/client-profiles";
 import { SUNBIZ_DEMO_LEADS } from "@/lib/sunbiz-demo-data";
-import { LeadsTableClient } from "@/components/leads/LeadsTableClient";
+import { LeadsTableClient, type LeadsTableStage } from "@/components/leads/LeadsTableClient";
+import { OASIS_LEAD_STAGES } from "@/lib/oasis-stage-meta";
 
 export const dynamic = "force-dynamic";
+
+// Tone hints for OASIS stages — maps stage semantics to the same Tailwind
+// classes the SunBiz tabs use, keeping the visual language consistent
+// across tenants. Mirrors the bg/fg colour intent in lib/oasis-stage-meta.
+const OASIS_STAGE_TONES: Record<string, string> = {
+  new_contact:   "text-fg-dim",
+  outreach:      "text-status-info",
+  discovery:     "text-status-info",
+  qualified:     "text-status-engaged",
+  proposal:      "text-accent",
+  negotiation:   "text-accent",
+  onboarding:    "text-status-warm",
+  active_client: "text-status-engaged",
+  churned:       "text-status-warm",
+  lost:          "text-status-warm",
+  archived:      "text-fg-dim",
+};
+
+const OASIS_STAGES: LeadsTableStage[] = OASIS_LEAD_STAGES.map((s) => ({
+  value: s.key,
+  label: s.label,
+  tone: OASIS_STAGE_TONES[s.key] || "text-fg-muted",
+}));
 
 export default async function LeadsPage() {
   const profile = await safe("leads.profile", getActiveProfile(), null);
@@ -26,10 +53,17 @@ export default async function LeadsPage() {
   const demoMode = demoProfile === "sun";
   const tenantId = demoMode ? "" : profile?.tenant_id || "";
 
-  // Pull up to 500 leads — the client component paginates locally at
-  // 50/page, so 500 is "10 pages of in-memory data" which feels
-  // instant to the operator. Beyond that we'd want server-side cursor
-  // pagination (Phase 13).
+  // Tenant detection: UserProfile has no tenant_slug; look it up from
+  // the tenants table. OASIS tenant slugs all begin with "oasis-" (the
+  // primary one is "oasis-ai-cc"; per-operator preview tenants follow
+  // the same prefix convention).
+  const tenant = tenantId
+    ? await safe("leads.tenant", getTenant(tenantId), null)
+    : null;
+  const tenantSlug = (tenant?.slug || "").toLowerCase();
+  const isOasis = tenantSlug.startsWith("oasis");
+  const stages = isOasis ? OASIS_STAGES : undefined; // undefined → SunBiz default
+
   const leads = demoMode
     ? SUNBIZ_DEMO_LEADS
     : tenantId
@@ -45,14 +79,16 @@ export default async function LeadsPage() {
             ? "Sun demo mode — sample leads loaded so you can see Solara's workflow."
             : tenantId
               ? leads.length === 0
-                ? "Send the application form to your first prospect to get started."
+                ? isOasis
+                  ? "Send the first outreach to your first prospect to get started."
+                  : "Send the application form to your first prospect to get started."
                 : `${leads.length} lead${leads.length === 1 ? "" : "s"} in the pipeline.`
               : "Finish onboarding to connect this workspace."
         }
       />
 
       {tenantId || demoMode ? (
-        <LeadsTableClient initialLeads={leads} />
+        <LeadsTableClient initialLeads={leads} stages={stages} />
       ) : (
         <div className="rounded-xl border border-bg-border bg-bg-elev/40 p-8 text-center text-fg-muted">
           Sign in to see your leads.
