@@ -196,14 +196,23 @@ export default async function OperationsPage({
         )
       : Promise.resolve(0),
     // Pending overrides — for the badge on the Override Approvals link.
+    // CRITICAL: also gate on expires_at > now. A row whose 5-min approval
+    // window has lapsed is settled state (the agent moved on); counting
+    // it as "pending" balloons the badge into a fake to-do list. CC saw
+    // 284 stale pendings on 2026-05-22 — all expired test artifacts.
+    // The override-queue-cleanup cron rewrites these to status='expired'
+    // every 10 min; this gte() filter keeps the badge honest between
+    // cleanup runs.
     safe(
       "operations.pending_overrides",
       (async () => {
+        const nowIso = new Date().toISOString();
         const r = await db
           .from("exec_overrides")
           .select("request_id", { count: "exact", head: true })
           .eq("status", "pending")
           .is("dashboard_decision", null)
+          .gt("expires_at", nowIso)
           .in("workspace_label", ["empire", "unknown"])
           .gte("ts", now24Ago);
         return r.count || 0;

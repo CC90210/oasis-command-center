@@ -190,10 +190,22 @@ export default async function OverridesPage({
   const showAllWorkspaces = params.ws === "all";
   const { rows, error } = await fetchRows(showAllWorkspaces);
 
-  const pending = rows.filter((r) => r.status === "pending" && !r.dashboard_decision);
+  // "Pending" must mean genuinely waiting for human input. A row whose
+  // expires_at is in the past is settled state (the agent already moved
+  // on) — counting it as pending balloons the badge into a fake to-do
+  // list. CC saw 284 "pending" on 2026-05-22, all expired test artifacts.
+  // The override-queue-cleanup cron also rewrites these to status='expired'
+  // every 10 min, but this client-side filter keeps the badge honest even
+  // between cleanup runs.
+  const nowMs = Date.now();
+  const isActivelyPending = (r: Row) =>
+    r.status === "pending" &&
+    !r.dashboard_decision &&
+    new Date(r.expires_at).getTime() > nowMs;
+  const pending = rows.filter(isActivelyPending);
   const inFlight = rows.filter((r) => r.dashboard_decision && !r.consumer_synced_at);
   const recent = rows.filter(
-    (r) => r.consumer_synced_at || r.status !== "pending" || r.dashboard_decision,
+    (r) => r.consumer_synced_at || r.status !== "pending" || r.dashboard_decision || !isActivelyPending(r),
   );
 
   return (
