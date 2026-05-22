@@ -47,6 +47,12 @@ import { asSSERecord, parseSSE, safeText } from "./sse-parser";
 import { downloadChatAttachmentText } from "./chat-attachments";
 import { parseLeadImportCsv } from "./leads-import-parser";
 import { importLeadsForTenant } from "./leads-import-service";
+import {
+  type ChatPlanMode,
+  composeSystemPrompt as composePlanSystemPrompt,
+  filterToolsForMode,
+  normalizeMode,
+} from "./chat-modes/plan-mode";
 
 const ANTHROPIC_VERSION = "2023-06-01";
 const MAX_TOOL_ITERATIONS = 8; // safety cap — prevents runaway tool loops
@@ -1170,6 +1176,19 @@ export type ToolLoopRequest = {
    * unaffected — they execute server-side on Vercel, not the bridge.
    */
   bridgeAdvertisedTools?: string[] | null;
+  /**
+   * Plan vs Build mode (2026-05-22, OpenCode-style chat affordance).
+   *
+   * "plan" → filter to the read-only allowlist in
+   *   lib/chat-modes/plan-mode.ts AND append the PLAN_MODE_PROMPT_OVERLAY
+   *   to the system prompt. Agent can read/research but cannot write.
+   * "build" or undefined → no change; agent has full access to whatever
+   *   tool list the other filters produce.
+   *
+   * Applied LAST in the filter chain — plan mode overrides anything
+   * upstream because its safety contract is the most restrictive.
+   */
+  chatMode?: ChatPlanMode;
 };
 
 export async function* streamAnthropicWithTools(
@@ -1183,15 +1202,22 @@ export async function* streamAnthropicWithTools(
     .filter((m) => m.content && m.content.length > 0)
     .map((m) => ({ role: m.role, content: m.content }) as AnthropicMessage);
 
+  // Plan mode adjusts both the system prompt AND the tool filter. Apply
+  // the prompt overlay HERE so the model sees the rules from turn 0; the
+  // tool filter is applied inside runIterationLoop alongside the other
+  // filters (palette / bridge-advertised / defer).
+  const mode = normalizeMode(req.chatMode);
+  const effectiveSystem = composePlanSystemPrompt(req.system, mode);
   yield* runIterationLoop({
     apiKey: req.apiKey,
     model: req.model,
-    system: req.system,
+    system: effectiveSystem,
     maxTokens: req.maxTokens,
     enableTools: req.enableTools,
     excludeDeferredTools: req.excludeDeferredTools,
     toolPalette: req.toolPalette,
     bridgeAdvertisedTools: req.bridgeAdvertisedTools,
+    chatMode: mode,
     history,
     startIter: 0,
     startTotalIn: 0,
@@ -1254,6 +1280,9 @@ type IterationLoopArgs = {
   excludeDeferredTools?: boolean;
   toolPalette?: string[];
   bridgeAdvertisedTools?: string[] | null;
+  /** Plan vs Build mode — when "plan", further filters activeTools to
+   *  the PLAN_MODE_TOOL_ALLOWLIST. Undefined = "build" (no filter). */
+  chatMode?: ChatPlanMode;
   /** Pre-built history. Mutates as the loop appends turns. */
   history: AnthropicMessage[];
   /** Iteration index to start at (0 for fresh, N+1 for resume). */
@@ -1310,6 +1339,13 @@ async function* runIterationLoop(
   if (args.toolPalette !== undefined) {
     const allow = new Set(args.toolPalette);
     activeTools = activeTools.filter((t) => allow.has(t.name));
+  }
+  // Filter 5 (LAST — most-restrictive wins): plan mode. Strips every write
+  // tool to the read/search allowlist. Plan mode also re-shapes the system
+  // prompt with the overlay (see PLAN_MODE_PROMPT_OVERLAY), applied where
+  // `system` is composed by streamAnthropicWithTools before this loop runs.
+  if (args.chatMode === "plan") {
+    activeTools = filterToolsForMode(activeTools, "plan");
   }
   let totalIn = args.startTotalIn;
   let totalOut = args.startTotalOut;

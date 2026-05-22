@@ -43,6 +43,7 @@ import { useSearchParams, useRouter, usePathname } from "next/navigation";
 import { getAgentInfo } from "@/lib/agents";
 import { BRIDGE_CHAT_BASE } from "@/lib/agent-roots";
 import { getBrowserSupabase } from "@/lib/supabase-browser";
+import { parseInput, renderHelp, type SlashCommandName } from "@/lib/chat-modes/slash-parser";
 
 type Role = "user" | "assistant" | "system";
 type ChatAttachmentSummary = {
@@ -367,6 +368,13 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
   // hydration runs in the mount effect below).
   const [chatMode, setChatModeState] = useState<ChatMode>("auto");
   const [cliRuntime, setCliRuntimeState] = useState<CliRuntime>("claude");
+  // Plan vs Build mode (2026-05-22 OpenCode-style). "build" = default, full
+  // tool registry. "plan" = read-only tools + plan-mode prompt overlay.
+  // Toggled by `/plan` and `/build` slash commands (see slash-parser.ts).
+  // Sent as `chat_mode` on every /api/chat POST so the server can filter
+  // tools + adjust the system prompt accordingly. Separate from chatMode
+  // (CLI vs Cloud) — orthogonal axis.
+  const [planMode, setPlanMode] = useState<"plan" | "build">("build");
   // Tracks which routing mode the most recent FAILED message used. Powers
   // the "Retry on the other mode" affordance on the error banner. Null
   // while everything is healthy or after a successful turn.
@@ -914,10 +922,85 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
         ? "Please review the attached file(s) and update the CRM if appropriate."
         : "");
     if ((!text && attachmentsForTurn.length === 0) || streaming || uploadingAttachments) return;
+
+    // Slash command interception — runs entirely client-side, no API call.
+    // Only fires when there are no attachments + the raw input parses as a
+    // known slash command. Anything else falls through to the regular send.
+    if (text && attachmentsForTurn.length === 0) {
+      const parsed = parseInput(text);
+      if (parsed.kind === "command") {
+        setInput("");
+        runSlashCommand(parsed.name, parsed.args);
+        return;
+      }
+    }
+
     setInput("");
     setPendingAttachments([]);
     setAttachmentError(null);
     return submitText(text, undefined, attachmentsForTurn);
+  }
+
+  /**
+   * Slash command dispatcher. Runs entirely client-side — each command
+   * either mutates local widget state (planMode, agent, messages) or
+   * appends a system note to the conversation so the operator sees what
+   * happened. None of these hit the model.
+   *
+   * /compact is the exception — it'd need a server summarization call
+   * which we punt on for v1; the slash is parsed but renders a "coming
+   * soon" note so the operator knows the command was recognised.
+   */
+  function runSlashCommand(name: SlashCommandName, args: string) {
+    const now = Date.now();
+    const appendSystem = (content: string) => {
+      setMessages((m) => [...m, { role: "system", content, at: now }]);
+    };
+    switch (name) {
+      case "help":
+        appendSystem(renderHelp());
+        return;
+      case "clear":
+        setMessages([]);
+        return;
+      case "plan":
+        setPlanMode("plan");
+        appendSystem(
+          "Plan mode active — agent is restricted to read-only tools. Run /build when you're ready to execute.",
+        );
+        return;
+      case "build":
+        setPlanMode("build");
+        appendSystem("Build mode active — full tool registry restored for this chat.");
+        return;
+      case "agent": {
+        const target = args.trim().toLowerCase();
+        if (!target) {
+          appendSystem("Usage: /agent <slug>. Try /agent bravo or /agent atlas.");
+          return;
+        }
+        if (!agentKeys.includes(target)) {
+          appendSystem(
+            `Unknown agent "${target}". Available: ${agentKeys.join(", ")}.`,
+          );
+          return;
+        }
+        setAgent(target);
+        setMessages([]);
+        appendSystem(`Switched to agent: ${target}. History cleared.`);
+        return;
+      }
+      case "model":
+        appendSystem(
+          "/model is not wired yet — change model in Settings → Agents for now. (Coming soon.)",
+        );
+        return;
+      case "compact":
+        appendSystem(
+          "/compact is not wired yet — for now, hit /clear to reset history. (Coming soon: server-side history summarisation.)",
+        );
+        return;
+    }
   }
 
   /**
@@ -1042,6 +1125,10 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
                 activeMode === "cloud_only"
                   ? ("cloud_only" as const)
                   : ("bridge_proxy" as const),
+              // Plan vs Build (2026-05-22 OpenCode-style). Server filters
+              // write tools out + appends the plan-mode prompt overlay
+              // when this is "plan". Default is "build" (full tools).
+              chat_mode: planMode,
             };
       const res = await fetchWithTimeout(url, {
         method: "POST",
@@ -1662,6 +1749,28 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
                   : "Mode: API + local tools (bridge offline)"}
             </option>
           </select>
+        )}
+        {planMode === "plan" && (
+          // Plan-mode badge (OpenCode-style, 2026-05-22). Visible whenever
+          // the operator has run /plan. Click toggles back to /build.
+          <button
+            type="button"
+            onClick={() => {
+              setPlanMode("build");
+              setMessages((m) => [
+                ...m,
+                {
+                  role: "system",
+                  content: "Build mode active — full tool registry restored for this chat.",
+                  at: Date.now(),
+                },
+              ]);
+            }}
+            className="inline-flex items-center gap-1 text-[10px] uppercase tracking-wider font-bold px-2 py-1 rounded-md border border-status-warm/40 bg-status-warm/10 text-status-warm hover:bg-status-warm/20 transition-colors"
+            title="Plan mode is active — agent is restricted to read-only tools. Click to exit (same as /build)."
+          >
+            ● PLAN MODE
+          </button>
         )}
         {bridgeReady && effectiveMode === "cli" && (
           <select

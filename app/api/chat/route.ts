@@ -148,6 +148,17 @@ type IncomingPayload = {
    */
   tool_routing?: "bridge_proxy" | "cloud_only";
   attachments?: Array<{ id?: string }>;
+  /**
+   * Plan vs Build mode (2026-05-22, OpenCode-style).
+   *   "plan"  — read-only tools + plan-mode system-prompt overlay.
+   *             Agent can read, search, analyze, and propose a plan.
+   *             Cannot write, run shell, or send anything.
+   *   "build" — default. Full tool registry for whatever cloud_tools /
+   *             tool_routing path applies.
+   * Toggled by the client via `/plan` and `/build` slash commands —
+   * see lib/chat-modes/slash-parser.ts + lib/chat-modes/plan-mode.ts.
+   */
+  chat_mode?: "plan" | "build";
 };
 
 export async function POST(req: NextRequest) {
@@ -521,6 +532,10 @@ export async function POST(req: NextRequest) {
               // pairing actually has installed. null = no advertisement
               // on record; runner falls back to the hardcoded bridge set.
               bridgeAdvertisedTools,
+              // Plan vs Build mode (2026-05-22 OpenCode-style). Plan
+              // mode filters write tools out + appends the plan-mode
+              // system overlay. "build" or undefined = no change.
+              chatMode: payload.chat_mode === "plan" ? "plan" : "build",
             },
             { tenantId, userId: user.id, agentKey, authUserId: user.id }
           )) {
