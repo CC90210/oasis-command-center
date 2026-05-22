@@ -80,7 +80,7 @@ export default async function OperationsPage({
   const now7Ago = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
   const now14Ago = new Date(Date.now() - 14 * 24 * 60 * 60 * 1000).toISOString();
 
-  const [snaps, pairings, events, errorsCount, failedCronsCount, stuckThreadsCount, staleLeadsCount, pendingOverridesCount] = await Promise.all([
+  const [snaps, pairings, events, errorsCount, failedCronsCount, stuckThreadsCount, staleLeadsCount] = await Promise.all([
     safe(
       "operations.agent_state_snapshot",
       agentStates(agentNamesForOps).then((rows) =>
@@ -195,30 +195,10 @@ export default async function OperationsPage({
           0
         )
       : Promise.resolve(0),
-    // Pending overrides — for the badge on the Override Approvals link.
-    // CRITICAL: also gate on expires_at > now. A row whose 5-min approval
-    // window has lapsed is settled state (the agent moved on); counting
-    // it as "pending" balloons the badge into a fake to-do list. CC saw
-    // 284 stale pendings on 2026-05-22 — all expired test artifacts.
-    // The override-queue-cleanup cron rewrites these to status='expired'
-    // every 10 min; this gte() filter keeps the badge honest between
-    // cleanup runs.
-    safe(
-      "operations.pending_overrides",
-      (async () => {
-        const nowIso = new Date().toISOString();
-        const r = await db
-          .from("exec_overrides")
-          .select("request_id", { count: "exact", head: true })
-          .eq("status", "pending")
-          .is("dashboard_decision", null)
-          .gt("expires_at", nowIso)
-          .in("workspace_label", ["empire", "unknown"])
-          .gte("ts", now24Ago);
-        return r.count || 0;
-      })(),
-      0
-    ),
+    // Overrides feature was deleted 2026-05-22 — CC's call: "I don't
+    // want to be an approval bot. The block IS the protection."
+    // exec_guard still refuses destructive commands; it just doesn't
+    // create approval-request rows anymore. No more badge.
   ]);
   const snapByName = new Map(snaps.map((s) => [s.agent_name, s] as const));
 
@@ -276,9 +256,8 @@ export default async function OperationsPage({
         <HealthMiniTile label="Failed automations" count={failedCronsCount} tone={failedCronsCount === 0 ? "engaged" : "warm"} href="/automations" hint="Scheduled jobs whose last run errored." />
         <HealthMiniTile label="Quiet shop-outs" count={stuckThreadsCount} tone={stuckThreadsCount === 0 ? "engaged" : "accent"} href="/health" hint="Lender emails sent >7d ago with no reply yet." />
         <HealthMiniTile label="Cold leads" count={staleLeadsCount} tone={staleLeadsCount === 0 ? "engaged" : "accent"} href="/pipeline" hint="Pipeline leads you haven't touched in 2+ weeks." />
-        <HealthMiniTile label="Overrides pending" count={pendingOverridesCount} tone={pendingOverridesCount === 0 ? "engaged" : "hot"} href="/overrides" hint="Bravo asked you to approve a blocked command." />
       </div>
-      {allClear && pendingOverridesCount === 0 && (
+      {allClear && (
         <div className="text-xs text-status-engaged">All clear — nothing needs your attention.</div>
       )}
 

@@ -126,7 +126,7 @@ function _dispatchSmsLocal({
     const proc = spawn(
       pythonBin,
       [scriptPath, "send", "--to", to, "--body", body, "--provider", "twilio", "--json"],
-      { shell: false }
+      { shell: false, windowsHide: process.platform === "win32" }
     );
 
     let stdout = "";

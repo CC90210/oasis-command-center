@@ -58,7 +58,7 @@ export function suppressPhoneViaCasl(
         "--source",
         source,
       ],
-      { cwd: repoRoot, shell: false },
+      { cwd: repoRoot, shell: false, windowsHide: process.platform === "win32" },
     );
 
     timeout = setTimeout(() => {
