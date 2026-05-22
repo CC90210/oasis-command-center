@@ -341,17 +341,29 @@ export default async function AgentsPage() {
         ) : (
           <ul className="divide-y divide-bg-border">
             {events.map((e) => {
-              const payload = e.payload || {};
-              const cls = (payload as Record<string, unknown>).classification as
-                | Record<string, unknown>
-                | undefined;
-              const subject = (payload as Record<string, unknown>).subject as string | undefined;
-              // Strip the SCREAMING_SNAKE_CASE wire format into readable
-              // sentence case for display. The raw event_type stays in
-                // the title attribute so power users can still copy the
-              // underlying token if they need to grep logs.
+              const payload = (e.payload || {}) as Record<string, unknown>;
+              const cls = payload.classification as Record<string, unknown> | undefined;
+              const subject = payload.subject as string | undefined;
               const prettyEvent = formatEventType(e.event_type);
               const prettyPublisher = formatPublisher(e.publisher_agent);
+              // Subject-fallback caption — when a producer didn't include
+              // payload.subject (legacy email_opened rows, lead-stage
+              // transitions, dashboard actions) compose a meaningful
+              // line from other payload fields so the row isn't blank.
+              // Keeps the event tape scannable: every row has SOMETHING
+              // identifying the entity it touched.
+              const fallbackCaption = (() => {
+                if (subject) return null;
+                const recipient = (payload.recipient || payload.to) as string | undefined;
+                const leadName = (payload.lead_name || payload.lead) as string | undefined;
+                const action = payload.action_type as string | undefined;
+                const recordId = (payload.record_id || payload.lead_id) as string | undefined;
+                if (recipient) return `to ${recipient}`;
+                if (leadName) return `lead: ${leadName}`;
+                if (action) return `action: ${action}`;
+                if (recordId) return `record ${String(recordId).slice(0, 8)}`;
+                return null;
+              })();
               return (
                 <li key={e.id} className="py-2.5">
                   <div className="flex justify-between items-baseline gap-3">
@@ -364,9 +376,11 @@ export default async function AgentsPage() {
                       {timeAgo(e.published_at)}
                     </span>
                   </div>
-                  {subject && (
+                  {subject ? (
                     <div className="text-fg mt-1.5 text-sm">{truncate(subject, 100)}</div>
-                  )}
+                  ) : fallbackCaption ? (
+                    <div className="text-fg-muted mt-1.5 text-xs italic">{fallbackCaption}</div>
+                  ) : null}
                   {cls && (
                     <div className="text-xs text-fg-muted mt-1">
                       intent: {String(cls.intent || "—")} · priority:{" "}

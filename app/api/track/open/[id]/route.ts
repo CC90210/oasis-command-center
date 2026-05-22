@@ -90,12 +90,18 @@ export async function GET(
     let tenantId: string | null = null;
     let leadId: string | null = null;
     let sentAtMs: number | null = null;
+    // 2026-05-22: also pull the email subject so the BRAVO_EMAIL_OPENED
+    // event lands on the dashboard event bus with a human-readable
+    // caption instead of a blank row. CC noticed inconsistency in the
+    // feed: OUTBOUND_RECORDED rows showed "Free 3D Virtual Walkthrough"
+    // while EMAIL_OPENED rows were blank.
+    let subject: string | null = null;
 
     const lookupTables = ["lead_interactions", "interactions"];
     for (const table of lookupTables) {
       const { data, error } = await sb
         .from(table)
-        .select("id, tenant_id, lead_id, created_at, sent_at")
+        .select("id, tenant_id, lead_id, created_at, sent_at, subject")
         .eq("id", id)
         .maybeSingle();
       if (!error && data) {
@@ -104,9 +110,11 @@ export async function GET(
           lead_id: string | null;
           created_at: string | null;
           sent_at: string | null;
+          subject: string | null;
         };
         tenantId = row.tenant_id || null;
         leadId = row.lead_id || null;
+        subject = row.subject || null;
         const ts = row.sent_at || row.created_at;
         if (ts) sentAtMs = new Date(ts).getTime();
         break;
@@ -171,6 +179,11 @@ export async function GET(
         lead_id: leadId,
         outbound_message_id: id,
         suspicious_prefetch: suspicious,
+        // Carry the subject through to the event bus so the /agents
+        // and /feed surfaces render a meaningful caption instead of
+        // a blank row. Null when the subject column was empty (legacy
+        // rows pre-migration); UI falls back to a "(no subject)" hint.
+        subject: subject || null,
       },
     });
 

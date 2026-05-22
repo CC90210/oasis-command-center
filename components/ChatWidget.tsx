@@ -927,20 +927,20 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
   // execution from a path that doesn't have them. Codex Finding #1.B.
   const accessStatus =
     effectiveMode === "cli"
-      ? `Access: this desktop - ${CLI_RUNTIME_LABELS[cliRuntime]}`
+      ? `On this computer · ${CLI_RUNTIME_LABELS[cliRuntime]}`
       : effectiveMode === "cloud_only"
-        ? "Access: cloud workspace - curated tools (no shell/edit)"
+        ? "Cloud · chat only (no files)"
         : bridgeReady
-          ? "Access: cloud workspace (Anthropic API) - local tool execution (bridge)"
-          : "Access: cloud workspace - bridge offline, curated tools only";
+          ? "Cloud + my files (bridge runs tools)"
+          : "Cloud · bridge offline";
   const accessTitle =
     chatMode === "auto"
-      ? "Auto: bridge if paired + online, otherwise API key with curated cloud tools. Install the bridge to unlock shell + file edits."
+      ? "Best path: use your computer's CLI when the bridge is running, otherwise fall back to your saved API key. Install the bridge to unlock file edits + shell access."
       : chatMode === "cli"
-        ? `CLI: pinned to the local ${CLI_RUNTIME_LABELS[cliRuntime]} bridge runtime. Errors loud if the bridge isn't running.`
+        ? `On my computer: pinned to the ${CLI_RUNTIME_LABELS[cliRuntime]} CLI running on this machine. Uses your subscription, full file/script access. Errors loud if the bridge isn't running.`
         : chatMode === "cloud_only"
-          ? "Cloud-only: pinned to /api/chat with your API key. Curated cloud tools only — records, http, integrations, dashboard actions. NO shell, NO file edits, NO local script execution. Install the bridge if you want a full coding agent."
-          : "API + local tools: LLM on your Anthropic API key, tools executed by the bridge (read_file, write_file, bash, send_email, send_sms). Best of both worlds — paid LLM, free local tools.";
+          ? "Cloud — chat only: uses your saved API key. Agent can chat, look up records, hit the dashboard, and check integrations — but CANNOT touch files on your machine, run scripts, or shell out. Pick this when you don't want the agent on your computer."
+          : "Cloud + my files: your API key drives the LLM, but the agent still has access to files + scripts on your machine through the bridge. Read, write, bash, send email/SMS all work. Best of both worlds — your paid LLM, your free local tools.";
   const activeStatus = `${providerStatus} · ${accessStatus}`;
   const composerPlaceholder = !ready
     ? cfg?.provider === "ollama"
@@ -2196,31 +2196,34 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
             aria-label="Chat routing mode"
             title={accessTitle}
           >
-            {/* Routing dropdown — Auto handles 99% of cases. The other three
-                are escape hatches for power users who want to pin a specific
-                path. Plain-English labels replace the prior cryptic ones
-                ("curated tools (no shell/edit)" → "Cloud only — no local
-                access") so operators don't have to think about the under-
-                lying transport when picking. */}
-            <option value="auto">Routing: Auto (recommended)</option>
-            <option value="cli">Routing: Local CLI on this machine</option>
-            <option value="cloud_only">Routing: Cloud only — no local access</option>
+            {/* Routing dropdown — end-user-readable labels. CC's feedback
+                2026-05-22: "this is very technical, I wish the options
+                were easier to select." Reframed in terms of what the
+                operator actually gets:
+                  - Best path: agent picks the right transport
+                  - On my computer: subscription + full local access
+                  - Cloud (chat only): API key, no local files
+                  - Cloud + my files: API key + bridge tools mixed
+            */}
+            <option value="auto">Best path (recommended)</option>
+            <option value="cli">On my computer (subscription)</option>
+            <option value="cloud_only">Cloud — chat only, no files</option>
             <option
               value="cloud_bridge_tools"
               disabled={bridgeOnline !== true}
               title={
                 bridgeOnline === false
-                  ? "Disabled: the local bridge isn't reachable. Run `pm2 restart claude-bridge` on this machine to enable Cloud + local."
+                  ? "Disabled: the bridge isn't running. Open Settings → Bridge to install it."
                   : bridgeOnline === null
                     ? "Checking bridge status..."
                     : undefined
               }
             >
               {bridgeOnline === true
-                ? "Routing: Cloud + local (API key drives LLM, bridge runs tools)"
+                ? "Cloud + my files"
                 : bridgeOnline === null
-                  ? "Routing: Cloud + local (checking…)"
-                  : "Routing: Cloud + local (bridge offline)"}
+                  ? "Cloud + my files (checking…)"
+                  : "Cloud + my files (bridge offline)"}
             </option>
           </select>
         )}
