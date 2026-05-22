@@ -18,7 +18,6 @@
  */
 
 import { NextResponse, type NextRequest } from "next/server";
-import { revalidatePath } from "next/cache";
 import { resolveSessionContext } from "@/lib/api-auth";
 import { dispatchLeadStageEvent, dispatchOasisOnlyEvent } from "@/lib/lead-stage-dispatcher";
 import type { OasisLeadStageEvent } from "@/lib/oasis-lead-stage-engine";
@@ -86,23 +85,12 @@ export async function POST(
         leadId,
       });
 
-  // Invalidate Next.js cached renders so the operator sees the new
-  // stage everywhere — without this, the lead detail page client-side
-  // refreshes (router.refresh in LeadLifecycleActions) but the
-  // /pipeline kanban + tenant-shell pipeline views stay stuck on
-  // their cached server render. That's exactly the "Bennett still
-  // looks active even though I marked him Lost" ghost CC saw.
-  if (result.fired) {
-    try {
-      revalidatePath("/pipeline");
-      revalidatePath(`/pipeline/${leadId}`);
-      // Tenant-shell pipeline reads from the same record; invalidate
-      // the broad /t segment so SunBiz / OASIS shells both refetch.
-      revalidatePath("/t", "layout");
-    } catch (err) {
-      console.error("[stage-event.revalidate]", err);
-    }
-  }
+  // Cache invalidation moved into the dispatcher (lib/lead-stage-
+  // dispatcher.ts) so every caller — API route, cloud tool,
+  // webhook — refreshes the operator's kanban + lead detail + tenant
+  // shell on a successful fire. Pre-extraction this lived inline
+  // here and in toolAdvanceLeadStage; the duplication would have
+  // drifted the first time someone added a new caller.
 
   return NextResponse.json({
     ok: true,

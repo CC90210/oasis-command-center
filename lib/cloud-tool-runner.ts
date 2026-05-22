@@ -45,7 +45,6 @@ import { runAction } from "./agent-actions";
 import { CLOUD_TOOLS } from "./cloud-tools";
 import { dispatchOasisOnlyEvent } from "./lead-stage-dispatcher";
 import type { OasisLeadStageEvent } from "./oasis-lead-stage-engine";
-import { revalidatePath } from "next/cache";
 import { asSSERecord, parseSSE, safeText } from "./sse-parser";
 import { downloadChatAttachmentText } from "./chat-attachments";
 import { parseLeadImportCsv } from "./leads-import-parser";
@@ -692,24 +691,15 @@ async function toolAdvanceLeadStage(
     throw new Error(`event_type_not_allowed:${eventType}`);
   }
 
+  // Dispatcher owns cache invalidation now (lib/lead-stage-dispatcher
+  // → invalidateLeadStagePaths) so both the UI button path and this
+  // chat-driven path get the same kanban refresh without duplicating
+  // the revalidatePath calls in two places.
   const result = await dispatchOasisOnlyEvent({
     type: eventType as OasisLeadStageEvent["type"],
     tenantId: ctx.tenantId,
     leadId,
   });
-
-  // Invalidate the same paths the API route invalidates so the
-  // operator sees the kanban refresh whether they triggered the
-  // stage change via a UI button or via chat.
-  if (result.fired) {
-    try {
-      revalidatePath("/pipeline");
-      revalidatePath(`/pipeline/${leadId}`);
-      revalidatePath("/t", "layout");
-    } catch (err) {
-      console.error("[advance_lead_stage.revalidate]", err);
-    }
-  }
 
   return {
     fired: result.fired,

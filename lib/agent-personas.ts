@@ -370,11 +370,7 @@ Allowed actions:
 - lookup_records          payload: { entity, filter?: { field: value }, sort?: "field" | "-field", limit?: number }
                           Use this when the operator asks for a specific filtered view of pipeline data that isn't already covered by the PIPELINE STATE block above. The action surfaces a toast/result to the operator with the matching rows; you can then ask them to confirm or share what they see. For broad questions like "what's in the pipeline" — answer directly from the PIPELINE STATE block already in your context; don't redundantly emit a marker.
 - update_record           payload: { entity, id, patch: { field: newValue } }
-                          Use this when the operator wants to change a NON-STAGE field on an existing row — name fix, email correction, value_estimate update. For LEAD STAGE changes ("mark Bennett as lost", "Acme just churned", "they signed the contract", "move this lead to active client") use the advance_lead_stage TOOL instead (NOT this marker). The tool routes through the stage engine which validates the transition, records the proper reason on the timeline, and refreshes the kanban + active-clients tab automatically — none of which happens with a raw update_record patch on the stage field.
-- advance_lead_stage      [TOOL, not marker] — Move a lead through its lifecycle by firing a stage-engine event.
-                          Use this whenever the operator describes a lead transition in natural language: "Bennett just churned" → advance_lead_stage(lead_id=..., event_type="contract_ended"). "I got off the phone with Windsor, they're qualified" → event_type="lead_qualified". "Move Mississauga Plumbing to archived" → event_type="manual_archive". Find the lead's id first via lookup_records or search_records; then call the tool.
-                          Event types: manual_outreach_started (→ outreach), discovery_call_scheduled (→ discovery), lead_qualified (→ qualified), proposal_sent (→ proposal), proposal_viewed (→ negotiation), contract_signed (→ onboarding), onboarding_complete (→ active_client), lead_replied_negative (→ lost), contract_ended (→ churned, only from active_client), manual_archive (→ archived).
-                          Archived leads have a bypass: any transition is allowed FROM archived (e.g. archived → active_client when a lead resurrects). The engine handles this automatically.
+                          Use this when the operator wants to change a NON-STAGE field on an existing row — name fix, email correction, value_estimate update. For LEAD STAGE changes use the advance_lead_stage TOOL instead (see the LEAD-STAGE TOOL section below). Patching the stage field directly via update_record bypasses the engine, skips the timeline event, and leaves the kanban stale.
 - delete_record           payload: { entity, id }
                           Use this ONLY after the operator explicitly confirms in the same conversation. Never emit delete_record on first mention; always confirm in chat first ("To confirm — delete lead xyz, this can't be undone?") and only emit on explicit yes.
 
@@ -383,7 +379,35 @@ Rules:
 - Always confirm the change in your reply text too ("Set primary agent to Atlas.")
 - The dashboard applies the marker AFTER your reply finishes streaming. The operator sees it on their next page load.
 - If the operator's request is destructive (clear MRR, disable all agents, delete a record), confirm in chat first; only emit the marker after explicit yes.
-- For pipeline questions, prefer the PIPELINE STATE block in your context over emitting lookup_records — it's already there. Reserve lookup_records for narrow filtered queries the operator explicitly asks for.`;
+- For pipeline questions, prefer the PIPELINE STATE block in your context over emitting lookup_records — it's already there. Reserve lookup_records for narrow filtered queries the operator explicitly asks for.
+
+---
+LEAD-STAGE TOOL (not a marker)
+
+When the operator describes a lead transition in natural language, call the advance_lead_stage TOOL directly. Do NOT use a dashboard-action marker for stage changes — markers fire AFTER the stream ends, but the tool fires DURING the stream so the operator's next message lands against the updated stage.
+
+Examples:
+  "Bennett just churned"                    → advance_lead_stage(lead_id=..., event_type="contract_ended")
+  "Windsor signed the contract"             → event_type="contract_signed"
+  "I got off the phone — Acme is qualified" → event_type="lead_qualified"
+  "Move Mississauga Plumbing to archived"   → event_type="manual_archive"
+  "Bennett came back, mark him active"      → event_type="onboarding_complete" (only works because Bennett is archived; bypass activates)
+
+Find the lead's id first via lookup_records or search_records, then call the tool.
+
+Event types and their target stages:
+  manual_outreach_started   → outreach        (from new_contact)
+  discovery_call_scheduled  → discovery       (from outreach)
+  lead_qualified            → qualified       (from outreach, discovery)
+  proposal_sent             → proposal        (from qualified, discovery)
+  proposal_viewed           → negotiation     (from proposal)
+  contract_signed           → onboarding      (from proposal, negotiation)
+  onboarding_complete       → active_client   (from onboarding)
+  lead_replied_negative     → lost            (any active stage)
+  contract_ended            → churned         (from active_client only)
+  manual_archive            → archived        (any non-archived stage)
+
+Archived bypass: when a lead's current stage is "archived", the engine allows ANY event_type to fire (except manual_archive itself, which is a no-op). Use this for resurrection — "Mississauga came back wanting to sign" on an archived lead → event_type="contract_signed" works without going through new_contact first.`;
 
 /**
  * Identity-lock overlay appended to every composed persona. Closes the

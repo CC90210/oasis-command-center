@@ -25,6 +25,7 @@
  * boilerplate.
  */
 
+import { revalidatePath } from "next/cache";
 import { getServiceSupabase } from "./supabase-server";
 import { recordLeadStageEvent, type LeadStageEvent, type LeadStageRecordResult } from "./lead-stage-engine";
 import { recordOasisLeadStageEvent, type OasisLeadStageEvent } from "./oasis-lead-stage-engine";
@@ -32,6 +33,29 @@ import { recordOasisLeadStageEvent, type OasisLeadStageEvent } from "./oasis-lea
 type DispatchResult =
   | LeadStageRecordResult
   | { fired: false; reason: "no_rule" | "error" };
+
+/**
+ * Invalidate every Next.js cached path that renders the lead's stage so
+ * the operator sees the update everywhere — kanban, lead detail,
+ * tenant-shell pipeline. Called from every successful stage-event
+ * dispatch so callers (API routes, cloud tools, webhooks) don't have
+ * to remember to do it themselves. Pre-extraction this lived inline
+ * in two places and would inevitably drift.
+ */
+function invalidateLeadStagePaths(leadId: string): void {
+  try {
+    revalidatePath("/pipeline");
+    revalidatePath(`/pipeline/${leadId}`);
+    // Tenant-shell pipeline reads the same record; broad /t segment
+    // invalidation refetches SunBiz / OASIS / future tenants' shells.
+    revalidatePath("/t", "layout");
+  } catch (err) {
+    // Best-effort. Cache invalidation failure should never break the
+    // stage transition itself — the engine already updated the DB,
+    // the operator just sees a stale render until next manual refresh.
+    console.error("[lead-stage-dispatcher.invalidate]", err);
+  }
+}
 
 async function tenantSlugFor(tenantId: string): Promise<string | null> {
   try {
@@ -72,16 +96,20 @@ function eventToOasis(event: LeadStageEvent): OasisLeadStageEvent | null {
  */
 export async function dispatchLeadStageEvent(event: LeadStageEvent): Promise<DispatchResult> {
   const slug = (await tenantSlugFor(event.tenantId))?.toLowerCase() || "";
+  let result: DispatchResult;
   if (slug.startsWith("oasis")) {
     const oasisEvent = eventToOasis(event);
     if (!oasisEvent) return { fired: false, reason: "no_rule" };
-    return recordOasisLeadStageEvent(oasisEvent);
+    result = await recordOasisLeadStageEvent(oasisEvent);
+  } else {
+    // SunBiz tenants (slug starts with "sun" or "submissions") and any
+    // other legacy tenant fall through to the SunBiz engine. That keeps
+    // existing call sites working — they were always hitting the SunBiz
+    // engine before the dispatcher existed.
+    result = await recordLeadStageEvent(event);
   }
-  // SunBiz tenants (slug starts with "sun" or "submissions") and any
-  // other legacy tenant fall through to the SunBiz engine. That keeps
-  // existing call sites working — they were always hitting the SunBiz
-  // engine before the dispatcher existed.
-  return recordLeadStageEvent(event);
+  if (result.fired) invalidateLeadStagePaths(event.leadId);
+  return result;
 }
 
 /**
@@ -92,5 +120,7 @@ export async function dispatchLeadStageEvent(event: LeadStageEvent): Promise<Dis
 export async function dispatchOasisOnlyEvent(event: OasisLeadStageEvent): Promise<DispatchResult> {
   const slug = (await tenantSlugFor(event.tenantId))?.toLowerCase() || "";
   if (!slug.startsWith("oasis")) return { fired: false, reason: "no_rule" };
-  return recordOasisLeadStageEvent(event);
+  const result = await recordOasisLeadStageEvent(event);
+  if (result.fired) invalidateLeadStagePaths(event.leadId);
+  return result;
 }
