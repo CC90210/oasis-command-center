@@ -17,6 +17,30 @@ export const runtime = "nodejs";
 
 const START_TIME = Date.now();
 
+// Integration env vars CC's dashboard needs to function. We report
+// presence (boolean) ONLY — never the values — so the operator can see at
+// a glance whether a deploy carries the right secrets without leaking
+// anything. Added 2026-05-21 after the BRAVO_ANTHROPIC_API_KEY-missing
+// regression on the "Recommend next move" button.
+const INTEGRATION_KEYS = [
+  "BRAVO_ANTHROPIC_API_KEY",
+  "ANTHROPIC_API_KEY",
+  "BRAVO_OPENAI_API_KEY",
+  "OPENAI_API_KEY",
+  "SUPABASE_URL",
+  "SUPABASE_SERVICE_ROLE_KEY",
+  "STRIPE_SECRET_KEY",
+  "OASIS_OUTBOUND_HMAC_SECRET",
+] as const;
+
+function integrationPresence(): Record<string, boolean> {
+  const out: Record<string, boolean> = {};
+  for (const k of INTEGRATION_KEYS) {
+    out[k] = Boolean((process.env[k] || "").trim());
+  }
+  return out;
+}
+
 export async function GET() {
   return NextResponse.json(
     {
@@ -28,6 +52,7 @@ export async function GET() {
         ? new Date(START_TIME).toISOString()
         : new Date(START_TIME).toISOString(),
       uptime_seconds: Math.round((Date.now() - START_TIME) / 1000),
+      integrations: integrationPresence(),
       ts: new Date().toISOString(),
     },
     {
