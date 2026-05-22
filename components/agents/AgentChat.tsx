@@ -93,13 +93,13 @@ export function AgentChat({
           case "plan":
             setPlanMode("plan");
             appendSystem(
-              "Plan mode active — agent can research and propose, but write tools are gated server-side. Run /build to execute.",
+              "Plan mode active — agent reads + reasons but write tools are gated server-side. Hit /build (or the Execute toggle) when you're ready to run.",
             );
             setInput("");
             return;
           case "build":
             setPlanMode("build");
-            appendSystem("Build mode active — full agent capabilities restored.");
+            appendSystem("Execute mode active — full agent capabilities restored.");
             setInput("");
             return;
           case "agent":
@@ -253,7 +253,7 @@ export function AgentChat({
                 setPlanMode("build");
                 setTurns((prev) => [
                   ...prev,
-                  { role: "system", content: "Build mode active — full agent capabilities restored." },
+                  { role: "system", content: "Execute mode active — full agent capabilities restored." },
                 ]);
               }}
               className="inline-flex items-center gap-1 text-[10px] uppercase tracking-wider font-bold px-2 py-1 rounded-md border border-status-warm/40 bg-status-warm/10 text-status-warm hover:bg-status-warm/20 transition-colors"

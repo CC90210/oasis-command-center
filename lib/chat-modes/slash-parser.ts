@@ -50,8 +50,8 @@ export const COMMAND_DESCRIPTIONS: Record<SlashCommandName, string> = {
   model:   "/model <id> — switch the active model (must already be saved in Settings → Agents).",
   clear:   "/clear — reset the conversation history. Keeps current agent + mode.",
   compact: "/compact — summarize the conversation into one message and keep going. Use when the chat gets long.",
-  plan:    "/plan — enter plan mode. Agent can read + reason but cannot call any write tool. Use /build to exit.",
-  build:   "/build — exit plan mode. Restores the full tool registry for the current chat mode.",
+  plan:    "/plan — switch to Plan mode. Agent reads + reasons but cannot call any write tool. Use /build to switch back to Execute.",
+  build:   "/build — switch to Execute mode. Restores the agent's full tool surface.",
   help:    "/help — show this list.",
 };
 

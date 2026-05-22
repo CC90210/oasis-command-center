@@ -1113,25 +1113,19 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
         return;
       case "plan":
         setPlanMode("plan");
-        // Plan mode is honored on both the cloud routing path AND the CLI
-        // bridge path since 2026-05-22. Cloud (/api/chat with Anthropic
-        // tool_use) filters write tools + appends a plan overlay; CLI
-        // bridge (localhost:9100/chat) maps to --permission-mode plan when
-        // the runtime is Claude (hard gate), or prepends an advisory
-        // overlay when the runtime is Codex/Gemini.
         if (effectiveMode === "cli" && cliRuntime !== "claude") {
           appendSystem(
             `Plan mode set — but you're routed through the ${cliRuntime} CLI which has no native plan-mode gate. The bridge will prepend an advisory overlay, but write tools are NOT hard-blocked. Switch to claude CLI or API mode for a hard gate.`,
           );
         } else {
           appendSystem(
-            "Plan mode active — agent is restricted to read-only tools. Run /build when you're ready to execute.",
+            "Plan mode active — agent is restricted to read-only tools. Hit Execute (or run /build) when you're ready to run.",
           );
         }
         return;
       case "build":
         setPlanMode("build");
-        appendSystem("Build mode active — full tool registry restored for this chat.");
+        appendSystem("Execute mode active — full agent capabilities restored.");
         return;
       case "agent": {
         const target = args.trim().toLowerCase();
@@ -2156,31 +2150,40 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
             aria-label="Chat routing mode"
             title={accessTitle}
           >
-            <option value="auto">Mode: Auto</option>
-            <option value="cli">Mode: CLI (local bridge)</option>
-            <option value="cloud_only">Mode: API · curated tools (no shell/edit)</option>
+            {/* Routing dropdown — Auto handles 99% of cases. The other three
+                are escape hatches for power users who want to pin a specific
+                path. Plain-English labels replace the prior cryptic ones
+                ("curated tools (no shell/edit)" → "Cloud only — no local
+                access") so operators don't have to think about the under-
+                lying transport when picking. */}
+            <option value="auto">Routing: Auto (recommended)</option>
+            <option value="cli">Routing: Local CLI on this machine</option>
+            <option value="cloud_only">Routing: Cloud only — no local access</option>
             <option
               value="cloud_bridge_tools"
               disabled={bridgeOnline !== true}
               title={
                 bridgeOnline === false
-                  ? "Disabled: the local bridge isn't reachable. Run `pm2 restart claude-bridge` on this machine to enable API + local tools."
+                  ? "Disabled: the local bridge isn't reachable. Run `pm2 restart claude-bridge` on this machine to enable Cloud + local."
                   : bridgeOnline === null
                     ? "Checking bridge status..."
                     : undefined
               }
             >
               {bridgeOnline === true
-                ? "Mode: API + local tools"
+                ? "Routing: Cloud + local (API key drives LLM, bridge runs tools)"
                 : bridgeOnline === null
-                  ? "Mode: API + local tools (checking…)"
-                  : "Mode: API + local tools (bridge offline)"}
+                  ? "Routing: Cloud + local (checking…)"
+                  : "Routing: Cloud + local (bridge offline)"}
             </option>
           </select>
         )}
         {planMode === "plan" && (
-          // Plan-mode badge (OpenCode-style, 2026-05-22). Visible whenever
-          // the operator has run /plan. Click toggles back to /build.
+          // Plan-mode header badge. Redundant with the new Plan/Execute
+          // toggle in the composer, but kept here as a quiet, always-
+          // visible state indicator so operators scrolling through long
+          // chats never lose track of the current mode. Click flips back
+          // to Execute, matching the toggle below.
           <button
             type="button"
             onClick={() => {
@@ -2189,7 +2192,7 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
                 ...m,
                 {
                   role: "system",
-                  content: "Build mode active — full tool registry restored for this chat.",
+                  content: "Execute mode active — full agent capabilities restored.",
                   at: Date.now(),
                 },
               ]);
@@ -2197,8 +2200,8 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
             className="inline-flex items-center gap-1 text-[10px] uppercase tracking-wider font-bold px-2 py-1 rounded-md border transition-colors border-status-warm/40 bg-status-warm/10 text-status-warm hover:bg-status-warm/20"
             title={
               effectiveMode === "cli"
-                ? "Plan mode active — Claude CLI uses --permission-mode plan; Codex/Gemini CLIs apply the overlay advisorily. Click to exit (same as /build)."
-                : "Plan mode active — agent is restricted to read-only tools. Click to exit (same as /build)."
+                ? "Plan mode active — Claude CLI uses --permission-mode plan; Codex/Gemini CLIs apply the overlay advisorily. Click to switch to Execute mode."
+                : "Plan mode active — agent is restricted to read-only tools. Click to switch to Execute mode."
             }
           >
             ● PLAN MODE
@@ -2680,6 +2683,67 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
           >
             {uploadingAttachments ? <Loader2 className="w-4 h-4 animate-spin" /> : <Paperclip className="w-4 h-4" />}
           </button>
+          {/* Plan / Execute segmented toggle. Two-state switch the operator
+              flips in one click — no slash command required. Mirrors the
+              /plan and /build commands; either path lands in the same
+              planMode state and triggers the same system pill. Lives next
+              to the attach button so the affordance is always visible. */}
+          <div
+            role="group"
+            aria-label="Agent mode"
+            className="inline-flex items-stretch rounded-lg border border-bg-border bg-bg-elev overflow-hidden h-11"
+          >
+            <button
+              type="button"
+              disabled={streaming}
+              onClick={() => {
+                if (planMode === "plan") return;
+                setPlanMode("plan");
+                setMessages((m) => [
+                  ...m,
+                  {
+                    role: "system",
+                    content:
+                      "Plan mode active — agent is restricted to read-only tools. Hit Execute when you're ready to run.",
+                    at: Date.now(),
+                  },
+                ]);
+              }}
+              className={`px-3 text-[11px] uppercase tracking-wider font-bold transition-colors ${
+                planMode === "plan"
+                  ? "bg-status-warm/15 text-status-warm border-r border-status-warm/30"
+                  : "text-fg-dim hover:text-fg-muted border-r border-bg-border"
+              } disabled:opacity-50`}
+              title="Plan mode: agent reads, searches, and proposes a plan but never writes or executes. Use this when you want to think before acting."
+            >
+              Plan
+            </button>
+            <button
+              type="button"
+              disabled={streaming}
+              onClick={() => {
+                if (planMode === "build") return;
+                setPlanMode("build");
+                setMessages((m) => [
+                  ...m,
+                  {
+                    role: "system",
+                    content:
+                      "Execute mode active — full agent capabilities restored.",
+                    at: Date.now(),
+                  },
+                ]);
+              }}
+              className={`px-3 text-[11px] uppercase tracking-wider font-bold transition-colors ${
+                planMode === "build"
+                  ? "bg-accent/15 text-accent"
+                  : "text-fg-dim hover:text-fg-muted"
+              } disabled:opacity-50`}
+              title="Execute mode: agent has full tool access — reads, writes, runs scripts, sends messages. Permissions are auto-approved for this dashboard chat."
+            >
+              Execute
+            </button>
+          </div>
           <textarea
             ref={inputRef}
             value={input}
