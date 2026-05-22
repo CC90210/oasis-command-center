@@ -965,9 +965,20 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
         return;
       case "plan":
         setPlanMode("plan");
-        appendSystem(
-          "Plan mode active — agent is restricted to read-only tools. Run /build when you're ready to execute.",
-        );
+        // Plan mode is honored ONLY on the cloud routing path
+        // (/api/chat with native Anthropic tool_use). The CLI bridge at
+        // localhost:9100/chat owns its own tool gating and doesn't read
+        // chat_mode — say so out loud so the operator isn't surprised
+        // when a /plan-flagged CLI turn still runs write tools.
+        if (effectiveMode === "cli") {
+          appendSystem(
+            "Plan mode set — but you're currently in CLI (local bridge) mode. The bridge runs its own tool harness and doesn't honor /plan. Switch the mode picker to API to make plan mode take effect.",
+          );
+        } else {
+          appendSystem(
+            "Plan mode active — agent is restricted to read-only tools. Run /build when you're ready to execute.",
+          );
+        }
         return;
       case "build":
         setPlanMode("build");
@@ -1766,10 +1777,18 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
                 },
               ]);
             }}
-            className="inline-flex items-center gap-1 text-[10px] uppercase tracking-wider font-bold px-2 py-1 rounded-md border border-status-warm/40 bg-status-warm/10 text-status-warm hover:bg-status-warm/20 transition-colors"
-            title="Plan mode is active — agent is restricted to read-only tools. Click to exit (same as /build)."
+            className={`inline-flex items-center gap-1 text-[10px] uppercase tracking-wider font-bold px-2 py-1 rounded-md border transition-colors ${
+              effectiveMode === "cli"
+                ? "border-fg-faint/40 bg-fg-faint/10 text-fg-dim hover:bg-fg-faint/20"
+                : "border-status-warm/40 bg-status-warm/10 text-status-warm hover:bg-status-warm/20"
+            }`}
+            title={
+              effectiveMode === "cli"
+                ? "Plan mode is set, but you're routed to the CLI bridge which doesn't honor it. Switch to API mode to make plan mode take effect. Click to exit plan (same as /build)."
+                : "Plan mode active — agent is restricted to read-only tools. Click to exit (same as /build)."
+            }
           >
-            ● PLAN MODE
+            ● PLAN MODE{effectiveMode === "cli" ? " (CLI ignores)" : ""}
           </button>
         )}
         {bridgeReady && effectiveMode === "cli" && (
