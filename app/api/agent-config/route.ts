@@ -16,7 +16,7 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { getAuthedSupabase, getServiceSupabase } from "@/lib/supabase-server";
-import { chatAgentKeys } from "@/lib/agent-personas";
+import { isTenantChatAgent } from "@/lib/manifest/tenant-scope";
 import { PROVIDER_MODELS } from "@/lib/providers";
 import { encryptField } from "@/lib/field-encryption";
 import { canManageTeam, getSessionContext } from "@/lib/team";
@@ -82,7 +82,7 @@ export async function POST(req: NextRequest) {
   }
 
   const agentKey = String(body?.agent_key || "").toLowerCase();
-  if (!chatAgentKeys().includes(agentKey)) {
+  if (!(await isTenantChatAgent(tenantId, agentKey))) {
     return NextResponse.json({ ok: false, error: `invalid_agent:${agentKey}` }, { status: 400 });
   }
   const provider = String(body?.provider || "");
@@ -193,7 +193,7 @@ export async function DELETE(req: NextRequest) {
   const url = req.nextUrl;
   const scope = url.searchParams.get("scope") === "user" ? "user" : "tenant";
   const agentKey = (url.searchParams.get("agent_key") || "").toLowerCase();
-  if (!chatAgentKeys().includes(agentKey)) {
+  if (!(await isTenantChatAgent(tenantId, agentKey))) {
     return NextResponse.json({ ok: false, error: `invalid_agent:${agentKey}` }, { status: 400 });
   }
   if (scope === "user" && !userId) {

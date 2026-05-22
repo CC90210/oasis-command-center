@@ -33,7 +33,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { getAuthedSupabase, getServiceSupabase } from "@/lib/supabase-server";
 import { PROVIDER_MODELS, PROVIDER_REGISTRY, type Provider } from "@/lib/providers";
 import { encryptField } from "@/lib/field-encryption";
-import { chatAgentKeys } from "@/lib/agent-personas";
+import { getTenantChatAgentKeys } from "@/lib/manifest/tenant-scope";
 import { canManageTeam, getSessionContext } from "@/lib/team";
 import { resolveAgentKey } from "@/lib/agents";
 
@@ -132,9 +132,14 @@ export async function POST(req: NextRequest) {
   const requestedAgents = Array.isArray(body?.agent_keys)
     ? (body.agent_keys as unknown[]).filter((s): s is string => typeof s === "string").map((s) => s.toLowerCase())
     : null;
+  // Manifest-aware fallback + allowlist. Empire-wide chat keys is the
+  // last-resort default (mid-onboarding tenants with no manifest); manifest-
+  // declared custom slugs (e.g. "renewal_specialist") are accepted as
+  // targets now. Codex Finding #2 (2026-05-22).
+  const tenantChatKeys = await getTenantChatAgentKeys(tenantId);
   const fallbackAgents =
-    profileEnabledAgents.length > 0 ? profileEnabledAgents : chatAgentKeys();
-  const chatAllowed = new Set(chatAgentKeys());
+    profileEnabledAgents.length > 0 ? profileEnabledAgents : tenantChatKeys;
+  const chatAllowed = new Set(tenantChatKeys);
   const targetAgents = Array.from(
     new Set((requestedAgents || fallbackAgents).map((k) => resolveAgentKey(k))),
   ).filter((k) => chatAllowed.has(k));

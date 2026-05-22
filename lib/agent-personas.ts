@@ -401,3 +401,22 @@ export function chatAgentKeys(): string[] {
   const NON_CHAT = new Set(["codex"]);
   return ALL_AGENT_KEYS.filter((k) => !NON_CHAT.has(k));
 }
+
+/**
+ * Append a tenant-specific overlay to the resolved persona base. The overlay
+ * comes from the manifest's per-agent binding (`prompt_overlay`) and is
+ * intended for stable per-tenant facts the operator wants the agent to know
+ * from turn 1 — FICO floor, send window, TCPA language, sub-brand voice.
+ *
+ * Empty / missing overlay returns the base persona unchanged. Distinct from
+ * the operator's per-row `system_prompt_override` (which REPLACES the
+ * persona entirely via getPersona's override branch).
+ */
+export function applyAgentManifestOverlay(
+  persona: string,
+  overlay: string | null | undefined,
+): string {
+  const trimmed = (overlay || "").trim();
+  if (!trimmed) return persona;
+  return `${persona}\n\n---\nTENANT-SPECIFIC OVERLAY:\n${trimmed}\n---`;
+}

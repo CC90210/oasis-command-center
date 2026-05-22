@@ -30,7 +30,8 @@ import {
   type ChatMessage,
   type Provider,
 } from "@/lib/providers";
-import { getPersona, chatAgentKeys } from "@/lib/agent-personas";
+import { getPersona, applyAgentManifestOverlay } from "@/lib/agent-personas";
+import { isTenantChatAgent } from "@/lib/manifest/tenant-scope";
 import { composeDashboardContextV2 } from "@/lib/agent-context";
 import { markReadDb } from "@/lib/agent-inbox-db";
 import { rateLimit } from "@/lib/rate-limit";
@@ -177,8 +178,8 @@ export async function POST(req: NextRequest) {
   }
 
   const agentKey = (payload.agent_key || "").toLowerCase();
-  if (!chatAgentKeys().includes(agentKey)) {
-    return jsonError(400, `invalid_agent:${agentKey}`);
+  if (!agentKey) {
+    return jsonError(400, "missing_agent_key");
   }
   const messages = Array.isArray(payload.messages) ? payload.messages : [];
   const lastUserMsg = [...messages].reverse().find((m) => m.role === "user");
@@ -192,6 +193,15 @@ export async function POST(req: NextRequest) {
     return jsonError(ctxResult.status, ctxResult.detail || ctxResult.code);
   }
   const { tenantId, provider, model, apiKey, cfgOverride, cfgScope } = ctxResult;
+
+  // Manifest-aware agent validation. A tenant's manifest can declare custom
+  // agent slugs (e.g. "renewal_specialist") that are not in the empire-wide
+  // AGENT_REGISTRY — they render in the chat picker, so the validator MUST
+  // accept them. Falls through to chatAgentKeys() for OASIS operators whose
+  // manifest is sparse mid-onboarding. Codex review finding #2 (2026-05-22).
+  if (!(await isTenantChatAgent(tenantId, agentKey))) {
+    return jsonError(400, `invalid_agent:${agentKey}`);
+  }
   const service = getServiceSupabase();
   const attachmentIds = Array.isArray(payload.attachments)
     ? payload.attachments
@@ -480,7 +490,13 @@ export async function POST(req: NextRequest) {
     lines.push("---");
     setupBlock = lines.join("\n");
   }
-  const personaPreOverlay = `${personaBase}${cloudModeNotice}${cloudToolsBlock}${setupBlock}${operatorBlock}${dashboardCtx ? `\n\n${dashboardCtx}` : ""}`;
+  // Apply the manifest's per-agent prompt_overlay BEFORE the cloud-mode
+  // notice — it's a tenant-specific extension of the agent's voice (FICO
+  // floor, send window, TCPA language, sub-brand tone), so it should land
+  // adjacent to the persona base, not after the runtime context. Empty
+  // overlay returns the base unchanged. Codex Finding #2 (2026-05-22).
+  const personaWithOverlay = applyAgentManifestOverlay(personaBase, agentBinding?.prompt_overlay);
+  const personaPreOverlay = `${personaWithOverlay}${cloudModeNotice}${cloudToolsBlock}${setupBlock}${operatorBlock}${dashboardCtx ? `\n\n${dashboardCtx}` : ""}`;
   // Plan-mode overlay applies to BOTH provider branches (native Anthropic
   // tool_use AND marker fallback). Codex Finding #5: previously only the
   // Anthropic branch composed it via streamAnthropicWithTools. Marker-
