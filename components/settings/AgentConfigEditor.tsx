@@ -17,7 +17,7 @@ import { useEffect, useState } from "react";
 import Link from "next/link";
 import { Save, Eye, EyeOff, Check, AlertCircle, ExternalLink, Sparkles, ChevronDown, ChevronUp, Cpu, Cloud, KeyRound } from "lucide-react";
 import { getAgentInfo } from "@/lib/agents";
-import { PROVIDER_REGISTRY } from "@/lib/providers";
+import { PROVIDER_REGISTRY, PROVIDER_TO_SERVICE } from "@/lib/providers";
 
 // Settings/Agents picker derives from the same single-source registry as
 // Onboarding. Each entry already carries `models`, `hint`, `recommended`,
@@ -104,17 +104,6 @@ type Props = {
    * confusion CC flagged 2026-05-22.
    */
   globallyConnectedServices?: string[];
-};
-
-// Maps provider name (as stored on agent_model_config) -> service slug
-// (as stored in aiServicesWithKey's set). Mirrors PROVIDER_TO_SERVICE
-// in lib/providers.ts but kept narrow here so this client component
-// doesn't have to import the full registry's server-side adjacency.
-const PROVIDER_TO_SERVICE_LOCAL: Record<string, string> = {
-  anthropic: "anthropic",
-  openai: "openai_codex",
-  google: "google_ai",
-  openrouter: "openrouter",
 };
 
 export function AgentConfigEditor({
@@ -494,7 +483,7 @@ export function AgentConfigEditor({
                 // Anthropic globally, but was confused by Override —
                 // didn't know if I had to paste the key a second time
                 // for Bravo." This block kills that confusion.
-                const rowService = PROVIDER_TO_SERVICE_LOCAL[row.provider];
+                const rowService = PROVIDER_TO_SERVICE[row.provider as keyof typeof PROVIDER_TO_SERVICE];
                 const matchesGlobalSetup =
                   !!rowService && globalServiceSet.has(rowService);
                 const usingGlobal = !!cfg?.has_key && matchesGlobalSetup;
