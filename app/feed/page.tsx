@@ -16,6 +16,7 @@ import { headers } from "next/headers";
 import { Activity, Radio, ArrowUpRight } from "lucide-react";
 import { Card, PageHeader, Tag } from "@/components/Card";
 import { getServiceSupabase } from "@/lib/supabase-server";
+import { formatEventType, formatPublisher } from "@/lib/event-bus-display";
 import { FeedRefresher } from "./refresher";
 
 export const dynamic = "force-dynamic";
@@ -155,14 +156,19 @@ export default async function FeedPage() {
               </div>
               <div className="flex-1 min-w-0">
                 <div className="flex items-center gap-2 flex-wrap">
-                  <span className="font-bold text-sm text-fg">{row.event_type}</span>
+                  <span
+                    className="font-bold text-sm text-fg"
+                    title={row.event_type}
+                  >
+                    {formatEventType(row.event_type)}
+                  </span>
                   <Tag tone={severityTone(row.severity)}>{row.severity || "info"}</Tag>
-                  <span className="text-xs text-fg-dim">
-                    {row.source_agent || "unknown"}
+                  <span className="text-xs text-fg-dim" title={row.source_agent || ""}>
+                    {row.source_agent ? formatPublisher(row.source_agent) : "Unknown"}
                   </span>
                   <ArrowUpRight size={12} className="text-fg-faint" />
-                  <span className="text-xs text-fg-dim">
-                    {row.target_agent || "broadcast"}
+                  <span className="text-xs text-fg-dim" title={row.target_agent || ""}>
+                    {row.target_agent ? formatPublisher(row.target_agent) : "Broadcast"}
                   </span>
                 </div>
                 <div className="text-xs text-fg-muted font-mono mt-1 truncate">

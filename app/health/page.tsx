@@ -35,6 +35,7 @@ import { PageHeader, Card, Tag } from "@/components/Card";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { resolveTenantId } from "@/lib/api-auth";
 import { getTenantEnabledAgents } from "@/lib/manifest/tenant-scope";
+import { formatEventType, formatPublisher } from "@/lib/event-bus-display";
 import { redirect } from "next/navigation";
 import Link from "next/link";
 import { AlertCircle, AlertTriangle, Clock, Activity, CheckCircle2 } from "lucide-react";
@@ -265,10 +266,24 @@ export default async function HealthPage() {
                 <div className="flex items-center justify-between gap-2">
                   <div className="flex items-center gap-2">
                     <Tag tone={ev.severity === "error" ? "warm" : "accent"}>{ev.severity}</Tag>
-                    <span className="font-mono text-[11px] text-fg-dim">{ev.event_type}</span>
+                    {/* Pretty event type for scannability, raw token in the
+                        title so engineers can still copy-paste into logs.
+                        Health-page audience overlaps with engineering
+                        debugging more than the /agents page does, so the
+                        monospace style is preserved — it's still a
+                        diagnostic surface. */}
+                    <span
+                      className="font-mono text-[11px] text-fg-dim"
+                      title={ev.event_type}
+                    >
+                      {formatEventType(ev.event_type)}
+                    </span>
                     {ev.publisher_agent && (
-                      <span className="text-[10px] uppercase tracking-wider text-fg-dim">
-                        {ev.publisher_agent}
+                      <span
+                        className="text-[10px] uppercase tracking-wider text-fg-dim"
+                        title={ev.publisher_agent}
+                      >
+                        {formatPublisher(ev.publisher_agent)}
                       </span>
                     )}
                   </div>

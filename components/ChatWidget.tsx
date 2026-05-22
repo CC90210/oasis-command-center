@@ -45,6 +45,7 @@ import { getAgentInfo } from "@/lib/agents";
 import { BRIDGE_CHAT_BASE } from "@/lib/agent-roots";
 import { getBrowserSupabase } from "@/lib/supabase-browser";
 import { parseInput, renderHelp, type SlashCommandName } from "@/lib/chat-modes/slash-parser";
+import { usePlanMode } from "@/lib/chat-modes/use-plan-mode";
 import {
   SlashCommandMenu,
   SlashArgMenu,
@@ -518,39 +519,19 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
   // hydration runs in the mount effect below).
   const [chatMode, setChatModeState] = useState<ChatMode>("auto");
   const [cliRuntime, setCliRuntimeState] = useState<CliRuntime>("claude");
-  // Plan vs Build mode (2026-05-22 OpenCode-style). "build" = default, full
-  // tool registry. "plan" = read-only tools + plan-mode prompt overlay.
-  // Toggled by `/plan` and `/build` slash commands (see slash-parser.ts).
-  // Sent as `chat_mode` on every /api/chat POST so the server can filter
-  // tools + adjust the system prompt accordingly. Separate from chatMode
-  // (CLI vs Cloud) — orthogonal axis.
+  // Plan vs Build mode (2026-05-22 OpenCode-style). Build = default, full
+  // tool registry. Plan = read-only tools + plan-mode prompt overlay.
+  // Toggled by `/plan` and `/build` slash commands, the composer
+  // Plan/Execute toggle, and the chat header badge — all four converge
+  // on the same state. Sent as `chat_mode` on every /api/chat POST so
+  // the server can filter tools + adjust the system prompt accordingly.
+  // Separate from chatMode (CLI vs Cloud) — orthogonal axis.
   //
-  // Persistence: sessionStorage (per-tab) so a reload mid-investigation
-  // doesn't drop the operator back into build mode. SSR-safe initializer
-  // returns "build"; the mount effect below hydrates from sessionStorage.
-  const [planMode, setPlanModeState] = useState<"plan" | "build">("build");
-  function setPlanMode(next: "plan" | "build") {
-    setPlanModeState(next);
-    if (typeof window !== "undefined") {
-      try {
-        window.sessionStorage.setItem(PLAN_MODE_STORAGE_KEY, next);
-      } catch {
-        // sessionStorage quota / privacy mode — fine, mode is in-memory.
-      }
-    }
-  }
-  // Hydrate planMode from sessionStorage on mount. Safe to run after the
-  // initial SSR render — the first paint shows "build" (default), then
-  // this effect upgrades to "plan" if a prior /plan invocation persisted.
-  useEffect(() => {
-    if (typeof window === "undefined") return;
-    try {
-      const saved = window.sessionStorage.getItem(PLAN_MODE_STORAGE_KEY);
-      if (saved === "plan" || saved === "build") setPlanModeState(saved);
-    } catch {
-      // sessionStorage unavailable — skip.
-    }
-  }, []);
+  // Hook owns sessionStorage hydration + persistence so AgentChat
+  // (tenant-preview surface) and this widget share the contract without
+  // duplicating the code. Per-surface storage key keeps the two
+  // surfaces' plan-mode state isolated.
+  const [planMode, setPlanMode] = usePlanMode(PLAN_MODE_STORAGE_KEY);
   // Tracks which routing mode the most recent FAILED message used. Powers
   // the "Retry on the other mode" affordance on the error banner. Null
   // while everything is healthy or after a successful turn.

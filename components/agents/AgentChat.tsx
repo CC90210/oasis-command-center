@@ -3,10 +3,17 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { AlertCircle, Loader2, Send, Sparkles } from "lucide-react";
 import { parseInput, renderHelp } from "@/lib/chat-modes/slash-parser";
+import { usePlanMode } from "@/lib/chat-modes/use-plan-mode";
 
 type ChatTurn = {
   role: "user" | "assistant" | "system";
   content: string;
+  /** Which model+provider serviced this assistant turn. Captured from
+   *  the `agent` SSE event the server emits right before streaming
+   *  text. Surfaces as a "via X" pill under the message so operators
+   *  can verify which runtime actually answered — same affordance as
+   *  the main /agents page chat. */
+  runtime?: string;
 };
 
 type Props = {
@@ -38,27 +45,10 @@ export function AgentChat({
   // Plan vs Build — OpenCode-style state machine. /plan filters write
   // intent out of the agent's system prompt (server-side, see
   // app/api/agents/chat/route.ts); /build restores full behavior.
-  // Lives in sessionStorage so a reload preserves the operator's mode.
-  const [planMode, setPlanModeState] = useState<"plan" | "build">("build");
-  const setPlanMode = (next: "plan" | "build") => {
-    setPlanModeState(next);
-    if (typeof window !== "undefined") {
-      try {
-        window.sessionStorage.setItem(PLAN_MODE_STORAGE_KEY, next);
-      } catch {
-        // Privacy mode / quota — fall back to in-memory state.
-      }
-    }
-  };
-  useEffect(() => {
-    if (typeof window === "undefined") return;
-    try {
-      const saved = window.sessionStorage.getItem(PLAN_MODE_STORAGE_KEY);
-      if (saved === "plan" || saved === "build") setPlanModeState(saved);
-    } catch {
-      // ignore
-    }
-  }, []);
+  // The shared usePlanMode hook owns sessionStorage hydration +
+  // persistence; the per-surface key keeps this state isolated from
+  // the main /agents page chat.
+  const [planMode, setPlanMode] = usePlanMode(PLAN_MODE_STORAGE_KEY);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
 
@@ -109,12 +99,60 @@ export function AgentChat({
             );
             setInput("");
             return;
-          case "compact":
-            appendSystem(
-              "/compact isn't wired for the tenant preview chat yet. Use /clear if the history is getting long.",
-            );
+          case "compact": {
+            const focusHint = parsed.args.trim();
+            const hasAssistant = turns.some((t) => t.role === "assistant");
+            const userCount = turns.filter((t) => t.role === "user").length;
+            if (!hasAssistant || userCount < 1) {
+              appendSystem("Nothing to compact yet — send a few turns first.");
+              setInput("");
+              return;
+            }
             setInput("");
+            void (async () => {
+              appendSystem("Compacting conversation…");
+              try {
+                // Reuses the main /api/chat/compact endpoint — the
+                // manifest-aware isTenantChatAgent check accepts the
+                // marketplace agent's slug, and the compaction system
+                // prompt is agent-agnostic ("summarize this transcript
+                // in one paragraph"). Same path, same UX.
+                const res = await fetch("/api/chat/compact", {
+                  method: "POST",
+                  headers: { "content-type": "application/json" },
+                  body: JSON.stringify({
+                    agent_key: agentSlug,
+                    messages: turns.filter(
+                      (t) => t.role === "user" || t.role === "assistant",
+                    ),
+                    focus: focusHint || null,
+                  }),
+                });
+                const body = (await res.json().catch(() => ({}))) as {
+                  ok?: boolean;
+                  summary?: string;
+                  error?: string;
+                  message?: string;
+                };
+                if (!res.ok || !body.ok || !body.summary) {
+                  const detail = body.message || body.error || `http_${res.status}`;
+                  appendSystem(`Compact failed: ${detail}. History unchanged.`);
+                  return;
+                }
+                setTurns([
+                  {
+                    role: "assistant",
+                    content: `--- Context summary ---\n\n${body.summary.trim()}\n\n--- End summary ---`,
+                  },
+                ]);
+              } catch (err) {
+                appendSystem(
+                  `Compact failed: ${err instanceof Error ? err.message : "network_error"}. History unchanged.`,
+                );
+              }
+            })();
             return;
+          }
         }
       }
 
@@ -188,14 +226,36 @@ export function AgentChat({
               continue;
             }
             if (eventName === "agent" && payload && typeof payload === "object") {
-              setModelLabel(((payload as { model?: string }).model) || null);
+              const model = (payload as { model?: string }).model || null;
+              setModelLabel(model);
+              // Stamp the assistant placeholder with the runtime so the
+              // pill renders under the message once streaming completes.
+              // The server emits this `agent` event BEFORE any delta,
+              // so the placeholder is already on screen at this point.
+              if (model) {
+                setTurns((prev) => {
+                  const next = [...prev];
+                  const last = next[next.length - 1];
+                  if (last && last.role === "assistant") {
+                    next[next.length - 1] = { ...last, runtime: model };
+                  }
+                  return next;
+                });
+              }
             } else if (eventName === "delta" && payload && typeof payload === "object") {
               const text = (payload as { text?: string }).text || "";
               if (text) {
                 assistantText += text;
                 setTurns((prev) => {
                   const next = [...prev];
-                  next[next.length - 1] = { role: "assistant", content: assistantText };
+                  const last = next[next.length - 1];
+                  // Preserve the runtime stamp from the prior `agent`
+                  // event when patching content during streaming.
+                  next[next.length - 1] = {
+                    role: "assistant",
+                    content: assistantText,
+                    runtime: last?.runtime,
+                  };
                   return next;
                 });
               }
@@ -290,18 +350,30 @@ export function AgentChat({
               </div>
             );
           }
+          const isLastAssistant = i === turns.length - 1 && t.role === "assistant";
+          const showRuntime =
+            t.role === "assistant" &&
+            !!t.runtime &&
+            t.content.trim().length > 0 &&
+            !(streaming && isLastAssistant);
           return (
-            <div
-              key={i}
-              className={`text-sm leading-relaxed whitespace-pre-wrap break-words ${
-                t.role === "user"
-                  ? "ml-8 rounded-xl bg-accent-soft border border-accent-muted/30 px-4 py-2.5 text-fg"
-                  : "mr-8 rounded-xl bg-bg-elev/70 border border-bg-border px-4 py-2.5 text-fg-muted"
-              }`}
-            >
-              {t.content || (streaming && i === turns.length - 1 ? (
-                <Loader2 className="h-3.5 w-3.5 animate-spin text-accent inline" />
-              ) : null)}
+            <div key={i} className="contents">
+              <div
+                className={`text-sm leading-relaxed whitespace-pre-wrap break-words ${
+                  t.role === "user"
+                    ? "ml-8 rounded-xl bg-accent-soft border border-accent-muted/30 px-4 py-2.5 text-fg"
+                    : "mr-8 rounded-xl bg-bg-elev/70 border border-bg-border px-4 py-2.5 text-fg-muted"
+                }`}
+              >
+                {t.content || (streaming && i === turns.length - 1 ? (
+                  <Loader2 className="h-3.5 w-3.5 animate-spin text-accent inline" />
+                ) : null)}
+              </div>
+              {showRuntime && (
+                <div className="text-[10px] text-fg-dim font-mono ml-2 mr-8 -mt-2">
+                  via {t.runtime}
+                </div>
+              )}
             </div>
           );
         })}
