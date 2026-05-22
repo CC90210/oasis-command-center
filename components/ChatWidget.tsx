@@ -18,6 +18,7 @@ import { mdToHtml } from "@/lib/markdown";
 import { useSynthCalls, type SynthCliRuntime } from "@/lib/use-synth-calls";
 import {
   Send,
+  Square,
   AlertCircle,
   Settings as Cog,
   Loader2,
@@ -603,6 +604,12 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  // Holds the AbortController for the currently-streaming POST. The Stop
+  // button calls .abort() on this; the stream consumer catches the
+  // AbortError and tears down state. Ref (not state) because aborting
+  // shouldn't re-render — the resulting state change happens via the
+  // streaming/setStreaming setters in the finally block.
+  const activeStreamControllerRef = useRef<AbortController | null>(null);
   const activeWelcomeMessage = welcomeMessages?.[agent]?.trim() || "";
   const [pendingAttachments, setPendingAttachments] = useState<ChatAttachmentSummary[]>([]);
   const [uploadingAttachments, setUploadingAttachments] = useState(false);
@@ -1396,11 +1403,18 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
               // when this is "plan". Default is "build" (full tools).
               chat_mode: planMode,
             };
+      // Stash an AbortController so the operator can Stop mid-stream.
+      // Cleared in the finally block below; the stream reader catches the
+      // AbortError naturally and falls through to the same cleanup path
+      // as a normal stream end.
+      const abortCtl = new AbortController();
+      activeStreamControllerRef.current = abortCtl;
       const res = await fetchWithTimeout(url, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify(body),
         timeoutMs: CHAT_FETCH_TIMEOUT_MS,
+        signal: abortCtl.signal,
       });
       if (!res.ok || !res.body) {
         const errBody = asRecord(await safeReadJson(res));
@@ -1892,15 +1906,39 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
         setLastFailedMode(null);
       }
     } catch (e) {
-      setError(e instanceof Error ? e.message : "request_failed");
-      setMessages((m) => {
-        const last = m[m.length - 1];
-        if (last && last.role === "assistant" && last.content.trim().length === 0) {
-          return m.slice(0, -1);
-        }
-        return m;
-      });
+      // AbortError from a Stop-button click isn't an error in the
+      // operator-perceived sense — they MEANT to interrupt the stream.
+      // Render a quiet system note instead of the red banner, and keep
+      // whatever assistant text streamed before they hit Stop.
+      const isAbort =
+        (e instanceof Error && e.name === "AbortError") ||
+        (typeof e === "object" && e !== null && "name" in e && (e as { name?: string }).name === "AbortError");
+      if (isAbort) {
+        setMessages((m) => {
+          const last = m[m.length - 1];
+          // Drop the placeholder if literally nothing streamed; otherwise
+          // keep the partial assistant message so the operator can see
+          // what the model got out before they stopped it.
+          if (last && last.role === "assistant" && last.content.trim().length === 0) {
+            return [...m.slice(0, -1), { role: "system", content: "Stopped.", at: Date.now() }];
+          }
+          return [...m, { role: "system", content: "Stopped.", at: Date.now() }];
+        });
+      } else {
+        setError(e instanceof Error ? e.message : "request_failed");
+        setMessages((m) => {
+          const last = m[m.length - 1];
+          if (last && last.role === "assistant" && last.content.trim().length === 0) {
+            return m.slice(0, -1);
+          }
+          return m;
+        });
+      }
     } finally {
+      // Clear the stream abort controller so a stale Stop click can't
+      // abort the NEXT turn. Safe to clear unconditionally — the
+      // controller is replaced on every send().
+      activeStreamControllerRef.current = null;
       setStreaming(false);
       setThinking(false);
       setStatusPhase(null);
@@ -2644,14 +2682,31 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
             className="flex-1 bg-bg-elev border border-bg-border rounded-lg px-3.5 py-2.5 text-sm text-fg placeholder-fg-dim focus:outline-none focus:border-accent disabled:opacity-50 resize-none max-h-32"
             style={{ minHeight: "2.75rem" }}
           />
-          <button
-            type="submit"
-            disabled={!ready || streaming || uploadingAttachments || (!input.trim() && pendingAttachments.length === 0)}
-            className="btn-send"
-          >
-            {streaming ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
-            {streaming ? "" : "Send"}
-          </button>
+          {streaming ? (
+            // Stop button — fires AbortController.abort() on the active
+            // stream so the operator can interrupt a runaway model
+            // before it eats their entire context budget. The catch
+            // block above translates AbortError into a "Stopped."
+            // system pill so the red error banner doesn't flash.
+            <button
+              type="button"
+              onClick={() => activeStreamControllerRef.current?.abort()}
+              className="btn-send !bg-status-warm/15 !text-status-warm !border !border-status-warm/40 hover:!bg-status-warm/25"
+              title="Stop the agent mid-stream. Whatever streamed before this click stays in the conversation."
+            >
+              <Square className="w-4 h-4 fill-current" />
+              Stop
+            </button>
+          ) : (
+            <button
+              type="submit"
+              disabled={!ready || uploadingAttachments || (!input.trim() && pendingAttachments.length === 0)}
+              className="btn-send"
+            >
+              <Send className="w-4 h-4" />
+              Send
+            </button>
+          )}
         </div>
       </form>
     </div>
