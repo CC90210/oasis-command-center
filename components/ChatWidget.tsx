@@ -53,6 +53,7 @@ import {
   filterArgCandidates,
   type ArgCandidate,
 } from "@/components/chat/SlashCommandMenu";
+import { ChatHistorySidebar } from "@/components/chat/ChatHistorySidebar";
 import { providerForModel, PROVIDER_MODELS } from "@/lib/providers";
 
 type Role = "user" | "assistant" | "system";
@@ -485,6 +486,10 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
     !streaming &&
     argCandidates.length > 0;
   const [sessionId, setSessionId] = useState<string | null>(null);
+  // Refresh ticker for the chat-history sidebar — bumped after every
+  // successful turn so the sidebar re-fetches and the just-completed
+  // session appears in the list without a page reload.
+  const [historyRefresh, setHistoryRefresh] = useState<number>(0);
   // Tab-stable identifier for the warm-process pool. Minted ONCE per
   // ChatWidget mount; persists across agent switches and turns. The
   // bridge keys its warm pool by `agent:tab_id` so even turn 1 (before
@@ -988,6 +993,71 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
     // leaving the state populated is a foot-gun for any future code
     // path that surfaces the value.
     setLastFailedMode(null);
+  }
+
+  /**
+   * Load a previously-saved chat session into the live composer.
+   * Called from the ChatHistorySidebar. Calls GET /api/chat/sessions/[id]
+   * which returns the agent_key + ordered messages, then resets state to
+   * the loaded session so the next /api/chat POST resumes against the
+   * same session_id (server keeps the chat_sessions row and appends new
+   * messages onto the existing thread).
+   *
+   * Side effects:
+   *   - If the loaded session is for a different agent, switch the agent
+   *     picker too (operator clicked a session in Atlas's folder while
+   *     looking at Bravo).
+   *   - Reset all tool-call / synth-call / cloud-result UI state since
+   *     those are per-turn, not per-session.
+   *   - Clear errors and the failed-mode tracker so the loaded session
+   *     starts clean.
+   */
+  async function loadPastSession(id: string) {
+    setError(null);
+    setErrorCode(null);
+    setLastFailedMode(null);
+    setActions([]);
+    setCloudResults([]);
+    setToolReads([]);
+    setToolRuns([]);
+    setToolCalls([]);
+    setExpandedReads(new Set());
+    setExpandedRuns(new Set());
+    setPendingAttachments([]);
+    setAttachmentError(null);
+    try {
+      const r = await fetch(`/api/chat/sessions/${encodeURIComponent(id)}`, {
+        cache: "no-store",
+      });
+      const j = (await r.json().catch(() => ({}))) as {
+        ok?: boolean;
+        session?: { id: string; agent_key: string; title: string | null };
+        messages?: Array<{ role: string; content: string; created_at: string }>;
+        error?: string;
+      };
+      if (!r.ok || !j.ok || !j.session || !Array.isArray(j.messages)) {
+        setError(j.error || `http_${r.status}`);
+        return;
+      }
+      // Switch agent if the loaded session belongs to a different one.
+      if (j.session.agent_key && j.session.agent_key !== agent) {
+        setAgent(j.session.agent_key);
+      }
+      // Map server-shape -> client Msg shape. created_at strings -> ms
+      // timestamps; "system" rows from earlier persistence get filtered
+      // (they're client-only chrome). assistant/user rows are kept.
+      const restored: Msg[] = j.messages
+        .filter((m) => m.role === "user" || m.role === "assistant")
+        .map((m) => ({
+          role: m.role as Role,
+          content: m.content,
+          at: new Date(m.created_at).getTime() || Date.now(),
+        }));
+      setMessages(restored);
+      setSessionId(j.session.id);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "session_load_failed");
+    }
   }
 
   function applySuggestion(text: string) {
@@ -1953,6 +2023,9 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
         // Successful turn — clear any stale "last failed mode" tracking so
         // the retry button doesn't linger past the next happy message.
         setLastFailedMode(null);
+        // Tick the history sidebar so the freshly-saved session lands
+        // in the operator's "previous chats" list without a page reload.
+        setHistoryRefresh((n) => n + 1);
       }
     } catch (e) {
       // AbortError from a Stop-button click isn't an error in the
@@ -2137,6 +2210,18 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
           per CC. accessMode state stays internally as "auto" so the
           downstream routing logic + status labels keep working. */}
       <div className="flex items-center gap-3 px-5 py-4 relative z-10">
+        {/* Chat history sidebar trigger. Closed state = compact button
+            sitting flush with the agent picker; open state = full drawer
+            overlay positioned by the component itself. Clicking a past
+            session calls loadPastSession() which restores the messages
+            into this widget and resumes the chat_sessions row. */}
+        <ChatHistorySidebar
+          agentKey={agent}
+          activeSessionId={sessionId}
+          onLoadSession={(id) => void loadPastSession(id)}
+          onNewChat={() => reset()}
+          refreshKey={historyRefresh}
+        />
         {/* Defensive fallback — if the page passed an empty agentKeys array (legacy
             profile.agents_enabled out of sync with chat-eligible agents), always
             include the current `agent` selection so the dropdown isn't a void
