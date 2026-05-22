@@ -5,12 +5,28 @@
  * duplicated character-for-character between /api/chat and
  * /api/chat/resume (Phase 2 of giggly-reef caught this).
  *
- * Auth priority — same rule the bridge follows:
- *   - Per-agent config row → decrypt that key, use that provider+model
- *   - Per-agent row exists but key missing AND user is the platform
- *     operator → operator fallback (env-supplied key)
- *   - No row AND operator → operator fallback
- *   - No row AND non-operator → 412 agent_not_configured
+ * Auth priority — strict resolution hierarchy. The first match wins:
+ *
+ *   1. USER OVERRIDE  (agent_model_config row where user_id = caller.id):
+ *      Per-employee override. Set when a teammate pastes their own key
+ *      under "Just-for-me overrides" in Settings. If this row has an
+ *      encrypted_api_key, that key + its provider/model are used and
+ *      cfgScope is "user".
+ *
+ *   2. TENANT DEFAULT (agent_model_config row where user_id IS NULL):
+ *      Workspace-wide default. Set by "AI Setup" (bulk-provider writes
+ *      identical rows for every enabled chat agent) and by per-agent
+ *      "Override an Agent's Provider" edits at scope=tenant. Used when
+ *      no user override exists. cfgScope is "tenant".
+ *
+ *   3. PLATFORM FALLBACK (operatorPlatformFallback env var):
+ *      Last-resort default for the platform operator's email only.
+ *      Used when:
+ *        - No row exists at all (fresh tenant pre-AI-setup), OR
+ *        - A row exists but its encrypted_api_key is null.
+ *      Non-operator users in either of those states get a typed error
+ *      (412 agent_not_configured / no_api_key) so they can't accidentally
+ *      bill the platform owner's key.
  *
  * Returns a discriminated union so callers don't have to remember which
  * NextResponse status maps to which error code.

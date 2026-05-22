@@ -261,6 +261,11 @@ export default async function SettingsPage() {
                 <AgentConfigEditor
                   agentKeys={enabledChatAgentKeys}
                   bridgeOnline={bridgeOnline}
+                  // Lets the override card show "Using AI Setup default"
+                  // when an agent's row matches a globally-connected
+                  // provider — kills the "do I need to paste this key
+                  // again for Bravo?" confusion.
+                  globallyConnectedServices={Array.from(connectedAiSet)}
                   agentPalettes={Object.fromEntries(
                     (manifest?.agents || []).map((a) => [
                       a.slug.toLowerCase(),

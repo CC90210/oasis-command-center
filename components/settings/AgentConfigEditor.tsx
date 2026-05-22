@@ -94,6 +94,27 @@ type Props = {
    * to render checkboxes grouped by Cloud vs Bridge.
    */
   toolCatalog?: ToolCatalogEntry[];
+  /**
+   * Service slugs the tenant has connected via the global "AI setup"
+   * card above (e.g. ["anthropic", "openrouter"]). When a per-agent
+   * row's provider matches one of these AND the row already has a
+   * saved key (has_key=true with no user-scope override), the API
+   * KEY field shows "Using AI Setup default" instead of asking for
+   * a re-paste — kills the "do I need to enter this key again?"
+   * confusion CC flagged 2026-05-22.
+   */
+  globallyConnectedServices?: string[];
+};
+
+// Maps provider name (as stored on agent_model_config) -> service slug
+// (as stored in aiServicesWithKey's set). Mirrors PROVIDER_TO_SERVICE
+// in lib/providers.ts but kept narrow here so this client component
+// doesn't have to import the full registry's server-side adjacency.
+const PROVIDER_TO_SERVICE_LOCAL: Record<string, string> = {
+  anthropic: "anthropic",
+  openai: "openai_codex",
+  google: "google_ai",
+  openrouter: "openrouter",
 };
 
 export function AgentConfigEditor({
@@ -102,7 +123,9 @@ export function AgentConfigEditor({
   agentPalettes = {},
   manifestSlug = null,
   toolCatalog = [],
+  globallyConnectedServices = [],
 }: Props) {
+  const globalServiceSet = new Set(globallyConnectedServices);
   const [configs, setConfigs] = useState<Record<string, AgentConfig>>({});
   const [loadError, setLoadError] = useState<string | null>(null);
   // Bumped from the cross-component event below (oasis:agent-configs-changed)
@@ -310,8 +333,45 @@ export function AgentConfigEditor({
     }
   }
 
+  const hasGlobal = globalServiceSet.size > 0;
   return (
     <div id="agents" className="space-y-4">
+      {/* Helper banner explaining what this card does relative to the
+          AI setup card above. CC's confusion 2026-05-22: "I successfully
+          connected Anthropic globally, but didn't know if I had to paste
+          the key a second time for Bravo." Banner spells out the
+          relationship + lights up green when a global key is connected
+          so the operator KNOWS the override is optional. */}
+      <div
+        className={`rounded-lg border p-3 text-xs leading-relaxed flex items-start gap-2.5 ${
+          hasGlobal
+            ? "border-status-engaged/30 bg-status-engaged/5"
+            : "border-bg-border bg-bg-deep/40"
+        }`}
+      >
+        <KeyRound
+          className={`w-4 h-4 shrink-0 mt-0.5 ${
+            hasGlobal ? "text-status-engaged" : "text-fg-dim"
+          }`}
+        />
+        <div className="text-fg-muted">
+          <span className="font-bold text-fg">Overrides are optional.</span>{" "}
+          {hasGlobal ? (
+            <>
+              Every agent uses your <span className="text-fg">AI Setup</span> key
+              by default. Fill in a key here only if you want THIS agent to use
+              a different provider or a different key. Leaving the key field
+              blank keeps whatever&apos;s already on file.
+            </>
+          ) : (
+            <>
+              No global AI account connected yet. Either connect one above in{" "}
+              <span className="text-fg">AI Setup</span> (recommended — one key
+              for every agent) or paste a key per-agent below.
+            </>
+          )}
+        </div>
+      </div>
       {loadError && (
         <div className="rounded-xl border border-status-hot/40 bg-status-hot/10 p-4 flex items-start gap-3">
           <AlertCircle size={18} className="text-status-hot shrink-0 mt-0.5" />
@@ -425,11 +485,39 @@ export function AgentConfigEditor({
                   ))}
                 </select>
               </label>
+              {(() => {
+                // Resolve "is this row using the AI Setup default key
+                // for its provider?". When yes, the API KEY field should
+                // not ask the operator to paste anything — bulk-provider
+                // already wrote the same key for every agent. CC's
+                // feedback 2026-05-22: "I successfully connected
+                // Anthropic globally, but was confused by Override —
+                // didn't know if I had to paste the key a second time
+                // for Bravo." This block kills that confusion.
+                const rowService = PROVIDER_TO_SERVICE_LOCAL[row.provider];
+                const matchesGlobalSetup =
+                  !!rowService && globalServiceSet.has(rowService);
+                const usingGlobal = !!cfg?.has_key && matchesGlobalSetup;
+                const labelHint = usingGlobal
+                  ? "(using AI Setup default — leave blank to keep)"
+                  : cfg?.has_key
+                    ? "(override key on file — leave blank to keep)"
+                    : "(required)";
+                const placeholder = usingGlobal
+                  ? "Using AI Setup default — paste to override"
+                  : cfg?.has_key
+                    ? "•••••••••••••••"
+                    : row.provider === "ollama"
+                      ? "http://localhost:11434/v1"
+                      : isOpenRouter
+                        ? "sk-or-v1-..."
+                        : "your provider key";
+                return (
               <label className="text-xs text-fg-muted space-y-1">
                 <span className="label">
                   {row.provider === "ollama" ? "Endpoint URL" : "API key"}{" "}
                   <span className="text-fg-dim normal-case tracking-normal font-normal">
-                    {cfg?.has_key ? "(leave blank to keep existing)" : "(required)"}
+                    {labelHint}
                   </span>
                 </span>
                 <div className="flex gap-2">
@@ -437,16 +525,12 @@ export function AgentConfigEditor({
                     type={row.showKey || row.provider === "ollama" ? "text" : "password"}
                     value={row.apiKey}
                     onChange={(e) => patchRow(key, { apiKey: e.target.value })}
-                    placeholder={
-                      cfg?.has_key
-                        ? "•••••••••••••••"
-                        : row.provider === "ollama"
-                          ? "http://localhost:11434/v1"
-                          : isOpenRouter
-                            ? "sk-or-v1-..."
-                            : "your provider key"
-                    }
-                    className="input font-mono"
+                    placeholder={placeholder}
+                    className={`input font-mono ${
+                      usingGlobal
+                        ? "italic text-accent placeholder:text-accent/60"
+                        : ""
+                    }`}
                   />
                   <button
                     type="button"
@@ -458,6 +542,8 @@ export function AgentConfigEditor({
                   </button>
                 </div>
               </label>
+                );
+              })()}
             </div>
 
             {/* Tool Access — two-channel summary. Channel A (Cloud tools)
