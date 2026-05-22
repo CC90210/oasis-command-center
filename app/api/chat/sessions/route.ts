@@ -26,7 +26,8 @@
  */
 
 import { NextRequest, NextResponse } from "next/server";
-import { getSessionUser, getServiceSupabase } from "@/lib/supabase-server";
+import { getServiceSupabase } from "@/lib/supabase-server";
+import { resolveSessionContext } from "@/lib/api-auth";
 import { isTenantChatAgent } from "@/lib/manifest/tenant-scope";
 
 export const dynamic = "force-dynamic";
@@ -39,8 +40,15 @@ function bad(status: number, error: string, code?: string) {
 }
 
 export async function GET(req: NextRequest) {
-  const user = await getSessionUser();
-  if (!user) return bad(401, "unauthorized");
+  // Shared session->tenant resolution. resolveSessionContext returns a
+  // discriminated union so callers don't have to null-check user_id +
+  // tenant_id independently. Same helper /api/leads and friends use.
+  const ctx = await resolveSessionContext();
+  if (!ctx.ok) {
+    if (ctx.reason === "no_session") return bad(401, "unauthorized");
+    return bad(403, ctx.reason);
+  }
+  const { userId, tenantId } = ctx;
 
   const url = req.nextUrl;
   const agentKey = (url.searchParams.get("agent") || "").toLowerCase();
@@ -50,18 +58,6 @@ export async function GET(req: NextRequest) {
   const limit = Math.max(1, Math.min(200, Number.isFinite(rawLimit) ? rawLimit : 50));
 
   const service = getServiceSupabase();
-  // Resolve tenant_id from the user profile so the session filter is
-  // scoped to the right org. Without this any session row across the
-  // platform could leak if RLS isn't perfectly aligned with the
-  // service-role client (we use service role here for the count
-  // join below).
-  const { data: profile } = await service
-    .from("user_profiles")
-    .select("tenant_id")
-    .eq("auth_user_id", user.id)
-    .maybeSingle();
-  const tenantId = (profile as { tenant_id: string | null } | null)?.tenant_id || null;
-  if (!tenantId) return bad(403, "no_tenant");
 
   // Validate the agent_key against the tenant's manifest-aware allowlist —
   // same gate /api/chat uses. Custom marketplace agents are accepted via
@@ -79,7 +75,7 @@ export async function GET(req: NextRequest) {
     .from("chat_sessions")
     .select("id, agent_key, title, created_at, updated_at")
     .eq("tenant_id", tenantId)
-    .eq("user_id", user.id)
+    .eq("user_id", userId)
     .eq("agent_key", agentKey)
     .order("updated_at", { ascending: false, nullsFirst: false })
     .limit(limit);

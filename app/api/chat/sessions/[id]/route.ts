@@ -25,7 +25,8 @@
  */
 
 import { NextRequest, NextResponse } from "next/server";
-import { getSessionUser, getServiceSupabase } from "@/lib/supabase-server";
+import { getServiceSupabase } from "@/lib/supabase-server";
+import { resolveSessionContext } from "@/lib/api-auth";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -38,32 +39,28 @@ export async function GET(
   _req: NextRequest,
   { params }: { params: Promise<{ id: string }> },
 ) {
-  const user = await getSessionUser();
-  if (!user) return bad(401, "unauthorized");
+  // Shared session->tenant resolution (same helper /api/chat/sessions
+  // list uses). Any reason that isn't "no session" gets collapsed to
+  // 404 so we don't leak the existence of other tenants' sessions via
+  // a distinct error code.
+  const ctx = await resolveSessionContext();
+  if (!ctx.ok) {
+    if (ctx.reason === "no_session") return bad(401, "unauthorized");
+    return bad(404, "session_not_found");
+  }
+  const { userId, tenantId } = ctx;
 
   const { id } = await params;
   const sessionId = (id || "").trim();
   if (!sessionId) return bad(404, "session_not_found");
 
   const service = getServiceSupabase();
-
-  // Resolve tenant_id so the session lookup can enforce
-  // (tenant_id, user_id) ownership. Empty profile -> tenant missing
-  // -> we can't validate ownership -> deny.
-  const { data: profile } = await service
-    .from("user_profiles")
-    .select("tenant_id")
-    .eq("auth_user_id", user.id)
-    .maybeSingle();
-  const tenantId = (profile as { tenant_id: string | null } | null)?.tenant_id || null;
-  if (!tenantId) return bad(404, "session_not_found");
-
   const { data: sessionRow, error: sessionErr } = await service
     .from("chat_sessions")
     .select("id, agent_key, title, created_at, updated_at")
     .eq("id", sessionId)
     .eq("tenant_id", tenantId)
-    .eq("user_id", user.id)
+    .eq("user_id", userId)
     .maybeSingle();
 
   if (sessionErr) {
