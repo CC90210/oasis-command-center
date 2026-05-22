@@ -1,6 +1,7 @@
 import { Card, PageHeader, EmptyState, Tag } from "@/components/Card";
 import ChatWidget from "@/components/ChatWidget";
 import { timeAgo, truncate } from "@/lib/fmt";
+import { formatEventType, formatPublisher } from "@/lib/event-bus-display";
 import { agentStates, recentEvents, getActiveProfile, integrationsHealth, aiServicesWithKey } from "@/lib/queries";
 import { FAMILY_AGENT_KEYS, getAgentInfo } from "@/lib/agents";
 import { getTenantManifestForUser } from "@/lib/manifest/tenant-scope";
@@ -200,74 +201,17 @@ export default async function AgentsPage() {
         />
       </section>
 
-      <Card title="Agent family" subtitle={`Primary: ${profile?.primary_agent || "—"}`}>
-        <ul className="grid md:grid-cols-2 gap-4">
-          {rows.map((r) => (
-            <li
-              key={r.name}
-              className="rounded-lg border border-bg-border bg-bg-elev p-4 transition-all hover:border-accent-muted/40"
-            >
-              <div className="flex justify-between items-center">
-                <div className="flex items-center gap-2">
-                  <div
-                    className={`w-2 h-2 rounded-full flex-shrink-0 ${
-                      r.live
-                        ? "bg-status-engaged shadow-[0_0_6px_rgba(16,185,129,0.6)] animate-pulse-slow"
-                        : r.lastSignalAt
-                          ? "bg-status-warm"
-                          : "bg-fg-faint"
-                    }`}
-                  />
-                  <span className={`font-bold uppercase tracking-[0.14em] text-sm ${r.info.textClass || "text-accent"}`}>
-                    {r.info.label}
-                  </span>
-                </div>
-                {r.live ? (
-                  <span className="text-xs text-status-engaged font-mono">
-                    live · {r.state ? `tick ${r.state.tick_count}` : "ping"}
-                  </span>
-                ) : r.lastSignalAt ? (
-                  <span className="text-xs text-status-warm">
-                    idle · {timeAgo(r.lastSignalAt)}
-                  </span>
-                ) : (
-                  <span className="text-xs text-fg-dim">never seen</span>
-                )}
-              </div>
-              <div className="text-xs text-fg-muted mt-2">{r.info.role}</div>
-              {r.info.description && (
-                <p className="text-sm text-fg mt-3 leading-relaxed">
-                  {r.info.description}
-                </p>
-              )}
-              {r.info.askMeAbout && (
-                <div className="text-[11px] text-fg-muted mt-3 italic leading-relaxed">
-                  <span className="text-fg-dim not-italic uppercase tracking-wider text-[9px] font-bold">Ask me about: </span>
-                  {r.info.askMeAbout}
-                </div>
-              )}
-              <div className="text-[10px] text-fg-dim mt-3 font-mono pt-2 border-t border-bg-border">
-                {r.info.location}
-                {r.lastSignalAt && (
-                  <>
-                    {" · "}
-                    Last signal {timeAgo(r.lastSignalAt)}
-                  </>
-                )}
-              </div>
-            </li>
-          ))}
-        </ul>
-      </Card>
-
       <Card
-        title="What each agent does for you"
-        subtitle="The autonomous workers running on your behalf. They handle the operational grind so you can stay on closing deals, shipping content, and the high-leverage moves only you can make."
+        title="Your agent family"
+        subtitle={`The autonomous workers running on your behalf. Primary: ${profile?.primary_agent || "—"}. Each tile shows what the agent does and what's running for it right now.`}
       >
         <div className="space-y-5">
           <div className="rounded-lg border border-bg-border bg-bg p-4 text-sm text-fg-muted leading-relaxed">
-            <div className="text-fg font-medium mb-1">How to read this</div>
-            Each agent has three kinds of jobs running for you: <span className="text-fg">scheduled tasks</span> (run on a clock), <span className="text-fg">always-on processes</span> (running locally on your machine), and <span className="text-fg">workflows</span> (event-triggered, cross-system).
+            <div className="text-fg font-medium mb-1">How to read each tile</div>
+            Every agent has up to three kinds of automation running for you:{" "}
+            <span className="text-fg">Scheduled tasks</span> (fire on a clock — e.g. 7am daily briefing),{" "}
+            <span className="text-fg">Always-on processes</span> (running locally on your machine — e.g. the inbox listener),{" "}
+            <span className="text-fg">Workflows</span> (event-triggered — e.g. lead opens email → drip step fires).
             <div className="mt-2 text-fg-dim text-[11px]">
               Repo stats: {stats.skills} skills · {stats.scripts} scripts · {stats.chat_tools} callable tools · {stats.brain_files} brain files · {stats.workflows} workflows
             </div>
@@ -275,60 +219,125 @@ export default async function AgentsPage() {
           {enabled.map((key) => {
             const info = getAgentInfo(key);
             const cat = catalogFor(key);
+            // Match this agent to its live row so we can surface
+            // status + last-signal alongside the description.
+            const row = rows.find((r) => r.name === key);
             const total = cat.crons.length + cat.processes.length + cat.workflows.length;
-            if (total === 0) return null;
             return (
               <div
                 key={key}
                 className="rounded-lg border border-bg-border bg-bg-elev p-4 space-y-3"
               >
-                <div className="flex items-center gap-2 flex-wrap">
-                  <span className={`font-bold uppercase tracking-[0.14em] text-sm ${info.textClass}`}>
-                    {info.label}
-                  </span>
-                  <span className="text-xs text-fg-muted">{info.tagline}</span>
-                  <span className="ml-auto text-[10px] uppercase tracking-wider text-fg-dim">
-                    {total} highlighted
-                  </span>
+                {/* Identity row — label, role, live indicator. Consolidates the
+                    "Agent family" card's status pill into the same tile that
+                    lists what the agent runs. One agent = one tile. */}
+                <div className="flex items-start gap-3 flex-wrap">
+                  <div
+                    className={`w-2 h-2 rounded-full flex-shrink-0 mt-1.5 ${
+                      row?.live
+                        ? "bg-status-engaged shadow-[0_0_6px_rgba(16,185,129,0.6)] animate-pulse-slow"
+                        : row?.lastSignalAt
+                          ? "bg-status-warm"
+                          : "bg-fg-faint"
+                    }`}
+                    title={
+                      row?.live
+                        ? "Live — agent has pinged in the last 15 minutes."
+                        : row?.lastSignalAt
+                          ? `Idle — last signal ${timeAgo(row.lastSignalAt)}.`
+                          : "Never seen — agent has not paired with this Command Center yet."
+                    }
+                  />
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className={`font-bold uppercase tracking-[0.14em] text-sm ${info.textClass}`}>
+                        {info.label}
+                      </span>
+                      <span className="text-xs text-fg-muted">{info.tagline}</span>
+                    </div>
+                    {info.description && (
+                      <p className="text-sm text-fg mt-2 leading-relaxed">
+                        {info.description}
+                      </p>
+                    )}
+                    {info.askMeAbout && (
+                      <div className="text-[11px] text-fg-muted mt-2 italic leading-relaxed">
+                        <span className="text-fg-dim not-italic uppercase tracking-wider text-[9px] font-bold">Ask me about: </span>
+                        {info.askMeAbout}
+                      </div>
+                    )}
+                  </div>
+                  <div className="text-right text-[10px] uppercase tracking-wider text-fg-dim shrink-0">
+                    {row?.live ? (
+                      <span className="text-status-engaged font-mono normal-case tracking-normal">
+                        live · {row.state ? `tick ${row.state.tick_count}` : "ping"}
+                      </span>
+                    ) : row?.lastSignalAt ? (
+                      <span className="text-status-warm normal-case tracking-normal">
+                        idle · {timeAgo(row.lastSignalAt)}
+                      </span>
+                    ) : (
+                      <span className="text-fg-dim normal-case tracking-normal">never seen</span>
+                    )}
+                    {total > 0 && <div className="mt-1">{total} highlighted</div>}
+                  </div>
                 </div>
-                <div className="grid sm:grid-cols-3 gap-3">
-                  <CatalogColumn
-                    title="Crons"
-                    icon={<Clock className="w-3.5 h-3.5" />}
-                    entries={cat.crons.map((c) => ({
-                      name: c.name,
-                      meta: c.schedule || c.location,
-                      desc: c.description,
-                    }))}
-                  />
-                  <CatalogColumn
-                    title="Processes"
-                    icon={<Cog className="w-3.5 h-3.5" />}
-                    entries={cat.processes.map((p) => ({
-                      name: p.name,
-                      meta: p.location,
-                      desc: p.description,
-                    }))}
-                  />
-                  <CatalogColumn
-                    title="Workflows"
-                    icon={<Workflow className="w-3.5 h-3.5" />}
-                    entries={cat.workflows.map((w) => ({
-                      name: w.name,
-                      meta: w.location,
-                      desc: w.description,
-                    }))}
-                  />
-                </div>
+
+                {/* Catalog grid — only render when this agent actually has
+                    anything to show. Empty agents (no crons, no processes,
+                    no workflows yet) still get an identity row so the
+                    operator can see they're part of the family. */}
+                {total > 0 && (
+                  <div className="grid sm:grid-cols-3 gap-3">
+                    <CatalogColumn
+                      title="Scheduled tasks"
+                      hint="on a clock"
+                      icon={<Clock className="w-3.5 h-3.5" />}
+                      entries={cat.crons.map((c) => ({
+                        name: c.name,
+                        meta: c.schedule || c.location,
+                        desc: c.description,
+                      }))}
+                    />
+                    <CatalogColumn
+                      title="Always-on processes"
+                      hint="running locally"
+                      icon={<Cog className="w-3.5 h-3.5" />}
+                      entries={cat.processes.map((p) => ({
+                        name: p.name,
+                        meta: p.location,
+                        desc: p.description,
+                      }))}
+                    />
+                    <CatalogColumn
+                      title="Workflows"
+                      hint="event-triggered"
+                      icon={<Workflow className="w-3.5 h-3.5" />}
+                      entries={cat.workflows.map((w) => ({
+                        name: w.name,
+                        meta: w.location,
+                        desc: w.description,
+                      }))}
+                    />
+                  </div>
+                )}
+                {total === 0 && (
+                  <div className="text-[11px] text-fg-dim italic pt-1">
+                    No scheduled tasks, processes, or workflows wired yet — chat with this agent and it will start the work that produces them.
+                  </div>
+                )}
               </div>
             );
           })}
         </div>
       </Card>
 
-      <Card title="Event bus" subtitle="Cross-agent coordination, most recent first">
+      <Card
+        title="Event bus"
+        subtitle="A live tape of every signal your agents publish — emails opened, leads bumped, statuses changed. Most recent first."
+      >
         {events.length === 0 ? (
-          <EmptyState message="No events yet. Events publish when the reasoning loop ticks or n8n inbound fires." />
+          <EmptyState message="No events yet. The bus fills up when a lead opens an email, an outbound goes out, or the reasoning loop ticks." />
         ) : (
           <ul className="divide-y divide-bg-border">
             {events.map((e) => {
@@ -337,12 +346,22 @@ export default async function AgentsPage() {
                 | Record<string, unknown>
                 | undefined;
               const subject = (payload as Record<string, unknown>).subject as string | undefined;
+              // Strip the SCREAMING_SNAKE_CASE wire format into readable
+              // sentence case for display. The raw event_type stays in
+                // the title attribute so power users can still copy the
+              // underlying token if they need to grep logs.
+              const prettyEvent = formatEventType(e.event_type);
+              const prettyPublisher = formatPublisher(e.publisher_agent);
               return (
                 <li key={e.id} className="py-2.5">
                   <div className="flex justify-between items-baseline gap-3">
-                    <Tag tone="accent">{e.event_type}</Tag>
+                    <span title={e.event_type} className="inline-block">
+                      <Tag tone="accent">{prettyEvent}</Tag>
+                    </span>
                     <span className="text-xs text-fg-dim">
-                      {e.publisher_agent} · {timeAgo(e.published_at)}
+                      <span title={e.publisher_agent}>{prettyPublisher}</span>
+                      {" · "}
+                      {timeAgo(e.published_at)}
                     </span>
                   </div>
                   {subject && (
@@ -369,20 +388,30 @@ function CatalogColumn({
   title,
   icon,
   entries,
+  hint,
 }: {
   title: string;
   icon: React.ReactNode;
   entries: Array<{ name: string; meta: string; desc: string }>;
+  /** Three-word clarifier rendered under the column header so operators
+   *  don't have to scroll up to remember what differentiates the three
+   *  columns. E.g. "on a clock" for Scheduled tasks. */
+  hint?: string;
 }) {
   return (
     <div>
-      <div className="flex items-center gap-1.5 text-[10px] uppercase tracking-wider font-bold text-fg-muted mb-2">
+      <div className="flex items-center gap-1.5 text-[10px] uppercase tracking-wider font-bold text-fg-muted mb-1">
         {icon}
         {title}
         <span className="text-fg-dim font-mono normal-case tracking-normal">
           ({entries.length})
         </span>
       </div>
+      {hint && (
+        <div className="text-[10px] text-fg-dim normal-case tracking-normal mb-2 italic">
+          {hint}
+        </div>
+      )}
       {entries.length === 0 ? (
         <div className="text-[11px] text-fg-faint italic">none</div>
       ) : (
