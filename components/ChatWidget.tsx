@@ -63,7 +63,20 @@ type ChatAttachmentSummary = {
   parser: string;
   text_excerpt?: string | null;
 };
-type Msg = { role: Role; content: string; at: number; attachments?: ChatAttachmentSummary[] };
+type Msg = {
+  role: Role;
+  content: string;
+  at: number;
+  attachments?: ChatAttachmentSummary[];
+  /** Which runtime actually serviced this assistant turn — surfaced as a
+   *  small "via gemini" pill under the message so operators can verify
+   *  the picker selection landed on the wire. Only set for assistant
+   *  messages; user/system messages leave this undefined. */
+  runtime?: {
+    label: string;  // e.g. "gemini", "claude", "anthropic / claude-opus-4-7"
+    detail?: string; // e.g. "local bridge" or "cloud · 3.4s"
+  };
+};
 
 // Legacy localStorage keys from the FIRST Auto/Cloud/Desktop picker (removed
 // 2026-05-13). The one-shot cleanup effect below clears them. Nothing else
@@ -111,6 +124,41 @@ const isChatMode = (s: unknown): s is ChatMode =>
 
 type CliRuntime = "claude" | "codex" | "gemini";
 const CLI_RUNTIME_STORAGE_KEY = "oasis.chat.cliRuntime.v1";
+/**
+ * Compute the human-readable runtime label for an outbound turn given the
+ * current picker state. Stamped on the assistant message at send time so
+ * operators can verify which runtime actually serviced the turn (e.g.
+ * "did Gemini really run, or did the bridge fall back to cloud?").
+ *
+ * Note: this is the EXPECTED runtime based on client-side picker state.
+ * If the bridge falls back to cloud mid-turn (e.g. claude CLI crashed)
+ * the SSE event handlers may overwrite this with the actual runtime
+ * the server dispatched to. The default-correct case is "what the
+ * picker said, what the bridge ran".
+ */
+function computeExpectedRuntime(args: {
+  chatMode: ChatMode;
+  modeOverride?: ChatMode;
+  bridgeOnline: boolean | null;
+  cliRuntime: CliRuntime;
+  cfgProvider?: string;
+  cfgModel?: string;
+}): { label: string; detail?: string } {
+  const mode = args.modeOverride ?? args.chatMode;
+  const usingBridge = mode === "cli" || (mode === "auto" && args.bridgeOnline === true);
+  if (usingBridge) {
+    return {
+      label: args.cliRuntime,
+      detail: "local bridge",
+    };
+  }
+  const provider = args.cfgProvider?.trim();
+  const model = args.cfgModel?.trim();
+  if (provider && model) return { label: `${provider} · ${model}`, detail: "cloud" };
+  if (provider) return { label: provider, detail: "cloud" };
+  return { label: "cloud", detail: undefined };
+}
+
 // Plan mode persists in sessionStorage (per tab) — operators who run /plan,
 // reload the page mid-investigation, then send another message expect their
 // mode to survive. Distinct from CHAT_MODE_STORAGE_KEY (localStorage, per
@@ -1308,7 +1356,24 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
       text_excerpt: att.text_excerpt || null,
     }));
     setMessages(newMessages);
-    setMessages((m) => [...m, { role: "assistant", content: "", at: Date.now() }]);
+    // Stamp the assistant placeholder with the runtime we expect to
+    // service this turn, derived from the same picker state the routing
+    // logic below uses. This lets the operator verify (a) "yes, Gemini
+    // really did run" or (b) "no, it fell back to cloud because the
+    // bridge dropped." Updated downstream if the bridge sends back an
+    // `info` event with the actual runtime it dispatched to.
+    const expectedRuntime = computeExpectedRuntime({
+      chatMode,
+      modeOverride,
+      bridgeOnline,
+      cliRuntime,
+      cfgProvider: cfg?.provider,
+      cfgModel: cfg?.model,
+    });
+    setMessages((m) => [
+      ...m,
+      { role: "assistant", content: "", at: Date.now(), runtime: expectedRuntime },
+    ]);
     setStreaming(true);
     setThinking(true);
     setStreamStartedAt(Date.now());
@@ -2326,6 +2391,26 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
                 at={m.at}
                 streaming={streaming && isLastAssistant}
               />
+              {/* Runtime indicator — answers "did Gemini really run, or did
+                  the bridge fall back?". Only renders for assistant
+                  messages that finished streaming (so the operator
+                  doesn't see "via gemini" flicker before the response
+                  actually lands) AND that have content (skip empty
+                  placeholders that were cleared by an error). */}
+              {m.role === "assistant" &&
+                m.runtime &&
+                m.content.trim().length > 0 &&
+                !(streaming && isLastAssistant) && (
+                  <div className="text-[10px] text-fg-dim font-mono mt-1 ml-2 inline-flex items-center gap-1.5">
+                    <span>via {m.runtime.label}</span>
+                    {m.runtime.detail && (
+                      <>
+                        <span>·</span>
+                        <span>{m.runtime.detail}</span>
+                      </>
+                    )}
+                  </div>
+                )}
             </div>
           );
         })}
