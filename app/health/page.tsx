@@ -35,6 +35,8 @@ import { PageHeader, Card, Tag } from "@/components/Card";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { resolveTenantId } from "@/lib/api-auth";
 import { getTenantEnabledAgents } from "@/lib/manifest/tenant-scope";
+import { resolveClientProfileSlug } from "@/lib/client-profiles";
+import { getTenant } from "@/lib/queries";
 import { formatEventType, formatPublisher } from "@/lib/event-bus-display";
 import { redirect } from "next/navigation";
 import Link from "next/link";
@@ -192,6 +194,14 @@ export default async function HealthPage() {
   const tenantId = await resolveTenantId();
   if (!tenantId) redirect("/login");
   const enabledAgents = await getTenantEnabledAgents(tenantId);
+  // Resolve the caller's tenant slug so the cold-lead and stuck-thread
+  // links land on THEIR tenant shell, not the hardcoded "sun" path the
+  // links used to use. Without this, the operator on the oasis tenant
+  // clicked "Bennett Agency" and landed on /t/sun/leads/<id> — a 404
+  // for their tenant, which is exactly why CC could see Bennett was
+  // stale but couldn't fix the stage from this page.
+  const tenant = await getTenant(tenantId).catch(() => null);
+  const tenantSlug = (tenant && resolveClientProfileSlug(tenant)) || "sun";
   const { recentErrors, failedCrons, stuckThreads, stuckLeads } = await loadHealth(
     tenantId,
     enabledAgents,
@@ -352,7 +362,7 @@ export default async function HealthPage() {
                   <div>
                     <div className="text-fg">
                       <Link
-                        href={`/t/sun/applications/${t.application_id}`}
+                        href={`/t/${tenantSlug}/applications/${t.application_id}`}
                         className="text-accent hover:underline"
                       >
                         App {t.application_id.slice(0, 8)}…
@@ -394,7 +404,7 @@ export default async function HealthPage() {
                 <li key={l.id} className="rounded-lg border border-bg-border bg-bg-deep/40 p-3 flex items-center justify-between gap-2">
                   <div>
                     <Link
-                      href={`/t/sun/leads/${l.id}`}
+                      href={`/t/${tenantSlug}/leads/${l.id}`}
                       className="font-bold text-fg hover:text-accent"
                     >
                       {name}

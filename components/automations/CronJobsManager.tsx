@@ -30,6 +30,7 @@ import {
   XCircle,
   Loader2,
 } from "lucide-react";
+import { friendlyDescription } from "@/lib/cron-descriptions";
 
 type ActionType = "script_run" | "snapshot_run" | "agent_prompt" | "webhook_post";
 
@@ -509,9 +510,17 @@ function JobRow({
               {job.action_type.replace(/_/g, " ")}
             </span>
           </div>
-          {job.description && (
-            <div className="text-sm text-fg-muted mt-2 leading-snug">{job.description}</div>
-          )}
+          {/* Prefer operator-friendly copy from lib/cron-descriptions
+              over the raw DB row (which is written for engineers and
+              references internal paths). Falls back to the DB string
+              when no override exists, so a newly-seeded job that's not
+              in the registry yet still renders something. */}
+          {(() => {
+            const text = friendlyDescription(job.name, job.description);
+            return text ? (
+              <div className="text-sm text-fg-muted mt-2 leading-snug">{text}</div>
+            ) : null;
+          })()}
           {justToggled && (
             <div className="mt-2 text-[11px] text-accent inline-flex items-center gap-1">
               <Clock className="w-3 h-3" />

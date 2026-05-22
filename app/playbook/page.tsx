@@ -162,23 +162,37 @@ function DefaultPlaybookIndex({ operatingManual }: { operatingManual: PlaybookFi
         action={<Tag tone="accent">v3 - canonical</Tag>}
       />
 
+      {/* Uniform-height grid — every card stretches to match the tallest
+          card in its row so the lineup reads as a clean lattice instead
+          of the prior mangled-blocks look. `h-full` on the wrapper +
+          card + content makes CSS Grid sync row heights; line-clamp on
+          the body caps long descriptions at 5 lines so a single
+          paragraph doesn't push everything else taller. CC's feedback
+          2026-05-22: "they need to be the same size, not weird
+          different-size blocks." */}
       <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-5">
         {SECTIONS.map((section, index) => {
           return (
-            <Link key={`${section.href}-${index}`} href={section.href} className="group block">
-              <Card>
-                <div className="flex items-start gap-4">
+            <Link
+              key={`${section.href}-${index}`}
+              href={section.href}
+              className="group block h-full"
+            >
+              <Card className="h-full">
+                <div className="flex items-start gap-4 h-full">
                   <div className="w-11 h-11 rounded-lg bg-accent-soft border border-accent-muted/30 flex items-center justify-center shrink-0 text-accent font-bold tracking-[0.16em] group-hover:bg-accent group-hover:text-bg transition-all">
                     {(index + 1).toString().padStart(2, "0")}
                   </div>
-                  <div className="flex-1 min-w-0">
+                  <div className="flex-1 min-w-0 flex flex-col">
                     <div className="text-fg font-bold text-base group-hover:text-accent transition-colors">
                       {section.title}
                     </div>
                     <div className="text-xs text-fg-muted mt-0.5 uppercase tracking-wider font-medium">
                       {section.subtitle}
                     </div>
-                    <p className="text-sm text-fg-muted mt-3 leading-relaxed">{section.body}</p>
+                    <p className="text-sm text-fg-muted mt-3 leading-relaxed line-clamp-5">
+                      {section.body}
+                    </p>
                   </div>
                 </div>
               </Card>
@@ -201,10 +215,10 @@ function DefaultPlaybookIndex({ operatingManual }: { operatingManual: PlaybookFi
               <Link
                 key={file.slug}
                 href={`/playbook/${file.slug}`}
-                className="group block"
+                className="group block h-full"
               >
-                <Card>
-                  <div className="flex items-start gap-3">
+                <Card className="h-full">
+                  <div className="flex items-start gap-3 h-full">
                     <div className="flex-1 min-w-0">
                       <div className="text-fg font-semibold group-hover:text-accent transition-colors">
                         {file.title}

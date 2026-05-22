@@ -114,9 +114,18 @@ export default async function AgentsPage() {
         title="Agents"
         subtitle="Every agent wired to your Command Center, plus the live event bus tape."
         action={
-          <Tag tone="accent">
-            {rows.filter((r) => r.live).length} / {enabled.length} live
-          </Tag>
+          <span
+            title={
+              rows.filter((r) => r.live).length === 0
+                ? `None of your ${enabled.length} agents have pinged in the last 15 minutes. Start an agent's autonomous loop on the paired machine (e.g. \`pm2 start bravo-autonomous\`) and it will turn green here.`
+                : `${rows.filter((r) => r.live).length} of ${enabled.length} agents have pinged in the last 15 minutes — their autonomous loops are running.`
+            }
+            className="inline-block"
+          >
+            <Tag tone={rows.filter((r) => r.live).length === 0 ? "neutral" : "engaged"}>
+              {rows.filter((r) => r.live).length} of {enabled.length} running
+            </Tag>
+          </span>
         }
       />
 
