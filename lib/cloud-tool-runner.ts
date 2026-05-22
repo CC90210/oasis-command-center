@@ -1133,6 +1133,12 @@ export type ResumeState = {
    *  the operator changed it mid-pause, the change applies on the next
    *  fresh /api/chat call, not on this one. */
   toolPalette?: string[];
+  /** Plan vs Build mode at the time of the pause. MUST persist across
+   *  resume — otherwise the second half of the turn would unlock write
+   *  tools that were filtered out before the pause. The system prompt
+   *  overlay is already carried in `system` above; this field re-applies
+   *  the tool filter inside runIterationLoop on resume. */
+  chatMode?: ChatPlanMode;
 };
 
 export type ToolLoopRequest = {
@@ -1263,6 +1269,10 @@ export async function* resumeAnthropicTurn(
     maxTokens: resume.maxTokens,
     enableTools: resume.enableTools,
     toolPalette: resume.toolPalette,
+    // Re-apply the chatMode tool filter on resume. The system prompt
+    // overlay is already baked into resume.system; this carries the
+    // tool-filter half of the plan-mode contract across the pause.
+    chatMode: resume.chatMode,
     history,
     startIter: resume.iteration + 1,
     startTotalIn: resume.totalIn,
@@ -1513,6 +1523,11 @@ async function* runIterationLoop(
           maxTokens,
           enableTools,
           toolPalette: args.toolPalette,
+          // Critical: persist chatMode across the pause so the tool
+          // filter re-applies on resume. Without this, a plan-mode turn
+          // that pauses for a deferred bridge tool would silently regain
+          // the full tool registry on resume.
+          chatMode: args.chatMode,
         },
       };
       return;

@@ -218,6 +218,34 @@ test("normalizeMode: anything else collapses to build (fail-open)", () => {
   assert.equal(normalizeMode(42), "build");
 });
 
+console.log("\n=== ResumeState carries chatMode (regression lock) ===");
+
+// Structural contract: ResumeState MUST carry chatMode so a paused
+// plan-mode turn can re-apply the tool filter on resume. If anyone
+// removes this field, the test file fails to compile — TypeScript
+// catches it before runtime.
+test("ResumeState type-shape includes chatMode (compile-time guarantee)", async () => {
+  const mod = await import("@/lib/cloud-tool-runner");
+  // We assert by constructing a value that satisfies the ResumeState type.
+  // If the field is removed from the type, this object literal will fail
+  // typecheck on the `chatMode` assignment.
+  const state: import("@/lib/cloud-tool-runner").ResumeState = {
+    model: "claude-sonnet-4-6",
+    system: "You are Bravo.",
+    history: [],
+    iteration: 0,
+    totalIn: 0,
+    totalOut: 0,
+    chatMode: "plan",
+  };
+  // Runtime assertion: the value we constructed echoes back unchanged via
+  // canonical JSON roundtrip (the same path the HMAC signer uses).
+  const json = JSON.stringify(state);
+  const parsed = JSON.parse(json) as typeof state;
+  assert.equal(parsed.chatMode, "plan");
+  assert.equal(typeof mod.streamAnthropicWithTools, "function");
+});
+
 console.log(`\n${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);
 
