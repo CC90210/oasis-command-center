@@ -13,7 +13,11 @@ import {
   renderHelp,
   type SlashCommandName,
 } from "@/lib/chat-modes/slash-parser";
-import { filterCommands, filterArgCandidates } from "@/components/chat/SlashCommandMenu";
+import {
+  filterCommands,
+  filterArgCandidates,
+  stripDescriptionPreamble,
+} from "@/components/chat/SlashCommandMenu";
 import {
   composeSystemPrompt,
   filterToolsForMode,
@@ -199,6 +203,35 @@ test("arg filter matches label substring (case-insensitive)", () => {
 
 test("arg filter — gibberish returns empty list", () => {
   assert.deepEqual(filterArgCandidates("zzz", SAMPLE_ARGS), []);
+});
+
+console.log("\n=== stripDescriptionPreamble (hint cleanup) ===");
+
+test("strips '/cmd — ' preamble for no-arg commands", () => {
+  const out = stripDescriptionPreamble("/clear — reset the conversation history.");
+  assert.equal(out, "reset the conversation history.");
+});
+
+test("strips '/cmd <arg> — ' preamble for arg commands (regression — the OLD regex missed these)", () => {
+  // The previous helper used /^\\/\\w+\\s*[—-]\\s*/ which only matched
+  // when the dash came right after the command word. /agent <slug> —
+  // ... had the <slug> placeholder in between and slipped through,
+  // duplicating the command name in the dropdown row.
+  const out = stripDescriptionPreamble(
+    "/agent <slug> — switch the agent persona (e.g., /agent atlas). Resets history.",
+  );
+  assert.equal(out, "switch the agent persona (e.g., /agent atlas). Resets history.");
+});
+
+test("falls back to the original string when no dash is present", () => {
+  assert.equal(stripDescriptionPreamble("no dash here"), "no dash here");
+});
+
+test("splits on the FIRST dash only — later dashes in the body are preserved", () => {
+  const out = stripDescriptionPreamble(
+    "/cmd — first part — second part",
+  );
+  assert.equal(out, "first part — second part");
 });
 
 console.log("\n=== plan-mode ===");

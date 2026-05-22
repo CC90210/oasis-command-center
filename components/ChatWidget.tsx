@@ -358,7 +358,14 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
   const [slashSelectedIdx, setSlashSelectedIdx] = useState(0);
   const [slashMenuDismissed, setSlashMenuDismissed] = useState(false);
   const slashMenuTrigger = /^\/[a-z]*$/i.exec(input.trim());
-  const slashMenuOpen = !!slashMenuTrigger && !slashMenuDismissed && !streaming;
+  // Derive a stable boolean for the dismissal effect's dep array. The
+  // raw RegExpExecArray is a fresh object every render, so depending on
+  // it directly fires the effect every keystroke — harmless (setState
+  // is a no-op on same value) but wasteful. The boolean only changes
+  // when the trigger pattern transitions, which is what we actually
+  // want.
+  const hasSlashMenuTrigger = !!slashMenuTrigger;
+  const slashMenuOpen = hasSlashMenuTrigger && !slashMenuDismissed && !streaming;
   const slashQuery = slashMenuTrigger ? slashMenuTrigger[0].slice(1).toLowerCase() : "";
   // Reset selection + dismissal whenever the trigger string changes so the
   // operator never sees a stale highlighted row (e.g., index 2 carried
@@ -370,8 +377,8 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
     // Auto-undismiss when the input leaves slash-trigger shape — so the
     // operator gets the menu back on the next attempt without having
     // to clear and retype.
-    if (!slashMenuTrigger) setSlashMenuDismissed(false);
-  }, [slashMenuTrigger]);
+    if (!hasSlashMenuTrigger) setSlashMenuDismissed(false);
+  }, [hasSlashMenuTrigger]);
 
   // Arg-completion menu — fires when the input is `/agent <query>` or
   // `/model <query>`. The arg menu and the command menu are mutually
@@ -383,14 +390,16 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
     ? (slashArgTrigger[1]!.toLowerCase() as "agent" | "model")
     : null;
   const slashArgQuery = slashArgTrigger ? (slashArgTrigger[2] || "").trim() : "";
+  // Stable boolean — see slashMenuTrigger above for the rationale.
+  const hasSlashArgTrigger = !!slashArgTrigger;
   const [slashArgSelectedIdx, setSlashArgSelectedIdx] = useState(0);
   const [slashArgDismissed, setSlashArgDismissed] = useState(false);
   useEffect(() => {
     setSlashArgSelectedIdx(0);
   }, [slashArgQuery, slashArgCommand]);
   useEffect(() => {
-    if (!slashArgTrigger) setSlashArgDismissed(false);
-  }, [slashArgTrigger]);
+    if (!hasSlashArgTrigger) setSlashArgDismissed(false);
+  }, [hasSlashArgTrigger]);
 
   // Candidate list per arg command. Memo so we don't rebuild on every
   // keystroke; the inputs (agentKeys, configs) only change rarely.
@@ -422,7 +431,7 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
   }, [slashArgCommand, agentKeys, configs]);
 
   const slashArgOpen =
-    !!slashArgTrigger &&
+    hasSlashArgTrigger &&
     !slashArgDismissed &&
     !streaming &&
     argCandidates.length > 0;

@@ -17,6 +17,23 @@
 
 import { ALL_COMMANDS, COMMAND_DESCRIPTIONS, type SlashCommandName } from "@/lib/chat-modes/slash-parser";
 
+/**
+ * Strip the leading "/command [<args>] — " preamble from a command's
+ * description so the dropdown's hint shows ONLY the explanatory text.
+ * Without this the row reads "/agent" (bold) then "/agent <slug> —
+ * switch the agent persona..." (hint) — the operator sees the command
+ * name twice.
+ *
+ * Splits on the first em-dash or hyphen surrounded by spaces. Falls
+ * back to the original string when the description has no dash (so a
+ * single-sentence description shows verbatim instead of getting empty).
+ */
+export function stripDescriptionPreamble(desc: string): string {
+  const dashMatch = desc.match(/\s[—-]\s/);
+  if (!dashMatch || dashMatch.index === undefined) return desc;
+  return desc.slice(dashMatch.index + dashMatch[0].length).trim();
+}
+
 type Props = {
   /** The string the operator has typed after the leading slash, lowercased.
    *  When this is empty (the operator just typed "/"), every command shows.
@@ -89,7 +106,7 @@ export function SlashCommandMenu({ query, selectedIndex, onSelect }: Props) {
           >
             <div className="font-mono font-bold">/{cmd}</div>
             <div className="text-[10px] text-fg-dim mt-0.5 leading-snug">
-              {COMMAND_DESCRIPTIONS[cmd].replace(/^\/\w+\s*[—-]\s*/, "")}
+              {stripDescriptionPreamble(COMMAND_DESCRIPTIONS[cmd])}
             </div>
           </button>
         );
