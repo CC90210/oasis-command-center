@@ -965,14 +965,15 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
         return;
       case "plan":
         setPlanMode("plan");
-        // Plan mode is honored ONLY on the cloud routing path
-        // (/api/chat with native Anthropic tool_use). The CLI bridge at
-        // localhost:9100/chat owns its own tool gating and doesn't read
-        // chat_mode — say so out loud so the operator isn't surprised
-        // when a /plan-flagged CLI turn still runs write tools.
-        if (effectiveMode === "cli") {
+        // Plan mode is honored on both the cloud routing path AND the CLI
+        // bridge path since 2026-05-22. Cloud (/api/chat with Anthropic
+        // tool_use) filters write tools + appends a plan overlay; CLI
+        // bridge (localhost:9100/chat) maps to --permission-mode plan when
+        // the runtime is Claude (hard gate), or prepends an advisory
+        // overlay when the runtime is Codex/Gemini.
+        if (effectiveMode === "cli" && cliRuntime !== "claude") {
           appendSystem(
-            "Plan mode set — but you're currently in CLI (local bridge) mode. The bridge runs its own tool harness and doesn't honor /plan. Switch the mode picker to API to make plan mode take effect.",
+            `Plan mode set — but you're routed through the ${cliRuntime} CLI which has no native plan-mode gate. The bridge will prepend an advisory overlay, but write tools are NOT hard-blocked. Switch to claude CLI or API mode for a hard gate.`,
           );
         } else {
           appendSystem(
@@ -1116,6 +1117,12 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
               cli_provider: cliRuntime,
               attachments: attachmentPayload,
               tab_id: tabId,  // warm pool key — stable across the widget's lifetime
+              // Plan vs Build — bridge_chat_server honors this since 2026-05-22.
+              // Claude CLI path: swaps --permission-mode to "plan", bypasses
+              // warm pool so the cold spawn picks up the new mode.
+              // Legacy /v1/messages path: filters tools + plan overlay.
+              // Codex/Gemini CLI: advisory overlay only (no hard gate).
+              chat_mode: planMode,
             }
           : {
               agent_key: agent,
@@ -1777,18 +1784,14 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
                 },
               ]);
             }}
-            className={`inline-flex items-center gap-1 text-[10px] uppercase tracking-wider font-bold px-2 py-1 rounded-md border transition-colors ${
-              effectiveMode === "cli"
-                ? "border-fg-faint/40 bg-fg-faint/10 text-fg-dim hover:bg-fg-faint/20"
-                : "border-status-warm/40 bg-status-warm/10 text-status-warm hover:bg-status-warm/20"
-            }`}
+            className="inline-flex items-center gap-1 text-[10px] uppercase tracking-wider font-bold px-2 py-1 rounded-md border transition-colors border-status-warm/40 bg-status-warm/10 text-status-warm hover:bg-status-warm/20"
             title={
               effectiveMode === "cli"
-                ? "Plan mode is set, but you're routed to the CLI bridge which doesn't honor it. Switch to API mode to make plan mode take effect. Click to exit plan (same as /build)."
+                ? "Plan mode active — Claude CLI uses --permission-mode plan; Codex/Gemini CLIs apply the overlay advisorily. Click to exit (same as /build)."
                 : "Plan mode active — agent is restricted to read-only tools. Click to exit (same as /build)."
             }
           >
-            ● PLAN MODE{effectiveMode === "cli" ? " (CLI ignores)" : ""}
+            ● PLAN MODE
           </button>
         )}
         {bridgeReady && effectiveMode === "cli" && (
