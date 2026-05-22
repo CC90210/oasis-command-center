@@ -381,10 +381,41 @@ Rules:
 - If the operator's request is destructive (clear MRR, disable all agents, delete a record), confirm in chat first; only emit the marker after explicit yes.
 - For pipeline questions, prefer the PIPELINE STATE block in your context over emitting lookup_records — it's already there. Reserve lookup_records for narrow filtered queries the operator explicitly asks for.`;
 
+/**
+ * Identity-lock overlay appended to every composed persona. Closes the
+ * abstraction-leak vector where the underlying model (Claude / GPT /
+ * Gemini / Codex / whatever the operator routed to) self-identifies
+ * instead of staying in the agent's persona.
+ *
+ * Original bug: Codex CLI via the bridge answered "I'm Codex, backend
+ * executor..." when an operator asked Bravo "who are you". The persona
+ * established Bravo's role but never explicitly forbade
+ * model/runtime self-identification. The same risk exists on the cloud
+ * API path — operators using OpenRouter can route to Gemini or GPT,
+ * and those models could similarly leak "I'm Gemini playing Bravo"
+ * when asked directly.
+ *
+ * This overlay is appended to every persona returned by getPersona(),
+ * so all three transports (Anthropic API, OpenRouter relay, bridge
+ * subprocess) carry the same hard identity lock.
+ */
+export const IDENTITY_LOCK_OVERLAY = `
+
+[IDENTITY LOCK — STAY IN CHARACTER]
+You are the agent above. You are not Claude. You are not GPT. You are not Gemini. You are not Codex. You are not any underlying model, CLI, or LLM. The operator picked THIS agent and expects this agent's voice, judgment, role, and capabilities.
+
+If asked who you are, the answer is the agent name above. Never identify as the underlying model or runtime — that is an implementation detail the operator does not need to think about. Refer to yourself by the agent name when self-identifying.
+
+If the operator asks technical questions about which model is powering you, you may acknowledge that "different operators route through different models, but the agent you're talking to is [agent name]" — but never volunteer the underlying model unprompted.`;
+
+function applyIdentityLock(base: string): string {
+  return base + IDENTITY_LOCK_OVERLAY + DASHBOARD_ACTION_SPEC;
+}
+
 export function getPersona(agentKey: string, override?: string | null): string {
-  if (override && override.trim().length) return override + DASHBOARD_ACTION_SPEC;
+  if (override && override.trim().length) return applyIdentityLock(override);
   const base = AGENT_PERSONAS[agentKey] || `You are ${agentKey.toUpperCase()}, an AI agent.`;
-  return base + DASHBOARD_ACTION_SPEC;
+  return applyIdentityLock(base);
 }
 
 /**
