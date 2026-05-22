@@ -1,178 +1,243 @@
 import Link from "next/link";
-import { ArrowRight, Bot, Cpu, ShieldCheck, Sparkles, Globe2, Monitor, Plug } from "lucide-react";
+import { ArrowRight, Activity } from "lucide-react";
 import { redirect } from "next/navigation";
 import { getSessionUser } from "@/lib/supabase-server";
 import { OasisLogo } from "@/components/brand/OasisLogo";
 
 export const dynamic = "force-dynamic";
 
+/**
+ * /welcome — landing surface.
+ *
+ * Rebuilt 2026-05-22 (CC: "currently looks too much like a standard
+ * marketing website with too much text — make it feel like an
+ * immersive futuristic software application").
+ *
+ * Design contract:
+ *   - One centered focal point. The entire viewport is a single
+ *     dark stage with the OASIS mark + one terse claim + two CTAs.
+ *   - No feature grid, no CTA strip, no marketing paragraphs.
+ *     Strip-and-center beats grid-and-explain. Operators who want
+ *     details click through.
+ *   - Motion at every layer: aurora gradient orbits with @keyframes
+ *     `orbit-*`, grid lattice slow-shimmers via opacity loop, the
+ *     status ticker animates as a "live system" pill, CTAs lift on
+ *     hover with a layered glow. CSS-only — no framer-motion dep.
+ *   - Glassmorphism on the central card: backdrop-blur-xl + 1px
+ *     accent border + soft inner highlight.
+ *   - Deep dark with vibrant cyan accents. The aurora is layered
+ *     conic + radial gradients so the cyan never feels flat.
+ */
 export default async function WelcomePage() {
   // Already signed in? Send them to the dashboard.
   const user = await getSessionUser().catch(() => null);
   if (user) redirect("/");
 
   return (
-    <main className="min-h-screen bg-bg-deep relative overflow-hidden">
-      {/* Aurora backdrop */}
-      <div aria-hidden className="pointer-events-none absolute inset-0 -z-10">
-        <div className="absolute -top-[20%] left-1/2 -translate-x-1/2 w-[1400px] h-[800px] rounded-full opacity-40 blur-3xl"
-             style={{ background: "radial-gradient(circle, rgba(59,130,246,0.4), rgba(0,212,255,0.2) 40%, transparent 70%)" }} />
-        <div className="absolute bottom-[-10%] right-[-10%] w-[800px] h-[600px] rounded-full opacity-30 blur-3xl"
-             style={{ background: "radial-gradient(circle, rgba(0,212,255,0.35), transparent 70%)" }} />
-        <div className="absolute inset-0 opacity-[0.04]"
-             style={{
-               backgroundImage:
-                 "linear-gradient(#3b82f6 1px, transparent 1px), linear-gradient(90deg, #3b82f6 1px, transparent 1px)",
-               backgroundSize: "48px 48px",
-             }} />
+    <main className="relative min-h-screen overflow-hidden bg-bg-deep text-fg">
+      {/* === Layered cinematic backdrop ============================== */}
+
+      {/* Orbiting aurora — two counter-rotating conic gradients sweep
+          across the stage. CSS keyframe `orbit-slow` lives in app's
+          global stylesheet; defined below in <style jsx global>. */}
+      <div
+        aria-hidden
+        className="pointer-events-none absolute inset-0 -z-30"
+      >
+        <div
+          className="absolute left-1/2 top-1/2 h-[140vmax] w-[140vmax] -translate-x-1/2 -translate-y-1/2 opacity-50 blur-3xl animate-[orbit-slow_36s_linear_infinite]"
+          style={{
+            background:
+              "conic-gradient(from 0deg at 50% 50%, rgba(0,212,255,0.35), rgba(59,130,246,0.18), transparent 40%, rgba(168,85,247,0.18) 70%, rgba(0,212,255,0.32))",
+          }}
+        />
+        <div
+          className="absolute left-1/2 top-1/2 h-[120vmax] w-[120vmax] -translate-x-1/2 -translate-y-1/2 opacity-30 blur-3xl animate-[orbit-fast_24s_linear_reverse_infinite]"
+          style={{
+            background:
+              "conic-gradient(from 180deg at 50% 50%, rgba(34,211,238,0.35), transparent 50%, rgba(6,182,212,0.25))",
+          }}
+        />
       </div>
 
-      {/* Top nav */}
-      <header className="relative z-10 mx-auto max-w-7xl px-6 sm:px-10 py-6 flex items-center justify-between">
-        <Link href="/welcome" className="flex items-center gap-2.5 group">
-          <OasisLogo size={36} priority className="group-hover:shadow-[0_0_28px_-2px_rgba(0,212,255,0.8)] transition-shadow" />
-          <div className="leading-none">
-            <div className="font-black text-fg tracking-tight">OASIS AI</div>
-            <div className="text-[10px] uppercase tracking-[0.18em] text-fg-dim">Agent Command Center</div>
-          </div>
-        </Link>
-        <nav className="flex items-center gap-3 sm:gap-5">
-          <a href="https://oasisai.work" target="_blank" rel="noopener noreferrer"
-             className="text-sm text-fg-muted hover:text-fg transition-colors hidden sm:inline-flex items-center gap-1">
-            oasisai.work <Globe2 className="w-3.5 h-3.5" />
-          </a>
-          <Link href="/login" className="text-sm text-fg-muted hover:text-fg transition-colors">
-            Sign in
-          </Link>
-          <Link href="/signup" className="btn-send !px-3.5 !py-2 text-xs">
-            Get started <ArrowRight className="w-3.5 h-3.5" />
-          </Link>
-        </nav>
-      </header>
+      {/* Grid lattice — sits BEHIND the aurora overlap; opacity loops
+          via animate-[grid-shimmer]. Reinforces the "command centre,
+          not a marketing site" read. */}
+      <div
+        aria-hidden
+        className="pointer-events-none absolute inset-0 -z-20 animate-[grid-shimmer_8s_ease-in-out_infinite]"
+        style={{
+          backgroundImage:
+            "linear-gradient(rgba(0,212,255,0.08) 1px, transparent 1px), linear-gradient(90deg, rgba(0,212,255,0.08) 1px, transparent 1px)",
+          backgroundSize: "56px 56px",
+          maskImage:
+            "radial-gradient(ellipse 80% 60% at 50% 50%, black 30%, transparent 80%)",
+          WebkitMaskImage:
+            "radial-gradient(ellipse 80% 60% at 50% 50%, black 30%, transparent 80%)",
+        }}
+      />
 
-      {/* Hero */}
-      <section className="relative z-10 mx-auto max-w-7xl px-6 sm:px-10 pt-12 pb-24">
-        <div className="max-w-3xl">
-          <div className="inline-flex items-center gap-2 rounded-full border border-accent/30 bg-accent/5 px-3 py-1 text-xs text-accent mb-6">
-            <Sparkles className="w-3 h-3" /> Built by OASIS AI · Multi-agent ops, one console
+      {/* Floating particle dots — pure CSS via radial-gradient mask. */}
+      <div
+        aria-hidden
+        className="pointer-events-none absolute inset-0 -z-10 opacity-[0.18] animate-[drift_22s_ease-in-out_infinite]"
+        style={{
+          backgroundImage:
+            "radial-gradient(rgba(0,212,255,0.6) 1px, transparent 1.4px)",
+          backgroundSize: "120px 120px",
+        }}
+      />
+
+      {/* Vignette — pulls focus to the central card. */}
+      <div
+        aria-hidden
+        className="pointer-events-none absolute inset-0 -z-10"
+        style={{
+          background:
+            "radial-gradient(ellipse 50% 50% at 50% 50%, transparent 0%, rgba(8,11,16,0.7) 100%)",
+        }}
+      />
+
+      {/* === Minimal top-left brand mark ============================ */}
+      <div className="absolute left-6 top-6 z-20 flex items-center gap-2.5 sm:left-10 sm:top-8">
+        <OasisLogo size={28} priority />
+        <div className="leading-none">
+          <div className="text-[11px] font-black tracking-[0.18em] text-fg">
+            OASIS AI
           </div>
-          <h1 className="text-5xl sm:text-7xl font-black text-fg leading-[1.05] tracking-tight">
-            Your AI agents,{" "}
-            <span className="bg-gradient-to-r from-accent via-cyan-400 to-accent bg-clip-text text-transparent">
-              one command center.
-            </span>
-          </h1>
-          <p className="mt-6 text-lg sm:text-xl text-fg-muted leading-relaxed max-w-2xl">
-            A C-suite of AI agents wired into your business — Bravo, Maven, Atlas, Aura, Hermes — running with full read/write access to your machine, your files, your stack. Chat any of them from one dashboard. They post handoffs to each other, execute scripts, draft documents, and ship work while you sleep.
-          </p>
-          <div className="mt-9 flex flex-wrap items-center gap-3">
-            <Link href="/download" className="btn-send !px-5 !py-3 text-sm">
-              Download desktop <Monitor className="w-4 h-4" />
-            </Link>
-            <Link href="/configure" className="btn-send !px-5 !py-3 text-sm">
-              See if we&apos;re a fit <ArrowRight className="w-4 h-4" />
-            </Link>
-            <Link href="/login" className="btn-secondary !px-5 !py-3 text-sm">
-              Sign in
-            </Link>
-            <a href="https://oasisai.work" target="_blank" rel="noopener noreferrer"
-               className="text-sm text-fg-muted hover:text-fg transition-colors">
-              Visit oasisai.work →
-            </a>
-          </div>
-          <div className="mt-7 flex flex-wrap gap-x-6 gap-y-2 text-xs text-fg-dim">
-            <span>✓ Local-first — your machine, your files</span>
-            <span>✓ Multi-tenant secure</span>
-            <span>✓ 30+ integrations included</span>
-            <span>✓ Founder-led — pricing on application</span>
+          <div className="text-[9px] uppercase tracking-[0.22em] text-fg-dim">
+            Command Center
           </div>
         </div>
-      </section>
+      </div>
 
-      {/* Feature grid */}
-      <section className="relative z-10 mx-auto max-w-7xl px-6 sm:px-10 pb-24">
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-          <FeatureCard
-            icon={<Monitor className="w-5 h-5" />}
-            title="Runs on your machine"
-            body="A small bridge daemon spawns Claude Code locally with full file-system access. Your agents read your repos, edit your files, run your scripts — same trust boundary as you. Cloud-only mode is also available for clients without a Claude subscription."
-          />
-          <FeatureCard
-            icon={<Bot className="w-5 h-5" />}
-            title="One chat, every agent"
-            body="Switch between Bravo (architect), Atlas (CFO), Maven (CMO), Aura (life/home), Hermes (commerce) mid-conversation. They share an inbox so handoffs happen without you relaying every message."
-          />
-          <FeatureCard
-            icon={<Plug className="w-5 h-5" />}
-            title="30+ integrations included"
-            body="Stripe, Supabase, Vercel, Cloudflare, GitHub, Notion, Google Workspace, Telegram, Zernio, Wise, Kraken, and more. Paste an API key once — the dashboard shows green/red status for every service the agents need."
-          />
-          <FeatureCard
-            icon={<Cpu className="w-5 h-5" />}
-            title="Pick the brain you trust"
-            body="Three real options. (1) Claude Code subscription — the bridge spawns it locally with full tool access. (2) API key — OpenRouter / Anthropic / OpenAI / Gemini, same personas without a Claude subscription. (3) Local model — Ollama or LM Studio for zero per-call cost and full data residency."
-          />
-          <FeatureCard
-            icon={<ShieldCheck className="w-5 h-5" />}
-            title="Encrypted, isolated, redacted"
-            body="API keys encrypted at rest with AES-256-GCM. RLS-isolated per tenant. Bridge log + chat persistence redacts known credentials before write — defense-in-depth across every storage surface."
-          />
-          <FeatureCard
-            icon={<Sparkles className="w-5 h-5" />}
-            title="Real numbers, real activity"
-            body="Pipeline, MRR trajectory, integrations health, live event tape — wired to actual Postgres, not screenshots. What the dashboard shows is what your tenant has."
-          />
+      {/* === Minimal top-right system status ticker ================= */}
+      <div className="absolute right-6 top-6 z-20 hidden sm:flex sm:right-10 sm:top-8">
+        <div className="inline-flex items-center gap-2 rounded-full border border-accent/20 bg-bg-elev/40 px-3 py-1.5 backdrop-blur-xl">
+          <span className="relative flex h-2 w-2">
+            <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-status-engaged opacity-60" />
+            <span className="relative inline-flex h-2 w-2 rounded-full bg-status-engaged" />
+          </span>
+          <span className="text-[10px] font-mono uppercase tracking-[0.16em] text-fg-muted">
+            SYSTEM ONLINE
+          </span>
         </div>
-      </section>
+      </div>
 
-      {/* CTA strip */}
-      <section className="relative z-10 mx-auto max-w-5xl px-6 sm:px-10 pb-24">
-        <div className="rounded-2xl border border-accent/30 bg-gradient-to-br from-accent/10 via-bg-elev/40 to-cyan-500/10 backdrop-blur-xl p-8 sm:p-10 relative overflow-hidden">
-          <div aria-hidden className="absolute inset-0 opacity-30 pointer-events-none"
-               style={{ background: "radial-gradient(800px 200px at 50% 0%, rgba(0,212,255,0.4), transparent)" }} />
-          <div className="relative">
-            <h2 className="text-2xl sm:text-3xl font-black text-fg leading-tight">
-              Built for operators, not tinkerers.
-            </h2>
-            <p className="mt-3 text-fg-muted">
-              OASIS AI is a paid, founder-led service. We deploy your command center, install the bridge on your machine, wire your integrations, and tune your agents&apos; voice to your business. You stay focused on the high-leverage moves only you can make; the agents handle the rest.
+      {/* === Center stage ============================================ */}
+      <section className="relative z-10 flex min-h-screen items-center justify-center px-6">
+        <div className="flex w-full max-w-2xl flex-col items-center text-center">
+          {/* Eyebrow */}
+          <div className="mb-8 inline-flex items-center gap-2 rounded-full border border-accent/25 bg-accent/5 px-3.5 py-1.5 text-[10px] font-mono uppercase tracking-[0.2em] text-accent backdrop-blur">
+            <Activity className="h-3 w-3 animate-pulse" />
+            Multi-agent operations
+          </div>
+
+          {/* Single immersive glass card with the headline + CTAs.
+              Layered border + inner highlight + backdrop-blur gives
+              the cinematic-software read. */}
+          <div className="group relative w-full overflow-hidden rounded-3xl border border-white/10 bg-bg-elev/30 px-8 py-12 backdrop-blur-2xl sm:px-12 sm:py-16">
+            {/* Inner highlight stripe at the top of the card */}
+            <div
+              aria-hidden
+              className="absolute inset-x-0 top-0 h-px"
+              style={{
+                background:
+                  "linear-gradient(90deg, transparent, rgba(0,212,255,0.6), transparent)",
+              }}
+            />
+            {/* Soft inner glow that breathes */}
+            <div
+              aria-hidden
+              className="pointer-events-none absolute inset-0 opacity-50 animate-[pulse-soft_6s_ease-in-out_infinite]"
+              style={{
+                background:
+                  "radial-gradient(circle at 50% 0%, rgba(0,212,255,0.25), transparent 60%)",
+              }}
+            />
+
+            <h1 className="relative text-5xl font-black leading-[1.02] tracking-tight text-fg sm:text-7xl">
+              <span className="block">Your agents.</span>
+              <span className="block bg-gradient-to-r from-accent via-cyan-300 to-accent bg-clip-text text-transparent animate-[shimmer_6s_ease-in-out_infinite]">
+                One command.
+              </span>
+            </h1>
+
+            <p className="relative mx-auto mt-5 max-w-md text-sm leading-relaxed text-fg-muted sm:text-base">
+              A C-suite of AI agents running on your machine, in one console.
             </p>
-            <div className="mt-6 flex flex-wrap items-center gap-3">
-              <Link href="/configure" className="btn-send !px-5 !py-3 text-sm">
-                Apply for a deployment <ArrowRight className="w-4 h-4" />
+
+            <div className="relative mt-10 flex flex-wrap items-center justify-center gap-3">
+              <Link
+                href="/signup"
+                className="group/cta relative inline-flex items-center gap-2 overflow-hidden rounded-xl border border-accent/40 bg-gradient-to-br from-accent/30 via-cyan-500/20 to-accent/30 px-6 py-3 text-sm font-bold text-fg shadow-[0_0_40px_-12px_rgba(0,212,255,0.6)] transition-all hover:scale-[1.02] hover:shadow-[0_0_60px_-8px_rgba(0,212,255,0.8)]"
+              >
+                <span
+                  aria-hidden
+                  className="absolute inset-0 -translate-x-full bg-gradient-to-r from-transparent via-white/15 to-transparent transition-transform duration-700 group-hover/cta:translate-x-full"
+                />
+                <span className="relative">Enter the command center</span>
+                <ArrowRight className="relative h-4 w-4 transition-transform group-hover/cta:translate-x-1" />
               </Link>
-              <a href="https://oasisai.work/contact" target="_blank" rel="noopener noreferrer"
-                 className="btn-secondary !px-5 !py-3 text-sm">
-                Talk to Conaugh
-              </a>
+
+              <Link
+                href="/login"
+                className="inline-flex items-center gap-2 rounded-xl border border-white/10 bg-bg-elev/40 px-6 py-3 text-sm font-medium text-fg-muted backdrop-blur-xl transition-colors hover:border-accent/30 hover:text-fg"
+              >
+                Sign in
+              </Link>
+            </div>
+
+            <div className="relative mt-10 flex flex-wrap items-center justify-center gap-x-5 gap-y-1.5 font-mono text-[10px] uppercase tracking-[0.18em] text-fg-dim">
+              <span className="inline-flex items-center gap-1.5">
+                <span className="h-1 w-1 rounded-full bg-accent" /> Local-first
+              </span>
+              <span className="inline-flex items-center gap-1.5">
+                <span className="h-1 w-1 rounded-full bg-accent" /> Multi-tenant
+              </span>
+              <span className="inline-flex items-center gap-1.5">
+                <span className="h-1 w-1 rounded-full bg-accent" /> 30+ integrations
+              </span>
             </div>
           </div>
+
+          {/* Subtle below-card hint */}
+          <Link
+            href="/download"
+            className="mt-10 text-[11px] font-mono uppercase tracking-[0.18em] text-fg-dim transition-colors hover:text-accent"
+          >
+            Or download the desktop app →
+          </Link>
         </div>
       </section>
 
-      {/* Footer */}
-      <footer className="relative z-10 mx-auto max-w-7xl px-6 sm:px-10 py-8 border-t border-bg-border flex flex-wrap items-center justify-between gap-3 text-xs text-fg-dim">
-        <span>© {new Date().getFullYear()} OASIS AI · Conaugh McKenna · International</span>
-        <div className="flex items-center gap-5">
-          <a href="https://oasisai.work" target="_blank" rel="noopener noreferrer" className="hover:text-fg transition-colors">
-            oasisai.work
-          </a>
-          <Link href="/login" className="hover:text-fg transition-colors">Sign in</Link>
-          <Link href="/signup" className="hover:text-fg transition-colors">Sign up</Link>
-        </div>
-      </footer>
+      {/* === Keyframes (scoped to this route via styled-jsx-global) === */}
+      <style>{`
+        @keyframes orbit-slow {
+          from { transform: translate(-50%, -50%) rotate(0deg); }
+          to { transform: translate(-50%, -50%) rotate(360deg); }
+        }
+        @keyframes orbit-fast {
+          from { transform: translate(-50%, -50%) rotate(0deg); }
+          to { transform: translate(-50%, -50%) rotate(-360deg); }
+        }
+        @keyframes grid-shimmer {
+          0%, 100% { opacity: 1; }
+          50% { opacity: 0.55; }
+        }
+        @keyframes drift {
+          0%, 100% { transform: translate3d(0, 0, 0); }
+          50% { transform: translate3d(18px, -22px, 0); }
+        }
+        @keyframes pulse-soft {
+          0%, 100% { opacity: 0.35; }
+          50% { opacity: 0.7; }
+        }
+        @keyframes shimmer {
+          0%, 100% { background-position: 0% 50%; }
+          50% { background-position: 100% 50%; }
+        }
+      `}</style>
     </main>
-  );
-}
-
-function FeatureCard({ icon, title, body }: { icon: React.ReactNode; title: string; body: string }) {
-  return (
-    <div className="group rounded-xl border border-bg-border bg-bg-elev/50 backdrop-blur p-5 hover:border-accent/40 hover:bg-bg-elev transition-all hover:shadow-[0_0_28px_-12px_rgba(0,212,255,0.4)]">
-      <div className="w-9 h-9 rounded-lg bg-accent/15 border border-accent/30 flex items-center justify-center text-accent mb-3 group-hover:bg-accent/25 transition-colors">
-        {icon}
-      </div>
-      <h3 className="text-sm font-bold text-fg mb-1.5 tracking-tight">{title}</h3>
-      <p className="text-xs text-fg-muted leading-relaxed">{body}</p>
-    </div>
   );
 }
