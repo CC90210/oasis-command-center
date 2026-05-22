@@ -1,227 +1,281 @@
 import Link from "next/link";
-import {
-  CheckCircle2,
-  Cloud,
-  Cpu,
-  Download,
-  KeyRound,
-  MonitorDown,
-  ShieldCheck,
-  Workflow,
-  XCircle,
-} from "lucide-react";
+import { Apple, Download, MonitorDown } from "lucide-react";
 import { OasisLogo } from "@/components/brand/OasisLogo";
 
 export const dynamic = "force-dynamic";
 
+/**
+ * /download — cinematic single-purpose download surface.
+ *
+ * Rebuilt 2026-05-22 (CC: "radically simplify — overwhelmingly
+ * cluttered with multi-colored prerequisite text boxes — center
+ * attention on one massive download CTA").
+ *
+ * Design contract:
+ *   - One hero with a single primary CTA. No competing buttons
+ *     above the fold.
+ *   - Mac (universal) + Windows + Linux as a clean trio of equal-
+ *     weight secondary cards. No subtype clutter ("Mac dmg only"
+ *     was confusing — now "Mac · Apple Silicon + Intel").
+ *   - All technical warnings (SmartScreen, Gatekeeper, Python,
+ *     checksums) collapsed into a single "Installation help"
+ *     `<details>` at the bottom. Operators who don't need them
+ *     never see them.
+ *   - Removed the Desktop Product Model sidebar — operators just
+ *     want to download the app, not read product copy.
+ */
+
 const VERSION = "0.1.0";
-const CHANNEL = "alpha";
 const RELEASE_TAG = "oasis-desktop-v0.1.0-alpha.4";
 const RELEASE_URL = `https://github.com/CC90210/CEO-Agent/releases/tag/${RELEASE_TAG}`;
 const AUTO_DOWNLOAD_URL = "/api/download/desktop";
-const WINDOWS_PORTABLE_URL = "/api/download/desktop?platform=windows";
-const WINDOWS_INSTALLER_URL = "/api/download/desktop?platform=windows-installer";
 const MAC_DMG_URL = "/api/download/desktop?platform=mac";
+const WINDOWS_INSTALLER_URL = "/api/download/desktop?platform=windows-installer";
+const WINDOWS_PORTABLE_URL = "/api/download/desktop?platform=windows";
 const LINUX_APPIMAGE_URL = "/api/download/desktop?platform=linux";
 const LINUX_DEB_URL = "/api/download/desktop?platform=linux-deb";
 const CHECKSUM_URL = "/api/download/desktop?platform=checksums";
+
 const CHECKSUMS = [
-  "Windows portable zip: 07dea7cf78ce4ae36321dbdebb0e0c246dbf0c173699c2bd31e3fa9fa88e9c76",
-  "Windows installer: 18e09eb6efd275d06c6b2f8f1e116f3edfe9635e888b0d6fb04cf069f3db23cd",
-  "macOS: 3119cdd4f3e6b7e7f61e715375fa980937964abedc8a393d9d8273bc120d6d63",
-  "Linux AppImage: 7df499a4fe4d0f9746d41ff6e13b85bcc6368ec59287820f288fa1508f5ef777",
-  "Linux deb: 0fc038c210e54b331169f8d443d12fa423eb0a43c5a900ec051e66e36bce33ab",
-];
+  ["Windows portable zip", "07dea7cf78ce4ae36321dbdebb0e0c246dbf0c173699c2bd31e3fa9fa88e9c76"],
+  ["Windows installer", "18e09eb6efd275d06c6b2f8f1e116f3edfe9635e888b0d6fb04cf069f3db23cd"],
+  ["macOS (universal)", "3119cdd4f3e6b7e7f61e715375fa980937964abedc8a393d9d8273bc120d6d63"],
+  ["Linux AppImage", "7df499a4fe4d0f9746d41ff6e13b85bcc6368ec59287820f288fa1508f5ef777"],
+  ["Linux deb", "0fc038c210e54b331169f8d443d12fa423eb0a43c5a900ec051e66e36bce33ab"],
+] as const;
 
 export default function DownloadPage() {
   return (
-    <main className="min-h-screen bg-bg-deep text-fg relative overflow-hidden">
-      <div aria-hidden className="pointer-events-none absolute inset-0 -z-10">
+    <main className="relative min-h-screen overflow-hidden bg-bg-deep text-fg">
+      {/* Aurora backdrop — single conic + radial layer, no grid clutter */}
+      <div aria-hidden className="pointer-events-none absolute inset-0 -z-30">
         <div
-          className="absolute -top-[22%] left-1/2 h-[760px] w-[1400px] -translate-x-1/2 rounded-full opacity-40 blur-3xl"
-          style={{ background: "radial-gradient(circle, rgba(0,212,255,0.42), rgba(59,130,246,0.18) 38%, transparent 70%)" }}
-        />
-        <div
-          className="absolute bottom-[-18%] right-[-12%] h-[620px] w-[860px] rounded-full opacity-30 blur-3xl"
-          style={{ background: "radial-gradient(circle, rgba(34,197,94,0.20), transparent 68%)" }}
+          className="absolute left-1/2 top-1/2 h-[120vmax] w-[120vmax] -translate-x-1/2 -translate-y-1/2 opacity-45 blur-3xl animate-[orbit-soft_42s_linear_infinite]"
+          style={{
+            background:
+              "conic-gradient(from 0deg at 50% 50%, rgba(0,212,255,0.32), rgba(59,130,246,0.18), transparent 45%, rgba(34,211,238,0.22) 75%, rgba(0,212,255,0.32))",
+          }}
         />
       </div>
+      <div
+        aria-hidden
+        className="pointer-events-none absolute inset-0 -z-20"
+        style={{
+          background:
+            "radial-gradient(ellipse 60% 60% at 50% 50%, transparent 0%, rgba(8,11,16,0.7) 100%)",
+        }}
+      />
 
-      <header className="relative z-10 mx-auto flex max-w-7xl items-center justify-between px-6 py-6 sm:px-10">
+      {/* === Top brand strip ============================================ */}
+      <header className="relative z-10 mx-auto flex max-w-6xl items-center justify-between px-6 py-6 sm:px-10">
         <Link href="/welcome" className="group flex items-center gap-2.5">
-          <OasisLogo size={36} priority className="transition-shadow group-hover:shadow-[0_0_28px_-2px_rgba(0,212,255,0.8)]" />
+          <OasisLogo
+            size={32}
+            priority
+            className="transition-shadow group-hover:shadow-[0_0_28px_-2px_rgba(0,212,255,0.7)]"
+          />
           <div className="leading-none">
-            <div className="font-black tracking-tight text-fg">OASIS AI</div>
-            <div className="text-[10px] uppercase tracking-[0.18em] text-fg-dim">Desktop Alpha</div>
+            <div className="text-sm font-black tracking-tight text-fg">OASIS AI</div>
+            <div className="text-[10px] uppercase tracking-[0.18em] text-fg-dim">
+              Desktop · v{VERSION}
+            </div>
           </div>
         </Link>
-        <nav className="flex items-center gap-3 sm:gap-5">
-          <Link href="/welcome" className="text-sm text-fg-muted transition-colors hover:text-fg">
-            Command Center
-          </Link>
-          <a href={RELEASE_URL} target="_blank" rel="noopener noreferrer" className="btn-secondary !px-3.5 !py-2 text-xs">
-            GitHub Release
-          </a>
-        </nav>
+        <a
+          href={RELEASE_URL}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="text-xs text-fg-dim transition-colors hover:text-fg"
+        >
+          Release notes →
+        </a>
       </header>
 
-      <section className="relative z-10 mx-auto grid max-w-7xl gap-8 px-6 pb-16 pt-12 sm:px-10 lg:grid-cols-[1.05fr_0.95fr] lg:items-center">
-        <div>
-          <div className="mb-6 inline-flex items-center gap-2 rounded-full border border-accent/30 bg-accent/5 px-3 py-1 text-xs text-accent">
-            <MonitorDown className="h-3.5 w-3.5" /> Desktop alpha - v{VERSION}
-          </div>
-          <h1 className="text-5xl font-black leading-[1.04] tracking-tight text-fg sm:text-7xl">
-            Download{" "}
-            <span className="bg-gradient-to-r from-accent via-cyan-300 to-accent bg-clip-text text-transparent">
-              OASIS Desktop.
+      {/* === Hero ===================================================== */}
+      <section className="relative z-10 mx-auto flex max-w-3xl flex-col items-center px-6 pt-10 text-center sm:pt-16">
+        <h1 className="text-5xl font-black leading-[1.02] tracking-tight text-fg sm:text-7xl">
+          <span className="block">OASIS Desktop.</span>
+          <span className="block bg-gradient-to-r from-accent via-cyan-300 to-accent bg-clip-text text-transparent">
+            One click to install.
+          </span>
+        </h1>
+        <p className="mt-5 max-w-md text-sm leading-relaxed text-fg-muted sm:text-base">
+          The native shell for the Agent Command Center. Picks your OS
+          automatically.
+        </p>
+
+        {/* === MASSIVE primary CTA ==================================== */}
+        <a
+          href={AUTO_DOWNLOAD_URL}
+          className="group/cta relative mt-10 inline-flex w-full max-w-xl items-center justify-center gap-3 overflow-hidden rounded-2xl border border-accent/40 bg-gradient-to-br from-accent/30 via-cyan-500/20 to-accent/30 px-8 py-6 text-base font-bold text-fg shadow-[0_0_60px_-12px_rgba(0,212,255,0.7)] transition-all hover:scale-[1.02] hover:shadow-[0_0_90px_-8px_rgba(0,212,255,0.9)] sm:text-lg"
+        >
+          <span
+            aria-hidden
+            className="absolute inset-0 -translate-x-full bg-gradient-to-r from-transparent via-white/15 to-transparent transition-transform duration-1000 group-hover/cta:translate-x-full"
+          />
+          <Download className="relative h-6 w-6" />
+          <span className="relative">Download for this computer</span>
+        </a>
+
+        {/* === Per-OS triplet (clean, equal-weight, no clutter) ======= */}
+        <div className="mt-6 grid w-full max-w-xl grid-cols-3 gap-3">
+          <DownloadCard
+            href={MAC_DMG_URL}
+            icon={<Apple className="h-5 w-5" />}
+            label="Mac"
+            sub="Apple Silicon + Intel"
+          />
+          <DownloadCard
+            href={WINDOWS_INSTALLER_URL}
+            icon={<MonitorDown className="h-5 w-5" />}
+            label="Windows"
+            sub="Installer (.exe)"
+          />
+          <DownloadCard
+            href={LINUX_APPIMAGE_URL}
+            icon={<Download className="h-5 w-5" />}
+            label="Linux"
+            sub="AppImage / deb"
+          />
+        </div>
+
+        <div className="mt-8 flex flex-wrap items-center justify-center gap-x-5 gap-y-1.5 font-mono text-[10px] uppercase tracking-[0.18em] text-fg-dim">
+          <span className="inline-flex items-center gap-1.5">
+            <span className="h-1 w-1 rounded-full bg-accent" /> Universal binary
+          </span>
+          <span className="inline-flex items-center gap-1.5">
+            <span className="h-1 w-1 rounded-full bg-accent" /> Bundled runtime
+          </span>
+          <span className="inline-flex items-center gap-1.5">
+            <span className="h-1 w-1 rounded-full bg-accent" /> Local-first
+          </span>
+        </div>
+      </section>
+
+      {/* === Installation help — ALL warnings hidden by default ====== */}
+      <section className="relative z-10 mx-auto mt-20 max-w-3xl px-6 pb-24 sm:px-10">
+        <details className="group rounded-2xl border border-bg-border bg-bg-elev/30 backdrop-blur-xl transition-all open:bg-bg-elev/50">
+          <summary className="flex cursor-pointer select-none items-center justify-between gap-3 rounded-2xl px-6 py-4 text-sm font-bold text-fg hover:bg-bg-elev/50">
+            <span className="flex items-center gap-2.5">
+              <span
+                aria-hidden
+                className="inline-flex h-1.5 w-1.5 rounded-full bg-fg-dim group-open:bg-accent"
+              />
+              Installation help
             </span>
-          </h1>
-          <p className="mt-6 max-w-2xl text-lg leading-relaxed text-fg-muted sm:text-xl">
-            This is the installable shell for the OASIS Agent Command Center. It is not a Chrome extension.
-            It runs as a desktop app and prepares the local runtime for files, tools, automations, and provider-powered agents.
-          </p>
-          <div className="mt-8 grid gap-3 sm:grid-cols-2">
-            <a href={AUTO_DOWNLOAD_URL} className="btn-send sm:col-span-2 !justify-center !px-5 !py-4 text-base">
-              <Download className="h-5 w-5" /> Download for this computer
-            </a>
-            <a href={WINDOWS_PORTABLE_URL} className="btn-secondary !px-5 !py-3 text-sm">
-              <Download className="h-4 w-4" /> Windows portable zip
-            </a>
-            <a href={WINDOWS_INSTALLER_URL} className="btn-secondary !px-5 !py-3 text-sm">
-              <Download className="h-4 w-4" /> Windows installer alpha
-            </a>
-            <a href={MAC_DMG_URL} className="btn-secondary !px-5 !py-3 text-sm">
-              <Download className="h-4 w-4" /> Mac dmg only
-            </a>
-            <a href={LINUX_APPIMAGE_URL} className="btn-secondary !px-5 !py-3 text-sm">
-              <Download className="h-4 w-4" /> Linux AppImage
-            </a>
-            <a href={LINUX_DEB_URL} className="btn-secondary !px-5 !py-3 text-sm">
-              <Download className="h-4 w-4" /> Linux deb
-            </a>
-            <a href={CHECKSUM_URL} target="_blank" rel="noopener noreferrer" className="btn-secondary !px-5 !py-3 text-sm">
-              SHA-256 checksum
-            </a>
-          </div>
-          <div className="mt-4 rounded-xl border border-accent/25 bg-accent/10 p-4 text-sm leading-relaxed text-fg-muted">
-            <strong className="text-fg">Windows note:</strong> use the portable zip first. A Mac <span className="font-mono text-accent">.dmg</span>{" "}
-            will make Windows ask you to pick an app, and an unsigned installer can be blocked by corporate security while it runs from Temp.
-            Save the zip to Downloads, extract it, then open <span className="font-mono text-accent">OASIS AI.exe</span> from the extracted folder.
-            SmartScreen will warn this build is from an unknown publisher — that&apos;s expected on the unsigned alpha.
-            Click <span className="font-mono text-accent">More info</span> then <span className="font-mono text-accent">Run anyway</span>.
-          </div>
-          <div className="mt-3 rounded-xl border border-cyan-300/25 bg-cyan-300/10 p-4 text-sm leading-relaxed text-fg-muted">
-            <strong className="text-fg">Prerequisite:</strong> the desktop bridge runs the agent harness in Python and currently uses the Python interpreter installed on your machine.{" "}
-            Install <strong className="text-fg">Python 3.12</strong> (or newer) from{" "}
-            <a href="https://python.org/downloads" target="_blank" rel="noopener noreferrer" className="text-cyan-200 underline hover:text-cyan-100">python.org/downloads</a>{" "}
-            <em>before</em> first launch.
-            <ul className="mt-2 ml-4 list-disc space-y-1 text-xs">
-              <li>Windows: tick &ldquo;Add Python to PATH&rdquo; in the installer.</li>
-              <li>macOS: <span className="font-mono">brew install python@3.12</span> or the python.org installer both work.</li>
-              <li>Linux: most distros ship it; <span className="font-mono">python3 --version</span> should print 3.12+.</li>
-            </ul>
-            A bundled Python ships in a future build so this step goes away; until then it&apos;s the one external dependency.
-          </div>
-          <div className="mt-3 rounded-xl border border-amber-300/25 bg-amber-300/10 p-4 text-sm leading-relaxed text-fg-muted">
-            <strong className="text-fg">macOS note:</strong> Gatekeeper will say <em>&quot;Apple cannot verify that OASIS AI is free of malware.&quot;</em>{" "}
-            This alpha is not yet Apple Developer ID-signed. Two ways to open it:
-            <ul className="mt-2 space-y-1.5 list-disc pl-5">
-              <li>
-                <strong className="text-fg">Right-click → Open</strong> the app in Applications, then click <span className="font-mono text-amber-200">Open</span> in
-                the warning dialog. macOS will trust it for future launches.
-              </li>
-              <li>
-                Or run this once in Terminal to clear the quarantine flag:
-                <pre className="mt-1.5 overflow-x-auto rounded-lg border border-amber-300/20 bg-bg-deep/80 px-3 py-2 font-mono text-xs text-amber-100">
-                  xattr -d com.apple.quarantine &quot;/Applications/OASIS AI.app&quot;
-                </pre>
-              </li>
-            </ul>
-          </div>
-          <div className="mt-5 rounded-xl border border-bg-border bg-bg-elev/50 p-4 font-mono text-xs text-fg-dim">
-            <div className="mb-2 uppercase tracking-[0.14em] text-fg-muted">Current checksums</div>
-            <div className="space-y-1">
-              {CHECKSUMS.map((checksum) => (
-                <div key={checksum} className="break-all text-accent">{checksum}</div>
-              ))}
-            </div>
-          </div>
-        </div>
+            <span className="font-mono text-[10px] uppercase tracking-wider text-fg-dim transition-transform group-open:rotate-180">
+              ▾
+            </span>
+          </summary>
 
-        <div className="rounded-3xl border border-accent/25 bg-bg-elev/55 p-5 shadow-[0_28px_100px_-36px_rgba(0,212,255,0.55)] backdrop-blur-xl">
-          <div className="rounded-2xl border border-bg-border bg-bg-deep/80 p-5">
-            <div className="mb-4 flex items-center justify-between border-b border-bg-border pb-4">
-              <div>
-                <div className="text-xs uppercase tracking-[0.18em] text-accent">OASIS AI</div>
-                <div className="text-lg font-black">Desktop Product Model</div>
-              </div>
-              <div className="rounded-full border border-accent/35 bg-accent/10 px-3 py-1 font-mono text-[10px] text-accent">
-                {CHANNEL}
-              </div>
-            </div>
-            <div className="space-y-3">
-              <ModelRow icon={<KeyRound className="h-4 w-4" />} title="Provider connection" body="OAuth/account sign-in, API key, or OASIS subscription." />
-              <ModelRow icon={<Cloud className="h-4 w-4" />} title="Cloud workspace" body="Hosted Command Center with no local file or desktop access." />
-              <ModelRow icon={<Cpu className="h-4 w-4" />} title="This desktop" body="Local bridge access for approved files, browser actions, automations, and tools." />
-              <ModelRow icon={<Workflow className="h-4 w-4" />} title="Target contract" body="Provider connection + runtime access = full agent capability." />
-            </div>
+          <div className="space-y-6 border-t border-bg-border/60 px-6 py-6 text-sm leading-relaxed text-fg-muted">
+            <HelpRow title="Windows · SmartScreen warning">
+              The first time you run the unsigned alpha, Windows will show
+              &ldquo;Windows protected your PC.&rdquo; Click <span className="font-mono text-fg">More info</span>{" "}
+              → <span className="font-mono text-fg">Run anyway</span>. If
+              corporate security blocks the installer entirely, use the{" "}
+              <a href={WINDOWS_PORTABLE_URL} className="text-accent hover:underline">
+                portable zip
+              </a>{" "}
+              instead — extract to Downloads, run <span className="font-mono">OASIS AI.exe</span> from the folder.
+            </HelpRow>
+
+            <HelpRow title="macOS · Gatekeeper warning">
+              Gatekeeper will say &ldquo;Apple cannot verify that OASIS AI is
+              free of malware.&rdquo; Right-click the app in Applications,
+              choose <span className="font-mono text-fg">Open</span>, then
+              click <span className="font-mono text-fg">Open</span> again in
+              the dialog. macOS trusts it from then on. Or clear the quarantine
+              flag from Terminal:
+              <pre className="mt-2 overflow-x-auto rounded-lg border border-bg-border bg-bg-deep/80 px-3 py-2 font-mono text-xs text-accent">
+                xattr -d com.apple.quarantine &quot;/Applications/OASIS AI.app&quot;
+              </pre>
+            </HelpRow>
+
+            <HelpRow title="First launch · runtime bootstrap">
+              On first launch the app provisions its own Python runtime in the
+              user-data folder. No global install required, no PATH changes.
+              If the bootstrap fails (offline / locked-down corporate machine),
+              the app surfaces a one-click &ldquo;Install runtime&rdquo; prompt
+              that opens the python.org installer for the operator. Either
+              path takes &lt;2 minutes.
+            </HelpRow>
+
+            <HelpRow title="Verifying the download · SHA-256 checksums">
+              <ul className="mt-1.5 space-y-1.5 font-mono text-[11px]">
+                {CHECKSUMS.map(([label, hash]) => (
+                  <li key={label} className="flex flex-col">
+                    <span className="text-fg-dim normal-case">{label}</span>
+                    <span className="break-all text-accent">{hash}</span>
+                  </li>
+                ))}
+              </ul>
+              <a
+                href={CHECKSUM_URL}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="mt-3 inline-block text-xs text-accent hover:underline"
+              >
+                Download SHA256SUMS.txt →
+              </a>
+            </HelpRow>
+
+            <HelpRow title="Linux · which package">
+              <a href={LINUX_APPIMAGE_URL} className="text-accent hover:underline">
+                AppImage
+              </a>{" "}
+              for any distro (chmod +x and run). <a href={LINUX_DEB_URL} className="text-accent hover:underline">
+                .deb
+              </a>{" "}
+              for Debian/Ubuntu. No RPM build yet.
+            </HelpRow>
           </div>
-        </div>
+        </details>
       </section>
 
-      <section className="relative z-10 mx-auto max-w-7xl px-6 pb-24 sm:px-10">
-        <div className="grid gap-4 lg:grid-cols-3">
-          <Panel title="First-run onboarding" icon={<Download className="h-5 w-5" />}>
-            <ol className="space-y-2 text-sm text-fg-muted">
-              <li><span className="text-accent font-bold">1.</span> Download for your OS and launch the app.</li>
-              <li><span className="text-accent font-bold">2.</span> <span className="text-fg">Pair this machine</span> — paste the 9-character code from your dashboard&apos;s <em>Settings → Devices</em>.</li>
-              <li><span className="text-accent font-bold">3.</span> <span className="text-fg">Connect AI</span> — pick your own provider, use a detected <code className="text-accent">claude/codex/gemini</code> CLI subscription, or skip and use the workspace default.</li>
-              <li><span className="text-accent font-bold">4.</span> Health check finishes, Command Center loads. Done.</li>
-            </ol>
-            <p className="text-[11px] text-fg-dim mt-3 leading-relaxed">
-              No terminal, no CLI setup commands. Everything the old wizard used to do is in the app now.
-            </p>
-          </Panel>
-          <Panel title="Chrome Extension?" icon={<XCircle className="h-5 w-5" />}>
-            <p className="text-sm leading-relaxed text-fg-muted">
-              No. OASIS Desktop is a native desktop app. A Chrome extension may come later for browser-specific capture,
-              but the product we are building now is the downloadable desktop runtime.
-            </p>
-          </Panel>
-          <Panel title="Alpha Safety" icon={<ShieldCheck className="h-5 w-5" />}>
-            <ul className="space-y-2 text-sm text-fg-muted">
-              <li className="flex gap-2"><CheckCircle2 className="mt-0.5 h-4 w-4 text-accent" /> Sandbox and context isolation are enabled.</li>
-              <li className="flex gap-2"><CheckCircle2 className="mt-0.5 h-4 w-4 text-accent" /> Support bundles redact obvious secrets.</li>
-              <li className="flex gap-2"><CheckCircle2 className="mt-0.5 h-4 w-4 text-accent" /> This build is unsigned and for internal alpha testing.</li>
-            </ul>
-          </Panel>
-        </div>
-      </section>
+      {/* === Keyframes ============================================ */}
+      <style>{`
+        @keyframes orbit-soft {
+          from { transform: translate(-50%, -50%) rotate(0deg); }
+          to { transform: translate(-50%, -50%) rotate(360deg); }
+        }
+      `}</style>
     </main>
   );
 }
-function ModelRow({ icon, title, body }: { icon: React.ReactNode; title: string; body: string }) {
+
+function DownloadCard({
+  href,
+  icon,
+  label,
+  sub,
+}: {
+  href: string;
+  icon: React.ReactNode;
+  label: string;
+  sub: string;
+}) {
   return (
-    <div className="flex gap-3 rounded-xl border border-bg-border bg-bg-elev/40 p-3">
-      <div className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-lg border border-accent/30 bg-accent/12 text-accent">
+    <a
+      href={href}
+      className="group/card flex flex-col items-center gap-2 rounded-xl border border-bg-border bg-bg-elev/40 px-3 py-4 text-center transition-all hover:border-accent/40 hover:bg-bg-elev/70 hover:shadow-[0_0_28px_-12px_rgba(0,212,255,0.6)]"
+    >
+      <div className="flex h-10 w-10 items-center justify-center rounded-lg border border-accent/25 bg-accent/10 text-accent transition-colors group-hover/card:bg-accent/20">
         {icon}
       </div>
-      <div>
-        <div className="text-sm font-bold text-fg">{title}</div>
-        <div className="text-xs leading-relaxed text-fg-muted">{body}</div>
-      </div>
-    </div>
+      <div className="text-sm font-bold text-fg">{label}</div>
+      <div className="text-[10px] uppercase tracking-wider text-fg-dim">{sub}</div>
+    </a>
   );
 }
 
-function Panel({ icon, title, children }: { icon: React.ReactNode; title: string; children: React.ReactNode }) {
+function HelpRow({ title, children }: { title: string; children: React.ReactNode }) {
   return (
-    <div className="rounded-2xl border border-bg-border bg-bg-elev/45 p-5 backdrop-blur">
-      <div className="mb-3 flex items-center gap-2 text-accent">
-        {icon}
-        <h2 className="text-sm font-black uppercase tracking-[0.14em] text-fg">{title}</h2>
+    <div>
+      <div className="mb-1.5 text-[11px] font-bold uppercase tracking-[0.14em] text-fg">
+        {title}
       </div>
-      {children}
+      <div className="text-sm text-fg-muted">{children}</div>
     </div>
   );
 }
