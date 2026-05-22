@@ -107,7 +107,11 @@ const SAFE_TENANT_TOOL_PALETTE: string[] = [
   // runner.ts after the 2026-05-16 hardening). Tenants can hit public
   // URLs and the dashboard's own API but not internal services.
   "http_get",
-  "http_post",
+  // http_post removed from default palette 2026-05-22 (Codex Finding #7):
+  // SSRF protection doesn't stop prompt-injection exfiltration to a
+  // public endpoint or unintended POSTs to webhook URLs. Re-enable
+  // per-tenant via the manifest tool_palette when a domain allowlist +
+  // operator confirmation flow is in place.
   // Bridge sends — already routed through send_gateway (CASL/TCPA
   // enforced) per the 2026-05-16 hardening of bridge_tools.py.
   "send_email",
@@ -476,7 +480,15 @@ export async function POST(req: NextRequest) {
     lines.push("---");
     setupBlock = lines.join("\n");
   }
-  const persona = `${personaBase}${cloudModeNotice}${cloudToolsBlock}${setupBlock}${operatorBlock}${dashboardCtx ? `\n\n${dashboardCtx}` : ""}`;
+  const personaPreOverlay = `${personaBase}${cloudModeNotice}${cloudToolsBlock}${setupBlock}${operatorBlock}${dashboardCtx ? `\n\n${dashboardCtx}` : ""}`;
+  // Plan-mode overlay applies to BOTH provider branches (native Anthropic
+  // tool_use AND marker fallback). Codex Finding #5: previously only the
+  // Anthropic branch composed it via streamAnthropicWithTools. Marker-
+  // fallback users in plan mode could still trigger write markers.
+  // Compose once here so both branches see the same prompt.
+  const { composeSystemPrompt: composePlanSystem } = await import("@/lib/chat-modes/plan-mode");
+  const effectivePlanMode: "plan" | "build" = payload.chat_mode === "plan" ? "plan" : "build";
+  const persona = composePlanSystem(personaPreOverlay, effectivePlanMode);
   const startedAt = Date.now();
 
   // ---- Stream response back as SSE ----------------------------------------
@@ -640,10 +652,25 @@ export async function POST(req: NextRequest) {
       // for providers that don't use the native tool_use loop. When mode is
       // "tools" we already executed everything mid-stream above, so skip
       // this block.
+      //
+      // Plan-mode gate (Codex Finding #5): when effectivePlanMode === "plan",
+      // only run markers whose tool name is in the plan-safe allowlist. The
+      // plan-mode prompt overlay tells the model not to emit non-plan-safe
+      // markers, but a non-Anthropic provider might emit them anyway, and
+      // we must NOT execute them silently.
       if (cloudToolsMode === "markers") {
         try {
+          const { PLAN_MODE_TOOL_ALLOWLIST } = await import("@/lib/chat-modes/plan-mode");
           const toolSpecs = extractCloudToolMarkers(assistantText);
           for (const spec of toolSpecs) {
+            if (effectivePlanMode === "plan" && !PLAN_MODE_TOOL_ALLOWLIST.has(spec.name)) {
+              send("cloud_tool_result", {
+                ok: false,
+                name: spec.name,
+                error: `${spec.name} blocked in plan mode — run /build to enable write tools`,
+              });
+              continue;
+            }
             const r = await runCloudTool(spec, { tenantId, userId: user.id });
             send("cloud_tool_result", r);
           }

@@ -25,14 +25,26 @@ export type SlashCommandName =
   | "build"      // /build        — exit plan mode (restore full registry)
   | "help";      // /help         — list commands
 
+/** Wired-and-working commands (surfaced by /help). The full set of
+ *  parseable command names lives in PARSER_KNOWN_COMMANDS below — model
+ *  and compact still parse so a future stub-removal commit can land
+ *  without breaking the parser contract, but they are NOT advertised. */
 export const ALL_COMMANDS: SlashCommandName[] = [
   "agent",
-  "model",
   "clear",
-  "compact",
   "plan",
   "build",
   "help",
+];
+
+/** Commands the PARSER recognizes (superset of ALL_COMMANDS). Used by
+ *  isKnownCommand so /model and /compact don't fall through as messages
+ *  while their handlers are stubs. As soon as model/compact are wired,
+ *  promote them into ALL_COMMANDS and they appear in /help automatically. */
+const PARSER_KNOWN_COMMANDS: SlashCommandName[] = [
+  ...ALL_COMMANDS,
+  "model",
+  "compact",
 ];
 
 /** One-line description for each command — surfaced by /help. */
@@ -103,10 +115,13 @@ export function parseInput(raw: string): ParsedInput {
 }
 
 export function isKnownCommand(name: string): name is SlashCommandName {
-  return (ALL_COMMANDS as string[]).includes(name);
+  // Parser recognizes the superset — model/compact still route to the
+  // dispatcher (which renders a "not wired yet" note) instead of falling
+  // through as a regular message that gets sent to the model.
+  return (PARSER_KNOWN_COMMANDS as string[]).includes(name);
 }
 
-/** Render the /help payload (plain text — caller formats for display). */
+/** Render the /help payload — only WIRED commands are advertised. */
 export function renderHelp(): string {
   const lines = ["Slash commands:"];
   for (const cmd of ALL_COMMANDS) {

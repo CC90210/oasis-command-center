@@ -1139,6 +1139,14 @@ export type ResumeState = {
    *  overlay is already carried in `system` above; this field re-applies
    *  the tool filter inside runIterationLoop on resume. */
   chatMode?: ChatPlanMode;
+  /** Filter-1 (bridge offline) persisted across the pause. Without this,
+   *  resume could surface deferred bridge tools that weren't in the
+   *  paused turn's palette. */
+  excludeDeferredTools?: boolean;
+  /** Filter-2 (bridge-advertised capabilities). Persisted so resume
+   *  sees the same bridge tool set the original call resolved.
+   *  null = no advertisement on record (older bridges). */
+  bridgeAdvertisedTools?: string[] | null;
 };
 
 export type ToolLoopRequest = {
@@ -1273,6 +1281,12 @@ export async function* resumeAnthropicTurn(
     // overlay is already baked into resume.system; this carries the
     // tool-filter half of the plan-mode contract across the pause.
     chatMode: resume.chatMode,
+    // Carry the bridge-availability + defer filters across the pause
+    // too. Without these, the resume iteration would compute
+    // activeTools from a fresh-args path that defaulted both to
+    // undefined — re-broadening the palette mid-turn. (Codex #8.)
+    excludeDeferredTools: resume.excludeDeferredTools,
+    bridgeAdvertisedTools: resume.bridgeAdvertisedTools,
     history,
     startIter: resume.iteration + 1,
     startTotalIn: resume.totalIn,
@@ -1488,6 +1502,50 @@ async function* runIterationLoop(
       return;
     }
 
+    // Defense-in-depth: reject any tool_use whose name is NOT in the
+    // activeTools set computed for this iteration. The model is only
+    // *told* about activeTools in the API call, but stream replay, a
+    // future provider adapter, or a malformed response could surface
+    // a name we didn't advertise. Filtering at send is necessary but
+    // not sufficient — we also gate at dispatch. (Codex adversarial
+    // review 2026-05-22, Finding #6.)
+    //
+    // Blocked calls become error tool_result blocks injected into the
+    // NEXT iteration's history so the model sees its mistake + can
+    // pick a different approach. Allowed calls continue to the
+    // deferred/executeTool dispatch below.
+    const allowedToolNames = new Set(activeTools.map((t) => t.name));
+    const blockedToolUses = toolUses.filter((tu) => !allowedToolNames.has(tu.name));
+    const dispatchableToolUses = toolUses.filter((tu) => allowedToolNames.has(tu.name));
+    const blockedResultBlocks: ContentBlock[] = blockedToolUses.map((tu) => ({
+      type: "tool_result" as const,
+      tool_use_id: tu.id,
+      content: JSON.stringify({
+        error: "tool_not_allowed_in_current_mode",
+        tool: tu.name,
+        hint: args.chatMode === "plan"
+          ? `${tu.name} is unavailable in plan mode. Run /build to restore the full tool registry.`
+          : `${tu.name} is not in the current agent's tool palette.`,
+      }),
+      is_error: true,
+    }));
+    for (const tu of blockedToolUses) {
+      yield {
+        type: "tool_result",
+        name: tu.name,
+        ok: false,
+        summary: `${tu.name} blocked — not in active tool palette`,
+      };
+    }
+    // If literally EVERY tool the model called was blocked, surface that
+    // up to the loop as a user-turn tool_result and continue to the next
+    // iteration so the model can recover. Don't run the deferred + execute
+    // path because there's nothing dispatchable.
+    if (dispatchableToolUses.length === 0 && blockedResultBlocks.length > 0) {
+      history.push({ role: "user", content: blockedResultBlocks });
+      continue;
+    }
+
     // Append the assistant turn (text + tool_use blocks) to history.
     history.push({
       role: "assistant",
@@ -1503,7 +1561,7 @@ async function* runIterationLoop(
     // remaining tool calls to the resume; the model will re-emit them.
     // In practice the model issues one tool_use per turn unless we ask
     // for parallel-tools, which we don't.)
-    const deferred = toolUses.find((tu) => {
+    const deferred = dispatchableToolUses.find((tu) => {
       const def = TOOL_DEFINITIONS.find((d) => d.name === tu.name);
       return def?.defer === true;
     });
@@ -1528,15 +1586,26 @@ async function* runIterationLoop(
           // that pauses for a deferred bridge tool would silently regain
           // the full tool registry on resume.
           chatMode: args.chatMode,
+          // Persist the bridge-capability + defer filters too. Without
+          // these, the post-resume iteration would re-derive
+          // activeTools using `args.excludeDeferredTools` /
+          // `args.bridgeAdvertisedTools` from a fresh-args path that
+          // doesn't have them — broadening the tool palette mid-turn.
+          // (Codex Finding #8.)
+          excludeDeferredTools: args.excludeDeferredTools,
+          bridgeAdvertisedTools: args.bridgeAdvertisedTools,
         },
       };
       return;
     }
 
-    // Execute each tool call, surface to the operator, and queue the
-    // tool_result blocks for the next turn.
-    const resultBlocks: ContentBlock[] = [];
-    for (const tu of toolUses) {
+    // Execute each dispatchable tool call, surface to the operator, and
+    // queue the tool_result blocks for the next turn. Blocked-tool errors
+    // (from the allowlist gate above) are prepended so the model sees
+    // BOTH its blocked attempt AND any successful sibling calls in one
+    // history turn.
+    const resultBlocks: ContentBlock[] = [...blockedResultBlocks];
+    for (const tu of dispatchableToolUses) {
       yield { type: "tool_use", name: tu.name, input: tu.input };
       const result = await executeTool(tu.name, tu.input, ctx);
       yield {
