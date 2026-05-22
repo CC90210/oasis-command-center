@@ -372,6 +372,28 @@ function KanbanCard({
   const titleFieldDef = entity.fields.find((f) => f.name === titleField);
   const titleValue = formatCardField(titleField, row.data[titleField], titleFieldDef);
 
+  // Fallback: when the primary title field is blank (common for leads with
+  // missing name/business_name), try a sensible cascade before giving up.
+  // "Untitled" reads like a bug; an email localpart or id-suffix is more
+  // useful for the operator.
+  const fallbackTitle = (() => {
+    const d = row.data as Record<string, unknown>;
+    const pick = (k: string) =>
+      typeof d[k] === "string" && (d[k] as string).trim() ? (d[k] as string).trim() : "";
+    const emailLocal = pick("email").split("@")[0];
+    return (
+      pick("name") ||
+      pick("business_name") ||
+      pick("company") ||
+      pick("contact_name") ||
+      pick("legal_name") ||
+      pick("dba") ||
+      emailLocal ||
+      `Record ${row.id.slice(0, 6)}`
+    );
+  })();
+  const displayTitle = titleValue || fallbackTitle;
+
   return (
     <li className="rounded-md border border-bg-border bg-bg-deep/60 hover:border-accent/40 hover:bg-bg-deep/80 transition-colors">
       <Link
@@ -380,7 +402,7 @@ function KanbanCard({
       >
         <div className="flex items-start justify-between gap-2">
           <div className="font-bold text-[14px] text-fg break-words leading-snug min-w-0">
-            {titleValue || "Untitled"}
+            {displayTitle}
           </div>
           {aiScore !== null && <AiScoreChip score={aiScore} />}
         </div>

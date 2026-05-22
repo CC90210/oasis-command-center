@@ -586,8 +586,17 @@ function oasisRowModel(row: Row, cfg: VariantConfig, stage: StageMeta) {
   // OASIS lead shape (lib/manifest/seeds.ts → OASIS_SEED.data_model.lead):
   //   name, company, email, phone, source, stage, score, value_estimate,
   //   last_contacted_at, notes, ai_score, ai_reasoning, ai_scored_at, ...
-  const name = str(d.name) || str(d.contact_name) || `Untitled ${row.id.slice(0, 6)}`;
   const company = str(d.company) || str(d.business_name) || "";
+  // Fallback ladder: real name → contact_name → company → email localpart →
+  // "Lead <id-prefix>". Avoids the bare "Untitled" — anything we can show
+  // beats a blank label.
+  const emailLocal = (str(d.email) || "").split("@")[0] || "";
+  const name =
+    str(d.name) ||
+    str(d.contact_name) ||
+    company ||
+    emailLocal ||
+    `Lead ${row.id.slice(0, 6)}`;
   const email = str(d.email) || "";
   const phone = formatPhone(str(d.phone) || "");
   const aiScoreRaw = typeof d.ai_score === "number" ? d.ai_score : null;
@@ -857,7 +866,9 @@ function pickTouchFirst(
           str(r.data.business_name) ||
           str(r.data.name) ||
           str(r.data.contact_name) ||
-          "Untitled",
+          str(r.data.company) ||
+          (str(r.data.email) || "").split("@")[0] ||
+          `Lead ${r.id.slice(0, 6)}`,
         stageLabel: stages.find((s) => s.key === stageKey)?.label || stageKey.replace(/_/g, " "),
         daysOverdue: days,
         potentialUsd: potential,
