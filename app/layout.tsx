@@ -48,6 +48,7 @@ export default async function RootLayout({
   // also lists API routes that aren't page-rendered.
   const FULL_BLEED_PREFIXES = [
     "/welcome",
+    "/command-centre-explained",
     "/download",
     "/configure",
     "/login",

@@ -67,10 +67,10 @@ export default async function ConfigurePage() {
             <Sparkles className="w-3 h-3" /> No account needed yet
           </div>
           <h1 className="text-3xl sm:text-4xl font-black text-fg leading-tight tracking-tight">
-            Configure your own agent.
+            Build your own agent.
           </h1>
           <p className="mt-3 text-fg-muted">
-            Pick the agent role you want, tell us about your business, and we&apos;ll generate a one-line install command tailored to you. The install clones the right repo onto your machine, runs the setup wizard with your answers pre-filled, and you&apos;re running locally with full file access in under five minutes.
+            Pick the agent role you want, tell us about your business, and generate the first blueprint before you create the Command Centre account. The install clones the right repo onto your machine, runs setup with your answers pre-filled, and gets you running locally with full file access in under five minutes.
           </p>
         </div>
 
