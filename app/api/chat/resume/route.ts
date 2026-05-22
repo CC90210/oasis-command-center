@@ -104,7 +104,7 @@ export async function POST(req: NextRequest) {
   // check below can compare against the caller's actual identity.
   const ctxResult = await resolveChatContext({ id: user.id, email: user.email }, agentKey);
   if (!ctxResult.ok) {
-    return jsonError(ctxResult.status, ctxResult.detail || ctxResult.code);
+    return jsonError(ctxResult.status, ctxResult.detail || ctxResult.code, ctxResult.code);
   }
   const { tenantId, provider, apiKey } = ctxResult;
 
@@ -315,8 +315,10 @@ export async function POST(req: NextRequest) {
   });
 }
 
-function jsonError(status: number, message: string) {
-  return new Response(JSON.stringify({ ok: false, error: message }), {
+function jsonError(status: number, message: string, code?: string) {
+  const body: { ok: false; error: string; code?: string } = { ok: false, error: message };
+  if (code) body.code = code;
+  return new Response(JSON.stringify(body), {
     status,
     headers: { "content-type": "application/json" },
   });

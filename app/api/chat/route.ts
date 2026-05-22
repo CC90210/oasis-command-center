@@ -190,7 +190,9 @@ export async function POST(req: NextRequest) {
   // platform-key fallback — shared with /api/chat/resume. See lib/chat-auth.ts.
   const ctxResult = await resolveChatContext({ id: user.id, email: user.email }, agentKey);
   if (!ctxResult.ok) {
-    return jsonError(ctxResult.status, ctxResult.detail || ctxResult.code);
+    // Pass both the human-readable detail AND the stable code so the client
+    // can pick a friendly recovery UI (e.g. "Replace key" for key_decrypt_failed).
+    return jsonError(ctxResult.status, ctxResult.detail || ctxResult.code, ctxResult.code);
   }
   const { tenantId, provider, model, apiKey, cfgOverride, cfgScope } = ctxResult;
 
@@ -865,8 +867,15 @@ function estimateCostUsd(
   return ((inTok * inP) + (outTok * outP)) / 1_000_000;
 }
 
-function jsonError(status: number, message: string) {
-  return new Response(JSON.stringify({ ok: false, error: message }), {
+function jsonError(status: number, message: string, code?: string) {
+  // `code` is a stable machine-readable error tag (e.g. "key_decrypt_failed",
+  // "agent_not_configured") that the client uses to pick a friendly recovery
+  // UI. Without it, the client falls back to dumping the raw `error` string
+  // — which for AES-GCM auth-tag failures reads as the Node crypto message
+  // "Unsupported state or unable to authenticate data" and confuses operators.
+  const body: { ok: false; error: string; code?: string } = { ok: false, error: message };
+  if (code) body.code = code;
+  return new Response(JSON.stringify(body), {
     status,
     headers: { "content-type": "application/json" },
   });

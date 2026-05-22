@@ -15,7 +15,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ToolTimelineList } from "@/components/chat/ToolTimelineList";
 import { MessageDownloadMenu } from "@/components/chat/MessageDownloadMenu";
 import { mdToHtml } from "@/lib/markdown";
-import { useSynthCalls } from "@/lib/use-synth-calls";
+import { useSynthCalls, type SynthCliRuntime } from "@/lib/use-synth-calls";
 import {
   Send,
   AlertCircle,
@@ -498,15 +498,25 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
   }, [streamStartedAt]);
 
   // Synthetic activity feed via the extracted useSynthCalls hook. Shows
-  // motion (terminal opening, cd, claude spawn, file scans) during the
+  // motion (terminal opening, cd, CLI spawn, file scans) during the
   // 0-30s cold-start window when no real tool events fire yet. Real
   // tool events always win — the hook bails the moment toolCalls is
   // non-empty. See lib/use-synth-calls.ts.
+  // 2026-05-22: pass the actual runtime so the trace doesn't hardcode
+  // "spawn claude" when the operator picked gemini/codex/cloud. CLI mode
+  // (pinned or auto+bridge) maps to the operator's cliRuntime; everything
+  // else is the cloud API-key path. Defaults to "cloud" pre-classification
+  // so a stale frame doesn't lie either.
+  const synthRuntime: SynthCliRuntime =
+    chatMode === "cli" || (chatMode === "auto" && bridgeOnline === true)
+      ? (cliRuntime as SynthCliRuntime)
+      : "cloud";
   const synthCalls = useSynthCalls({
     streaming,
     streamStartedAt,
     hasRealTools: toolCalls.length > 0,
     agent,
+    cliRuntime: synthRuntime,
   });
 
   const elapsedLabel = useMemo(() => {
