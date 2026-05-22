@@ -509,7 +509,7 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
   // so a stale frame doesn't lie either.
   const synthRuntime: SynthCliRuntime =
     chatMode === "cli" || (chatMode === "auto" && bridgeOnline === true)
-      ? (cliRuntime as SynthCliRuntime)
+      ? cliRuntime
       : "cloud";
   const synthCalls = useSynthCalls({
     streaming,
