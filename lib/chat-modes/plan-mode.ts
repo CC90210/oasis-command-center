@@ -33,6 +33,10 @@ export type ChatPlanMode = "plan" | "build";
  * plan mode.
  */
 export const PLAN_MODE_TOOL_ALLOWLIST: ReadonlySet<string> = new Set([
+  // Cloud-safe knowledge reads
+  "read_brain_doc",
+  "search_memory",
+  "web_fetch",
   // Tenant-record reads
   "list_records",
   "get_record",

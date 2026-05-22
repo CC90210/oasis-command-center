@@ -50,6 +50,7 @@ import {
 } from "@/lib/cloud-tools";
 import {
   cloudToolsPromptBlockV2,
+  streamOpenAICompatibleWithTools,
   streamAnthropicWithTools,
 } from "@/lib/cloud-tool-runner";
 import { resolveChatContext } from "@/lib/chat-auth";
@@ -319,7 +320,11 @@ export async function POST(req: NextRequest) {
   // conversation even if the daemon is paired and the heartbeat is fresh.
   const toolRouting: "bridge_proxy" | "cloud_only" =
     payload.tool_routing === "cloud_only" ? "cloud_only" : "bridge_proxy";
-  const bridgeToolsActive = toolRouting !== "cloud_only" && bridgeOnline;
+  const supportsNativeTools =
+    provider === "anthropic" || provider === "openai" || provider === "openrouter";
+  const supportsDeferredBridgeTools = provider === "anthropic";
+  const bridgeToolsActive =
+    toolRouting !== "cloud_only" && bridgeOnline && supportsDeferredBridgeTools;
 
   // Per-agent tool palette from the tenant's manifest (Phase D of
   // giggly-reef). Undefined → no manifest filter — BUT we apply a
@@ -461,11 +466,11 @@ export async function POST(req: NextRequest) {
     requestedCloudTools === "off"
       ? "off"
       : requestedCloudTools === "tools"
-        ? (provider === "anthropic" ? "tools" : "markers") // fall back if provider can't
+        ? (supportsNativeTools ? "tools" : "markers") // fall back if provider can't
         : requestedCloudTools === "markers"
           ? "markers"
-          : provider === "anthropic"
-            ? "tools" // default: prefer native tools on Anthropic
+          : supportsNativeTools
+            ? "tools" // default: prefer native tools when the provider supports them
             : "markers";
 
   const cloudToolsBlock =
@@ -526,7 +531,7 @@ export async function POST(req: NextRequest) {
       send("session", { session_id: sessionId });
 
       try {
-        if (cloudToolsMode === "tools" && provider === "anthropic") {
+        if (cloudToolsMode === "tools" && supportsNativeTools) {
           // Native Anthropic tool_use loop. The runner re-opens /v1/messages
           // each iteration as tools chain — it yields {delta, tool_use,
           // tool_result, done, error} which we forward to the SSE client.
@@ -536,12 +541,14 @@ export async function POST(req: NextRequest) {
             role: "user" | "assistant";
             content: string;
           }>;
-          for await (const ev of streamAnthropicWithTools(
-            {
-              apiKey,
-              model,
-              system: persona,
-              messages: stripped,
+          const nativeEvents =
+            provider === "anthropic"
+              ? streamAnthropicWithTools(
+                  {
+                    apiKey,
+                    model,
+                    system: persona,
+                    messages: stripped,
               // Filter deferred (bridge-routed) tools out of the palette
               // when the bridge isn't online. Prevents the model from
               // trying to call send_email / bash etc. and getting
@@ -568,7 +575,20 @@ export async function POST(req: NextRequest) {
               chatMode: payload.chat_mode === "plan" ? "plan" : "build",
             },
             { tenantId, userId: user.id, agentKey, authUserId: user.id }
-          )) {
+          )
+              : streamOpenAICompatibleWithTools(
+                  {
+                    provider: provider as "openai" | "openrouter",
+                    apiKey,
+                    model,
+                    system: persona,
+                    messages: stripped,
+                    toolPalette,
+                    chatMode: payload.chat_mode === "plan" ? "plan" : "build",
+                  },
+                  { tenantId, userId: user.id, agentKey, authUserId: user.id },
+                );
+          for await (const ev of nativeEvents) {
             if (ev.type === "delta") {
               assistantText += ev.text;
               send("delta", { text: ev.text });

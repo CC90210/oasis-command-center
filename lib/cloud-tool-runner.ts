@@ -45,7 +45,7 @@ import { runAction } from "./agent-actions";
 import { CLOUD_TOOLS } from "./cloud-tools";
 import { dispatchOasisOnlyEvent } from "./lead-stage-dispatcher";
 import type { OasisLeadStageEvent } from "./oasis-lead-stage-engine";
-import { asSSERecord, parseSSE, safeText } from "./sse-parser";
+import { asSSEArray, asSSERecord, parseSSE, safeText } from "./sse-parser";
 import { downloadChatAttachmentText } from "./chat-attachments";
 import { parseLeadImportCsv } from "./leads-import-parser";
 import { importLeadsForTenant } from "./leads-import-service";
@@ -55,6 +55,7 @@ import {
   filterToolsForMode,
   normalizeMode,
 } from "./chat-modes/plan-mode";
+import { readBrainDoc, searchMemory } from "./cloud-knowledge-tools";
 
 const ANTHROPIC_VERSION = "2023-06-01";
 const MAX_TOOL_ITERATIONS = 8; // safety cap — prevents runaway tool loops
@@ -120,6 +121,51 @@ type ToolDef = {
  * useful tools first.
  */
 export const TOOL_DEFINITIONS: ToolDef[] = [
+  {
+    name: "read_brain_doc",
+    description:
+      "Read an allowed knowledge file from the CEO-Agent repository (brain/*.md, memory/*.md, CONTEXT.md, AGENTS.md, docs/adr/*.md, or a skill's SKILL.md). Use this in cloud mode when the operator asks about repo brain/state/docs and the local bridge is not required.",
+    input_schema: {
+      type: "object",
+      properties: {
+        path: {
+          type: "string",
+          description: "Repo-relative path, for example 'brain/STATE.md', 'CONTEXT.md', or 'skills/outreach-send/SKILL.md'.",
+        },
+        max_chars: {
+          type: "number",
+          description: "Optional max characters to return. Default 12000, max 40000.",
+        },
+      },
+      required: ["path"],
+    },
+  },
+  {
+    name: "search_memory",
+    description:
+      "Search the CEO-Agent brain and memory docs for a phrase and return ranked line-referenced snippets. Use before reading whole files when the operator asks whether the system has seen a topic, mistake, SOP, or prior decision before.",
+    input_schema: {
+      type: "object",
+      properties: {
+        query: { type: "string", description: "Search phrase, for example 'quiet day cron' or 'V6 architecture'." },
+        limit: { type: "number", description: "Optional max snippets to return. Default 8, max 20." },
+      },
+      required: ["query"],
+    },
+  },
+  {
+    name: "web_fetch",
+    description:
+      "Fetch a public URL with the same SSRF protections as http_get. Use when the operator asks to read a page, inspect public docs, or summarize a pasted URL.",
+    input_schema: {
+      type: "object",
+      properties: {
+        url: { type: "string", description: "Absolute public URL." },
+        headers: { type: "object", description: "Optional non-auth request headers as a string-to-string map." },
+      },
+      required: ["url"],
+    },
+  },
   {
     name: "list_records",
     description:
@@ -600,6 +646,12 @@ async function dispatch(
   ctx: ToolContext
 ): Promise<unknown> {
   switch (name) {
+    case "read_brain_doc":
+      return await readBrainDoc(input);
+    case "search_memory":
+      return await searchMemory(input);
+    case "web_fetch":
+      return await toolHttpGet(input);
     case "list_records":
       return await toolListRecords(input, ctx);
     case "get_record":
@@ -1130,6 +1182,18 @@ async function toolHttpPost(input: Record<string, unknown>) {
 
 function humanSummary(name: string, input: Record<string, unknown>, data: unknown): string {
   switch (name) {
+    case "read_brain_doc": {
+      const d = data as { path?: string; truncated?: boolean };
+      return `read ${d.path || String(input.path)}${d.truncated ? " (truncated)" : ""}`;
+    }
+    case "search_memory": {
+      const d = data as { count?: number };
+      return `searched memory for "${String(input.query)}" - ${d.count || 0} match${d.count === 1 ? "" : "es"}`;
+    }
+    case "web_fetch": {
+      const d = data as { status: number };
+      return `fetch ${String(input.url).slice(0, 60)} -> ${d.status}`;
+    }
     case "list_records": {
       const d = data as { count: number };
       return `listed ${d.count} ${String(input.entity)} row${d.count === 1 ? "" : "s"}`;
@@ -1406,6 +1470,228 @@ export async function* resumeAnthropicTurn(
   });
 }
 
+type OpenAICompatibleProvider = "openai" | "openrouter";
+
+type OpenAICompatibleMessage =
+  | { role: "system"; content: string }
+  | { role: "user"; content: string }
+  | {
+      role: "assistant";
+      content: string | null;
+      tool_calls?: Array<{
+        id: string;
+        type: "function";
+        function: { name: string; arguments: string };
+      }>;
+    }
+  | { role: "tool"; tool_call_id: string; content: string };
+
+export type OpenAICompatibleToolLoopRequest = Omit<
+  ToolLoopRequest,
+  "bridgeAdvertisedTools" | "excludeDeferredTools"
+> & {
+  provider: OpenAICompatibleProvider;
+};
+
+export async function* streamOpenAICompatibleWithTools(
+  req: OpenAICompatibleToolLoopRequest,
+  ctx: ToolContext,
+): AsyncGenerator<StreamYield> {
+  const history: OpenAICompatibleMessage[] = req.messages
+    .filter((m) => m.content && m.content.length > 0)
+    .map((m) => ({ role: m.role, content: m.content }) as OpenAICompatibleMessage);
+  const mode = normalizeMode(req.chatMode);
+  const system = composePlanSystemPrompt(req.system, mode);
+  const activeTools = resolveActiveTools({
+    toolPalette: req.toolPalette,
+    chatMode: mode,
+    // OpenAI-compatible resume for bridge-deferred tools is not wired yet.
+    // Keep this path cloud-safe instead of advertising tools it cannot resume.
+    forceExcludeDeferred: true,
+  });
+  let totalIn = 0;
+  let totalOut = 0;
+
+  for (let iter = 0; iter < MAX_TOOL_ITERATIONS; iter++) {
+    const body: Record<string, unknown> = {
+      model: req.model,
+      messages: [{ role: "system", content: system }, ...history],
+      stream: true,
+      stream_options: { include_usage: true },
+    };
+    if (req.provider === "openai") {
+      body.max_completion_tokens = req.maxTokens ?? 4096;
+    } else {
+      body.max_tokens = req.maxTokens ?? 4096;
+    }
+    if (req.enableTools !== false && activeTools.length > 0) {
+      body.tools = activeTools.map((tool) => ({
+        type: "function",
+        function: {
+          name: tool.name,
+          description: tool.description,
+          parameters: tool.input_schema,
+        },
+      }));
+      body.tool_choice = "auto";
+    }
+
+    const res = await fetchWithRetry(openAICompatibleUrl(req.provider), {
+      method: "POST",
+      headers: openAICompatibleHeaders(req.provider, req.apiKey),
+      body: JSON.stringify(body),
+    });
+    if (!res.ok || !res.body) {
+      const detail = await safeText(res);
+      yield {
+        type: "error",
+        message:
+          res.status >= 500 || res.status === 429
+            ? `provider_temporarily_unavailable:${req.provider}_${res.status}`
+            : `${req.provider}_${res.status}:${detail}`,
+      };
+      return;
+    }
+
+    let assistantText = "";
+    let finishReason: string | null = null;
+    const toolBuffers = new Map<number, { id: string; name: string; args: string }>();
+
+    for await (const ev of parseSSE(res.body)) {
+      const data = asSSERecord(ev.data);
+      if (!data) continue;
+      const choice = firstSSERecord(data.choices);
+      const delta = asSSERecord(choice?.delta);
+      const text = delta?.content;
+      if (typeof text === "string" && text.length > 0) {
+        assistantText += text;
+        yield { type: "delta", text };
+      }
+      for (const rawCall of asSSEArray(delta?.tool_calls)) {
+        const call = asSSERecord(rawCall);
+        if (!call) continue;
+        const index = typeof call.index === "number" ? call.index : toolBuffers.size;
+        const fn = asSSERecord(call.function);
+        const prev = toolBuffers.get(index) || { id: "", name: "", args: "" };
+        toolBuffers.set(index, {
+          id: typeof call.id === "string" && call.id ? call.id : prev.id,
+          name: typeof fn?.name === "string" && fn.name ? fn.name : prev.name,
+          args: prev.args + (typeof fn?.arguments === "string" ? fn.arguments : ""),
+        });
+      }
+      if (typeof choice?.finish_reason === "string") {
+        finishReason = choice.finish_reason;
+      }
+      const usage = asSSERecord(data.usage);
+      if (usage) {
+        totalIn = numberOr(usage.prompt_tokens, totalIn);
+        totalOut = numberOr(usage.completion_tokens, totalOut);
+      }
+    }
+
+    const toolUses = [...toolBuffers.values()]
+      .filter((tu) => tu.name.length > 0)
+      .map((tu, index) => ({
+        id: tu.id || `tool_${iter}_${index}`,
+        name: tu.name,
+        input: parseToolArgs(tu.args),
+        rawArgs: tu.args || "{}",
+      }));
+    if (toolUses.length === 0 || finishReason !== "tool_calls") {
+      yield { type: "done", inputTokens: totalIn, outputTokens: totalOut };
+      return;
+    }
+
+    const allowedToolNames = new Set(activeTools.map((t) => t.name));
+    history.push({
+      role: "assistant",
+      content: assistantText || null,
+      tool_calls: toolUses.map((tu) => ({
+        id: tu.id,
+        type: "function" as const,
+        function: { name: tu.name, arguments: tu.rawArgs },
+      })),
+    });
+
+    for (const tu of toolUses) {
+      if (!allowedToolNames.has(tu.name)) {
+        const content = JSON.stringify({
+          error: "tool_not_allowed_in_current_mode",
+          tool: tu.name,
+          hint:
+            mode === "plan"
+              ? `${tu.name} is unavailable in plan mode. Run /build to restore the full tool registry.`
+              : `${tu.name} is not in the current agent's tool palette.`,
+        });
+        history.push({ role: "tool", tool_call_id: tu.id, content });
+        yield {
+          type: "tool_result",
+          name: tu.name,
+          ok: false,
+          summary: `${tu.name} blocked - not in active tool palette`,
+        };
+        continue;
+      }
+      yield { type: "tool_use", name: tu.name, input: tu.input };
+      const result = await executeTool(tu.name, tu.input, ctx);
+      yield {
+        type: "tool_result",
+        name: tu.name,
+        summary: result.summary,
+        ok: !result.is_error,
+      };
+      history.push({ role: "tool", tool_call_id: tu.id, content: result.content });
+    }
+  }
+
+  yield {
+    type: "error",
+    message: `tool_loop_exhausted_after_${MAX_TOOL_ITERATIONS}_iterations`,
+  };
+}
+
+function openAICompatibleUrl(provider: OpenAICompatibleProvider): string {
+  return provider === "openrouter"
+    ? "https://openrouter.ai/api/v1/chat/completions"
+    : "https://api.openai.com/v1/chat/completions";
+}
+
+function openAICompatibleHeaders(
+  provider: OpenAICompatibleProvider,
+  apiKey: string,
+): Record<string, string> {
+  const headers: Record<string, string> = {
+    "content-type": "application/json",
+    authorization: `Bearer ${apiKey}`,
+  };
+  if (provider === "openrouter") {
+    headers["HTTP-Referer"] = "https://oasisai.work";
+    headers["X-Title"] = "OASIS Agent Command Center";
+  }
+  return headers;
+}
+
+function parseToolArgs(raw: string): Record<string, unknown> {
+  if (!raw.trim()) return {};
+  try {
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      return parsed as Record<string, unknown>;
+    }
+  } catch {
+    return {};
+  }
+  return {};
+}
+
+function firstSSERecord(value: unknown): Record<string, unknown> | null {
+  return asSSERecord(asSSEArray(value)[0]);
+}
+
+function numberOr(value: unknown, fallback: number): number {
+  return typeof value === "number" ? value : fallback;
+}
+
 type IterationLoopArgs = {
   apiKey: string;
   model: string;
@@ -1426,6 +1712,30 @@ type IterationLoopArgs = {
   startTotalOut: number;
   ctx: ToolContext;
 };
+
+function resolveActiveTools(args: {
+  excludeDeferredTools?: boolean;
+  bridgeAdvertisedTools?: string[] | null;
+  toolPalette?: string[];
+  chatMode?: ChatPlanMode;
+  forceExcludeDeferred?: boolean;
+}): ToolDef[] {
+  let activeTools: ToolDef[] = TOOL_DEFINITIONS;
+  if (args.forceExcludeDeferred || args.excludeDeferredTools) {
+    activeTools = activeTools.filter((t) => !t.defer);
+  } else if (args.bridgeAdvertisedTools !== undefined && args.bridgeAdvertisedTools !== null) {
+    const advertised = new Set(args.bridgeAdvertisedTools);
+    activeTools = activeTools.filter((t) => !t.defer || advertised.has(t.name));
+  }
+  if (args.toolPalette !== undefined) {
+    const allow = new Set(args.toolPalette);
+    activeTools = activeTools.filter((t) => allow.has(t.name));
+  }
+  if (args.chatMode === "plan") {
+    activeTools = filterToolsForMode(activeTools, "plan");
+  }
+  return activeTools;
+}
 
 /**
  * The core Anthropic tool_use streaming loop. Owns the per-iteration

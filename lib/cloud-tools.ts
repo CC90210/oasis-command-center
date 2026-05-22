@@ -29,6 +29,7 @@ import { getServiceSupabase } from "./supabase-server";
 import { downloadChatAttachmentText } from "./chat-attachments";
 import { parseLeadImportCsv } from "./leads-import-parser";
 import { importLeadsForTenant } from "./leads-import-service";
+import { readBrainDoc, searchMemory } from "./cloud-knowledge-tools";
 
 export type CloudToolContext = {
   tenantId: string;
@@ -55,6 +56,44 @@ type CloudTool = {
 // ============================================================================
 // Tool implementations
 // ============================================================================
+
+const readBrainDocCloud: CloudTool = {
+  name: "read_brain_doc",
+  description:
+    "Read an allowed knowledge file from the CEO-Agent repository, such as brain/STATE.md, CONTEXT.md, memory/*.md, docs/adr/*.md, or skills/*/SKILL.md.",
+  args: {
+    path: "Repo-relative path, e.g. 'brain/STATE.md' or 'CONTEXT.md'.",
+    max_chars: "Optional max characters to return (default 12000, max 40000).",
+  },
+  async execute(input) {
+    const data = await readBrainDoc(input);
+    return {
+      ok: true,
+      name: "read_brain_doc",
+      data,
+      summary: `Read ${data.path}${data.truncated ? " (truncated)" : ""}.`,
+    };
+  },
+};
+
+const searchMemoryCloud: CloudTool = {
+  name: "search_memory",
+  description:
+    "Search CEO-Agent brain and memory docs for a phrase and return ranked line-referenced snippets.",
+  args: {
+    query: "Search phrase, e.g. 'quiet day cron' or 'V6 architecture'.",
+    limit: "Optional max snippets to return (default 8, max 20).",
+  },
+  async execute(input) {
+    const data = await searchMemory(input);
+    return {
+      ok: true,
+      name: "search_memory",
+      data,
+      summary: `Found ${data.count} memory match${data.count === 1 ? "" : "es"} for "${data.query}".`,
+    };
+  },
+};
 
 const lookupLeadByName: CloudTool = {
   name: "lookup_lead_by_name",
@@ -247,6 +286,8 @@ const importLeadsFromAttachment: CloudTool = {
 // ============================================================================
 
 export const CLOUD_TOOLS: Record<string, CloudTool> = {
+  [readBrainDocCloud.name]: readBrainDocCloud,
+  [searchMemoryCloud.name]: searchMemoryCloud,
   [lookupLeadByName.name]: lookupLeadByName,
   [listOpenLeads.name]: listOpenLeads,
   [integrationStatus.name]: integrationStatus,
