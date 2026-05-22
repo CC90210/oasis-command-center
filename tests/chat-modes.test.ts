@@ -13,6 +13,7 @@ import {
   renderHelp,
   type SlashCommandName,
 } from "@/lib/chat-modes/slash-parser";
+import { filterCommands } from "@/components/chat/SlashCommandMenu";
 import {
   composeSystemPrompt,
   filterToolsForMode,
@@ -140,6 +141,36 @@ test("renderHelp lists every wired command", () => {
 
 test("renderHelp starts with a heading", () => {
   assert.match(renderHelp().split("\n")[0]!, /Slash commands/i);
+});
+
+console.log("\n=== SlashCommandMenu (autocomplete filter) ===");
+
+test("empty query returns every wired command", () => {
+  const out = filterCommands("");
+  assert.deepEqual(out, ALL_COMMANDS);
+});
+
+test("filter narrows by prefix — 'pl' returns only /plan", () => {
+  const out = filterCommands("pl");
+  assert.deepEqual(out, ["plan"]);
+});
+
+test("filter is case-insensitive", () => {
+  const out = filterCommands("PL");
+  assert.deepEqual(out, ["plan"]);
+});
+
+test("filter — 'c' returns clear + compact (both start with c)", () => {
+  const out = filterCommands("c");
+  assert.ok(out.includes("clear"));
+  assert.ok(out.includes("compact"));
+  // No other letters in our wired set should leak in here.
+  for (const c of out) assert.equal(c.startsWith("c"), true);
+});
+
+test("filter — gibberish returns empty list", () => {
+  const out = filterCommands("xyz");
+  assert.deepEqual(out, []);
 });
 
 console.log("\n=== plan-mode ===");

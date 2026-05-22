@@ -44,6 +44,7 @@ import { getAgentInfo } from "@/lib/agents";
 import { BRIDGE_CHAT_BASE } from "@/lib/agent-roots";
 import { getBrowserSupabase } from "@/lib/supabase-browser";
 import { parseInput, renderHelp, type SlashCommandName } from "@/lib/chat-modes/slash-parser";
+import { SlashCommandMenu, filterCommands } from "@/components/chat/SlashCommandMenu";
 import { providerForModel, PROVIDER_MODELS } from "@/lib/providers";
 
 type Role = "user" | "assistant" | "system";
@@ -340,6 +341,30 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
   const [messages, setMessages] = useState<Msg[]>(() => seedMessagesForAgent(initialAgent, welcomeMessages));
   const [input, setInput] = useState("");
   const [streaming, setStreaming] = useState(false);
+  // Slash-command autocomplete. The menu opens whenever the input matches
+  // `^/[a-z]*$` (a single slash followed by zero or more lowercase letters,
+  // no whitespace yet). The operator can dismiss it manually with Escape
+  // (sets slashMenuDismissed) — that flag clears the moment the input
+  // changes back to something that wouldn't trigger the menu (e.g., they
+  // start a regular message), so a single Escape dismisses for ONE attempt
+  // without permanently disabling the affordance.
+  const [slashSelectedIdx, setSlashSelectedIdx] = useState(0);
+  const [slashMenuDismissed, setSlashMenuDismissed] = useState(false);
+  const slashMenuTrigger = /^\/[a-z]*$/i.exec(input.trim());
+  const slashMenuOpen = !!slashMenuTrigger && !slashMenuDismissed && !streaming;
+  const slashQuery = slashMenuTrigger ? slashMenuTrigger[0].slice(1).toLowerCase() : "";
+  // Reset selection + dismissal whenever the trigger string changes so the
+  // operator never sees a stale highlighted row (e.g., index 2 carried
+  // over after the filter narrowed to one match).
+  useEffect(() => {
+    setSlashSelectedIdx(0);
+  }, [slashQuery]);
+  useEffect(() => {
+    // Auto-undismiss when the input leaves slash-trigger shape — so the
+    // operator gets the menu back on the next attempt without having
+    // to clear and retype.
+    if (!slashMenuTrigger) setSlashMenuDismissed(false);
+  }, [slashMenuTrigger]);
   const [sessionId, setSessionId] = useState<string | null>(null);
   // Tab-stable identifier for the warm-process pool. Minted ONCE per
   // ChatWidget mount; persists across agent switches and turns. The
@@ -1827,7 +1852,69 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
     }
   }
 
+  /**
+   * Insert a slash command into the composer. Used by both keyboard nav
+   * (Tab/Enter when the menu is open) and click handlers. The trailing
+   * space sets the operator up to either submit immediately (commands
+   * like /plan, /build, /clear) or start typing args (/agent, /model,
+   * /compact). Closes the menu side-effect via setSlashMenuDismissed.
+   */
+  function insertSlashCommand(name: SlashCommandName) {
+    setInput(`/${name} `);
+    setSlashMenuDismissed(true);
+    setSlashSelectedIdx(0);
+    // Re-focus the textarea — onMouseDown's preventDefault keeps focus
+    // for click events, but Enter/Tab via keyboard doesn't need this
+    // (focus never left). Defensive call so both paths land in the
+    // same final state.
+    setTimeout(() => inputRef.current?.focus(), 0);
+  }
+
   function onKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
+    // Slash menu navigation — only intercept when the menu is open so
+    // regular textarea typing isn't affected.
+    if (slashMenuOpen) {
+      const matches = filterCommands(slashQuery);
+      if (e.key === "ArrowDown") {
+        e.preventDefault();
+        if (matches.length > 0) {
+          setSlashSelectedIdx((idx) => (idx + 1) % matches.length);
+        }
+        return;
+      }
+      if (e.key === "ArrowUp") {
+        e.preventDefault();
+        if (matches.length > 0) {
+          setSlashSelectedIdx((idx) => (idx - 1 + matches.length) % matches.length);
+        }
+        return;
+      }
+      if (e.key === "Tab") {
+        // Tab is the canonical "insert this and let me keep typing" key.
+        // Always inserts the highlighted command regardless of Shift.
+        e.preventDefault();
+        const pick = matches[slashSelectedIdx];
+        if (pick) insertSlashCommand(pick);
+        return;
+      }
+      if (e.key === "Enter" && !e.shiftKey) {
+        // When the menu has at least one match, Enter accepts the
+        // selection (same UX as VS Code's IntelliSense). When the
+        // menu has no matches, Enter falls through to the normal
+        // submit path — the operator typed gibberish like `/foo`,
+        // sending it as a regular message is the right escape hatch.
+        if (matches.length > 0) {
+          e.preventDefault();
+          insertSlashCommand(matches[slashSelectedIdx]);
+          return;
+        }
+      }
+      if (e.key === "Escape") {
+        e.preventDefault();
+        setSlashMenuDismissed(true);
+        return;
+      }
+    }
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
       send();
@@ -2387,7 +2474,21 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
             )}
           </div>
         )}
-        <div className="flex gap-2">
+        <div className="flex gap-2 relative">
+          {/* Slash-command autocomplete — anchored above the textarea
+              via the parent's relative positioning. Renders only when
+              the input is in slash-trigger shape. */}
+          {slashMenuOpen && (
+            <div className="absolute left-[3.5rem] right-0 bottom-0 pointer-events-none">
+              <div className="pointer-events-auto">
+                <SlashCommandMenu
+                  query={slashQuery}
+                  selectedIndex={slashSelectedIdx}
+                  onSelect={insertSlashCommand}
+                />
+              </div>
+            </div>
+          )}
           <input
             ref={fileInputRef}
             type="file"
