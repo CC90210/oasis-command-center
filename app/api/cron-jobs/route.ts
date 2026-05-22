@@ -143,6 +143,25 @@ export async function GET() {
  * adds/removes empire automations. The UI gates edit/delete on the source
  * tag.
  */
+/**
+ * Empire cron_jobs has no agent_key column — every row was historically
+ * "Bravo's empire scheduler". Now that the dashboard groups by agent
+ * (CEO/CFO/CMO), we infer the owning agent from the job name / action_type:
+ *
+ *   - "Atlas *" name OR action_type starting with "atlas_" → atlas (CFO)
+ *   - "Maven *" name OR action_type starting with "maven_" → maven (CMO)
+ *   - "Aura *" / "Morning Pow Wow" (Aura's voice note) → aura (life-coach)
+ *   - everything else → bravo (CEO — business ops)
+ */
+function inferEmpireAgentKey(name: string, actionType: string | null): string {
+  const n = (name || "").toLowerCase();
+  const t = (actionType || "").toLowerCase();
+  if (n.startsWith("atlas") || t.startsWith("atlas_")) return "atlas";
+  if (n.startsWith("maven") || t.startsWith("maven_")) return "maven";
+  if (n.startsWith("aura") || n.includes("pow wow") || t.startsWith("morning_powwow")) return "aura";
+  return "bravo";
+}
+
 function normalizeEmpireRow(row: EmpireCronRow) {
   // last_result is a free-form text column written by scripts/scheduler.py.
   // Observed patterns in scheduler.py:
@@ -163,7 +182,7 @@ function normalizeEmpireRow(row: EmpireCronRow) {
       : "success";
   return {
     id: row.id,
-    agent_key: "bravo-scheduler",
+    agent_key: inferEmpireAgentKey(row.name, row.action_type),
     name: row.name,
     description: row.description,
     schedule: row.schedule,

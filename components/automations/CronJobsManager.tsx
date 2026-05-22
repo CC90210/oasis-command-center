@@ -319,65 +319,101 @@ export function CronJobsManager({ agentKeys }: Props) {
       )}
 
           {jobs && jobs.length > 0 && (() => {
-        const tenantJobs = jobs.filter((j) => j.source === "tenant");
-        const empireJobs = jobs.filter((j) => j.source === "empire");
+        // Group by AGENT (CEO/CFO/CMO/Aura), not by source.
+        // CC's directive 2026-05-22: "this is my personal account ... I'm
+        // using Maven, Atlas, and Bravo." The empire is a single-operator
+        // C-suite. Tenant-vs-Empire grouping made sense when there were
+        // client tenants on the same dashboard; now it's just confusing.
+        //
+        // Order: CEO (Bravo) → CFO (Atlas) → CMO (Maven) → Aura.
+        // Mavenless empires still render the section with a "no automations
+        // yet" placeholder so CC sees the gap, not silence.
+        const groups: Array<{
+          key: string;
+          label: string;
+          subLabel: string;
+          jobs: typeof jobs;
+        }> = [
+          {
+            key: "bravo",
+            label: "Bravo (CEO) — Business Operations",
+            subLabel: "Daily briefs, lead scoring, funnel polling, MRR sync, snapshots",
+            jobs: jobs.filter((j) => (j.agent_key || "").toLowerCase().startsWith("bravo")),
+          },
+          {
+            key: "atlas",
+            label: "Atlas (CFO) — Finance & Compliance",
+            subLabel: "Wealth tracking, tax deadlines, balance nudges, pulse refresh",
+            jobs: jobs.filter((j) => (j.agent_key || "").toLowerCase().startsWith("atlas")),
+          },
+          {
+            key: "maven",
+            label: "Maven (CMO) — Content & Brand",
+            subLabel: "Social posting, content pipelines, brand voice gate",
+            jobs: jobs.filter((j) => (j.agent_key || "").toLowerCase().startsWith("maven")),
+          },
+          {
+            key: "aura",
+            label: "Aura — Personal",
+            subLabel: "Voice notes, habit tracking, personal cadence",
+            jobs: jobs.filter((j) => (j.agent_key || "").toLowerCase().startsWith("aura")),
+          },
+        ];
+        const orphanJobs = jobs.filter(
+          (j) => !["bravo", "atlas", "maven", "aura"].some((k) => (j.agent_key || "").toLowerCase().startsWith(k)),
+        );
+        if (orphanJobs.length > 0) {
+          groups.push({
+            key: "other",
+            label: "Other",
+            subLabel: "Automations not yet mapped to an agent",
+            jobs: orphanJobs,
+          });
+        }
+
         return (
           <div className="space-y-6">
-            {tenantJobs.length > 0 && (
-              <div className="space-y-2">
-                {empireJobs.length > 0 && (
-                  <div className="text-[10px] font-bold uppercase tracking-wider text-fg-dim">
-                    Tenant automations
-                  </div>
-                )}
-                {tenantJobs.map((job) =>
-                  editingId === job.id ? (
-                    <JobEditor
-                      key={job.id}
-                      mode="edit"
-                      job={job}
-                      agentKeys={agentKeys}
-                      onCancel={() => setEditingId(null)}
-                      onSaved={() => {
-                        setEditingId(null);
-                        refresh();
-                      }}
-                    />
-                  ) : (
-                    <JobRow
-                      key={job.id}
-                      job={job}
-                      onToggle={() => toggleEnabled(job)}
-                      onEdit={() => setEditingId(job.id)}
-                      onDelete={() => deleteJob(job.id)}
-                      isPending={pendingId === job.id}
-                      justToggled={recentlyToggled?.id === job.id}
-                    />
-                  ),
-                )}
-              </div>
-            )}
-            {empireJobs.length > 0 && (
-              <div className="space-y-2">
+            {groups.map((g) => (
+              <div key={g.key} className="space-y-2">
                 <div className="text-[10px] font-bold uppercase tracking-wider text-fg-dim">
-                  Empire automations
+                  {g.label}
                   <span className="ml-2 text-fg-dim/70 normal-case font-normal tracking-normal">
-                    Schedule + action managed by <span className="font-mono">scripts/cron_engine.py</span> SEED_JOBS · on/off is operator-controlled
+                    {g.subLabel}
                   </span>
                 </div>
-                {empireJobs.map((job) => (
-                  <JobRow
-                    key={job.id}
-                    job={job}
-                    onToggle={() => toggleEnabled(job)}
-                    onEdit={() => {/* empire schedule + action_config remain read-only */}}
-                    onDelete={() => {/* empire rows can be disabled, not deleted */}}
-                    isPending={pendingId === job.id}
-                    justToggled={recentlyToggled?.id === job.id}
-                  />
-                ))}
+                {g.jobs.length === 0 ? (
+                  <div className="rounded-lg border border-dashed border-bg-border bg-bg-deep/30 p-4 text-xs text-fg-dim">
+                    No automations yet for this agent.
+                  </div>
+                ) : (
+                  g.jobs.map((job) =>
+                    editingId === job.id ? (
+                      <JobEditor
+                        key={job.id}
+                        mode="edit"
+                        job={job}
+                        agentKeys={agentKeys}
+                        onCancel={() => setEditingId(null)}
+                        onSaved={() => {
+                          setEditingId(null);
+                          refresh();
+                        }}
+                      />
+                    ) : (
+                      <JobRow
+                        key={job.id}
+                        job={job}
+                        onToggle={() => toggleEnabled(job)}
+                        onEdit={() => job.source === "empire" ? undefined : setEditingId(job.id)}
+                        onDelete={() => job.source === "empire" ? undefined : deleteJob(job.id)}
+                        isPending={pendingId === job.id}
+                        justToggled={recentlyToggled?.id === job.id}
+                      />
+                    ),
+                  )
+                )}
               </div>
-            )}
+            ))}
           </div>
         );
       })()}
