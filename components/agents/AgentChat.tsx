@@ -2,9 +2,10 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { AlertCircle, Loader2, Send, Sparkles } from "lucide-react";
+import { parseInput, renderHelp } from "@/lib/chat-modes/slash-parser";
 
 type ChatTurn = {
-  role: "user" | "assistant";
+  role: "user" | "assistant" | "system";
   content: string;
 };
 
@@ -16,6 +17,11 @@ type Props = {
   /** Optional welcome message rendered above the empty-state. */
   greeting?: string;
 };
+
+// sessionStorage key for plan mode. Per-tab so a tenant-preview reload
+// doesn't drop the operator back into build mode mid-investigation.
+// Distinct from ChatWidget's key — separate surfaces, separate state.
+const PLAN_MODE_STORAGE_KEY = "oasis.tenant-chat.planMode.v1";
 
 export function AgentChat({
   tenantSlug,
@@ -29,6 +35,30 @@ export function AgentChat({
   const [streaming, setStreaming] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [modelLabel, setModelLabel] = useState<string | null>(null);
+  // Plan vs Build — OpenCode-style state machine. /plan filters write
+  // intent out of the agent's system prompt (server-side, see
+  // app/api/agents/chat/route.ts); /build restores full behavior.
+  // Lives in sessionStorage so a reload preserves the operator's mode.
+  const [planMode, setPlanModeState] = useState<"plan" | "build">("build");
+  const setPlanMode = (next: "plan" | "build") => {
+    setPlanModeState(next);
+    if (typeof window !== "undefined") {
+      try {
+        window.sessionStorage.setItem(PLAN_MODE_STORAGE_KEY, next);
+      } catch {
+        // Privacy mode / quota — fall back to in-memory state.
+      }
+    }
+  };
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    try {
+      const saved = window.sessionStorage.getItem(PLAN_MODE_STORAGE_KEY);
+      if (saved === "plan" || saved === "build") setPlanModeState(saved);
+    } catch {
+      // ignore
+    }
+  }, []);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
 
@@ -41,6 +71,52 @@ export function AgentChat({
       const trimmed = text.trim();
       if (!trimmed || streaming) return;
       setError(null);
+
+      // Slash commands — intercepted client-side, never hit the server.
+      // Mirrors ChatWidget's surface but scoped to commands that make
+      // sense for a single-agent preview chat: /clear, /help, /plan,
+      // /build. /agent and /model don't apply here (agent is fixed by
+      // route; model swap belongs in Settings, not the tenant preview).
+      const parsed = parseInput(trimmed);
+      if (parsed.kind === "command") {
+        const appendSystem = (content: string) =>
+          setTurns((prev) => [...prev, { role: "system", content }]);
+        switch (parsed.name) {
+          case "clear":
+            setTurns([]);
+            setInput("");
+            return;
+          case "help":
+            appendSystem(renderHelp());
+            setInput("");
+            return;
+          case "plan":
+            setPlanMode("plan");
+            appendSystem(
+              "Plan mode active — agent can research and propose, but write tools are gated server-side. Run /build to execute.",
+            );
+            setInput("");
+            return;
+          case "build":
+            setPlanMode("build");
+            appendSystem("Build mode active — full agent capabilities restored.");
+            setInput("");
+            return;
+          case "agent":
+          case "model":
+            appendSystem(
+              `/${parsed.name} isn't available on the tenant preview chat — switch agents via the marketplace, or use the main /agents page for in-place /model + /agent.`,
+            );
+            setInput("");
+            return;
+          case "compact":
+            appendSystem(
+              "/compact isn't wired for the tenant preview chat yet. Use /clear if the history is getting long.",
+            );
+            setInput("");
+            return;
+        }
+      }
 
       const nextTurns: ChatTurn[] = [
         ...turns,
@@ -58,9 +134,16 @@ export function AgentChat({
           body: JSON.stringify({
             tenant_slug: tenantSlug,
             agent_slug: agentSlug,
+            // Filter out system pills — those are client-only chrome
+            // (slash-command echoes, error banners) and would confuse
+            // the model if sent as conversation history.
             messages: nextTurns
               .slice(0, -1)
-              .filter((t) => t.content || t.role === "user"),
+              .filter((t) => (t.role === "user" || t.role === "assistant") && (t.content || t.role === "user")),
+            // Plan vs build (2026-05-22 parity with ChatWidget). Server
+            // composes the plan overlay onto the agent's system prompt
+            // when this is "plan".
+            chat_mode: planMode,
           }),
         });
 
@@ -159,11 +242,32 @@ export function AgentChat({
             )}
           </div>
         </div>
-        {modelLabel && (
-          <span className="text-[10px] uppercase tracking-[0.16em] text-fg-dim font-mono">
-            {modelLabel}
-          </span>
-        )}
+        <div className="flex items-center gap-2">
+          {planMode === "plan" && (
+            // Plan-mode badge — click to /build. Mirrors ChatWidget's
+            // badge in shape + behavior so the operator's muscle memory
+            // from the /agents page transfers to the tenant preview.
+            <button
+              type="button"
+              onClick={() => {
+                setPlanMode("build");
+                setTurns((prev) => [
+                  ...prev,
+                  { role: "system", content: "Build mode active — full agent capabilities restored." },
+                ]);
+              }}
+              className="inline-flex items-center gap-1 text-[10px] uppercase tracking-wider font-bold px-2 py-1 rounded-md border border-status-warm/40 bg-status-warm/10 text-status-warm hover:bg-status-warm/20 transition-colors"
+              title="Plan mode active — agent restricted to read/research. Click to exit (same as /build)."
+            >
+              ● PLAN MODE
+            </button>
+          )}
+          {modelLabel && (
+            <span className="text-[10px] uppercase tracking-[0.16em] text-fg-dim font-mono">
+              {modelLabel}
+            </span>
+          )}
+        </div>
       </div>
 
       <div ref={scrollRef} className="flex-1 overflow-y-auto px-5 py-4 space-y-4">
@@ -172,20 +276,35 @@ export function AgentChat({
             {greeting || `Start chatting with ${agentName}. Use Cmd/Ctrl+Enter to send.`}
           </div>
         )}
-        {turns.map((t, i) => (
-          <div
-            key={i}
-            className={`text-sm leading-relaxed whitespace-pre-wrap break-words ${
-              t.role === "user"
-                ? "ml-8 rounded-xl bg-accent-soft border border-accent-muted/30 px-4 py-2.5 text-fg"
-                : "mr-8 rounded-xl bg-bg-elev/70 border border-bg-border px-4 py-2.5 text-fg-muted"
-            }`}
-          >
-            {t.content || (streaming && i === turns.length - 1 ? (
-              <Loader2 className="h-3.5 w-3.5 animate-spin text-accent inline" />
-            ) : null)}
-          </div>
-        ))}
+        {turns.map((t, i) => {
+          // System pills (slash command echoes, mode-change confirmations)
+          // get a distinct dimmed style so the operator can scan past them
+          // without confusing them for assistant output.
+          if (t.role === "system") {
+            return (
+              <div
+                key={i}
+                className="text-xs leading-relaxed whitespace-pre-wrap break-words text-fg-dim font-mono px-3 py-2 rounded-lg border border-bg-border/50 bg-bg-deep/40"
+              >
+                {t.content}
+              </div>
+            );
+          }
+          return (
+            <div
+              key={i}
+              className={`text-sm leading-relaxed whitespace-pre-wrap break-words ${
+                t.role === "user"
+                  ? "ml-8 rounded-xl bg-accent-soft border border-accent-muted/30 px-4 py-2.5 text-fg"
+                  : "mr-8 rounded-xl bg-bg-elev/70 border border-bg-border px-4 py-2.5 text-fg-muted"
+              }`}
+            >
+              {t.content || (streaming && i === turns.length - 1 ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin text-accent inline" />
+              ) : null)}
+            </div>
+          );
+        })}
       </div>
 
       {error && (
