@@ -18,6 +18,7 @@
  */
 
 import { NextResponse, type NextRequest } from "next/server";
+import { revalidatePath } from "next/cache";
 import { resolveSessionContext } from "@/lib/api-auth";
 import { dispatchLeadStageEvent, dispatchOasisOnlyEvent } from "@/lib/lead-stage-dispatcher";
 import type { OasisLeadStageEvent } from "@/lib/oasis-lead-stage-engine";
@@ -84,6 +85,24 @@ export async function POST(
         tenantId: sess.tenantId,
         leadId,
       });
+
+  // Invalidate Next.js cached renders so the operator sees the new
+  // stage everywhere — without this, the lead detail page client-side
+  // refreshes (router.refresh in LeadLifecycleActions) but the
+  // /pipeline kanban + tenant-shell pipeline views stay stuck on
+  // their cached server render. That's exactly the "Bennett still
+  // looks active even though I marked him Lost" ghost CC saw.
+  if (result.fired) {
+    try {
+      revalidatePath("/pipeline");
+      revalidatePath(`/pipeline/${leadId}`);
+      // Tenant-shell pipeline reads from the same record; invalidate
+      // the broad /t segment so SunBiz / OASIS shells both refetch.
+      revalidatePath("/t", "layout");
+    } catch (err) {
+      console.error("[stage-event.revalidate]", err);
+    }
+  }
 
   return NextResponse.json({
     ok: true,

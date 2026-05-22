@@ -176,13 +176,26 @@ export function LeadLifecycleActions({
       </div>
       <div className="flex flex-wrap gap-2">
         {ACTIONS.map((action) => {
-          const enabled = action.from.has(currentStage);
+          // Archived-lead resurrection (2026-05-22, CC): once a lead is
+          // archived they've already traveled the funnel. If they come
+          // back, the operator must be able to drop them at ANY stage
+          // without linear restrictions. Backend engine carries the
+          // matching bypass. Only "Move to archived" stays gated when
+          // we're already there (idempotent no-op).
+          const isArchived = currentStage === "archived";
+          const enabled =
+            (isArchived && action.type !== "manual_archive") ||
+            action.from.has(currentStage);
           // Tooltip strategy — enabled buttons show the plain-English
           // description of what firing does. Disabled buttons show
           // which stage(s) the action becomes available from, so the
           // operator understands the gate instead of guessing.
+          // Archived bypass surfaces a distinct hint so the operator
+          // knows why every button is available.
           const titleText = enabled
-            ? action.description
+            ? isArchived && !action.from.has(currentStage)
+              ? `${action.description} (unlocked because this lead is archived — resurrect to any stage)`
+              : action.description
             : stageGate(action);
           return (
             <button
@@ -205,7 +218,13 @@ export function LeadLifecycleActions({
       <div className="mt-2 text-[10px] text-fg-dim leading-relaxed">
         Hover any action for what it does. Greyed-out actions show which
         stage they become available from. Current stage:{" "}
-        <span className="text-fg-muted font-medium">{currentStage.replace(/_/g, " ")}</span>.
+        <span className="text-fg-muted font-medium">{currentStage.replace(/_/g, " ")}</span>
+        {currentStage === "archived" && (
+          <span className="text-status-warm">
+            {" — archived leads can resurrect to any stage; all actions unlocked."}
+          </span>
+        )}
+        .
       </div>
     </div>
   );

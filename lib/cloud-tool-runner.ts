@@ -43,6 +43,9 @@ import {
 } from "./manifest/data";
 import { runAction } from "./agent-actions";
 import { CLOUD_TOOLS } from "./cloud-tools";
+import { dispatchOasisOnlyEvent } from "./lead-stage-dispatcher";
+import type { OasisLeadStageEvent } from "./oasis-lead-stage-engine";
+import { revalidatePath } from "next/cache";
 import { asSSERecord, parseSSE, safeText } from "./sse-parser";
 import { downloadChatAttachmentText } from "./chat-attachments";
 import { parseLeadImportCsv } from "./leads-import-parser";
@@ -198,6 +201,35 @@ export const TOOL_DEFINITIONS: ToolDef[] = [
         id: { type: "string", description: "Record UUID." },
       },
       required: ["entity", "id"],
+    },
+  },
+  {
+    name: "advance_lead_stage",
+    description:
+      "Move a lead through its lifecycle by firing a stage-engine event. " +
+      "Use this (NOT update_record with a stage patch) when the operator " +
+      "says things like 'mark Bennett as lost', 'Acme just churned', 'I " +
+      "got off the phone with Windsor — they signed the contract', or 'move " +
+      "this lead to archived'. The engine validates the transition, emits " +
+      "the proper timeline event, and invalidates the dashboard cache so " +
+      "the kanban + active-clients tab refresh immediately. " +
+      "Event types (OASIS): manual_outreach_started (-> outreach), " +
+      "discovery_call_scheduled (-> discovery), lead_qualified (-> " +
+      "qualified), proposal_sent (-> proposal), proposal_viewed (-> " +
+      "negotiation), contract_signed (-> onboarding), onboarding_complete " +
+      "(-> active_client), lead_replied_negative (-> lost), contract_ended " +
+      "(-> churned, only from active_client), manual_archive (-> archived). " +
+      "Find the lead's UUID first via search_records or list_records.",
+    input_schema: {
+      type: "object",
+      properties: {
+        lead_id: { type: "string", description: "Lead UUID." },
+        event_type: {
+          type: "string",
+          description: "One of: manual_outreach_started, discovery_call_scheduled, lead_qualified, proposal_sent, proposal_viewed, contract_signed, onboarding_complete, lead_replied_negative, contract_ended, manual_archive.",
+        },
+      },
+      required: ["lead_id", "event_type"],
     },
   },
   {
@@ -606,9 +638,98 @@ async function dispatch(
       return await toolListLeadDocuments(input, ctx);
     case "import_leads_from_attachment":
       return await toolImportLeadsFromAttachment(input, ctx);
+    case "advance_lead_stage":
+      return await toolAdvanceLeadStage(input, ctx);
     default:
       throw new Error(`unknown_tool:${name}`);
   }
+}
+
+/**
+ * NL-CRM bridge: operator says "Bennett just churned" -> Bravo calls
+ * this with {lead_id, event_type: "contract_ended"} -> engine moves
+ * the lead's stage, emits BRAVO_LEAD_AUTO_BUMPED, revalidates the
+ * dashboard cache.
+ *
+ * This is preferred over update_record({stage: "..."}) because it
+ * runs through the engine: archived-lead bypass kicks in, from-set
+ * gates protect against accidental backflow on regular leads, and
+ * the timeline gets a row with the canonical reason code (not just
+ * a generic field-changed entry).
+ *
+ * The tool is OASIS-tenant aware via dispatchOasisOnlyEvent — on
+ * SunBiz / other tenants it returns no_rule, which is the correct
+ * shape (those tenants use a different lifecycle and have their
+ * own dispatcher entry points).
+ */
+async function toolAdvanceLeadStage(
+  input: unknown,
+  ctx: { tenantId: string },
+): Promise<unknown> {
+  const args = (input || {}) as { lead_id?: string; event_type?: string };
+  const leadId = String(args.lead_id || "").trim();
+  const eventType = String(args.event_type || "").trim();
+  if (!leadId) throw new Error("missing_lead_id");
+  if (!eventType) throw new Error("missing_event_type");
+
+  // Whitelist matches the API route's OASIS_OPERATOR_TRIGGERABLE so
+  // the agent can't synthesize a transition the operator UI couldn't
+  // also fire. Keeps webhook-only events (outbound_email_sent, etc.)
+  // off the table.
+  const ALLOWED: ReadonlySet<OasisLeadStageEvent["type"]> = new Set([
+    "discovery_call_scheduled",
+    "lead_qualified",
+    "proposal_sent",
+    "proposal_viewed",
+    "contract_signed",
+    "onboarding_complete",
+    "lead_replied_negative",
+    "contract_ended",
+    "manual_outreach_started",
+    "manual_archive",
+  ]);
+  if (!ALLOWED.has(eventType as OasisLeadStageEvent["type"])) {
+    throw new Error(`event_type_not_allowed:${eventType}`);
+  }
+
+  const result = await dispatchOasisOnlyEvent({
+    type: eventType as OasisLeadStageEvent["type"],
+    tenantId: ctx.tenantId,
+    leadId,
+  });
+
+  // Invalidate the same paths the API route invalidates so the
+  // operator sees the kanban refresh whether they triggered the
+  // stage change via a UI button or via chat.
+  if (result.fired) {
+    try {
+      revalidatePath("/pipeline");
+      revalidatePath(`/pipeline/${leadId}`);
+      revalidatePath("/t", "layout");
+    } catch (err) {
+      console.error("[advance_lead_stage.revalidate]", err);
+    }
+  }
+
+  return {
+    fired: result.fired,
+    ...(result.fired
+      ? {
+          from: result.from,
+          to: result.to,
+          reason: result.reasonCode,
+          summary: `Lead moved from ${result.from} -> ${result.to} (${result.reasonCode}).`,
+        }
+      : {
+          reason: result.reason,
+          summary:
+            result.reason === "stage_blocked"
+              ? "No-op: that transition isn't allowed from the lead's current stage."
+              : result.reason === "not_found"
+                ? "No-op: lead not found (already deleted or wrong tenant)."
+                : "No-op: stage engine declined the event.",
+        }),
+  };
 }
 
 // ----------------------------------------------------------------------------

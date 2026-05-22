@@ -232,7 +232,14 @@ export async function recordOasisLeadStageEvent(
 
     const data = lead.data as Record<string, unknown>;
     const currentStage = String(data.stage || "");
-    if (!rule.from.has(currentStage)) {
+    // Archived-lead resurrection bypass (2026-05-22, CC). Archived leads
+    // have already moved through the funnel; if they come back the
+    // operator must be able to drop them at any stage without the
+    // linear from-set gates. Only manual_archive is excluded — moving
+    // archived -> archived is a no-op anyway.
+    const archivedBypass =
+      currentStage === "archived" && event.type !== "manual_archive";
+    if (!archivedBypass && !rule.from.has(currentStage)) {
       return { fired: false, reason: "stage_blocked" };
     }
     if (currentStage === rule.to) {
