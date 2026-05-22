@@ -15,12 +15,20 @@ const OPERATOR_CATEGORIES: PromptCategory[] = [
   "system_override",
   "system_health",
   "system_integration",
+  // agent_tooling = meta-prompts that drop agents into specialized
+  // roles (prompt engineering, translation layers, persona overlays).
+  // Placed last in the operator block because it's a power-user
+  // surface, not a daily ritual.
+  "agent_tooling",
 ];
 
 const CLIENT_CATEGORIES: PromptCategory[] = [
   "client_setup",
   "client_optimization",
   "client_handoff",
+  // Shared-audience agent_tooling entries surface here too — clients
+  // running their own deployment can fire the same meta-prompts.
+  "agent_tooling",
 ];
 
 function PromptCard({ p }: { p: typeof PROMPTS_LIBRARY[number] }) {

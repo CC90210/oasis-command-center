@@ -27,7 +27,8 @@ export type PromptCategory =
   | "system_health"
   | "system_integration"
   | "ops_daily"
-  | "ops_review";
+  | "ops_review"
+  | "agent_tooling";
 
 export type PromptAudience = "operator" | "client" | "shared";
 
@@ -77,19 +78,30 @@ export const PROMPT_CATEGORIES: Record<PromptCategory, { label: string; descript
     label: "Review + retro",
     description: "End-of-day, end-of-week, end-of-quarter reflections.",
   },
+  agent_tooling: {
+    label: "Agent tooling",
+    description: "Meta-prompts that drop an agent into a specialized role — prompt engineering, translation layers, persona overlays. Useful regardless of which agent you're targeting.",
+  },
 };
 
 export const PROMPTS_LIBRARY: PromptEntry[] = [
-  // ── SYSTEM OVERRIDE — VIBE-TO-EXECUTION TRANSLATOR (2026-05-22) ──
+  // ── AGENT TOOLING — VIBE-TO-EXECUTION TRANSLATOR (2026-05-22) ──
   // Meta-mode prompt: drops the receiving agent into "prompt-engineer
   // for other agents" role. Operator brain-dumps land as polished
   // execution-ready system messages for Claude Code / Codex / Bravo /
   // any downstream agent. Foundational because it's a canonical
   // workflow primitive — every operator should be able to fire this
   // from any chat surface to convert vibe coding into structured work.
+  //
+  // Lives in agent_tooling (not system_override) because the
+  // system_override category has a strict [OVERRIDE]-prefix convention
+  // for its prompt bodies, and this entry intentionally preserves the
+  // operator's original prompt text starting with `# MISSION`. The
+  // dedicated agent_tooling category was introduced specifically for
+  // meta-prompts that drop agents into specialized roles.
   {
     id: "vibe-to-execution-translator",
-    category: "system_override",
+    category: "agent_tooling",
     audience: "shared",
     agent: "bravo",
     title: "Vibe-to-Execution Prompt Engineer",
