@@ -7,10 +7,12 @@
  * supports keyboard nav (Up/Down to cycle, Tab/Enter to insert,
  * Escape to dismiss).
  *
- * The component is purely presentational + selection-driven — all
- * keyboard handling lives in the parent (ChatWidget) because the
- * textarea owns focus. This file's job is the visuals + the
- * `onSelect` callback contract.
+ * Sibling export: SlashArgMenu — same shape, but for arg autocomplete
+ * (e.g. `/agent <slug>` shows available agent slugs after the space).
+ *
+ * Components are purely presentational + selection-driven; all keyboard
+ * handling lives in the parent (ChatWidget) because the textarea owns
+ * focus. This file owns the visuals + onSelect callback contract.
  */
 
 import { ALL_COMMANDS, COMMAND_DESCRIPTIONS, type SlashCommandName } from "@/lib/chat-modes/slash-parser";
@@ -92,6 +94,99 @@ export function SlashCommandMenu({ query, selectedIndex, onSelect }: Props) {
           </button>
         );
       })}
+      <div className="px-3 py-1.5 text-[10px] text-fg-dim border-t border-bg-border/60 bg-bg-deep/40 font-mono">
+        ↑↓ navigate · Tab/Enter to insert · Esc to dismiss
+      </div>
+    </div>
+  );
+}
+
+/**
+ * SlashArgMenu — companion to SlashCommandMenu for arg completion.
+ *
+ * Used when the operator has already committed to a command (e.g.,
+ * typed `/agent ` with a trailing space) and is now picking the arg.
+ * The candidates list is supplied by the caller because the universe
+ * of valid args depends on the command (agent slugs for /agent,
+ * model ids for /model).
+ */
+export type ArgCandidate = {
+  /** What gets inserted when the operator picks this row. */
+  value: string;
+  /** Short label rendered in the row — typically the same as `value`
+   *  but with light formatting (e.g., title case for agent slugs). */
+  label: string;
+  /** Optional supporting text rendered beneath the label. */
+  hint?: string;
+};
+
+export function filterArgCandidates(query: string, candidates: ArgCandidate[]): ArgCandidate[] {
+  const q = query.trim().toLowerCase();
+  if (!q) return candidates;
+  return candidates.filter((c) => c.value.toLowerCase().includes(q) || c.label.toLowerCase().includes(q));
+}
+
+type ArgMenuProps = {
+  /** What the operator has typed AFTER the command + space.
+   *  E.g. for input `/agent atl`, query is "atl". */
+  query: string;
+  candidates: ArgCandidate[];
+  selectedIndex: number;
+  /** The command this arg menu is bound to — used only for the header
+   *  label so the operator sees what they're picking from. */
+  command: SlashCommandName;
+  onSelect: (value: string) => void;
+};
+
+export function SlashArgMenu({ query, candidates, selectedIndex, command, onSelect }: ArgMenuProps) {
+  const matches = filterArgCandidates(query, candidates);
+  if (matches.length === 0) {
+    return (
+      <div className="absolute bottom-full left-0 mb-2 w-80 rounded-lg border border-bg-border bg-bg-elev shadow-lg z-20 px-3 py-2 text-xs text-fg-dim">
+        No <span className="font-mono">/{command}</span> values match
+        <span className="font-mono"> {query}</span>
+      </div>
+    );
+  }
+  return (
+    <div
+      className="absolute bottom-full left-0 mb-2 w-80 rounded-lg border border-bg-border bg-bg-elev shadow-lg z-20 overflow-hidden"
+      role="listbox"
+      aria-label={`Arguments for /${command}`}
+    >
+      <div className="px-3 py-1.5 text-[10px] uppercase tracking-wider font-bold text-fg-dim border-b border-bg-border/60 bg-bg-deep/60 font-mono">
+        /{command} arguments
+      </div>
+      {matches.slice(0, 12).map((c, idx) => {
+        const isSelected = idx === selectedIndex;
+        return (
+          <button
+            key={c.value}
+            type="button"
+            role="option"
+            aria-selected={isSelected}
+            onClick={() => onSelect(c.value)}
+            onMouseDown={(e) => e.preventDefault()}
+            className={`block w-full text-left px-3 py-2 text-xs transition-colors ${
+              isSelected
+                ? "bg-accent/15 text-fg"
+                : "text-fg-muted hover:bg-bg-deep/40 hover:text-fg"
+            }`}
+          >
+            <div className="font-mono font-bold">{c.label}</div>
+            {c.hint && (
+              <div className="text-[10px] text-fg-dim mt-0.5 leading-snug truncate">
+                {c.hint}
+              </div>
+            )}
+          </button>
+        );
+      })}
+      {matches.length > 12 && (
+        <div className="px-3 py-1.5 text-[10px] text-fg-dim border-t border-bg-border/60 bg-bg-deep/40 font-mono">
+          + {matches.length - 12} more — keep typing to narrow
+        </div>
+      )}
       <div className="px-3 py-1.5 text-[10px] text-fg-dim border-t border-bg-border/60 bg-bg-deep/40 font-mono">
         ↑↓ navigate · Tab/Enter to insert · Esc to dismiss
       </div>

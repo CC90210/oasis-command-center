@@ -13,7 +13,7 @@ import {
   renderHelp,
   type SlashCommandName,
 } from "@/lib/chat-modes/slash-parser";
-import { filterCommands } from "@/components/chat/SlashCommandMenu";
+import { filterCommands, filterArgCandidates } from "@/components/chat/SlashCommandMenu";
 import {
   composeSystemPrompt,
   filterToolsForMode,
@@ -171,6 +171,34 @@ test("filter — 'c' returns clear + compact (both start with c)", () => {
 test("filter — gibberish returns empty list", () => {
   const out = filterCommands("xyz");
   assert.deepEqual(out, []);
+});
+
+console.log("\n=== SlashArgMenu (arg autocomplete filter) ===");
+
+const SAMPLE_ARGS = [
+  { value: "atlas", label: "ATLAS", hint: "CFO" },
+  { value: "bravo", label: "BRAVO", hint: "Lead architect" },
+  { value: "maven", label: "MAVEN", hint: "CMO" },
+];
+
+test("empty arg query returns every candidate", () => {
+  assert.deepEqual(filterArgCandidates("", SAMPLE_ARGS), SAMPLE_ARGS);
+});
+
+test("arg filter matches value prefix", () => {
+  const out = filterArgCandidates("atl", SAMPLE_ARGS);
+  assert.equal(out.length, 1);
+  assert.equal(out[0]!.value, "atlas");
+});
+
+test("arg filter matches label substring (case-insensitive)", () => {
+  const out = filterArgCandidates("brav", SAMPLE_ARGS);
+  assert.equal(out.length, 1);
+  assert.equal(out[0]!.value, "bravo");
+});
+
+test("arg filter — gibberish returns empty list", () => {
+  assert.deepEqual(filterArgCandidates("zzz", SAMPLE_ARGS), []);
 });
 
 console.log("\n=== plan-mode ===");

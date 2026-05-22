@@ -44,7 +44,13 @@ import { getAgentInfo } from "@/lib/agents";
 import { BRIDGE_CHAT_BASE } from "@/lib/agent-roots";
 import { getBrowserSupabase } from "@/lib/supabase-browser";
 import { parseInput, renderHelp, type SlashCommandName } from "@/lib/chat-modes/slash-parser";
-import { SlashCommandMenu, filterCommands } from "@/components/chat/SlashCommandMenu";
+import {
+  SlashCommandMenu,
+  SlashArgMenu,
+  filterCommands,
+  filterArgCandidates,
+  type ArgCandidate,
+} from "@/components/chat/SlashCommandMenu";
 import { providerForModel, PROVIDER_MODELS } from "@/lib/providers";
 
 type Role = "user" | "assistant" | "system";
@@ -365,6 +371,60 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
     // to clear and retype.
     if (!slashMenuTrigger) setSlashMenuDismissed(false);
   }, [slashMenuTrigger]);
+
+  // Arg-completion menu — fires when the input is `/agent <query>` or
+  // `/model <query>`. The arg menu and the command menu are mutually
+  // exclusive (the command menu only matches the no-whitespace pattern;
+  // the arg menu only matches after a space). Two different state shapes
+  // because the candidate sets are different.
+  const slashArgTrigger = /^\/(agent|model)\s+(\S.*)?$/i.exec(input);
+  const slashArgCommand = slashArgTrigger
+    ? (slashArgTrigger[1]!.toLowerCase() as "agent" | "model")
+    : null;
+  const slashArgQuery = slashArgTrigger ? (slashArgTrigger[2] || "").trim() : "";
+  const [slashArgSelectedIdx, setSlashArgSelectedIdx] = useState(0);
+  const [slashArgDismissed, setSlashArgDismissed] = useState(false);
+  useEffect(() => {
+    setSlashArgSelectedIdx(0);
+  }, [slashArgQuery, slashArgCommand]);
+  useEffect(() => {
+    if (!slashArgTrigger) setSlashArgDismissed(false);
+  }, [slashArgTrigger]);
+
+  // Candidate list per arg command. Memo so we don't rebuild on every
+  // keystroke; the inputs (agentKeys, configs) only change rarely.
+  const argCandidates: ArgCandidate[] = useMemo(() => {
+    if (slashArgCommand === "agent") {
+      return agentKeys.map((k) => ({
+        value: k,
+        label: getAgentInfo(k).label || k.toUpperCase(),
+        hint: getAgentInfo(k).tagline,
+      }));
+    }
+    if (slashArgCommand === "model") {
+      // Surface models the operator actually has providers configured
+      // for first — those are the only ones /model can successfully
+      // switch to. If no configs are loaded yet, show the full registry
+      // as a fallback (better than an empty menu mid-onboarding).
+      const configuredProviders = new Set(configs.map((c) => c.provider));
+      const flat: ArgCandidate[] = [];
+      for (const [provider, models] of Object.entries(PROVIDER_MODELS)) {
+        const isConfigured = configuredProviders.has(provider) || configs.length === 0;
+        if (!isConfigured) continue;
+        for (const m of models) {
+          flat.push({ value: m, label: m, hint: provider });
+        }
+      }
+      return flat;
+    }
+    return [];
+  }, [slashArgCommand, agentKeys, configs]);
+
+  const slashArgOpen =
+    !!slashArgTrigger &&
+    !slashArgDismissed &&
+    !streaming &&
+    argCandidates.length > 0;
   const [sessionId, setSessionId] = useState<string | null>(null);
   // Tab-stable identifier for the warm-process pool. Minted ONCE per
   // ChatWidget mount; persists across agent switches and turns. The
@@ -1870,7 +1930,60 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
     setTimeout(() => inputRef.current?.focus(), 0);
   }
 
+  /**
+   * Insert an arg value into a `/<command> ` composition. Replaces
+   * whatever the operator was typing after the space with the picked
+   * value — so `/agent atl` → pick "atlas" → `/agent atlas`. Does NOT
+   * auto-submit; the operator can edit further or hit Enter.
+   */
+  function insertSlashArg(value: string) {
+    if (!slashArgCommand) return;
+    setInput(`/${slashArgCommand} ${value}`);
+    setSlashArgDismissed(true);
+    setSlashArgSelectedIdx(0);
+    setTimeout(() => inputRef.current?.focus(), 0);
+  }
+
   function onKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
+    // Arg menu navigation takes priority over command menu — they can't
+    // both be open at once (mutually-exclusive trigger patterns), but
+    // checking arg first keeps the logic linear.
+    if (slashArgOpen) {
+      const argMatches = filterArgCandidates(slashArgQuery, argCandidates);
+      if (e.key === "ArrowDown") {
+        e.preventDefault();
+        if (argMatches.length > 0) {
+          setSlashArgSelectedIdx((idx) => (idx + 1) % argMatches.length);
+        }
+        return;
+      }
+      if (e.key === "ArrowUp") {
+        e.preventDefault();
+        if (argMatches.length > 0) {
+          setSlashArgSelectedIdx((idx) => (idx - 1 + argMatches.length) % argMatches.length);
+        }
+        return;
+      }
+      if (e.key === "Tab") {
+        e.preventDefault();
+        const pick = argMatches[slashArgSelectedIdx];
+        if (pick) insertSlashArg(pick.value);
+        return;
+      }
+      if (e.key === "Enter" && !e.shiftKey) {
+        // Same accept-or-fall-through semantics as the command menu.
+        if (argMatches.length > 0) {
+          e.preventDefault();
+          insertSlashArg(argMatches[slashArgSelectedIdx].value);
+          return;
+        }
+      }
+      if (e.key === "Escape") {
+        e.preventDefault();
+        setSlashArgDismissed(true);
+        return;
+      }
+    }
     // Slash menu navigation — only intercept when the menu is open so
     // regular textarea typing isn't affected.
     if (slashMenuOpen) {
@@ -2477,8 +2590,23 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
         <div className="flex gap-2 relative">
           {/* Slash-command autocomplete — anchored above the textarea
               via the parent's relative positioning. Renders only when
-              the input is in slash-trigger shape. */}
-          {slashMenuOpen && (
+              the input is in slash-trigger shape. The arg menu and
+              command menu are mutually exclusive triggers so we can
+              short-circuit on the arg-open branch. */}
+          {slashArgOpen && slashArgCommand && (
+            <div className="absolute left-[3.5rem] right-0 bottom-0 pointer-events-none">
+              <div className="pointer-events-auto">
+                <SlashArgMenu
+                  query={slashArgQuery}
+                  candidates={argCandidates}
+                  command={slashArgCommand}
+                  selectedIndex={slashArgSelectedIdx}
+                  onSelect={insertSlashArg}
+                />
+              </div>
+            </div>
+          )}
+          {!slashArgOpen && slashMenuOpen && (
             <div className="absolute left-[3.5rem] right-0 bottom-0 pointer-events-none">
               <div className="pointer-events-auto">
                 <SlashCommandMenu
