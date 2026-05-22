@@ -748,21 +748,25 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
     return configsLoaded ? "Provider: not connected" : "Provider: loading...";
   })();
   // Resolve the actual route the next /send will take, given the picker.
+  // Honest copy on scope: the cloud-only path is curated tools (records,
+  // http, integrations) — NOT a full coding agent. We surface that
+  // distinction here so operators don't expect bash / edit_file / shell
+  // execution from a path that doesn't have them. Codex Finding #1.B.
   const accessStatus =
     effectiveMode === "cli"
       ? `Access: this desktop - ${CLI_RUNTIME_LABELS[cliRuntime]}`
       : effectiveMode === "cloud_only"
-        ? "Access: cloud workspace - cloud tools only"
+        ? "Access: cloud workspace - curated tools (no shell/edit)"
         : bridgeReady
           ? "Access: cloud workspace (Anthropic API) - local tool execution (bridge)"
-          : "Access: cloud workspace - tool_use loop";
+          : "Access: cloud workspace - bridge offline, curated tools only";
   const accessTitle =
     chatMode === "auto"
-      ? "Auto: bridge if paired + online, otherwise API key with bridge tools when available."
+      ? "Auto: bridge if paired + online, otherwise API key with curated cloud tools. Install the bridge to unlock shell + file edits."
       : chatMode === "cli"
         ? `CLI: pinned to the local ${CLI_RUNTIME_LABELS[cliRuntime]} bridge runtime. Errors loud if the bridge isn't running.`
         : chatMode === "cloud_only"
-          ? "Cloud-only: pinned to /api/chat with your API key. ONLY the 11 cloud tools (records, http, integrations) — no bridge tools even if it's online. Pick this when you don't want the LLM running bash / edit_file on your machine."
+          ? "Cloud-only: pinned to /api/chat with your API key. Curated cloud tools only — records, http, integrations, dashboard actions. NO shell, NO file edits, NO local script execution. Install the bridge if you want a full coding agent."
           : "API + local tools: LLM on your Anthropic API key, tools executed by the bridge (read_file, write_file, bash, send_email, send_sms). Best of both worlds — paid LLM, free local tools.";
   const activeStatus = `${providerStatus} · ${accessStatus}`;
   const composerPlaceholder = !ready
@@ -1748,7 +1752,7 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
           >
             <option value="auto">Mode: Auto</option>
             <option value="cli">Mode: CLI (local bridge)</option>
-            <option value="cloud_only">Mode: API · cloud tools only</option>
+            <option value="cloud_only">Mode: API · curated tools (no shell/edit)</option>
             <option
               value="cloud_bridge_tools"
               disabled={bridgeOnline !== true}
