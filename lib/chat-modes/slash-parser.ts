@@ -25,27 +25,24 @@ export type SlashCommandName =
   | "build"      // /build        — exit plan mode (restore full registry)
   | "help";      // /help         — list commands
 
-/** Wired-and-working commands (surfaced by /help). The full set of
- *  parseable command names lives in PARSER_KNOWN_COMMANDS below — model
- *  and compact still parse so a future stub-removal commit can land
- *  without breaking the parser contract, but they are NOT advertised. */
+/** Wired-and-working commands — surfaced by /help and accepted by the
+ *  parser. /model and /compact were promoted out of the stub list on
+ *  2026-05-22 when their handlers shipped (see ChatWidget.runSlashCommand
+ *  and POST /api/chat/compact). */
 export const ALL_COMMANDS: SlashCommandName[] = [
   "agent",
+  "model",
   "clear",
+  "compact",
   "plan",
   "build",
   "help",
 ];
 
-/** Commands the PARSER recognizes (superset of ALL_COMMANDS). Used by
- *  isKnownCommand so /model and /compact don't fall through as messages
- *  while their handlers are stubs. As soon as model/compact are wired,
- *  promote them into ALL_COMMANDS and they appear in /help automatically. */
-const PARSER_KNOWN_COMMANDS: SlashCommandName[] = [
-  ...ALL_COMMANDS,
-  "model",
-  "compact",
-];
+/** Identical to ALL_COMMANDS now that every parser-known command has a
+ *  real handler. Kept as a named export so a future stub-vs-wired split
+ *  has a place to live without churning the surface. */
+const PARSER_KNOWN_COMMANDS: SlashCommandName[] = [...ALL_COMMANDS];
 
 /** One-line description for each command — surfaced by /help. */
 export const COMMAND_DESCRIPTIONS: Record<SlashCommandName, string> = {

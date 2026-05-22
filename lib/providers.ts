@@ -198,6 +198,22 @@ export function getProvider(value: Provider): ProviderRegistryEntry | null {
 }
 
 /**
+ * Given a model id (e.g. `"claude-opus-4-7"`, `"anthropic/claude-sonnet-4.6"`),
+ * return the first provider that lists it. Used by the `/model` slash command
+ * so the operator can type a model id without re-stating the provider.
+ *
+ * Returns null when no provider claims the model.
+ */
+export function providerForModel(modelId: string): Provider | null {
+  const id = modelId.trim();
+  if (!id) return null;
+  for (const p of PROVIDER_REGISTRY) {
+    if (p.models.some((m) => m.id === id)) return p.value;
+  }
+  return null;
+}
+
+/**
  * Canonical provider → integration-registry service-slug map. Lives here
  * (in client-safe pure-data territory) so both server code (queries.ts's
  * aiServicesWithKey) and client surfaces (ProviderAccountsCard) can

@@ -44,6 +44,7 @@ import { getAgentInfo } from "@/lib/agents";
 import { BRIDGE_CHAT_BASE } from "@/lib/agent-roots";
 import { getBrowserSupabase } from "@/lib/supabase-browser";
 import { parseInput, renderHelp, type SlashCommandName } from "@/lib/chat-modes/slash-parser";
+import { providerForModel, PROVIDER_MODELS } from "@/lib/providers";
 
 type Role = "user" | "assistant" | "system";
 type ChatAttachmentSummary = {
@@ -102,6 +103,12 @@ const isChatMode = (s: unknown): s is ChatMode =>
 
 type CliRuntime = "claude" | "codex" | "gemini";
 const CLI_RUNTIME_STORAGE_KEY = "oasis.chat.cliRuntime.v1";
+// Plan mode persists in sessionStorage (per tab) — operators who run /plan,
+// reload the page mid-investigation, then send another message expect their
+// mode to survive. Distinct from CHAT_MODE_STORAGE_KEY (localStorage, per
+// origin) because plan mode is a within-conversation state, not a long-lived
+// operator preference.
+const PLAN_MODE_STORAGE_KEY = "oasis.chat.planMode.v1";
 const isCliRuntime = (s: unknown): s is CliRuntime =>
   s === "claude" || s === "codex" || s === "gemini";
 const CLI_RUNTIME_LABELS: Record<CliRuntime, string> = {
@@ -374,7 +381,33 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
   // Sent as `chat_mode` on every /api/chat POST so the server can filter
   // tools + adjust the system prompt accordingly. Separate from chatMode
   // (CLI vs Cloud) — orthogonal axis.
-  const [planMode, setPlanMode] = useState<"plan" | "build">("build");
+  //
+  // Persistence: sessionStorage (per-tab) so a reload mid-investigation
+  // doesn't drop the operator back into build mode. SSR-safe initializer
+  // returns "build"; the mount effect below hydrates from sessionStorage.
+  const [planMode, setPlanModeState] = useState<"plan" | "build">("build");
+  function setPlanMode(next: "plan" | "build") {
+    setPlanModeState(next);
+    if (typeof window !== "undefined") {
+      try {
+        window.sessionStorage.setItem(PLAN_MODE_STORAGE_KEY, next);
+      } catch {
+        // sessionStorage quota / privacy mode — fine, mode is in-memory.
+      }
+    }
+  }
+  // Hydrate planMode from sessionStorage on mount. Safe to run after the
+  // initial SSR render — the first paint shows "build" (default), then
+  // this effect upgrades to "plan" if a prior /plan invocation persisted.
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    try {
+      const saved = window.sessionStorage.getItem(PLAN_MODE_STORAGE_KEY);
+      if (saved === "plan" || saved === "build") setPlanModeState(saved);
+    } catch {
+      // sessionStorage unavailable — skip.
+    }
+  }, []);
   // Tracks which routing mode the most recent FAILED message used. Powers
   // the "Retry on the other mode" affordance on the error banner. Null
   // while everything is healthy or after a successful turn.
@@ -1016,16 +1049,132 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
         appendSystem(`Switched to agent: ${target}. History cleared.`);
         return;
       }
-      case "model":
-        appendSystem(
-          "/model is not wired yet — change model in Settings → Agents for now. (Coming soon.)",
-        );
+      case "model": {
+        const requested = args.trim();
+        if (!requested) {
+          // No args — list the models available across the operator's
+          // configured providers so they don't have to guess. Falls back
+          // to the full registry when no configs are loaded.
+          const known = configs.length
+            ? Array.from(
+                new Set(
+                  configs.flatMap((c) => PROVIDER_MODELS[c.provider as keyof typeof PROVIDER_MODELS] || []),
+                ),
+              )
+            : Object.values(PROVIDER_MODELS).flat();
+          appendSystem(
+            `Usage: /model <id>. Examples: ${known.slice(0, 6).join(", ")}${known.length > 6 ? ", ..." : ""}.`,
+          );
+          return;
+        }
+        const provider = providerForModel(requested);
+        if (!provider) {
+          appendSystem(
+            `Unknown model "${requested}". Use a model id from one of: ${Object.keys(PROVIDER_MODELS).join(", ")}. Tip: /model with no arg lists examples.`,
+          );
+          return;
+        }
+        // Fire-and-forget — runSlashCommand is sync, but the API call is
+        // async. We surface progress + result via system notes; refetching
+        // /api/agent-config refreshes the visible "Provider: x · model: y"
+        // header line. Try tenant scope first (operator/admin path), fall
+        // back to user scope on 403 (employees on a shared tenant).
+        void (async () => {
+          const tryScope = async (scope: "tenant" | "user") => {
+            const res = await fetch("/api/agent-config", {
+              method: "POST",
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify({ agent_key: agent, provider, model: requested, scope }),
+            });
+            const body = (await res.json().catch(() => ({}))) as {
+              ok?: boolean;
+              error?: string;
+              message?: string;
+            };
+            return { res, body };
+          };
+          let attempt = await tryScope("tenant");
+          if (!attempt.res.ok && attempt.body.error === "admin_required") {
+            attempt = await tryScope("user");
+          }
+          if (!attempt.res.ok || !attempt.body.ok) {
+            const msg = attempt.body.message || attempt.body.error || `http_${attempt.res.status}`;
+            appendSystem(
+              `Couldn't switch model to ${requested}: ${msg}. The current model stays active.`,
+            );
+            return;
+          }
+          // Refetch configs so the chat header + provider pill reflect the
+          // new model on the very next render — no page reload needed.
+          try {
+            const r = await fetch("/api/agent-config");
+            const j = (await r.json().catch(() => ({}))) as { ok?: boolean; configs?: AgentConfig[] };
+            if (j?.ok && Array.isArray(j.configs)) setConfigs(j.configs);
+          } catch {
+            // non-fatal — header may stay stale until next reload.
+          }
+          appendSystem(
+            `Model switched to ${requested} (${provider}). Next turn uses the new model.`,
+          );
+        })();
         return;
-      case "compact":
-        appendSystem(
-          "/compact is not wired yet — for now, hit /clear to reset history. (Coming soon: server-side history summarisation.)",
-        );
+      }
+      case "compact": {
+        const focusHint = args.trim();
+        // Need at least an assistant + user pair to compact. Anything less
+        // and there's nothing to summarize — bail with a friendly note.
+        const hasAssistant = messages.some((m) => m.role === "assistant");
+        const userCount = messages.filter((m) => m.role === "user").length;
+        if (!hasAssistant || userCount < 1) {
+          appendSystem("Nothing to compact yet — send a few turns first.");
+          return;
+        }
+        void (async () => {
+          appendSystem("Compacting conversation…");
+          try {
+            const res = await fetch("/api/chat/compact", {
+              method: "POST",
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify({
+                agent_key: agent,
+                messages: messages.filter((m) => m.role === "user" || m.role === "assistant"),
+                focus: focusHint || null,
+              }),
+            });
+            const body = (await res.json().catch(() => ({}))) as {
+              ok?: boolean;
+              summary?: string;
+              error?: string;
+              message?: string;
+            };
+            if (!res.ok || !body.ok || !body.summary) {
+              const detail = body.message || body.error || `http_${res.status}`;
+              appendSystem(`Compact failed: ${detail}. History unchanged.`);
+              return;
+            }
+            // Replace the live history with one assistant message holding
+            // the summary, prefixed with a "context summary" marker so
+            // operators can see what got folded. The compacted summary
+            // becomes the new starting context for whatever the operator
+            // types next.
+            setMessages([
+              {
+                role: "assistant",
+                content: `--- Context summary ---\n\n${body.summary.trim()}\n\n--- End summary ---`,
+                at: Date.now(),
+              },
+            ]);
+            // Clear sessionId so the bridge / cloud loop doesn't try to
+            // resume against a stale chat thread that no longer matches.
+            setSessionId(null);
+          } catch (err) {
+            appendSystem(
+              `Compact failed: ${err instanceof Error ? err.message : "network_error"}. History unchanged.`,
+            );
+          }
+        })();
         return;
+      }
     }
   }
 

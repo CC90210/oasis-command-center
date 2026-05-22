@@ -117,11 +117,9 @@ test("isKnownCommand passes for every entry in ALL_COMMANDS", () => {
   for (const c of ALL_COMMANDS) assert.equal(isKnownCommand(c), true);
 });
 
-test("isKnownCommand also accepts /model + /compact (parseable stubs)", () => {
-  // ALL_COMMANDS only lists WIRED commands. The parser still recognizes
-  // /model and /compact so they route to a "not wired yet" handler
-  // instead of falling through to the model as text. Promote them into
-  // ALL_COMMANDS when their handlers ship.
+test("isKnownCommand accepts /model + /compact (both now wired)", () => {
+  // Both promoted from stubs to wired handlers on 2026-05-22 —
+  // /model hits /api/agent-config; /compact hits /api/chat/compact.
   assert.equal(isKnownCommand("model"), true);
   assert.equal(isKnownCommand("compact"), true);
 });
@@ -131,13 +129,13 @@ test("isKnownCommand rejects unknown + case-sensitive at the type-guard layer", 
   assert.equal(isKnownCommand("Build"), false);
 });
 
-test("renderHelp lists ONLY wired commands (no stubs)", () => {
+test("renderHelp lists every wired command", () => {
   const help = renderHelp();
   for (const c of ALL_COMMANDS) assert.ok(help.includes(`/${c}`));
-  // Stubs must NOT be advertised — operators shouldn't see a command
-  // in /help that doesn't actually work.
-  assert.ok(!help.includes("/model"));
-  assert.ok(!help.includes("/compact"));
+  // /model and /compact were stubs until 2026-05-22; now they're real
+  // handlers and must appear in /help so operators discover them.
+  assert.ok(help.includes("/model"));
+  assert.ok(help.includes("/compact"));
 });
 
 test("renderHelp starts with a heading", () => {
