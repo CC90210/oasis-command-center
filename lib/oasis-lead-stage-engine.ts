@@ -53,7 +53,16 @@ export type OasisLeadStageEvent =
   | { type: "contract_signed"; tenantId: string; leadId: string }
   | { type: "onboarding_complete"; tenantId: string; leadId: string }
   | { type: "lead_replied_negative"; tenantId: string; leadId: string }
-  | { type: "contract_ended"; tenantId: string; leadId: string };
+  | { type: "contract_ended"; tenantId: string; leadId: string }
+  // 2026-05-22: operator-driven transitions that the automated webhooks
+  // don't cover. Without these, operators couldn't move a lead from
+  // new_contact -> outreach without sending email through the dashboard
+  // (manual outreach via phone / Telegram / LinkedIn left the lead
+  // stuck at new_contact). And they couldn't archive a churned/lost
+  // lead from the UI — which is exactly why Bennett Agency stayed
+  // labelled active_client for weeks despite being lost.
+  | { type: "manual_outreach_started"; tenantId: string; leadId: string }
+  | { type: "manual_archive"; tenantId: string; leadId: string };
 
 export type OasisLeadStageRecordResult =
   | { fired: false; reason: "not_found" | "no_rule" | "stage_blocked" | "error" }
@@ -162,6 +171,38 @@ const RULES: Record<OasisLeadStageEvent["type"], Rule> = {
     from: new Set<string>(["active_client"]),
     to: "churned",
     reasonCode: "contract_ended",
+  },
+
+  // Operator pressed "Outreach started" — they called / DM'd / met the
+  // lead in person and want the funnel to reflect it. Only valid from
+  // new_contact so already-progressed leads don't regress to outreach.
+  manual_outreach_started: {
+    from: new Set<string>(["new_contact"]),
+    to: "outreach",
+    reasonCode: "operator_marked_outreach_started",
+  },
+
+  // Operator pressed "Move to archived" — final cleanup for stale rows
+  // that should disappear from active views. Allowed from any terminal
+  // OR active stage so things like Bennett (active_client, but lost
+  // months ago) can finally be cleaned up from the UI without a DB
+  // edit. Engine-side guard: target stage is "archived"; from filters
+  // out only "archived" itself (no-op when already there).
+  manual_archive: {
+    from: new Set<string>([
+      "new_contact",
+      "outreach",
+      "discovery",
+      "qualified",
+      "proposal",
+      "negotiation",
+      "onboarding",
+      "active_client",
+      "churned",
+      "lost",
+    ]),
+    to: "archived",
+    reasonCode: "operator_archived_lead",
   },
 };
 

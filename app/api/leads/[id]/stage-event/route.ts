@@ -42,6 +42,8 @@ const OASIS_OPERATOR_TRIGGERABLE = new Set<OasisLeadStageEvent["type"]>([
   "onboarding_complete",
   "lead_replied_negative",
   "contract_ended",
+  "manual_outreach_started",
+  "manual_archive",
 ]);
 
 export async function POST(

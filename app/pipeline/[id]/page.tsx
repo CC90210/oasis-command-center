@@ -22,6 +22,7 @@ import { getActiveProfile } from "@/lib/queries";
 import { safe } from "@/lib/api-helpers";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { findOasisStage, type StageMeta } from "@/lib/oasis-stage-meta";
+import { OASIS_STAGE_SLA_DAYS } from "@/lib/oasis-sla";
 import { formatMoney, nonEmptyString, relTime } from "@/lib/format-helpers";
 import { ScoreLeadButton } from "./ScoreLeadButton";
 import { NextActionButton } from "./NextActionButton";
@@ -102,6 +103,7 @@ export default async function PipelineLeadDetailPage({
           </Link>
         }
       />
+      <LeadContactBand data={record.data} />
       <LeadMetricsBand metrics={metrics} />
       <div className="grid lg:grid-cols-2 gap-3">
         <ScoreLeadButton
@@ -219,7 +221,60 @@ async function loadLeadDetailMetrics(
   };
 }
 
+/**
+ * LeadContactBand — sticky quick-summary at the top of the lead page
+ * so an operator on a cold call has name / company / email / phone
+ * in one row instead of scrolling to the form below. CC's feedback
+ * 2026-05-22: "I need a quick client summary I can see within the
+ * same stage, last touch, AI score, value plus score, and UI display."
+ */
+function LeadContactBand({ data }: { data: Record<string, unknown> }) {
+  const name = nonEmptyString(data.name);
+  const company = nonEmptyString(data.company);
+  const email = nonEmptyString(data.email);
+  const phone = nonEmptyString(data.phone);
+  return (
+    <div className="rounded-lg border border-bg-border bg-bg-elev/40 p-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+      <ContactCell label="Name" value={name} />
+      <ContactCell label="Company" value={company} />
+      <ContactCell label="Email" value={email} mono />
+      <ContactCell label="Phone" value={phone} mono />
+    </div>
+  );
+}
+
+function ContactCell({
+  label,
+  value,
+  mono = false,
+}: {
+  label: string;
+  value: string | null;
+  mono?: boolean;
+}) {
+  return (
+    <div>
+      <div className="text-[10px] uppercase tracking-wider font-bold text-fg-dim">{label}</div>
+      <div className={`mt-0.5 text-sm ${value ? "text-fg" : "text-fg-faint italic"} ${mono ? "font-mono break-all" : ""}`}>
+        {value || "—"}
+      </div>
+    </div>
+  );
+}
+
 function LeadMetricsBand({ metrics }: { metrics: LeadDetailMetrics }) {
+  // Overdue framing — match the pipeline's "Touch first" callout math
+  // so the operator doesn't see "5d overdue" on the kanban and "9d ago"
+  // on the detail page and wonder which one's lying. Uses the SAME
+  // SLA table the pipeline view uses (lib/oasis-sla.ts), applied to
+  // the same days-since-last-touch number this page computes.
+  const slaDays = OASIS_STAGE_SLA_DAYS[metrics.stageKey] ?? null;
+  const isTerminalSla = slaDays === null || slaDays >= 999;
+  const overdueDays =
+    !isTerminalSla && slaDays !== null && metrics.daysSinceLastTouch !== null
+      ? metrics.daysSinceLastTouch - slaDays
+      : null;
+  const isOverdue = overdueDays !== null && overdueDays > 0;
   return (
     <div className="space-y-3">
       <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
@@ -234,6 +289,11 @@ function LeadMetricsBand({ metrics }: { metrics: LeadDetailMetrics }) {
             >
               {metrics.stageLabel}
             </span>
+            {slaDays !== null && !isTerminalSla && (
+              <span className="text-[10px] text-fg-dim font-mono">
+                {slaDays}d target
+              </span>
+            )}
           </div>
           <div className="mt-2 text-xs text-fg-dim">
             {metrics.daysInStage == null
@@ -247,7 +307,21 @@ function LeadMetricsBand({ metrics }: { metrics: LeadDetailMetrics }) {
               ? "No touch logged"
               : `${metrics.daysSinceLastTouch} day${metrics.daysSinceLastTouch === 1 ? "" : "s"} ago`}
           </MetricValue>
-          <div className="mt-2 text-xs text-fg-dim">{metrics.lastTouch ? relTime(metrics.lastTouch) : "Timeline is empty"}</div>
+          <div className="mt-2 text-xs">
+            {isOverdue ? (
+              <span className="text-status-warm font-medium">
+                Overdue by {overdueDays}d
+                <span className="text-fg-dim font-normal">
+                  {" "}
+                  ({slaDays}d target for {metrics.stageLabel})
+                </span>
+              </span>
+            ) : (
+              <span className="text-fg-dim">
+                {metrics.lastTouch ? relTime(metrics.lastTouch) : "Timeline is empty"}
+              </span>
+            )}
+          </div>
         </MetricBox>
         <MetricBox label="AI score">
           <MetricValue>{metrics.aiScore == null ? "Not scored" : `${metrics.aiScore}/100`}</MetricValue>
