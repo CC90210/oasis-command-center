@@ -173,7 +173,7 @@ export function AgentAssemblyScrollScene() {
     <section
       ref={sectionRef}
       id="agent-build"
-      className="relative z-10 min-h-screen min-[641px]:min-h-[700vh] lg:min-h-[800vh]"
+      className="relative z-10 min-h-screen min-[641px]:min-h-[950vh] lg:min-h-[1100vh]"
     >
       <div className="relative flex min-h-screen items-center justify-center overflow-hidden px-5 py-12 min-[641px]:sticky min-[641px]:top-0 min-[641px]:h-screen sm:px-8">
         {/* Cosmic background: deep space gradient → nebula clouds → slowly
