@@ -4,11 +4,11 @@ import type { CSSProperties } from "react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   BrainCircuit,
+  ChevronDown,
   Cpu,
   Database,
   Eye,
   Orbit,
-  Search,
   ShieldCheck,
   Wrench,
 } from "lucide-react";
@@ -17,38 +17,44 @@ const PHASES = [
   {
     start: 0,
     marker: "01",
-    title: "Core cognition",
-    text: "The agent receives a reasoning core and the operating context it needs before an account exists.",
+    title: "Reasoning core",
+    text: "Multi-provider brain — Anthropic, OpenAI, OpenRouter, Groq, Ollama. Each agent (Bravo, Atlas, Maven, Aura, Hermes) is a persona on the same router.",
+    path: "lib/providers.ts · lib/agent-personas.ts",
   },
   {
-    start: 0.18,
+    start: 0.17,
     marker: "02",
     title: "Browser optics",
-    text: "Search and browser work become a visor system, not a loose feature floating beside the agent.",
+    text: "Sees the public web through a real logged-in Chrome — Cloudflare, DataDome, fingerprint-proof via the CloakBrowser stealth tier.",
+    path: "scripts/browser/browser_harness_doctor.py · cloak_browser_tool.py",
   },
   {
-    start: 0.34,
+    start: 0.31,
     marker: "03",
     title: "Memory spine",
-    text: "Business context, files, playbooks, and session memory lock into the agent's backplane.",
+    text: "Hybrid lexical + semantic recall across 219 memory, skills, and brain files. FTS5 lexical + LanceDB semantic merged via reciprocal rank fusion.",
+    path: "scripts/core/memory_retriever.py · state/memory_index.{db,lance}",
   },
   {
-    start: 0.5,
+    start: 0.45,
     marker: "04",
     title: "Tool limbs",
-    text: "Execution tools attach as arms, so the agent can move from thinking to doing.",
+    text: "21 local tools through the bridge — read/write, bash, Stripe, Supabase, Vercel, n8n, Firecrawl. Cloud-safe tools when the bridge is offline.",
+    path: "bravo_cli/bridge_tools.py · scripts/*",
   },
   {
-    start: 0.66,
+    start: 0.59,
     marker: "05",
-    title: "Guarded autonomy",
-    text: "Role gates, quiet-day logic, and provider controls become the agent's protective shell.",
+    title: "Guard shell",
+    text: "Three guards: secrets never leave the box, destructive ops blocked at the shell, sacred state stays append-only. PreToolUse hooks fire before every command.",
+    path: "scripts/state/{secret,exec,state}_guard.py",
   },
   {
-    start: 0.82,
+    start: 0.73,
     marker: "06",
-    title: "Agent online",
-    text: "The assembled operator is ready. Choose whether to build yours, sign in, or install the desktop app.",
+    title: "Output halo",
+    text: "Cross-agent nervous system live — Telegram, email, SMS, dashboard feed all wired through the agent_events bus and the event-router daemon.",
+    path: "agent_events · scripts/core/event_router.py · telegram_agent.js",
   },
 ];
 
@@ -170,12 +176,25 @@ export function AgentAssemblyScrollScene() {
             <p className="mt-2 text-sm leading-6 text-white/[0.58]">
               {phase.text}
             </p>
+            <p className="mt-3 font-mono text-[10px] leading-5 tracking-[0.14em] text-emerald-200/[0.62]">
+              {phase.path}
+            </p>
           </div>
 
           <div className="mt-6 flex items-center gap-3 font-mono text-[10px] uppercase tracking-[0.18em] text-white/[0.42]">
             <span>Scroll to assemble</span>
             <span className="h-px w-16 bg-emerald-200/[0.35]" />
           </div>
+
+          {progress > 0.88 && (
+            <a
+              href="#choose-agent"
+              className="mt-8 inline-flex items-center gap-2 border border-emerald-200/[0.45] bg-emerald-200/[0.08] px-4 py-3 text-sm font-bold text-emerald-100 transition-all hover:border-emerald-200/[0.75] hover:bg-emerald-200/[0.14]"
+            >
+              Agent online — choose entry
+              <ChevronDown className="h-4 w-4 animate-bounce" />
+            </a>
+          )}
         </div>
 
         <div className="relative min-h-[580px] lg:min-h-[760px]">
@@ -188,8 +207,16 @@ export function AgentAssemblyScrollScene() {
             <div className="android-blueprint" />
 
             <div
+              className="android-part torso-shell"
+              style={{ opacity: 0.55 }}
+              aria-hidden
+            >
+              <div className="torso-ribs" />
+            </div>
+
+            <div
               className="android-part cognition-core"
-              style={partStyle(progress, 0.03, 0.18, {
+              style={partStyle(progress, 0.04, 0.18, {
                 x: -260,
                 y: 90,
                 rotate: -18,
@@ -202,7 +229,7 @@ export function AgentAssemblyScrollScene() {
 
             <div
               className="android-part head-shell"
-              style={partStyle(progress, 0.14, 0.28, {
+              style={partStyle(progress, 0.18, 0.32, {
                 x: 230,
                 y: -210,
                 rotate: 16,
@@ -217,7 +244,7 @@ export function AgentAssemblyScrollScene() {
 
             <div
               className="android-part memory-spine"
-              style={partStyle(progress, 0.3, 0.44, {
+              style={partStyle(progress, 0.32, 0.46, {
                 x: -260,
                 y: -10,
                 rotate: -10,
@@ -229,20 +256,8 @@ export function AgentAssemblyScrollScene() {
             </div>
 
             <div
-              className="android-part torso-shell"
-              style={partStyle(progress, 0.38, 0.54, {
-                x: 0,
-                y: 260,
-                rotate: 0,
-                scale: 0.78,
-              })}
-            >
-              <div className="torso-ribs" />
-            </div>
-
-            <div
               className="android-part tool-arm left"
-              style={partStyle(progress, 0.48, 0.62, {
+              style={partStyle(progress, 0.46, 0.60, {
                 x: -320,
                 y: 20,
                 rotate: -24,
@@ -250,38 +265,12 @@ export function AgentAssemblyScrollScene() {
               })}
             >
               <Wrench className="h-4 w-4" />
-              <span>Tool Arm</span>
-            </div>
-
-            <div
-              className="android-part tool-arm right"
-              style={partStyle(progress, 0.5, 0.64, {
-                x: 330,
-                y: -12,
-                rotate: 24,
-                scale: 0.82,
-              })}
-            >
-              <Search className="h-4 w-4" />
-              <span>Search Arm</span>
-            </div>
-
-            <div
-              className="android-part automation-drive"
-              style={partStyle(progress, 0.58, 0.72, {
-                x: 70,
-                y: 290,
-                rotate: 8,
-                scale: 0.78,
-              })}
-            >
-              <Orbit className="h-4 w-4" />
-              <span>Automation Drive</span>
+              <span>Tool Limbs</span>
             </div>
 
             <div
               className="android-part guard-shell"
-              style={partStyle(progress, 0.68, 0.82, {
+              style={partStyle(progress, 0.60, 0.74, {
                 x: 260,
                 y: 80,
                 rotate: 12,
@@ -289,20 +278,20 @@ export function AgentAssemblyScrollScene() {
               })}
             >
               <ShieldCheck className="h-5 w-5" />
-              <span>Guardrails</span>
+              <span>Guard Shell</span>
             </div>
 
             <div
               className="android-part reasoning-halo"
-              style={partStyle(progress, 0.78, 0.94, {
+              style={partStyle(progress, 0.74, 0.92, {
                 x: 0,
                 y: -180,
                 rotate: 0,
                 scale: 0.48,
               })}
             >
-              <BrainCircuit className="h-4 w-4" />
-              <span>Planning Lattice</span>
+              <Orbit className="h-4 w-4" />
+              <span>Output Halo</span>
             </div>
 
             <div className="android-light one" />
@@ -516,15 +505,8 @@ export function AgentAssemblyScrollScene() {
         }
 
         .tool-arm.left {
-          margin-left: -296px;
-          margin-top: -50px;
-          transform-origin: right center;
-        }
-
-        .tool-arm.right {
-          margin-left: 110px;
-          margin-top: -50px;
-          transform-origin: left center;
+          margin-left: -93px;
+          margin-top: 84px;
         }
 
         .tool-arm:after {
@@ -535,26 +517,10 @@ export function AgentAssemblyScrollScene() {
           border-radius: 9999px;
           border: 1px solid rgba(52,211,153,0.18);
           background: rgba(52,211,153,0.08);
-        }
-
-        .tool-arm.left:after {
-          right: -30px;
-        }
-
-        .tool-arm.right:after {
-          left: -30px;
-        }
-
-        .automation-drive {
-          width: 198px;
-          height: 112px;
-          margin-left: -99px;
-          margin-top: 192px;
-          display: flex;
-          align-items: center;
-          justify-content: center;
-          gap: 9px;
-          border-radius: 34px 34px 74px 74px;
+          left: 50%;
+          transform: translateX(-50%);
+          bottom: -52px;
+          opacity: 0.6;
         }
 
         .guard-shell {

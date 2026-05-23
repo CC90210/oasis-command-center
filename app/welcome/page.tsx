@@ -12,9 +12,9 @@ export default async function WelcomePage() {
   if (user) redirect("/");
 
   return (
-    <main className="relative min-h-screen overflow-hidden bg-[#03070a] text-fg">
-      <div aria-hidden className="absolute inset-0 welcome-depth" />
-      <div aria-hidden className="absolute inset-0 welcome-grid" />
+    <main className="relative min-h-screen bg-[#03070a] text-fg">
+      <div aria-hidden className="pointer-events-none fixed inset-0 z-0 welcome-depth" />
+      <div aria-hidden className="pointer-events-none fixed inset-0 z-0 welcome-grid" />
 
       <header className="relative z-20 mx-auto flex max-w-7xl items-center justify-between px-5 py-5 sm:px-8">
         <Link href="/welcome" className="flex items-center gap-3">
