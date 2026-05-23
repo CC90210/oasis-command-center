@@ -3,58 +3,63 @@
 import type { CSSProperties } from "react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
+  Activity,
   BrainCircuit,
   ChevronDown,
   Cpu,
   Database,
   Eye,
+  Network,
   Orbit,
   ShieldCheck,
+  Sparkles,
   Wrench,
 } from "lucide-react";
+
+const PERSONAS = ["BRAVO", "ATLAS", "MAVEN", "AURA", "HERMES"];
 
 const PHASES = [
   {
     start: 0,
     marker: "01",
     title: "Reasoning core",
-    text: "Multi-provider brain — Anthropic, OpenAI, OpenRouter, Groq, Ollama. Each agent (Bravo, Atlas, Maven, Aura, Hermes) is a persona on the same router.",
-    path: "lib/providers.ts · lib/agent-personas.ts",
+    text: "Multi-provider brain locks in — the primary reasoning core, the Codex dual-AI executor, the state pulse that keeps the empire substrate alive, and the persona ring (Bravo, Atlas, Maven, Aura, Hermes) on the same router.",
+    path: "lib/providers.ts · lib/agent-personas.ts · state/empire_state.db · codex-companion.mjs",
   },
   {
     start: 0.17,
     marker: "02",
     title: "Browser optics",
-    text: "Sees the public web through a real logged-in Chrome — Cloudflare, DataDome, fingerprint-proof via the CloakBrowser stealth tier.",
+    text: "Sees the public web through a real logged-in Chrome — Cloudflare, DataDome, fingerprint-proof via the CloakBrowser stealth tier with C++ source-level patches.",
     path: "scripts/browser/browser_harness_doctor.py · cloak_browser_tool.py",
   },
   {
     start: 0.31,
     marker: "03",
     title: "Memory spine",
-    text: "Hybrid lexical + semantic recall across 219 memory, skills, and brain files. FTS5 lexical + LanceDB semantic merged via reciprocal rank fusion.",
-    path: "scripts/core/memory_retriever.py · state/memory_index.{db,lance}",
+    text: "Hybrid lexical + semantic recall across 219 memory, skills, and brain files. FTS5 + LanceDB merged via reciprocal rank fusion. 148 skills surface as a queryable capability constellation above the spine.",
+    path: "scripts/core/memory_retriever.py · state/memory_index.{db,lance} · brain/CAPABILITY_GRAPH.json",
   },
   {
     start: 0.45,
     marker: "04",
     title: "Tool limbs",
-    text: "21 local tools through the bridge — read/write, bash, Stripe, Supabase, Vercel, n8n, Firecrawl. Cloud-safe tools when the bridge is offline.",
+    text: "21 local tools through the bridge — read/write, bash, Stripe, Supabase, Vercel, n8n, Firecrawl. Cloud-safe tools when the bridge is offline. 115 Python CLI scripts under scripts/.",
     path: "bravo_cli/bridge_tools.py · scripts/*",
   },
   {
     start: 0.59,
     marker: "05",
     title: "Guard shell",
-    text: "Three guards: secrets never leave the box, destructive ops blocked at the shell, sacred state stays append-only. PreToolUse hooks fire before every command.",
+    text: "Three guards wrap the body: secrets never leave the box, destructive ops blocked at the shell, sacred state stays append-only. PreToolUse hooks fire before every command.",
     path: "scripts/state/{secret,exec,state}_guard.py",
   },
   {
     start: 0.73,
     marker: "06",
     title: "Output halo",
-    text: "Cross-agent nervous system live — Telegram, email, SMS, dashboard feed all wired through the agent_events bus and the event-router daemon.",
-    path: "agent_events · scripts/core/event_router.py · telegram_agent.js",
+    text: "Cross-agent nervous system live — Telegram, email, SMS, dashboard feed all wired through the agent_events bus and the event-router daemon. The bridge spine connects to the operator's machine on port 9100.",
+    path: "agent_events · scripts/core/event_router.py · telegram_agent.js · bravo_cli/bridge_chat_server.py",
   },
 ];
 
@@ -215,6 +220,29 @@ export function AgentAssemblyScrollScene() {
             </div>
 
             <div
+              className="android-part persona-ring"
+              style={partStyle(progress, 0.10, 0.24, {
+                x: 0,
+                y: 0,
+                rotate: -90,
+                scale: 0.5,
+              })}
+              aria-hidden
+            >
+              {PERSONAS.map((name, index) => (
+                <span
+                  key={name}
+                  className="persona-name"
+                  style={{
+                    transform: `rotate(${(index * 360) / PERSONAS.length}deg) translateY(-220px)`,
+                  }}
+                >
+                  {name}
+                </span>
+              ))}
+            </div>
+
+            <div
               className="android-part cognition-core"
               style={partStyle(progress, 0.04, 0.18, {
                 x: -260,
@@ -225,6 +253,32 @@ export function AgentAssemblyScrollScene() {
             >
               <Cpu className="h-5 w-5" />
               <span>Reasoning Core</span>
+            </div>
+
+            <div
+              className="android-part state-pulse"
+              style={partStyle(progress, 0.06, 0.20, {
+                x: 0,
+                y: -240,
+                rotate: 0,
+                scale: 0.5,
+              })}
+            >
+              <Activity className="h-3.5 w-3.5" />
+              <span>State Pulse</span>
+            </div>
+
+            <div
+              className="android-part codex-companion"
+              style={partStyle(progress, 0.08, 0.22, {
+                x: 240,
+                y: 60,
+                rotate: 22,
+                scale: 0.6,
+              })}
+            >
+              <Network className="h-3.5 w-3.5" />
+              <span>Codex</span>
             </div>
 
             <div
@@ -253,6 +307,26 @@ export function AgentAssemblyScrollScene() {
             >
               <Database className="h-4 w-4" />
               <span>Memory Spine</span>
+            </div>
+
+            <div
+              className="android-part capability-constellation"
+              style={partStyle(progress, 0.34, 0.48, {
+                x: 0,
+                y: 240,
+                rotate: 0,
+                scale: 0.4,
+              })}
+              aria-hidden
+            >
+              <span className="constellation-dot c1" />
+              <span className="constellation-dot c2" />
+              <span className="constellation-dot c3" />
+              <span className="constellation-dot c4" />
+              <span className="constellation-dot c5" />
+              <span className="constellation-dot c6" />
+              <span className="constellation-dot c7" />
+              <Sparkles className="constellation-icon h-3 w-3" />
             </div>
 
             <div
@@ -293,6 +367,54 @@ export function AgentAssemblyScrollScene() {
               <Orbit className="h-4 w-4" />
               <span>Output Halo</span>
             </div>
+
+            <div
+              className="android-part bridge-spine"
+              style={partStyle(progress, 0.80, 0.94, {
+                x: 0,
+                y: 80,
+                rotate: 0,
+                scale: 0.4,
+              })}
+              aria-hidden
+            >
+              <span className="bridge-line" />
+              <span className="bridge-node" />
+              <span className="bridge-label">localhost:9100</span>
+            </div>
+
+            {progress > 0.90 && (
+              <div
+                className="spec-overlay"
+                aria-hidden
+                style={{ opacity: span(progress, 0.90, 0.98) }}
+              >
+                <div className="spec-label spec-tl">
+                  <span className="spec-tag">01 · State Pulse</span>
+                  <span className="spec-path">empire_state.db</span>
+                </div>
+                <div className="spec-label spec-tr">
+                  <span className="spec-tag">06 · Output Halo</span>
+                  <span className="spec-path">agent_events bus</span>
+                </div>
+                <div className="spec-label spec-ml">
+                  <span className="spec-tag">03 · Memory Spine</span>
+                  <span className="spec-path">memory_retriever.py</span>
+                </div>
+                <div className="spec-label spec-mr">
+                  <span className="spec-tag">02 · Browser Optics</span>
+                  <span className="spec-path">browser_harness</span>
+                </div>
+                <div className="spec-label spec-bl">
+                  <span className="spec-tag">04 · Tool Limbs</span>
+                  <span className="spec-path">bridge_tools.py</span>
+                </div>
+                <div className="spec-label spec-br">
+                  <span className="spec-tag">05 · Guard Shell</span>
+                  <span className="spec-path">secret_guard.py</span>
+                </div>
+              </div>
+            )}
 
             <div className="android-light one" />
             <div className="android-light two" />
@@ -338,12 +460,13 @@ export function AgentAssemblyScrollScene() {
         }
 
         .android-online {
-          width: 390px;
-          height: 520px;
+          width: 280px;
+          height: 380px;
           transform: translate(-50%, -50%);
           border-radius: 40%;
-          background: radial-gradient(circle at 50% 34%, rgba(134,239,172,0.26), transparent 36%);
-          filter: blur(18px);
+          background: radial-gradient(circle at 50% 38%, rgba(134,239,172,0.16), transparent 40%);
+          filter: blur(26px);
+          opacity: 0.7;
         }
 
         .android-blueprint {
@@ -356,16 +479,16 @@ export function AgentAssemblyScrollScene() {
         }
 
         .android-part {
-          color: rgba(236,253,245,0.88);
-          border: 1px solid rgba(255,255,255,0.15);
+          color: rgba(236,253,245,0.92);
+          border: 1px solid rgba(255,255,255,0.28);
           background:
-            linear-gradient(135deg, rgba(255,255,255,0.12), rgba(255,255,255,0.03)),
-            radial-gradient(circle at 50% 12%, rgba(52,211,153,0.2), transparent 46%);
+            linear-gradient(135deg, rgba(255,255,255,0.14), rgba(255,255,255,0.04)),
+            radial-gradient(circle at 50% 12%, rgba(52,211,153,0.18), transparent 46%);
           box-shadow:
-            0 0 0 1px rgba(52,211,153,0.08),
-            inset 0 0 42px rgba(255,255,255,0.045),
+            0 0 0 1px rgba(52,211,153,0.10),
+            inset 0 0 24px rgba(255,255,255,0.06),
             0 28px 70px rgba(0,0,0,0.32);
-          backdrop-filter: blur(16px);
+          backdrop-filter: blur(14px);
           transition: opacity 120ms linear;
           will-change: transform, opacity;
         }
@@ -558,6 +681,194 @@ export function AgentAssemblyScrollScene() {
           animation: reasoning-spin 18s linear infinite;
         }
 
+        .state-pulse {
+          width: 92px;
+          height: 32px;
+          margin-left: -46px;
+          margin-top: -16px;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          gap: 6px;
+          border-radius: 9999px;
+          background:
+            linear-gradient(135deg, rgba(255,255,255,0.18), rgba(255,255,255,0.05)),
+            radial-gradient(circle at 50% 50%, rgba(245,158,11,0.16), transparent 60%);
+          border-color: rgba(245,158,11,0.32);
+          box-shadow:
+            0 0 0 1px rgba(245,158,11,0.18),
+            0 0 32px rgba(245,158,11,0.22);
+        }
+
+        .state-pulse:before {
+          content: "";
+          position: absolute;
+          left: 8px;
+          width: 6px;
+          height: 6px;
+          border-radius: 9999px;
+          background: rgba(245,158,11,0.92);
+          box-shadow: 0 0 12px rgba(245,158,11,0.78);
+          animation: state-blink 1.4s ease-in-out infinite;
+        }
+
+        .state-pulse span {
+          color: rgba(245,158,11,0.88);
+        }
+
+        .codex-companion {
+          width: 64px;
+          height: 64px;
+          margin-left: 36px;
+          margin-top: -120px;
+          display: grid;
+          place-items: center;
+          gap: 4px;
+          border-radius: 9999px;
+          background:
+            radial-gradient(circle, rgba(236,253,245,0.84) 0 8%, rgba(124,140,247,0.42) 9% 36%, rgba(124,140,247,0.18) 37% 60%, transparent 61%),
+            conic-gradient(from 90deg, rgba(124,140,247,0.78), rgba(180,200,255,0.42), rgba(124,140,247,0.78));
+          border-color: rgba(124,140,247,0.42);
+          box-shadow:
+            0 0 0 1px rgba(124,140,247,0.22),
+            0 0 38px rgba(124,140,247,0.34);
+        }
+
+        .codex-companion span {
+          position: absolute;
+          bottom: -22px;
+          width: max-content;
+          color: rgba(180,200,255,0.78);
+        }
+
+        .persona-ring {
+          width: 540px;
+          height: 540px;
+          margin-left: -270px;
+          margin-top: -270px;
+          border-radius: 9999px;
+          border: 1px dashed rgba(52,211,153,0.32);
+          background: transparent;
+          box-shadow: none;
+          backdrop-filter: none;
+          animation: persona-spin 38s linear infinite;
+        }
+
+        .persona-ring .persona-name {
+          position: absolute;
+          left: 50%;
+          top: 50%;
+          font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+          font-size: 9px;
+          font-weight: 800;
+          letter-spacing: 0.32em;
+          color: rgba(236,253,245,0.62);
+          text-transform: uppercase;
+          transform-origin: 0 220px;
+        }
+
+        .capability-constellation {
+          width: 220px;
+          height: 96px;
+          margin-left: -110px;
+          margin-top: 224px;
+          border-radius: 22px;
+          background: transparent;
+          border-color: rgba(52,211,153,0.18);
+          box-shadow: none;
+          backdrop-filter: none;
+        }
+
+        .capability-constellation .constellation-icon {
+          position: absolute;
+          left: 50%;
+          top: 50%;
+          transform: translate(-50%, -50%);
+          color: rgba(236,253,245,0.78);
+        }
+
+        .constellation-dot {
+          position: absolute;
+          width: 4px;
+          height: 4px;
+          border-radius: 9999px;
+          background: rgba(134,239,172,0.92);
+          box-shadow: 0 0 8px rgba(52,211,153,0.78);
+          animation: constellation-flicker 3.2s ease-in-out infinite;
+        }
+
+        .constellation-dot.c1 { left: 18%; top: 22%; animation-delay: 0s; }
+        .constellation-dot.c2 { left: 36%; top: 70%; animation-delay: 0.4s; }
+        .constellation-dot.c3 { left: 54%; top: 14%; animation-delay: 0.8s; }
+        .constellation-dot.c4 { left: 70%; top: 64%; animation-delay: 1.2s; }
+        .constellation-dot.c5 { left: 86%; top: 32%; animation-delay: 1.6s; }
+        .constellation-dot.c6 { left: 24%; top: 88%; animation-delay: 2s; }
+        .constellation-dot.c7 { left: 62%; top: 88%; animation-delay: 2.4s; }
+
+        .bridge-spine {
+          width: 12px;
+          height: 180px;
+          margin-left: -6px;
+          margin-top: 226px;
+          border-radius: 0;
+          border: none;
+          background: transparent;
+          box-shadow: none;
+          backdrop-filter: none;
+        }
+
+        .bridge-line {
+          position: absolute;
+          left: 50%;
+          top: 0;
+          width: 1px;
+          height: 100%;
+          background: linear-gradient(to bottom, rgba(52,211,153,0.72), transparent);
+          transform: translateX(-50%);
+        }
+
+        .bridge-node {
+          position: absolute;
+          left: 50%;
+          bottom: 8px;
+          width: 12px;
+          height: 12px;
+          border-radius: 9999px;
+          background: rgba(52,211,153,0.42);
+          border: 1px solid rgba(52,211,153,0.62);
+          box-shadow: 0 0 18px rgba(52,211,153,0.62);
+          transform: translateX(-50%);
+        }
+
+        .bridge-label {
+          position: absolute;
+          left: 50%;
+          bottom: -22px;
+          font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+          font-size: 9px;
+          font-weight: 800;
+          letter-spacing: 0.18em;
+          color: rgba(52,211,153,0.78);
+          text-transform: uppercase;
+          transform: translateX(-50%);
+          white-space: nowrap;
+        }
+
+        @keyframes state-blink {
+          0%, 100% { opacity: 0.45; transform: scale(0.85); }
+          50% { opacity: 1; transform: scale(1.15); }
+        }
+
+        @keyframes persona-spin {
+          from { rotate: 0deg; }
+          to { rotate: 360deg; }
+        }
+
+        @keyframes constellation-flicker {
+          0%, 100% { opacity: 0.32; transform: scale(0.7); }
+          50% { opacity: 1; transform: scale(1.2); }
+        }
+
         .android-light {
           width: 6px;
           height: 6px;
@@ -617,6 +928,66 @@ export function AgentAssemblyScrollScene() {
           }
         }
 
+        .spec-overlay {
+          position: absolute;
+          inset: 0;
+          pointer-events: none;
+          transition: opacity 240ms ease-out;
+        }
+
+        .spec-label {
+          position: absolute;
+          display: flex;
+          flex-direction: column;
+          gap: 2px;
+          padding: 6px 10px;
+          background: rgba(3, 7, 10, 0.62);
+          border: 1px solid rgba(52,211,153,0.32);
+          backdrop-filter: blur(6px);
+        }
+
+        .spec-label:before {
+          content: "";
+          position: absolute;
+          height: 1px;
+          background: linear-gradient(to right, rgba(52,211,153,0.62), rgba(52,211,153,0.08));
+          width: 60px;
+        }
+
+        .spec-tag {
+          font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+          font-size: 9px;
+          font-weight: 800;
+          letter-spacing: 0.16em;
+          text-transform: uppercase;
+          color: rgba(236,253,245,0.92);
+        }
+
+        .spec-path {
+          font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+          font-size: 8px;
+          letter-spacing: 0.06em;
+          color: rgba(52,211,153,0.76);
+        }
+
+        .spec-tl { top: 6%; left: 4%; }
+        .spec-tl:before { right: -60px; top: 50%; }
+
+        .spec-tr { top: 6%; right: 4%; }
+        .spec-tr:before { left: -60px; top: 50%; background: linear-gradient(to left, rgba(52,211,153,0.62), rgba(52,211,153,0.08)); }
+
+        .spec-ml { top: 42%; left: 0%; }
+        .spec-ml:before { right: -60px; top: 50%; }
+
+        .spec-mr { top: 42%; right: 0%; }
+        .spec-mr:before { left: -60px; top: 50%; background: linear-gradient(to left, rgba(52,211,153,0.62), rgba(52,211,153,0.08)); }
+
+        .spec-bl { bottom: 6%; left: 4%; }
+        .spec-bl:before { right: -60px; top: 50%; }
+
+        .spec-br { bottom: 6%; right: 4%; }
+        .spec-br:before { left: -60px; top: 50%; background: linear-gradient(to left, rgba(52,211,153,0.62), rgba(52,211,153,0.08)); }
+
         @media (max-width: 1023px) {
           .agent-scroll {
             min-height: 430vh;
@@ -624,6 +995,10 @@ export function AgentAssemblyScrollScene() {
 
           .android-stage {
             transform: translateY(-70px) scale(0.76);
+          }
+
+          .spec-overlay {
+            display: none;
           }
         }
 
