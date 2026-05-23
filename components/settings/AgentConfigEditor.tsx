@@ -214,17 +214,18 @@ export function AgentConfigEditor({
   }
 
   // Alpha.6 — probe the provider with the typed key before saving so the
-  // operator sees green ✓ / red ✗ inline. /api/agent-config/test-key hits
-  // the provider's lightest endpoint and reports HTTP status + latency.
-  // The button is disabled when the field is empty; clearing the field
-  // clears any previous result so a stale ✓ never lingers across edits.
+  // operator sees green ✓ / red ✗ inline. /api/agent-config/test-connection
+  // accepts an optional api_key in the body to test a not-yet-saved value;
+  // without api_key it falls back to testing the key already on file. One
+  // endpoint serves both jobs (consolidated 2026-05-23 from a separate
+  // /api/agent-config/test-key that duplicated this logic).
   async function testKey(agentKey: string) {
     const row = rows[agentKey];
     const key = row.apiKey.trim();
     if (!key) return;
     patchRow(agentKey, { testing: true, testResult: undefined });
     try {
-      const res = await fetch("/api/agent-config/test-key", {
+      const res = await fetch("/api/agent-config/test-connection", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ provider: row.provider, api_key: key }),
@@ -234,6 +235,7 @@ export function AgentConfigEditor({
         message?: string;
         code?: string;
         provider_response_ms?: number;
+        latency_ms?: number;
       };
       patchRow(agentKey, {
         testing: false,
@@ -241,7 +243,7 @@ export function AgentConfigEditor({
           ok: !!body.ok,
           message: body.message,
           code: body.code,
-          provider_response_ms: body.provider_response_ms,
+          provider_response_ms: body.provider_response_ms ?? body.latency_ms,
         },
       });
     } catch (e) {
