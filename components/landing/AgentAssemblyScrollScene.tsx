@@ -11,7 +11,7 @@ const PHASES = [
     title: "Initial seed",
     subtitle: "Holographic silhouette warming up. Reasoning core and state pulse synchronizing.",
     progressLabel: "9%",
-    image: "/images/agent-assembly/phase-01-initial-seed.png",
+    image: "/images/agent-assembly/phase-01-initial-seed.jpg",
     subsystem: "lib/providers.ts · state/empire_state.db",
   },
   {
@@ -20,7 +20,7 @@ const PHASES = [
     title: "Neural backbone",
     subtitle: "Memory spine forming vertically through the torso and neck. Hybrid recall stabilizing.",
     progressLabel: "22%",
-    image: "/images/agent-assembly/phase-02-neural-backbone.png",
+    image: "/images/agent-assembly/phase-02-neural-backbone.jpg",
     subsystem: "scripts/core/memory_retriever.py · state/memory_index.{db,lance}",
   },
   {
@@ -29,7 +29,7 @@ const PHASES = [
     title: "Optic calibration",
     subtitle: "Browser optics docking. Vision-feed stability climbing toward signal lock.",
     progressLabel: "35%",
-    image: "/images/agent-assembly/phase-03-optic-calibration.png",
+    image: "/images/agent-assembly/phase-03-optic-calibration.jpg",
     subsystem: "scripts/browser/browser_harness_doctor.py · cloak_browser_tool.py",
   },
   {
@@ -38,7 +38,7 @@ const PHASES = [
     title: "Tool limb docking",
     subtitle: "Actuators online. Hand modules calibrating against grip, range, and micro-motor control.",
     progressLabel: "52%",
-    image: "/images/agent-assembly/phase-04-tool-limb-docking.png",
+    image: "/images/agent-assembly/phase-04-tool-limb-docking.jpg",
     subsystem: "bravo_cli/bridge_tools.py · scripts/*",
   },
   {
@@ -47,7 +47,7 @@ const PHASES = [
     title: "Guard shield",
     subtitle: "Policy alignment confirmed. Safe-execution protocols locked. Structural stability optimal.",
     progressLabel: "68%",
-    image: "/images/agent-assembly/phase-05-guard-shield.png",
+    image: "/images/agent-assembly/phase-05-guard-shield.jpg",
     subsystem: "scripts/state/{secret,exec,state}_guard.py",
   },
   {
@@ -56,7 +56,7 @@ const PHASES = [
     title: "Output halo",
     subtitle: "Response synthesis online. Routing decision channels primed. Delivery protocols live.",
     progressLabel: "81%",
-    image: "/images/agent-assembly/phase-06-output-halo.png",
+    image: "/images/agent-assembly/phase-06-output-halo.jpg",
     subsystem: "agent_events bus · scripts/core/event_router.py · telegram_agent.js",
   },
   {
@@ -65,7 +65,7 @@ const PHASES = [
     title: "Security mesh",
     subtitle: "Zero-trust architecture engaged. All channels authenticated. Containment protocols armed.",
     progressLabel: "92%",
-    image: "/images/agent-assembly/phase-07-security-mesh.png",
+    image: "/images/agent-assembly/phase-07-security-mesh.jpg",
     subsystem: "scripts/state/secret_guard.py · scripts/audit_mcp_secrets.py",
   },
   {
@@ -74,32 +74,13 @@ const PHASES = [
     title: "Bravo online",
     subtitle: "Executive agent fully assembled. All systems locked. Capability complete. Mission ready.",
     progressLabel: "100%",
-    image: "/images/agent-assembly/phase-08-bravo-online.png",
+    image: "/images/agent-assembly/phase-08-bravo-online.jpg",
     subsystem: "Bravo v1.0.0 · OASIS AI Command Centre",
   },
 ] as const;
 
-const SYSTEMS = [
-  "Reasoning Core",
-  "State Pulse",
-  "Memory Spine",
-  "Browser Optics",
-  "Tool Limbs",
-  "Guard Shield",
-  "Output Halo",
-  "Security Layer",
-  "Bravo Assembly",
-] as const;
-
-type Status = "active" | "complete" | "pending" | "online";
-
 function clamp(value: number) {
   return Math.max(0, Math.min(1, value));
-}
-
-function ease(value: number) {
-  const t = clamp(value);
-  return t * t * (3 - 2 * t);
 }
 
 function imageOpacity(i: number, progress: number): number {
@@ -115,55 +96,6 @@ function imageScale(i: number, progress: number): number {
   const dist = Math.abs(progress - center);
   const active = Math.max(0, 1 - dist * 8);
   return 1 + active * 0.018;
-}
-
-function statusFor(systemIdx: number, phaseIdx: number): Status {
-  if (phaseIdx >= PHASES.length - 1) return "online";
-  if (phaseIdx === 0) {
-    return systemIdx <= 1 ? "active" : "pending";
-  }
-  if (systemIdx <= phaseIdx) return "complete";
-  if (systemIdx === phaseIdx + 1) return "active";
-  return "pending";
-}
-
-function statusLabel(status: Status): string {
-  switch (status) {
-    case "active":
-      return "ACTIVE";
-    case "complete":
-      return "LOCKED";
-    case "online":
-      return "ONLINE";
-    default:
-      return "PENDING";
-  }
-}
-
-function statusColor(status: Status): string {
-  switch (status) {
-    case "active":
-      return "text-emerald-200";
-    case "complete":
-      return "text-white/65";
-    case "online":
-      return "text-amber-200";
-    default:
-      return "text-white/30";
-  }
-}
-
-function statusDot(status: Status): string {
-  switch (status) {
-    case "active":
-      return "bg-emerald-300 shadow-[0_0_10px_rgba(52,211,153,0.85)] animate-pulse";
-    case "complete":
-      return "bg-emerald-300/45";
-    case "online":
-      return "bg-amber-300 shadow-[0_0_12px_rgba(245,158,11,0.85)]";
-    default:
-      return "bg-white/15";
-  }
 }
 
 export function AgentAssemblyScrollScene() {
@@ -210,8 +142,6 @@ export function AgentAssemblyScrollScene() {
     const raw = Math.floor(progress * PHASES.length);
     return Math.min(PHASES.length - 1, Math.max(0, raw));
   }, [progress]);
-
-  const phase = PHASES[phaseIdx];
 
   return (
     <section
@@ -280,9 +210,9 @@ export function AgentAssemblyScrollScene() {
           </div>
         )}
 
-        {/* Cinematic gradient overlays — readability for left text column + bottom CTA */}
-        <div className="pointer-events-none absolute inset-0 bg-gradient-to-r from-[#03070a]/95 via-[#03070a]/40 to-[#03070a]/30" />
-        <div className="pointer-events-none absolute inset-0 bg-gradient-to-b from-[#03070a]/60 via-transparent to-[#03070a]/80" />
+        {/* Subtle vignette + bottom darkening for CTA legibility — image carries its own UI so keep this light */}
+        <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(ellipse_at_center,_transparent_55%,_rgba(3,7,10,0.45)_100%)]" />
+        <div className="pointer-events-none absolute inset-x-0 bottom-0 h-40 bg-gradient-to-b from-transparent to-[#03070a]/85" />
 
         {/* SVG overlay layer — orbit rings, particles, subtle motion */}
         <svg
@@ -332,92 +262,24 @@ export function AgentAssemblyScrollScene() {
           />
         </svg>
 
-        {/* Left text panel — minimal, sits over the gradient */}
-        <div className="relative z-20 mx-auto flex h-full max-w-7xl items-center px-5 sm:px-8">
-          <div className="max-w-md">
-            <div className="mb-5 inline-flex items-center gap-2 border-l border-emerald-300/[0.45] bg-emerald-300/[0.08] px-3 py-2 text-[10px] font-mono uppercase tracking-[0.22em] text-emerald-100/[0.85]">
-              Build the agent first
-            </div>
-
-            <h1 className="text-[clamp(2.35rem,4.2vw,4.4rem)] font-black leading-[0.94] tracking-tight text-white">
-              Build the agent
-              <br />
-              before you enter.
-            </h1>
-
-            <p className="mt-6 max-w-md text-base leading-7 text-white/[0.66]">
-              Before signup, the system assembles a working operator around your
-              business. Scroll to watch reasoning, memory, vision, tools,
-              guardrails, and security lock into the body.
-            </p>
-
-            {/* Phase status card */}
-            <div className="mt-8 border border-white/[0.10] bg-black/45 p-4 backdrop-blur-md">
-              <div className="flex items-center justify-between gap-4">
-                <div className="font-mono text-[10px] uppercase tracking-[0.22em] text-emerald-200/[0.78]">
-                  Phase {String(phase.id).padStart(2, "0")} · {phase.title}
-                </div>
-                <div className="font-mono text-[10px] tracking-[0.12em] text-emerald-200/[0.92]">
-                  {phase.progressLabel}
-                </div>
-              </div>
-              <div className="mt-3 h-1 w-full overflow-hidden rounded-full bg-white/[0.08]">
-                <div
-                  className="h-full bg-emerald-300/[0.88]"
-                  style={{
-                    width: `${ease(progress) * 100}%`,
-                    transition: "width 80ms linear",
-                  }}
-                />
-              </div>
-              <p className="mt-4 text-sm leading-6 text-white/[0.76]">
-                {phase.subtitle}
-              </p>
-              <p className="mt-3 font-mono text-[10px] leading-5 tracking-[0.12em] text-emerald-200/[0.62]">
-                {phase.subsystem}
-              </p>
-            </div>
-
-            {/* Live system roster */}
-            <ul className="mt-6 space-y-1.5 text-[11px] font-mono uppercase tracking-[0.16em]">
-              {SYSTEMS.map((name, idx) => {
-                const status = statusFor(idx, phaseIdx);
-                return (
-                  <li
-                    key={name}
-                    className={`flex items-center gap-3 ${statusColor(status)}`}
-                  >
-                    <span className={`h-1.5 w-1.5 rounded-full ${statusDot(status)}`} />
-                    <span className="flex-1">
-                      {String(idx + 1).padStart(2, "0")} · {name}
-                    </span>
-                    <span className="text-[9px] opacity-70">{statusLabel(status)}</span>
-                  </li>
-                );
-              })}
-            </ul>
-
-            {progress > 0.92 && (
-              <a
-                href="#choose-agent"
-                className="mt-8 inline-flex items-center gap-2 border border-amber-200/[0.55] bg-amber-200/[0.10] px-4 py-3 text-sm font-bold text-amber-100 transition-all hover:border-amber-200/[0.85] hover:bg-amber-200/[0.18]"
-              >
-                Bravo online — choose entry
-                <ChevronDown className="h-4 w-4 animate-bounce" />
-              </a>
-            )}
-          </div>
-        </div>
-
-        {/* Scroll hint — only on first viewport */}
-        {progress < 0.04 && (
-          <div className="pointer-events-none absolute bottom-8 left-1/2 z-20 -translate-x-1/2 transform">
-            <div className="flex flex-col items-center gap-2 text-[10px] font-mono uppercase tracking-[0.32em] text-emerald-200/[0.62]">
+        {/* Bottom-center affordance: scroll hint at start, CTA at end. Image bakes in the rest of the UI. */}
+        <div className="pointer-events-none absolute inset-x-0 bottom-10 z-20 flex justify-center">
+          {progress < 0.04 && (
+            <div className="flex flex-col items-center gap-2 text-[10px] font-mono uppercase tracking-[0.32em] text-emerald-200/[0.72]">
               <span>Scroll to assemble</span>
               <ChevronDown className="h-4 w-4 animate-bounce" />
             </div>
-          </div>
-        )}
+          )}
+          {progress > 0.92 && (
+            <a
+              href="#choose-agent"
+              className="pointer-events-auto inline-flex items-center gap-2 border border-amber-200/[0.55] bg-amber-200/[0.14] px-5 py-3 text-sm font-bold text-amber-100 backdrop-blur-md transition-all hover:border-amber-200/[0.85] hover:bg-amber-200/[0.22]"
+            >
+              Bravo online — choose entry
+              <ChevronDown className="h-4 w-4 animate-bounce" />
+            </a>
+          )}
+        </div>
 
         <style>{`
           .placeholder-figure {
