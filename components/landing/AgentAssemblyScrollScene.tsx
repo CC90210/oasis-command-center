@@ -4,91 +4,312 @@ import type { CSSProperties } from "react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { ChevronDown } from "lucide-react";
 
-// Each phase reveals via a clip-path circle that blooms from a body-part
-// origin so the operator sees the new system bolt onto the previous figure
-// instead of crossfading over it.
+/**
+ * AgentAssemblyScrollScene — manufacturing-line build for /welcome.
+ *
+ * One static photoreal backdrop (phase-01-initial-seed.jpg) acts as the
+ * persistent figure. Eight code-driven SVG modules (spine, optics, limbs,
+ * shield, halo, mesh, bravo-online) progressively bolt onto the figure as
+ * the operator scrolls. Two robotic arm SVGs fly to each module's install
+ * point during the install window, fire an energy beam, then retract.
+ *
+ * Each module's draw animation, the arm trajectories, the beam tracers,
+ * the spark bursts, and the final "Bravo online" ignition are all driven
+ * by scroll-progress math — no opacity crossfades between still photos.
+ */
+
+const BACKDROP = "/images/agent-assembly/phase-01-initial-seed.jpg";
+
+// Eight ordered phases. Each phase owns:
+//   - title  : displayed in the bottom HUD strip
+//   - target : { x%, y% } on the figure where the module installs (drives arm + beam endpoints)
+//   - accent : color for the module's primary draw + spark
+//   - module : kind of SVG geometry to draw (interpreted in <ModuleLayer/>)
 const PHASES = [
-  { id: 1, title: "Initial seed",       image: "/images/agent-assembly/phase-01-initial-seed.jpg",      revealX: 50, revealY: 50, accentColor: "rgba(52,211,153,0.95)" },
-  { id: 2, title: "Neural backbone",    image: "/images/agent-assembly/phase-02-neural-backbone.jpg",   revealX: 50, revealY: 36, accentColor: "rgba(52,211,153,0.95)" },
-  { id: 3, title: "Optic calibration",  image: "/images/agent-assembly/phase-03-optic-calibration.jpg", revealX: 50, revealY: 30, accentColor: "rgba(134,239,172,0.95)" },
-  { id: 4, title: "Tool limb docking",  image: "/images/agent-assembly/phase-04-tool-limb-docking.jpg", revealX: 50, revealY: 52, accentColor: "rgba(167,243,208,0.95)" },
-  { id: 5, title: "Guard shield",       image: "/images/agent-assembly/phase-05-guard-shield.jpg",      revealX: 50, revealY: 50, accentColor: "rgba(187,247,208,0.95)" },
-  { id: 6, title: "Output halo",        image: "/images/agent-assembly/phase-06-output-halo.jpg",       revealX: 50, revealY: 22, accentColor: "rgba(252,211,77,0.95)" },
-  { id: 7, title: "Security mesh",      image: "/images/agent-assembly/phase-07-security-mesh.jpg",     revealX: 50, revealY: 50, accentColor: "rgba(110,231,183,0.95)" },
-  { id: 8, title: "Bravo online",       image: "/images/agent-assembly/phase-08-bravo-online.jpg",      revealX: 50, revealY: 50, accentColor: "rgba(252,211,77,0.95)" },
+  { id: 1, title: "Initial seed",       target: { x: 50, y: 52 }, accent: "rgba(252,211,77,0.95)",  module: "core"    as const },
+  { id: 2, title: "Neural backbone",    target: { x: 50, y: 36 }, accent: "rgba(52,211,153,0.95)",  module: "spine"   as const },
+  { id: 3, title: "Optic calibration",  target: { x: 50, y: 27 }, accent: "rgba(134,239,172,0.95)", module: "optics"  as const },
+  { id: 4, title: "Tool limb docking",  target: { x: 50, y: 50 }, accent: "rgba(167,243,208,0.95)", module: "limbs"   as const },
+  { id: 5, title: "Guard shield",       target: { x: 50, y: 50 }, accent: "rgba(187,247,208,0.95)", module: "shield"  as const },
+  { id: 6, title: "Output halo",        target: { x: 50, y: 16 }, accent: "rgba(252,211,77,0.95)",  module: "halo"    as const },
+  { id: 7, title: "Security mesh",      target: { x: 50, y: 50 }, accent: "rgba(110,231,183,0.95)", module: "mesh"    as const },
+  { id: 8, title: "Bravo online",       target: { x: 50, y: 52 }, accent: "rgba(252,211,77,0.95)",  module: "online"  as const },
 ] as const;
 
-const REVEAL_PORTION = 0.55; // reveal animation occupies first 55% of each phase segment
-const FLASH_PORTION = 0.08;  // flash overlay punches the first 8% of each segment
+type ModuleKind = (typeof PHASES)[number]["module"];
 
-function clamp(value: number) {
-  return Math.max(0, Math.min(1, value));
-}
+const INSTALL_PORTION = 0.55; // first 55% of each phase segment is the install window
 
-function smoothstep(value: number) {
-  const t = clamp(value);
-  return t * t * (3 - 2 * t);
-}
+function clamp(v: number) { return Math.max(0, Math.min(1, v)); }
+function smoothstep(v: number) { const t = clamp(v); return t * t * (3 - 2 * t); }
+function lerp(a: number, b: number, t: number) { return a + (b - a) * t; }
 
-/**
- * Returns the clip-path string for the image at index `i` given current scroll
- * progress. Phase 0 is the base layer (always fully visible). Phases 1..7 each
- * reveal via a circle that blooms from the phase's revealX/revealY origin
- * during the first REVEAL_PORTION of their own segment.
- */
-function clipPathFor(i: number, progress: number): string {
-  if (i === 0) return "circle(150% at 50% 50%)";
+/** 0 (not yet) → 1 (fully installed) for phase i at the given scroll position. */
+function installProgress(i: number, progress: number): number {
   const segmentSize = 1 / PHASES.length;
   const segmentStart = i * segmentSize;
-  const revealWindow = segmentSize * REVEAL_PORTION;
-  const localT = (progress - segmentStart) / revealWindow;
-  const eased = smoothstep(localT);
-  const phase = PHASES[i];
-  return `circle(${eased * 160}% at ${phase.revealX}% ${phase.revealY}%)`;
+  const installWindow = segmentSize * INSTALL_PORTION;
+  return clamp((progress - segmentStart) / installWindow);
 }
 
-/**
- * Subtle scale pulse on whichever phase is currently active. Adds depth and
- * suggests the figure is "breathing" between phase changes.
- */
-function imageScale(i: number, progress: number): number {
+/** Tent function: 0 outside install window, peaks at 1 mid-install. Drives arm + beam visibility. */
+function installActivity(i: number, progress: number): number {
   const segmentSize = 1 / PHASES.length;
-  const center = (i + 0.5) * segmentSize;
-  const dist = Math.abs(progress - center);
-  const active = Math.max(0, 1 - dist / segmentSize);
-  return 1 + active * 0.024;
+  const segmentStart = i * segmentSize;
+  const installWindow = segmentSize * INSTALL_PORTION;
+  const t = (progress - segmentStart) / installWindow;
+  if (t < 0 || t > 1) return 0;
+  return 1 - Math.abs(t - 0.5) * 2;
 }
 
-/**
- * Returns 0..1 indicating "how close are we to a phase boundary" so we can
- * pulse a flash overlay precisely at each phase transition.
- *
- * Only fires when the operator has crossed INTO segments 1..PHASES.length-1.
- * Segment 0 (initial seed, before any transition) and beyond the last segment
- * return 0 so the page doesn't flash on first paint or at scroll-end.
- */
-function flashIntensityAt(progress: number): number {
-  const segmentSize = 1 / PHASES.length;
-  const segmentIdx = Math.floor(progress / segmentSize);
-  if (segmentIdx <= 0 || segmentIdx >= PHASES.length) return 0;
-  const segmentLocal = (progress / segmentSize) % 1;
-  if (segmentLocal > FLASH_PORTION) return 0;
-  return 1 - segmentLocal / FLASH_PORTION;
+/** Which arm side handles each phase's install (alternating for visual rhythm). */
+function armSideFor(phaseIdx: number): "left" | "right" | "both" {
+  // optics, limbs, shield, mesh use BOTH arms (symmetric install).
+  // spine + halo + online come from above; map to "both" too.
+  // remaining (just initial seed which is base) -> both.
+  if (phaseIdx === 0) return "both";
+  const m = PHASES[phaseIdx].module;
+  if (m === "optics" || m === "limbs" || m === "shield" || m === "mesh") return "both";
+  return "both";
+}
+
+function ModuleLayer({
+  kind,
+  progress,
+  accent,
+}: {
+  kind: ModuleKind;
+  progress: number; // 0..1, install progress for this module
+  accent: string;
+}) {
+  // `eased` for opacity (smooth in), `progress` for stroke draw.
+  const eased = smoothstep(progress);
+  const dashOffset = 1 - progress;
+
+  // viewBox is 0..100 in both axes so numeric coords ARE percentages.
+  // Stroke widths, radii, drop-shadow blur values all live in the same
+  // 0..100 unit space, so use small fractional sizes (0.3, 0.6, 1.5 etc).
+  switch (kind) {
+    case "core":
+      return (
+        <g opacity={eased * 0.75}>
+          <circle cx={50} cy={52} r={6} fill="none" stroke={accent} strokeWidth={0.3} />
+          <circle cx={50} cy={52} r={10} fill="none" stroke={accent} strokeWidth={0.18} opacity={0.5} />
+        </g>
+      );
+
+    case "spine": {
+      const len = 32; // 54 - 22
+      return (
+        <g opacity={eased}>
+          <line
+            x1={50} y1={54} x2={50} y2={22}
+            stroke={accent} strokeWidth={0.5} strokeLinecap="round"
+            strokeDasharray={len}
+            strokeDashoffset={len * dashOffset}
+            filter="drop-shadow(0 0 0.8px rgba(52,211,153,0.7))"
+          />
+          {[22, 30, 38, 46, 54].map((y, i) => {
+            const nodeT = clamp((progress - i * 0.15) * 4);
+            return (
+              <circle
+                key={y}
+                cx={50}
+                cy={y}
+                r={nodeT * 0.7}
+                fill={accent}
+                opacity={nodeT}
+              />
+            );
+          })}
+        </g>
+      );
+    }
+
+    case "optics":
+      return (
+        <g opacity={eased}>
+          {[46, 54].map((x) => (
+            <g key={x}>
+              <circle
+                cx={x} cy={27}
+                r={0.6 + progress * 1.2}
+                fill="none" stroke={accent} strokeWidth={0.3}
+                opacity={1 - progress * 0.4}
+              />
+              <circle cx={x} cy={27} r={0.4 * eased} fill={accent} />
+            </g>
+          ))}
+          <line
+            x1={30} y1={27} x2={70} y2={27}
+            stroke={accent} strokeWidth={0.18} opacity={progress * 0.7}
+            strokeDasharray={40}
+            strokeDashoffset={40 * dashOffset}
+          />
+        </g>
+      );
+
+    case "limbs":
+      return (
+        <g opacity={eased}>
+          {[
+            { x: 38, y: 42 }, { x: 32, y: 56 }, { x: 28, y: 68 },
+            { x: 62, y: 42 }, { x: 68, y: 56 }, { x: 72, y: 68 },
+          ].map(({ x, y }, i) => {
+            const nodeT = clamp((progress - i * 0.10) * 4);
+            return (
+              <g key={`${x}-${y}`}>
+                <circle cx={x} cy={y} r={0.4 + nodeT * 0.5} fill={accent} opacity={nodeT * 0.85} />
+                <circle cx={x} cy={y} r={1.2 * nodeT} fill="none" stroke={accent} strokeWidth={0.18} opacity={nodeT * 0.4} />
+              </g>
+            );
+          })}
+        </g>
+      );
+
+    case "shield": {
+      const cx = 50; const cy = 52; const rx = 18; const ry = 26;
+      const sides = 6;
+      const points = Array.from({ length: sides }, (_, i) => {
+        const a = (i / sides) * Math.PI * 2 - Math.PI / 2;
+        return `${(cx + Math.cos(a) * rx).toFixed(2)},${(cy + Math.sin(a) * ry).toFixed(2)}`;
+      }).join(" ");
+      // Approx perimeter for dash-array (rough sum of side lengths).
+      const perimeter = 6 * Math.sqrt(rx * rx + ry * ry) * 0.9;
+      return (
+        <g opacity={eased}>
+          <polygon
+            points={points}
+            fill={accent}
+            fillOpacity={progress * 0.10}
+            stroke={accent}
+            strokeWidth={0.3}
+            strokeDasharray={perimeter}
+            strokeDashoffset={perimeter * dashOffset}
+          />
+        </g>
+      );
+    }
+
+    case "halo":
+      return (
+        <g opacity={eased}>
+          <ellipse
+            cx={50} cy={14} rx={14} ry={2.8}
+            fill="none" stroke={accent} strokeWidth={0.4}
+            strokeDasharray={90}
+            strokeDashoffset={90 * dashOffset}
+            filter="drop-shadow(0 0 1.2px rgba(252,211,77,0.7))"
+          />
+          <ellipse
+            cx={50} cy={14} rx={9} ry={1.8}
+            fill="none" stroke={accent} strokeWidth={0.25} opacity={progress * 0.6}
+            strokeDasharray={60}
+            strokeDashoffset={60 * dashOffset}
+          />
+          <line
+            x1={50} y1={52} x2={50} y2={14}
+            stroke={accent} strokeWidth={0.2} opacity={progress * 0.35}
+            strokeDasharray="0.6 0.8"
+          />
+        </g>
+      );
+
+    case "mesh": {
+      const tiles: Array<{ x: number; y: number; delay: number }> = [];
+      for (let row = 0; row < 7; row++) {
+        for (let col = 0; col < 5; col++) {
+          tiles.push({
+            x: 38 + col * 6 + (row % 2 === 0 ? 0 : 3),
+            y: 28 + row * 7,
+            delay: (row * 5 + col) * 0.025,
+          });
+        }
+      }
+      return (
+        <g opacity={eased * 0.85}>
+          {tiles.map(({ x, y, delay }, i) => {
+            const tileT = clamp((progress - delay) * 4);
+            return (
+              <polygon
+                key={i}
+                points={`${x - 2},${y} ${x},${y - 2} ${x + 2},${y} ${x},${y + 2}`}
+                fill="none" stroke={accent} strokeWidth={0.1}
+                opacity={tileT * 0.7}
+              />
+            );
+          })}
+        </g>
+      );
+    }
+
+    case "online":
+      return (
+        <g opacity={eased}>
+          <circle cx={50} cy={52} r={16 + progress * 8} fill="none" stroke={accent} strokeWidth={0.5} opacity={1 - progress * 0.5} />
+          <circle cx={50} cy={52} r={10 + progress * 5} fill={accent} fillOpacity={0.12} />
+          <circle cx={50} cy={52} r={3.5} fill={accent} fillOpacity={0.65} />
+        </g>
+      );
+
+    default:
+      return null;
+  }
+}
+
+function RoboticArm({
+  side,
+  targetX,
+  targetY,
+  activity,
+}: {
+  side: "left" | "right";
+  targetX: number; // 0..100 viewBox X
+  targetY: number; // 0..100 viewBox Y
+  activity: number; // 0 idle (off-screen) → 1 fully deployed at target
+}) {
+  const idleX = side === "left" ? -8 : 108;
+  const idleY = 50;
+  const x = lerp(idleX, targetX, activity);
+  const y = lerp(idleY, targetY, activity);
+  const armReach = activity * 30;
+  const fromX = side === "left" ? x - armReach : x + armReach;
+  const fromY = y;
+  const midX = (fromX + x) / 2;
+  const midY = (fromY + y) / 2;
+  return (
+    <g opacity={activity * 0.95}>
+      {/* Arm shaft */}
+      <line
+        x1={fromX} y1={fromY}
+        x2={x} y2={y}
+        stroke="rgba(236,253,245,0.88)" strokeWidth={0.55}
+        filter="drop-shadow(0 0 0.6px rgba(0,0,0,0.6))"
+      />
+      {/* Mid-segment joint */}
+      <circle cx={midX} cy={midY} r={0.7} fill="rgba(20,40,30,0.95)" stroke="rgba(167,243,208,0.85)" strokeWidth={0.18} />
+      {/* Claw / needle tip */}
+      <circle
+        cx={x} cy={y} r={0.85}
+        fill="rgba(252,211,77,0.88)"
+        stroke="rgba(252,211,77,1)" strokeWidth={0.2}
+        filter="drop-shadow(0 0 1.2px rgba(252,211,77,0.9))"
+      />
+      {/* Beam from tip toward the figure centre */}
+      <line
+        x1={x} y1={y}
+        x2={50} y2={y}
+        stroke="rgba(252,211,77,0.78)" strokeWidth={0.22}
+        strokeDasharray="0.8 0.6"
+        opacity={activity * 0.85}
+      />
+    </g>
+  );
 }
 
 export function AgentAssemblyScrollScene() {
   const sectionRef = useRef<HTMLElement | null>(null);
   const [progress, setProgress] = useState(0);
-  const [loadedSet, setLoadedSet] = useState<Set<number>>(() => new Set());
-
-  const markLoaded = (i: number) => {
-    setLoadedSet((prev) => {
-      if (prev.has(i)) return prev;
-      const next = new Set(prev);
-      next.add(i);
-      return next;
-    });
-  };
 
   useEffect(() => {
     let frame = 0;
@@ -117,8 +338,9 @@ export function AgentAssemblyScrollScene() {
     return Math.min(PHASES.length - 1, Math.max(0, raw));
   }, [progress]);
 
-  const flashIntensity = flashIntensityAt(progress);
   const activePhase = PHASES[phaseIdx];
+  const activeInstall = installProgress(phaseIdx, progress);
+  const activeActivity = installActivity(phaseIdx, progress);
 
   return (
     <section
@@ -128,49 +350,89 @@ export function AgentAssemblyScrollScene() {
       style={{ minHeight: "800vh" } as CSSProperties}
     >
       <div className="sticky top-0 h-screen w-full overflow-hidden bg-[#03070a]">
-        {/* Image stack — every phase always rendered, clip-path controls reveal */}
+        {/* Persistent photoreal backdrop — the figure that all modules attach to. */}
         <div className="absolute inset-0">
-          {PHASES.map((p, i) => (
-            <div
-              key={p.id}
-              className="absolute inset-0"
-              style={{
-                clipPath: clipPathFor(i, progress),
-                transform: `scale(${imageScale(i, progress)})`,
-                transformOrigin: "center center",
-                willChange: "clip-path, transform",
-              }}
-            >
-              {/* eslint-disable-next-line @next/next/no-img-element */}
-              <img
-                src={p.image}
-                alt={p.title}
-                loading={i <= 1 ? "eager" : "lazy"}
-                decoding="async"
-                className="h-full w-full object-cover object-center"
-                style={{ filter: "saturate(1.06) contrast(1.05)" }}
-                onLoad={() => markLoaded(i)}
-                onError={(e) => {
-                  (e.currentTarget as HTMLImageElement).style.display = "none";
-                }}
-              />
-            </div>
-          ))}
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img
+            src={BACKDROP}
+            alt="OASIS executive agent — assembly base"
+            loading="eager"
+            decoding="async"
+            className="h-full w-full object-cover object-center"
+            style={{ filter: "saturate(1.06) contrast(1.06)" }}
+          />
         </div>
 
-        {/* Placeholder hero — visible while the current phase image is still loading */}
-        {!loadedSet.has(phaseIdx) && (
-          <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
-            <div className="placeholder-figure">
-              <div className="placeholder-head" />
-              <div className="placeholder-torso" />
-              <div className="placeholder-core" />
-              <div className="placeholder-scan" />
-            </div>
-          </div>
-        )}
+        {/* Code-driven assembly layer — modules + arms + beams + sparks
+            ride on top of the backdrop. This is the scroll-dynamic part. */}
+        <svg
+          aria-hidden
+          className="pointer-events-none absolute inset-0 h-full w-full"
+          viewBox="0 0 100 100"
+          preserveAspectRatio="xMidYMid slice"
+        >
+          {/* Cumulative module stack — all phases up to and including the
+              current one render at their fully-installed state. The active
+              phase renders with `activeInstall` controlling the draw. */}
+          {PHASES.map((p, i) => {
+            if (i > phaseIdx) return null;
+            const isActive = i === phaseIdx;
+            const moduleProgress = isActive ? activeInstall : 1;
+            return (
+              <ModuleLayer
+                key={p.id}
+                kind={p.module}
+                progress={moduleProgress}
+                accent={p.accent}
+              />
+            );
+          })}
 
-        {/* Continuous manufacturing motion layer — runs forever, intensifies at transitions */}
+          {/* Active install: robotic arms fly to the target during the
+              install window, fire the beam, then retract. Both arms always
+              active for symmetric assembly. */}
+          {activeActivity > 0.01 && (
+            <>
+              <RoboticArm
+                side="left"
+                targetX={activePhase.target.x - 12}
+                targetY={activePhase.target.y}
+                activity={activeActivity}
+              />
+              <RoboticArm
+                side="right"
+                targetX={activePhase.target.x + 12}
+                targetY={activePhase.target.y}
+                activity={activeActivity}
+              />
+              {/* Spark burst at install point — radiates 8 lines + a fill disc. */}
+              <g
+                transform={`translate(${activePhase.target.x} ${activePhase.target.y})`}
+                opacity={activeActivity}
+              >
+                {Array.from({ length: 10 }, (_, i) => {
+                  const angle = (i * Math.PI * 2) / 10;
+                  const len = 4 + activeActivity * 5;
+                  return (
+                    <line
+                      key={i}
+                      x1="0" y1="0"
+                      x2={(Math.cos(angle) * len).toFixed(2)}
+                      y2={(Math.sin(angle) * len).toFixed(2)}
+                      stroke={activePhase.accent}
+                      strokeWidth="0.4"
+                      opacity={0.85}
+                    />
+                  );
+                })}
+                <circle cx="0" cy="0" r={2 + activeActivity * 2.5} fill={activePhase.accent} opacity="0.55" />
+              </g>
+            </>
+          )}
+        </svg>
+
+        {/* Continuous ambient motion — scan line, chest pulse, particles.
+            Lives in its own SVG with native pixel viewBox for crisp sizing. */}
         <svg
           aria-hidden
           className="pointer-events-none absolute inset-0 h-full w-full"
@@ -178,159 +440,39 @@ export function AgentAssemblyScrollScene() {
           preserveAspectRatio="xMidYMid slice"
         >
           <defs>
-            <radialGradient id="reveal-bloom" cx="50%" cy="50%" r="50%">
-              <stop offset="0%" stopColor={activePhase.accentColor} stopOpacity="0.55" />
-              <stop offset="35%" stopColor={activePhase.accentColor} stopOpacity="0.18" />
-              <stop offset="100%" stopColor={activePhase.accentColor} stopOpacity="0" />
-            </radialGradient>
-            <linearGradient id="scan-line-gradient" x1="0" y1="0" x2="1920" y2="0">
+            <linearGradient id="scan-grad" x1="0" y1="0" x2="1920" y2="0">
               <stop offset="0%" stopColor="rgba(52,211,153,0)" />
               <stop offset="50%" stopColor="rgba(134,239,172,0.85)" />
               <stop offset="100%" stopColor="rgba(52,211,153,0)" />
             </linearGradient>
-            <linearGradient id="arm-beam-left" x1="0" y1="0.5" x2="1" y2="0.5">
-              <stop offset="0%" stopColor="rgba(52,211,153,0)" />
-              <stop offset="100%" stopColor="rgba(252,211,77,0.95)" />
-            </linearGradient>
-            <linearGradient id="arm-beam-right" x1="1" y1="0.5" x2="0" y2="0.5">
-              <stop offset="0%" stopColor="rgba(52,211,153,0)" />
-              <stop offset="100%" stopColor="rgba(252,211,77,0.95)" />
-            </linearGradient>
           </defs>
 
-          {/* Reveal bloom — radial gradient at the active phase's reveal origin,
-              pulses brighter during transitions */}
-          <rect
-            x={`${activePhase.revealX - 25}%`}
-            y={`${activePhase.revealY - 18}%`}
-            width="50%"
-            height="36%"
-            fill="url(#reveal-bloom)"
-            opacity={0.35 + flashIntensity * 0.5}
-            className="reveal-bloom-rect"
-          />
+          <rect className="scan-line" x="0" y="-3" width="1920" height="2" fill="url(#scan-grad)" />
 
-          {/* Vertical scan line — continuous top-to-bottom sweep, gives the
-              impression of an active 3D scanner / printer head */}
-          <rect
-            className="scan-line"
-            x="0"
-            y="-3"
-            width="1920"
-            height="3"
-            fill="url(#scan-line-gradient)"
-          />
-
-          {/* Horizontal scan field — slow horizontal sweep at chest level */}
-          <line
-            className="scan-field"
-            x1="0"
-            y1="540"
-            x2="1920"
-            y2="540"
-            stroke="rgba(52,211,153,0.18)"
-            strokeWidth="0.5"
-            strokeDasharray="8 16"
-          />
-
-          {/* Robotic arm energy beams — animated dashed lines from L/R edges
-              to figure center, intensify at transitions */}
-          <line
-            x1="0"
-            y1="540"
-            x2="940"
-            y2="540"
-            stroke="url(#arm-beam-left)"
-            strokeWidth="1.2"
-            strokeDasharray="120 60"
-            className="arm-beam arm-beam-l"
-            opacity={0.5 + flashIntensity * 0.5}
-          />
-          <line
-            x1="1920"
-            y1="540"
-            x2="980"
-            y2="540"
-            stroke="url(#arm-beam-right)"
-            strokeWidth="1.2"
-            strokeDasharray="120 60"
-            className="arm-beam arm-beam-r"
-            opacity={0.5 + flashIntensity * 0.5}
-          />
-
-          {/* Pulse halo at chest — anchored to the figure's energy core */}
-          <circle
-            cx="960"
-            cy="540"
-            r="180"
-            fill="none"
-            stroke={activePhase.accentColor}
-            strokeWidth="1"
-            opacity={0.25 + flashIntensity * 0.6}
-            className="chest-pulse"
-          />
-          <circle
-            cx="960"
-            cy="540"
-            r="260"
-            fill="none"
-            stroke={activePhase.accentColor}
-            strokeWidth="0.8"
-            strokeDasharray="6 14"
-            opacity={0.18}
-            className="chest-pulse-outer"
-          />
-
-          {/* Spark burst at reveal origin during transitions */}
-          {flashIntensity > 0.1 && (
-            <g
-              transform={`translate(${(activePhase.revealX / 100) * 1920} ${(activePhase.revealY / 100) * 1080})`}
-              opacity={flashIntensity}
-            >
-              {Array.from({ length: 8 }, (_, i) => {
-                const angle = (i * Math.PI) / 4;
-                const len = 80 + flashIntensity * 60;
-                const x2 = Math.cos(angle) * len;
-                const y2 = Math.sin(angle) * len;
-                return (
-                  <line
-                    key={i}
-                    x1="0"
-                    y1="0"
-                    x2={x2}
-                    y2={y2}
-                    stroke={activePhase.accentColor}
-                    strokeWidth="1.5"
-                    opacity="0.85"
-                  />
-                );
-              })}
-              <circle cx="0" cy="0" r={20 + flashIntensity * 40} fill={activePhase.accentColor} opacity="0.45" />
-            </g>
-          )}
-
-          {/* Drifting particles */}
           {Array.from({ length: 14 }, (_, i) => i).map((i) => (
             <circle key={i} className={`particle particle-${i}`} r="1.4" fill="rgba(167,243,208,0.78)" />
           ))}
         </svg>
 
-        {/* Transition flash — full-viewport flash at every phase boundary */}
-        <div
-          className="pointer-events-none absolute inset-0"
-          style={{
-            background: `radial-gradient(ellipse at ${activePhase.revealX}% ${activePhase.revealY}%, ${activePhase.accentColor.replace("0.95", "0.42")} 0%, transparent 50%)`,
-            opacity: flashIntensity * 0.85,
-            transition: "opacity 60ms linear",
-            mixBlendMode: "screen",
-          }}
-        />
-
-        {/* Subtle vignette so text affordances at bottom stay legible */}
+        {/* Bottom vignette + HUD strip */}
         <div className="pointer-events-none absolute inset-x-0 bottom-0 h-40 bg-gradient-to-b from-transparent to-[#03070a]/85" />
 
-        {/* Bottom-center affordance */}
-        <div className="pointer-events-none absolute inset-x-0 bottom-10 z-20 flex justify-center">
+        <div className="pointer-events-none absolute inset-x-0 bottom-10 z-20 flex flex-col items-center gap-3">
+          {/* Phase indicator strip — always visible mid-scroll, lets the operator know what's being installed */}
+          {progress > 0.005 && progress < 0.98 && (
+            <div className="flex items-center gap-4 border border-white/[0.10] bg-black/55 px-5 py-2 backdrop-blur-md">
+              <span className="font-mono text-[10px] uppercase tracking-[0.32em] text-emerald-200/[0.78]">
+                Phase {String(activePhase.id).padStart(2, "0")}
+              </span>
+              <span className="h-3 w-px bg-emerald-200/[0.30]" />
+              <span className="text-sm font-bold text-white">{activePhase.title}</span>
+              <span className="h-3 w-px bg-emerald-200/[0.30]" />
+              <span className="font-mono text-[10px] tracking-[0.20em] text-emerald-200/[0.85]">
+                {Math.round(progress * 100)}%
+              </span>
+            </div>
+          )}
+
           {progress < 0.04 && (
             <div className="flex flex-col items-center gap-2 text-[10px] font-mono uppercase tracking-[0.32em] text-emerald-200/[0.72]">
               <span>Scroll to assemble</span>
@@ -349,116 +491,15 @@ export function AgentAssemblyScrollScene() {
         </div>
 
         <style>{`
-          .placeholder-figure {
-            position: relative;
-            width: 280px;
-            height: 480px;
-          }
-          .placeholder-head {
-            position: absolute;
-            top: 0; left: 50%;
-            width: 120px; height: 140px;
-            margin-left: -60px;
-            border-radius: 60px 60px 56px 56px;
-            border: 1px solid rgba(52,211,153,0.20);
-            background: radial-gradient(circle at 50% 35%, rgba(52,211,153,0.10), transparent 60%);
-            animation: placeholder-pulse 3.6s ease-in-out infinite;
-          }
-          .placeholder-torso {
-            position: absolute;
-            top: 150px; left: 50%;
-            width: 220px; height: 320px;
-            margin-left: -110px;
-            border-radius: 70px 70px 90px 90px;
-            border: 1px solid rgba(52,211,153,0.16);
-            background: linear-gradient(180deg, rgba(52,211,153,0.06), transparent 70%);
-            animation: placeholder-pulse 3.6s ease-in-out infinite;
-            animation-delay: 0.6s;
-          }
-          .placeholder-core {
-            position: absolute;
-            top: 250px; left: 50%;
-            width: 50px; height: 50px;
-            margin-left: -25px;
-            border-radius: 9999px;
-            background: radial-gradient(circle, rgba(236,253,245,0.85) 0 8%, rgba(52,211,153,0.42) 9% 35%, transparent 60%);
-            box-shadow: 0 0 42px rgba(52,211,153,0.42);
-            animation: placeholder-core-pulse 2.2s ease-in-out infinite;
-          }
-          .placeholder-scan {
-            position: absolute;
-            top: 0; left: -20px; right: -20px;
-            height: 2px;
-            background: linear-gradient(90deg, transparent, rgba(52,211,153,0.62), transparent);
-            box-shadow: 0 0 18px rgba(52,211,153,0.62);
-            animation: placeholder-scan 3.2s ease-in-out infinite;
-          }
-
-          @keyframes placeholder-pulse {
-            0%, 100% { opacity: 0.32; }
-            50% { opacity: 0.78; }
-          }
-          @keyframes placeholder-core-pulse {
-            0%, 100% { transform: scale(0.92); opacity: 0.72; }
-            50% { transform: scale(1.12); opacity: 1; }
-          }
-          @keyframes placeholder-scan {
-            0%   { transform: translateY(0); opacity: 0; }
-            10%  { opacity: 1; }
-            90%  { opacity: 1; }
-            100% { transform: translateY(480px); opacity: 0; }
-          }
-
-          /* Continuous scan line travelling top → bottom across the figure.
-             Gives a constant "scanning / fabricating" feel even when the user
-             pauses scrolling. */
           .scan-line {
             animation: scan-travel 5.2s linear infinite;
             filter: drop-shadow(0 0 8px rgba(134,239,172,0.72));
           }
           @keyframes scan-travel {
-            0%   { transform: translateY(0);    opacity: 0; }
+            0%   { transform: translateY(0); opacity: 0; }
             8%   { opacity: 0.9; }
             92%  { opacity: 0.9; }
             100% { transform: translateY(1080px); opacity: 0; }
-          }
-
-          .scan-field {
-            animation: scan-field-pulse 3.6s ease-in-out infinite;
-          }
-          @keyframes scan-field-pulse {
-            0%, 100% { opacity: 0.18; }
-            50%      { opacity: 0.62; }
-          }
-
-          /* L/R arm energy beams — dashed lines that march toward centre,
-             so the operator sees a constant "feed" into the figure */
-          .arm-beam {
-            stroke-dashoffset: 0;
-            animation: arm-beam-march 1.8s linear infinite;
-          }
-          .arm-beam-r { animation-direction: reverse; }
-
-          @keyframes arm-beam-march {
-            from { stroke-dashoffset: 0; }
-            to   { stroke-dashoffset: -180; }
-          }
-
-          .chest-pulse {
-            transform-origin: 960px 540px;
-            animation: chest-pulse-anim 3.4s ease-in-out infinite;
-          }
-          .chest-pulse-outer {
-            transform-origin: 960px 540px;
-            animation: chest-pulse-anim 4.6s ease-in-out infinite reverse;
-          }
-          @keyframes chest-pulse-anim {
-            0%, 100% { transform: scale(0.94); opacity: 0.22; }
-            50%      { transform: scale(1.10); opacity: 0.62; }
-          }
-
-          .reveal-bloom-rect {
-            filter: blur(40px);
           }
 
           .particle {
@@ -489,10 +530,7 @@ export function AgentAssemblyScrollScene() {
             .agent-assembly { min-height: 600vh; }
           }
           @media (prefers-reduced-motion: reduce) {
-            .scan-line, .scan-field, .arm-beam, .chest-pulse, .chest-pulse-outer, .particle,
-            .placeholder-head, .placeholder-torso, .placeholder-core, .placeholder-scan {
-              animation: none !important;
-            }
+            .scan-line, .particle { animation: none !important; }
           }
         `}</style>
       </div>
