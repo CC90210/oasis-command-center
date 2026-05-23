@@ -1809,7 +1809,18 @@ async function* runIterationLoop(
       messages: history,
     };
     if (enableTools) {
-      body.tools = activeTools;
+      // Strip `defer` — it's our internal flag that tells the runner this
+      // tool round-trips to the operator's local bridge instead of executing
+      // server-side. Anthropic's tools[] schema only accepts name +
+      // description + input_schema; any extra key triggers a 400 with
+      // "tools.N.custom.<key>: Extra inputs are not permitted". Older code
+      // passed activeTools through raw and silently broke API-key mode for
+      // every chat where the palette included a deferred tool.
+      body.tools = activeTools.map(({ name, description, input_schema }) => ({
+        name,
+        description,
+        input_schema,
+      }));
     }
 
     const res = await fetchWithRetry("https://api.anthropic.com/v1/messages", {
