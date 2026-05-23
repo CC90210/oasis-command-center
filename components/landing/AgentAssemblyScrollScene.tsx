@@ -1,0 +1,683 @@
+"use client";
+
+import type { CSSProperties } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import {
+  BrainCircuit,
+  Cpu,
+  Database,
+  Eye,
+  Orbit,
+  Search,
+  ShieldCheck,
+  Wrench,
+} from "lucide-react";
+
+const PHASES = [
+  {
+    start: 0,
+    marker: "01",
+    title: "Core cognition",
+    text: "The agent receives a reasoning core and the operating context it needs before an account exists.",
+  },
+  {
+    start: 0.18,
+    marker: "02",
+    title: "Browser optics",
+    text: "Search and browser work become a visor system, not a loose feature floating beside the agent.",
+  },
+  {
+    start: 0.34,
+    marker: "03",
+    title: "Memory spine",
+    text: "Business context, files, playbooks, and session memory lock into the agent's backplane.",
+  },
+  {
+    start: 0.5,
+    marker: "04",
+    title: "Tool limbs",
+    text: "Execution tools attach as arms, so the agent can move from thinking to doing.",
+  },
+  {
+    start: 0.66,
+    marker: "05",
+    title: "Guarded autonomy",
+    text: "Role gates, quiet-day logic, and provider controls become the agent's protective shell.",
+  },
+  {
+    start: 0.82,
+    marker: "06",
+    title: "Agent online",
+    text: "The assembled operator is ready. Choose whether to build yours, sign in, or install the desktop app.",
+  },
+];
+
+function clamp(value: number) {
+  return Math.max(0, Math.min(1, value));
+}
+
+function ease(value: number) {
+  const t = clamp(value);
+  return t * t * (3 - 2 * t);
+}
+
+function span(progress: number, start: number, end: number) {
+  return ease((progress - start) / (end - start));
+}
+
+function lerp(from: number, to: number, amount: number) {
+  return from + (to - from) * amount;
+}
+
+function partStyle(
+  progress: number,
+  start: number,
+  end: number,
+  from: { x: number; y: number; rotate?: number; scale?: number },
+): CSSProperties {
+  const t = span(progress, start, end);
+  const rotate = lerp(from.rotate ?? 0, 0, t);
+  const scale = lerp(from.scale ?? 0.86, 1, t);
+
+  return {
+    opacity: lerp(0.16, 1, t),
+    transform: `translate3d(${lerp(from.x, 0, t)}px, ${lerp(
+      from.y,
+      0,
+      t,
+    )}px, 0) rotate(${rotate}deg) scale(${scale})`,
+  };
+}
+
+export function AgentAssemblyScrollScene() {
+  const sectionRef = useRef<HTMLElement | null>(null);
+  const [progress, setProgress] = useState(0);
+
+  useEffect(() => {
+    let frame = 0;
+
+    const update = () => {
+      if (!sectionRef.current) return;
+
+      const rect = sectionRef.current.getBoundingClientRect();
+      const travel = Math.max(1, rect.height - window.innerHeight);
+      setProgress(clamp(-rect.top / travel));
+    };
+
+    const requestUpdate = () => {
+      window.cancelAnimationFrame(frame);
+      frame = window.requestAnimationFrame(update);
+    };
+
+    update();
+    window.addEventListener("scroll", requestUpdate, { passive: true });
+    window.addEventListener("resize", requestUpdate);
+
+    return () => {
+      window.cancelAnimationFrame(frame);
+      window.removeEventListener("scroll", requestUpdate);
+      window.removeEventListener("resize", requestUpdate);
+    };
+  }, []);
+
+  const phase = useMemo(() => {
+    return PHASES.reduce((active, item) =>
+      progress >= item.start ? item : active,
+    );
+  }, [progress]);
+
+  const glow = span(progress, 0.82, 1);
+
+  return (
+    <section
+      ref={sectionRef}
+      id="agent-build"
+      className="agent-scroll relative z-10 min-h-[360vh] px-5 sm:px-8"
+      style={{ "--agent-progress": progress } as CSSProperties}
+    >
+      <div className="sticky top-0 mx-auto grid min-h-screen max-w-7xl items-center gap-8 py-8 lg:grid-cols-[0.78fr_1.22fr]">
+        <div className="max-w-xl pt-12 lg:pt-0">
+          <div className="mb-5 inline-flex items-center gap-2 border-l border-emerald-300/[0.45] bg-emerald-300/[0.08] px-3 py-2 text-[10px] font-mono uppercase tracking-[0.2em] text-emerald-100/[0.80]">
+            <BrainCircuit className="h-3.5 w-3.5" />
+            Build the agent first
+          </div>
+
+          <h1 className="max-w-2xl text-[clamp(2.35rem,4.4vw,4.8rem)] font-black leading-[0.94] tracking-tight text-white">
+            Build the agent before you enter.
+          </h1>
+
+          <p className="mt-6 max-w-lg text-base leading-7 text-white/[0.66] sm:text-lg">
+            Before signup, the system assembles a working operator around your
+            business. Scroll to watch cognition, browser vision, memory, tools,
+            automation, and guardrails lock into the body.
+          </p>
+
+          <div className="mt-8 border border-white/10 bg-white/[0.045] p-4 backdrop-blur-xl">
+            <div className="flex items-center justify-between gap-4">
+              <div className="font-mono text-[10px] uppercase tracking-[0.22em] text-emerald-200/[0.70]">
+                Assembly {phase.marker}
+              </div>
+              <div className="h-1.5 w-24 overflow-hidden rounded-full bg-white/10">
+                <div
+                  className="h-full rounded-full bg-emerald-200"
+                  style={{ width: `${Math.round(progress * 100)}%` }}
+                />
+              </div>
+            </div>
+            <h2 className="mt-3 text-xl font-black tracking-tight text-white">
+              {phase.title}
+            </h2>
+            <p className="mt-2 text-sm leading-6 text-white/[0.58]">
+              {phase.text}
+            </p>
+          </div>
+
+          <div className="mt-6 flex items-center gap-3 font-mono text-[10px] uppercase tracking-[0.18em] text-white/[0.42]">
+            <span>Scroll to assemble</span>
+            <span className="h-px w-16 bg-emerald-200/[0.35]" />
+          </div>
+        </div>
+
+        <div className="relative min-h-[580px] lg:min-h-[760px]">
+          <div className="android-stage" aria-hidden>
+            <div className="android-ambient" />
+            <div
+              className="android-online"
+              style={{ opacity: lerp(0, 1, glow) }}
+            />
+            <div className="android-blueprint" />
+
+            <div
+              className="android-part cognition-core"
+              style={partStyle(progress, 0.03, 0.18, {
+                x: -260,
+                y: 90,
+                rotate: -18,
+                scale: 0.78,
+              })}
+            >
+              <Cpu className="h-5 w-5" />
+              <span>Reasoning Core</span>
+            </div>
+
+            <div
+              className="android-part head-shell"
+              style={partStyle(progress, 0.14, 0.28, {
+                x: 230,
+                y: -210,
+                rotate: 16,
+                scale: 0.82,
+              })}
+            >
+              <div className="visor">
+                <Eye className="h-5 w-5" />
+                <span>Browser Optics</span>
+              </div>
+            </div>
+
+            <div
+              className="android-part memory-spine"
+              style={partStyle(progress, 0.3, 0.44, {
+                x: -260,
+                y: -10,
+                rotate: -10,
+                scale: 0.84,
+              })}
+            >
+              <Database className="h-4 w-4" />
+              <span>Memory Spine</span>
+            </div>
+
+            <div
+              className="android-part torso-shell"
+              style={partStyle(progress, 0.38, 0.54, {
+                x: 0,
+                y: 260,
+                rotate: 0,
+                scale: 0.78,
+              })}
+            >
+              <div className="torso-ribs" />
+            </div>
+
+            <div
+              className="android-part tool-arm left"
+              style={partStyle(progress, 0.48, 0.62, {
+                x: -320,
+                y: 20,
+                rotate: -24,
+                scale: 0.82,
+              })}
+            >
+              <Wrench className="h-4 w-4" />
+              <span>Tool Arm</span>
+            </div>
+
+            <div
+              className="android-part tool-arm right"
+              style={partStyle(progress, 0.5, 0.64, {
+                x: 330,
+                y: -12,
+                rotate: 24,
+                scale: 0.82,
+              })}
+            >
+              <Search className="h-4 w-4" />
+              <span>Search Arm</span>
+            </div>
+
+            <div
+              className="android-part automation-drive"
+              style={partStyle(progress, 0.58, 0.72, {
+                x: 70,
+                y: 290,
+                rotate: 8,
+                scale: 0.78,
+              })}
+            >
+              <Orbit className="h-4 w-4" />
+              <span>Automation Drive</span>
+            </div>
+
+            <div
+              className="android-part guard-shell"
+              style={partStyle(progress, 0.68, 0.82, {
+                x: 260,
+                y: 80,
+                rotate: 12,
+                scale: 0.9,
+              })}
+            >
+              <ShieldCheck className="h-5 w-5" />
+              <span>Guardrails</span>
+            </div>
+
+            <div
+              className="android-part reasoning-halo"
+              style={partStyle(progress, 0.78, 0.94, {
+                x: 0,
+                y: -180,
+                rotate: 0,
+                scale: 0.48,
+              })}
+            >
+              <BrainCircuit className="h-4 w-4" />
+              <span>Planning Lattice</span>
+            </div>
+
+            <div className="android-light one" />
+            <div className="android-light two" />
+            <div className="android-light three" />
+            <div className="android-circuit a" />
+            <div className="android-circuit b" />
+            <div className="android-circuit c" />
+          </div>
+        </div>
+      </div>
+
+      <style>{`
+        .android-stage {
+          position: absolute;
+          inset: 0;
+          display: grid;
+          place-items: center;
+          perspective: 1100px;
+          filter: drop-shadow(0 0 54px rgba(52,211,153,0.18));
+        }
+
+        .android-ambient,
+        .android-online,
+        .android-blueprint,
+        .android-part,
+        .android-light,
+        .android-circuit {
+          position: absolute;
+          left: 50%;
+          top: 50%;
+        }
+
+        .android-ambient {
+          width: min(74vw, 720px);
+          height: min(74vw, 720px);
+          border-radius: 9999px;
+          transform: translate(-50%, -50%) rotateX(63deg);
+          border: 1px solid rgba(52,211,153,0.2);
+          background:
+            radial-gradient(circle at 50% 50%, rgba(52,211,153,0.2), transparent 34%),
+            radial-gradient(circle at 50% 50%, transparent 0 46%, rgba(52,211,153,0.18) 47% 47.5%, transparent 48%);
+          animation: android-orbit 12s ease-in-out infinite;
+        }
+
+        .android-online {
+          width: 390px;
+          height: 520px;
+          transform: translate(-50%, -50%);
+          border-radius: 40%;
+          background: radial-gradient(circle at 50% 34%, rgba(134,239,172,0.26), transparent 36%);
+          filter: blur(18px);
+        }
+
+        .android-blueprint {
+          width: 260px;
+          height: 560px;
+          transform: translate(-50%, -48%);
+          border: 1px dashed rgba(236,253,245,0.18);
+          border-radius: 130px 130px 82px 82px;
+          opacity: 0.5;
+        }
+
+        .android-part {
+          color: rgba(236,253,245,0.88);
+          border: 1px solid rgba(255,255,255,0.15);
+          background:
+            linear-gradient(135deg, rgba(255,255,255,0.12), rgba(255,255,255,0.03)),
+            radial-gradient(circle at 50% 12%, rgba(52,211,153,0.2), transparent 46%);
+          box-shadow:
+            0 0 0 1px rgba(52,211,153,0.08),
+            inset 0 0 42px rgba(255,255,255,0.045),
+            0 28px 70px rgba(0,0,0,0.32);
+          backdrop-filter: blur(16px);
+          transition: opacity 120ms linear;
+          will-change: transform, opacity;
+        }
+
+        .android-part span {
+          font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+          font-size: 9px;
+          font-weight: 800;
+          letter-spacing: 0.16em;
+          text-transform: uppercase;
+          color: rgba(236,253,245,0.62);
+        }
+
+        .cognition-core {
+          width: 92px;
+          height: 92px;
+          margin-left: -46px;
+          margin-top: -46px;
+          display: grid;
+          place-items: center;
+          border-radius: 9999px;
+          background:
+            radial-gradient(circle, rgba(236,253,245,0.96) 0 7%, rgba(52,211,153,0.42) 8% 35%, rgba(245,158,11,0.24) 36% 58%, transparent 59%),
+            conic-gradient(from 90deg, rgba(52,211,153,0.9), rgba(245,158,11,0.62), rgba(52,211,153,0.9));
+          box-shadow: 0 0 74px rgba(52,211,153,0.42);
+        }
+
+        .cognition-core span {
+          position: absolute;
+          bottom: -28px;
+          width: max-content;
+        }
+
+        .head-shell {
+          width: 178px;
+          height: 128px;
+          margin-left: -89px;
+          margin-top: -232px;
+          border-radius: 54px 54px 38px 38px;
+          display: grid;
+          place-items: center;
+        }
+
+        .head-shell:before,
+        .head-shell:after {
+          content: "";
+          position: absolute;
+          top: 46px;
+          width: 8px;
+          height: 40px;
+          border-radius: 9999px;
+          background: rgba(52,211,153,0.34);
+          box-shadow: 0 0 18px rgba(52,211,153,0.38);
+        }
+
+        .head-shell:before {
+          left: -13px;
+        }
+
+        .head-shell:after {
+          right: -13px;
+        }
+
+        .visor {
+          display: flex;
+          align-items: center;
+          gap: 8px;
+          width: 122px;
+          height: 42px;
+          justify-content: center;
+          border-radius: 9999px;
+          border: 1px solid rgba(52,211,153,0.32);
+          background: rgba(52,211,153,0.12);
+          box-shadow: inset 0 0 28px rgba(52,211,153,0.16);
+        }
+
+        .memory-spine {
+          width: 56px;
+          height: 284px;
+          margin-left: -28px;
+          margin-top: -122px;
+          border-radius: 9999px;
+          display: flex;
+          flex-direction: column;
+          align-items: center;
+          justify-content: center;
+          gap: 12px;
+        }
+
+        .memory-spine:before {
+          content: "";
+          position: absolute;
+          inset: 18px 23px;
+          border-radius: 9999px;
+          background: repeating-linear-gradient(
+            to bottom,
+            rgba(52,211,153,0.78) 0 8px,
+            transparent 8px 20px
+          );
+        }
+
+        .memory-spine span {
+          position: absolute;
+          left: -48px;
+          top: 50%;
+          transform: rotate(-90deg) translateX(50%);
+          transform-origin: center;
+          width: max-content;
+        }
+
+        .torso-shell {
+          width: 212px;
+          height: 286px;
+          margin-left: -106px;
+          margin-top: -88px;
+          border-radius: 58px 58px 76px 76px;
+        }
+
+        .torso-ribs {
+          position: absolute;
+          inset: 24px;
+          border-radius: 42px 42px 62px 62px;
+          border: 1px solid rgba(52,211,153,0.18);
+          background:
+            linear-gradient(90deg, transparent 0 47%, rgba(52,211,153,0.18) 48% 52%, transparent 53%),
+            repeating-linear-gradient(to bottom, transparent 0 34px, rgba(255,255,255,0.06) 35px 36px);
+        }
+
+        .tool-arm {
+          width: 186px;
+          height: 74px;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          gap: 9px;
+          border-radius: 9999px;
+        }
+
+        .tool-arm.left {
+          margin-left: -296px;
+          margin-top: -50px;
+          transform-origin: right center;
+        }
+
+        .tool-arm.right {
+          margin-left: 110px;
+          margin-top: -50px;
+          transform-origin: left center;
+        }
+
+        .tool-arm:after {
+          content: "";
+          position: absolute;
+          width: 42px;
+          height: 42px;
+          border-radius: 9999px;
+          border: 1px solid rgba(52,211,153,0.18);
+          background: rgba(52,211,153,0.08);
+        }
+
+        .tool-arm.left:after {
+          right: -30px;
+        }
+
+        .tool-arm.right:after {
+          left: -30px;
+        }
+
+        .automation-drive {
+          width: 198px;
+          height: 112px;
+          margin-left: -99px;
+          margin-top: 192px;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          gap: 9px;
+          border-radius: 34px 34px 74px 74px;
+        }
+
+        .guard-shell {
+          width: 282px;
+          height: 360px;
+          margin-left: -141px;
+          margin-top: -118px;
+          display: flex;
+          align-items: flex-end;
+          justify-content: center;
+          gap: 9px;
+          padding-bottom: 22px;
+          border-radius: 92px;
+          border-color: rgba(134,239,172,0.24);
+          background:
+            linear-gradient(135deg, rgba(134,239,172,0.08), rgba(255,255,255,0.02)),
+            radial-gradient(circle at 50% 32%, rgba(52,211,153,0.16), transparent 50%);
+          pointer-events: none;
+        }
+
+        .reasoning-halo {
+          width: 470px;
+          height: 470px;
+          margin-left: -235px;
+          margin-top: -250px;
+          display: flex;
+          align-items: flex-start;
+          justify-content: center;
+          gap: 8px;
+          padding-top: 28px;
+          border-radius: 9999px;
+          background:
+            radial-gradient(circle, transparent 0 58%, rgba(52,211,153,0.09) 59% 60%, transparent 61%),
+            conic-gradient(from 0deg, transparent, rgba(52,211,153,0.18), transparent, rgba(245,158,11,0.12), transparent);
+          animation: reasoning-spin 18s linear infinite;
+        }
+
+        .android-light {
+          width: 6px;
+          height: 6px;
+          border-radius: 9999px;
+          background: rgba(236,253,245,0.92);
+          box-shadow: 0 0 20px rgba(52,211,153,0.88);
+          opacity: calc(0.18 + (var(--agent-progress) * 0.78));
+        }
+
+        .android-light.one {
+          transform: translate(-50%, -50%) translate(-112px, -206px);
+        }
+
+        .android-light.two {
+          transform: translate(-50%, -50%) translate(112px, -206px);
+        }
+
+        .android-light.three {
+          transform: translate(-50%, -50%) translate(0, -46px);
+        }
+
+        .android-circuit {
+          height: 1px;
+          width: 260px;
+          transform-origin: left center;
+          background: linear-gradient(90deg, transparent, rgba(52,211,153,0.62), transparent);
+          opacity: calc(0.08 + (var(--agent-progress) * 0.42));
+        }
+
+        .android-circuit.a {
+          transform: translate(-50%, -50%) translate(-242px, -126px) rotate(24deg);
+        }
+
+        .android-circuit.b {
+          transform: translate(-50%, -50%) translate(72px, -18px) rotate(-18deg);
+        }
+
+        .android-circuit.c {
+          transform: translate(-50%, -50%) translate(-168px, 162px) rotate(-12deg);
+        }
+
+        @keyframes android-orbit {
+          0%, 100% {
+            transform: translate(-50%, -50%) rotateX(63deg) rotateZ(0deg);
+          }
+          50% {
+            transform: translate(-50%, -50%) rotateX(68deg) rotateZ(7deg);
+          }
+        }
+
+        @keyframes reasoning-spin {
+          from {
+            rotate: 0deg;
+          }
+          to {
+            rotate: 360deg;
+          }
+        }
+
+        @media (max-width: 1023px) {
+          .agent-scroll {
+            min-height: 430vh;
+          }
+
+          .android-stage {
+            transform: translateY(-70px) scale(0.76);
+          }
+        }
+
+        @media (max-width: 640px) {
+          .agent-scroll {
+            min-height: 470vh;
+          }
+
+          .android-stage {
+            transform: translateY(-150px) scale(0.58);
+          }
+        }
+
+        @media (prefers-reduced-motion: reduce) {
+          .android-ambient,
+          .reasoning-halo {
+            animation: none !important;
+          }
+        }
+      `}</style>
+    </section>
+  );
+}
