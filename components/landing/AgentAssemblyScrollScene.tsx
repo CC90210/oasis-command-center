@@ -683,9 +683,9 @@ export function AgentAssemblyScrollScene() {
 
         .state-pulse {
           width: 92px;
-          height: 32px;
+          height: 30px;
           margin-left: -46px;
-          margin-top: -16px;
+          margin-top: -88px;
           display: flex;
           align-items: center;
           justify-content: center;
@@ -717,10 +717,10 @@ export function AgentAssemblyScrollScene() {
         }
 
         .codex-companion {
-          width: 64px;
-          height: 64px;
-          margin-left: 36px;
-          margin-top: -120px;
+          width: 58px;
+          height: 58px;
+          margin-left: 80px;
+          margin-top: -29px;
           display: grid;
           place-items: center;
           gap: 4px;
@@ -758,21 +758,22 @@ export function AgentAssemblyScrollScene() {
           position: absolute;
           left: 50%;
           top: 50%;
+          margin-left: -28px;
           font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
           font-size: 9px;
           font-weight: 800;
           letter-spacing: 0.32em;
           color: rgba(236,253,245,0.62);
           text-transform: uppercase;
-          transform-origin: 0 220px;
+          transform-origin: center;
         }
 
         .capability-constellation {
-          width: 220px;
-          height: 96px;
-          margin-left: -110px;
-          margin-top: 224px;
-          border-radius: 22px;
+          width: 200px;
+          height: 64px;
+          margin-left: -100px;
+          margin-top: 216px;
+          border-radius: 18px;
           background: transparent;
           border-color: rgba(52,211,153,0.18);
           box-shadow: none;
@@ -807,9 +808,9 @@ export function AgentAssemblyScrollScene() {
 
         .bridge-spine {
           width: 12px;
-          height: 180px;
+          height: 86px;
           margin-left: -6px;
-          margin-top: 226px;
+          margin-top: 296px;
           border-radius: 0;
           border: none;
           background: transparent;
