@@ -142,6 +142,35 @@ export async function POST(req: NextRequest) {
     await recordPairAttempt(row.profile_id, "ok", ip);
   }
 
+  // V0.1.0 alpha.5 — desktop sign-in is now turnkey via oasis:// deep-link.
+  // After the redeem succeeds, we ALSO mint a one-time magic-link the
+  // desktop will load in its main Electron window. Loading that link sets
+  // a Supabase session cookie on the Electron browser's domain so the
+  // user is already signed in when the dashboard renders — no second
+  // sign-in step inside the Electron view. The pair-code was already the
+  // authentication; the magic-link just transports the session into the
+  // desktop's cookie jar. Magic-links are single-use and Supabase-default
+  // 1-hour TTL'd so leak window matches the pair-code's 15-min window.
+  let magicLinkUrl: string | null = null;
+  try {
+    const userLookup = await db.auth.admin.getUserById(row.auth_user_id);
+    const email = userLookup.data.user?.email;
+    if (email) {
+      const callbackUrl = `${baseUrl.replace(/\/$/, "")}/auth/callback?next=/`;
+      const linkRes = await db.auth.admin.generateLink({
+        type: "magiclink",
+        email,
+        options: { redirectTo: callbackUrl },
+      });
+      magicLinkUrl = linkRes.data?.properties?.action_link || null;
+    }
+  } catch {
+    // Magic-link minting must never block pairing. If it fails the desktop
+    // falls back to "open Command Center in browser" — degraded UX but
+    // pairing itself still succeeded.
+    magicLinkUrl = null;
+  }
+
   return NextResponse.json({
     ok: true,
     tenant_id: row.tenant_id,
@@ -152,5 +181,6 @@ export async function POST(req: NextRequest) {
       token: tokenPlain,
       dashboard_url: baseUrl.replace(/\/$/, "") + "/",
     },
+    session: magicLinkUrl ? { magic_link_url: magicLinkUrl } : null,
   });
 }
