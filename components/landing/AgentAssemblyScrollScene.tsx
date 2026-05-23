@@ -62,17 +62,6 @@ function installActivity(i: number, progress: number): number {
   return 1 - Math.abs(t - 0.5) * 2;
 }
 
-/** Which arm side handles each phase's install (alternating for visual rhythm). */
-function armSideFor(phaseIdx: number): "left" | "right" | "both" {
-  // optics, limbs, shield, mesh use BOTH arms (symmetric install).
-  // spine + halo + online come from above; map to "both" too.
-  // remaining (just initial seed which is base) -> both.
-  if (phaseIdx === 0) return "both";
-  const m = PHASES[phaseIdx].module;
-  if (m === "optics" || m === "limbs" || m === "shield" || m === "mesh") return "both";
-  return "both";
-}
-
 function ModuleLayer({
   kind,
   progress,
@@ -216,13 +205,16 @@ function ModuleLayer({
       );
 
     case "mesh": {
+      // 35 tiles. Each tile needs (progress - delay) * 4 to reach 1.0, i.e.
+      // 0.25 progress units to fully light. For tile 34 to reach 1.0 by
+      // progress=1, max delay must be <= 0.75 → 0.75 / 34 ≈ 0.022.
       const tiles: Array<{ x: number; y: number; delay: number }> = [];
       for (let row = 0; row < 7; row++) {
         for (let col = 0; col < 5; col++) {
           tiles.push({
             x: 38 + col * 6 + (row % 2 === 0 ? 0 : 3),
             y: 28 + row * 7,
-            delay: (row * 5 + col) * 0.025,
+            delay: (row * 5 + col) * 0.02,
           });
         }
       }
