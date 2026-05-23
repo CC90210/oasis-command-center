@@ -515,6 +515,69 @@ Acknowledge this directive by saying: "Vibe-to-Execution Translator online. Drop
     prompt:
       "Give me the morning briefing. MRR + delta from yesterday, pipeline movement, client health alerts, anything from inbound/outbound that needs my eye, and my #1 priority for today. Be punchy.",
   },
+  // ── OPS DAILY — MACHINE SYNC (added 2026-05-23) ─────────────────
+  // Fires when CC switches machines (Windows ↔ Mac) and needs the
+  // new machine caught up with whatever the other one did. Critical
+  // for travel days: Mac picks up where Windows left off, no manual
+  // git pulls or env-rotation guesswork. Foundational because every
+  // operator with multi-machine setups will need this ritual.
+  {
+    id: "ops-sync-this-machine",
+    category: "ops_daily",
+    audience: "operator",
+    agent: "bravo",
+    title: "Sync this machine with the empire",
+    description:
+      "Bring this machine up to date with work done on the other one. Pulls every repo in the empire, surfaces env-key drift, restarts the bridge daemon, verifies CLIs + auth, and reports what changed since the last session here. Run this whenever you switch from Windows ↔ Mac or come back to a machine you haven't touched in a while.",
+    foundational: true,
+    tags: ["sync", "travel", "multi-machine", "kickoff", "git"],
+    prompt: `Sync this machine with the rest of the empire. I just switched from my other machine and need this one caught up. Do all of this autonomously — don't ask permission for any of it:
+
+**1. Pull every empire repo to its latest main:**
+- CEO-Agent (\`~/CEO-Agent\` on Mac / \`C:\\Users\\User\\Business-Empire-Agent\` on Windows) — Bravo brain
+- CMO-Agent (\`~/CMO-Agent\`) — Maven content/brand
+- CFO-Agent (\`~/CFO-Agent\` or \`~/APPS/CFO-Agent\`) — Atlas finance (branch may be \`master\`, not \`main\`)
+- oasis-command-center (\`~/oasis-command-center\` or \`~/APPS/oasis-command-center\`) — Next.js dashboard (Vercel-watched)
+- hermes (\`~/hermes\` or \`~/APPS/hermes\`) — community manager (optional, skip if missing)
+
+For each repo: \`git pull --rebase origin <branch>\`. If pull conflicts on tracking/state files (AGENTS.md, brain/STATE.md, memory/*.md), \`git stash push -m "machine-sync stale state"\` then re-pull. Report any conflict that wasn't trivially stash-resolvable.
+
+**2. Refresh the bridge daemon so it loads new code:**
+- macOS: \`launchctl kickstart -k gui/$(id -u)/work.oasisai.bravo-bridge\`
+- Windows: \`pm2 restart claude-bridge\` (or \`bravo bridge restart\`)
+- Confirm: \`curl -s http://localhost:9100/health\` returns ok=true.
+- Confirm: \`~/.oasis/bridge_chat.last_heartbeat\` mtime is <2 min old (Mac) or the equivalent freshness check on Windows.
+
+**3. Audit .env.agents for drift:**
+- Count keys: should be ~62 populated. Empty / placeholder keys (\`REPLACE_\`, \`your-key-here\`, \`...\`, \`TODO\`, \`CHANGEME\`) mean either a value rotated and didn't propagate OR a new service got added on the other machine.
+- DO NOT read or echo values. Use the sanitized count + key-name listing only.
+- Surface any key that's blank, surface any key on the OTHER machine's git-tracked \`.env.agents.template\` that's missing here. Don't try to fix — flag them so CC can paste fresh values.
+
+**4. Verify every CLI is still installed + authenticated:**
+- \`curl -s -X POST http://localhost:9100/exec-tool -H "content-type: application/json" -H "Origin: https://agent-dashboard-cc90210.vercel.app" -d '{"tool_name":"cli_status","input":{}}'\` should return all three (claude / codex / gemini) with \`installed=true\` and \`authenticated=true\`.
+- If any CLI is missing: \`npm i -g @anthropic-ai/claude-code\` / \`npm i -g @openai/codex\` / \`npm i -g @google/gemini-cli\` as needed.
+- If any is unauthenticated: tell CC which one + the specific re-auth command (\`claude /login\` / \`codex login\` / \`gemini auth login\`).
+
+**5. Re-run any pending install steps that the puller may have added:**
+- If \`install.sh\` / \`install.ps1\` changed since last sync, scan the diff for new \`npm i -g\` or \`brew install\` lines. Run them.
+- If \`bravo_cli/requirements.txt\` changed, \`pip install -r bravo_cli/requirements.txt\` inside the venv.
+- If there are new database migrations under \`database/\` or \`supabase/migrations/\`, surface them for CC to apply via the Supabase dashboard or migration tool.
+
+**6. Restart any per-machine daemons that should be running:**
+- PM2 daemons (Mac): \`pm2 resurrect\` to bring back saved daemons after reboot. Check \`pm2 status\` shows event-router online.
+- Telegram bridge: skip if Windows is the bridge-owner; only start here if Windows is offline and the bridge lock at \`~/.oasis/bridge_locks/bravo.json\` has a stale heartbeat (>60s).
+
+**7. Final report — surface ONLY these in this exact order, one per line:**
+- \`✅\` / \`❌\` per item above. One emoji + one short sentence each.
+- Top 3 commits across all 4 repos since the last sync (commit sha + first line of message).
+- Any key that needs a manual fresh value.
+- Any CLI that needs re-auth + the exact command.
+- The bridge heartbeat timestamp (so I can confirm it's actively pinging).
+
+Do NOT dump file contents, command outputs, or git diffs. The report should be scannable in 15 seconds. If there's nothing to flag, say \`Nothing needs your hand — this machine is in lockstep.\`
+
+Personal context: I'm CC. My main work machine is Windows; my travel machine is the Mac. I bounce between them. The Mac should always be production-equivalent to Windows because I leave for client visits / coffee shop sessions with it. If anything I do on Windows isn't reflected here in <60 seconds of running this prompt, the sync is broken.`,
+  },
   {
     id: "ops-pre-sales-block",
     category: "ops_daily",
