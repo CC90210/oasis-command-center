@@ -506,7 +506,7 @@ export function AgentAssemblyScrollScene() {
 
         .tool-arm.left {
           margin-left: -93px;
-          margin-top: 84px;
+          margin-top: 130px;
         }
 
         .tool-arm:after {
