@@ -13,7 +13,7 @@ export type ScrollPhase = {
   scrollProgress: MotionValue<number>;
 };
 
-const DEFAULT_PHASE_COUNT = 11;
+const DEFAULT_PHASE_COUNT = 8;
 
 function clampProgress(value: number) {
   return Math.max(0, Math.min(1, value));

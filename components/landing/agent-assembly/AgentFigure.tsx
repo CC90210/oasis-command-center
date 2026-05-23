@@ -14,6 +14,10 @@ type AgentFigureProps = {
   children?: ReactNode;
   /** Modules anchored to the head — visor, halo. Tilt + drift with cursor. */
   headChildren?: ReactNode;
+  /** Modules anchored to the left arm — tool gauntlets swing with cursor. */
+  leftArmChildren?: ReactNode;
+  /** Modules anchored to the right arm — tool gauntlets swing with cursor. */
+  rightArmChildren?: ReactNode;
   cursorX: MotionValue<number>;
   cursorY: MotionValue<number>;
   className?: string;
@@ -36,6 +40,8 @@ const ARM_SPRING = {
 export function AgentFigure({
   children,
   headChildren,
+  leftArmChildren,
+  rightArmChildren,
   cursorX,
   cursorY,
   className,
@@ -136,6 +142,7 @@ export function AgentFigure({
             stroke="rgba(52,211,153,0.26)"
             strokeWidth={1.4}
           />
+          {leftArmChildren}
         </motion.g>
 
         {/* RIGHT arm group — mirrored pivot at (280, 250). */}
@@ -160,6 +167,7 @@ export function AgentFigure({
             stroke="rgba(52,211,153,0.26)"
             strokeWidth={1.4}
           />
+          {rightArmChildren}
         </motion.g>
         <path
           d="M143 254 L181 227 H239 L277 254 L263 420 L226 470 H194 L157 420 Z"

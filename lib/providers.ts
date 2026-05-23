@@ -85,8 +85,8 @@ export const PROVIDER_REGISTRY: ProviderRegistryEntry[] = [
     apiKey: "https://openrouter.ai/keys",
     docs: "https://openrouter.ai/docs/quick-start",
     models: [
-      { id: "anthropic/claude-sonnet-4", label: "Claude Sonnet 4 (balanced)" },
-      { id: "anthropic/claude-opus-4", label: "Claude Opus 4 (heavy reasoning)" },
+      { id: "anthropic/claude-sonnet-4.6", label: "Claude Sonnet 4.6 (balanced)" },
+      { id: "anthropic/claude-opus-4.7", label: "Claude Opus 4.7 (heavy reasoning)" },
       { id: "openai/gpt-5.4", label: "GPT-5.4" },
       { id: "openai/gpt-5.4-mini", label: "GPT-5.4 mini (cheap)" },
       { id: "google/gemini-2.5-pro", label: "Gemini 2.5 Pro" },

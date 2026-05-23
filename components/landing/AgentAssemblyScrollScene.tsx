@@ -5,46 +5,32 @@ import { ChevronDown } from "lucide-react";
 import { motion, useReducedMotion, useTransform, type MotionValue } from "framer-motion";
 import { AgentFigure } from "./agent-assembly/AgentFigure";
 import { BrowserOptics } from "./agent-assembly/modules/BrowserOptics";
-import { BusinessLayer } from "./agent-assembly/modules/BusinessLayer";
-import { CommandCentre } from "./agent-assembly/modules/CommandCentre";
-import { DashboardMetrics } from "./agent-assembly/modules/DashboardMetrics";
 import { GuardShield } from "./agent-assembly/modules/GuardShield";
 import { MemorySpine } from "./agent-assembly/modules/MemorySpine";
 import { OutputHalo } from "./agent-assembly/modules/OutputHalo";
 import { ReasoningCore } from "./agent-assembly/modules/ReasoningCore";
 import { SecurityMesh } from "./agent-assembly/modules/SecurityMesh";
 import { StatePulse } from "./agent-assembly/modules/StatePulse";
-import { ToolLimbs } from "./agent-assembly/modules/ToolLimbs";
+import { ToolGauntlet } from "./agent-assembly/modules/ToolLimbs";
 import { useCursorTracking } from "./agent-assembly/useCursorTracking";
 import { useScrollPhase } from "./agent-assembly/useScrollPhase";
 
-const PHASE_COUNT = 11;
-const INSTALL_WINDOW = 0.05;
+const PHASE_COUNT = 8;
+const INSTALL_WINDOW = 0.06;
 
 /**
- * Each phase maps to a real subsystem in CC's empire. Labels surface in
- * the manifest HUD beside the figure so the operator knows exactly what
- * is being installed — not "Reasoning Core" in the abstract but the
- * actual model + provider + script powering it.
- *
- * IMPORTANT: order must stay in sync with the <AgentFigure> children
- * below (ReasoningCore, StatePulse, MemorySpine, BrowserOptics,
- * ToolLimbs, GuardShield, OutputHalo, SecurityMesh — that exact
- * sequence). Reordering one without the other silently desyncs the
- * label from the geometry being installed.
+ * Keep this order in sync with the scroll-driven module progress below.
+ * CC's accepted brief names these eight phases as the canonical assembly.
  */
 const MODULE_MANIFEST = [
-  { label: "Reasoning Core",     subsystem: "Multi-model brain with Claude, GPT, and four backup providers" },
-  { label: "State Pulse",        subsystem: "Live operational heartbeat tracking every action and event" },
-  { label: "Memory Spine",       subsystem: "Hybrid keyword and meaning-based recall across all your knowledge" },
-  { label: "Browser Optics",     subsystem: "Stealth web browser that sees the public web like a real human" },
-  { label: "Bridge Tools",       subsystem: "Twenty-one local actions plus an automation library, ready to run" },
-  { label: "Guard Shield",       subsystem: "Three guardrails sealing secrets, blocking destructive operations" },
-  { label: "Output Channels",    subsystem: "Speaks back through Telegram, email, and the dashboard feed" },
-  { label: "Security Mesh",      subsystem: "Zero-trust envelope with continuous credential and access audits" },
-  { label: "Business Layer",     subsystem: "Your brand, your voice, your audience, your goals" },
-  { label: "Command Centre",     subsystem: "Daily digest, scheduled work, lead funnel, and sales pipeline" },
-  { label: "Dashboard Metrics",  subsystem: "Live revenue, pipeline health, and conversion analytics" },
+  { label: "Reasoning Core", subsystem: "Chest orb" },
+  { label: "State Pulse", subsystem: "Heartbeat indicator" },
+  { label: "Memory Spine", subsystem: "Torso node column" },
+  { label: "Browser Optics", subsystem: "Eye overlays and scan beams" },
+  { label: "Tool Limbs", subsystem: "Shoulder and arm attachments" },
+  { label: "Guard Shield", subsystem: "Translucent body shield" },
+  { label: "Output Halo", subsystem: "Gold ring above the head" },
+  { label: "Security Mesh", subsystem: "Hex lattice over the figure" },
 ] as const;
 
 const AMBIENT_PARTICLES = [
@@ -146,7 +132,10 @@ function useInstallProgress(scrollProgress: MotionValue<number>, phaseIndex: num
 
 export function AgentAssemblyScrollScene() {
   const sectionRef = useRef<HTMLElement>(null);
-  const { phase, localProgress, scrollProgress } = useScrollPhase(sectionRef);
+  const { phase, localProgress, scrollProgress } = useScrollPhase(
+    sectionRef,
+    PHASE_COUNT,
+  );
   const shouldReduceMotion = useReducedMotion();
   const isCompact = useCompactViewport();
   const forceInstalled = Boolean(shouldReduceMotion || isCompact);
@@ -160,9 +149,6 @@ export function AgentAssemblyScrollScene() {
   const shieldProgress = useInstallProgress(scrollProgress, 5);
   const haloProgress = useInstallProgress(scrollProgress, 6);
   const meshProgress = useInstallProgress(scrollProgress, 7);
-  const businessProgress = useInstallProgress(scrollProgress, 8);
-  const commandProgress = useInstallProgress(scrollProgress, 9);
-  const dashboardProgress = useInstallProgress(scrollProgress, 10);
 
   const progressScale = forceInstalled ? 1 : scrollProgress;
   const buildPercent = forceInstalled
@@ -173,7 +159,7 @@ export function AgentAssemblyScrollScene() {
     <section
       ref={sectionRef}
       id="agent-build"
-      className="relative z-10 min-h-screen min-[641px]:min-h-[950vh] lg:min-h-[1100vh]"
+      className="relative z-10 min-h-screen min-[641px]:min-h-[700vh] lg:min-h-[800vh]"
     >
       <div className="relative flex min-h-screen items-center justify-center overflow-hidden px-5 py-12 min-[641px]:sticky min-[641px]:top-0 min-[641px]:h-screen sm:px-8">
         {/* Cosmic background: deep space gradient → nebula clouds → slowly
@@ -394,16 +380,26 @@ export function AgentAssemblyScrollScene() {
                 <OutputHalo installProgress={haloProgress} forceInstalled={forceInstalled} />
               </>
             }
+            leftArmChildren={
+              <ToolGauntlet
+                side="left"
+                installProgress={limbsProgress}
+                forceInstalled={forceInstalled}
+              />
+            }
+            rightArmChildren={
+              <ToolGauntlet
+                side="right"
+                installProgress={limbsProgress}
+                forceInstalled={forceInstalled}
+              />
+            }
           >
             <ReasoningCore installProgress={reasoningProgress} forceInstalled={forceInstalled} />
             <StatePulse installProgress={stateProgress} forceInstalled={forceInstalled} />
             <MemorySpine installProgress={memoryProgress} forceInstalled={forceInstalled} />
-            <ToolLimbs installProgress={limbsProgress} forceInstalled={forceInstalled} />
             <GuardShield installProgress={shieldProgress} forceInstalled={forceInstalled} />
             <SecurityMesh installProgress={meshProgress} forceInstalled={forceInstalled} />
-            <BusinessLayer installProgress={businessProgress} forceInstalled={forceInstalled} />
-            <CommandCentre installProgress={commandProgress} forceInstalled={forceInstalled} />
-            <DashboardMetrics installProgress={dashboardProgress} forceInstalled={forceInstalled} />
           </AgentFigure>
         </div>
 

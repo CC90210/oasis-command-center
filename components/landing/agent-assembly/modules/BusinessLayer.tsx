@@ -28,10 +28,10 @@ export function BusinessLayer(props: ModuleProps) {
             SecurityMesh wraps. Each tag attaches to a specific anchor
             point so it reads as DOCKED to the body, not floating. */}
         {[
-          { x: -150, y: -36, anchorX: -50, anchorY: -36, label: "BRAND" },
-          { x: 150, y: -36, anchorX: 50, anchorY: -36, label: "VOICE" },
-          { x: -150, y: 60, anchorX: -50, anchorY: 60, label: "AUDIENCE" },
-          { x: 150, y: 60, anchorX: 50, anchorY: 60, label: "GOALS" },
+          { x: -184, y: -44, anchorX: -50, anchorY: -36, label: "BRAND" },
+          { x: 184, y: -44, anchorX: 50, anchorY: -36, label: "VOICE" },
+          { x: -184, y: 72, anchorX: -50, anchorY: 60, label: "AUDIENCE" },
+          { x: 184, y: 72, anchorX: 50, anchorY: 60, label: "GOALS" },
         ].map((tag) => (
           <g key={tag.label}>
             {/* Thin connector line from body anchor to tag */}

@@ -16,15 +16,15 @@ export function DashboardMetrics(props: ModuleProps) {
   return (
     <AssemblyModule
       {...props}
-      dock={{ x: 18, y: 310 }}
-      from={{ x: -240, y: 420, rotate: -10, scale: 0.5 }}
-      via={{ x: -60, y: 340 }}
+      dock={{ x: -42, y: 310 }}
+      from={{ x: -300, y: 420, rotate: -10, scale: 0.5 }}
+      via={{ x: -118, y: 340 }}
       burstColor="rgba(132, 204, 22, 0.95)"
     >
       <g filter="url(#agent-soft-glow)">
         {/* Single combined dashboard card — replaces the two stacked cards
             that previously overlapped the figure. Anchored at far-left of
-            the viewBox (x=18) so it sits in clear space beside the body. */}
+            the viewBox so it sits in clear space beside the body tags. */}
         <rect
           x={-44}
           y={-66}
