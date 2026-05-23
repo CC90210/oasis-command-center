@@ -125,6 +125,63 @@ export async function getBridgeOnline(tenantId: string | null): Promise<boolean>
 }
 
 /**
+ * Richer variant of getBridgeOnline — returns the freshest tenant pairing's
+ * online-ness + the machine label + the owner's display name. Used by
+ * ChatWidget to render a friendlier message when this browser's localhost
+ * probe fails but the tenant DOES have a bridge running on another machine
+ * (typical multi-employee scenario per ADR-0006).
+ *
+ * Returns null fields when there's no pairing; consumers should treat that
+ * as "no bridge anywhere in the tenant."
+ */
+export async function getTenantBridgeOwner(tenantId: string | null): Promise<{
+  online: boolean;
+  machine_label: string | null;
+  owner_display_name: string | null;
+}> {
+  if (!tenantId) return { online: false, machine_label: null, owner_display_name: null };
+  try {
+    const db = getServiceSupabase();
+    const r = await db
+      .from("bridge_pairings")
+      .select("last_seen_at, label, user_id")
+      .eq("tenant_id", tenantId)
+      .is("revoked_at", null)
+      .order("last_seen_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    const row = r.data as
+      | { last_seen_at?: string | null; label?: string | null; user_id?: string | null }
+      | null;
+    if (!row?.last_seen_at) {
+      return { online: false, machine_label: null, owner_display_name: null };
+    }
+    const online = Date.now() - new Date(row.last_seen_at).getTime() < 5 * 60 * 1000;
+    // Best-effort owner-name lookup. Failure is fine — UX just shows the
+    // machine label without an attributed name.
+    let ownerName: string | null = null;
+    if (row.user_id) {
+      const p = await db
+        .from("user_profiles")
+        .select("display_name, full_name")
+        .eq("auth_user_id", row.user_id)
+        .maybeSingle();
+      const pd = p.data as
+        | { display_name?: string | null; full_name?: string | null }
+        | null;
+      ownerName = pd?.display_name || pd?.full_name || null;
+    }
+    return {
+      online,
+      machine_label: row.label || null,
+      owner_display_name: ownerName,
+    };
+  } catch {
+    return { online: false, machine_label: null, owner_display_name: null };
+  }
+}
+
+/**
  * Phase F of giggly-reef — return the tool registry the operator's currently
  * live bridge has advertised, or null when no bridge is online or the
  * advertised list is empty (no filter, fall back to TOOL_DEFINITIONS defaults).

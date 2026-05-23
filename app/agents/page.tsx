@@ -2,7 +2,7 @@ import { Card, PageHeader, EmptyState, Tag } from "@/components/Card";
 import ChatWidget from "@/components/ChatWidget";
 import { timeAgo, truncate } from "@/lib/fmt";
 import { formatEventType, formatPublisher } from "@/lib/event-bus-display";
-import { agentStates, recentEvents, getActiveProfile, integrationsHealth, aiServicesWithKey } from "@/lib/queries";
+import { agentStates, recentEvents, getActiveProfile, integrationsHealth, aiServicesWithKey, getTenantBridgeOwner } from "@/lib/queries";
 import { FAMILY_AGENT_KEYS, getAgentInfo } from "@/lib/agents";
 import { getTenantManifestForUser } from "@/lib/manifest/tenant-scope";
 import { catalogFor } from "@/lib/agent-catalog";
@@ -54,7 +54,7 @@ export default async function AgentsPage() {
     .filter((a) => a.enabled)
     .map((a) => a.slug.toLowerCase());
 
-  const [states, events, integrations, stats, noBridge, aiServices] = await Promise.all([
+  const [states, events, integrations, stats, noBridge, aiServices, tenantBridgeOwner] = await Promise.all([
     agentStates(manifestEnabledSlugs),
     // sinceDays: 0 — same fix as /operations. Default 7-day window left
     // the Event Bus card looking empty when crons / inbound traffic had
@@ -68,6 +68,10 @@ export default async function AgentsPage() {
     getAgentStats(profile?.primary_agent || "bravo"),
     _tenantHasNoBridge(profile?.tenant_id || null),
     aiServicesWithKey(profile?.tenant_id || null),
+    // ADR-0006: the tenant's bridge owner — used by ChatWidget to render
+    // "Bridge runs on <owner>'s machine" when this browser's localhost
+    // probe fails but the tenant has a bridge online elsewhere.
+    getTenantBridgeOwner(profile?.tenant_id || null),
   ]);
   // No provider keys on file AND bridge offline AND non-operator. Operators
   // have the platform fallback so chat works without a per-agent key — they
@@ -207,6 +211,11 @@ export default async function AgentsPage() {
           // view); SunBiz / SUGA / future end-user tenants don't show
           // the dropdown.
           advancedPicker={manifestForAgents?.ui?.advanced_picker ?? false}
+          // ADR-0006: the tenant's primary bridge owner. Used to render
+          // "Bridge runs on <owner>'s machine" when this browser's
+          // localhost probe fails but the tenant DOES have a bridge
+          // running on another teammate's machine.
+          tenantBridgeOwner={tenantBridgeOwner}
         />
       </section>
 

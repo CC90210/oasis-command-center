@@ -367,6 +367,18 @@ type Props = {
    * "if one of them just works correctly."
    */
   advancedPicker?: boolean;
+  /**
+   * Server-resolved tenant bridge owner (ADR-0006). Used to surface
+   * "Bridge runs on <owner>'s machine" when this browser can't reach
+   * localhost:9100 but the tenant DOES have a bridge online elsewhere
+   * (typical multi-employee scenario: admin's always-on machine).
+   * Null fields when there's no pairing anywhere in the tenant.
+   */
+  tenantBridgeOwner?: {
+    online: boolean;
+    machine_label: string | null;
+    owner_display_name: string | null;
+  };
 };
 
 function seedMessagesForAgent(
@@ -378,7 +390,7 @@ function seedMessagesForAgent(
   return [{ role: "assistant", content, at: Date.now() }];
 }
 
-export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMessages, advancedPicker }: Props) {
+export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMessages, advancedPicker, tenantBridgeOwner }: Props) {
   const searchParams = useSearchParams();
   const router = useRouter();
   const pathname = usePathname();
@@ -1441,12 +1453,41 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
       activeMode === "cli" ||
       (activeMode === "auto" && bridgeOnline === true);
     if (activeMode === "cli" && bridgeOnline !== true) {
-      // Pinned to bridge but bridge isn't online — fail loud rather than
-      // silently falling through to the API-key path. The operator chose
-      // CLI mode for a reason.
-      setError(
-        "Pinned to CLI (local bridge), but the bridge isn't reachable. Run `pm2 restart claude-bridge` on this machine, or switch the mode to API key."
-      );
+      // Pinned to bridge but THIS browser's localhost probe failed. Two
+      // very different situations to surface differently (ADR-0006):
+      //
+      //   A. The tenant has a bridge online elsewhere (typical multi-
+      //      employee model: admin's always-on machine). Tell the
+      //      employee whose machine owns the bridge so they understand
+      //      the model + suggest switching to API-key mode for this
+      //      session.
+      //
+      //   B. No bridge anywhere in the tenant. Tell them to start one
+      //      on their own machine or switch modes.
+      const tenantHasRemoteBridge =
+        tenantBridgeOwner?.online === true &&
+        (tenantBridgeOwner.machine_label || tenantBridgeOwner.owner_display_name);
+      if (tenantHasRemoteBridge) {
+        const owner = tenantBridgeOwner!.owner_display_name;
+        const machine = tenantBridgeOwner!.machine_label;
+        const where = owner && machine
+          ? `${owner}'s machine (${machine})`
+          : owner
+            ? `${owner}'s machine`
+            : machine
+              ? machine
+              : "another teammate's machine";
+        setError(
+          `Bridge runs on ${where} and isn't reachable from this browser. ` +
+          "Switch the chat mode to API key for this session, or open the dashboard on the machine that owns the bridge."
+        );
+      } else {
+        setError(
+          "Pinned to CLI (local bridge), but no bridge is online. " +
+          "Start the bridge on your machine (`pm2 restart claude-bridge` / `bravo bridge serve`), " +
+          "or switch the mode to API key."
+        );
+      }
       setStreaming(false);
       setMessages((m) => m.slice(0, -1));
       return;
