@@ -144,6 +144,19 @@ Acknowledge this directive by saying: "Vibe-to-Execution Translator online. Drop
   },
   // ── CLIENT SETUP ────────────────────────────────────────────────
   {
+    id: "client-admin-bridge-setup",
+    category: "client_setup",
+    audience: "operator",
+    agent: "bravo",
+    title: "Set up admin's always-on bridge",
+    description:
+      "Codifies the admin-bridge model from ADR-0006 for a new client tenant: one machine (the owner's) stays on 24/7 to power the bridge daemon; every employee chats via the dashboard against that bridge; personal API keys remain private per employee.",
+    foundational: true,
+    tags: ["client", "setup", "bridge", "multi-tenant", "admin"],
+    prompt:
+      "I'm setting up a new client tenant. The client's owner/admin will run one always-on machine that powers the bridge daemon for every employee. Walk me through: (1) confirm the admin's machine is suitable (idle CPU + memory headroom; stable network; can run 24/7 without sleep). (2) Install the OASIS Desktop app on the admin's machine + pair it as the tenant's primary bridge. Verify the launchd / pm2 service is set to auto-start on boot. (3) Confirm the admin's Claude / Codex / Gemini CLI subscriptions are signed in on that machine — every employee on this tenant will chat against those subscriptions by default. (4) Set the tenant's workspace-default API key in Settings → Agents (the fallback when the bridge isn't reachable from an employee's browser, e.g. quota exceeded). (5) Onboard each employee with their own dashboard account — they inherit the admin's bridge automatically. Walk them through where to paste their PERSONAL API key (Settings → My Agents) if they ever want to override — that key is private to them via RLS (migration 063), no other tenant member can read or use it. Confirm step-by-step with the admin in chat. Report what's done + what's pending.",
+  },
+  {
     id: "client-fresh-machine-bootstrap",
     category: "client_setup",
     audience: "client",

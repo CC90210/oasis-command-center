@@ -96,89 +96,129 @@ export async function getTenant(tenantId: string): Promise<Tenant | null> {
 }
 
 /**
- * True when the tenant has a non-revoked bridge pairing that pinged in the
- * last 5 minutes — same freshness rule the layout's header dot uses. Single
- * source of truth so Settings page + ChatWidget + AgentConfigEditor + any
- * future caller agree on what "bridge online" means.
+ * Tenant bridge status — canonical single-query source of truth.
  *
- * Returns false on missing tenant, missing pair, stale pair, or any DB error.
- * Never throws — best-effort signal that callers gate optional features on.
- */
-export async function getBridgeOnline(tenantId: string | null): Promise<boolean> {
-  if (!tenantId) return false;
-  try {
-    const db = getServiceSupabase();
-    const r = await db
-      .from("bridge_pairings")
-      .select("last_seen_at")
-      .eq("tenant_id", tenantId)
-      .is("revoked_at", null)
-      .order("last_seen_at", { ascending: false })
-      .limit(1)
-      .maybeSingle();
-    const last = (r.data as { last_seen_at?: string | null } | null)?.last_seen_at;
-    if (!last) return false;
-    return Date.now() - new Date(last).getTime() < 5 * 60 * 1000;
-  } catch {
-    return false;
-  }
-}
-
-/**
- * Richer variant of getBridgeOnline — returns the freshest tenant pairing's
- * online-ness + the machine label + the owner's display name. Used by
- * ChatWidget to render a friendlier message when this browser's localhost
- * probe fails but the tenant DOES have a bridge running on another machine
- * (typical multi-employee scenario per ADR-0006).
+ * Returns the freshest non-revoked bridge_pairings row for the tenant
+ * plus computed fields. Consumed by three thin wrappers below; every
+ * UI surface that talks about "is the bridge online" should bottom out
+ * here so freshness rules + label resolution + tool-capabilities
+ * filtering all stay consistent.
  *
- * Returns null fields when there's no pairing; consumers should treat that
- * as "no bridge anywhere in the tenant."
+ * Consolidated 2026-05-23 from three near-duplicate queries
+ * (getBridgeOnline / getBridgeToolCapabilities / getTenantBridgeOwner).
+ * Each was doing the same SELECT-freshest-pairing + different
+ * post-processing. Now one query, one freshness check.
+ *
+ * Best-effort: returns the all-null shape on any error so callers can
+ * gate optional features without try/catch noise.
  */
-export async function getTenantBridgeOwner(tenantId: string | null): Promise<{
+export async function getTenantBridgeStatus(tenantId: string | null): Promise<{
   online: boolean;
   machine_label: string | null;
+  owner_user_id: string | null;
   owner_display_name: string | null;
+  tools: string[] | null;
+  last_seen_at: string | null;
 }> {
-  if (!tenantId) return { online: false, machine_label: null, owner_display_name: null };
+  const empty = {
+    online: false,
+    machine_label: null,
+    owner_user_id: null,
+    owner_display_name: null,
+    tools: null,
+    last_seen_at: null,
+  };
+  if (!tenantId) return empty;
   try {
     const db = getServiceSupabase();
     const r = await db
       .from("bridge_pairings")
-      .select("last_seen_at, label, user_id")
+      .select("last_seen_at, label, user_id, tool_capabilities")
       .eq("tenant_id", tenantId)
       .is("revoked_at", null)
       .order("last_seen_at", { ascending: false })
       .limit(1)
       .maybeSingle();
     const row = r.data as
-      | { last_seen_at?: string | null; label?: string | null; user_id?: string | null }
+      | {
+          last_seen_at?: string | null;
+          label?: string | null;
+          user_id?: string | null;
+          tool_capabilities?: string[] | null;
+        }
       | null;
-    if (!row?.last_seen_at) {
-      return { online: false, machine_label: null, owner_display_name: null };
-    }
+    if (!row?.last_seen_at) return empty;
     const online = Date.now() - new Date(row.last_seen_at).getTime() < 5 * 60 * 1000;
-    // Best-effort owner-name lookup. Failure is fine — UX just shows the
-    // machine label without an attributed name.
+    // Owner name lookup — best-effort. Failure leaves owner_display_name
+    // null and consumers fall back to the machine label.
     let ownerName: string | null = null;
     if (row.user_id) {
-      const p = await db
-        .from("user_profiles")
-        .select("display_name, full_name")
-        .eq("auth_user_id", row.user_id)
-        .maybeSingle();
-      const pd = p.data as
-        | { display_name?: string | null; full_name?: string | null }
-        | null;
-      ownerName = pd?.display_name || pd?.full_name || null;
+      try {
+        const p = await db
+          .from("user_profiles")
+          .select("display_name, full_name")
+          .eq("auth_user_id", row.user_id)
+          .maybeSingle();
+        const pd = p.data as
+          | { display_name?: string | null; full_name?: string | null }
+          | null;
+        ownerName = pd?.display_name || pd?.full_name || null;
+      } catch {
+        ownerName = null;
+      }
     }
+    // tools[] processing — empty array means "bridge online but never
+    // ran the new daemon (pre-Phase-F)". Fall back to null so /api/chat
+    // treats as "no filter, use the TOOL_DEFINITIONS hardcoded defaults."
+    // Preserves backwards-compat with existing pairings.
+    const toolsRaw = Array.isArray(row.tool_capabilities)
+      ? row.tool_capabilities.filter((t): t is string => typeof t === "string")
+      : [];
+    const tools = online && toolsRaw.length > 0 ? toolsRaw : null;
     return {
       online,
       machine_label: row.label || null,
+      owner_user_id: row.user_id || null,
       owner_display_name: ownerName,
+      tools,
+      last_seen_at: row.last_seen_at,
     };
   } catch {
-    return { online: false, machine_label: null, owner_display_name: null };
+    return empty;
   }
+}
+
+/**
+ * True when the tenant has a non-revoked bridge pairing that pinged in the
+ * last 5 minutes — same freshness rule the layout's header dot uses. Thin
+ * wrapper around getTenantBridgeStatus.
+ *
+ * Returns false on missing tenant, missing pair, stale pair, or any DB error.
+ * Never throws — best-effort signal that callers gate optional features on.
+ */
+export async function getBridgeOnline(tenantId: string | null): Promise<boolean> {
+  const status = await getTenantBridgeStatus(tenantId);
+  return status.online;
+}
+
+/**
+ * Owner-attributed status — { online, machine_label, owner_display_name }.
+ * Used by ChatWidget to render "Bridge runs on <Owner>'s machine" when this
+ * browser's localhost probe fails but the tenant has a bridge online
+ * elsewhere (multi-employee scenario per ADR-0006). Thin wrapper around
+ * getTenantBridgeStatus.
+ */
+export async function getTenantBridgeOwner(tenantId: string | null): Promise<{
+  online: boolean;
+  machine_label: string | null;
+  owner_display_name: string | null;
+}> {
+  const status = await getTenantBridgeStatus(tenantId);
+  return {
+    online: status.online,
+    machine_label: status.machine_label,
+    owner_display_name: status.owner_display_name,
+  };
 }
 
 /**
@@ -187,40 +227,14 @@ export async function getTenantBridgeOwner(tenantId: string | null): Promise<{
  * advertised list is empty (no filter, fall back to TOOL_DEFINITIONS defaults).
  *
  * Used by /api/chat to filter the bridge tools sent to Anthropic: dashboard
- * shouldn't advertise read_file if the operator's bridge version doesn't ship
- * that tool yet. Single round-trip — same row getBridgeOnline reads, plus
- * the tool_capabilities column.
+ * shouldn't advertise read_file if the operator's bridge version doesn't
+ * ship that tool yet. Thin wrapper around getTenantBridgeStatus.
  */
 export async function getBridgeToolCapabilities(
   tenantId: string | null,
 ): Promise<{ online: boolean; tools: string[] | null }> {
-  if (!tenantId) return { online: false, tools: null };
-  try {
-    const db = getServiceSupabase();
-    const r = await db
-      .from("bridge_pairings")
-      .select("last_seen_at, tool_capabilities")
-      .eq("tenant_id", tenantId)
-      .is("revoked_at", null)
-      .order("last_seen_at", { ascending: false })
-      .limit(1)
-      .maybeSingle();
-    const row = r.data as
-      | { last_seen_at?: string | null; tool_capabilities?: string[] | null }
-      | null;
-    if (!row?.last_seen_at) return { online: false, tools: null };
-    const online = Date.now() - new Date(row.last_seen_at).getTime() < 5 * 60 * 1000;
-    if (!online) return { online: false, tools: null };
-    const tools = Array.isArray(row.tool_capabilities)
-      ? row.tool_capabilities.filter((t): t is string => typeof t === "string")
-      : [];
-    // Empty array → bridge online but never ran the new daemon (pre-Phase-F).
-    // Fall back to null so /api/chat treats as "no filter" and uses the
-    // hardcoded defaults. Preserves backwards-compat with existing pairings.
-    return { online, tools: tools.length > 0 ? tools : null };
-  } catch {
-    return { online: false, tools: null };
-  }
+  const status = await getTenantBridgeStatus(tenantId);
+  return { online: status.online, tools: status.tools };
 }
 
 export async function getTodayPlan(profileId: string): Promise<DailyPlan | null> {
