@@ -141,19 +141,104 @@ export function AgentFigure({
           strokeLinecap="round"
           strokeWidth={1}
         />
-        <g clipPath="url(#agent-torso-clip)" opacity={0.26}>
+
+        {/* Articulated armour plates — overlapping segments with glowing
+            seam lines between them. Reads as a sleek futuristic suit
+            rather than a flat torso outline. */}
+        <g clipPath="url(#agent-torso-clip)">
+          <g opacity={0.26}>
+            <path
+              d="M128 290 H292 M128 322 H292 M128 354 H292 M128 386 H292 M128 418 H292"
+              fill="none"
+              stroke="rgba(167,243,208,0.35)"
+              strokeWidth={0.8}
+            />
+            <path
+              d="M154 236 V457 M186 226 V482 M218 226 V482 M250 236 V457"
+              fill="none"
+              stroke="rgba(52,211,153,0.16)"
+              strokeWidth={0.8}
+            />
+          </g>
+          {/* Glowing seam lines */}
           <path
-            d="M128 290 H292 M128 322 H292 M128 354 H292 M128 386 H292 M128 418 H292"
+            d="M155 270 L155 415 M265 270 L265 415"
             fill="none"
-            stroke="rgba(167,243,208,0.35)"
+            stroke="rgba(134,239,172,0.45)"
             strokeWidth={0.8}
           />
+          {/* Diagonal pectoral plates */}
           <path
-            d="M154 236 V457 M186 226 V482 M218 226 V482 M250 236 V457"
+            d="M165 270 L205 296 L205 332 L165 318 Z"
+            fill="rgba(52,211,153,0.05)"
+            stroke="rgba(134,239,172,0.32)"
+            strokeWidth={0.9}
+          />
+          <path
+            d="M255 270 L215 296 L215 332 L255 318 Z"
+            fill="rgba(52,211,153,0.05)"
+            stroke="rgba(134,239,172,0.32)"
+            strokeWidth={0.9}
+          />
+          {/* Lower abdomen plates */}
+          <path
+            d="M170 360 H250 L246 396 H174 Z"
+            fill="rgba(52,211,153,0.04)"
+            stroke="rgba(134,239,172,0.28)"
+            strokeWidth={0.9}
+          />
+        </g>
+
+        {/* OASIS tree-of-life chest emblem — pulsing low-opacity insignia
+            on the upper chest plate. References the OASIS brand mark
+            (circuit-tree icon) without competing with the assembly modules. */}
+        <g opacity={0.55}>
+          {/* Roots */}
+          <path
+            d="M205 358 L200 366 M210 358 L210 368 M215 358 L220 366"
             fill="none"
-            stroke="rgba(52,211,153,0.16)"
+            stroke="rgba(167,243,208,0.55)"
+            strokeLinecap="round"
+            strokeWidth={0.9}
+          />
+          {/* Trunk */}
+          <line x1={210} y1={328} x2={210} y2={358} stroke="rgba(167,243,208,0.62)" strokeWidth={1.1} strokeLinecap="round" />
+          {/* Branches */}
+          <path
+            d="M210 338 L199 326 M210 338 L221 326 M210 332 L201 320 M210 332 L219 320"
+            fill="none"
+            stroke="rgba(167,243,208,0.50)"
+            strokeLinecap="round"
             strokeWidth={0.8}
           />
+          {/* Canopy nodes — three small leaves */}
+          <circle cx={199} cy={326} r={1.6} fill="rgba(134,239,172,0.85)" />
+          <circle cx={221} cy={326} r={1.6} fill="rgba(134,239,172,0.85)" />
+          <circle cx={210} cy={318} r={2.0} fill="rgba(252,211,77,0.78)" />
+          {/* Crown shimmer */}
+          <circle cx={210} cy={318} r={4.2} fill="none" stroke="rgba(252,211,77,0.45)" strokeWidth={0.7} />
+        </g>
+
+        {/* Shoulder pauldron accent strokes — adds futuristic articulation
+            to the shoulder caps so they read as armoured, not painted on. */}
+        <g opacity={0.7}>
+          <path
+            d="M120 248 C133 232 154 222 175 230"
+            fill="none"
+            stroke="rgba(134,239,172,0.42)"
+            strokeWidth={1}
+            strokeLinecap="round"
+          />
+          <path
+            d="M300 248 C287 232 266 222 245 230"
+            fill="none"
+            stroke="rgba(134,239,172,0.42)"
+            strokeWidth={1}
+            strokeLinecap="round"
+          />
+          {/* Shoulder rivet nodes */}
+          <circle cx={146} cy={247} r={1.4} fill="rgba(252,211,77,0.65)" />
+          <circle cx={274} cy={247} r={1.4} fill="rgba(252,211,77,0.65)" />
         </g>
       </g>
 
@@ -201,6 +286,26 @@ export function AgentFigure({
           strokeLinecap="round"
           strokeWidth={1.2}
         />
+        {/* Helmet crown — thin emerald rim across the top, with two
+            golden focal nodes flanking the centre. Reads as helmet
+            articulation without obscuring the cursor-tracking eyes. */}
+        <path
+          d="M165 110 C182 92 196 84 210 84 C224 84 238 92 255 110"
+          fill="none"
+          stroke="rgba(134,239,172,0.55)"
+          strokeLinecap="round"
+          strokeWidth={1.4}
+        />
+        <circle cx={186} cy={101} r={1.4} fill="rgba(252,211,77,0.72)" />
+        <circle cx={234} cy={101} r={1.4} fill="rgba(252,211,77,0.72)" />
+        {/* Cheek panel seams */}
+        <path
+          d="M170 165 L165 195 M250 165 L255 195"
+          fill="none"
+          stroke="rgba(167,243,208,0.32)"
+          strokeWidth={0.9}
+          strokeLinecap="round"
+        />
         <AgentEye cx={190} cy={165} cursorX={cursorX} cursorY={cursorY} />
         <AgentEye cx={230} cy={165} cursorX={cursorX} cursorY={cursorY} />
         <path
@@ -208,6 +313,14 @@ export function AgentFigure({
           stroke="rgba(209,250,229,0.36)"
           strokeLinecap="round"
           strokeWidth={1.2}
+        />
+        {/* Chin guard accent */}
+        <path
+          d="M198 209 L210 218 L222 209"
+          fill="none"
+          stroke="rgba(134,239,172,0.42)"
+          strokeWidth={1}
+          strokeLinecap="round"
         />
       </motion.g>
 
