@@ -18,6 +18,7 @@ node_modules/
 # Type checker cache
 *.tsbuildinfo
 next-env.d.ts
+tmp/
 
 # Vercel
 .vercel
