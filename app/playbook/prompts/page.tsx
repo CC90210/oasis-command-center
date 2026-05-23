@@ -5,7 +5,8 @@ import {
   PROMPTS_LIBRARY,
   type PromptCategory,
 } from "@/lib/prompts-library";
-import { ArrowRight, ShieldAlert, User as UserIcon, Users } from "lucide-react";
+import { ArrowLeft } from "lucide-react";
+import { PromptsLibraryFilter } from "@/components/playbook/PromptsLibraryFilter";
 
 export const dynamic = "force-dynamic";
 
@@ -31,40 +32,6 @@ const CLIENT_CATEGORIES: PromptCategory[] = [
   "agent_tooling",
 ];
 
-function PromptCard({ p }: { p: typeof PROMPTS_LIBRARY[number] }) {
-  const href = `/agents?agent=${encodeURIComponent(p.agent)}&prompt=${encodeURIComponent(p.prompt)}`;
-  const isOverride = p.category === "system_override";
-  return (
-    <Link
-      href={href}
-      className="group rounded-lg border border-bg-border bg-bg-elev/40 hover:border-accent/50 hover:bg-accent/5 transition-all p-3.5 flex items-start gap-3"
-    >
-      <div className="flex-1 min-w-0">
-        <div className="flex items-center gap-1.5 flex-wrap">
-          <span className="text-sm font-bold text-fg">{p.title}</span>
-          {p.foundational && (
-            <span className="text-[9px] uppercase tracking-wider font-bold text-accent bg-accent/10 border border-accent/30 px-1.5 py-0.5 rounded">
-              foundational
-            </span>
-          )}
-          <span className="text-[10px] uppercase tracking-wider font-bold text-fg-dim">
-            → {p.agent}
-          </span>
-          <ArrowRight className="w-3.5 h-3.5 text-fg-dim opacity-0 group-hover:opacity-100 transition-opacity ml-auto" />
-        </div>
-        <div className="text-xs text-fg-muted mt-1.5 leading-snug">
-          {p.description}
-        </div>
-        {isOverride && (
-          <div className="text-[10px] text-status-warm font-mono mt-2 inline-flex items-center gap-1">
-            <ShieldAlert className="w-3 h-3" /> [OVERRIDE] prompt
-          </div>
-        )}
-      </div>
-    </Link>
-  );
-}
-
 export default function PromptsLibraryPage() {
   // Operator section: prompts tagged "operator" + the "shared" ones that
   // are universally useful (override syntax, health checks, end-of-day).
@@ -77,14 +44,30 @@ export default function PromptsLibraryPage() {
     (p) => p.audience === "client" || p.audience === "shared"
   );
 
+  // Total count for the header tag — the filter component computes
+  // filtered counts client-side, but the page header shows the full
+  // library size so the operator knows the scope.
+  const totalPrompts = PROMPTS_LIBRARY.length;
+
   return (
     <div className="space-y-6 animate-fade-in">
+      {/* Breadcrumb — clicking lands back on the Playbook hub. Plain
+          Next Link so the dashboard layout's sidebar stays mounted
+          and the in-flight SSR cache is reused. */}
+      <Link
+        href="/playbook"
+        className="inline-flex items-center gap-1.5 text-xs text-fg-muted hover:text-fg transition-colors"
+      >
+        <ArrowLeft className="w-3.5 h-3.5" />
+        <span>Playbook</span>
+      </Link>
+
       <PageHeader
         title="Prompts Library"
-        subtitle="Saved prompts that move the system. Two audiences: yours (your daily operator moves) and the client toolkit (what to fire when you're setting up someone else's machine)."
+        subtitle="Saved prompts that move the system. Two audiences: yours (daily operator moves) and the client toolkit (what to fire when setting up someone else's machine)."
         action={
           <Tag tone="accent">
-            {operatorPrompts.length} operator · {clientPrompts.length} client
+            {totalPrompts} prompts · {operatorPrompts.length} operator · {clientPrompts.length} client
           </Tag>
         }
       />
@@ -104,59 +87,16 @@ Disable every cron in vercel.json by setting it to a date in the past...`}</pre>
         </div>
       </Card>
 
-      {/* ── YOUR PROMPTS (operator) ────────────────────────────── */}
-      <div>
-        <div className="flex items-baseline gap-2 mb-3">
-          <UserIcon className="w-4 h-4 text-accent" />
-          <h2 className="text-lg font-bold text-fg">Your prompts</h2>
-          <span className="text-xs text-fg-muted">
-            personal to your OASIS AI deployment + universal moves
-          </span>
-        </div>
-        <div className="space-y-4">
-          {OPERATOR_CATEGORIES.map((cat) => {
-            const def = PROMPT_CATEGORIES[cat];
-            const list = operatorPrompts.filter((p) => p.category === cat);
-            if (list.length === 0) return null;
-            return (
-              <Card key={cat} title={def.label} subtitle={def.description}>
-                <div className="grid sm:grid-cols-2 gap-2.5">
-                  {list.map((p) => (
-                    <PromptCard key={p.id} p={p} />
-                  ))}
-                </div>
-              </Card>
-            );
-          })}
-        </div>
-      </div>
-
-      {/* ── CLIENT DEPLOYMENT TOOLKIT ──────────────────────────── */}
-      <div>
-        <div className="flex items-baseline gap-2 mb-3">
-          <Users className="w-4 h-4 text-pink-400" />
-          <h2 className="text-lg font-bold text-fg">Client deployment toolkit</h2>
-          <span className="text-xs text-fg-muted">
-            run these when you&apos;re setting up a new client&apos;s machine
-          </span>
-        </div>
-        <div className="space-y-4">
-          {CLIENT_CATEGORIES.map((cat) => {
-            const def = PROMPT_CATEGORIES[cat];
-            const list = clientPrompts.filter((p) => p.category === cat);
-            if (list.length === 0) return null;
-            return (
-              <Card key={cat} title={def.label} subtitle={def.description}>
-                <div className="grid sm:grid-cols-2 gap-2.5">
-                  {list.map((p) => (
-                    <PromptCard key={p.id} p={p} />
-                  ))}
-                </div>
-              </Card>
-            );
-          })}
-        </div>
-      </div>
+      {/* Client-side filter — single input narrows the whole library
+          (operator + client sections) by title, description, tag, or
+          category label. Lives in a small client island so the SSR
+          page stays static and the filter UX is instant. */}
+      <PromptsLibraryFilter
+        prompts={PROMPTS_LIBRARY}
+        operatorCategories={OPERATOR_CATEGORIES}
+        clientCategories={CLIENT_CATEGORIES}
+        categoryDefs={PROMPT_CATEGORIES}
+      />
     </div>
   );
 }

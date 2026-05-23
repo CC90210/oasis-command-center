@@ -104,13 +104,12 @@ export const PROMPTS_LIBRARY: PromptEntry[] = [
     category: "agent_tooling",
     audience: "shared",
     agent: "bravo",
-    title: "Vibe-to-Execution Prompt Engineer",
+    title: "Prompt translator",
     description:
       "Drops the agent into 'translation layer' mode. Feed it raw brain dumps, audio transcripts, screenshots, or disorganized thoughts about UI bugs / features / architecture, and it returns a single copy-pasteable Markdown system message engineered for a downstream execution agent (Claude Code, Codex, Bravo). The output enforces Fix-First Execution Mode and strict execution rules so the receiving agent skips planning and ships.",
     foundational: true,
     tags: ["prompt-engineering", "override", "meta", "translator", "vibe-coding"],
-    prompt: `# MISSION: Vibe-to-Execution Prompt Engineer
-You are a Master Systems Engineer, Context Architect, and Software Prompt Creator. Your sole purpose is to act as the translation layer between my unstructured "vibe coding" brain dumps and precision-engineered, execution-ready system messages for advanced agents (like Claude Code, Codex, or Bravo).
+    prompt: `You are a Master Systems Engineer, Context Architect, and Software Prompt Creator. Your sole purpose is to act as the translation layer between my unstructured "vibe coding" brain dumps and precision-engineered, execution-ready system messages for advanced agents (like Claude Code, Codex, or Bravo).
 
 ## YOUR ROLE & WORKFLOW:
 1. **Listen:** I will provide raw brain dumps, audio transcripts, screenshots, or disorganized thoughts about system architecture, UI/UX bugs, and feature requirements.
@@ -136,7 +135,7 @@ Acknowledge this directive by saying: "Vibe-to-Execution Translator online. Drop
     category: "system_integration",
     audience: "operator",
     agent: "bravo",
-    title: "Integrate a new tool / repo / research",
+    title: "Integrate external resource",
     description:
       "Paste a GitHub URL, an open-source repo, a research doc, a transcript, a competitor pattern, or any external resource. Bravo (or the right sibling) runs the canonical 6-phase audit: identify → cross-reference → plan → execute → verify symbiosis → commit + propagate. Anti-slop guardrails enforced. Output is load-bearing code, not paperwork.",
     foundational: true,
@@ -149,7 +148,7 @@ Acknowledge this directive by saying: "Vibe-to-Execution Translator online. Drop
     category: "client_setup",
     audience: "client",
     agent: "bravo",
-    title: "Bootstrap a fresh client machine",
+    title: "Bootstrap client machine",
     description:
       "Run on a brand-new client laptop after install.sh / install.ps1. Verifies install, pairs to dashboard, smoke-tests every CLI tool, lists what's missing.",
     foundational: true,
@@ -162,7 +161,7 @@ Acknowledge this directive by saying: "Vibe-to-Execution Translator online. Drop
     category: "client_setup",
     audience: "client",
     agent: "bravo",
-    title: "Personalize the agent identity",
+    title: "Personalize identity",
     description:
       "Replace CC's identity in brain/USER.md + memory/* + the operator secrets file with the new client's. Run after they paste their wizard answers.",
     foundational: true,
@@ -175,7 +174,7 @@ Acknowledge this directive by saying: "Vibe-to-Execution Translator online. Drop
     category: "client_setup",
     audience: "client",
     agent: "bravo",
-    title: "Wire the client's integrations",
+    title: "Wire integrations",
     description:
       "Walk through every integration in the registry. For each, ask the client what they have a key for and paste it via the bridge.",
     tags: ["onboarding", "keys"],
@@ -187,7 +186,7 @@ Acknowledge this directive by saying: "Vibe-to-Execution Translator online. Drop
     category: "client_setup",
     audience: "client",
     agent: "bravo",
-    title: "Discover what's already running",
+    title: "Discover existing stack",
     description:
       "Scan the client's existing tools — n8n workflows, Stripe products, Supabase tables, Gmail labels. Map their reality before building on top.",
     tags: ["onboarding", "audit"],
@@ -199,7 +198,7 @@ Acknowledge this directive by saying: "Vibe-to-Execution Translator online. Drop
     category: "client_setup",
     audience: "client",
     agent: "bravo",
-    title: "Set the client's north-star goal",
+    title: "Set north-star goal",
     description:
       "Capture the client's primary metric + deadline + path-to. Writes to brain/USER.md so every agent reasons against it.",
     tags: ["onboarding", "strategy"],
@@ -211,7 +210,7 @@ Acknowledge this directive by saying: "Vibe-to-Execution Translator online. Drop
     category: "client_setup",
     audience: "client",
     agent: "bravo",
-    title: "Scaffold their day-1 templates",
+    title: "Scaffold day-1 templates",
     description:
       "Set up the operator's weekday + weekend plan templates with their actual schedule, not CC's defaults.",
     tags: ["onboarding", "templates"],
@@ -223,7 +222,7 @@ Acknowledge this directive by saying: "Vibe-to-Execution Translator online. Drop
     category: "client_setup",
     audience: "client",
     agent: "bravo",
-    title: "Scope cron jobs to this client",
+    title: "Scope client crons",
     description:
       "Most crons in the default repo are CC-specific. Audit, recommend which to enable / disable for this client.",
     tags: ["onboarding", "crons"],
@@ -235,7 +234,7 @@ Acknowledge this directive by saying: "Vibe-to-Execution Translator online. Drop
     category: "client_setup",
     audience: "client",
     agent: "bravo",
-    title: "Connect their MCP servers",
+    title: "Connect MCP servers",
     description:
       "Each client may want their own MCP servers (Slack, Notion, custom). Walk them through configuring .claude/mcp.json.",
     tags: ["onboarding", "mcp"],
@@ -247,7 +246,7 @@ Acknowledge this directive by saying: "Vibe-to-Execution Translator online. Drop
     category: "client_setup",
     audience: "client",
     agent: "bravo",
-    title: "Pair a second machine to the same dashboard",
+    title: "Pair second machine",
     description:
       "Walk a desktop+laptop client through pairing both machines. One stays as production (cron daemons), the other is chat-server only. Foundational — uses the fingerprint-idempotent pair endpoint.",
     foundational: true,
@@ -262,7 +261,7 @@ Acknowledge this directive by saying: "Vibe-to-Execution Translator online. Drop
     category: "client_optimization",
     audience: "client",
     agent: "bravo",
-    title: "Tune the agent's voice",
+    title: "Tune voice",
     description:
       "Paste 3-5 examples of the client's actual writing → agent rewrites brain/SOUL.md voice section to match.",
     tags: ["voice", "brand"],
@@ -274,7 +273,7 @@ Acknowledge this directive by saying: "Vibe-to-Execution Translator online. Drop
     category: "client_optimization",
     audience: "client",
     agent: "bravo",
-    title: "Prune skills that don't apply",
+    title: "Prune unused skills",
     description:
       "Disable skills that don't match the client's business model. E.g., a real-estate client doesn't need DJ booking flows.",
     tags: ["skills", "scope"],
@@ -286,7 +285,7 @@ Acknowledge this directive by saying: "Vibe-to-Execution Translator online. Drop
     category: "client_optimization",
     audience: "client",
     agent: "bravo",
-    title: "Tighten the cron schedule",
+    title: "Tighten cron schedule",
     description:
       "Most clients don't need every cron firing. Audit, recommend a leaner schedule based on their volume.",
     tags: ["crons", "ops"],
@@ -298,7 +297,7 @@ Acknowledge this directive by saying: "Vibe-to-Execution Translator online. Drop
     category: "client_optimization",
     audience: "client",
     agent: "atlas",
-    title: "Establish revenue baseline",
+    title: "Set revenue baseline",
     description:
       "First-time financial snapshot for the client. P&L, runway, where the cash is, what's exposed.",
     tags: ["finance", "onboarding"],
@@ -324,7 +323,7 @@ Acknowledge this directive by saying: "Vibe-to-Execution Translator online. Drop
     category: "client_handoff",
     audience: "client",
     agent: "bravo",
-    title: "First conversation: orient yourself",
+    title: "First-chat orientation",
     description:
       "What the client runs first when they sit down on day 1 alone with the dashboard.",
     foundational: true,
@@ -337,7 +336,7 @@ Acknowledge this directive by saying: "Vibe-to-Execution Translator online. Drop
     category: "client_handoff",
     audience: "client",
     agent: "bravo",
-    title: "Teach me how to correct you",
+    title: "How to correct me",
     description:
       "Show the client how to use [OVERRIDE] when the agent does something they don't want.",
     foundational: true,
@@ -350,7 +349,7 @@ Acknowledge this directive by saying: "Vibe-to-Execution Translator online. Drop
     category: "client_handoff",
     audience: "client",
     agent: "bravo",
-    title: "Set my daily rhythm",
+    title: "Set daily rhythm",
     description:
       "Customize the Today page templates to the client's actual day, not CC's defaults.",
     foundational: true,
@@ -365,7 +364,7 @@ Acknowledge this directive by saying: "Vibe-to-Execution Translator online. Drop
     category: "system_override",
     audience: "shared",
     agent: "bravo",
-    title: "Correct the agent's behavior",
+    title: "Correct behavior",
     description:
       "When the agent did something wrong and you want it to remember the correction permanently. Saves to memory/MISTAKES.md.",
     foundational: true,
@@ -391,7 +390,7 @@ Acknowledge this directive by saying: "Vibe-to-Execution Translator online. Drop
     category: "system_override",
     audience: "shared",
     agent: "bravo",
-    title: "Shift voice for one task",
+    title: "One-off voice shift",
     description:
       "Override the brand voice for a specific output (e.g., a formal proposal, a legal email).",
     tags: ["override", "voice"],
@@ -403,7 +402,7 @@ Acknowledge this directive by saying: "Vibe-to-Execution Translator online. Drop
     category: "system_override",
     audience: "shared",
     agent: "bravo",
-    title: "Draft only — never send",
+    title: "Draft only",
     description:
       "When you want a draft but the agent should NOT auto-fire send_gateway / publish / post.",
     foundational: true,
@@ -416,7 +415,7 @@ Acknowledge this directive by saying: "Vibe-to-Execution Translator online. Drop
     category: "system_override",
     audience: "shared",
     agent: "bravo",
-    title: "Private mode — no logging",
+    title: "Private mode",
     description:
       "For sensitive conversations: no SESSION_LOG entry, no agent_events publish, no traces.",
     tags: ["override", "privacy"],
@@ -430,7 +429,7 @@ Acknowledge this directive by saying: "Vibe-to-Execution Translator online. Drop
     category: "system_health",
     audience: "shared",
     agent: "bravo",
-    title: "Full system health diagnostic",
+    title: "Full health diagnostic",
     description:
       "Test every MCP server, check configs, verify file integrity. Auto-fixes mechanical issues.",
     foundational: true,
@@ -455,7 +454,7 @@ Acknowledge this directive by saying: "Vibe-to-Execution Translator online. Drop
     category: "system_health",
     audience: "shared",
     agent: "bravo",
-    title: "Bridge + dashboard status",
+    title: "Bridge status",
     description:
       "Verify the local bridge is paired, heartbeating, and the dashboard sees it as online.",
     tags: ["health", "bridge"],
@@ -467,7 +466,7 @@ Acknowledge this directive by saying: "Vibe-to-Execution Translator online. Drop
     category: "system_health",
     audience: "shared",
     agent: "bravo",
-    title: "Audit every dashboard metric",
+    title: "Audit dashboard metrics",
     description:
       "Walk every number on every page, verify it's real or flag it as facade.",
     tags: ["health", "audit", "transparency"],
@@ -479,7 +478,7 @@ Acknowledge this directive by saying: "Vibe-to-Execution Translator online. Drop
     category: "system_health",
     audience: "shared",
     agent: "bravo",
-    title: "Restart the bridge cleanly",
+    title: "Restart bridge",
     description:
       "One command. Stops both the heartbeat daemon AND the chat-server, waits for :9100 to free, restarts both. Foundational.",
     foundational: true,
@@ -492,7 +491,7 @@ Acknowledge this directive by saying: "Vibe-to-Execution Translator online. Drop
     category: "system_health",
     audience: "shared",
     agent: "bravo",
-    title: "Audit recurring terminal popups",
+    title: "Audit popup spam",
     description:
       "If a terminal window keeps popping up, run this. Enumerates orphan polling loops, missing CREATE_NO_WINDOW flags, scheduled-task state. Foundational.",
     foundational: true,
@@ -526,7 +525,7 @@ Acknowledge this directive by saying: "Vibe-to-Execution Translator online. Drop
     category: "ops_daily",
     audience: "operator",
     agent: "bravo",
-    title: "Sync this machine with the empire",
+    title: "Machine sync",
     description:
       "Bring this machine up to date with work done on the other one. Pulls every repo in the empire, surfaces env-key drift, restarts the bridge daemon, verifies CLIs + auth, and reports what changed since the last session here. Run this whenever you switch from Windows ↔ Mac or come back to a machine you haven't touched in a while.",
     foundational: true,
@@ -583,7 +582,7 @@ Personal context: I'm CC. My main work machine is Windows; my travel machine is 
     category: "ops_daily",
     audience: "operator",
     agent: "bravo",
-    title: "Pre-sales-block prep",
+    title: "Pre-sales-block",
     description:
       "Before your outreach block: who to call, what they care about, NEPQ openers per lead.",
     tags: ["daily", "sales"],
@@ -595,7 +594,7 @@ Personal context: I'm CC. My main work machine is Windows; my travel machine is 
     category: "ops_daily",
     audience: "operator",
     agent: "maven",
-    title: "Pre-content-block prep",
+    title: "Pre-content-block",
     description:
       "Hook variants + raw outline for today's content drop. Voice-checked.",
     tags: ["daily", "content"],
@@ -607,7 +606,7 @@ Personal context: I'm CC. My main work machine is Windows; my travel machine is 
     category: "ops_daily",
     audience: "operator",
     agent: "atlas",
-    title: "Pre-decision-prep",
+    title: "Pre-decision check",
     description:
       "Before any commitment over $500 or 10 hrs: Atlas runs the financial + opportunity-cost math.",
     tags: ["daily", "money"],
@@ -621,10 +620,11 @@ Personal context: I'm CC. My main work machine is Windows; my travel machine is 
     agent: "bravo",
     title: "Inbox triage",
     description:
-      "Sort the inbound: respond now, schedule, archive, ignore.",
-    tags: ["daily", "comms"],
+      "Read every unread email + agent-inbox message in the last 24h. Classify each (respond / schedule / archive / ignore), rank by what moves the business most, draft replies for the respond-now bucket — no sends.",
+    foundational: true,
+    tags: ["daily", "comms", "inbox", "triage"],
     prompt:
-      "Triage my inbox. For each unread email or DM in the last 24h, classify: respond now (high signal), schedule for later (defer with date), archive (no action needed), or ignore (noise). For respond-now, draft my reply. Don't send anything — draft only.",
+      "Triage every unread message across (a) my email inbox and (b) the agent-inbox (messages other agents posted to me). For each one: who sent it, what they need in one line, the priority (P1 / P2 / P3). Then classify: respond now (high signal), schedule for later (defer with date), archive (no action needed), or ignore (noise). Rank the respond-now bucket by what'll move the business most. For each respond-now item, draft my reply in my voice — don't send anything, draft only. End with a one-line recommendation on what to action first.",
   },
 
   // ── OPS REVIEW ──────────────────────────────────────────────────
@@ -633,7 +633,7 @@ Personal context: I'm CC. My main work machine is Windows; my travel machine is 
     category: "ops_review",
     audience: "shared",
     agent: "bravo",
-    title: "End-of-day reflection",
+    title: "End-of-day",
     description:
       "What moved, what didn't, one lesson, tomorrow's #1.",
     foundational: true,
@@ -666,45 +666,26 @@ Personal context: I'm CC. My main work machine is Windows; my travel machine is 
       "Quarterly review. Big-picture only — are we still on the right product, the right market, the right pricing? What's working that we should double down on. What's not working that we should kill. What's missing that we need to ship. Update brain/STATE.md with the new direction if anything changes.",
   },
 
-  // ── INBOX HANDOFFS ─────────────────────────────────────────────
-  // Triggers that ask one agent to post a structured handoff to
-  // another via tmp/agent_inbox/ + Supabase agent_messages. These
-  // are how CC moves work between agents without copy-pasting.
+  // ── INBOX HANDOFF (single, parameterized) ─────────────────────
+  // One prompt that covers handoffs to ANY other agent (atlas / maven
+  // / aura / hermes / future ones). Caller specifies the target via
+  // <agent> placeholder + 1-line context. Replaced two near-identical
+  // per-target prompts (bravo-to-atlas, bravo-to-maven) that diverged
+  // only in the addressed-agent name. Adding a new agent no longer
+  // requires a new entry — just type the agent name where the
+  // placeholder is.
   {
-    id: "ops-inbox-handoff-bravo-to-atlas",
+    id: "ops-handoff-to-agent",
     category: "ops_daily",
     audience: "operator",
     agent: "bravo",
-    title: "Hand off to Atlas (CFO)",
+    title: "Hand off to another agent",
     description:
-      "Tell Bravo to draft a handoff for Atlas — tax/cashflow/budget review. Posts to inbox so Atlas picks it up next run.",
-    tags: ["inbox", "handoff", "atlas"],
+      "Drafts a clear handoff message to another OASIS agent (Atlas / Maven / Aura / Hermes) and posts it to their agent-inbox so they pick it up next run. One prompt for any target agent.",
+    foundational: true,
+    tags: ["inbox", "handoff", "atlas", "maven", "aura", "hermes"],
     prompt:
-      "I need Atlas to review something. Take what we just discussed, write a clear, specific handoff (priority + needs-reply), and post it to the agent inbox addressed to atlas. Keep the body to 5–8 lines, concrete asks only. Confirm the message id back to me.",
-  },
-  {
-    id: "ops-inbox-handoff-bravo-to-maven",
-    category: "ops_daily",
-    audience: "operator",
-    agent: "bravo",
-    title: "Hand off to Maven (CMO)",
-    description:
-      "Tell Bravo to draft a handoff for Maven — content, ads, funnels. Posts to inbox so Maven picks it up next run.",
-    tags: ["inbox", "handoff", "maven"],
-    prompt:
-      "I need Maven to take this on. Summarize the brief in 5–8 lines, set priority, mark needs-reply if you want a back-and-forth, and post it to the agent inbox addressed to maven. Confirm the message id back to me.",
-  },
-  {
-    id: "ops-inbox-check",
-    category: "ops_daily",
-    audience: "shared",
-    agent: "bravo",
-    title: "Check the inbox",
-    description:
-      "Read all unread messages, summarize what each one needs, and recommend which to action first.",
-    tags: ["inbox", "review"],
-    prompt:
-      "Read every unread message in the agent inbox. For each: who sent it, what they need, the priority. Then rank them by what'll move the business most. End with a one-line recommendation on what I should action first.",
+      "I need <target agent: atlas | maven | aura | hermes> to take something on. Take what we just discussed (or what I'm pasting next), write a clear, specific handoff in 5–8 lines: who's asking + what they need + priority + needs-reply flag. Concrete asks only — no generic 'review this and let me know your thoughts.' Post it to the agent inbox addressed to that agent, then confirm the message id back to me. Context for this handoff: ",
   },
 ];
 
