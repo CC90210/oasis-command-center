@@ -180,7 +180,16 @@ const MAX_ATTACHMENT_EXCERPT_CHARS = 120_000;
 const CHAT_FETCH_TIMEOUT_MS = 90_000;
 const BRIDGE_TOOL_TIMEOUT_MS = 120_000;
 const RESUME_FETCH_TIMEOUT_MS = 90_000;
-const SSE_INACTIVITY_TIMEOUT_MS = 75_000;
+// SSE inactivity watchdog — bumped 2026-05-23 from 75s to 240s.
+// Codex / Gemini CLI subprocesses can run silently for 60-180s while
+// they do their internal tool-use loop (file reads, command execution,
+// HTTP fetches), then emit one big delta with the final response. The
+// bridge ticks `agent_status: thinking` every 25s during long waits
+// (heartbeat in _run_chat_via_local_cli) which keeps the watchdog
+// from firing — but 240s is the safety margin if that ticker ever
+// fails. The previous 75s tripped on every long-running daily-briefing
+// turn.
+const SSE_INACTIVITY_TIMEOUT_MS = 240_000;
 
 /**
  * One-shot migration from the v2 vocabulary to the v3 vocabulary.
@@ -215,10 +224,10 @@ function migrateLegacyChatMode(): ChatMode | null {
 
 const AGENT_SUGGESTIONS: Record<string, string[]> = {
   bravo: [
+    "Run the daily briefing",
     "Show me my MRR + this week's revenue movement",
     "Which leads are qualified and ready to close?",
-    "Send a check-in to Jonathan",
-    "Run the daily briefing",
+    "Draft a follow-up for my top stalled lead",
   ],
   atlas: [
     "Summarize this week's net worth + cash position",
