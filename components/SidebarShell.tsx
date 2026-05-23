@@ -18,13 +18,15 @@
 import { useEffect, useRef, useState, type ComponentProps } from "react";
 import { usePathname } from "next/navigation";
 import Link from "next/link";
-import { Menu } from "lucide-react";
+import { Menu, PanelLeftOpen } from "lucide-react";
 import { Sidebar } from "./Sidebar";
+import { useSidebarCollapsed } from "@/lib/useSidebarCollapsed";
 
 type SidebarProps = ComponentProps<typeof Sidebar>;
 
 export function SidebarShell(props: SidebarProps) {
   const [open, setOpen] = useState(false);
+  const { collapsed: desktopCollapsed, toggle: toggleDesktopCollapse } = useSidebarCollapsed();
   const pathname = usePathname();
   const hamburgerRef = useRef<HTMLButtonElement | null>(null);
 
@@ -97,10 +99,33 @@ export function SidebarShell(props: SidebarProps) {
         />
       )}
 
+      {/* Floating reopen button — visible ONLY at md+ when desktop
+          sidebar is collapsed. Anchored to top-left so the operator can
+          always find their way back. */}
+      {desktopCollapsed && (
+        <button
+          type="button"
+          onClick={toggleDesktopCollapse}
+          aria-label="Open navigation"
+          aria-expanded={false}
+          aria-controls="sidebar-drawer"
+          title="Reopen sidebar"
+          className="hidden md:inline-flex fixed top-3 left-3 z-30 h-9 w-9 items-center justify-center rounded-md border border-bg-border bg-bg-panel/80 backdrop-blur text-fg-muted hover:text-fg hover:bg-bg-elev shadow-card transition-colors"
+        >
+          <PanelLeftOpen className="w-4 h-4" />
+        </button>
+      )}
+
       {/* The aside itself — Sidebar owns its own close button (mobile)
           via the onMobileClose prop, so the X always tracks the sidebar's
           actual width instead of a magic offset. */}
-      <Sidebar {...props} isMobileOpen={open} onMobileClose={() => setOpen(false)} />
+      <Sidebar
+        {...props}
+        isMobileOpen={open}
+        onMobileClose={() => setOpen(false)}
+        onDesktopCollapse={toggleDesktopCollapse}
+        isDesktopCollapsed={desktopCollapsed}
+      />
     </>
   );
 }

@@ -5,6 +5,17 @@
 :root {
   color-scheme: dark;
   --grid-fade: radial-gradient(ellipse at center, black 30%, transparent 80%);
+  /* Sidebar width — consumed by app/layout.tsx <main>'s left margin. The
+     boot script in <head> flips html[data-sidebar] to "expanded" or
+     "collapsed" before paint, and these rules set the matching width.
+     15rem = 240px = w-60 in Tailwind. */
+  --sidebar-w: 15rem;
+}
+html[data-sidebar="collapsed"] {
+  --sidebar-w: 0rem;
+}
+html[data-sidebar="expanded"] {
+  --sidebar-w: 15rem;
 }
 
 html,

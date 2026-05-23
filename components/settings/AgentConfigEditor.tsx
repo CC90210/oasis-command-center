@@ -57,6 +57,11 @@ type RowState = {
   paletteSaving: boolean;
   paletteSaved: boolean;
   paletteError: string | null;
+  // Alpha.6 — "Test connection" probe state. Set while the request is
+  // in flight (testing=true) and to the result after. Cleared whenever
+  // the operator edits the apiKey field so a stale ✓/✗ never lingers.
+  testing?: boolean;
+  testResult?: { ok: boolean; message?: string; code?: string; provider_response_ms?: number };
 };
 
 export type ToolCatalogEntry = {
@@ -206,6 +211,48 @@ export function AgentConfigEditor({
 
   function patchRow(key: string, patch: Partial<RowState>) {
     setRows((r) => ({ ...r, [key]: { ...r[key], ...patch } }));
+  }
+
+  // Alpha.6 — probe the provider with the typed key before saving so the
+  // operator sees green ✓ / red ✗ inline. /api/agent-config/test-key hits
+  // the provider's lightest endpoint and reports HTTP status + latency.
+  // The button is disabled when the field is empty; clearing the field
+  // clears any previous result so a stale ✓ never lingers across edits.
+  async function testKey(agentKey: string) {
+    const row = rows[agentKey];
+    const key = row.apiKey.trim();
+    if (!key) return;
+    patchRow(agentKey, { testing: true, testResult: undefined });
+    try {
+      const res = await fetch("/api/agent-config/test-key", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ provider: row.provider, api_key: key }),
+      });
+      const body = (await res.json().catch(() => ({}))) as {
+        ok?: boolean;
+        message?: string;
+        code?: string;
+        provider_response_ms?: number;
+      };
+      patchRow(agentKey, {
+        testing: false,
+        testResult: {
+          ok: !!body.ok,
+          message: body.message,
+          code: body.code,
+          provider_response_ms: body.provider_response_ms,
+        },
+      });
+    } catch (e) {
+      patchRow(agentKey, {
+        testing: false,
+        testResult: {
+          ok: false,
+          message: e instanceof Error ? e.message : "Network error while testing key.",
+        },
+      });
+    }
   }
 
   async function save(agentKey: string) {
@@ -513,7 +560,7 @@ export function AgentConfigEditor({
                   <input
                     type={row.showKey || row.provider === "ollama" ? "text" : "password"}
                     value={row.apiKey}
-                    onChange={(e) => patchRow(key, { apiKey: e.target.value })}
+                    onChange={(e) => patchRow(key, { apiKey: e.target.value, testResult: undefined })}
                     placeholder={placeholder}
                     className={`input font-mono ${
                       usingGlobal
@@ -529,7 +576,35 @@ export function AgentConfigEditor({
                   >
                     {row.showKey ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
                   </button>
+                  <button
+                    type="button"
+                    onClick={() => testKey(key)}
+                    disabled={!row.apiKey.trim() || row.testing}
+                    className="btn-secondary text-xs whitespace-nowrap disabled:opacity-50"
+                    title="Probe the provider with this key to confirm it's valid before saving"
+                  >
+                    {row.testing ? "Testing…" : "Test connection"}
+                  </button>
                 </div>
+                {row.testResult && (
+                  <div
+                    className={`mt-1.5 rounded-md border px-2.5 py-1.5 text-[11px] leading-relaxed ${
+                      row.testResult.ok
+                        ? "border-status-engaged/40 bg-status-engaged/10 text-status-engaged"
+                        : "border-status-hot/40 bg-status-hot/10 text-status-hot"
+                    }`}
+                  >
+                    {row.testResult.ok ? (
+                      <span>
+                        ✓ Provider responded in {row.testResult.provider_response_ms || "?"}ms. Save when ready.
+                      </span>
+                    ) : (
+                      <span className="font-sans">
+                        {row.testResult.message || `Probe failed (code ${row.testResult.code || "?"})`}
+                      </span>
+                    )}
+                  </div>
+                )}
               </label>
                 );
               })()}

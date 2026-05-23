@@ -22,6 +22,7 @@ import { isOperatorEmail } from "@/lib/operator-credentials";
 import { timeAgo, truncate } from "@/lib/fmt";
 import { buildRecordResolver, projectEvent } from "@/lib/event-projection";
 import { WarmPoolPanel } from "@/components/WarmPoolPanel";
+import { BridgeCliPanel } from "@/components/BridgeCliPanel";
 
 export const dynamic = "force-dynamic";
 
@@ -345,6 +346,13 @@ export default async function OperationsPage({
             })}
           </ul>
         )}
+      </Card>
+
+      <Card
+        title="Local CLI status"
+        subtitle="Per-CLI install probe on your local bridge. Green = the bridge found the binary and could run --version. Red = chat-via-CLI will fall back to API-key mode for that provider."
+      >
+        <BridgeCliPanel />
       </Card>
 
       <Card

@@ -1548,6 +1548,13 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
       // the loop to detect silent-stream failures without having to read
       // React state from inside another setter.
       let receivedAnyContent = false;
+      // Captured by the SSE `error` event handler below so the post-
+      // stream "empty content" check can decide whether to overwrite
+      // with the generic banner or trust the specific bridge error.
+      // Alpha.6 — bridge emits {code, message} so we can drive specific
+      // UX (install CLI, sign in to provider, switch to API-key mode).
+      let streamErrorCode = "";
+      let streamErrorMessage = "";
       // Populated when the cloud tool_use loop pauses on a deferred tool
       // (defer:true on a tool definition — see lib/cloud-tool-runner.ts).
       // After the SSE stream closes, we proxy this to localhost:9100 via
@@ -1880,10 +1887,20 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
             // (e.g., claude_exit_1 with the actual claude error message)
             // so the operator can see WHY the subprocess crashed instead
             // of just a cryptic exit code.
+            //
+            // Alpha.6 — the bridge now emits a structured `code` field
+            // (cli_not_found, cli_empty_output, cli_auth_required, etc.)
+            // alongside the human `message`. We mirror code into local
+            // `streamErrorCode` so the post-stream empty-content check
+            // below doesn't clobber it with the generic banner.
             const msg = String(parsed.message || "stream_error");
+            const code = parsed.code ? String(parsed.code) : "";
             const rawDetail = parsed.detail ? String(parsed.detail) : "";
             const detail = rawDetail.slice(0, 1500);
             setError(detail ? `${msg}\n\n${detail}` : msg);
+            if (code) setErrorCode(code);
+            streamErrorCode = code || streamErrorCode;
+            streamErrorMessage = msg;
             // Auto-clear sessionId on subprocess crashes so the next
             // Send doesn't pass --resume <stale-id> to claude. The user
             // gets a clean retry without having to click refresh.
@@ -2002,9 +2019,21 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
       // from inside another setter's updater (strict-mode double-invoke
       // hazard).
       if (!receivedAnyContent) {
-        setError(
-          "The agent returned no response. The bridge or upstream model closed the stream without sending any text. Check the bridge logs (pm2 logs claude-bridge) or your API-key quota."
-        );
+        // Alpha.6 — if the SSE stream already emitted a specific error
+        // (code + message), trust that. Only fall back to the generic
+        // "no response" banner when the bridge closed silently without
+        // any error event at all. The previous behaviour ALWAYS wrote
+        // the generic banner here, which clobbered "Gemini CLI isn't
+        // installed" / "Codex says you need to sign in" with a useless
+        // "check bridge logs" string.
+        if (!streamErrorMessage) {
+          setError(
+            "The agent returned no response. The bridge closed the stream without sending any text or error. " +
+              (useBridge
+                ? "Open Operations → Local Bridge for CLI status, or use the Retry button below to try API-key mode."
+                : "Often a provider quota or network blip — try again, or check Settings → AI provider accounts.")
+          );
+        }
         // Stash which route just failed so the error banner can offer a
         // one-click retry on the OTHER route (CLI bridge ↔ cloud API key).
         setLastFailedMode(useBridge ? "cli" : "cloud");
@@ -2620,6 +2649,47 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
                     </Link>{" "}
                     and click <strong>Replace key</strong> on the affected provider — paste the same value, save, and you&apos;re back. Takes 30 seconds.
                   </div>
+                </>
+              ) : errorCode === "cli_not_found" ? (
+                <>
+                  <div className="font-bold">The local CLI for this agent isn&apos;t installed.</div>
+                  <div className="text-xs text-fg-muted font-sans whitespace-pre-wrap">{error}</div>
+                  <div className="text-xs text-fg-muted font-sans">
+                    Either install it (the message above tells you how) or use the Retry button below to switch to API-key mode.
+                  </div>
+                </>
+              ) : errorCode === "cli_auth_required" ? (
+                <>
+                  <div className="font-bold">The CLI needs to sign in first.</div>
+                  <div className="text-xs text-fg-muted font-sans whitespace-pre-wrap">{error}</div>
+                  <div className="text-xs text-fg-muted font-sans">
+                    Open Terminal and run the command shown above, then click Retry.
+                  </div>
+                </>
+              ) : errorCode === "cli_outdated" ? (
+                <>
+                  <div className="font-bold">Your CLI is too old for this build.</div>
+                  <div className="text-xs text-fg-muted font-sans whitespace-pre-wrap">{error}</div>
+                </>
+              ) : errorCode === "cli_empty_output" ? (
+                <>
+                  <div className="font-bold">The CLI ran but returned nothing.</div>
+                  <div className="text-xs text-fg-muted font-sans whitespace-pre-wrap">{error}</div>
+                  <div className="text-xs text-fg-muted font-sans">
+                    Usually a quota or auth issue. Try Retry on API-key mode below, or check the CLI in Terminal.
+                  </div>
+                </>
+              ) : errorCode === "cli_timeout" ? (
+                <>
+                  <div className="font-bold">The CLI timed out.</div>
+                  <div className="text-xs text-fg-muted font-sans">
+                    Long prompts can exceed the bridge&apos;s 120-second budget. Try API-key mode (it streams) or shorten the prompt.
+                  </div>
+                </>
+              ) : errorCode === "cli_nonzero_exit" ? (
+                <>
+                  <div className="font-bold">The CLI exited with an error.</div>
+                  <div className="text-xs text-fg-muted font-sans whitespace-pre-wrap">{error}</div>
                 </>
               ) : error.startsWith("provider_temporarily_unavailable") ? (
                 <>

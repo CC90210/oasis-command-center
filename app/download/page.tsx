@@ -29,8 +29,8 @@ export const dynamic = "force-dynamic";
  * lands — the auto-detect proxy routes to the right tag per platform.
  */
 
-const VERSION = "0.1.0-alpha.5";
-const RELEASE_TAG = "oasis-desktop-v0.1.0-alpha.5";
+const VERSION = "0.1.0-alpha.6";
+const RELEASE_TAG = "oasis-desktop-v0.1.0-alpha.6";
 const RELEASE_URL = `https://github.com/CC90210/CEO-Agent/releases/tag/${RELEASE_TAG}`;
 const AUTO_DOWNLOAD_URL = "/api/download/desktop";
 const MAC_DMG_URL = "/api/download/desktop?platform=mac";
@@ -41,11 +41,9 @@ const LINUX_DEB_URL = "/api/download/desktop?platform=linux-deb";
 const CHECKSUM_URL = "/api/download/desktop?platform=checksums";
 
 const CHECKSUMS = [
-  ["macOS (universal · alpha.5)", "b12104e5081e595b38fae4d6b9e543ec0374f81d1b9d5a3f4dc6c64646f0aaa1"],
-  ["Linux x86_64 AppImage (alpha.5)", "b1eee174e548792c26053298515f926e225b18c47d6575ae3f1ea98c9cc8377b"],
-  ["Linux amd64 deb (alpha.5)", "315d836705eedc45dc4fc9dccea025a5577bec32573114f12a0e21400e115f20"],
-  ["Linux arm64 AppImage (alpha.5)", "14ad24e521212c8c6629af93f57c97a1f9be70dc20ad15ede7294d27e4204aad"],
-  ["Linux arm64 deb (alpha.5)", "aac05250e3495438fdda82fbc9eb886a41375b2e8460315129bf49f11270d23a"],
+  ["macOS (universal · alpha.6)", "eecde66712654f5cdd4447b33986a1afb2853c0659de56cacd7b59d3cf965139"],
+  ["Linux x86_64 AppImage (alpha.6)", "2125e7fa16cdefba02474d11b3d6bc62a5bbba15e61beb962864393b4cfe6b1d"],
+  ["Linux amd64 deb (alpha.6)", "41103e2112f7816af4603c29eaf41ea3645a71ccf1b847b4e99692d33f6fe9c9"],
   ["Windows portable zip (alpha.4)", "07dea7cf78ce4ae36321dbdebb0e0c246dbf0c173699c2bd31e3fa9fa88e9c76"],
   ["Windows installer (alpha.4)", "18e09eb6efd275d06c6b2f8f1e116f3edfe9635e888b0d6fb04cf069f3db23cd"],
 ] as const;

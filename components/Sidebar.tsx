@@ -27,6 +27,7 @@ import {
   Mail,
   Megaphone,
   MessageSquare,
+  PanelLeftClose,
   Plug,
   Radio,
   RefreshCcw,
@@ -98,6 +99,8 @@ export function Sidebar({
   demoLandingPath = "/demo/sun",
   isMobileOpen = false,
   onMobileClose,
+  onDesktopCollapse,
+  isDesktopCollapsed = false,
 }: {
   brand?: string;
   logo?: "oasis" | "sunbiz" | "suga";
@@ -121,6 +124,13 @@ export function Sidebar({
   /** Mobile drawer close handler. Required for the close button inside the
    *  drawer to work. Ignored at md+. */
   onMobileClose?: () => void;
+  /** Desktop collapse handler — wired by SidebarShell to flip the
+   *  localStorage-backed collapsed state. Renders the PanelLeftClose
+   *  affordance inside the brand block when present. */
+  onDesktopCollapse?: () => void;
+  /** Whether the desktop sidebar is currently collapsed. Drives the
+   *  translate-x animation. Ignored on mobile (drawer state wins). */
+  isDesktopCollapsed?: boolean;
 }) {
   const pathname = usePathname();
   const navItems = items && items.length > 0 ? items : CC_NAV;
@@ -177,9 +187,13 @@ export function Sidebar({
       role={isMobileOpen ? "dialog" : undefined}
       aria-modal={isMobileOpen ? true : undefined}
       aria-label="Navigation menu"
+      // Desktop collapse: when isDesktopCollapsed, slide the aside fully
+      // off-screen. Mobile drawer transform takes priority on small
+      // screens. CSS variable on <html> drives the main element's left
+      // margin so the page expands smoothly.
       className={`fixed left-0 top-0 bottom-0 w-60 border-r border-bg-border bg-bg-panel flex flex-col z-40 md:z-20 transition-transform duration-200 ${
         isMobileOpen ? "translate-x-0" : "-translate-x-full"
-      } md:translate-x-0`}
+      } ${isDesktopCollapsed ? "md:-translate-x-full" : "md:translate-x-0"}`}
     >
       {/* Brand block */}
       <div className="px-5 py-5 border-b border-bg-border relative">
@@ -197,6 +211,20 @@ export function Sidebar({
             className="md:hidden absolute top-3 right-3 inline-flex h-8 w-8 items-center justify-center rounded-md text-fg-muted hover:text-fg hover:bg-bg-elev"
           >
             <X className="w-4 h-4" />
+          </button>
+        )}
+        {/* Desktop-only collapse button — slides the sidebar off-screen.
+            Floating reopen affordance lives in SidebarShell so it can
+            render when the sidebar itself isn't visible. */}
+        {onDesktopCollapse && (
+          <button
+            type="button"
+            onClick={onDesktopCollapse}
+            aria-label="Collapse navigation"
+            className="hidden md:inline-flex absolute top-3 right-3 h-8 w-8 items-center justify-center rounded-md text-fg-muted hover:text-fg hover:bg-bg-elev transition-colors"
+            title="Collapse sidebar (full-width view)"
+          >
+            <PanelLeftClose className="w-4 h-4" />
           </button>
         )}
         <Link href="/" className="flex items-center gap-2.5 group">

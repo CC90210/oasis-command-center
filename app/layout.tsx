@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import { cookies, headers } from "next/headers";
 import "./globals.css";
 import { SidebarShell } from "@/components/SidebarShell";
+import { SIDEBAR_BOOT_SCRIPT } from "@/lib/useSidebarCollapsed";
 import { getActiveProfile, getBridgeOnline } from "@/lib/queries";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { safe } from "@/lib/api-helpers";
@@ -218,6 +219,18 @@ export default async function RootLayout({
 
   return (
     <html lang="en">
+      <head>
+        {/* Synchronous boot script — reads localStorage and writes
+            data-sidebar=collapsed|expanded on <html> before paint. CSS
+            below keys main element's left margin off that attribute.
+            Without this the page paints with the default sidebar width
+            then visibly jolts when React hydrates with the collapsed
+            value. */}
+        <script
+          // eslint-disable-next-line react/no-danger
+          dangerouslySetInnerHTML={{ __html: SIDEBAR_BOOT_SCRIPT }}
+        />
+      </head>
       <body className="grain">
         {isFullBleed || !manifest ? (
           children
@@ -244,7 +257,11 @@ export default async function RootLayout({
               demoMode={demoMode}
               demoLabel={`${manifest.brand.name} demo`}
             />
-            <main className="ml-0 md:ml-60 min-h-screen relative z-10 pt-14 md:pt-0">
+            {/* Main element responds to the data-sidebar attribute on
+                <html>. Expanded: ml-60. Collapsed: ml-0. The transition
+                class is applied at md+ only so mobile (where sidebar is
+                position:fixed overlay) isn't affected. */}
+            <main className="ml-0 md:ml-[var(--sidebar-w,15rem)] min-h-screen relative z-10 pt-14 md:pt-0 transition-[margin] duration-200">
               <div className={`mx-auto ${contentWidthClass} px-4 md:px-8 py-6 md:py-8`}>
                 {children}
               </div>

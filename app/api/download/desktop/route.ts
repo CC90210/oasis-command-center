@@ -7,16 +7,16 @@ export const dynamic = "force-dynamic";
 // works for Windows users (just with the older sign-in UX). The build
 // per-platform may diverge again on future drops — keep this mapping
 // per-target rather than collapsing to a single tag.
-const MAC_LINUX_TAG = "oasis-desktop-v0.1.0-alpha.5";
+const MAC_LINUX_TAG = "oasis-desktop-v0.1.0-alpha.6";
 const WIN_TAG = "oasis-desktop-v0.1.0-alpha.4";
 const RELEASE_BASE = `https://github.com/CC90210/CEO-Agent/releases/download`;
 
 const DOWNLOADS = {
   windows: `${RELEASE_BASE}/${WIN_TAG}/OASIS-AI-0.1.0-win-x64-portable.zip`,
   windowsInstaller: `${RELEASE_BASE}/${WIN_TAG}/OASIS-AI-0.1.0-win-x64.exe`,
-  mac: `${RELEASE_BASE}/${MAC_LINUX_TAG}/OASIS-AI-0.1.0-alpha.5-mac-universal.dmg`,
-  linux: `${RELEASE_BASE}/${MAC_LINUX_TAG}/OASIS-AI-0.1.0-alpha.5-linux-x86_64.AppImage`,
-  linuxDeb: `${RELEASE_BASE}/${MAC_LINUX_TAG}/OASIS-AI-0.1.0-alpha.5-linux-amd64.deb`,
+  mac: `${RELEASE_BASE}/${MAC_LINUX_TAG}/OASIS-AI-0.1.0-alpha.6-mac-universal.dmg`,
+  linux: `${RELEASE_BASE}/${MAC_LINUX_TAG}/OASIS-AI-0.1.0-alpha.6-linux-x86_64.AppImage`,
+  linuxDeb: `${RELEASE_BASE}/${MAC_LINUX_TAG}/OASIS-AI-0.1.0-alpha.6-linux-amd64.deb`,
   checksums: `${RELEASE_BASE}/${MAC_LINUX_TAG}/SHA256SUMS-release.txt`,
 } as const;
 
