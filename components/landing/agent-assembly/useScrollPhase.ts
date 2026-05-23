@@ -13,7 +13,7 @@ export type ScrollPhase = {
   scrollProgress: MotionValue<number>;
 };
 
-const PHASE_COUNT = 8;
+const DEFAULT_PHASE_COUNT = 11;
 
 function clampProgress(value: number) {
   return Math.max(0, Math.min(1, value));
@@ -21,7 +21,9 @@ function clampProgress(value: number) {
 
 export function useScrollPhase(
   target: RefObject<HTMLElement | null>,
+  phaseCount: number = DEFAULT_PHASE_COUNT,
 ): ScrollPhase {
+  const PHASE_COUNT = phaseCount;
   const { scrollYProgress } = useScroll({
     target,
     offset: ["start start", "end end"],

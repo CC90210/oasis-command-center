@@ -5,6 +5,9 @@ import { ChevronDown } from "lucide-react";
 import { motion, useReducedMotion, useTransform, type MotionValue } from "framer-motion";
 import { AgentFigure } from "./agent-assembly/AgentFigure";
 import { BrowserOptics } from "./agent-assembly/modules/BrowserOptics";
+import { BusinessLayer } from "./agent-assembly/modules/BusinessLayer";
+import { CommandCentre } from "./agent-assembly/modules/CommandCentre";
+import { DashboardMetrics } from "./agent-assembly/modules/DashboardMetrics";
 import { GuardShield } from "./agent-assembly/modules/GuardShield";
 import { MemorySpine } from "./agent-assembly/modules/MemorySpine";
 import { OutputHalo } from "./agent-assembly/modules/OutputHalo";
@@ -15,8 +18,8 @@ import { ToolLimbs } from "./agent-assembly/modules/ToolLimbs";
 import { useCursorTracking } from "./agent-assembly/useCursorTracking";
 import { useScrollPhase } from "./agent-assembly/useScrollPhase";
 
-const PHASE_COUNT = 8;
-const INSTALL_WINDOW = 0.06;
+const PHASE_COUNT = 11;
+const INSTALL_WINDOW = 0.05;
 
 /**
  * Each phase maps to a real subsystem in CC's empire. Labels surface in
@@ -39,6 +42,9 @@ const MODULE_MANIFEST = [
   { label: "Guard Shield",       subsystem: "secret · exec · state guard hooks" },
   { label: "Output Channels",    subsystem: "Telegram · Email · Dashboard feed" },
   { label: "Security Mesh",      subsystem: "Zero-trust mesh · audit_mcp_secrets · RLS" },
+  { label: "Business Layer",     subsystem: "Brand · Voice · Audience · Goals manifest" },
+  { label: "Command Centre",     subsystem: "Pulse · Crons · Funnel · Pipeline" },
+  { label: "Dashboard Metrics",  subsystem: "MRR · Pipeline · Conversions live" },
 ] as const;
 
 const AMBIENT_PARTICLES = [
@@ -154,6 +160,9 @@ export function AgentAssemblyScrollScene() {
   const shieldProgress = useInstallProgress(scrollProgress, 5);
   const haloProgress = useInstallProgress(scrollProgress, 6);
   const meshProgress = useInstallProgress(scrollProgress, 7);
+  const businessProgress = useInstallProgress(scrollProgress, 8);
+  const commandProgress = useInstallProgress(scrollProgress, 9);
+  const dashboardProgress = useInstallProgress(scrollProgress, 10);
 
   const progressScale = forceInstalled ? 1 : scrollProgress;
   const buildPercent = forceInstalled
@@ -386,6 +395,9 @@ export function AgentAssemblyScrollScene() {
             <GuardShield installProgress={shieldProgress} forceInstalled={forceInstalled} />
             <OutputHalo installProgress={haloProgress} forceInstalled={forceInstalled} />
             <SecurityMesh installProgress={meshProgress} forceInstalled={forceInstalled} />
+            <BusinessLayer installProgress={businessProgress} forceInstalled={forceInstalled} />
+            <CommandCentre installProgress={commandProgress} forceInstalled={forceInstalled} />
+            <DashboardMetrics installProgress={dashboardProgress} forceInstalled={forceInstalled} />
           </AgentFigure>
         </div>
 

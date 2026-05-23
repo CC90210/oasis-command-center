@@ -22,6 +22,14 @@ const HEAD_SPRING = {
   mass: 0.45,
 };
 
+// Softer spring for arms so they trail the head slightly — feels organic,
+// like the body catching up to where the gaze has already shifted.
+const ARM_SPRING = {
+  stiffness: 80,
+  damping: 26,
+  mass: 0.6,
+};
+
 export function AgentFigure({
   children,
   cursorX,
@@ -32,6 +40,16 @@ export function AgentFigure({
   const headPitch = useSpring(useTransform(cursorY, [-1, 1], [2, -2]), HEAD_SPRING);
   const headX = useSpring(useTransform(cursorX, [-1, 1], [-1.8, 1.8]), HEAD_SPRING);
   const headY = useSpring(useTransform(cursorY, [-1, 1], [-1.2, 1.2]), HEAD_SPRING);
+
+  // Arms drift toward the cursor with a softer, slower spring. Left arm
+  // pivots subtly inward on right-cursor (and vice-versa) so the agent
+  // looks like it's reaching toward the pointer.
+  const leftArmX = useSpring(useTransform(cursorX, [-1, 1], [-2.5, 1.5]), ARM_SPRING);
+  const leftArmY = useSpring(useTransform(cursorY, [-1, 1], [-1, 1.5]), ARM_SPRING);
+  const leftArmRotate = useSpring(useTransform(cursorX, [-1, 1], [1.5, -2.2]), ARM_SPRING);
+  const rightArmX = useSpring(useTransform(cursorX, [-1, 1], [-1.5, 2.5]), ARM_SPRING);
+  const rightArmY = useSpring(useTransform(cursorY, [-1, 1], [-1, 1.5]), ARM_SPRING);
+  const rightArmRotate = useSpring(useTransform(cursorX, [-1, 1], [-2.2, 1.5]), ARM_SPRING);
 
   return (
     <svg
@@ -91,30 +109,54 @@ export function AgentFigure({
       </g>
 
       <g>
-        <path
-          d="M128 273 C115 306 111 359 122 421 L147 411 C141 357 145 311 160 279 Z"
-          fill="#07120f"
-          stroke="rgba(52,211,153,0.18)"
-          strokeWidth={1.2}
-        />
-        <path
-          d="M292 273 C305 306 309 359 298 421 L273 411 C279 357 275 311 260 279 Z"
-          fill="#07120f"
-          stroke="rgba(52,211,153,0.18)"
-          strokeWidth={1.2}
-        />
-        <path
-          d="M111 264 C128 232 162 216 184 226 L167 277 C143 276 124 273 111 264 Z"
-          fill="url(#agent-body-gradient)"
-          stroke="rgba(52,211,153,0.26)"
-          strokeWidth={1.4}
-        />
-        <path
-          d="M309 264 C292 232 258 216 236 226 L253 277 C277 276 296 273 309 264 Z"
-          fill="url(#agent-body-gradient)"
-          stroke="rgba(52,211,153,0.26)"
-          strokeWidth={1.4}
-        />
+        {/* LEFT arm group — pivots at the shoulder (140, 250) so subtle
+            rotation reads as the arm swinging toward the cursor. */}
+        <motion.g
+          style={{
+            x: leftArmX,
+            y: leftArmY,
+            rotate: leftArmRotate,
+            transformBox: "view-box",
+            transformOrigin: "140px 250px",
+          }}
+        >
+          <path
+            d="M128 273 C115 306 111 359 122 421 L147 411 C141 357 145 311 160 279 Z"
+            fill="#07120f"
+            stroke="rgba(52,211,153,0.18)"
+            strokeWidth={1.2}
+          />
+          <path
+            d="M111 264 C128 232 162 216 184 226 L167 277 C143 276 124 273 111 264 Z"
+            fill="url(#agent-body-gradient)"
+            stroke="rgba(52,211,153,0.26)"
+            strokeWidth={1.4}
+          />
+        </motion.g>
+
+        {/* RIGHT arm group — mirrored pivot at (280, 250). */}
+        <motion.g
+          style={{
+            x: rightArmX,
+            y: rightArmY,
+            rotate: rightArmRotate,
+            transformBox: "view-box",
+            transformOrigin: "280px 250px",
+          }}
+        >
+          <path
+            d="M292 273 C305 306 309 359 298 421 L273 411 C279 357 275 311 260 279 Z"
+            fill="#07120f"
+            stroke="rgba(52,211,153,0.18)"
+            strokeWidth={1.2}
+          />
+          <path
+            d="M309 264 C292 232 258 216 236 226 L253 277 C277 276 296 273 309 264 Z"
+            fill="url(#agent-body-gradient)"
+            stroke="rgba(52,211,153,0.26)"
+            strokeWidth={1.4}
+          />
+        </motion.g>
         <path
           d="M143 254 L181 227 H239 L277 254 L263 420 L226 470 H194 L157 420 Z"
           fill="url(#agent-body-gradient)"
