@@ -22,65 +22,61 @@ export function BusinessLayer(props: ModuleProps) {
       burstColor="rgba(167, 139, 250, 0.95)"
     >
       <g filter="url(#agent-soft-glow)">
-        {/* Wide oval data ring around the figure's torso */}
-        <ellipse
-          cx={0}
-          cy={0}
-          rx={160}
-          ry={92}
-          fill="none"
-          stroke="rgba(167, 139, 250, 0.42)"
-          strokeWidth={1.1}
-          strokeDasharray="6 8"
-        />
-        <ellipse
-          cx={0}
-          cy={0}
-          rx={140}
-          ry={78}
-          fill="none"
-          stroke="rgba(167, 139, 250, 0.28)"
-          strokeWidth={0.7}
-        />
-
-        {/* Four brand-pillar tags pinned at compass points on the ring */}
+        {/* Four brand-pillar tags anchored at body landmarks with thin
+            connector lines back to the figure. Replaces the previous
+            big orbital ring that competed with the GuardShield +
+            SecurityMesh wraps. Each tag attaches to a specific anchor
+            point so it reads as DOCKED to the body, not floating. */}
         {[
-          { x: -158, y: 0, label: "BRAND" },
-          { x: 158, y: 0, label: "VOICE" },
-          { x: 0, y: -90, label: "AUDIENCE" },
-          { x: 0, y: 92, label: "GOALS" },
+          { x: -150, y: -36, anchorX: -50, anchorY: -36, label: "BRAND" },
+          { x: 150, y: -36, anchorX: 50, anchorY: -36, label: "VOICE" },
+          { x: -150, y: 60, anchorX: -50, anchorY: 60, label: "AUDIENCE" },
+          { x: 150, y: 60, anchorX: 50, anchorY: 60, label: "GOALS" },
         ].map((tag) => (
-          <g key={tag.label} transform={`translate(${tag.x} ${tag.y})`}>
-            <rect x={-22} y={-7} width={44} height={14} rx={2} fill="rgba(7, 18, 15, 0.92)" stroke="rgba(167, 139, 250, 0.7)" strokeWidth={0.8} />
-            <text
-              x={0}
-              y={3}
-              fontSize="6.5"
+          <g key={tag.label}>
+            {/* Thin connector line from body anchor to tag */}
+            <line
+              x1={tag.anchorX}
+              y1={tag.anchorY}
+              x2={tag.x + (tag.x > 0 ? -22 : 22)}
+              y2={tag.y}
+              stroke="rgba(167, 139, 250, 0.42)"
+              strokeWidth={0.8}
+              strokeDasharray="2 3"
+            />
+            {/* Anchor dot on the body */}
+            <circle
+              cx={tag.anchorX}
+              cy={tag.anchorY}
+              r={1.6}
               fill="rgba(216, 180, 254, 0.95)"
-              fontFamily="ui-monospace, monospace"
-              textAnchor="middle"
-              letterSpacing="0.18em"
-            >
-              {tag.label}
-            </text>
+            />
+            {/* Tag badge */}
+            <g transform={`translate(${tag.x} ${tag.y})`}>
+              <rect
+                x={-22}
+                y={-7}
+                width={44}
+                height={14}
+                rx={2}
+                fill="rgba(7, 18, 15, 0.94)"
+                stroke="rgba(167, 139, 250, 0.7)"
+                strokeWidth={0.9}
+              />
+              <text
+                x={0}
+                y={3}
+                fontSize="6.5"
+                fill="rgba(216, 180, 254, 0.95)"
+                fontFamily="ui-monospace, monospace"
+                textAnchor="middle"
+                letterSpacing="0.18em"
+              >
+                {tag.label}
+              </text>
+            </g>
           </g>
         ))}
-
-        {/* Four small data dots between the tags for visual rhythm */}
-        {[45, 135, 225, 315].map((angle) => {
-          const rad = (angle * Math.PI) / 180;
-          const x = Math.cos(rad) * 158;
-          const y = Math.sin(rad) * 90;
-          return (
-            <circle
-              key={angle}
-              cx={x}
-              cy={y}
-              r={2}
-              fill="rgba(216, 180, 254, 0.85)"
-            />
-          );
-        })}
       </g>
     </AssemblyModule>
   );

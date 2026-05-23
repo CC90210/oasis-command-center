@@ -34,17 +34,17 @@ const INSTALL_WINDOW = 0.05;
  * label from the geometry being installed.
  */
 const MODULE_MANIFEST = [
-  { label: "Reasoning Core",     subsystem: "Claude Sonnet 4.5 · OpenRouter · GPT-5" },
-  { label: "State Pulse",        subsystem: "empire_state.db · agent_events" },
-  { label: "Memory Spine",       subsystem: "FTS5 lexical + LanceDB semantic · 219 files" },
-  { label: "Browser Optics",     subsystem: "CloakBrowser · Browser Harness" },
-  { label: "Bridge Tools",       subsystem: "bravo_cli/bridge_tools.py · 21 tools + 115 scripts" },
-  { label: "Guard Shield",       subsystem: "secret · exec · state guard hooks" },
-  { label: "Output Channels",    subsystem: "Telegram · Email · Dashboard feed" },
-  { label: "Security Mesh",      subsystem: "Zero-trust mesh · audit_mcp_secrets · RLS" },
-  { label: "Business Layer",     subsystem: "Brand · Voice · Audience · Goals manifest" },
-  { label: "Command Centre",     subsystem: "Pulse · Crons · Funnel · Pipeline" },
-  { label: "Dashboard Metrics",  subsystem: "MRR · Pipeline · Conversions live" },
+  { label: "Reasoning Core",     subsystem: "Multi-model brain with Claude, GPT, and four backup providers" },
+  { label: "State Pulse",        subsystem: "Live operational heartbeat tracking every action and event" },
+  { label: "Memory Spine",       subsystem: "Hybrid keyword and meaning-based recall across all your knowledge" },
+  { label: "Browser Optics",     subsystem: "Stealth web browser that sees the public web like a real human" },
+  { label: "Bridge Tools",       subsystem: "Twenty-one local actions plus an automation library, ready to run" },
+  { label: "Guard Shield",       subsystem: "Three guardrails sealing secrets, blocking destructive operations" },
+  { label: "Output Channels",    subsystem: "Speaks back through Telegram, email, and the dashboard feed" },
+  { label: "Security Mesh",      subsystem: "Zero-trust envelope with continuous credential and access audits" },
+  { label: "Business Layer",     subsystem: "Your brand, your voice, your audience, your goals" },
+  { label: "Command Centre",     subsystem: "Daily digest, scheduled work, lead funnel, and sales pipeline" },
+  { label: "Dashboard Metrics",  subsystem: "Live revenue, pipeline health, and conversion analytics" },
 ] as const;
 
 const AMBIENT_PARTICLES = [
@@ -386,14 +386,20 @@ export function AgentAssemblyScrollScene() {
             cursorX={cursor.x}
             cursorY={cursor.y}
             className="h-auto w-full overflow-visible drop-shadow-[0_0_34px_rgba(52,211,153,0.22)]"
+            // Visor + halo ride the head's motion group so they tilt with
+            // the head when the cursor moves. The rest stay on the body.
+            headChildren={
+              <>
+                <BrowserOptics installProgress={opticsProgress} forceInstalled={forceInstalled} />
+                <OutputHalo installProgress={haloProgress} forceInstalled={forceInstalled} />
+              </>
+            }
           >
             <ReasoningCore installProgress={reasoningProgress} forceInstalled={forceInstalled} />
             <StatePulse installProgress={stateProgress} forceInstalled={forceInstalled} />
             <MemorySpine installProgress={memoryProgress} forceInstalled={forceInstalled} />
-            <BrowserOptics installProgress={opticsProgress} forceInstalled={forceInstalled} />
             <ToolLimbs installProgress={limbsProgress} forceInstalled={forceInstalled} />
             <GuardShield installProgress={shieldProgress} forceInstalled={forceInstalled} />
-            <OutputHalo installProgress={haloProgress} forceInstalled={forceInstalled} />
             <SecurityMesh installProgress={meshProgress} forceInstalled={forceInstalled} />
             <BusinessLayer installProgress={businessProgress} forceInstalled={forceInstalled} />
             <CommandCentre installProgress={commandProgress} forceInstalled={forceInstalled} />

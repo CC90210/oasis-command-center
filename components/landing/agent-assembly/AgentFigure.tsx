@@ -10,7 +10,10 @@ import {
 import { AgentEye } from "./AgentEye";
 
 type AgentFigureProps = {
+  /** Modules anchored to the body — stay put as the head tilts. */
   children?: ReactNode;
+  /** Modules anchored to the head — visor, halo. Tilt + drift with cursor. */
+  headChildren?: ReactNode;
   cursorX: MotionValue<number>;
   cursorY: MotionValue<number>;
   className?: string;
@@ -32,6 +35,7 @@ const ARM_SPRING = {
 
 export function AgentFigure({
   children,
+  headChildren,
   cursorX,
   cursorY,
   className,
@@ -366,6 +370,12 @@ export function AgentFigure({
           strokeWidth={1}
           strokeLinecap="round"
         />
+
+        {/* Head-anchored modules ride INSIDE the head's motion.g so the
+            visor and halo tilt + drift with the head when the cursor
+            moves. Previously these floated in space while the head
+            tilted away from them. */}
+        {headChildren}
       </motion.g>
 
       {children}
