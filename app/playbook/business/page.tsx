@@ -5,7 +5,7 @@ import {
   DOC_PILLARS,
   type DocPillar,
 } from "@/lib/business-docs";
-import { Briefcase, DollarSign, Megaphone, Wrench, Scale, ArrowRight, Check, FileText } from "lucide-react";
+import { ArrowLeft, Briefcase, DollarSign, Megaphone, Wrench, Scale, ArrowRight, Check, FileText } from "lucide-react";
 import { getAgentInfo } from "@/lib/agents";
 
 export const dynamic = "force-dynamic";
@@ -25,6 +25,16 @@ export default function BusinessDocsPage() {
 
   return (
     <div className="space-y-6 animate-fade-in">
+      {/* Breadcrumb — matches the pattern other /playbook/* deep
+          pages use so navigation is consistent across the section. */}
+      <Link
+        href="/playbook"
+        className="inline-flex items-center gap-1.5 text-xs text-fg-muted hover:text-fg transition-colors"
+      >
+        <ArrowLeft className="w-3.5 h-3.5" />
+        <span>Playbook</span>
+      </Link>
+
       <PageHeader
         title="Business Documentation"
         subtitle="Every document a real C-suite needs. Click to ask the owning agent to draft / refresh it."
