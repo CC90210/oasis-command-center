@@ -169,6 +169,16 @@ function statusDot(status: Status): string {
 export function AgentAssemblyScrollScene() {
   const sectionRef = useRef<HTMLElement | null>(null);
   const [progress, setProgress] = useState(0);
+  const [loadedSet, setLoadedSet] = useState<Set<number>>(() => new Set());
+
+  const markLoaded = (i: number) => {
+    setLoadedSet((prev) => {
+      if (prev.has(i)) return prev;
+      const next = new Set(prev);
+      next.add(i);
+      return next;
+    });
+  };
 
   useEffect(() => {
     let frame = 0;
@@ -245,11 +255,30 @@ export function AgentAssemblyScrollScene() {
                   decoding="async"
                   className="h-full w-full object-cover object-center"
                   style={{ filter: "saturate(1.05) contrast(1.05)" }}
+                  onLoad={() => markLoaded(i)}
+                  onError={(e) => {
+                    (e.currentTarget as HTMLImageElement).style.display = "none";
+                  }}
                 />
               </div>
             );
           })}
         </div>
+
+        {/* Placeholder hero — visible whenever the CURRENT phase's
+            image hasn't loaded. Renders a centered figure silhouette
+            + scanline so the page doesn't read as broken while
+            public/images/agent-assembly/ is being populated. */}
+        {!loadedSet.has(phaseIdx) && (
+          <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
+            <div className="placeholder-figure">
+              <div className="placeholder-head" />
+              <div className="placeholder-torso" />
+              <div className="placeholder-core" />
+              <div className="placeholder-scan" />
+            </div>
+          </div>
+        )}
 
         {/* Cinematic gradient overlays — readability for left text column + bottom CTA */}
         <div className="pointer-events-none absolute inset-0 bg-gradient-to-r from-[#03070a]/95 via-[#03070a]/40 to-[#03070a]/30" />
@@ -391,6 +420,78 @@ export function AgentAssemblyScrollScene() {
         )}
 
         <style>{`
+          .placeholder-figure {
+            position: relative;
+            width: 280px;
+            height: 480px;
+          }
+          .placeholder-head {
+            position: absolute;
+            top: 0;
+            left: 50%;
+            width: 120px;
+            height: 140px;
+            margin-left: -60px;
+            border-radius: 60px 60px 56px 56px;
+            border: 1px solid rgba(52,211,153,0.18);
+            background: radial-gradient(circle at 50% 35%, rgba(52,211,153,0.08), transparent 60%);
+            animation: placeholder-pulse 3.6s ease-in-out infinite;
+          }
+          .placeholder-torso {
+            position: absolute;
+            top: 150px;
+            left: 50%;
+            width: 220px;
+            height: 320px;
+            margin-left: -110px;
+            border-radius: 70px 70px 90px 90px;
+            border: 1px solid rgba(52,211,153,0.14);
+            background:
+              linear-gradient(180deg, rgba(52,211,153,0.06), transparent 70%);
+            animation: placeholder-pulse 3.6s ease-in-out infinite;
+            animation-delay: 0.6s;
+          }
+          .placeholder-core {
+            position: absolute;
+            top: 250px;
+            left: 50%;
+            width: 50px;
+            height: 50px;
+            margin-left: -25px;
+            border-radius: 9999px;
+            background:
+              radial-gradient(circle, rgba(236,253,245,0.85) 0 8%, rgba(52,211,153,0.42) 9% 35%, transparent 60%);
+            box-shadow: 0 0 42px rgba(52,211,153,0.42);
+            animation: placeholder-core-pulse 2.2s ease-in-out infinite;
+          }
+          .placeholder-scan {
+            position: absolute;
+            top: 0;
+            left: -20px;
+            right: -20px;
+            height: 2px;
+            background: linear-gradient(90deg, transparent, rgba(52,211,153,0.62), transparent);
+            box-shadow: 0 0 18px rgba(52,211,153,0.62);
+            animation: placeholder-scan 3.2s ease-in-out infinite;
+          }
+
+          @keyframes placeholder-pulse {
+            0%, 100% { opacity: 0.32; }
+            50%      { opacity: 0.78; }
+          }
+
+          @keyframes placeholder-core-pulse {
+            0%, 100% { transform: scale(0.92); opacity: 0.72; }
+            50%      { transform: scale(1.12); opacity: 1; }
+          }
+
+          @keyframes placeholder-scan {
+            0%   { transform: translateY(0);    opacity: 0; }
+            10%  { opacity: 1; }
+            90%  { opacity: 1; }
+            100% { transform: translateY(480px); opacity: 0; }
+          }
+
           .pulse-halo {
             opacity: 0.6;
             animation: pulse-breathe 6s ease-in-out infinite;
