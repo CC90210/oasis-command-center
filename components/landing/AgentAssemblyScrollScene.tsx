@@ -62,9 +62,15 @@ function imageScale(i: number, progress: number): number {
 /**
  * Returns 0..1 indicating "how close are we to a phase boundary" so we can
  * pulse a flash overlay precisely at each phase transition.
+ *
+ * Only fires when the operator has crossed INTO segments 1..PHASES.length-1.
+ * Segment 0 (initial seed, before any transition) and beyond the last segment
+ * return 0 so the page doesn't flash on first paint or at scroll-end.
  */
 function flashIntensityAt(progress: number): number {
   const segmentSize = 1 / PHASES.length;
+  const segmentIdx = Math.floor(progress / segmentSize);
+  if (segmentIdx <= 0 || segmentIdx >= PHASES.length) return 0;
   const segmentLocal = (progress / segmentSize) % 1;
   if (segmentLocal > FLASH_PORTION) return 0;
   return 1 - segmentLocal / FLASH_PORTION;
