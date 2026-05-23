@@ -23,6 +23,12 @@ const INSTALL_WINDOW = 0.06;
  * the manifest HUD beside the figure so the operator knows exactly what
  * is being installed — not "Reasoning Core" in the abstract but the
  * actual model + provider + script powering it.
+ *
+ * IMPORTANT: order must stay in sync with the <AgentFigure> children
+ * below (ReasoningCore, StatePulse, MemorySpine, BrowserOptics,
+ * ToolLimbs, GuardShield, OutputHalo, SecurityMesh — that exact
+ * sequence). Reordering one without the other silently desyncs the
+ * label from the geometry being installed.
  */
 const MODULE_MANIFEST = [
   { label: "Reasoning Core",     subsystem: "Claude Sonnet 4.5 · OpenRouter · GPT-5" },
@@ -32,7 +38,7 @@ const MODULE_MANIFEST = [
   { label: "Bridge Tools",       subsystem: "bravo_cli/bridge_tools.py · 21 tools + 115 scripts" },
   { label: "Guard Shield",       subsystem: "secret · exec · state guard hooks" },
   { label: "Output Channels",    subsystem: "Telegram · Email · Dashboard feed" },
-  { label: "Bravo Online",       subsystem: "Capability complete · mission ready" },
+  { label: "Security Mesh",      subsystem: "Zero-trust mesh · audit_mcp_secrets · RLS" },
 ] as const;
 
 const AMBIENT_PARTICLES = [
