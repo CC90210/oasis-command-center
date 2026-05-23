@@ -3,48 +3,101 @@
 import type { ModuleProps } from "../AssemblyModule";
 import { AssemblyModule } from "../AssemblyModule";
 
+/**
+ * Tool Bridge — holographic interface palettes that float beside each
+ * forearm. Represents the 21-tool registry in bravo_cli/bridge_tools.py
+ * + the 115 CLI scripts under scripts/. Deliberately does NOT redraw
+ * the figure's arms (those already exist in AgentFigure) — instead it
+ * "attaches" floating data panels with a grid of tool-glyph dots.
+ *
+ * Dock anchors on the figure's centre so left/right tool palettes
+ * symmetric-frame the body. Translucent emerald-amber palette so they
+ * distinguish from the green body silhouette.
+ */
 export function ToolLimbs(props: ModuleProps) {
   return (
     <AssemblyModule
       {...props}
-      dock={{ x: 210, y: 288 }}
-      from={{ x: -264, y: 222, rotate: 134, scale: 0.38 }}
-      via={{ x: 62, y: 224 }}
-      burstColor="rgba(110, 231, 183, 0.95)"
+      dock={{ x: 210, y: 340 }}
+      from={{ x: 0, y: -320, rotate: 0, scale: 0.6 }}
+      via={{ x: 120, y: 80 }}
+      burstColor="rgba(252, 211, 77, 0.92)"
     >
       <g>
-        <path
-          d="M-106 -52 L-69 -71 L-42 -49 L-52 -16 L-93 -18 Z"
-          fill="rgba(7, 18, 15, 0.96)"
-          stroke="rgba(110, 231, 183, 0.6)"
-          strokeWidth={1.5}
-        />
-        <path
-          d="M106 -52 L69 -71 L42 -49 L52 -16 L93 -18 Z"
-          fill="rgba(7, 18, 15, 0.96)"
-          stroke="rgba(110, 231, 183, 0.6)"
-          strokeWidth={1.5}
-        />
-        <path
-          d="M-92 -16 L-122 44 L-105 105 L-80 101 L-91 47 L-61 -9 Z"
-          fill="rgba(6, 78, 59, 0.54)"
-          stroke="rgba(110, 231, 183, 0.42)"
-          strokeWidth={1.3}
-        />
-        <path
-          d="M92 -16 L122 44 L105 105 L80 101 L91 47 L61 -9 Z"
-          fill="rgba(6, 78, 59, 0.54)"
-          stroke="rgba(110, 231, 183, 0.42)"
-          strokeWidth={1.3}
-        />
-        <path
-          d="M-122 44 L-142 37 M122 44 L142 37 M-105 105 L-121 125 M105 105 L121 125"
-          stroke="rgba(252, 211, 77, 0.45)"
-          strokeLinecap="round"
-          strokeWidth={2.2}
-        />
-        <circle cx={-78} cy={-42} r={8} fill="rgba(167,243,208,0.62)" />
-        <circle cx={78} cy={-42} r={8} fill="rgba(167,243,208,0.62)" />
+        {/* Two interface panels — left forearm + right forearm.
+            Each is a small rounded-rect with a 3x4 dot grid suggesting
+            an open tool palette. Wrist tether line connects each panel
+            to the forearm. */}
+        {[-1, 1].map((side) => {
+          const panelX = side * 122;
+          return (
+            <g key={side}>
+              {/* Tether from forearm to panel */}
+              <line
+                x1={side * 92}
+                y1={6}
+                x2={panelX - side * 22}
+                y2={-4}
+                stroke="rgba(252,211,77,0.55)"
+                strokeWidth={0.9}
+                strokeDasharray="3 3"
+              />
+              {/* Panel frame */}
+              <rect
+                x={panelX - 22}
+                y={-26}
+                width={44}
+                height={52}
+                rx={6}
+                fill="rgba(7, 18, 15, 0.88)"
+                stroke="rgba(252,211,77,0.55)"
+                strokeWidth={1.1}
+              />
+              {/* Inner divider */}
+              <line
+                x1={panelX - 18}
+                y1={-12}
+                x2={panelX + 18}
+                y2={-12}
+                stroke="rgba(252,211,77,0.32)"
+                strokeWidth={0.6}
+              />
+              {/* Header dot row */}
+              <circle cx={panelX - 14} cy={-19} r={1.4} fill="rgba(252,211,77,0.8)" />
+              <circle cx={panelX - 8}  cy={-19} r={1.4} fill="rgba(252,211,77,0.55)" />
+              <circle cx={panelX - 2}  cy={-19} r={1.4} fill="rgba(252,211,77,0.45)" />
+              {/* 3 rows of 5 tool glyphs each = 15 visible tools per panel
+                  (the bridge actually exposes 21 tools, but 15 is the
+                  visible density that reads cleanly at this scale) */}
+              {[0, 1, 2].map((row) =>
+                [0, 1, 2, 3, 4].map((col) => (
+                  <circle
+                    key={`${row}-${col}`}
+                    cx={panelX - 16 + col * 8}
+                    cy={-5 + row * 9}
+                    r={1.5}
+                    fill={
+                      (row + col) % 3 === 0
+                        ? "rgba(167,243,208,0.78)"
+                        : "rgba(252,211,77,0.42)"
+                    }
+                  />
+                )),
+              )}
+              {/* Wrist gauntlet ring — subtle accent on the forearm
+                  where the tool palette docks */}
+              <circle
+                cx={side * 92}
+                cy={6}
+                r={6}
+                fill="none"
+                stroke="rgba(252,211,77,0.62)"
+                strokeWidth={1}
+              />
+              <circle cx={side * 92} cy={6} r={2} fill="rgba(252,211,77,0.72)" />
+            </g>
+          );
+        })}
       </g>
     </AssemblyModule>
   );

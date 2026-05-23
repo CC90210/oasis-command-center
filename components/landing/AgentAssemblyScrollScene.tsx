@@ -18,6 +18,23 @@ import { useScrollPhase } from "./agent-assembly/useScrollPhase";
 const PHASE_COUNT = 8;
 const INSTALL_WINDOW = 0.06;
 
+/**
+ * Each phase maps to a real subsystem in CC's empire. Labels surface in
+ * the manifest HUD beside the figure so the operator knows exactly what
+ * is being installed — not "Reasoning Core" in the abstract but the
+ * actual model + provider + script powering it.
+ */
+const MODULE_MANIFEST = [
+  { label: "Reasoning Core",     subsystem: "Claude Sonnet 4.5 · OpenRouter · GPT-5" },
+  { label: "State Pulse",        subsystem: "empire_state.db · agent_events" },
+  { label: "Memory Spine",       subsystem: "FTS5 lexical + LanceDB semantic · 219 files" },
+  { label: "Browser Optics",     subsystem: "CloakBrowser · Browser Harness" },
+  { label: "Bridge Tools",       subsystem: "bravo_cli/bridge_tools.py · 21 tools + 115 scripts" },
+  { label: "Guard Shield",       subsystem: "secret · exec · state guard hooks" },
+  { label: "Output Channels",    subsystem: "Telegram · Email · Dashboard feed" },
+  { label: "Bravo Online",       subsystem: "Capability complete · mission ready" },
+] as const;
+
 const AMBIENT_PARTICLES = [
   { left: 8, top: 22, size: 2, delay: 0, drift: -16 },
   { left: 17, top: 72, size: 3, delay: 0.9, drift: 18 },
@@ -300,6 +317,50 @@ export function AgentAssemblyScrollScene() {
           <p className="mt-5 text-sm leading-6 text-white/[0.66] min-[641px]:text-[13px] xl:text-base xl:leading-7">
             OASIS assembles reasoning, memory, vision, tools, guardrails, and security into a working operator before you pick an entry path.
           </p>
+
+          {/* Live manifest — names the REAL subsystem powering each phase so
+              the operator can see exactly what's installing. Status flips
+              from pending → active (during install) → locked (after install)
+              based on scroll phase. Hidden on mobile (compact mode). */}
+          <ul className="mt-6 hidden space-y-1.5 text-left font-mono text-[10px] uppercase tracking-[0.14em] min-[641px]:block">
+            {MODULE_MANIFEST.map((entry, idx) => {
+              const status: "locked" | "active" | "pending" = forceInstalled
+                ? "locked"
+                : idx < phase
+                  ? "locked"
+                  : idx === phase
+                    ? "active"
+                    : "pending";
+              const dotClass =
+                status === "active"
+                  ? "bg-emerald-300 shadow-[0_0_10px_rgba(52,211,153,0.85)] animate-pulse"
+                  : status === "locked"
+                    ? "bg-emerald-300/55"
+                    : "bg-white/15";
+              const textClass =
+                status === "active"
+                  ? "text-emerald-100"
+                  : status === "locked"
+                    ? "text-white/70"
+                    : "text-white/30";
+              return (
+                <li key={entry.label} className={`flex items-start gap-3 ${textClass}`}>
+                  <span className={`mt-1 h-1.5 w-1.5 shrink-0 rounded-full ${dotClass}`} />
+                  <span className="flex-1">
+                    <span className="block tracking-[0.18em]">
+                      {String(idx + 1).padStart(2, "0")} · {entry.label}
+                    </span>
+                    <span className="block text-[9px] normal-case tracking-[0.04em] text-white/45">
+                      {entry.subsystem}
+                    </span>
+                  </span>
+                  <span className="text-[8px] tracking-[0.22em] opacity-70">
+                    {status === "active" ? "ACTIVE" : status === "locked" ? "LOCKED" : "PENDING"}
+                  </span>
+                </li>
+              );
+            })}
+          </ul>
         </div>
 
         <div

@@ -191,8 +191,10 @@ export function AgentFigure({
 
         {/* OASIS tree-of-life chest emblem — pulsing low-opacity insignia
             on the upper chest plate. References the OASIS brand mark
-            (circuit-tree icon) without competing with the assembly modules. */}
-        <g opacity={0.55}>
+            (circuit-tree icon) without competing with the assembly modules.
+            Opacity intentionally low so the docked modules at the chest
+            (ReasoningCore, StatePulse) stay foregrounded. */}
+        <g opacity={0.32}>
           {/* Roots */}
           <path
             d="M205 358 L200 366 M210 358 L210 368 M215 358 L220 366"
