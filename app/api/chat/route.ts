@@ -614,12 +614,22 @@ export async function POST(req: NextRequest) {
   const stream = new ReadableStream({
     async start(controller) {
       const streamingRedactor = new StreamingRedactor(vaultSecretsForRedaction);
+      // Events that DEFINITIVELY end the turn. The streaming redactor
+      // can safely flush its held-back tail only at these points,
+      // because no more deltas will arrive that could complete a
+      // partial secret match.
+      //
+      // CRITICAL — Codex P1 finding 2026-05-24: mid-stream events like
+      // `tool_use`, `cloud_tool_call`, `cloud_tool_result`,
+      // `tool_use_pending` happen BETWEEN deltas in the native tool
+      // loop. Flushing on those would emit the buffered tail
+      // (potentially the leading prefix of a secret the model is
+      // mid-way through writing) BEFORE the next deltas arrive with
+      // the rest of the secret. The user would see the whole thing
+      // chunk-by-chunk, defeating the hold-back protection.
+      // Only `done` / `error` truly terminate the assistant turn.
+      const TERMINAL_EVENTS = new Set(["done", "error"]);
       const flushDelta = () => {
-        // Emit whatever's still buffered with a final scrub for the
-        // trailing tail. Called on stream close AND before any
-        // non-delta event so events arrive in the right order (the
-        // buffered tail is still text the user should see before the
-        // terminal usage/done/error event).
         const tail = streamingRedactor.flush();
         if (tail.length > 0) {
           controller.enqueue(
@@ -644,9 +654,14 @@ export async function POST(req: NextRequest) {
           }
           return;
         }
-        // Non-delta: flush any held-back delta tail FIRST so the user
-        // sees text in causal order, then emit the structured event.
-        flushDelta();
+        // Mid-stream non-delta events (tool_use, cloud_tool_call,
+        // cloud_tool_result, tool_use_pending, usage, session)
+        // do NOT flush — the assistant turn may continue with more
+        // deltas afterward and the buffer must survive across them.
+        // The chat UI renders tool events as side-channel chips, so
+        // the slight out-of-order between a tool chip and the text
+        // tail that preceded it is acceptable; secret leakage isn't.
+        if (TERMINAL_EVENTS.has(event)) flushDelta();
         controller.enqueue(
           encoder.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`)
         );

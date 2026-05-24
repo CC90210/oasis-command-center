@@ -205,6 +205,12 @@ export async function POST(req: NextRequest) {
   const stream = new ReadableStream({
     async start(controller) {
       const streamingRedactor = new StreamingRedactor(vaultSecretsForRedaction);
+      // See app/api/chat/route.ts for the rationale — mid-stream
+      // tool events MUST NOT flush the redactor's held tail or a
+      // secret in mid-emission can leak chunk-by-chunk via partial
+      // releases before the rest arrives. Only truly terminal events
+      // drain the buffer.
+      const TERMINAL_EVENTS = new Set(["done", "error"]);
       const flushDelta = () => {
         const tail = streamingRedactor.flush();
         if (tail.length > 0) {
@@ -214,9 +220,6 @@ export async function POST(req: NextRequest) {
         }
       };
       const send = (event: string, data: unknown) => {
-        // Same shape as /api/chat: route deltas through the streaming
-        // redactor; non-delta events flush any held-back tail first
-        // so the user sees text in causal order.
         if (event === "delta" && data && typeof data === "object" && "text" in data) {
           const raw = String((data as { text: unknown }).text || "");
           const safe = streamingRedactor.push(raw);
@@ -227,7 +230,7 @@ export async function POST(req: NextRequest) {
           }
           return;
         }
-        flushDelta();
+        if (TERMINAL_EVENTS.has(event)) flushDelta();
         controller.enqueue(
           encoder.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`)
         );
