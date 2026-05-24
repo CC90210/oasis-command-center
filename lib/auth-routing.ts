@@ -1,5 +1,6 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { getClientProfileSlugForBrand, resolveClientProfileSlug } from "@/lib/client-profiles";
+import { isOperatorEmail } from "@/lib/operator-credentials";
 
 type ProfileRouteRow = {
   id: string;
@@ -16,6 +17,14 @@ type ProfileRouteRow = {
 export type PostLoginTenantContext = {
   tenantSlug?: string | null;
   commandCenterProfileSlug?: string | null;
+  // Empire operators (OPERATOR_EMAIL / ADMIN_EMAILS) default to the master
+  // dashboard on login even when their user_profiles row resolves to a
+  // client tenant — they're frequently listed as the operator on a
+  // client's tenants row (e.g. CC on SunBiz), and auto-routing them
+  // into /t/sun on every login was the chrome-bleed bug reported
+  // 2026-05-24. They can still deep-link into any tenant via explicit
+  // ?next= or by navigating manually.
+  isEmpireOperator?: boolean;
 };
 
 function cleanSlug(value: string | null | undefined): string | null {
@@ -38,6 +47,7 @@ function tenantSlugFromPath(path: string): string | null {
 }
 
 export function homePathForTenant(ctx: PostLoginTenantContext): string {
+  if (ctx.isEmpireOperator) return "/";
   const profileSlug = cleanSlug(ctx.commandCenterProfileSlug);
   if (profileSlug === "sun" || profileSlug === "suga") return `/t/${profileSlug}`;
   return "/";
@@ -51,6 +61,12 @@ export function normalizePostLoginRedirect(
   if (safeNext.startsWith("/demo/")) return homePathForTenant(ctx);
   const requestedTenantSlug = tenantSlugFromPath(safeNext);
   if (!requestedTenantSlug) return safeNext;
+
+  // Empire operators can preview any tenant (per canPreviewTenantSlug),
+  // so honor an explicit tenant deep-link even when the operator's own
+  // profile resolves elsewhere. Without this, an operator bookmarking
+  // /t/sun/leads would be silently bounced to / on every login.
+  if (ctx.isEmpireOperator) return safeNext;
 
   const ownSlugs = new Set(
     [ctx.tenantSlug, ctx.commandCenterProfileSlug]
@@ -157,5 +173,6 @@ export async function resolvePostLoginRedirect({
   return normalizePostLoginRedirect(requestedNext, {
     tenantSlug: tenant?.slug || null,
     commandCenterProfileSlug: profileSlug,
+    isEmpireOperator: isOperatorEmail(email || profile.email || undefined),
   });
 }

@@ -126,13 +126,40 @@ export async function middleware(req: NextRequest) {
   // If env not configured (preview/local), let it through — page-level guards still run
   if (!url || !anon) return NextResponse.next({ request: { headers: requestHeaders } });
 
-  const res = NextResponse.next({ request: { headers: requestHeaders } });
+  // Canonical @supabase/ssr cookie-sync pattern.
+  //
+  // When auth.getUser() below detects an expired access token, it refreshes
+  // it and asks us to persist the new cookie. We MUST write the refreshed
+  // cookie to BOTH (a) the request stream — so downstream Server Components
+  // reading cookies() inside this same request see the fresh token — AND
+  // (b) the response — so the browser receives the new cookie for the next
+  // request. Writing only to the response leaves Server Components reading
+  // the stale expired token; their own auth.getUser() then returns null
+  // and the page redirects to /login even though middleware just
+  // successfully refreshed the session.
+  //
+  // Verified failure mode 2026-05-24 — /t/sun/applications click on an
+  // active SunBiz session bounced to /login because the page-level
+  // requireTenantPreviewAccess() saw the stale cookie after middleware
+  // refreshed.
+  //
+  // Subtle: rebuild requestHeaders from req.headers AFTER the cookie
+  // mutation. `requestHeaders` from line 114 was snapshotted before this
+  // refresh fired, so reusing it would forward the original (now stale)
+  // Cookie header to Server Components even though req.cookies.set
+  // already updated the live req.headers Cookie value. Codex review
+  // caught this in the first iteration of the fix.
+  let res = NextResponse.next({ request: { headers: requestHeaders } });
   const supa = createServerClient(url, anon, {
     cookies: {
       getAll() {
         return req.cookies.getAll();
       },
       setAll(toSet) {
+        toSet.forEach(({ name, value }) => req.cookies.set(name, value));
+        const refreshedHeaders = new Headers(req.headers);
+        refreshedHeaders.set("x-pathname", pathname);
+        res = NextResponse.next({ request: { headers: refreshedHeaders } });
         toSet.forEach(({ name, value, options }) =>
           res.cookies.set({ name, value, ...options })
         );
