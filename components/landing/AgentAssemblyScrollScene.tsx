@@ -496,7 +496,7 @@ export function AgentAssemblyScrollScene() {
                 screen vertically and the scattered fragments orbit
                 comfortably around it. */}
             <div
-              className="relative flex aspect-[540/1435] w-[52vw] max-w-[230px] items-center justify-center min-[641px]:h-[min(88vh,860px)] min-[641px]:w-auto min-[641px]:max-w-none min-[641px]:min-h-[560px]"
+              className="relative flex aspect-[540/1435] w-[52vw] max-w-[230px] items-center justify-center min-[641px]:h-[min(88vh,860px)] min-[641px]:w-auto min-[641px]:max-w-none"
             >
               <AgentFigureSprite
                 installProgresses={layerProgresses}
