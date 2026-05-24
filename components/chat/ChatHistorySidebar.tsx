@@ -26,7 +26,8 @@
  * new message has been persisted.
  */
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { MessageSquare, Plus, X, History, Loader2 } from "lucide-react";
 import { timeAgo } from "@/lib/fmt";
 
@@ -104,6 +105,19 @@ export function ChatHistorySidebar({
   const [sessions, setSessions] = useState<ChatSessionSummary[]>([]);
   const [loading, setLoading] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
+  // Portal target for the open drawer. The toggle button renders inside
+  // the chat header (which is `relative z-10`), so an `absolute` aside
+  // rendered as the toggle's sibling would anchor against the header
+  // (collapsing to header height — Codex caught this 2026-05-24). We
+  // portal the backdrop + aside into the chat-container element so the
+  // absolute positioning anchors to the full chat panel instead.
+  const toggleRef = useRef<HTMLButtonElement | null>(null);
+  const [panelHost, setPanelHost] = useState<HTMLElement | null>(null);
+  useEffect(() => {
+    if (!open) return;
+    const host = toggleRef.current?.closest(".chat-container") as HTMLElement | null;
+    setPanelHost(host || null);
+  }, [open]);
 
   const fetchSessions = useCallback(async () => {
     if (!agentKey) return;
@@ -158,6 +172,7 @@ export function ChatHistorySidebar({
   // the drawer is closed, so the operator can find their way back.
   const toggle = (
     <button
+      ref={toggleRef}
       type="button"
       onClick={() => setOpen((o) => !o)}
       className="inline-flex items-center gap-1.5 text-[11px] uppercase tracking-wider font-bold px-2.5 py-1.5 rounded-lg border border-bg-border bg-bg-elev text-fg-muted hover:text-fg hover:border-accent/40 transition-colors"
@@ -171,22 +186,21 @@ export function ChatHistorySidebar({
     </button>
   );
 
-  if (!open) {
-    // Closed state: just the toggle button. Parent positions it where
-    // it fits in the chat header.
-    return toggle;
-  }
-
-  return (
+  // Portal payload — backdrop + drawer, rendered into the chat-container
+  // element rather than as a sibling of the toggle. This is what makes
+  // `absolute inset-y-0 left-0` anchor to the full chat panel (which is
+  // `position: relative; overflow: hidden` per .chat-container in
+  // globals.css) instead of the header row that contains the toggle.
+  //
+  // Falls back gracefully: if panelHost isn't resolved yet on the very
+  // first render after open (one tick — the useEffect hasn't fired), we
+  // skip the portal that frame. The next render mounts it correctly.
+  const drawerNode = (
     <>
-      {toggle}
-      {/* Backdrop — clicking it closes the panel. Stays INSIDE the chat
+      {/* Backdrop — clicking it closes the panel. Anchored to the chat
           container (absolute, not fixed) so it never covers the app
-          sidebar or page chrome. z-20 sits above chat content (z-10) but
-          below the panel (z-30). Pre-fix this was `fixed inset-y-0 left-0`
-          which floated over the entire viewport, clipping the chat header
-          text and bleeding past the chat input footer (CC reported
-          2026-05-24). */}
+          sidebar or page chrome. z-20 sits above chat content (z-10)
+          but below the panel (z-30). */}
       <button
         type="button"
         onClick={() => setOpen(false)}
@@ -314,6 +328,13 @@ export function ChatHistorySidebar({
           )}
         </div>
       </aside>
+    </>
+  );
+
+  return (
+    <>
+      {toggle}
+      {open && panelHost ? createPortal(drawerNode, panelHost) : null}
     </>
   );
 }
