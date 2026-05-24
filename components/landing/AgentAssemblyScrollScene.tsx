@@ -403,7 +403,7 @@ export function AgentAssemblyScrollScene() {
 
         <div
           aria-hidden="true"
-          className="absolute left-1/2 top-1/2 z-10 flex h-[min(82vh,680px)] -translate-x-1/2 -translate-y-1/2 items-center justify-center"
+          className="absolute left-1/2 top-1/2 z-10 flex h-[min(68vh,520px)] -translate-x-1/2 -translate-y-1/2 items-center justify-center min-[641px]:h-[min(82vh,680px)]"
           style={{ aspectRatio: "521 / 1536" }}
         >
           <AgentFigureSprite

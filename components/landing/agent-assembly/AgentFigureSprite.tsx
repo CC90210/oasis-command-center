@@ -450,16 +450,18 @@ function SystemOnlinePill({
   // Sits just below the activation platform. Fades in during the second
   // half of compaction.
   const opacity = useTransform(compactionProgress, [0.5, 0.85], [0, 1]);
-  const PILL_X = 188;
-  const PILL_Y = 1492;
-  const PILL_W = 145;
-  const PILL_H = 32;
+  // Pill scaled up so it stays legible at small figure sizes (mobile).
+  // Centered horizontally; sits just below the activation podium.
+  const PILL_W = 240;
+  const PILL_H = 56;
+  const PILL_X = (PNG_W - PILL_W) / 2;
+  const PILL_Y = 1480;
   if (forceInstalled) {
     return (
       <g transform={`translate(${PILL_X} ${PILL_Y})`}>
-        <rect x={0} y={0} width={PILL_W} height={PILL_H} rx={4} fill="#03070a" stroke={C.primary} strokeWidth={2} />
-        <circle cx={18} cy={PILL_H / 2} r={5} fill={C.primary} filter="url(#hg-glow)" />
-        <text x={32} y={PILL_H / 2 + 5} fontFamily="monospace" fontSize={14} fill={C.primary} letterSpacing="3">
+        <rect x={0} y={0} width={PILL_W} height={PILL_H} rx={6} fill="#03070a" stroke={C.primary} strokeWidth={3} />
+        <circle cx={26} cy={PILL_H / 2} r={8} fill={C.primary} filter="url(#hg-glow)" />
+        <text x={48} y={PILL_H / 2 + 8} fontFamily="monospace" fontSize={22} fontWeight="bold" fill={C.primary} letterSpacing="4">
           SYSTEM ONLINE
         </text>
       </g>
@@ -467,9 +469,9 @@ function SystemOnlinePill({
   }
   return (
     <motion.g transform={`translate(${PILL_X} ${PILL_Y})`} style={{ opacity }}>
-      <rect x={0} y={0} width={PILL_W} height={PILL_H} rx={4} fill="#03070a" stroke={C.primary} strokeWidth={2} />
-      <circle cx={18} cy={PILL_H / 2} r={5} fill={C.primary} filter="url(#hg-glow)" />
-      <text x={32} y={PILL_H / 2 + 5} fontFamily="monospace" fontSize={14} fill={C.primary} letterSpacing="3">
+      <rect x={0} y={0} width={PILL_W} height={PILL_H} rx={6} fill="#03070a" stroke={C.primary} strokeWidth={3} />
+      <circle cx={26} cy={PILL_H / 2} r={8} fill={C.primary} filter="url(#hg-glow)" />
+      <text x={48} y={PILL_H / 2 + 8} fontFamily="monospace" fontSize={22} fontWeight="bold" fill={C.primary} letterSpacing="4">
         SYSTEM ONLINE
       </text>
     </motion.g>
