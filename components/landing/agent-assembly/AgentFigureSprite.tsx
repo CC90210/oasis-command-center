@@ -24,8 +24,8 @@ import { motion, useTime, useTransform, type MotionValue } from "framer-motion";
  *  - REDUCED-MOTION: forceInstalled short-circuits to a static fully-
  *    assembled view (agent-solid PNG + SYSTEM ONLINE overlay).
  *
- * Sizing: parent constrains by HEIGHT (e.g. h-[min(78vh,620px)]); the
- * figure aspect-ratio (521:1536) yields a narrow humanoid column that
+ * Sizing: parent constrains by HEIGHT (e.g. h-[min(88vh,860px)]); the
+ * figure aspect-ratio (540:1435) yields a narrow humanoid column that
  * always fits the viewport.
  */
 
@@ -118,7 +118,7 @@ export function AgentFigureSprite({
         ))}
       </LockClickWrapper>
 
-      {/* SVG overlays — share PNG coordinate space (viewBox 521x1536) so
+      {/* SVG overlays — share PNG coordinate space (viewBox 540x1435) so
           connection lines and lock-in rings land on the right anatomy. */}
       <svg
         viewBox={`0 0 ${PNG_W} ${PNG_H}`}
