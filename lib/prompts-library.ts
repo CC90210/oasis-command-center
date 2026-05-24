@@ -572,7 +572,7 @@ For each repo: \`git pull --rebase origin <branch>\`. If pull conflicts on track
 
 **4b. Enable the Codex end-of-task review gate for the CEO-Agent workspace.** Added 2026-05-23 per CC. The codex-plugin lives at \`~/.claude/codex-plugin/\` on both Mac and Windows. The gate makes the Stop hook block until Codex has reviewed any big-task diff — workflow embed lives in CLAUDE.md Rule 8 + skills/codex-delegation/SKILL.md Pattern 5, but the gate itself is a per-workspace config that doesn't survive \`git pull\`. Each rig has to enable it locally:
 - \`cd ~/CEO-Agent && node ~/.claude/codex-plugin/scripts/codex-companion.mjs setup --enable-review-gate --json\` — flips \`stopReviewGate\` to true for this workspace.
-- Confirm: re-run \`node ~/.claude/codex-plugin/scripts/codex-companion.mjs setup --json | grep reviewGateEnabled\` returns \`"reviewGateEnabled": true\`.
+- Confirm: \`cd ~/CEO-Agent && node ~/.claude/codex-plugin/scripts/codex-companion.mjs setup --json | grep reviewGateEnabled\` returns \`"reviewGateEnabled": true\`. The \`cd\` prefix is REQUIRED — the gate is per-workspace and the lookup resolves against cwd, so omitting it can return a different project's state and silently pass the check.
 - If the plugin directory is missing entirely, surface that as a hard error — CC needs to install it from the codex-plugin source. Don't try to scaffold one.
 
 **5. Re-run any pending install steps that the puller may have added:**
