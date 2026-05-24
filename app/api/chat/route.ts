@@ -614,20 +614,25 @@ export async function POST(req: NextRequest) {
   const stream = new ReadableStream({
     async start(controller) {
       const streamingRedactor = new StreamingRedactor(vaultSecretsForRedaction);
-      // Events that DEFINITIVELY end the turn. The streaming redactor
-      // can safely flush its held-back tail only at these points,
-      // because no more deltas will arrive that could complete a
-      // partial secret match.
+      // Track whether this turn paused for a deferred-tool resume
+      // (vs completed normally). When paused, the SAME logical turn
+      // continues over in /api/chat/resume with a fresh redactor — if
+      // we flushed our held-back tail here, the secret prefix would
+      // leak before the resumed deltas arrive with the suffix.
       //
-      // CRITICAL — Codex P1 finding 2026-05-24: mid-stream events like
-      // `tool_use`, `cloud_tool_call`, `cloud_tool_result`,
-      // `tool_use_pending` happen BETWEEN deltas in the native tool
-      // loop. Flushing on those would emit the buffered tail
-      // (potentially the leading prefix of a secret the model is
-      // mid-way through writing) BEFORE the next deltas arrive with
-      // the rest of the secret. The user would see the whole thing
-      // chunk-by-chunk, defeating the hold-back protection.
-      // Only `done` / `error` truly terminate the assistant turn.
+      // Codex P1 finding 2026-05-24: a secret split across the
+      // pause/resume boundary defeats the hold-back if either side
+      // flushes its buffer. Resolution: on pause, DON'T flush — the
+      // tail is dropped from the SSE stream (small visible blip at
+      // the pause point) but persistAssistantTurn still gets the
+      // complete raw assistantText and scrubs it for storage. The
+      // user sees a tiny gap in the live stream; nobody sees the
+      // secret. Worth it.
+      let pausedForResume = false;
+      // Events that DEFINITIVELY end the turn AND we're sure no more
+      // deltas will arrive (locally OR remotely). Mid-stream tool
+      // events still don't flush — those happen BETWEEN deltas in the
+      // native tool loop and flushing would partial-release the tail.
       const TERMINAL_EVENTS = new Set(["done", "error"]);
       const flushDelta = () => {
         const tail = streamingRedactor.flush();
@@ -654,14 +659,19 @@ export async function POST(req: NextRequest) {
           }
           return;
         }
+        // tool_use_pending arms the pause flag — the assistant turn
+        // continues over in /api/chat/resume after the browser
+        // executes the deferred tool. Subsequent `done` MUST NOT
+        // flush or the held-back tail leaks across the boundary.
+        if (event === "tool_use_pending") pausedForResume = true;
         // Mid-stream non-delta events (tool_use, cloud_tool_call,
         // cloud_tool_result, tool_use_pending, usage, session)
-        // do NOT flush — the assistant turn may continue with more
-        // deltas afterward and the buffer must survive across them.
-        // The chat UI renders tool events as side-channel chips, so
-        // the slight out-of-order between a tool chip and the text
-        // tail that preceded it is acceptable; secret leakage isn't.
-        if (TERMINAL_EVENTS.has(event)) flushDelta();
+        // do NOT flush — the buffer must survive across them. The
+        // chat UI renders tool events as side-channel chips, so a
+        // small out-of-order between a tool chip and the text tail
+        // that preceded it is acceptable; secret leakage isn't.
+        const shouldFlush = TERMINAL_EVENTS.has(event) && !pausedForResume;
+        if (shouldFlush) flushDelta();
         controller.enqueue(
           encoder.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`)
         );

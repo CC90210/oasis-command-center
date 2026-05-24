@@ -205,11 +205,12 @@ export async function POST(req: NextRequest) {
   const stream = new ReadableStream({
     async start(controller) {
       const streamingRedactor = new StreamingRedactor(vaultSecretsForRedaction);
-      // See app/api/chat/route.ts for the rationale — mid-stream
-      // tool events MUST NOT flush the redactor's held tail or a
-      // secret in mid-emission can leak chunk-by-chunk via partial
-      // releases before the rest arrives. Only truly terminal events
-      // drain the buffer.
+      // Same pause/resume reasoning as /api/chat — a chained deferred
+      // tool can pause AGAIN mid-resume (model uses tool A, browser
+      // executes, resume picks up, model decides to use tool B → new
+      // tool_use_pending event, new /api/chat/resume call). The buffer
+      // must not flush across that boundary either.
+      let pausedForResume = false;
       const TERMINAL_EVENTS = new Set(["done", "error"]);
       const flushDelta = () => {
         const tail = streamingRedactor.flush();
@@ -230,7 +231,9 @@ export async function POST(req: NextRequest) {
           }
           return;
         }
-        if (TERMINAL_EVENTS.has(event)) flushDelta();
+        if (event === "tool_use_pending") pausedForResume = true;
+        const shouldFlush = TERMINAL_EVENTS.has(event) && !pausedForResume;
+        if (shouldFlush) flushDelta();
         controller.enqueue(
           encoder.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`)
         );
