@@ -5,6 +5,7 @@ import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { getBrowserSupabase } from "@/lib/supabase-browser";
 import { OasisLogo } from "@/components/brand/OasisLogo";
+import { AuthRedirectGuard } from "@/components/AuthRedirectGuard";
 
 export default function SignupPage() {
   const router = useRouter();
@@ -132,6 +133,11 @@ export default function SignupPage() {
 
   return (
     <div className="min-h-screen bg-bg flex items-center justify-center px-6 py-12">
+      {/* Same defensive guard as /login and /welcome — an already-authed
+          user landing on /signup (back button after success, accidental
+          re-visit) should be bounced into the app, not shown the signup
+          form again. */}
+      <AuthRedirectGuard to="/" />
       <div className="w-full max-w-md">
         <div className="text-center mb-8">
           <div className="inline-flex items-center gap-3 mb-4">

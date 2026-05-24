@@ -56,6 +56,7 @@ import {
   normalizeMode,
 } from "./chat-modes/plan-mode";
 import { readBrainDoc, searchMemory } from "./cloud-knowledge-tools";
+import { PROFILE_CUSTOM_FIELD_KEYS } from "./profile-custom-fields";
 
 const ANTHROPIC_VERSION = "2023-06-01";
 const MAX_TOOL_ITERATIONS = 8; // safety cap — prevents runaway tool loops
@@ -151,6 +152,22 @@ export const TOOL_DEFINITIONS: ToolDef[] = [
         limit: { type: "number", description: "Optional max snippets to return. Default 8, max 20." },
       },
       required: ["query"],
+    },
+  },
+  {
+    name: "save_known_fact",
+    description:
+      "Append an evergreen fact about the operator to their KNOWN FACTS (user_profiles.custom_fields.quick_facts). Call this WHEN the operator tells you something you'll likely need in future chats — calendar booking link, email signature, business name, preferred tone, common phrasings, brand assets. Each call adds ONE bullet. After saving, briefly confirm what you saved so the operator can edit it in Settings if needed. Do NOT save secrets, passwords, or one-time tokens; do NOT save transient task details (those belong in the conversation, not in evergreen facts). Per-user — each user only writes their own profile.",
+    input_schema: {
+      type: "object",
+      properties: {
+        fact: {
+          type: "string",
+          description:
+            "One single fact, written as a self-contained bullet (e.g., 'Calendar booking link: https://cal.com/cc' or 'Email signature: Best, CC — OASIS AI · oasisai.work'). Keep under 500 chars.",
+        },
+      },
+      required: ["fact"],
     },
   },
   {
@@ -650,6 +667,8 @@ async function dispatch(
       return await readBrainDoc(input);
     case "search_memory":
       return await searchMemory(input);
+    case "save_known_fact":
+      return await toolSaveKnownFact(input, ctx);
     case "web_fetch":
       return await toolHttpGet(input);
     case "list_records":
@@ -799,6 +818,74 @@ async function resolveEntity(tenantId: string, entityName: string) {
     throw new Error(`unknown_entity:${entityName} (available: ${avail || "none"})`);
   }
   return entity;
+}
+
+/**
+ * Append one bullet to user_profiles.custom_fields.quick_facts for the
+ * authenticated user. Bounded, deduped, per-user — each user only
+ * writes their own profile.
+ *
+ * Bounds (all defensive, not security):
+ *   - fact must be a non-empty string ≤ 500 chars after trim
+ *   - total quick_facts capped at 8000 chars — once full, returns an
+ *     error telling the model to ask the operator to prune in Settings
+ *   - exact-line dedupe — if the same bullet exists already, returns
+ *     {deduped: true} without writing
+ *
+ * Backs the "I'll save this to KNOWN FACTS for next time" promise in
+ * the cloud system prompt — without this tool the model could only
+ * say it would save, not actually do it.
+ */
+const QUICK_FACTS_MAX_CHARS = 8000;
+const QUICK_FACT_MAX_CHARS = 500;
+async function toolSaveKnownFact(input: Record<string, unknown>, ctx: ToolContext) {
+  const raw = typeof input.fact === "string" ? input.fact.trim() : "";
+  if (!raw) throw new Error("empty_fact");
+  if (raw.length > QUICK_FACT_MAX_CHARS) {
+    throw new Error(`fact_too_long_${QUICK_FACT_MAX_CHARS}_chars_max`);
+  }
+  const bullet = raw.startsWith("- ") ? raw : `- ${raw}`;
+
+  const db = getServiceSupabase();
+  const read = await db
+    .from("user_profiles")
+    .select("custom_fields")
+    .eq("auth_user_id", ctx.authUserId)
+    .maybeSingle();
+  if (read.error) throw new Error(read.error.message);
+  if (!read.data) throw new Error("profile_not_found");
+
+  const cf: Record<string, unknown> = { ...(read.data.custom_fields || {}) };
+  const existing =
+    typeof cf[PROFILE_CUSTOM_FIELD_KEYS.QUICK_FACTS] === "string"
+      ? (cf[PROFILE_CUSTOM_FIELD_KEYS.QUICK_FACTS] as string)
+      : "";
+
+  // Exact-line dedupe — strip whitespace per-line, compare normalized.
+  const normalized = bullet.trim();
+  const alreadyPresent = existing
+    .split("\n")
+    .map((l) => l.trim())
+    .includes(normalized);
+  if (alreadyPresent) {
+    return { ok: true, deduped: true, saved: bullet };
+  }
+
+  const next = existing ? `${existing}\n${bullet}` : bullet;
+  if (next.length > QUICK_FACTS_MAX_CHARS) {
+    throw new Error(
+      `quick_facts_full_${QUICK_FACTS_MAX_CHARS}_chars_max__operator_must_prune_in_settings`,
+    );
+  }
+
+  cf[PROFILE_CUSTOM_FIELD_KEYS.QUICK_FACTS] = next;
+  const upd = await db
+    .from("user_profiles")
+    .update({ custom_fields: cf })
+    .eq("auth_user_id", ctx.authUserId);
+  if (upd.error) throw new Error(upd.error.message);
+
+  return { ok: true, saved: bullet, total_chars: next.length };
 }
 
 async function toolListRecords(input: Record<string, unknown>, ctx: ToolContext) {
@@ -1189,6 +1276,12 @@ function humanSummary(name: string, input: Record<string, unknown>, data: unknow
     case "search_memory": {
       const d = data as { count?: number };
       return `searched memory for "${String(input.query)}" - ${d.count || 0} match${d.count === 1 ? "" : "es"}`;
+    }
+    case "save_known_fact": {
+      const d = data as { saved?: string; deduped?: boolean };
+      if (d.deduped) return `known fact already saved (deduped)`;
+      const preview = (d.saved || String(input.fact || "")).slice(0, 80);
+      return `saved known fact: "${preview}${preview.length >= 80 ? "…" : ""}"`;
     }
     case "web_fetch": {
       const d = data as { status: number };

@@ -30,6 +30,7 @@ import { operatorDateKey, operatorDayStartIso } from "./dates";
 import { getDbBackend } from "./db";
 import { isMissingTableError } from "./api-helpers";
 import { getTenantEnabledAgents } from "./manifest/tenant-scope";
+import { PROFILE_CUSTOM_FIELD_KEYS, getCustomFieldString } from "./profile-custom-fields";
 import type { TenantRecord } from "./manifest/data";
 import {
   getTodayPlanTurso,
@@ -783,8 +784,8 @@ export async function topClientConcentration(tenantId: string): Promise<{
   // Read from profile.custom_fields.top_client_mrr_usd. Operators set this
   // in Settings or via scripts/seed_profile.py. No magic numbers.
   const customFields = (profile?.custom_fields || {}) as Record<string, unknown>;
-  const configuredName = (customFields.top_client_name as string) || null;
-  const configuredMrr = Number(customFields.top_client_mrr_usd) || 0;
+  const configuredName = getCustomFieldString(customFields, PROFILE_CUSTOM_FIELD_KEYS.TOP_CLIENT_NAME);
+  const configuredMrr = Number(customFields[PROFILE_CUSTOM_FIELD_KEYS.TOP_CLIENT_MRR_USD]) || 0;
 
   const name = configuredName || topWonName || "Top client";
   const pct = configuredMrr > 0 ? (configuredMrr / totalMrr) * 100 : 0;

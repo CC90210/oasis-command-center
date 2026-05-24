@@ -29,6 +29,12 @@ export const PROFILE_CUSTOM_FIELD_KEYS = {
   BRIEFING_CHANNEL: "briefing_channel",
   /** Profile photo URL set during onboarding. */
   PHOTO_URL: "photo_url",
+  /** Operator's biggest client by name — drives the concentration-risk
+   *  metric on the dashboard. Set in Settings or seed_profile.py. */
+  TOP_CLIENT_NAME: "top_client_name",
+  /** USD MRR from the biggest client — denominator stays
+   *  `mrr_current_usd`, this is the numerator. */
+  TOP_CLIENT_MRR_USD: "top_client_mrr_usd",
 } as const;
 
 export type ProfileCustomFieldKey =
