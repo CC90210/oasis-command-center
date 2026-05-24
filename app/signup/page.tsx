@@ -136,8 +136,12 @@ export default function SignupPage() {
       {/* Same defensive guard as /login and /welcome — an already-authed
           user landing on /signup (back button after success, accidental
           re-visit) should be bounced into the app, not shown the signup
-          form again. */}
-      <AuthRedirectGuard to="/" />
+          form again. SPECIAL CASE: if they arrived with an invite token,
+          send them to /invite/<token> instead of "/" so the redemption
+          flow still fires. Bouncing them straight to "/" would strand
+          them in their original tenant and silently drop the invite —
+          Codex caught this 2026-05-24. */}
+      <AuthRedirectGuard to={inviteToken ? `/invite/${encodeURIComponent(inviteToken)}` : "/"} />
       <div className="w-full max-w-md">
         <div className="text-center mb-8">
           <div className="inline-flex items-center gap-3 mb-4">
