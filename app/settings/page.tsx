@@ -12,6 +12,7 @@ import {
 import { safe } from "@/lib/api-helpers";
 import { ChangePasswordForm } from "@/components/ChangePasswordForm";
 import { KnownFactsEditor } from "@/components/KnownFactsEditor";
+import { CustomCredentialsVault } from "@/components/settings/CustomCredentialsVault";
 import { ProfileEditor } from "@/components/settings/ProfileEditor";
 import { BrandLogoCard } from "@/components/settings/BrandLogoCard";
 import { QuickInviteCard } from "@/components/settings/QuickInviteCard";
@@ -190,6 +191,17 @@ export default async function SettingsPage() {
               <KnownFactsEditor />
             </SafeBoundary>
           </Card>
+
+          {canManageTenant && (
+            <Card
+              title="Custom credentials"
+              subtitle="Drop in any KEY=VALUE secret your agents need — API keys, webhook URLs, client-specific tokens. Encrypted at rest. Agents retrieve them by name via get_credential; values never appear in chat."
+            >
+              <SafeBoundary label="Custom credentials vault">
+                <CustomCredentialsVault />
+              </SafeBoundary>
+            </Card>
+          )}
 
           <Card title="Password" subtitle="Change your sign-in password">
             <SafeBoundary label="Password form">

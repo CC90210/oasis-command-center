@@ -57,6 +57,7 @@ import {
 } from "./chat-modes/plan-mode";
 import { readBrainDoc, searchMemory } from "./cloud-knowledge-tools";
 import { PROFILE_CUSTOM_FIELD_KEYS } from "./profile-custom-fields";
+import { getTenantIntegrationValue } from "./tenant-integration-store";
 
 const ANTHROPIC_VERSION = "2023-06-01";
 const MAX_TOOL_ITERATIONS = 8; // safety cap — prevents runaway tool loops
@@ -152,6 +153,22 @@ export const TOOL_DEFINITIONS: ToolDef[] = [
         limit: { type: "number", description: "Optional max snippets to return. Default 8, max 20." },
       },
       required: ["query"],
+    },
+  },
+  {
+    name: "get_credential",
+    description:
+      "Retrieve a secret credential (API key, webhook URL, access token) the operator saved in Settings → Custom credentials. Use this BEFORE asking the operator for a credential they may have already stored. The value is returned but you should NEVER echo it back to the operator in chat — pass it directly to the action that needs it (e.g., http_post Authorization header) and tell the operator what you did, not what the value was. If the credential doesn't exist, you'll get {found:false} — at that point, tell the operator the credential is missing and which exact KEY name to add under Settings → Custom credentials.",
+    input_schema: {
+      type: "object",
+      properties: {
+        name: {
+          type: "string",
+          description:
+            "The credential key, UPPER_SNAKE_CASE (e.g., 'STRIPE_WEBHOOK_SECRET', 'CALENDLY_API_KEY'). Matches the key the operator typed in Settings.",
+        },
+      },
+      required: ["name"],
     },
   },
   {
@@ -669,6 +686,8 @@ async function dispatch(
       return await searchMemory(input);
     case "save_known_fact":
       return await toolSaveKnownFact(input, ctx);
+    case "get_credential":
+      return await toolGetCredential(input, ctx);
     case "web_fetch":
       return await toolHttpGet(input);
     case "list_records":
@@ -886,6 +905,51 @@ async function toolSaveKnownFact(input: Record<string, unknown>, ctx: ToolContex
   if (upd.error) throw new Error(upd.error.message);
 
   return { ok: true, saved: bullet, total_chars: next.length };
+}
+
+/**
+ * Read a custom credential the tenant admin saved at Settings →
+ * Custom credentials. Looks up `tenant_integration_credentials` with
+ * service="custom" + field_key=lowercase(name). Returns the decrypted
+ * value to the tool dispatcher.
+ *
+ * SAFETY: the returned value flows into the tool_result content, which
+ * is part of the model's context window for the rest of the turn. The
+ * tool's *prompt* description instructs the model never to echo it
+ * back to the user — that's a soft control, not a hard one. For hard
+ * isolation we'd have to intercept the value at the send_email /
+ * http_post layer and substitute it server-side after the model emits
+ * a placeholder. Worth doing next round.
+ *
+ * For now: the model is told, the operator stays aware they pasted a
+ * secret, and the credential is at least never SAVED to the
+ * chat_messages transcript (we strip tool_result content before
+ * persisting elsewhere — verify in the persistence layer).
+ */
+const CUSTOM_CREDENTIAL_SERVICE = "custom";
+async function toolGetCredential(input: Record<string, unknown>, ctx: ToolContext) {
+  const raw = typeof input.name === "string" ? input.name.trim() : "";
+  if (!raw) throw new Error("name_required");
+  // Same regex as the upload route — refuses anything that wouldn't
+  // round-trip with the stored field_key.
+  if (!/^[A-Z][A-Z0-9_]{0,63}$/.test(raw.toUpperCase())) {
+    throw new Error("invalid_credential_name_format");
+  }
+  const fieldKey = raw.toLowerCase();
+  const value = await getTenantIntegrationValue(
+    ctx.tenantId,
+    CUSTOM_CREDENTIAL_SERVICE,
+    fieldKey,
+  );
+  if (value === null) {
+    return {
+      found: false,
+      name: raw.toUpperCase(),
+      hint:
+        "Credential not in vault. Tell the operator to add it under Settings → Custom credentials using this exact KEY name.",
+    };
+  }
+  return { found: true, name: raw.toUpperCase(), value };
 }
 
 async function toolListRecords(input: Record<string, unknown>, ctx: ToolContext) {
@@ -1282,6 +1346,13 @@ function humanSummary(name: string, input: Record<string, unknown>, data: unknow
       if (d.deduped) return `known fact already saved (deduped)`;
       const preview = (d.saved || String(input.fact || "")).slice(0, 80);
       return `saved known fact: "${preview}${preview.length >= 80 ? "…" : ""}"`;
+    }
+    case "get_credential": {
+      const d = data as { found?: boolean };
+      const name = String(input.name || "?").toUpperCase();
+      return d.found
+        ? `retrieved credential ${name} (value masked)`
+        : `credential ${name} not found in vault`;
     }
     case "web_fetch": {
       const d = data as { status: number };
