@@ -473,23 +473,40 @@ export function AgentAssemblyScrollScene() {
         {/* ───────── FIGURE STAGE ─────────
             Mobile: flex-1 region in the column, constrained to a phone-safe
             height so it never touches the heading or CTA.
-            Desktop: absolutely centered, original aspect-locked container. */}
-        <motion.div
+            Desktop: absolutely centered, original aspect-locked container.
+            BUG FIX 2026-05-24: parallax x/y on the centered element overrides
+            Tailwind's -translate-1/2 (framer-motion writes `transform:
+            translateX()` directly), so the stage was rendering 396px low and
+            its legs were clipped off the bottom of the viewport. Split into
+            an OUTER absolutely-centered shell (no parallax) and an INNER
+            motion.div that holds the parallax — both transforms now compose
+            cleanly. */}
+        <div
           aria-hidden="true"
           className="relative z-10 flex flex-1 items-center justify-center pt-2 min-[641px]:pointer-events-none min-[641px]:absolute min-[641px]:left-1/2 min-[641px]:top-1/2 min-[641px]:z-10 min-[641px]:flex-none min-[641px]:-translate-x-1/2 min-[641px]:-translate-y-1/2 min-[641px]:p-0"
-          style={{ x: parallaxX, y: parallaxY }}
         >
-          <div
-            className="relative flex aspect-[521/1536] w-[44vw] max-w-[200px] items-center justify-center min-[641px]:h-[min(82vh,680px)] min-[641px]:w-auto min-[641px]:max-w-none"
+          <motion.div
+            aria-hidden="true"
+            style={{ x: parallaxX, y: parallaxY }}
           >
-            <AgentFigureSprite
-              installProgresses={layerProgresses}
-              compactionProgress={compactionProgress}
-              forceInstalled={forceInstalled}
-              className="h-full w-full"
-            />
-          </div>
-        </motion.div>
+            {/* Figure stage — sized by HEIGHT (never width) so the full
+                standing humanoid always fits the viewport with breathing room.
+                Old version capped at 680px which clipped legs on shorter
+                windows; new uses 88vh (with floor) so the body fills the
+                screen vertically and the scattered fragments orbit
+                comfortably around it. */}
+            <div
+              className="relative flex aspect-[540/1435] w-[52vw] max-w-[230px] items-center justify-center min-[641px]:h-[min(88vh,860px)] min-[641px]:w-auto min-[641px]:max-w-none min-[641px]:min-h-[560px]"
+            >
+              <AgentFigureSprite
+                installProgresses={layerProgresses}
+                compactionProgress={compactionProgress}
+                forceInstalled={forceInstalled}
+                className="h-full w-full"
+              />
+            </div>
+          </motion.div>
+        </div>
 
         {/* ───────── PROGRESS + CTA ─────────
             Mobile: in-flow at the bottom of the column.

@@ -33,8 +33,10 @@ export const SPRITE_LAYER_COUNT = 10;
 
 // Source PNG dimensions — used as the SVG overlay viewBox so connection
 // lines and lock-in flashes share coordinate space with the figure.
-const PNG_W = 521;
-const PNG_H = 1536;
+// Updated 2026-05-24 — new figure is the OASIS AI standing humanoid
+// (cropped + alpha-cut from the May 24 ChatGPT reference, 540x1435).
+const PNG_W = 540;
+const PNG_H = 1435;
 
 const C = {
   primary: "#86efac",
@@ -56,17 +58,26 @@ type LayerSpec = {
 // PAINT ORDER: bottom (activation podium) → top (head). Z-stacking matches
 // the original photoreal slice order so foreground parts land last.
 // manifestIdx is the SUBSYSTEM order from MODULE_MANIFEST in the scene.
+//
+// SCATTER LAYOUT (rebuilt 2026-05-24 for new standing-humanoid figure):
+// Each slice gets HORIZONTAL displacement only (small ±Y for separation).
+// The figure is a tall narrow column; pushing slices SIDEWAYS off the body
+// reads cleaner than pushing them up/down (where they'd collide with the
+// next slice's dock anyway). X-offsets alternate L/R every step so adjacent
+// slices in the body chain go opposite directions — clear orbital read.
+// Scales 0.78-0.95 keep parts big and recognizable. Rotations ±13° give
+// the field life without anyone looking "tipped over".
 const LAYERS: LayerSpec[] = [
-  { file: "10-activation",      manifestIdx: 9, scatter: { x: -25,  y: 95,   rotate: -5,  scale: 0.7 } },
-  { file: "09-body-pelvis",     manifestIdx: 8, scatter: { x: -55,  y: -45,  rotate: -7,  scale: 0.45 } },
-  { file: "08-ethics-hip",      manifestIdx: 7, scatter: { x: 110,  y: 50,   rotate: 12,  scale: 0.65 } },
-  { file: "07-communication",   manifestIdx: 6, scatter: { x: -120, y: -25,  rotate: -11, scale: 0.6 } },
-  { file: "06-reasoning-torso", manifestIdx: 5, scatter: { x: 85,   y: 55,   rotate: 8,   scale: 0.55 } },
-  { file: "05-sensors",         manifestIdx: 4, scatter: { x: -135, y: 25,   rotate: -14, scale: 0.45 } },
-  { file: "04-memory-ring",     manifestIdx: 3, scatter: { x: 95,   y: -75,  rotate: 13,  scale: 0.6 } },
-  { file: "03-neural-disc",     manifestIdx: 2, scatter: { x: -65,  y: 40,   rotate: -6,  scale: 0.7 } },
-  { file: "02-neural-cube",     manifestIdx: 1, scatter: { x: 100,  y: -20,  rotate: 10,  scale: 0.55 } },
-  { file: "01-head",            manifestIdx: 0, scatter: { x: 55,   y: -115, rotate: 8,   scale: 0.5 } },
+  { file: "10-activation",      manifestIdx: 9, scatter: { x: -180, y: 60,   rotate: -6,  scale: 0.85 } }, // podium → bottom-left
+  { file: "09-body-pelvis",     manifestIdx: 8, scatter: { x: 200,  y: 40,   rotate: 8,   scale: 0.85 } }, // feet → bottom-right
+  { file: "08-ethics-hip",      manifestIdx: 7, scatter: { x: -210, y: -10,  rotate: -9,  scale: 0.88 } }, // calves → mid-bot-left
+  { file: "07-communication",   manifestIdx: 6, scatter: { x: 220,  y: 0,    rotate: 10,  scale: 0.90 } }, // thighs → mid-bot-right
+  { file: "06-reasoning-torso", manifestIdx: 5, scatter: { x: -220, y: 20,   rotate: -11, scale: 0.92 } }, // hips → mid-left
+  { file: "05-sensors",         manifestIdx: 4, scatter: { x: 230,  y: -10,  rotate: 12,  scale: 0.92 } }, // abdomen → mid-right
+  { file: "04-memory-ring",     manifestIdx: 3, scatter: { x: -210, y: -20,  rotate: -10, scale: 0.90 } }, // lower chest → upper-left
+  { file: "03-neural-disc",     manifestIdx: 2, scatter: { x: 200,  y: 30,   rotate: 11,  scale: 0.88 } }, // upper chest → upper-right
+  { file: "02-neural-cube",     manifestIdx: 1, scatter: { x: -160, y: 80,   rotate: -7,  scale: 0.82 } }, // neck → top-left (lower)
+  { file: "01-head",            manifestIdx: 0, scatter: { x: 170,  y: 70,   rotate: 9,   scale: 0.85 } }, // head → top-right (lower)
 ];
 
 // next/image sizes hint — the figure column never exceeds ~25vw on desktop.
@@ -214,15 +225,29 @@ function InstallLayer({
   const restRot = useTransform(installProgress, [0, 0.6, 1], [layer.scatter.rotate * 1.8, layer.scatter.rotate * 1.1, layer.scatter.rotate]);
   const restScale = useTransform(installProgress, [0, 0.6, 1], [layer.scatter.scale * 0.78, layer.scatter.scale * 1.04, layer.scatter.scale]);
 
-  // Continuous idle drift while scattered. Each fragment seeds its own sin
-  // phase from its scatter coordinates so all 10 pieces breathe on their
-  // own rhythm. Amplitudes are small enough to read as "alive in space",
-  // large enough to never appear frozen. Floating fades out as the fragment
-  // converges (multiplied by 1-c below).
+  // Continuous idle drift while scattered. Each fragment is given its own
+  // ORBITAL motion (small ellipse around its scatter dock) plus a vertical
+  // BOB on a different period — combination reads as "intelligent suspension
+  // in zero-g" instead of metronomic sway. Amplitudes scaled up from the
+  // previous build (9/11/2) so larger parts have proportional motion.
+  // Phase seeds derived from scatter coords so all 10 fragments breathe on
+  // independent rhythms. Float dampens to 0 as compaction approaches 1.
   const time = useTime();
-  const floatX = useTransform(time, (t) => Math.sin((t as number) / 1900 + layer.scatter.x * 0.06) * 9);
-  const floatY = useTransform(time, (t) => Math.cos((t as number) / 2300 + layer.scatter.y * 0.05) * 11);
-  const floatRot = useTransform(time, (t) => Math.sin((t as number) / 2700 + layer.scatter.rotate * 0.4) * 2);
+  const orbitPhaseX = (layer.scatter.x + 320) * 0.011; // unique phase per fragment
+  const orbitPhaseY = (layer.scatter.y + 400) * 0.014;
+  const bobPhase = layer.scatter.rotate * 0.35;
+  // Orbital X/Y traces a slow ellipse (period ~7.2s X / ~9.6s Y).
+  const floatX = useTransform(time, (t) =>
+    Math.sin((t as number) / 2400 + orbitPhaseX) * 16 + Math.cos((t as number) / 3700 + orbitPhaseY) * 6,
+  );
+  const floatY = useTransform(time, (t) =>
+    Math.cos((t as number) / 3000 + orbitPhaseY) * 18 + Math.sin((t as number) / 4100 + orbitPhaseX) * 7,
+  );
+  // Subtle counter-rotation that follows the orbit phase — fragment looks
+  // like it's drifting along its trajectory, not spinning in place.
+  const floatRot = useTransform(time, (t) =>
+    Math.sin((t as number) / 3400 + bobPhase) * 3.5,
+  );
 
   // Ease-in-out compaction lerp so the merger reads as mechanical, not linear.
   const c = useTransform(compactionProgress, (v) => {
@@ -349,18 +374,18 @@ type LinkSegment = {
 
 /**
  * Network of electric lines wiring subsystems together. Coordinates are
- * in PNG image space (521x1536). Anatomy estimates derived from the
- * agent-solid PNG layout: head ~y180, chest ~y490, hips ~y1080,
- * hands ~y820, platform ~y1480.
+ * in PNG image space (540x1435). Anatomy landmarks for the new standing
+ * humanoid: head ~y130, chest core ~y540, hips ~y800, hands ~y870,
+ * knees ~y1050, podium ~y1390. Lines wire spine + limbs together.
  */
 const LINK_SEGMENTS: LinkSegment[] = [
-  { d: "M 260 250 L 260 470", x1: 260, y1: 250, x2: 260, y2: 470, start: 0.18, end: 0.4 },   // head → chest
-  { d: "M 260 580 L 260 1080", x1: 260, y1: 580, x2: 260, y2: 1080, start: 0.25, end: 0.5 }, // chest → hips
-  { d: "M 220 540 L 110 830", x1: 220, y1: 540, x2: 110, y2: 830, start: 0.3, end: 0.6 },    // left torso → left hand
-  { d: "M 300 540 L 410 830", x1: 300, y1: 540, x2: 410, y2: 830, start: 0.3, end: 0.6 },    // right torso → right hand
-  { d: "M 110 830 L 210 1460", x1: 110, y1: 830, x2: 210, y2: 1460, start: 0.4, end: 0.72 },  // left hand → base
-  { d: "M 410 830 L 310 1460", x1: 410, y1: 830, x2: 310, y2: 1460, start: 0.4, end: 0.72 },  // right hand → base
-  { d: "M 260 1100 L 260 1470", x1: 260, y1: 1100, x2: 260, y2: 1470, start: 0.5, end: 0.82 }, // spine → platform
+  { d: "M 270 200 L 270 410",   x1: 270, y1: 200,  x2: 270, y2: 410,  start: 0.18, end: 0.4  }, // head → chest
+  { d: "M 270 540 L 270 800",   x1: 270, y1: 540,  x2: 270, y2: 800,  start: 0.25, end: 0.5  }, // chest core → hips
+  { d: "M 220 540 L 160 870",   x1: 220, y1: 540,  x2: 160, y2: 870,  start: 0.30, end: 0.6  }, // left shoulder → left hand
+  { d: "M 320 540 L 380 870",   x1: 320, y1: 540,  x2: 380, y2: 870,  start: 0.30, end: 0.6  }, // right shoulder → right hand
+  { d: "M 230 820 L 235 1300",  x1: 230, y1: 820,  x2: 235, y2: 1300, start: 0.40, end: 0.72 }, // left hip → left foot
+  { d: "M 310 820 L 305 1300",  x1: 310, y1: 820,  x2: 305, y2: 1300, start: 0.40, end: 0.72 }, // right hip → right foot
+  { d: "M 270 1300 L 270 1395", x1: 270, y1: 1300, x2: 270, y2: 1395, start: 0.50, end: 0.82 }, // feet → podium
 ];
 
 function CompactionLinks({
@@ -491,11 +516,12 @@ function LockInFlash({
   const r3 = useTransform(compactionProgress, [0.55, 1], [20, 420]);
   const o3 = useTransform(compactionProgress, [0.55, 0.8, 1], [0, 0.5, 0]);
   if (forceInstalled) return null;
+  // Heart of the figure ≈ chest core (light element) at (270, 540) in new PNG space.
   return (
     <g fill="none" filter="url(#hg-glow-soft)">
-      <motion.circle cx={260} cy={620} strokeWidth={4} stroke={C.primary} style={{ r: r1, opacity: o1 }} />
-      <motion.circle cx={260} cy={620} strokeWidth={3} stroke={C.accent} style={{ r: r2, opacity: o2 }} />
-      <motion.circle cx={260} cy={620} strokeWidth={3} stroke={C.warm} style={{ r: r3, opacity: o3 }} />
+      <motion.circle cx={270} cy={540} strokeWidth={4} stroke={C.primary} style={{ r: r1, opacity: o1 }} />
+      <motion.circle cx={270} cy={540} strokeWidth={3} stroke={C.accent} style={{ r: r2, opacity: o2 }} />
+      <motion.circle cx={270} cy={540} strokeWidth={3} stroke={C.warm} style={{ r: r3, opacity: o3 }} />
     </g>
   );
 }
@@ -518,8 +544,8 @@ function CenterShockwave({
   if (forceInstalled) return null;
   return (
     <motion.circle
-      cx={260}
-      cy={620}
+      cx={270}
+      cy={540}
       fill="none"
       stroke={C.primary}
       filter="url(#hg-glow-soft)"
@@ -545,7 +571,7 @@ function SystemOnlinePill({
   const PILL_W = 240;
   const PILL_H = 56;
   const PILL_X = (PNG_W - PILL_W) / 2;
-  const PILL_Y = 1480;
+  const PILL_Y = 1420;
   if (forceInstalled) {
     return (
       <g transform={`translate(${PILL_X} ${PILL_Y})`}>
