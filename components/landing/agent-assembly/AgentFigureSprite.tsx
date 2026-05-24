@@ -1,43 +1,76 @@
 "use client";
 
+import Image from "next/image";
 import { type ReactNode } from "react";
 import { motion, useTime, useTransform, type MotionValue } from "framer-motion";
 
 /**
- * HolographicAgent — pure-SVG, fully-owned holographic humanoid.
+ * AgentFigureSprite — photoreal scroll-driven agent assembly.
  *
- * Replaces the third-party PNG slices. Every pixel is generated from
- * primitives we control: 10 install groups map 1:1 to the OASIS subsystem
- * manifest, then a compaction beat locks the figure into its "system online"
- * state. The figure is parametric — colour, stroke weight, glow, anatomy
- * coords all live in this file.
+ * Renders 10 transparent PNG slices of a humanoid agent figure (sliced from
+ * the ChatGPT reference render) layered with scatter-then-compact motion:
  *
- * Sizing contract: render at the natural viewBox aspect (2:3); the scene
- * wrapper constrains the OUTER container to viewport height so this never
- * overflows.
+ *  - INSTALL phase: each slice fades in AT a scattered offset (50-130px
+ *    from anatomical home, with mild rotation) and STAYS scattered through
+ *    its scroll window. Reads as exploded-view blueprint fragments
+ *    materialising one by one.
+ *  - COMPACTION phase (last scroll beat): every slice converges from its
+ *    scattered rest position toward home (0, 0, 0, 1) via an ease-in-out
+ *    lerp; the whole figure punches +6% scale ("lock click"); 7 connection
+ *    lines draw in sequence wiring subsystems together; a triple-ring
+ *    burst confirms SYSTEM ONLINE; the agent-solid base PNG cross-fades
+ *    in for the final "fully assembled" look.
+ *  - REDUCED-MOTION / mobile: forceInstalled short-circuits to a static
+ *    fully-assembled view (just the agent-solid PNG with SYSTEM ONLINE
+ *    overlay).
  *
- * Motion philosophy: install motion is confident (snap-in, gentle settle).
- * Once a layer is installed, it LOCKS — no idle wobble, no cursor float.
- * Aliveness comes from light travelling along connection lines and the
- * central reasoning-core pulse, not from anatomical drift.
+ * Sizing: parent constrains by HEIGHT (e.g. h-[min(78vh,620px)]); the
+ * figure aspect-ratio (521:1536) yields a narrow humanoid column that
+ * always fits the viewport.
  */
 
 export const SPRITE_LAYER_COUNT = 10;
 
-const VB_W = 480;
-const VB_H = 720;
+// Source PNG dimensions — used as the SVG overlay viewBox so connection
+// lines and lock-in flashes share coordinate space with the figure.
+const PNG_W = 521;
+const PNG_H = 1536;
 
 const C = {
   primary: "#86efac",
-  primarySoft: "rgba(134,239,172,0.55)",
-  primaryFaint: "rgba(134,239,172,0.18)",
   accent: "#5eead4",
-  accentSoft: "rgba(94,234,212,0.5)",
   warm: "#fcd34d",
-  warmSoft: "rgba(252,211,77,0.55)",
-  shell: "rgba(167,243,208,0.92)",
-  bg: "#03070a",
 } as const;
+
+type Scatter = { x: number; y: number; rotate: number; scale: number };
+
+type LayerSpec = {
+  /** PNG basename (no extension) inside /public/welcome/parts/ */
+  file: string;
+  /** Index into installProgresses (manifest order: 0=Reasoning Core ... 9=Command Centre). */
+  manifestIdx: number;
+  /** Offset (in CSS px relative to dock) the slice rests at while scattered. */
+  scatter: Scatter;
+};
+
+// PAINT ORDER: bottom (activation podium) → top (head). Z-stacking matches
+// the original photoreal slice order so foreground parts land last.
+// manifestIdx is the SUBSYSTEM order from MODULE_MANIFEST in the scene.
+const LAYERS: LayerSpec[] = [
+  { file: "10-activation",      manifestIdx: 9, scatter: { x: -25,  y: 95,   rotate: -5,  scale: 0.7 } },
+  { file: "09-body-pelvis",     manifestIdx: 8, scatter: { x: -55,  y: -45,  rotate: -7,  scale: 0.45 } },
+  { file: "08-ethics-hip",      manifestIdx: 7, scatter: { x: 110,  y: 50,   rotate: 12,  scale: 0.65 } },
+  { file: "07-communication",   manifestIdx: 6, scatter: { x: -120, y: -25,  rotate: -11, scale: 0.6 } },
+  { file: "06-reasoning-torso", manifestIdx: 5, scatter: { x: 85,   y: 55,   rotate: 8,   scale: 0.55 } },
+  { file: "05-sensors",         manifestIdx: 4, scatter: { x: -135, y: 25,   rotate: -14, scale: 0.45 } },
+  { file: "04-memory-ring",     manifestIdx: 3, scatter: { x: 95,   y: -75,  rotate: 13,  scale: 0.6 } },
+  { file: "03-neural-disc",     manifestIdx: 2, scatter: { x: -65,  y: 40,   rotate: -6,  scale: 0.7 } },
+  { file: "02-neural-cube",     manifestIdx: 1, scatter: { x: 100,  y: -20,  rotate: 10,  scale: 0.55 } },
+  { file: "01-head",            manifestIdx: 0, scatter: { x: 55,   y: -115, rotate: 8,   scale: 0.5 } },
+];
+
+// next/image sizes hint — the figure column never exceeds ~25vw on desktop.
+const IMG_SIZES = "(max-width: 640px) 70vw, (max-width: 1024px) 30vw, 25vw";
 
 type Props = {
   installProgresses: MotionValue<number>[];
@@ -58,128 +91,161 @@ export function AgentFigureSprite({
     );
   }
 
-  const [
-    reasoningCore,
-    statePulse,
-    memorySpine,
-    browserOptics,
-    bridgeTools,
-    guardShield,
-    outputChannels,
-    securityMesh,
-    businessLayer,
-    commandCentre,
-  ] = installProgresses;
-
   return (
-    <div className={className} style={{ position: "relative", width: "100%", aspectRatio: `${VB_W} / ${VB_H}` }}>
+    <div className={className} style={{ position: "relative", width: "100%", height: "100%" }}>
+      <SilhouetteLayer compactionProgress={compactionProgress} forceInstalled={forceInstalled} />
+
+      <SolidLayer compactionProgress={compactionProgress} forceInstalled={forceInstalled} />
+
+      <LockClickWrapper compactionProgress={compactionProgress} forceInstalled={forceInstalled}>
+        {LAYERS.map((layer) => (
+          <InstallLayer
+            key={layer.file}
+            layer={layer}
+            installProgress={installProgresses[layer.manifestIdx]}
+            compactionProgress={compactionProgress}
+            forceInstalled={forceInstalled}
+          />
+        ))}
+      </LockClickWrapper>
+
+      {/* SVG overlays — share PNG coordinate space (viewBox 521x1536) so
+          connection lines and lock-in rings land on the right anatomy. */}
       <svg
-        viewBox={`0 0 ${VB_W} ${VB_H}`}
-        width="100%"
-        height="100%"
+        viewBox={`0 0 ${PNG_W} ${PNG_H}`}
         xmlns="http://www.w3.org/2000/svg"
-        style={{ display: "block", overflow: "visible" }}
+        aria-hidden="true"
+        style={{
+          position: "absolute",
+          inset: 0,
+          width: "100%",
+          height: "100%",
+          pointerEvents: "none",
+          overflow: "visible",
+        }}
       >
         <Defs />
-
-        {/* WHOLE-FIGURE LOCK CLICK — a 6% scale punch at the compaction
-            midpoint reads as the pieces "snapping together" mechanically. */}
-        <LockClickGroup compactionProgress={compactionProgress} forceInstalled={forceInstalled}>
-          {/* PAINT ORDER (bottom → top). Anatomy stacks behind, HUD on top. */}
-          <Wireframe compactionProgress={compactionProgress} forceInstalled={forceInstalled} />
-
-          <InstallGroup progress={commandCentre} compactionProgress={compactionProgress} forceInstalled={forceInstalled} from={{ x: -20, y: 80, rotate: -4, scale: 0.7 }}>
-            <ActivationPlatform compactionProgress={compactionProgress} forceInstalled={forceInstalled} />
-          </InstallGroup>
-
-          <InstallGroup progress={memorySpine} compactionProgress={compactionProgress} forceInstalled={forceInstalled} from={{ x: -60, y: 40, rotate: -6, scale: 0.7 }}>
-            <MemorySpine compactionProgress={compactionProgress} forceInstalled={forceInstalled} />
-          </InstallGroup>
-
-          <InstallGroup progress={outputChannels} compactionProgress={compactionProgress} forceInstalled={forceInstalled} from={{ x: -110, y: -30, rotate: -10, scale: 0.6 }}>
-            <Arms compactionProgress={compactionProgress} forceInstalled={forceInstalled} />
-          </InstallGroup>
-
-          <InstallGroup progress={statePulse} compactionProgress={compactionProgress} forceInstalled={forceInstalled} from={{ x: 95, y: -20, rotate: 9, scale: 0.55 }}>
-            <StatePulse compactionProgress={compactionProgress} forceInstalled={forceInstalled} />
-          </InstallGroup>
-
-          <InstallGroup progress={guardShield} compactionProgress={compactionProgress} forceInstalled={forceInstalled} from={{ x: 80, y: 60, rotate: 7, scale: 0.55 }}>
-            <GuardShield compactionProgress={compactionProgress} forceInstalled={forceInstalled} />
-          </InstallGroup>
-
-          <InstallGroup progress={bridgeTools} compactionProgress={compactionProgress} forceInstalled={forceInstalled} from={{ x: -130, y: 30, rotate: -14, scale: 0.45 }}>
-            <BridgeTools compactionProgress={compactionProgress} forceInstalled={forceInstalled} />
-          </InstallGroup>
-
-          <InstallGroup progress={businessLayer} compactionProgress={compactionProgress} forceInstalled={forceInstalled} from={{ x: -70, y: -50, rotate: -8, scale: 0.4 }}>
-            <BusinessBadge />
-          </InstallGroup>
-
-          <InstallGroup progress={reasoningCore} compactionProgress={compactionProgress} forceInstalled={forceInstalled} from={{ x: 50, y: -110, rotate: 8, scale: 0.5 }}>
-            <ReasoningCore compactionProgress={compactionProgress} forceInstalled={forceInstalled} />
-          </InstallGroup>
-
-          <InstallGroup progress={browserOptics} compactionProgress={compactionProgress} forceInstalled={forceInstalled} from={{ x: 90, y: -70, rotate: 12, scale: 0.6 }}>
-            <BrowserOptics compactionProgress={compactionProgress} forceInstalled={forceInstalled} />
-          </InstallGroup>
-
-          <InstallGroup progress={securityMesh} compactionProgress={compactionProgress} forceInstalled={forceInstalled} from={{ x: 0, y: 0, rotate: 6, scale: 1.18 }}>
-            <SecurityMesh />
-          </InstallGroup>
-
-          <InstallGroup progress={commandCentre} compactionProgress={compactionProgress} forceInstalled={forceInstalled} from={{ x: 30, y: -40, rotate: 4, scale: 0.92 }}>
-            <HudFrame compactionProgress={compactionProgress} forceInstalled={forceInstalled} />
-          </InstallGroup>
-
-          <CompactionLinks compactionProgress={compactionProgress} forceInstalled={forceInstalled} />
-        </LockClickGroup>
-
-        <Scanline forceInstalled={forceInstalled} compactionProgress={compactionProgress} />
+        <CompactionLinks compactionProgress={compactionProgress} forceInstalled={forceInstalled} />
         <LockInFlash compactionProgress={compactionProgress} forceInstalled={forceInstalled} />
+        <SystemOnlinePill compactionProgress={compactionProgress} forceInstalled={forceInstalled} />
+        <Scanline compactionProgress={compactionProgress} forceInstalled={forceInstalled} />
       </svg>
     </div>
   );
 }
 
-/* ─────────────────────────────  install wrapper  ───────────────────────── */
+/* ────────────────────────  base PNG layers  ─────────────────────────── */
 
-/**
- * InstallGroup — wraps a subsystem with the install + compaction motion.
- *
- * Two-phase motion:
- *   1. INSTALL — piece fades in AT its scattered "from" offset (mild bob
- *      from 1.8x → 1.0x of the offset). It does NOT travel to home yet.
- *   2. COMPACTION — once compactionProgress > 0, piece smoothly converges
- *      from its scattered resting position toward home (0, 0, 0, 1).
- *      At compaction = 1, all pieces are at exact anatomical positions.
- *
- * The result: during scroll the figure reads as scattered fragments
- * gradually materialising; at the compaction beat they visibly snap
- * together into a coherent humanoid.
- */
-function InstallGroup({
-  progress,
+/** Faint blurred silhouette — anchors the figure pre-scroll. Fades out
+ *  as the solid base layer takes over during compaction. */
+function SilhouetteLayer({
   compactionProgress,
   forceInstalled,
-  from,
-  children,
 }: {
-  progress: MotionValue<number>;
   compactionProgress: MotionValue<number>;
   forceInstalled: boolean;
-  from: { x: number; y: number; rotate: number; scale: number };
-  children: ReactNode;
 }) {
-  const opacity = useTransform(progress, [0, 0.18, 0.55, 1], [0, 0.45, 0.92, 1]);
+  const opacity = useTransform(compactionProgress, [0, 0.45], [0.16, 0]);
+  if (forceInstalled) return null;
+  return (
+    <motion.div
+      aria-hidden
+      style={{
+        position: "absolute",
+        inset: 0,
+        opacity,
+        filter: "blur(2px) brightness(0.55)",
+        mixBlendMode: "screen",
+      }}
+    >
+      <Image
+        src="/welcome/parts/agent-full.png"
+        alt=""
+        fill
+        sizes={IMG_SIZES}
+        style={{ objectFit: "contain", objectPosition: "center" }}
+        draggable={false}
+        priority
+      />
+    </motion.div>
+  );
+}
 
-  // Scattered resting position the piece settles into after install.
-  const restX = useTransform(progress, [0, 0.6, 1], [from.x * 1.8, from.x * 1.1, from.x]);
-  const restY = useTransform(progress, [0, 0.6, 1], [from.y * 1.8, from.y * 1.1, from.y]);
-  const restRot = useTransform(progress, [0, 0.6, 1], [from.rotate * 1.8, from.rotate * 1.1, from.rotate]);
-  const restScale = useTransform(progress, [0, 0.6, 1], [from.scale * 0.78, from.scale * 1.04, from.scale]);
+/** Solid compacted figure — fades IN during the compaction beat. On
+ *  reduced-motion / mobile this is the only thing visible. */
+function SolidLayer({
+  compactionProgress,
+  forceInstalled,
+}: {
+  compactionProgress: MotionValue<number>;
+  forceInstalled: boolean;
+}) {
+  const opacity = useTransform(compactionProgress, [0, 0.55, 1], [0, 0.55, 1]);
+  const filter = useTransform(
+    compactionProgress,
+    [0, 1],
+    ["brightness(1) drop-shadow(0 0 0 rgba(134,239,172,0))", "brightness(1.12) drop-shadow(0 0 28px rgba(134,239,172,0.45))"],
+  );
+  if (forceInstalled) {
+    return (
+      <div
+        aria-hidden
+        style={{
+          position: "absolute",
+          inset: 0,
+          filter: "brightness(1.12) drop-shadow(0 0 24px rgba(134,239,172,0.4))",
+        }}
+      >
+        <Image
+          src="/welcome/parts/agent-solid.png"
+          alt=""
+          fill
+          sizes={IMG_SIZES}
+          style={{ objectFit: "contain", objectPosition: "center" }}
+          draggable={false}
+          priority
+        />
+      </div>
+    );
+  }
+  return (
+    <motion.div aria-hidden style={{ position: "absolute", inset: 0, opacity, filter }}>
+      <Image
+        src="/welcome/parts/agent-solid.png"
+        alt=""
+        fill
+        sizes={IMG_SIZES}
+        style={{ objectFit: "contain", objectPosition: "center" }}
+        draggable={false}
+        priority
+      />
+    </motion.div>
+  );
+}
 
-  // Ease-in-out the compaction lerp so the merger feels mechanical, not linear.
+/* ────────────────────────  install layer  ───────────────────────────── */
+
+function InstallLayer({
+  layer,
+  installProgress,
+  compactionProgress,
+  forceInstalled,
+}: {
+  layer: LayerSpec;
+  installProgress: MotionValue<number>;
+  compactionProgress: MotionValue<number>;
+  forceInstalled: boolean;
+}) {
+  // Install fade-in (0 → 1 over the install window).
+  const installOpacity = useTransform(installProgress, [0, 0.18, 0.55, 1], [0, 0.45, 0.92, 1]);
+
+  // Scattered resting position settled into post-install (mild damped approach).
+  const restX = useTransform(installProgress, [0, 0.6, 1], [layer.scatter.x * 1.8, layer.scatter.x * 1.1, layer.scatter.x]);
+  const restY = useTransform(installProgress, [0, 0.6, 1], [layer.scatter.y * 1.8, layer.scatter.y * 1.1, layer.scatter.y]);
+  const restRot = useTransform(installProgress, [0, 0.6, 1], [layer.scatter.rotate * 1.8, layer.scatter.rotate * 1.1, layer.scatter.rotate]);
+  const restScale = useTransform(installProgress, [0, 0.6, 1], [layer.scatter.scale * 0.78, layer.scatter.scale * 1.04, layer.scatter.scale]);
+
+  // Ease-in-out compaction lerp so the merger reads as mechanical, not linear.
   const c = useTransform(compactionProgress, (v) => {
     const t = v as number;
     return t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
@@ -194,32 +260,43 @@ function InstallGroup({
     return s + (1 - s) * e;
   });
 
-  if (forceInstalled) return <g>{children}</g>;
+  // After compaction the exploded slice fades out so the agent-solid base
+  // shows alone (otherwise the two stack and the figure double-prints).
+  const compactionFade = useTransform(compactionProgress, [0.55, 1], [1, 0]);
+  const opacity = useTransform([installOpacity, compactionFade] as const, ([io, cf]) => (io as number) * (cf as number));
+
+  if (forceInstalled) return null;
 
   return (
-    <motion.g
+    <motion.div
+      aria-hidden
       style={{
-        opacity,
+        position: "absolute",
+        inset: 0,
         x,
         y,
         rotate,
         scale,
-        transformBox: "fill-box",
+        opacity,
         transformOrigin: "center",
       }}
     >
-      {children}
-    </motion.g>
+      <Image
+        src={`/welcome/parts/${layer.file}.png`}
+        alt=""
+        fill
+        sizes={IMG_SIZES}
+        style={{ objectFit: "contain", objectPosition: "center" }}
+        draggable={false}
+        priority={layer.file === "01-head" || layer.file === "06-reasoning-torso"}
+      />
+    </motion.div>
   );
 }
 
-/* ─────────────────────────────  lock-click group  ───────────────────────── */
+/* ────────────────────────  lock-click wrapper  ──────────────────────── */
 
-/**
- * Wraps the whole figure. At the compaction midpoint (~50%) it punches up
- * by 6% then settles — the "click" of fragments snapping into one body.
- */
-function LockClickGroup({
+function LockClickWrapper({
   compactionProgress,
   forceInstalled,
   children,
@@ -229,20 +306,60 @@ function LockClickGroup({
   children: ReactNode;
 }) {
   const scale = useTransform(compactionProgress, [0, 0.35, 0.55, 0.75, 1], [1, 1, 1.06, 0.985, 1]);
-  if (forceInstalled) return <g>{children}</g>;
+  if (forceInstalled) return <div style={{ position: "absolute", inset: 0 }}>{children}</div>;
   return (
-    <motion.g style={{ scale, transformBox: "fill-box", transformOrigin: "center" }}>{children}</motion.g>
+    <motion.div style={{ position: "absolute", inset: 0, scale, transformOrigin: "center" }}>
+      {children}
+    </motion.div>
   );
 }
 
-/* ─────────────────────────────  compaction links  ───────────────────────── */
+/* ────────────────────────  SVG overlay defs  ────────────────────────── */
+
+function Defs() {
+  return (
+    <defs>
+      <filter id="hg-glow" x="-50%" y="-50%" width="200%" height="200%">
+        <feGaussianBlur stdDeviation="6" result="blur" />
+        <feMerge>
+          <feMergeNode in="blur" />
+          <feMergeNode in="SourceGraphic" />
+        </feMerge>
+      </filter>
+      <filter id="hg-glow-soft" x="-50%" y="-50%" width="200%" height="200%">
+        <feGaussianBlur stdDeviation="14" result="blur" />
+        <feMerge>
+          <feMergeNode in="blur" />
+          <feMergeNode in="SourceGraphic" />
+        </feMerge>
+      </filter>
+      <linearGradient id="hg-scan" x1="0%" y1="0%" x2="0%" y2="100%">
+        <stop offset="0%" stopColor={C.primary} stopOpacity="0" />
+        <stop offset="50%" stopColor={C.primary} stopOpacity="0.55" />
+        <stop offset="100%" stopColor={C.primary} stopOpacity="0" />
+      </linearGradient>
+    </defs>
+  );
+}
+
+/* ────────────────────────  compaction links  ────────────────────────── */
 
 /**
- * Network of electric lines wiring subsystems together. Pre-compaction:
- * invisible. As compactionProgress crosses 0.2 → 1, each line draws in
- * (stroke-dashoffset) and brightens, reading as the parts "wiring up"
- * into a single integrated agent at the moment of lock-in.
+ * Network of electric lines wiring subsystems together. Coordinates are
+ * in PNG image space (521x1536). Anatomy estimates derived from the
+ * agent-solid PNG layout: head ~y180, chest ~y490, hips ~y1080,
+ * hands ~y820, platform ~y1480.
  */
+const LINK_SEGMENTS = [
+  { d: "M 260 250 L 260 470", start: 0.18, end: 0.4 },   // head → chest
+  { d: "M 260 580 L 260 1080", start: 0.25, end: 0.5 },  // chest → hips
+  { d: "M 220 540 L 110 830", start: 0.3, end: 0.6 },    // left torso → left hand
+  { d: "M 300 540 L 410 830", start: 0.3, end: 0.6 },    // right torso → right hand
+  { d: "M 110 830 L 210 1460", start: 0.4, end: 0.72 },  // left hand → base
+  { d: "M 410 830 L 310 1460", start: 0.4, end: 0.72 },  // right hand → base
+  { d: "M 260 1100 L 260 1470", start: 0.5, end: 0.82 }, // spine → platform
+];
+
 function CompactionLinks({
   compactionProgress,
   forceInstalled,
@@ -250,30 +367,18 @@ function CompactionLinks({
   compactionProgress: MotionValue<number>;
   forceInstalled: boolean;
 }) {
-  // Each line gets its own dash window so they light up in sequence.
-  const segs = [
-    { d: "M 240 178 L 240 240", start: 0.18, end: 0.4 }, // head → chest
-    { d: "M 240 280 L 240 408", start: 0.25, end: 0.5 }, // chest → shield base
-    { d: "M 184 320 L 110 420", start: 0.32, end: 0.62 }, // left torso → left hand
-    { d: "M 296 320 L 370 420", start: 0.32, end: 0.62 }, // right torso → right hand
-    { d: "M 110 420 L 200 690", start: 0.4, end: 0.72 }, // left hand → base
-    { d: "M 370 420 L 280 690", start: 0.4, end: 0.72 }, // right hand → base
-    { d: "M 240 440 L 240 692", start: 0.5, end: 0.82 }, // spine → platform centre
-  ];
-
   if (forceInstalled) {
     return (
-      <g stroke={C.primary} strokeWidth={0.9} fill="none" opacity={0.85} filter="url(#hg-glow)">
-        {segs.map((s) => (
+      <g stroke={C.primary} strokeWidth={2.5} fill="none" opacity={0.7} filter="url(#hg-glow)">
+        {LINK_SEGMENTS.map((s) => (
           <path key={s.d} d={s.d} />
         ))}
       </g>
     );
   }
-
   return (
     <g fill="none">
-      {segs.map((s) => (
+      {LINK_SEGMENTS.map((s) => (
         <CompactionLink key={s.d} d={s.d} start={s.start} end={s.end} compactionProgress={compactionProgress} />
       ))}
     </g>
@@ -291,17 +396,14 @@ function CompactionLink({
   end: number;
   compactionProgress: MotionValue<number>;
 }) {
-  // 0 = full dash hidden, 1 = no dash (line drawn in). Drawn between
-  // [start, end] of compactionProgress.
   const drawn = useTransform(compactionProgress, [start, end], [0, 1], { clamp: true });
-  const opacity = useTransform(compactionProgress, [start, (start + end) / 2, 1], [0, 0.6, 1]);
-  // 200-unit pathLength approximation via dasharray.
+  const opacity = useTransform(compactionProgress, [start, (start + end) / 2, 1], [0, 0.65, 0.85]);
   const offset = useTransform(drawn, (v) => 200 - (v as number) * 200);
   return (
     <motion.path
       d={d}
       stroke={C.primary}
-      strokeWidth={1}
+      strokeWidth={2.5}
       strokeLinecap="round"
       pathLength={200}
       strokeDasharray="200 200"
@@ -311,520 +413,70 @@ function CompactionLink({
   );
 }
 
-/* ─────────────────────────────  defs  ──────────────────────────────────── */
+/* ────────────────────────  lock-in flash  ───────────────────────────── */
 
-function Defs() {
-  return (
-    <defs>
-      <filter id="hg-glow" x="-50%" y="-50%" width="200%" height="200%">
-        <feGaussianBlur stdDeviation="2.5" result="blur" />
-        <feMerge>
-          <feMergeNode in="blur" />
-          <feMergeNode in="SourceGraphic" />
-        </feMerge>
-      </filter>
-      <filter id="hg-glow-soft" x="-50%" y="-50%" width="200%" height="200%">
-        <feGaussianBlur stdDeviation="6" result="blur" />
-        <feMerge>
-          <feMergeNode in="blur" />
-          <feMergeNode in="SourceGraphic" />
-        </feMerge>
-      </filter>
-      <linearGradient id="hg-spine" x1="0%" y1="0%" x2="0%" y2="100%">
-        <stop offset="0%" stopColor={C.accent} stopOpacity="0.85" />
-        <stop offset="50%" stopColor={C.primary} stopOpacity="0.9" />
-        <stop offset="100%" stopColor={C.warm} stopOpacity="0.7" />
-      </linearGradient>
-      <radialGradient id="hg-core" cx="50%" cy="50%" r="50%">
-        <stop offset="0%" stopColor="#ffffff" stopOpacity="1" />
-        <stop offset="35%" stopColor={C.primary} stopOpacity="0.9" />
-        <stop offset="100%" stopColor={C.primary} stopOpacity="0" />
-      </radialGradient>
-      <radialGradient id="hg-platform" cx="50%" cy="50%" r="50%">
-        <stop offset="0%" stopColor={C.primary} stopOpacity="0.7" />
-        <stop offset="80%" stopColor={C.primary} stopOpacity="0.1" />
-        <stop offset="100%" stopColor={C.primary} stopOpacity="0" />
-      </radialGradient>
-      <pattern id="hg-mesh" x="0" y="0" width="14" height="14" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
-        <line x1="0" y1="0" x2="0" y2="14" stroke={C.primary} strokeWidth="0.5" strokeOpacity="0.32" />
-        <line x1="0" y1="0" x2="14" y2="0" stroke={C.primary} strokeWidth="0.5" strokeOpacity="0.32" />
-      </pattern>
-      <clipPath id="hg-body-clip">
-        <BodySilhouettePath />
-      </clipPath>
-      <linearGradient id="hg-scan" x1="0%" y1="0%" x2="0%" y2="100%">
-        <stop offset="0%" stopColor={C.primary} stopOpacity="0" />
-        <stop offset="50%" stopColor={C.primary} stopOpacity="0.7" />
-        <stop offset="100%" stopColor={C.primary} stopOpacity="0" />
-      </linearGradient>
-    </defs>
-  );
-}
-
-function BodySilhouettePath() {
-  // Coarse humanoid envelope used as clipPath for the security mesh and
-  // anywhere we want the overlay to read only inside the body.
-  return (
-    <path
-      d="
-        M 240 50
-        C 280 50 300 80 300 115
-        C 300 140 285 160 268 168
-        L 312 215
-        L 360 235
-        L 388 410
-        L 360 432
-        L 318 410
-        L 305 460
-        L 300 600
-        L 290 700
-        L 258 700
-        L 252 600
-        L 240 480
-        L 228 600
-        L 222 700
-        L 190 700
-        L 180 600
-        L 175 460
-        L 162 410
-        L 120 432
-        L 92 410
-        L 120 235
-        L 168 215
-        L 212 168
-        C 195 160 180 140 180 115
-        C 180 80 200 50 240 50
-        Z
-      "
-    />
-  );
-}
-
-/* ─────────────────────────────  base wireframe  ─────────────────────────── */
-
-function Wireframe({
+function LockInFlash({
   compactionProgress,
   forceInstalled,
 }: {
   compactionProgress: MotionValue<number>;
   forceInstalled: boolean;
 }) {
-  // Always-visible faint outline of the humanoid envelope. Acts as the
-  // anchor so the figure has presence pre-scroll. Brightens at compaction.
-  const opacity = useTransform(compactionProgress, [0, 1], [0.18, 0.42]);
-  const strokeWidth = useTransform(compactionProgress, [0, 1], [0.6, 1.1]);
+  const r1 = useTransform(compactionProgress, [0.35, 0.95], [40, 520]);
+  const o1 = useTransform(compactionProgress, [0.35, 0.6, 0.95], [0, 0.75, 0]);
+  const r2 = useTransform(compactionProgress, [0.45, 1], [30, 680]);
+  const o2 = useTransform(compactionProgress, [0.45, 0.7, 1], [0, 0.6, 0]);
+  const r3 = useTransform(compactionProgress, [0.55, 1], [20, 420]);
+  const o3 = useTransform(compactionProgress, [0.55, 0.8, 1], [0, 0.5, 0]);
+  if (forceInstalled) return null;
+  return (
+    <g fill="none" filter="url(#hg-glow-soft)">
+      <motion.circle cx={260} cy={620} strokeWidth={4} stroke={C.primary} style={{ r: r1, opacity: o1 }} />
+      <motion.circle cx={260} cy={620} strokeWidth={3} stroke={C.accent} style={{ r: r2, opacity: o2 }} />
+      <motion.circle cx={260} cy={620} strokeWidth={3} stroke={C.warm} style={{ r: r3, opacity: o3 }} />
+    </g>
+  );
+}
 
+/* ────────────────────────  system online pill  ──────────────────────── */
+
+function SystemOnlinePill({
+  compactionProgress,
+  forceInstalled,
+}: {
+  compactionProgress: MotionValue<number>;
+  forceInstalled: boolean;
+}) {
+  // Sits just below the activation platform. Fades in during the second
+  // half of compaction.
+  const opacity = useTransform(compactionProgress, [0.5, 0.85], [0, 1]);
+  const PILL_X = 188;
+  const PILL_Y = 1492;
+  const PILL_W = 145;
+  const PILL_H = 32;
   if (forceInstalled) {
     return (
-      <g stroke={C.primary} strokeWidth={1.1} fill="none" opacity={0.42}>
-        <BodySilhouettePath />
-      </g>
-    );
-  }
-
-  return (
-    <motion.g style={{ opacity, strokeWidth }} fill="none" stroke={C.primary}>
-      <BodySilhouettePath />
-    </motion.g>
-  );
-}
-
-/* ─────────────────────────────  layer: reasoning core (head)  ───────────── */
-
-function ReasoningCore({
-  compactionProgress,
-  forceInstalled,
-}: {
-  compactionProgress: MotionValue<number>;
-  forceInstalled: boolean;
-}) {
-  const time = useTime();
-  // Steady pulse on the central reasoning node — alive but not floating.
-  const pulse = useTransform(time, (t) => {
-    const s = (t as number) / 1000;
-    return 0.78 + Math.sin(s * 2.2) * 0.22;
-  });
-  const lock = useTransform(compactionProgress, [0, 1], [1, 1.18]);
-
-  // Hexagonal head outline at (240, 110) with circumradius 60.
-  const cx = 240;
-  const cy = 110;
-  const r = 60;
-  const hexPath = hexagonPath(cx, cy, r);
-  const innerHexPath = hexagonPath(cx, cy, r * 0.62);
-
-  return (
-    <g>
-      <path d={hexPath} fill="none" stroke={C.primary} strokeWidth={1.6} filter="url(#hg-glow)" />
-      <path d={innerHexPath} fill="none" stroke={C.accent} strokeWidth={1} opacity={0.7} />
-      {/* Neural cluster — 6 satellites + 1 central node. */}
-      {[0, 60, 120, 180, 240, 300].map((deg) => {
-        const rad = (deg * Math.PI) / 180;
-        const x = cx + Math.cos(rad) * 26;
-        const y = cy + Math.sin(rad) * 26;
-        return (
-          <g key={deg}>
-            <line x1={cx} y1={cy} x2={x} y2={y} stroke={C.primarySoft} strokeWidth={0.8} />
-            <circle cx={x} cy={y} r={2.2} fill={C.primary} />
-          </g>
-        );
-      })}
-      {/* Central pulsing core. */}
-      {forceInstalled ? (
-        <circle cx={cx} cy={cy} r={8} fill="url(#hg-core)" />
-      ) : (
-        <motion.circle cx={cx} cy={cy} r={8} fill="url(#hg-core)" style={{ opacity: pulse, scale: lock, transformBox: "fill-box", transformOrigin: "center" }} />
-      )}
-      <circle cx={cx} cy={cy} r={3} fill="#ffffff" />
-    </g>
-  );
-}
-
-function hexagonPath(cx: number, cy: number, r: number) {
-  const pts: string[] = [];
-  for (let i = 0; i < 6; i++) {
-    const a = (Math.PI / 3) * i - Math.PI / 2;
-    const x = cx + Math.cos(a) * r;
-    const y = cy + Math.sin(a) * r;
-    pts.push(`${x.toFixed(1)},${y.toFixed(1)}`);
-  }
-  return `M ${pts[0]} L ${pts.slice(1).join(" L ")} Z`;
-}
-
-/* ─────────────────────────────  layer: state pulse  ─────────────────────── */
-
-function StatePulse({
-  compactionProgress,
-  forceInstalled,
-}: {
-  compactionProgress: MotionValue<number>;
-  forceInstalled: boolean;
-}) {
-  const time = useTime();
-  const dashOffset = useTransform(time, (t) => -((t as number) / 32) % 200);
-  const lockOpacity = useTransform(compactionProgress, [0, 1], [0.85, 1]);
-
-  // Heartbeat trace running across the chest, between (170,290) and (310,290).
-  const path = "M 170 290 L 200 290 L 210 275 L 220 305 L 235 270 L 250 310 L 265 290 L 310 290";
-
-  return (
-    <g style={{ opacity: forceInstalled ? 1 : undefined }}>
-      <path d={path} stroke={C.primaryFaint} strokeWidth={2.5} fill="none" />
-      {forceInstalled ? (
-        <path d={path} stroke={C.primary} strokeWidth={1.6} fill="none" filter="url(#hg-glow)" />
-      ) : (
-        <motion.path
-          d={path}
-          stroke={C.primary}
-          strokeWidth={1.6}
-          fill="none"
-          strokeDasharray="20 6"
-          filter="url(#hg-glow)"
-          style={{ strokeDashoffset: dashOffset, opacity: lockOpacity }}
-        />
-      )}
-      {/* Central pulse node sits at solar plexus. */}
-      <circle cx={240} cy={290} r={4} fill={C.warm} filter="url(#hg-glow)" />
-    </g>
-  );
-}
-
-/* ─────────────────────────────  layer: memory spine  ────────────────────── */
-
-function MemorySpine({
-  compactionProgress,
-  forceInstalled,
-}: {
-  compactionProgress: MotionValue<number>;
-  forceInstalled: boolean;
-}) {
-  const opacity = useTransform(compactionProgress, [0, 1], [0.85, 1]);
-
-  // Spine column from neck (240,180) to pelvis (240,460), 6 stacked rings.
-  const ringYs = [200, 240, 280, 320, 360, 400, 440];
-
-  return (
-    <motion.g style={{ opacity: forceInstalled ? 1 : opacity }}>
-      <line x1={240} y1={180} x2={240} y2={460} stroke="url(#hg-spine)" strokeWidth={1.8} />
-      {ringYs.map((y, i) => (
-        <g key={y}>
-          <ellipse cx={240} cy={y} rx={18} ry={3.2} fill="none" stroke={C.accent} strokeWidth={1} opacity={0.55 + i * 0.04} />
-          <circle cx={222} cy={y} r={1.6} fill={C.accent} />
-          <circle cx={258} cy={y} r={1.6} fill={C.accent} />
-        </g>
-      ))}
-    </motion.g>
-  );
-}
-
-/* ─────────────────────────────  layer: browser optics  ──────────────────── */
-
-function BrowserOptics({
-  compactionProgress,
-  forceInstalled,
-}: {
-  compactionProgress: MotionValue<number>;
-  forceInstalled: boolean;
-}) {
-  const time = useTime();
-  // Scan pulse drifts across the visor.
-  const dashOffset = useTransform(time, (t) => -((t as number) / 18) % 80);
-  const lock = useTransform(compactionProgress, [0, 1], [0.9, 1]);
-
-  return (
-    <motion.g style={{ opacity: forceInstalled ? 1 : lock }}>
-      {/* Visor band across the head at y ≈ 100. */}
-      <rect x={188} y={92} width={104} height={16} rx={2} fill={C.bg} stroke={C.accent} strokeWidth={1.2} />
-      {forceInstalled ? (
-        <rect x={188} y={92} width={104} height={16} rx={2} fill="none" stroke={C.primary} strokeWidth={1} opacity={0.85} />
-      ) : (
-        <motion.rect
-          x={188}
-          y={92}
-          width={104}
-          height={16}
-          rx={2}
-          fill="none"
-          stroke={C.primary}
-          strokeWidth={1}
-          strokeDasharray="8 4"
-          style={{ strokeDashoffset: dashOffset }}
-        />
-      )}
-      {/* Two eye nodes inside the visor. */}
-      <circle cx={216} cy={100} r={3} fill={C.primary} filter="url(#hg-glow)" />
-      <circle cx={264} cy={100} r={3} fill={C.primary} filter="url(#hg-glow)" />
-    </motion.g>
-  );
-}
-
-/* ─────────────────────────────  layer: bridge tools  ────────────────────── */
-
-function BridgeTools({
-  compactionProgress,
-  forceInstalled,
-}: {
-  compactionProgress: MotionValue<number>;
-  forceInstalled: boolean;
-}) {
-  const time = useTime();
-  const rot = useTransform(time, (t) => ((t as number) / 28) % 360);
-  const lock = useTransform(compactionProgress, [0, 1], [0.9, 1]);
-
-  const leftHand = { x: 96, y: 425 };
-  const rightHand = { x: 384, y: 425 };
-
-  const renderCluster = (hx: number, hy: number, key: string) => (
-    <g key={key}>
-      <circle cx={hx} cy={hy} r={14} fill="none" stroke={C.primary} strokeWidth={1.1} />
-      <circle cx={hx} cy={hy} r={6} fill="none" stroke={C.accent} strokeWidth={0.9} opacity={0.75} />
-      <circle cx={hx} cy={hy} r={2.2} fill={C.warm} filter="url(#hg-glow)" />
-      {forceInstalled ? (
-        <g>
-          <circle cx={hx + 14} cy={hy} r={1.4} fill={C.primary} />
-          <circle cx={hx - 14} cy={hy} r={1.4} fill={C.primary} />
-          <circle cx={hx} cy={hy + 14} r={1.4} fill={C.primary} />
-        </g>
-      ) : (
-        <motion.g style={{ rotate: rot, transformBox: "fill-box", transformOrigin: "center" }}>
-          <circle cx={hx + 14} cy={hy} r={1.4} fill={C.primary} />
-          <circle cx={hx - 14} cy={hy} r={1.4} fill={C.primary} />
-          <circle cx={hx} cy={hy + 14} r={1.4} fill={C.primary} />
-        </motion.g>
-      )}
-    </g>
-  );
-
-  return (
-    <motion.g style={{ opacity: forceInstalled ? 1 : lock }}>
-      {renderCluster(leftHand.x, leftHand.y, "left")}
-      {renderCluster(rightHand.x, rightHand.y, "right")}
-    </motion.g>
-  );
-}
-
-/* ─────────────────────────────  layer: guard shield  ────────────────────── */
-
-function GuardShield({
-  compactionProgress,
-  forceInstalled,
-}: {
-  compactionProgress: MotionValue<number>;
-  forceInstalled: boolean;
-}) {
-  const lock = useTransform(compactionProgress, [0, 1], [0.7, 1]);
-
-  // Shield silhouette spanning chest 200..280, 240..400.
-  const shield =
-    "M 240 240 L 296 256 L 296 340 C 296 372 272 392 240 408 C 208 392 184 372 184 340 L 184 256 Z";
-
-  return (
-    <motion.g style={{ opacity: forceInstalled ? 1 : lock }}>
-      <path d={shield} fill={C.primaryFaint} stroke={C.primary} strokeWidth={1.4} filter="url(#hg-glow)" />
-      <line x1={240} y1={240} x2={240} y2={408} stroke={C.accent} strokeWidth={0.9} />
-      <path
-        d="M 240 280 L 264 300 L 252 330 L 228 330 L 216 300 Z"
-        fill="none"
-        stroke={C.warm}
-        strokeWidth={1}
-        opacity={0.85}
-      />
-    </motion.g>
-  );
-}
-
-/* ─────────────────────────────  layer: output (arms + comms)  ───────────── */
-
-function Arms({
-  compactionProgress,
-  forceInstalled,
-}: {
-  compactionProgress: MotionValue<number>;
-  forceInstalled: boolean;
-}) {
-  const time = useTime();
-  // Expanding comm arcs above head.
-  const arc1 = useTransform(time, (t) => 0.35 + ((((t as number) / 14) % 60) / 60) * 0.4);
-  const arc2 = useTransform(time, (t) => 0.2 + ((((t as number) / 14 + 20) % 60) / 60) * 0.35);
-  const lock = useTransform(compactionProgress, [0, 1], [0.9, 1]);
-
-  // Arm polylines: shoulder → elbow → hand.
-  const leftArm = "M 168 215 L 130 330 L 96 425";
-  const rightArm = "M 312 215 L 350 330 L 384 425";
-
-  return (
-    <motion.g style={{ opacity: forceInstalled ? 1 : lock }}>
-      <path d={leftArm} fill="none" stroke={C.primary} strokeWidth={2} strokeLinecap="round" filter="url(#hg-glow)" />
-      <path d={rightArm} fill="none" stroke={C.primary} strokeWidth={2} strokeLinecap="round" filter="url(#hg-glow)" />
-      {/* Joints. */}
-      <circle cx={168} cy={215} r={3} fill={C.primary} />
-      <circle cx={130} cy={330} r={2.4} fill={C.accent} />
-      <circle cx={312} cy={215} r={3} fill={C.primary} />
-      <circle cx={350} cy={330} r={2.4} fill={C.accent} />
-
-      {/* Comm arcs above head — three expanding semicircles. */}
-      {forceInstalled ? (
-        <g fill="none" stroke={C.accent} strokeWidth={1} opacity={0.55}>
-          <path d="M 200 80 A 40 40 0 0 1 280 80" />
-          <path d="M 184 60 A 56 56 0 0 1 296 60" opacity={0.4} />
-        </g>
-      ) : (
-        <g fill="none" stroke={C.accent} strokeWidth={1}>
-          <motion.path d="M 200 80 A 40 40 0 0 1 280 80" style={{ opacity: arc1 }} />
-          <motion.path d="M 184 60 A 56 56 0 0 1 296 60" style={{ opacity: arc2 }} />
-        </g>
-      )}
-    </motion.g>
-  );
-}
-
-/* ─────────────────────────────  layer: security mesh  ───────────────────── */
-
-function SecurityMesh() {
-  // Diamond mesh clipped to body silhouette — reads as a security envelope.
-  return (
-    <g clipPath="url(#hg-body-clip)" opacity={0.7}>
-      <rect x={0} y={0} width={VB_W} height={VB_H} fill="url(#hg-mesh)" />
-    </g>
-  );
-}
-
-/* ─────────────────────────────  layer: business badge  ──────────────────── */
-
-function BusinessBadge() {
-  // OASIS badge on upper chest.
-  return (
-    <g>
-      <rect x={216} y={224} width={48} height={16} rx={2} fill={C.bg} stroke={C.warm} strokeWidth={1} />
-      <text x={240} y={235} textAnchor="middle" fontFamily="monospace" fontSize={9} fill={C.warm} letterSpacing="1.4">
-        OASIS
-      </text>
-    </g>
-  );
-}
-
-/* ─────────────────────────────  activation platform  ────────────────────── */
-
-function ActivationPlatform({
-  compactionProgress,
-  forceInstalled,
-}: {
-  compactionProgress: MotionValue<number>;
-  forceInstalled: boolean;
-}) {
-  const time = useTime();
-  const pulseScale = useTransform(time, (t) => 1 + Math.sin(((t as number) / 1000) * 1.4) * 0.04);
-  const lockGlow = useTransform(compactionProgress, [0, 1], [0.5, 0.95]);
-
-  return (
-    <g>
-      {/* Glow disc. */}
-      <ellipse cx={240} cy={696} rx={150} ry={26} fill="url(#hg-platform)" />
-      {/* Three concentric rings. */}
-      <ellipse cx={240} cy={702} rx={134} ry={12} fill="none" stroke={C.primary} strokeWidth={1.4} filter="url(#hg-glow)" />
-      <ellipse cx={240} cy={702} rx={104} ry={9} fill="none" stroke={C.accent} strokeWidth={1.1} opacity={0.75} />
-      {forceInstalled ? (
-        <ellipse cx={240} cy={702} rx={70} ry={6} fill="none" stroke={C.warm} strokeWidth={1} opacity={0.85} />
-      ) : (
-        <motion.ellipse
-          cx={240}
-          cy={702}
-          rx={70}
-          ry={6}
-          fill="none"
-          stroke={C.warm}
-          strokeWidth={1}
-          style={{ opacity: lockGlow, scale: pulseScale, transformBox: "fill-box", transformOrigin: "center" }}
-        />
-      )}
-      {/* Tick marks around outer ring. */}
-      {Array.from({ length: 24 }).map((_, i) => {
-        const a = (i / 24) * Math.PI * 2;
-        const x1 = 240 + Math.cos(a) * 138;
-        const y1 = 702 + Math.sin(a) * 14;
-        const x2 = 240 + Math.cos(a) * 146;
-        const y2 = 702 + Math.sin(a) * 17;
-        return <line key={i} x1={x1} y1={y1} x2={x2} y2={y2} stroke={C.primary} strokeWidth={0.5} opacity={0.55} />;
-      })}
-    </g>
-  );
-}
-
-/* ─────────────────────────────  hud frame  ──────────────────────────────── */
-
-function HudFrame({
-  compactionProgress,
-  forceInstalled,
-}: {
-  compactionProgress: MotionValue<number>;
-  forceInstalled: boolean;
-}) {
-  const lockOpacity = useTransform(compactionProgress, [0, 1], [0.7, 1]);
-  // Four L-shaped corner brackets and ONLINE badge at base.
-  return (
-    <motion.g style={{ opacity: forceInstalled ? 1 : lockOpacity }} stroke={C.primary} strokeWidth={1.4} fill="none">
-      {/* Top-left */}
-      <path d="M 10 30 L 10 10 L 38 10" />
-      {/* Top-right */}
-      <path d="M 442 10 L 470 10 L 470 30" />
-      {/* Bottom-left */}
-      <path d="M 10 690 L 10 710 L 38 710" />
-      {/* Bottom-right */}
-      <path d="M 442 710 L 470 710 L 470 690" />
-
-      {/* Online status pill. */}
-      <g transform="translate(190 660)">
-        <rect x={0} y={0} width={100} height={20} rx={2} fill={C.bg} stroke={C.primary} strokeWidth={1} />
-        <circle cx={12} cy={10} r={3.2} fill={C.primary} filter="url(#hg-glow)" />
-        <text x={22} y={14} fontFamily="monospace" fontSize={9} fill={C.primary} letterSpacing="2">
+      <g transform={`translate(${PILL_X} ${PILL_Y})`}>
+        <rect x={0} y={0} width={PILL_W} height={PILL_H} rx={4} fill="#03070a" stroke={C.primary} strokeWidth={2} />
+        <circle cx={18} cy={PILL_H / 2} r={5} fill={C.primary} filter="url(#hg-glow)" />
+        <text x={32} y={PILL_H / 2 + 5} fontFamily="monospace" fontSize={14} fill={C.primary} letterSpacing="3">
           SYSTEM ONLINE
         </text>
       </g>
+    );
+  }
+  return (
+    <motion.g transform={`translate(${PILL_X} ${PILL_Y})`} style={{ opacity }}>
+      <rect x={0} y={0} width={PILL_W} height={PILL_H} rx={4} fill="#03070a" stroke={C.primary} strokeWidth={2} />
+      <circle cx={18} cy={PILL_H / 2} r={5} fill={C.primary} filter="url(#hg-glow)" />
+      <text x={32} y={PILL_H / 2 + 5} fontFamily="monospace" fontSize={14} fill={C.primary} letterSpacing="3">
+        SYSTEM ONLINE
+      </text>
     </motion.g>
   );
 }
 
-/* ─────────────────────────────  scanline  ───────────────────────────────── */
+/* ────────────────────────  scanline sweep  ──────────────────────────── */
 
 function Scanline({
   compactionProgress,
@@ -834,45 +486,12 @@ function Scanline({
   forceInstalled: boolean;
 }) {
   const time = useTime();
-  // Sweeps top → bottom every 4.2s. Locks centered after compaction.
-  const yPre = useTransform(time, (t) => ((((t as number) / 4200) % 1) * (VB_H + 40)) - 20);
+  const yPre = useTransform(time, (t) => ((((t as number) / 4500) % 1) * (PNG_H + 60)) - 30);
   const y = useTransform([yPre, compactionProgress] as const, ([raw, c]) => {
-    if ((c as number) >= 0.95) return VB_H / 2 - 12;
+    if ((c as number) >= 0.95) return PNG_H / 2 - 24;
     return raw as number;
   });
-  const opacity = useTransform(compactionProgress, [0, 0.95, 1], [0.45, 0.45, 0.15]);
-
+  const opacity = useTransform(compactionProgress, [0, 0.9, 1], [0.35, 0.35, 0.12]);
   if (forceInstalled) return null;
-
-  return <motion.rect x={0} width={VB_W} height={24} fill="url(#hg-scan)" style={{ y, opacity }} clipPath="url(#hg-body-clip)" />;
-}
-
-/* ─────────────────────────────  lock-in flash  ──────────────────────────── */
-
-function LockInFlash({
-  compactionProgress,
-  forceInstalled,
-}: {
-  compactionProgress: MotionValue<number>;
-  forceInstalled: boolean;
-}) {
-  // Three concentric rings expanding from the chest at lock-in,
-  // staggered so the burst reads as a "system online" pulse and not a
-  // single drifting circle.
-  const r1 = useTransform(compactionProgress, [0.35, 0.95], [30, 280]);
-  const o1 = useTransform(compactionProgress, [0.35, 0.6, 0.95], [0, 0.7, 0]);
-  const r2 = useTransform(compactionProgress, [0.45, 1], [20, 380]);
-  const o2 = useTransform(compactionProgress, [0.45, 0.7, 1], [0, 0.55, 0]);
-  const r3 = useTransform(compactionProgress, [0.55, 1], [10, 220]);
-  const o3 = useTransform(compactionProgress, [0.55, 0.8, 1], [0, 0.45, 0]);
-
-  if (forceInstalled) return null;
-
-  return (
-    <g fill="none" stroke={C.primary} filter="url(#hg-glow-soft)">
-      <motion.circle cx={240} cy={320} strokeWidth={2.2} style={{ r: r1, opacity: o1 }} />
-      <motion.circle cx={240} cy={320} strokeWidth={1.4} style={{ r: r2, opacity: o2 }} stroke={C.accent} />
-      <motion.circle cx={240} cy={320} strokeWidth={1.6} style={{ r: r3, opacity: o3 }} stroke={C.warm} />
-    </g>
-  );
+  return <motion.rect x={0} width={PNG_W} height={48} fill="url(#hg-scan)" style={{ y, opacity }} />;
 }

@@ -403,8 +403,8 @@ export function AgentAssemblyScrollScene() {
 
         <div
           aria-hidden="true"
-          className="absolute left-1/2 top-1/2 z-10 flex h-[min(72vh,560px)] -translate-x-1/2 -translate-y-1/2 items-center justify-center"
-          style={{ aspectRatio: "480 / 720" }}
+          className="absolute left-1/2 top-1/2 z-10 flex h-[min(82vh,680px)] -translate-x-1/2 -translate-y-1/2 items-center justify-center"
+          style={{ aspectRatio: "521 / 1536" }}
         >
           <AgentFigureSprite
             installProgresses={layerProgresses}
