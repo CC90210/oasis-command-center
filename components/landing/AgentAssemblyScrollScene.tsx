@@ -184,10 +184,14 @@ export function AgentAssemblyScrollScene() {
     ? autoplayProgress
     : scrollProgress;
 
-  // Mobile-only "INITIALIZING → LINKING → ONLINE" status (driven by autoplay).
-  const [mobileStage, setMobileStage] = useState<MobileStage>("init");
+  // Mobile-only "INITIALIZING → LINKING → ONLINE" status. Driven by autoplay
+  // when it runs; pinned to "online" for reduced-motion users so the row
+  // doesn't read "Initializing" next to a figure that's already fully built.
+  const [mobileStage, setMobileStage] = useState<MobileStage>(
+    forceInstalled ? "online" : "init",
+  );
   useMotionValueEvent(effectiveProgress, "change", (v) => {
-    if (!isCompact) return;
+    if (!isCompact || forceInstalled) return;
     const next: MobileStage = v < 0.55 ? "init" : v < 0.9 ? "link" : "online";
     setMobileStage((current) => (current === next ? current : next));
   });
