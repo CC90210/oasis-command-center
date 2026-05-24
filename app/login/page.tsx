@@ -1,6 +1,7 @@
 import { redirect } from "next/navigation";
 import { getSessionUser } from "@/lib/supabase-server";
 import { LoginForm } from "./LoginForm";
+import { AuthRedirectGuard } from "@/components/AuthRedirectGuard";
 
 export const dynamic = "force-dynamic";
 
@@ -13,7 +14,10 @@ export const dynamic = "force-dynamic";
  * recognize they're already authed and forward them.
  *
  * Auth-state check is server-side so it runs BEFORE the form renders —
- * no flash of the sign-in UI for already-authed users.
+ * no flash of the sign-in UI for already-authed users. The
+ * AuthRedirectGuard below catches the residual race where the SSR cookie
+ * was stale but the browser already has the session — same defensive
+ * pattern as /welcome.
  */
 export default async function LoginPage({
   searchParams,
@@ -22,11 +26,16 @@ export default async function LoginPage({
 }) {
   const params = (await searchParams) || {};
   const user = await getSessionUser().catch(() => null);
+  const next = typeof params.next === "string" && params.next.startsWith("/")
+    ? params.next
+    : "/";
   if (user) {
-    const next = typeof params.next === "string" && params.next.startsWith("/")
-      ? params.next
-      : "/";
     redirect(`/auth/land?next=${encodeURIComponent(next)}`);
   }
-  return <LoginForm />;
+  return (
+    <>
+      <AuthRedirectGuard to={`/auth/land?next=${encodeURIComponent(next)}`} />
+      <LoginForm />
+    </>
+  );
 }

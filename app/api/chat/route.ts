@@ -58,6 +58,7 @@ import { getBridgeToolCapabilities } from "@/lib/queries";
 import { signResumeState } from "@/lib/resume-hmac";
 import { getAgentInfo } from "@/lib/agents";
 import { isOperatorEmail } from "@/lib/operator-credentials";
+import { PROFILE_CUSTOM_FIELD_KEYS, getCustomFieldString } from "@/lib/profile-custom-fields";
 import { getTenantManifestForUser } from "@/lib/manifest/tenant-scope";
 import { redactAll } from "@/lib/secret-redaction";
 import { persistAssistantTurn } from "@/lib/chat-persistence";
@@ -352,7 +353,8 @@ export async function POST(req: NextRequest) {
   //
   // Operators (OPERATOR_EMAIL / ADMIN_EMAILS) get the full unrestricted
   // palette so CC's own multi-tool workflows aren't crippled.
-  if (!toolPalette && !isOperatorEmail(user.email)) {
+  const isOperator = isOperatorEmail(user.email);
+  if (!toolPalette && !isOperator) {
     toolPalette = SAFE_TENANT_TOOL_PALETTE;
   }
 
@@ -371,9 +373,28 @@ export async function POST(req: NextRequest) {
   const agentLabel = agentInfo.label || agentKey.toUpperCase();
   const agentRole = agentInfo.role || "agent";
 
-  const cloudModeNoticeBridge = `\n\n---\nRUNTIME: CLOUD MODE + LOCAL BRIDGE\nYou are ${agentLabel} (${agentRole}), running through the dashboard's /api/chat path on Vercel — but the operator's local bridge IS online. The browser proxies tool_use calls to localhost:9100/exec-tool, so you have real local capabilities even though the LLM call itself is going through the operator's API key.\n\nWhat you CAN do:\n- Anything in the cloud tool palette below (records, http_get/post, integrations).\n- Read/write files on the operator's machine (read_file, write_file).\n- Run shell commands (bash) — confirm destructive ones first.\n- Discover the operator's scripts (list_scripts) and run them (run_script).\n- Discover the operator's playbooks (list_skills) and load them (load_skill) before executing procedural work — they exist for a reason; don't improvise.\n- Send real emails (send_email) via the operator's Gmail.\n- Send SMS (send_sms) — always include opt-out language on first-touch.\n- Mutate dashboard data via <dashboard-action> markers.\n- Strategy, drafting, brainstorming, advice.\n\nSEARCH BEFORE DECLINING — NON-NEGOTIABLE:\nBefore you EVER say "I don't have X" or "I don't see X anywhere" or ask the operator for something they might have already saved, you MUST:\n  1. Check the OPERATOR KNOWN FACTS block (if present below) — calendar links, signatures, business names, common assets live there.\n  2. If still not found, call read_brain_doc on a plausibly-named doc (e.g., USER.md, STATE.md, PROFILE.md) or search_memory with relevant keywords.\n  3. Only after a real search returns nothing should you ask the operator. When you do ask, offer to save the answer to KNOWN FACTS for next time.\nThe operator gets visibly frustrated when you decline without searching — they've told previous instances of you the same thing 20 times. Search first, ask last.\n\nIf a bridge tool fails with "bridge_unreachable" in the result, the operator's bridge just went offline mid-turn. Tell them to check \`pm2 logs claude-bridge\` and \`pm2 restart claude-bridge\` — don't retry the same tool.\n---`;
+  // Search-first instruction varies by audience:
+  //   - Operators get the full "check KNOWN FACTS → call read_brain_doc /
+  //     search_memory → ask last" ladder (they own the CEO-Agent brain
+  //     repo those tools read from).
+  //   - Non-operator tenants don't have read_brain_doc / search_memory
+  //     in their palette — those would leak CC's brain. They just get
+  //     "check KNOWN FACTS first" since their KNOWN FACTS block is the
+  //     only operator-personal context available cloud-side.
+  const searchFirstBridge = isOperator
+    ? `\n\nSEARCH BEFORE DECLINING — NON-NEGOTIABLE:\nBefore you EVER say "I don't have X" or "I don't see X anywhere" or ask the operator for something they might have already saved, you MUST:\n  1. Check the OPERATOR KNOWN FACTS block (if present below) — calendar links, signatures, business names, common assets live there.\n  2. If still not found, call read_brain_doc on a plausibly-named doc (e.g., USER.md, STATE.md, PROFILE.md) or search_memory with relevant keywords.\n  3. Only after a real search returns nothing should you ask the operator. When you do ask, offer to save the answer to KNOWN FACTS for next time.\nThe operator gets visibly frustrated when you decline without searching — they've told previous instances of you the same thing 20 times. Search first, ask last.`
+    : `\n\nSEARCH BEFORE DECLINING:\nBefore saying "I don't have X" or asking the operator for something basic about them, ALWAYS check the OPERATOR KNOWN FACTS block (if present below) — that's where they save evergreen facts. If a fact isn't there, ask AND offer to save it to KNOWN FACTS so the next chat doesn't have to ask again.`;
 
-  const cloudModeNoticeNoBridge = `\n\n---\nRUNTIME: CLOUD ONLY\nYou are ${agentLabel} (${agentRole}), running through the dashboard's /api/chat path on Vercel. The operator's local bridge is NOT online right now. You have the DASHBOARD STATE block below (real Supabase data — MRR, pipeline, recent inbound, today's plan, integrations health) plus the cloud tool palette (records, http_get/post, integrations) but NO local file system access, no shell, no email/SMS sends, no Python scripts.\n\nIf the operator asks for something that needs the local machine (read a file, send an email, run a script, follow a playbook):\n- Be explicit: say the bridge isn't online right now.\n- Tell them: "Open a terminal on your machine and run \`pm2 restart claude-bridge\`. The chat header will turn cyan when it comes back and I'll have read_file / write_file / bash / send_email / send_sms / list_skills / list_scripts available."\n- Do NOT infer file contents. Do NOT pretend to have sent emails you didn't send.\n\nBEFORE DECLINING — CHECK KNOWN FACTS:\nEven without the bridge, the OPERATOR KNOWN FACTS block (if present below) and search_memory can answer most "what's my X?" questions. ALWAYS check those first before saying "I don't have X." If a fact you need is missing, ask the operator AND offer to save it to KNOWN FACTS so the next chat doesn't have to ask again.\n\nWhat you CAN do right now:\n- Use the cloud tool palette below (records read/write/search, http_get/post, lead lookup, integration status).\n- Mutate dashboard data via <dashboard-action> markers.\n- Strategy, drafting, brainstorming, advice — anything that doesn't need the operator's machine.\n---`;
+  const cloudModeNoticeBridge = `\n\n---\nRUNTIME: CLOUD MODE + LOCAL BRIDGE\nYou are ${agentLabel} (${agentRole}), running through the dashboard's /api/chat path on Vercel — but the operator's local bridge IS online. The browser proxies tool_use calls to localhost:9100/exec-tool, so you have real local capabilities even though the LLM call itself is going through the operator's API key.\n\nWhat you CAN do:\n- Anything in the cloud tool palette below (records, http_get/post, integrations).\n- Read/write files on the operator's machine (read_file, write_file).\n- Run shell commands (bash) — confirm destructive ones first.\n- Discover the operator's scripts (list_scripts) and run them (run_script).\n- Discover the operator's playbooks (list_skills) and load them (load_skill) before executing procedural work — they exist for a reason; don't improvise.\n- Send real emails (send_email) via the operator's Gmail.\n- Send SMS (send_sms) — always include opt-out language on first-touch.\n- Mutate dashboard data via <dashboard-action> markers.\n- Strategy, drafting, brainstorming, advice.${searchFirstBridge}\n\nIf a bridge tool fails with "bridge_unreachable" in the result, the operator's bridge just went offline mid-turn. Tell them to check \`pm2 logs claude-bridge\` and \`pm2 restart claude-bridge\` — don't retry the same tool.\n---`;
+
+  // Same operator/tenant split as the bridge notice. For non-operators,
+  // skip the `search_memory` mention since they don't have the tool in
+  // their palette.
+  const searchFirstNoBridge = isOperator
+    ? `\n\nBEFORE DECLINING — CHECK KNOWN FACTS:\nEven without the bridge, the OPERATOR KNOWN FACTS block (if present below) and search_memory can answer most "what's my X?" questions. ALWAYS check those first before saying "I don't have X." If a fact you need is missing, ask the operator AND offer to save it to KNOWN FACTS so the next chat doesn't have to ask again.`
+    : `\n\nBEFORE DECLINING — CHECK KNOWN FACTS:\nThe OPERATOR KNOWN FACTS block (if present below) holds evergreen facts the operator has saved. ALWAYS check it before saying "I don't have X." If a fact isn't there, ask AND offer to save it to KNOWN FACTS so the next chat knows it.`;
+
+  const cloudModeNoticeNoBridge = `\n\n---\nRUNTIME: CLOUD ONLY\nYou are ${agentLabel} (${agentRole}), running through the dashboard's /api/chat path on Vercel. The operator's local bridge is NOT online right now. You have the DASHBOARD STATE block below (real Supabase data — MRR, pipeline, recent inbound, today's plan, integrations health) plus the cloud tool palette (records, http_get/post, integrations) but NO local file system access, no shell, no email/SMS sends, no Python scripts.\n\nIf the operator asks for something that needs the local machine (read a file, send an email, run a script, follow a playbook):\n- Be explicit: say the bridge isn't online right now.\n- Tell them: "Open a terminal on your machine and run \`pm2 restart claude-bridge\`. The chat header will turn cyan when it comes back and I'll have read_file / write_file / bash / send_email / send_sms / list_skills / list_scripts available."\n- Do NOT infer file contents. Do NOT pretend to have sent emails you didn't send.${searchFirstNoBridge}\n\nWhat you CAN do right now:\n- Use the cloud tool palette below (records read/write/search, http_get/post, lead lookup, integration status).\n- Mutate dashboard data via <dashboard-action> markers.\n- Strategy, drafting, brainstorming, advice — anything that doesn't need the operator's machine.\n---`;
 
   // Phase 3 — when operator pinned cloud_only, the persona MUST see the
   // no-bridge notice even if the bridge is paired. Otherwise the model
@@ -440,15 +461,15 @@ export async function POST(req: NextRequest) {
       // operator had told previous instances of him 20 times. Bridge
       // mode already had this via brain/USER.md; cloud now has parity.
       let knownFactsBlock = "";
-      const rawFacts =
-        op.custom_fields && typeof op.custom_fields === "object"
-          ? (op.custom_fields as Record<string, unknown>).quick_facts
-          : null;
-      if (typeof rawFacts === "string" && rawFacts.trim().length > 0) {
+      const rawFacts = getCustomFieldString(
+        op.custom_fields,
+        PROFILE_CUSTOM_FIELD_KEYS.QUICK_FACTS,
+      );
+      if (rawFacts) {
         knownFactsBlock =
           `\n\n---\nOPERATOR KNOWN FACTS\n` +
           `Evergreen facts the operator has saved about themselves. Treat these as authoritative — use them BEFORE asking the operator for the same info. The operator gets frustrated when you ask for things you could have found here.\n\n` +
-          rawFacts.trim() +
+          rawFacts +
           `\n---`;
       }
       operatorBlock =

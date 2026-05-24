@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { PROFILE_CUSTOM_FIELD_KEYS } from "@/lib/profile-custom-fields";
 
 /**
  * KnownFactsEditor — operator-editable scratchpad of evergreen facts
@@ -43,7 +44,8 @@ export function KnownFactsEditor() {
           return;
         }
         const cf = (j.profile?.custom_fields || {}) as Record<string, unknown>;
-        const initial = typeof cf.quick_facts === "string" ? cf.quick_facts : "";
+        const raw = cf[PROFILE_CUSTOM_FIELD_KEYS.QUICK_FACTS];
+        const initial = typeof raw === "string" ? raw : "";
         setText(initial);
         setOrig(initial);
       } catch (e) {
@@ -67,7 +69,7 @@ export function KnownFactsEditor() {
         profile?: { custom_fields?: Record<string, unknown> | null };
       };
       const cf = { ...(j.profile?.custom_fields || {}) } as Record<string, unknown>;
-      cf.quick_facts = text;
+      cf[PROFILE_CUSTOM_FIELD_KEYS.QUICK_FACTS] = text;
 
       const patch = await fetch("/api/profile", {
         method: "PATCH",
