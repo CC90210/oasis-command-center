@@ -325,14 +325,24 @@ main > div {
   background: linear-gradient(135deg, #3b82f6 0%, #00d4ff 100%);
   color: #02060f;
   font-weight: 700;
-  padding: 0.6rem 1rem;
+  padding: 0.75rem 1rem;
   border-radius: 0.5rem;
-  font-size: 0.875rem;
+  font-size: 0.95rem;
   display: inline-flex;
   align-items: center;
   gap: 0.4rem;
+  min-height: 2.75rem;
   transition: filter 0.15s, transform 0.05s, box-shadow 0.2s;
   box-shadow: 0 0 0 1px rgba(0,212,255,0.3), 0 8px 24px -6px rgba(0,212,255,0.5);
+}
+/* Tighten the send button on desktop (mouse precision allows smaller
+   targets; mobile defaults above keep a 44px minimum tap target). */
+@media (min-width: 768px) {
+  .btn-send {
+    padding: 0.6rem 1rem;
+    font-size: 0.875rem;
+    min-height: 0;
+  }
 }
 .btn-send:hover { filter: brightness(1.1); }
 .btn-send:active { transform: translateY(1px); }

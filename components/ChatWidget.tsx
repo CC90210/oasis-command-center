@@ -2276,7 +2276,15 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
   return (
     <div
       ref={chatContainerRef}
-      className={`chat-container agent-${agent} flex flex-col h-[640px]`}
+      /* Height: on desktop the chat is a fixed 640px panel that lives
+         alongside other widgets on the page. On mobile (where the
+         viewport is the only real estate) we let it size to the
+         viewport minus the topbar (3.5rem) + page padding (1.5rem) +
+         section header above the chat (~8rem) = ~13rem total chrome,
+         leaving the chat to fill the rest. Uses 100dvh so iOS Safari's
+         dynamic toolbar collapse doesn't cause layout jumps as the URL
+         bar shows/hides. */
+      className={`chat-container agent-${agent} flex flex-col h-[calc(100dvh-13rem)] min-h-[28rem] md:h-[640px] md:min-h-0`}
     >
       {/* Aurora wash inside the bordered container */}
       <div className="chat-aurora absolute inset-0 pointer-events-none" />
@@ -2288,7 +2296,9 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
           configuration decision as a per-message choice — gone 2026-05-14
           per CC. accessMode state stays internally as "auto" so the
           downstream routing logic + status labels keep working. */}
-      <div className="flex items-center gap-3 px-5 py-4 relative z-10">
+      {/* Header padding: tighter on mobile so the agent picker +
+          history button + status text don't get squeezed off-screen. */}
+      <div className="flex items-center gap-2 md:gap-3 px-3 md:px-5 py-3 md:py-4 relative z-10">
         {/* Chat history sidebar trigger. Closed state = compact button
             sitting flush with the agent picker; open state = full drawer
             overlay positioned by the component itself. Clicking a past
@@ -2308,7 +2318,10 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
         <select
           value={agent}
           onChange={(e) => setAgent(e.target.value)}
-          className="bg-bg-elev border border-bg-border rounded-lg px-3 py-2 text-sm text-fg uppercase tracking-[0.14em] font-bold focus:outline-none focus:border-accent transition-colors cursor-pointer min-w-[120px]"
+          /* text-base on mobile keeps iOS from auto-zooming on the
+             native select picker; text-sm on desktop matches the
+             surrounding header density. */
+          className="bg-bg-elev border border-bg-border rounded-lg px-3 py-2 text-base md:text-sm text-fg uppercase tracking-[0.14em] font-bold focus:outline-none focus:border-accent transition-colors cursor-pointer min-w-[120px]"
           aria-label="Choose agent"
         >
           {(agentKeys.length > 0 ? agentKeys : [agent]).map((k) => (
@@ -2880,7 +2893,11 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
           e.preventDefault();
           send();
         }}
-        className="border-t border-bg-border px-5 py-4 relative z-10 bg-bg-panel/40 backdrop-blur space-y-2"
+        /* Composer padding: tighter side padding on mobile (px-3) so the
+           textarea + send button + tool-buttons row have more horizontal
+           room. Bottom padding bumps slightly (pb-5) so the send button
+           clears the iOS home-indicator safe area on phones. */
+        className="border-t border-bg-border px-3 md:px-5 py-3 pb-5 md:py-4 relative z-10 bg-bg-panel/40 backdrop-blur space-y-2"
       >
         {(pendingAttachments.length > 0 || attachmentError) && (
           <div className="flex flex-wrap gap-1.5 text-[11px]">
@@ -3026,8 +3043,12 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
             placeholder={composerPlaceholder}
             disabled={!ready || streaming}
             rows={1}
-            className="flex-1 bg-bg-elev border border-bg-border rounded-lg px-3.5 py-2.5 text-sm text-fg placeholder-fg-dim focus:outline-none focus:border-accent disabled:opacity-50 resize-none max-h-32"
-            style={{ minHeight: "2.75rem" }}
+            /* text-base on mobile prevents iOS Safari's auto-zoom on
+               focus (it zooms whenever an input's font-size is <16px).
+               Stays text-sm on desktop where the smaller font matches
+               surrounding UI density. */
+            className="flex-1 bg-bg-elev border border-bg-border rounded-lg px-3.5 py-3 md:py-2.5 text-base md:text-sm text-fg placeholder-fg-dim focus:outline-none focus:border-accent disabled:opacity-50 resize-none max-h-32"
+            style={{ minHeight: "3rem" }}
           />
           {streaming ? (
             // Stop button — fires AbortController.abort() on the active
@@ -3186,7 +3207,11 @@ function Bubble({
       {!isUser && <AgentAvatar agent={agent} />}
       <div className={`max-w-[88%] flex flex-col gap-1 ${isUser ? "items-end" : "items-start"}`}>
         <div
-          className={`rounded-2xl px-4 py-3 text-sm leading-relaxed ${
+          /* text-[15px] on mobile is just enough to be comfortably
+             readable on a phone while staying tighter than text-base.
+             Desktop drops back to text-sm to match the surrounding UI
+             density. */
+          className={`rounded-2xl px-4 py-3 text-[15px] md:text-sm leading-relaxed ${
             isUser ? "bubble-user" : `bubble-assistant ${streaming ? "streaming" : ""}`
           }`}
         >
@@ -3211,7 +3236,13 @@ function Bubble({
             </div>
           )}
         </div>
-        <div className="flex items-center gap-2 px-1 opacity-0 group-hover:opacity-100 transition-opacity text-[10px] text-fg-dim">
+        {/* Meta row: timestamp + copy/export. On desktop this is
+            hover-revealed to keep the bubble clean. On touch devices
+            (where :hover doesn't fire) it stays visible at low opacity
+            so operators can actually tap copy/export. The
+            `[@media(hover:hover)]` variants narrow the hover-only
+            behavior to devices that have real hover capability. */}
+        <div className="flex items-center gap-2 px-1 text-[10px] text-fg-dim opacity-70 [@media(hover:hover)]:opacity-0 [@media(hover:hover)]:group-hover:opacity-100 transition-opacity">
           <span className="font-mono">{_relTime(at)}</span>
           {!isUser && content && (
             <button
