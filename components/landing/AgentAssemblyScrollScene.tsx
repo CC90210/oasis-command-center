@@ -7,26 +7,34 @@ import { AgentFigureSprite, SPRITE_LAYER_COUNT } from "./agent-assembly/AgentFig
 import { useCursorTracking } from "./agent-assembly/useCursorTracking";
 import { useScrollPhase } from "./agent-assembly/useScrollPhase";
 
-const PHASE_COUNT = SPRITE_LAYER_COUNT;
-const INSTALL_WINDOW = 0.07;
+// 11 scroll phases — 10 drive the layer installs (1:1 with sprite layers),
+// the 11th drives the final compaction beat where floating fragments fade
+// out and the solid base figure fades in.
+const PHASE_COUNT = SPRITE_LAYER_COUNT + 1; // 11
+const COMPACTION_PHASE_INDEX = SPRITE_LAYER_COUNT; // 10 (zero-indexed)
+const INSTALL_WINDOW = 0.06;
+// The compaction beat needs a longer window than a normal install so the
+// fragment fade-out reads cleanly without snapping.
+const COMPACTION_WINDOW = 0.08;
 
 /**
- * Reference-image subsystem manifest. Order matches AgentFigureSprite's
- * top-to-bottom layer order: head → neural cube → neural disc → memory
- * ring → sensors → reasoning torso → communication → ethics → body →
- * activation. The dot indicators light up as each scroll phase activates.
+ * OASIS subsystem manifest — 11 entries describing the REAL OASIS product
+ * subsystems being marketed. Phases 1-10 drive the visual layer installs;
+ * phase 11 (Dashboard Metrics) drives the final compaction beat that
+ * collapses the exploded view into a solid, fully-assembled figure.
  */
 const MODULE_MANIFEST = [
-  { label: "Core", subsystem: "Processing unit — multi-model reasoning head" },
-  { label: "Neural Cube", subsystem: "AI model — Claude, GPT, and backup providers" },
-  { label: "Neural Lattice", subsystem: "Training — meaning-based recall lattice" },
-  { label: "Memory", subsystem: "Knowledge base — hybrid keyword + vector memory" },
-  { label: "Sensors", subsystem: "Perception layer — browser optics + telemetry" },
-  { label: "Reasoning Engine", subsystem: "Decision making — chest pulse + state guardrails" },
-  { label: "Communication", subsystem: "Language & APIs — Telegram, email, dashboard feed" },
-  { label: "Ethics Layer", subsystem: "Alignment & safety — secret, exec, and state guards" },
-  { label: "Body Interface", subsystem: "Hardware integration — brand, voice, audience, goals" },
-  { label: "Activation", subsystem: "Oasis AI online — pulse, crons, funnel, pipeline" },
+  { label: "Reasoning Core",    subsystem: "Multi-model brain with Claude, GPT, and four backup providers" },
+  { label: "State Pulse",       subsystem: "Live operational heartbeat tracking every action and event" },
+  { label: "Memory Spine",      subsystem: "Hybrid keyword and meaning-based recall across all your knowledge" },
+  { label: "Browser Optics",    subsystem: "Stealth web browser that sees the public web like a real human" },
+  { label: "Bridge Tools",      subsystem: "Twenty-one local actions plus an automation library, ready to run" },
+  { label: "Guard Shield",      subsystem: "Three guardrails sealing secrets, blocking destructive operations" },
+  { label: "Output Channels",   subsystem: "Speaks back through Telegram, email, and the dashboard feed" },
+  { label: "Security Mesh",     subsystem: "Zero-trust envelope with continuous credential and access audits" },
+  { label: "Business Layer",    subsystem: "Your brand, your voice, your audience, your goals" },
+  { label: "Command Centre",    subsystem: "Daily digest, scheduled work, lead funnel, and sales pipeline" },
+  { label: "Dashboard Metrics", subsystem: "Live revenue, pipeline health — system fully online, fragments locked" },
 ] as const;
 
 const AMBIENT_PARTICLES = [
@@ -126,6 +134,18 @@ function useInstallProgress(scrollProgress: MotionValue<number>, phaseIndex: num
   );
 }
 
+/** Compaction beat runs during the final phase with a wider window so the
+ *  fragment fade-out + solid fade-in cross-dissolve smoothly. */
+function useCompactionProgress(scrollProgress: MotionValue<number>) {
+  const start = COMPACTION_PHASE_INDEX / PHASE_COUNT;
+  return useTransform(
+    scrollProgress,
+    [start, Math.min(start + COMPACTION_WINDOW, 1)],
+    [0, 1],
+    { clamp: true },
+  );
+}
+
 export function AgentAssemblyScrollScene() {
   const sectionRef = useRef<HTMLElement>(null);
   const { phase, localProgress, scrollProgress } = useScrollPhase(
@@ -137,28 +157,32 @@ export function AgentAssemblyScrollScene() {
   const forceInstalled = Boolean(shouldReduceMotion || isCompact);
   const cursor = useCursorTracking(forceInstalled);
 
-  const coreProgress = useInstallProgress(scrollProgress, 0);
-  const neuralCubeProgress = useInstallProgress(scrollProgress, 1);
-  const neuralDiscProgress = useInstallProgress(scrollProgress, 2);
-  const memoryProgress = useInstallProgress(scrollProgress, 3);
-  const sensorsProgress = useInstallProgress(scrollProgress, 4);
-  const reasoningProgress = useInstallProgress(scrollProgress, 5);
-  const communicationProgress = useInstallProgress(scrollProgress, 6);
-  const ethicsProgress = useInstallProgress(scrollProgress, 7);
-  const bodyProgress = useInstallProgress(scrollProgress, 8);
-  const activationProgress = useInstallProgress(scrollProgress, 9);
+  // Phases 1-10 (zero-indexed 0-9) drive the 10 visual layer installs in
+  // OASIS-manifest order: Reasoning Core → Command Centre. Phase 11
+  // (index 10) drives the compaction beat — fragments fade into solid.
+  const reasoningCoreProgress = useInstallProgress(scrollProgress, 0);
+  const statePulseProgress = useInstallProgress(scrollProgress, 1);
+  const memorySpineProgress = useInstallProgress(scrollProgress, 2);
+  const browserOpticsProgress = useInstallProgress(scrollProgress, 3);
+  const bridgeToolsProgress = useInstallProgress(scrollProgress, 4);
+  const guardShieldProgress = useInstallProgress(scrollProgress, 5);
+  const outputChannelsProgress = useInstallProgress(scrollProgress, 6);
+  const securityMeshProgress = useInstallProgress(scrollProgress, 7);
+  const businessLayerProgress = useInstallProgress(scrollProgress, 8);
+  const commandCentreProgress = useInstallProgress(scrollProgress, 9);
+  const compactionProgress = useCompactionProgress(scrollProgress);
 
   const layerProgresses = [
-    coreProgress,
-    neuralCubeProgress,
-    neuralDiscProgress,
-    memoryProgress,
-    sensorsProgress,
-    reasoningProgress,
-    communicationProgress,
-    ethicsProgress,
-    bodyProgress,
-    activationProgress,
+    reasoningCoreProgress,     // → 01-head
+    statePulseProgress,        // → 02-neural-cube
+    memorySpineProgress,       // → 03-neural-disc
+    browserOpticsProgress,     // → 04-memory-ring
+    bridgeToolsProgress,       // → 05-sensors
+    guardShieldProgress,       // → 06-reasoning-torso
+    outputChannelsProgress,    // → 07-communication
+    securityMeshProgress,      // → 08-ethics-hip
+    businessLayerProgress,     // → 09-body-pelvis
+    commandCentreProgress,     // → 10-activation
   ];
 
   const progressScale = forceInstalled ? 1 : scrollProgress;
@@ -170,7 +194,7 @@ export function AgentAssemblyScrollScene() {
     <section
       ref={sectionRef}
       id="agent-build"
-      className="relative z-10 min-h-screen min-[641px]:min-h-[950vh] lg:min-h-[1100vh]"
+      className="relative z-10 min-h-screen min-[641px]:min-h-[1100vh] lg:min-h-[1250vh]"
     >
       <div className="relative flex min-h-screen items-center justify-center overflow-hidden px-5 py-12 min-[641px]:sticky min-[641px]:top-0 min-[641px]:h-screen sm:px-8">
         {/* Cosmic background: deep space gradient → nebula clouds → slowly
@@ -377,10 +401,11 @@ export function AgentAssemblyScrollScene() {
 
         <div
           aria-hidden="true"
-          className="absolute left-1/2 top-[55%] z-10 w-[min(86vw,360px)] -translate-x-1/2 -translate-y-1/2 min-[641px]:top-1/2 min-[641px]:w-[min(48vw,440px)] lg:w-[min(36vw,500px)]"
+          className="absolute left-1/2 top-[55%] z-10 w-[min(72vw,260px)] -translate-x-1/2 -translate-y-1/2 min-[641px]:top-1/2 min-[641px]:w-[min(34vw,320px)] lg:w-[min(26vw,360px)]"
         >
           <AgentFigureSprite
             installProgresses={layerProgresses}
+            compactionProgress={compactionProgress}
             cursorX={cursor.x}
             cursorY={cursor.y}
             forceInstalled={forceInstalled}
