@@ -161,7 +161,6 @@ type MobileStage = "init" | "link" | "online";
 
 export function AgentAssemblyScrollScene() {
   const sectionRef = useRef<HTMLElement>(null);
-  const figureStageRef = useRef<HTMLDivElement>(null);
   const { phase, localProgress, scrollProgress } = useScrollPhase(
     sectionRef,
     PHASE_COUNT,
@@ -476,7 +475,6 @@ export function AgentAssemblyScrollScene() {
             height so it never touches the heading or CTA.
             Desktop: absolutely centered, original aspect-locked container. */}
         <motion.div
-          ref={figureStageRef}
           aria-hidden="true"
           className="relative z-10 flex flex-1 items-center justify-center pt-2 min-[641px]:pointer-events-none min-[641px]:absolute min-[641px]:left-1/2 min-[641px]:top-1/2 min-[641px]:z-10 min-[641px]:flex-none min-[641px]:-translate-x-1/2 min-[641px]:-translate-y-1/2 min-[641px]:p-0"
           style={{ x: parallaxX, y: parallaxY }}
