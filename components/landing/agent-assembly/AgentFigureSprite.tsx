@@ -42,8 +42,6 @@ const C = {
 type Props = {
   installProgresses: MotionValue<number>[];
   compactionProgress: MotionValue<number>;
-  cursorX: MotionValue<number>;
-  cursorY: MotionValue<number>;
   forceInstalled?: boolean;
   className?: string;
 };

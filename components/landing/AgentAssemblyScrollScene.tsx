@@ -4,7 +4,6 @@ import { useEffect, useRef, useState } from "react";
 import { ChevronDown } from "lucide-react";
 import { motion, useReducedMotion, useTransform, type MotionValue } from "framer-motion";
 import { AgentFigureSprite, SPRITE_LAYER_COUNT } from "./agent-assembly/AgentFigureSprite";
-import { useCursorTracking } from "./agent-assembly/useCursorTracking";
 import { useScrollPhase } from "./agent-assembly/useScrollPhase";
 
 // 11 scroll phases — 10 drive the layer installs (1:1 with sprite layers),
@@ -159,7 +158,6 @@ export function AgentAssemblyScrollScene() {
   const shouldReduceMotion = useReducedMotion();
   const isCompact = useCompactViewport();
   const forceInstalled = Boolean(shouldReduceMotion || isCompact);
-  const cursor = useCursorTracking(forceInstalled);
 
   // Phases 1-10 (zero-indexed 0-9) drive the 10 visual layer installs in
   // OASIS-manifest order: Reasoning Core → Command Centre. Phase 11
@@ -411,8 +409,6 @@ export function AgentAssemblyScrollScene() {
           <AgentFigureSprite
             installProgresses={layerProgresses}
             compactionProgress={compactionProgress}
-            cursorX={cursor.x}
-            cursorY={cursor.y}
             forceInstalled={forceInstalled}
             className="h-full w-full"
           />
