@@ -183,7 +183,7 @@ export function ManifestEditorChat({ slug, initialManifest, initialVersion }: Pr
   return (
     <div className="grid grid-cols-1 lg:grid-cols-[1.05fr_0.95fr] gap-6">
       {/* Chat pane */}
-      <div className="flex flex-col rounded-2xl border border-bg-border bg-bg-elev/40 backdrop-blur-sm min-h-[600px]">
+      <div className="flex flex-col rounded-2xl border border-bg-border bg-bg-elev/40 backdrop-blur-sm min-h-[calc(100dvh-14rem)] md:min-h-[600px]">
         <div className="border-b border-bg-border px-5 py-3 flex items-center justify-between">
           <div className="flex items-center gap-2 text-fg">
             <Sparkles className="h-4 w-4 text-accent" />
@@ -254,7 +254,7 @@ export function ManifestEditorChat({ slug, initialManifest, initialVersion }: Pr
       </div>
 
       {/* Preview pane */}
-      <div className="flex flex-col rounded-2xl border border-bg-border bg-bg-elev/40 backdrop-blur-sm min-h-[600px]">
+      <div className="flex flex-col rounded-2xl border border-bg-border bg-bg-elev/40 backdrop-blur-sm min-h-[calc(100dvh-14rem)] md:min-h-[600px]">
         <div className="border-b border-bg-border px-5 py-3 flex items-center justify-between">
           <span className="font-bold text-sm text-fg">Preview</span>
           {pending && (

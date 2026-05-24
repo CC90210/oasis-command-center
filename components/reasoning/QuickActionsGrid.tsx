@@ -76,7 +76,7 @@ export function QuickActionsGrid({ actions }: { actions: QuickAction[] }) {
                       <div className="flex-1 min-w-0">
                         <div className="flex items-center gap-1.5">
                           <span className="text-sm font-bold text-fg">{q.title}</span>
-                          <ArrowRight className="w-3.5 h-3.5 text-fg-dim opacity-0 group-hover:opacity-100 transition-opacity" />
+                          <ArrowRight className="hover-reveal-cue w-3.5 h-3.5 text-fg-dim transition-opacity" />
                         </div>
                         <div className="text-xs text-fg-muted mt-1 leading-snug">
                           {q.description}

@@ -348,6 +348,34 @@ main > div {
 .btn-send:active { transform: translateY(1px); }
 .btn-send:disabled { opacity: 0.4; cursor: not-allowed; filter: grayscale(0.5); }
 
+/* Hover-reveal pattern for affordance hints (arrows, metadata, action
+   buttons that should appear on row hover). On touch devices :hover
+   never fires, so the element stays invisible and operators can't
+   tell the row is interactive. Two opacity levels:
+
+     .hover-reveal        — element stays at 70% on touch (use for
+                            actual interactive controls — copy buttons,
+                            open links, anything tappable)
+     .hover-reveal-cue    — element stays at 40% on touch (use for
+                            decoration hints — arrow icons that signal
+                            "this row is clickable" but aren't the
+                            target themselves)
+
+   Both collapse to the original opacity-0 + group-hover:opacity-100
+   behavior on devices with real hover. The `transition-opacity`
+   utility should still be applied at the call site. */
+.hover-reveal,
+.hover-reveal-cue {
+  opacity: 0.7;
+}
+.hover-reveal-cue { opacity: 0.4; }
+@media (hover: hover) {
+  .hover-reveal,
+  .hover-reveal-cue { opacity: 0; }
+  .group:hover .hover-reveal,
+  .group:hover .hover-reveal-cue { opacity: 1; }
+}
+
 /* Agent pill in the chat header */
 .agent-pill {
   display: inline-flex;

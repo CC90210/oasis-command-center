@@ -114,7 +114,7 @@ export default function BusinessDocsPage() {
                             missing
                           </span>
                         )}
-                        <ArrowRight className="w-3.5 h-3.5 text-fg-dim opacity-0 group-hover:opacity-100 transition-opacity ml-auto" />
+                        <ArrowRight className="hover-reveal-cue w-3.5 h-3.5 text-fg-dim transition-opacity ml-auto" />
                       </div>
                       <div className="text-xs text-fg-muted mt-1 leading-snug">{d.description}</div>
                       {d.storage_hint && (

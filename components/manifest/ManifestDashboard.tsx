@@ -371,7 +371,7 @@ function KpiCard({
           >
             {icon}
           </div>
-          <ArrowRight className="w-3.5 h-3.5 text-fg-dim opacity-0 group-hover:opacity-100 transition-opacity" />
+          <ArrowRight className="hover-reveal-cue w-3.5 h-3.5 text-fg-dim transition-opacity" />
         </div>
         <div className="text-[10px] uppercase tracking-[0.14em] font-bold text-fg-dim mb-1">
           {title}

@@ -3236,13 +3236,11 @@ function Bubble({
             </div>
           )}
         </div>
-        {/* Meta row: timestamp + copy/export. On desktop this is
-            hover-revealed to keep the bubble clean. On touch devices
-            (where :hover doesn't fire) it stays visible at low opacity
-            so operators can actually tap copy/export. The
-            `[@media(hover:hover)]` variants narrow the hover-only
-            behavior to devices that have real hover capability. */}
-        <div className="flex items-center gap-2 px-1 text-[10px] text-fg-dim opacity-70 [@media(hover:hover)]:opacity-0 [@media(hover:hover)]:group-hover:opacity-100 transition-opacity">
+        {/* Meta row: timestamp + copy/export. .hover-reveal keeps it
+            visible at low opacity on touch (so copy/export are
+            tappable) and hides it on desktop until the bubble's
+            group-hover fires. See globals.css. */}
+        <div className="hover-reveal flex items-center gap-2 px-1 text-[10px] text-fg-dim transition-opacity">
           <span className="font-mono">{_relTime(at)}</span>
           {!isUser && content && (
             <button

@@ -196,7 +196,7 @@ export async function ManifestTable({
                   <td className="px-2 py-2.5 text-right">
                     <Link
                       href={`${effectiveLinkBase}/${row.id}`}
-                      className="inline-flex items-center gap-1 text-fg-dim hover:text-accent text-xs opacity-0 group-hover:opacity-100 transition-opacity"
+                      className="hover-reveal inline-flex items-center gap-1 text-fg-dim hover:text-accent text-xs transition-opacity"
                       title="Open record"
                     >
                       Open

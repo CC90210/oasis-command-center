@@ -197,7 +197,7 @@ function PromptCard({ p }: { p: PromptEntry }) {
           <span className="text-[10px] uppercase tracking-wider font-bold text-fg-dim">
             → {p.agent}
           </span>
-          <ArrowRight className="w-3.5 h-3.5 text-fg-dim opacity-0 group-hover:opacity-100 transition-opacity ml-auto" />
+          <ArrowRight className="hover-reveal-cue w-3.5 h-3.5 text-fg-dim transition-opacity ml-auto" />
         </div>
         <div className="text-xs text-fg-muted mt-1.5 leading-snug">{p.description}</div>
         {isOverride && (
