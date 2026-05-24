@@ -108,10 +108,26 @@ test("secret shorter than MIN_REDACTABLE_LEN ignored", () => {
   assert.ok(out.includes(SECRET_TOO_SHORT.value), `too-short value was scrubbed: ${out}`);
 });
 
-test("empty secrets array → push is pass-through", () => {
+test("empty vault secrets → push + flush preserves the input", () => {
+  // NOTE — Codex P2 catch: StreamingRedactor's constructor ALWAYS
+  // folds in loadEnvSecretPairs() alongside the passed vault secrets.
+  // In environments with credential-shaped env vars (OPENAI_API_KEY,
+  // GITHUB_TOKEN, etc. — likely on every dev machine and CI), the
+  // redactor's maxSecretLen is non-zero even when vaultSecrets=[],
+  // which means `push()` will hold back text. The right invariant
+  // to test for the "no MATCHING secrets in the input" case isn't
+  // "push returns input verbatim" — it's "push + flush together
+  // preserve the input AND don't accidentally redact non-secret
+  // text." Use a string that's pure ASCII filler unlikely to
+  // collide with any real env-var value.
   const r = new StreamingRedactor([]);
-  const out = r.push("Anything goes when there are no secrets to hide.");
-  assert.equal(out, "Anything goes when there are no secrets to hide.");
+  const input = "Lorem ipsum dolor sit amet, consectetur adipiscing elit.";
+  const combined = r.push(input) + r.flush();
+  assert.equal(
+    combined,
+    input,
+    `push+flush should preserve input verbatim when nothing matches; got: ${combined}`,
+  );
 });
 
 test("flush returns and clears buffer", () => {
