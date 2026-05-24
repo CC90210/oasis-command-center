@@ -60,6 +60,7 @@ import { PROFILE_CUSTOM_FIELD_KEYS } from "./profile-custom-fields";
 import {
   getTenantIntegrationValue,
   setTenantIntegrationValue,
+  VAULT_CUSTOM_SERVICE,
 } from "./tenant-integration-store";
 
 const ANTHROPIC_VERSION = "2023-06-01";
@@ -959,7 +960,6 @@ async function toolSaveKnownFact(input: Record<string, unknown>, ctx: ToolContex
  * chat_messages transcript (we strip tool_result content before
  * persisting elsewhere — verify in the persistence layer).
  */
-const CUSTOM_CREDENTIAL_SERVICE = "custom";
 /**
  * Structured audit line for credential vault access. Picked up by
  * Vercel log filters (look for "[AUDIT credential_access]") so a
@@ -1046,7 +1046,7 @@ async function toolGetCredential(input: Record<string, unknown>, ctx: ToolContex
   const fieldKey = raw.toLowerCase();
   const value = await getTenantIntegrationValue(
     ctx.tenantId,
-    CUSTOM_CREDENTIAL_SERVICE,
+    VAULT_CUSTOM_SERVICE,
     fieldKey,
   );
   if (value === null) {
@@ -1135,7 +1135,7 @@ async function toolAddCredential(input: Record<string, unknown>, ctx: ToolContex
   }
   const r = await setTenantIntegrationValue({
     tenantId: ctx.tenantId,
-    service: CUSTOM_CREDENTIAL_SERVICE,
+    service: VAULT_CUSTOM_SERVICE,
     fieldKey: upperName.toLowerCase(),
     value: rawValue,
     createdBy: null,

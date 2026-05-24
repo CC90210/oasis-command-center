@@ -35,12 +35,12 @@ import { canManageTeam, type TeamRole } from "@/lib/team";
 import {
   setTenantIntegrationValue,
   deleteTenantIntegrationValue,
+  VAULT_CUSTOM_SERVICE,
 } from "@/lib/tenant-integration-store";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-const CUSTOM_SERVICE = "custom";
 const MAX_KEY_LEN = 64;
 const MAX_VALUE_LEN = 8192; // 8 KB per value — enough for private keys
 const MAX_BULK_ENTRIES = 100;
@@ -88,7 +88,7 @@ export async function GET() {
     .from("tenant_integration_credentials")
     .select("field_key, encrypted_value, updated_at")
     .eq("tenant_id", sess.tenantId)
-    .eq("service", CUSTOM_SERVICE)
+    .eq("service", VAULT_CUSTOM_SERVICE)
     .order("field_key", { ascending: true });
   const rows: CustomCredentialRow[] = (
     (r.data || []) as { field_key: string; encrypted_value: string; updated_at: string | null }[]
@@ -200,7 +200,7 @@ export async function POST(req: NextRequest) {
     }
     const r = await setTenantIntegrationValue({
       tenantId: sess.tenantId,
-      service: CUSTOM_SERVICE,
+      service: VAULT_CUSTOM_SERVICE,
       fieldKey: normalizedKey.toLowerCase(),
       value,
       createdBy: sess.profileId,
@@ -241,7 +241,7 @@ export async function DELETE(req: NextRequest) {
   }
   const r = await deleteTenantIntegrationValue({
     tenantId: sess.tenantId,
-    service: CUSTOM_SERVICE,
+    service: VAULT_CUSTOM_SERVICE,
     fieldKey: normalizedKey.toLowerCase(),
   });
   if (!r.ok) {

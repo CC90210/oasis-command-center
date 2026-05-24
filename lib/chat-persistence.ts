@@ -23,8 +23,7 @@ import {
   type VaultSecret,
 } from "./secret-redaction";
 import { decryptField } from "./field-encryption";
-
-const CUSTOM_VAULT_SERVICE = "custom";
+import { VAULT_CUSTOM_SERVICE } from "./tenant-integration-store";
 
 /**
  * Fetch decrypted (KEY, value) pairs from a tenant's custom credentials
@@ -47,7 +46,7 @@ export async function fetchTenantVaultSecretsForRedaction(
     .from("tenant_integration_credentials")
     .select("field_key, encrypted_value")
     .eq("tenant_id", tenantId)
-    .eq("service", CUSTOM_VAULT_SERVICE);
+    .eq("service", VAULT_CUSTOM_SERVICE);
   const out: VaultSecret[] = [];
   for (const row of (r.data || []) as { field_key: string; encrypted_value: string }[]) {
     if (!row.encrypted_value) continue;

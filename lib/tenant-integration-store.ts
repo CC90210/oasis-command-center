@@ -19,6 +19,20 @@ import "server-only";
 import { getServiceSupabase } from "./supabase-server";
 import { encryptField, decryptField } from "./field-encryption";
 
+/**
+ * Sentinel `service` value for the arbitrary KEY=VALUE vault
+ * (Settings → Custom credentials). Distinct from the schema-locked
+ * KNOWN_INTEGRATIONS entries (stripe, twilio, etc.) — `service="custom"`
+ * rows are user-named and have no schema validation.
+ *
+ * Single source of truth so every reader/writer (API route, agent
+ * tool, redaction loader) refers to the same string. Pre-extraction
+ * this was duplicated as CUSTOM_SERVICE / CUSTOM_CREDENTIAL_SERVICE /
+ * CUSTOM_VAULT_SERVICE across three files — a rename would have
+ * silently drifted them.
+ */
+export const VAULT_CUSTOM_SERVICE = "custom";
+
 type StoreRow = {
   id: string;
   tenant_id: string;
