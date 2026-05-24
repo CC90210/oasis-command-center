@@ -107,9 +107,18 @@ export async function persistAssistantTurn(
   //   2. redactTenantVaultSecrets: per-tenant custom vault values that
   //      env-var redaction can't know about. Runs AFTER redactAll so
   //      env-var-shaped leaks land first with their canonical name.
-  const envRedacted = redactAll(args.content);
-  const body = redactTenantVaultSecrets(envRedacted, args.vaultSecrets);
+  //
+  // Applied to BOTH content AND error (Codex P1 follow-up, 2026-05-24).
+  // Provider/tool error messages can quote back request bodies that
+  // contain the credential value (e.g., "401 Unauthorized for key
+  // sk_live_...abcd"), so the same scrub has to run on args.error or
+  // chat_messages.error becomes the leak surface content was just
+  // hardened against.
+  const scrub = (s: string): string =>
+    redactTenantVaultSecrets(redactAll(s), args.vaultSecrets);
+  const body = scrub(args.content);
   const fullContent = args.prefix ? `${args.prefix}\n\n${body}` : body;
+  const scrubbedError = args.error ? scrub(args.error) : null;
   const r = await service.from("chat_messages").insert({
     session_id: args.sessionId,
     tenant_id: args.tenantId,
@@ -118,7 +127,7 @@ export async function persistAssistantTurn(
     input_tokens: args.inputTokens,
     output_tokens: args.outputTokens,
     latency_ms: args.latencyMs,
-    error: args.error ?? null,
+    error: scrubbedError,
   });
   if (r.error) {
     console.error("[chat-persistence.insert]", r.error.message);
