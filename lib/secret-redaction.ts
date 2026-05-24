@@ -63,3 +63,49 @@ export function redactUrlKeyParams(text: string | null | undefined): string {
 export function redactAll(text: string | null | undefined): string {
   return redactSecrets(redactUrlKeyParams(text));
 }
+
+/**
+ * Tenant vault secret redaction — runtime variant that takes a list of
+ * (KEY, value) pairs fetched from `tenant_integration_credentials`
+ * with `service="custom"` and scrubs them from text the same way
+ * `redactSecrets` scrubs env-var values.
+ *
+ * Why a runtime variant instead of folding into the cached env-var
+ * pairs: tenant vault values are dynamic per-tenant and change as
+ * admins paste/delete entries. Caching at module init the way
+ * `loadPairs()` does would leak one tenant's secrets into another
+ * tenant's redaction pass (or worse, never refresh until process
+ * restart). Per-request fetch is the right cost model — one extra
+ * SELECT per chat turn that touches the cloud system prompt, only
+ * runs when the tenant has at least one vault entry.
+ *
+ * Callers fetch via `fetchTenantVaultSecrets(tenantId)` then pass
+ * the result here. The two-step shape lets the caller hoist the
+ * fetch above streaming so each delta doesn't pay for a round-trip.
+ *
+ * Sorted by value length DESC so a long secret containing a short
+ * secret as substring doesn't half-scrub. Same MIN_REDACTABLE_LEN
+ * guard as env-var redaction so trivial 1-2-char "secrets" don't
+ * create runaway false positives.
+ */
+export type VaultSecret = { key: string; value: string };
+
+export function redactTenantVaultSecrets(
+  text: string | null | undefined,
+  secrets: VaultSecret[] | null | undefined,
+): string {
+  if (!text) return text ?? "";
+  if (!secrets || secrets.length === 0) return String(text);
+  let out = String(text);
+  // Length-DESC ensures substring conflicts resolve in favor of the
+  // longer match — same invariant as redactSecrets above.
+  const sorted = [...secrets]
+    .filter((s) => s.value && s.value.length >= MIN_REDACTABLE_LEN)
+    .sort((a, b) => b.value.length - a.value.length);
+  for (const { key, value } of sorted) {
+    if (out.includes(value)) {
+      out = out.split(value).join(`[REDACTED:${key.toUpperCase()}]`);
+    }
+  }
+  return out;
+}

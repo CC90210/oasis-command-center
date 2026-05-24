@@ -49,7 +49,7 @@ import {
 } from "@/lib/cloud-tool-runner";
 import { verifyResumeState, signResumeState } from "@/lib/resume-hmac";
 import { redactAll } from "@/lib/secret-redaction";
-import { persistAssistantTurn } from "@/lib/chat-persistence";
+import { persistAssistantTurn, fetchTenantVaultSecretsForRedaction } from "@/lib/chat-persistence";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -287,6 +287,12 @@ export async function POST(req: NextRequest) {
           );
         }
         const latencyMs = Date.now() - startedAt;
+        // Vault redaction (Codex P1 follow-up, 2026-05-24) — same
+        // shape as /api/chat: pre-fetch tenant vault values, scrub any
+        // echo before chat_messages persists it.
+        const vaultSecretsForRedaction = await fetchTenantVaultSecretsForRedaction(
+          tenantId,
+        ).catch(() => []);
         // Shared chat_messages writer (lib/chat-persistence). Same helper
         // /api/chat uses — single home for redaction + row shape.
         await persistAssistantTurn({
@@ -298,6 +304,7 @@ export async function POST(req: NextRequest) {
           outputTokens: resumeUsageOut,
           latencyMs,
           error: resumeStreamError,
+          vaultSecrets: vaultSecretsForRedaction,
         });
         // chat_sessions running totals — ACCUMULATE here (vs /api/chat
         // which overwrites). The pause/resume boundary means one logical

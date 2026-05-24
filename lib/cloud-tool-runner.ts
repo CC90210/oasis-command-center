@@ -57,7 +57,10 @@ import {
 } from "./chat-modes/plan-mode";
 import { readBrainDoc, searchMemory } from "./cloud-knowledge-tools";
 import { PROFILE_CUSTOM_FIELD_KEYS } from "./profile-custom-fields";
-import { getTenantIntegrationValue } from "./tenant-integration-store";
+import {
+  getTenantIntegrationValue,
+  setTenantIntegrationValue,
+} from "./tenant-integration-store";
 
 const ANTHROPIC_VERSION = "2023-06-01";
 const MAX_TOOL_ITERATIONS = 8; // safety cap — prevents runaway tool loops
@@ -161,6 +164,26 @@ export const TOOL_DEFINITIONS: ToolDef[] = [
         limit: { type: "number", description: "Optional max snippets to return. Default 8, max 20." },
       },
       required: ["query"],
+    },
+  },
+  {
+    name: "add_credential",
+    description:
+      "Save a new credential to the vault (admin only — same gate as Settings → Custom credentials). Use this when the operator gives you a secret in chat that future chats will need (an API key they just generated, a webhook URL for a new integration, etc.). After saving, tell the operator what KEY name you saved it as so they can find it under Settings if they need to edit or delete. NEVER call this for the operator's PERSONAL transient secrets (one-time tokens, OTP codes, passwords); only evergreen workflow credentials.",
+    input_schema: {
+      type: "object",
+      properties: {
+        name: {
+          type: "string",
+          description:
+            "Credential KEY in UPPER_SNAKE_CASE (e.g., 'STRIPE_WEBHOOK_SECRET'). Pick a name that future-you would guess on the first try.",
+        },
+        value: {
+          type: "string",
+          description: "The secret value the operator gave you. Stored encrypted at rest.",
+        },
+      },
+      required: ["name", "value"],
     },
   },
   {
@@ -696,6 +719,8 @@ async function dispatch(
       return await toolSaveKnownFact(input, ctx);
     case "get_credential":
       return await toolGetCredential(input, ctx);
+    case "add_credential":
+      return await toolAddCredential(input, ctx);
     case "web_fetch":
       return await toolHttpGet(input);
     case "list_records":
@@ -935,7 +960,41 @@ async function toolSaveKnownFact(input: Record<string, unknown>, ctx: ToolContex
  * persisting elsewhere — verify in the persistence layer).
  */
 const CUSTOM_CREDENTIAL_SERVICE = "custom";
+/**
+ * Structured audit line for credential vault access. Picked up by
+ * Vercel log filters (look for "[AUDIT credential_access]") so a
+ * tenant admin can pull the access history without a dedicated UI.
+ *
+ * Why console.warn instead of a DB row: the dashboard repo doesn't
+ * own its migrations directly (schema is managed in the empire repo).
+ * console.warn is the lowest-friction durable channel — Vercel
+ * retains structured logs and they're queryable per deployment.
+ * Promoting to a `credential_access_log` table is a tracked
+ * follow-up; the JSON shape here is designed to ingest into one
+ * cleanly when that lands (action, tenant_id, user_id, target,
+ * result, timestamp_iso).
+ */
+function auditCredentialAccess(args: {
+  action: "get_credential" | "add_credential";
+  tenantId: string;
+  userId: string;
+  agentKey: string;
+  target: string;
+  result: "ok" | "not_found" | "forbidden" | "invalid" | "error";
+  errorMessage?: string;
+}): void {
+  console.warn(
+    "[AUDIT credential_access]",
+    JSON.stringify({
+      ...args,
+      timestamp_iso: new Date().toISOString(),
+    }),
+  );
+}
+
 async function toolGetCredential(input: Record<string, unknown>, ctx: ToolContext) {
+  const raw = typeof input.name === "string" ? input.name.trim() : "";
+  const targetForAudit = raw ? raw.toUpperCase().slice(0, 64) : "(empty)";
   // ADMIN-ONLY (Codex P1 finding, 2026-05-24). The Settings UI for the
   // vault is gated on canManageTenant; the tool must enforce the same
   // gate or a non-admin member (loan_officer, processor, etc.) could
@@ -943,6 +1002,14 @@ async function toolGetCredential(input: Record<string, unknown>, ctx: ToolContex
   // not to echo credentials, but that's a soft control — the only hard
   // one is refusing to return the value in the first place.
   if (!ctx.isAdmin) {
+    auditCredentialAccess({
+      action: "get_credential",
+      tenantId: ctx.tenantId,
+      userId: ctx.userId,
+      agentKey: ctx.agentKey,
+      target: targetForAudit,
+      result: "forbidden",
+    });
     return {
       found: false,
       forbidden: true,
@@ -950,11 +1017,30 @@ async function toolGetCredential(input: Record<string, unknown>, ctx: ToolContex
         "Credential vault is admin-only. Ask the tenant owner or an admin to retrieve this credential, or to add you to the admin role under Settings → Team.",
     };
   }
-  const raw = typeof input.name === "string" ? input.name.trim() : "";
-  if (!raw) throw new Error("name_required");
+  if (!raw) {
+    auditCredentialAccess({
+      action: "get_credential",
+      tenantId: ctx.tenantId,
+      userId: ctx.userId,
+      agentKey: ctx.agentKey,
+      target: targetForAudit,
+      result: "invalid",
+      errorMessage: "name_required",
+    });
+    throw new Error("name_required");
+  }
   // Same regex as the upload route — refuses anything that wouldn't
   // round-trip with the stored field_key.
   if (!/^[A-Z][A-Z0-9_]{0,63}$/.test(raw.toUpperCase())) {
+    auditCredentialAccess({
+      action: "get_credential",
+      tenantId: ctx.tenantId,
+      userId: ctx.userId,
+      agentKey: ctx.agentKey,
+      target: targetForAudit,
+      result: "invalid",
+      errorMessage: "invalid_credential_name_format",
+    });
     throw new Error("invalid_credential_name_format");
   }
   const fieldKey = raw.toLowerCase();
@@ -964,6 +1050,14 @@ async function toolGetCredential(input: Record<string, unknown>, ctx: ToolContex
     fieldKey,
   );
   if (value === null) {
+    auditCredentialAccess({
+      action: "get_credential",
+      tenantId: ctx.tenantId,
+      userId: ctx.userId,
+      agentKey: ctx.agentKey,
+      target: targetForAudit,
+      result: "not_found",
+    });
     return {
       found: false,
       name: raw.toUpperCase(),
@@ -971,7 +1065,106 @@ async function toolGetCredential(input: Record<string, unknown>, ctx: ToolContex
         "Credential not in vault. Tell the operator to add it under Settings → Custom credentials using this exact KEY name.",
     };
   }
+  auditCredentialAccess({
+    action: "get_credential",
+    tenantId: ctx.tenantId,
+    userId: ctx.userId,
+    agentKey: ctx.agentKey,
+    target: targetForAudit,
+    result: "ok",
+  });
   return { found: true, name: raw.toUpperCase(), value };
+}
+
+/**
+ * Admin-only mirror of toolGetCredential. Lets an admin tell the
+ * agent in chat "save this as STRIPE_WEBHOOK_SECRET" and have the
+ * agent persist it without the admin navigating to Settings.
+ *
+ * Same gate as get_credential (ctx.isAdmin); same regex for KEY
+ * validation; same audit log. Reuses setTenantIntegrationValue from
+ * the integration store so encryption + upsert semantics are
+ * identical to what the Settings UI / API route do.
+ */
+async function toolAddCredential(input: Record<string, unknown>, ctx: ToolContext) {
+  const rawName = typeof input.name === "string" ? input.name.trim() : "";
+  const rawValue = typeof input.value === "string" ? input.value : "";
+  const targetForAudit = rawName ? rawName.toUpperCase().slice(0, 64) : "(empty)";
+  if (!ctx.isAdmin) {
+    auditCredentialAccess({
+      action: "add_credential",
+      tenantId: ctx.tenantId,
+      userId: ctx.userId,
+      agentKey: ctx.agentKey,
+      target: targetForAudit,
+      result: "forbidden",
+    });
+    return {
+      ok: false,
+      forbidden: true,
+      hint:
+        "Adding credentials is admin-only. Ask the tenant owner or an admin to save this credential.",
+    };
+  }
+  if (!rawName) throw new Error("name_required");
+  if (!rawValue) throw new Error("value_required");
+  const upperName = rawName.toUpperCase();
+  if (!/^[A-Z][A-Z0-9_]{0,63}$/.test(upperName)) {
+    auditCredentialAccess({
+      action: "add_credential",
+      tenantId: ctx.tenantId,
+      userId: ctx.userId,
+      agentKey: ctx.agentKey,
+      target: targetForAudit,
+      result: "invalid",
+      errorMessage: "invalid_credential_name_format",
+    });
+    throw new Error("invalid_credential_name_format");
+  }
+  if (rawValue.length > 8192) {
+    auditCredentialAccess({
+      action: "add_credential",
+      tenantId: ctx.tenantId,
+      userId: ctx.userId,
+      agentKey: ctx.agentKey,
+      target: targetForAudit,
+      result: "invalid",
+      errorMessage: "value_too_long",
+    });
+    throw new Error("value_too_long_max_8192");
+  }
+  const r = await setTenantIntegrationValue({
+    tenantId: ctx.tenantId,
+    service: CUSTOM_CREDENTIAL_SERVICE,
+    fieldKey: upperName.toLowerCase(),
+    value: rawValue,
+    createdBy: null,
+  });
+  if (!r.ok) {
+    auditCredentialAccess({
+      action: "add_credential",
+      tenantId: ctx.tenantId,
+      userId: ctx.userId,
+      agentKey: ctx.agentKey,
+      target: targetForAudit,
+      result: "error",
+      errorMessage: r.error,
+    });
+    throw new Error(r.error);
+  }
+  auditCredentialAccess({
+    action: "add_credential",
+    tenantId: ctx.tenantId,
+    userId: ctx.userId,
+    agentKey: ctx.agentKey,
+    target: targetForAudit,
+    result: "ok",
+  });
+  return {
+    ok: true,
+    name: upperName,
+    hint: "Saved to the vault. Future chats can retrieve this via get_credential.",
+  };
 }
 
 async function toolListRecords(input: Record<string, unknown>, ctx: ToolContext) {
@@ -1370,11 +1563,18 @@ function humanSummary(name: string, input: Record<string, unknown>, data: unknow
       return `saved known fact: "${preview}${preview.length >= 80 ? "…" : ""}"`;
     }
     case "get_credential": {
-      const d = data as { found?: boolean };
+      const d = data as { found?: boolean; forbidden?: boolean };
       const name = String(input.name || "?").toUpperCase();
+      if (d.forbidden) return `credential ${name} access denied (admin only)`;
       return d.found
         ? `retrieved credential ${name} (value masked)`
         : `credential ${name} not found in vault`;
+    }
+    case "add_credential": {
+      const d = data as { ok?: boolean; forbidden?: boolean };
+      const name = String(input.name || "?").toUpperCase();
+      if (d.forbidden) return `add credential ${name} denied (admin only)`;
+      return d.ok ? `saved credential ${name} to vault` : `add credential ${name} failed`;
     }
     case "web_fetch": {
       const d = data as { status: number };

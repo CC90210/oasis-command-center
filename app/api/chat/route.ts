@@ -61,7 +61,7 @@ import { isOperatorEmail } from "@/lib/operator-credentials";
 import { PROFILE_CUSTOM_FIELD_KEYS, getCustomFieldString } from "@/lib/profile-custom-fields";
 import { getTenantManifestForUser } from "@/lib/manifest/tenant-scope";
 import { redactAll } from "@/lib/secret-redaction";
-import { persistAssistantTurn } from "@/lib/chat-persistence";
+import { persistAssistantTurn, fetchTenantVaultSecretsForRedaction } from "@/lib/chat-persistence";
 import {
   formatAttachmentContext,
   injectAttachmentContextIntoMessages,
@@ -129,8 +129,14 @@ const SAFE_TENANT_TOOL_PALETTE: string[] = [
   // decrypted value (AES-256-GCM) for the tool to use; the model is
   // instructed not to echo it back. Lets agents actually consume the
   // KEY=VALUE secrets the operator pasted in Settings → Custom
-  // credentials without having to ask for them every turn.
+  // credentials without having to ask for them every turn. Admin-gated
+  // inside the tool (ctx.isAdmin) — non-admin tenants see {forbidden}.
   "get_credential",
+  // Admin-only mirror of get_credential — lets an admin tell the agent
+  // in chat "save this as STRIPE_WEBHOOK_SECRET" and have it persisted
+  // to the vault without navigating to Settings. Same admin gate;
+  // every call is audit-logged.
+  "add_credential",
 ];
 
 type IncomingPayload = {
@@ -394,8 +400,8 @@ export async function POST(req: NextRequest) {
   //     "check KNOWN FACTS first" since their KNOWN FACTS block is the
   //     only operator-personal context available cloud-side.
   const searchFirstBridge = isOperator
-    ? `\n\nSEARCH BEFORE DECLINING — NON-NEGOTIABLE:\nBefore you EVER say "I don't have X" or "I don't see X anywhere" or ask the operator for something they might have already saved, you MUST:\n  1. Check the OPERATOR KNOWN FACTS block (if present below) — calendar links, signatures, business names, common assets live there.\n  2. If the operator might have stored it as a SECRET (API key, webhook URL, access token), call get_credential with a plausible UPPER_SNAKE_CASE name (e.g., STRIPE_SECRET_KEY, CALENDLY_API_KEY, CUSTOM_WEBHOOK_URL). Try 2-3 plausible names before giving up.\n  3. If still not found, call read_brain_doc on a plausibly-named doc (e.g., USER.md, STATE.md, PROFILE.md) or search_memory with relevant keywords.\n  4. Only after a real search returns nothing should you ask the operator. When they give you the answer, IMMEDIATELY call save_known_fact for facts OR tell them exactly which Settings → Custom credentials KEY name to add for secrets, so the next chat doesn't have to ask again.\nThe operator gets visibly frustrated when you decline without searching — they've told previous instances of you the same thing 20 times. Search first, ask last, save always. NEVER echo a credential value back in chat — pass it to the tool that needs it and tell the operator what you did, not what the value was.`
-    : `\n\nSEARCH BEFORE DECLINING:\nBefore saying "I don't have X" or asking the operator for something basic about them, ALWAYS:\n  - Check the OPERATOR KNOWN FACTS block (if present below) — evergreen facts live there.\n  - For secrets (API keys, webhooks, tokens), call get_credential with a plausible UPPER_SNAKE_CASE name first.\nIf a fact or credential isn't found, ask AND save it via save_known_fact (facts) or by telling the operator the exact KEY name to add under Settings → Custom credentials (secrets). NEVER echo a credential value back in chat.`;
+    ? `\n\nSEARCH BEFORE DECLINING — NON-NEGOTIABLE:\nBefore you EVER say "I don't have X" or "I don't see X anywhere" or ask the operator for something they might have already saved, you MUST:\n  1. Check the OPERATOR KNOWN FACTS block (if present below) — calendar links, signatures, business names, common assets live there.\n  2. If the operator might have stored it as a SECRET (API key, webhook URL, access token), call get_credential with a plausible UPPER_SNAKE_CASE name (e.g., STRIPE_SECRET_KEY, CALENDLY_API_KEY, CUSTOM_WEBHOOK_URL). Try 2-3 plausible names before giving up.\n  3. If still not found, call read_brain_doc on a plausibly-named doc (e.g., USER.md, STATE.md, PROFILE.md) or search_memory with relevant keywords.\n  4. Only after a real search returns nothing should you ask the operator. When they give you the answer, IMMEDIATELY call save_known_fact for facts OR add_credential for secrets (admin-only — if get_credential returned {forbidden:true} earlier, tell them to save it via Settings → Custom credentials instead).\nThe operator gets visibly frustrated when you decline without searching — they've told previous instances of you the same thing 20 times. Search first, ask last, save always. NEVER echo a credential value back in chat — pass it to the tool that needs it and tell the operator what you did, not what the value was. Vault values you receive are scrubbed from chat_messages on persist, but the live SSE stream is the operator's screen — discipline yourself.`
+    : `\n\nSEARCH BEFORE DECLINING:\nBefore saying "I don't have X" or asking the operator for something basic about them, ALWAYS:\n  - Check the OPERATOR KNOWN FACTS block (if present below) — evergreen facts live there.\n  - For secrets (API keys, webhooks, tokens), call get_credential with a plausible UPPER_SNAKE_CASE name first.\nIf a fact or credential isn't found, ask AND save it via save_known_fact (facts) or add_credential (secrets — admin only; if you're forbidden, tell the operator the exact KEY name to add under Settings → Custom credentials). NEVER echo a credential value back in chat.`;
 
   const cloudModeNoticeBridge = `\n\n---\nRUNTIME: CLOUD MODE + LOCAL BRIDGE\nYou are ${agentLabel} (${agentRole}), running through the dashboard's /api/chat path on Vercel — but the operator's local bridge IS online. The browser proxies tool_use calls to localhost:9100/exec-tool, so you have real local capabilities even though the LLM call itself is going through the operator's API key.\n\nWhat you CAN do:\n- Anything in the cloud tool palette below (records, http_get/post, integrations).\n- Read/write files on the operator's machine (read_file, write_file).\n- Run shell commands (bash) — confirm destructive ones first.\n- Discover the operator's scripts (list_scripts) and run them (run_script).\n- Discover the operator's playbooks (list_skills) and load them (load_skill) before executing procedural work — they exist for a reason; don't improvise.\n- Send real emails (send_email) via the operator's Gmail.\n- Send SMS (send_sms) — always include opt-out language on first-touch.\n- Mutate dashboard data via <dashboard-action> markers.\n- Strategy, drafting, brainstorming, advice.${searchFirstBridge}\n\nIf a bridge tool fails with "bridge_unreachable" in the result, the operator's bridge just went offline mid-turn. Tell them to check \`pm2 logs claude-bridge\` and \`pm2 restart claude-bridge\` — don't retry the same tool.\n---`;
 
@@ -403,8 +409,8 @@ export async function POST(req: NextRequest) {
   // skip the `search_memory` mention since they don't have the tool in
   // their palette.
   const searchFirstNoBridge = isOperator
-    ? `\n\nBEFORE DECLINING — CHECK KNOWN FACTS + CREDENTIALS:\nEven without the bridge, three cloud-side surfaces hold operator context:\n  - OPERATOR KNOWN FACTS block below (calendar link, signature, business name, common asks)\n  - Custom credentials vault — call get_credential with a plausible UPPER_SNAKE_CASE name for any secret (API keys, webhook URLs, access tokens)\n  - search_memory for prior decisions / SOPs the operator's brain has documented\nALWAYS check all three before saying "I don't have X." When a fact is missing, ask AND call save_known_fact; when a credential is missing, tell the operator the exact KEY name to add under Settings → Custom credentials. NEVER echo a credential value back in chat.`
-    : `\n\nBEFORE DECLINING — CHECK KNOWN FACTS + CREDENTIALS:\nTwo cloud-side surfaces hold operator context: the OPERATOR KNOWN FACTS block below (evergreen facts) and the Custom credentials vault (call get_credential with a plausible UPPER_SNAKE_CASE name for secrets). ALWAYS check both before saying "I don't have X." When something's missing, ask AND save it (save_known_fact for facts; tell the operator the exact KEY name for credentials). NEVER echo a credential value back in chat.`;
+    ? `\n\nBEFORE DECLINING — CHECK KNOWN FACTS + CREDENTIALS:\nEven without the bridge, three cloud-side surfaces hold operator context:\n  - OPERATOR KNOWN FACTS block below (calendar link, signature, business name, common asks)\n  - Custom credentials vault — call get_credential with a plausible UPPER_SNAKE_CASE name for any secret (API keys, webhook URLs, access tokens)\n  - search_memory for prior decisions / SOPs the operator's brain has documented\nALWAYS check all three before saying "I don't have X." When a fact is missing, ask AND call save_known_fact; when a credential is missing, ask AND call add_credential (admin only — fall back to telling the operator the exact KEY name to add under Settings → Custom credentials if you're forbidden). NEVER echo a credential value back in chat.`
+    : `\n\nBEFORE DECLINING — CHECK KNOWN FACTS + CREDENTIALS:\nTwo cloud-side surfaces hold operator context: the OPERATOR KNOWN FACTS block below (evergreen facts) and the Custom credentials vault (call get_credential with a plausible UPPER_SNAKE_CASE name for secrets). ALWAYS check both before saying "I don't have X." When something's missing, ask AND save it (save_known_fact for facts; add_credential for secrets if admin, else tell the operator the exact KEY name for Settings). NEVER echo a credential value back in chat.`;
 
   const cloudModeNoticeNoBridge = `\n\n---\nRUNTIME: CLOUD ONLY\nYou are ${agentLabel} (${agentRole}), running through the dashboard's /api/chat path on Vercel. The operator's local bridge is NOT online right now. You have the DASHBOARD STATE block below (real Supabase data — MRR, pipeline, recent inbound, today's plan, integrations health) plus the cloud tool palette (records, http_get/post, integrations) but NO local file system access, no shell, no email/SMS sends, no Python scripts.\n\nIf the operator asks for something that needs the local machine (read a file, send an email, run a script, follow a playbook):\n- Be explicit: say the bridge isn't online right now.\n- Tell them: "Open a terminal on your machine and run \`pm2 restart claude-bridge\`. The chat header will turn cyan when it comes back and I'll have read_file / write_file / bash / send_email / send_sms / list_skills / list_scripts available."\n- Do NOT infer file contents. Do NOT pretend to have sent emails you didn't send.${searchFirstNoBridge}\n\nWhat you CAN do right now:\n- Use the cloud tool palette below (records read/write/search, http_get/post, lead lookup, integration status).\n- Mutate dashboard data via <dashboard-action> markers.\n- Strategy, drafting, brainstorming, advice — anything that doesn't need the operator's machine.\n---`;
 
@@ -849,6 +855,14 @@ export async function POST(req: NextRequest) {
       // uses. Centralizes redaction + chat_messages row shape so schema
       // changes only need to land in one place.
       const latencyMs = Date.now() - startedAt;
+      // Vault redaction (Codex P1 follow-up, 2026-05-24). Pre-fetch
+      // the tenant's custom vault values so any value the model
+      // echoed in assistantText (despite the "never echo" prompt) gets
+      // scrubbed before chat_messages persists it. One SELECT per
+      // turn; no-op early-return when the tenant has no vault entries.
+      const vaultSecrets = await fetchTenantVaultSecretsForRedaction(tenantId).catch(
+        () => [],
+      );
       await persistAssistantTurn({
         sessionId,
         tenantId,
@@ -857,6 +871,7 @@ export async function POST(req: NextRequest) {
         outputTokens: usageOut,
         latencyMs,
         error: streamError,
+        vaultSecrets,
       });
       const cost = estimateCostUsd(provider, model, usageIn, usageOut);
       await service
