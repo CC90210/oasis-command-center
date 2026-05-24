@@ -198,7 +198,7 @@ export function AgentAssemblyScrollScene() {
     <section
       ref={sectionRef}
       id="agent-build"
-      className="relative z-10 min-h-screen min-[641px]:min-h-[1100vh] lg:min-h-[1250vh]"
+      className="relative z-10 min-h-screen min-[641px]:min-h-[700vh] lg:min-h-[780vh]"
     >
       <div className="relative flex min-h-screen items-center justify-center overflow-hidden px-5 py-12 min-[641px]:sticky min-[641px]:top-0 min-[641px]:h-screen sm:px-8">
         {/* Cosmic background: deep space gradient → nebula clouds → slowly
@@ -405,7 +405,8 @@ export function AgentAssemblyScrollScene() {
 
         <div
           aria-hidden="true"
-          className="absolute left-1/2 top-[55%] z-10 w-[min(72vw,260px)] -translate-x-1/2 -translate-y-1/2 min-[641px]:top-1/2 min-[641px]:w-[min(34vw,320px)] lg:w-[min(26vw,360px)]"
+          className="absolute left-1/2 top-1/2 z-10 flex h-[min(72vh,560px)] -translate-x-1/2 -translate-y-1/2 items-center justify-center"
+          style={{ aspectRatio: "480 / 720" }}
         >
           <AgentFigureSprite
             installProgresses={layerProgresses}
@@ -413,7 +414,7 @@ export function AgentAssemblyScrollScene() {
             cursorX={cursor.x}
             cursorY={cursor.y}
             forceInstalled={forceInstalled}
-            className="drop-shadow-[0_0_60px_rgba(52,211,153,0.18)]"
+            className="h-full w-full"
           />
         </div>
 
