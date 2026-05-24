@@ -237,7 +237,7 @@ function LayerSprite({
   );
   const opacity = useTransform(
     [installOpacity, compactionFade] as const,
-    ([io, cf]) => Math.max(0, (io as number) * (cf as number)),
+    ([io, cf]) => (io as number) * (cf as number),
   );
 
   // ── Cursor parallax (depth-weighted). Each layer drifts toward the

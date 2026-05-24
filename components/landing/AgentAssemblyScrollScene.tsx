@@ -37,6 +37,15 @@ const MODULE_MANIFEST = [
   { label: "Dashboard Metrics", subsystem: "Live revenue, pipeline health — system fully online, fragments locked" },
 ] as const;
 
+// Compile-time guard: manifest length must match phase count so the
+// left-rail dot indicators stay in lockstep with the install phases.
+// If you add a layer, add a manifest entry (or vice-versa).
+if (MODULE_MANIFEST.length !== PHASE_COUNT) {
+  throw new Error(
+    `MODULE_MANIFEST length (${MODULE_MANIFEST.length}) must match PHASE_COUNT (${PHASE_COUNT})`,
+  );
+}
+
 const AMBIENT_PARTICLES = [
   { left: 8, top: 22, size: 2, delay: 0, drift: -16 },
   { left: 17, top: 72, size: 3, delay: 0.9, drift: 18 },
@@ -124,23 +133,18 @@ function useCompactViewport() {
   return isCompact;
 }
 
-function useInstallProgress(scrollProgress: MotionValue<number>, phaseIndex: number) {
+/** Maps scroll progress to a 0→1 ramp over a single phase window.
+ *  Used for both per-layer installs (narrow window) and the compaction
+ *  beat (wider window). */
+function usePhaseWindow(
+  scrollProgress: MotionValue<number>,
+  phaseIndex: number,
+  window: number,
+) {
   const start = phaseIndex / PHASE_COUNT;
   return useTransform(
     scrollProgress,
-    [start, Math.min(start + INSTALL_WINDOW, 1)],
-    [0, 1],
-    { clamp: true },
-  );
-}
-
-/** Compaction beat runs during the final phase with a wider window so the
- *  fragment fade-out + solid fade-in cross-dissolve smoothly. */
-function useCompactionProgress(scrollProgress: MotionValue<number>) {
-  const start = COMPACTION_PHASE_INDEX / PHASE_COUNT;
-  return useTransform(
-    scrollProgress,
-    [start, Math.min(start + COMPACTION_WINDOW, 1)],
+    [start, Math.min(start + window, 1)],
     [0, 1],
     { clamp: true },
   );
@@ -160,17 +164,17 @@ export function AgentAssemblyScrollScene() {
   // Phases 1-10 (zero-indexed 0-9) drive the 10 visual layer installs in
   // OASIS-manifest order: Reasoning Core → Command Centre. Phase 11
   // (index 10) drives the compaction beat — fragments fade into solid.
-  const reasoningCoreProgress = useInstallProgress(scrollProgress, 0);
-  const statePulseProgress = useInstallProgress(scrollProgress, 1);
-  const memorySpineProgress = useInstallProgress(scrollProgress, 2);
-  const browserOpticsProgress = useInstallProgress(scrollProgress, 3);
-  const bridgeToolsProgress = useInstallProgress(scrollProgress, 4);
-  const guardShieldProgress = useInstallProgress(scrollProgress, 5);
-  const outputChannelsProgress = useInstallProgress(scrollProgress, 6);
-  const securityMeshProgress = useInstallProgress(scrollProgress, 7);
-  const businessLayerProgress = useInstallProgress(scrollProgress, 8);
-  const commandCentreProgress = useInstallProgress(scrollProgress, 9);
-  const compactionProgress = useCompactionProgress(scrollProgress);
+  const reasoningCoreProgress  = usePhaseWindow(scrollProgress, 0, INSTALL_WINDOW);
+  const statePulseProgress     = usePhaseWindow(scrollProgress, 1, INSTALL_WINDOW);
+  const memorySpineProgress    = usePhaseWindow(scrollProgress, 2, INSTALL_WINDOW);
+  const browserOpticsProgress  = usePhaseWindow(scrollProgress, 3, INSTALL_WINDOW);
+  const bridgeToolsProgress    = usePhaseWindow(scrollProgress, 4, INSTALL_WINDOW);
+  const guardShieldProgress    = usePhaseWindow(scrollProgress, 5, INSTALL_WINDOW);
+  const outputChannelsProgress = usePhaseWindow(scrollProgress, 6, INSTALL_WINDOW);
+  const securityMeshProgress   = usePhaseWindow(scrollProgress, 7, INSTALL_WINDOW);
+  const businessLayerProgress  = usePhaseWindow(scrollProgress, 8, INSTALL_WINDOW);
+  const commandCentreProgress  = usePhaseWindow(scrollProgress, 9, INSTALL_WINDOW);
+  const compactionProgress     = usePhaseWindow(scrollProgress, COMPACTION_PHASE_INDEX, COMPACTION_WINDOW);
 
   const layerProgresses = [
     reasoningCoreProgress,     // → 01-head
