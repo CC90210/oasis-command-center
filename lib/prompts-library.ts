@@ -570,6 +570,11 @@ For each repo: \`git pull --rebase origin <branch>\`. If pull conflicts on track
 - If any CLI is missing: \`npm i -g @anthropic-ai/claude-code\` / \`npm i -g @openai/codex\` / \`npm i -g @google/gemini-cli\` as needed.
 - If any is unauthenticated: tell CC which one + the specific re-auth command (\`claude /login\` / \`codex login\` / \`gemini auth login\`).
 
+**4b. Enable the Codex end-of-task review gate for the CEO-Agent workspace.** Added 2026-05-23 per CC. The codex-plugin lives at \`~/.claude/codex-plugin/\` on both Mac and Windows. The gate makes the Stop hook block until Codex has reviewed any big-task diff — workflow embed lives in CLAUDE.md Rule 8 + skills/codex-delegation/SKILL.md Pattern 5, but the gate itself is a per-workspace config that doesn't survive \`git pull\`. Each rig has to enable it locally:
+- \`cd ~/CEO-Agent && node ~/.claude/codex-plugin/scripts/codex-companion.mjs setup --enable-review-gate --json\` — flips \`stopReviewGate\` to true for this workspace.
+- Confirm: re-run \`node ~/.claude/codex-plugin/scripts/codex-companion.mjs setup --json | grep reviewGateEnabled\` returns \`"reviewGateEnabled": true\`.
+- If the plugin directory is missing entirely, surface that as a hard error — CC needs to install it from the codex-plugin source. Don't try to scaffold one.
+
 **5. Re-run any pending install steps that the puller may have added:**
 - If \`install.sh\` / \`install.ps1\` changed since last sync, scan the diff for new \`npm i -g\` or \`brew install\` lines. Run them.
 - If \`bravo_cli/requirements.txt\` changed, \`pip install -r bravo_cli/requirements.txt\` inside the venv.
@@ -585,6 +590,7 @@ For each repo: \`git pull --rebase origin <branch>\`. If pull conflicts on track
 - Any key that needs a manual fresh value.
 - Any CLI that needs re-auth + the exact command.
 - The bridge heartbeat timestamp (so I can confirm it's actively pinging).
+- Whether the Codex review-gate is enabled for the CEO-Agent workspace (from step 4b).
 
 Do NOT dump file contents, command outputs, or git diffs. The report should be scannable in 15 seconds. If there's nothing to flag, say \`Nothing needs your hand — this machine is in lockstep.\`
 
