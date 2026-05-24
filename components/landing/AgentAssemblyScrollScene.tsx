@@ -3,40 +3,30 @@
 import { useEffect, useRef, useState } from "react";
 import { ChevronDown } from "lucide-react";
 import { motion, useReducedMotion, useTransform, type MotionValue } from "framer-motion";
-import { AgentFigure } from "./agent-assembly/AgentFigure";
-import { BrowserOptics } from "./agent-assembly/modules/BrowserOptics";
-import { BusinessLayer } from "./agent-assembly/modules/BusinessLayer";
-import { CommandCentre } from "./agent-assembly/modules/CommandCentre";
-import { DashboardMetrics } from "./agent-assembly/modules/DashboardMetrics";
-import { GuardShield } from "./agent-assembly/modules/GuardShield";
-import { MemorySpine } from "./agent-assembly/modules/MemorySpine";
-import { OutputHalo } from "./agent-assembly/modules/OutputHalo";
-import { ReasoningCore } from "./agent-assembly/modules/ReasoningCore";
-import { SecurityMesh } from "./agent-assembly/modules/SecurityMesh";
-import { StatePulse } from "./agent-assembly/modules/StatePulse";
-import { ToolGauntlet } from "./agent-assembly/modules/ToolLimbs";
+import { AgentFigureSprite, SPRITE_LAYER_COUNT } from "./agent-assembly/AgentFigureSprite";
 import { useCursorTracking } from "./agent-assembly/useCursorTracking";
 import { useScrollPhase } from "./agent-assembly/useScrollPhase";
 
-const PHASE_COUNT = 11;
-const INSTALL_WINDOW = 0.05;
+const PHASE_COUNT = SPRITE_LAYER_COUNT;
+const INSTALL_WINDOW = 0.07;
 
 /**
- * Keep this order in sync with the scroll-driven module progress below.
- * These are the real OASIS subsystems the welcome scene assembles.
+ * Reference-image subsystem manifest. Order matches AgentFigureSprite's
+ * top-to-bottom layer order: head → neural cube → neural disc → memory
+ * ring → sensors → reasoning torso → communication → ethics → body →
+ * activation. The dot indicators light up as each scroll phase activates.
  */
 const MODULE_MANIFEST = [
-  { label: "Reasoning Core", subsystem: "Multi-model brain with Claude, GPT, and backup providers" },
-  { label: "State Pulse", subsystem: "Live heartbeat tracking every action and event" },
-  { label: "Memory Spine", subsystem: "Hybrid keyword and meaning-based recall" },
-  { label: "Browser Optics", subsystem: "Stealth browser and search vision" },
-  { label: "Bridge Tools", subsystem: "Local actions and automation scripts" },
-  { label: "Guard Shield", subsystem: "Secret, execution, and state guardrails" },
-  { label: "Output Channels", subsystem: "Telegram, email, and dashboard feed" },
-  { label: "Security Mesh", subsystem: "Credential and access audit envelope" },
-  { label: "Business Layer", subsystem: "Brand, voice, audience, and goals" },
-  { label: "Command Centre", subsystem: "Pulse, crons, funnel, and pipeline" },
-  { label: "Dashboard Metrics", subsystem: "Revenue, pipeline health, and analytics" },
+  { label: "Core", subsystem: "Processing unit — multi-model reasoning head" },
+  { label: "Neural Cube", subsystem: "AI model — Claude, GPT, and backup providers" },
+  { label: "Neural Lattice", subsystem: "Training — meaning-based recall lattice" },
+  { label: "Memory", subsystem: "Knowledge base — hybrid keyword + vector memory" },
+  { label: "Sensors", subsystem: "Perception layer — browser optics + telemetry" },
+  { label: "Reasoning Engine", subsystem: "Decision making — chest pulse + state guardrails" },
+  { label: "Communication", subsystem: "Language & APIs — Telegram, email, dashboard feed" },
+  { label: "Ethics Layer", subsystem: "Alignment & safety — secret, exec, and state guards" },
+  { label: "Body Interface", subsystem: "Hardware integration — brand, voice, audience, goals" },
+  { label: "Activation", subsystem: "Oasis AI online — pulse, crons, funnel, pipeline" },
 ] as const;
 
 const AMBIENT_PARTICLES = [
@@ -147,17 +137,29 @@ export function AgentAssemblyScrollScene() {
   const forceInstalled = Boolean(shouldReduceMotion || isCompact);
   const cursor = useCursorTracking(forceInstalled);
 
-  const reasoningProgress = useInstallProgress(scrollProgress, 0);
-  const stateProgress = useInstallProgress(scrollProgress, 1);
-  const memoryProgress = useInstallProgress(scrollProgress, 2);
-  const opticsProgress = useInstallProgress(scrollProgress, 3);
-  const limbsProgress = useInstallProgress(scrollProgress, 4);
-  const shieldProgress = useInstallProgress(scrollProgress, 5);
-  const haloProgress = useInstallProgress(scrollProgress, 6);
-  const meshProgress = useInstallProgress(scrollProgress, 7);
-  const businessProgress = useInstallProgress(scrollProgress, 8);
-  const commandProgress = useInstallProgress(scrollProgress, 9);
-  const dashboardProgress = useInstallProgress(scrollProgress, 10);
+  const coreProgress = useInstallProgress(scrollProgress, 0);
+  const neuralCubeProgress = useInstallProgress(scrollProgress, 1);
+  const neuralDiscProgress = useInstallProgress(scrollProgress, 2);
+  const memoryProgress = useInstallProgress(scrollProgress, 3);
+  const sensorsProgress = useInstallProgress(scrollProgress, 4);
+  const reasoningProgress = useInstallProgress(scrollProgress, 5);
+  const communicationProgress = useInstallProgress(scrollProgress, 6);
+  const ethicsProgress = useInstallProgress(scrollProgress, 7);
+  const bodyProgress = useInstallProgress(scrollProgress, 8);
+  const activationProgress = useInstallProgress(scrollProgress, 9);
+
+  const layerProgresses = [
+    coreProgress,
+    neuralCubeProgress,
+    neuralDiscProgress,
+    memoryProgress,
+    sensorsProgress,
+    reasoningProgress,
+    communicationProgress,
+    ethicsProgress,
+    bodyProgress,
+    activationProgress,
+  ];
 
   const progressScale = forceInstalled ? 1 : scrollProgress;
   const buildPercent = forceInstalled
@@ -375,44 +377,15 @@ export function AgentAssemblyScrollScene() {
 
         <div
           aria-hidden="true"
-          className="absolute left-1/2 top-[55%] z-10 w-[min(92vw,460px)] -translate-x-1/2 -translate-y-1/2 min-[641px]:top-1/2 min-[641px]:w-[min(58vw,520px)] lg:w-[min(44vw,560px)]"
+          className="absolute left-1/2 top-[55%] z-10 w-[min(86vw,360px)] -translate-x-1/2 -translate-y-1/2 min-[641px]:top-1/2 min-[641px]:w-[min(48vw,440px)] lg:w-[min(36vw,500px)]"
         >
-          <AgentFigure
+          <AgentFigureSprite
+            installProgresses={layerProgresses}
             cursorX={cursor.x}
             cursorY={cursor.y}
-            className="h-auto w-full overflow-visible drop-shadow-[0_0_34px_rgba(52,211,153,0.22)]"
-            // Visor + halo ride the head's motion group so they tilt with
-            // the head when the cursor moves. The rest stay on the body.
-            headChildren={
-              <>
-                <BrowserOptics installProgress={opticsProgress} forceInstalled={forceInstalled} />
-                <OutputHalo installProgress={haloProgress} forceInstalled={forceInstalled} />
-              </>
-            }
-            leftArmChildren={
-              <ToolGauntlet
-                side="left"
-                installProgress={limbsProgress}
-                forceInstalled={forceInstalled}
-              />
-            }
-            rightArmChildren={
-              <ToolGauntlet
-                side="right"
-                installProgress={limbsProgress}
-                forceInstalled={forceInstalled}
-              />
-            }
-          >
-            <ReasoningCore installProgress={reasoningProgress} forceInstalled={forceInstalled} />
-            <StatePulse installProgress={stateProgress} forceInstalled={forceInstalled} />
-            <MemorySpine installProgress={memoryProgress} forceInstalled={forceInstalled} />
-            <GuardShield installProgress={shieldProgress} forceInstalled={forceInstalled} />
-            <SecurityMesh installProgress={meshProgress} forceInstalled={forceInstalled} />
-            <BusinessLayer installProgress={businessProgress} forceInstalled={forceInstalled} />
-            <CommandCentre installProgress={commandProgress} forceInstalled={forceInstalled} />
-            <DashboardMetrics installProgress={dashboardProgress} forceInstalled={forceInstalled} />
-          </AgentFigure>
+            forceInstalled={forceInstalled}
+            className="drop-shadow-[0_0_60px_rgba(52,211,153,0.18)]"
+          />
         </div>
 
         <div className="pointer-events-none absolute bottom-8 left-5 right-5 z-20 flex items-end justify-between gap-6 sm:left-8 sm:right-8">
