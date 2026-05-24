@@ -546,7 +546,7 @@ Acknowledge this directive by saying: "Vibe-to-Execution Translator online. Drop
     prompt: `Sync this machine with the rest of the empire. I just switched from my other machine and need this one caught up. Do all of this autonomously — don't ask permission for any of it:
 
 **1. Pull every empire repo to its latest main:**
-- CEO-Agent (\`~/CEO-Agent\` on Mac / \`C:\\Users\\User\\Business-Empire-Agent\` on Windows) — Bravo brain
+- CEO-Agent (\`~/CEO-Agent\` on Mac / \`C:\\Users\\User\\CEO-Agent\` on Windows — was \`Business-Empire-Agent\` pre-rename, check both) — Bravo brain
 - CMO-Agent (\`~/CMO-Agent\`) — Maven content/brand
 - CFO-Agent (\`~/CFO-Agent\` or \`~/APPS/CFO-Agent\`) — Atlas finance (branch may be \`master\`, not \`main\`)
 - oasis-command-center (\`~/oasis-command-center\` or \`~/APPS/oasis-command-center\`) — Next.js dashboard (Vercel-watched)
