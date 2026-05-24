@@ -50,7 +50,7 @@ import {
 import { verifyResumeState, signResumeState } from "@/lib/resume-hmac";
 import { redactAll } from "@/lib/secret-redaction";
 import { persistAssistantTurn, fetchTenantVaultSecretsForRedaction } from "@/lib/chat-persistence";
-import { StreamingRedactor } from "@/lib/secret-redaction";
+import { createRedactingSseSend } from "@/lib/chat-sse-helpers";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -178,7 +178,6 @@ export async function POST(req: NextRequest) {
   }
 
   // Stream the resumed iteration back to the browser as SSE.
-  const encoder = new TextEncoder();
   const sessionId = payload.session_id || null;
 
   // Capture resumed-turn state for the chat_messages persist below.
@@ -204,40 +203,14 @@ export async function POST(req: NextRequest) {
 
   const stream = new ReadableStream({
     async start(controller) {
-      const streamingRedactor = new StreamingRedactor(vaultSecretsForRedaction);
-      // Same pause/resume reasoning as /api/chat — a chained deferred
+      // Shared factory — same contract as /api/chat. A chained deferred
       // tool can pause AGAIN mid-resume (model uses tool A, browser
-      // executes, resume picks up, model decides to use tool B → new
-      // tool_use_pending event, new /api/chat/resume call). The buffer
-      // must not flush across that boundary either.
-      let pausedForResume = false;
-      const TERMINAL_EVENTS = new Set(["done", "error"]);
-      const flushDelta = () => {
-        const tail = streamingRedactor.flush();
-        if (tail.length > 0) {
-          controller.enqueue(
-            encoder.encode(`event: delta\ndata: ${JSON.stringify({ text: tail })}\n\n`),
-          );
-        }
-      };
-      const send = (event: string, data: unknown) => {
-        if (event === "delta" && data && typeof data === "object" && "text" in data) {
-          const raw = String((data as { text: unknown }).text || "");
-          const safe = streamingRedactor.push(raw);
-          if (safe.length > 0) {
-            controller.enqueue(
-              encoder.encode(`event: delta\ndata: ${JSON.stringify({ text: safe })}\n\n`),
-            );
-          }
-          return;
-        }
-        if (event === "tool_use_pending") pausedForResume = true;
-        const shouldFlush = TERMINAL_EVENTS.has(event) && !pausedForResume;
-        if (shouldFlush) flushDelta();
-        controller.enqueue(
-          encoder.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`)
-        );
-      };
+      // executes, resume picks up here, model decides to use tool B →
+      // new tool_use_pending → new /api/chat/resume call). The factory's
+      // pause flag arms on tool_use_pending and suppresses the flush on
+      // the subsequent `done` so the buffer doesn't release across the
+      // boundary.
+      const { send } = createRedactingSseSend(controller, vaultSecretsForRedaction);
       if (sessionId) send("session", { session_id: sessionId });
 
       try {

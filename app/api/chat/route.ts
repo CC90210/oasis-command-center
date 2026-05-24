@@ -62,7 +62,7 @@ import { PROFILE_CUSTOM_FIELD_KEYS, getCustomFieldString } from "@/lib/profile-c
 import { getTenantManifestForUser } from "@/lib/manifest/tenant-scope";
 import { redactAll } from "@/lib/secret-redaction";
 import { persistAssistantTurn, fetchTenantVaultSecretsForRedaction } from "@/lib/chat-persistence";
-import { StreamingRedactor } from "@/lib/secret-redaction";
+import { createRedactingSseSend } from "@/lib/chat-sse-helpers";
 import {
   formatAttachmentContext,
   injectAttachmentContextIntoMessages,
@@ -593,7 +593,6 @@ export async function POST(req: NextRequest) {
   const startedAt = Date.now();
 
   // ---- Stream response back as SSE ----------------------------------------
-  const encoder = new TextEncoder();
   let assistantText = "";
   let usageIn = 0;
   let usageOut = 0;
@@ -613,69 +612,12 @@ export async function POST(req: NextRequest) {
 
   const stream = new ReadableStream({
     async start(controller) {
-      const streamingRedactor = new StreamingRedactor(vaultSecretsForRedaction);
-      // Track whether this turn paused for a deferred-tool resume
-      // (vs completed normally). When paused, the SAME logical turn
-      // continues over in /api/chat/resume with a fresh redactor — if
-      // we flushed our held-back tail here, the secret prefix would
-      // leak before the resumed deltas arrive with the suffix.
-      //
-      // Codex P1 finding 2026-05-24: a secret split across the
-      // pause/resume boundary defeats the hold-back if either side
-      // flushes its buffer. Resolution: on pause, DON'T flush — the
-      // tail is dropped from the SSE stream (small visible blip at
-      // the pause point) but persistAssistantTurn still gets the
-      // complete raw assistantText and scrubs it for storage. The
-      // user sees a tiny gap in the live stream; nobody sees the
-      // secret. Worth it.
-      let pausedForResume = false;
-      // Events that DEFINITIVELY end the turn AND we're sure no more
-      // deltas will arrive (locally OR remotely). Mid-stream tool
-      // events still don't flush — those happen BETWEEN deltas in the
-      // native tool loop and flushing would partial-release the tail.
-      const TERMINAL_EVENTS = new Set(["done", "error"]);
-      const flushDelta = () => {
-        const tail = streamingRedactor.flush();
-        if (tail.length > 0) {
-          controller.enqueue(
-            encoder.encode(`event: delta\ndata: ${JSON.stringify({ text: tail })}\n\n`),
-          );
-        }
-      };
-      const send = (event: string, data: unknown) => {
-        // Route delta events through the streaming redactor so any
-        // vault value the model started emitting gets scrubbed BEFORE
-        // it reaches the operator's browser. The redactor holds back
-        // the trailing maxSecretLen-1 chars until enough following
-        // bytes prove a match isn't forming; empty pushes mean
-        // everything was held this round.
-        if (event === "delta" && data && typeof data === "object" && "text" in data) {
-          const raw = String((data as { text: unknown }).text || "");
-          const safe = streamingRedactor.push(raw);
-          if (safe.length > 0) {
-            controller.enqueue(
-              encoder.encode(`event: delta\ndata: ${JSON.stringify({ text: safe })}\n\n`),
-            );
-          }
-          return;
-        }
-        // tool_use_pending arms the pause flag — the assistant turn
-        // continues over in /api/chat/resume after the browser
-        // executes the deferred tool. Subsequent `done` MUST NOT
-        // flush or the held-back tail leaks across the boundary.
-        if (event === "tool_use_pending") pausedForResume = true;
-        // Mid-stream non-delta events (tool_use, cloud_tool_call,
-        // cloud_tool_result, tool_use_pending, usage, session)
-        // do NOT flush — the buffer must survive across them. The
-        // chat UI renders tool events as side-channel chips, so a
-        // small out-of-order between a tool chip and the text tail
-        // that preceded it is acceptable; secret leakage isn't.
-        const shouldFlush = TERMINAL_EVENTS.has(event) && !pausedForResume;
-        if (shouldFlush) flushDelta();
-        controller.enqueue(
-          encoder.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`)
-        );
-      };
+      // Shared factory — see lib/chat-sse-helpers.ts for the full
+      // contract (delta scrubbing, terminal-event flush, pause/
+      // resume buffer preservation). Both /api/chat and
+      // /api/chat/resume use this factory so the routing semantics
+      // can never desync between them.
+      const { send } = createRedactingSseSend(controller, vaultSecretsForRedaction);
       send("session", { session_id: sessionId });
 
       try {
