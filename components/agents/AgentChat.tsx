@@ -286,10 +286,10 @@ export function AgentChat({
     }
   };
 
+  // Min-height: on phones a hardcoded 640px is taller than a lot of
+  // viewports (iPhone SE = 667px). Use a viewport-relative floor on
+  // mobile, the original fixed floor on desktop.
   return (
-    {/* Min-height: on phones a hardcoded 640px is taller than a lot of
-        viewports (iPhone SE = 667px). Use a viewport-relative floor on
-        mobile, the original fixed floor on desktop. */}
     <div className="flex flex-col rounded-2xl border border-bg-border bg-bg-elev/40 backdrop-blur-sm min-h-[calc(100dvh-14rem)] md:min-h-[640px]">
       <div className="border-b border-bg-border px-5 py-3 flex items-center justify-between">
         <div className="flex items-center gap-2.5">
