@@ -1718,6 +1718,15 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
             // surface the CLI/bridge path uses) so CLI mode and API mode
             // render tool activity identically. The matching cloud_tool_result
             // event arrives a moment later and patches `output`.
+            //
+            // Counts as content for the "agent returned no response" check
+            // (Codex P2 finding 2026-05-24). The streaming redactor's
+            // hold-back behavior can suppress all text deltas during a
+            // tool-only turn (model emits a few chars, calls a deferred
+            // tool, resume finishes without more text). Without this,
+            // the assistant bubble would be removed as empty even though
+            // the tool ran successfully.
+            receivedAnyContent = true;
             const toolName = String(parsed.name || "tool");
             const entryId = `cloud-${toolName}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
             setThinking(true);
@@ -1781,6 +1790,11 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
             // and exit the read loop — the outer resume loop below will
             // POST the call to localhost:9100/exec-tool and then POST the
             // result to /api/chat/resume to continue the model's iteration.
+            //
+            // Counts as content (same rationale as cloud_tool_call above)
+            // — a deferred tool firing means the turn DID produce a real
+            // action even if the redactor swallowed the surrounding text.
+            receivedAnyContent = true;
             pendingToolUse = {
               tool_use_id: String(parsed.tool_use_id || ""),
               name: String(parsed.name || "tool"),
