@@ -153,6 +153,29 @@ export async function POST(req: NextRequest) {
     return jsonError(400, `resume_not_supported_for_provider:${provider}`);
   }
 
+  // Admin gate for the credential vault (Codex P1, 2026-05-24). Same
+  // lookup the parent /api/chat route does — fails CLOSED so a profile
+  // lookup hiccup never grants vault access. The bridge-proxy path
+  // through this resume route hits get_credential just like the
+  // initial turn, so the gate must be carried here too.
+  let callerIsAdmin = false;
+  try {
+    const profRow = await getServiceSupabase()
+      .from("user_profiles")
+      .select("team_role, is_owner")
+      .eq("auth_user_id", user.id)
+      .maybeSingle();
+    const prof = profRow.data as { team_role: string | null; is_owner: boolean | null } | null;
+    if (prof) {
+      callerIsAdmin =
+        prof.is_owner === true ||
+        prof.team_role === "owner" ||
+        prof.team_role === "admin";
+    }
+  } catch {
+    // Fail closed.
+  }
+
   // Stream the resumed iteration back to the browser as SSE.
   const encoder = new TextEncoder();
   const sessionId = payload.session_id || null;
@@ -185,7 +208,7 @@ export async function POST(req: NextRequest) {
           resumeState,
           toolUseId,
           normalizedResult,
-          { tenantId, userId: user.id, agentKey, authUserId: user.id },
+          { tenantId, userId: user.id, agentKey, authUserId: user.id, isAdmin: callerIsAdmin },
           apiKey,
         )) {
           if (ev.type === "delta") {

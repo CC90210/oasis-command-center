@@ -442,10 +442,17 @@ export async function POST(req: NextRequest) {
   // transient DB hiccup gives the operator a read-only chat experience,
   // not a write-bypass.
   let operatorRole = "read_only";
+  // Admin gate for credential-vault reads (Codex P1 finding,
+  // 2026-05-24). True only for is_owner or owner/admin team_role —
+  // same shape as canManageTenant() in /api/credentials/custom. Fails
+  // CLOSED: a profile lookup that throws or returns null leaves this
+  // false, so non-admin members never get vault reads even on a
+  // transient DB hiccup.
+  let callerIsAdmin = false;
   try {
     const opRow = await service
       .from("user_profiles")
-      .select("display_name, full_name, email, team_role, custom_fields")
+      .select("display_name, full_name, email, team_role, custom_fields, is_owner")
       .eq("auth_user_id", user.id)
       .maybeSingle();
     const op = opRow.data as
@@ -455,6 +462,7 @@ export async function POST(req: NextRequest) {
           email: string | null;
           team_role: string | null;
           custom_fields: Record<string, unknown> | null;
+          is_owner: boolean | null;
         }
       | null;
     if (op) {
@@ -463,6 +471,13 @@ export async function POST(req: NextRequest) {
       // valid profile, that operator was never assigned a role, so
       // read_only is the right default for them too.
       operatorRole = op.team_role || "read_only";
+      // Admin gate for the credential vault. Owner is always admin;
+      // otherwise canManageTeam(role) decides. Mirrors the gate used
+      // by /api/credentials/custom and Settings → Custom credentials.
+      callerIsAdmin =
+        op.is_owner === true ||
+        operatorRole === "owner" ||
+        operatorRole === "admin";
       // KNOWN FACTS block — operator's evergreen personal context
       // (calendar booking link, email signature, business name,
       // preferred tone, common assets). Lives in user_profiles
@@ -630,7 +645,7 @@ export async function POST(req: NextRequest) {
               // system overlay. "build" or undefined = no change.
               chatMode: payload.chat_mode === "plan" ? "plan" : "build",
             },
-            { tenantId, userId: user.id, agentKey, authUserId: user.id }
+            { tenantId, userId: user.id, agentKey, authUserId: user.id, isAdmin: callerIsAdmin }
           )
               : streamOpenAICompatibleWithTools(
                   {
@@ -642,7 +657,7 @@ export async function POST(req: NextRequest) {
                     toolPalette,
                     chatMode: payload.chat_mode === "plan" ? "plan" : "build",
                   },
-                  { tenantId, userId: user.id, agentKey, authUserId: user.id },
+                  { tenantId, userId: user.id, agentKey, authUserId: user.id, isAdmin: callerIsAdmin },
                 );
           for await (const ev of nativeEvents) {
             if (ev.type === "delta") {

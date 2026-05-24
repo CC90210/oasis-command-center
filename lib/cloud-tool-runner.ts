@@ -74,6 +74,14 @@ export type ToolContext = {
   agentKey: string;
   /** Required to call runAction (it uses auth_user_id for profile-bound writes). */
   authUserId: string;
+  /**
+   * True if the caller is owner/admin of the tenant (canManageTenant).
+   * Gates admin-only tools like get_credential — non-admin members
+   * cannot pull decrypted vault secrets via chat even though they have
+   * chat access. Resolved server-side in app/api/chat/route.ts before
+   * the tool loop starts.
+   */
+  isAdmin: boolean;
 };
 
 export type ToolUseBlock = {
@@ -928,6 +936,20 @@ async function toolSaveKnownFact(input: Record<string, unknown>, ctx: ToolContex
  */
 const CUSTOM_CREDENTIAL_SERVICE = "custom";
 async function toolGetCredential(input: Record<string, unknown>, ctx: ToolContext) {
+  // ADMIN-ONLY (Codex P1 finding, 2026-05-24). The Settings UI for the
+  // vault is gated on canManageTenant; the tool must enforce the same
+  // gate or a non-admin member (loan_officer, processor, etc.) could
+  // extract decrypted secrets via the chat surface. The model is told
+  // not to echo credentials, but that's a soft control — the only hard
+  // one is refusing to return the value in the first place.
+  if (!ctx.isAdmin) {
+    return {
+      found: false,
+      forbidden: true,
+      hint:
+        "Credential vault is admin-only. Ask the tenant owner or an admin to retrieve this credential, or to add you to the admin role under Settings → Team.",
+    };
+  }
   const raw = typeof input.name === "string" ? input.name.trim() : "";
   if (!raw) throw new Error("name_required");
   // Same regex as the upload route — refuses anything that wouldn't
