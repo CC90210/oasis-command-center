@@ -62,6 +62,7 @@ import { PROFILE_CUSTOM_FIELD_KEYS, getCustomFieldString } from "@/lib/profile-c
 import { getTenantManifestForUser } from "@/lib/manifest/tenant-scope";
 import { redactAll } from "@/lib/secret-redaction";
 import { persistAssistantTurn, fetchTenantVaultSecretsForRedaction } from "@/lib/chat-persistence";
+import { StreamingRedactor } from "@/lib/secret-redaction";
 import {
   formatAttachmentContext,
   injectAttachmentContextIntoMessages,
@@ -598,9 +599,54 @@ export async function POST(req: NextRequest) {
   let usageOut = 0;
   let streamError: string | null = null;
 
+  // Pre-fetch the tenant's vault values ONCE before the stream opens.
+  // Used twice:
+  //   (1) by the StreamingRedactor below to scrub any vault value out
+  //       of SSE deltas BEFORE they reach the operator's browser —
+  //       closes the "live stream is a soft control" gap.
+  //   (2) by persistAssistantTurn at the end so we don't re-fetch.
+  // Empty array on failure → redaction degrades to env-var-only,
+  // chat still works.
+  const vaultSecretsForRedaction = await fetchTenantVaultSecretsForRedaction(
+    tenantId,
+  ).catch(() => []);
+
   const stream = new ReadableStream({
     async start(controller) {
+      const streamingRedactor = new StreamingRedactor(vaultSecretsForRedaction);
+      const flushDelta = () => {
+        // Emit whatever's still buffered with a final scrub for the
+        // trailing tail. Called on stream close AND before any
+        // non-delta event so events arrive in the right order (the
+        // buffered tail is still text the user should see before the
+        // terminal usage/done/error event).
+        const tail = streamingRedactor.flush();
+        if (tail.length > 0) {
+          controller.enqueue(
+            encoder.encode(`event: delta\ndata: ${JSON.stringify({ text: tail })}\n\n`),
+          );
+        }
+      };
       const send = (event: string, data: unknown) => {
+        // Route delta events through the streaming redactor so any
+        // vault value the model started emitting gets scrubbed BEFORE
+        // it reaches the operator's browser. The redactor holds back
+        // the trailing maxSecretLen-1 chars until enough following
+        // bytes prove a match isn't forming; empty pushes mean
+        // everything was held this round.
+        if (event === "delta" && data && typeof data === "object" && "text" in data) {
+          const raw = String((data as { text: unknown }).text || "");
+          const safe = streamingRedactor.push(raw);
+          if (safe.length > 0) {
+            controller.enqueue(
+              encoder.encode(`event: delta\ndata: ${JSON.stringify({ text: safe })}\n\n`),
+            );
+          }
+          return;
+        }
+        // Non-delta: flush any held-back delta tail FIRST so the user
+        // sees text in causal order, then emit the structured event.
+        flushDelta();
         controller.enqueue(
           encoder.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`)
         );
@@ -853,16 +899,10 @@ export async function POST(req: NextRequest) {
       // ---- Persist assistant turn ----------------------------------------
       // Shared writer in lib/chat-persistence — same helper /api/chat/resume
       // uses. Centralizes redaction + chat_messages row shape so schema
-      // changes only need to land in one place.
+      // changes only need to land in one place. Reuses the vault secrets
+      // we already fetched for the streaming redactor — one DB round-trip
+      // per turn covers both the live stream scrub AND the persist scrub.
       const latencyMs = Date.now() - startedAt;
-      // Vault redaction (Codex P1 follow-up, 2026-05-24). Pre-fetch
-      // the tenant's custom vault values so any value the model
-      // echoed in assistantText (despite the "never echo" prompt) gets
-      // scrubbed before chat_messages persists it. One SELECT per
-      // turn; no-op early-return when the tenant has no vault entries.
-      const vaultSecrets = await fetchTenantVaultSecretsForRedaction(tenantId).catch(
-        () => [],
-      );
       await persistAssistantTurn({
         sessionId,
         tenantId,
@@ -871,7 +911,7 @@ export async function POST(req: NextRequest) {
         outputTokens: usageOut,
         latencyMs,
         error: streamError,
-        vaultSecrets,
+        vaultSecrets: vaultSecretsForRedaction,
       });
       const cost = estimateCostUsd(provider, model, usageIn, usageOut);
       await service

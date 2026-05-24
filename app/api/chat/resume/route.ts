@@ -50,6 +50,7 @@ import {
 import { verifyResumeState, signResumeState } from "@/lib/resume-hmac";
 import { redactAll } from "@/lib/secret-redaction";
 import { persistAssistantTurn, fetchTenantVaultSecretsForRedaction } from "@/lib/chat-persistence";
+import { StreamingRedactor } from "@/lib/secret-redaction";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -194,9 +195,39 @@ export async function POST(req: NextRequest) {
   let resumeStreamError: string | null = null;
   const toolCallsExecuted: Array<{ name: string; ok: boolean; summary?: string }> = [];
 
+  // Pre-fetch tenant vault secrets for live SSE redaction + reuse at
+  // persist time. Same pattern as /api/chat — one SELECT covers both
+  // the streaming scrub and the chat_messages scrub.
+  const vaultSecretsForRedaction = await fetchTenantVaultSecretsForRedaction(
+    tenantId,
+  ).catch(() => []);
+
   const stream = new ReadableStream({
     async start(controller) {
+      const streamingRedactor = new StreamingRedactor(vaultSecretsForRedaction);
+      const flushDelta = () => {
+        const tail = streamingRedactor.flush();
+        if (tail.length > 0) {
+          controller.enqueue(
+            encoder.encode(`event: delta\ndata: ${JSON.stringify({ text: tail })}\n\n`),
+          );
+        }
+      };
       const send = (event: string, data: unknown) => {
+        // Same shape as /api/chat: route deltas through the streaming
+        // redactor; non-delta events flush any held-back tail first
+        // so the user sees text in causal order.
+        if (event === "delta" && data && typeof data === "object" && "text" in data) {
+          const raw = String((data as { text: unknown }).text || "");
+          const safe = streamingRedactor.push(raw);
+          if (safe.length > 0) {
+            controller.enqueue(
+              encoder.encode(`event: delta\ndata: ${JSON.stringify({ text: safe })}\n\n`),
+            );
+          }
+          return;
+        }
+        flushDelta();
         controller.enqueue(
           encoder.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`)
         );
@@ -287,14 +318,10 @@ export async function POST(req: NextRequest) {
           );
         }
         const latencyMs = Date.now() - startedAt;
-        // Vault redaction (Codex P1 follow-up, 2026-05-24) — same
-        // shape as /api/chat: pre-fetch tenant vault values, scrub any
-        // echo before chat_messages persists it.
-        const vaultSecretsForRedaction = await fetchTenantVaultSecretsForRedaction(
-          tenantId,
-        ).catch(() => []);
-        // Shared chat_messages writer (lib/chat-persistence). Same helper
-        // /api/chat uses — single home for redaction + row shape.
+        // Shared chat_messages writer (lib/chat-persistence). Reuses the
+        // same vaultSecretsForRedaction we fetched once before the
+        // stream opened — one DB round-trip per turn covers both the
+        // live SSE scrub and the persist-time scrub.
         await persistAssistantTurn({
           sessionId,
           tenantId,

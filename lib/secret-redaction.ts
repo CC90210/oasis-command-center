@@ -27,6 +27,17 @@ const MIN_REDACTABLE_LEN = 12;
 
 let cachedPairs: Array<[string, string]> | null = null;
 
+/**
+ * Exported view of the cached env-var secret pairs so the streaming
+ * redactor below can fold them into its per-delta scan alongside the
+ * runtime-fetched tenant vault values. Internal to this module
+ * otherwise — callers should prefer redactSecrets / redactAll /
+ * createStreamingRedactor.
+ */
+export function loadEnvSecretPairs(): Array<{ key: string; value: string }> {
+  return loadPairs().map(([key, value]) => ({ key, value }));
+}
+
 function loadPairs(): Array<[string, string]> {
   if (cachedPairs) return cachedPairs;
   const out: Map<string, string> = new Map();
@@ -108,4 +119,99 @@ export function redactTenantVaultSecrets(
     }
   }
   return out;
+}
+
+/**
+ * Streaming redactor for the SSE delta path.
+ *
+ * The persist-time redaction (chat-persistence.ts) hardens the
+ * stored chat_messages row, but the live SSE stream goes to the
+ * operator's browser BEFORE persist runs. If a jailbroken model
+ * starts emitting a vault value mid-stream, the operator sees the
+ * raw bytes; only the long-term storage gets scrubbed.
+ *
+ * This class closes that gap. Hold the trailing
+ * `maxSecretLen - 1` bytes of the buffer back on every `push()` —
+ * those bytes could be the start of a not-yet-complete secret. A
+ * secret is only flushed downstream once we've seen its full
+ * length AND scanned for any match. When a match completes inside
+ * the held tail, replace it with [REDACTED:KEY] before flushing.
+ *
+ * Worst-case delay between a model token and the user seeing it:
+ * `maxSecretLen` characters of throughput, which for a vault with
+ * a long secret is ~200 chars (a JWT). Imperceptible on a
+ * conversational stream — Claude emits ~30 tokens/sec, so a 200-
+ * char hold-back is <2 seconds and only matters if the stream
+ * stalls mid-secret.
+ *
+ * Combines tenant vault values + env-var secret pairs in one
+ * pass so the SSE path covers both classes uniformly.
+ */
+export class StreamingRedactor {
+  private buffer = "";
+  private readonly secrets: VaultSecret[];
+  private readonly maxSecretLen: number;
+
+  constructor(vaultSecrets: VaultSecret[] = []) {
+    // Length-DESC so substring conflicts resolve in favor of the
+    // longer match (same invariant as the other redactors). Filter
+    // by MIN_REDACTABLE_LEN to avoid false positives on 1-2-char
+    // values that would shred normal text.
+    const combined = [
+      ...vaultSecrets,
+      ...loadEnvSecretPairs(),
+    ].filter((s) => s.value && s.value.length >= MIN_REDACTABLE_LEN);
+    this.secrets = combined.sort((a, b) => b.value.length - a.value.length);
+    this.maxSecretLen = this.secrets.length === 0
+      ? 0
+      : Math.max(...this.secrets.map((s) => s.value.length));
+  }
+
+  /**
+   * Append `chunk` to the internal buffer, scrub any complete
+   * secret matches, return the safe-to-emit prefix. The trailing
+   * `maxSecretLen - 1` characters stay buffered for the next call
+   * so a secret that spans two chunks still gets caught.
+   */
+  push(chunk: string): string {
+    if (!chunk) return "";
+    if (this.secrets.length === 0) return chunk;
+    this.buffer += chunk;
+    // Scrub any complete matches first. Length-DESC sort ensures we
+    // don't half-replace a long secret because a substring of it
+    // also matched.
+    for (const { key, value } of this.secrets) {
+      if (this.buffer.includes(value)) {
+        this.buffer = this.buffer.split(value).join(`[REDACTED:${key.toUpperCase()}]`);
+      }
+    }
+    // Hold back the trailing maxSecretLen-1 chars. They could be
+    // the leading prefix of a secret that's about to complete on
+    // the next chunk; emit them only after we've seen enough
+    // following characters to disprove the match.
+    const holdBack = Math.max(0, this.maxSecretLen - 1);
+    if (this.buffer.length <= holdBack) return "";
+    const out = this.buffer.slice(0, this.buffer.length - holdBack);
+    this.buffer = this.buffer.slice(this.buffer.length - holdBack);
+    return out;
+  }
+
+  /**
+   * Stream ended — emit any remaining buffer with a final scrub
+   * pass. The buffer only ever contains the tail that was held
+   * back, so this runs once at the end of the SSE stream.
+   */
+  flush(): string {
+    if (!this.buffer) return "";
+    let out = this.buffer;
+    if (this.secrets.length > 0) {
+      for (const { key, value } of this.secrets) {
+        if (out.includes(value)) {
+          out = out.split(value).join(`[REDACTED:${key.toUpperCase()}]`);
+        }
+      }
+    }
+    this.buffer = "";
+    return out;
+  }
 }
