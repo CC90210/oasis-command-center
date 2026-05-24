@@ -283,9 +283,14 @@ export function Sidebar({
             </div>
           </div>
         </div>
-        <div className="flex items-center justify-between text-[10px] uppercase tracking-wider">
+        {/* Status row — agent live + bridge online, both compact, both
+            on the left. Sign-out gets its own row below so a wide
+            bridge label can never collide with the logout button (the
+            old flex-between layout did, especially on narrow sidebars
+            and zoomed viewports — CC reported the overlap 2026-05-24). */}
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[10px] uppercase tracking-wider">
           <span
-            className="text-fg-dim flex items-center gap-1.5"
+            className="text-fg-dim flex items-center gap-1.5 min-w-0"
             title={
               primaryAgentLive
                 ? `${primaryAgent} ticked in the last 15 min`
@@ -293,33 +298,33 @@ export function Sidebar({
             }
           >
             <span className={primaryAgentLive ? "text-status-engaged animate-pulse-slow" : "text-fg-faint"}>●</span>
-            <span>{primaryAgent}</span>
+            <span className="truncate">{primaryAgent}</span>
             <span className={primaryAgentLive ? "text-status-engaged" : "text-fg-faint"}>
               {primaryAgentLive ? "live" : "idle"}
             </span>
           </span>
-          <form action="/api/auth/signout" method="post">
-            <button
-              type="submit"
-              className="text-fg-dim hover:text-status-hot transition-colors flex items-center gap-1"
-            >
-              <LogOut size={11} />
-              <span>Sign out</span>
-            </button>
-          </form>
-        </div>
-        <div
-          className="flex items-center gap-1.5 text-[10px] uppercase tracking-wider text-fg-dim"
-          title={bridgeOnline
-            ? "Local bridge daemon pinged within last 5 min"
-            : "Local bridge offline — pair a machine from Settings → Devices"}
-        >
-          <span className={bridgeOnline ? "text-accent animate-pulse-slow" : "text-fg-faint"}>◆</span>
-          <span>local bridge</span>
-          <span className={bridgeOnline ? "text-accent" : "text-fg-faint"}>
-            {bridgeOnline ? "online" : "offline"}
+          <span
+            className="text-fg-dim flex items-center gap-1.5 min-w-0"
+            title={bridgeOnline
+              ? "Local bridge daemon pinged within last 5 min"
+              : "Local bridge offline — pair a machine from Settings → Devices"}
+          >
+            <span className={bridgeOnline ? "text-accent animate-pulse-slow" : "text-fg-faint"}>◆</span>
+            <span className="truncate">bridge</span>
+            <span className={bridgeOnline ? "text-accent" : "text-fg-faint"}>
+              {bridgeOnline ? "online" : "offline"}
+            </span>
           </span>
         </div>
+        <form action="/api/auth/signout" method="post" className="pt-1">
+          <button
+            type="submit"
+            className="w-full text-[10px] uppercase tracking-wider text-fg-dim hover:text-status-hot transition-colors flex items-center justify-center gap-1.5 rounded-md border border-bg-border/60 hover:border-status-hot/30 px-2 py-1.5"
+          >
+            <LogOut size={11} />
+            <span>Sign out</span>
+          </button>
+        </form>
       </div>
     </aside>
   );

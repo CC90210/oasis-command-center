@@ -84,17 +84,11 @@ function chooseProfileForLogin(rows: ProfileRouteRow[], email: string | null | u
   );
 }
 
-export async function resolvePostLoginRedirect({
-  db,
-  authUserId,
-  email,
-  requestedNext,
-}: {
-  db: SupabaseClient;
-  authUserId: string;
-  email?: string | null;
-  requestedNext?: string | null;
-}): Promise<string> {
+async function fetchProfileRows(
+  db: SupabaseClient,
+  authUserId: string,
+  email?: string | null,
+): Promise<ProfileRouteRow[]> {
   const byAuth = await db
     .from("user_profiles")
     .select("id, email, tenant_id, brand, primary_agent, is_owner, onboarding_completed_at, created_at, updated_at")
@@ -111,10 +105,40 @@ export async function resolvePostLoginRedirect({
       .limit(20);
     rows = ((byEmail.data || []) as ProfileRouteRow[]) || [];
   }
+  return rows;
+}
+
+export async function resolvePostLoginRedirect({
+  db,
+  authUserId,
+  email,
+  requestedNext,
+}: {
+  db: SupabaseClient;
+  authUserId: string;
+  email?: string | null;
+  requestedNext?: string | null;
+}): Promise<string> {
+  let rows = await fetchProfileRows(db, authUserId, email);
+
+  // Provisioning race recovery (2026-05-24): when a brand-new OAuth
+  // signup hits this resolver, provisionAuthenticatedUser() may have
+  // just committed and the read replica hasn't caught up yet. A 0-row
+  // result here used to silently fall back to "/" → marketing landing.
+  // One short retry covers the common read-after-write lag without
+  // adding meaningful latency to every login.
+  if (rows.length === 0) {
+    await new Promise((r) => setTimeout(r, 250));
+    rows = await fetchProfileRows(db, authUserId, email);
+  }
 
   const profile = chooseProfileForLogin(rows, email);
   if (!profile?.tenant_id) {
-    return normalizePostLoginRedirect(requestedNext, {});
+    // Still no profile after retry — send the user to the new-user
+    // wizard instead of dumping them at "/" where the dashboard can't
+    // render anything useful. The wizard is idempotent and re-runs
+    // provisioning, so the next dashboard hit will work.
+    return "/onboarding/welcome";
   }
 
   const tenantRes = await db

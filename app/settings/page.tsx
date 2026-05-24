@@ -11,6 +11,7 @@ import {
 } from "@/lib/queries";
 import { safe } from "@/lib/api-helpers";
 import { ChangePasswordForm } from "@/components/ChangePasswordForm";
+import { KnownFactsEditor } from "@/components/KnownFactsEditor";
 import { ProfileEditor } from "@/components/settings/ProfileEditor";
 import { BrandLogoCard } from "@/components/settings/BrandLogoCard";
 import { QuickInviteCard } from "@/components/settings/QuickInviteCard";
@@ -180,6 +181,15 @@ export default async function SettingsPage() {
               </p>
             </Card>
           )}
+
+          <Card
+            title="Known facts about you"
+            subtitle="Evergreen context every cloud chat injects automatically — calendar link, signature, business name, common asks. Saves you from re-typing the same things every conversation."
+          >
+            <SafeBoundary label="Known facts editor">
+              <KnownFactsEditor />
+            </SafeBoundary>
+          </Card>
 
           <Card title="Password" subtitle="Change your sign-in password">
             <SafeBoundary label="Password form">

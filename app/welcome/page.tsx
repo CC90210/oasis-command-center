@@ -3,6 +3,7 @@ import { redirect } from "next/navigation";
 import { ArrowRight, Bot, Download, LogIn } from "lucide-react";
 import { OasisLogo } from "@/components/brand/OasisLogo";
 import { AgentAssemblyScrollScene } from "@/components/landing/AgentAssemblyScrollScene";
+import { AuthRedirectGuard } from "@/components/AuthRedirectGuard";
 import { getSessionUser } from "@/lib/supabase-server";
 
 export const dynamic = "force-dynamic";
@@ -13,6 +14,11 @@ export default async function WelcomePage() {
 
   return (
     <main className="relative min-h-screen bg-[#03070a] text-fg">
+      {/* Defensive: if SSR missed the just-set auth cookie (the classic
+          post-sign-in propagation race) but the browser already has the
+          session, bounce the user into the app instead of stranding them
+          on the marketing landing. CC reported 2026-05-24. */}
+      <AuthRedirectGuard to="/" />
       <div aria-hidden className="pointer-events-none fixed inset-0 z-0 welcome-depth" />
       <div aria-hidden className="pointer-events-none fixed inset-0 z-0 welcome-grid" />
 

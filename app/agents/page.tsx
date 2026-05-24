@@ -137,12 +137,17 @@ export default async function AgentsPage() {
         <header className="flex items-end justify-between flex-wrap gap-2">
           <div>
             <h2 className="text-xs font-bold uppercase tracking-[0.14em] text-fg">Chat</h2>
-            <div className="text-xs text-fg-muted mt-1">
+            {/* Long explainer paragraphs — hidden on mobile to give the
+                chat itself the screen real estate. Operators on phones
+                already know which agent they're talking to; the
+                workspace/personal-override nuance is desktop-config copy
+                they only need once. */}
+            <div className="hidden md:block text-xs text-fg-muted mt-1">
               {isAdmin
                 ? "Chat any agent. Two paths: (1) Local bridge — spawns the Claude Code CLI on your machine using your Claude subscription, full file/script access. (2) Cloud mode — uses the API key you saved per agent (OpenRouter / Anthropic / OpenAI / Gemini) to power the chat without a Claude subscription. Same persona either way; the bridge path can also write files. Clients run cloud mode by default."
                 : "Talk to any agent in your family — set up your provider + key in Settings → Agents. The key powers the chat (no Claude Code subscription needed)."}
             </div>
-            <div className="mt-2 rounded-md border border-bg-border bg-bg-elev/40 px-3 py-2 text-[11.5px] text-fg-muted max-w-3xl leading-relaxed">
+            <div className="hidden md:block mt-2 rounded-md border border-bg-border bg-bg-elev/40 px-3 py-2 text-[11.5px] text-fg-muted max-w-3xl leading-relaxed">
               <span className="text-fg font-semibold">Workspace default vs. personal override:</span>{" "}
               {isAdmin
                 ? "The keys you save in Settings → Agents are the workspace default — every employee on this tenant uses them. Each employee can also paste their OWN key under Settings → My Agents to route only their chat through their personal account."

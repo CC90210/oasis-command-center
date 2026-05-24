@@ -73,8 +73,15 @@ export async function GET(req: NextRequest) {
         (data.user.email?.split("@")[0] ?? "User"),
       brand: brandHint || (data.user.user_metadata?.brand as string) || "OASIS AI",
     });
-  } catch {
+  } catch (provisioningErr) {
     // Don't block sign-in if provisioning hiccups; Settings can re-trigger.
+    // Log so we can spot if the redirect-bounce-to-onboarding fallback
+    // is being hit because of a real provisioning failure (vs the more
+    // benign read-replica lag handled in resolvePostLoginRedirect).
+    console.warn(
+      "[auth/callback] provisionAuthenticatedUser failed:",
+      provisioningErr instanceof Error ? provisioningErr.message : provisioningErr,
+    );
   }
 
   const postLoginPath = await resolvePostLoginRedirect({

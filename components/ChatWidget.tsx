@@ -2320,8 +2320,12 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
           onChange={(e) => setAgent(e.target.value)}
           /* text-base on mobile keeps iOS from auto-zooming on the
              native select picker; text-sm on desktop matches the
-             surrounding header density. */
-          className="bg-bg-elev border border-bg-border rounded-lg px-3 py-2 text-base md:text-sm text-fg uppercase tracking-[0.14em] font-bold focus:outline-none focus:border-accent transition-colors cursor-pointer min-w-[120px]"
+             surrounding header density. min-w-0 on mobile lets the
+             agent picker shrink when the header gets crowded — the
+             pre-fix `min-w-[120px]` pushed everything else off-screen
+             on phones <420px (CC reported 2026-05-24 mobile chat
+             unusable). */
+          className="bg-bg-elev border border-bg-border rounded-lg px-2 md:px-3 py-2 text-base md:text-sm text-fg uppercase tracking-[0.14em] font-bold focus:outline-none focus:border-accent transition-colors cursor-pointer min-w-0 md:min-w-[120px] max-w-[40vw] md:max-w-none truncate"
           aria-label="Choose agent"
         >
           {(agentKeys.length > 0 ? agentKeys : [agent]).map((k) => (
@@ -2330,7 +2334,10 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
             </option>
           ))}
         </select>
-        <div className="flex-1 min-w-0">
+        {/* Desktop info pane — agent tagline + provider/status line. Hidden
+            on mobile where the screen has no room for two lines of meta
+            text; mobile shows just the short status pill below. */}
+        <div className="hidden md:block flex-1 min-w-0">
           <div className="text-xs text-fg-muted truncate">
             {getAgentInfo(agent).tagline}
           </div>
@@ -2342,6 +2349,18 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
               {activeStatus}
             </span>
           </div>
+        </div>
+        {/* Mobile-only compact status — one short pill so the operator
+            still sees whether they're routed through the bridge or a
+            cloud key. */}
+        <div className="md:hidden flex-1 min-w-0">
+          <span
+            title={accessTitle}
+            className={`text-[10px] font-mono truncate block ${bridgeReady ? "text-accent" : "text-fg-dim"}`}
+          >
+            {bridgeReady && <Cpu className="w-3 h-3 inline-block mr-1 -mt-0.5" />}
+            {activeStatus}
+          </span>
         </div>
         {/*
           Chat-mode picker — Phase 3 of giggly-reef (2026-05-15). Four real
@@ -2369,7 +2388,11 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
               const v = e.target.value;
               if (isChatMode(v)) setChatMode(v);
             }}
-            className="bg-bg-elev border border-bg-border rounded-lg px-2 py-2 text-[11px] text-fg-muted focus:outline-none focus:border-accent transition-colors cursor-pointer"
+            /* Hidden on mobile — Auto mode handles routing silently and
+               there is no useful way to scan four long option labels on
+               a 375px phone. Settings page still exposes the same modes
+               for any deliberate override. */
+            className="hidden md:block bg-bg-elev border border-bg-border rounded-lg px-2 py-2 text-[11px] text-fg-muted focus:outline-none focus:border-accent transition-colors cursor-pointer"
             aria-label="Chat routing mode"
             title={accessTitle}
           >
@@ -2441,7 +2464,10 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
               if (isCliRuntime(v)) setCliRuntime(v);
             }}
             disabled={streaming}
-            className="bg-bg-elev border border-bg-border rounded-lg px-2 py-2 text-[11px] text-fg-muted focus:outline-none focus:border-accent transition-colors cursor-pointer disabled:opacity-60"
+            /* Hidden on mobile — CLI runtime choice is a desktop
+               operator concern; phones default to whatever the bridge
+               last used. */
+            className="hidden md:block bg-bg-elev border border-bg-border rounded-lg px-2 py-2 text-[11px] text-fg-muted focus:outline-none focus:border-accent transition-colors cursor-pointer disabled:opacity-60"
             aria-label="Local CLI runtime"
             title="Choose which local CLI the desktop bridge uses for this chat. This is separate from API-key provider overrides."
           >
@@ -2463,7 +2489,10 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
           <button
             type="button"
             onClick={reset}
-            className="text-fg-dim hover:text-accent transition-colors p-1"
+            /* Hidden on mobile — the History panel's "+ New chat"
+               button covers this. Keeping it desktop-only frees one
+               more slot in the cramped phone header. */
+            className="hidden md:inline-flex text-fg-dim hover:text-accent transition-colors p-1"
             title="Start new conversation"
           >
             <RefreshCw className="w-4 h-4" />
@@ -2472,7 +2501,9 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
         <button
           type="button"
           onClick={toggleFullscreen}
-          className="text-fg-dim hover:text-accent transition-colors p-1"
+          /* Hidden on mobile — fullscreen toggle is a desktop affordance.
+             Phones are already full-bleed. */
+          className="hidden md:inline-flex text-fg-dim hover:text-accent transition-colors p-1"
           title={isFullscreen ? "Exit fullscreen (Esc)" : "Open chat fullscreen"}
         >
           {isFullscreen ? (
@@ -3000,7 +3031,7 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
                   },
                 ]);
               }}
-              className={`px-3 text-[11px] uppercase tracking-wider font-bold transition-colors ${
+              className={`px-2 md:px-3 text-[11px] uppercase tracking-wider font-bold transition-colors ${
                 planMode === "plan"
                   ? "bg-status-warm/15 text-status-warm border-r border-status-warm/30"
                   : "text-fg-dim hover:text-fg-muted border-r border-bg-border"
@@ -3025,7 +3056,7 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
                   },
                 ]);
               }}
-              className={`px-3 text-[11px] uppercase tracking-wider font-bold transition-colors ${
+              className={`px-2 md:px-3 text-[11px] uppercase tracking-wider font-bold transition-colors ${
                 planMode === "build"
                   ? "bg-accent/15 text-accent"
                   : "text-fg-dim hover:text-fg-muted"

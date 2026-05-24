@@ -180,8 +180,22 @@ export function ChatHistorySidebar({
   return (
     <>
       {toggle}
+      {/* Backdrop — clicking it closes the panel. Stays INSIDE the chat
+          container (absolute, not fixed) so it never covers the app
+          sidebar or page chrome. z-20 sits above chat content (z-10) but
+          below the panel (z-30). Pre-fix this was `fixed inset-y-0 left-0`
+          which floated over the entire viewport, clipping the chat header
+          text and bleeding past the chat input footer (CC reported
+          2026-05-24). */}
+      <button
+        type="button"
+        onClick={() => setOpen(false)}
+        className="absolute inset-0 z-20 bg-bg/50 backdrop-blur-sm cursor-default"
+        aria-label="Close chat history"
+        tabIndex={-1}
+      />
       <aside
-        className="fixed inset-y-0 left-0 z-40 w-80 bg-bg border-r border-bg-border shadow-xl flex flex-col"
+        className="absolute inset-y-0 left-0 z-30 w-72 sm:w-80 max-w-[85%] bg-bg border-r border-bg-border shadow-xl flex flex-col"
         aria-label="Chat history"
       >
         <header className="flex items-center justify-between px-4 py-3 border-b border-bg-border">
