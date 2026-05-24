@@ -2,9 +2,17 @@
 
 import { useEffect, useRef, useState } from "react";
 import { ChevronDown } from "lucide-react";
-import { motion, useReducedMotion, useTransform, type MotionValue } from "framer-motion";
+import {
+  motion,
+  useMotionValue,
+  useMotionValueEvent,
+  useReducedMotion,
+  useTransform,
+  type MotionValue,
+} from "framer-motion";
 import { AgentFigureSprite, SPRITE_LAYER_COUNT } from "./agent-assembly/AgentFigureSprite";
 import { useScrollPhase } from "./agent-assembly/useScrollPhase";
+import { useAutoplayProgress } from "./agent-assembly/useAutoplayProgress";
 
 // 11 scroll phases — 10 drive the layer installs (1:1 with sprite layers),
 // the 11th drives the final compaction beat where floating fragments fade
@@ -132,47 +140,72 @@ function useCompactViewport() {
   return isCompact;
 }
 
-/** Maps scroll progress to a 0→1 ramp over a single phase window.
+/** Maps progress (0→1) to a 0→1 ramp over a single phase window.
  *  Used for both per-layer installs (narrow window) and the compaction
  *  beat (wider window). */
 function usePhaseWindow(
-  scrollProgress: MotionValue<number>,
+  progress: MotionValue<number>,
   phaseIndex: number,
   window: number,
 ) {
   const start = phaseIndex / PHASE_COUNT;
   return useTransform(
-    scrollProgress,
+    progress,
     [start, Math.min(start + window, 1)],
     [0, 1],
     { clamp: true },
   );
 }
 
+type MobileStage = "init" | "link" | "online";
+
 export function AgentAssemblyScrollScene() {
   const sectionRef = useRef<HTMLElement>(null);
+  const figureStageRef = useRef<HTMLDivElement>(null);
   const { phase, localProgress, scrollProgress } = useScrollPhase(
     sectionRef,
     PHASE_COUNT,
   );
   const shouldReduceMotion = useReducedMotion();
   const isCompact = useCompactViewport();
-  const forceInstalled = Boolean(shouldReduceMotion || isCompact);
+
+  // forceInstalled is for accessibility ONLY — reduced-motion users get the
+  // static fully-assembled figure. Mobile users get the real animation,
+  // just driven by time (useAutoplayProgress) instead of scroll.
+  const forceInstalled = Boolean(shouldReduceMotion);
+
+  // Mobile autoplay: an 8.5s easeOut ramp that drives the same phase machine
+  // as desktop scroll. Disabled on desktop and for reduced-motion users.
+  const autoplayEnabled = isCompact && !shouldReduceMotion;
+  const autoplayProgress = useAutoplayProgress(autoplayEnabled);
+
+  // The single progress source the figure animations bind to.
+  const effectiveProgress: MotionValue<number> = autoplayEnabled
+    ? autoplayProgress
+    : scrollProgress;
+
+  // Mobile-only "INITIALIZING → LINKING → ONLINE" status (driven by autoplay).
+  const [mobileStage, setMobileStage] = useState<MobileStage>("init");
+  useMotionValueEvent(effectiveProgress, "change", (v) => {
+    if (!isCompact) return;
+    const next: MobileStage = v < 0.55 ? "init" : v < 0.9 ? "link" : "online";
+    setMobileStage((current) => (current === next ? current : next));
+  });
 
   // Phases 1-10 (zero-indexed 0-9) drive the 10 visual layer installs in
   // OASIS-manifest order: Reasoning Core → Command Centre. Phase 11
   // (index 10) drives the compaction beat — fragments fade into solid.
-  const reasoningCoreProgress  = usePhaseWindow(scrollProgress, 0, INSTALL_WINDOW);
-  const statePulseProgress     = usePhaseWindow(scrollProgress, 1, INSTALL_WINDOW);
-  const memorySpineProgress    = usePhaseWindow(scrollProgress, 2, INSTALL_WINDOW);
-  const browserOpticsProgress  = usePhaseWindow(scrollProgress, 3, INSTALL_WINDOW);
-  const bridgeToolsProgress    = usePhaseWindow(scrollProgress, 4, INSTALL_WINDOW);
-  const guardShieldProgress    = usePhaseWindow(scrollProgress, 5, INSTALL_WINDOW);
-  const outputChannelsProgress = usePhaseWindow(scrollProgress, 6, INSTALL_WINDOW);
-  const securityMeshProgress   = usePhaseWindow(scrollProgress, 7, INSTALL_WINDOW);
-  const businessLayerProgress  = usePhaseWindow(scrollProgress, 8, INSTALL_WINDOW);
-  const commandCentreProgress  = usePhaseWindow(scrollProgress, 9, INSTALL_WINDOW);
-  const compactionProgress     = usePhaseWindow(scrollProgress, COMPACTION_PHASE_INDEX, COMPACTION_WINDOW);
+  const reasoningCoreProgress  = usePhaseWindow(effectiveProgress, 0, INSTALL_WINDOW);
+  const statePulseProgress     = usePhaseWindow(effectiveProgress, 1, INSTALL_WINDOW);
+  const memorySpineProgress    = usePhaseWindow(effectiveProgress, 2, INSTALL_WINDOW);
+  const browserOpticsProgress  = usePhaseWindow(effectiveProgress, 3, INSTALL_WINDOW);
+  const bridgeToolsProgress    = usePhaseWindow(effectiveProgress, 4, INSTALL_WINDOW);
+  const guardShieldProgress    = usePhaseWindow(effectiveProgress, 5, INSTALL_WINDOW);
+  const outputChannelsProgress = usePhaseWindow(effectiveProgress, 6, INSTALL_WINDOW);
+  const securityMeshProgress   = usePhaseWindow(effectiveProgress, 7, INSTALL_WINDOW);
+  const businessLayerProgress  = usePhaseWindow(effectiveProgress, 8, INSTALL_WINDOW);
+  const commandCentreProgress  = usePhaseWindow(effectiveProgress, 9, INSTALL_WINDOW);
+  const compactionProgress     = usePhaseWindow(effectiveProgress, COMPACTION_PHASE_INDEX, COMPACTION_WINDOW);
 
   const layerProgresses = [
     reasoningCoreProgress,     // → 01-head
@@ -192,13 +225,34 @@ export function AgentAssemblyScrollScene() {
     ? 100
     : Math.min(100, Math.round(((phase + localProgress) / PHASE_COUNT) * 100));
 
+  // Desktop-only mouse parallax. Wraps the figure stage. Tracks pointer
+  // position relative to viewport center and shifts the figure ±10px on
+  // each axis — enough to feel like depth, small enough to not distract.
+  const parallaxX = useMotionValue(0);
+  const parallaxY = useMotionValue(0);
+  useEffect(() => {
+    if (isCompact || shouldReduceMotion) {
+      parallaxX.set(0);
+      parallaxY.set(0);
+      return;
+    }
+    const onMove = (e: MouseEvent) => {
+      const w = window.innerWidth;
+      const h = window.innerHeight;
+      parallaxX.set(((e.clientX - w / 2) / w) * 16);
+      parallaxY.set(((e.clientY - h / 2) / h) * 16);
+    };
+    window.addEventListener("mousemove", onMove, { passive: true });
+    return () => window.removeEventListener("mousemove", onMove);
+  }, [isCompact, shouldReduceMotion, parallaxX, parallaxY]);
+
   return (
     <section
       ref={sectionRef}
       id="agent-build"
       className="relative z-10 min-h-screen min-[641px]:min-h-[700vh] lg:min-h-[780vh]"
     >
-      <div className="relative flex min-h-screen items-center justify-center overflow-hidden px-5 py-12 min-[641px]:sticky min-[641px]:top-0 min-[641px]:h-screen sm:px-8">
+      <div className="relative flex min-h-screen flex-col overflow-hidden px-5 pb-8 pt-4 min-[641px]:sticky min-[641px]:top-0 min-[641px]:block min-[641px]:h-screen min-[641px]:items-center min-[641px]:justify-center min-[641px]:px-8 min-[641px]:py-12">
         {/* Cosmic background: deep space gradient → nebula clouds → slowly
             rotating spiral galaxy → distant star field → faint grid →
             edge vignette. Each layer is pointer-events-none and aria-hidden. */}
@@ -345,21 +399,33 @@ export function AgentAssemblyScrollScene() {
           ))}
         </div>
 
-        <div className="absolute left-5 right-5 top-8 z-20 mx-auto max-w-xl text-center min-[641px]:left-8 min-[641px]:right-auto min-[641px]:mx-0 min-[641px]:max-w-[18rem] min-[641px]:text-left xl:max-w-md">
-          <div className="mb-4 inline-flex items-center gap-2 border-l border-emerald-300/[0.45] bg-emerald-300/[0.08] px-3 py-2 text-[10px] font-mono uppercase tracking-[0.22em] text-emerald-100/[0.85] backdrop-blur-md">
+        {/* ───────── HEADING ─────────
+            Mobile: in-flow at the top of the column.
+            Desktop: absolute top-left rail (original behaviour). */}
+        <div className="relative z-20 mx-auto w-full max-w-xl text-center min-[641px]:absolute min-[641px]:left-8 min-[641px]:top-8 min-[641px]:right-auto min-[641px]:mx-0 min-[641px]:max-w-[18rem] min-[641px]:text-left xl:max-w-md">
+          <div className="mb-3 inline-flex items-center gap-2 border-l border-emerald-300/[0.45] bg-emerald-300/[0.08] px-3 py-1.5 text-[10px] font-mono uppercase tracking-[0.22em] text-emerald-100/[0.85] backdrop-blur-md min-[641px]:mb-4 min-[641px]:py-2">
             Build the agent first
           </div>
-          <h1 className="text-[clamp(2.35rem,7vw,4.2rem)] font-black leading-[0.94] tracking-tight text-white min-[641px]:text-[clamp(2.1rem,4.1vw,4rem)]">
+          <h1 className="text-[clamp(1.85rem,7vw,4.2rem)] font-black leading-[0.94] tracking-tight text-white min-[641px]:text-[clamp(2.1rem,4.1vw,4rem)]">
             Build the agent before you enter.
           </h1>
-          <p className="mt-5 text-sm leading-6 text-white/[0.66] min-[641px]:text-[13px] xl:text-base xl:leading-7">
+          <p className="mt-3 text-[13px] leading-5 text-white/[0.66] min-[641px]:mt-5 min-[641px]:text-[13px] min-[641px]:leading-6 xl:text-base xl:leading-7">
             OASIS assembles reasoning, memory, vision, tools, guardrails, and security into a working operator before you pick an entry path.
           </p>
 
-          {/* Live manifest — names the REAL subsystem powering each phase so
-              the operator can see exactly what's installing. Status flips
-              from pending → active (during install) → locked (after install)
-              based on scroll phase. Hidden on mobile (compact mode). */}
+          {/* Mobile-only autoplay status row — small, monospace, three beats.
+              Hidden on desktop where the full MODULE_MANIFEST takes over. */}
+          <div className="mt-3 flex items-center justify-center gap-3 font-mono text-[9px] uppercase tracking-[0.22em] min-[641px]:hidden">
+            <MobileStageDot active={mobileStage === "init"} done={mobileStage !== "init"} label="Initializing" />
+            <span className="h-px w-4 bg-white/15" />
+            <MobileStageDot active={mobileStage === "link"} done={mobileStage === "online"} label="Linking" />
+            <span className="h-px w-4 bg-white/15" />
+            <MobileStageDot active={mobileStage === "online"} done={false} label="Online" />
+          </div>
+
+          {/* Desktop manifest — names the REAL subsystem powering each phase
+              so the operator can see exactly what's installing. Hidden on
+              mobile (compact mode). */}
           <ul className="mt-6 hidden space-y-1.5 text-left font-mono text-[10px] uppercase tracking-[0.14em] min-[641px]:block">
             {MODULE_MANIFEST.map((entry, idx) => {
               const status: "locked" | "active" | "pending" = forceInstalled
@@ -401,20 +467,32 @@ export function AgentAssemblyScrollScene() {
           </ul>
         </div>
 
-        <div
+        {/* ───────── FIGURE STAGE ─────────
+            Mobile: flex-1 region in the column, constrained to a phone-safe
+            height so it never touches the heading or CTA.
+            Desktop: absolutely centered, original aspect-locked container. */}
+        <motion.div
+          ref={figureStageRef}
           aria-hidden="true"
-          className="absolute left-1/2 top-1/2 z-10 flex h-[min(68vh,520px)] -translate-x-1/2 -translate-y-1/2 items-center justify-center min-[641px]:h-[min(82vh,680px)]"
-          style={{ aspectRatio: "521 / 1536" }}
+          className="relative z-10 flex flex-1 items-center justify-center pt-2 min-[641px]:pointer-events-none min-[641px]:absolute min-[641px]:left-1/2 min-[641px]:top-1/2 min-[641px]:z-10 min-[641px]:flex-none min-[641px]:-translate-x-1/2 min-[641px]:-translate-y-1/2 min-[641px]:p-0"
+          style={{ x: parallaxX, y: parallaxY }}
         >
-          <AgentFigureSprite
-            installProgresses={layerProgresses}
-            compactionProgress={compactionProgress}
-            forceInstalled={forceInstalled}
-            className="h-full w-full"
-          />
-        </div>
+          <div
+            className="relative flex aspect-[521/1536] w-[44vw] max-w-[200px] items-center justify-center min-[641px]:h-[min(82vh,680px)] min-[641px]:w-auto min-[641px]:max-w-none"
+          >
+            <AgentFigureSprite
+              installProgresses={layerProgresses}
+              compactionProgress={compactionProgress}
+              forceInstalled={forceInstalled}
+              className="h-full w-full"
+            />
+          </div>
+        </motion.div>
 
-        <div className="pointer-events-none absolute bottom-8 left-5 right-5 z-20 flex items-end justify-between gap-6 sm:left-8 sm:right-8">
+        {/* ───────── PROGRESS + CTA ─────────
+            Mobile: in-flow at the bottom of the column.
+            Desktop: absolute bottom row, original layout. */}
+        <div className="relative z-20 mt-4 flex items-end justify-between gap-6 min-[641px]:pointer-events-none min-[641px]:absolute min-[641px]:bottom-8 min-[641px]:left-8 min-[641px]:right-8 min-[641px]:mt-0">
           <div className="hidden min-[641px]:block">
             <div className="text-[10px] font-mono uppercase tracking-[0.22em] text-emerald-200/60">
               Assembly {buildPercent}%
@@ -437,5 +515,32 @@ export function AgentAssemblyScrollScene() {
         </div>
       </div>
     </section>
+  );
+}
+
+function MobileStageDot({
+  active,
+  done,
+  label,
+}: {
+  active: boolean;
+  done: boolean;
+  label: string;
+}) {
+  const dotClass = active
+    ? "bg-emerald-300 shadow-[0_0_10px_rgba(52,211,153,0.85)] animate-pulse"
+    : done
+      ? "bg-emerald-300/70"
+      : "bg-white/15";
+  const textClass = active
+    ? "text-emerald-100"
+    : done
+      ? "text-white/65"
+      : "text-white/30";
+  return (
+    <span className={`inline-flex items-center gap-1.5 ${textClass}`}>
+      <span className={`h-1.5 w-1.5 rounded-full ${dotClass}`} />
+      {label}
+    </span>
   );
 }
