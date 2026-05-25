@@ -20,6 +20,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Card, Tag } from "@/components/Card";
+import { formatMoney } from "@/lib/format-helpers";
 import {
   ChevronDown,
   ChevronRight,
@@ -129,12 +130,9 @@ function fmtDate(iso: string | null): string {
   });
 }
 
-function fmtCurrency(val: unknown): string {
-  if (val == null || val === "") return "—";
-  const n = Number(val);
-  if (isNaN(n)) return "—";
-  return `$${n.toLocaleString()}`;
-}
+// Use the shared formatMoney from lib/format-helpers — self-review
+// 2026-05-24 surfaced that this file was duplicating the same util.
+const fmtCurrency = formatMoney;
 
 function StatusPill({ status }: { status: string }) {
   const tone =

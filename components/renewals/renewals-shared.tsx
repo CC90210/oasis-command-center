@@ -24,13 +24,18 @@ import {
   AlertCircle,
 } from "lucide-react";
 import { Tag } from "@/components/Card";
+import { formatMoney, initialsOf as initialsOfRaw } from "@/lib/format-helpers";
 import type { FundedDealRow } from "@/lib/queries";
 
-export function fmtCurrency(value: number | null | undefined): string {
-  if (value === null || value === undefined) return "—";
-  return "$" + Number(value).toLocaleString("en-US", { maximumFractionDigits: 0 });
-}
+// Re-export the shared money formatter under its old local name so
+// every existing call site in this module keeps working. The two
+// signatures are compatible (formatMoney accepts unknown). One source
+// of truth in lib/format-helpers.ts. Self-review 2026-05-24.
+export const fmtCurrency = formatMoney;
 
+// renewals-specific date format: month + day + year ("May 24, 2026").
+// Offers uses a shorter month+day format — different surfaces, different
+// densities. Both legitimate; don't force-consolidate.
 export function fmtDate(iso: string | null | undefined): string {
   if (!iso) return "—";
   return new Date(iso).toLocaleDateString("en-US", {
@@ -46,10 +51,11 @@ export function daysUntil(iso: string | null | undefined): number | null {
   return Math.round(ms / (1000 * 60 * 60 * 24));
 }
 
+// Wrap the shared initialsOf so null/empty input renders "??" instead
+// of "" (matches the prior renewals row behaviour).
 export function initialsOf(name: string | null | undefined): string {
   if (!name) return "??";
-  const parts = name.trim().split(/\s+/).slice(0, 2);
-  return parts.map((part) => part[0]?.toUpperCase() || "").join("") || "??";
+  return initialsOfRaw(name) || "??";
 }
 
 /**
