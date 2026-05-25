@@ -253,7 +253,16 @@ export function DescribeAutomationFlow() {
         </details>
 
         <div className="text-[11px] text-fg-muted leading-snug bg-bg-deep/40 rounded p-2.5">
-          <span className="font-bold text-fg">Bravo&apos;s reasoning:</span> {draft.reasoning}
+          {/* Drafting agent's name — was hardcoded as "Bravo's" which
+              leaked CC's empire agent into every tenant view (Sun Biz
+              would see "Bravo's reasoning" attached to a Solara
+              draft). Use the actual draft.agent_key, title-cased. */}
+          <span className="font-bold text-fg">
+            {draft.agent_key
+              ? `${draft.agent_key.charAt(0).toUpperCase()}${draft.agent_key.slice(1).toLowerCase()}'s reasoning:`
+              : "AI reasoning:"}
+          </span>{" "}
+          {draft.reasoning}
         </div>
 
         <div className="flex items-center justify-end gap-2">
