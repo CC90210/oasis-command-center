@@ -63,15 +63,16 @@ const MODULES: Module[] = [
     key: "shopping_out_sender",
     name: "Shopping Out Sender",
     description:
-      "Multi-lender package delivery — match-fitness ranking, attachment validation, queueing.",
-    // Honest label (2026-05-24): the UI + API are wired, but physical
-    // SMTP fires from the operator's bridge — not from this route.
-    // Threads land at status='pending' and stay there until Phase 6.3-bis
-    // (bridge /exec-tool shop_out_send_batch handler) ships.
-    status: "partial",
+      "Multi-lender package delivery — match-fitness ranking, attachment validation, queueing, and bridge-side SMTP send via the universal send_gateway chokepoint.",
+    // Phase 6.3-bis shipped 2026-05-25. Threads queued by the
+    // dashboard route are now consumed by scripts/shop_out_sender.py
+    // on the operator's bridge, which fires actual SMTP via
+    // send_gateway and flips the thread to status='sent' (or 'error'
+    // with last_error set). End-to-end wired.
+    status: "live",
     icon: Send,
     connected:
-      "lib/lenders/shop-out.ts + POST /api/applications/[id]/shop-out → application_lender_threads (status='pending'). Physical SMTP fires from the operator's bridge (Phase 6.3-bis pending) — until then, run `python scripts/send_gateway.py send` or trigger via Solara chat.",
+      "lib/lenders/shop-out.ts + POST /api/applications/[id]/shop-out → application_lender_threads → scripts/shop_out_sender.py loop (bridge) → send_gateway.send → status='sent'. Migration 065 persists body_template + attachments per-thread so the operator's confirmed copy + docs survive across the dashboard → bridge boundary.",
   },
   {
     key: "renewal_calculator",

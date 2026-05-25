@@ -162,20 +162,38 @@ export async function recordShopOutThreads(input: {
   tenant_id: string;
   application_id: string;
   cc_emails: string[];
-  entries: Array<{ lender_id: string; subject: string; sent: boolean; error?: string }>;
+  entries: Array<{
+    lender_id: string;
+    subject: string;
+    /** Per-lender rendered body (template substitutions already applied). */
+    body?: string;
+    sent: boolean;
+    error?: string;
+  }>;
+  /** Attachments the operator confirmed on this shop-out. Same shape and
+   *  validation the POST route accepts (tenant-scoped storage paths). */
+  attachments?: ShopOutAttachment[];
 }): Promise<{ ok: true; inserted: number } | { ok: false; error: string }> {
   if (input.entries.length === 0) return { ok: true, inserted: 0 };
   const db = getServiceSupabase();
+  // Persist body_template + attachments on each thread (migration 065,
+  // 2026-05-25). Without these the bridge-side sender can't faithfully
+  // reproduce what the operator approved — it'd re-render from defaults
+  // and silently drop the operator's notes / chosen docs. Both columns
+  // are nullable / default-empty, so legacy threads keep working.
+  const attachmentsJson = (input.attachments ?? []) as unknown as Record<string, unknown>[];
   const rows = input.entries.map((e) => ({
     application_id: input.application_id,
     lender_id: e.lender_id,
     tenant_id: input.tenant_id,
     subject: e.subject.slice(0, 500),
+    body_template: e.body ?? null,
+    attachments: attachmentsJson,
     cc_emails: input.cc_emails,
     // Errors (missing contact, match blocker) -> 'error'. Otherwise
-    // 'pending' until Phase 6.3-bis flips it to 'sent' on real SMTP
-    // success. Never 'sent' from this route — that would lie to the
-    // operator about what actually happened.
+    // 'pending' until the bridge-side sender (scripts/shop_out_sender.py,
+    // Phase 6.3-bis) flips it to 'sent' on real SMTP success. Never
+    // 'sent' from this route — that would lie about what happened.
     status: e.error ? "error" : "pending",
     last_error: e.error || null,
     sent_at: null,

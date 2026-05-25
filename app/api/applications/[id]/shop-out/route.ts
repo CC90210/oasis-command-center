@@ -203,7 +203,12 @@ export async function POST(
   const entries = planResult.plan.map((row) => ({
     lender_id: row.lender_id,
     subject: row.rendered_subject,
-    sent: false,  // intentionally false — physical send is Phase 6.3-bis
+    // Persist the rendered body per-lender so the bridge-side sender
+    // (scripts/shop_out_sender.py) can fire SMTP with exactly the copy
+    // the operator approved — including any body_template override they
+    // passed in this request. Migration 065 added the column.
+    body: row.rendered_body,
+    sent: false,  // physical send happens bridge-side once the daemon picks it up
     error: !row.recipient_email
       ? "missing lender contact email"
       : row.blockers.length > 0
@@ -216,6 +221,10 @@ export async function POST(
     application_id: applicationId,
     cc_emails: ccEmails,
     entries,
+    // Validated attachments (the foreign-tenant ones already got
+    // filtered out above into rejectedAttachments). Persisted per-
+    // thread so the sender doesn't have to re-resolve them.
+    attachments,
   });
   if (!inserted.ok) {
     return NextResponse.json({ ok: false, error: inserted.error }, { status: 500 });
