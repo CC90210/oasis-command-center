@@ -235,18 +235,18 @@ export default async function RootLayout({
           children
         ) : (
           <>
-            {/* Brand resolution (fixed 2026-05-25 cross-tenant audit):
-                - demo mode: tenant's manifest brand.
-                - tenant-route preview (pathOverrideSlug set, viewer
-                  isn't the tenant owner): manifest brand of THAT
-                  tenant — NOT the operator's profile.brand. CC
-                  previewing /t/sun/* used to see "OASIS AI" in the
-                  sidebar because profile?.brand won the fallback;
-                  now the URL tenant wins.
-                - home route: operator's own brand (their tenant). */}
+            {/* Brand + primary-agent resolution (fixed 2026-05-25
+                Codex review caught a P2 in the first attempt — using
+                bare pathOverrideSlug also fires on the OWNER'S OWN
+                tenant route, which would override Ezra's saved
+                profile.brand customization on /t/sun/* when he owns
+                that slug. The correct distinction is "is the URL
+                tenant DIFFERENT from the user's own tenant" — that's
+                the preview case. Owned tenant routes still use the
+                operator's saved profile values. */}
             <SidebarShell
               brand={
-                demoMode || pathOverrideSlug
+                demoMode || (pathOverrideSlug && pathOverrideSlug !== tenantProfileSlug)
                   ? manifest.brand.name
                   : profile?.brand || manifest.brand.name
               }
@@ -260,19 +260,29 @@ export default async function RootLayout({
               }
               operatorEmail={demoMode ? "demo@sunbizfunding.com" : profile?.email}
               primaryAgent={
-                // Same shape as the brand fix above — preview mode
-                // (operator on /t/<slug>/ they don't own) uses the
-                // tenant manifest's primary agent, not the operator's.
-                // Without this, CC previewing /t/sun/* used to render
-                // Bravo as the sidebar's primary agent indicator
-                // instead of Solara (the SunBiz primary). Fixed
-                // 2026-05-25 cross-tenant audit.
-                demoMode || pathOverrideSlug
+                // Same gate — only force manifest primary agent when
+                // the operator is previewing a tenant they don't own.
+                demoMode || (pathOverrideSlug && pathOverrideSlug !== tenantProfileSlug)
                   ? manifestPrimaryAgentSlug(manifest)
                   : profile?.primary_agent || manifestPrimaryAgentSlug(manifest)
               }
-              primaryAgentLive={demoMode ? false : primaryAgentLive}
-              bridgeOnline={demoMode ? false : bridgeOnline}
+              primaryAgentLive={
+                // Suppress the live indicator in preview mode — it
+                // was reading the operator's agent_state_snapshot
+                // even when showing the tenant's manifest agent
+                // label, which misrepresented the indicator. Owned
+                // tenant routes still get the real live indicator.
+                demoMode || (pathOverrideSlug && pathOverrideSlug !== tenantProfileSlug)
+                  ? false
+                  : primaryAgentLive
+              }
+              bridgeOnline={
+                // Same — preview mode shouldn't show CC's bridge as
+                // "online" inside the Sun Biz shell.
+                demoMode || (pathOverrideSlug && pathOverrideSlug !== tenantProfileSlug)
+                  ? false
+                  : bridgeOnline
+              }
               demoMode={demoMode}
               demoLabel={`${manifest.brand.name} demo`}
             />
