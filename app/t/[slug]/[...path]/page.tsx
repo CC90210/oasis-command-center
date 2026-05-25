@@ -350,10 +350,10 @@ export default async function TenantCatchAllPage({
         oppStageFilter={oppStageFilter}
         query={query}
       />
-      {normalised === "sun" && drawerLeadId && (
+      {normalised === "sun" && !isPreview && drawerLeadId && (
         <LeadDetailDrawer tenantSlug={normalised} recordId={drawerLeadId} entity="lead" />
       )}
-      {normalised === "sun" && !drawerLeadId && drawerAppId && (
+      {normalised === "sun" && !isPreview && !drawerLeadId && drawerAppId && (
         <LeadDetailDrawer tenantSlug={normalised} recordId={drawerAppId} entity="application" />
       )}
     </div>

@@ -22,11 +22,11 @@ import { BackgroundWorkersPanel } from "@/components/automations/BackgroundWorke
 import { DescribeAutomationFlow } from "@/components/automations/DescribeAutomationFlow";
 import { AgentsModulesStatusBoard } from "@/components/automations/AgentsModulesStatusBoard";
 import { getActiveProfile, getBridgeOnline, getTenant } from "@/lib/queries";
-import { chatAgentKeys } from "@/lib/agent-personas";
 import { safe } from "@/lib/api-helpers";
 import { isOperatorEmail } from "@/lib/operator-credentials";
 import { getSessionUser } from "@/lib/supabase-server";
 import { resolveClientProfileSlug } from "@/lib/client-profiles";
+import { getManifest, manifestExists } from "@/lib/manifest/loader";
 import { Clock, Cpu, Cloud, Download } from "lucide-react";
 import Link from "next/link";
 
@@ -72,6 +72,21 @@ export async function AutomationsContent({
           null,
         )
       : null
+  );
+  const hasTenantManifest = tenantSlug
+    ? await safe("automations.manifest_exists", manifestExists(tenantSlug), false)
+    : false;
+  const manifest = tenantSlug && hasTenantManifest
+    ? await safe("automations.manifest", getManifest(tenantSlug), null)
+    : null;
+  const profileAgentKeys = Array.isArray(profile?.agents_enabled) ? profile.agents_enabled : [];
+  const manifestAgentKeys = (manifest?.agents || [])
+    .filter((agent) => agent.enabled)
+    .map((agent) => agent.slug);
+  const automationAgentKeys = Array.from(
+    new Set((profileAgentKeys.length > 0 ? profileAgentKeys : manifestAgentKeys)
+      .map((key) => String(key).trim().toLowerCase())
+      .filter(Boolean)),
   );
 
   return (
@@ -154,11 +169,7 @@ export async function AutomationsContent({
         <>
           <DescribeAutomationFlow />
           <AgentsModulesStatusBoard tenantSlug={tenantSlug} />
-          <CronJobsManager
-            agentKeys={chatAgentKeys().filter((k) =>
-              (profile.agents_enabled || chatAgentKeys()).includes(k),
-            )}
-          />
+          <CronJobsManager agentKeys={automationAgentKeys} />
           {isOperator && (
             <div className="border-t border-bg-border pt-6">
               <BackgroundWorkersPanel />

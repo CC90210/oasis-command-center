@@ -353,7 +353,8 @@ export function CronJobsManager({ agentKeys }: Props) {
           type="button"
           onClick={() => setCreating(true)}
           className="btn-primary inline-flex items-center gap-1.5 text-xs"
-          disabled={creating}
+          disabled={creating || agentKeys.length === 0}
+          title={agentKeys.length === 0 ? "No agents are enabled for this tenant yet." : undefined}
         >
           <Plus className="w-3.5 h-3.5" />
           New automation
@@ -382,10 +383,7 @@ export function CronJobsManager({ agentKeys }: Props) {
         // Display copy comes from AGENT_GROUP_COPY for known agents;
         // unknown agent_keys get a title-cased fallback so the UI
         // doesn't silently swallow a typo.
-        const orderedKeys = (agentKeys && agentKeys.length > 0
-          ? agentKeys
-          : ["bravo", "atlas", "maven", "aura"]
-        ).map((k) => k.toLowerCase());
+        const orderedKeys = (agentKeys || []).map((k) => k.toLowerCase());
 
         const groups: Array<{
           key: string;
@@ -655,7 +653,7 @@ function JobEditor({
 }) {
   const [name, setName] = useState(job?.name || "");
   const [description, setDescription] = useState(job?.description || "");
-  const [agentKey, setAgentKey] = useState(job?.agent_key || agentKeys[0] || "bravo");
+  const [agentKey, setAgentKey] = useState(job?.agent_key || agentKeys[0] || "");
   const [scheduleMode, setScheduleMode] = useState<"preset" | "custom">(() => {
     if (!job) return "preset";
     return SCHEDULE_PRESETS.some((p) => p.value === job.schedule) ? "preset" : "custom";
@@ -674,6 +672,10 @@ function JobEditor({
   const [error, setError] = useState<string | null>(null);
 
   async function save() {
+    if (!agentKey) {
+      setError("No agents are enabled for this tenant yet.");
+      return;
+    }
     setSaving(true);
     setError(null);
     const body: Record<string, unknown> = {
@@ -741,6 +743,7 @@ function JobEditor({
             value={agentKey}
             onChange={(e) => setAgentKey(e.target.value)}
             className="input w-full text-sm"
+            disabled={agentKeys.length === 0}
           >
             {agentKeys.map((k) => (
               <option key={k} value={k}>
