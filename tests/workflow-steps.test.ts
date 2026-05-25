@@ -36,8 +36,8 @@ function makeCtx(overrides: Partial<StepContext> = {}): StepContext {
 const registered = listRegisteredStepTypes();
 assert.deepEqual(
   registered.sort(),
-  ["delay", "http-request", "if-else", "mail-sender", "record-crud"].sort(),
-  "registered step types must match the V6.9.2 substrate set",
+  ["ai-agent", "delay", "http-request", "if-else", "mail-sender", "record-crud"].sort(),
+  "registered step types must match the V6.9.2+V6.9.3 substrate set",
 );
 
 assert.ok(getStepHandler("record-crud") !== null);
@@ -45,6 +45,7 @@ assert.ok(getStepHandler("http-request") !== null);
 assert.ok(getStepHandler("if-else") !== null);
 assert.ok(getStepHandler("delay") !== null);
 assert.ok(getStepHandler("mail-sender") !== null);
+assert.ok(getStepHandler("ai-agent") !== null);
 assert.equal(getStepHandler("unknown-type"), null);
 
 async function main() {

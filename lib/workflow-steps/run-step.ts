@@ -21,6 +21,7 @@ import httpRequest from "./http-request";
 import ifElse from "./if-else";
 import delay from "./delay";
 import mailSender from "./mail-sender";
+import aiAgent from "./ai-agent";
 
 const REGISTRY: Record<string, WorkflowStep> = {
   [recordCrud.type]: recordCrud,
@@ -28,6 +29,7 @@ const REGISTRY: Record<string, WorkflowStep> = {
   [ifElse.type]: ifElse,
   [delay.type]: delay,
   [mailSender.type]: mailSender,
+  [aiAgent.type]: aiAgent,
 };
 
 /**

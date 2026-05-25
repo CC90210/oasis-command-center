@@ -119,6 +119,26 @@ export type ManifestAgentBinding = {
    * and tenant B; only the values differ.
    */
   setup_answers?: Record<string, string | number | boolean>;
+  /**
+   * V6.9.3 — field-level read/write permissions per entity_type.
+   * Enforced server-side in lib/role-gates.ts (resolveAllowedFields +
+   * applyFieldReadFilter + findDisallowedWriteFields). See
+   * docs/adr/0004-field-level-permission-model.md.
+   *
+   * Semantics:
+   *   - undefined / missing → no field filter; agent has full r/w on every field
+   *   - empty array []     → agent has zero field access (metadata-only)
+   *   - populated list      → only listed fields visible/mutable; default-deny
+   *     for any other field on the same entity_type
+   *
+   * Each entry scopes to one (entity_type, mode) pair. Multiple entries can
+   * cover the same entity_type with different modes (e.g. read=many, write=few).
+   */
+  field_permissions?: Array<{
+    entity_type: string;
+    fields: string[];
+    mode: "read" | "write";
+  }>;
 };
 
 // ---------------------------------------------------------------------------
