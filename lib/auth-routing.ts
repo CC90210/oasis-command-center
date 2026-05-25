@@ -78,6 +78,29 @@ export function normalizePostLoginRedirect(
   return homePathForTenant(ctx);
 }
 
+/**
+ * Brand patterns for known client tenants. Used to deprioritize client-
+ * tenant rows when the empire operator (CC) logs in and resolves
+ * against multiple user_profiles rows. Without this guard the chooser's
+ * looser fallbacks (any-owner / any-onboarded / candidates[0]) can pick
+ * whichever row Postgres returned first — alphabetically "sun" beats
+ * "oasis", so the operator's first-login lands inside the client
+ * tenant shell instead of their own home dashboard. Reported by CC
+ * 2026-05-24; fixed 2026-05-25.
+ */
+const CLIENT_BRAND_PATTERNS = [
+  /^sun\s*biz/i,
+  /^suga/i,
+  /^propflow/i,
+  /^nostalgic/i,
+];
+
+function isClientBrand(brand: string | null): boolean {
+  const s = (brand || "").trim();
+  if (!s) return false;
+  return CLIENT_BRAND_PATTERNS.some((re) => re.test(s));
+}
+
 function chooseProfileForLogin(rows: ProfileRouteRow[], email: string | null | undefined): ProfileRouteRow | null {
   if (rows.length === 0) return null;
   if (rows.length === 1) return rows[0];
@@ -86,7 +109,18 @@ function chooseProfileForLogin(rows: ProfileRouteRow[], email: string | null | u
   const exactEmail = normalizedEmail
     ? rows.filter((row) => (row.email || "").trim().toLowerCase() === normalizedEmail)
     : [];
-  const candidates = exactEmail.length > 0 ? exactEmail : rows;
+  let candidates = exactEmail.length > 0 ? exactEmail : rows;
+
+  // Empire-operator deterministic routing: if the signer is an empire
+  // operator AND at least one of their candidate rows is NOT a client-
+  // tenant brand, drop the client rows from the candidate set so the
+  // find chain below can't accidentally pick one. Preserves current
+  // behaviour for non-operators (full row set) and for operators whose
+  // only profile rows happen to be client tenants (no filtering).
+  if (isOperatorEmail(email || undefined)) {
+    const nonClient = candidates.filter((row) => !isClientBrand(row.brand));
+    if (nonClient.length > 0) candidates = nonClient;
+  }
 
   return (
     candidates.find((row) => {
