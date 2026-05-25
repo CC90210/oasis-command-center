@@ -450,17 +450,290 @@ function lenderStatusClass(status: string): string {
   return "bg-bg-deep text-fg-muted";
 }
 
+/* -------------------------------------------------------------------------- */
+/* Underwriting types (application_underwriting table — migration 069)        */
+/* -------------------------------------------------------------------------- */
+
+type UnderwritingRun = {
+  id: string;
+  run_at: string;
+  status: "pending" | "parsing" | "complete" | "error";
+  readiness_score: number | null;
+  risk_flags: string[] | null;
+  error_message: string | null;
+};
+
+/* -------------------------------------------------------------------------- */
+/* Sparkline — pure SVG polyline, no chart library                             */
+/* FIXME(api): parser_output series fields are Phase ε (daemon side).         */
+/* -------------------------------------------------------------------------- */
+
+function Sparkline({
+  values,
+  label,
+  width = 120,
+  height = 30,
+}: {
+  values: number[];
+  label: string;
+  width?: number;
+  height?: number;
+}) {
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+  const range = max - min || 1;
+  const pad = 2;
+  const points = values
+    .map((v, i) => {
+      const x = pad + (i / (values.length - 1)) * (width - pad * 2);
+      const y = pad + (1 - (v - min) / range) * (height - pad * 2);
+      return `${x.toFixed(1)},${y.toFixed(1)}`;
+    })
+    .join(" ");
+
+  return (
+    <div className="flex flex-col items-center gap-1">
+      <span className="text-[10px] text-fg-dim font-medium">{label}</span>
+      <svg
+        width={width}
+        height={height}
+        viewBox={`0 0 ${width} ${height}`}
+        className="overflow-visible"
+        aria-hidden="true"
+      >
+        <polyline
+          points={points}
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="1.5"
+          strokeLinejoin="round"
+          strokeLinecap="round"
+          className="text-accent"
+        />
+      </svg>
+    </div>
+  );
+}
+
+/* -------------------------------------------------------------------------- */
+/* UnderwritingBadge                                                           */
+/* FIXME(api): /api/applications/[id]/underwriting/latest and                 */
+/*             /api/applications/[id]/underwriting/run — Phase ε endpoints.   */
+/* -------------------------------------------------------------------------- */
+
+function UnderwritingBadge({
+  applicationId,
+  tenantSlug,
+  run,
+  onRerun,
+  rerunPending,
+}: {
+  applicationId: string;
+  tenantSlug: string;
+  run: UnderwritingRun | null;
+  onRerun: () => void;
+  rerunPending: boolean;
+}) {
+  const underwritingHref = `/t/${tenantSlug}/underwriting?application=${applicationId}`;
+
+  if (!run) {
+    return (
+      <div className="flex items-center gap-2 flex-wrap">
+        <span className="inline-flex items-center px-2 py-0.5 rounded text-[10.5px] font-semibold bg-bg-deep border border-bg-border text-fg-dim">
+          Not underwritten
+        </span>
+        <Link href={underwritingHref} className="text-[10.5px] text-accent hover:underline">
+          Run underwriting →
+        </Link>
+      </div>
+    );
+  }
+
+  if (run.status === "pending" || run.status === "parsing") {
+    return (
+      <div className="flex items-center gap-2">
+        <span
+          className="inline-block w-3 h-3 rounded-full border-2 border-amber-400 border-t-transparent animate-spin"
+          aria-hidden="true"
+        />
+        <span className="text-[10.5px] font-semibold text-amber-300">
+          Underwriting in progress…
+        </span>
+      </div>
+    );
+  }
+
+  if (run.status === "error") {
+    return (
+      <div className="flex items-center gap-2 flex-wrap">
+        <span
+          className="inline-flex items-center px-2 py-0.5 rounded text-[10.5px] font-semibold bg-red-500/15 border border-red-500/30 text-red-300"
+          title={run.error_message || "Unknown error"}
+        >
+          Underwriting failed
+        </span>
+        {run.error_message && (
+          <span
+            className="text-[10px] text-red-300/70 truncate max-w-[160px]"
+            title={run.error_message}
+          >
+            {run.error_message}
+          </span>
+        )}
+        <button
+          type="button"
+          disabled={rerunPending}
+          onClick={onRerun}
+          className="text-[10.5px] font-semibold px-2 py-0.5 rounded border border-red-500/40 text-red-300 hover:bg-red-500/10 disabled:opacity-50"
+        >
+          {rerunPending ? "…" : "Retry"}
+        </button>
+      </div>
+    );
+  }
+
+  // status === 'complete'
+  const score = typeof run.readiness_score === "number" ? run.readiness_score : null;
+  const scoreLabel = score !== null ? `${score}/100` : "—";
+
+  let badgeClass = "bg-red-500/15 border-red-500/30 text-red-300";
+  let badgeText = `Not ready (readiness ${scoreLabel})`;
+  if (score !== null && score >= 70) {
+    badgeClass = "bg-emerald-500/15 border-emerald-500/30 text-emerald-300";
+    badgeText = `Ready to shop (readiness ${scoreLabel})`;
+  } else if (score !== null && score >= 40) {
+    badgeClass = "bg-amber-500/15 border-amber-500/30 text-amber-300";
+    badgeText = `Caution (readiness ${scoreLabel}) — see risk flags`;
+  }
+
+  return (
+    <span
+      className={`inline-flex items-center px-2 py-0.5 rounded text-[10.5px] font-semibold border ${badgeClass}`}
+    >
+      {badgeText}
+    </span>
+  );
+}
+
+/* -------------------------------------------------------------------------- */
+/* BankTab — enhanced with underwriting status + sparklines (2026-05-25)      */
+/* -------------------------------------------------------------------------- */
+
 function BankTab({
   record,
+  application,
+  tenantSlug,
 }: {
   record: Record<string, unknown>;
-  // application and tenantSlug passed by the call site; accepted here
-  // so TypeScript doesn't reject the JSX, even though this tab doesn't
-  // use them yet (future expansion for the underwriting agent link).
-  application?: { id: string; data: Record<string, unknown> } | null;
-  tenantSlug?: string;
+  application: { id: string; data: Record<string, unknown> } | null;
+  tenantSlug: string;
 }) {
-  const fields: { key: string; label: string; format?: "money" | "raw" }[] = [
+  const applicationId = application?.id ?? null;
+
+  // Underwriting run state.
+  // undefined = fetch still in flight (shows "Loading…")
+  // null      = no run yet, or Phase ε endpoint not built (shows "Not underwritten")
+  // FIXME(api): /api/applications/[id]/underwriting/latest — Phase ε
+  const [uwRun, setUwRun] = useState<UnderwritingRun | null | undefined>(undefined);
+  const [uwError, setUwError] = useState<string | null>(null);
+  const [rerunPending, setRerunPending] = useState(false);
+
+  const fetchLatestRun = useCallback(async () => {
+    if (!applicationId) return;
+    try {
+      const r = await fetch(`/api/applications/${applicationId}/underwriting/latest`, {
+        credentials: "include",
+        cache: "no-store",
+      });
+      const j = await r.json().catch(() => ({}));
+      // Non-ok (including 404 while Phase ε endpoint isn't built yet) →
+      // resolve to null so the badge shows "Not underwritten", not "Loading…"
+      // indefinitely.
+      if (!r.ok) {
+        setUwRun(null);
+        return;
+      }
+      setUwRun((j.run as UnderwritingRun) ?? null);
+    } catch {
+      // Network failure — resolve to null; operator can retry via Re-run.
+      setUwRun(null);
+    }
+  }, [applicationId]);
+
+  useEffect(() => {
+    fetchLatestRun();
+  }, [fetchLatestRun]);
+
+  // FIXME(api): /api/applications/[id]/underwriting/run — Phase ε
+  const handleRerun = async () => {
+    if (!applicationId) return;
+    setRerunPending(true);
+    setUwError(null);
+    try {
+      const r = await fetch(`/api/applications/${applicationId}/underwriting/run`, {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ triggered_by: "manual" }),
+      });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok) {
+        setUwError(j.error || `failed_${r.status}`);
+        return;
+      }
+      await fetchLatestRun();
+    } catch (e) {
+      setUwError(String((e as Error).message || e));
+    } finally {
+      setRerunPending(false);
+    }
+  };
+
+  // Extract sparkline series from parser_output.
+  // Phase ε — absent until the parser daemon writes them.
+  // Only render Sparkline when the series has ≥ 2 data points.
+  const parserOutput =
+    record.parser_output && typeof record.parser_output === "object"
+      ? (record.parser_output as Record<string, unknown>)
+      : null;
+
+  const revenueSeries: number[] = Array.isArray(parserOutput?.monthly_revenue_series)
+    ? (parserOutput!.monthly_revenue_series as { amount: number }[])
+        .slice(-3)
+        .map((p) => (typeof p.amount === "number" ? p.amount : 0))
+    : [];
+
+  const balanceSeries: number[] = Array.isArray(parserOutput?.daily_balance_series)
+    ? (parserOutput!.daily_balance_series as { amount: number }[])
+        .slice(-90)
+        .map((p) => (typeof p.amount === "number" ? p.amount : 0))
+    : [];
+
+  const depositSeries: number[] = Array.isArray(parserOutput?.deposits_per_month_series)
+    ? (parserOutput!.deposits_per_month_series as { count: number }[])
+        .slice(-3)
+        .map((p) => (typeof p.count === "number" ? p.count : 0))
+    : [];
+
+  // Labels shown above each sparkline. Fall back to static record values
+  // when no series data exists — those values also appear in the field rows
+  // below, so no separate static fallback div is needed inside Trends.
+  const avgRevLabel = record.avg_monthly_revenue
+    ? fmtMoney(record.avg_monthly_revenue)
+    : record.monthly_revenue
+      ? fmtMoney(record.monthly_revenue)
+      : null;
+  const avgBalLabel = record.avg_daily_balance ? fmtMoney(record.avg_daily_balance) : null;
+  const depMonthLabel = record.deposits_per_month ? String(record.deposits_per_month) : null;
+
+  // Risk flags from the latest underwriting run.
+  const riskFlags: string[] =
+    Array.isArray(uwRun?.risk_flags) && (uwRun?.risk_flags?.length ?? 0) > 0
+      ? (uwRun!.risk_flags as string[])
+      : [];
+
+  // Static field rows — original BankTab behaviour fully preserved.
+  const FIELDS: { key: string; label: string; format?: "money" }[] = [
     { key: "avg_monthly_revenue", label: "Avg monthly revenue", format: "money" },
     { key: "monthly_revenue", label: "Avg monthly revenue", format: "money" },
     { key: "revenue_trend", label: "Revenue trend" },
@@ -475,40 +748,125 @@ function BankTab({
     { key: "last_funding", label: "Last funding" },
     { key: "bank_name", label: "Bank" },
   ];
-  // Dedupe labels — some fields are aliases. First-match wins.
   const seen = new Set<string>();
-  const rows = fields
-    .filter((f) => {
-      const v = record[f.key];
-      if (v == null || v === "") return false;
-      if (seen.has(f.label)) return false;
-      seen.add(f.label);
-      return true;
-    })
-    .map((f) => ({
-      label: f.label,
-      value: f.format === "money" ? fmtMoney(record[f.key]) : String(record[f.key]),
-    }));
+  const rows = FIELDS.filter((f) => {
+    const v = record[f.key];
+    if (v == null || v === "") return false;
+    if (seen.has(f.label)) return false;
+    seen.add(f.label);
+    return true;
+  }).map((f) => ({
+    label: f.label,
+    value: f.format === "money" ? fmtMoney(record[f.key]) : String(record[f.key]),
+  }));
 
-  if (rows.length === 0) {
-    return (
-      <div className="text-xs text-fg-dim italic py-6 text-center">
-        No banking info yet. Fields fill in from the application form, uploaded
-        bank statements, and the underwriter brief.
-      </div>
-    );
-  }
+  const isRunInProgress = uwRun?.status === "pending" || uwRun?.status === "parsing";
+  const underwritingHref = applicationId
+    ? `/t/${tenantSlug}/underwriting?application=${applicationId}`
+    : null;
+
   return (
-    <div className="space-y-1">
-      {rows.map((r, i) => (
-        <div
-          key={i}
-          className="flex items-baseline justify-between gap-3 py-2.5 border-b border-bg-border last:border-b-0"
-        >
-          <dt className="text-[12px] text-fg-muted">{r.label}</dt>
-          <dd className="text-fg text-[13px] font-medium text-right">{r.value}</dd>
+    <div className="space-y-4">
+      {/* Underwriting status — application-only; hidden on the lead drawer */}
+      {applicationId && (
+        <div className="rounded-md border border-bg-border bg-bg-deep/40 p-3 space-y-2">
+          <div className="text-[10px] uppercase tracking-wider text-fg-dim font-semibold mb-1">
+            Underwriting
+          </div>
+          {uwRun === undefined ? (
+            <div className="text-[11px] text-fg-dim italic">Loading…</div>
+          ) : (
+            <UnderwritingBadge
+              applicationId={applicationId}
+              tenantSlug={tenantSlug}
+              run={uwRun}
+              onRerun={handleRerun}
+              rerunPending={rerunPending}
+            />
+          )}
+          {uwError && <div className="text-[11px] text-red-300">{uwError}</div>}
+
+          {/* Risk flags chip strip — only when flags present */}
+          {riskFlags.length > 0 && (
+            <div className="flex flex-wrap gap-1 pt-1">
+              {riskFlags.map((flag) => (
+                <span
+                  key={flag}
+                  className="text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded bg-red-500/15 text-red-300 border border-red-500/30 font-semibold"
+                >
+                  {flag.replace(/_/g, " ")}
+                </span>
+              ))}
+            </div>
+          )}
         </div>
-      ))}
+      )}
+
+      {/* Sparklines — only when the daemon has written series data.
+          Static number fallbacks live in the field rows below, not here. */}
+      {(revenueSeries.length >= 2 || balanceSeries.length >= 2 || depositSeries.length >= 2) && (
+        <div className="rounded-md border border-bg-border bg-bg-deep/40 p-3">
+          <div className="text-[10px] uppercase tracking-wider text-fg-dim font-semibold mb-3">
+            Trends
+          </div>
+          <div className="flex items-start justify-around gap-2">
+            {revenueSeries.length >= 2 && (
+              <Sparkline values={revenueSeries} label={avgRevLabel || "Rev / mo"} />
+            )}
+            {balanceSeries.length >= 2 && (
+              <Sparkline values={balanceSeries} label={avgBalLabel || "Daily bal"} />
+            )}
+            {depositSeries.length >= 2 && (
+              <Sparkline
+                values={depositSeries}
+                label={depMonthLabel ? `${depMonthLabel}/mo` : "Dep / mo"}
+              />
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Static field rows — original behaviour preserved */}
+      {rows.length === 0 && !applicationId ? (
+        <div className="text-xs text-fg-dim italic py-6 text-center">
+          No banking info yet. Fields fill in from the application form, uploaded
+          bank statements, and the underwriter brief.
+        </div>
+      ) : (
+        <div className="space-y-1">
+          {rows.map((r, i) => (
+            <div
+              key={i}
+              className="flex items-baseline justify-between gap-3 py-2.5 border-b border-bg-border last:border-b-0"
+            >
+              <dt className="text-[12px] text-fg-muted">{r.label}</dt>
+              <dd className="text-fg text-[13px] font-medium text-right">{r.value}</dd>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Re-run button + report link — application-only footer */}
+      {applicationId && (
+        <div className="pt-1 flex flex-col items-end gap-1.5">
+          <button
+            type="button"
+            disabled={isRunInProgress || rerunPending}
+            onClick={handleRerun}
+            className="text-[11px] font-semibold px-3 py-1.5 rounded-md bg-bg-elev border border-bg-border text-fg-muted hover:text-fg hover:bg-bg-elev/80 disabled:opacity-40"
+          >
+            {rerunPending ? "Running…" : "Re-run underwriting"}
+          </button>
+          {underwritingHref && (
+            <Link
+              href={underwritingHref}
+              className="text-xs text-fg-dim hover:text-fg underline-offset-2 hover:underline"
+            >
+              View full underwriting report →
+            </Link>
+          )}
+        </div>
+      )}
     </div>
   );
 }

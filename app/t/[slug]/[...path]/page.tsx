@@ -9,6 +9,7 @@ import { ManifestDashboard } from "@/components/manifest/ManifestDashboard";
 import { ManifestRecordForm } from "@/components/manifest/ManifestRecordForm";
 import { ManifestReasoning } from "@/components/manifest/ManifestReasoning";
 import { LeadsImportClient } from "@/components/leads/LeadsImportClient";
+import { ImportClient } from "@/components/import/ImportClient";
 import { ShoppingOutClient } from "@/components/shopping-out/ShoppingOutClient";
 import { OffersByDealClient } from "@/components/offers/OffersByDealClient";
 import { LendersDirectoryClient } from "@/components/lenders/LendersDirectoryClient";
@@ -413,10 +414,13 @@ async function PageBody({
     case "dashboard":
       return <ManifestDashboard manifest={manifest} tenantId={tenantId} />;
     case "import":
-      // The import page reads the operator's tenant_id server-side via
-      // /api/leads/import; no extra props needed. Tenant_id check
-      // happens inside the API route so a viewer in preview-mode can't
-      // accidentally bulk-insert into someone else's leads table.
+      // SunBiz gets the tabbed ImportClient (warm pipeline + cold list).
+      // All other tenants keep the original LeadsImportClient behaviour.
+      // The split is intentional: cold and warm storage are separate tables
+      // and SunBiz is the first tenant to use the cold-list workflow.
+      if (slug === "sun") {
+        return <ImportClient tenantSlug={slug} />;
+      }
       return <LeadsImportClient />;
     case "shopping_out":
       // Phase 4 (Jordan/Oasis 2026-05-23). Multi-lender outreach UI;
