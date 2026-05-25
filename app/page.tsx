@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { cookies } from "next/headers";
+import { redirect } from "next/navigation";
 import { Card, Stat, EmptyState, PageHeader, Tag } from "@/components/Card";
 import { MRRProgressChart } from "@/components/charts/MRRProgressChart";
 import { TodayBlockToggle } from "@/components/TodayBlockToggle";
@@ -68,8 +69,18 @@ export default async function TodayPage() {
           null
         )
         : null;
+  // SunBiz operators (Ezra et al.) land directly on the manifest
+  // dashboard at /t/sun. The prior welcome/setup-wizard screen was
+  // removed 2026-05-25 per CC — real operators don't need an intro
+  // screen on every login; they need the work surface. Demo previews
+  // (unauthenticated visitors with the demo cookie) keep the welcome
+  // surface so /demo/sun still shows what the onboarding looks like.
   if (tenantProfileSlug === "sun") {
-    return <SunBizDashboard demoMode={demoProfile.id === "sun"} />;
+    const isDemo = demoProfile.id === "sun";
+    if (!isDemo) {
+      redirect("/t/sun");
+    }
+    return <SunBizDashboard demoMode={isDemo} />;
   }
 
   // safe(label, p, fallback) imported from @/lib/api-helpers — used across
