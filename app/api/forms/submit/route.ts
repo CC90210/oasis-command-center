@@ -630,7 +630,11 @@ async function initAnonymousLead(input: {
   const pick = (k: string) =>
     typeof input.payload[k] === "string" ? (input.payload[k] as string) : undefined;
   const leadData: Record<string, unknown> = {
-    stage: "imported",
+    // Migration 064 (2026-05-23): public-form submissions land as
+    // hot_lead (the prospect actively engaged by filling out the form,
+    // which is the literal definition of hot). Replaces the old
+    // "imported" landing stage which was a cold-CSV-ingest concept.
+    stage: "hot_lead",
     source: "public_form",
     created_from_form_id: form.id,
     created_from_ip_hash: input.ip ? hashIp(input.ip) : null,

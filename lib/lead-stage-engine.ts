@@ -71,8 +71,11 @@ const RULES: Record<LeadStageEvent["type"], Rule> = {
   // All three required SunBiz docs (bank statements + driver's
   // license + void cheque) present → hot_lead. Partial set keeps
   // the lead in missing_info so the operator can chase the rest.
+  // 2026-05-23: removed "imported" from from-set (stage was retired
+  // in migration 064; existing imported rows were remapped to hot_lead
+  // and the empty-stage entry covers fresh records).
   doc_uploaded: {
-    from: new Set<string>(["", "imported", "missing_info", "follow_up"]),
+    from: new Set<string>(["", "missing_info", "follow_up"]),
     to: "hot_lead",
     reasonCode: "all_required_docs_received",
     predicate: async ({ tenantId, leadId }) => {
@@ -90,8 +93,9 @@ const RULES: Record<LeadStageEvent["type"], Rule> = {
 
   // Operator queues an outbound email to the lead. Bumps the
   // sales motion forward — "we've made contact" maps to sent_application.
+  // 2026-05-23: removed "imported" (retired in migration 064).
   outbound_email_queued: {
-    from: new Set<string>(["imported", "hot_lead", "follow_up", "missing_info"]),
+    from: new Set<string>(["hot_lead", "follow_up", "missing_info"]),
     to: "sent_application",
     reasonCode: "application_emailed",
   },
@@ -100,8 +104,9 @@ const RULES: Record<LeadStageEvent["type"], Rule> = {
   // /api/outbound/log. Same target stage as the queue event —
   // included so a daemon-only send (no dashboard queue intermediate)
   // still moves the lead forward.
+  // 2026-05-23: removed "imported" (retired in migration 064).
   outbound_email_sent: {
-    from: new Set<string>(["imported", "hot_lead", "follow_up", "missing_info"]),
+    from: new Set<string>(["hot_lead", "follow_up", "missing_info"]),
     to: "sent_application",
     reasonCode: "application_emailed",
   },
@@ -126,18 +131,19 @@ const RULES: Record<LeadStageEvent["type"], Rule> = {
 
   // Inbound classifier flagged the reply as negative ("not interested,
   // remove me, etc."). Always overrides forward progression — a lead
-  // that explicitly opts out goes to not_interested regardless of
-  // what stage they were in.
+  // that explicitly opts out goes to declined regardless of what stage
+  // they were in.
+  // 2026-05-23: target rewired not_interested → declined (not_interested
+  // retired in migration 064); from-set drops "imported" (also retired).
   lead_replied_negative: {
     from: new Set<string>([
-      "imported",
       "hot_lead",
       "missing_info",
       "follow_up",
       "sent_application",
       "viewed_application",
     ]),
-    to: "not_interested",
+    to: "declined",
     reasonCode: "lead_replied_negative",
   },
 

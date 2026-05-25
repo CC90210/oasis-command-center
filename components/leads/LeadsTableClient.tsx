@@ -74,22 +74,20 @@ type Props = {
   detailBase?: string;
 };
 
-/** SunBiz Lead Pipeline tabs — Salesforce-parity rework 2026-05-17.
+/** SunBiz Lead Pipeline tabs — Jordan/Oasis 2026-05-23 slimdown
+ *  (migration 064). Dropped imported / not_interested / approved.
  *  Must stay in sync with SUN_SEED.data_model.lead.stage in
  *  lib/manifest/seeds.ts AND the colors in lib/sunbiz-stage-meta.ts. */
 const SUNBIZ_STAGES: LeadsTableStage[] = [
-  { value: "imported",           label: "Imported",           tone: "text-fg-dim" },
-  { value: "not_interested",     label: "Not interested",     tone: "text-status-warm" },
   { value: "hot_lead",           label: "Hot lead",           tone: "text-accent" },
   { value: "missing_info",       label: "Missing info",       tone: "text-status-info" },
-  { value: "declined",           label: "Declined",           tone: "text-status-warm" },
   { value: "follow_up",          label: "Follow up",          tone: "text-status-info" },
   { value: "sent_application",   label: "App sent",           tone: "text-status-info" },
   { value: "viewed_application", label: "App viewed",         tone: "text-accent" },
   { value: "signed_application", label: "App signed",         tone: "text-accent" },
-  { value: "default",            label: "Default",            tone: "text-status-warm" },
   { value: "submitted",          label: "Submitted",          tone: "text-status-engaged" },
-  { value: "approved",           label: "Approved",           tone: "text-status-engaged" },
+  { value: "declined",           label: "Declined",           tone: "text-status-warm" },
+  { value: "default",            label: "Default",            tone: "text-status-warm" },
 ];
 
 type SortKey = "last_touch" | "score" | "name" | "company" | "created";

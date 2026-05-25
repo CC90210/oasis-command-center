@@ -106,8 +106,10 @@ export async function POST(req: NextRequest) {
 
   // Engine wiring: if the classifier flagged the reply as negative
   // (sentiment=negative, intent=opt_out / unsubscribe), advance the
-  // lead to `not_interested`. Best-effort — looks up tenant + lead
-  // from the freshly-inserted interaction row and fires the rule.
+  // lead via `lead_replied_negative` which now targets `declined`
+  // (migration 064 retired `not_interested`). Best-effort — looks up
+  // tenant + lead from the freshly-inserted interaction row and fires
+  // the rule.
   // Lookup failure or RPC-returned id mismatch silently no-ops; the
   // primary inbound write has already succeeded by this point and we
   // must not regress that on a stage-event hiccup.

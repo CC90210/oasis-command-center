@@ -16,9 +16,8 @@
  */
 
 export const STAGE_SLA_DAYS: Record<string, number> = {
-  // Lead stages
-  imported: 2,
-  not_interested: 999,
+  // Lead stages (migration 064 — imported / not_interested / approved
+  // retired). Terminal stages keep 999d so they never count as overdue.
   hot_lead: 1,
   missing_info: 3,
   declined: 999,
@@ -28,50 +27,42 @@ export const STAGE_SLA_DAYS: Record<string, number> = {
   signed_application: 2,
   default: 7,
   submitted: 5,
-  approved: 30,
-  // Opportunity stages
+  // Opportunity stages (migration 064 — slimmed to 10).
   application_in: 2,
   shopping: 2,
-  selling: 2,
   requested_docs: 2,
   docs_out: 2,
   login: 1,
-  follow_ups: 3,
-  submitted_to_underwriting: 2,
-  approved_open_offers: 1,
-  contracts_ordered: 2,
   funded: 999,
-  approved_never_funded: 5,
-  no_offers_available: 7,
+  follow_ups: 3,
   dead_file: 999,
 };
 
-/** Stages an "active" lead can be in. Excludes terminal stages. */
+/** Stages an "active" lead can be in. Excludes terminal stages
+ *  (declined, default, dead_file, funded). Migration 064 cleanup:
+ *  imported / approved (lead) / selling / approved_open_offers /
+ *  contracts_ordered / submitted_to_underwriting / approved_never_funded
+ *  are all retired or consolidated into shopping/docs_out/dead_file. */
 export const ACTIVE_STAGES = new Set<string>([
-  "imported",
+  // Lead-side active
   "hot_lead",
   "missing_info",
   "follow_up",
   "sent_application",
   "viewed_application",
   "signed_application",
-  "default",
   "submitted",
+  // Application-side active
   "application_in",
   "shopping",
-  "selling",
   "requested_docs",
   "docs_out",
   "login",
   "follow_ups",
-  "submitted_to_underwriting",
-  "approved_open_offers",
-  "contracts_ordered",
-  "approved_never_funded",
 ]);
 
 export const VISIBLE_TARGET_STAGES = new Set<string>([
-  "imported",
+  // Lead-side
   "hot_lead",
   "missing_info",
   "follow_up",
@@ -79,16 +70,13 @@ export const VISIBLE_TARGET_STAGES = new Set<string>([
   "viewed_application",
   "signed_application",
   "submitted",
+  // Application-side
   "application_in",
   "shopping",
-  "selling",
   "requested_docs",
   "docs_out",
   "login",
   "follow_ups",
-  "submitted_to_underwriting",
-  "approved_open_offers",
-  "contracts_ordered",
 ]);
 
 /** Stages where the operator should be advancing the deal NOW. */
@@ -96,11 +84,8 @@ export const READY_TO_ADVANCE_STAGES = new Set<string>([
   "viewed_application",
   "signed_application",
   "application_in",
-  "approved",
   "docs_out",
   "login",
-  "contracts_ordered",
-  "approved_open_offers",
 ]);
 
 export function slaDaysFor(stage: string): number {

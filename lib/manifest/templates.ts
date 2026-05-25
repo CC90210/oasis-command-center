@@ -159,7 +159,9 @@ export const BUSINESS_FUNDING_TEMPLATE: TenantManifest = {
         { name: "phone", type: "string" },
         { name: "email", type: "string" },
         { name: "monthly_revenue", type: "number" },
-        { name: "stage", type: "enum", enum_values: ["imported", "not_interested", "hot_lead", "missing_info", "declined", "follow_up", "sent_application", "viewed_application", "signed_application", "default", "submitted", "approved"], required: true },
+        // Aligned with SUN_SEED post migration 064 (Jordan/Oasis
+        // 2026-05-23). Dropped imported / not_interested / approved.
+        { name: "stage", type: "enum", enum_values: ["hot_lead", "missing_info", "follow_up", "sent_application", "viewed_application", "signed_application", "submitted", "declined", "default"], required: true },
         { name: "missing_info", type: "json" },
       ],
     },
@@ -173,7 +175,9 @@ export const BUSINESS_FUNDING_TEMPLATE: TenantManifest = {
         { name: "lender_id", type: "string" },
         { name: "requested_amount", type: "number" },
         { name: "submitted_at", type: "datetime" },
-        { name: "status", type: "enum", enum_values: ["application_in", "shopping", "missing_info", "approved", "selling", "requested_docs", "docs_out", "login", "funded", "follow_ups", "declined", "dead_file", "submitted_to_underwriting", "approved_open_offers", "contracts_ordered", "approved_never_funded", "no_offers_available"], required: true },
+        // Aligned with SUN_SEED post migration 064 (Jordan/Oasis
+        // 2026-05-23). Slimmed from 17 statuses to 10.
+        { name: "status", type: "enum", enum_values: ["application_in", "shopping", "missing_info", "requested_docs", "docs_out", "login", "funded", "follow_ups", "declined", "dead_file"], required: true },
       ],
     },
     {

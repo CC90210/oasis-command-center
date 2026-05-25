@@ -162,10 +162,21 @@ export type ManifestPageKind =
   | "import" // bulk lead import — renders LeadsImportClient in the catch-all router
   | "pipeline"        // two-pipeline superview — Lead Pipeline above Opportunity
                       // Pipeline. Reads config.lead_entity + config.opportunity_entity.
-  | "pipeline_entity"; // single-entity Salesforce-style pipeline — renders the
+  | "pipeline_entity" // single-entity Salesforce-style pipeline — renders the
                       // chevron arrow bar + filtered records table for one entity.
                       // Used by /leads (entity=lead) + /applications (entity=
                       // application). Reads config.stage_field (default "stage").
+  | "shopping_out"    // Phase 4 (Jordan/Oasis 2026-05-23). Multi-lender outreach
+                      // UI on top of the existing shop-out engine
+                      // (lib/lenders/shop-out.ts + POST /api/applications/[id]/
+                      // shop-out). Renders ShoppingOutClient. Tenant-specific
+                      // primitive — SunBiz only opts in via its manifest.
+  | "offers_v2"       // Phase 6. Deal-first offer intelligence view (accordion +
+                      // kanban toggle) on top of application_lender_threads.
+                      // Replaces the generic kanban for the offers page.
+  | "lenders_v2";     // Phase 7. Lender directory with the expanded field set
+                      // (buy rate, funding range, restricted states, decline
+                      // reasons, etc.) and the LenderDetailDrawer.
 
 export type ManifestPageDef = {
   path: string;           // relative path under /t/<slug>/ e.g. "leads"
@@ -406,7 +417,21 @@ const NAV_ICON_KEYS = new Set<ManifestNavIconKey>([
 ]);
 
 const LOGO_KEYS = new Set<ManifestLogoKey>(["oasis", "sunbiz", "suga", "custom"]);
-const PAGE_KINDS = new Set<ManifestPageKind>(["dashboard", "table", "kanban", "form", "markdown", "reasoning", "import"]);
+const PAGE_KINDS = new Set<ManifestPageKind>([
+  "dashboard",
+  "table",
+  "kanban",
+  "form",
+  "markdown",
+  "reasoning",
+  "import",
+  "pipeline",
+  "pipeline_entity",
+  // Jordan/Oasis 2026-05-23 (migration 064) — SunBiz tenant-specific primitives
+  "shopping_out",
+  "offers_v2",
+  "lenders_v2",
+]);
 const ENTITY_FIELD_TYPES = new Set(["string", "number", "boolean", "date", "datetime", "enum", "json"]);
 const INTEGRATION_KINDS = new Set<ManifestIntegrationKind>([
   "twilio", "jotform", "stripe", "google_workspace", "supabase", "turso", "custom",

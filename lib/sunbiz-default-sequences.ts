@@ -41,8 +41,8 @@ export type DefaultSequence = {
 export const SUNBIZ_DEFAULT_SEQUENCES: DefaultSequence[] = [
   // ─────────────────────────────────────────────────────────────────
   // 1. Any earlier stage -> follow_up : 3-touch follow-up cadence
-  // (Salesforce-parity stages 2026-05-17: imported / not_interested /
-  // hot_lead / missing_info — any of these landing on follow_up.)
+  // (post-migration-064 stages: hot_lead / missing_info — any of these
+  // landing on follow_up via operator action or stage engine.)
   // ─────────────────────────────────────────────────────────────────
   {
     name: "Follow-up sequence",
@@ -150,25 +150,33 @@ export const SUNBIZ_DEFAULT_SEQUENCES: DefaultSequence[] = [
   },
 
   // ─────────────────────────────────────────────────────────────────
-  // 5. Approved-never-funded -> monthly bank-statement refresh
+  // 5. Missing Info -> 3-touch info request (Phase 5 of Jordan/Oasis
+  //    2026-05-23 restructure). Replaces the prior no_offers_available
+  //    sequence — that stage was retired in migration 064 (consolidated
+  //    into `declined`, which already has its own 1-month check-back).
   // ─────────────────────────────────────────────────────────────────
   {
-    name: "No offers / approved-not-funded — monthly bank statement refresh",
+    name: "Missing info — chase + book call",
     description:
-      "Fires when an offer rolls to no_offer status. Asks the operator for updated bank statements monthly so we can re-shop.",
+      "Fires when a lead lands in missing_info (manual or classifier-flagged). Two-touch cadence to request the outstanding info and book a call if they go silent.",
     trigger_event: "BRAVO_RECORD_STATUS_CHANGED",
-    trigger_filter: { entity: "offer", field: "stage", to: "no_offers_available" },
-    // Multi-fire-allowed (one_per_lead=false). The monthly cadence is
-    // the whole point — same lead, new month, new statements.
-    one_per_lead: false,
+    trigger_filter: { entity: "lead", field: "stage", to: "missing_info" },
+    one_per_lead: true,
     steps: [
       {
-        channel: "email",
-        delay_minutes: 60 * 24 * 30, // 30 days
+        channel: "sms",
+        delay_minutes: 30,
         from_label: "Solara",
-        subject: "Quick re-shop for {{lead.business_name}}?",
         body:
-          "Hi {{lead.contact_name}},\n\nIt's been a month since we last shopped your file. If you can send the latest month of bank statements, I'll re-run it through our lender network and see what's changed.\n\nFast turnaround — usually 24-48h to bring offers back.\n\n— Solara, SunBiz Funding",
+          "Hi {{lead.contact_name}} — your file is one step from underwriting but we're missing a couple things. Reply here and I'll list what's outstanding, or text me a good time to call.",
+      },
+      {
+        channel: "email",
+        delay_minutes: 60 * 24 * 2, // 48h
+        from_label: "Solara",
+        subject: "Quick info to unblock {{lead.business_name}}",
+        body:
+          "Hi {{lead.contact_name}},\n\nFollowing up — your file is sitting in our queue waiting on a couple data points before lenders can price it. Easiest path: reply here with a good time today or tomorrow for a 5-min call and we'll knock it out together.\n\n— Solara, SunBiz Funding",
       },
     ],
   },

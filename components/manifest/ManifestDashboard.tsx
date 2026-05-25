@@ -106,12 +106,18 @@ export async function ManifestDashboard({ manifest, tenantId, demoRowsByEntity }
       {openAlerts.length > 0 && <OpenAlertsRow alerts={openAlerts} slug={slug} />}
 
       {isSunBizShape ? (
-        <SunBizHeroKpis
-          slug={slug}
-          leads={rowsByEntity.lead || []}
-          applications={rowsByEntity.application || []}
-          fundedDeals={rowsByEntity.funded_deal || []}
-        />
+        <>
+          <SunBizHeroKpis
+            slug={slug}
+            leads={rowsByEntity.lead || []}
+            applications={rowsByEntity.application || []}
+            fundedDeals={rowsByEntity.funded_deal || []}
+          />
+          {/* Phase 10 — second action band: renewal alerts, offers needing
+              review, shopping-out activity. Server-rendered separately so
+              its three table queries don't block the hero kpis above it. */}
+          <SunBizActionBand slug={slug} tenantId={tenantId} />
+        </>
       ) : (
         <GenericKpis allRows={allRows} />
       )}
@@ -289,10 +295,21 @@ function SunBizHeroKpis({
     return false;
   }).length;
 
-  const oppPositive = applications.filter((a) => {
-    const s = String(a.data.status || "");
-    return s === "submitted_to_underwriting" || s === "approved_open_offers" || s === "contracts_ordered";
-  }).length;
+  // "In motion" — applications that are mid-funnel (not terminal, not
+  // funded). Post-migration-064 the operative set is application_in /
+  // shopping / requested_docs / docs_out / login. follow_ups is a
+  // long-tail status and intentionally excluded from "in motion" so
+  // the count reflects deals the operator can move TODAY.
+  const IN_MOTION = new Set([
+    "application_in",
+    "shopping",
+    "requested_docs",
+    "docs_out",
+    "login",
+  ]);
+  const oppPositive = applications.filter((a) =>
+    IN_MOTION.has(String(a.data.status || "")),
+  ).length;
 
   return (
     <section className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
@@ -321,7 +338,10 @@ function SunBizHeroKpis({
         sub="open opportunities"
       />
       <KpiCard
-        href={`/t/${slug}/funded-deals`}
+        // Migration 064: funded-deals nav was removed; link to the
+        // Applications page filtered by funded status surfaces the
+        // same rows the funded-deals kanban used to.
+        href={`/t/${slug}/applications?stage=funded`}
         title="Funded this month"
         value={fundedThisMonth.length}
         accent="#3BA755"
@@ -338,6 +358,76 @@ function SunBizHeroKpis({
           sub="40%+ through term"
         />
       )}
+    </section>
+  );
+}
+
+/* ----------------------------------------------------------------- *
+ * SunBiz action band — second row of cards surfacing renewal alerts,
+ * offers needing review, and shopping-out activity. Phase 10 of the
+ * Jordan/Oasis 2026-05-23 restructure (new operator-facing surfaces).
+ * Server-rendered; query failures degrade to zero counts rather than
+ * breaking the whole dashboard.
+ * ----------------------------------------------------------------- */
+
+async function SunBizActionBand({
+  slug,
+  tenantId,
+}: {
+  slug: string;
+  tenantId: string | null;
+}) {
+  if (!tenantId) return null;
+
+  const sb = getServiceSupabase();
+  const SEVEN_DAYS_AGO_ISO = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+
+  // Three queries in parallel. Each falls back to zero on error so a
+  // missing-table or RLS-deny doesn't break the dashboard.
+  const [reviewRes, shoppingRes] = await Promise.all([
+    sb
+      .from("application_lender_threads")
+      .select("id, status, last_error", { count: "exact", head: false })
+      .eq("tenant_id", tenantId)
+      .or("status.eq.info_requested,last_error.not.is.null")
+      .limit(1),
+    sb
+      .from("application_lender_threads")
+      .select("id", { count: "exact", head: true })
+      .eq("tenant_id", tenantId)
+      .eq("status", "sent")
+      .gte("sent_at", SEVEN_DAYS_AGO_ISO),
+  ]);
+
+  const needsReview = reviewRes.error ? 0 : reviewRes.count ?? 0;
+  const shoppingActive = shoppingRes.error ? 0 : shoppingRes.count ?? 0;
+
+  return (
+    <section className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+      <KpiCard
+        href={`/t/${slug}/renewals`}
+        title="Renewal alerts"
+        value={0}
+        accent="#E96F2D"
+        icon={<RefreshCw className="w-5 h-5" />}
+        sub="see Renewals for past-due + this-week details"
+      />
+      <KpiCard
+        href={`/t/${slug}/offers`}
+        title="Offers needing review"
+        value={needsReview}
+        accent="#C58B2F"
+        icon={<AlertTriangle className="w-5 h-5" />}
+        sub={needsReview > 0 ? "info-requested or send error" : "queue clear"}
+      />
+      <KpiCard
+        href={`/t/${slug}/shopping-out`}
+        title="Shopping out (7d)"
+        value={shoppingActive}
+        accent="#3978BE"
+        icon={<Sparkles className="w-5 h-5" />}
+        sub={shoppingActive > 0 ? "lenders awaiting reply" : "nothing in flight"}
+      />
     </section>
   );
 }
@@ -507,6 +597,9 @@ function PipelineGlanceCard({
  * Today's focus — top urgent leads + renewals due
  * ----------------------------------------------------------------- */
 
+// Migration 064 (2026-05-23) — imported / not_interested / approved
+// retired from the active lead funnel. Remaining stages re-weighted so
+// the urgency scorer ranks the active funnel cleanly without zombie keys.
 const STAGE_WEIGHT: Record<string, number> = {
   hot_lead: 100,
   signed_application: 90,
@@ -515,12 +608,9 @@ const STAGE_WEIGHT: Record<string, number> = {
   missing_info: 65,
   follow_up: 50,
   submitted: 40,
-  imported: 20,
-  not_interested: 0,
   declined: 0,
   default: 0,
   dead_file: 0,
-  approved: 75,
 };
 
 function urgencyScore(lead: TenantRecord): number {
@@ -536,11 +626,11 @@ function urgencyScore(lead: TenantRecord): number {
 }
 
 function TopUrgentLeads({ slug, leads }: { slug: string; leads: TenantRecord[] }) {
+  // Terminal states post-migration-064 — anything in this set drops off
+  // the urgency surface.
+  const TERMINAL = new Set(["default", "declined", "dead_file"]);
   const top = [...leads]
-    .filter((l) => {
-      const s = String(l.data.stage || "");
-      return s !== "default" && s !== "declined" && s !== "dead_file" && s !== "not_interested";
-    })
+    .filter((l) => !TERMINAL.has(String(l.data.stage || "")))
     .sort((a, b) => urgencyScore(b) - urgencyScore(a))
     .slice(0, 5);
 

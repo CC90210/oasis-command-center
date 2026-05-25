@@ -237,6 +237,16 @@ export const SUN_SEED: TenantManifest = {
     // (sun-themed, matches the Solara linguistic family).
     { slug: "helios", display_name: "Helios", enabled: true },
   ],
+  // Nav reorganized per the Jordan/Oasis 2026-05-23 meeting (migration 064):
+  //   OPERATIONS  Dashboard · Agents · Reasoning · Playbook
+  //   PIPELINE    Leads · Shopping Out · Applications
+  //   DEALS       Offers · Renewals · Commissions · Lenders
+  //   SYSTEM      Import · Forms · Sequences · Team · Automations · Settings
+  // Funded Deals removed from the sidebar (the page route at /t/sun/funded-
+  // deals still resolves via the manifest entry below — Applications-filtered-
+  // by-Funded + Renewals cover the same surface in the operator workflow).
+  // Network group dropped; Lenders moved into Deals where it belongs alongside
+  // Offers + Renewals + Commissions.
   nav: [
     { href: "/t/sun", label: "Dashboard", icon: "LayoutDashboard", group: "Operations" },
     // Top-level /agent chat — Ezra picks between Solara (operational) and
@@ -246,21 +256,30 @@ export const SUN_SEED: TenantManifest = {
     { href: "/agent", label: "Agents", icon: "Bot", group: "Operations" },
     { href: "/t/sun/reasoning", label: "Reasoning", icon: "Brain", group: "Operations" },
     { href: "/t/sun/playbook", label: "Playbook", icon: "BookOpen", group: "Operations" },
+    // Pipeline — top-of-funnel through funding shop. Shopping Out is the
+    // new (Phase 4) multi-lender outreach surface; sits between Leads and
+    // Applications to mirror the operator's real workflow order.
     { href: "/t/sun/leads", label: "Leads", icon: "Users", group: "Pipeline" },
+    { href: "/t/sun/shopping-out", label: "Shopping Out", icon: "ShoppingBag", group: "Pipeline" },
     { href: "/t/sun/applications", label: "Applications", icon: "FileText", group: "Pipeline" },
-    { href: "/t/sun/import", label: "Import", icon: "Upload", group: "Pipeline" },
+    // Deals — post-shop lifecycle: offers in, renewals tracked, commissions
+    // booked, lenders managed. Lenders moved here from the (now-deleted)
+    // Network group — it's a deal-context entity, not a separate domain.
+    { href: "/t/sun/offers", label: "Offers", icon: "HandCoins", group: "Deals" },
+    { href: "/t/sun/renewals", label: "Renewals", icon: "RefreshCcw", group: "Deals" },
+    { href: "/t/sun/commissions", label: "Commissions", icon: "DollarSign", group: "Deals" },
+    { href: "/t/sun/lenders", label: "Lenders", icon: "Landmark", group: "Deals" },
+    // System — data ingest + drip/cron infrastructure + admin. Import +
+    // Forms + Sequences moved here from Pipeline (they're plumbing for the
+    // pipeline, not pipeline stages themselves).
+    { href: "/t/sun/import", label: "Import", icon: "Upload", group: "System" },
     // /forms is top-level (tenant-aware on the server via user.tenant_id).
     // Same shared surface every tenant gets — design forms, mint
     // personalized lead links, replace JotForm.
-    { href: "/forms", label: "Forms", icon: "FileCode2", group: "Pipeline" },
+    { href: "/forms", label: "Forms", icon: "FileCode2", group: "System" },
     // /sequences is the drip-campaign control panel — same Outreach
     // lane as SMS / Email Blast but for status-triggered automation.
-    { href: "/sequences", label: "Sequences", icon: "Sparkles", group: "Pipeline" },
-    { href: "/t/sun/offers", label: "Offers", icon: "HandCoins", group: "Deals" },
-    { href: "/t/sun/funded-deals", label: "Funded Deals", icon: "BadgeDollarSign", group: "Deals" },
-    { href: "/t/sun/renewals", label: "Renewals", icon: "RefreshCcw", group: "Deals" },
-    { href: "/t/sun/commissions", label: "Commissions", icon: "DollarSign", group: "Deals" },
-    { href: "/t/sun/lenders", label: "Lenders", icon: "Landmark", group: "Network" },
+    { href: "/sequences", label: "Sequences", icon: "Sparkles", group: "System" },
     // Top-level /team — admins mint invite URLs that drop a teammate
     // straight into this tenant's onboarding wizard. Owner/admin sees
     // the mint UI; non-admins see the member roster. Without this entry
@@ -270,7 +289,8 @@ export const SUN_SEED: TenantManifest = {
     // Top-level /automations — tenant-aware cron job manager. Bridge polls
     // tenant_cron_jobs and executes locally on the operator's machine.
     // Same surface across every tenant; routes here from any /t/<slug>/
-    // path land on the shared /automations page.
+    // path land on the shared /automations page. Phase 11 adds an
+    // "Agents & Modules" status section above the cron list.
     { href: "/automations", label: "Automations", icon: "RefreshCcw", group: "System" },
     // Top-level /settings — already tenant-aware (reads profile.tenant_id).
     // Modeled on the OASIS settings shell: integrations, agents enabled,
@@ -287,25 +307,25 @@ export const SUN_SEED: TenantManifest = {
         { name: "phone", type: "string" },
         { name: "email", type: "string" },
         { name: "monthly_revenue", type: "number" },
-        // Lead Pipeline stages — verbatim Salesforce parity per Adon's
-        // 2026-05-16 screenshots. Order = left-to-right arrow flow on
-        // the pipeline bar. Colors live in lib/sunbiz-stage-meta.ts.
+        // Lead Pipeline stages — slimmed per Jordan/Oasis 2026-05-23
+        // meeting (migration 064). Dropped imported / not_interested /
+        // approved; existing rows were remapped (imported→hot_lead,
+        // not_interested→declined, approved→submitted) so no data is
+        // lost. Order = left-to-right arrow flow on the pipeline bar.
+        // Colors live in lib/sunbiz-stage-meta.ts.
         //
-        //   imported            — fresh CSV/API ingest, no engagement yet
-        //   not_interested      — explicitly declined the cold touch
         //   hot_lead            — actively engaging, replied / called back
         //   missing_info        — needs additional data before progressing
         //                         (auto-tagged by Phase 20 classifier)
-        //   declined            — lender or operator passed
         //   follow_up           — nurture cadence, waiting on next touch
         //   sent_application    — Solara dispatched the application link
         //   viewed_application  — prospect opened the link (engagement)
         //   signed_application  — prospect completed the application form
-        //   default             — repayment failure / bankruptcy
         //   submitted           — submitted to underwriting (graduates to
-        //                         Opportunity Pipeline; see offer.stage)
-        //   approved            — lender approved (graduates to offer)
-        { name: "stage", type: "enum", enum_values: ["imported", "not_interested", "hot_lead", "missing_info", "declined", "follow_up", "sent_application", "viewed_application", "signed_application", "default", "submitted", "approved"], required: true },
+        //                         Opportunity Pipeline; see application.status)
+        //   declined            — lender or operator passed (terminal)
+        //   default             — repayment failure / bankruptcy (terminal)
+        { name: "stage", type: "enum", enum_values: ["hot_lead", "missing_info", "follow_up", "sent_application", "viewed_application", "signed_application", "submitted", "declined", "default"], required: true },
         // missing_info — Phase 20 (2026-05-17) classifier output. Array
         // of canonical doc-type strings the lead still owes us before
         // an application can advance. Populated by
@@ -328,22 +348,39 @@ export const SUN_SEED: TenantManifest = {
         { name: "lender_id", type: "string" },
         { name: "requested_amount", type: "number" },
         { name: "submitted_at", type: "datetime" },
-        // Opportunity Pipeline status — verbatim Salesforce parity per
-        // Adon's 2026-05-16 screenshots. /applications page renders this
-        // as the chevron pipeline. "New" is intentionally excluded per
-        // the meeting decision. Order = left-to-right arrow flow.
-        // Colors in lib/sunbiz-stage-meta.ts under the "application" key.
+        // Opportunity Pipeline status — slimmed to 10 stages per the
+        // Jordan/Oasis 2026-05-23 meeting (migration 064). Dropped
+        // approved* / selling / submitted_to_underwriting / contracts_
+        // ordered / no_offers_available (Offers page owns the offer
+        // intelligence layer now; statuses that duplicated other steps
+        // were collapsed). Existing rows were remapped in migration
+        // 064. Order = left-to-right arrow flow.
         //
-        //   submitted_to_underwriting — application in lender hands
-        //   approved_open_offers      — lender returned a term sheet
-        //   contracts_ordered         — contract sent; awaiting signature
-        //   funded                    — wire complete; rolls into
-        //                               funded_deals + commissions
-        //   approved_never_funded     — approved but client never closed
-        //                               (revival drip eligible)
-        //   no_offers_available       — every lender declined
-        //   dead_file                 — client killed the deal
-        { name: "status", type: "enum", enum_values: ["application_in", "shopping", "missing_info", "approved", "selling", "requested_docs", "docs_out", "login", "funded", "follow_ups", "declined", "dead_file", "submitted_to_underwriting", "approved_open_offers", "contracts_ordered", "approved_never_funded", "no_offers_available"], required: true },
+        //   application_in   — application received; pre-shop
+        //   shopping         — out to multiple lenders (was also:
+        //                      submitted_to_underwriting, approved,
+        //                      approved_open_offers, selling)
+        //   missing_info     — needs additional info before progressing
+        //   requested_docs   — operator asked lender / client for docs
+        //   docs_out         — contract / docs sent to client (was also:
+        //                      contracts_ordered)
+        //   login            — lender portal / signing portal step
+        //   funded           — wire complete; rolls into funded_deals
+        //   follow_ups       — long-tail follow-up after approval
+        //   declined         — lender or operator passed (was also:
+        //                      no_offers_available)
+        //   dead_file        — client killed the deal (was also:
+        //                      approved_never_funded)
+        { name: "status", type: "enum", enum_values: ["application_in", "shopping", "missing_info", "requested_docs", "docs_out", "login", "funded", "follow_ups", "declined", "dead_file"], required: true },
+        // Owner address — Phase 3 of Jordan/Oasis restructure. Lives in
+        // JSONB on the application record (no DDL needed). OwnerTab in
+        // the lead drawer renders these. Optional; legacy applications
+        // without an address gracefully render as "—".
+        { name: "owner_address_line1", type: "string" },
+        { name: "owner_address_line2", type: "string" },
+        { name: "owner_address_city", type: "string" },
+        { name: "owner_address_state", type: "string" },
+        { name: "owner_address_zip", type: "string" },
       ],
     },
     {
@@ -357,24 +394,11 @@ export const SUN_SEED: TenantManifest = {
         { name: "amount", type: "number" },
         { name: "term_months", type: "number" },
         { name: "factor_rate", type: "number" },
-        // Opportunity Pipeline stages — verbatim Salesforce parity per
-        // Adon's 2026-05-16 screenshots. "New" is intentionally excluded
-        // per the meeting decision. Order = left-to-right arrow flow.
-        // Colors in lib/sunbiz-stage-meta.ts.
-        //
-        //   submitted_to_underwriting — application in lender hands
-        //   approved_open_offers      — lender returned a term sheet
-        //   contracts_ordered         — contract sent to client; awaiting
-        //                               signature
-        //   funded                    — wire complete; rolls into
-        //                               funded_deals + commission split
-        //   approved_never_funded     — approved but client never closed
-        //                               (revival drip eligible)
-        //   no_offers_available       — every lender declined
-        //   dead_file                 — file was good but client killed
-        //                               it (took a competitor's offer,
-        //                               lost contact, changed plans)
-        { name: "stage", type: "enum", enum_values: ["application_in", "shopping", "missing_info", "approved", "selling", "requested_docs", "docs_out", "login", "funded", "follow_ups", "declined", "dead_file", "submitted_to_underwriting", "approved_open_offers", "contracts_ordered", "approved_never_funded", "no_offers_available"], required: true },
+        // Offer stage — same consolidated list as application.status
+        // post-migration 064 (Jordan/Oasis 2026-05-23). Kept in sync so
+        // the Offers page can group by either entity's stage without a
+        // mismatched enum.
+        { name: "stage", type: "enum", enum_values: ["application_in", "shopping", "missing_info", "requested_docs", "docs_out", "login", "funded", "follow_ups", "declined", "dead_file"], required: true },
       ],
     },
     {
@@ -439,6 +463,21 @@ export const SUN_SEED: TenantManifest = {
         { name: "fico_floor", type: "number" },
         { name: "sla_response_days", type: "number" },
         { name: "notes", type: "string" },
+        // Phase 7 — knowledge-base fields per Jordan/Oasis 2026-05-23.
+        // Live in tenant_records.data JSONB; no DDL needed. The Lender
+        // Matching Agent + Shopping Out lender ranker consume these.
+        { name: "portal_url", type: "string" },
+        { name: "buy_rate_avg", type: "number" },
+        { name: "funding_range_min", type: "number" },
+        { name: "funding_range_max", type: "number" },
+        { name: "term_range_min_months", type: "number" },
+        { name: "term_range_max_months", type: "number" },
+        { name: "industry_preferences", type: "json" },     // array of strings
+        { name: "industry_restrictions", type: "json" },    // array of strings
+        { name: "restricted_states", type: "json" },        // array of state codes
+        { name: "required_documents", type: "json" },       // array of doc-type keys
+        { name: "common_decline_reasons", type: "json" },   // array of strings
+        { name: "active", type: "boolean", default: true },
       ],
     },
   ],
@@ -469,10 +508,17 @@ export const SUN_SEED: TenantManifest = {
       entity: "application",
       config: { stage_field: "status" },
     },
-    // Offers are per-lender term sheets under an application; rendered
-    // as the conventional Kanban since they're a sub-detail view, not
-    // the operator's primary pipeline.
-    { path: "offers", label: "Offers", kind: "kanban", entity: "offer", config: { group_by: "stage" } },
+    // Shopping Out — Phase 4 (Jordan/Oasis 2026-05-23). Multi-lender
+    // outreach UI on top of the existing shop-out engine (POST
+    // /api/applications/[id]/shop-out + lib/lenders/match-fitness +
+    // lib/lenders/shop-out → application_lender_threads). Renders
+    // <ShoppingOutClient> via the catch-all dispatcher.
+    { path: "shopping-out", label: "Shopping Out", kind: "shopping_out", entity: "application" },
+    // Offers — Phase 6 (Jordan/Oasis 2026-05-23). Deal-first intelligence
+    // view (accordion + kanban toggle) replacing the generic
+    // kind="kanban" rendering. Reads application_lender_threads grouped
+    // by application; flags info_requested / last_error as Needs Review.
+    { path: "offers", label: "Offers", kind: "offers_v2", entity: "offer" },
     {
       path: "funded-deals",
       label: "Funded Deals",
@@ -488,7 +534,12 @@ export const SUN_SEED: TenantManifest = {
     },
     { path: "renewals", label: "Renewals", kind: "kanban", entity: "renewal", config: { group_by: "status" } },
     { path: "commissions", label: "Commissions", kind: "table", entity: "commission" },
-    { path: "lenders", label: "Lenders", kind: "table", entity: "lender" },
+    // Lenders — Phase 7 (Jordan/Oasis 2026-05-23). Knowledge-base shell
+    // with the expanded field set (buy rate, funding range, restricted
+    // states, decline reasons) and the LenderDetailDrawer. Replaces the
+    // generic kind="table" rendering for SunBiz; other tenants still
+    // get the generic table primitive.
+    { path: "lenders", label: "Lenders", kind: "lenders_v2", entity: "lender" },
     { path: "import", label: "Import leads", kind: "import" },
     { path: "playbook", label: "Operating Manual", kind: "markdown", config: { body: "## Meet your agents\n\n**Solara** is your funding-shop operator. She watches the pipeline, drafts follow-ups in your voice over text and email, scores incoming applications against your lender book, and surfaces renewal windows before they close.\n\n**Helios** is your sales voice. He runs cold outreach and brings ghosted deals back to the table — the same human-sounding cadence you'd send yourself, just faster.\n\n## Where leads come from\n\n- The **SunBiz application form** (built into the dashboard — see Forms). Personalized links go out by SMS or email; submissions land in Leads in the **Imported** column.\n- **Bulk CSV import** (see Import). Drop a Google Sheet export and Solara de-duplicates by email and phone before adding.\n- **Manual entry** from the Leads page → **+ New lead**.\n\n## Your day, end to end\n\n1. **Open the Dashboard.** Hot leads, missing-info alerts, and renewals due are at the top — that's your priority list.\n2. **Move leads through the pipeline.** Click any chevron stage to see who's there. Drag the hot ones to **Follow Up** and the 3-touch cadence fires automatically.\n3. **Send applications.** When a lead is ready, send them the application link from their detail page. Once they sign and upload bank statements, they graduate to the Opportunity Pipeline.\n4. **Shop the application out.** Open the application card and check **Recommended Lenders** — top fits by FICO, monthly revenue, and time in business. One click forwards the deal to a lender.\n5. **Log the offer.** When a lender returns terms, capture them in Offers. Click **Accept** and the deal rolls into Funded Deals as a draft.\n6. **Watch renewals.** Funded Deals shows the renewal window — anything 40-50% through term is your re-funding focus for the week.\n\n## Behind the scenes\n\n- The **Automations** tab shows the scheduled jobs running on your computer — lead scoring, follow-up checks, daily briefs. You can describe a new one in plain English and your agent writes the script for you.\n- **Settings → Devices** is where you pair the local install. Once paired, the dashboard reads from your machine and your agents can run code in the background." } },
   ],

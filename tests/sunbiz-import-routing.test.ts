@@ -47,8 +47,10 @@ assert.deepEqual(routed, [
   { stage: "dead_file", entityType: "application" },
 ]);
 
+// Migration 064 (2026-05-23): "Inbound" now routes to hot_lead
+// (imported stage was retired; inbound rows are by definition engaged).
 assert.deepEqual(routeSunBizImportStage("Inbound"), {
-  stage: "imported",
+  stage: "hot_lead",
   entityType: "lead",
 });
 assert.deepEqual(routeSunBizImportStage("Declined"), {
@@ -59,8 +61,11 @@ assert.deepEqual(routeSunBizImportStage(null, { hasApplicationEvidence: true }),
   stage: "application_in",
   entityType: "application",
 });
+// Migration 064: legacy "Approved" application status now routes to
+// shopping (offers live on the Offers page now; an approved deal is
+// effectively in the shopping/offer-comparison loop).
 assert.deepEqual(routeSunBizImportStage("Approved", { explicitRecordType: "application" }), {
-  stage: "approved",
+  stage: "shopping",
   entityType: "application",
 });
 

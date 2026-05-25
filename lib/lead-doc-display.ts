@@ -16,9 +16,18 @@
  * application docs the auto-stage engine treats as completion.
  */
 export const LEAD_DOC_TYPES: { key: string; label: string; required: boolean }[] = [
+  // Required (auto-stage engine watches these three — all three present
+  // bumps the lead to hot_lead).
   { key: "bank_statements_3mo", label: "Bank statements (3 months)", required: true },
   { key: "drivers_license", label: "Driver's license", required: true },
   { key: "void_cheque", label: "Void cheque", required: true },
+  // Optional underwriting / Shopping Out support docs (Phase 3 of
+  // Jordan/Oasis 2026-05-23 restructure — Shopping Out attaches these
+  // alongside bank statements when shopping to multiple lenders).
+  { key: "signed_application", label: "Signed application", required: false },
+  { key: "second_application_form", label: "Second application form", required: false },
+  { key: "underwriting_docs", label: "Underwriting docs", required: false },
+  { key: "portal_docs", label: "Portal docs", required: false },
   { key: "proof_of_ownership", label: "Proof of ownership", required: false },
   { key: "business_license", label: "Business license", required: false },
   { key: "tax_returns", label: "Tax returns", required: false },

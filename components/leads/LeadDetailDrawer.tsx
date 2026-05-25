@@ -20,7 +20,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 // useRef intentionally imported for the file-input ref in DocumentsTab.
 import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
-import { X, FileText, ImageIcon, Phone, Mail } from "lucide-react";
+import { X, FileText, ImageIcon, Phone, Mail, ShoppingBag } from "lucide-react";
 import { LeadTimelinePanel } from "./LeadTimelinePanel";
 import { humanLeadDocSize, leadDocTypeLabel, LEAD_DOC_TYPES } from "@/lib/lead-doc-display";
 import { LEAD_PIPELINE_STAGES, OPPORTUNITY_PIPELINE_STAGES, type StageMeta } from "@/lib/sunbiz-stage-meta";
@@ -209,7 +209,23 @@ export function LeadDetailDrawer({
           {/* Row 3: Owner/Signer + Assigned to */}
           {data && <OwnerAssignedRow record={data.record.data} />}
 
-          <div className="flex items-center justify-end">
+          <div className="flex items-center justify-between gap-3">
+            {/* Shop Out — Phase 4 entry point (Jordan/Oasis 2026-05-23).
+                Only on the application drawer; pre-selects this app on the
+                Shopping Out page so the operator picks lenders + previews
+                + sends in one motion. Hidden on the lead drawer (Lead-side
+                shopping doesn't make sense until the application exists). */}
+            {entity === "application" ? (
+              <Link
+                href={`/t/${tenantSlug}/shopping-out?application=${recordId}`}
+                className="inline-flex items-center gap-1.5 text-[10.5px] font-semibold px-2.5 py-1 rounded-md bg-accent/10 text-accent border border-accent/30 hover:bg-accent/20"
+              >
+                <ShoppingBag className="w-3 h-3" />
+                Shop Out
+              </Link>
+            ) : (
+              <span />
+            )}
             <Link
               href={editHref}
               className="text-[10.5px] text-fg-muted hover:text-fg underline underline-offset-2"
@@ -1342,6 +1358,23 @@ function OwnerTab({ record }: { record: Record<string, unknown> }) {
   const phone = str(record.phone) || str(record.contact_phone);
   const email = str(record.email) || str(record.contact_email);
 
+  // Owner address — Phase 3 of Jordan/Oasis 2026-05-23 restructure.
+  // Lives on the application JSONB (or on the lead for legacy rows that
+  // captured it pre-application).
+  const addrLine1 = str(record.owner_address_line1);
+  const addrLine2 = str(record.owner_address_line2);
+  const addrCity = str(record.owner_address_city);
+  const addrState = str(record.owner_address_state);
+  const addrZip = str(record.owner_address_zip);
+  const addressLines: string[] = [];
+  if (addrLine1) addressLines.push(addrLine1);
+  if (addrLine2) addressLines.push(addrLine2);
+  const cityStateZip = [addrCity, [addrState, addrZip].filter(Boolean).join(" ")]
+    .filter(Boolean)
+    .join(", ");
+  if (cityStateZip) addressLines.push(cityStateZip);
+  const hasAddress = addressLines.length > 0;
+
   const legalName = str(record.legal_name) || str(record.business_name);
   const dba = str(record.dba) || legalName;
   const ein = str(record.ein) || str(record.tax_id);
@@ -1377,6 +1410,20 @@ function OwnerTab({ record }: { record: Record<string, unknown> }) {
           <KvRow label="Phone" value={phone} />
           <KvRow label="Email" value={email} />
         </dl>
+        <div className="mt-3 pt-3 border-t border-bg-border">
+          <div className="text-[9.5px] uppercase tracking-wider text-fg-dim mb-1.5">
+            Owner address
+          </div>
+          {hasAddress ? (
+            <div className="text-[12px] text-fg leading-relaxed font-medium">
+              {addressLines.map((line, idx) => (
+                <div key={idx}>{line}</div>
+              ))}
+            </div>
+          ) : (
+            <div className="text-[12px] text-fg-dim italic">—</div>
+          )}
+        </div>
       </div>
 
       <div className="rounded-lg border border-bg-border bg-bg-deep/40 p-3.5">

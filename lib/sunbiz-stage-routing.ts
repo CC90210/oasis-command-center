@@ -20,8 +20,14 @@ const OPP_STAGE_LABELS = new Map(
   OPPORTUNITY_PIPELINE_STAGES.map((s) => [normalizeStageText(s.label), s.key]),
 );
 
+// 2026-05-23: "inbound" alias now routes to hot_lead (imported stage
+// retired in migration 064). "not interested" / "not_interested" added
+// as aliases for declined so legacy inbound payloads still resolve.
 const LEAD_STAGE_ALIASES = new Map<string, string>([
-  ["inbound", "imported"],
+  ["inbound", "hot_lead"],
+  ["imported", "hot_lead"],
+  ["not interested", "declined"],
+  ["not_interested", "declined"],
   ["application sent", "sent_application"],
   ["sent app", "sent_application"],
   ["app sent", "sent_application"],
@@ -34,8 +40,17 @@ const LEAD_STAGE_ALIASES = new Map<string, string>([
   ["hot", "hot_lead"],
   ["missing", "missing_info"],
   ["decline", "declined"],
+  ["approved", "submitted"],
 ]);
 
+// Migration 064 (2026-05-23): legacy aliases that previously mapped to
+// retired stages now route to their consolidation targets so historical
+// imports / inbound payloads still resolve cleanly:
+//   submitted_to_underwriting → shopping
+//   approved / approved_open_offers / selling → shopping
+//   contracts_ordered → docs_out
+//   approved_never_funded → dead_file
+//   no_offers_available → declined
 const APPLICATION_STAGE_ALIASES = new Map<string, string>([
   ["application in", "application_in"],
   ["app in", "application_in"],
@@ -45,14 +60,14 @@ const APPLICATION_STAGE_ALIASES = new Map<string, string>([
   ["shop out", "shopping"],
   ["shopout", "shopping"],
   ["submitted", "shopping"],
-  ["submitted to underwriting", "submitted_to_underwriting"],
-  ["underwriting", "submitted_to_underwriting"],
+  ["submitted to underwriting", "shopping"],
+  ["underwriting", "shopping"],
   ["missing", "missing_info"],
   ["missing info", "missing_info"],
-  ["approved", "approved"],
-  ["approved open offers", "approved_open_offers"],
-  ["open offers", "approved_open_offers"],
-  ["selling", "selling"],
+  ["approved", "shopping"],
+  ["approved open offers", "shopping"],
+  ["open offers", "shopping"],
+  ["selling", "shopping"],
   ["requested docs", "requested_docs"],
   ["docs requested", "requested_docs"],
   ["docs out", "docs_out"],
@@ -68,14 +83,14 @@ const APPLICATION_STAGE_ALIASES = new Map<string, string>([
   ["decline", "declined"],
   ["dead", "dead_file"],
   ["dead file", "dead_file"],
-  ["contracts ordered", "contracts_ordered"],
-  ["contract ordered", "contracts_ordered"],
-  ["contract out", "contracts_ordered"],
-  ["approved never funded", "approved_never_funded"],
-  ["never funded", "approved_never_funded"],
-  ["no offers available", "no_offers_available"],
-  ["no offer", "no_offers_available"],
-  ["no offers", "no_offers_available"],
+  ["contracts ordered", "docs_out"],
+  ["contract ordered", "docs_out"],
+  ["contract out", "docs_out"],
+  ["approved never funded", "dead_file"],
+  ["never funded", "dead_file"],
+  ["no offers available", "declined"],
+  ["no offer", "declined"],
+  ["no offers", "declined"],
 ]);
 
 const APPLICATION_RECORD_TYPES = new Set(["application", "opportunity", "deal"]);
@@ -96,7 +111,7 @@ export function routeSunBizImportStage(
     if (explicitApplication || hasApplicationEvidence) {
       return { stage: "application_in", entityType: "application" };
     }
-    return { stage: "imported", entityType: "lead" };
+    return { stage: "hot_lead", entityType: "lead" };
   }
 
   const directOpportunity = resolveOpportunityStage(stageText);

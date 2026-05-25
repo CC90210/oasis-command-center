@@ -1,5 +1,5 @@
 import { Card, PageHeader, Stat, EmptyState, Tag } from "@/components/Card";
-import { Flame, Clock, CalendarDays, TrendingUp, Phone, Mail, ChevronRight } from "lucide-react";
+import { Flame, Clock, CalendarDays, TrendingUp, Phone, Mail, ChevronRight, AlertCircle } from "lucide-react";
 import {
   getActiveProfile,
   getRenewalsSummary,
@@ -39,6 +39,35 @@ function initialsOf(name: string | null | undefined): string {
   return parts.map((part) => part[0]?.toUpperCase() || "").join("") || "??";
 }
 
+/**
+ * Renewal progress 0-100 — how far the deal is between funded_at and
+ * next_renewal_date. >=100 means the deal is at or past renewal
+ * eligibility (operator should be re-shopping NOW). Returns null when
+ * either timestamp is missing — UI renders "Needs Data" instead.
+ *
+ * Phase 8 of the Jordan/Oasis 2026-05-23 restructure. Eligibility
+ * threshold defaults to 40% but the SUN_SEED.settings block can
+ * override per-tenant (migration 064 patches the field).
+ */
+function renewalProgress(row: FundedDealRow): number | null {
+  if (!row.funded_at || !row.next_renewal_date) return null;
+  const funded = new Date(row.funded_at).getTime();
+  const renewal = new Date(row.next_renewal_date).getTime();
+  if (!Number.isFinite(funded) || !Number.isFinite(renewal) || renewal <= funded) return null;
+  const now = Date.now();
+  const pct = ((now - funded) / (renewal - funded)) * 100;
+  return Math.max(0, Math.round(pct));
+}
+
+function sortByUrgency(a: FundedDealRow, b: FundedDealRow): number {
+  // Past due first (descending — most overdue at top), then closest
+  // upcoming, then no-date stragglers.
+  if (!a.next_renewal_date && !b.next_renewal_date) return 0;
+  if (!a.next_renewal_date) return 1;
+  if (!b.next_renewal_date) return -1;
+  return new Date(a.next_renewal_date).getTime() - new Date(b.next_renewal_date).getTime();
+}
+
 function groupRows(rows: FundedDealRow[]): { label: string; rows: FundedDealRow[]; subtotal: number }[] {
   const now = new Date();
   const in60 = new Date(now);
@@ -59,6 +88,13 @@ function groupRows(rows: FundedDealRow[]): { label: string; rows: FundedDealRow[
     else if (date <= in60) next60.push(row);
     else later.push(row);
   }
+
+  // Sort each bucket ascending by date so the most-urgent row in each
+  // group floats to the top. Past Due is already "most overdue first"
+  // since older dates sort earlier.
+  past.sort(sortByUrgency);
+  next60.sort(sortByUrgency);
+  later.sort(sortByUrgency);
 
   const subtotal = (group: FundedDealRow[]) =>
     group.reduce((sum, row) => sum + Number(row.funded_amount_usd || 0), 0);
@@ -215,6 +251,13 @@ export default async function RenewalsPage() {
 function RenewalRow({ row }: { row: FundedDealRow }) {
   const days = daysUntil(row.next_renewal_date);
   const hasLender = !!row.lender_name;
+  const progress = renewalProgress(row);
+  const needsData = !row.funded_at || !row.next_renewal_date;
+  // Wire the previously-inert call/email buttons (Phase 8). tel: + mailto:
+  // pull data from the FundedDealRow itself; if no phone/email available
+  // the buttons render disabled.
+  const phone = (row as FundedDealRow & { contact_phone?: string }).contact_phone || null;
+  const email = (row as FundedDealRow & { contact_email?: string }).contact_email || null;
   return (
     <div className="flex items-center gap-4 px-5 py-3 hover:bg-bg-hover/30 transition-colors">
       <div className="w-8 h-8 rounded-full bg-bg-elev border border-bg-border flex items-center justify-center text-fg-muted text-[10px] font-bold flex-shrink-0">
@@ -226,10 +269,34 @@ function RenewalRow({ row }: { row: FundedDealRow }) {
           {days !== null && days >= 0 && days <= 60 && (
             <Tag tone={days <= 7 ? "warm" : "info"}>in {days}d</Tag>
           )}
+          {needsData && (
+            <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[9.5px] font-mono uppercase tracking-wider bg-amber-500/15 text-amber-300 border border-amber-500/30">
+              <AlertCircle size={9} /> Needs Data
+            </span>
+          )}
         </div>
         <div className="text-fg-dim text-xs">
           {row.contact_name || "-"} · {hasLender ? row.lender_name : "No lender assigned"}
         </div>
+        {progress !== null && (
+          <div className="mt-1.5 flex items-center gap-2">
+            <div className="flex-1 h-1 bg-bg-elev rounded-full overflow-hidden">
+              <div
+                className={`h-full rounded-full transition-all ${
+                  progress >= 100
+                    ? "bg-red-500"
+                    : progress >= 75
+                      ? "bg-amber-500"
+                      : "bg-accent"
+                }`}
+                style={{ width: `${Math.min(100, progress)}%` }}
+              />
+            </div>
+            <span className="text-[10px] font-mono text-fg-dim w-10 text-right">
+              {progress}%
+            </span>
+          </div>
+        )}
       </div>
       <div className="text-right flex-shrink-0">
         <div className="text-[10px] uppercase tracking-wider text-fg-faint">Renewal</div>
@@ -251,18 +318,42 @@ function RenewalRow({ row }: { row: FundedDealRow }) {
         </div>
       </div>
       <div className="flex items-center gap-2 text-fg-dim flex-shrink-0">
-        <button
-          className="hover:text-fg p-1 transition-colors"
-          title={`Call ${row.contact_name || "merchant"}`}
-        >
-          <Phone size={14} />
-        </button>
-        <button
-          className="hover:text-fg p-1 transition-colors"
-          title={`Email ${row.contact_name || "merchant"}`}
-        >
-          <Mail size={14} />
-        </button>
+        {phone ? (
+          <a
+            href={`tel:${phone}`}
+            className="hover:text-fg p-1 transition-colors"
+            title={`Call ${row.contact_name || "merchant"} — ${phone}`}
+          >
+            <Phone size={14} />
+          </a>
+        ) : (
+          <button
+            type="button"
+            disabled
+            className="opacity-30 p-1 cursor-not-allowed"
+            title="No phone on file"
+          >
+            <Phone size={14} />
+          </button>
+        )}
+        {email ? (
+          <a
+            href={`mailto:${email}?subject=Renewal%20opportunity%20—%20${encodeURIComponent(row.merchant_name || "")}`}
+            className="hover:text-fg p-1 transition-colors"
+            title={`Email ${row.contact_name || "merchant"} — ${email}`}
+          >
+            <Mail size={14} />
+          </a>
+        ) : (
+          <button
+            type="button"
+            disabled
+            className="opacity-30 p-1 cursor-not-allowed"
+            title="No email on file"
+          >
+            <Mail size={14} />
+          </button>
+        )}
         <ChevronRight size={14} className="text-fg-faint" />
       </div>
     </div>

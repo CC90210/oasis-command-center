@@ -5,7 +5,8 @@
  * tenant's slug:
  *
  *   - SunBiz (slug starts with "sun" or "submissions") → lib/lead-stage-engine.ts
- *     (Salesforce-parity funding funnel: imported → hot_lead → ... → submitted)
+ *     (Salesforce-parity funding funnel: hot_lead → ... → submitted;
+ *     migration 064 retired imported / not_interested / approved)
  *
  *   - OASIS (slug starts with "oasis") → lib/oasis-lead-stage-engine.ts
  *     (AI-agency lifecycle: new_contact → outreach → ... → active_client)

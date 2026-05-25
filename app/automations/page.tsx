@@ -10,6 +10,7 @@ import { PageHeader } from "@/components/Card";
 import { CronJobsManager } from "@/components/automations/CronJobsManager";
 import { BackgroundWorkersPanel } from "@/components/automations/BackgroundWorkersPanel";
 import { DescribeAutomationFlow } from "@/components/automations/DescribeAutomationFlow";
+import { AgentsModulesStatusBoard } from "@/components/automations/AgentsModulesStatusBoard";
 import { getActiveProfile, getBridgeOnline } from "@/lib/queries";
 import { chatAgentKeys } from "@/lib/agent-personas";
 import { safe } from "@/lib/api-helpers";
@@ -145,6 +146,11 @@ export default async function AutomationsPage() {
 
       {profile ? (
         <>
+          {/* Phase 11 (Jordan/Oasis 2026-05-23) — Agents & modules status
+              board above the cron manager. Honest Live/Planned badges per
+              backend module; no claims of automation that isn't actually
+              wired. */}
+          <AgentsModulesStatusBoard />
           <DescribeAutomationFlow />
           <CronJobsManager
             agentKeys={chatAgentKeys().filter((k) =>

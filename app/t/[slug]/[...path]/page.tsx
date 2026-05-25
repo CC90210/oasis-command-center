@@ -9,6 +9,9 @@ import { ManifestDashboard } from "@/components/manifest/ManifestDashboard";
 import { ManifestRecordForm } from "@/components/manifest/ManifestRecordForm";
 import { ManifestReasoning } from "@/components/manifest/ManifestReasoning";
 import { LeadsImportClient } from "@/components/leads/LeadsImportClient";
+import { ShoppingOutClient } from "@/components/shopping-out/ShoppingOutClient";
+import { OffersByDealClient } from "@/components/offers/OffersByDealClient";
+import { LendersDirectoryClient } from "@/components/lenders/LendersDirectoryClient";
 import { LeadTimelinePanel } from "@/components/leads/LeadTimelinePanel";
 import { LeadDocumentsPanel } from "@/components/leads/LeadDocumentsPanel";
 import { StageRail } from "@/components/manifest/StageRail";
@@ -365,6 +368,9 @@ function renderSubtitle(brand: string, page: ManifestPageDef): string {
     case "import": return "Paste a CSV or drop a file. Duplicate-check is automatic.";
     case "pipeline": return "Lead Pipeline and Opportunity Pipeline — Salesforce-parity overview.";
     case "pipeline_entity": return page.entity ? `${humanizeEntity(page.entity)} by stage` : "Pipeline";
+    case "shopping_out": return "Multi-lender outreach — pick lenders, attach docs, send.";
+    case "offers_v2": return "Offers by deal — lender intelligence, accordion + kanban views.";
+    case "lenders_v2": return "Lender directory — buy rates, restricted states, decline reasons.";
     default: return brand;
   }
 }
@@ -406,6 +412,35 @@ async function PageBody({
       // happens inside the API route so a viewer in preview-mode can't
       // accidentally bulk-insert into someone else's leads table.
       return <LeadsImportClient />;
+    case "shopping_out":
+      // Phase 4 (Jordan/Oasis 2026-05-23). Multi-lender outreach UI;
+      // ranks lenders via lib/lenders/match-fitness, attaches docs,
+      // POSTs to /api/applications/[id]/shop-out, surfaces resulting
+      // application_lender_threads. Tenant-scoped reads in the client.
+      return (
+        <ShoppingOutClient
+          tenantSlug={slug}
+          tenantId={tenantId}
+        />
+      );
+    case "offers_v2":
+      // Phase 6 (Jordan/Oasis 2026-05-23). Deal-first accordion + kanban
+      // toggle over application_lender_threads grouped by application.
+      return (
+        <OffersByDealClient
+          tenantSlug={slug}
+          tenantId={tenantId}
+        />
+      );
+    case "lenders_v2":
+      // Phase 7 (Jordan/Oasis 2026-05-23). Lender knowledge base — table
+      // + LenderDetailDrawer with the expanded field set.
+      return (
+        <LendersDirectoryClient
+          tenantSlug={slug}
+          tenantId={tenantId}
+        />
+      );
     case "pipeline": {
       // Stacked superview — Lead Pipeline above Opportunity Pipeline.
       // Each section has its own chevron bar + filtered table. Filter
