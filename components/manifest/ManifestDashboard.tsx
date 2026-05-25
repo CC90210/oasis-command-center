@@ -378,7 +378,12 @@ async function SunBizActionBand({
   slug: string;
   tenantId: string | null;
 }) {
-  if (!tenantId) return null;
+  // Preview mode (operator viewing a tenant they don't own) renders
+  // the 3-card band with zero counts instead of hiding it. Matches the
+  // same "render scaffold with empty data" pattern the v2 surfaces use
+  // (Offers / Renewals / Lenders / Shopping Out) — consistency fix
+  // 2026-05-25. No queries fire when tenantId is null.
+  const previewMode = !tenantId;
 
   const sb = getServiceSupabase();
   const SEVEN_DAYS_AGO_ISO = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
@@ -388,7 +393,20 @@ async function SunBizActionBand({
   // Renewal summary reuses the same query the /renewals page uses so
   // the card's count matches what the user sees when they click through
   // (Codex review 2026-05-24 — was hardcoded to 0).
-  const [reviewRes, shoppingRes, renewals] = await Promise.all([
+  const [reviewRes, shoppingRes, renewals] = previewMode
+    ? [
+        { error: null, count: 0 } as const,
+        { error: null, count: 0 } as const,
+        {
+          past_due_count: 0,
+          this_week_count: 0,
+          this_month_count: 0,
+          est_commission_total_usd: 0,
+          total_with_dates: 0,
+          total_no_date: 0,
+        },
+      ]
+    : await Promise.all([
     sb
       .from("application_lender_threads")
       .select("id, status, last_error", { count: "exact", head: false })
