@@ -10,7 +10,11 @@ import { useEffect, useState } from "react";
  * button is the user-driven path. Auto-fire just primes the prompt.
  */
 export function DesktopLinkClient({
-  code,
+  // `code` is part of the props contract (server passes it from the
+  // pair-code lookup) but isn't surfaced in the client UI — the deepLink
+  // already encodes it. Underscore prefix satisfies the eslint
+  // /^_/u allowlist while keeping the type contract intact.
+  code: _code,
   deepLink,
   expiresMinutes,
   host,

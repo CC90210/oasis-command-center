@@ -19,7 +19,7 @@
  */
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Card, Tag } from "@/components/Card";
+import { Card } from "@/components/Card";
 import { formatMoney } from "@/lib/format-helpers";
 import {
   ChevronDown,

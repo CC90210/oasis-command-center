@@ -227,7 +227,6 @@ export default async function RootLayout({
             then visibly jolts when React hydrates with the collapsed
             value. */}
         <script
-          // eslint-disable-next-line react/no-danger
           dangerouslySetInnerHTML={{ __html: SIDEBAR_BOOT_SCRIPT }}
         />
       </head>

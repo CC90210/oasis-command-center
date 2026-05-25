@@ -272,7 +272,12 @@ export function AgentChat({
         inputRef.current?.focus();
       }
     },
-    [tenantSlug, agentSlug, streaming, turns]
+    // planMode is read on send (chat_mode payload); setPlanMode is
+    // called by the /plan and /build slash commands inside this same
+    // callback. Both belong in the dep array per
+    // react-hooks/exhaustive-deps. setPlanMode is stable (returned
+    // from usePlanMode) so adding it is free.
+    [tenantSlug, agentSlug, streaming, turns, planMode, setPlanMode]
   );
 
   const handleSubmit = (e: React.FormEvent) => {

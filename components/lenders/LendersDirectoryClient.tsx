@@ -15,7 +15,6 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Card } from "@/components/Card";
 import { formatMoney, relTime } from "@/lib/format-helpers";
 import { Landmark, Loader2, Plus, Save, Trash2, X } from "lucide-react";
 
