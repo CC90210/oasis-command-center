@@ -286,12 +286,19 @@ export function CronJobsManager({ agentKeys }: Props) {
             const tenantCount = jobs.filter((j) => j.source === "tenant").length;
             const empireCount = jobs.filter((j) => j.source === "empire").length;
             const activeCount = jobs.filter((j) => j.enabled).length;
+            // Honest, unambiguous labels (CC asked 2026-05-25 "what
+            // even are those metrics"). The "empire" split only shows
+            // when the signed-in user is the empire operator AND
+            // there's at least one empire row — otherwise the line
+            // collapses to "N automations · M active".
             const parts = [
               `${jobs.length} automation${jobs.length === 1 ? "" : "s"}`,
               `${activeCount} active`,
             ];
             if (empireCount > 0) {
-              parts.push(`${tenantCount} tenant · ${empireCount} empire`);
+              parts.push(
+                `${tenantCount} for this workspace · ${empireCount} empire-wide (operator-only)`,
+              );
             }
             return parts.join(" · ");
           })()}

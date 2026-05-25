@@ -11,11 +11,12 @@ import { CronJobsManager } from "@/components/automations/CronJobsManager";
 import { BackgroundWorkersPanel } from "@/components/automations/BackgroundWorkersPanel";
 import { DescribeAutomationFlow } from "@/components/automations/DescribeAutomationFlow";
 import { AgentsModulesStatusBoard } from "@/components/automations/AgentsModulesStatusBoard";
-import { getActiveProfile, getBridgeOnline } from "@/lib/queries";
+import { getActiveProfile, getBridgeOnline, getTenant } from "@/lib/queries";
 import { chatAgentKeys } from "@/lib/agent-personas";
 import { safe } from "@/lib/api-helpers";
 import { isOperatorEmail } from "@/lib/operator-credentials";
 import { getSessionUser } from "@/lib/supabase-server";
+import { resolveClientProfileSlug } from "@/lib/client-profiles";
 import { Clock, Cpu, Cloud, Download } from "lucide-react";
 import Link from "next/link";
 
@@ -36,6 +37,24 @@ export default async function AutomationsPage() {
   // 2026-05-18" so the operator can see it's no longer running.
   const user = await getSessionUser().catch(() => null);
   const isOperator = isOperatorEmail(user?.email || undefined);
+
+  // Resolve the signed-in user's tenant slug. Passed to
+  // AgentsModulesStatusBoard so it ONLY renders the module list for
+  // the tenant being viewed — CC on OASIS won't see SunBiz funding-
+  // flow modules, Ezra on Sun Biz won't see OASIS-specific modules
+  // (when those exist). Closes the cross-tenant leak CC flagged
+  // 2026-05-25.
+  const tenantIdForSlug = profile?.tenant_id ?? null;
+  const tenantSlug = tenantIdForSlug
+    ? await safe(
+        "automations.tenant_slug",
+        (async () => {
+          const t = await getTenant(tenantIdForSlug);
+          return t ? resolveClientProfileSlug(t) : null;
+        })(),
+        null,
+      )
+    : null;
 
   return (
     <div className="space-y-6 animate-fade-in">
@@ -149,9 +168,11 @@ export default async function AutomationsPage() {
           {/* Phase 11 (Jordan/Oasis 2026-05-23). Order matters and was
               reversed 2026-05-24 per CC: Describe-first (operator's
               entry point for creating new automations), then the honest
-              Agents & Modules status board, then the live cron list. */}
+              Agents & Modules status board, then the live cron list.
+              Board is tenant-scoped (2026-05-25 leak fix) — returns
+              null for tenants with no registered modules. */}
           <DescribeAutomationFlow />
-          <AgentsModulesStatusBoard />
+          <AgentsModulesStatusBoard tenantSlug={tenantSlug} />
           <CronJobsManager
             agentKeys={chatAgentKeys().filter((k) =>
               (profile.agents_enabled || chatAgentKeys()).includes(k),

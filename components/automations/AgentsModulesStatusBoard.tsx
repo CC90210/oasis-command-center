@@ -1,17 +1,22 @@
 /**
- * Agents & Modules status board — Phase 11 of the Jordan/Oasis
- * 2026-05-23 restructure.
+ * Agents & Modules status board — tenant-scoped status grid.
  *
- * Renders an HONEST status grid of the backend automation modules
- * that power the SunBiz pipeline. Live vs Planned reflects whether
- * the supporting code actually exists and is wired into a request
- * path — not whether the operator has it switched on for their
- * tenant. Sits ABOVE the cron-jobs manager so operators see the
- * full automation surface (modules + custom crons) on one page.
+ * Originally shipped as Phase 11 of the Jordan/Oasis 2026-05-23
+ * restructure with a hardcoded SunBiz module list. CC flagged the
+ * cross-tenant leak 2026-05-25: those SunBiz modules (Email Offer
+ * Scanner, Shopping Out Sender, Lender Matching Agent, ...) were
+ * rendering on the OASIS /automations view too. They have nothing
+ * to do with OASIS operations.
  *
- * No fetching here — module presence is a build-time fact. The
- * cron-jobs manager below this component handles the per-tenant
- * dynamic schedule layer.
+ * Fix: keyed the module list by tenant slug. The board returns null
+ * when the viewing tenant has no modules registered — OASIS sees
+ * nothing (correctly), Sun Biz sees its 9 funding-flow modules,
+ * future tenants get their own lists by adding a MODULES_BY_TENANT
+ * entry.
+ *
+ * Renders an HONEST status grid per tenant. Live vs Planned reflects
+ * whether the supporting code actually exists and is wired into a
+ * request path — not whether the operator has it switched on.
  */
 
 import { Card } from "@/components/Card";
@@ -40,7 +45,7 @@ type Module = {
   connected: string;
 };
 
-const MODULES: Module[] = [
+const SUNBIZ_MODULES: Module[] = [
   {
     key: "email_offer_scanner",
     name: "Email Offer Scanner",
@@ -147,14 +152,47 @@ const STATUS_LABEL: Record<ModuleStatus, string> = {
   planned: "Planned",
 };
 
-export function AgentsModulesStatusBoard() {
+/**
+ * Module list per tenant slug. Tenants without an entry get an empty
+ * list — the board returns null and nothing renders. This prevents
+ * the SunBiz funding-flow modules from leaking onto OASIS / SUGA /
+ * any other tenant view (the 2026-05-25 leak CC flagged: signed in
+ * as conaugh@oasisai.work on /automations was showing Email Offer
+ * Scanner / Shopping Out Sender / Lender Matching Agent etc. — none
+ * of which exist for OASIS).
+ *
+ * Adding a new tenant's module list is a one-line entry here. OASIS
+ * intentionally has no entry — its automation surface is the empire
+ * cron jobs visible below (operator-only via isOperatorEmail).
+ */
+const MODULES_BY_TENANT: Record<string, Module[]> = {
+  sun: SUNBIZ_MODULES,
+};
+
+export function AgentsModulesStatusBoard({
+  tenantSlug,
+}: {
+  /** Signed-in user's tenant slug. When undefined / not in
+   *  MODULES_BY_TENANT, the board returns null and the parent page
+   *  renders without it. */
+  tenantSlug?: string | null;
+}) {
+  const slug = (tenantSlug || "").toLowerCase();
+  const modules = slug ? MODULES_BY_TENANT[slug] : undefined;
+  if (!modules || modules.length === 0) {
+    // Honest no-op for tenants without registered modules. OASIS and
+    // any future tenant whose automations are 100% cron-driven get
+    // this branch.
+    return null;
+  }
+
   return (
     <Card
       title="Agents & modules"
       subtitle="Honest status board for the backend modules powering this workspace. Live = wired and serving requests. Planned = on the roadmap, not running."
     >
       <ul className="grid gap-2 sm:grid-cols-2">
-        {MODULES.map((m) => {
+        {modules.map((m) => {
           const Icon = m.icon;
           return (
             <li
