@@ -395,6 +395,41 @@ export async function SettingsContent({
  * Sections hidden (user-scoped, no tenant equivalent): Profile,
  * Known facts, Password, Plan templates, Just-for-me overrides.
  */
+/**
+ * Preview-mode scaffold cards — kept as one list so future tenants
+ * adopting the `settings` page kind get a consistent shape with one
+ * edit. Add/remove a card by editing this array; the renderer below
+ * stays unchanged.
+ */
+const PREVIEW_SECTIONS: { id?: string; title: string; subtitle: string; empty: string }[] = [
+  {
+    title: "Branding",
+    subtitle: "Logo + name shown on this tenant's forms, public pages, and dashboard chrome.",
+    empty: "No brand set yet. The tenant operator can upload a logo from this section once signed in.",
+  },
+  {
+    title: "Team",
+    subtitle: "Tenant operator + invited teammates.",
+    empty: "No team members visible in preview mode. The tenant operator manages invites here once signed in.",
+  },
+  {
+    title: "Devices (advanced)",
+    subtitle: "Machines paired by this tenant to run the local bridge — gives the tenant's agents file-system, bash, and full MCP access.",
+    empty: "No devices paired for this tenant yet. The tenant operator pairs machines from here once signed in.",
+  },
+  {
+    id: "providers",
+    title: "AI setup",
+    subtitle: "AI provider account(s) connected to this tenant. Powers chat + agent reasoning for everyone in the tenant.",
+    empty: "No AI providers connected to this tenant yet. The tenant operator connects them from here once signed in.",
+  },
+  {
+    title: "Integration health",
+    subtitle: "Read-only status across the systems this tenant's enabled agents use.",
+    empty: "No integration data in preview mode.",
+  },
+];
+
 function PreviewSettings({ tenantSlug, hideHeader }: { tenantSlug: string; hideHeader: boolean }) {
   return (
     <div className="space-y-6 animate-fade-in">
@@ -405,42 +440,11 @@ function PreviewSettings({ tenantSlug, hideHeader }: { tenantSlug: string; hideH
           action={<Tag tone="warm">Preview · not signed in as tenant</Tag>}
         />
       )}
-
-      <Card
-        title="Branding"
-        subtitle="Logo + name shown on this tenant's forms, public pages, and dashboard chrome."
-      >
-        <EmptyState message="No brand set yet. The tenant operator can upload a logo from this section once signed in." />
-      </Card>
-
-      <Card
-        title="Team"
-        subtitle="Tenant operator + invited teammates."
-      >
-        <EmptyState message="No team members visible in preview mode. The tenant operator manages invites here once signed in." />
-      </Card>
-
-      <Card
-        title="Devices (advanced)"
-        subtitle="Machines paired by this tenant to run the local bridge — gives the tenant's agents file-system, bash, and full MCP access."
-      >
-        <EmptyState message="No devices paired for this tenant yet. The tenant operator pairs machines from here once signed in." />
-      </Card>
-
-      <Card
-        id="providers"
-        title="AI setup"
-        subtitle="AI provider account(s) connected to this tenant. Powers chat + agent reasoning for everyone in the tenant."
-      >
-        <EmptyState message="No AI providers connected to this tenant yet. The tenant operator connects them from here once signed in." />
-      </Card>
-
-      <Card
-        title="Integration health"
-        subtitle="Read-only status across the systems this tenant's enabled agents use."
-      >
-        <EmptyState message="No integration data in preview mode." />
-      </Card>
+      {PREVIEW_SECTIONS.map((s) => (
+        <Card key={s.title} id={s.id} title={s.title} subtitle={s.subtitle}>
+          <EmptyState message={s.empty} />
+        </Card>
+      ))}
     </div>
   );
 }
