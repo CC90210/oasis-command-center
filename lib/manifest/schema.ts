@@ -125,6 +125,17 @@ export type ManifestAgentBinding = {
 // Pages & Data Model (Phase 2 renderer consumes these; Phase 1 keeps them
 // optional and lets the existing route layer render until the catch-all
 // renderer is ready)
+//
+// V6.9.0 (migration 070, 2026-05-25) — `data_model[]` is no longer the only
+// source of truth for entity schemas. The new `object_metadata` +
+// `field_metadata` tables (DB-backed registry) take precedence at the
+// introspector layer (lib/schema-introspector.ts):
+//   1. DB row matching (tenant_id, slug) → wins
+//   2. manifest.data_model[] inline entry matching name → legacy fallback
+// Forward-only: existing inline entities keep working unchanged; new entity
+// types added through the AI manifest editor (V6.9.4) write DB rows.
+// `ManifestObjectMetadataRef` below is the future explicit-pointer shape;
+// not wired into TenantManifest yet (introspector probes DB first anyway).
 // ---------------------------------------------------------------------------
 
 export type ManifestPageKind =
@@ -191,6 +202,17 @@ export type ManifestEntityDef = {
   name: string;
   label: string;
   fields: ManifestEntityField[];
+};
+
+/**
+ * V6.9.0 — explicit pointer to a DB-backed object_metadata row, as an
+ * alternative to inline `ManifestEntityDef`. Not yet a top-level manifest
+ * field; reserved for V6.9.4's AI manifest editor which can emit either
+ * inline entities (legacy) or refs (DB-backed). Until then the
+ * schema-introspector handles DB-vs-manifest precedence transparently.
+ */
+export type ManifestObjectMetadataRef = {
+  object_metadata_slug: string;
 };
 
 // ---------------------------------------------------------------------------
