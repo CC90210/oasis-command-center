@@ -5,6 +5,11 @@
  * created, with quick actions: enable/disable, copy slug, open editor,
  * delete. "New form" button creates a stub form with one empty step,
  * then redirects to the editor for the operator to flesh out.
+ *
+ * Phase 3.4 (2026-05-25): When the resolved tenant slug is "sun", renders
+ * SunBizFormsClient instead of FormsListClient — the SunBiz surface shows
+ * the three-step funnel cards (Initial Lead Capture, Full Application,
+ * Bank Statement Upload) with status pills + create-from-template buttons.
  */
 
 import { PageHeader } from "@/components/Card";
@@ -12,6 +17,7 @@ import { getActiveProfile, getTenant } from "@/lib/queries";
 import { getSessionUser, getServiceSupabase } from "@/lib/supabase-server";
 import { safe, isMissingTableError } from "@/lib/api-helpers";
 import { FormsListClient } from "@/components/forms/FormsListClient";
+import { SunBizFormsClient } from "@/components/forms/SunBizFormsClient";
 import { AlertCircle } from "lucide-react";
 import { redirect } from "next/navigation";
 
@@ -105,13 +111,18 @@ export default async function FormsPage() {
         </div>
       )}
 
-      {result.ok && (
+      {result.ok && tenantSlug === "sun" ? (
+        <SunBizFormsClient
+          initialRows={result.rows}
+          tenantSlug={tenantSlug}
+        />
+      ) : result.ok ? (
         <FormsListClient
           initialRows={result.rows}
           tenantLogoUrl={tenantLogoUrl}
           tenantSlug={tenantSlug}
         />
-      )}
+      ) : null}
     </div>
   );
 }

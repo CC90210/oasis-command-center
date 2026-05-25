@@ -1,0 +1,477 @@
+"use client";
+
+/**
+ * SunBizFormsClient — SunBiz-specific Forms surface for /forms (Phase 3.4).
+ *
+ * Renders three prominent step cards at the top (Initial Lead Capture,
+ * Full Application, Bank Statement Upload), each showing a status pill
+ * and quick-action buttons. Below the cards: any other forms for this
+ * tenant that don't match the three SunBiz slugs ("Other forms").
+ *
+ * Detection: a form IS a SunBiz step iff its slug matches one of the
+ * three canonical slugs below. If an operator edits the slug in the
+ * form editor to something else, the form silently drops from the step
+ * group and appears under "Other forms" instead — by design.
+ *
+ * Wired into app/forms/page.tsx when tenant slug === "sun".
+ */
+
+import { useState, useRef, useCallback } from "react";
+import { useRouter } from "next/navigation";
+import Link from "next/link";
+import {
+  FileText,
+  CheckCircle2,
+  AlertCircle,
+  Edit3,
+  Eye,
+  Copy,
+  Sparkles,
+  Loader2,
+  Check,
+  X,
+} from "lucide-react";
+
+// ---------------------------------------------------------------------------
+// Types
+// ---------------------------------------------------------------------------
+
+type FormRow = {
+  id: string;
+  slug: string;
+  name: string;
+  description: string | null;
+  enabled: boolean;
+  created_at: string;
+  updated_at: string;
+};
+
+type SunBizStepSlug =
+  | "initial-lead-capture"
+  | "full-application"
+  | "bank-statement-upload";
+
+type StepSpec = {
+  slug: SunBizStepSlug;
+  stepNumber: 1 | 2 | 3;
+  title: string;
+  description: string;
+};
+
+// ---------------------------------------------------------------------------
+// Step spec — source of truth for ordering + display copy
+// ---------------------------------------------------------------------------
+
+const STEP_SPECS: StepSpec[] = [
+  {
+    slug: "initial-lead-capture",
+    stepNumber: 1,
+    title: "Initial Lead Capture",
+    description:
+      "First touch. Captures business name, contact, phone, email, and a one-line note. Sent via personalized link.",
+  },
+  {
+    slug: "full-application",
+    stepNumber: 2,
+    title: "Full Application",
+    description:
+      "Comprehensive application. All the fields a lender needs — business identity, owner info, financials, and document uploads.",
+  },
+  {
+    slug: "bank-statement-upload",
+    stepNumber: 3,
+    title: "Bank Statement Upload",
+    description:
+      "Lightweight follow-up form for any lead missing statements. Just 3 file slots + a confirmation checkbox.",
+  },
+];
+
+const SUNBIZ_SLUGS: Set<string> = new Set(STEP_SPECS.map((s) => s.slug));
+
+// ---------------------------------------------------------------------------
+// Status pill
+// ---------------------------------------------------------------------------
+
+type PillState = "active" | "disabled" | "missing";
+
+function StatusPill({ state }: { state: PillState }) {
+  if (state === "active") {
+    return (
+      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-500/15 text-emerald-400">
+        <CheckCircle2 className="w-3 h-3" />
+        Active
+      </span>
+    );
+  }
+  if (state === "disabled") {
+    return (
+      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-500/15 text-amber-400">
+        <AlertCircle className="w-3 h-3" />
+        Not configured
+      </span>
+    );
+  }
+  return (
+    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-red-500/15 text-red-400">
+      <AlertCircle className="w-3 h-3" />
+      Missing — create now
+    </span>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Preview modal
+// ---------------------------------------------------------------------------
+
+function PreviewModal({
+  tenantSlug,
+  formSlug,
+  onClose,
+}: {
+  tenantSlug: string;
+  formSlug: string;
+  onClose: () => void;
+}) {
+  const sampleUrl = `${window.location.origin}/f/${tenantSlug}/${formSlug}/v1.<sample-payload>.<sample-sig>`;
+  const [copied, setCopied] = useState(false);
+
+  async function handleCopy() {
+    try {
+      await navigator.clipboard.writeText(sampleUrl);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1800);
+    } catch {
+      window.prompt("Copy this URL:", sampleUrl);
+    }
+  }
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-bg-deep/80 backdrop-blur-sm p-4"
+      onClick={onClose}
+    >
+      <div
+        className="relative w-full max-w-lg rounded-xl border border-bg-border bg-bg-panel shadow-card p-6 space-y-4"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <button
+          type="button"
+          onClick={onClose}
+          className="absolute top-4 right-4 text-fg-dim hover:text-fg"
+        >
+          <X className="w-4 h-4" />
+        </button>
+
+        <div className="space-y-1">
+          <div className="text-xs font-bold uppercase tracking-[0.14em] text-fg-muted">
+            Personalized link preview
+          </div>
+          <div className="text-sm text-fg">
+            This is what a per-lead URL looks like. The token segment is an
+            HMAC-signed payload — generated by Solara when it mints a link for
+            a specific lead. The placeholder below is illustrative only; no real
+            lead token is exposed here.
+          </div>
+        </div>
+
+        <div className="rounded-lg bg-bg-deep border border-bg-border p-3 font-mono text-[11px] text-fg-muted break-all select-all leading-relaxed">
+          {sampleUrl}
+        </div>
+
+        <div className="text-xs text-fg-dim">
+          Real links are minted via{" "}
+          <code className="text-accent bg-bg-deep px-1 rounded">
+            POST /api/forms/{"<id>"}/mint-link
+          </code>{" "}
+          with a <code className="text-accent">lead_id</code>. Opening the link
+          transitions the lead to{" "}
+          <span className="font-mono text-fg">viewed_application</span>.
+        </div>
+
+        <button
+          type="button"
+          onClick={handleCopy}
+          className="inline-flex items-center gap-2 rounded-lg bg-accent/10 border border-accent/30 text-accent px-4 py-2 text-sm font-bold hover:bg-accent/20 transition-colors"
+        >
+          {copied ? (
+            <>
+              <Check className="w-4 h-4" />
+              Copied
+            </>
+          ) : (
+            <>
+              <Copy className="w-4 h-4" />
+              Copy sample URL
+            </>
+          )}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Step card
+// ---------------------------------------------------------------------------
+
+function StepCard({
+  spec,
+  form,
+  tenantSlug,
+  onCreateSuccess,
+}: {
+  spec: StepSpec;
+  form: FormRow | null;
+  tenantSlug: string | null;
+  onCreateSuccess: (slug: string, formId: string) => void;
+}) {
+  const router = useRouter();
+  const [creating, setCreating] = useState(false);
+  const [createError, setCreateError] = useState<string | null>(null);
+  const [showPreview, setShowPreview] = useState(false);
+
+  // Prevent double-fire on "Create from template"
+  const inFlightRef = useRef(false);
+
+  const pillState: PillState = !form ? "missing" : form.enabled ? "active" : "disabled";
+
+  const handleCreate = useCallback(async () => {
+    if (inFlightRef.current) return;
+    inFlightRef.current = true;
+    setCreating(true);
+    setCreateError(null);
+    try {
+      const res = await fetch(`/api/forms/templates/sunbiz/${spec.slug}`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+      });
+      const data = (await res.json()) as {
+        ok: boolean;
+        form_id?: string;
+        error?: string;
+        hint?: string;
+      };
+
+      if (res.status === 409 && data.form_id) {
+        // Form already exists — navigate to its editor
+        router.push(`/forms/${data.form_id}/edit`);
+        return;
+      }
+      if (!data.ok || !data.form_id) {
+        setCreateError(data.hint ?? data.error ?? `http_${res.status}`);
+        return;
+      }
+      onCreateSuccess(spec.slug, data.form_id);
+      router.push(`/forms/${data.form_id}/edit`);
+    } catch (err) {
+      setCreateError(err instanceof Error ? err.message : "network_error");
+    } finally {
+      setCreating(false);
+      inFlightRef.current = false;
+    }
+  }, [spec.slug, router, onCreateSuccess]);
+
+  return (
+    <>
+      {showPreview && tenantSlug && form && (
+        <PreviewModal
+          tenantSlug={tenantSlug}
+          formSlug={spec.slug}
+          onClose={() => setShowPreview(false)}
+        />
+      )}
+
+      <div className="rounded-xl border border-bg-border bg-bg-panel shadow-card p-5 space-y-4">
+        {/* Header row */}
+        <div className="flex items-start gap-3">
+          <div className="mt-0.5 flex-shrink-0 w-8 h-8 rounded-lg bg-accent/10 border border-accent/20 flex items-center justify-center">
+            <FileText className="w-4 h-4 text-accent" />
+          </div>
+          <div>
+            <div className="flex items-center gap-2 flex-wrap">
+              <span className="text-[10px] font-bold uppercase tracking-[0.12em] text-fg-muted">
+                Step {spec.stepNumber}
+              </span>
+              <StatusPill state={pillState} />
+            </div>
+            <div className="mt-0.5 font-bold text-fg text-sm">{spec.title}</div>
+          </div>
+        </div>
+
+        {/* Description */}
+        <div className="text-xs text-fg-muted leading-relaxed">{spec.description}</div>
+
+        {/* Error */}
+        {createError && (
+          <div className="rounded-lg border border-rose-500/40 bg-rose-500/10 p-2.5 text-xs text-rose-400">
+            {createError}
+          </div>
+        )}
+
+        {/* Action row */}
+        <div className="flex flex-wrap items-center gap-2 pt-1">
+          {form ? (
+            <>
+              <Link
+                href={`/forms/${form.id}/edit`}
+                className="inline-flex items-center gap-1.5 rounded-lg bg-bg-elev border border-bg-border text-fg-muted hover:text-fg hover:border-accent/40 px-3 py-1.5 text-xs font-bold transition-colors"
+              >
+                <Edit3 className="w-3.5 h-3.5" />
+                Open form editor
+              </Link>
+
+              {tenantSlug && (
+                <button
+                  type="button"
+                  onClick={() => setShowPreview(true)}
+                  className="inline-flex items-center gap-1.5 rounded-lg bg-bg-elev border border-bg-border text-fg-muted hover:text-fg hover:border-accent/40 px-3 py-1.5 text-xs font-bold transition-colors"
+                >
+                  <Eye className="w-3.5 h-3.5" />
+                  Preview personalized link
+                </button>
+              )}
+            </>
+          ) : (
+            <button
+              type="button"
+              onClick={handleCreate}
+              disabled={creating}
+              className="inline-flex items-center gap-1.5 rounded-lg bg-accent text-bg-deep px-3 py-1.5 text-xs font-bold hover:bg-accent-bright disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+            >
+              {creating ? (
+                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+              ) : (
+                <Sparkles className="w-3.5 h-3.5" />
+              )}
+              Create from template
+            </button>
+          )}
+        </div>
+      </div>
+    </>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Main export
+// ---------------------------------------------------------------------------
+
+export function SunBizFormsClient({
+  initialRows,
+  tenantSlug,
+}: {
+  initialRows: FormRow[];
+  tenantSlug: string | null;
+}) {
+  const [rows, setRows] = useState(initialRows);
+
+  // Build a slug → form map for O(1) step lookups
+  const slugMap = new Map(rows.map((r) => [r.slug, r]));
+
+  // "Other forms" = anything that doesn't match a SunBiz step slug
+  const otherForms = rows.filter((r) => !SUNBIZ_SLUGS.has(r.slug));
+
+  function handleCreateSuccess(slug: string, formId: string) {
+    // Optimistically add the newly-created form to the rows state so the
+    // step card immediately shows "Active" if the user navigates back here.
+    setRows((prev) => {
+      if (prev.some((r) => r.id === formId)) return prev;
+      const now = new Date().toISOString();
+      return [
+        ...prev,
+        {
+          id: formId,
+          slug,
+          name: STEP_SPECS.find((s) => s.slug === slug)?.title ?? slug,
+          description: null,
+          enabled: true,
+          created_at: now,
+          updated_at: now,
+        },
+      ];
+    });
+  }
+
+  return (
+    <div className="space-y-8">
+      {/* ------------------------------------------------------------------ */}
+      {/* Three-step funnel cards                                              */}
+      {/* ------------------------------------------------------------------ */}
+      <section className="space-y-3">
+        <div className="text-[10px] font-bold uppercase tracking-[0.14em] text-fg-muted">
+          SunBiz application funnel
+        </div>
+        <div className="grid gap-4 sm:grid-cols-1 lg:grid-cols-3">
+          {STEP_SPECS.map((spec) => (
+            <StepCard
+              key={spec.slug}
+              spec={spec}
+              form={slugMap.get(spec.slug) ?? null}
+              tenantSlug={tenantSlug}
+              onCreateSuccess={handleCreateSuccess}
+            />
+          ))}
+        </div>
+      </section>
+
+      {/* ------------------------------------------------------------------ */}
+      {/* Other forms                                                          */}
+      {/* ------------------------------------------------------------------ */}
+      {otherForms.length > 0 && (
+        <section className="space-y-3">
+          <div className="text-[10px] font-bold uppercase tracking-[0.14em] text-fg-muted">
+            Other forms
+          </div>
+          <div className="overflow-x-auto rounded-xl border border-bg-border">
+            <table className="w-full text-sm">
+              <thead className="bg-bg-elev/50">
+                <tr className="text-left text-[10px] uppercase tracking-wider text-fg-dim">
+                  <th className="px-4 py-2 font-bold">Name</th>
+                  <th className="px-4 py-2 font-bold">Slug</th>
+                  <th className="px-4 py-2 font-bold">Status</th>
+                  <th className="px-4 py-2 font-bold text-right">Actions</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-bg-border">
+                {otherForms.map((r) => (
+                  <tr key={r.id} className="hover:bg-bg-elev/30">
+                    <td className="px-4 py-3">
+                      <div className="font-bold text-fg">{r.name}</div>
+                      {r.description && (
+                        <div className="text-xs text-fg-muted truncate max-w-md">
+                          {r.description}
+                        </div>
+                      )}
+                    </td>
+                    <td className="px-4 py-3 font-mono text-xs text-fg-muted">
+                      {r.slug}
+                    </td>
+                    <td className="px-4 py-3">
+                      <StatusPill state={r.enabled ? "active" : "disabled"} />
+                    </td>
+                    <td className="px-4 py-3 text-right">
+                      <Link
+                        href={`/forms/${r.id}/edit`}
+                        className="inline-flex items-center gap-1 text-accent hover:text-accent-bright text-xs"
+                      >
+                        <Edit3 className="w-3 h-3" />
+                        Edit
+                      </Link>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      )}
+
+      {/* Empty state when no other forms */}
+      {otherForms.length === 0 && rows.some((r) => SUNBIZ_SLUGS.has(r.slug)) && (
+        <div className="text-xs text-fg-dim">
+          All forms are part of the SunBiz funnel above.
+        </div>
+      )}
+    </div>
+  );
+}
