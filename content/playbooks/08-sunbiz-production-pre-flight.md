@@ -175,6 +175,60 @@ When CC's back from Montreal, Phase 6.3-bis is probably the highest-leverage nex
 
 ---
 
+## Section 6 — Cross-tenant isolation (2026-05-25 hardening pass)
+
+Every shared surface audited; per-leak fix + commit:
+
+| Surface | Leak | Closed by |
+|---|---|---|
+| AgentsModulesStatusBoard | SunBiz funding modules on OASIS view | `b283c14` slug-gate via `MODULES_BY_TENANT` |
+| CronJobsManager | Empire C-suite groups (Bravo/Atlas/Maven/Aura) on tenant view | `58fd7d8` agentKeys-driven groups |
+| DescribeAutomationFlow | "Bravo's reasoning" label | `c78c798` agent_key driven |
+| Layout brand resolution | profile.brand won over manifest.brand on tenant routes | `f608c5c` pathOverrideSlug gate |
+| Layout primaryAgent | same shape | `f608c5c` |
+| Sidebar / SidebarShell defaults | "OASIS AI" hardcoded fallback | `f608c5c` -> "Command Center" |
+| FormPublicClient footer | "Powered by OASIS AI" | `f608c5c` removed |
+| 8 shared route bullets + ComingSoon body | SunBiz/Solara copy | `f554b6b` |
+| ComingSoon folder location | `components/sunbiz/` — name lied | `4b68d09` moved to `components/` |
+| Reasoning page EmptyState | "your Bravo terminal" | this commit |
+| Tenant Settings route | top-level /settings rendered operator data | `24fa69b` Option A |
+| Tenant Automations route | top-level /automations same shape | `d94fefe` Option A |
+
+## Section 7 — Data layer hardening (2026-05-25)
+
+| Issue | Closed by |
+|---|---|
+| Migration 064 silently no-op'd (queried `tenants.slug='sun'` but actual slug is `submissions`); 10 stuck application statuses (`approved`, `submitted_to_underwriting`) | `c088dab` (migration 066) — correctly resolves via `tenant_manifests` |
+| Ezra has no `is_owner=true` on Sun Biz tenant — Settings → Devices hides | `c088dab` migration 066 idempotent grant |
+| `drip_sequences` table was empty for Sun Biz despite seed updates | `3bdb437` (`scripts/reconcile_sunbiz_sequences.py`) inserted all 8 |
+| `tenant_manifests` row for slug='sun' status | `3bdb437` (`scripts/diag_manifest_drift.py`) — no row exists, in-code SUN_SEED is live (no drift to fix) |
+| send_gateway BRAND_IDENTITY missing 'sunbiz' — outbound emails to lenders used OASIS footer | `4e91145` added sunbiz brand + `shop_out_sender` picks via tenant slug |
+| Lead drawer missing Kixie click-to-call | `4b68d09` Call button + `kixie:` URL scheme |
+
+## Section 8 — How to diagnose data visibility issues
+
+If a tenant operator reports "I imported X but nothing shows up":
+
+```bash
+cd ~/Business-Empire-Agent
+python scripts/diag_lead_visibility.py
+```
+
+Output groups by (tenant slug → entity_type → stage/status). Stages outside the post-064 visible set are flagged `[HIDDEN]`. If imports landed under the wrong tenant_id (signed-in-user mismatch), it shows in the source breakdown. If stages are stuck at retired values, run migration 066 again — it's idempotent.
+
+For drip sequences:
+
+```bash
+python scripts/reconcile_sunbiz_sequences.py --dry-run   # report only
+python scripts/reconcile_sunbiz_sequences.py             # apply changes
+```
+
+For manifest DB-row vs in-code drift:
+
+```bash
+python scripts/diag_manifest_drift.py
+```
+
 ## Session lineage (so the next agent has context)
 
 Commits shipped in the 2026-05-24 → 25 session — all on `main`, both repos:

@@ -60,7 +60,10 @@ export default async function ReasoningPage() {
         }
       >
         {decisions.length === 0 ? (
-          <EmptyState message="No decisions yet. The reasoning loop hasn't run today — try `python scripts/autonomous_agent.py tick` from your Bravo terminal." />
+          // Brand-neutralized 2026-05-25 cross-tenant audit. Was
+          // "from your Bravo terminal" — leaked CC's empire agent
+          // name onto every tenant's reasoning page.
+          <EmptyState message="No decisions yet. The reasoning loop hasn't run today — start your local agent runner from your bridge terminal." />
         ) : (
           <ul className="space-y-3">
             {decisions.map((d) => (
