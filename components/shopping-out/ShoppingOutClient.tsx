@@ -56,6 +56,15 @@ type PlanRow = {
   rendered_subject: string;
 };
 
+type DocRow = {
+  id: string;
+  filename: string;
+  mime_type: string;
+  size_bytes: number;
+  doc_type: string;
+  storage_path: string;
+};
+
 // Application statuses that DON'T qualify for shopping out (terminal /
 // post-funded states). Mirror of the keep-list from migration 064.
 const SHOPPABLE_STATUSES = new Set<string>([
@@ -101,6 +110,8 @@ export function ShoppingOutClient({
   const [selectedLenderIds, setSelectedLenderIds] = useState<Set<string>>(new Set());
   const [notes, setNotes] = useState("");
   const [threads, setThreads] = useState<Thread[]>([]);
+  const [docs, setDocs] = useState<DocRow[]>([]);
+  const [selectedDocIds, setSelectedDocIds] = useState<Set<string>>(new Set());
   const [sending, setSending] = useState(false);
   const [sendResult, setSendResult] = useState<{ ok: boolean; message: string } | null>(null);
 
@@ -154,7 +165,10 @@ export function ShoppingOutClient({
     [apps, selectedAppId],
   );
 
-  // Refresh plan + threads whenever the selected application changes.
+  // Refresh plan + threads + documents whenever the selected application
+  // changes. Documents are fetched via the application's entity-aware
+  // endpoint (resolves the parent lead_id server-side so the document
+  // checklist always reflects what's actually on the lead).
   const refreshPlanAndThreads = useCallback(async () => {
     if (!selectedAppId || !lenders) return;
     setPlanLoading(true);
@@ -165,7 +179,7 @@ export function ShoppingOutClient({
       const allLenderIds = lenders
         .filter((l) => l.data.active !== false)
         .map((l) => l.id);
-      const [planRes, threadsRes] = await Promise.all([
+      const [planRes, threadsRes, docsRes] = await Promise.all([
         fetch(`/api/applications/${selectedAppId}/shop-out`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -180,9 +194,35 @@ export function ShoppingOutClient({
         fetch(`/api/applications/${selectedAppId}/lender-threads`, {
           credentials: "include",
         }),
+        fetch(`/api/leads/${selectedAppId}/documents?entity=application`, {
+          credentials: "include",
+        }),
       ]);
       const planJson = await planRes.json();
       const threadsJson = await threadsRes.json();
+      const docsJson = await docsRes.json();
+      if (docsJson.ok && Array.isArray(docsJson.documents)) {
+        const loaded: DocRow[] = docsJson.documents
+          .filter(
+            (d: Record<string, unknown>) =>
+              typeof d.storage_path === "string" && d.storage_path.length > 0,
+          )
+          .map((d: Record<string, unknown>) => ({
+            id: String(d.id || ""),
+            filename: String(d.filename || ""),
+            mime_type: String(d.mime_type || "application/octet-stream"),
+            size_bytes: typeof d.size_bytes === "number" ? d.size_bytes : 0,
+            doc_type: String(d.doc_type || "unclassified"),
+            storage_path: String(d.storage_path || ""),
+          }));
+        setDocs(loaded);
+        // Default — every available doc selected. Operator can uncheck
+        // any they don't want to forward.
+        setSelectedDocIds(new Set(loaded.map((d) => d.id)));
+      } else {
+        setDocs([]);
+        setSelectedDocIds(new Set());
+      }
       if (planJson.ok && Array.isArray(planJson.plan)) {
         // Rank by match_score desc; preserve only entries with a real
         // recipient_email (no point pre-selecting a lender we can't reach).
@@ -234,11 +274,33 @@ export function ShoppingOutClient({
     });
   };
 
+  const toggleDoc = (id: string) => {
+    setSelectedDocIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
   const submit = async () => {
     if (!selectedAppId || selectedLenderIds.size === 0) return;
     setSending(true);
     setSendResult(null);
     try {
+      // Build the attachments payload from the operator's checked docs.
+      // Shop-out route validates each storage_path starts with `<tenant_id>/`
+      // before forwarding, so a manipulated path here will be rejected
+      // server-side — but we only send the operator's own tenant's docs
+      // anyway since /api/leads/[id]/documents is tenant-scoped.
+      const attachments = docs
+        .filter((d) => selectedDocIds.has(d.id))
+        .map((d) => ({
+          filename: d.filename,
+          storage_path: d.storage_path,
+          mime_type: d.mime_type,
+          size_bytes: d.size_bytes,
+        }));
       const res = await fetch(`/api/applications/${selectedAppId}/shop-out`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -246,7 +308,7 @@ export function ShoppingOutClient({
         body: JSON.stringify({
           lender_ids: Array.from(selectedLenderIds),
           cc_emails: [],
-          attachments: [],
+          attachments,
           body_template: notes.trim() || undefined,
         }),
       });
@@ -434,12 +496,64 @@ export function ShoppingOutClient({
         </Card>
       )}
 
-      {/* Step 3 — Notes + Send */}
+      {/* Step 3 — Attachments */}
       {selectedAppId && plan && plan.length > 0 && (
         <Card>
           <div className="space-y-3">
             <div className="text-[11px] uppercase tracking-wider text-fg-dim font-semibold">
-              3 · Notes (optional — injected into email body)
+              3 · Attachments
+            </div>
+            {docs.length === 0 ? (
+              <div className="rounded-md border border-amber-500/30 bg-amber-500/10 p-3 text-[12px] text-amber-100 leading-relaxed">
+                No documents uploaded for this application yet. Open the
+                application detail drawer and upload at least the bank
+                statements before shopping out — lenders won&apos;t price the
+                deal without them.
+              </div>
+            ) : (
+              <div className="rounded-md border border-bg-border divide-y divide-bg-border">
+                {docs.map((d) => {
+                  const checked = selectedDocIds.has(d.id);
+                  const sizeKb = Math.max(1, Math.round(d.size_bytes / 1024));
+                  return (
+                    <label
+                      key={d.id}
+                      className={`flex items-center gap-3 px-3 py-2 cursor-pointer hover:bg-bg-elev/60 ${
+                        checked ? "bg-accent/10" : ""
+                      }`}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={checked}
+                        onChange={() => toggleDoc(d.id)}
+                        className="accent-accent"
+                      />
+                      <div className="flex-1 min-w-0">
+                        <div className="text-[12.5px] text-fg font-medium truncate">
+                          {d.filename}
+                        </div>
+                        <div className="text-[10.5px] text-fg-dim font-mono">
+                          {d.doc_type.replace(/_/g, " ")} · {sizeKb} KB
+                        </div>
+                      </div>
+                    </label>
+                  );
+                })}
+              </div>
+            )}
+            <div className="text-[10.5px] text-fg-dim">
+              {selectedDocIds.size} of {docs.length} attached
+            </div>
+          </div>
+        </Card>
+      )}
+
+      {/* Step 4 — Notes + Send */}
+      {selectedAppId && plan && plan.length > 0 && (
+        <Card>
+          <div className="space-y-3">
+            <div className="text-[11px] uppercase tracking-wider text-fg-dim font-semibold">
+              4 · Notes (optional — injected into email body)
             </div>
             <textarea
               value={notes}
@@ -451,9 +565,8 @@ export function ShoppingOutClient({
             />
             <div className="flex items-center justify-between gap-3">
               <div className="text-[11px] text-fg-dim">
-                {selectedLenderIds.size} lender{selectedLenderIds.size === 1 ? "" : "s"} selected
-                {" · "}
-                attachments inherited from the application&apos;s documents
+                {selectedLenderIds.size} lender{selectedLenderIds.size === 1 ? "" : "s"} ·{" "}
+                {selectedDocIds.size} attachment{selectedDocIds.size === 1 ? "" : "s"}
               </div>
               <button
                 type="button"

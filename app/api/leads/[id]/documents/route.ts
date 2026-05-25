@@ -85,7 +85,12 @@ export async function GET(
   const db = getServiceSupabase();
   const r = await db
     .from("lead_documents")
-    .select("id, filename, mime_type, size_bytes, doc_type, uploaded_by, uploaded_at")
+    // storage_path exposed so the Shopping Out workflow can pass it into
+    // POST /api/applications/[id]/shop-out's `attachments` array
+    // (the shop-out route validates each path starts with `<tenant_id>/`
+    // before forwarding to send_gateway). Tenant-scoped read is already
+    // enforced by the .eq("tenant_id") + RLS combo.
+    .select("id, filename, mime_type, size_bytes, doc_type, storage_path, uploaded_by, uploaded_at")
     .eq("tenant_id", sess.tenantId)
     .eq("lead_id", target.documentLeadId)
     .order("uploaded_at", { ascending: false });

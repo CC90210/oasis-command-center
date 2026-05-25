@@ -178,6 +178,13 @@ export const BUSINESS_FUNDING_TEMPLATE: TenantManifest = {
         // Aligned with SUN_SEED post migration 064 (Jordan/Oasis
         // 2026-05-23). Slimmed from 17 statuses to 10.
         { name: "status", type: "enum", enum_values: ["application_in", "shopping", "missing_info", "requested_docs", "docs_out", "login", "funded", "follow_ups", "declined", "dead_file"], required: true },
+        // Owner address — Phase 3 of Jordan/Oasis 2026-05-23. Lives in
+        // JSONB on the application record (no DDL). Matches SUN_SEED.
+        { name: "owner_address_line1", type: "string" },
+        { name: "owner_address_line2", type: "string" },
+        { name: "owner_address_city", type: "string" },
+        { name: "owner_address_state", type: "string" },
+        { name: "owner_address_zip", type: "string" },
       ],
     },
     {
@@ -191,7 +198,9 @@ export const BUSINESS_FUNDING_TEMPLATE: TenantManifest = {
         { name: "amount", type: "number" },
         { name: "term_months", type: "number" },
         { name: "factor_rate", type: "number" },
-        { name: "stage", type: "enum", enum_values: ["application_in", "shopping", "missing_info", "approved", "selling", "requested_docs", "docs_out", "login", "funded", "follow_ups", "declined", "dead_file", "submitted_to_underwriting", "approved_open_offers", "contracts_ordered", "approved_never_funded", "no_offers_available"], required: true },
+        // Same slimmed enum as application.status post-064 — keeps the
+        // Offers page able to group by either entity's stage.
+        { name: "stage", type: "enum", enum_values: ["application_in", "shopping", "missing_info", "requested_docs", "docs_out", "login", "funded", "follow_ups", "declined", "dead_file"], required: true },
       ],
     },
     {
