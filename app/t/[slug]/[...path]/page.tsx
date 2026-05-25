@@ -14,6 +14,7 @@ import { OffersByDealClient } from "@/components/offers/OffersByDealClient";
 import { LendersDirectoryClient } from "@/components/lenders/LendersDirectoryClient";
 import { RenewalsV2 } from "@/components/renewals/RenewalsV2";
 import { TenantSettings } from "@/components/settings/TenantSettings";
+import { TenantAutomations } from "@/components/automations/TenantAutomations";
 import { LeadTimelinePanel } from "@/components/leads/LeadTimelinePanel";
 import { LeadDocumentsPanel } from "@/components/leads/LeadDocumentsPanel";
 import { StageRail } from "@/components/manifest/StageRail";
@@ -375,6 +376,7 @@ function renderSubtitle(brand: string, page: ManifestPageDef): string {
     case "lenders_v2": return "Lender directory — buy rates, restricted states, decline reasons.";
     case "renewals_v2": return "Funded deals ranked by renewal urgency.";
     case "settings": return "Tenant-scoped — owner sees full settings, preview shows scaffold only.";
+    case "automations": return "Tenant-scoped automations — cron jobs, bridge status, AI-described drafts.";
     default: return brand;
   }
 }
@@ -461,6 +463,9 @@ async function PageBody({
       // tenant. The dataTenantId gate (null for non-owners) controls
       // which branch renders inside TenantSettings.
       return <TenantSettings tenantSlug={slug} tenantId={tenantId} />;
+    case "automations":
+      // Tenant-scoped Automations — same Option A pattern as Settings.
+      return <TenantAutomations tenantSlug={slug} tenantId={tenantId} />;
     case "pipeline": {
       // Stacked superview — Lead Pipeline above Opportunity Pipeline.
       // Each section has its own chevron bar + filtered table. Filter

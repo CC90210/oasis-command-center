@@ -182,6 +182,10 @@ export type ManifestPageKind =
                       // wired tel:/mailto: buttons. Replaces the generic
                       // kind="kanban" rendering of the (unused) `renewal`
                       // entity in tenant_records for the SunBiz tenant.
+  | "automations"     // Tenant-scoped Automations (Option A, 2026-05-25).
+                      // Same pattern as settings — routes through
+                      // /t/<slug>/automations via catch-all so
+                      // preview-mode handling gates operator-data leaks.
   | "settings";       // Tenant-scoped Settings — routes through the
                       // catch-all under /t/<slug>/settings instead of
                       // top-level /settings. Closes the cross-tenant
@@ -447,6 +451,7 @@ const PAGE_KINDS = new Set<ManifestPageKind>([
   "lenders_v2",
   "renewals_v2",
   "settings",
+  "automations",
 ]);
 const ENTITY_FIELD_TYPES = new Set(["string", "number", "boolean", "date", "datetime", "enum", "json"]);
 const INTEGRATION_KINDS = new Set<ManifestIntegrationKind>([
