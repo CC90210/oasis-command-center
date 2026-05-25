@@ -47,13 +47,33 @@ type Thread = {
   created_at: string;
 };
 
+// 2026-05-25 second-meeting expansion — warnings carry severity tiers
+// (info / warning / high_risk) instead of opaque blocker strings. The
+// dialog before send asks the operator to confirm each high_risk lender
+// + capture a short override note. Overrides persist to shop_out_warnings.
+type WarningSeverity = "info" | "warning" | "high_risk";
+type PlanWarning = {
+  severity: WarningSeverity;
+  code: string;
+  detail: string;
+};
+
 type PlanRow = {
   lender_id: string;
   lender_name: string;
   recipient_email: string | null;
   match_score: number;
+  /** Backward-compat — high_risk warnings flattened to strings. */
   blockers: string[];
+  /** Severity-tiered warnings (2026-05-25 expansion). */
+  warnings: PlanWarning[];
   rendered_subject: string;
+  /**
+   * 2026-05-25 — plain-English narrative explaining why this lender
+   * ranked where it did. Populated by buildLenderNarrative() on the
+   * server; rendered as small italic prose below the warning chips.
+   */
+  narrative: string;
 };
 
 type DocRow = {
@@ -139,6 +159,14 @@ export function ShoppingOutClient({
   const [selectedDocIds, setSelectedDocIds] = useState<Set<string>>(new Set());
   const [sending, setSending] = useState(false);
   const [sendResult, setSendResult] = useState<{ ok: boolean; message: string } | null>(null);
+
+  // 2026-05-25 expansion — Proceed Anyway dialog. When the operator hits
+  // Send and any selected lender has a high_risk warning, this state pops
+  // a confirmation modal that captures a single override note covering all
+  // high-risk lenders in the batch. The note + per-lender warning codes
+  // get sent in the request body and persisted to shop_out_warnings.
+  const [overrideNote, setOverrideNote] = useState("");
+  const [pendingConfirmation, setPendingConfirmation] = useState(false);
 
   // Load active applications + lenders on mount.
   useEffect(() => {
@@ -267,7 +295,21 @@ export function ShoppingOutClient({
             blockers: Array.isArray(p.blockers)
               ? (p.blockers as string[]).filter((b) => typeof b === "string")
               : [],
+            warnings: Array.isArray(p.warnings)
+              ? (p.warnings as Array<Record<string, unknown>>)
+                  .filter((w) =>
+                    w && typeof w === "object" &&
+                    (w.severity === "info" || w.severity === "warning" || w.severity === "high_risk") &&
+                    typeof w.code === "string" && typeof w.detail === "string",
+                  )
+                  .map((w) => ({
+                    severity: w.severity as WarningSeverity,
+                    code: w.code as string,
+                    detail: w.detail as string,
+                  }))
+              : [],
             rendered_subject: String(p.rendered_subject || ""),
+            narrative: typeof p.narrative === "string" ? p.narrative : "",
           }))
           .sort((a: PlanRow, b: PlanRow) => b.match_score - a.match_score);
         setPlan(ranked);
@@ -315,7 +357,17 @@ export function ShoppingOutClient({
     });
   };
 
-  const submit = async () => {
+  // 2026-05-25 expansion — surface high-risk lenders in the selection so
+  // the Send button can route through the confirmation modal when any
+  // are present. Pure derived state; no fetch.
+  const highRiskSelected = useMemo(() => {
+    if (!plan) return [];
+    return plan.filter(
+      (p) => selectedLenderIds.has(p.lender_id) && p.warnings.some((w) => w.severity === "high_risk"),
+    );
+  }, [plan, selectedLenderIds]);
+
+  const performSend = async () => {
     if (!selectedAppId || selectedLenderIds.size === 0) return;
     setSending(true);
     setSendResult(null);
@@ -333,6 +385,14 @@ export function ShoppingOutClient({
           mime_type: d.mime_type,
           size_bytes: d.size_bytes,
         }));
+      // Acknowledge the high-risk warnings for every selected lender that
+      // has any. Single override_note covers the whole batch; server splits
+      // it into one shop_out_warnings row per (lender, warning_code).
+      const acknowledged = highRiskSelected.map((p) => ({
+        lender_id: p.lender_id,
+        warning_codes: p.warnings.filter((w) => w.severity === "high_risk").map((w) => w.code),
+        override_note: overrideNote.trim(),
+      }));
       const res = await fetch(`/api/applications/${selectedAppId}/shop-out`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -342,6 +402,7 @@ export function ShoppingOutClient({
           cc_emails: [],
           attachments,
           body_template: notes.trim() || undefined,
+          acknowledged_warnings: acknowledged.length > 0 ? acknowledged : undefined,
         }),
       });
       const json = await res.json();
@@ -360,7 +421,21 @@ export function ShoppingOutClient({
       setSendResult({ ok: false, message: String((err as Error).message || err) });
     } finally {
       setSending(false);
+      setPendingConfirmation(false);
+      setOverrideNote("");
     }
+  };
+
+  // Entry point for the Send button. If any selected lender has a
+  // high_risk warning, route through the confirmation dialog so the
+  // operator captures an override note. Otherwise send immediately.
+  const submit = async () => {
+    if (!selectedAppId || selectedLenderIds.size === 0) return;
+    if (highRiskSelected.length > 0) {
+      setPendingConfirmation(true);
+      return;
+    }
+    await performSend();
   };
 
   // Preview-mode bail removed 2026-05-25 — operator viewing a tenant
@@ -469,8 +544,14 @@ export function ShoppingOutClient({
               <div className="max-h-80 overflow-y-auto rounded-md border border-bg-border divide-y divide-bg-border">
                 {plan.map((p) => {
                   const isSelected = selectedLenderIds.has(p.lender_id);
-                  const blocked = p.blockers.length > 0;
                   const missingEmail = !p.recipient_email;
+                  // 2026-05-25 expansion — group warnings by severity for
+                  // tiered rendering. Operator can still pick high_risk
+                  // lenders (no hard block), but they hit a confirmation
+                  // dialog at Send + the override gets logged.
+                  const highRiskWarnings = p.warnings.filter((w) => w.severity === "high_risk");
+                  const warningTier = p.warnings.filter((w) => w.severity === "warning");
+                  const infoTier = p.warnings.filter((w) => w.severity === "info");
                   return (
                     <label
                       key={p.lender_id}
@@ -493,16 +574,41 @@ export function ShoppingOutClient({
                           <span className="text-[10px] font-mono text-fg-dim">
                             score {p.match_score.toFixed(2)}
                           </span>
+                          {highRiskWarnings.length > 0 && (
+                            <span className="text-[10px] uppercase tracking-wider font-bold px-1.5 py-0.5 rounded bg-rose-500/15 text-rose-300 border border-rose-500/30">
+                              High risk
+                            </span>
+                          )}
+                          {highRiskWarnings.length === 0 && warningTier.length > 0 && (
+                            <span className="text-[10px] uppercase tracking-wider font-bold px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-300 border border-amber-500/30">
+                              Warning
+                            </span>
+                          )}
                         </div>
                         <div className="text-[11px] text-fg-muted truncate">
                           {p.recipient_email || (
                             <span className="text-rose-300">no contact email — uncontactable</span>
                           )}
                         </div>
-                        {blocked && (
-                          <div className="text-[10.5px] text-amber-300 mt-1 leading-snug">
-                            ⚠ {p.blockers.join(" · ")}
+                        {highRiskWarnings.length > 0 && (
+                          <div className="text-[10.5px] text-rose-300 mt-1 leading-snug">
+                            &#9888; {highRiskWarnings.map((w) => w.detail).join(" · ")}
                           </div>
+                        )}
+                        {warningTier.length > 0 && (
+                          <div className="text-[10.5px] text-amber-300 mt-1 leading-snug">
+                            &bull; {warningTier.map((w) => w.detail).join(" · ")}
+                          </div>
+                        )}
+                        {infoTier.length > 0 && (
+                          <div className="text-[10.5px] text-fg-dim mt-1 leading-snug">
+                            {infoTier.map((w) => w.detail).join(" · ")}
+                          </div>
+                        )}
+                        {p.narrative && (
+                          <p className="text-fg-muted text-[11px] italic leading-snug mt-1.5">
+                            {p.narrative}
+                          </p>
                         )}
                       </div>
                     </label>
@@ -652,11 +758,11 @@ export function ShoppingOutClient({
                         </div>
                         {t.last_response_summary && (
                           <div className="text-[11.5px] text-fg-muted mt-1 leading-snug">
-                            ↳ {t.last_response_summary}
+                            &#8627; {t.last_response_summary}
                           </div>
                         )}
                         {t.last_error && (
-                          <div className="text-[11px] text-rose-300 mt-1">⚠ {t.last_error}</div>
+                          <div className="text-[11px] text-rose-300 mt-1">&#9888; {t.last_error}</div>
                         )}
                       </div>
                       <div className="text-right shrink-0 space-y-1">
@@ -678,6 +784,91 @@ export function ShoppingOutClient({
             )}
           </div>
         </Card>
+      )}
+
+      {/* Proceed Anyway confirmation modal — 2026-05-25 expansion. Shows
+          when the operator hits Send with any high_risk lender selected.
+          Captures a single override note that covers the entire batch;
+          server splits it into one shop_out_warnings row per (lender,
+          warning_code) so the audit trail is granular even when the
+          operator's reason is global ("Re-shopping this deal after
+          revenue update; old number was stale"). */}
+      {pendingConfirmation && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm"
+          role="dialog"
+          aria-modal="true"
+        >
+          <div className="bg-bg-deep border border-bg-border rounded-xl shadow-2xl w-full max-w-lg mx-4 p-5 space-y-4">
+            <div className="flex items-start gap-3">
+              <div className="rounded-md bg-rose-500/15 p-2 border border-rose-500/30 shrink-0">
+                <span className="text-rose-300 text-lg leading-none">&#9888;</span>
+              </div>
+              <div className="flex-1 min-w-0">
+                <div className="text-sm font-semibold text-fg">
+                  {highRiskSelected.length} lender{highRiskSelected.length === 1 ? "" : "s"} flagged High Risk
+                </div>
+                <div className="text-[12px] text-fg-muted mt-0.5">
+                  These lenders are likely to decline based on the application profile.
+                  You can still send — every override is logged to the audit trail.
+                </div>
+              </div>
+            </div>
+
+            <div className="max-h-40 overflow-y-auto rounded-md border border-bg-border bg-bg-elev/30 p-3 space-y-2">
+              {highRiskSelected.map((p) => {
+                const flags = p.warnings.filter((w) => w.severity === "high_risk");
+                return (
+                  <div key={p.lender_id} className="text-[12px]">
+                    <div className="font-semibold text-fg">{p.lender_name}</div>
+                    <div className="text-rose-300 leading-snug">
+                      {flags.map((w) => w.detail).join(" · ")}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+
+            <div>
+              <label className="block text-[11px] uppercase tracking-wider text-fg-dim font-semibold mb-1.5">
+                Override note (required)
+              </label>
+              <textarea
+                value={overrideNote}
+                onChange={(e) => setOverrideNote(e.target.value)}
+                placeholder="Why are you sending despite the risk? e.g. operator has spoken to lender directly, revenue update incoming, etc."
+                rows={3}
+                className="w-full text-sm px-3 py-2 rounded-md bg-bg-deep border border-bg-border text-fg placeholder:text-fg-dim resize-none"
+              />
+              <div className="text-[10.5px] text-fg-dim mt-1">
+                Logged to shop_out_warnings with your user_id + timestamp.
+              </div>
+            </div>
+
+            <div className="flex items-center justify-end gap-2 pt-1">
+              <button
+                type="button"
+                onClick={() => {
+                  setPendingConfirmation(false);
+                  setOverrideNote("");
+                }}
+                disabled={sending}
+                className="text-xs px-3 py-1.5 rounded-md border border-bg-border text-fg-muted hover:text-fg hover:bg-bg-elev disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={performSend}
+                disabled={sending || overrideNote.trim().length < 5}
+                className="text-xs px-3 py-1.5 rounded-md bg-rose-500/20 border border-rose-500/40 text-rose-200 hover:bg-rose-500/30 disabled:opacity-50 inline-flex items-center gap-1.5"
+              >
+                {sending ? <Loader2 className="w-3 h-3 animate-spin" /> : null}
+                Proceed Anyway
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );

@@ -280,7 +280,9 @@ export function LeadDetailDrawer({
           {data && activeTab === "activity" && <LeadTimelinePanel leadId={recordId} />}
           {data && activeTab === "owner" && <OwnerTab record={data.record.data} />}
           {data && activeTab === "lenders" && <LendersTab application={data.application} />}
-          {data && activeTab === "bank" && <BankTab record={data.record.data} />}
+          {data && activeTab === "bank" && (
+            <BankTab record={data.record.data} application={data.application} tenantSlug={tenantSlug} />
+          )}
           {data && activeTab === "notes" && <NotesTab leadId={recordId} />}
           {data && activeTab === "documents" && (
             <DocumentsTab
@@ -448,7 +450,16 @@ function lenderStatusClass(status: string): string {
   return "bg-bg-deep text-fg-muted";
 }
 
-function BankTab({ record }: { record: Record<string, unknown> }) {
+function BankTab({
+  record,
+}: {
+  record: Record<string, unknown>;
+  // application and tenantSlug passed by the call site; accepted here
+  // so TypeScript doesn't reject the JSX, even though this tab doesn't
+  // use them yet (future expansion for the underwriting agent link).
+  application?: { id: string; data: Record<string, unknown> } | null;
+  tenantSlug?: string;
+}) {
   const fields: { key: string; label: string; format?: "money" | "raw" }[] = [
     { key: "avg_monthly_revenue", label: "Avg monthly revenue", format: "money" },
     { key: "monthly_revenue", label: "Avg monthly revenue", format: "money" },
