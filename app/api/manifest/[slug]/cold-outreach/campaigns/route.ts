@@ -1,0 +1,327 @@
+/**
+ * GET  /api/manifest/<slug>/cold-outreach/campaigns
+ * POST /api/manifest/<slug>/cold-outreach/campaigns
+ *
+ * Campaign lifecycle entry point. The cold_outreach_runner.py daemon drains
+ * campaigns at status='queued' by sending messages via send_gateway for each
+ * pending recipient row.
+ *
+ * GET query params:
+ *   limit        (default 10) — how many campaigns to return, newest first
+ *   cold_list_id (optional)   — filter to campaigns targeting a specific list
+ *
+ * GET returns: { ok: true, campaigns: Campaign[] }
+ *
+ * POST body:
+ *   {
+ *     cold_list_id:     string,                           // required
+ *     channel:          'sms_twilio'|'sms_texttorrent'|'email', // required
+ *     message_body:     string,                           // required
+ *     subject?:         string,                           // email only
+ *     recipient_filter?: { stage?: string, max_attempts?: number },
+ *     daily_cap?:       number (default 500, max 5000),
+ *     name?:            string (auto-generated if omitted),
+ *     scheduled_for?:   ISO-8601 string
+ *   }
+ *
+ * POST behavior:
+ *   1. Resolve tenant, auth-gate.
+ *   2. Validate channel.
+ *   3. Confirm cold_list_id belongs to this tenant.
+ *   4. Apply recipient_filter to count matching cold_leads.
+ *   5. Reject if total_recipients = 0.
+ *   6. INSERT cold_outreach_campaigns at status='queued'.
+ *   7. INSERT one cold_outreach_recipients row per matching lead.
+ *   8. UPDATE campaign.total_recipients.
+ *
+ * POST returns: { ok: true, campaign_id, total_recipients }
+ *
+ * Auth: session required + caller must own this slug (resolveDataTenant).
+ */
+
+import { NextRequest, NextResponse } from "next/server";
+import { getSessionUser, getServiceSupabase } from "@/lib/supabase-server";
+import { resolveDataTenant } from "@/lib/manifest/tenant-scope";
+import { manifestExists } from "@/lib/manifest/loader";
+
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+
+const SLUG_RE = /^[a-z0-9][a-z0-9_-]{1,62}$/;
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const ALLOWED_CHANNELS = ["sms_twilio", "sms_texttorrent", "email"] as const;
+type Channel = typeof ALLOWED_CHANNELS[number];
+const DAILY_CAP_MAX = 5_000;
+const DAILY_CAP_DEFAULT = 500;
+
+type RecipientFilter = {
+  stage?: string;
+  max_attempts?: number;
+};
+
+async function resolveContext(
+  userId: string,
+  slug: string,
+): Promise<
+  | { ok: true; tenantId: string }
+  | { ok: false; status: number; error: string }
+> {
+  if (!SLUG_RE.test(slug)) return { ok: false, status: 400, error: "invalid_slug" };
+  if (!(await manifestExists(slug))) return { ok: false, status: 404, error: "unknown_tenant" };
+
+  const db = getServiceSupabase();
+  const profileRes = await db
+    .from("user_profiles")
+    .select("tenant_id")
+    .eq("auth_user_id", userId)
+    .maybeSingle();
+  const userTenantId =
+    (profileRes.data as { tenant_id: string | null } | null)?.tenant_id ?? null;
+
+  const dataTenantId = await resolveDataTenant(slug, userTenantId);
+  if (!dataTenantId) {
+    return { ok: false, status: 403, error: "forbidden" };
+  }
+  return { ok: true, tenantId: dataTenantId };
+}
+
+// ---------------------------------------------------------------------------
+// GET — list campaigns
+// ---------------------------------------------------------------------------
+
+export async function GET(
+  req: NextRequest,
+  ctx: { params: Promise<{ slug: string }> },
+) {
+  const { slug } = await ctx.params;
+  const user = await getSessionUser();
+  if (!user) return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
+
+  const context = await resolveContext(user.id, slug);
+  if (!context.ok) {
+    return NextResponse.json({ ok: false, error: context.error }, { status: context.status });
+  }
+
+  const sp = req.nextUrl.searchParams;
+  const limitRaw = sp.get("limit");
+  const limit =
+    limitRaw !== null && !Number.isNaN(Number(limitRaw))
+      ? Math.max(1, Math.min(100, Number(limitRaw)))
+      : 10;
+  const coldListId = sp.get("cold_list_id") ?? null;
+
+  const db = getServiceSupabase();
+
+  let query = db
+    .from("cold_outreach_campaigns")
+    .select(
+      "id, name, channel, status, cold_list_id, message_body, subject, recipient_filter, " +
+      "total_recipients, sent_count, failed_count, daily_cap, scheduled_for, " +
+      "started_at, completed_at, created_at",
+    )
+    .eq("tenant_id", context.tenantId)
+    .order("created_at", { ascending: false })
+    .limit(limit);
+
+  if (coldListId && UUID_RE.test(coldListId)) {
+    query = query.eq("cold_list_id", coldListId);
+  }
+
+  const { data, error } = await query;
+  if (error) {
+    return NextResponse.json(
+      { ok: false, error: "db_error", detail: error.message },
+      { status: 500 },
+    );
+  }
+
+  return NextResponse.json({ ok: true, campaigns: data ?? [] });
+}
+
+// ---------------------------------------------------------------------------
+// POST — create + queue a campaign
+// ---------------------------------------------------------------------------
+
+export async function POST(
+  req: NextRequest,
+  ctx: { params: Promise<{ slug: string }> },
+) {
+  const { slug } = await ctx.params;
+  const user = await getSessionUser();
+  if (!user) return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
+
+  const context = await resolveContext(user.id, slug);
+  if (!context.ok) {
+    return NextResponse.json({ ok: false, error: context.error }, { status: context.status });
+  }
+
+  let body: {
+    cold_list_id?: unknown;
+    channel?: unknown;
+    message_body?: unknown;
+    subject?: unknown;
+    recipient_filter?: unknown;
+    daily_cap?: unknown;
+    name?: unknown;
+    scheduled_for?: unknown;
+  };
+  try {
+    body = await req.json();
+  } catch {
+    return NextResponse.json({ ok: false, error: "invalid_json" }, { status: 400 });
+  }
+
+  // Validate required fields.
+  const coldListId = typeof body.cold_list_id === "string" ? body.cold_list_id.trim() : "";
+  if (!coldListId || !UUID_RE.test(coldListId)) {
+    return NextResponse.json({ ok: false, error: "cold_list_id_required" }, { status: 400 });
+  }
+
+  const channel = typeof body.channel === "string" ? body.channel : "";
+  if (!(ALLOWED_CHANNELS as readonly string[]).includes(channel)) {
+    return NextResponse.json(
+      { ok: false, error: "invalid_channel", allowed: ALLOWED_CHANNELS },
+      { status: 400 },
+    );
+  }
+
+  const messageBody = typeof body.message_body === "string" ? body.message_body.trim() : "";
+  if (!messageBody) {
+    return NextResponse.json({ ok: false, error: "message_body_required" }, { status: 400 });
+  }
+
+  const subject =
+    channel === "email" && typeof body.subject === "string" && body.subject.trim()
+      ? body.subject.trim()
+      : null;
+
+  const dailyCap =
+    typeof body.daily_cap === "number" && body.daily_cap > 0
+      ? Math.min(body.daily_cap, DAILY_CAP_MAX)
+      : DAILY_CAP_DEFAULT;
+
+  const scheduledFor =
+    typeof body.scheduled_for === "string" && body.scheduled_for.trim()
+      ? body.scheduled_for.trim()
+      : null;
+
+  // Parse recipient_filter safely.
+  const rawFilter = body.recipient_filter;
+  const recipientFilter: RecipientFilter =
+    rawFilter && typeof rawFilter === "object" && !Array.isArray(rawFilter)
+      ? (rawFilter as RecipientFilter)
+      : {};
+
+  const db = getServiceSupabase();
+
+  // Confirm the list belongs to this tenant.
+  const { data: listRow, error: listErr } = await db
+    .from("cold_lead_lists")
+    .select("id, name")
+    .eq("id", coldListId)
+    .eq("tenant_id", context.tenantId)
+    .is("archived_at", null)
+    .maybeSingle();
+
+  if (listErr || !listRow) {
+    return NextResponse.json({ ok: false, error: "list_not_found" }, { status: 404 });
+  }
+
+  // Build the matching-leads query for this filter to get the recipient set.
+  let leadsQuery = db
+    .from("cold_leads")
+    .select("id, phone, email")
+    .eq("tenant_id", context.tenantId)
+    .eq("list_id", coldListId);
+
+  if (recipientFilter.stage) {
+    leadsQuery = leadsQuery.eq("stage", recipientFilter.stage);
+  }
+  if (typeof recipientFilter.max_attempts === "number") {
+    leadsQuery = leadsQuery.lte("attempt_count", recipientFilter.max_attempts);
+  }
+
+  const { data: matchingLeads, error: leadsErr } = await leadsQuery;
+  if (leadsErr) {
+    return NextResponse.json(
+      { ok: false, error: "db_error", detail: leadsErr.message },
+      { status: 500 },
+    );
+  }
+
+  const leads = matchingLeads ?? [];
+  if (leads.length === 0) {
+    return NextResponse.json(
+      { ok: false, error: "no_recipients", hint: "No cold leads match the given filter." },
+      { status: 400 },
+    );
+  }
+
+  const campaignName =
+    typeof body.name === "string" && body.name.trim()
+      ? body.name.trim()
+      : `${(listRow as { name: string }).name} — ${new Date().toLocaleDateString("en-CA")}`;
+
+  // INSERT the campaign at status='queued'.
+  const { data: campaignData, error: campaignErr } = await db
+    .from("cold_outreach_campaigns")
+    .insert({
+      tenant_id: context.tenantId,
+      name: campaignName,
+      channel: channel as Channel,
+      message_body: messageBody,
+      subject,
+      cold_list_id: coldListId,
+      recipient_filter: recipientFilter,
+      status: "queued",
+      daily_cap: dailyCap,
+      scheduled_for: scheduledFor,
+      total_recipients: 0, // updated below after recipient rows land
+      sent_count: 0,
+      failed_count: 0,
+      created_by_user_id: user.id,
+    })
+    .select("id")
+    .single();
+
+  if (campaignErr || !campaignData) {
+    return NextResponse.json(
+      { ok: false, error: "db_error", detail: campaignErr?.message },
+      { status: 500 },
+    );
+  }
+  const campaignId = (campaignData as { id: string }).id;
+
+  // INSERT one cold_outreach_recipients row per matching lead.
+  type LeadRow = { id: string; phone: string | null; email: string | null };
+  const recipientRows = (leads as LeadRow[]).map((lead) => ({
+    tenant_id: context.tenantId,
+    campaign_id: campaignId,
+    cold_lead_id: lead.id,
+    // contact_address resolves to phone for SMS channels, email for email.
+    contact_address:
+      channel === "email" ? (lead.email ?? "") : (lead.phone ?? ""),
+    status: "pending",
+  }));
+
+  // Insert in chunks to avoid request-size limits on large lists.
+  const CHUNK = 500;
+  let totalInserted = 0;
+  for (let i = 0; i < recipientRows.length; i += CHUNK) {
+    const chunk = recipientRows.slice(i, i + CHUNK);
+    const { error: rErr } = await db
+      .from("cold_outreach_recipients")
+      .insert(chunk);
+    // Partial failures are tolerated — daemon retries pending rows on next tick.
+    if (!rErr) totalInserted += chunk.length;
+  }
+
+  // UPDATE campaign.total_recipients to the actual count that landed.
+  await db
+    .from("cold_outreach_campaigns")
+    .update({ total_recipients: totalInserted })
+    .eq("id", campaignId)
+    .eq("tenant_id", context.tenantId);
+
+  return NextResponse.json({ ok: true, campaign_id: campaignId, total_recipients: totalInserted });
+}
