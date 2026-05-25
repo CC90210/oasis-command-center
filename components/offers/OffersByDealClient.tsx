@@ -169,7 +169,15 @@ export function OffersByDealClient({
 
   // ── Load apps + offer records on mount ──────────────────────────────────
   useEffect(() => {
-    if (!tenantId) return;
+    if (!tenantId) {
+      // Preview mode (operator viewing a tenant they don't own) — render
+      // the same scaffold an empty real tenant would see: kanban columns,
+      // accordion, view toggle, all visible with zero rows. The catch-all
+      // dispatcher already surfaces a "preview" Tag at page chrome.
+      setApps([]);
+      setOfferRecords([]);
+      return;
+    }
     (async () => {
       try {
         const [appsRes, offersRes] = await Promise.all([
@@ -256,17 +264,11 @@ export function OffersByDealClient({
       });
   }, [apps, threadMap, offerRecords]);
 
-  // ── Preview guard ────────────────────────────────────────────────────────
-  if (!tenantId) {
-    return (
-      <Card>
-        <div className="text-sm text-fg-muted leading-relaxed">
-          Preview mode — Offers is operator-only. Sign in as the SunBiz tenant
-          to see deal-first lender intelligence.
-        </div>
-      </Card>
-    );
-  }
+  // Preview-mode bail removed 2026-05-25 — operator viewing a tenant
+  // they don't own should see the same scaffold (8 kanban columns,
+  // accordion shell, view toggle) an empty real tenant sees. Empty
+  // arrays + the existing empty-state cards handle the no-data render
+  // honestly; catch-all dispatcher already shows the "preview" Tag.
 
   // ── Loading skeleton ─────────────────────────────────────────────────────
   const isLoading = apps === null;

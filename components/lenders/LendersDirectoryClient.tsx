@@ -185,7 +185,13 @@ export function LendersDirectoryClient({
   }, [tenantSlug]);
 
   useEffect(() => {
-    if (!tenantId) return;
+    if (!tenantId) {
+      // Preview mode — render the empty directory scaffold instead of a
+      // stub Card so operators see the table chrome + columns + filters
+      // they'll see once they own the tenant.
+      setRecords([]);
+      return;
+    }
     load();
   }, [tenantId, load]);
 
@@ -238,17 +244,10 @@ export function LendersDirectoryClient({
 
   const openRecord = records?.find((r) => r.id === drawerTarget) ?? null;
 
-  /* Preview mode ----------------------------------------------------------- */
-  if (!tenantId) {
-    return (
-      <Card>
-        <div className="text-sm text-fg-muted leading-relaxed">
-          Preview mode — Lenders is operator-only. Sign in as the SunBiz tenant
-          to manage your lender directory.
-        </div>
-      </Card>
-    );
-  }
+  /* Preview-mode bail removed 2026-05-25 — operator viewing a tenant
+     they don't own now sees the same empty directory scaffold a real
+     owner would see on day one. Records is set to [] in the effect
+     above; the empty-state path handles the no-data render. */
 
   return (
     <div className="space-y-5">

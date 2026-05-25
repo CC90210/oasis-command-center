@@ -142,7 +142,14 @@ export function ShoppingOutClient({
 
   // Load active applications + lenders on mount.
   useEffect(() => {
-    if (!tenantId) return;
+    if (!tenantId) {
+      // Preview mode — render the same 4-step scaffold a real Sun Biz
+      // operator sees, with empty pickers. No fetches fire for a tenant
+      // the operator doesn't own.
+      setApps([]);
+      setLenders([]);
+      return;
+    }
     (async () => {
       try {
         const [appsRes, lendersRes] = await Promise.all([
@@ -356,16 +363,9 @@ export function ShoppingOutClient({
     }
   };
 
-  if (!tenantId) {
-    return (
-      <Card>
-        <div className="text-sm text-fg-muted leading-relaxed">
-          Preview mode — Shopping Out is operator-only. Sign in as the SunBiz
-          tenant to pick applications, rank lenders, and send packages.
-        </div>
-      </Card>
-    );
-  }
+  // Preview-mode bail removed 2026-05-25 — operator viewing a tenant
+  // they don't own now sees the Step 1 application picker (empty),
+  // matching the same chrome a real Sun Biz operator sees on day one.
 
   return (
     <div className="space-y-5">

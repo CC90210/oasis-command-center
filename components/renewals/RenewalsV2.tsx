@@ -22,31 +22,26 @@ import {
 } from "@/lib/queries";
 import { fmtCurrency, groupRows, RenewalRow } from "./renewals-shared";
 
-export async function RenewalsV2({ tenantId }: { tenantId: string | null }) {
-  // No tenant_id → preview mode. The catch-all dispatcher already
-  // surfaces a preview banner above; render a minimal stub here.
-  if (!tenantId) {
-    return (
-      <Card>
-        <div className="text-sm text-fg-muted leading-relaxed">
-          Preview mode — Renewals is operator-only. Sign in as the SunBiz
-          tenant to see your funded-deal renewal queue.
-        </div>
-      </Card>
-    );
-  }
+const EMPTY_SUMMARY = {
+  past_due_count: 0,
+  this_week_count: 0,
+  this_month_count: 0,
+  est_commission_total_usd: 0,
+  total_with_dates: 0,
+  total_no_date: 0,
+};
 
-  const [summary, rows] = await Promise.all([
-    getRenewalsSummary(tenantId).catch(() => ({
-      past_due_count: 0,
-      this_week_count: 0,
-      this_month_count: 0,
-      est_commission_total_usd: 0,
-      total_with_dates: 0,
-      total_no_date: 0,
-    })),
-    getRenewalsRows(tenantId, 100).catch(() => [] as FundedDealRow[]),
-  ]);
+export async function RenewalsV2({ tenantId }: { tenantId: string | null }) {
+  // Preview-mode bail removed 2026-05-25 — operator viewing a tenant
+  // they don't own now sees the same 4-KPI band + grouped rows shell
+  // a real owner would see on day one. Empty summary + zero rows make
+  // every counter render "0" and the row list show the EmptyState card.
+  const [summary, rows] = tenantId
+    ? await Promise.all([
+        getRenewalsSummary(tenantId).catch(() => EMPTY_SUMMARY),
+        getRenewalsRows(tenantId, 100).catch(() => [] as FundedDealRow[]),
+      ])
+    : [EMPTY_SUMMARY, [] as FundedDealRow[]];
 
   const groups = groupRows(rows);
 
