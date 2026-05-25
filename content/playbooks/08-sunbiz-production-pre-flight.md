@@ -323,3 +323,64 @@ done
 ### Operator-facing runbook
 
 `SunBiz-Agent/docs/VPS_BRINGUP.md` (committed 2026-05-25) walks Ezra (or anyone) through cold-starting a VPS in eight steps: clone → setup wizard → env from template → doctor → migrations → PM2 → save → smoke-test. The runbook is the operator-readable counterpart to this section.
+
+## Section 10 — Three-repo split: what lives where (2026-05-25)
+
+CC flagged 2026-05-25 evening that SunBiz scripts were piling up in CEO-Agent without being mirrored to SunBiz-Agent. The 7d34f2e (2026-05-15) policy is now reinforced and the second-meeting build (commits `5792cc3` CEO / `7862e36` SunBiz / `3ba95c5` dashboard) ships with the matrix below applied end-to-end.
+
+### Repo responsibilities
+
+| Repo | GitHub remote | Purpose | Canonical for |
+|---|---|---|---|
+| `~/Business-Empire-Agent` | `CC90210/CEO-Agent` | Empire substrate + PM2 runtime | V6 state DB, retrieval, guards, event bus, `ecosystem.config.js`, `send_gateway.py` (empire chokepoint), CC's bridge + Telegram + scheduler |
+| `~/APPS/oasis-command-center` | `CC90210/oasis-command-center` | Multi-tenant dashboard | All Next.js UI for every tenant — manifest-driven, no per-tenant dashboard repos |
+| `~/SunBiz-Agent` | `CC90210/SunBiz-Agent` | SunBiz-specific business logic + VPS deploy | Authoritative storage for SunBiz daemons + migrations. Runtime copies still live in CEO-Agent for PM2 |
+
+### Mirror rules (what gets dual-stored)
+
+**SunBiz-specific scripts — mirror to SunBiz-Agent on every change:**
+- `scripts/shop_out_sender.py`
+- `scripts/sequence_runner.py`
+- `scripts/lender_response_classifier.py`
+- `scripts/underwriting/*` (all)
+- `scripts/renewal_reminder.py`
+- `scripts/follow_up_generator.py`
+- `scripts/cold_outreach_runner.py`
+- `scripts/daily_plan_generator.py`
+- `scripts/underwriting_orchestrator.py`
+- `scripts/diag_lead_visibility.py`
+- `scripts/diag_manifest_drift.py`
+- `scripts/reconcile_sunbiz_sequences.py`
+
+**SunBiz-specific migrations — mirror:**
+- `database/042_tenant_forms.sql`, `043_drip_sequences.sql`, `044_lender_shopout.sql`
+- `database/064_sunbiz_restructure.sql` through `database/069_sunbiz_meeting2_expansion.sql`
+
+**Empire-wide — stays canonical in CEO-Agent only:**
+- `scripts/integrations/send_gateway.py` (multi-tenant chokepoint — SunBiz brand identity lives inside)
+- `scripts/integrations/*` (the rest)
+- `scripts/state/*`, `scripts/core/*` (V6 substrate)
+- `scripts/_bridge_manifest.json` (bridge-side discoverability — CEO-Agent is the bridge)
+- `ecosystem.config.js`
+
+### Operational protocol — when you touch a SunBiz-specific script
+
+1. Edit + commit in CEO-Agent (since that's where PM2 runs from).
+2. **Same session, before pushing:** `cp ~/Business-Empire-Agent/scripts/<file>.py ~/SunBiz-Agent/scripts/<file>.py`
+3. Commit the mirror to SunBiz-Agent with a body that references the CEO-Agent commit SHA.
+4. Push both repos.
+
+A future cleanup will collapse this dual-storage by making the bridge's tenant-routing read from per-tenant `agent_roots` — see the 7d34f2e commit body for the long-term plan. Until then: dual commits per change.
+
+### Verification
+
+After any session that touched SunBiz scripts, confirm the mirror is current:
+
+```bash
+diff -r --brief \
+  ~/Business-Empire-Agent/scripts/shop_out_sender.py \
+  ~/SunBiz-Agent/scripts/shop_out_sender.py
+# repeat per file, or script the loop
+```
+
+Empty output means in sync. Any "differ" line is drift to repair before claiming the work is done.
