@@ -79,21 +79,29 @@ export function normalizePostLoginRedirect(
 }
 
 /**
- * Brand patterns for known client tenants. Used to deprioritize client-
- * tenant rows when the empire operator (CC) logs in and resolves
- * against multiple user_profiles rows. Without this guard the chooser's
- * looser fallbacks (any-owner / any-onboarded / candidates[0]) can pick
- * whichever row Postgres returned first — alphabetically "sun" beats
- * "oasis", so the operator's first-login lands inside the client
- * tenant shell instead of their own home dashboard. Reported by CC
- * 2026-05-24; fixed 2026-05-25.
+ * Brand-detection helpers for the empire-operator routing path. Two
+ * independent checks so the chooser can pick the right tenant even
+ * as new client brands are onboarded without an immediate code update.
+ *
+ * Reported by CC 2026-05-24; hardened 2026-05-25 to add the OASIS
+ * positive-match path as the primary signal — relying ONLY on the
+ * negative client-brand filter would route an operator into the
+ * NEXT new client tenant the moment one is onboarded before its
+ * brand pattern gets added to the deny list.
  */
+const OPERATOR_HOME_BRAND_PATTERNS = [/oasis/i];
 const CLIENT_BRAND_PATTERNS = [
   /^sun\s*biz/i,
   /^suga/i,
   /^propflow/i,
   /^nostalgic/i,
 ];
+
+function isOperatorHomeBrand(brand: string | null): boolean {
+  const s = (brand || "").trim();
+  if (!s) return false;
+  return OPERATOR_HOME_BRAND_PATTERNS.some((re) => re.test(s));
+}
 
 function isClientBrand(brand: string | null): boolean {
   const s = (brand || "").trim();
@@ -111,15 +119,26 @@ function chooseProfileForLogin(rows: ProfileRouteRow[], email: string | null | u
     : [];
   let candidates = exactEmail.length > 0 ? exactEmail : rows;
 
-  // Empire-operator deterministic routing: if the signer is an empire
-  // operator AND at least one of their candidate rows is NOT a client-
-  // tenant brand, drop the client rows from the candidate set so the
-  // find chain below can't accidentally pick one. Preserves current
-  // behaviour for non-operators (full row set) and for operators whose
-  // only profile rows happen to be client tenants (no filtering).
+  // Empire-operator deterministic routing — three-tier preference:
+  //   1. If any candidate row's brand matches the OPERATOR home
+  //      pattern (OASIS), restrict to those rows. Positive match —
+  //      future-proof against new client tenants nobody added to
+  //      CLIENT_BRAND_PATTERNS yet.
+  //   2. Else if any candidate is a non-client brand, drop the
+  //      known-client rows. Catches operators with a non-OASIS home
+  //      tenant we haven't anticipated.
+  //   3. Else (operator's only profile rows are all clients) — leave
+  //      candidates intact and let the find chain pick its best.
+  //
+  // Non-operators get the full row set unchanged.
   if (isOperatorEmail(email || undefined)) {
-    const nonClient = candidates.filter((row) => !isClientBrand(row.brand));
-    if (nonClient.length > 0) candidates = nonClient;
+    const operatorHome = candidates.filter((row) => isOperatorHomeBrand(row.brand));
+    if (operatorHome.length > 0) {
+      candidates = operatorHome;
+    } else {
+      const nonClient = candidates.filter((row) => !isClientBrand(row.brand));
+      if (nonClient.length > 0) candidates = nonClient;
+    }
   }
 
   return (
