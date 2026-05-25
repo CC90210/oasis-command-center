@@ -146,12 +146,12 @@ export default async function AutomationsPage() {
 
       {profile ? (
         <>
-          {/* Phase 11 (Jordan/Oasis 2026-05-23) — Agents & modules status
-              board above the cron manager. Honest Live/Planned badges per
-              backend module; no claims of automation that isn't actually
-              wired. */}
-          <AgentsModulesStatusBoard />
+          {/* Phase 11 (Jordan/Oasis 2026-05-23). Order matters and was
+              reversed 2026-05-24 per CC: Describe-first (operator's
+              entry point for creating new automations), then the honest
+              Agents & Modules status board, then the live cron list. */}
           <DescribeAutomationFlow />
+          <AgentsModulesStatusBoard />
           <CronJobsManager
             agentKeys={chatAgentKeys().filter((k) =>
               (profile.agents_enabled || chatAgentKeys()).includes(k),

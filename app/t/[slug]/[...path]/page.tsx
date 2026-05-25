@@ -12,6 +12,7 @@ import { LeadsImportClient } from "@/components/leads/LeadsImportClient";
 import { ShoppingOutClient } from "@/components/shopping-out/ShoppingOutClient";
 import { OffersByDealClient } from "@/components/offers/OffersByDealClient";
 import { LendersDirectoryClient } from "@/components/lenders/LendersDirectoryClient";
+import { RenewalsV2 } from "@/components/renewals/RenewalsV2";
 import { LeadTimelinePanel } from "@/components/leads/LeadTimelinePanel";
 import { LeadDocumentsPanel } from "@/components/leads/LeadDocumentsPanel";
 import { StageRail } from "@/components/manifest/StageRail";
@@ -371,6 +372,7 @@ function renderSubtitle(brand: string, page: ManifestPageDef): string {
     case "shopping_out": return "Multi-lender outreach — pick lenders, attach docs, send.";
     case "offers_v2": return "Offers by deal — lender intelligence, accordion + kanban views.";
     case "lenders_v2": return "Lender directory — buy rates, restricted states, decline reasons.";
+    case "renewals_v2": return "Funded deals ranked by renewal urgency.";
     default: return brand;
   }
 }
@@ -441,6 +443,13 @@ async function PageBody({
           tenantId={tenantId}
         />
       );
+    case "renewals_v2":
+      // Phase 8 (Jordan/Oasis 2026-05-23). Funded-deals-backed renewals
+      // view with progress bars + urgency sort + wired tel:/mailto:.
+      // Replaces the generic kind="kanban" rendering of the unused
+      // `renewal` entity. RenewalsV2 is async (server component) — it
+      // reads getRenewalsSummary + getRenewalsRows server-side.
+      return <RenewalsV2 tenantId={tenantId} />;
     case "pipeline": {
       // Stacked superview — Lead Pipeline above Opportunity Pipeline.
       // Each section has its own chevron bar + filtered table. Filter

@@ -19,7 +19,7 @@
  */
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Card, PageHeader, Tag } from "@/components/Card";
+import { Card, Tag } from "@/components/Card";
 import {
   ChevronDown,
   ChevronRight,
@@ -275,11 +275,8 @@ export function OffersByDealClient({
 
   return (
     <div className="space-y-5">
-      <PageHeader
-        title="Offers"
-        subtitle="Lender offers grouped by deal."
-        action={<Tag tone="info">Phase 6 · deal-first</Tag>}
-      />
+      {/* Catch-all dispatcher already renders the page title +
+          subtitle. No inner PageHeader here — duplicated 2026-05-24. */}
 
       {/* View toggle */}
       <div className="flex items-center gap-2">
@@ -320,6 +317,24 @@ export function OffersByDealClient({
         <div className="text-xs text-fg-dim italic py-8 text-center">
           Loading applications and lender threads…
         </div>
+      ) : view === "kanban" ? (
+        // Kanban always renders its 8-column lifecycle scaffold even
+        // when deals is empty — operators need to see the structure of
+        // the offer pipeline (pending / sent / responded / approved /
+        // needs review / declined / no response / error) without first
+        // having data, per CC's 2026-05-24 feedback.
+        <>
+          {deals.length === 0 && (
+            <Card>
+              <div className="flex items-center gap-2 text-sm text-fg-muted py-2">
+                <HandCoins className="w-4 h-4 text-fg-dim" />
+                No lender threads yet. Use Shopping Out to send the first
+                package — replies will land in the columns below.
+              </div>
+            </Card>
+          )}
+          <KanbanView deals={deals} />
+        </>
       ) : deals.length === 0 ? (
         <Card>
           <div className="flex items-center gap-2 text-sm text-fg-muted py-2">
@@ -328,14 +343,12 @@ export function OffersByDealClient({
             the first package.
           </div>
         </Card>
-      ) : view === "accordion" ? (
+      ) : (
         <AccordionView
           deals={deals}
           expanded={expanded}
           setExpanded={setExpanded}
         />
-      ) : (
-        <KanbanView deals={deals} />
       )}
     </div>
   );

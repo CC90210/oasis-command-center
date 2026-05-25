@@ -15,7 +15,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Card, PageHeader, Tag } from "@/components/Card";
+import { Card } from "@/components/Card";
 import { formatMoney, relTime } from "@/lib/format-helpers";
 import { Landmark, Loader2, Plus, Save, Trash2, X } from "lucide-react";
 
@@ -252,11 +252,8 @@ export function LendersDirectoryClient({
 
   return (
     <div className="space-y-5">
-      <PageHeader
-        title="Lenders"
-        subtitle="Knowledge base — buy rates, requirements, restricted states."
-        action={<Tag tone="info">Phase 7</Tag>}
-      />
+      {/* Catch-all dispatcher renders the page title + subtitle. No
+          inner PageHeader here — was duplicating 2026-05-24. */}
 
       {/* Toolbar */}
       <div className="flex flex-wrap items-center gap-3">

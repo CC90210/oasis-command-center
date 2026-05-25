@@ -532,7 +532,12 @@ export const SUN_SEED: TenantManifest = {
       // table. Operator can flip to ?view=table for sorting/filtering.
       config: { compute_group_by: "renewal_window" },
     },
-    { path: "renewals", label: "Renewals", kind: "kanban", entity: "renewal", config: { group_by: "status" } },
+    // Renewals — Phase 8 (Jordan/Oasis 2026-05-23). Funded-deals-backed
+    // view with progress bars, urgency sort, Needs Data badge, wired
+    // tel:/mailto: buttons. Replaces the generic kind="kanban" rendering
+    // of the (unused) `renewal` entity in tenant_records — the actual
+    // renewal data is computed from funded_deals.
+    { path: "renewals", label: "Renewals", kind: "renewals_v2" },
     { path: "commissions", label: "Commissions", kind: "table", entity: "commission" },
     // Lenders — Phase 7 (Jordan/Oasis 2026-05-23). Knowledge-base shell
     // with the expanded field set (buy rate, funding range, restricted

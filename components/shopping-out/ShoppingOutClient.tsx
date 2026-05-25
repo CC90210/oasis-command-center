@@ -20,7 +20,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "next/navigation";
-import { Card, PageHeader, Tag } from "@/components/Card";
+import { Card, Tag } from "@/components/Card";
 import { ShoppingBag, Send, RefreshCcw, Loader2 } from "lucide-react";
 
 type AppRow = {
@@ -344,11 +344,8 @@ export function ShoppingOutClient({
 
   return (
     <div className="space-y-5">
-      <PageHeader
-        title="Shopping Out"
-        subtitle="Pick an application, pick lenders, send the package."
-        action={<Tag tone="info">Phase 4 · live engine</Tag>}
-      />
+      {/* Catch-all dispatcher renders the page title + subtitle. No
+          inner PageHeader here — was duplicating 2026-05-24. */}
 
       {/* Step 1 — Pick application */}
       <Card>

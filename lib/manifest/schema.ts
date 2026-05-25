@@ -174,9 +174,14 @@ export type ManifestPageKind =
   | "offers_v2"       // Phase 6. Deal-first offer intelligence view (accordion +
                       // kanban toggle) on top of application_lender_threads.
                       // Replaces the generic kanban for the offers page.
-  | "lenders_v2";     // Phase 7. Lender directory with the expanded field set
+  | "lenders_v2"      // Phase 7. Lender directory with the expanded field set
                       // (buy rate, funding range, restricted states, decline
                       // reasons, etc.) and the LenderDetailDrawer.
+  | "renewals_v2";    // Phase 8. Funded-deals-backed renewals view —
+                      // progress bars, urgency sort, "Needs Data" badge,
+                      // wired tel:/mailto: buttons. Replaces the generic
+                      // kind="kanban" rendering of the (unused) `renewal`
+                      // entity in tenant_records for the SunBiz tenant.
 
 export type ManifestPageDef = {
   path: string;           // relative path under /t/<slug>/ e.g. "leads"
@@ -431,6 +436,7 @@ const PAGE_KINDS = new Set<ManifestPageKind>([
   "shopping_out",
   "offers_v2",
   "lenders_v2",
+  "renewals_v2",
 ]);
 const ENTITY_FIELD_TYPES = new Set(["string", "number", "boolean", "date", "datetime", "enum", "json"]);
 const INTEGRATION_KINDS = new Set<ManifestIntegrationKind>([
