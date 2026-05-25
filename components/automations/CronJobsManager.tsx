@@ -60,6 +60,52 @@ type CronJob = {
 
 type Props = { agentKeys: string[] };
 
+/**
+ * Per-agent display copy. Tenants whose agent palette doesn't include
+ * an empire-side key (Sun Biz uses solara/helios, never bravo/atlas/
+ * maven/aura) won't see those groups — the renderer iterates the
+ * tenant's actual agentKeys, not the hardcoded list. Adding a new
+ * agent to a tenant means adding a one-line entry here OR falling
+ * back to the auto-titlecased default.
+ *
+ * Closes the 2026-05-25 leak where Ezra on Sun Biz was seeing
+ * "Bravo (CEO) — Business Operations / no automations yet" groups
+ * for CC's empire agents.
+ */
+const AGENT_GROUP_COPY: Record<string, { label: string; subLabel: string }> = {
+  // Empire (CC's personal C-suite — only visible when CC is signed in)
+  bravo: {
+    label: "Bravo (CEO) — Business Operations",
+    subLabel: "Daily briefs, lead scoring, funnel polling, MRR sync, snapshots",
+  },
+  atlas: {
+    label: "Atlas (CFO) — Finance & Compliance",
+    subLabel: "Wealth tracking, tax deadlines, balance nudges, pulse refresh",
+  },
+  maven: {
+    label: "Maven (CMO) — Content & Brand",
+    subLabel: "Social posting, content pipelines, brand voice gate",
+  },
+  aura: {
+    label: "Aura — Personal",
+    subLabel: "Voice notes, habit tracking, personal cadence",
+  },
+  // SunBiz operational + sales
+  solara: {
+    label: "Solara — Funding Operations",
+    subLabel: "Lead intake, application shop-out, renewal watch, document parsing",
+  },
+  helios: {
+    label: "Helios — Sales & Outreach",
+    subLabel: "Cold outreach cadence, follow-up sequences, revival drips",
+  },
+};
+
+function titleCase(s: string): string {
+  if (!s) return "Other";
+  return s.charAt(0).toUpperCase() + s.slice(1).toLowerCase();
+}
+
 // Operator-friendly schedule presets — solves the "what cron expression
 // do I write?" UX gap without forcing operators to learn cron syntax.
 // "Custom" reveals the raw 5-field input.
@@ -327,48 +373,41 @@ export function CronJobsManager({ agentKeys }: Props) {
       )}
 
           {jobs && jobs.length > 0 && (() => {
-        // Group by AGENT (CEO/CFO/CMO/Aura), not by source.
-        // CC's directive 2026-05-22: "this is my personal account ... I'm
-        // using Maven, Atlas, and Bravo." The empire is a single-operator
-        // C-suite. Tenant-vs-Empire grouping made sense when there were
-        // client tenants on the same dashboard; now it's just confusing.
+        // Group by AGENT, driven by the tenant's actual agentKeys
+        // (passed in from /automations after filtering by the
+        // signed-in user's profile.agents_enabled). Closes the
+        // 2026-05-25 leak — Ezra on Sun Biz now sees Solara / Helios
+        // groups (his actual agents), not CC's empire C-suite.
         //
-        // Order: CEO (Bravo) → CFO (Atlas) → CMO (Maven) → Aura.
-        // Mavenless empires still render the section with a "no automations
-        // yet" placeholder so CC sees the gap, not silence.
+        // Display copy comes from AGENT_GROUP_COPY for known agents;
+        // unknown agent_keys get a title-cased fallback so the UI
+        // doesn't silently swallow a typo.
+        const orderedKeys = (agentKeys && agentKeys.length > 0
+          ? agentKeys
+          : ["bravo", "atlas", "maven", "aura"]
+        ).map((k) => k.toLowerCase());
+
         const groups: Array<{
           key: string;
           label: string;
           subLabel: string;
           jobs: typeof jobs;
-        }> = [
-          {
-            key: "bravo",
-            label: "Bravo (CEO) — Business Operations",
-            subLabel: "Daily briefs, lead scoring, funnel polling, MRR sync, snapshots",
-            jobs: jobs.filter((j) => (j.agent_key || "").toLowerCase().startsWith("bravo")),
-          },
-          {
-            key: "atlas",
-            label: "Atlas (CFO) — Finance & Compliance",
-            subLabel: "Wealth tracking, tax deadlines, balance nudges, pulse refresh",
-            jobs: jobs.filter((j) => (j.agent_key || "").toLowerCase().startsWith("atlas")),
-          },
-          {
-            key: "maven",
-            label: "Maven (CMO) — Content & Brand",
-            subLabel: "Social posting, content pipelines, brand voice gate",
-            jobs: jobs.filter((j) => (j.agent_key || "").toLowerCase().startsWith("maven")),
-          },
-          {
-            key: "aura",
-            label: "Aura — Personal",
-            subLabel: "Voice notes, habit tracking, personal cadence",
-            jobs: jobs.filter((j) => (j.agent_key || "").toLowerCase().startsWith("aura")),
-          },
-        ];
+        }> = orderedKeys.map((k) => {
+          const copy = AGENT_GROUP_COPY[k] || {
+            label: titleCase(k),
+            subLabel: "Tenant automations for this agent.",
+          };
+          return {
+            key: k,
+            label: copy.label,
+            subLabel: copy.subLabel,
+            jobs: jobs.filter((j) => (j.agent_key || "").toLowerCase().startsWith(k)),
+          };
+        });
+
+        const knownPrefixes = orderedKeys;
         const orphanJobs = jobs.filter(
-          (j) => !["bravo", "atlas", "maven", "aura"].some((k) => (j.agent_key || "").toLowerCase().startsWith(k)),
+          (j) => !knownPrefixes.some((k) => (j.agent_key || "").toLowerCase().startsWith(k)),
         );
         if (orphanJobs.length > 0) {
           groups.push({
