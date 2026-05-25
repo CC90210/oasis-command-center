@@ -537,6 +537,27 @@ function AccordionRow({
                       />
                     );
                   })}
+                  {/* Codex review 2026-05-24 — offer records without a
+                      matching thread (legacy / manually-entered offers)
+                      were hidden because the table only rendered
+                      sortedThreads. Render them here as offer-only rows
+                      so the count in the accordion header always matches
+                      what the table shows. */}
+                  {(() => {
+                    const threadLenderKeys = new Set<string>();
+                    for (const t of sortedThreads) {
+                      threadLenderKeys.add(t.lender_id);
+                      if (t.lender_name) threadLenderKeys.add(t.lender_name);
+                    }
+                    const orphanOffers = offers.filter((o) => {
+                      const lid = String(o.data.lender_id || "");
+                      const lname = String(o.data.lender_name || "");
+                      return !threadLenderKeys.has(lid) && !threadLenderKeys.has(lname);
+                    });
+                    return orphanOffers.map((o) => (
+                      <OfferOnlyRow key={`offer-${o.id}`} offer={o} />
+                    ));
+                  })()}
                 </tbody>
               </table>
             </div>
@@ -606,6 +627,39 @@ function ThreadRow({
         </tr>
       )}
     </>
+  );
+}
+
+/**
+ * Renders an offer record that has no matching application_lender_thread.
+ * Codex review 2026-05-24: without this row the accordion header's
+ * "N offer records" count would be a lie — header says 2, table shows 0.
+ */
+function OfferOnlyRow({ offer }: { offer: OfferRow }) {
+  const d = offer.data;
+  const lenderName = String(d.lender_name || "—");
+  const amount = fmtCurrency(d.amount);
+  const termMonths = d.term_months != null ? `${d.term_months}mo` : "—";
+  const factorRate = d.factor_rate != null ? String(d.factor_rate) : "—";
+  const stage = String(d.stage || "—");
+  return (
+    <tr className="border-b border-bg-border/50 last:border-0 hover:bg-bg-elev/20 transition-colors align-top">
+      <td className="px-4 py-2.5">
+        <div className="font-semibold text-fg text-[12.5px] leading-tight">{lenderName}</div>
+        <div className="text-[10px] text-fg-dim mt-0.5">offer record · no thread</div>
+      </td>
+      <td className="px-3 py-2.5">
+        <span className="text-[10px] uppercase tracking-wider font-mono px-1.5 py-0.5 rounded border bg-emerald-500/15 text-emerald-300 border-emerald-500/30">
+          {stage.replace(/_/g, " ")}
+        </span>
+      </td>
+      <td className="px-3 py-2.5 font-mono text-[11.5px] text-fg">{amount}</td>
+      <td className="px-3 py-2.5 font-mono text-[11.5px] text-fg-muted">{termMonths}</td>
+      <td className="px-3 py-2.5 font-mono text-[11.5px] text-fg-muted">{factorRate}</td>
+      <td className="px-3 py-2.5 text-[11px] text-fg-dim hidden sm:table-cell">—</td>
+      <td className="px-3 py-2.5 text-[11px] text-fg-dim font-mono whitespace-nowrap">—</td>
+      <td className="px-3 py-2.5 text-[11px] text-fg-dim font-mono whitespace-nowrap">—</td>
+    </tr>
   );
 }
 

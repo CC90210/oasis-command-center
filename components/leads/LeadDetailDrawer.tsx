@@ -216,8 +216,13 @@ export function LeadDetailDrawer({
                 + sends in one motion. Hidden on the lead drawer (Lead-side
                 shopping doesn't make sense until the application exists). */}
             {entity === "application" ? (
+              // ?app= (not ?application=) — the catch-all dispatcher at
+              // app/t/[slug]/[...path]/page.tsx treats ?application= as
+              // the signal to open the LeadDetailDrawer. Using ?app=
+              // here keeps the drawer from re-opening over the Shopping
+              // Out page (Codex review 2026-05-24).
               <Link
-                href={`/t/${tenantSlug}/shopping-out?application=${recordId}`}
+                href={`/t/${tenantSlug}/shopping-out?app=${recordId}`}
                 className="inline-flex items-center gap-1.5 text-[10.5px] font-semibold px-2.5 py-1 rounded-md bg-accent/10 text-accent border border-accent/30 hover:bg-accent/20"
               >
                 <ShoppingBag className="w-3 h-3" />

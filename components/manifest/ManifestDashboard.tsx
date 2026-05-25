@@ -4,6 +4,7 @@ import { Card } from "@/components/Card";
 import { listRecords, type TenantRecord } from "@/lib/manifest/data";
 import type { TenantManifest } from "@/lib/manifest/schema";
 import { getServiceSupabase } from "@/lib/supabase-server";
+import { getRenewalsSummary } from "@/lib/queries";
 import { LEAD_PIPELINE_STAGES, OPPORTUNITY_PIPELINE_STAGES, type StageMeta } from "@/lib/sunbiz-stage-meta";
 import { formatMoney, timeAgo } from "@/lib/fmt";
 
@@ -384,7 +385,10 @@ async function SunBizActionBand({
 
   // Three queries in parallel. Each falls back to zero on error so a
   // missing-table or RLS-deny doesn't break the dashboard.
-  const [reviewRes, shoppingRes] = await Promise.all([
+  // Renewal summary reuses the same query the /renewals page uses so
+  // the card's count matches what the user sees when they click through
+  // (Codex review 2026-05-24 — was hardcoded to 0).
+  const [reviewRes, shoppingRes, renewals] = await Promise.all([
     sb
       .from("application_lender_threads")
       .select("id, status, last_error", { count: "exact", head: false })
@@ -397,20 +401,33 @@ async function SunBizActionBand({
       .eq("tenant_id", tenantId)
       .eq("status", "sent")
       .gte("sent_at", SEVEN_DAYS_AGO_ISO),
+    getRenewalsSummary(tenantId).catch(() => ({
+      past_due_count: 0,
+      this_week_count: 0,
+      this_month_count: 0,
+      est_commission_total_usd: 0,
+      total_with_dates: 0,
+      total_no_date: 0,
+    })),
   ]);
 
   const needsReview = reviewRes.error ? 0 : reviewRes.count ?? 0;
   const shoppingActive = shoppingRes.error ? 0 : shoppingRes.count ?? 0;
+  const renewalAlerts = renewals.past_due_count + renewals.this_week_count;
 
   return (
     <section className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
       <KpiCard
         href={`/t/${slug}/renewals`}
         title="Renewal alerts"
-        value={0}
+        value={renewalAlerts}
         accent="#E96F2D"
         icon={<RefreshCw className="w-5 h-5" />}
-        sub="see Renewals for past-due + this-week details"
+        sub={
+          renewalAlerts > 0
+            ? `${renewals.past_due_count} past due · ${renewals.this_week_count} this week`
+            : "queue clear — nothing due this week"
+        }
       />
       <KpiCard
         href={`/t/${slug}/offers`}

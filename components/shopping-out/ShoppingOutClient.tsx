@@ -87,7 +87,10 @@ export function ShoppingOutClient({
   tenantId: string | null;
 }) {
   const params = useSearchParams();
-  const presetAppId = params.get("application");
+  // ?app= (not ?application=) — the catch-all tenant dispatcher opens
+  // the LeadDetailDrawer on ?application= so we use a non-colliding
+  // param here (Codex review 2026-05-24).
+  const presetAppId = params.get("app");
 
   const [apps, setApps] = useState<AppRow[] | null>(null);
   const [lenders, setLenders] = useState<LenderRow[] | null>(null);
@@ -156,7 +159,12 @@ export function ShoppingOutClient({
     if (!selectedAppId || !lenders) return;
     setPlanLoading(true);
     try {
-      const allLenderIds = lenders.map((l) => l.id);
+      // Filter inactive lenders — the Lenders directory's active toggle
+      // is the authoritative on/off switch. Inactive lenders should
+      // never appear in the shop-out plan (Codex review 2026-05-24).
+      const allLenderIds = lenders
+        .filter((l) => l.data.active !== false)
+        .map((l) => l.id);
       const [planRes, threadsRes] = await Promise.all([
         fetch(`/api/applications/${selectedAppId}/shop-out`, {
           method: "POST",

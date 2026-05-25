@@ -74,7 +74,10 @@ export async function POST(
       { status: 400 },
     );
   }
-  if (lenderIds.length > 20) {
+  // 20-cap only applies to real sends. Dry-run scoring needs to look at
+  // every lender so the Shopping Out UI can rank a directory of any size
+  // without 21+ lenders making the page unusable (Codex review 2026-05-24).
+  if (!body.dry_run && lenderIds.length > 20) {
     return NextResponse.json(
       { ok: false, error: "too_many_lenders", hint: "Max 20 lenders per shop-out. Re-shop unfunded leads next month with a different cohort." },
       { status: 400 },
