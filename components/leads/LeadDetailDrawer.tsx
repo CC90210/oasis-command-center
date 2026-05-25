@@ -849,6 +849,54 @@ function DocDownloadButton({ id, filename }: { id: string; filename: string }) {
 
 type ComposerMode = "email" | "sms" | "torrent" | null;
 
+/**
+ * CallButton — Kixie click-to-call action (2026-05-25, CC ask).
+ *
+ * Normalizes any phone shape into E.164 (US default), then renders an
+ * <a href="kixie:call?number=+1XXX"> styled as a button. The Kixie
+ * PowerCall Chrome extension intercepts that protocol and rings the
+ * operator's configured device + dials out via Kixie's PBX.
+ *
+ * If the extension isn't installed the anchor falls through to the OS
+ * handler (system dialer / softphone / nothing depending on platform).
+ * Disabled state when there's no phone on the record.
+ */
+function CallButton({ phone }: { phone: string | null }) {
+  const e164 = (() => {
+    if (!phone) return null;
+    const digits = String(phone).replace(/\D+/g, "");
+    if (digits.length === 11 && digits.startsWith("1")) return `+${digits}`;
+    if (digits.length === 10) return `+1${digits}`;
+    if (digits.length > 0) return `+${digits}`;
+    return null;
+  })();
+
+  if (!e164) {
+    return (
+      <button
+        type="button"
+        disabled
+        title="No phone on this record"
+        className="flex-1 text-[12px] font-semibold px-3 py-2 rounded-md bg-bg-elev border border-bg-border text-fg-dim opacity-50 cursor-not-allowed inline-flex items-center justify-center gap-1.5"
+      >
+        <Phone className="w-3 h-3" />
+        Call
+      </button>
+    );
+  }
+
+  return (
+    <a
+      href={`kixie:call?number=${encodeURIComponent(e164)}`}
+      title={`Call ${e164} via Kixie`}
+      className="flex-1 text-[12px] font-semibold px-3 py-2 rounded-md bg-emerald-500/15 border border-emerald-500/40 text-emerald-300 hover:bg-emerald-500/25 inline-flex items-center justify-center gap-1.5"
+    >
+      <Phone className="w-3 h-3" />
+      Call (Kixie)
+    </a>
+  );
+}
+
 function DrawerFooter({
   recordId,
   entity,
@@ -879,6 +927,15 @@ function DrawerFooter({
           >
             Send SMS
           </button>
+          {/* Kixie click-to-call (added 2026-05-25 per CC).
+              Primary path: kixie:call?number=... triggers the Kixie
+              PowerCall Chrome extension which rings the operator's
+              configured device and dials out via Kixie's PBX. Falls
+              back to tel: when the extension isn't installed — most
+              desktops will then open their default softphone or do
+              nothing depending on OS handler. Disabled when there's
+              no phone on the record. */}
+          <CallButton phone={str(recordData.phone)} />
           <button
             type="button"
             onClick={() => setMode("torrent")}

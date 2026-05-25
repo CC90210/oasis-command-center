@@ -3,12 +3,19 @@ import { Sparkles } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 
 /**
- * Phase 1 stub page. Renders the full sidebar shell so Sun's click-through
- * never hits a 404, but tells the operator the feature is wired and pending.
+ * Shared placeholder for routes whose deeper UX is queued. Renders the
+ * full sidebar shell so a click-through never hits a 404 — instead the
+ * operator sees the route exists, what it'll do, and which related
+ * surfaces work today.
  *
- * Phase 2 turns each stub into a real list view backed by migrations
- * 037-047. Replacing a stub: swap `<ComingSoon ... />` for the actual
- * page content — the nav-config entry stays untouched.
+ * Moved 2026-05-25 from components/sunbiz/ to components/ to match
+ * reality: this component is mounted by 9+ cross-tenant routes
+ * (templates, offers, lenders, funded-deals, email-blast, embed,
+ * contacts, commissions, applications) and the SunBiz namespace was a
+ * lie that produced the 2026-05-25 cross-tenant copy leak.
+ *
+ * Body copy is brand-agnostic by design. Per-page bullets come from
+ * the caller via `phase2Bullets`.
  */
 export function ComingSoon({
   title,
@@ -36,13 +43,6 @@ export function ComingSoon({
             <div>
               <div className="text-fg text-base font-semibold mb-1">Coming Soon</div>
               <p className="text-fg-muted text-sm">
-                {/* Body copy generalized 2026-05-25 cross-tenant audit.
-                    Previously hardcoded 'Sun Biz Funding Command Center
-                    / Solara's deeper workflow' which leaked SunBiz
-                    branding into the 9 shared routes that mount this
-                    component (templates, offers, lenders, funded-deals,
-                    email-blast, embed, contacts, commissions,
-                    applications). */}
                 This page is wired into the Command Center. The deeper
                 workflow for this area is queued next; the links below
                 are the parts your team can use today.

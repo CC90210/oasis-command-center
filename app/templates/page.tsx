@@ -1,4 +1,4 @@
-import { ComingSoon } from "@/components/sunbiz/ComingSoon";
+import { ComingSoon } from "@/components/ComingSoon";
 import { FileCode2 } from "lucide-react";
 
 export const dynamic = "force-dynamic";
