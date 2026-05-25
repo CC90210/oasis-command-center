@@ -177,11 +177,20 @@ export type ManifestPageKind =
   | "lenders_v2"      // Phase 7. Lender directory with the expanded field set
                       // (buy rate, funding range, restricted states, decline
                       // reasons, etc.) and the LenderDetailDrawer.
-  | "renewals_v2";    // Phase 8. Funded-deals-backed renewals view —
+  | "renewals_v2"     // Phase 8. Funded-deals-backed renewals view —
                       // progress bars, urgency sort, "Needs Data" badge,
                       // wired tel:/mailto: buttons. Replaces the generic
                       // kind="kanban" rendering of the (unused) `renewal`
                       // entity in tenant_records for the SunBiz tenant.
+  | "settings";       // Tenant-scoped Settings — routes through the
+                      // catch-all under /t/<slug>/settings instead of
+                      // top-level /settings. Closes the cross-tenant
+                      // leak where previewing a tenant rendered the
+                      // operator's own profile/devices/AI inside the
+                      // tenant shell. Catch-all renders TenantSettings,
+                      // which delegates to shared SettingsContent with
+                      // previewMode=true when the operator doesn't own
+                      // the slug (resolveDataTenant returns null).
 
 export type ManifestPageDef = {
   path: string;           // relative path under /t/<slug>/ e.g. "leads"
@@ -437,6 +446,7 @@ const PAGE_KINDS = new Set<ManifestPageKind>([
   "offers_v2",
   "lenders_v2",
   "renewals_v2",
+  "settings",
 ]);
 const ENTITY_FIELD_TYPES = new Set(["string", "number", "boolean", "date", "datetime", "enum", "json"]);
 const INTEGRATION_KINDS = new Set<ManifestIntegrationKind>([

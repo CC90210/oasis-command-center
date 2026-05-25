@@ -292,10 +292,15 @@ export const SUN_SEED: TenantManifest = {
     // path land on the shared /automations page. Phase 11 adds an
     // "Agents & Modules" status section above the cron list.
     { href: "/automations", label: "Automations", icon: "RefreshCcw", group: "System" },
-    // Top-level /settings — already tenant-aware (reads profile.tenant_id).
-    // Modeled on the OASIS settings shell: integrations, agents enabled,
-    // templates, devices, password. Same shape, tenant-scoped data.
-    { href: "/settings", label: "Settings", icon: "Settings", group: "System" },
+    // Settings — routed through the catch-all (kind="settings") since
+    // 2026-05-25 to close the cross-tenant leak where the prior
+    // top-level /settings link rendered the SIGNED-IN operator's data
+    // inside whichever tenant shell they were viewing. Now /t/sun/
+    // settings hits TenantSettings which uses resolveDataTenant() to
+    // gate previewMode — operator previewing a non-owned tenant sees
+    // an empty scaffold with no sub-components mounted (no fetches,
+    // no leaks). Tenant owner sees full settings as before.
+    { href: "/t/sun/settings", label: "Settings", icon: "Settings", group: "System" },
   ],
   data_model: [
     {
@@ -546,6 +551,10 @@ export const SUN_SEED: TenantManifest = {
     // get the generic table primitive.
     { path: "lenders", label: "Lenders", kind: "lenders_v2", entity: "lender" },
     { path: "import", label: "Import leads", kind: "import" },
+    // Settings — tenant-scoped, routed via the catch-all so
+    // resolveDataTenant() can gate previewMode for non-owners. See
+    // schema.ts ManifestPageKind / TenantSettings for the full rules.
+    { path: "settings", label: "Settings", kind: "settings" },
     { path: "playbook", label: "Operating Manual", kind: "markdown", config: { body: "## Meet your agents\n\n**Solara** is your funding-shop operator. She watches the pipeline, drafts follow-ups in your voice over text and email, scores incoming applications against your lender book, and surfaces renewal windows before they close.\n\n**Helios** is your sales voice. He runs cold outreach and brings ghosted deals back to the table — the same human-sounding cadence you'd send yourself, just faster.\n\n## Where leads come from\n\n- The **SunBiz application form** (built into the dashboard — see Forms). Personalized links go out by SMS or email; submissions land in Leads in the **Imported** column.\n- **Bulk CSV import** (see Import). Drop a Google Sheet export and Solara de-duplicates by email and phone before adding.\n- **Manual entry** from the Leads page → **+ New lead**.\n\n## Your day, end to end\n\n1. **Open the Dashboard.** Hot leads, missing-info alerts, and renewals due are at the top — that's your priority list.\n2. **Move leads through the pipeline.** Click any chevron stage to see who's there. Drag the hot ones to **Follow Up** and the 3-touch cadence fires automatically.\n3. **Send applications.** When a lead is ready, send them the application link from their detail page. Once they sign and upload bank statements, they graduate to the Opportunity Pipeline.\n4. **Shop the application out.** Open the application card and check **Recommended Lenders** — top fits by FICO, monthly revenue, and time in business. One click forwards the deal to a lender.\n5. **Log the offer.** When a lender returns terms, capture them in Offers. Click **Accept** and the deal rolls into Funded Deals as a draft.\n6. **Watch renewals.** Funded Deals shows the renewal window — anything 40-50% through term is your re-funding focus for the week.\n\n## Behind the scenes\n\n- The **Automations** tab shows the scheduled jobs running on your computer — lead scoring, follow-up checks, daily briefs. You can describe a new one in plain English and your agent writes the script for you.\n- **Settings → Devices** is where you pair the local install. Once paired, the dashboard reads from your machine and your agents can run code in the background." } },
   ],
   default_prompts: [

@@ -13,6 +13,7 @@ import { ShoppingOutClient } from "@/components/shopping-out/ShoppingOutClient";
 import { OffersByDealClient } from "@/components/offers/OffersByDealClient";
 import { LendersDirectoryClient } from "@/components/lenders/LendersDirectoryClient";
 import { RenewalsV2 } from "@/components/renewals/RenewalsV2";
+import { TenantSettings } from "@/components/settings/TenantSettings";
 import { LeadTimelinePanel } from "@/components/leads/LeadTimelinePanel";
 import { LeadDocumentsPanel } from "@/components/leads/LeadDocumentsPanel";
 import { StageRail } from "@/components/manifest/StageRail";
@@ -373,6 +374,7 @@ function renderSubtitle(brand: string, page: ManifestPageDef): string {
     case "offers_v2": return "Offers by deal — lender intelligence, accordion + kanban views.";
     case "lenders_v2": return "Lender directory — buy rates, restricted states, decline reasons.";
     case "renewals_v2": return "Funded deals ranked by renewal urgency.";
+    case "settings": return "Tenant-scoped — owner sees full settings, preview shows scaffold only.";
     default: return brand;
   }
 }
@@ -450,6 +452,15 @@ async function PageBody({
       // `renewal` entity. RenewalsV2 is async (server component) — it
       // reads getRenewalsSummary + getRenewalsRows server-side.
       return <RenewalsV2 tenantId={tenantId} />;
+    case "settings":
+      // Tenant-scoped Settings (2026-05-25). Routed here instead of
+      // top-level /settings to fix the cross-tenant leak — operator
+      // previewing a non-owned tenant gets the preview-mode scaffold
+      // (no sub-components mount, no fetches), while the tenant owner
+      // sees the full SettingsContent with their data scoped to this
+      // tenant. The dataTenantId gate (null for non-owners) controls
+      // which branch renders inside TenantSettings.
+      return <TenantSettings tenantSlug={slug} tenantId={tenantId} />;
     case "pipeline": {
       // Stacked superview — Lead Pipeline above Opportunity Pipeline.
       // Each section has its own chevron bar + filtered table. Filter
