@@ -19,7 +19,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { useSearchParams } from "next/navigation";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { Card, Tag } from "@/components/Card";
 import { ShoppingBag, Send, RefreshCcw, Loader2 } from "lucide-react";
 
@@ -96,10 +96,35 @@ export function ShoppingOutClient({
   tenantId: string | null;
 }) {
   const params = useSearchParams();
+  const router = useRouter();
+  const pathname = usePathname();
   // ?app= (not ?application=) — the catch-all tenant dispatcher opens
   // the LeadDetailDrawer on ?application= so we use a non-colliding
-  // param here (Codex review 2026-05-24).
+  // param here (Codex review 2026-05-24). On EXPLICIT row click below
+  // we additionally push ?application= so the drawer pops in-context
+  // with the operator's full deal profile (CC ask 2026-05-25).
   const presetAppId = params.get("app");
+
+  /**
+   * Selecting an application has two effects: it primes Step 2's
+   * lender picker locally (setSelectedAppId), AND it pushes
+   * ?application=<id> so the catch-all dispatcher mounts the
+   * LeadDetailDrawer over the page. The drawer's close() clears
+   * ?application= but leaves ?app= intact, so dismissing returns the
+   * operator to Shopping Out with the app still primed.
+   *
+   * Deep-link entry (?app=<id> only, e.g. from the "Shop Out" button
+   * on the Application drawer) intentionally does NOT auto-pop — that
+   * flow expects to land on the lender picker, not re-open the drawer
+   * the operator just came from.
+   */
+  function selectApplication(appId: string) {
+    setSelectedAppId(appId);
+    const next = new URLSearchParams(params?.toString() || "");
+    next.set("app", appId);
+    next.set("application", appId);
+    router.push(`${pathname}?${next.toString()}`, { scroll: false });
+  }
 
   const [apps, setApps] = useState<AppRow[] | null>(null);
   const [lenders, setLenders] = useState<LenderRow[] | null>(null);
@@ -378,7 +403,7 @@ export function ShoppingOutClient({
                   <button
                     key={a.id}
                     type="button"
-                    onClick={() => setSelectedAppId(a.id)}
+                    onClick={() => selectApplication(a.id)}
                     className={`w-full text-left px-3 py-2 flex items-center justify-between gap-3 hover:bg-bg-elev/60 ${
                       isSelected ? "bg-accent/10" : ""
                     }`}

@@ -23,6 +23,8 @@ import {
   FileText,
   Landmark,
   ArrowRight,
+  BadgeDollarSign,
+  Clock,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import type { ReactNode } from "react";
@@ -106,6 +108,29 @@ const MODULES: Module[] = [
     status: "live",
     icon: ArrowRight,
     connected: "lib/lead-stage-engine.ts + lib/lead-stage-dispatcher.ts.",
+  },
+  // Two new modules added 2026-05-25 per CC. Both honestly Planned —
+  // no code wired yet. The board entries make the roadmap visible to
+  // the operator so they don't expect either to be running.
+  {
+    key: "underwriting_agent",
+    name: "Underwriting Agent",
+    description:
+      "Watches shopped-out deals as they progress toward funding. Captures lender rate, term, and projected commission ($ + points) so Commissions stays in sync with what's actually been sold.",
+    status: "planned",
+    icon: BadgeDollarSign,
+    connected:
+      "Phase 6.6 — depends on the Email Offer Scanner being Live so amount/term/buy-rate can be extracted from inbound lender emails, plus a commissions_projection field on application_lender_threads.",
+  },
+  {
+    key: "renewal_reminder_agent",
+    name: "Renewal Reminder Agent",
+    description:
+      "Daily 9am sweep of funded deals. Flags any deal at 40-50% through its term (configurable via manifest.settings.renewal_eligibility_threshold_pct, default 40) and pushes a Telegram alert so the team has time to re-shop.",
+    status: "planned",
+    icon: Clock,
+    connected:
+      "Phase 8.2 — needs a tenant_cron_jobs seed (daily 09:00 ET, action_type='agent_prompt') + Solara given a 'scan funded_deals where progress in [0.35, 0.50]' tool. Distinct from the Renewal Calculator entry above (which computes % on page-load).",
   },
 ];
 
