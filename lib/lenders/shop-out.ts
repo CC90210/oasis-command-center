@@ -21,8 +21,9 @@
  */
 
 import { getServiceSupabase } from "@/lib/supabase-server";
-import type { LenderProfile, ApplicationProfile } from "./match-fitness";
+import type { LenderProfile, ApplicationProfile, LenderWarning } from "./match-fitness";
 import { scoreLenderMatch } from "./match-fitness";
+import { buildLenderNarrative } from "./match-narrative";
 
 export type ShopOutAttachment = {
   /** Display filename — e.g. "bank-statements-mar-may.pdf". */
@@ -77,7 +78,12 @@ export type ShopOutPlanRow = {
   lender_id: string;
   lender_name: string;
   match_score: number;
+  /** Backward-compat — flattened high_risk warning details. */
   blockers: string[];
+  /** 2026-05-25 — severity-tiered warnings the UI groups by tier. */
+  warnings: LenderWarning[];
+  /** 2026-05-25 — 1-3 sentence plain-English explanation of the rank. */
+  narrative: string;
   rendered_subject: string;
   rendered_body: string;
   recipient_email: string | null;
@@ -134,6 +140,8 @@ export async function buildShopOutPlan(input: ShopOutPlanInput): Promise<{
       lender_name: lender.name,
       match_score: score.score,
       blockers: score.blockers,
+      warnings: score.warnings,
+      narrative: buildLenderNarrative(score, lender, input.application),
       rendered_subject: renderSimple(subjectTemplate, vars),
       rendered_body: renderSimple(bodyTemplate, vars),
       recipient_email: recipient,
@@ -173,8 +181,20 @@ export async function recordShopOutThreads(input: {
   /** Attachments the operator confirmed on this shop-out. Same shape and
    *  validation the POST route accepts (tenant-scoped storage paths). */
   attachments?: ShopOutAttachment[];
-}): Promise<{ ok: true; inserted: number } | { ok: false; error: string }> {
-  if (input.entries.length === 0) return { ok: true, inserted: 0 };
+  /**
+   * 2026-05-25 (migration 069) — assigned rep's phone snapshot.
+   * Resolved from application.data.assigned_rep_phone at queue time so
+   * reassignment AFTER queue doesn't silently change the outbound.
+   * scripts/shop_out_sender.py substitutes {{owner_phone}} placeholders
+   * in body templates with this value; falls back to
+   * "[no owner phone configured]" when null.
+   */
+  owner_phone?: string | null;
+}): Promise<
+  | { ok: true; inserted: number; threads: Array<{ id: string; lender_id: string }> }
+  | { ok: false; error: string }
+> {
+  if (input.entries.length === 0) return { ok: true, inserted: 0, threads: [] };
   const db = getServiceSupabase();
   // Persist body_template + attachments on each thread (migration 065,
   // 2026-05-25). Without these the bridge-side sender can't faithfully
@@ -190,6 +210,7 @@ export async function recordShopOutThreads(input: {
     body_template: e.body ?? null,
     attachments: attachmentsJson,
     cc_emails: input.cc_emails,
+    owner_phone: input.owner_phone ?? null,
     // Errors (missing contact, match blocker) -> 'error'. Otherwise
     // 'pending' until the bridge-side sender (scripts/shop_out_sender.py,
     // Phase 6.3-bis) flips it to 'sent' on real SMTP success. Never
@@ -198,9 +219,16 @@ export async function recordShopOutThreads(input: {
     last_error: e.error || null,
     sent_at: null,
   }));
-  const { error } = await db.from("application_lender_threads").insert(rows);
+  const { data, error } = await db
+    .from("application_lender_threads")
+    .insert(rows)
+    .select("id, lender_id");
   if (error) {
     return { ok: false, error: error.message };
   }
-  return { ok: true, inserted: rows.length };
+  const threads = (data || []).map((r) => ({
+    id: String((r as { id: unknown }).id),
+    lender_id: String((r as { lender_id: unknown }).lender_id),
+  }));
+  return { ok: true, inserted: threads.length, threads };
 }

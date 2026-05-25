@@ -42,7 +42,9 @@ export type NavIconKey =
   | "Megaphone"
   | "ShoppingBag"
   | "Heart"
-  | "Sparkles";
+  | "Sparkles"
+  | "FileSearch"
+  | "ClipboardCheck";
 
 /**
  * NavItem - one entry in the sidebar.

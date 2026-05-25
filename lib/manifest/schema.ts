@@ -23,43 +23,18 @@
 
 export const MANIFEST_SCHEMA_VERSION = 1 as const;
 
-// ---------------------------------------------------------------------------
-// Primitive types
-// ---------------------------------------------------------------------------
+// Import NavIconKey and re-export as ManifestNavIconKey so the two types stay
+// in sync automatically. Any icon added to nav-config.ts is immediately valid
+// in tenant manifests without a separate update here. Before this import the
+// two lists drifted (ClipboardCheck / FileSearch were in NavIconKey but not
+// ManifestNavIconKey), which caused build failures whenever seeds.ts referenced
+// an icon the narrower type didn't know about.
+import type { NavIconKey } from "@/lib/nav-config";
+export type ManifestNavIconKey = NavIconKey;
 
-export type ManifestNavIconKey =
-  | "LayoutDashboard"
-  | "GitBranch"
-  | "Brain"
-  | "BookOpen"
-  | "Bot"
-  | "BarChart3"
-  | "Plug"
-  | "Settings"
-  | "Activity"
-  | "Inbox"
-  | "History"
-  | "ShieldCheck"
-  | "ShieldAlert"
-  | "Radio"
-  | "Users"
-  | "BookUser"
-  | "FileText"
-  | "Upload"
-  | "HandCoins"
-  | "BadgeDollarSign"
-  | "RefreshCcw"
-  | "DollarSign"
-  | "MessageSquare"
-  | "Mail"
-  | "Landmark"
-  | "FileCode2"
-  | "UsersRound"
-  | "Code2"
-  | "Megaphone"
-  | "ShoppingBag"
-  | "Heart"
-  | "Sparkles";
+// ---------------------------------------------------------------------------
+// Primitive types (non-icon)
+// ---------------------------------------------------------------------------
 
 export type ManifestLogoKey = "oasis" | "sunbiz" | "suga" | "custom";
 
@@ -431,7 +406,7 @@ const NAV_ICON_KEYS = new Set<ManifestNavIconKey>([
   "ShieldAlert", "Radio", "Users", "BookUser", "FileText", "Upload",
   "HandCoins", "BadgeDollarSign", "RefreshCcw", "DollarSign", "MessageSquare",
   "Mail", "Landmark", "FileCode2", "UsersRound", "Code2", "Megaphone",
-  "ShoppingBag", "Heart", "Sparkles",
+  "ShoppingBag", "Heart", "Sparkles", "FileSearch", "ClipboardCheck",
 ]);
 
 const LOGO_KEYS = new Set<ManifestLogoKey>(["oasis", "sunbiz", "suga", "custom"]);

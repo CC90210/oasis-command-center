@@ -60,6 +60,15 @@ export async function POST(
     subject_template?: string;
     body_template?: string;
     dry_run?: boolean;
+    // 2026-05-25 second-meeting expansion. Operator acknowledged the
+    // severity-tiered warnings via the Proceed Anyway dialog. Recorded
+    // to shop_out_warnings after the threads queue so the audit trail
+    // captures who overrode what + why.
+    acknowledged_warnings?: Array<{
+      lender_id: string;
+      warning_codes: string[];
+      override_note: string;
+    }>;
   };
   try {
     body = await req.json();
@@ -216,6 +225,16 @@ export async function POST(
         : undefined,
   }));
 
+  // 2026-05-25 (migration 069) — resolve assigned-rep phone at queue
+  // time so shop_out_sender.py can substitute {{owner_phone}} in body
+  // templates with the correct rep (Jordan / Ethan / Ezra / Emily).
+  // Stored on each thread row so reassignment AFTER queue doesn't
+  // silently change the outbound.
+  const ownerPhone =
+    typeof appData.assigned_rep_phone === "string" && appData.assigned_rep_phone.trim()
+      ? appData.assigned_rep_phone.trim()
+      : null;
+
   const inserted = await recordShopOutThreads({
     tenant_id: tenantId,
     application_id: applicationId,
@@ -225,9 +244,46 @@ export async function POST(
     // filtered out above into rejectedAttachments). Persisted per-
     // thread so the sender doesn't have to re-resolve them.
     attachments,
+    owner_phone: ownerPhone,
   });
   if (!inserted.ok) {
     return NextResponse.json({ ok: false, error: inserted.error }, { status: 500 });
+  }
+
+  // 2026-05-25 second-meeting expansion — persist the operator's
+  // overrides of any severity-tiered warnings to shop_out_warnings.
+  // The threads already queued above; this is the audit trail only.
+  // Best-effort: a write failure here doesn't roll back the queued
+  // sends (operator already saw + chose to proceed in the UI).
+  const acknowledgedWarnings = Array.isArray(body.acknowledged_warnings)
+    ? body.acknowledged_warnings.filter(
+        (w) => w && typeof w.lender_id === "string" && Array.isArray(w.warning_codes),
+      )
+    : [];
+  if (acknowledgedWarnings.length > 0) {
+    const warningRows = acknowledgedWarnings.flatMap((ack) => {
+      const planRow = planResult.plan.find((p) => p.lender_id === ack.lender_id);
+      if (!planRow) return [];
+      const matchedWarnings = (planRow.warnings || []).filter((w) =>
+        ack.warning_codes.includes(w.code),
+      );
+      const thread = inserted.threads.find((t) => t.lender_id === ack.lender_id);
+      return matchedWarnings.map((w) => ({
+        tenant_id: tenantId,
+        application_id: applicationId,
+        lender_id: ack.lender_id,
+        severity: w.severity,
+        reason_code: w.code,
+        reason_detail: w.detail,
+        overridden: true,
+        override_note: ack.override_note || null,
+        overridden_at: new Date().toISOString(),
+        thread_id: thread?.id || null,
+      }));
+    });
+    if (warningRows.length > 0) {
+      await db.from("shop_out_warnings").insert(warningRows);
+    }
   }
 
   const queued = entries.filter((e) => !e.error).length;

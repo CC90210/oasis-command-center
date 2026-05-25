@@ -43,13 +43,37 @@ export type ApplicationProfile = {
   desired_product?: string;
 };
 
+/**
+ * Severity tiers for lender warnings — replaces the prior hard-block
+ * model per the 2026-05-25 second SunBiz product meeting. The operator
+ * can still send to a lender flagged 'high_risk', but they hit a
+ * confirmation dialog and the override is logged to shop_out_warnings.
+ */
+export type WarningSeverity = "info" | "warning" | "high_risk";
+
+export type LenderWarning = {
+  severity: WarningSeverity;
+  /** Stable machine-readable code; persists to shop_out_warnings.reason_code. */
+  code: string;
+  /** One-line human-readable detail; persists to shop_out_warnings.reason_detail. */
+  detail: string;
+};
+
 export type MatchScore = {
   lender_id: string;
   score: number;
   /** Plain-English bullet points the UI surfaces in a tooltip. */
   reasons: string[];
-  /** Hard gate failures (score=0 implies at least one) for operator clarity. */
+  /**
+   * Pre-2026-05-25 hard-block list. Kept for backward compatibility.
+   * Subset of `warnings` where severity === 'high_risk'.
+   */
   blockers: string[];
+  /**
+   * 2026-05-25 second-meeting expansion — severity-tiered warnings the
+   * Shopping Out UI renders with appropriate styling and override flow.
+   */
+  warnings: LenderWarning[];
 };
 
 function normalizeProductTypes(v: LenderProfile["product_types"]): string[] {
@@ -72,13 +96,19 @@ export function scoreLenderMatch(
   application: ApplicationProfile,
 ): MatchScore {
   const reasons: string[] = [];
-  const blockers: string[] = [];
+  const warnings: LenderWarning[] = [];
   let score = 100;
 
-  // ── Hard gate: revenue floor ──────────────────────────────────────
+  const flag = (severity: WarningSeverity, code: string, detail: string) => {
+    warnings.push({ severity, code, detail });
+  };
+
+  // ── Revenue floor (high_risk) ──────────────────────────────────────
   if (lender.min_monthly_revenue !== undefined && application.monthly_revenue !== undefined) {
     if (application.monthly_revenue < lender.min_monthly_revenue) {
-      blockers.push(
+      flag(
+        "high_risk",
+        "below_min_revenue",
         `Monthly revenue $${application.monthly_revenue.toLocaleString()} below lender floor $${lender.min_monthly_revenue.toLocaleString()}`,
       );
     } else {
@@ -88,16 +118,18 @@ export function scoreLenderMatch(
     }
   } else if (lender.min_monthly_revenue !== undefined) {
     score -= 10;
-    reasons.push("Lender requires revenue floor; application doesn't report monthly revenue");
+    flag("info", "missing_revenue_data", "Lender requires revenue floor; application doesn't report monthly revenue");
   }
 
-  // ── Hard gate: time in business ────────────────────────────────────
+  // ── Time in business floor (high_risk) ─────────────────────────────
   if (
     lender.min_time_in_business_months !== undefined &&
     application.time_in_business_months !== undefined
   ) {
     if (application.time_in_business_months < lender.min_time_in_business_months) {
-      blockers.push(
+      flag(
+        "high_risk",
+        "below_tib_floor",
         `Time in business ${application.time_in_business_months}mo below lender floor ${lender.min_time_in_business_months}mo`,
       );
     } else {
@@ -107,12 +139,15 @@ export function scoreLenderMatch(
     }
   } else if (lender.min_time_in_business_months !== undefined) {
     score -= 5;
+    flag("info", "missing_tib_data", "Lender requires TIB floor; application doesn't report TIB");
   }
 
-  // ── Hard gate: FICO floor ──────────────────────────────────────────
+  // ── FICO floor (high_risk) ─────────────────────────────────────────
   if (lender.fico_floor !== undefined && application.applicant_fico !== undefined) {
     if (application.applicant_fico < lender.fico_floor) {
-      blockers.push(
+      flag(
+        "high_risk",
+        "below_fico_floor",
         `FICO ${application.applicant_fico} below ${lender.fico_floor} floor`,
       );
     } else {
@@ -120,50 +155,57 @@ export function scoreLenderMatch(
     }
   } else if (lender.fico_floor !== undefined) {
     score -= 5;
+    flag("info", "missing_fico_data", "Lender requires FICO floor; application doesn't report FICO");
   }
 
-  // ── Hard gate: max funded amount ───────────────────────────────────
+  // ── Max funded amount (warning — counter-offer at cap likely) ──────
   if (
     lender.max_funded_amount !== undefined &&
     application.requested_amount !== undefined &&
     application.requested_amount > lender.max_funded_amount
   ) {
-    blockers.push(
-      `Requested $${application.requested_amount.toLocaleString()} exceeds lender max $${lender.max_funded_amount.toLocaleString()}`,
+    flag(
+      "warning",
+      "exceeds_max_funded",
+      `Requested $${application.requested_amount.toLocaleString()} exceeds lender max $${lender.max_funded_amount.toLocaleString()} — expect a counter-offer at the cap`,
     );
   }
 
-  // ── Soft signal: product-match bonus ───────────────────────────────
+  // ── Product mismatch (warning) ─────────────────────────────────────
   const lenderProducts = normalizeProductTypes(lender.product_types);
   if (application.desired_product && lenderProducts.length > 0) {
     if (lenderProducts.includes(application.desired_product)) {
       reasons.push(`Product match: lender offers ${application.desired_product}`);
     } else {
       score -= 15;
-      reasons.push(
-        `Product mismatch: lender offers ${lenderProducts.join(", ")}; deal wants ${application.desired_product}`,
+      flag(
+        "warning",
+        "product_mismatch",
+        `Lender offers ${lenderProducts.join(", ")}; deal wants ${application.desired_product}`,
       );
     }
   }
 
-  // ── Soft signal: SLA visibility ────────────────────────────────────
+  // ── SLA visibility (info) ──────────────────────────────────────────
   if (lender.sla_response_days !== undefined) {
     reasons.push(`SLA: ${lender.sla_response_days}d typical response`);
   }
 
-  // If any hard gate fired, score collapses to 0 regardless of soft
-  // signals — operator can still override by manually picking, but the
-  // rank will be honest about which lenders are likely to decline.
+  // Backward-compat: blockers = subset of warnings where severity='high_risk'.
+  // Existing callers (POST /api/applications/[id]/shop-out) still read this
+  // field; the 2026-05-25 UI prefers `warnings` for severity-tier rendering.
+  const blockers = warnings.filter((w) => w.severity === "high_risk").map((w) => w.detail);
+
   if (blockers.length > 0) {
-    return { lender_id: lender.id, score: 0, reasons, blockers };
+    return { lender_id: lender.id, score: 0, reasons, blockers, warnings };
   }
 
-  // Clamp below 0 to 0 (defensive against future soft-penalty changes).
   return {
     lender_id: lender.id,
     score: Math.max(0, Math.min(100, score)),
     reasons,
     blockers,
+    warnings,
   };
 }
 
