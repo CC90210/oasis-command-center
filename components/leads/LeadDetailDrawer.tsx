@@ -850,15 +850,20 @@ function DocDownloadButton({ id, filename }: { id: string; filename: string }) {
 type ComposerMode = "email" | "sms" | "torrent" | null;
 
 /**
- * CallButton — Kixie click-to-call action (2026-05-25, CC ask).
+ * CallButton — click-to-call action (2026-05-25, CC ask).
  *
- * Normalizes any phone shape into E.164 (US default), then renders an
- * <a href="kixie:call?number=+1XXX"> styled as a button. The Kixie
- * PowerCall Chrome extension intercepts that protocol and rings the
- * operator's configured device + dials out via Kixie's PBX.
+ * Uses `tel:` as the universal click-to-call protocol — Kixie's
+ * PowerCall Chrome extension intercepts `tel:` URIs when configured
+ * as the operator's default phone handler (their recommended setup
+ * per Kixie docs). Without Kixie installed, the OS falls back to its
+ * default dialer / softphone. Either path gives the operator a
+ * working call action without dashboard-side per-integration code.
  *
- * If the extension isn't installed the anchor falls through to the OS
- * handler (system dialer / softphone / nothing depending on platform).
+ * The original implementation used a `kixie:call?number=...` custom
+ * protocol; switched to `tel:` 2026-05-25 self-review after
+ * confirming the custom scheme is unverified and `tel:` is what
+ * Kixie's setup docs route through.
+ *
  * Disabled state when there's no phone on the record.
  */
 function CallButton({ phone }: { phone: string | null }) {
@@ -887,12 +892,12 @@ function CallButton({ phone }: { phone: string | null }) {
 
   return (
     <a
-      href={`kixie:call?number=${encodeURIComponent(e164)}`}
-      title={`Call ${e164} via Kixie`}
+      href={`tel:${e164}`}
+      title={`Call ${e164} — routes through Kixie when set as your default phone handler`}
       className="flex-1 text-[12px] font-semibold px-3 py-2 rounded-md bg-emerald-500/15 border border-emerald-500/40 text-emerald-300 hover:bg-emerald-500/25 inline-flex items-center justify-center gap-1.5"
     >
       <Phone className="w-3 h-3" />
-      Call (Kixie)
+      Call
     </a>
   );
 }
