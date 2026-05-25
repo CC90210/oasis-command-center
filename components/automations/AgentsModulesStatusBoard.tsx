@@ -27,7 +27,7 @@ import {
 import type { LucideIcon } from "lucide-react";
 import type { ReactNode } from "react";
 
-type ModuleStatus = "live" | "planned";
+type ModuleStatus = "live" | "partial" | "planned";
 
 type Module = {
   key: string;
@@ -61,10 +61,15 @@ const MODULES: Module[] = [
     key: "shopping_out_sender",
     name: "Shopping Out Sender",
     description:
-      "Multi-lender package delivery — match-fitness ranking, attachment validation, simultaneous send.",
-    status: "live",
+      "Multi-lender package delivery — match-fitness ranking, attachment validation, queueing.",
+    // Honest label (2026-05-24): the UI + API are wired, but physical
+    // SMTP fires from the operator's bridge — not from this route.
+    // Threads land at status='pending' and stay there until Phase 6.3-bis
+    // (bridge /exec-tool shop_out_send_batch handler) ships.
+    status: "partial",
     icon: Send,
-    connected: "lib/lenders/shop-out.ts + POST /api/applications/[id]/shop-out → application_lender_threads.",
+    connected:
+      "lib/lenders/shop-out.ts + POST /api/applications/[id]/shop-out → application_lender_threads (status='pending'). Physical SMTP fires from the operator's bridge (Phase 6.3-bis pending) — until then, run `python scripts/send_gateway.py send` or trigger via Solara chat.",
   },
   {
     key: "renewal_calculator",
@@ -106,11 +111,13 @@ const MODULES: Module[] = [
 
 const STATUS_TONE: Record<ModuleStatus, string> = {
   live: "bg-emerald-500/15 text-emerald-300 border-emerald-500/30",
+  partial: "bg-amber-500/15 text-amber-300 border-amber-500/30",
   planned: "bg-slate-500/15 text-slate-300 border-slate-500/30",
 };
 
 const STATUS_LABEL: Record<ModuleStatus, string> = {
   live: "Live",
+  partial: "Partial",
   planned: "Planned",
 };
 
