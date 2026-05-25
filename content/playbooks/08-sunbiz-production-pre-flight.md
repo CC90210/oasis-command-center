@@ -254,3 +254,72 @@ Commits shipped in the 2026-05-24 → 25 session — all on `main`, both repos:
 | oasis-command-center | `2527b7e` | Auth chooser fix (operator routing v1) |
 | oasis-command-center | `93140e1` | Auth chooser hardening (positive OPERATOR_HOME match) |
 | oasis-command-center | `52f206e` | All 5 Vercel build warnings cleared |
+| Business-Empire-Agent | `2204ebc` | Phase 6.3-bis — shop_out_sender + migration 065 |
+| Business-Empire-Agent | `c088dab` | Migration 066 — fixes 064's tenant lookup + remaps 10 stuck Sun Biz apps |
+| Business-Empire-Agent | `4e91145` | Per-tenant brand identity in send_gateway + shop_out_sender |
+| Business-Empire-Agent | `3bdb437` | Drip reconciler + manifest drift checker |
+| Business-Empire-Agent | `3e3c917` | Migrations 067/068 + shop_out_sender claim-state hardening |
+| oasis-command-center | `fee64a4` | Cross-tenant isolation polish — automations + leads drawer |
+| SunBiz-Agent | `845a563` | Mirror Phase 6.3-bis + isolation hardening from CEO-Agent (caught up 10 days of drift) |
+
+## Section 9 — VPS deployment readiness (2026-05-25)
+
+CC's deploy target is a Linux VPS running the SunBiz daemon stack. Three things make a VPS bring-up safe: a daemon inventory you can predict, idempotent migrations you can re-apply, and an environment template that matches what the daemons actually read.
+
+### Daemon inventory (which PM2 entries the SunBiz VPS should run)
+
+`ecosystem.config.js` branches per-platform via `IS_WIN` / `IS_MAC` / `IS_LINUX`. On Linux, the **default** `pm2 start ecosystem.config.js` would currently start every daemon NOT gated by `IS_WIN` — including `bravo-telegram`, which would conflict with Windows. Use `--only` on the VPS, not the default boot.
+
+**Run on VPS:**
+
+| Daemon | Why | Manifest key (cron-poll dispatch) |
+|---|---|---|
+| `event-router` | V6 Apex Phase 3 cross-agent event bus tail — feeds /feed on the dashboard | — (PM2-daemon, not cron-dispatched) |
+| `sequence-runner` | Drip-campaign engine — SunBiz drip enrollment + execution | `sequence_runner_loop` |
+| `lender-response-classifier` | Closes the loop on lender shop-out replies (5-min poll) | `lender_response_classifier_loop` |
+| `claude-bridge-ping` | Heartbeat to `/api/bridge/ping` + tenant cron poller | — (PM2-daemon) |
+| `shop_out_sender` (cron-driven) | Bridge-side SMTP sender for `application_lender_threads`. Not in ecosystem.config.js; fires via the dashboard's tenant cron poller using manifest key `shop_out_sender_loop` | `shop_out_sender_loop` |
+
+**Do NOT run on VPS:**
+
+| Daemon | Why |
+|---|---|
+| `bravo-scheduler` | Empire-only — gated by `IS_WIN`; never starts on Linux anyway |
+| `bravo-telegram` | Single-bridge invariant — same `TELEGRAM_BOT_TOKEN` from two hosts = random message routing. Telegram routing stays on Windows |
+| `claude-bridge` | Dev-tool for Bravo's localhost:9100 chat HTTP server — unrelated to SunBiz operator workflows |
+| `dashboard-email-consumer` | Empire-only — gated by `IS_WIN`; the SunBiz operator drawer sends through send_gateway via `shop_out_sender`, not this consumer |
+
+VPS boot command:
+
+```bash
+pm2 start ecosystem.config.js --only event-router,sequence-runner,lender-response-classifier,claude-bridge-ping
+pm2 save && pm2 startup
+```
+
+### Migration order
+
+Idempotent (re-runnable) per audit on 2026-05-25:
+
+| File | Idempotency mechanism |
+|---|---|
+| `042_tenant_forms.sql` | 7 × `IF NOT EXISTS` |
+| `043_drip_sequences.sql` | 7 × `IF NOT EXISTS` |
+| `044_lender_shopout.sql` | 4 × `IF NOT EXISTS` |
+| `064_sunbiz_restructure.sql` | `DO $$ ... $$` block; UPDATEs target old-shape rows only |
+| `065_shop_out_thread_send_context.sql` | 2 × `IF NOT EXISTS` |
+| `066_sunbiz_remap_stuck_records.sql` | `DO $$` block; fails LOUDLY on prod if SunBiz tenant is unseeded (intentional) |
+| `067_sunbiz_stage_remap_fix.sql` | `DO $$` block; graceful bail on dev environments without tenant |
+| `068_shop_out_sender_claim_state.sql` | `DROP CONSTRAINT IF EXISTS` then `ADD CONSTRAINT`; `ADD COLUMN IF NOT EXISTS`; `CREATE INDEX IF NOT EXISTS` |
+
+Apply in numeric order:
+
+```bash
+cd ~/SunBiz-Agent   # or CEO-Agent on the VPS — same files mirrored 2026-05-25
+for f in 042 043 044 064 065 066 067 068; do
+  python scripts/apply_migration.py database/${f}_*.sql --supabase-project sunbiz
+done
+```
+
+### Operator-facing runbook
+
+`SunBiz-Agent/docs/VPS_BRINGUP.md` (committed 2026-05-25) walks Ezra (or anyone) through cold-starting a VPS in eight steps: clone → setup wizard → env from template → doctor → migrations → PM2 → save → smoke-test. The runbook is the operator-readable counterpart to this section.
