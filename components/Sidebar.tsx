@@ -83,7 +83,12 @@ const NAV_ICONS: Record<NavIconKey, LucideIcon> = {
 };
 
 export function Sidebar({
-  brand = "OASIS AI",
+  // Neutralized 2026-05-25 — these defaults used to silently fall
+  // back to OASIS branding when a caller forgot to pass props,
+  // which would render OASIS chrome on a Sun Biz route. Now the
+  // fallback is brand-agnostic; if a caller doesn't pass brand,
+  // the sidebar reads "Command Center" instead of "OASIS AI".
+  brand = "Command Center",
   logo = "oasis",
   subtitle = "Agent Command Center",
   items,

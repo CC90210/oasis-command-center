@@ -759,7 +759,7 @@ function JobEditor({
           type="text"
           value={description}
           onChange={(e) => setDescription(e.target.value)}
-          placeholder="Pulls revenue + pipeline + Atlas snapshot every morning"
+          placeholder="What does this automation do? — e.g. 'pulls revenue + pipeline snapshot every morning'"
           className="input w-full text-sm"
           maxLength={500}
         />

@@ -235,8 +235,21 @@ export default async function RootLayout({
           children
         ) : (
           <>
+            {/* Brand resolution (fixed 2026-05-25 cross-tenant audit):
+                - demo mode: tenant's manifest brand.
+                - tenant-route preview (pathOverrideSlug set, viewer
+                  isn't the tenant owner): manifest brand of THAT
+                  tenant — NOT the operator's profile.brand. CC
+                  previewing /t/sun/* used to see "OASIS AI" in the
+                  sidebar because profile?.brand won the fallback;
+                  now the URL tenant wins.
+                - home route: operator's own brand (their tenant). */}
             <SidebarShell
-              brand={demoMode ? manifest.brand.name : profile?.brand || manifest.brand.name}
+              brand={
+                demoMode || pathOverrideSlug
+                  ? manifest.brand.name
+                  : profile?.brand || manifest.brand.name
+              }
               logo={manifestLogoToSidebarLogo(manifest.brand.logo)}
               subtitle={manifest.brand.subtitle}
               items={manifestNavToNavItems(manifest.nav)}
@@ -247,7 +260,14 @@ export default async function RootLayout({
               }
               operatorEmail={demoMode ? "demo@sunbizfunding.com" : profile?.email}
               primaryAgent={
-                demoMode
+                // Same shape as the brand fix above — preview mode
+                // (operator on /t/<slug>/ they don't own) uses the
+                // tenant manifest's primary agent, not the operator's.
+                // Without this, CC previewing /t/sun/* used to render
+                // Bravo as the sidebar's primary agent indicator
+                // instead of Solara (the SunBiz primary). Fixed
+                // 2026-05-25 cross-tenant audit.
+                demoMode || pathOverrideSlug
                   ? manifestPrimaryAgentSlug(manifest)
                   : profile?.primary_agent || manifestPrimaryAgentSlug(manifest)
               }

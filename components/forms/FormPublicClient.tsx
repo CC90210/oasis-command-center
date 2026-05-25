@@ -372,9 +372,12 @@ export function FormPublicClient({
           )}
         </div>
 
-        <footer className="text-center text-[10px] uppercase tracking-wider text-fg-dim">
-          Powered by OASIS AI
-        </footer>
+        {/* Hardcoded "Powered by OASIS AI" footer removed 2026-05-25
+            (CC cross-tenant audit). A Sun Biz lead filling out a Sun
+            Biz application form shouldn't see OASIS AI attribution
+            on the public-facing page. If a tenant wants attribution
+            they can render it via branding.subheadline or extend
+            FormBranding with a footer_label field. */}
       </div>
     </main>
   );

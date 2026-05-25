@@ -603,7 +603,7 @@ function StepsEditor({
               type="text"
               value={step.from_label || ""}
               onChange={(e) => update(idx, { from_label: e.target.value || undefined })}
-              placeholder="Solara"
+              placeholder="Your agent name (e.g. the agent's display name)"
               className="w-full rounded-md border border-bg-border bg-bg-elev px-2 py-1.5 text-xs text-fg"
             />
           </label>

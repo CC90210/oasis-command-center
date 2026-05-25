@@ -84,7 +84,11 @@ export function SidebarShell(props: SidebarProps) {
           <Menu className="w-5 h-5" />
         </button>
         <Link href="/" className="text-sm font-bold text-fg truncate">
-          {props.brand || "OASIS AI"}
+          {/* Neutralized 2026-05-25 — was "OASIS AI" fallback which
+              leaked OASIS branding into Sun Biz routes if a caller
+              forgot to pass brand. "Command Center" is the brand-
+              agnostic safety net. */}
+          {props.brand || "Command Center"}
         </Link>
       </div>
 
