@@ -13,7 +13,7 @@ export default function ContactsPage() {
         "Leads can become contacts once someone replies or submits an application.",
         "Each contact will show SMS and email history in one place.",
         "Applications, offers, funded deals, and renewals will connect back to the same merchant.",
-        "Solara will surface funding-fit notes inline.",
+        "Your agent will surface fit notes inline as deals progress.",
       ]}
       related={[
         { href: "/leads", label: "Leads" },

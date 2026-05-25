@@ -12,7 +12,7 @@ export default function LendersPage() {
       phase2Bullets={[
         "Keep each lender's contact, terms, rate range, funding fit, and commission notes in one place.",
         "See how many applications go to each lender and how often they win.",
-        "Track industry exclusions so Solara avoids poor-fit submissions.",
+        "Track industry exclusions so the matching engine avoids poor-fit submissions.",
         "Store contract dates, rate sheets, and document templates per lender.",
       ]}
       related={[

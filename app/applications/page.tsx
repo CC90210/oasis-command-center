@@ -10,7 +10,7 @@ export default function ApplicationsPage() {
       subtitle="Funding applications from JotForm, processors, and your team"
       icon={FileText}
       phase2Bullets={[
-        "New applications appear here as Solara receives them.",
+        "New applications appear here as they come in through your forms and inbound channels.",
         "Each application gets a clear status: new, in review, offers out, declined, or funded.",
         "Every file gets a document checklist so nothing slips through the cracks.",
         "The sidebar count updates automatically as the pipeline changes.",

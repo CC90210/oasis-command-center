@@ -11,9 +11,9 @@ export default function EmailBlastPage() {
       icon={Mail}
       phase2Bullets={[
         "Pick a template, choose a recipient list, and preview each message before sending.",
-        "Solara will keep sending paced so the mailbox stays healthy.",
+        "Sends are paced automatically so your mailbox reputation stays healthy.",
         "Track delivery, opens, replies, and unsubscribes per recipient.",
-        "Use the approved funding email templates already prepared for Sun Biz.",
+        "Use the approved email templates configured for your workspace.",
       ]}
       related={[{ href: "/templates", label: "Templates" }, { href: "/sms", label: "SMS" }]}
     />

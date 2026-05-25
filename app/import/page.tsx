@@ -24,7 +24,7 @@ export default async function ImportPage() {
     <div className="space-y-6 animate-fade-in">
       <PageHeader
         title="Import leads"
-        subtitle="Paste a CSV or drop a file. Solara checks for duplicates before adding anything to your pipeline."
+        subtitle="Paste a CSV or drop a file. Duplicates are checked automatically before anything is added to your pipeline."
       />
 
       {hasTenant ? (

@@ -14,7 +14,7 @@ export default function FundedDealsPage() {
         "Filter by lender, funding band, month-to-date, and year-to-date.",
         "Each deal gets a timeline: application, offer, funded, renewal.",
         "New funded deals will automatically feed renewals and commissions.",
-        "Solara will check these deals for renewal opportunities.",
+        "Renewal opportunities surface automatically as deals progress through their term.",
       ]}
       related={[
         { href: "/renewals", label: "Renewals" },

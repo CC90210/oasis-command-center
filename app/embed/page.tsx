@@ -7,13 +7,13 @@ export default function EmbedPage() {
   return (
     <ComingSoon
       title="Embed"
-      subtitle="Embeddable lead-capture widgets for Sun's website"
+      subtitle="Embeddable lead-capture widgets for your website"
       icon={Code2}
       phase2Bullets={[
-        "Generate a JotForm-style script snippet Sun can paste on their site",
-        "New website leads will land in the same Solara pipeline as every other lead.",
+        "Generate a script snippet you can paste on your site.",
+        "New website leads land in the same pipeline as every other lead.",
         "Customize colors, fields, and qualification questions per form.",
-        "See which page on Sun's site converts best.",
+        "See which pages on your site convert best.",
       ]}
       related={[{ href: "/leads", label: "Leads" }, { href: "/import", label: "Import" }]}
     />
