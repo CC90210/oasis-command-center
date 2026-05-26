@@ -55,9 +55,28 @@ const handler: WorkflowStep = {
       if (!input.data || typeof input.data !== "object") {
         return { status: "failed", error: "missing_data_for_update" };
       }
+      /* V6.9.5 hotfix: previous version replaced the entire JSONB `data`
+         column with the input, silently wiping every field not in the
+         update body. Now we fetch-then-merge: read current row, spread
+         existing data + input.data, write merged result. Race-tolerant
+         because tenant_records is operator-mutated, not heavy concurrent. */
+      const current = await db
+        .from("tenant_records")
+        .select("data")
+        .eq("id", input.record_id)
+        .eq("tenant_id", ctx.tenant_id)
+        .maybeSingle();
+      if (current.error) {
+        return { status: "failed", error: `read_for_merge_failed: ${current.error.message}` };
+      }
+      if (!current.data) return { status: "failed", error: "record_not_found" };
+      const merged = {
+        ...((current.data as { data?: Record<string, unknown> }).data ?? {}),
+        ...input.data,
+      };
       const update = await db
         .from("tenant_records")
-        .update({ data: input.data })
+        .update({ data: merged })
         .eq("id", input.record_id)
         .eq("tenant_id", ctx.tenant_id)
         .select("id")
@@ -66,7 +85,7 @@ const handler: WorkflowStep = {
         return { status: "failed", error: `update_failed: ${update.error.message}` };
       }
       if (!update.data) return { status: "failed", error: "record_not_found" };
-      return { status: "complete", output: { id: input.record_id } };
+      return { status: "complete", output: { id: input.record_id, merged_keys: Object.keys(input.data) } };
     }
 
     if (input.operation === "delete") {

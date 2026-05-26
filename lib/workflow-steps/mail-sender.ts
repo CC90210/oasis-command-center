@@ -1,23 +1,27 @@
 /**
- * mail-sender step — V6.9.2.
+ * mail-sender step — V6.9.5 (hotfix from V6.9.2).
  *
- * Sends an outbound email through the existing `send_gateway` chokepoint
- * (scripts/integrations/send_gateway.py in CEO-Agent). The empire
- * chokepoint enforces CASL compliance + daily caps + cooldowns; this
- * step must NOT bypass it. Calls the bridge's /exec-tool endpoint with
- * the send_gateway tool name.
+ * Sends outbound email through the bridge `/exec-tool` endpoint using the
+ * existing `send_email` cloud tool. The bridge's `send_email` handler
+ * routes through `scripts/integrations/google_tool.py` (operator's Gmail
+ * OAuth) which itself respects the empire's CASL + cap chokepoints.
+ *
+ * Wire format per `lib/cloud-tool-runner.ts:496` + `lib/prompts-library.ts:569`:
+ *   POST /exec-tool { tool_name: "send_email", input: { to, subject, body, from? } }
+ *
+ * The `send_email` tool's `to` field is a single string. For multi-recipient
+ * sends we loop sequentially and stop on first failure, accumulating success
+ * count so the workflow_run audit shows partial-send state honestly.
  *
  * Input shape:
  *   { to: string | string[],
  *     subject: string,
  *     body: string,             // HTML or plaintext
- *     from?: string,            // optional override; defaults to tenant brand
- *     reply_to?: string,
- *     tenant_brand?: string }   // optional brand selector for send_gateway
+ *     from?: string }           // optional override; defaults to operator's primary Gmail
  *
- * Per-run cap enforcement: each call decrements ctx.outbound_cap_remaining.
- * Run aborts when cap hits 0 (caller's responsibility to enforce; this
- * step short-circuits with `failed` when called past the cap).
+ * Per-run cap enforcement: this step honors ctx.outbound_cap_remaining.
+ * Returns `failed: outbound_cap_would_exceed` BEFORE any send when the
+ * recipient count exceeds the remaining cap.
  */
 
 import type { StepContext, StepResult, WorkflowStep } from "./types";
@@ -27,8 +31,6 @@ type MailSenderInput = {
   subject?: string;
   body?: string;
   from?: string;
-  reply_to?: string;
-  tenant_brand?: string;
 };
 
 const handler: WorkflowStep = {
@@ -43,6 +45,7 @@ const handler: WorkflowStep = {
     }
 
     const recipients = Array.isArray(input.to) ? input.to : [input.to];
+    if (recipients.length === 0) return { status: "failed", error: "empty_recipient_list" };
     if (recipients.length > ctx.outbound_cap_remaining) {
       return {
         status: "failed",
@@ -50,48 +53,58 @@ const handler: WorkflowStep = {
       };
     }
 
-    /* Route through bridge's send_gateway invocation surface. The bridge
-       URL + token resolution is bridge-config; we read from env. The
-       /exec-tool endpoint is the canonical operator-machine channel for
-       outbound. */
     const bridgeUrl = process.env.BRAVO_BRIDGE_URL ?? "http://localhost:9100";
     const bridgeToken = process.env.BRAVO_BRIDGE_TOKEN ?? "";
 
-    try {
-      const res = await fetch(`${bridgeUrl}/exec-tool`, {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          ...(bridgeToken ? { authorization: `Bearer ${bridgeToken}` } : {}),
-        },
-        body: JSON.stringify({
-          tool: "send_gateway",
-          tenant_id: ctx.tenant_id,
-          run_id: ctx.run_id,
-          input: {
-            channel: "email",
-            to: recipients,
-            subject: input.subject,
-            body: input.body,
-            from: input.from,
-            reply_to: input.reply_to,
-            tenant_brand: input.tenant_brand,
+    const successes: string[] = [];
+    const failures: Array<{ to: string; error: string }> = [];
+
+    for (const recipient of recipients) {
+      try {
+        const res = await fetch(`${bridgeUrl}/exec-tool`, {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            ...(bridgeToken ? { authorization: `Bearer ${bridgeToken}` } : {}),
           },
-        }),
-      });
-      if (!res.ok) {
-        const text = await res.text();
-        return { status: "failed", error: `send_gateway_http_${res.status}: ${text.slice(0, 200)}` };
+          body: JSON.stringify({
+            tool_name: "send_email",
+            input: {
+              to: recipient,
+              subject: input.subject,
+              body: input.body,
+              ...(input.from ? { from: input.from } : {}),
+            },
+          }),
+        });
+        if (!res.ok) {
+          const text = await res.text();
+          failures.push({ to: recipient, error: `http_${res.status}: ${text.slice(0, 200)}` });
+          break;
+        }
+        const payload = (await res.json()) as { ok?: boolean; error?: string };
+        if (!payload.ok) {
+          failures.push({ to: recipient, error: payload.error || "bridge_unknown_error" });
+          break;
+        }
+        successes.push(recipient);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        failures.push({ to: recipient, error: `bridge_unreachable: ${message}` });
+        break;
       }
-      const payload = (await res.json()) as { ok?: boolean; error?: string; send_id?: string };
-      if (!payload.ok) {
-        return { status: "failed", error: payload.error || "send_gateway_unknown_error" };
-      }
-      return { status: "complete", output: { send_id: payload.send_id, recipient_count: recipients.length } };
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      return { status: "failed", error: `bridge_unreachable: ${message}` };
     }
+
+    if (failures.length > 0) {
+      return {
+        status: "failed",
+        error: `partial_send: ${successes.length} sent, first failure on ${failures[0].to}: ${failures[0].error}`,
+      };
+    }
+    return {
+      status: "complete",
+      output: { recipient_count: successes.length, recipients: successes },
+    };
   },
 };
 

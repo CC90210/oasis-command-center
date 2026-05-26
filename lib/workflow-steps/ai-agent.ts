@@ -32,7 +32,11 @@ type AiAgentInput = {
 const DEFAULT_MODEL = "claude-sonnet-4-6";
 const MAX_TOKENS_CAP = 8192;
 const ANTHROPIC_URL = "https://api.anthropic.com/v1/messages";
-const ANTHROPIC_VERSION = "2026-01-01";
+// Matches the version every other Anthropic call in this repo uses
+// (lib/ai-lead-scoring.ts, lib/ai-next-action.ts, lib/cloud-tool-runner.ts).
+// V6.9.5 hotfix: prior value "2026-01-01" was a made-up future date and
+// would 400 at the API.
+const ANTHROPIC_VERSION = "2023-06-01";
 
 /**
  * Replace {{trigger.x}} + {{step_id.field}} placeholders with values from

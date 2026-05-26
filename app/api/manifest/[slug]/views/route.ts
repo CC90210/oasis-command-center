@@ -107,6 +107,43 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ slug: stri
 
   const db = getServiceSupabase();
 
+  /* V6.9.5 hotfix: validate cross-table IDs against this tenant BEFORE
+     inserting the view. Otherwise an attacker with a session on tenant A
+     could pass tenant B's object_metadata_id and bind a view across
+     tenants. Same logic for child field_metadata_id rows. */
+  const objectRes = await db
+    .from("object_metadata")
+    .select("id, tenant_id")
+    .eq("id", body.object_metadata_id)
+    .eq("tenant_id", context.tenantId)
+    .maybeSingle();
+  if (objectRes.error || !objectRes.data) {
+    return NextResponse.json({ ok: false, error: "object_metadata_not_in_tenant" }, { status: 400 });
+  }
+
+  const childFieldIds = Array.from(
+    new Set<string>([
+      ...(body.fields?.map((f) => f.field_metadata_id) ?? []),
+      ...(body.filters?.map((f) => f.field_metadata_id) ?? []),
+      ...(body.sorts?.map((s) => s.field_metadata_id) ?? []),
+    ]),
+  );
+  if (childFieldIds.length > 0) {
+    const fieldsRes = await db
+      .from("field_metadata")
+      .select("id, object_id")
+      .in("id", childFieldIds)
+      .eq("object_id", body.object_metadata_id);
+    if (fieldsRes.error) {
+      return NextResponse.json({ ok: false, error: "db_error", detail: fieldsRes.error.message }, { status: 500 });
+    }
+    const foundIds = new Set((fieldsRes.data ?? []).map((r) => (r as { id: string }).id));
+    const missing = childFieldIds.filter((id) => !foundIds.has(id));
+    if (missing.length > 0) {
+      return NextResponse.json({ ok: false, error: "field_metadata_not_in_object", missing }, { status: 400 });
+    }
+  }
+
   const insertView = await db
     .from("views")
     .insert({
@@ -128,6 +165,10 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ slug: stri
   }
   const viewId = (insertView.data as { id: string }).id;
 
+  /* V6.9.5 hotfix: child insert errors are checked. Previously they were
+     silently ignored, so POST could return ok with a partially-created
+     view. If any child fails, soft-delete the parent and return the
+     specific error rather than leaving a half-baked row. */
   if (body.fields?.length) {
     const rows = body.fields.map((f, idx) => ({
       view_id: viewId,
@@ -136,7 +177,11 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ slug: stri
       width: f.width ?? null,
       is_visible: f.is_visible ?? true,
     }));
-    await db.from("view_fields").insert(rows);
+    const r = await db.from("view_fields").insert(rows);
+    if (r.error) {
+      await db.from("views").update({ is_active: false }).eq("id", viewId);
+      return NextResponse.json({ ok: false, error: "child_insert_failed", detail: `view_fields: ${r.error.message}` }, { status: 500 });
+    }
   }
   if (body.filters?.length) {
     const rows = body.filters.map((f, idx) => ({
@@ -147,7 +192,11 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ slug: stri
       conjunction: f.conjunction ?? "AND",
       position: f.position ?? idx,
     }));
-    await db.from("view_filters").insert(rows);
+    const r = await db.from("view_filters").insert(rows);
+    if (r.error) {
+      await db.from("views").update({ is_active: false }).eq("id", viewId);
+      return NextResponse.json({ ok: false, error: "child_insert_failed", detail: `view_filters: ${r.error.message}` }, { status: 500 });
+    }
   }
   if (body.sorts?.length) {
     const rows = body.sorts.map((s, idx) => ({
@@ -156,7 +205,11 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ slug: stri
       direction: s.direction ?? "ASC",
       position: s.position ?? idx,
     }));
-    await db.from("view_sorts").insert(rows);
+    const r = await db.from("view_sorts").insert(rows);
+    if (r.error) {
+      await db.from("views").update({ is_active: false }).eq("id", viewId);
+      return NextResponse.json({ ok: false, error: "child_insert_failed", detail: `view_sorts: ${r.error.message}` }, { status: 500 });
+    }
   }
 
   return NextResponse.json({ ok: true, view_id: viewId });

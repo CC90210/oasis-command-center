@@ -16,6 +16,7 @@ import {
 } from "@/lib/workflow-steps/run-step";
 import { evaluatePredicate } from "@/lib/workflow-steps/if-else";
 import { computeDelayMs } from "@/lib/workflow-steps/delay";
+import { isUrlSafeForWorkflowRequest } from "@/lib/workflow-steps/http-request";
 import type { StepContext } from "@/lib/workflow-steps/types";
 
 function makeCtx(overrides: Partial<StepContext> = {}): StepContext {
@@ -73,11 +74,13 @@ assert.deepEqual(
   "inline",
 );
 
+// V6.9.5: long delays return `failed` with explicit setup pointer rather
+// than claiming `complete` without sleeping (prior version was a stub).
 const deferredDelay = await runStep("delay", { hours: 1 }, makeCtx());
-assert.equal(deferredDelay.status, "complete");
-assert.deepEqual(
-  deferredDelay.status === "complete" && (deferredDelay.output as { mode?: string }).mode,
-  "deferred",
+assert.equal(deferredDelay.status, "failed");
+assert.ok(
+  deferredDelay.status === "failed" && deferredDelay.error.includes("delay_requires_daemon_requeue"),
+  "long delay must fail honestly until workflow_runner.py ships",
 );
 
 // ---------------------------------------------------------------------------
@@ -137,6 +140,52 @@ assert.equal(branchElse.status, "complete");
 assert.deepEqual(
   branchElse.status === "complete" && (branchElse.output as { branch?: string }).branch,
   "else",
+);
+
+// ---------------------------------------------------------------------------
+// 8. SSRF guard (V6.9.5) — block private/localhost/metadata IPs.
+// ---------------------------------------------------------------------------
+const safeUrls = [
+  "https://api.example.com/webhook",
+  "http://203.0.113.42/endpoint",
+  "https://hooks.slack.com/services/T00000000/B00000000/XXXXXXXXXXXXX",
+];
+for (const u of safeUrls) {
+  const r = isUrlSafeForWorkflowRequest(u);
+  assert.equal(r.ok, true, `expected safe: ${u}`);
+}
+
+const blockedUrls = [
+  "http://localhost/admin",
+  "http://127.0.0.1:9100/exec-tool",
+  "http://10.0.0.5/internal",
+  "http://172.16.0.1/router",
+  "http://192.168.1.1/router",
+  "http://169.254.169.254/latest/meta-data",
+  "ftp://example.com/file",
+  "file:///etc/passwd",
+  "javascript:alert(1)",
+  "http://[::1]/admin",
+  "http://[fe80::1]/admin",
+  "http://[fc00::1]/admin",
+];
+for (const u of blockedUrls) {
+  const r = isUrlSafeForWorkflowRequest(u);
+  if (r.ok !== false) {
+    console.error(`SSRF guard failed to block: ${u} → ${JSON.stringify(r)}`);
+  }
+  assert.equal(r.ok, false, `expected blocked: ${u}`);
+}
+
+// ---------------------------------------------------------------------------
+// 9. http-request step end-to-end against the guard (no real fetch fired
+//    when blocked — guard returns before fetch is called).
+// ---------------------------------------------------------------------------
+const ssrfAttempt = await runStep("http-request", { url: "http://169.254.169.254/latest/meta-data" }, makeCtx());
+assert.equal(ssrfAttempt.status, "failed");
+assert.ok(
+  ssrfAttempt.status === "failed" && ssrfAttempt.error.startsWith("ssrf_blocked:"),
+  "ssrf attempt must fail with ssrf_blocked prefix",
 );
 
 console.log("workflow-steps: all assertions passed");

@@ -261,29 +261,67 @@ export const loadDefaultView = cache(
 );
 
 /**
- * Translate a view's filters + sorts into a chain of `.filter()` /
- * `.order()` calls applied over a Supabase query. Field names map to
- * JSONB paths in tenant_records.data (e.g., field "first_name" → JSONB
- * arrow `data->>'first_name'`).
+ * Translate a view's filters + sorts into a chain of `.filter()` / `.is()` /
+ * `.order()` calls applied over a Supabase query. Field names map to the
+ * PostgREST JSONB-arrow column syntax `data->>field` (no quotes around the
+ * key — matches the convention in `lib/manifest/data.ts:95`).
  *
- * Pure-function so it's unit-testable. Caller passes the query, this
- * returns the chained query.
+ * V6.9.5 hotfix: previous version used `data->>"field"` (JSON.stringify'd
+ * the key), wrapped `contains`/`starts_with` values without `%` wildcards,
+ * called `.filter(col, 'is', value)` instead of `.is(col, null)`, and
+ * silently treated `OR` conjunction as `AND`. All four were silent
+ * correctness bugs masked by a false-positive unit test.
+ *
+ * Supported in this version:
+ *   - AND conjunctions only (default). OR is V6.9.5.x deferred; filter
+ *     rows with `conjunction='OR'` are SKIPPED with a console.warn rather
+ *     than misapplied as AND.
+ *   - Operators: eq, neq, gt, lt, gte, lte, contains (ilike `%v%`),
+ *     starts_with (ilike `v%`), in (comma-joined), is_null (.is null).
+ *
+ * Pure-function so the unit test can drive it with a stub. Caller passes
+ * the query, this returns the chained query.
  */
-export function applyViewToQuery<Q extends {
+
+type ApplyViewQuery<Q> = Q & {
   filter: (col: string, op: string, val: unknown) => Q;
   order: (col: string, opts: { ascending: boolean }) => Q;
-}>(query: Q, view: LoadedView): Q {
-  let q = query;
+  is: (col: string, val: null) => Q;
+};
+
+export function applyViewToQuery<Q extends ApplyViewQuery<Q>>(query: Q, view: LoadedView): Q {
+  let q: Q = query;
 
   for (const f of view.filters) {
-    const col = `data->>${JSON.stringify(f.field_name)}`;
-    const supabaseOp = mapOperator(f.operator);
-    if (supabaseOp === null) continue; // unsupported in this dialect; skip
-    q = q.filter(col, supabaseOp, f.value);
+    if (f.conjunction === "OR") {
+      console.warn(
+        `[views.applyViewToQuery] skipping filter with conjunction='OR' (V6.9.5.x deferred): view=${view.slug} field=${f.field_name}`,
+      );
+      continue;
+    }
+    const col = `data->>${f.field_name}`;
+    if (f.operator === "is_null") {
+      q = q.is(col, null);
+      continue;
+    }
+    if (f.operator === "in") {
+      const list = Array.isArray(f.value) ? f.value : [f.value];
+      q = q.filter(col, "in", `(${list.map((v) => String(v)).join(",")})`);
+      continue;
+    }
+    if (f.operator === "contains") {
+      q = q.filter(col, "ilike", `%${String(f.value ?? "")}%`);
+      continue;
+    }
+    if (f.operator === "starts_with") {
+      q = q.filter(col, "ilike", `${String(f.value ?? "")}%`);
+      continue;
+    }
+    q = q.filter(col, f.operator, f.value);
   }
 
   for (const s of view.sorts) {
-    const col = `data->>${JSON.stringify(s.field_name)}`;
+    const col = `data->>${s.field_name}`;
     q = q.order(col, { ascending: s.direction === "ASC" });
   }
 
@@ -292,8 +330,10 @@ export function applyViewToQuery<Q extends {
 
 /**
  * 10 view-filter operators → Supabase filter() ops. Pure function for the
- * test harness. `null` return = the dialect can't express it; caller
- * skips that filter.
+ * test harness. `null` return = handled via a separate code path (is_null
+ * uses `.is()`, in uses comma-joined string format).
+ *
+ * Kept for callers that need the raw mapping (logging, audit display).
  */
 export function mapOperator(op: ViewFilterOperator): string | null {
   switch (op) {
@@ -316,6 +356,6 @@ export function mapOperator(op: ViewFilterOperator): string | null {
     case "in":
       return "in";
     case "is_null":
-      return "is";
+      return null; // handled via .is(col, null) in applyViewToQuery
   }
 }

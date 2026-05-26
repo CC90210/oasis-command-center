@@ -35,6 +35,19 @@ async function resolveContext(userId: string, slug: string) {
   return { ok: true as const, tenantId: dataTenantId };
 }
 
+/**
+ * Private-view gate (V6.9.5 hotfix): a view with `owner_user_id !== null` is
+ * private to that user. Tenant-scoped RLS alone is not enough — every
+ * tenant member would otherwise be able to read/delete each other's private
+ * views just by knowing the UUID. The route enforces the per-user gate
+ * AFTER the tenant gate.
+ */
+function isViewAccessible(view: { tenant_id: string; owner_user_id: string | null }, tenantId: string, userId: string): boolean {
+  if (view.tenant_id !== tenantId) return false;
+  if (view.owner_user_id === null) return true; // workspace-shared
+  return view.owner_user_id === userId;
+}
+
 export async function GET(
   _req: NextRequest,
   ctx: { params: Promise<{ slug: string; id: string }> },
@@ -47,7 +60,7 @@ export async function GET(
   if (!context.ok) return NextResponse.json({ ok: false, error: context.error }, { status: context.status });
 
   const view = await loadView(id);
-  if (!view || view.tenant_id !== context.tenantId) {
+  if (!view || !isViewAccessible(view, context.tenantId, user.id)) {
     return NextResponse.json({ ok: false, error: "not_found" }, { status: 404 });
   }
   return NextResponse.json({ ok: true, view });
@@ -63,6 +76,12 @@ export async function DELETE(
   if (!user) return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
   const context = await resolveContext(user.id, slug);
   if (!context.ok) return NextResponse.json({ ok: false, error: context.error }, { status: context.status });
+
+  // Load first to enforce private-view gate before mutating.
+  const view = await loadView(id);
+  if (!view || !isViewAccessible(view, context.tenantId, user.id)) {
+    return NextResponse.json({ ok: false, error: "not_found" }, { status: 404 });
+  }
 
   const db = getServiceSupabase();
   const result = await db
