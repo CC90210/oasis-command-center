@@ -160,7 +160,6 @@ export async function POST(
   let contactIdx = -1;
   let phoneIdx = -1;
   let emailIdx = -1;
-  let totalColumns = 0;
   let headerCols: string[] = [];
 
   if (detectHeaderRow(rawLines[0])) {
@@ -170,14 +169,12 @@ export async function POST(
     contactIdx = parseAlias(CONTACT_ALIASES, headerCols);
     phoneIdx = parseAlias(PHONE_ALIASES, headerCols);
     emailIdx = parseAlias(EMAIL_ALIASES, headerCols);
-    totalColumns = headerCols.length;
   } else {
     // No header — assume positional: business_name, contact_name, phone, email.
     bizIdx = 0;
     contactIdx = 1;
     phoneIdx = 2;
     emailIdx = 3;
-    totalColumns = 4;
   }
 
   if (dataLines.length > MAX_ROWS) {

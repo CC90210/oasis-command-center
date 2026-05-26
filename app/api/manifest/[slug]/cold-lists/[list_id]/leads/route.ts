@@ -129,12 +129,6 @@ export async function GET(
   }
 
   // Count query — always returns the full filtered count regardless of limit.
-  const countQuery = db
-    .from("cold_leads")
-    .select("*", { count: "exact", head: true })
-    .eq("tenant_id", context.tenantId)
-    .eq("list_id", list_id);
-
   let filteredCountQuery = db
     .from("cold_leads")
     .select("*", { count: "exact", head: true })

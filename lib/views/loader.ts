@@ -283,14 +283,20 @@ export const loadDefaultView = cache(
  * the query, this returns the chained query.
  */
 
-type ApplyViewQuery<Q> = Q & {
-  filter: (col: string, op: string, val: unknown) => Q;
-  order: (col: string, opts: { ascending: boolean }) => Q;
-  is: (col: string, val: null) => Q;
-};
+/**
+ * Self-referencing fluent-chain shape — every Supabase filter builder
+ * method returns the same builder. Non-recursive generic: avoids the
+ * "circular constraint" TS2313 the prior `<Q extends ApplyViewQuery<Q>>`
+ * pattern triggered (broke Vercel build on commit 7892561).
+ */
+interface QueryChain {
+  filter: (col: string, op: string, val: unknown) => QueryChain;
+  order: (col: string, opts: { ascending: boolean }) => QueryChain;
+  is: (col: string, val: null) => QueryChain;
+}
 
-export function applyViewToQuery<Q extends ApplyViewQuery<Q>>(query: Q, view: LoadedView): Q {
-  let q: Q = query;
+export function applyViewToQuery<Q extends QueryChain>(query: Q, view: LoadedView): Q {
+  let q: QueryChain = query;
 
   for (const f of view.filters) {
     if (f.conjunction === "OR") {
@@ -325,7 +331,7 @@ export function applyViewToQuery<Q extends ApplyViewQuery<Q>>(query: Q, view: Lo
     q = q.order(col, { ascending: s.direction === "ASC" });
   }
 
-  return q;
+  return q as Q;
 }
 
 /**
