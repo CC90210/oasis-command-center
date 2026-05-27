@@ -35,6 +35,7 @@ import {
   ChevronDown,
   ChevronUp,
   Users,
+  Trash2,
 } from "lucide-react";
 
 // ---------------------------------------------------------------------------
@@ -204,6 +205,7 @@ function ListPicker({
   selectedId,
   onSelect,
   onCreated,
+  onDeleted,
   loading,
 }: {
   tenantSlug: string;
@@ -211,11 +213,14 @@ function ListPicker({
   selectedId: string | null;
   onSelect: (id: string) => void;
   onCreated: (list: ColdList) => void;
+  onDeleted: (id: string) => void;
   loading: boolean;
 }) {
   const [newName, setNewName] = useState("");
   const [creating, setCreating] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
 
   async function handleCreate() {
     const name = newName.trim();
@@ -251,6 +256,33 @@ function ListPicker({
     }
   }
 
+  async function handleDelete(list: ColdList) {
+    const warning =
+      list.row_count > 0
+        ? `Delete "${list.name}" and hide its ${list.row_count.toLocaleString()} imported contact${list.row_count === 1 ? "" : "s"}? The data is archived, not erased — contact support to restore.`
+        : `Delete "${list.name}"?`;
+    if (!window.confirm(warning)) return;
+
+    setDeletingId(list.id);
+    setDeleteError(null);
+    try {
+      const res = await fetch(
+        `/api/manifest/${tenantSlug}/cold-lists/${list.id}`,
+        { method: "DELETE" },
+      );
+      const data = (await res.json()) as { ok: boolean; error?: string };
+      if (!data.ok) {
+        setDeleteError(data.error ?? `http_${res.status}`);
+        return;
+      }
+      onDeleted(list.id);
+    } catch {
+      setDeleteError("network_error");
+    } finally {
+      setDeletingId(null);
+    }
+  }
+
   return (
     <div className="space-y-3">
       {loading ? (
@@ -263,25 +295,48 @@ function ListPicker({
             <div className="grid gap-1.5 max-h-48 overflow-y-auto pr-1">
               {lists.map((list) => {
                 const active = list.id === selectedId;
+                const deleting = deletingId === list.id;
                 return (
-                  <button
+                  <div
                     key={list.id}
-                    type="button"
-                    onClick={() => onSelect(list.id)}
-                    className={`flex items-center justify-between w-full rounded-md border px-3 py-2 text-left text-[12.5px] transition-colors ${
+                    className={`group flex items-center w-full rounded-md border text-[12.5px] transition-colors ${
                       active
                         ? "border-accent/50 bg-accent/10 text-accent"
                         : "border-bg-border bg-bg-deep text-fg hover:bg-bg-elev/60"
                     }`}
                   >
-                    <span className="font-medium truncate">{list.name}</span>
-                    <span className="ml-3 shrink-0 text-fg-muted text-[11px]">
-                      {list.row_count.toLocaleString()} rows · {list.promoted_count} promoted
-                    </span>
-                  </button>
+                    <button
+                      type="button"
+                      onClick={() => onSelect(list.id)}
+                      disabled={deleting}
+                      className="flex-1 min-w-0 flex items-center justify-between px-3 py-2 text-left disabled:opacity-50"
+                    >
+                      <span className="font-medium truncate">{list.name}</span>
+                      <span className="ml-3 shrink-0 text-fg-muted text-[11px]">
+                        {list.row_count.toLocaleString()} rows · {list.promoted_count} promoted
+                      </span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => void handleDelete(list)}
+                      disabled={deleting}
+                      aria-label={`Delete list ${list.name}`}
+                      title="Delete list"
+                      className="shrink-0 h-full px-2.5 text-fg-dim opacity-0 group-hover:opacity-100 focus:opacity-100 hover:text-rose-400 transition-opacity disabled:opacity-50"
+                    >
+                      {deleting ? (
+                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      ) : (
+                        <Trash2 className="w-3.5 h-3.5" />
+                      )}
+                    </button>
+                  </div>
                 );
               })}
             </div>
+          )}
+          {deleteError && (
+            <p className="text-xs text-rose-400">Could not delete list: {deleteError}</p>
           )}
           <div className="flex items-center gap-2">
             <input
@@ -705,6 +760,22 @@ export function ColdListImportClient({ tenantSlug }: { tenantSlug: string }) {
     }
   }
 
+  // When operator deletes a list (soft-archive on the server), drop it from
+  // the picker locally so the UI stays responsive without a refetch. If the
+  // deleted list was the one being imported into, clear downstream state
+  // so step 2/3/4 don't keep referring to a list that's no longer visible.
+  function handleListDeleted(id: string) {
+    setLists((prev) => prev.filter((l) => l.id !== id));
+    if (selectedListId === id) {
+      setSelectedListId(null);
+      setCsvText("");
+      setImportResult(null);
+      setImportError(null);
+      setStageData(null);
+      setActiveStage(null);
+    }
+  }
+
   function handleLeadPromoted(coldLeadId: string, warmLeadId: string) {
     setPromotedIds((prev) => new Set([...prev, coldLeadId]));
     // Refresh stage data to reflect the promotion.
@@ -752,9 +823,20 @@ export function ColdListImportClient({ tenantSlug }: { tenantSlug: string }) {
           selectedId={selectedListId}
           onSelect={handleListSelect}
           onCreated={(list) => setLists((prev) => [list, ...prev])}
+          onDeleted={handleListDeleted}
           loading={loadingLists}
         />
       </section>
+
+      {/* Hint shown until a list is selected, so the operator knows step 2 is
+          waiting for them rather than just missing from the page. */}
+      {!selectedListId && !loadingLists && (
+        <div className="rounded-xl border border-dashed border-bg-border bg-bg-elev/20 px-5 py-4 text-xs text-fg-muted leading-relaxed">
+          <span className="font-semibold text-fg">Next:</span> pick or create a
+          list above. Once a list is selected, step 2 (paste or upload CSV)
+          appears below.
+        </div>
+      )}
 
       {/* Step 2 — Paste / upload CSV */}
       {selectedListId && (
