@@ -99,12 +99,15 @@ export async function GET(
 
   const db = getServiceSupabase();
 
-  // Verify the list belongs to this tenant.
+  // Verify the list belongs to this tenant and is not archived. Sibling
+  // import/ and leads/ routes apply the same filter; without it a stale
+  // bookmark to an archived list would still leak its stage view.
   const { data: listRow, error: listErr } = await db
     .from("cold_lead_lists")
     .select("id, name, row_count, promoted_count")
     .eq("id", list_id)
     .eq("tenant_id", context.tenantId)
+    .is("archived_at", null)
     .maybeSingle();
 
   if (listErr || !listRow) {
