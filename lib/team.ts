@@ -42,6 +42,14 @@ export type InviteRow = {
   created_at: string;
 };
 
+export type InvitePreview = {
+  tenant_id: string;
+  tenant_name: string;
+  team_role: Exclude<TeamRole, "owner">;
+  expires_at: string;
+  email_pinned: string | null;
+};
+
 export type SessionContext = {
   authUserId: string;
   profileId: string;
@@ -61,6 +69,19 @@ export function hashInviteToken(rawToken: string): string {
 export function generateInviteToken(): { raw: string; hash: string } {
   const raw = randomBytes(32).toString("base64url");
   return { raw, hash: hashInviteToken(raw) };
+}
+
+function normalizeEmail(email: string | null | undefined): string {
+  return (email || "").trim().toLowerCase();
+}
+
+export function inviteEmailMatchesUser(
+  inviteEmail: string | null | undefined,
+  userEmail: string | null | undefined,
+): boolean {
+  const pinned = normalizeEmail(inviteEmail);
+  if (!pinned) return true;
+  return pinned === normalizeEmail(userEmail);
 }
 
 export async function getSessionContext(): Promise<SessionContext | null> {
@@ -135,6 +156,17 @@ export async function createInvite(args: {
   return { id: data.id, rawToken: raw, expiresAt: data.expires_at as string };
 }
 
+export async function previewInvite(rawToken: string): Promise<InvitePreview | null> {
+  const token = rawToken.trim();
+  if (!token) return null;
+  const supa = getServiceSupabase();
+  const { data, error } = await supa.rpc("preview_tenant_invite", {
+    p_token_hash: hashInviteToken(token),
+  });
+  if (error || !data) return null;
+  return data as InvitePreview;
+}
+
 export async function revokeInvite(inviteId: string, tenantId: string): Promise<void> {
   const supa = getServiceSupabase();
   const { error } = await supa
@@ -150,6 +182,13 @@ export async function redeemInvite(
   redeemerAuthId: string
 ): Promise<{ ok: true; tenantId: string; teamRole: TeamRole } | { ok: false; error: string }> {
   const supa = getServiceSupabase();
+  const preview = await previewInvite(rawToken);
+  if (!preview) return { ok: false, error: "invalid_or_expired" };
+  const { data: authUser, error: authErr } = await supa.auth.admin.getUserById(redeemerAuthId);
+  if (authErr || !authUser?.user) return { ok: false, error: "auth_user_not_found" };
+  if (!inviteEmailMatchesUser(preview.email_pinned, authUser.user.email)) {
+    return { ok: false, error: "email_mismatch" };
+  }
   const hash = hashInviteToken(rawToken);
   const { data, error } = await supa.rpc("redeem_tenant_invite", {
     p_token_hash: hash,
