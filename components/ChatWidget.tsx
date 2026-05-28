@@ -178,6 +178,19 @@ const MAX_ATTACHMENTS_PER_TURN = 5;
 const TEXT_ATTACHMENT_READ_BYTES = 512 * 1024;
 const MAX_ATTACHMENT_EXCERPT_CHARS = 120_000;
 const CHAT_FETCH_TIMEOUT_MS = 90_000;
+// ============================================================================
+// BRIDGE TIMEOUT CONSTANTS — paired with server-side caps in
+// CEO-Agent/bravo_cli/bridge_chat_server.py. Both sides MUST move together.
+// Mismatches mean either (a) the client cuts off a working bridge run,
+// or (b) the bridge keeps running after the client has given up.
+//
+// Client side (this file):
+//   BRIDGE_TOOL_TIMEOUT_MS      ←→ bridge_chat_server._run_cli_command timeout_s
+//   SSE_INACTIVITY_TIMEOUT_MS   ←→ bridge_chat_server.WATCHDOG_TIMEOUT_SEC
+//
+// History: 2026-05-28 — bumped both pairs after CC hit the 120s cap on a
+// Gemini run that legitimately needed >2 minutes (deep research workload).
+// ============================================================================
 // BRIDGE_TOOL_TIMEOUT_MS: bumped 2026-05-28 from 120s to 6 hours.
 // The bridge endpoint here is http://127.0.0.1:9100 — direct browser
 // → localhost. There's no Vercel function on this path, so no
