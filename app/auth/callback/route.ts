@@ -79,7 +79,13 @@ export async function GET(req: NextRequest) {
     // NextResponse.redirect() here would drop those Set-Cookie headers
     // and leave the browser signed in (Codex P2). Reuse `res` so the
     // sign-out cookies actually travel back to the client.
-    await supa.auth.signOut();
+    //
+    // Scope MUST be "local" — the default "global" revokes every refresh
+    // token across every device for this user, which is wildly out of
+    // proportion when their only mistake was clicking a stale invite or
+    // signing in with the wrong Google account (Codex P2 #2). We only
+    // want to clear the session this very callback just established.
+    await supa.auth.signOut({ scope: "local" });
     res.headers.set("Location", `${origin}/login?err=${encodeURIComponent(errCode)}`);
     return res;
   }
