@@ -5,6 +5,7 @@ import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { getBrowserSupabase } from "@/lib/supabase-browser";
 import { OasisLogo } from "@/components/brand/OasisLogo";
+import { validatePassword, PASSWORD_HINT } from "@/lib/password-validation";
 
 /**
  * Where the password-reset email's link lands. Supabase's reset email
@@ -48,8 +49,12 @@ export default function ResetPasswordPage() {
       setErr("Passwords don't match.");
       return;
     }
-    if (pwd.length < 8) {
-      setErr("Use at least 8 characters.");
+    // Use the same rules as /signup so a reset password is one a user
+    // could have signed up with. Previously this only checked length,
+    // which let a user reset to a weaker password than signup allowed.
+    const issue = validatePassword(pwd);
+    if (issue) {
+      setErr(issue);
       return;
     }
     setBusy(true);
@@ -116,6 +121,7 @@ export default function ResetPasswordPage() {
                   autoComplete="new-password"
                   autoFocus
                 />
+                <div className="text-xs text-fg-dim mt-1">{PASSWORD_HINT}</div>
               </div>
               <div>
                 <label className="text-xs uppercase tracking-wider font-bold text-fg-muted">

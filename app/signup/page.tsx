@@ -6,6 +6,7 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { getBrowserSupabase } from "@/lib/supabase-browser";
 import { OasisLogo } from "@/components/brand/OasisLogo";
 import { AuthRedirectGuard } from "@/components/AuthRedirectGuard";
+import { validatePassword, PASSWORD_HINT } from "@/lib/password-validation";
 
 export default function SignupPage() {
   const router = useRouter();
@@ -240,7 +241,7 @@ export default function SignupPage() {
               onChange={setPassword}
               required
               autoComplete="new-password"
-              hint="At least 8 characters with a letter and a number."
+              hint={PASSWORD_HINT}
             />
 
             {err && (
@@ -330,21 +331,3 @@ function Field({
   );
 }
 
-/**
- * Client-side password floor. Mirrors Supabase's server-side minimum of
- * 8 characters but adds a "must contain at least one letter and one
- * number" rule so we catch the dictionary-word case before the network
- * round-trip. Returns a human-readable error string when the password
- * fails, or null when it passes.
- */
-function validatePassword(pwd: string): string | null {
-  if (pwd.length < 8) {
-    return "Password must be at least 8 characters.";
-  }
-  const hasLetter = /[A-Za-z]/.test(pwd);
-  const hasDigit = /\d/.test(pwd);
-  if (!hasLetter || !hasDigit) {
-    return "Password must include at least one letter and one number.";
-  }
-  return null;
-}
