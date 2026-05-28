@@ -62,6 +62,33 @@ export const OPPORTUNITY_PIPELINE_STAGES: StageMeta[] = [
   { key: "dead_file",       label: "Dead",            bg: "#6F2D34", fg: "#FFFFFF" },
 ];
 
+// Adon's canonical 7-stage deal model — 2026-05-28 (Adon handoff,
+// cc-pipeline-handoff.md §"Stage groups, color-banded headers"). Used by
+// Phase 5's pixel-port PipelineView, which reads merchant_summary.deal_stage
+// rather than data.stage. Colors are DESIGN-LOCKED — do not desaturate
+// or remap; they drive both the chevron headers and the merchant-row
+// stage-edge accent.
+//
+// Why two lists coexist: the existing manifest-driven SunBiz dispatcher
+// at /t/sun/leads reads data.stage (legacy 10-stage), and LeadPipelineView
+// renders against OPPORTUNITY_PIPELINE_STAGES. Phase 5 ships a separate
+// PipelineView that reads merchant_summary.deal_stage and uses
+// ADON_DEAL_STAGES. After Phase 5 retires LeadPipelineView, we delete
+// OPPORTUNITY_PIPELINE_STAGES in one cleanup migration.
+//
+// Sub-state preservation: the original 10 keys are kept at
+// data.legacy_stage (per migration 065) so an operator escape hatch can
+// surface the fine-grained substate if Adon later asks for it back.
+export const ADON_DEAL_STAGES: StageMeta[] = [
+  { key: "Application In",  label: "Application In",  bg: "#ef4444", fg: "#FFFFFF" }, // red
+  { key: "Missing Info",    label: "Missing Info",    bg: "#f97316", fg: "#FFFFFF" }, // orange
+  { key: "Shopping",        label: "Shopping",        bg: "#f59e0b", fg: "#FFFFFF" }, // amber
+  { key: "Approved",        label: "Approved",        bg: "#3b82f6", fg: "#FFFFFF" }, // blue
+  { key: "Declined",        label: "Declined",        bg: "#64748b", fg: "#FFFFFF" }, // slate
+  { key: "Funded",          label: "Funded",          bg: "#10b981", fg: "#FFFFFF" }, // green
+  { key: "Dead",            label: "Dead",            bg: "#71717a", fg: "#FFFFFF" }, // zinc
+];
+
 export function getStageMeta(entityName: string): StageMeta[] {
   if (entityName === "lead") return LEAD_PIPELINE_STAGES;
   // application is the operator-facing Opportunity Pipeline (per

@@ -27,9 +27,21 @@ export const STAGE_SLA_DAYS: Record<string, number> = {
   signed_application: 2,
   default: 7,
   submitted: 5,
-  // Opportunity stages (migration 064 — slimmed to 10).
-  application_in: 2,
-  shopping: 2,
+  // Opportunity stages — 2026-05-28 v3 (Adon's 7-stage spec, migration
+  // 065+066). Keys are Adon's canonical labels (Title Case) since they
+  // come from the merchant_summary view directly.
+  "Application In": 1,
+  "Missing Info":   2,
+  "Shopping":       3,
+  "Approved":       2, // operator decision window — push for funding paperwork
+  "Declined":       999,
+  "Funded":         999,
+  "Dead":           999,
+  // Legacy keys retained for any code path still reading data.stage
+  // (the unfiltered raw value). These will drop after Phase 5 deletes
+  // the legacy variant.
+  application_in: 1,
+  shopping: 3,
   requested_docs: 2,
   docs_out: 2,
   login: 1,
@@ -39,10 +51,9 @@ export const STAGE_SLA_DAYS: Record<string, number> = {
 };
 
 /** Stages an "active" lead can be in. Excludes terminal stages
- *  (declined, default, dead_file, funded). Migration 064 cleanup:
- *  imported / approved (lead) / selling / approved_open_offers /
- *  contracts_ordered / submitted_to_underwriting / approved_never_funded
- *  are all retired or consolidated into shopping/docs_out/dead_file. */
+ *  (Declined, Funded, Dead). Mixed-case keys are Adon's 7-stage labels
+ *  used by merchant_summary.deal_stage; snake_case keys are legacy
+ *  data.stage values (retained until Phase 5 retires the old variant). */
 export const ACTIVE_STAGES = new Set<string>([
   // Lead-side active
   "hot_lead",
@@ -52,7 +63,12 @@ export const ACTIVE_STAGES = new Set<string>([
   "viewed_application",
   "signed_application",
   "submitted",
-  // Application-side active
+  // Application-side active — Adon 7-stage
+  "Application In",
+  "Missing Info",
+  "Shopping",
+  "Approved",
+  // Legacy 10-stage
   "application_in",
   "shopping",
   "requested_docs",
@@ -70,7 +86,12 @@ export const VISIBLE_TARGET_STAGES = new Set<string>([
   "viewed_application",
   "signed_application",
   "submitted",
-  // Application-side
+  // Application-side — Adon 7-stage
+  "Application In",
+  "Missing Info",
+  "Shopping",
+  "Approved",
+  // Legacy 10-stage
   "application_in",
   "shopping",
   "requested_docs",
@@ -83,6 +104,10 @@ export const VISIBLE_TARGET_STAGES = new Set<string>([
 export const READY_TO_ADVANCE_STAGES = new Set<string>([
   "viewed_application",
   "signed_application",
+  // Adon 7-stage
+  "Application In",
+  "Approved",
+  // Legacy 10-stage
   "application_in",
   "docs_out",
   "login",
