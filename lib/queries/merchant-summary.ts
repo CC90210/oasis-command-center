@@ -170,16 +170,25 @@ export async function getMerchantSummary(
 }
 
 /**
- * Fetch a single merchant row by its tenant_records.id. Returns null
- * when no such merchant exists (or RLS blocks the read).
+ * Fetch a single merchant row by its tenant_records.id. tenant_id is
+ * REQUIRED — the underlying client uses the service role which bypasses
+ * RLS, so without an explicit tenant filter a caller from tenant A
+ * passing a merchant_id from tenant B would receive the row. Always
+ * pass the caller's tenant from the authed session (typically via
+ * getActiveProfile()). Codex P1 finding 2026-05-28.
+ *
+ * Returns null when the merchant doesn't exist OR belongs to a
+ * different tenant.
  */
 export async function getMerchantSummaryRow(
+  tenantId: string,
   merchantId: string,
 ): Promise<MerchantSummaryRow | null> {
   const db = getServiceSupabase();
   const { data, error } = await db
     .from("merchant_summary")
     .select("*")
+    .eq("tenant_id", tenantId)
     .eq("merchant_id", merchantId)
     .maybeSingle();
 
@@ -194,19 +203,22 @@ export async function getMerchantSummaryRow(
 
 /**
  * Group rows by deal_stage for the Pipeline page's collapsible
- * stage-section render. Empty groups omitted — the frontend handles
- * "show all stages even if empty" via its own stage-list constant.
+ * stage-section render. Returns Partial — keys for stages that have
+ * zero rows are omitted, so callers MUST handle the undefined case
+ * (Codex P2 finding 2026-05-28: a `Record<DealStage, ...>` cast would
+ * lie to callers and crash on grouped['Funded'].length when no funded
+ * deals exist).
  */
 export function groupByDealStage(
   rows: MerchantSummaryRow[],
-): Record<DealStage, MerchantSummaryRow[]> {
-  const out: Record<string, MerchantSummaryRow[]> = {};
+): Partial<Record<DealStage, MerchantSummaryRow[]>> {
+  const out: Partial<Record<DealStage, MerchantSummaryRow[]>> = {};
   for (const r of rows) {
     if (!r.deal_stage) continue;
     if (!out[r.deal_stage]) out[r.deal_stage] = [];
     out[r.deal_stage]!.push(r);
   }
-  return out as Record<DealStage, MerchantSummaryRow[]>;
+  return out;
 }
 
 /**
