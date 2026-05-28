@@ -203,20 +203,32 @@ export async function getMerchantSummaryRow(
 
 /**
  * Group rows by deal_stage for the Pipeline page's collapsible
- * stage-section render. Returns Partial — keys for stages that have
- * zero rows are omitted, so callers MUST handle the undefined case
- * (Codex P2 finding 2026-05-28: a `Record<DealStage, ...>` cast would
- * lie to callers and crash on grouped['Funded'].length when no funded
- * deals exist).
+ * stage-section render. Pre-initializes every DealStage key to an
+ * empty array so callers can safely do `grouped['Funded'].length`
+ * without a Partial-undefined check (consistency with
+ * groupByMerchantStage below — Phase 1 self-review 2026-05-28).
+ * Earlier Codex P2 said "either initialize all keys or return
+ * Partial"; initializing is the more useful contract for the
+ * Pipeline page's "render every stage even if empty" iteration.
+ *
+ * Rows with null deal_stage (merchant_stage='Lead' typically) are
+ * not categorized — they're not in the pipeline yet.
  */
 export function groupByDealStage(
   rows: MerchantSummaryRow[],
-): Partial<Record<DealStage, MerchantSummaryRow[]>> {
-  const out: Partial<Record<DealStage, MerchantSummaryRow[]>> = {};
+): Record<DealStage, MerchantSummaryRow[]> {
+  const out: Record<DealStage, MerchantSummaryRow[]> = {
+    "Application In": [],
+    "Missing Info": [],
+    "Shopping": [],
+    "Approved": [],
+    "Declined": [],
+    "Funded": [],
+    "Dead": [],
+  };
   for (const r of rows) {
     if (!r.deal_stage) continue;
-    if (!out[r.deal_stage]) out[r.deal_stage] = [];
-    out[r.deal_stage]!.push(r);
+    out[r.deal_stage].push(r);
   }
   return out;
 }
