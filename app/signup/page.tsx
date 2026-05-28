@@ -52,7 +52,35 @@ export default function SignupPage() {
       if (data.user) {
         if (inviteToken) {
           if (!data.session) {
-            setInfo("Check your email to finish accepting the invite.");
+            // Supabase email-confirmation gate fired. The invitee already
+            // proved possession of this email by clicking the personalized
+            // invite link to get here, so requiring another email round-trip
+            // breaks the onboarding loop. Auto-confirm + redeem server-side,
+            // then bounce to /login with the email pre-filled so they sign
+            // in with the password they just created.
+            const r = await fetch("/api/auth/finalize-invite-signup", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                raw_token: inviteToken,
+                user_id: data.user.id,
+              }),
+            });
+            const body = (await r.json().catch(() => ({}))) as {
+              ok?: boolean;
+              error?: string;
+              message?: string;
+            };
+            if (!r.ok || !body.ok) {
+              setErr(body.message || body.error || "Invite finalization failed");
+              return;
+            }
+            const loginUrl =
+              `/login?invite=${encodeURIComponent(inviteToken)}` +
+              `&email=${encodeURIComponent(email)}` +
+              `&fresh=1`;
+            router.push(loginUrl);
+            router.refresh();
             return;
           }
           const r = await fetch("/api/auth/redeem-invite", {

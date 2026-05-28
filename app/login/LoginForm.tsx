@@ -10,11 +10,16 @@ export function LoginForm() {
   const router = useRouter();
   const params = useSearchParams();
   const inviteToken = (params.get("invite") || "").trim();
+  // ?email=<addr>&fresh=1 is set by /signup after a successful invite
+  // signup so the invitee lands here with their email pre-filled and a
+  // contextual hint instead of an empty form.
+  const emailHint = (params.get("email") || "").trim();
+  const isFreshFromSignup = params.get("fresh") === "1";
   // If there's an invite, post-login routes through the welcome wizard
   // (Phase C) so the new teammate sets their personal preferences before
   // landing on the dashboard. Otherwise honor the explicit ?next= param.
   const next = inviteToken ? "/onboarding/welcome" : params.get("next") || "/";
-  const [email, setEmail] = useState("");
+  const [email, setEmail] = useState(emailHint);
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
@@ -97,6 +102,16 @@ export function LoginForm() {
             The operating system for your AI agents.
           </p>
         </div>
+
+        {isFreshFromSignup && (
+          <div className="mb-4 rounded-md border border-accent/40 bg-accent/10 px-4 py-3 text-sm text-fg">
+            <div className="font-semibold text-accent">Almost there.</div>
+            <div className="text-fg-muted text-xs mt-1 leading-relaxed">
+              Your account is ready. Sign in below with the password you just
+              created and you&apos;ll land on your Command Center.
+            </div>
+          </div>
+        )}
 
         <div className="bg-bg-panel border border-bg-border rounded-xl p-6 shadow-card">
           <form onSubmit={onSubmit} className="space-y-4">
