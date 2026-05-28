@@ -69,15 +69,19 @@ export async function GET(req: NextRequest) {
     // bounce them to /login with a human-readable error. Silently falling
     // through to provisionAuthenticatedUser would create a brand-new
     // tenant for them, stranding them outside the invite's workspace
-    // (Codex P0: data-integrity leak across tenants).
+    // (data-integrity leak across tenants).
     const reason = (redeemed.error || "").toLowerCase();
     let errCode = "invite_redeem_failed";
     if (reason.includes("email_mismatch")) errCode = "invite_email_mismatch";
     else if (reason.includes("invalid_or_expired")) errCode = "invite_expired";
+    // supa.auth.signOut() writes the session-cookie expirations to `res`
+    // via the createServerClient cookie adapter above. Returning a fresh
+    // NextResponse.redirect() here would drop those Set-Cookie headers
+    // and leave the browser signed in (Codex P2). Reuse `res` so the
+    // sign-out cookies actually travel back to the client.
     await supa.auth.signOut();
-    return NextResponse.redirect(
-      `${origin}/login?err=${encodeURIComponent(errCode)}`,
-    );
+    res.headers.set("Location", `${origin}/login?err=${encodeURIComponent(errCode)}`);
+    return res;
   }
 
   try {
