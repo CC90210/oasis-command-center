@@ -123,6 +123,38 @@ export type MerchantSummaryRow = {
   created_at: string;
   updated_at: string;
   active_application_id: string | null;
+
+  // ==========================================================================
+  // v2 columns — underwriting-sourced metrics surfaced from
+  // application_underwriting.status='complete'. Populated when
+  // SunBiz-Agent's underwriting_orchestrator daemon writes a complete row;
+  // null until the first run finishes. See CEO-Agent migration 072.
+  // ==========================================================================
+
+  /** Underwriting agent's 0-100 suggestion. Not a binding decision. */
+  readiness_score: number | null;
+
+  /** Array of structured flags from the underwriting run. */
+  risk_flags: Array<{
+    level?: "info" | "warning" | "critical";
+    code?: string;
+    detail?: string;
+  }> | null;
+
+  /** Generated pitch copy from sales_angle.py. Shown in the Bank tab. */
+  sales_angle: string | null;
+
+  /** Average daily balance from parsed bank statements. */
+  avg_daily_balance: number | null;
+
+  /** Percentage of months with deposits above a tenant-set threshold. */
+  deposit_consistency_pct: number | null;
+
+  /** Monthly aggregate MCA payment burden (Adon §6 / §7). */
+  debt_service_monthly: number | null;
+
+  /** When the latest complete underwriting run finished. */
+  last_underwriting_run_at: string | null;
 };
 
 // ============================================================================
