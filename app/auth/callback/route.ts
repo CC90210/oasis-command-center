@@ -57,7 +57,27 @@ export async function GET(req: NextRequest) {
   if (pendingInviteToken) {
     res.cookies.set({ name: PENDING_INVITE_COOKIE, value: "", maxAge: 0, path: "/" });
     const redeemed = await redeemInvite(pendingInviteToken, data.user.id);
-    if (redeemed.ok) return res;
+    if (redeemed.ok) {
+      // Route to /onboarding/welcome on first-login (invitee path); the
+      // hardcoded `next` already accounts for this in signup/login URL
+      // construction, but be explicit here so OAuth + invite always lands
+      // on the wizard rather than the requested `next` (which can be `/`).
+      res.headers.set("Location", `${origin}/onboarding/welcome`);
+      return res;
+    }
+    // Redeem failed — sign the user OUT to undo the cookie write, then
+    // bounce them to /login with a human-readable error. Silently falling
+    // through to provisionAuthenticatedUser would create a brand-new
+    // tenant for them, stranding them outside the invite's workspace
+    // (Codex P0: data-integrity leak across tenants).
+    const reason = (redeemed.error || "").toLowerCase();
+    let errCode = "invite_redeem_failed";
+    if (reason.includes("email_mismatch")) errCode = "invite_email_mismatch";
+    else if (reason.includes("invalid_or_expired")) errCode = "invite_expired";
+    await supa.auth.signOut();
+    return NextResponse.redirect(
+      `${origin}/login?err=${encodeURIComponent(errCode)}`,
+    );
   }
 
   try {

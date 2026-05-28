@@ -13,6 +13,12 @@ export default function SignupPage() {
   const brandHint = (params.get("brand") || "").trim();
   const inviteToken = (params.get("invite") || "").trim();
   const emailHint = (params.get("email") || "").trim();
+  // Workspace name comes from the /invite/[token] landing page's preview
+  // RPC. It's a display-only hint so the invitee sees "Join Sun Biz
+  // Funding" instead of the generic OASIS AI brand. Sanitized to a
+  // reasonable length to avoid an attacker forging a wildly long
+  // workspace label via the URL.
+  const workspaceHint = (params.get("workspace") || "").trim().slice(0, 80);
   const [email, setEmail] = useState(emailHint);
   const [fullName, setFullName] = useState("");
   const [brand, setBrand] = useState(brandHint);
@@ -27,6 +33,19 @@ export default function SignupPage() {
     setErr(null);
     setInfo(null);
     try {
+      // Client-side password floor. Supabase will also reject weak
+      // passwords server-side but its error copy is generic
+      // ("Password should be at least 6 characters"). Catching it here
+      // gives the operator a specific, actionable message before the
+      // round-trip — and prevents the auto-create-tenant side-effects
+      // from firing on a doomed signup.
+      const passwordIssue = validatePassword(password);
+      if (passwordIssue) {
+        setErr(passwordIssue);
+        setBusy(false);
+        return;
+      }
+
       const supa = getBrowserSupabase();
       const callback = new URL("/auth/callback", window.location.origin);
       callback.searchParams.set("next", inviteToken ? "/onboarding/welcome" : "/onboarding/wizard");
@@ -182,7 +201,11 @@ export default function SignupPage() {
             <div className="text-fg font-bold tracking-tight text-lg">OASIS AI</div>
           </div>
           <h1 className="text-2xl font-bold text-fg">
-            {inviteToken ? "Accept your invite" : "Create your Command Center"}
+            {inviteToken
+              ? workspaceHint
+                ? `Join ${workspaceHint}`
+                : "Accept your invite"
+              : "Create your Command Center"}
           </h1>
           <p className="text-fg-muted text-sm mt-2">
             {inviteToken
@@ -193,7 +216,9 @@ export default function SignupPage() {
 
         {inviteToken && (
           <div className="mb-4 rounded-lg border border-accent/40 bg-accent/5 px-3 py-2 text-[12px] text-fg-muted">
-            ✓ Invite detected — you&apos;ll be added to the workspace automatically after signup.
+            ✓ Invite detected
+            {workspaceHint ? ` for ${workspaceHint}` : ""} —
+            you&apos;ll be added to the workspace automatically after signup.
           </div>
         )}
 
@@ -215,7 +240,7 @@ export default function SignupPage() {
               onChange={setPassword}
               required
               autoComplete="new-password"
-              hint="Minimum 8 characters."
+              hint="At least 8 characters with a letter and a number."
             />
 
             {err && (
@@ -303,4 +328,23 @@ function Field({
       {hint && <div className="text-xs text-fg-dim mt-1">{hint}</div>}
     </div>
   );
+}
+
+/**
+ * Client-side password floor. Mirrors Supabase's server-side minimum of
+ * 8 characters but adds a "must contain at least one letter and one
+ * number" rule so we catch the dictionary-word case before the network
+ * round-trip. Returns a human-readable error string when the password
+ * fails, or null when it passes.
+ */
+function validatePassword(pwd: string): string | null {
+  if (pwd.length < 8) {
+    return "Password must be at least 8 characters.";
+  }
+  const hasLetter = /[A-Za-z]/.test(pwd);
+  const hasDigit = /\d/.test(pwd);
+  if (!hasLetter || !hasDigit) {
+    return "Password must include at least one letter and one number.";
+  }
+  return null;
 }

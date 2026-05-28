@@ -15,6 +15,19 @@ export function LoginForm() {
   // contextual hint instead of an empty form.
   const emailHint = (params.get("email") || "").trim();
   const isFreshFromSignup = params.get("fresh") === "1";
+  // The auth/callback route bounces here with ?err=<code> when an OAuth
+  // invite redeem fails (email mismatch, expired token, etc). Surface a
+  // human-readable copy instead of leaking error codes to the operator.
+  const errCode = (params.get("err") || "").trim();
+  const errHint = errCode
+    ? errCode === "invite_email_mismatch"
+      ? "The Google account you used doesn't match the email this invite was sent to. Sign in with the right account, or ask your admin to send a new invite."
+      : errCode === "invite_expired"
+        ? "That invite link has expired or was already used. Sign in with your existing account or ask for a fresh invite."
+        : errCode === "invite_redeem_failed"
+          ? "We couldn't complete the invite. Sign in below if you already have an account, or ask your admin to resend the invite."
+          : null
+    : null;
   // If there's an invite, post-login routes through the welcome wizard
   // (Phase C) so the new teammate sets their personal preferences before
   // landing on the dashboard. Otherwise honor the explicit ?next= param.
@@ -51,7 +64,25 @@ export function LoginForm() {
           first_login?: boolean;
         };
         if (!r.ok || !body.ok) {
-          setErr(body.message || body.error || "Invite redemption failed");
+          // Soft-fail when the invite is already redeemed — this happens
+          // in two valid flows: (a) the new finalize-invite-signup endpoint
+          // redeems it server-side before the user reaches /login, (b) the
+          // user retried sign-in after a successful initial redeem. In both
+          // cases the user already has the tenant assignment, so we route
+          // them through /auth/land which resolves the right destination
+          // based on user_profile state rather than surfacing a confusing
+          // "Invite redemption failed" wall.
+          const reason = (body.message || body.error || "").toLowerCase();
+          const alreadyRedeemed =
+            reason.includes("invalid_or_expired") ||
+            reason.includes("already") ||
+            reason.includes("redeemed");
+          if (!alreadyRedeemed) {
+            setErr(body.message || body.error || "Invite redemption failed");
+            return;
+          }
+          router.push(`/auth/land?next=${encodeURIComponent("/onboarding/welcome")}`);
+          router.refresh();
           return;
         }
         router.push(body.first_login ? "/onboarding/welcome" : "/");
@@ -103,13 +134,20 @@ export function LoginForm() {
           </p>
         </div>
 
-        {isFreshFromSignup && (
+        {isFreshFromSignup && !errHint && (
           <div className="mb-4 rounded-md border border-accent/40 bg-accent/10 px-4 py-3 text-sm text-fg">
             <div className="font-semibold text-accent">Almost there.</div>
             <div className="text-fg-muted text-xs mt-1 leading-relaxed">
               Your account is ready. Sign in below with the password you just
               created and you&apos;ll land on your Command Center.
             </div>
+          </div>
+        )}
+
+        {errHint && (
+          <div className="mb-4 rounded-md border border-amber-500/40 bg-amber-500/10 px-4 py-3 text-sm text-fg">
+            <div className="font-semibold text-amber-300">Couldn&apos;t complete that invite</div>
+            <div className="text-fg-muted text-xs mt-1 leading-relaxed">{errHint}</div>
           </div>
         )}
 

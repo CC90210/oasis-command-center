@@ -119,16 +119,32 @@ export default async function InviteLanding({
 
 function InvalidCard() {
   return (
-    <div className="rounded-2xl border border-amber-500/40 bg-amber-500/5 p-6">
+    <div className="rounded-2xl border border-amber-500/40 bg-amber-500/5 p-6 space-y-4">
       <div className="flex items-start gap-3">
         <AlertCircle className="w-6 h-6 text-amber-400 shrink-0 mt-0.5" />
         <div className="space-y-2">
           <h1 className="text-lg font-bold text-fg">This invite isn&apos;t active</h1>
           <p className="text-sm text-fg-muted leading-relaxed">
-            The link you used has expired, been revoked, or was already redeemed. Ask whoever sent it
-            to generate a fresh one — invites are single-use and good for 7 days by default.
+            The link you used has expired, been revoked, or was already redeemed. Invites are
+            single-use and good for 7 days by default.
           </p>
         </div>
+      </div>
+
+      {/* Recovery paths — don't strand the user on the error card. If they
+          already have an account they can sign in; if they don't they need
+          a fresh link from whoever invited them. */}
+      <div className="border-t border-amber-500/20 pt-4 space-y-2.5">
+        <Link
+          href="/login"
+          className="block w-full text-center rounded-lg bg-accent text-bg-deep font-bold py-2.5 text-sm hover:bg-accent/90 transition-colors"
+        >
+          Sign in to an existing account
+        </Link>
+        <p className="text-[11px] text-fg-dim leading-relaxed text-center">
+          Need a fresh invite? Ask the person who sent you this link to send a new one — they can
+          generate it from their workspace&apos;s Team page.
+        </p>
       </div>
     </div>
   );
@@ -174,11 +190,16 @@ function ValidCard({ token, preview }: { token: string; preview: Preview }) {
       </ul>
 
       <Link
-        href={
-          preview.email_pinned
-            ? `/signup?invite=${encodeURIComponent(token)}&email=${encodeURIComponent(preview.email_pinned)}`
-            : `/signup?invite=${encodeURIComponent(token)}`
-        }
+        href={(() => {
+          const sp = new URLSearchParams();
+          sp.set("invite", token);
+          if (preview.email_pinned) sp.set("email", preview.email_pinned);
+          // Carry the tenant name through so /signup can show "Join
+          // <Workspace>" instead of the generic OASIS AI brand. The
+          // preview RPC is the source of truth — signup doesn't re-fetch.
+          sp.set("workspace", preview.tenant_name);
+          return `/signup?${sp.toString()}`;
+        })()}
         className="block w-full text-center rounded-lg bg-accent text-bg-deep font-bold py-2.5 text-sm hover:bg-accent/90 transition-colors"
       >
         Continue → Create account
