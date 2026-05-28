@@ -75,10 +75,15 @@ export default function SignupPage() {
               setErr(body.message || body.error || "Invite finalization failed");
               return;
             }
+            // Intentionally omit ?invite= from the /login URL — the
+            // server-side finalize step above already redeemed the token,
+            // so re-passing it would make LoginForm call redeem-invite a
+            // second time and fail with "invalid_or_expired". Pass next=
+            // so /auth/land routes to the welcome wizard post-signin.
             const loginUrl =
-              `/login?invite=${encodeURIComponent(inviteToken)}` +
-              `&email=${encodeURIComponent(email)}` +
-              `&fresh=1`;
+              `/login?email=${encodeURIComponent(email)}` +
+              `&fresh=1` +
+              `&next=${encodeURIComponent("/onboarding/welcome")}`;
             router.push(loginUrl);
             router.refresh();
             return;
