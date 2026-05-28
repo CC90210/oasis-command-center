@@ -178,18 +178,26 @@ const MAX_ATTACHMENTS_PER_TURN = 5;
 const TEXT_ATTACHMENT_READ_BYTES = 512 * 1024;
 const MAX_ATTACHMENT_EXCERPT_CHARS = 120_000;
 const CHAT_FETCH_TIMEOUT_MS = 90_000;
-const BRIDGE_TOOL_TIMEOUT_MS = 120_000;
+// BRIDGE_TOOL_TIMEOUT_MS: bumped 2026-05-28 from 120s to 6 hours.
+// The bridge endpoint here is http://127.0.0.1:9100 — direct browser
+// → localhost. There's no Vercel function on this path, so no
+// infrastructure-side budget. The prior 120s was a defensive client-
+// side cap that fired on every multi-minute Gemini / Codex CLI run
+// (operator tasks legitimately taking hours, per CC 2026-05-28). 6
+// hours covers any realistic CLI workload while still bounding a
+// truly stuck request so the browser eventually reclaims its slot.
+const BRIDGE_TOOL_TIMEOUT_MS = 21_600_000;
 const RESUME_FETCH_TIMEOUT_MS = 90_000;
-// SSE inactivity watchdog — bumped 2026-05-23 from 75s to 240s.
+// SSE inactivity watchdog — bumped 2026-05-28 from 240s to 600s.
 // Codex / Gemini CLI subprocesses can run silently for 60-180s while
 // they do their internal tool-use loop (file reads, command execution,
 // HTTP fetches), then emit one big delta with the final response. The
 // bridge ticks `agent_status: thinking` every 25s during long waits
 // (heartbeat in _run_chat_via_local_cli) which keeps the watchdog
-// from firing — but 240s is the safety margin if that ticker ever
-// fails. The previous 75s tripped on every long-running daily-briefing
-// turn.
-const SSE_INACTIVITY_TIMEOUT_MS = 240_000;
+// from firing — but 600s is the safety margin if that ticker ever
+// fails. The previous 240s tripped on the longest daily-briefing
+// runs when the bridge heartbeat momentarily stalled.
+const SSE_INACTIVITY_TIMEOUT_MS = 600_000;
 
 /**
  * One-shot migration from the v2 vocabulary to the v3 vocabulary.
@@ -2791,7 +2799,7 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
                 <>
                   <div className="font-bold">The CLI timed out.</div>
                   <div className="text-xs text-fg-muted font-sans">
-                    Long prompts can exceed the bridge&apos;s 120-second budget. Try API-key mode (it streams) or shorten the prompt.
+                    The bridge gave up waiting (6h ceiling). Check the bridge logs for a stuck subprocess, or retry on API-key mode which streams.
                   </div>
                 </>
               ) : errorCode === "cli_nonzero_exit" ? (
