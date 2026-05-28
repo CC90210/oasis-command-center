@@ -64,27 +64,14 @@ export function LoginForm() {
           first_login?: boolean;
         };
         if (!r.ok || !body.ok) {
-          // Soft-fail when the invite is already redeemed — this happens
-          // in two valid flows: (a) the new finalize-invite-signup endpoint
-          // redeems it server-side before the user reaches /login, (b) the
-          // user retried sign-in after a successful initial redeem. In both
-          // cases the user already has the tenant assignment, so we route
-          // them through /auth/land which resolves the right destination
-          // based on user_profile state rather than surfacing a confusing
-          // "Invite redemption failed" wall.
-          const reason = (body.message || body.error || "").toLowerCase();
-          const alreadyRedeemed =
-            reason.includes("invalid_or_expired") ||
-            reason.includes("already") ||
-            reason.includes("redeemed");
-          if (!alreadyRedeemed) {
-            setErr(body.message || body.error || "Invite redemption failed");
-            return;
-          }
-          router.push(`/auth/land?next=${encodeURIComponent("/onboarding/welcome")}`);
-          router.refresh();
+          setErr(body.message || body.error || "Invite redemption failed");
           return;
         }
+        // redeemInvite() (server) now returns ok=true for the legitimate
+        // "this user already redeemed this exact token" case (idempotent
+        // path), so any !body.ok above is a real failure (expired, revoked,
+        // email mismatch, etc.) and we surface it. Success cases route
+        // through the welcome wizard on first-login.
         router.push(body.first_login ? "/onboarding/welcome" : "/");
         router.refresh();
         return;

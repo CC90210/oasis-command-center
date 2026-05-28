@@ -180,16 +180,45 @@ export async function revokeInvite(inviteId: string, tenantId: string): Promise<
 export async function redeemInvite(
   rawToken: string,
   redeemerAuthId: string
-): Promise<{ ok: true; tenantId: string; teamRole: TeamRole } | { ok: false; error: string }> {
+): Promise<
+  | { ok: true; tenantId: string; teamRole: TeamRole; idempotent?: boolean }
+  | { ok: false; error: string }
+> {
   const supa = getServiceSupabase();
+  const hash = hashInviteToken(rawToken);
+
   const preview = await previewInvite(rawToken);
-  if (!preview) return { ok: false, error: "invalid_or_expired" };
+  if (!preview) {
+    // previewInvite returns null for invalid / expired / revoked / already-
+    // redeemed tokens — the four cases are indistinguishable from its
+    // shape. Before declaring failure, check whether the calling user
+    // has already redeemed this exact token. That's the legitimate
+    // idempotent-success case (back-button, double-submit, retry after
+    // network blip, or LoginForm calling us after finalize-invite-signup
+    // already ran). Without this disambiguation a real already-redeemed
+    // user gets surfaced "Invite redemption failed" — Codex P2 finding.
+    const { data: priorRedeem } = await supa
+      .from("tenant_invites")
+      .select("tenant_id, team_role")
+      .eq("token_hash", hash)
+      .eq("redeemed_by", redeemerAuthId)
+      .not("redeemed_at", "is", null)
+      .maybeSingle();
+    if (priorRedeem?.tenant_id && priorRedeem.team_role) {
+      return {
+        ok: true,
+        tenantId: priorRedeem.tenant_id as string,
+        teamRole: priorRedeem.team_role as TeamRole,
+        idempotent: true,
+      };
+    }
+    return { ok: false, error: "invalid_or_expired" };
+  }
   const { data: authUser, error: authErr } = await supa.auth.admin.getUserById(redeemerAuthId);
   if (authErr || !authUser?.user) return { ok: false, error: "auth_user_not_found" };
   if (!inviteEmailMatchesUser(preview.email_pinned, authUser.user.email)) {
     return { ok: false, error: "email_mismatch" };
   }
-  const hash = hashInviteToken(rawToken);
   const { data, error } = await supa.rpc("redeem_tenant_invite", {
     p_token_hash: hash,
     p_redeemer_auth_id: redeemerAuthId,
