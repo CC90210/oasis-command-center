@@ -45,6 +45,11 @@ export type ChatAuthContext = {
   /** Per-agent system prompt override, if the operator set one in
    *  Settings → Agents. Null otherwise (use the default persona). */
   cfgOverride: string | null;
+  /** Per-user display-name override (Settings → My Agents). When set,
+   *  the agent self-identifies with this name on user-facing surfaces
+   *  (chat header, persona self-introduction). Backend daemon logs
+   *  still use the canonical agent name. Null = canonical name. */
+  displayNameOverride: string | null;
   /** True when the user matches isOperatorEmail. Useful for routes that
    *  want to grant operator-only features beyond what auth covers. */
   isOperator: boolean;
@@ -99,7 +104,7 @@ export async function resolveChatContext(
   // service-role client + minimize round-trips.
   const userOverride = await service
     .from("agent_model_config")
-    .select("provider, model, encrypted_api_key, system_prompt_override, enabled")
+    .select("provider, model, encrypted_api_key, system_prompt_override, display_name_override, enabled")
     .eq("tenant_id", tenantId)
     .eq("user_id", user.id)
     .eq("agent_key", agentKey)
@@ -109,11 +114,18 @@ export async function resolveChatContext(
     ? { data: null as null }
     : await service
         .from("agent_model_config")
-        .select("provider, model, encrypted_api_key, system_prompt_override, enabled")
+        .select("provider, model, encrypted_api_key, system_prompt_override, display_name_override, enabled")
         .eq("tenant_id", tenantId)
         .is("user_id", null)
         .eq("agent_key", agentKey)
         .maybeSingle();
+
+  // display_name_override is a USER-level concept; we only honour it
+  // from the user row, never the tenant default. If the user hasn't
+  // set a rename, the canonical persona name applies — even if a
+  // tenant-default row exists for the same agent.
+  const displayNameOverride: string | null =
+    (userOverride.data?.display_name_override as string | null) || null;
 
   const cfg = userOverride.data?.encrypted_api_key ? userOverride.data : tenantDefault.data;
   const cfgScope: "user" | "tenant" | null = userOverride.data?.encrypted_api_key
@@ -178,6 +190,7 @@ export async function resolveChatContext(
     model,
     apiKey,
     cfgOverride,
+    displayNameOverride,
     isOperator,
     cfgScope,
   };

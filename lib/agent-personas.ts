@@ -453,10 +453,38 @@ function applyIdentityLock(base: string): string {
   return base + IDENTITY_LOCK_OVERLAY + DASHBOARD_ACTION_SPEC;
 }
 
-export function getPersona(agentKey: string, override?: string | null): string {
-  if (override && override.trim().length) return applyIdentityLock(override);
-  const base = AGENT_PERSONAS[agentKey] || `You are ${agentKey.toUpperCase()}, an AI agent.`;
-  return applyIdentityLock(base);
+/**
+ * Per-user display-name override prelude. When an employee renames
+ * their copy of Solara to "Ada" (Settings → My Agents), this block is
+ * prepended to the persona so the agent self-identifies with the
+ * employee's preferred name. The agent's role, behaviours, and
+ * boundaries below are untouched — only the surface name flips.
+ */
+function applyDisplayNameOverride(base: string, displayNameOverride: string): string {
+  const name = displayNameOverride.trim();
+  return (
+    `[OPERATOR-FACING DISPLAY NAME]\n` +
+    `Your operator-facing display name is "${name}". When you self-identify ` +
+    `to the operator — opening line, signature, "who are you" questions — ` +
+    `say "${name}". Your role, behaviours, voice, and boundaries below are ` +
+    `unchanged. Backend logs and cross-employee references still use your ` +
+    `canonical agent name; only this operator sees you as "${name}".\n\n` +
+    base
+  );
+}
+
+export function getPersona(
+  agentKey: string,
+  override?: string | null,
+  displayNameOverride?: string | null,
+): string {
+  const base = override && override.trim().length
+    ? override
+    : AGENT_PERSONAS[agentKey] || `You are ${agentKey.toUpperCase()}, an AI agent.`;
+  const withName = displayNameOverride && displayNameOverride.trim().length
+    ? applyDisplayNameOverride(base, displayNameOverride)
+    : base;
+  return applyIdentityLock(withName);
 }
 
 /**

@@ -36,6 +36,10 @@ type Override = {
   enabled: boolean;
   has_key: boolean;
   last_used_at: string | null;
+  /** Per-user display name override (Solara → "Ada" etc). Surfaces in
+   *  the chat header and the agent's self-introduction. Null = use the
+   *  canonical agent name. */
+  display_name_override: string | null;
 };
 
 type Props = {
@@ -146,6 +150,7 @@ function AgentRow({
   const [model, setModel] = useState<string>(override?.model || "");
   const [apiKey, setApiKey] = useState("");
   const [showKey, setShowKey] = useState(false);
+  const [displayName, setDisplayName] = useState<string>(override?.display_name_override || "");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [savedFlash, setSavedFlash] = useState(false);
@@ -165,6 +170,10 @@ function AgentRow({
           provider,
           model: model || providerModels[0],
           api_key: apiKey || undefined,
+          // Send the trimmed value so server-side empty/whitespace clears
+          // the override and the canonical name resumes. Server also
+          // re-trims defensively.
+          display_name_override: displayName.trim(),
         }),
       });
       const body = (await r.json()) as { ok: boolean; error?: string };
@@ -234,6 +243,23 @@ function AgentRow({
 
       {open && (
         <div className="border-t border-bg-border px-3 py-3 space-y-3">
+          <label className="block">
+            <span className="text-[10.5px] uppercase tracking-wider font-bold text-fg-dim">
+              Display name (your nickname for {label})
+            </span>
+            <input
+              type="text"
+              value={displayName}
+              onChange={(e) => setDisplayName(e.target.value)}
+              placeholder={label}
+              maxLength={40}
+              className="mt-1 w-full bg-bg-deep border border-bg-border rounded-md px-2 py-1.5 text-sm text-fg placeholder:text-fg-dim focus:border-accent focus:outline-none"
+            />
+            <span className="text-[11px] text-fg-dim mt-1 block leading-relaxed">
+              Only YOU see this name in chat. Teammates keep seeing the canonical name. Leave blank to use {label}.
+            </span>
+          </label>
+
           <label className="block">
             <span className="text-[10.5px] uppercase tracking-wider font-bold text-fg-dim">
               Provider

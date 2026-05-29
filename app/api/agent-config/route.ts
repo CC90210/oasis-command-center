@@ -48,7 +48,7 @@ export async function GET(req: NextRequest) {
   const service = getServiceSupabase();
   let q = service
     .from("agent_model_config")
-    .select("agent_key, provider, model, enabled, last_used_at, encrypted_api_key, system_prompt_override")
+    .select("agent_key, provider, model, enabled, last_used_at, encrypted_api_key, system_prompt_override, display_name_override")
     .eq("tenant_id", tenantId);
   if (scope === "user") {
     if (!userId) return NextResponse.json({ ok: false, error: "no_user" }, { status: 401 });
@@ -66,6 +66,12 @@ export async function GET(req: NextRequest) {
     last_used_at: row.last_used_at,
     has_key: !!row.encrypted_api_key,
     has_override: !!row.system_prompt_override,
+    // Surface the actual value (not just a boolean) so the Settings UI
+    // can hydrate the text input on render — display name overrides are
+    // intentionally non-secret. Only present on user-scope reads since
+    // display_name_override never lives on tenant default rows.
+    display_name_override:
+      scope === "user" ? ((row.display_name_override as string | null) || null) : null,
   }));
   return NextResponse.json({ ok: true, scope, configs });
 }
@@ -96,6 +102,11 @@ export async function POST(req: NextRequest) {
     typeof body?.api_key === "string" && body.api_key.trim() ? body.api_key.trim() : undefined;
   const overrideRaw: string | undefined =
     typeof body?.system_prompt_override === "string" ? body.system_prompt_override : undefined;
+  // display_name_override is per-user only; tenant-scope writes ignore it
+  // (canonical names stay on the tenant default row). Same parsing shape
+  // as overrideRaw: empty/whitespace clears, non-empty stores.
+  const displayNameRaw: string | undefined =
+    typeof body?.display_name_override === "string" ? body.display_name_override : undefined;
   const enabled = body?.enabled === false ? false : true;
 
   const service = getServiceSupabase();
@@ -157,6 +168,11 @@ export async function POST(req: NextRequest) {
   if (encryptedKey !== undefined) payload.encrypted_api_key = encryptedKey;
   if (overrideRaw !== undefined) {
     payload.system_prompt_override = overrideRaw.trim().length ? overrideRaw : null;
+  }
+  // display_name_override only stamps on user-scope rows. Tenant defaults
+  // keep the canonical name so per-user renames can't leak across the team.
+  if (displayNameRaw !== undefined && scope === "user") {
+    payload.display_name_override = displayNameRaw.trim().length ? displayNameRaw.trim() : null;
   }
 
   if (existing) {

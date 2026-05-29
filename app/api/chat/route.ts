@@ -215,7 +215,7 @@ export async function POST(req: NextRequest) {
     // can pick a friendly recovery UI (e.g. "Replace key" for key_decrypt_failed).
     return jsonError(ctxResult.status, ctxResult.detail || ctxResult.code, ctxResult.code);
   }
-  const { tenantId, provider, model, apiKey, cfgOverride, cfgScope } = ctxResult;
+  const { tenantId, provider, model, apiKey, cfgOverride, displayNameOverride, cfgScope } = ctxResult;
 
   // Manifest-aware agent validation. A tenant's manifest can declare custom
   // agent slugs (e.g. "renewal_specialist") that are not in the empire-wide
@@ -308,7 +308,7 @@ export async function POST(req: NextRequest) {
     content: persistedUserContent,
   });
 
-  const personaBase = getPersona(agentKey, cfgOverride);
+  const personaBase = getPersona(agentKey, cfgOverride, displayNameOverride);
   // Bridge-online detection — the persona notice that follows depends on
   // whether the operator's local bridge is reachable. When it IS, Phase 2
   // of giggly-reef gives the cloud-mode chat real local tools (read_file,
