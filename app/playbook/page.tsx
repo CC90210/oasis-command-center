@@ -108,25 +108,11 @@ const SUN_PLAYBOOK_SLUGS = new Set<string>([
 ]);
 
 /**
- * Frontmatter-aware SunBiz filter. A playbook belongs to the SunBiz portal
- * when ANY of:
- *   - slug is in the explicit SUN_PLAYBOOK_SLUGS allowlist
- *   - slug contains "sunbiz" / "solara" / "helios"
- *   - body's first 600 chars contain a frontmatter `audience:` line whose
- *     value matches "sunbiz" / "solara" / "helios" / "sun-" (covers the
- *     pre-flight `audience: empire-operator` carve-out which is handled
- *     by the SUN_PLAYBOOK_SLUGS lookup above)
- *   - body's first 600 chars declare a `tags:` line containing "sunbiz"
- *
- * The empire-operator pre-flight (`08`) is SunBiz operations even though
- * the operator is CC — that's why it stays in the explicit SUN_PLAYBOOK_SLUGS
- * list above. Pure operator-audience docs like `07-new-client-onboarding`
- * stay on the OASIS playbook (they're tenant-agnostic).
- *
- * Frontmatter check added 2026-05-28 — the prior pass documented the
- * frontmatter rule in this JSDoc but never implemented it. Without it,
- * a future doc with slug `09-funding-walkthrough` and `audience:
- * sunbiz-client` would leak onto CC's index.
+ * A playbook belongs to the SunBiz portal when slug matches the explicit
+ * allowlist, contains a known SunBiz keyword, or the frontmatter
+ * audience/tags declare SunBiz scope. Empire-operator-audience docs
+ * about SunBiz (e.g. the pre-flight) stay in SUN_PLAYBOOK_SLUGS above
+ * since audience alone wouldn't catch them.
  */
 function isSunBizPlaybook(file: PlaybookFile): boolean {
   if (SUN_PLAYBOOK_SLUGS.has(file.slug)) return true;

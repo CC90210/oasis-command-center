@@ -61,10 +61,6 @@ export async function PATCH(
   }
   if (typeof body.agent_key === "string") {
     const nextAgentKey = body.agent_key.toLowerCase();
-    // Same tenant-allowlist gate as POST. Without this, an operator
-    // could PATCH agent_key to a sibling-repo agent ("bravo" from
-    // SunBiz) and trick the bridge into resolving CEO-Agent scripts
-    // via SIBLING_ROOT_BY_AGENT_KEY.
     const allowedAgents = await getTenantEnabledAgents(tenantId);
     if (allowedAgents.length > 0 && !allowedAgents.includes(nextAgentKey)) {
       return NextResponse.json(
@@ -93,18 +89,10 @@ export async function PATCH(
   if (error) return NextResponse.json({ ok: false, error: error.message }, { status: 500 });
   if (data) return NextResponse.json({ ok: true, job: data });
 
-  // Tenant row not found — try the empire cron_jobs table. Operators have
-  // a legitimate need to pause/resume SEED_JOBS without code edits (e.g.
-  // when an underlying engine is temporarily broken and the cron keeps
-  // banging on it). For empire rows only the enabled flag is honoured;
-  // schedule / action_config edits would drift from the SEED_JOBS source
-  // of truth which re-asserts on every bridge tick.
-  //
-  // SECURITY (added 2026-05-28): the empire fallback MUST gate on
-  // isOperatorEmail. Without this gate, any tenant operator with a
-  // session cookie + a guessed/leaked empire row UUID could toggle CC's
-  // empire crons. The GET route already filters empire rows by operator
-  // email; the PATCH route is the matching guard.
+  // Empire fallback — operators pause/resume SEED_JOBS rows without code
+  // edits. Only enabled is honoured; schedule/action_config would drift
+  // from cron_engine.SEED_JOBS which re-asserts every bridge tick.
+  // isOperatorEmail gate matches the GET route's empire-lane filter.
   const user = await getSessionUser().catch(() => null);
   if (!isOperatorEmail(user?.email || undefined)) {
     return NextResponse.json({ ok: false, error: "not_found_or_forbidden" }, { status: 404 });

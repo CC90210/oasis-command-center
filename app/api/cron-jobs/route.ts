@@ -125,10 +125,9 @@ export async function GET() {
     if (!empireQuery.error && empireQuery.data) {
       empireJobs = (empireQuery.data as EmpireCronRow[])
         .map(normalizeEmpireRow)
-        // Defense-in-depth: even if a tenant-scoped cron lands in the
-        // empire table, suppress it here so it never reaches CC's UI.
-        // Closes the 2026-05-28 SunBiz leak (3 SunBiz rows seeded from
-        // cron_engine.py rendered under the Bravo group on /automations).
+        // Suppress tenant-scoped rows that leaked into the empire table
+        // so they never reach CC's UI. The bridge cron_runner is the
+        // execution-side guard; this is the read-side guard.
         .filter((row) => EMPIRE_AGENT_ALLOWLIST.has(row.agent_key));
     }
   }
@@ -256,10 +255,9 @@ export async function POST(req: NextRequest) {
       ? (body.action_payload as Record<string, unknown>)
       : {};
 
-  // Server-side action_payload.root gate (added 2026-05-28). Without this,
-  // a tenant operator could set root="bravo" and dispatch CEO-Agent scripts
-  // through their bridge — privilege escalation from tenant scope to empire
-  // scope. Resolve the caller's tenant slug and check against the allowlist.
+  // Without this gate a tenant operator could set action_payload.root
+  // to a sibling-repo slug (e.g. "bravo" from SunBiz) and the bridge
+  // would dispatch CEO-Agent scripts from inside their tenant bridge.
   const db = getServiceSupabase();
   const tenantRow = await db
     .from("tenants")
@@ -281,16 +279,10 @@ export async function POST(req: NextRequest) {
   }
 
   const agentKey = String(body?.agent_key || "bravo").toLowerCase();
-  // Agent-key allowlist (security-reviewer MEDIUM #10 + the same
-  // privilege-escalation class as action_payload.root). Without this
-  // gate, a SunBiz operator could POST a row with agent_key="bravo"
-  // — the bridge then maps agent_key → repo root via
-  // SIBLING_ROOT_BY_AGENT_KEY and dispatches CEO-Agent scripts. The
-  // manifest tells us which agents this tenant is allowed to schedule
-  // for; anything outside that set is rejected.
-  //
-  // TODO(architect-P1): when manifest.allowed_roots ships, drop this
-  // tenant-scope dependency in favor of the manifest field directly.
+  // Same privilege-escalation class as action_payload.root: the bridge
+  // maps agent_key → repo root via SIBLING_ROOT_BY_AGENT_KEY, so an
+  // unfiltered agent_key lets a tenant operator pick which sibling
+  // repo runs.
   const allowedAgents = await getTenantEnabledAgents(tenantId);
   if (allowedAgents.length > 0 && !allowedAgents.includes(agentKey)) {
     return NextResponse.json(
@@ -326,28 +318,14 @@ export async function POST(req: NextRequest) {
   return NextResponse.json({ ok: true, job: data });
 }
 
-/**
- * Tenants whose cron jobs are allowed to set action_payload.root. Each
- * tenant slug maps to the sibling-agent slug their bridge is allowed to
- * dispatch into. Anything else is rejected at the API edge — the bridge
- * also defends, but server-side validation closes the path before the
- * untrusted payload ever reaches the daemon.
- *
- * TODO(architect-P1, 2026-05-28): this is a hardcoded slug map — the
- * same anti-pattern the audit flagged for MODULES_BY_TENANT and
- * EMPIRE_AGENT_ALLOWLIST. The long-term fix is a manifest field
- * (manifest.allowed_roots: string[]) so adding tenant #3 is one
- * manifest entry, not a code edit across N files. Until that ships,
- * keep this map in sync with bravo_cli/cron_runner.py
- * SIBLING_ROOT_BY_AGENT_KEY (each tenant's agents must map to the
- * tenant's allowed root).
- */
+// Tenants allowed to set action_payload.root, mapped to the sibling-agent
+// slug their bridge may dispatch into. Hardcoded for now; long-term home
+// is manifest.allowed_roots so adding a tenant is a manifest edit, not a
+// code change. Must stay in sync with bravo_cli/cron_runner.py
+// SIBLING_ROOT_BY_AGENT_KEY.
 const TENANT_ROOT_ALLOWLIST: Record<string, string> = {
-  // SunBiz tenant (slug "submissions", resolveClientProfileSlug -> "sun")
   submissions: "sunbiz",
   sun: "sunbiz",
-  // CC's empire tenant — bravo is the implicit default everywhere, so this
-  // is here for clarity rather than necessity.
   "oasis-ai-cc": "bravo",
 };
 
