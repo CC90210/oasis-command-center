@@ -9,7 +9,7 @@
     "start": "next start --port 3100",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",
-    "test:sunbiz": "tsx tests/sunbiz-import-routing.test.ts && tsx tests/auth-routing.test.ts && tsx tests/middleware-prefix.test.ts && tsx tests/team-invites.test.ts",
+    "test:sunbiz": "tsx tests/sunbiz-import-routing.test.ts && tsx tests/auth-routing.test.ts && tsx tests/middleware-prefix.test.ts && tsx tests/onboarding-gate.test.ts && tsx tests/team-invites.test.ts",
     "test:chat-modes": "tsx tests/chat-modes.test.ts",
     "test:event-bus": "tsx tests/event-bus-display.test.ts",
     "test:streaming-redactor": "tsx tests/streaming-redactor.test.ts"

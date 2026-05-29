@@ -8,6 +8,7 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { createServerClient } from "@supabase/ssr";
 import { matchesPathPrefix } from "./lib/path-prefix";
+import { shouldRedirectToOnboarding } from "./lib/onboarding-gate";
 
 const PUBLIC_PATH_PREFIXES = [
   "/welcome",              // public marketing landing
@@ -256,27 +257,11 @@ export async function middleware(req: NextRequest) {
         .select("onboarding_completed_at, invited_by, tenant_id")
         .eq("auth_user_id", data.user.id)
         .maybeSingle();
-      // A user with tenant_id set is already attached to a workspace —
-      // either they completed the fresh-tenant wizard (which sets
-      // tenant_id at the end) or they joined via an invite (which sets
-      // tenant_id via redeem_tenant_invite). In both cases the
-      // onboarding gate has nothing useful to add and silently
-      // overrides downstream redirects (signup → /t/<slug>, login →
-      // /t/<slug>) with the wizard. Skip the gate for attached users.
-      // The cookie write below still fires when onboarding IS complete,
-      // so the per-request DB cost only happens until the user finishes.
-      if (
-        profile &&
-        profile.onboarding_completed_at == null &&
-        profile.tenant_id == null
-      ) {
-        // New signups with no tenant attachment land on the industry-
-        // template wizard by default. Invitees with no tenant_id (a
-        // failed redemption stuck them in limbo) get the welcome
-        // wizard which itself runs orphan recovery on render.
-        return NextResponse.redirect(
-          new URL(profile.invited_by ? "/onboarding/welcome" : "/onboarding/wizard", req.url),
-        );
+      // Gate decision is centralised in lib/onboarding-gate.ts so it's
+      // testable in isolation. Returns the redirect path or null.
+      const redirectPath = shouldRedirectToOnboarding(profile);
+      if (redirectPath) {
+        return NextResponse.redirect(new URL(redirectPath, req.url));
       }
       if (profile && profile.onboarding_completed_at) {
         // Cache the decision so subsequent page loads skip the DB query.
