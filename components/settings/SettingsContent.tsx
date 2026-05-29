@@ -42,6 +42,7 @@ import { QuickInviteCard } from "@/components/settings/QuickInviteCard";
 import { PlanTemplateEditor } from "@/components/settings/PlanTemplateEditor";
 import { AgentConfigEditor } from "@/components/settings/AgentConfigEditor";
 import { IntegrationKeysPanel } from "@/components/settings/IntegrationKeysPanel";
+import { PersonalIntegrationsPanel } from "@/components/settings/PersonalIntegrationsPanel";
 import { SafeBoundary } from "@/components/SafeBoundary";
 import { MyAgentsCard } from "@/components/settings/MyAgentsCard";
 import { DevicesEditor } from "@/components/settings/DevicesEditor";
@@ -186,6 +187,15 @@ export async function SettingsContent({
 
           <SafeBoundary label="Integration keys">
             <IntegrationKeysPanel canManage={canManageTenant} />
+          </SafeBoundary>
+
+          {/* Phase 4 of SunBiz multi-employee personalization (2026-05-29):
+              per-user credentials section. Today this hosts Gmail OAuth
+              so each employee can send mail from their own address.
+              Tenant-shared credentials (TextTorrent, Kixie, etc.) stay
+              in the IntegrationKeysPanel above. */}
+          <SafeBoundary label="Personal integrations">
+            <PersonalIntegrationsPanel />
           </SafeBoundary>
 
           {canManageTenant && (

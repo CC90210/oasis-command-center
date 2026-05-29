@@ -24,6 +24,23 @@ export type IntegrationSchema = {
   label: string;
   description: string;
   fields: IntegrationFieldDef[];
+  /**
+   * Storage scope. Phase 4 of multi-employee personalization
+   * (2026-05-29):
+   *
+   *   - "tenant" (default) — credential lives in the tenant_integration_
+   *     credentials table. Shared by every team member. Used for
+   *     services where billing/identity goes through the tenant owner
+   *     (Twilio, TextTorrent, Kixie, Stripe, etc.).
+   *
+   *   - "user_only" — credential lives in user_integration_credentials.
+   *     Per-employee, never tenant-shared. Used when each employee
+   *     MUST authenticate as themselves (Gmail OAuth — sends come
+   *     from the employee's own address, not the owner's). The
+   *     Settings UI renders these under the "Personal integrations"
+   *     section instead of the tenant integrations grid.
+   */
+  scope?: "tenant" | "user_only";
 };
 
 export const INTEGRATION_SCHEMAS: IntegrationSchema[] = [
@@ -96,6 +113,26 @@ export const INTEGRATION_SCHEMAS: IntegrationSchema[] = [
     label: "Telegram Bridge",
     description: "Mobile notifications via BotFather.",
     fields: [{ key: "bot_token", label: "Bot Token", sensitive: true, hint: "Format: <digits>:<base64>" }],
+  },
+  // Per-user OAuth integration. Migration 076 added the
+  // user_integration_credentials table that backs this; the OAuth
+  // start/callback routes (app/api/auth/google-oauth/*) populate the
+  // fields automatically — the operator never pastes them by hand,
+  // so all fields are marked sensitive=true but only refresh_token
+  // is rendered as a password input in the rare manual-edit path.
+  {
+    service: "gmail_oauth",
+    label: "Gmail (your personal account)",
+    description:
+      "Connect your own Gmail so outbound emails from the dashboard go from your address, not the workspace owner. Required scope: gmail.send (we cannot read your inbox).",
+    scope: "user_only",
+    fields: [
+      { key: "refresh_token", label: "Refresh Token", sensitive: true, hint: "Auto-populated by the OAuth flow." },
+      { key: "access_token", label: "Access Token", sensitive: true, hint: "Short-lived, refreshed on demand." },
+      { key: "expires_at", label: "Expires At", sensitive: false, hint: "ISO timestamp of access_token expiry." },
+      { key: "scope", label: "Granted Scope", sensitive: false },
+      { key: "gmail_address", label: "Your Gmail Address", sensitive: false, validation: "email" },
+    ],
   },
 ];
 

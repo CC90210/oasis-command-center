@@ -93,6 +93,11 @@ export async function POST(
       metadata: {
         requested_by_profile_id: sess.profileId,
         requested_by_email: sess.email,
+        // Phase 4 SunBiz multi-employee personalization: the consumer
+        // daemon reads acted_by_user_id and, if the user has connected
+        // their personal Gmail via Settings → Personal, sends from
+        // THEIR address instead of the tenant-shared submissions@.
+        acted_by_user_id: sess.userId,
         status: "queued",
       },
     })
