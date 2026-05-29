@@ -16,6 +16,7 @@ import { getSessionUser, getServiceSupabase } from "@/lib/supabase-server";
 import { resolveTenantId } from "@/lib/api-auth";
 import { isMissingTableError, missingTablePayload } from "@/lib/api-helpers";
 import { isOperatorEmail } from "@/lib/operator-credentials";
+import { getTenantEnabledAgents } from "@/lib/manifest/tenant-scope";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -122,7 +123,13 @@ export async function GET() {
     // fresh client deploy). Quietly skip rather than 503 — tenant lane
     // already returned.
     if (!empireQuery.error && empireQuery.data) {
-      empireJobs = (empireQuery.data as EmpireCronRow[]).map(normalizeEmpireRow);
+      empireJobs = (empireQuery.data as EmpireCronRow[])
+        .map(normalizeEmpireRow)
+        // Defense-in-depth: even if a tenant-scoped cron lands in the
+        // empire table, suppress it here so it never reaches CC's UI.
+        // Closes the 2026-05-28 SunBiz leak (3 SunBiz rows seeded from
+        // cron_engine.py rendered under the Bravo group on /automations).
+        .filter((row) => EMPIRE_AGENT_ALLOWLIST.has(row.agent_key));
     }
   }
 
@@ -151,6 +158,9 @@ export async function GET() {
  *   - "Atlas *" name OR action_type starting with "atlas_" → atlas (CFO)
  *   - "Maven *" name OR action_type starting with "maven_" → maven (CMO)
  *   - "Aura *" / "Morning Pow Wow" (Aura's voice note) → aura (life-coach)
+ *   - "SunBiz *" / "Solara *" / "Helios *" → tenant-scoped (filtered out
+ *     by EMPIRE_AGENT_ALLOWLIST below — these belong on the SunBiz portal,
+ *     not CC's empire view)
  *   - everything else → bravo (CEO — business ops)
  */
 function inferEmpireAgentKey(name: string, actionType: string | null): string {
@@ -159,8 +169,19 @@ function inferEmpireAgentKey(name: string, actionType: string | null): string {
   if (n.startsWith("atlas") || t.startsWith("atlas_")) return "atlas";
   if (n.startsWith("maven") || t.startsWith("maven_")) return "maven";
   if (n.startsWith("aura") || n.includes("pow wow") || t.startsWith("morning_powwow")) return "aura";
+  if (n.startsWith("sunbiz") || n.startsWith("solara") || n.startsWith("helios")) return "sunbiz";
   return "bravo";
 }
+
+/**
+ * Rows whose inferred agent isn't in this set are tenant-scoped automations
+ * that leaked into the empire cron_jobs table (most commonly SunBiz crons
+ * that predate the multi-root manifest split). They MUST NOT render in CC's
+ * Automations tab — they belong to a different tenant's portal.
+ *
+ * If you add a new empire agent (rare), append it here.
+ */
+const EMPIRE_AGENT_ALLOWLIST = new Set(["bravo", "atlas", "maven", "aura"]);
 
 function normalizeEmpireRow(row: EmpireCronRow) {
   // last_result is a free-form text column written by scripts/scheduler.py.
@@ -230,10 +251,27 @@ export async function POST(req: NextRequest) {
       { status: 400 },
     );
   }
-  const actionPayload: Record<string, unknown> =
+  const rawActionPayload: Record<string, unknown> =
     body?.action_payload && typeof body.action_payload === "object" && !Array.isArray(body.action_payload)
       ? (body.action_payload as Record<string, unknown>)
       : {};
+
+  // Server-side action_payload.root gate (added 2026-05-28). Without this,
+  // a tenant operator could set root="bravo" and dispatch CEO-Agent scripts
+  // through their bridge — privilege escalation from tenant scope to empire
+  // scope. Resolve the caller's tenant slug and check against the allowlist.
+  const db = getServiceSupabase();
+  const tenantRow = await db
+    .from("tenants")
+    .select("slug")
+    .eq("id", tenantId)
+    .maybeSingle();
+  const tenantSlug = (tenantRow.data as { slug: string | null } | null)?.slug?.toLowerCase() ?? null;
+  const rootCheck = validateAndScopeRoot(rawActionPayload, tenantSlug);
+  if (!rootCheck.ok) {
+    return NextResponse.json({ ok: false, error: rootCheck.error }, { status: 403 });
+  }
+  const actionPayload = rootCheck.payload;
 
   // Per-type payload validation. Keeps malformed payloads from reaching the
   // bridge where they'd just error silently in cron_engine.
@@ -243,10 +281,32 @@ export async function POST(req: NextRequest) {
   }
 
   const agentKey = String(body?.agent_key || "bravo").toLowerCase();
+  // Agent-key allowlist (security-reviewer MEDIUM #10 + the same
+  // privilege-escalation class as action_payload.root). Without this
+  // gate, a SunBiz operator could POST a row with agent_key="bravo"
+  // — the bridge then maps agent_key → repo root via
+  // SIBLING_ROOT_BY_AGENT_KEY and dispatches CEO-Agent scripts. The
+  // manifest tells us which agents this tenant is allowed to schedule
+  // for; anything outside that set is rejected.
+  //
+  // TODO(architect-P1): when manifest.allowed_roots ships, drop this
+  // tenant-scope dependency in favor of the manifest field directly.
+  const allowedAgents = await getTenantEnabledAgents(tenantId);
+  if (allowedAgents.length > 0 && !allowedAgents.includes(agentKey)) {
+    return NextResponse.json(
+      {
+        ok: false,
+        error: `agent_key_not_allowed_for_tenant:${agentKey}`,
+        allowed: allowedAgents,
+      },
+      { status: 403 },
+    );
+  }
   const description = body?.description ? String(body.description).slice(0, 500) : null;
   const enabled = body?.enabled !== false;
 
-  const db = getServiceSupabase();
+  // `db` was opened above for the tenant-slug lookup — reuse it for the
+  // insert. The service-role client is a process-singleton anyway.
   const { data, error } = await db
     .from("tenant_cron_jobs")
     .insert({
@@ -264,6 +324,72 @@ export async function POST(req: NextRequest) {
     .single();
   if (error) return NextResponse.json({ ok: false, error: error.message }, { status: 500 });
   return NextResponse.json({ ok: true, job: data });
+}
+
+/**
+ * Tenants whose cron jobs are allowed to set action_payload.root. Each
+ * tenant slug maps to the sibling-agent slug their bridge is allowed to
+ * dispatch into. Anything else is rejected at the API edge — the bridge
+ * also defends, but server-side validation closes the path before the
+ * untrusted payload ever reaches the daemon.
+ *
+ * TODO(architect-P1, 2026-05-28): this is a hardcoded slug map — the
+ * same anti-pattern the audit flagged for MODULES_BY_TENANT and
+ * EMPIRE_AGENT_ALLOWLIST. The long-term fix is a manifest field
+ * (manifest.allowed_roots: string[]) so adding tenant #3 is one
+ * manifest entry, not a code edit across N files. Until that ships,
+ * keep this map in sync with bravo_cli/cron_runner.py
+ * SIBLING_ROOT_BY_AGENT_KEY (each tenant's agents must map to the
+ * tenant's allowed root).
+ */
+const TENANT_ROOT_ALLOWLIST: Record<string, string> = {
+  // SunBiz tenant (slug "submissions", resolveClientProfileSlug -> "sun")
+  submissions: "sunbiz",
+  sun: "sunbiz",
+  // CC's empire tenant — bravo is the implicit default everywhere, so this
+  // is here for clarity rather than necessity.
+  "oasis-ai-cc": "bravo",
+};
+
+/**
+ * Server-side `action_payload.root` validation. Returns the same payload
+ * with an unknown / unauthorized `root` field stripped, OR an error string.
+ *
+ * The root field is what tells `bravo_cli/cron_runner.py:_exec_script_run`
+ * which sibling agent root to resolve the script against. An operator who
+ * could set it freely could escalate from tenant scope to empire scope
+ * (run CEO-Agent scripts inside SunBiz's bridge). This function gates
+ * by the caller's tenant.
+ */
+function validateAndScopeRoot(
+  payload: Record<string, unknown>,
+  tenantSlug: string | null,
+): { ok: true; payload: Record<string, unknown> } | { ok: false; error: string } {
+  const root = payload.root;
+  if (root === undefined || root === null) {
+    // No root field — implicit bravo, fine for empire-tenant jobs. Other
+    // tenants' bridges resolve "bravo" against their local agent root by
+    // default; the cron_runner handles the slug -> path mapping.
+    return { ok: true, payload };
+  }
+  if (typeof root !== "string") {
+    return { ok: false, error: "action_payload.root must be a string" };
+  }
+  const rootSlug = root.trim().toLowerCase();
+  const allowed = tenantSlug ? TENANT_ROOT_ALLOWLIST[tenantSlug] : null;
+  if (!allowed) {
+    return {
+      ok: false,
+      error: `tenant ${tenantSlug ?? "(unknown)"} is not allowed to set action_payload.root`,
+    };
+  }
+  if (rootSlug !== allowed) {
+    return {
+      ok: false,
+      error: `tenant ${tenantSlug} cannot dispatch into root=${rootSlug} (allowed: ${allowed})`,
+    };
+  }
+  return { ok: true, payload: { ...payload, root: rootSlug } };
 }
 
 /**

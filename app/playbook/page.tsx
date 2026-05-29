@@ -97,11 +97,61 @@ const SUN_MANUAL_ORDER = [
 
 // Slugs that belong to the SunBiz operating manual and must NEVER appear on
 // the OASIS Playbook index (otherwise "Meet Solara" leaks into CC's portal).
+// The frontmatter-driven check in isSunBizPlaybook() below is the
+// future-proofing layer — any new playbook with `audience: sunbiz-*` or a
+// `sun` / `sunbiz` slug prefix is auto-excluded without needing an entry here.
 const SUN_PLAYBOOK_SLUGS = new Set<string>([
   ...SUN_MANUAL_ORDER,
   "05-customer-onboarding-script",
   "06-sunbiz-runbook",
+  "08-sunbiz-production-pre-flight",
 ]);
+
+/**
+ * Frontmatter-aware SunBiz filter. A playbook belongs to the SunBiz portal
+ * when ANY of:
+ *   - slug is in the explicit SUN_PLAYBOOK_SLUGS allowlist
+ *   - slug contains "sunbiz" / "solara" / "helios"
+ *   - body's first 600 chars contain a frontmatter `audience:` line whose
+ *     value matches "sunbiz" / "solara" / "helios" / "sun-" (covers the
+ *     pre-flight `audience: empire-operator` carve-out which is handled
+ *     by the SUN_PLAYBOOK_SLUGS lookup above)
+ *   - body's first 600 chars declare a `tags:` line containing "sunbiz"
+ *
+ * The empire-operator pre-flight (`08`) is SunBiz operations even though
+ * the operator is CC — that's why it stays in the explicit SUN_PLAYBOOK_SLUGS
+ * list above. Pure operator-audience docs like `07-new-client-onboarding`
+ * stay on the OASIS playbook (they're tenant-agnostic).
+ *
+ * Frontmatter check added 2026-05-28 — the prior pass documented the
+ * frontmatter rule in this JSDoc but never implemented it. Without it,
+ * a future doc with slug `09-funding-walkthrough` and `audience:
+ * sunbiz-client` would leak onto CC's index.
+ */
+function isSunBizPlaybook(file: PlaybookFile): boolean {
+  if (SUN_PLAYBOOK_SLUGS.has(file.slug)) return true;
+  const lowered = file.slug.toLowerCase();
+  if (lowered.includes("sunbiz") || lowered.includes("solara") || lowered.includes("helios")) {
+    return true;
+  }
+  // Bound the scan to the document head so giant playbooks don't pay a
+  // body-wide regex cost on every render.
+  const head = file.body.slice(0, 600).toLowerCase();
+  const audienceLine = head.match(/^audience:\s*(.+?)\s*$/m)?.[1] ?? "";
+  if (
+    audienceLine.includes("sunbiz") ||
+    audienceLine.includes("solara") ||
+    audienceLine.includes("helios") ||
+    audienceLine.startsWith("sun-")
+  ) {
+    return true;
+  }
+  const tagsLine = head.match(/^tags:\s*\[(.+?)\]/m)?.[1] ?? "";
+  if (tagsLine.includes("sunbiz") || tagsLine.includes("solara") || tagsLine.includes("helios")) {
+    return true;
+  }
+  return false;
+}
 
 const SUN_MANUAL_META: Record<string, { eyebrow: string; summary: string }> = {
   "01-getting-started": {
@@ -149,7 +199,7 @@ export default async function PlaybookIndex() {
     return <SunBizPlaybookIndex manualFiles={manualFiles} demoMode={demoProfile.id === "sun"} />;
   }
 
-  const defaultManual = operatingManual.filter((f) => !SUN_PLAYBOOK_SLUGS.has(f.slug));
+  const defaultManual = operatingManual.filter((f) => !isSunBizPlaybook(f));
   return <DefaultPlaybookIndex operatingManual={defaultManual} />;
 }
 

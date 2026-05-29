@@ -5,8 +5,10 @@
  */
 
 import { NextRequest, NextResponse } from "next/server";
-import { getServiceSupabase } from "@/lib/supabase-server";
+import { getServiceSupabase, getSessionUser } from "@/lib/supabase-server";
 import { resolveTenantId } from "@/lib/api-auth";
+import { isOperatorEmail } from "@/lib/operator-credentials";
+import { getTenantEnabledAgents } from "@/lib/manifest/tenant-scope";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -58,7 +60,23 @@ export async function PATCH(
     update.enabled = body.enabled;
   }
   if (typeof body.agent_key === "string") {
-    update.agent_key = body.agent_key.toLowerCase();
+    const nextAgentKey = body.agent_key.toLowerCase();
+    // Same tenant-allowlist gate as POST. Without this, an operator
+    // could PATCH agent_key to a sibling-repo agent ("bravo" from
+    // SunBiz) and trick the bridge into resolving CEO-Agent scripts
+    // via SIBLING_ROOT_BY_AGENT_KEY.
+    const allowedAgents = await getTenantEnabledAgents(tenantId);
+    if (allowedAgents.length > 0 && !allowedAgents.includes(nextAgentKey)) {
+      return NextResponse.json(
+        {
+          ok: false,
+          error: `agent_key_not_allowed_for_tenant:${nextAgentKey}`,
+          allowed: allowedAgents,
+        },
+        { status: 403 },
+      );
+    }
+    update.agent_key = nextAgentKey;
   }
   if (Object.keys(update).length === 0) {
     return NextResponse.json({ ok: false, error: "no_editable_fields_supplied" }, { status: 400 });
@@ -81,6 +99,16 @@ export async function PATCH(
   // banging on it). For empire rows only the enabled flag is honoured;
   // schedule / action_config edits would drift from the SEED_JOBS source
   // of truth which re-asserts on every bridge tick.
+  //
+  // SECURITY (added 2026-05-28): the empire fallback MUST gate on
+  // isOperatorEmail. Without this gate, any tenant operator with a
+  // session cookie + a guessed/leaked empire row UUID could toggle CC's
+  // empire crons. The GET route already filters empire rows by operator
+  // email; the PATCH route is the matching guard.
+  const user = await getSessionUser().catch(() => null);
+  if (!isOperatorEmail(user?.email || undefined)) {
+    return NextResponse.json({ ok: false, error: "not_found_or_forbidden" }, { status: 404 });
+  }
   if (typeof body.enabled !== "boolean") {
     return NextResponse.json({ ok: false, error: "empire_rows_only_accept_enabled_toggle" }, { status: 400 });
   }

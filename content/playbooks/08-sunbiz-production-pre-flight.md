@@ -2,7 +2,7 @@
 title: SunBiz production pre-flight
 audience: empire-operator
 status: current
-last_updated: 2026-05-25
+last_updated: 2026-05-28
 ---
 
 # SunBiz production pre-flight
@@ -161,6 +161,20 @@ These are surfaced on the Agents & Modules board with "Planned" badges. Document
 When CC's back from Montreal, Phase 6.3-bis is probably the highest-leverage next ship — closes the only Live-vs-Partial gap on the Shopping Out path.
 
 ---
+
+## Section 4.5 — Audits to run on each pre-flight (added 2026-05-28)
+
+These caught two real issues during the 2026-05-28 pass — the SunBiz cron leak and BRAVO Sleep's silent failure. Run them whenever you sit down to a fresh session, especially after a multi-day gap.
+
+| Check | Command | Pass condition |
+|---|---|---|
+| SunBiz crons live in the right table | `.venv/bin/python scripts/integrations/supabase_tool.py select cron_jobs --columns "name" \| grep -i "sunbiz\|solara\|helios"` | Empty output — none should appear in the empire table. They belong in `tenant_cron_jobs` for the SunBiz tenant. |
+| BRAVO Sleep last run status | `.venv/bin/python scripts/integrations/supabase_tool.py select cron_jobs --eq '{"name": "Bravo — Sleep Agent (Memory Consolidation)"}'` | `last_result` does NOT start with `ERROR:`. If it does, the script can't reach `ANTHROPIC_API_KEY` — check `scripts/bravo_sleep.py:225-235` and `scripts/lib/secret_loader.py` are in sync. |
+| OASIS automations tab clean | Open `https://agent-dashboard-sigma-eight.vercel.app/automations` signed in as CC | Only empire agents (Bravo / Atlas / Maven / Aura) render. No "SunBiz" / "Solara" / "Helios" group should be visible. |
+| Playbook page clean | Open `/playbook` signed in as CC | The "Operating manual" section lists `New Client Onboarding` but NOT `SunBiz production pre-flight`, `SunBiz Runbook`, `Customer Onboarding Script`, or any "Meet Solara" link. |
+| OASIS settings clean for SunBiz operator | Open `/t/sun/settings` as Ezra | Renders the SunBiz tenant's branding / team / integrations only. No CC empire data leaks in. |
+
+If any audit fails, see Section 10 for the architectural rules and Section 4 (Known gaps) for in-flight work.
 
 ## Section 5 — If something breaks
 
@@ -324,63 +338,79 @@ done
 
 `SunBiz-Agent/docs/VPS_BRINGUP.md` (committed 2026-05-25) walks Ezra (or anyone) through cold-starting a VPS in eight steps: clone → setup wizard → env from template → doctor → migrations → PM2 → save → smoke-test. The runbook is the operator-readable counterpart to this section.
 
-## Section 10 — Three-repo split: what lives where (2026-05-25)
+## Section 10 — Three-repo split: what lives where (updated 2026-05-28)
 
-CC flagged 2026-05-25 evening that SunBiz scripts were piling up in CEO-Agent without being mirrored to SunBiz-Agent. The 7d34f2e (2026-05-15) policy is now reinforced and the second-meeting build (commits `5792cc3` CEO / `7862e36` SunBiz / `3ba95c5` dashboard) ships with the matrix below applied end-to-end.
+**Major architectural shift completed 2026-05-28**: dual-storage is dead.
+The bridge now resolves SunBiz scripts via the multi-root manifest
+(`scripts/lib/agent_roots.py::resolve_sunbiz_root`) so SunBiz daemons
+live in SunBiz-Agent ONLY. CEO-Agent's `scripts/` no longer carries
+SunBiz copies. Commits sealing this transition: `6b9cefc8` (relocate),
+`8c959e8d` (round 2 — strip 21 more files), `a10b6abd` (cross-platform
+fallback), `f025952d` (multi-root manifest), `fdf141a5` (shared sibling
+resolver in `lib/agent_roots`).
 
-### Repo responsibilities
+### Repo responsibilities (canonical)
 
 | Repo | GitHub remote | Purpose | Canonical for |
 |---|---|---|---|
-| `~/Business-Empire-Agent` | `CC90210/CEO-Agent` | Empire substrate + PM2 runtime | V6 state DB, retrieval, guards, event bus, `ecosystem.config.js`, `send_gateway.py` (empire chokepoint), CC's bridge + Telegram + scheduler |
-| `~/APPS/oasis-command-center` | `CC90210/oasis-command-center` | Multi-tenant dashboard | All Next.js UI for every tenant — manifest-driven, no per-tenant dashboard repos |
-| `~/SunBiz-Agent` | `CC90210/SunBiz-Agent` | SunBiz-specific business logic + VPS deploy | Authoritative storage for SunBiz daemons + migrations. Runtime copies still live in CEO-Agent for PM2 |
+| `~/CEO-Agent` (Mac) / `~/Business-Empire-Agent` (Win) | `CC90210/CEO-Agent` | Empire substrate + PM2 runtime + bridge dispatch | V6 state DB, retrieval, guards, event bus, `ecosystem.config.js`, `send_gateway.py` (empire chokepoint), CC's bridge + Telegram + scheduler, sibling-root resolver |
+| `~/oasis-command-center` (Mac) / `~/APPS/oasis-command-center` (Win) | `CC90210/oasis-command-center` | Multi-tenant dashboard | All Next.js UI for every tenant — manifest-driven, no per-tenant dashboard repos |
+| `~/SunBiz-Agent` | `CC90210/SunBiz-Agent` | SunBiz-specific business logic + VPS deploy | **Sole canonical home** for SunBiz daemons, migrations, cron registry, and runtime. The bridge dispatches against this root via `SUNBIZ_AGENT_ROOT` env var (auto-resolved by `lib/agent_roots.py`). |
 
-### Mirror rules (what gets dual-stored)
+### What lives in SunBiz-Agent (and ONLY there)
 
-**SunBiz-specific scripts — mirror to SunBiz-Agent on every change:**
-- `scripts/shop_out_sender.py`
-- `scripts/sequence_runner.py`
-- `scripts/lender_response_classifier.py`
-- `scripts/underwriting/*` (all)
-- `scripts/renewal_reminder.py`
-- `scripts/follow_up_generator.py`
-- `scripts/cold_outreach_runner.py`
-- `scripts/daily_plan_generator.py`
-- `scripts/underwriting_orchestrator.py`
-- `scripts/diag_lead_visibility.py`
-- `scripts/diag_manifest_drift.py`
-- `scripts/reconcile_sunbiz_sequences.py`
+- All SunBiz business-logic scripts: `shop_out_sender.py`, `sequence_runner.py`, `lender_response_classifier.py`, `underwriting/*`, `renewal_reminder.py`, `follow_up_generator.py`, `cold_outreach_runner.py`, `daily_plan_generator.py`, `underwriting_orchestrator.py`, `diag_lead_visibility.py`, `diag_manifest_drift.py`, `reconcile_sunbiz_sequences.py`.
+- `scripts/core/cron_registry.py` — canonical SunBiz cron schedule (added 2026-05-28). Seeds `tenant_cron_jobs` rows scoped to the SunBiz tenant. Dispatched by `claude-bridge-ping`'s tenant cron poller, NOT by the empire `bravo-scheduler`.
+- SunBiz migrations: `database/042_tenant_forms.sql`, `043_drip_sequences.sql`, `044_lender_shopout.sql`, `064_sunbiz_restructure.sql` through `069_sunbiz_meeting2_expansion.sql`.
+- SunBiz PM2 ecosystem (`ecosystem.config.js` at SunBiz-Agent root).
+- SunBiz operator docs: `docs/DAEMON_PLAYBOOK.md`, `docs/VPS_BRINGUP.md`, `docs/ARCHITECTURE.md`.
 
-**SunBiz-specific migrations — mirror:**
-- `database/042_tenant_forms.sql`, `043_drip_sequences.sql`, `044_lender_shopout.sql`
-- `database/064_sunbiz_restructure.sql` through `database/069_sunbiz_meeting2_expansion.sql`
+### What stays in CEO-Agent (and ONLY there)
 
-**Empire-wide — stays canonical in CEO-Agent only:**
-- `scripts/integrations/send_gateway.py` (multi-tenant chokepoint — SunBiz brand identity lives inside)
-- `scripts/integrations/*` (the rest)
-- `scripts/state/*`, `scripts/core/*` (V6 substrate)
-- `scripts/_bridge_manifest.json` (bridge-side discoverability — CEO-Agent is the bridge)
-- `ecosystem.config.js`
+- `scripts/integrations/send_gateway.py` (multi-tenant chokepoint — SunBiz brand identity is selected by tenant slug inside).
+- `scripts/integrations/*` (everything else there is empire-wide).
+- `scripts/state/*`, `scripts/core/*` (V6 substrate).
+- `scripts/lib/agent_roots.py` (the sibling-root resolver — every CEO-Agent script that needs to reach SunBiz-Agent imports from here).
+- `scripts/_bridge_manifest.json` (bridge-side script discovery — multi-root aware).
+- `ecosystem.config.js` for empire daemons (bravo-scheduler, bravo-telegram, claude-bridge, claude-bridge-ping, dashboard-email-consumer).
 
-### Operational protocol — when you touch a SunBiz-specific script
+### Cron / automation separation (the 2026-05-28 leak fix)
 
-1. Edit + commit in CEO-Agent (since that's where PM2 runs from).
-2. **Same session, before pushing:** `cp ~/Business-Empire-Agent/scripts/<file>.py ~/SunBiz-Agent/scripts/<file>.py`
-3. Commit the mirror to SunBiz-Agent with a body that references the CEO-Agent commit SHA.
-4. Push both repos.
+**Empire (`public.cron_jobs`) vs Tenant (`public.tenant_cron_jobs`):**
 
-A future cleanup will collapse this dual-storage by making the bridge's tenant-routing read from per-tenant `agent_roots` — see the 7d34f2e commit body for the long-term plan. Until then: dual commits per change.
+- `public.cron_jobs` — empire-only. Seeded by `~/CEO-Agent/scripts/core/cron_engine.py` SEED_JOBS. Dispatched by `bravo-scheduler` (Windows-only). Visible on CC's OASIS `/automations` (operator-only via `isOperatorEmail` gate).
+- `public.tenant_cron_jobs` — tenant-scoped. Seeded by per-tenant cron registries (`SunBiz-Agent/scripts/core/cron_registry.py` for SunBiz, similar for any future tenant). Dispatched by `claude-bridge-ping`'s tenant cron poller. Visible on `/t/<slug>/automations` ONLY.
+
+**Hard rule — SunBiz cron entries MUST NEVER appear in CEO-Agent's `SEED_JOBS` array.** If you find one, delete it and re-home it in SunBiz-Agent's `cron_registry.py`. Three SunBiz rows leaked into `cron_jobs` between 2026-05-25 and 2026-05-28 (migration 069 era); rendered on CC's `/automations` under the "Bravo (CEO)" group; deleted + re-homed to `tenant_cron_jobs` on 2026-05-28.
+
+**Defense-in-depth (so a future leak can't render visibly):** `oasis-command-center/app/api/cron-jobs/route.ts` defines `EMPIRE_AGENT_ALLOWLIST = {bravo, atlas, maven, aura}` and filters every empire row whose `inferEmpireAgentKey()` result isn't in the set. SunBiz/Solara/Helios rows that somehow land in `cron_jobs` will still be invisible to CC's UI. Run the `npm run test:sunbiz` suite plus a quick `/automations` smoke test after any change to `cron_engine.py` to verify.
+
+### Operational protocol — when you touch SunBiz code
+
+1. Edit + commit + push **in SunBiz-Agent**. That's the canonical home.
+2. If the change is a new script that needs scheduled execution: add an entry to `~/SunBiz-Agent/scripts/core/cron_registry.py` and run `python scripts/core/cron_registry.py seed`.
+3. If the change touches the multi-root resolver contract (script name, manifest key): update `~/CEO-Agent/scripts/lib/agent_roots.py` and `_bridge_manifest.json` in the same session.
+4. Smoke-test from CEO-Agent: `python -c "from lib.agent_roots import resolve_sunbiz_root; print(resolve_sunbiz_root())"` should print the SunBiz-Agent path.
 
 ### Verification
 
-After any session that touched SunBiz scripts, confirm the mirror is current:
-
 ```bash
-diff -r --brief \
-  ~/Business-Empire-Agent/scripts/shop_out_sender.py \
-  ~/SunBiz-Agent/scripts/shop_out_sender.py
-# repeat per file, or script the loop
+# 1. No SunBiz daemons left orphaned in CEO-Agent
+ls ~/CEO-Agent/scripts/follow_up_generator.py 2>/dev/null || echo "OK — relocated"
+ls ~/CEO-Agent/scripts/daily_plan_generator.py 2>/dev/null || echo "OK — relocated"
+ls ~/CEO-Agent/scripts/renewal_reminder.py 2>/dev/null || echo "OK — relocated"
+
+# 2. SunBiz cron registry is in place
+ls ~/SunBiz-Agent/scripts/core/cron_registry.py && echo "OK — registry exists"
+python ~/SunBiz-Agent/scripts/core/cron_registry.py list
+
+# 3. No SunBiz rows in the empire cron_jobs table
+cd ~/CEO-Agent
+.venv/bin/python scripts/integrations/supabase_tool.py select cron_jobs \
+  --columns "name" | grep -i "sunbiz\|solara\|helios" || echo "OK — none leaked"
+
+# 4. EMPIRE_AGENT_ALLOWLIST is in place in the dashboard
+grep -n "EMPIRE_AGENT_ALLOWLIST" ~/oasis-command-center/app/api/cron-jobs/route.ts
 ```
 
-Empty output means in sync. Any "differ" line is drift to repair before claiming the work is done.
+All four checks should pass cleanly. Any failure indicates the leak prevention has regressed.
