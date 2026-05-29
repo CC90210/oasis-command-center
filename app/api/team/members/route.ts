@@ -34,6 +34,11 @@ export async function GET() {
     can_manage: canManage,
     members: members.map((m) => ({
       id: m.id,
+      // auth_user_id is required by the lead-drawer "Assign to" dropdown
+      // (Phase 3 of multi-employee personalization, 2026-05-29). Safe to
+      // expose to every tenant member — it's the same UUID that surfaces
+      // in chat session headers and other already-public identifiers.
+      auth_user_id: m.auth_user_id,
       email: canManage ? m.email : null,
       full_name: m.full_name,
       display_name: m.display_name,

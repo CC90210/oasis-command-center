@@ -13,6 +13,8 @@ import {
 } from "lucide-react";
 import { Card, PageHeader, Stat, Tag } from "@/components/Card";
 import { safe } from "@/lib/api-helpers";
+import { getMyAssignedRecords } from "@/lib/queries/merchant-summary";
+import { MyActiveDealsCard } from "./MyActiveDealsCard";
 import {
   getActiveProfile,
   getLeadsForTenant,
@@ -153,14 +155,24 @@ export async function SunBizDashboard({ demoMode = false }: Props) {
   const profile = await safe("sun.dashboard.profile", getActiveProfile(), null);
   const tenantId = demoMode ? "" : profile?.tenant_id || "";
   const link = (real: string) => demoHref(real, { demoMode });
-  const [liveHealthRows, liveLeads, liveRenewals] = demoMode
-    ? [DEMO_HEALTH, SUNBIZ_DEMO_LEADS, SUNBIZ_DEMO_RENEWALS_SUMMARY]
+  // Phase 3 of the SunBiz multi-employee personalization plan: fetch
+  // the operator's personally-assigned records in parallel with the
+  // tenant-wide data so the MyActiveDealsCard can render at the top of
+  // the dashboard. Skipped in demo mode (no real auth user_id to scope
+  // by). Empty profile / null auth_user_id → empty list, widget shows
+  // the empty state explaining how assignment works.
+  const myUserId = profile?.auth_user_id || null;
+  const [liveHealthRows, liveLeads, liveRenewals, myAssigned] = demoMode
+    ? [DEMO_HEALTH, SUNBIZ_DEMO_LEADS, SUNBIZ_DEMO_RENEWALS_SUMMARY, []]
     : await Promise.all([
         safe("sun.dashboard.health", integrationsHealth(tenantId || null), [] as IntegrationHealth[]),
         tenantId ? safe("sun.dashboard.leads", getLeadsForTenant(tenantId, 100), [] as Lead[]) : Promise.resolve([] as Lead[]),
         tenantId
           ? safe("sun.dashboard.renewals", getRenewalsSummary(tenantId), SUNBIZ_DEMO_RENEWALS_SUMMARY as RenewalsSummary)
           : Promise.resolve(SUNBIZ_DEMO_RENEWALS_SUMMARY as RenewalsSummary),
+        tenantId && myUserId
+          ? safe("sun.dashboard.my_assigned", getMyAssignedRecords(tenantId, myUserId, { limit: 30 }), [])
+          : Promise.resolve([]),
       ]);
 
   const healthByService = new Map(liveHealthRows.map((row) => [row.service, row] as const));
@@ -190,6 +202,16 @@ export async function SunBizDashboard({ demoMode = false }: Props) {
           </div>
         }
       />
+
+      {/* Phase 3 of the SunBiz multi-employee personalization plan:
+          render the operator's assigned deals at the top of the
+          dashboard. Always-visible (even when empty) so the operator
+          understands the assignment surface exists. Skipped in demo
+          mode to avoid showing a stale "no deals" message in marketing
+          screenshots. */}
+      {!demoMode && (
+        <MyActiveDealsCard records={myAssigned} displayName={clientName} />
+      )}
 
       <section className="grid gap-6 xl:grid-cols-[1.45fr,0.95fr]">
         <section className="relative overflow-hidden rounded-[28px] border border-amber-300/30 bg-[radial-gradient(circle_at_top_left,rgba(251,191,36,0.22),transparent_34%),linear-gradient(135deg,rgba(24,24,27,0.96),rgba(15,23,42,0.94))] p-6 shadow-[0_24px_80px_-36px_rgba(251,191,36,0.55)]">

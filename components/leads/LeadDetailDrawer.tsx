@@ -22,6 +22,7 @@ import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { X, FileText, ImageIcon, Phone, Mail, ShoppingBag } from "lucide-react";
 import { LeadTimelinePanel } from "./LeadTimelinePanel";
+import { AssignmentControl } from "./AssignmentControl";
 import { humanLeadDocSize, leadDocTypeLabel, LEAD_DOC_TYPES } from "@/lib/lead-doc-display";
 import { LEAD_PIPELINE_STAGES, OPPORTUNITY_PIPELINE_STAGES, type StageMeta } from "@/lib/sunbiz-stage-meta";
 import { formatMoney, relTime } from "@/lib/format-helpers";
@@ -208,6 +209,23 @@ export function LeadDetailDrawer({
 
           {/* Row 3: Owner/Signer + Assigned to */}
           {data && <OwnerAssignedRow record={data.record.data} />}
+
+          {/* Row 3.5: Assignment control (Phase 3 of SunBiz multi-employee
+              personalization, 2026-05-29). Lets any team member set the
+              soft-ownership assignee. The assigned employee's "My active
+              deals" widget on their dashboard surfaces this record at the
+              top. Doesn't lock anyone out of actions — it's a presentation
+              hint, not an authorization gate. */}
+          {data && recordId && (
+            <AssignmentControl
+              recordId={recordId}
+              currentAssignedTo={
+                typeof data.record.data.assigned_to === "string"
+                  ? data.record.data.assigned_to
+                  : null
+              }
+            />
+          )}
 
           <div className="flex items-center justify-between gap-3">
             {/* Shop Out — Phase 4 entry point (Jordan/Oasis 2026-05-23).

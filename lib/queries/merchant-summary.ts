@@ -246,6 +246,88 @@ export async function getMerchantSummaryRow(
  * Rows with null deal_stage (merchant_stage='Lead' typically) are
  * not categorized — they're not in the pipeline yet.
  */
+// ============================================================================
+// Per-user "my active deals" — Phase 3 of the SunBiz multi-employee
+// personalization plan (2026-05-29).
+// ============================================================================
+//
+// Read tenant_records directly filtered by data->>'assigned_to' = current
+// auth_user_id. Returns a leaner shape than MerchantSummaryRow because the
+// widget renders compact cards (business name, stage, amount, updated_at)
+// not the full merchant detail. Future enhancement: roll assigned_to into
+// the merchant_summary view so both the global pipeline and the personal
+// widget can share one query path.
+//
+// The field is data.assigned_to — set by /api/leads/[id]/assign (the
+// drawer dropdown). Migration 077 (SunBiz-Agent) added the CHECK
+// constraint forcing UUID shape and the partial index that backs this
+// query. Anyone in the tenant CAN still act on the record regardless of
+// whose assigned_to is set — this is presentation only.
+
+export type MyAssignedRecord = {
+  id: string;
+  entity_type: "lead" | "application" | "funded_deal" | "renewal";
+  business_name: string | null;
+  stage: string | null;
+  deal_stage: string | null;
+  amount_requested: number | null;
+  monthly_revenue: number | null;
+  updated_at: string | null;
+};
+
+export async function getMyAssignedRecords(
+  tenantId: string,
+  userId: string,
+  options?: { limit?: number },
+): Promise<MyAssignedRecord[]> {
+  if (!tenantId || !userId) return [];
+  const db = getServiceSupabase();
+  const limit = options?.limit ?? 30;
+
+  // Direct read of tenant_records — the partial index added in migration
+  // 077 means this is O(log n) on (tenant_id, assigned_to). Returns
+  // applications and leads; funded_deal + renewal are out of scope for
+  // the "active deals" widget (those have their own sections).
+  const { data, error } = await db
+    .from("tenant_records")
+    .select("id, entity_type, data, updated_at")
+    .eq("tenant_id", tenantId)
+    .in("entity_type", ["lead", "application"])
+    .filter("data->>assigned_to", "eq", userId)
+    .order("updated_at", { ascending: false })
+    .limit(limit);
+
+  if (error) {
+    // Return empty rather than throwing — the dashboard renders an empty
+    // widget state instead of crashing the whole page on a transient
+    // query error. Real failures still surface in the server logs.
+    console.error("[getMyAssignedRecords]", error);
+    return [];
+  }
+
+  return ((data ?? []) as Array<{
+    id: string;
+    entity_type: string;
+    data: Record<string, unknown>;
+    updated_at: string | null;
+  }>).map((row) => {
+    const d = row.data || {};
+    return {
+      id: row.id,
+      entity_type: row.entity_type as MyAssignedRecord["entity_type"],
+      business_name: (d.business_name as string) || (d.dba as string) || null,
+      stage: (d.stage as string) || null,
+      deal_stage: (d.deal_stage as string) || null,
+      amount_requested:
+        typeof d.amount_requested === "number" ? d.amount_requested : null,
+      monthly_revenue:
+        typeof d.monthly_revenue === "number" ? d.monthly_revenue : null,
+      updated_at: row.updated_at,
+    };
+  });
+}
+
+
 export function groupByDealStage(
   rows: MerchantSummaryRow[],
 ): Record<DealStage, MerchantSummaryRow[]> {
