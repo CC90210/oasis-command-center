@@ -66,12 +66,12 @@ export async function GET(req: NextRequest) {
     return settingsRedirect(req, { gmail_oauth: "error", reason: "state_secret_missing" });
   }
   const parts = state.split("|");
-  if (parts.length !== 4) {
+  if (parts.length !== 5) {
     return settingsRedirect(req, { gmail_oauth: "error", reason: "malformed_state" });
   }
-  const [tenantId, stateUserId, nonce, providedSig] = parts;
+  const [tenantId, stateUserId, nonce, issuedAtRaw, providedSig] = parts;
   const expectedSig = createHmac("sha256", stateSecret)
-    .update(`${tenantId}|${stateUserId}|${nonce}`)
+    .update(`${tenantId}|${stateUserId}|${nonce}|${issuedAtRaw}`)
     .digest("base64url");
   let sigMatch = false;
   try {
@@ -83,6 +83,15 @@ export async function GET(req: NextRequest) {
   }
   if (!sigMatch) {
     return settingsRedirect(req, { gmail_oauth: "error", reason: "state_signature_invalid" });
+  }
+
+  // Reject states older than 15 minutes. Stale state is the canonical
+  // replay vector — even with the same signature, an attacker who
+  // recovered a leaked URL should not be able to complete the flow
+  // hours later. 15 min covers human-paced "click consent" with margin.
+  const issuedAtMs = parseInt(issuedAtRaw, 36);
+  if (!Number.isFinite(issuedAtMs) || Date.now() - issuedAtMs > 15 * 60 * 1000) {
+    return settingsRedirect(req, { gmail_oauth: "error", reason: "state_expired" });
   }
 
   // Verify the session user matches what /start signed. Prevents an
@@ -149,13 +158,12 @@ export async function GET(req: NextRequest) {
     });
   }
 
-  // Look up the operator's Gmail address. The userinfo endpoint
-  // returns { email, ... } when the access_token has the
-  // userinfo.email scope — gmail.send IMPLICITLY grants this, but
-  // some account configurations don't expose it. We soft-fail to
-  // empty string if the lookup fails; the credential still works
-  // for sending, the operator just won't see their address in
-  // Settings.
+  // Look up the operator's Gmail address. We requested `openid email`
+  // in the start route specifically so userinfo reliably returns the
+  // email. Missing email is a HARD FAILURE — the send pipeline uses
+  // gmail_address as the From identity, so storing the bundle without
+  // it leaves the connection useless. Better to fail the OAuth flow
+  // visibly here than to silently degrade later.
   let gmailAddress = "";
   try {
     const ur = await fetch("https://www.googleapis.com/oauth2/v3/userinfo", {
@@ -166,7 +174,13 @@ export async function GET(req: NextRequest) {
       gmailAddress = userinfo.email || "";
     }
   } catch {
-    // Soft-fail.
+    // Userinfo failure handled below as the missing-email branch.
+  }
+  if (!gmailAddress) {
+    return settingsRedirect(req, {
+      gmail_oauth: "error",
+      reason: "userinfo_email_missing",
+    });
   }
 
   // Persist. Tokens are encrypted in user_integration_credentials.
@@ -176,8 +190,8 @@ export async function GET(req: NextRequest) {
     access_token: tokenResp.access_token,
     expires_at: expiresAt,
     scope: tokenResp.scope || GMAIL_SEND_SCOPE,
+    gmail_address: gmailAddress,
   };
-  if (gmailAddress) bundle.gmail_address = gmailAddress;
 
   const setResult = await setUserIntegrationBundle(
     tenantId,
@@ -194,6 +208,6 @@ export async function GET(req: NextRequest) {
 
   return settingsRedirect(req, {
     gmail_oauth: "connected",
-    ...(gmailAddress ? { gmail: gmailAddress } : {}),
+    gmail: gmailAddress,
   });
 }

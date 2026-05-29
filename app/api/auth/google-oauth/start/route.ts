@@ -30,7 +30,17 @@ import { getSessionUser, getServiceSupabase } from "@/lib/supabase-server";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-const GMAIL_SEND_SCOPE = "https://www.googleapis.com/auth/gmail.send";
+// gmail.send is the load-bearing scope — that's what authorizes the
+// actual send. openid + email come along so the callback can reliably
+// resolve the user's Gmail address from the ID token (without these,
+// userinfo can return blank because the OAuth grant doesn't include
+// any identity scope per Google's OIDC contract). Inbox read is still
+// out of scope.
+const OAUTH_SCOPES = [
+  "openid",
+  "email",
+  "https://www.googleapis.com/auth/gmail.send",
+].join(" ");
 
 export async function GET() {
   const user = await getSessionUser();
@@ -92,7 +102,11 @@ export async function GET() {
     );
   }
   const nonce = randomBytes(16).toString("base64url");
-  const statePayload = `${tenantId}|${user.id}|${nonce}`;
+  // Issued-at timestamp embedded in the state so the callback can
+  // reject stale states (replay window <= 15 min). The HMAC covers the
+  // timestamp so an attacker can't lengthen the window.
+  const issuedAt = Date.now().toString(36);
+  const statePayload = `${tenantId}|${user.id}|${nonce}|${issuedAt}`;
   const signature = createHmac("sha256", stateSecret).update(statePayload).digest("base64url");
   const state = `${statePayload}|${signature}`;
 
@@ -105,7 +119,7 @@ export async function GET() {
   authUrl.searchParams.set("client_id", clientId);
   authUrl.searchParams.set("redirect_uri", redirectUri);
   authUrl.searchParams.set("response_type", "code");
-  authUrl.searchParams.set("scope", GMAIL_SEND_SCOPE);
+  authUrl.searchParams.set("scope", OAUTH_SCOPES);
   authUrl.searchParams.set("access_type", "offline"); // need refresh_token
   authUrl.searchParams.set("prompt", "consent"); // force refresh_token issuance
   authUrl.searchParams.set("state", state);
