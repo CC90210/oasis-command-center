@@ -89,6 +89,31 @@ export async function POST(req: NextRequest) {
     );
   }
 
+  // 3. Set primary_agent from the tenant manifest's default. The redeem
+  //    RPC stamps platform default 'bravo' on new profile rows; for
+  //    tenants like SunBiz whose first-touch agent is Solara, that
+  //    leaves the new invitee chatting with the wrong persona. Look up
+  //    the manifest's primary agent and stamp it onto the profile.
+  //    Soft-fail — if the manifest is missing or doesn't declare a
+  //    primary, we leave the profile's primary_agent as-is.
+  try {
+    const { data: manifestRow } = await db
+      .from("tenant_manifests")
+      .select("manifest")
+      .eq("tenant_id", result.tenantId)
+      .maybeSingle();
+    const manifest = manifestRow?.manifest as { agents?: Array<{ slug: string; primary?: boolean; enabled?: boolean }> } | null;
+    const primarySlug = manifest?.agents?.find((a) => a.primary && a.enabled !== false)?.slug;
+    if (primarySlug) {
+      await db
+        .from("user_profiles")
+        .update({ primary_agent: primarySlug })
+        .eq("auth_user_id", userId);
+    }
+  } catch {
+    // Manifest lookup is best-effort; default 'bravo' is a safe fallback.
+  }
+
   // Resolve the tenant's Command Center profile slug so the signup page
   // can route the invitee directly to /t/<slug> after the bounce through
   // /login. Skips the redundant new-tenant wizard (2026-05-29 fix).
