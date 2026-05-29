@@ -90,6 +90,7 @@ export default function SignupPage() {
               ok?: boolean;
               error?: string;
               message?: string;
+              tenant_slug?: string | null;
             };
             if (!r.ok || !body.ok) {
               setErr(body.message || body.error || "Invite finalization failed");
@@ -104,7 +105,7 @@ export default function SignupPage() {
             // the redundant new-tenant wizard entirely (2026-05-29 fix).
             // Fall back to "/" when no slug — /auth/land + the welcome
             // page's own redirect catch the legacy path.
-            const finalSlug = (body as { tenant_slug?: string | null })?.tenant_slug?.trim();
+            const finalSlug = body.tenant_slug?.trim();
             const nextPath = finalSlug ? `/t/${finalSlug}` : "/";
             const loginUrl =
               `/login?email=${encodeURIComponent(email)}` +
@@ -124,16 +125,18 @@ export default function SignupPage() {
             error?: string;
             message?: string;
             first_login?: boolean;
+            tenant_slug?: string | null;
           };
           if (!r.ok || !body.ok) {
             setErr(body.message || body.error || "Invite redemption failed");
             return;
           }
-          // First-login invitees land on the welcome wizard (Phase C).
-          // Returning users (re-redeem of a previously-redeemed token
-          // shouldn't happen because the RPC marks redeemed_at, but if
-          // they somehow get here, send them home).
-          router.push(body.first_login ? "/onboarding/welcome" : "/");
+          // Invitees skip the new-tenant wizard and land directly in
+          // their tenant workspace (2026-05-29 fix). Falls back to "/"
+          // when no slug was resolvable — the welcome page's own
+          // redirect catches the legacy path.
+          const slug = body.tenant_slug?.trim();
+          router.push(slug ? `/t/${slug}` : "/");
           router.refresh();
           return;
         }

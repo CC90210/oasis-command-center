@@ -48,13 +48,17 @@ export function InviteRedeemForSignedInUser({ token, tenantName, roleLabel, emai
         error?: string;
         message?: string;
         first_login?: boolean;
+        tenant_slug?: string | null;
       };
       if (!r.ok || !body.ok) {
         setError(body.message || body.error || `Redeem failed (${r.status})`);
         setBusy(false);
         return;
       }
-      router.push(body.first_login ? "/onboarding/welcome" : "/");
+      // Land the invitee directly in their tenant workspace when we
+      // resolved a slug (2026-05-29 fix — see redeem-invite route).
+      const slug = body.tenant_slug?.trim();
+      router.push(slug ? `/t/${slug}` : "/");
       router.refresh();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Redeem failed");

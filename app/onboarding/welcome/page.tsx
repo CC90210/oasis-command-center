@@ -29,9 +29,21 @@ import { WelcomeWizardClient } from "./WelcomeWizardClient";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-export default async function WelcomePage() {
+export default async function WelcomePage({
+  searchParams,
+}: {
+  searchParams: Promise<{ settings?: string }>;
+}) {
   const user = await getSessionUser();
   if (!user) redirect("/login");
+
+  // `?settings=1` is set by the Settings → Open personalisation wizard
+  // link. When present, we render the wizard regardless of tenant
+  // state so existing employees can re-edit their timezone / default
+  // agent / briefing channel. Without this opt-in flag, tenant-attached
+  // invitees auto-redirect to /t/<slug> (2026-05-29 fix — see below).
+  const sp = await searchParams;
+  const fromSettings = sp?.settings === "1";
 
   const db = getServiceSupabase();
   const { data: profile } = await db
@@ -62,14 +74,13 @@ export default async function WelcomePage() {
   // Invitees joining an existing tenant don't need the new-tenant
   // scaffolding wizard. If they have a tenant attachment AND that
   // tenant resolves to a Command Center profile (sun, suga, etc.),
-  // skip the personal-settings wizard entirely and land them in
-  // their workspace. The personalisation flow stays available via
-  // Settings → Personal — the welcome wizard's own docstring already
-  // describes itself as re-entrant from there. Reported by CC
-  // 2026-05-29: forcing every invitee through this wizard is
-  // redundant because we already know their tenant; they should
-  // land directly in /t/<slug>.
-  if (tenant) {
+  // skip the wizard and land them in their workspace. The
+  // personalisation flow stays available via Settings → Personal,
+  // which appends ?settings=1 so this redirect won't fire for the
+  // re-entrant path (CC bug report 2026-05-29). Without the opt-in
+  // flag, every invitee was being forced through a redundant 3-step
+  // wizard before reaching /t/<slug>.
+  if (!fromSettings && tenant) {
     const profileSlug = resolveClientProfileSlug(tenant);
     if (profileSlug) {
       redirect(`/t/${profileSlug}`);

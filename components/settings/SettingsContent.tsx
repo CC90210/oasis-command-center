@@ -153,7 +153,7 @@ export async function SettingsContent({
                   </Tag>
                 )}
                 <a
-                  href="/onboarding/welcome"
+                  href="/onboarding/welcome?settings=1"
                   className="text-xs text-accent hover:text-accent/80 underline underline-offset-2"
                   title="Re-open the personalisation wizard to edit timezone / default agent / briefing channel"
                 >
