@@ -218,7 +218,12 @@ async function tryRecoverOrphanInvite(
     .limit(1);
 
   const invite = (invites || [])[0] as { token_hash?: string | null } | undefined;
-  if (!invite?.token_hash) return false;
+  if (!invite?.token_hash) {
+    // Quiet path — orphan with no invite means a genuinely new user landed
+    // in the resolver before provisioning ran. The wizard fallthrough will
+    // route them correctly; no operational signal needed.
+    return false;
+  }
 
   // The RPC takes a token HASH (not the raw token). The hash is what we
   // already have in the row — no need to round-trip through the raw
@@ -229,7 +234,27 @@ async function tryRecoverOrphanInvite(
     p_token_hash: invite.token_hash,
     p_redeemer_auth_id: authUserId,
   });
-  if (error || !data?.ok) return false;
+  if (error || !data?.ok) {
+    // Structured server log so ops can see when recovery WAS attempted
+    // but the RPC rejected (email_mismatch, expired between read+rpc,
+    // etc). Silent failure of recovery is the worst outcome — same as
+    // before the fix — so make it visible. Use console.warn over .error
+    // because the user gracefully falls through to /onboarding/welcome.
+    console.warn("[auth-routing] orphan-recovery RPC failed", {
+      auth_user_id: authUserId,
+      email: normalizedEmail,
+      rpc_error: error?.message || data?.error || "unknown",
+    });
+    return false;
+  }
+  // Successful recovery is the load-bearing telemetry signal — log it
+  // at info level so ops can confirm the fix is firing in production.
+  console.info("[auth-routing] orphan-recovery succeeded", {
+    auth_user_id: authUserId,
+    email: normalizedEmail,
+    tenant_id: data?.tenant_id,
+    team_role: data?.team_role,
+  });
   return true;
 }
 
