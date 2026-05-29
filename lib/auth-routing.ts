@@ -177,6 +177,63 @@ async function fetchProfileRows(
   return rows;
 }
 
+/**
+ * Orphan-recovery hook (2026-05-29).
+ *
+ * Detects the silent-signup-failure case: a signed-in auth user with no
+ * user_profiles.tenant_id and an active tenant_invite pinned to their
+ * email. This happens when /api/auth/finalize-invite-signup encounters
+ * a transient error during the redeem step but the auth.users row was
+ * already created. Today's symptom: every subsequent /api/* call returns
+ * 401 "unauthorized" because getSessionContext() returns null without a
+ * tenant attachment. The user thinks signin is broken.
+ *
+ * Resolution: when we detect the orphan state, look up an active invite
+ * pinned to the user's email and atomically redeem it via the SECURITY
+ * DEFINER RPC. The RPC creates the user_profiles row + sets tenant_id +
+ * marks the invite redeemed. Caller can then re-fetch the profile row.
+ *
+ * Returns true if an orphan was recovered, false otherwise.
+ */
+async function tryRecoverOrphanInvite(
+  db: SupabaseClient,
+  authUserId: string,
+  email: string | null | undefined,
+): Promise<boolean> {
+  const normalizedEmail = (email || "").trim().toLowerCase();
+  if (!normalizedEmail) return false;
+
+  // Find any active invite pinned to this email. If there's more than
+  // one (very rare — multi-tenant invite cascade) we pick the most
+  // recently created. Older ones can still be redeemed manually after
+  // the user is in a working state.
+  const { data: invites } = await db
+    .from("tenant_invites")
+    .select("token_hash, created_at")
+    .eq("email", normalizedEmail)
+    .is("redeemed_at", null)
+    .is("revoked_at", null)
+    .gt("expires_at", new Date().toISOString())
+    .order("created_at", { ascending: false })
+    .limit(1);
+
+  const invite = (invites || [])[0] as { token_hash?: string | null } | undefined;
+  if (!invite?.token_hash) return false;
+
+  // The RPC takes a token HASH (not the raw token). The hash is what we
+  // already have in the row — no need to round-trip through the raw
+  // token, which only the original recipient holds. The SECURITY
+  // DEFINER function still enforces email_pinned vs auth.users.email
+  // so we can't accidentally redeem onto a wrong user.
+  const { data, error } = await db.rpc("redeem_tenant_invite", {
+    p_token_hash: invite.token_hash,
+    p_redeemer_auth_id: authUserId,
+  });
+  if (error || !data?.ok) return false;
+  return true;
+}
+
+
 export async function resolvePostLoginRedirect({
   db,
   authUserId,
@@ -201,12 +258,26 @@ export async function resolvePostLoginRedirect({
     rows = await fetchProfileRows(db, authUserId, email);
   }
 
-  const profile = chooseProfileForLogin(rows, email);
+  let profile = chooseProfileForLogin(rows, email);
+
+  // Orphan recovery (2026-05-29): if there's still no tenant attachment
+  // after the provisioning-race retry, check for an active invite pinned
+  // to this email and auto-redeem. Closes the silent-signup-failure
+  // window that left jordan@/alex@sunbizfunding.com with auth accounts
+  // but no profile, surfacing as "unauthorized" on every API call.
   if (!profile?.tenant_id) {
-    // Still no profile after retry — send the user to the new-user
-    // wizard instead of dumping them at "/" where the dashboard can't
-    // render anything useful. The wizard is idempotent and re-runs
-    // provisioning, so the next dashboard hit will work.
+    const recovered = await tryRecoverOrphanInvite(db, authUserId, email);
+    if (recovered) {
+      rows = await fetchProfileRows(db, authUserId, email);
+      profile = chooseProfileForLogin(rows, email);
+    }
+  }
+
+  if (!profile?.tenant_id) {
+    // Still no profile after retry + invite-recovery — send the user
+    // to the new-user wizard instead of dumping them at "/" where the
+    // dashboard can't render anything useful. The wizard is idempotent
+    // and re-runs provisioning, so the next dashboard hit will work.
     return "/onboarding/welcome";
   }
 
