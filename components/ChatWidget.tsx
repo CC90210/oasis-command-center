@@ -42,6 +42,7 @@ import {
 import Link from "next/link";
 import { useSearchParams, useRouter, usePathname } from "next/navigation";
 import { getAgentInfo } from "@/lib/agents";
+import { useAgentDisplayNames } from "@/lib/use-agent-display-names";
 import { BRIDGE_CHAT_BASE } from "@/lib/agent-roots";
 import { getBrowserSupabase } from "@/lib/supabase-browser";
 import { parseInput, renderHelp, type SlashCommandName } from "@/lib/chat-modes/slash-parser";
@@ -437,6 +438,12 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
   const [agent, setAgent] = useState<string>(initialAgent);
   const [configs, setConfigs] = useState<AgentConfig[]>([]);
   const [configsLoaded, setConfigsLoaded] = useState(false);
+  // Per-user display names (Solara → "Ada" etc). The hook fetches
+  // /api/agent-config?scope=user once at mount and returns labelFor()
+  // which falls back to the canonical agent label when the operator
+  // hasn't set an override. Used wherever an agent name surfaces in
+  // the chat chrome.
+  const { labelFor: agentDisplayName } = useAgentDisplayNames();
   const [messages, setMessages] = useState<Msg[]>(() => seedMessagesForAgent(initialAgent, welcomeMessages));
   const [input, setInput] = useState("");
   const [streaming, setStreaming] = useState(false);
@@ -499,7 +506,7 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
     if (slashArgCommand === "agent") {
       return agentKeys.map((k) => ({
         value: k,
-        label: getAgentInfo(k).label || k.toUpperCase(),
+        label: agentDisplayName(k),
         hint: getAgentInfo(k).tagline,
       }));
     }
@@ -993,7 +1000,7 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
     ? cfg?.provider === "ollama"
       ? "Install the desktop bridge to use local Ollama models"
       : "Configure this agent's provider + API key in Settings → Agents"
-    : `Message ${getAgentInfo(agent).label.toUpperCase()}…  (Shift+Enter for newline)`;
+    : `Message ${agentDisplayName(agent).toUpperCase()}…  (Shift+Enter for newline)`;
 
   function reset() {
     // Best-effort: tell the bridge to kill the warm claude subprocess
@@ -2365,7 +2372,7 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
         >
           {(agentKeys.length > 0 ? agentKeys : [agent]).map((k) => (
             <option key={k} value={k}>
-              {getAgentInfo(k).label || k.toUpperCase()}
+              {agentDisplayName(k)}
             </option>
           ))}
         </select>
@@ -2576,6 +2583,7 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
           <EmptyTranscript
             ready={!!ready}
             agent={agent}
+            agentDisplayName={agentDisplayName}
             configsLoaded={configsLoaded}
             isAdmin={!!isAdmin}
             currentProvider={cfg?.provider ?? null}
@@ -2613,6 +2621,7 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
               <Bubble
                 role={m.role}
                 agent={agent}
+                agentDisplayName={agentDisplayName}
                 content={stripActionMarkers(m.content)}
                 attachments={m.attachments}
                 at={m.at}
@@ -3150,6 +3159,7 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
 function EmptyTranscript({
   ready,
   agent,
+  agentDisplayName,
   configsLoaded,
   isAdmin,
   currentProvider,
@@ -3157,6 +3167,11 @@ function EmptyTranscript({
 }: {
   ready: boolean;
   agent: string;
+  /** Lookup that returns the operator's per-user nickname for an agent
+   *  (Solara → "Ada") or the canonical label when no override exists.
+   *  Plumbed through from the chat widget so EmptyTranscript doesn't
+   *  have to call useAgentDisplayNames itself (would double-fetch). */
+  agentDisplayName: (agentKey: string) => string;
   configsLoaded: boolean;
   isAdmin: boolean;
   currentProvider: string | null;
@@ -3174,7 +3189,7 @@ function EmptyTranscript({
     // not reachable from Vercel). All other providers work in pure cloud
     // mode once a key is saved.
     const needsDesktop = currentProvider === "ollama";
-    const agentLabel = getAgentInfo(agent).label.toUpperCase();
+    const agentLabel = agentDisplayName(agent).toUpperCase();
     return (
       <div className="rounded-lg border border-accent/20 bg-accent/5 p-5 text-sm space-y-3">
         <div className="flex items-center gap-2 text-accent font-bold uppercase tracking-[0.14em] text-xs">
@@ -3213,8 +3228,8 @@ function EmptyTranscript({
         </div>
         <p className="text-fg-muted">
           {isAdmin
-            ? `Talking to ${getAgentInfo(agent).label.toUpperCase()} via the platform default key.`
-            : `${getAgentInfo(agent).label.toUpperCase()} is configured and ready.`} Ask anything — strategy, drafting, debugging, ops.
+            ? `Talking to ${agentDisplayName(agent).toUpperCase()} via the platform default key.`
+            : `${agentDisplayName(agent).toUpperCase()} is configured and ready.`} Ask anything — strategy, drafting, debugging, ops.
         </p>
       </div>
       <div>
@@ -3241,6 +3256,7 @@ function EmptyTranscript({
 function Bubble({
   role,
   agent,
+  agentDisplayName,
   content,
   attachments,
   at,
@@ -3248,6 +3264,10 @@ function Bubble({
 }: {
   role: Role;
   agent: string;
+  /** Operator's per-user agent name lookup (Solara → "Ada"). Plumbed
+   *  through from the chat widget so download/export headers reflect
+   *  the rename. Falls back to canonical labels via the hook. */
+  agentDisplayName: (agentKey: string) => string;
   content: string;
   attachments?: ChatAttachmentSummary[];
   at: number;
@@ -3319,7 +3339,9 @@ function Bubble({
               {copied ? "copied" : "copy"}
             </button>
           )}
-          {showExports && <MessageDownloadMenu content={content} agent={agent} />}
+          {showExports && (
+            <MessageDownloadMenu content={content} agent={agent} agentDisplayLabel={agentDisplayName(agent)} />
+          )}
         </div>
       </div>
       {isUser && <UserAvatar />}

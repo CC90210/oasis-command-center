@@ -61,12 +61,16 @@ const PRINT_STYLES = `
   }
 `;
 
-function buildHtmlDoc(content: string, agent: string): string {
+function buildHtmlDoc(content: string, agent: string, agentDisplayLabel?: string): string {
   const renderedAt = new Date().toLocaleString();
   const inner = mdToHtml(content);
-  // Use the display label, not the raw slug — exports would otherwise read
-  // "LIFE-PRESERVATION — chat reply" instead of "LUMEN — chat reply".
-  const agentLabel = getAgentInfo(agent).label.toUpperCase();
+  // Prefer the operator's per-user display name (Solara → "Ada" etc).
+  // Falls back to the canonical agent label from lib/agents.ts when no
+  // override exists OR the caller didn't pass one. Without this, an
+  // exported chat reply from Alex's renamed Solara would still title
+  // itself "SOLARA — chat reply", which contradicts what he was
+  // reading on screen.
+  const agentLabel = (agentDisplayLabel || getAgentInfo(agent).label || agent).toUpperCase();
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -100,9 +104,14 @@ function safeSlug(s: string): string {
 export function MessageDownloadMenu({
   content,
   agent,
+  agentDisplayLabel,
 }: {
   content: string;
   agent: string;
+  /** Operator's per-user nickname for this agent. Optional — the menu
+   *  falls back to the canonical agent label when not supplied. Plumbed
+   *  through from the chat widget which already has the labels. */
+  agentDisplayLabel?: string;
 }) {
   const [open, setOpen] = useState(false);
   const [done, setDone] = useState<"md" | "html" | "pdf" | null>(null);
@@ -122,7 +131,7 @@ export function MessageDownloadMenu({
   }
 
   function downloadHtml(): void {
-    const html = buildHtmlDoc(content, agent);
+    const html = buildHtmlDoc(content, agent, agentDisplayLabel);
     const stamp = new Date().toISOString().slice(0, 10);
     const firstLine = content.split("\n").find((l) => l.trim()) || "reply";
     const name = `${stamp}-${agent}-${safeSlug(firstLine)}.html`;
@@ -131,7 +140,7 @@ export function MessageDownloadMenu({
   }
 
   function printPdf(): void {
-    const html = buildHtmlDoc(content, agent);
+    const html = buildHtmlDoc(content, agent, agentDisplayLabel);
     // Use a hidden iframe so we don't lose the chat window's state. Some
     // pop-up blockers nuke window.open() too.
     const iframe = document.createElement("iframe");
