@@ -99,11 +99,17 @@ export default function SignupPage() {
             // server-side finalize step above already redeemed the token,
             // so re-passing it would make LoginForm call redeem-invite a
             // second time and fail with "invalid_or_expired". Pass next=
-            // so /auth/land routes to the welcome wizard post-signin.
+            // pointing directly at the tenant workspace (e.g. /t/sun)
+            // when finalize gave us a tenant_slug, so the invitee skips
+            // the redundant new-tenant wizard entirely (2026-05-29 fix).
+            // Fall back to "/" when no slug — /auth/land + the welcome
+            // page's own redirect catch the legacy path.
+            const finalSlug = (body as { tenant_slug?: string | null })?.tenant_slug?.trim();
+            const nextPath = finalSlug ? `/t/${finalSlug}` : "/";
             const loginUrl =
               `/login?email=${encodeURIComponent(email)}` +
               `&fresh=1` +
-              `&next=${encodeURIComponent("/onboarding/welcome")}`;
+              `&next=${encodeURIComponent(nextPath)}`;
             router.push(loginUrl);
             router.refresh();
             return;

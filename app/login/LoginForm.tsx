@@ -62,6 +62,7 @@ export function LoginForm() {
           error?: string;
           message?: string;
           first_login?: boolean;
+          tenant_slug?: string | null;
         };
         if (!r.ok || !body.ok) {
           setErr(body.message || body.error || "Invite redemption failed");
@@ -70,9 +71,16 @@ export function LoginForm() {
         // redeemInvite() (server) now returns ok=true for the legitimate
         // "this user already redeemed this exact token" case (idempotent
         // path), so any !body.ok above is a real failure (expired, revoked,
-        // email mismatch, etc.) and we surface it. Success cases route
-        // through the welcome wizard on first-login.
-        router.push(body.first_login ? "/onboarding/welcome" : "/");
+        // email mismatch, etc.) and we surface it.
+        //
+        // Post-redeem routing (2026-05-29 fix): invitees joining an
+        // existing tenant skip the new-tenant wizard and land directly
+        // in their workspace (/t/<slug>). Falls back to "/" when the
+        // server couldn't resolve a Command Center profile slug — the
+        // welcome page itself also auto-redirects, so the fallback path
+        // is safe.
+        const slug = body.tenant_slug?.trim();
+        router.push(slug ? `/t/${slug}` : "/");
         router.refresh();
         return;
       }

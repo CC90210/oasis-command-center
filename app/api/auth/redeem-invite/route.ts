@@ -20,6 +20,7 @@
 
 import { NextResponse, type NextRequest } from "next/server";
 import { redeemInvite } from "@/lib/team";
+import { resolveClientProfileSlug } from "@/lib/client-profiles";
 import { getServiceSupabase, getSessionUser } from "@/lib/supabase-server";
 
 export const runtime = "nodejs";
@@ -57,10 +58,11 @@ export async function POST(req: NextRequest) {
   }
 
   // First-login signal: did the user have onboarding_completed_at set
-  // already? If not, the welcome wizard should fire post-redirect.
-  // (We never CLEAR onboarding_completed_at on redeem — only set it
-  // on first successful completion of the wizard. So we just check if
-  // it's null right now to decide where to route the user next.)
+  // already? If not, the welcome wizard used to fire post-redirect.
+  // After the 2026-05-29 fix, invitees skip the wizard regardless and
+  // land directly in their tenant workspace — the first_login flag is
+  // kept for callers that want to differentiate (e.g. show a brief
+  // first-time toast) but it no longer gates the redirect path.
   let firstLogin = true;
   try {
     const db = getServiceSupabase();
@@ -71,8 +73,26 @@ export async function POST(req: NextRequest) {
       .maybeSingle();
     firstLogin = !data?.onboarding_completed_at;
   } catch {
-    // Soft-fail — default to first_login=true so the wizard fires (safer
-    // to over-show the wizard than under-show it).
+    // Soft-fail — default to first_login=true.
+  }
+
+  // Resolve the tenant's Command Center profile slug so the client can
+  // route directly to /t/<slug> instead of bouncing through the welcome
+  // wizard. resolveClientProfileSlug handles the SunBiz mapping (slug
+  // 'submissions' OR custom_fields.command_center_profile_slug='sun')
+  // along with any future client-tenant mappings.
+  let tenantSlug: string | null = null;
+  try {
+    const db = getServiceSupabase();
+    const { data: tenant } = await db
+      .from("tenants")
+      .select("slug, custom_fields")
+      .eq("id", result.tenantId)
+      .maybeSingle();
+    if (tenant) tenantSlug = resolveClientProfileSlug(tenant);
+  } catch {
+    // Soft-fail — null tenantSlug just routes the caller through "/" which
+    // the layout will handle.
   }
 
   return NextResponse.json({
@@ -80,5 +100,6 @@ export async function POST(req: NextRequest) {
     tenant_id: result.tenantId,
     team_role: result.teamRole,
     first_login: firstLogin,
+    tenant_slug: tenantSlug,
   });
 }

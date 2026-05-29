@@ -33,6 +33,7 @@
 
 import { NextResponse, type NextRequest } from "next/server";
 import { redeemInvite } from "@/lib/team";
+import { resolveClientProfileSlug } from "@/lib/client-profiles";
 import { getServiceSupabase } from "@/lib/supabase-server";
 
 export const runtime = "nodejs";
@@ -88,9 +89,26 @@ export async function POST(req: NextRequest) {
     );
   }
 
+  // Resolve the tenant's Command Center profile slug so the signup page
+  // can route the invitee directly to /t/<slug> after the bounce through
+  // /login. Skips the redundant new-tenant wizard (2026-05-29 fix).
+  let tenantSlug: string | null = null;
+  try {
+    const { data: tenant } = await db
+      .from("tenants")
+      .select("slug, custom_fields")
+      .eq("id", result.tenantId)
+      .maybeSingle();
+    if (tenant) tenantSlug = resolveClientProfileSlug(tenant);
+  } catch {
+    // Soft-fail — null slug just routes through "/" which the welcome
+    // page's own redirect (added in this same commit) catches.
+  }
+
   return NextResponse.json({
     ok: true,
     tenant_id: result.tenantId,
     team_role: result.teamRole,
+    tenant_slug: tenantSlug,
   });
 }

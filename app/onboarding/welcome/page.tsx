@@ -59,6 +59,23 @@ export default async function WelcomePage() {
       ).data
     : null;
 
+  // Invitees joining an existing tenant don't need the new-tenant
+  // scaffolding wizard. If they have a tenant attachment AND that
+  // tenant resolves to a Command Center profile (sun, suga, etc.),
+  // skip the personal-settings wizard entirely and land them in
+  // their workspace. The personalisation flow stays available via
+  // Settings → Personal — the welcome wizard's own docstring already
+  // describes itself as re-entrant from there. Reported by CC
+  // 2026-05-29: forcing every invitee through this wizard is
+  // redundant because we already know their tenant; they should
+  // land directly in /t/<slug>.
+  if (tenant) {
+    const profileSlug = resolveClientProfileSlug(tenant);
+    if (profileSlug) {
+      redirect(`/t/${profileSlug}`);
+    }
+  }
+
   // Enabled agents for the operator's tenant — limits the "default agent"
   // dropdown to ones their workspace actually has. Falls back to a sane
   // pair if the manifest isn't seeded yet.
