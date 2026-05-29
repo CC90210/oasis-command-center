@@ -602,10 +602,9 @@ function oasisRowModel(row: Row, cfg: VariantConfig, stage: StageMeta) {
   const aiScoreRaw = typeof d.ai_score === "number" ? d.ai_score : null;
   const scoreRaw = typeof d.score === "number" ? d.score : null;
   const scoreNum = aiScoreRaw ?? scoreRaw;
-  const lastTouchIso =
-    str(d.last_contacted_at) || str(d.last_touch_at) || row.updated_at || row.created_at || null;
-  const cold = isGoingColdVariant(cfg, stage.key, lastTouchIso);
-  const lastTouchLabel = lastTouchIso ? relTime(lastTouchIso) : "-";
+  const touchIso = lastTouchIso(row);
+  const cold = isGoingColdVariant(cfg, stage.key, touchIso);
+  const lastTouchLabel = touchIso ? relTime(touchIso) : "-";
   const createdIso = row.created_at || null;
   const createdLabel = createdIso ? formatShortDate(createdIso) : "-";
   return {
@@ -833,6 +832,41 @@ type TouchFirst = {
   potentialUsd: number | null;
 };
 
+/** Canonical "when did we last touch this lead?" — matches what
+ *  oasisRowModel / sunbizRowModel read so the Touch-first callout
+ *  and the per-row cold badges agree on staleness. */
+function lastTouchIso(row: Row): string | null {
+  const d = row.data;
+  return (
+    str(d.last_contacted_at) ||
+    str(d.last_touch_at) ||
+    row.updated_at ||
+    row.created_at ||
+    null
+  );
+}
+
+/** Best-available dollar value for the lead — SunBiz uses funding-side
+ *  fields, OASIS uses value_estimate. Returns null when none are set. */
+function leadPotentialUsd(row: Row): number | null {
+  const d = row.data;
+  if (typeof d.requested_amount === "number") return d.requested_amount;
+  if (typeof d.best_offer === "number") return d.best_offer;
+  if (typeof d.value_estimate === "number") return d.value_estimate;
+  if (typeof d.monthly_revenue === "number") return d.monthly_revenue;
+  return null;
+}
+
+/** OASIS qualification proxy — used when value_estimate isn't populated
+ *  yet (most cold-outreach leads). Prefers ai_score over the manual
+ *  score; both are 0-100 so they're directly comparable. */
+function leadQualificationScore(row: Row): number {
+  const d = row.data;
+  if (typeof d.ai_score === "number") return d.ai_score;
+  if (typeof d.score === "number") return d.score;
+  return 0;
+}
+
 function pickTouchFirst(
   rows: Row[],
   stageField: string,
@@ -840,26 +874,24 @@ function pickTouchFirst(
   cfg: VariantConfig,
 ): TouchFirst | null {
   let best: TouchFirst | null = null;
+  let bestRank: [number, number, number] | null = null;
   for (const r of rows) {
     const stageKey = String(r.data[stageField] || "");
     if (!cfg.active.has(stageKey)) continue;
-    const lastTouch = (r.data.last_touch_at as string) || r.updated_at || r.created_at || null;
+    const lastTouch = lastTouchIso(r);
     if (!isGoingColdVariant(cfg, stageKey, lastTouch)) continue;
     const days = daysSince(lastTouch) - (cfg.slaDays[stageKey] ?? 7);
-    // SunBiz uses requested_amount/best_offer/monthly_revenue; OASIS
-    // tracks value_estimate. Both are read here so either tenant's
-    // "biggest stale lead" surfaces in the Touch-first callout.
-    const potential =
-      typeof r.data.requested_amount === "number"
-        ? r.data.requested_amount
-        : typeof r.data.best_offer === "number"
-          ? r.data.best_offer
-          : typeof r.data.value_estimate === "number"
-            ? r.data.value_estimate
-            : typeof r.data.monthly_revenue === "number"
-              ? r.data.monthly_revenue
-              : null;
-    if (!best || (potential ?? 0) > (best.potentialUsd ?? 0)) {
+    const potential = leadPotentialUsd(r);
+    // Ranking tuple — highest wins, evaluated left to right:
+    //   1. dollar potential (when known)
+    //   2. qualification score (the meaningful signal for OASIS pre-revenue)
+    //   3. days overdue (longer overdue = more urgent tie-break)
+    const rank: [number, number, number] = [
+      potential ?? 0,
+      leadQualificationScore(r),
+      days,
+    ];
+    if (!best || !bestRank || rankGreater(rank, bestRank)) {
       best = {
         id: r.id,
         name:
@@ -873,9 +905,16 @@ function pickTouchFirst(
         daysOverdue: days,
         potentialUsd: potential,
       };
+      bestRank = rank;
     }
   }
   return best;
+}
+
+function rankGreater(a: [number, number, number], b: [number, number, number]): boolean {
+  if (a[0] !== b[0]) return a[0] > b[0];
+  if (a[1] !== b[1]) return a[1] > b[1];
+  return a[2] > b[2];
 }
 
 function formatShortDate(value: string): string {
