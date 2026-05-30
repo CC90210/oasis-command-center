@@ -154,7 +154,7 @@ export function LeadPipelineView({
       if (s === hotStageKey) hot++;
       if (cfg.readyToAdvance.has(s)) ready++;
 
-      const lastTouch = r.data.last_touch_at || r.updated_at || r.created_at;
+      const lastTouch = lastTouchIso(r);
       if (typeof lastTouch === "string" && isGoingColdVariant(cfg, s, lastTouch)) cold++;
 
       const t = r.updated_at ? new Date(r.updated_at).getTime() : 0;
@@ -794,9 +794,9 @@ function rowModel(row: Row, stage: StageMeta) {
   const dayPill = submitIso ? `${Math.max(0, Math.round(daysSince(submitIso)))}d` : "-";
   const agentFull = str(d.assigned_to_name) || str(d.assigned_to) || "-";
   const agentLabel = compactAgent(agentFull);
-  const lastTouchIso = str(d.last_touch_at) || row.updated_at || row.created_at || null;
-  const cold = isGoingColdSun(stage.key, lastTouchIso);
-  const lastTouchLabel = lastTouchIso ? relTime(lastTouchIso) : "-";
+  const touchIso = lastTouchIso(row);
+  const cold = isGoingColdSun(stage.key, touchIso);
+  const lastTouchLabel = touchIso ? relTime(touchIso) : "-";
   const paper = str(d.paper_grade) || str(d.leverage_grade) || "-";
   const leverage = d.leverage != null ? String(d.leverage) : str(d.leverage_ratio) || "-";
   const monthlyRevRaw = d.monthly_revenue ?? d.avg_monthly_revenue ?? null;
@@ -838,12 +838,19 @@ type TouchFirst = {
  *  the final fallback (not updated_at): for a never-contacted lead,
  *  the SLA clock is "when did this lead enter our system," which
  *  updated_at distorts every time the row is re-stamped for an
- *  unrelated reason (ai_score sync, stage correction, etc.). */
+ *  unrelated reason (ai_score sync, stage correction, etc.).
+ *
+ *  SunBiz applications also carry submitted_at — when the JotForm
+ *  intake landed. That's a real touch signal (initial app receipt
+ *  resets the staleness clock) so it ranks above the created_at
+ *  fallback when present. */
 function lastTouchIso(row: Row): string | null {
   const d = row.data;
   return (
     str(d.last_contacted_at) ||
     str(d.last_touch_at) ||
+    str(d.submitted_at) ||
+    str(d.date_submitted) ||
     row.created_at ||
     null
   );
