@@ -1,4 +1,3 @@
-import assert from "node:assert/strict";
 import { classifyUrlForSsrf } from "../lib/url-safety";
 
 type Case = [url: string, shouldBlock: boolean, label: string];

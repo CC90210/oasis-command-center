@@ -97,6 +97,11 @@ export async function POST(
       channel: "note",
       direction: "internal",
       agent_source: "operator_note",
+      // actor_user_id is the canonical "who wrote this" field
+      // (migration 078). metadata.author_* duplicates kept for
+      // backwards-compat with pre-migration analytics; can drop
+      // once every reader has been updated.
+      actor_user_id: sess.userId,
       content: note,
       content_preview: note.length > 1024 ? note.slice(0, 1024) : note,
       metadata: {
