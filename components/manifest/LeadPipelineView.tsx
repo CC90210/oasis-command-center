@@ -834,13 +834,16 @@ type TouchFirst = {
 
 /** Canonical "when did we last touch this lead?" — matches what
  *  oasisRowModel / sunbizRowModel read so the Touch-first callout
- *  and the per-row cold badges agree on staleness. */
+ *  and the per-row cold badges agree on staleness. created_at is
+ *  the final fallback (not updated_at): for a never-contacted lead,
+ *  the SLA clock is "when did this lead enter our system," which
+ *  updated_at distorts every time the row is re-stamped for an
+ *  unrelated reason (ai_score sync, stage correction, etc.). */
 function lastTouchIso(row: Row): string | null {
   const d = row.data;
   return (
     str(d.last_contacted_at) ||
     str(d.last_touch_at) ||
-    row.updated_at ||
     row.created_at ||
     null
   );
