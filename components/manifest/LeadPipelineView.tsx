@@ -6,6 +6,7 @@ import { ChevronDown, ChevronRight, Plus } from "lucide-react";
 import type { StageMeta } from "@/lib/sunbiz-stage-meta";
 import { PageSearchBar } from "@/components/manifest/PageSearchBar";
 import { pipelineRowHref } from "@/lib/pipeline-display";
+import { lastTouchIso } from "@/lib/lead-staleness";
 import {
   formatMoney,
   initialsOf,
@@ -96,10 +97,10 @@ function slaDaysForVariant(cfg: VariantConfig, stage: string): number {
 function isGoingColdVariant(
   cfg: VariantConfig,
   stage: string,
-  lastTouchIso: string | null | undefined,
+  iso: string | null | undefined,
 ): boolean {
   if (!cfg.active.has(stage)) return false;
-  return daysSince(lastTouchIso) > slaDaysForVariant(cfg, stage);
+  return daysSince(iso) > slaDaysForVariant(cfg, stage);
 }
 
 function stageTargetLabelVariant(cfg: VariantConfig, stage: string): string | null {
@@ -831,30 +832,6 @@ type TouchFirst = {
   daysOverdue: number;
   potentialUsd: number | null;
 };
-
-/** Canonical "when did we last touch this lead?" — matches what
- *  oasisRowModel / sunbizRowModel read so the Touch-first callout
- *  and the per-row cold badges agree on staleness. created_at is
- *  the final fallback (not updated_at): for a never-contacted lead,
- *  the SLA clock is "when did this lead enter our system," which
- *  updated_at distorts every time the row is re-stamped for an
- *  unrelated reason (ai_score sync, stage correction, etc.).
- *
- *  SunBiz applications also carry submitted_at — when the JotForm
- *  intake landed. That's a real touch signal (initial app receipt
- *  resets the staleness clock) so it ranks above the created_at
- *  fallback when present. */
-function lastTouchIso(row: Row): string | null {
-  const d = row.data;
-  return (
-    str(d.last_contacted_at) ||
-    str(d.last_touch_at) ||
-    str(d.submitted_at) ||
-    str(d.date_submitted) ||
-    row.created_at ||
-    null
-  );
-}
 
 /** Best-available dollar value for the lead — SunBiz uses funding-side
  *  fields, OASIS uses value_estimate. Returns null when none are set. */

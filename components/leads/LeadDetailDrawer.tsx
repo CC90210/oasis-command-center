@@ -26,6 +26,7 @@ import { AssignmentControl } from "./AssignmentControl";
 import { humanLeadDocSize, leadDocTypeLabel, LEAD_DOC_TYPES } from "@/lib/lead-doc-display";
 import { LEAD_PIPELINE_STAGES, OPPORTUNITY_PIPELINE_STAGES, type StageMeta } from "@/lib/sunbiz-stage-meta";
 import { formatMoney, relTime } from "@/lib/format-helpers";
+import { lastTouchIsoFlat } from "@/lib/lead-staleness";
 
 type DocRow = {
   id: string;
@@ -1759,7 +1760,7 @@ function OwnerAssignedRow({ record }: { record: Record<string, unknown> }) {
     str(record.assigned_to) ||
     str(record.owner_assigned) ||
     null;
-  const lastTouchIso = str(record.last_touch_at) || str(record.updated_at);
+  const lastTouchIso = lastTouchIsoFlat(record);
 
   return (
     <div className="grid grid-cols-2 gap-3">

@@ -49,6 +49,7 @@ import {
   Sparkles,
 } from "lucide-react";
 import type { Lead } from "@/lib/supabase";
+import { lastTouchIsoFlat } from "@/lib/lead-staleness";
 
 export type LeadsTableStage = { value: string; label: string; tone: string };
 
@@ -134,8 +135,8 @@ export function LeadsTableClient({ initialLeads, stages, detailBase }: Props) {
       let bv: number | string = "";
       switch (sortKey) {
         case "last_touch":
-          av = new Date(a.last_contacted_at || a.updated_at || 0).getTime();
-          bv = new Date(b.last_contacted_at || b.updated_at || 0).getTime();
+          av = new Date(lastTouchIsoFlat(a) || 0).getTime();
+          bv = new Date(lastTouchIsoFlat(b) || 0).getTime();
           break;
         case "score":
           av = a.score ?? -1;
@@ -424,7 +425,7 @@ function LeadRow({
       .join("")
       .toUpperCase() || "?";
 
-  const lastTouch = lead.last_contacted_at || lead.updated_at;
+  const lastTouch = lastTouchIsoFlat(lead);
   return (
     <tr className="border-b border-bg-border last:border-0 hover:bg-bg-elev/30 transition-colors cursor-pointer">
       <td className="px-4 py-3">

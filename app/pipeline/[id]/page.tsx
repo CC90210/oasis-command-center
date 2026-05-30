@@ -18,6 +18,7 @@ import { ManifestRecordForm } from "@/components/manifest/ManifestRecordForm";
 import { LeadTimelinePanel } from "@/components/leads/LeadTimelinePanel";
 import { OASIS_SEED } from "@/lib/manifest/seeds";
 import { getRecord } from "@/lib/manifest/data";
+import { lastTouchIso } from "@/lib/lead-staleness";
 import { getActiveProfile } from "@/lib/queries";
 import { safe } from "@/lib/api-helpers";
 import { getServiceSupabase } from "@/lib/supabase-server";
@@ -86,7 +87,7 @@ export default async function PipelineLeadDetailPage({
     (typeof record.data.name === "string" && record.data.name) ||
     (typeof record.data.company === "string" && record.data.company) ||
     `Lead ${id.slice(0, 8)}`;
-  const metrics = await loadLeadDetailMetrics(tenantId, id, record.data);
+  const metrics = await loadLeadDetailMetrics(tenantId, id, record.data, record.created_at);
 
   return (
     <div className="space-y-4 animate-fade-in">
@@ -154,6 +155,7 @@ async function loadLeadDetailMetrics(
   tenantId: string,
   leadId: string,
   data: Record<string, unknown>,
+  recordCreatedAt: string | null,
 ): Promise<LeadDetailMetrics> {
   const db = getServiceSupabase();
   const stageKey = nonEmptyString(data.stage) || "new_contact";
@@ -190,13 +192,14 @@ async function loadLeadDetailMetrics(
       : typeof matchingStageEvent?.created_at === "string"
         ? matchingStageEvent.created_at
         : null;
+  // Prefer the most recent lead_interactions row directly — it's the
+  // source of truth for "touched at." Fall back to the canonical
+  // staleness ladder (lib/lead-staleness) when no interaction is
+  // logged yet. updated_at intentionally NOT in the ladder.
   const lastTouch =
     typeof lastTouchEvent.data?.created_at === "string"
       ? lastTouchEvent.data.created_at
-      : nonEmptyString(data.last_touch_at) ||
-        nonEmptyString(data.last_contacted_at) ||
-        nonEmptyString(data.updated_at) ||
-        null;
+      : lastTouchIso({ data, created_at: recordCreatedAt });
   const aiScore =
     typeof data.ai_score === "number"
       ? data.ai_score
