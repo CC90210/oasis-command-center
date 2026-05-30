@@ -30,6 +30,12 @@ const PERSONAL_OAUTH_SERVICES = ["gmail_oauth"];
  * Tenant-shared services the owner/admin must wire so day-to-day sends
  * + ingest + billing work. SunBiz-focused defaults; expand as more
  * tenants come online and want their own readiness opinion.
+ *
+ * Hardcoded for now. Long-term home is manifest.required_services so
+ * each tenant declares its own readiness opinion — until then, OASIS
+ * and SunBiz share this list (acceptable: both need Anthropic + SMTP;
+ * Stripe is universal billing; JotForm matters for SunBiz intake but
+ * is harmless to flag missing on OASIS).
  */
 const TENANT_REQUIRED_SERVICES: { service: string; label: string }[] = [
   { service: "anthropic", label: "Anthropic (Claude API)" },

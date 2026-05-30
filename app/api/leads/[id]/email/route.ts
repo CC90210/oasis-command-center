@@ -86,6 +86,10 @@ export async function POST(
       channel: "email",
       direction: "outbound",
       agent_source: "dashboard_drawer",
+      // Canonical "who queued this" — companion to migration 078.
+      // metadata.acted_by_user_id retained for the consumer daemon
+      // which already reads from it.
+      actor_user_id: sess.userId,
       subject: truncatedSubject,
       content: truncatedBody,
       content_preview: truncatedBody.slice(0, 1024),
