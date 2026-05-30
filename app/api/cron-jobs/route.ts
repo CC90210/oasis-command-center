@@ -400,6 +400,60 @@ function validateActionPayload(type: ActionType, payload: Record<string, unknown
       if (typeof payload.url !== "string" || !/^https?:\/\//.test(payload.url)) {
         return "webhook_post requires action_payload.url (http/https URL)";
       }
-      return null;
+      return validateWebhookUrlForSsrf(payload.url);
   }
+}
+
+/**
+ * SSRF guard on the URL the bridge will POST to. Without this, an
+ * operator can schedule a cron that hits the bridge host's loopback
+ * (debug consoles, dev DBs), RFC-1918 LAN ranges, or — on cloud
+ * hosts — the metadata service (AWS 169.254.169.254, GCP/Azure
+ * equivalents). All bad.
+ *
+ * Strategy: reject obvious local/private hostnames + the cloud
+ * metadata IPs at the API edge. The bridge can still POST to any
+ * public webhook (n8n, Zapier, Make) the operator legitimately
+ * needs. Hostnames that resolve via DNS aren't checked here — the
+ * bridge would need its own resolution-time check to fully close
+ * DNS-rebinding, but the API gate covers the bulk of accidental
+ * mistakes plus the easy-to-craft attacks.
+ */
+function validateWebhookUrlForSsrf(raw: string): string | null {
+  let parsed: URL;
+  try {
+    parsed = new URL(raw);
+  } catch {
+    return "webhook_post.url is not a parseable URL";
+  }
+  const host = parsed.hostname.toLowerCase();
+  if (!host) return "webhook_post.url has no hostname";
+  // Cloud instance metadata endpoints (AWS, GCP, Azure, OCI). Hard block.
+  if (host === "169.254.169.254" || host === "metadata.google.internal") {
+    return "webhook_post.url targets cloud metadata service";
+  }
+  // Loopback in every common form.
+  if (host === "localhost" || host === "127.0.0.1" || host === "::1") {
+    return "webhook_post.url targets loopback";
+  }
+  // IPv4 RFC-1918 + link-local + loopback ranges.
+  const ipv4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(host);
+  if (ipv4) {
+    const [a, b] = [parseInt(ipv4[1], 10), parseInt(ipv4[2], 10)];
+    if (a === 10) return "webhook_post.url targets RFC-1918 (10.0.0.0/8)";
+    if (a === 127) return "webhook_post.url targets loopback (127.0.0.0/8)";
+    if (a === 169 && b === 254) return "webhook_post.url targets link-local (169.254.0.0/16)";
+    if (a === 172 && b >= 16 && b <= 31) return "webhook_post.url targets RFC-1918 (172.16/12)";
+    if (a === 192 && b === 168) return "webhook_post.url targets RFC-1918 (192.168/16)";
+    if (a === 0) return "webhook_post.url targets 0.0.0.0/8";
+  }
+  // IPv6 unique-local + loopback. Hostnames in brackets per RFC 3986.
+  if (host.startsWith("fc") || host.startsWith("fd")) {
+    return "webhook_post.url targets IPv6 unique-local (fc00::/7)";
+  }
+  if (host.startsWith("fe8") || host.startsWith("fe9") ||
+      host.startsWith("fea") || host.startsWith("feb")) {
+    return "webhook_post.url targets IPv6 link-local (fe80::/10)";
+  }
+  return null;
 }

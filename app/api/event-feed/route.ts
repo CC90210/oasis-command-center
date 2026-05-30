@@ -16,21 +16,21 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getServiceSupabase, getSessionUser } from "@/lib/supabase-server";
 import { bad } from "@/lib/api-helpers";
+import { resolveTenantId } from "@/lib/api-auth";
+import { isOperatorEmail } from "@/lib/operator-credentials";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
 export async function GET(req: NextRequest) {
-  // Auth gate (Codex adversarial pass 4, 2026-05-18): this endpoint
-  // was in middleware PUBLIC_PATH_PREFIXES under the "proof of life
-  // for OASIS Town" rationale, but the response includes raw
-  // agent_events.payload — which can carry record IDs, lead context,
-  // command summaries, error details. Unauthenticated read = cross-
-  // tenant scrape. Require a session; payload still spans tenants
-  // (that's the empire-wide nature of agent_events) but the access
-  // surface is no longer the open internet.
+  // Auth gate: response includes raw agent_events.payload (record IDs,
+  // lead context, command summaries, error details). Unauthed read =
+  // open scrape, tenant-scoped read = honest per-tenant feed.
   const user = await getSessionUser().catch(() => null);
   if (!user) return bad(401, "unauthorized");
+  const isOperator = isOperatorEmail(user.email || undefined);
+  const tenantId = isOperator ? null : await resolveTenantId();
+  if (!isOperator && !tenantId) return bad(401, "unauthorized");
 
   const url = new URL(req.url);
   const sinceMinutes = Math.min(
@@ -58,6 +58,11 @@ export async function GET(req: NextRequest) {
       .order("created_at", { ascending: false })
       .limit(limit);
 
+    // Tenants see only their own events; operators (CC) see everything.
+    // correlation_id is the canonical tenant pointer on agent_events —
+    // every producer (kixie webhook, state_manager, bridge events) sets
+    // it to the originating tenant_id.
+    if (tenantId) q = q.eq("correlation_id", tenantId);
     if (source) q = q.eq("source_agent", source);
     if (eventType) q = q.eq("event_type", eventType);
 
