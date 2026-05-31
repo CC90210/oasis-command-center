@@ -42,16 +42,9 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { getServiceSupabase } from "@/lib/supabase-server";
-import { bad, sha256 } from "@/lib/api-helpers";
+import { bad, getClientIp, sha256 } from "@/lib/api-helpers";
 import { createRecord, updateRecord, RecordsError } from "@/lib/manifest/data";
 import { rateLimit } from "@/lib/rate-limit";
-
-function clientIp(req: NextRequest): string {
-  const xff = req.headers.get("x-forwarded-for") || "";
-  const first = xff.split(",")[0]?.trim();
-  if (first) return first;
-  return req.headers.get("x-real-ip") || "unknown";
-}
 
 /** Token-bucket gate — applied BEFORE the bridge token check so
  *  brute-forcers can't probe the hash-comparison timing. Writes get
@@ -59,7 +52,7 @@ function clientIp(req: NextRequest): string {
  *  flood the records table; legit daemons fire mutations at known
  *  cadences well under this rate. */
 function checkRateLimit(req: NextRequest): NextResponse | null {
-  const ip = clientIp(req);
+  const ip = getClientIp(req);
   const rl = rateLimit({
     key: `bridge.records:${ip}`,
     capacity: 30,

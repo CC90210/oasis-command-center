@@ -18,6 +18,7 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { getServiceSupabase } from "@/lib/supabase-server";
+import { getClientIp } from "@/lib/api-helpers";
 import { verifyFormLink, type FormLinkPayload } from "@/lib/form-links";
 import { rateLimit } from "@/lib/rate-limit";
 import { updateRecord, RecordsError } from "@/lib/manifest/data";
@@ -126,8 +127,8 @@ export async function POST(req: NextRequest) {
 
   // Insert the form_views row first so we have an audit trail even if
   // the stage-transition fails downstream.
-  const ipHeader =
-    req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() || null;
+  const resolvedIp = getClientIp(req);
+  const ipHeader = resolvedIp === "unknown" ? null : resolvedIp;
   const userAgent = req.headers.get("user-agent")?.slice(0, 500) || null;
   await db.from("form_views").insert({
     form_id: form.id,

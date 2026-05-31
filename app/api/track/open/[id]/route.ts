@@ -34,6 +34,7 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { getServiceSupabase } from "@/lib/supabase-server";
+import { getClientIp } from "@/lib/api-helpers";
 import { publishAgentEvent } from "@/lib/manifest/events";
 import { dispatchLeadStageEvent } from "@/lib/lead-stage-dispatcher";
 
@@ -124,8 +125,8 @@ export async function GET(
     if (!tenantId) return gifResponse(); // unknown id — silently drop, return pixel
 
     const ua = req.headers.get("user-agent") || null;
-    const fwd = req.headers.get("x-forwarded-for") || null;
-    const ip = fwd ? fwd.split(",")[0].trim() : null;
+    const resolvedIp = getClientIp(req);
+    const ip = resolvedIp === "unknown" ? null : resolvedIp;
     const ipHash = hashIp(ip);
     const nowMs = Date.now();
     const suspicious =

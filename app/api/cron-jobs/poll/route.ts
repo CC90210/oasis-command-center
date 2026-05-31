@@ -18,10 +18,30 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { getServiceSupabase } from "@/lib/supabase-server";
-import { bad, sha256 } from "@/lib/api-helpers";
+import { bad, getClientIp, sha256 } from "@/lib/api-helpers";
+import { rateLimit } from "@/lib/rate-limit";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+
+/** Brute-force gate identical in shape to /api/bridge/ping. Legit
+ *  bridges poll every ~60s; the bucket allows post-network-blip
+ *  retries but caps anyone hammering with token guesses. */
+function checkPollRateLimit(req: NextRequest): NextResponse | null {
+  const ip = getClientIp(req);
+  const rl = rateLimit({
+    key: `cron-poll:${ip}`,
+    capacity: 60,
+    refillPerSec: 1,
+  });
+  if (!rl.allowed) {
+    return NextResponse.json(
+      { ok: false, error: "rate_limited", reset_in: rl.resetIn },
+      { status: 429 },
+    );
+  }
+  return null;
+}
 
 async function resolveBridge(req: NextRequest): Promise<{ tenantId: string } | null> {
   const auth = req.headers.get("authorization") || "";
@@ -41,6 +61,8 @@ async function resolveBridge(req: NextRequest): Promise<{ tenantId: string } | n
 }
 
 export async function GET(req: NextRequest) {
+  const limited = checkPollRateLimit(req);
+  if (limited) return limited;
   const bridge = await resolveBridge(req);
   if (!bridge) return bad(401, "invalid_or_revoked_bridge_token");
 
@@ -60,6 +82,8 @@ export async function GET(req: NextRequest) {
 }
 
 export async function POST(req: NextRequest) {
+  const limited = checkPollRateLimit(req);
+  if (limited) return limited;
   const bridge = await resolveBridge(req);
   if (!bridge) return bad(401, "invalid_or_revoked_bridge_token");
 

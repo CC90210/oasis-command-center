@@ -24,7 +24,8 @@ explicitly only if you want different values for browser vs server.
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `OPERATOR_EMAIL` | `conaugh@oasisai.work` | Default login fallback |
+| `OPERATOR_EMAIL` | _unset_ | Single-tenant fallback email for `getActiveProfile()`. Only consulted when `OPERATOR_EMAIL_FALLBACK_ENABLED=true`. Leave unset on multi-tenant deploys. |
+| `OPERATOR_EMAIL_FALLBACK_ENABLED` | _unset_ | Set to `"true"` ONLY for single-tenant dev. On a multi-tenant deploy the fallback returns the operator's profile to anyone who hits an unauthed render — cross-tenant leak. Default is fail-closed (return null on no session). |
 | `ADMIN_EMAILS` | _empty_ | Comma-separated list of admin emails |
 | `OPERATOR_TIMEZONE` | `America/Toronto` | Server-side TZ for cron + date formatting |
 | `NEXT_PUBLIC_OPERATOR_TIMEZONE` | `America/Toronto` | Browser-side TZ for the live clock |

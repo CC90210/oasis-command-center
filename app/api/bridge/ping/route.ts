@@ -30,15 +30,8 @@
 
 import { NextResponse, type NextRequest } from "next/server";
 import { getServiceSupabase } from "@/lib/supabase-server";
-import { bad, sha256 } from "@/lib/api-helpers";
+import { bad, getClientIp, sha256 } from "@/lib/api-helpers";
 import { rateLimit } from "@/lib/rate-limit";
-
-function clientIp(req: NextRequest): string {
-  const xff = req.headers.get("x-forwarded-for") || "";
-  const first = xff.split(",")[0]?.trim();
-  if (first) return first;
-  return req.headers.get("x-real-ip") || "unknown";
-}
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -54,7 +47,7 @@ export async function POST(req: NextRequest) {
   // bridge_tokens can't time hash lookups. Legit bridges hit at most
   // 1 ping per 60s; the bucket allows generous bursts (paired clients
   // sometimes retry after a network blip) but caps sustained rate.
-  const callerIp = clientIp(req);
+  const callerIp = getClientIp(req);
   const rl = rateLimit({
     key: `bridge.ping:${callerIp}`,
     capacity: 60,
@@ -106,11 +99,10 @@ export async function POST(req: NextRequest) {
   // Touch the pairing's heartbeat. If the bridge included a tool_capabilities
   // list, stamp it on the pairing too — dashboard reads this when filtering
   // TOOL_DEFINITIONS for the /api/chat tool palette.
-  const ipHeader = req.headers.get("x-forwarded-for") || req.headers.get("x-real-ip");
-  const ip = ipHeader ? ipHeader.split(",")[0].trim() : null;
+  const recordedIp = getClientIp(req);
   const pairingUpdate: Record<string, unknown> = {
     last_seen_at: new Date().toISOString(),
-    last_seen_ip: ip,
+    last_seen_ip: recordedIp === "unknown" ? null : recordedIp,
   };
   let toolCapsRecorded = false;
   if (Array.isArray(body.tool_capabilities)) {

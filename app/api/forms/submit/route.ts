@@ -32,6 +32,7 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { getServiceSupabase } from "@/lib/supabase-server";
+import { getClientIp } from "@/lib/api-helpers";
 import { verifyFormLink, signFormLink, type FormLinkPayload } from "@/lib/form-links";
 import {
   parseFormSteps,
@@ -134,10 +135,8 @@ export async function POST(req: NextRequest) {
     // by someone else hammering the same form. 10 inits/minute per
     // (ip, form) is roughly one human filling the form every 6 seconds,
     // well above retry-after-typo but far below scripted abuse.
-    const ip =
-      req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ||
-      req.headers.get("x-real-ip")?.trim() ||
-      "no-ip";
+    const resolved = getClientIp(req);
+    const ip = resolved === "unknown" ? "no-ip" : resolved;
     const tenantSlug = body.anonymous_init.tenant_slug.toLowerCase();
     const formSlug = body.anonymous_init.form_slug.toLowerCase();
     const initLimit = rateLimit({
@@ -332,8 +331,8 @@ export async function POST(req: NextRequest) {
 
   // Insert the submission row. service-role write — RLS doesn't see this
   // path; HMAC token + tenant_id match is the auth boundary.
-  const ipHeader =
-    req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() || null;
+  const resolvedIp = getClientIp(req);
+  const ipHeader = resolvedIp === "unknown" ? null : resolvedIp;
   const userAgent = req.headers.get("user-agent")?.slice(0, 500) || null;
 
   // Move inline files to Supabase Storage. The bucket + RLS policies live

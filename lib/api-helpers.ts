@@ -70,6 +70,23 @@ export function checkBearerSecret(req: NextRequest, envVar: string): boolean {
 }
 
 /**
+ * Best-effort client IP extraction. Walks x-forwarded-for first
+ * entry, then x-real-ip, then "unknown" so the caller doesn't have
+ * to null-check. Used as a key for rate limiters + forensic logs.
+ * Don't treat the value as identity — the headers are operator-
+ * controllable on a self-hosted deploy.
+ *
+ * Single source of truth so a future "trust nginx-proxied real-ip
+ * over xff" tweak lands in one place instead of six.
+ */
+export function getClientIp(req: NextRequest): string {
+  const xff = req.headers.get("x-forwarded-for") || "";
+  const first = xff.split(",")[0]?.trim();
+  if (first) return first;
+  return req.headers.get("x-real-ip") || "unknown";
+}
+
+/**
  * Resolve the authed user's profile row. Returns null when no session OR
  * no profile linked to that auth user. Routes should `return bad(401, ...)`
  * on null.
