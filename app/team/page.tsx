@@ -6,6 +6,7 @@ import {
   getTenantMembers,
   listActiveInvites,
 } from "@/lib/team";
+import { computeSeatWarning } from "@/lib/seat-warning";
 import { TeamInviteActions, RemoveMemberClientButton } from "./TeamInviteActions";
 import { redirect } from "next/navigation";
 
@@ -25,9 +26,10 @@ export default async function TeamPage() {
   const ctx = await getSessionContext();
   if (!ctx) redirect("/login?next=%2Fteam");
 
-  const [members, invites] = await Promise.all([
+  const [members, invites, seatWarning] = await Promise.all([
     getTenantMembers(ctx.tenantId),
     canManageTeam(ctx.teamRole) ? listActiveInvites(ctx.tenantId) : Promise.resolve([]),
+    canManageTeam(ctx.teamRole) ? computeSeatWarning(ctx.tenantId) : Promise.resolve(null),
   ]);
   const canManage = canManageTeam(ctx.teamRole);
 
@@ -38,8 +40,27 @@ export default async function TeamPage() {
         subtitle={canManage ? "Invite, manage, and remove team members." : "Members on this tenant."}
       />
 
+      {canManage && seatWarning && seatWarning.status !== "ok" && (
+        <div
+          className={`rounded-lg border px-4 py-3 text-sm ${
+            seatWarning.status === "over"
+              ? "border-status-warm/40 bg-status-warm/10 text-status-warm"
+              : "border-accent/40 bg-accent/5 text-accent"
+          }`}
+        >
+          {seatWarning.message}
+        </div>
+      )}
+
       {canManage && (
-        <Card title="Invite a teammate" subtitle="Generate a one-time invite link.">
+        <Card
+          title="Invite a teammate"
+          subtitle={
+            seatWarning && seatWarning.status === "ok"
+              ? `${seatWarning.message} Generate a one-time invite link.`
+              : "Generate a one-time invite link."
+          }
+        >
           <TeamInviteActions activeInvites={invites.map((i) => ({
             id: i.id,
             email: i.email,

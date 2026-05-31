@@ -27,6 +27,9 @@ export function ProfileEditor({
 
   const [fullName, setFullName] = useState(profile.full_name);
   const [displayName, setDisplayName] = useState(profile.display_name || "");
+  const [personalPhone, setPersonalPhone] = useState(
+    (profile as { personal_phone?: string | null }).personal_phone || "",
+  );
   const [brand, setBrand] = useState(profile.brand);
   const [mrrTarget, setMrrTarget] = useState(String(profile.mrr_target_usd));
   const [mrrCurrent, setMrrCurrent] = useState(String(profile.mrr_current_usd));
@@ -76,6 +79,7 @@ export function ProfileEditor({
         body: JSON.stringify({
           full_name: fullName,
           display_name: displayName || null,
+          personal_phone: personalPhone.trim() || null,
           brand,
           mrr_target_usd: Number(mrrTarget) || 0,
           mrr_current_usd: Number(mrrCurrent) || 0,
@@ -107,6 +111,18 @@ export function ProfileEditor({
         </Field>
         <Field label="Display name">
           <input className="input" value={displayName} onChange={(e) => setDisplayName(e.target.value)} placeholder="e.g. CC" />
+        </Field>
+        <Field label="Personal phone">
+          <input
+            className="input"
+            type="tel"
+            value={personalPhone}
+            onChange={(e) => setPersonalPhone(e.target.value)}
+            placeholder="555-123-4567"
+          />
+          <p className="text-xs text-fg-muted mt-1">
+            Display-only. Outbound SMS still goes through your tenant&apos;s shared number; this is what agents quote when they tell a lead how to reach you directly.
+          </p>
         </Field>
         <Field label="Brand">
           <input className="input" value={brand} onChange={(e) => setBrand(e.target.value)} />

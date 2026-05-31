@@ -7,9 +7,12 @@
  * unique-local + link-local, and cloud-metadata endpoints (AWS
  * 169.254.169.254 / GCP metadata.google.internal).
  *
- * Out of scope: DNS-rebinding. A hostname that resolves to a public
- * IP at submission time but flips to RFC-1918 on request must be
- * blocked at the requester (the bridge), not here.
+ * Out of scope here: DNS-rebinding. The companion check at request
+ * time is _is_private_ipv4 + _check_resolved_addresses_safe in
+ * CEO-Agent/bravo_cli/cron_runner.py. Range list MUST stay in sync
+ * with that file. If you add a new private range here, mirror it
+ * there (and vice-versa) — a one-sided update creates an attack
+ * window through whichever check the attacker bypasses.
  */
 
 /**

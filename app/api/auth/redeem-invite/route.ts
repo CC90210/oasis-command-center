@@ -22,6 +22,9 @@ import { NextResponse, type NextRequest } from "next/server";
 import { redeemInvite } from "@/lib/team";
 import { resolveClientProfileSlug } from "@/lib/client-profiles";
 import { getServiceSupabase, getSessionUser } from "@/lib/supabase-server";
+import { getManifest } from "@/lib/manifest/loader";
+import { defaultAgentsForRole } from "@/lib/role-agent-defaults";
+import type { TeamRole } from "@/lib/team";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -93,6 +96,30 @@ export async function POST(req: NextRequest) {
   } catch {
     // Soft-fail — null tenantSlug just routes the caller through "/" which
     // the layout will handle.
+  }
+
+  // Stamp role-based default agents on the newly-redeemed profile (the
+  // SQL redeem_tenant_invite function leaves agents_enabled NULL).
+  // Existing profiles keep whatever they had — `is null` clause means
+  // re-redeem doesn't overwrite explicit user choices. Soft-fail: a
+  // missing manifest or unresolvable slug shouldn't block the redeem.
+  try {
+    const db = getServiceSupabase();
+    const manifest = tenantSlug ? await getManifest(tenantSlug).catch(() => null) : null;
+    const defaults = defaultAgentsForRole({
+      tenantSlug,
+      role: (result.teamRole as TeamRole) || null,
+      manifest,
+    });
+    if (defaults.length > 0) {
+      await db
+        .from("user_profiles")
+        .update({ agents_enabled: defaults })
+        .eq("auth_user_id", user.id)
+        .is("agents_enabled", null);
+    }
+  } catch {
+    // soft-fail
   }
 
   return NextResponse.json({

@@ -12,6 +12,7 @@ export const dynamic = "force-dynamic";
 const EDITABLE = new Set([
   "full_name",
   "display_name",
+  "personal_phone",
   "brand",
   "mrr_target_usd",
   "mrr_current_usd",
