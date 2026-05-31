@@ -30,6 +30,16 @@ export type LenderProfile = {
   fico_floor?: number;
   sla_response_days?: number;
   notes?: string;
+  // SOP §1 shop_list(deal) filter fields (2026-05-31). Hard constraints
+  // the Lender List SOP encodes per-lender; the scorer treats violations
+  // as high_risk warnings (same severity tier as FICO/revenue/TIB floors).
+  tier?: "A" | "B" | "C" | "D" | "Micro";
+  paper_grades?: string[];
+  position_min?: number;
+  position_max?: number;
+  defaults_policy?: "none" | "satisfied_only" | "accepts";
+  max_negative_days?: number;
+  reverses_only?: boolean;
 };
 
 export type ApplicationProfile = {
@@ -41,6 +51,15 @@ export type ApplicationProfile = {
   requested_amount?: number;
   /** Operator-set; matches lender product_types. */
   desired_product?: string;
+  // SOP §1 fields the underwriter chain populates (2026-05-31). Optional
+  // because legacy applications may not have been re-underwritten yet;
+  // the scorer treats absence as "unknown" (info warning), not "fails".
+  paper_grade?: string;
+  position_count?: number;
+  has_default?: boolean;
+  default_satisfied?: boolean;
+  negative_days?: number;
+  deal_kind?: "fresh_capital" | "reverse_consolidation";
 };
 
 /**
@@ -182,6 +201,108 @@ export function scoreLenderMatch(
         "warning",
         "product_mismatch",
         `Lender offers ${lenderProducts.join(", ")}; deal wants ${application.desired_product}`,
+      );
+    }
+  }
+
+  // ── Position range (high_risk) — SOP §1 ────────────────────────────
+  if (lender.position_min !== undefined || lender.position_max !== undefined) {
+    if (application.position_count !== undefined) {
+      const min = lender.position_min ?? 1;
+      const max =
+        lender.position_max !== undefined && lender.position_max > 0
+          ? lender.position_max
+          : Number.POSITIVE_INFINITY;
+      if (application.position_count < min || application.position_count > max) {
+        const maxLabel = max === Number.POSITIVE_INFINITY ? "any" : String(max);
+        flag(
+          "high_risk",
+          "position_out_of_range",
+          `Deal sits at position ${application.position_count}; lender accepts ${min}-${maxLabel}`,
+        );
+      } else {
+        const maxLabel = max === Number.POSITIVE_INFINITY ? "any" : String(max);
+        reasons.push(`Position ${application.position_count} fits ${min}-${maxLabel} range`);
+      }
+    } else {
+      score -= 5;
+      flag(
+        "info",
+        "missing_position_data",
+        "Lender has position-range constraint; deal doesn't report position_count",
+      );
+    }
+  }
+
+  // ── Paper grade (high_risk) — SOP §1 ───────────────────────────────
+  if (lender.paper_grades && lender.paper_grades.length > 0) {
+    if (application.paper_grade) {
+      if (!lender.paper_grades.includes(application.paper_grade)) {
+        flag(
+          "high_risk",
+          "paper_grade_mismatch",
+          `Deal grades as ${application.paper_grade}; lender accepts ${lender.paper_grades.join("/")}`,
+        );
+      } else {
+        reasons.push(`${application.paper_grade}-paper accepted by ${lender.paper_grades.join("/")} box`);
+      }
+    } else {
+      score -= 5;
+      flag(
+        "info",
+        "missing_paper_grade",
+        "Lender has paper-grade box; deal hasn't been graded yet",
+      );
+    }
+  }
+
+  // ── Defaults policy (high_risk) — SOP §1 ───────────────────────────
+  if (lender.defaults_policy && application.has_default !== undefined) {
+    if (application.has_default) {
+      if (lender.defaults_policy === "none") {
+        flag(
+          "high_risk",
+          "default_blocked",
+          "Deal has prior MCA default; lender does not accept any defaults",
+        );
+      } else if (lender.defaults_policy === "satisfied_only" && !application.default_satisfied) {
+        flag(
+          "high_risk",
+          "unsatisfied_default",
+          "Deal has unsatisfied prior default; lender accepts satisfied defaults only",
+        );
+      } else {
+        reasons.push(
+          lender.defaults_policy === "satisfied_only"
+            ? "Default is satisfied; lender accepts satisfied defaults"
+            : "Lender accepts defaults",
+        );
+      }
+    }
+  }
+
+  // ── Max negative days (high_risk) — SOP §1 ─────────────────────────
+  if (lender.max_negative_days !== undefined && application.negative_days !== undefined) {
+    if (application.negative_days > lender.max_negative_days) {
+      flag(
+        "high_risk",
+        "exceeds_max_negative_days",
+        `Deal has ${application.negative_days} negative day(s); lender caps at ${lender.max_negative_days}`,
+      );
+    } else {
+      reasons.push(`${application.negative_days} neg day(s) under ${lender.max_negative_days} cap`);
+    }
+  }
+
+  // ── Reverses-only lender (high_risk on fresh capital) — SOP §7 #1 ──
+  if (lender.reverses_only) {
+    if (application.deal_kind === "reverse_consolidation") {
+      reasons.push("Reverse-consolidation specialist; strong fit");
+    } else {
+      flag(
+        "high_risk",
+        "reverses_only_lender",
+        "Lender funds reverse-consolidation only; this deal is fresh capital",
       );
     }
   }

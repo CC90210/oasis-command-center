@@ -45,6 +45,14 @@ type LenderData = {
   fico_floor?: number;
   sla_response_days?: number;
   product_types?: string[] | string;
+  // SOP §1 shop_list filter fields (2026-05-31).
+  tier?: "A" | "B" | "C" | "D" | "Micro";
+  paper_grades?: string[];
+  position_min?: number;
+  position_max?: number;
+  defaults_policy?: "none" | "satisfied_only" | "accepts";
+  max_negative_days?: number;
+  reverses_only?: boolean;
 };
 
 type CheckResult = {
@@ -129,6 +137,40 @@ export async function POST(
         ? (underwriting.product_type as string).toLowerCase()
         : null;
 
+  // SOP §1 fields the underwriter chain populates. Same fall-through
+  // pattern: app row first, then underwriting summary. Undefined when
+  // not yet computed — the scorer treats absence as info, not failure.
+  const paperGrade =
+    typeof appData.paper_grade === "string"
+      ? (appData.paper_grade as string).toUpperCase()
+      : typeof underwriting.paper_grade === "string"
+        ? (underwriting.paper_grade as string).toUpperCase()
+        : null;
+  const positionCount =
+    num(appData.position_count) ??
+    num(underwriting.position_count) ??
+    num(underwriting.active_positions);
+  const hasDefault =
+    typeof appData.has_default === "boolean"
+      ? (appData.has_default as boolean)
+      : typeof underwriting.has_default === "boolean"
+        ? (underwriting.has_default as boolean)
+        : null;
+  const defaultSatisfied =
+    typeof appData.default_satisfied === "boolean"
+      ? (appData.default_satisfied as boolean)
+      : typeof underwriting.default_satisfied === "boolean"
+        ? (underwriting.default_satisfied as boolean)
+        : null;
+  const negativeDays =
+    num(appData.negative_days) ??
+    num(underwriting.negative_days) ??
+    num(underwriting.worst_month_negative_days);
+  const dealKind =
+    appData.deal_kind === "reverse_consolidation" || appData.deal_kind === "fresh_capital"
+      ? (appData.deal_kind as "reverse_consolidation" | "fresh_capital")
+      : null;
+
   // Pull every lender for this tenant. Tenants typically have <50
   // lenders so we score in-memory.
   const lendersRes = await db
@@ -151,6 +193,12 @@ export async function POST(
     applicant_fico: ficoScore ?? undefined,
     requested_amount: requestedAmount ?? undefined,
     desired_product: productType ?? undefined,
+    paper_grade: paperGrade ?? undefined,
+    position_count: positionCount ?? undefined,
+    has_default: hasDefault ?? undefined,
+    default_satisfied: defaultSatisfied ?? undefined,
+    negative_days: negativeDays ?? undefined,
+    deal_kind: dealKind ?? undefined,
   };
 
   // Build a lookup of raw lender data for LenderProfile construction later.
@@ -227,6 +275,77 @@ export async function POST(
       });
     }
 
+    // SOP §1 hard-requirement checks. Each is gated on the lender
+    // carrying the constraint AND the application carrying the matching
+    // data point. When either is missing the check is skipped (mirrors
+    // the original revenue / FICO / TIB pattern above).
+    if (typeof data.position_min === "number" || typeof data.position_max === "number") {
+      const min = typeof data.position_min === "number" ? data.position_min : 1;
+      const max =
+        typeof data.position_max === "number" && data.position_max > 0
+          ? data.position_max
+          : Number.POSITIVE_INFINITY;
+      const maxLabel = max === Number.POSITIVE_INFINITY ? "any" : String(max);
+      const passes =
+        positionCount !== null && positionCount >= min && positionCount <= max;
+      checks.push({
+        key: "position",
+        label: "Position",
+        requirement: `${min}-${maxLabel}`,
+        actual: positionCount !== null ? String(positionCount) : "unknown",
+        passed: passes,
+      });
+    }
+    if (Array.isArray(data.paper_grades) && data.paper_grades.length > 0) {
+      const passes = paperGrade !== null && data.paper_grades.includes(paperGrade);
+      checks.push({
+        key: "paper_grade",
+        label: "Paper grade",
+        requirement: data.paper_grades.join("/"),
+        actual: paperGrade ?? "unknown",
+        passed: passes,
+      });
+    }
+    if (data.defaults_policy && hasDefault !== null) {
+      let passes = true;
+      let actual = hasDefault ? "has default" : "no default";
+      if (hasDefault) {
+        if (data.defaults_policy === "none") {
+          passes = false;
+        } else if (data.defaults_policy === "satisfied_only") {
+          passes = defaultSatisfied === true;
+          actual = defaultSatisfied ? "satisfied default" : "unsatisfied default";
+        }
+      }
+      checks.push({
+        key: "defaults",
+        label: "Defaults",
+        requirement: data.defaults_policy,
+        actual,
+        passed: passes,
+      });
+    }
+    if (typeof data.max_negative_days === "number" && negativeDays !== null) {
+      const passes = negativeDays <= data.max_negative_days;
+      checks.push({
+        key: "negative_days",
+        label: "Negative days",
+        requirement: `≤ ${data.max_negative_days}`,
+        actual: String(negativeDays),
+        passed: passes,
+      });
+    }
+    if (data.reverses_only) {
+      const passes = dealKind === "reverse_consolidation";
+      checks.push({
+        key: "reverses_only",
+        label: "Deal kind",
+        requirement: "reverse_consolidation",
+        actual: dealKind ?? "unknown",
+        passed: passes,
+      });
+    }
+
     const passes = checks.filter((c) => c.passed).length;
     const total = checks.length;
     const score = total === 0 ? 0 : passes / total;
@@ -270,6 +389,13 @@ export async function POST(
       min_time_in_business_months: raw?.min_time_in_business_months ?? undefined,
       fico_floor: raw?.fico_floor ?? undefined,
       sla_response_days: raw?.sla_response_days ?? undefined,
+      tier: raw?.tier,
+      paper_grades: raw?.paper_grades,
+      position_min: raw?.position_min,
+      position_max: raw?.position_max,
+      defaults_policy: raw?.defaults_policy,
+      max_negative_days: raw?.max_negative_days,
+      reverses_only: raw?.reverses_only,
     };
     return { matchScore: scoreLenderMatch(lenderProfile, applicationProfile), lenderProfile };
   });

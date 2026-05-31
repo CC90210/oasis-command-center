@@ -483,6 +483,19 @@ export const SUN_SEED: TenantManifest = {
         { name: "required_documents", type: "json" },       // array of doc-type keys
         { name: "common_decline_reasons", type: "json" },   // array of strings
         { name: "active", type: "boolean", default: true },
+        // SOP §1 shop_list(deal) filter fields (2026-05-31). The Lender
+        // List SOP encodes hard requirements as tier, paper-grade fit,
+        // position-count range, defaults policy, and max negative days.
+        // The match-fitness scorer reads these directly so the filter
+        // applies at recommendation time, not just at notes-field text.
+        { name: "tier", type: "enum", enum_values: ["A", "B", "C", "D", "Micro"] },
+        { name: "paper_grades", type: "json" },             // array of A/B/C/D/JUNK
+        { name: "position_min", type: "number" },           // 1 = 1st position; 0 = any
+        { name: "position_max", type: "number" },           // 0 = no cap
+        { name: "defaults_policy", type: "enum", enum_values: ["none", "satisfied_only", "accepts"] },
+        { name: "max_negative_days", type: "number" },
+        { name: "submission_cc_emails", type: "json" },     // array of strings
+        { name: "reverses_only", type: "boolean", default: false },
       ],
     },
   ],
