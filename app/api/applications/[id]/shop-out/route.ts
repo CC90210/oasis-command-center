@@ -154,6 +154,27 @@ export async function POST(
     desired_product: typeof appData.desired_product === "string" ? appData.desired_product : undefined,
   };
 
+  // SunBiz directive 2026-05-31: under the shared-inbox From: model
+  // (all emails fire from submissions@), the assigned rep stays on
+  // each lender thread by being CC'd. Resolve their email here so
+  // buildShopOutPlan can merge it into the per-row CC alongside the
+  // operator's typed list and the lender's stored submission_cc_emails.
+  // application.data.assigned_to holds an auth_user_id (set by
+  // /api/leads/[id]/assign); join through user_profiles to get the email.
+  let assignedRepEmail: string | null = null;
+  const assignedTo = typeof appData.assigned_to === "string" ? appData.assigned_to : null;
+  if (assignedTo) {
+    const profileRes = await db
+      .from("user_profiles")
+      .select("email")
+      .eq("auth_user_id", assignedTo)
+      .maybeSingle();
+    const email = (profileRes.data as { email: string | null } | null)?.email;
+    if (typeof email === "string" && email.includes("@")) {
+      assignedRepEmail = email;
+    }
+  }
+
   // Build the plan first — operator sees this on dry_run and we use
   // it for the actual send pass below.
   const planResult = await buildShopOutPlan({
@@ -164,6 +185,7 @@ export async function POST(
     attachments,
     subject_template: body.subject_template,
     body_template: body.body_template,
+    assigned_rep_email: assignedRepEmail,
   });
   if (!planResult.ok) {
     return NextResponse.json({ ok: false, error: planResult.error }, { status: 500 });

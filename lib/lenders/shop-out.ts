@@ -44,6 +44,12 @@ export type ShopOutPlanInput = {
   /** Optional operator override for the email body. {{lender.name}} substitution. */
   subject_template?: string;
   body_template?: string;
+  /** Assigned rep's email — resolved from application.data.assigned_to in
+   * the route. Under the SunBiz shared-inbox model the From: is always
+   * tenant-shared, so the rep stays on the thread by being CC'd on every
+   * lender email going out. Merged into the per-row cc list alongside
+   * the operator's typed cc + the lender's stored submission_cc_emails. */
+  assigned_rep_email?: string | null;
 };
 
 const DEFAULT_SUBJECT = "Funding application — {{application.business_name}}";
@@ -145,12 +151,17 @@ export async function buildShopOutPlan(input: ShopOutPlanInput): Promise<{
     const vars = { lender, application: input.application };
 
     // Per-lender CC list = operator's global cc_emails ∪ lender's stored
-    // submission_cc_emails. De-duped + lower-cased so the same address
-    // doesn't show up twice if operator manually typed one the catalog
-    // already has.
+    // submission_cc_emails ∪ the assigned rep's email (so the rep stays
+    // on the thread under the shared-inbox From: model). De-duped +
+    // lower-cased so the same address doesn't show up twice if operator
+    // manually typed one the catalog already has.
     const cc_emails = Array.from(
       new Set(
-        [...input.cc_emails, ...(lender.submission_cc_emails ?? [])]
+        [
+          ...input.cc_emails,
+          ...(lender.submission_cc_emails ?? []),
+          ...(input.assigned_rep_email ? [input.assigned_rep_email] : []),
+        ]
           .map((e) => e.trim().toLowerCase())
           .filter((e) => e && e.includes("@")),
       ),

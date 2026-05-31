@@ -44,6 +44,15 @@ const TENANT_REQUIRED_SERVICES: { service: string; label: string }[] = [
   { service: "jotform", label: "JotForm (intake forms)" },
 ];
 
+// Tenants on the shared-inbox model — every outbound email fires from the
+// tenant-shared Gmail/SMTP identity, no per-user OAuth. Mirrors the
+// `_SHARED_INBOX_SLUGS` set in CEO-Agent's user_gmail_oauth.py. When the
+// tenant is on this list, the readiness report shows a "shared inbox
+// configured" status instead of the "Connect Gmail" CTA — connecting
+// personal Gmail is unnecessary and would mislead the operator. Promote
+// to manifest/tenant-config when a third tenant adopts the same model.
+const SHARED_INBOX_SLUGS = new Set<string>(["submissions"]);
+
 export async function loadReadinessReport(args: {
   tenantId: string | null;
   authUserId: string | null;
@@ -53,30 +62,59 @@ export async function loadReadinessReport(args: {
   const tenantId = args.tenantId;
   const userId = args.authUserId;
 
+  // Resolve tenant slug so we can branch personal Gmail messaging for
+  // shared-inbox tenants (SunBiz etc). One DB call up front — the rest
+  // of this function already touches several tables, so the marginal
+  // cost is rounding error.
+  let tenantSlug: string | null = null;
+  if (tenantId) {
+    const tenantRes = await db
+      .from("tenants")
+      .select("slug")
+      .eq("id", tenantId)
+      .maybeSingle();
+    tenantSlug = (tenantRes.data as { slug: string | null } | null)?.slug ?? null;
+  }
+  const isSharedInboxTenant = !!tenantSlug && SHARED_INBOX_SLUGS.has(tenantSlug);
+
   const personal: ReadinessItem[] = [];
   if (tenantId && userId) {
-    const personalRows = await db
-      .from("user_integration_credentials")
-      .select("service,field_key")
-      .eq("tenant_id", tenantId)
-      .eq("user_id", userId)
-      .in("service", PERSONAL_OAUTH_SERVICES);
-    const rows = personalRows.data || [];
-    const hasGmail = rows.some(
-      (r: { service: string; field_key: string }) =>
-        r.service === "gmail_oauth" && r.field_key === "refresh_token",
-    );
-    personal.push({
-      key: "gmail_oauth",
-      label: "Personal Gmail",
-      status: hasGmail ? "ok" : "warn",
-      detail: hasGmail
-        ? "Connected. Sends will go through your address."
-        : "Not connected — outbound mail will fall back to the shared address.",
-      cta: hasGmail
-        ? undefined
-        : { href: "/settings#integrations", label: "Connect Gmail" },
-    });
+    if (isSharedInboxTenant) {
+      // Shared-inbox tenants don't surface a personal Gmail item — every
+      // send goes via the tenant-shared identity (e.g. SunBiz's shared
+      // submissions@). Showing "Connect Gmail" here would tell the
+      // operator to do something that has no effect on their outbound.
+      personal.push({
+        key: "gmail_shared_inbox",
+        label: "Shared inbox",
+        status: "ok",
+        detail:
+          "This tenant uses a shared outbound identity. You don't need to connect personal Gmail; replies to deals will be CC'd to you automatically.",
+      });
+    } else {
+      const personalRows = await db
+        .from("user_integration_credentials")
+        .select("service,field_key")
+        .eq("tenant_id", tenantId)
+        .eq("user_id", userId)
+        .in("service", PERSONAL_OAUTH_SERVICES);
+      const rows = personalRows.data || [];
+      const hasGmail = rows.some(
+        (r: { service: string; field_key: string }) =>
+          r.service === "gmail_oauth" && r.field_key === "refresh_token",
+      );
+      personal.push({
+        key: "gmail_oauth",
+        label: "Personal Gmail",
+        status: hasGmail ? "ok" : "warn",
+        detail: hasGmail
+          ? "Connected. Sends will go through your address."
+          : "Not connected — outbound mail will fall back to the shared address.",
+        cta: hasGmail
+          ? undefined
+          : { href: "/settings#integrations", label: "Connect Gmail" },
+      });
+    }
   }
 
   if (!args.isOwnerOrAdmin || !tenantId) {
@@ -168,6 +206,10 @@ export async function loadReadinessReport(args: {
   // 4. Per-employee Gmail status (owner-visible — surfaces "Alex hasn't
   //    connected" without forcing the owner to chase). Skips owners
   //    since they're typically using the shared submissions@ address.
+  //    SKIPPED ENTIRELY for shared-inbox tenants since per-user OAuth
+  //    is a no-op under that model (every send goes via the shared
+  //    identity; the assigned-rep CC layer covers per-deal visibility).
+  if (!isSharedInboxTenant) {
   const profileRes = await db
     .from("user_profiles")
     .select("email,is_owner,auth_user_id")
@@ -212,6 +254,7 @@ export async function loadReadinessReport(args: {
       });
     }
   }
+  }  // close: if (!isSharedInboxTenant)
 
   return { personal, tenant };
 }
