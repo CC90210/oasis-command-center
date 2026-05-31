@@ -1,36 +1,21 @@
 /**
- * lib/seat-warning.ts — soft seat-limit advisory for tenant invites.
- *
- * SunBiz product decision #7 (TOMORROW.md, Option B). When an
- * operator invites a new teammate, the dashboard surfaces a soft
- * banner saying "you have N/M seats" so they know billing will
- * adjust on the next cycle. No hard block — Stripe metered billing
- * (when wired) handles the reconciliation.
- *
- * Plan limits are declared here. Tenants without a `seat_limit_soft`
- * value on their plan_tier get no warning.
+ * lib/seat-warning.ts — DB-touching wrapper around the pure policy in
+ * lib/seat-warning-policy. SunBiz product decision #7 (TOMORROW.md,
+ * Option B). When an operator invites a new teammate, the dashboard
+ * surfaces a soft banner saying "you have N/M seats" so they know
+ * billing will adjust on the next cycle. No hard block — Stripe
+ * metered billing (when wired) handles the reconciliation.
  */
 
 import "server-only";
 
 import { getServiceSupabase } from "@/lib/supabase-server";
+import {
+  classifySeatUsage,
+  type SeatWarning,
+} from "@/lib/seat-warning-policy";
 
-const SEAT_LIMITS_BY_PLAN: Record<string, number> = {
-  // Single-operator plans
-  free: 1,
-  // Small team — original SunBiz Phase-1 sizing
-  starter: 3,
-  growth: 10,
-  pro: 25,
-  // Enterprise = no soft cap
-};
-
-export type SeatWarning = {
-  used: number;
-  limit: number | null;
-  status: "ok" | "approaching" | "over";
-  message: string;
-};
+export type { SeatWarning } from "@/lib/seat-warning-policy";
 
 export async function computeSeatWarning(
   tenantId: string,
@@ -49,32 +34,5 @@ export async function computeSeatWarning(
   ]);
   const planTier = (tenantRes.data as { plan_tier: string | null } | null)?.plan_tier;
   const used = profilesRes.count || 0;
-  if (!planTier) return null;
-  const limit = SEAT_LIMITS_BY_PLAN[planTier];
-  if (limit === undefined) {
-    // Enterprise / unknown plan: no soft cap.
-    return null;
-  }
-  if (used <= limit - 1) {
-    return {
-      used,
-      limit,
-      status: "ok",
-      message: `${used} of ${limit} seats used on the ${planTier} plan.`,
-    };
-  }
-  if (used === limit) {
-    return {
-      used,
-      limit,
-      status: "approaching",
-      message: `${used} of ${limit} seats used. One more invite puts you over your plan — billing will adjust next cycle.`,
-    };
-  }
-  return {
-    used,
-    limit,
-    status: "over",
-    message: `${used} of ${limit} seats used — over the ${planTier} plan limit. Billing will adjust next cycle.`,
-  };
+  return classifySeatUsage({ used, planTier });
 }
