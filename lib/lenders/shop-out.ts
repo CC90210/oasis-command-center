@@ -87,6 +87,11 @@ export type ShopOutPlanRow = {
   rendered_subject: string;
   rendered_body: string;
   recipient_email: string | null;
+  /** Per-lender CC list — operator's global cc_emails + the lender's
+   *  stored submission_cc_emails (SOP-encoded routing). The shop-out
+   *  route persists this per-row so the bridge-side sender hits every
+   *  cc the SOP specifies without the operator having to retype them. */
+  recipient_cc_emails: string[];
 };
 
 /**
@@ -128,12 +133,28 @@ export async function buildShopOutPlan(input: ShopOutPlanInput): Promise<{
       min_time_in_business_months: typeof data.min_time_in_business_months === "number" ? data.min_time_in_business_months : undefined,
       fico_floor: typeof data.fico_floor === "number" ? data.fico_floor : undefined,
       sla_response_days: typeof data.sla_response_days === "number" ? data.sla_response_days : undefined,
+      submission_cc_emails: Array.isArray(data.submission_cc_emails)
+        ? (data.submission_cc_emails as unknown[])
+            .filter((s): s is string => typeof s === "string" && s.includes("@"))
+        : undefined,
     };
     const recipient = typeof data.contact === "string" ? data.contact : null;
     if (!recipient) missing_recipients.push(lender.name);
 
     const score = scoreLenderMatch(lender, input.application);
     const vars = { lender, application: input.application };
+
+    // Per-lender CC list = operator's global cc_emails ∪ lender's stored
+    // submission_cc_emails. De-duped + lower-cased so the same address
+    // doesn't show up twice if operator manually typed one the catalog
+    // already has.
+    const cc_emails = Array.from(
+      new Set(
+        [...input.cc_emails, ...(lender.submission_cc_emails ?? [])]
+          .map((e) => e.trim().toLowerCase())
+          .filter((e) => e && e.includes("@")),
+      ),
+    );
 
     plan.push({
       lender_id: lender.id,
@@ -145,6 +166,7 @@ export async function buildShopOutPlan(input: ShopOutPlanInput): Promise<{
       rendered_subject: renderSimple(subjectTemplate, vars),
       rendered_body: renderSimple(bodyTemplate, vars),
       recipient_email: recipient,
+      recipient_cc_emails: cc_emails,
     });
   }
 
@@ -169,6 +191,8 @@ export async function buildShopOutPlan(input: ShopOutPlanInput): Promise<{
 export async function recordShopOutThreads(input: {
   tenant_id: string;
   application_id: string;
+  /** Operator's global cc list — used as the fallback when an entry
+   *  doesn't carry its own per-lender cc list. */
   cc_emails: string[];
   entries: Array<{
     lender_id: string;
@@ -177,6 +201,11 @@ export async function recordShopOutThreads(input: {
     body?: string;
     sent: boolean;
     error?: string;
+    /** Per-lender CC list — when present, persisted instead of the global
+     *  `cc_emails` so the bridge-side sender hits the lender's stored
+     *  routing (Maison's rummi@, TBF's joe.v@, etc.) without the operator
+     *  retyping them every shop-out. */
+    cc_emails?: string[];
   }>;
   /** Attachments the operator confirmed on this shop-out. Same shape and
    *  validation the POST route accepts (tenant-scoped storage paths). */
@@ -209,7 +238,7 @@ export async function recordShopOutThreads(input: {
     subject: e.subject.slice(0, 500),
     body_template: e.body ?? null,
     attachments: attachmentsJson,
-    cc_emails: input.cc_emails,
+    cc_emails: e.cc_emails ?? input.cc_emails,
     owner_phone: input.owner_phone ?? null,
     // Errors (missing contact, match blocker) -> 'error'. Otherwise
     // 'pending' until the bridge-side sender (scripts/shop_out_sender.py,

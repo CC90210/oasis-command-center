@@ -218,6 +218,11 @@ export async function POST(
     // passed in this request. Migration 065 added the column.
     body: row.rendered_body,
     sent: false,  // physical send happens bridge-side once the daemon picks it up
+    // Per-row CC = operator's global cc list ∪ lender's stored
+    // submission_cc_emails (SOP routing). buildShopOutPlan computed the
+    // merge already; we just pass it through here so each row carries
+    // its own list to application_lender_threads.cc_emails.
+    cc_emails: row.recipient_cc_emails,
     error: !row.recipient_email
       ? "missing lender contact email"
       : row.blockers.length > 0

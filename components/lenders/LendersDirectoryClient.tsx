@@ -52,7 +52,41 @@ type LenderData = {
   common_decline_reasons: string[];
   active: boolean;
   last_updated: string;
+  // SOP §1 hard requirements (2026-05-31). Operator-fillable from this
+  // drawer; the shop_list filter + match-fitness scorer key off these.
+  tier: string;
+  paper_grades: string[];
+  position_min: number | null;
+  position_max: number | null;
+  defaults_policy: string;
+  max_negative_days: number | null;
+  submission_cc_emails: string[];
+  reverses_only: boolean;
 };
+
+const TIER_OPTIONS = [
+  { value: "", label: "—" },
+  { value: "A", label: "A — Premium box" },
+  { value: "B", label: "B — Workhorse" },
+  { value: "C", label: "C — Stacking-tolerant" },
+  { value: "D", label: "D — Sub-prime" },
+  { value: "Micro", label: "Micro" },
+] as const;
+
+const PAPER_GRADE_OPTIONS = [
+  { value: "A", label: "A" },
+  { value: "B", label: "B" },
+  { value: "C", label: "C" },
+  { value: "D", label: "D" },
+  { value: "JUNK", label: "JUNK" },
+] as const;
+
+const DEFAULTS_POLICY_OPTIONS = [
+  { value: "", label: "—" },
+  { value: "none", label: "None — no defaults accepted" },
+  { value: "satisfied_only", label: "Satisfied only" },
+  { value: "accepts", label: "Accepts (any)" },
+] as const;
 
 const PRODUCT_TYPES = [
   { value: "same_day_funding", label: "Same-day funding" },
@@ -124,6 +158,14 @@ function toLenderData(raw: Record<string, unknown>): LenderData {
     common_decline_reasons: arr(raw.common_decline_reasons),
     active: bool(raw.active),
     last_updated: str(raw.last_updated),
+    tier: str(raw.tier),
+    paper_grades: arr(raw.paper_grades),
+    position_min: num(raw.position_min),
+    position_max: num(raw.position_max),
+    defaults_policy: str(raw.defaults_policy),
+    max_negative_days: num(raw.max_negative_days),
+    submission_cc_emails: arr(raw.submission_cc_emails),
+    reverses_only: raw.reverses_only === true,
   };
 }
 
@@ -150,6 +192,14 @@ const BLANK_DATA: LenderData = {
   common_decline_reasons: [],
   active: true,
   last_updated: "",
+  tier: "",
+  paper_grades: [],
+  position_min: null,
+  position_max: null,
+  defaults_policy: "",
+  max_negative_days: null,
+  submission_cc_emails: [],
+  reverses_only: false,
 };
 
 /* -------------------------------------------------------------------------- */
@@ -760,6 +810,85 @@ function LenderDrawer({
                 />
               </Field>
             </div>
+          </Section>
+
+          {/* Section 2b: SOP §1 hard requirements — the structured fields
+              the shop_list filter + match-fitness scorer key off. Tier
+              is informational; paper_grades + position range + defaults
+              policy + max_negative_days are the actual filter gates;
+              reverses_only flags reverse-consolidation specialists. */}
+          <Section label="SOP §1 hard requirements">
+            <div className="grid grid-cols-2 gap-3">
+              <Field label="Tier">
+                <select
+                  value={form.tier}
+                  onChange={(e) => set("tier", e.target.value)}
+                  className="w-full px-2 py-1.5 rounded-md bg-bg-deep border border-bg-border text-fg text-[12.5px]"
+                >
+                  {TIER_OPTIONS.map((o) => (
+                    <option key={o.value} value={o.value}>
+                      {o.label}
+                    </option>
+                  ))}
+                </select>
+              </Field>
+              <Field label="Defaults policy">
+                <select
+                  value={form.defaults_policy}
+                  onChange={(e) => set("defaults_policy", e.target.value)}
+                  className="w-full px-2 py-1.5 rounded-md bg-bg-deep border border-bg-border text-fg text-[12.5px]"
+                >
+                  {DEFAULTS_POLICY_OPTIONS.map((o) => (
+                    <option key={o.value} value={o.value}>
+                      {o.label}
+                    </option>
+                  ))}
+                </select>
+              </Field>
+              <Field label="Position min (1 = 1st)">
+                <NumberInput
+                  value={form.position_min}
+                  onChange={(v) => set("position_min", v)}
+                  placeholder="1"
+                />
+              </Field>
+              <Field label="Position max (0 = no cap)">
+                <NumberInput
+                  value={form.position_max}
+                  onChange={(v) => set("position_max", v)}
+                  placeholder="5"
+                />
+              </Field>
+              <Field label="Max negative days">
+                <NumberInput
+                  value={form.max_negative_days}
+                  onChange={(v) => set("max_negative_days", v)}
+                  placeholder="5"
+                />
+              </Field>
+              <Field label="Reverses only">
+                <ToggleSwitch
+                  value={form.reverses_only}
+                  onChange={(v) => set("reverses_only", v)}
+                  labelOn="Reverses only"
+                  labelOff="Fresh capital OK"
+                />
+              </Field>
+            </div>
+            <Field label="Paper grades accepted">
+              <MultiSelect
+                options={PAPER_GRADE_OPTIONS}
+                value={form.paper_grades}
+                onChange={(v) => set("paper_grades", v)}
+              />
+            </Field>
+            <Field label="Submission CC emails">
+              <TagInput
+                tags={form.submission_cc_emails}
+                onChange={(v) => set("submission_cc_emails", v)}
+                placeholder="e.g. submissions@lender.com, paul@…"
+              />
+            </Field>
           </Section>
 
           {/* Section 3: Buy rate & range */}

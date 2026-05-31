@@ -40,6 +40,10 @@ export type LenderProfile = {
   defaults_policy?: "none" | "satisfied_only" | "accepts";
   max_negative_days?: number;
   reverses_only?: boolean;
+  /** Per-lender CC list — the SOP encodes routing like "submissions@<x>
+   * with cc rummi@" for Maison. The shop-out send path merges this with
+   * the operator's global cc list so the catalog routing flows end-to-end. */
+  submission_cc_emails?: string[];
 };
 
 export type ApplicationProfile = {
