@@ -34,15 +34,45 @@
  *   { ok, record: TenantRecord }   on success
  *   { ok: false, error: string }   with a descriptive status code
  *
- * Rate limiting: not enforced at this layer (yet). Daemons run with
- * known cadences and the bridge token gates abuse. Add a per-token
- * rate limiter when client deployments outnumber the operator count.
+ * Rate limiting: IP-keyed token-bucket gate (lib/rate-limit) runs
+ * BEFORE the bridge-token check so brute-forcers can't probe hash
+ * comparison timing. Writes get 30 capacity + 0.5/sec refill — well
+ * above legit daemon cadence but tight enough to make a flood loud.
  */
 
 import { NextRequest, NextResponse } from "next/server";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { bad, sha256 } from "@/lib/api-helpers";
 import { createRecord, updateRecord, RecordsError } from "@/lib/manifest/data";
+import { rateLimit } from "@/lib/rate-limit";
+
+function clientIp(req: NextRequest): string {
+  const xff = req.headers.get("x-forwarded-for") || "";
+  const first = xff.split(",")[0]?.trim();
+  if (first) return first;
+  return req.headers.get("x-real-ip") || "unknown";
+}
+
+/** Token-bucket gate — applied BEFORE the bridge token check so
+ *  brute-forcers can't probe the hash-comparison timing. Writes get
+ *  a tighter ceiling than reads because a misbehaving daemon could
+ *  flood the records table; legit daemons fire mutations at known
+ *  cadences well under this rate. */
+function checkRateLimit(req: NextRequest): NextResponse | null {
+  const ip = clientIp(req);
+  const rl = rateLimit({
+    key: `bridge.records:${ip}`,
+    capacity: 30,
+    refillPerSec: 0.5,
+  });
+  if (!rl.allowed) {
+    return NextResponse.json(
+      { ok: false, error: "rate_limited", reset_in: rl.resetIn },
+      { status: 429 },
+    );
+  }
+  return null;
+}
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -94,6 +124,8 @@ export async function POST(
   req: NextRequest,
   ctx: { params: Promise<{ entity: string }> },
 ) {
+  const limited = checkRateLimit(req);
+  if (limited) return limited;
   const auth = await resolveBridgePairing(req);
   if (!auth.ok) return bad(auth.status, auth.message);
   const { entity } = await ctx.params;
@@ -132,6 +164,8 @@ export async function PATCH(
   req: NextRequest,
   ctx: { params: Promise<{ entity: string }> },
 ) {
+  const limited = checkRateLimit(req);
+  if (limited) return limited;
   const auth = await resolveBridgePairing(req);
   if (!auth.ok) return bad(auth.status, auth.message);
   const { entity } = await ctx.params;

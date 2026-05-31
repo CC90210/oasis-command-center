@@ -46,7 +46,6 @@ export async function getActiveProfile(): Promise<UserProfile | null> {
   const db = getServiceSupabase();
   const user = await getSessionUser();
 
-  // Prefer authed user; fall back to OPERATOR_EMAIL (CC's legacy single-tenant default)
   if (user?.id) {
     const r = await db.from("user_profiles").select("*").eq("auth_user_id", user.id).limit(20);
     const rows = ((r.data || []) as ActiveUserProfile[]) || [];
@@ -59,7 +58,16 @@ export async function getActiveProfile(): Promise<UserProfile | null> {
     }
   }
 
-  const fallbackEmail = process.env.OPERATOR_EMAIL || "conaugh@oasisai.work";
+  // OPERATOR_EMAIL fallback is single-tenant only. On a multi-tenant
+  // deploy any unauthed render would return CC's profile to whoever's
+  // looking at the page — cross-tenant leak. Gate behind an explicit
+  // env opt-in so production deploys fail closed; CC's local dev can
+  // set OPERATOR_EMAIL_FALLBACK_ENABLED=true to keep the old behavior.
+  if (process.env.OPERATOR_EMAIL_FALLBACK_ENABLED !== "true") {
+    return null;
+  }
+  const fallbackEmail = process.env.OPERATOR_EMAIL;
+  if (!fallbackEmail) return null;
   const r = await db.from("user_profiles").select("*").eq("email", fallbackEmail).maybeSingle();
   if (r.error || !r.data) return null;
   return r.data as UserProfile;

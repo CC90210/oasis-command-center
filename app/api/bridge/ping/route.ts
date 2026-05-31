@@ -31,6 +31,14 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { bad, sha256 } from "@/lib/api-helpers";
+import { rateLimit } from "@/lib/rate-limit";
+
+function clientIp(req: NextRequest): string {
+  const xff = req.headers.get("x-forwarded-for") || "";
+  const first = xff.split(",")[0]?.trim();
+  if (first) return first;
+  return req.headers.get("x-real-ip") || "unknown";
+}
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -42,6 +50,22 @@ type ServiceReport = {
 };
 
 export async function POST(req: NextRequest) {
+  // Brute-force backstop BEFORE the token check so a guesser hammering
+  // bridge_tokens can't time hash lookups. Legit bridges hit at most
+  // 1 ping per 60s; the bucket allows generous bursts (paired clients
+  // sometimes retry after a network blip) but caps sustained rate.
+  const callerIp = clientIp(req);
+  const rl = rateLimit({
+    key: `bridge.ping:${callerIp}`,
+    capacity: 60,
+    refillPerSec: 1,
+  });
+  if (!rl.allowed) {
+    return NextResponse.json(
+      { ok: false, error: "rate_limited", reset_in: rl.resetIn },
+      { status: 429 },
+    );
+  }
   const auth = req.headers.get("authorization") || "";
   if (!auth.toLowerCase().startsWith("bearer ")) {
     return bad(401, "Bearer bridge token required");
