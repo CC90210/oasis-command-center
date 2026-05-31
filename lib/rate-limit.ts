@@ -1,17 +1,24 @@
 /**
  * In-memory token-bucket rate limiter.
  *
- * Per-tenant ceiling on /api/chat to keep a runaway script from burning
- * through the platform key in the operator-fallback path. Buckets live in
- * the serverless-function instance memory; Vercel reuses warm instances
- * for ~minutes, so this is "good enough" without a Redis dependency.
+ * Originally a per-tenant ceiling on /api/chat to keep a runaway script
+ * from burning through the platform key in the operator-fallback path.
+ * Also used by the bridge-token endpoints (/api/bridge/ping, /api/bridge/
+ * records, /api/cron-jobs/poll) to backstop brute-force attempts BEFORE
+ * the SHA-256 token comparison runs.
  *
- * For client-tenant deploys with their own keys, the upstream provider is
- * the real ceiling — this limiter mainly protects YOUR platform key when
- * an admin bypasses BYO via operatorFallback().
+ * Buckets live in the serverless-function instance memory. Vercel reuses
+ * warm instances for ~minutes, so per-instance accuracy is "good enough"
+ * for the bridge brute-force surface — a token guesser racing across 10
+ * Vercel instances effectively gets 10x the documented rate, but legit
+ * bridges are pinned to one instance per warm window so they see the
+ * documented limits.
  *
- * Replace with @upstash/ratelimit + @upstash/redis if you ever need
- * cross-instance accuracy or a dashboard view of who's hitting limits.
+ * If/when cross-instance accuracy matters (multiple bridges per tenant,
+ * larger Vercel concurrency, dashboard view of who's hitting limits),
+ * replace this with @upstash/ratelimit + @upstash/redis. Adds one
+ * dependency and a Redis-cost line item; no API surface change beyond
+ * the function signature.
  */
 
 type Bucket = {

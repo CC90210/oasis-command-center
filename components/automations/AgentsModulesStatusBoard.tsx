@@ -153,17 +153,13 @@ const STATUS_LABEL: Record<ModuleStatus, string> = {
 };
 
 /**
- * Module list per tenant slug. Tenants without an entry get an empty
- * list — the board returns null and nothing renders. This prevents
- * the SunBiz funding-flow modules from leaking onto OASIS / SUGA /
- * any other tenant view (the 2026-05-25 leak CC flagged: signed in
- * as conaugh@oasisai.work on /automations was showing Email Offer
- * Scanner / Shopping Out Sender / Lender Matching Agent etc. — none
- * of which exist for OASIS).
+ * Module list per tenant slug. Empty entry = board returns null.
  *
- * Adding a new tenant's module list is a one-line entry here. OASIS
- * intentionally has no entry — its automation surface is the empire
- * cron jobs visible below (operator-only via isOperatorEmail).
+ * TODO(architectural): move this map into the manifest schema so
+ * adding a tenant is a manifest edit, not a code edit. Blocker: the
+ * Module type carries `icon: ReactComponent` which is non-serializable.
+ * The right shape is module_keys: string[] in the manifest + a
+ * KEY_TO_ICON registry here. Lift when a third tenant ships.
  */
 const MODULES_BY_TENANT: Record<string, Module[]> = {
   sun: SUNBIZ_MODULES,

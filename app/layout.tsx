@@ -262,9 +262,9 @@ export default async function RootLayout({
               primaryAgent={
                 // Same gate — only force manifest primary agent when
                 // the operator is previewing a tenant they don't own.
-                demoMode || (pathOverrideSlug && pathOverrideSlug !== tenantProfileSlug)
-                  ? manifestPrimaryAgentSlug(manifest)
-                  : profile?.primary_agent || manifestPrimaryAgentSlug(manifest)
+                (demoMode || (pathOverrideSlug && pathOverrideSlug !== tenantProfileSlug))
+                  ? (manifestPrimaryAgentSlug(manifest) ?? "bravo")
+                  : (profile?.primary_agent || manifestPrimaryAgentSlug(manifest) || "bravo")
               }
               primaryAgentLive={
                 // Suppress the live indicator in preview mode — it

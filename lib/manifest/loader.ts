@@ -123,10 +123,15 @@ export function manifestLogoToSidebarLogo(
 }
 
 /**
- * Pull the slug that drives a tenant's manifest — same precedence the old
- * layout used (demo cookie/path > tenant custom field > tenant slug > default).
+ * Pull the slug that drives a tenant's manifest. Returns null when the
+ * manifest declares no agents — caller decides the right fallback for
+ * its surface. Hardcoded "bravo" fallback was removed: on a SunBiz
+ * tenant manifest mid-edit (or any tenant whose agents list temporarily
+ * empties) the previous code returned CC's primary agent slug as
+ * though it belonged to that tenant, which is a cross-tenant label
+ * leak on per-tenant surfaces.
  */
-export function manifestPrimaryAgentSlug(m: TenantManifest): string {
-  return primaryAgent(m)?.slug || "bravo";
+export function manifestPrimaryAgentSlug(m: TenantManifest): string | null {
+  return primaryAgent(m)?.slug ?? null;
 }
 

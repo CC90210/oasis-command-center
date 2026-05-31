@@ -85,11 +85,13 @@ function chooseActiveProfile(rows: ActiveUserProfile[], email: string | null | u
     ? rows.filter((row) => (row.email || "").trim().toLowerCase() === normalizedEmail)
     : [];
   const candidates = exactEmail.length > 0 ? exactEmail : rows;
+  // Architect P1 #11: the original "brand.includes('oasis')" tiebreaker
+  // baked CC's empire identity into the chooser, so a user with profiles
+  // across multiple tenants always resolved to OASIS even when their
+  // current session was a different tenant. Stripped the brand check —
+  // ownership + onboarding-completion is the right precedence. Callers
+  // that need tenant-explicit resolution should pass tenant_id directly.
   return (
-    candidates.find((row) => {
-      const brand = (row.brand || "").toLowerCase();
-      return row.is_owner && row.primary_agent === "bravo" && brand.includes("oasis");
-    }) ||
     candidates.find((row) => row.is_owner && row.onboarding_completed_at) ||
     candidates.find((row) => row.onboarding_completed_at) ||
     candidates.find((row) => row.is_owner) ||
@@ -486,9 +488,13 @@ export async function recentDecisions(
   if (!tenantId) return [];
   if (agentNames.length === 0) return [];
   const db = getServiceSupabase();
+  // Migration 086 added tenant_id — primary scope now, agent_name
+  // remains as a secondary filter for "decisions from agents I have
+  // enabled" rather than the cross-tenant proxy it used to be.
   const r = await db
     .from("agent_decisions")
     .select("*")
+    .eq("tenant_id", tenantId)
     .in("agent_name", agentNames)
     .order("created_at", { ascending: false })
     .limit(limit);

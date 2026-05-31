@@ -108,9 +108,11 @@ export async function GET() {
   }
   const tenantJobs = (tenantQuery.data || []).map((j) => ({ ...j, source: "tenant" as const }));
 
-  // Empire lane — operator-only. cron_jobs is single-tenant (CC's empire);
-  // exposing it to client tenants would leak unrelated automations. Match
-  // by signed-in user email against OPERATOR_EMAIL / ADMIN_EMAILS.
+  // Empire lane — operator-only. cron_jobs is now tenant-scoped (migration
+  // 084), so the operator's tenantId is the canonical filter. Pre-084 we
+  // ran an inferEmpireAgentKey heuristic + EMPIRE_AGENT_ALLOWLIST defense
+  // to suppress tenant-scoped rows that leaked in; the column makes both
+  // unnecessary.
   let empireJobs: ReturnType<typeof normalizeEmpireRow>[] = [];
   if (isOperatorEmail(user.email)) {
     const empireQuery = await db
@@ -118,18 +120,10 @@ export async function GET() {
       .select(
         "id, name, description, schedule, action_type, action_config, is_active, last_run_at, last_result, next_run_at, run_count, created_at",
       )
+      .eq("tenant_id", tenantId)
       .order("created_at", { ascending: false });
-    // cron_jobs has predated the Phase I tenant table for months; if it's
-    // missing the empire stack just isn't deployed in this env (e.g. a
-    // fresh client deploy). Quietly skip rather than 503 — tenant lane
-    // already returned.
     if (!empireQuery.error && empireQuery.data) {
-      empireJobs = (empireQuery.data as EmpireCronRow[])
-        .map(normalizeEmpireRow)
-        // Suppress tenant-scoped rows that leaked into the empire table
-        // so they never reach CC's UI. The bridge cron_runner is the
-        // execution-side guard; this is the read-side guard.
-        .filter((row) => EMPIRE_AGENT_ALLOWLIST.has(row.agent_key));
+      empireJobs = (empireQuery.data as EmpireCronRow[]).map(normalizeEmpireRow);
     }
   }
 
@@ -152,15 +146,13 @@ export async function GET() {
  */
 /**
  * Empire cron_jobs has no agent_key column — every row was historically
- * "Bravo's empire scheduler". Now that the dashboard groups by agent
- * (CEO/CFO/CMO), we infer the owning agent from the job name / action_type:
+ * "Bravo's empire scheduler". Infer the owning agent from the job name
+ * for UI grouping (CEO/CFO/CMO sections). Tenant scoping is handled by
+ * the .eq("tenant_id", ...) filter on the query, not by this function.
  *
  *   - "Atlas *" name OR action_type starting with "atlas_" → atlas (CFO)
  *   - "Maven *" name OR action_type starting with "maven_" → maven (CMO)
- *   - "Aura *" / "Morning Pow Wow" (Aura's voice note) → aura (life-coach)
- *   - "SunBiz *" / "Solara *" / "Helios *" → tenant-scoped (filtered out
- *     by EMPIRE_AGENT_ALLOWLIST below — these belong on the SunBiz portal,
- *     not CC's empire view)
+ *   - "Aura *" / "Morning Pow Wow" → aura (life-coach)
  *   - everything else → bravo (CEO — business ops)
  */
 function inferEmpireAgentKey(name: string, actionType: string | null): string {
@@ -169,19 +161,8 @@ function inferEmpireAgentKey(name: string, actionType: string | null): string {
   if (n.startsWith("atlas") || t.startsWith("atlas_")) return "atlas";
   if (n.startsWith("maven") || t.startsWith("maven_")) return "maven";
   if (n.startsWith("aura") || n.includes("pow wow") || t.startsWith("morning_powwow")) return "aura";
-  if (n.startsWith("sunbiz") || n.startsWith("solara") || n.startsWith("helios")) return "sunbiz";
   return "bravo";
 }
-
-/**
- * Rows whose inferred agent isn't in this set are tenant-scoped automations
- * that leaked into the empire cron_jobs table (most commonly SunBiz crons
- * that predate the multi-root manifest split). They MUST NOT render in CC's
- * Automations tab — they belong to a different tenant's portal.
- *
- * If you add a new empire agent (rare), append it here.
- */
-const EMPIRE_AGENT_ALLOWLIST = new Set(["bravo", "atlas", "maven", "aura"]);
 
 function normalizeEmpireRow(row: EmpireCronRow) {
   // last_result is a free-form text column written by scripts/scheduler.py.

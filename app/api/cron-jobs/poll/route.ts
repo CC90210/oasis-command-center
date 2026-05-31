@@ -104,31 +104,21 @@ export async function POST(req: NextRequest) {
   const errorText = typeof body?.error === "string" ? body.error.slice(0, 2000) : null;
 
   const db = getServiceSupabase();
-  // Pull current run_count so the increment is atomic-ish (Supabase doesn't
-  // support raw SQL increments through the JS client without an RPC).
-  // Race condition tolerated — two ticks within the same second on the
-  // same job are pathological and operators noticing a count-of-1 short
-  // is fine.
-  const cur = await db
-    .from("tenant_cron_jobs")
-    .select("run_count")
-    .eq("id", jobId)
-    .eq("tenant_id", bridge.tenantId)
-    .maybeSingle();
-  if (cur.error || !cur.data) return bad(404, "job_not_found_or_other_tenant");
-  const runCount = ((cur.data as { run_count?: number }).run_count || 0) + 1;
-
-  const { error } = await db
-    .from("tenant_cron_jobs")
-    .update({
-      last_run_at: new Date().toISOString(),
-      last_run_status: status,
-      last_run_output: output,
-      last_run_error: errorText,
-      run_count: runCount,
-    })
-    .eq("id", jobId)
-    .eq("tenant_id", bridge.tenantId);
-  if (error) return NextResponse.json({ ok: false, error: error.message }, { status: 500 });
-  return NextResponse.json({ ok: true, job_id: jobId, run_count: runCount });
+  // Migration 087 — atomic single-statement update via record_tenant_cron_run.
+  // Previous SELECT-then-UPDATE pattern raced under multi-machine pairing.
+  const rpc = await db.rpc("record_tenant_cron_run", {
+    p_job_id: jobId,
+    p_tenant_id: bridge.tenantId,
+    p_status: status,
+    p_output: output,
+    p_error: errorText,
+  });
+  if (rpc.error) {
+    return NextResponse.json({ ok: false, error: rpc.error.message }, { status: 500 });
+  }
+  const result = rpc.data as { ok: boolean; error?: string; run_count?: number } | null;
+  if (!result?.ok) {
+    return bad(404, result?.error || "job_not_found_or_other_tenant");
+  }
+  return NextResponse.json({ ok: true, job_id: jobId, run_count: result.run_count });
 }
