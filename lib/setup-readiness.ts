@@ -37,21 +37,14 @@ const PERSONAL_OAUTH_SERVICES = ["gmail_oauth"];
  * Stripe is universal billing; JotForm matters for SunBiz intake but
  * is harmless to flag missing on OASIS).
  */
+import { isSharedInboxTenant as checkSharedInbox } from "@/lib/shared-inbox-tenants";
+
 const TENANT_REQUIRED_SERVICES: { service: string; label: string }[] = [
   { service: "anthropic", label: "Anthropic (Claude API)" },
   { service: "smtp", label: "SMTP relay (outbound email)" },
   { service: "stripe", label: "Stripe (billing)" },
   { service: "jotform", label: "JotForm (intake forms)" },
 ];
-
-// Tenants on the shared-inbox model — every outbound email fires from the
-// tenant-shared Gmail/SMTP identity, no per-user OAuth. Mirrors the
-// `_SHARED_INBOX_SLUGS` set in CEO-Agent's user_gmail_oauth.py. When the
-// tenant is on this list, the readiness report shows a "shared inbox
-// configured" status instead of the "Connect Gmail" CTA — connecting
-// personal Gmail is unnecessary and would mislead the operator. Promote
-// to manifest/tenant-config when a third tenant adopts the same model.
-const SHARED_INBOX_SLUGS = new Set<string>(["submissions"]);
 
 export async function loadReadinessReport(args: {
   tenantId: string | null;
@@ -75,7 +68,7 @@ export async function loadReadinessReport(args: {
       .maybeSingle();
     tenantSlug = (tenantRes.data as { slug: string | null } | null)?.slug ?? null;
   }
-  const isSharedInboxTenant = !!tenantSlug && SHARED_INBOX_SLUGS.has(tenantSlug);
+  const isSharedInboxTenant = checkSharedInbox(tenantSlug);
 
   const personal: ReadinessItem[] = [];
   if (tenantId && userId) {
@@ -204,12 +197,28 @@ export async function loadReadinessReport(args: {
   });
 
   // 4. Per-employee Gmail status (owner-visible — surfaces "Alex hasn't
-  //    connected" without forcing the owner to chase). Skips owners
-  //    since they're typically using the shared submissions@ address.
-  //    SKIPPED ENTIRELY for shared-inbox tenants since per-user OAuth
-  //    is a no-op under that model (every send goes via the shared
-  //    identity; the assigned-rep CC layer covers per-deal visibility).
+  //    connected" without forcing the owner to chase). Skipped entirely
+  //    for shared-inbox tenants since per-user OAuth is a no-op under
+  //    that model (every send goes via the shared identity; the
+  //    assigned-rep CC layer covers per-deal visibility).
   if (!isSharedInboxTenant) {
+    const teamGmailItem = await checkTeamGmail(db, tenantId);
+    if (teamGmailItem) tenant.push(teamGmailItem);
+  }
+
+  return { personal, tenant };
+}
+
+/**
+ * Audit per-employee Gmail OAuth connection state for the owner-visible
+ * "Team Gmail" readiness item. Returns null when the tenant has no
+ * employees to audit. Owners are excluded since they're typically using
+ * the shared submissions@ address even on per-user-OAuth tenants.
+ */
+async function checkTeamGmail(
+  db: ReturnType<typeof getServiceSupabase>,
+  tenantId: string,
+): Promise<ReadinessItem | null> {
   const profileRes = await db
     .from("user_profiles")
     .select("email,is_owner,auth_user_id")
@@ -219,42 +228,38 @@ export async function loadReadinessReport(args: {
     is_owner: boolean;
     auth_user_id: string | null;
   }[]).filter((u) => !u.is_owner && u.auth_user_id);
-  if (employees.length > 0) {
-    const userIds = employees.map((u) => u.auth_user_id as string);
-    const credsRes = await db
-      .from("user_integration_credentials")
-      .select("user_id,service,field_key")
-      .eq("tenant_id", tenantId)
-      .eq("service", "gmail_oauth")
-      .in("user_id", userIds);
-    const connected = new Set<string>();
-    for (const row of (credsRes.data || []) as {
-      user_id: string;
-      field_key: string;
-    }[]) {
-      if (row.field_key === "refresh_token") connected.add(row.user_id);
-    }
-    const unconnected = employees.filter(
-      (u) => !connected.has(u.auth_user_id as string),
-    );
-    if (unconnected.length === 0) {
-      tenant.push({
-        key: "tenant.team_gmail",
-        label: "Team Gmail",
-        status: "ok",
-        detail: `All ${employees.length} employee(s) have Gmail connected.`,
-      });
-    } else {
-      tenant.push({
-        key: "tenant.team_gmail",
-        label: "Team Gmail",
-        status: "warn",
-        detail: `${unconnected.length} of ${employees.length} employee(s) not connected: ${unconnected.map((u) => u.email).join(", ")}`,
-        cta: { href: "/team", label: "Open team" },
-      });
-    }
-  }
-  }  // close: if (!isSharedInboxTenant)
+  if (employees.length === 0) return null;
 
-  return { personal, tenant };
+  const userIds = employees.map((u) => u.auth_user_id as string);
+  const credsRes = await db
+    .from("user_integration_credentials")
+    .select("user_id,service,field_key")
+    .eq("tenant_id", tenantId)
+    .eq("service", "gmail_oauth")
+    .in("user_id", userIds);
+  const connected = new Set<string>();
+  for (const row of (credsRes.data || []) as {
+    user_id: string;
+    field_key: string;
+  }[]) {
+    if (row.field_key === "refresh_token") connected.add(row.user_id);
+  }
+  const unconnected = employees.filter(
+    (u) => !connected.has(u.auth_user_id as string),
+  );
+  if (unconnected.length === 0) {
+    return {
+      key: "tenant.team_gmail",
+      label: "Team Gmail",
+      status: "ok",
+      detail: `All ${employees.length} employee(s) have Gmail connected.`,
+    };
+  }
+  return {
+    key: "tenant.team_gmail",
+    label: "Team Gmail",
+    status: "warn",
+    detail: `${unconnected.length} of ${employees.length} employee(s) not connected: ${unconnected.map((u) => u.email).join(", ")}`,
+    cta: { href: "/team", label: "Open team" },
+  };
 }

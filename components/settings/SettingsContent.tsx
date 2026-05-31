@@ -55,6 +55,7 @@ import { chatAgentKeys } from "@/lib/agent-personas";
 import { resolveClientProfileSlug } from "@/lib/client-profiles";
 import { getManifest } from "@/lib/manifest/loader";
 import { visibleIntegrationsForTenant } from "@/lib/integrations-registry";
+import { isSharedInboxTenant } from "@/lib/shared-inbox-tenants";
 import { resolveAgentKey } from "@/lib/agents";
 import { isOperatorEmail } from "@/lib/operator-credentials";
 import { getSessionUser } from "@/lib/supabase-server";
@@ -214,10 +215,17 @@ export async function SettingsContent({
               per-user credentials section. Today this hosts Gmail OAuth
               so each employee can send mail from their own address.
               Tenant-shared credentials (TextTorrent, Kixie, etc.) stay
-              in the IntegrationKeysPanel above. */}
-          <SafeBoundary label="Personal integrations">
-            <PersonalIntegrationsPanel />
-          </SafeBoundary>
+              in the IntegrationKeysPanel above.
+              SunBiz directive 2026-05-31: hidden for shared-inbox tenants
+              since per-user OAuth has no effect on outbound (send_gateway
+              ignores it for these tenants — see user_gmail_oauth.py
+              _SHARED_INBOX_SLUGS). Showing the panel would tell the
+              operator to do something that doesn't change their sends. */}
+          {!isSharedInboxTenant(tenant?.slug ?? null) && (
+            <SafeBoundary label="Personal integrations">
+              <PersonalIntegrationsPanel />
+            </SafeBoundary>
+          )}
 
           {canManageTenant && (
             <Card
