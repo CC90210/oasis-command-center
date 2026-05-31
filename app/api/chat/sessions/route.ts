@@ -96,24 +96,28 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ ok: true, sessions: [] });
   }
 
-  // For each session, find the last assistant message + count so the
-  // sidebar can show preview text + how busy each thread is. One
-  // round-trip per session would be N+1; instead pull all the
-  // session_ids' messages in one query and group client-side.
+  // For each session, find the last message preview so the sidebar can
+  // show a hint of the conversation. One round-trip per session would be
+  // N+1; instead pull all session_ids' recent messages in one query and
+  // group client-side. The limit is `sessionIds.length * 2` — enough to
+  // pick up at least one message per session even with skew, half the
+  // payload of the prior `* 4`. `role` is omitted (unused in the loop).
+  // `message_count` is approximate: it counts what fell within this
+  // capped window, not the true row count. The /chat/messages route
+  // serves the authoritative count when the session is opened.
   const sessionIds = rows.map((r) => r.id);
   const { data: latestMessages } = await service
     .from("chat_messages")
-    .select("session_id, role, content, created_at")
+    .select("session_id, content, created_at")
     .in("session_id", sessionIds)
     .order("created_at", { ascending: false })
-    .limit(sessionIds.length * 4); // grab the last ~4 messages per session
+    .limit(sessionIds.length * 2);
 
   // Group by session and pull the most recent message preview per id.
   const previewBySession = new Map<string, { preview: string; lastMessageAt: string }>();
   const countBySession = new Map<string, number>();
   for (const m of (latestMessages || []) as Array<{
     session_id: string;
-    role: string;
     content: string;
     created_at: string;
   }>) {

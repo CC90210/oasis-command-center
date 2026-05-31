@@ -75,8 +75,12 @@ async function fetchFromSupabaseMirror() {
           "agent_name, tick_count, last_tick_at, working_memory, health_status",
         )
         .order("last_tick_at", { ascending: false }),
-      db.from("session_logs").select("id", { count: "exact", head: true }),
-      db.from("agent_events").select("id", { count: "exact", head: true }),
+      // `count: "estimated"` reads pg_class.reltuples — O(1), index-only,
+      // no full table scan. The dashboard health view shows "~12,400" not
+      // "12,387" and that's fine; both tables grow continuously and an
+      // exact count forced a sequential scan on every load.
+      db.from("session_logs").select("id", { count: "estimated", head: true }),
+      db.from("agent_events").select("id", { count: "estimated", head: true }),
       db
         .from("agent_events")
         .select("published_at, source_agent, event_type")

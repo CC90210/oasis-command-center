@@ -56,35 +56,38 @@ export async function GET(
         ? ((record.data as Record<string, unknown>).lead_id as string)
         : id;
 
+  // Documents and the linked application have no data dependency on each
+  // other — fire them in parallel so the drawer-open trip is one DB
+  // round-trip wide, not two. When the drawer is opened on an application
+  // the record itself IS the application, so we skip the listRecords call.
   const db = getServiceSupabase();
-  const docsRes = docLeadId
-    ? await db
+  const docsPromise = docLeadId
+    ? db
         .from("lead_documents")
         .select("id, filename, mime_type, size_bytes, doc_type, uploaded_by, uploaded_at")
         .eq("tenant_id", tenantId)
         .eq("lead_id", docLeadId)
         .order("uploaded_at", { ascending: false })
-    : { data: [] as unknown[], error: null };
+    : Promise.resolve({ data: [] as unknown[], error: null });
 
-  // Linked application for the Lenders tab — only when the drawer was
-  // opened on a lead. When opened on an application, the record itself
-  // is the application.
+  const appPromise =
+    entity === "lead"
+      ? listRecords({
+          tenant_id: tenantId,
+          entity: "application",
+          where: { lead_id: id },
+          limit: 1,
+        }).catch(() => ({ rows: [] }))
+      : Promise.resolve({ rows: [{ id: record.id, data: record.data }] });
+
+  const [docsRes, apps] = await Promise.all([docsPromise, appPromise]);
+
   let linkedApplication: { id: string; data: Record<string, unknown> } | null = null;
-  if (entity === "lead") {
-    const apps = await listRecords({
-      tenant_id: tenantId,
-      entity: "application",
-      where: { lead_id: id },
-      limit: 1,
-    }).catch(() => ({ rows: [] }));
-    if (apps.rows[0]) {
-      linkedApplication = {
-        id: apps.rows[0].id,
-        data: apps.rows[0].data as Record<string, unknown>,
-      };
-    }
-  } else {
-    linkedApplication = { id: record.id, data: record.data as Record<string, unknown> };
+  if (apps.rows[0]) {
+    linkedApplication = {
+      id: apps.rows[0].id,
+      data: apps.rows[0].data as Record<string, unknown>,
+    };
   }
 
   return NextResponse.json({

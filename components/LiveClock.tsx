@@ -43,8 +43,34 @@ export function LiveClock({ initialDateKey }: { initialDateKey: string }) {
       }
     };
     tick();
-    const id = setInterval(tick, 30_000);
-    return () => clearInterval(id);
+    // Only schedule ticks while the tab is visible. Background tabs don't
+    // need a re-render every 30s and modern browsers throttle setInterval
+    // anyway — explicit visibility handling means no zombie React state
+    // updates and a clean catch-up tick the moment the tab returns.
+    let id: ReturnType<typeof setInterval> | null = null;
+    const start = () => {
+      if (id === null) id = setInterval(tick, 30_000);
+    };
+    const stop = () => {
+      if (id !== null) {
+        clearInterval(id);
+        id = null;
+      }
+    };
+    const onVisibility = () => {
+      if (document.hidden) {
+        stop();
+      } else {
+        tick();
+        start();
+      }
+    };
+    start();
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      document.removeEventListener("visibilitychange", onVisibility);
+      stop();
+    };
   }, [initialDateKey, router]);
 
   const dateLabel = fmt(
