@@ -15,6 +15,7 @@ import { Card, PageHeader, Stat, Tag } from "@/components/Card";
 import { safe } from "@/lib/api-helpers";
 import { getMyAssignedRecords } from "@/lib/queries/merchant-summary";
 import { MyActiveDealsCard } from "./MyActiveDealsCard";
+import { TodaysCallsCard, getTodaysCalls } from "./TodaysCallsCard";
 import {
   getActiveProfile,
   getLeadsForTenant,
@@ -162,8 +163,8 @@ export async function SunBizDashboard({ demoMode = false }: Props) {
   // by). Empty profile / null auth_user_id → empty list, widget shows
   // the empty state explaining how assignment works.
   const myUserId = profile?.auth_user_id || null;
-  const [liveHealthRows, liveLeads, liveRenewals, myAssigned] = demoMode
-    ? [DEMO_HEALTH, SUNBIZ_DEMO_LEADS, SUNBIZ_DEMO_RENEWALS_SUMMARY, []]
+  const [liveHealthRows, liveLeads, liveRenewals, myAssigned, todaysCalls] = demoMode
+    ? [DEMO_HEALTH, SUNBIZ_DEMO_LEADS, SUNBIZ_DEMO_RENEWALS_SUMMARY, [], []]
     : await Promise.all([
         safe("sun.dashboard.health", integrationsHealth(tenantId || null), [] as IntegrationHealth[]),
         tenantId ? safe("sun.dashboard.leads", getLeadsForTenant(tenantId, 100), [] as Lead[]) : Promise.resolve([] as Lead[]),
@@ -172,6 +173,11 @@ export async function SunBizDashboard({ demoMode = false }: Props) {
           : Promise.resolve(SUNBIZ_DEMO_RENEWALS_SUMMARY as RenewalsSummary),
         tenantId && myUserId
           ? safe("sun.dashboard.my_assigned", getMyAssignedRecords(tenantId, myUserId, { limit: 30 }), [])
+          : Promise.resolve([]),
+        // Phase 3 of TT + Kixie embedding (2026-06-01): per-employee
+        // call activity for today, scoped via actor_user_id.
+        tenantId && myUserId
+          ? safe("sun.dashboard.todays_calls", getTodaysCalls(tenantId, myUserId), [])
           : Promise.resolve([]),
       ]);
 
@@ -211,6 +217,13 @@ export async function SunBizDashboard({ demoMode = false }: Props) {
           screenshots. */}
       {!demoMode && (
         <MyActiveDealsCard records={myAssigned} displayName={clientName} />
+      )}
+
+      {/* Today's calls tile — Phase 3 of TT + Kixie embedding
+          (2026-06-01). Shows per-employee call count + talk time +
+          outcome breakdown for today. */}
+      {!demoMode && (
+        <TodaysCallsCard rows={todaysCalls} />
       )}
 
       <section className="grid gap-6 xl:grid-cols-[1.45fr,0.95fr]">

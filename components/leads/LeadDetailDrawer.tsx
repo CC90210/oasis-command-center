@@ -20,7 +20,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 // useRef intentionally imported for the file-input ref in DocumentsTab.
 import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
-import { X, FileText, ImageIcon, Phone, Mail, ShoppingBag } from "lucide-react";
+import { X, FileText, ImageIcon, Phone, Mail, ShoppingBag, Loader2 } from "lucide-react";
 import { LeadTimelinePanel } from "./LeadTimelinePanel";
 import { AssignmentControl } from "./AssignmentControl";
 import { humanLeadDocSize, leadDocTypeLabel, LEAD_DOC_TYPES } from "@/lib/lead-doc-display";
@@ -1254,18 +1254,37 @@ type ComposerMode = "email" | "sms" | "torrent" | null;
  *
  * Disabled state when there's no phone on the record.
  */
-function CallButton({ phone }: { phone: string | null }) {
-  const dialTarget = (() => {
+/**
+ * Kixie alley-oop call button. Phase 3 of TT + Kixie embedding (2026-06-01).
+ *
+ * Posts to /api/leads/[id]/call which:
+ *   1. Resolves the acting employee's Kixie agent email (user override →
+ *      user_profiles.email → tenant default).
+ *   2. Rings their Kixie line first (the alley-oop).
+ *   3. Bridges to the lead's phone once they pick up.
+ *
+ * Replaces the prior tel:-based handler. The new path runs server-side
+ * so it works from any device (mobile too), persists a call_initiated
+ * interaction row immediately, and gets the full Kixie webhook lifecycle
+ * (start/answer/end/disposition/recording) attributed via customField1.
+ */
+function CallButton({ recordId, phone }: { recordId: string; phone: string | null }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [flash, setFlash] = useState<string | null>(null);
+
+  const dialable = (() => {
     if (!phone) return null;
     const raw = String(phone).trim();
     const digits = raw.replace(/\D+/g, "");
     if (raw.startsWith("+") && digits.length >= 8 && digits.length <= 15) return `+${digits}`;
     if (digits.length === 11 && digits.startsWith("1")) return `+${digits}`;
-    if (digits.length >= 7 && digits.length <= 15) return digits;
+    if (digits.length === 10) return `+1${digits}`;
+    if (digits.length >= 8 && digits.length <= 15) return `+${digits}`;
     return null;
   })();
 
-  if (!dialTarget) {
+  if (!dialable) {
     return (
       <button
         type="button"
@@ -1279,15 +1298,60 @@ function CallButton({ phone }: { phone: string | null }) {
     );
   }
 
+  async function startCall() {
+    setBusy(true);
+    setError(null);
+    setFlash(null);
+    try {
+      const r = await fetch(`/api/leads/${recordId}/call`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      });
+      const body = (await r.json().catch(() => ({}))) as {
+        ok?: boolean;
+        message?: string;
+        agent_email?: string;
+        target_phone?: string;
+        error?: string;
+      };
+      if (!r.ok || !body.ok) {
+        setError(body.message || body.error || `call_failed:${r.status}`);
+        return;
+      }
+      setFlash(body.message || `Calling ${body.target_phone} via ${body.agent_email}`);
+      // Auto-clear flash after 4s so it doesn't hang on the footer.
+      setTimeout(() => setFlash(null), 4000);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "call_failed");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   return (
-    <a
-      href={`tel:${dialTarget}`}
-      title={`Call ${dialTarget} — routes through Kixie when set as your default phone handler`}
-      className="flex-1 text-[12px] font-semibold px-3 py-2 rounded-md bg-emerald-500/15 border border-emerald-500/40 text-emerald-300 hover:bg-emerald-500/25 inline-flex items-center justify-center gap-1.5"
-    >
-      <Phone className="w-3 h-3" />
-      Call
-    </a>
+    <div className="flex-1 flex flex-col items-stretch">
+      <button
+        type="button"
+        onClick={startCall}
+        disabled={busy}
+        title={`Kixie alley-oop call to ${dialable} — your Kixie line rings first, then bridges to the lead`}
+        className="text-[12px] font-semibold px-3 py-2 rounded-md bg-emerald-500/15 border border-emerald-500/40 text-emerald-300 hover:bg-emerald-500/25 disabled:opacity-60 inline-flex items-center justify-center gap-1.5"
+      >
+        {busy ? <Loader2 className="w-3 h-3 animate-spin" /> : <Phone className="w-3 h-3" />}
+        Call
+      </button>
+      {error && (
+        <div className="text-[10.5px] text-red-300 mt-1 leading-tight" title={error}>
+          {error.length > 60 ? `${error.slice(0, 60)}…` : error}
+        </div>
+      )}
+      {flash && (
+        <div className="text-[10.5px] text-emerald-300 mt-1 leading-tight">
+          {flash.length > 60 ? `${flash.slice(0, 60)}…` : flash}
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -1321,15 +1385,14 @@ function DrawerFooter({
           >
             Send SMS
           </button>
-          {/* Kixie click-to-call (added 2026-05-25 per CC).
-              Primary path: kixie:call?number=... triggers the Kixie
-              PowerCall Chrome extension which rings the operator's
-              configured device and dials out via Kixie's PBX. Falls
-              back to tel: when the extension isn't installed — most
-              desktops will then open their default softphone or do
-              nothing depending on OS handler. Disabled when there's
-              no phone on the record. */}
-          <CallButton phone={str(recordData.phone)} />
+          {/* Kixie alley-oop click-to-call (Phase 3 of TT + Kixie
+              embedding, 2026-06-01). POSTs to /api/leads/[id]/call
+              which resolves the acting employee's Kixie agent email
+              (per-user override → user_profiles.email → tenant default),
+              rings their Kixie line first, then bridges to the lead.
+              Replaces the prior tel:-based handler. Disabled when
+              there's no phone on the record. */}
+          <CallButton recordId={recordId} phone={str(recordData.phone)} />
           <button
             type="button"
             onClick={() => setMode("torrent")}
