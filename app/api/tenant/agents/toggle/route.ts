@@ -103,12 +103,14 @@ export async function POST(req: NextRequest) {
 
   const existingRow = await db
     .from("tenant_manifests")
-    .select("manifest")
+    .select("id, manifest")
     .eq("tenant_id", tenantId)
     .maybeSingle();
+  const existingManifestId =
+    (existingRow.data as { id?: string } | null)?.id || null;
   let manifest = (existingRow.data as { manifest?: Record<string, unknown> } | null)?.manifest;
   if (!manifest) {
-    // Seed-only manifest — load and persist a DB copy so we can mutate.
+    // Seed-only manifest — load so we have something to mutate.
     const seed = await getTenantManifestForUser(tenantId);
     if (!seed) {
       return NextResponse.json(
@@ -174,24 +176,38 @@ export async function POST(req: NextRequest) {
 
   const newManifest = { ...(manifest as Record<string, unknown>), agents };
 
-  // Upsert the manifest row. Existing rows get UPDATE; seed-only
-  // tenants get INSERT so subsequent mutations have a row to hit.
-  const upsert = await db
-    .from("tenant_manifests")
-    .upsert(
-      {
+  // Existing row → UPDATE the manifest column only (slug + id stay put).
+  // Missing row → INSERT a new row with the resolved tenant slug + the
+  // seed-derived manifest. UPSERT-via-on_conflict was the original
+  // approach but tenant_manifests.slug is NOT NULL and PostgREST's
+  // upsert path does INSERT-first (would fail on slug NULL) even when
+  // the unique tenant_id constraint would have matched. The two-path
+  // pattern below is explicit + safe.
+  if (existingManifestId) {
+    const upd = await db
+      .from("tenant_manifests")
+      .update({ manifest: newManifest })
+      .eq("id", existingManifestId);
+    if (upd.error) {
+      return NextResponse.json(
+        { ok: false, error: "manifest_write_failed", message: upd.error.message },
+        { status: 500 },
+      );
+    }
+  } else {
+    const ins = await db
+      .from("tenant_manifests")
+      .insert({
         tenant_id: tenantId,
+        slug: tenantSlug,
         manifest: newManifest,
-      },
-      { onConflict: "tenant_id" },
-    )
-    .select("manifest")
-    .single();
-  if (upsert.error) {
-    return NextResponse.json(
-      { ok: false, error: "manifest_write_failed", message: upsert.error.message },
-      { status: 500 },
-    );
+      });
+    if (ins.error) {
+      return NextResponse.json(
+        { ok: false, error: "manifest_write_failed", message: ins.error.message },
+        { status: 500 },
+      );
+    }
   }
 
   return NextResponse.json({

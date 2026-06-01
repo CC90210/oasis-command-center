@@ -10,7 +10,7 @@ import {
 import { resolveAgentKey } from "@/lib/agents";
 import { isOperatorEmail } from "@/lib/operator-credentials";
 import { getSessionUser } from "@/lib/supabase-server";
-import { getTenantEnabledAgents } from "@/lib/manifest/tenant-scope";
+import { getTenantAwareEnabledAgents } from "@/lib/manifest/tenant-scope";
 import type { IntegrationHealth } from "@/lib/supabase";
 
 export const dynamic = "force-dynamic";
@@ -21,21 +21,24 @@ export const dynamic = "force-dynamic";
 export default async function IntegrationsPage() {
   const profile = await safe("integrations.profile", getActiveProfile(), null);
 
-  const [dbRows, connectedAiSet, user, manifestEnabledSlugs] = await Promise.all([
+  const [dbRows, connectedAiSet, user, enabledRaw] = await Promise.all([
     safe("integrations.health", integrationsHealth(profile?.tenant_id || null), []),
     safe("integrations.ai_keys", aiServicesWithKey(profile?.tenant_id || null), new Set<string>()),
     getSessionUser().catch(() => null),
-    safe("integrations.manifest_agents", getTenantEnabledAgents(profile?.tenant_id ?? null), [] as string[]),
+    safe(
+      "integrations.tenant_aware_agents",
+      getTenantAwareEnabledAgents({
+        userTenantId: profile?.tenant_id ?? null,
+        profileAgentsEnabled: profile?.agents_enabled ?? null,
+      }),
+      [] as string[],
+    ),
   ]);
 
-  // Manifest is the source of truth for "what this tenant has." Reading
-  // profile.agents_enabled alone surfaced Bravo's integrations to fresh
-  // SunBiz invitees whose redeem-time agents_enabled stamp didn't get
-  // overwritten by finalize-invite. Mirrors /agent and /agents pages.
-  const enabledAgents = (manifestEnabledSlugs.length > 0
-    ? manifestEnabledSlugs
-    : (profile?.agents_enabled || [])
-  ).map(resolveAgentKey);
+  // Shared precedence rule via getTenantAwareEnabledAgents (manifest →
+  // profile column → empty). Never falls back to a hardcoded empire
+  // default. Visible integrations narrow to just what these agents need.
+  const enabledAgents = enabledRaw.map(resolveAgentKey);
   const isOperator = isOperatorEmail(user?.email || undefined);
   const visibleDefinitions = visibleIntegrationsForTenant(enabledAgents, { isOperator });
 
