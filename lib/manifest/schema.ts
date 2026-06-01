@@ -359,6 +359,30 @@ export type ManifestUiConfig = {
 };
 
 // ---------------------------------------------------------------------------
+// Required services — drives the per-tenant Setup Readiness card
+// ---------------------------------------------------------------------------
+
+export type ManifestRequiredServiceKind =
+  | "tenant_credential" // matches tenant_integration_credentials.service
+  | "ai_provider"        // satisfied by ANY configured AI provider key
+  | "shared_inbox_info"; // informational only, no live check (e.g. "Shared inbox")
+
+export type ManifestRequiredService = {
+  /**
+   * For kind="tenant_credential", matches tenant_integration_credentials.service
+   * For kind="ai_provider", a stable identifier like "ai_provider" (the card
+   *   queries aiServicesWithKey / agent_model_config presence).
+   * For kind="shared_inbox_info", just a stable key for the card.
+   */
+  service: string;
+  label: string;
+  kind?: ManifestRequiredServiceKind; // defaults to tenant_credential
+  /** Optional detail string for the unwired state. Falls back to "Not yet wired." */
+  detail?: string;
+  /** Optional CTA — defaults to /settings#integrations / "Add key". */
+  cta?: { href: string; label: string };
+};
+
 // Top-level TenantManifest
 // ---------------------------------------------------------------------------
 
@@ -367,6 +391,14 @@ export type TenantManifest = {
   tenant_slug: string;
   brand: ManifestBrand;
   agents: ManifestAgentBinding[];
+  /**
+   * Per-tenant Setup Readiness opinion. Drives the SetupReadinessCard's
+   * Workspace-wide section so SunBiz (Kixie + TextTorrent + Gmail App
+   * Password + an AI key) and OASIS (its own stack) don't share a
+   * hardcoded list. Omitting this falls back to a minimal universal
+   * default in lib/setup-readiness.ts.
+   */
+  required_services?: ManifestRequiredService[];
   nav: ManifestNavItem[];
   pages?: ManifestPageDef[];
   data_model?: ManifestEntityDef[];
@@ -519,6 +551,38 @@ function parseNavItem(v: Json, path: string): ManifestNavItem {
     group: requireString(v, "group", path),
     badge_key: optionalString(v, "badge_key"),
     expandable: optionalBoolean(v, "expandable"),
+  };
+}
+
+const REQUIRED_SERVICE_KINDS: ReadonlySet<ManifestRequiredServiceKind> = new Set([
+  "tenant_credential",
+  "ai_provider",
+  "shared_inbox_info",
+]);
+
+function parseRequiredService(v: Json, path: string): ManifestRequiredService {
+  if (!isObject(v)) throw new ManifestParseError(path, "expected object");
+  const kindRaw = optionalString(v, "kind");
+  if (kindRaw && !REQUIRED_SERVICE_KINDS.has(kindRaw as ManifestRequiredServiceKind)) {
+    throw new ManifestParseError(`${path}.kind`, `unknown kind "${kindRaw}"`);
+  }
+  const ctaRaw = v.cta;
+  let cta: { href: string; label: string } | undefined;
+  if (ctaRaw !== undefined && ctaRaw !== null) {
+    if (!isObject(ctaRaw)) {
+      throw new ManifestParseError(`${path}.cta`, "expected object");
+    }
+    cta = {
+      href: requireString(ctaRaw, "href", `${path}.cta`),
+      label: requireString(ctaRaw, "label", `${path}.cta`),
+    };
+  }
+  return {
+    service: requireString(v, "service", path),
+    label: requireString(v, "label", path),
+    kind: kindRaw as ManifestRequiredServiceKind | undefined,
+    detail: optionalString(v, "detail"),
+    cta,
   };
 }
 
@@ -695,6 +759,8 @@ export function parseManifest(input: Json): TenantManifest {
     tenant_slug: slug,
     brand: parseBrand(input.brand, "$.brand"),
     agents: requireArray(input, "agents", "$", (a, idx) => parseAgent(a, `$.agents[${idx}]`)),
+    required_services: optionalArray(input, "required_services", "$.required_services",
+      (s, idx) => parseRequiredService(s, `$.required_services[${idx}]`)),
     nav: requireArray(input, "nav", "$", (n, idx) => parseNavItem(n, `$.nav[${idx}]`)),
     pages: optionalArray(input, "pages", "$.pages", (p, idx) => parsePage(p, `$.pages[${idx}]`)),
     data_model: optionalArray(input, "data_model", "$.data_model", (e, idx) => parseEntity(e, `$.data_model[${idx}]`)),

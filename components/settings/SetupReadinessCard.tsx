@@ -17,13 +17,15 @@ export function SetupReadinessCard({
   personal: ReadinessItem[];
   tenant: ReadinessItem[] | null;
 }) {
-  const personalNeedsAttention = personal.some((i) => i.status !== "ok");
-  const tenantNeedsAttention =
-    !!tenant && tenant.some((i) => i.status !== "ok");
+  // "info" rows are notes (e.g. "this workspace uses a shared inbox"),
+  // not gaps. Only warn/fail count as needs-attention.
+  const isGap = (i: ReadinessItem) => i.status === "warn" || i.status === "fail";
+  const personalNeedsAttention = personal.some(isGap);
+  const tenantNeedsAttention = !!tenant && tenant.some(isGap);
   const headline = (() => {
     if (personalNeedsAttention || tenantNeedsAttention) {
-      const personalGaps = personal.filter((i) => i.status !== "ok").length;
-      const tenantGaps = tenant?.filter((i) => i.status !== "ok").length ?? 0;
+      const personalGaps = personal.filter(isGap).length;
+      const tenantGaps = tenant?.filter(isGap).length ?? 0;
       const total = personalGaps + tenantGaps;
       return `${total} item(s) still need attention`;
     }
@@ -115,6 +117,17 @@ function StatusGlyph({ status }: { status: ReadinessItem["status"] }) {
         className="mt-1 inline-flex h-4 w-4 items-center justify-center rounded-full bg-status-warm/15 text-status-warm shrink-0 text-[10px] font-bold"
       >
         !
+      </span>
+    );
+  }
+  if (status === "info") {
+    // Distinct icon from "ok" so operators don't read it as "verified."
+    return (
+      <span
+        aria-label="Info"
+        className="mt-1 inline-flex h-4 w-4 items-center justify-center rounded-full bg-accent/15 text-accent shrink-0 text-[10px] font-bold"
+      >
+        i
       </span>
     );
   }

@@ -49,13 +49,44 @@ export const OASIS_SEED: TenantManifest = {
     footer_tagline: '"Only good things from now on."',
   },
   agents: [
-    { slug: "bravo", display_name: "Bravo", enabled: true, primary: true },
-    { slug: "atlas", display_name: "Atlas", enabled: true },
-    { slug: "maven", display_name: "Maven", enabled: true },
+    { slug: "bravo", display_name: "Bravo", enabled: true, primary: true, core: true },
+    { slug: "atlas", display_name: "Atlas", enabled: true, core: true },
+    { slug: "maven", display_name: "Maven", enabled: true, core: true },
     // Aura — voice / sensory persona. Owns scripts/aura/ (morning pow
     // wow + future voice automations). Enabled 2026-05-17 when Aura got
     // her own home directory and first cron. See agents/aura.md.
-    { slug: "aura", display_name: "Aura", enabled: true },
+    { slug: "aura", display_name: "Aura", enabled: true, core: true },
+  ],
+  // OASIS Setup Readiness opinion — CC's empire stack. Distinct from
+  // SunBiz: includes Stripe (CC bills through OASIS), n8n for inbound
+  // webhooks. No Kixie / TextTorrent (CC doesn't use them for the
+  // agency motion).
+  required_services: [
+    {
+      service: "ai_provider",
+      label: "AI provider key (Anthropic / OpenRouter / Gemini / OpenAI)",
+      kind: "ai_provider",
+      detail:
+        "Powers backend automations + chat fallback when the bridge is offline. Most callers go through the local Claude Code bridge first.",
+    },
+    {
+      service: "gws",
+      label: "Gmail App Password",
+      kind: "tenant_credential",
+      detail: "Outbound from conaugh@oasisai.work via send_gateway.py.",
+    },
+    {
+      service: "stripe",
+      label: "Stripe (billing)",
+      kind: "tenant_credential",
+      detail: "Subscription billing + ARR widget on the dashboard.",
+    },
+    {
+      service: "n8n",
+      label: "n8n (inbound webhook bridge)",
+      kind: "tenant_credential",
+      detail: "Inbound qualifier workflow posts here.",
+    },
   ],
   nav: navToManifest(CC_NAV),
   data_model: [
@@ -240,6 +271,44 @@ export const SUN_SEED: TenantManifest = {
     // Non-core add-ons (Bravo, Atlas, Maven, Aura, Hermes) can be appended
     // by the operator via /t/sun/settings#agents — they render in the
     // standard agent grid but stay clearly opt-in.
+  ],
+  // SunBiz Setup Readiness opinion. The card on /t/sun/settings reads
+  // this list (NOT a global hardcoded one) so the funding-shop stack
+  // surfaces: AI key for backend automations, the shared submissions@
+  // Gmail App Password, Kixie click-to-call, TextTorrent SMS. Stripe
+  // + JotForm are intentionally absent — SunBiz uses custom forms and
+  // doesn't run billing through Stripe today. The Lender catalog and
+  // Bridge are universal infra checks added automatically — they
+  // don't need to be declared here.
+  required_services: [
+    {
+      service: "ai_provider",
+      label: "AI provider key (Anthropic / OpenRouter / Gemini / OpenAI)",
+      kind: "ai_provider",
+      detail:
+        "Powers Solara + Helios backend automations (drip cadence, lender response classifier, daily plan generator). Chat itself uses the local bridge + Claude Code; this key is for cron / autonomous loops.",
+    },
+    {
+      service: "gws",
+      label: "Gmail App Password (shared submissions@)",
+      kind: "tenant_credential",
+      detail:
+        "Outbound email + shop-out routing all go through the shared submissions@sunbizfunding.com identity; the assigned rep is auto-CC'd per deal. send_gateway.py consumes this on the bridge.",
+    },
+    {
+      service: "kixie",
+      label: "Kixie (click-to-call + business SMS)",
+      kind: "tenant_credential",
+      detail:
+        "Centralizes Kixie so operators never need to open the Kixie app — call buttons, dialer, SMS, and call logs all surface in the lead drawer.",
+    },
+    {
+      service: "texttorrent",
+      label: "TextTorrent (bulk + 1:1 SMS)",
+      kind: "tenant_credential",
+      detail:
+        "TT API powers the Text Torrent button on the lead drawer + bulk sequences. The goal is full embedding — every TT feature reachable from the command center.",
+    },
   ],
   // Nav reorganized per the Jordan/Oasis 2026-05-23 meeting (migration 064):
   //   OPERATIONS  Dashboard · Agents · Reasoning · Playbook

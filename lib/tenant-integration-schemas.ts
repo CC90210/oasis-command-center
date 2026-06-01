@@ -64,6 +64,17 @@ export const INTEGRATION_SCHEMAS: IntegrationSchema[] = [
     ],
   },
   {
+    service: "kixie",
+    label: "Kixie",
+    description:
+      "Click-to-call + SMS via Kixie. Powers the call button on the lead drawer and per-employee outbound numbers. Goal is full centralization — operators never need to open the Kixie app.",
+    fields: [
+      { key: "api_key", label: "API Key", sensitive: true, hint: "Kixie PowerCall → Settings → Integrations → REST API." },
+      { key: "business_id", label: "Business ID", sensitive: false, hint: "Numeric tenant identifier shown next to the API key." },
+      { key: "from_number", label: "Default Business Number", sensitive: false, validation: "phone_e164", hint: "E.164 format, e.g. +14165551212. Used when no per-employee Kixie line is set." },
+    ],
+  },
+  {
     service: "gws",
     label: "Google Workspace (Gmail)",
     description: "Outbound email via Gmail App Password. Consumed by send_gateway.py on the operator machine.",

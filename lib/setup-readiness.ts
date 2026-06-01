@@ -4,16 +4,27 @@
  * Computes per-user + per-tenant readiness in a single round-trip so the
  * card can render in one render pass without N+1 fetches. Used by
  * components/settings/SettingsContent.tsx.
+ *
+ * The card is per-tenant: SunBiz declares Kixie / TextTorrent / Gmail App
+ * Password / an AI provider key as required services in its manifest;
+ * OASIS declares its own list. Sharing a hardcoded list would surface
+ * Stripe + JotForm on SunBiz (irrelevant to a funding shop) and Kixie
+ * + TextTorrent on OASIS (irrelevant to CC's empire), so the card now
+ * reads `manifest.required_services` and dispatches per item kind.
  */
 
 import "server-only";
 
 import { getServiceSupabase } from "@/lib/supabase-server";
+import { getTenantManifestForUser } from "@/lib/manifest/tenant-scope";
+import { aiServicesWithKey } from "@/lib/queries";
+import { isSharedInboxTenant as checkSharedInbox } from "@/lib/shared-inbox-tenants";
+import type { ManifestRequiredService } from "@/lib/manifest/schema";
 
 export type ReadinessItem = {
   key: string;
   label: string;
-  status: "ok" | "warn" | "fail";
+  status: "ok" | "warn" | "fail" | "info";
   detail: string;
   /** Optional href the user should click to fix this. Internal route. */
   cta?: { href: string; label: string };
@@ -27,23 +38,18 @@ export type ReadinessReport = {
 const PERSONAL_OAUTH_SERVICES = ["gmail_oauth"];
 
 /**
- * Tenant-shared services the owner/admin must wire so day-to-day sends
- * + ingest + billing work. SunBiz-focused defaults; expand as more
- * tenants come online and want their own readiness opinion.
- *
- * Hardcoded for now. Long-term home is manifest.required_services so
- * each tenant declares its own readiness opinion — until then, OASIS
- * and SunBiz share this list (acceptable: both need Anthropic + SMTP;
- * Stripe is universal billing; JotForm matters for SunBiz intake but
- * is harmless to flag missing on OASIS).
+ * Default required_services list for tenants whose manifest doesn't
+ * declare its own. Kept intentionally minimal — just an AI provider
+ * (the one universal need). Per-tenant manifests should override.
  */
-import { isSharedInboxTenant as checkSharedInbox } from "@/lib/shared-inbox-tenants";
-
-const TENANT_REQUIRED_SERVICES: { service: string; label: string }[] = [
-  { service: "anthropic", label: "Anthropic (Claude API)" },
-  { service: "smtp", label: "SMTP relay (outbound email)" },
-  { service: "stripe", label: "Stripe (billing)" },
-  { service: "jotform", label: "JotForm (intake forms)" },
+const DEFAULT_REQUIRED_SERVICES: ManifestRequiredService[] = [
+  {
+    service: "ai_provider",
+    label: "AI provider key (Anthropic / OpenRouter / Gemini / OpenAI)",
+    kind: "ai_provider",
+    detail:
+      "Powers backend automations + Claude-driven workflows. Chat itself uses your local bridge + CLI; this key is for the cron / agent loops.",
+  },
 ];
 
 export async function loadReadinessReport(args: {
@@ -56,9 +62,7 @@ export async function loadReadinessReport(args: {
   const userId = args.authUserId;
 
   // Resolve tenant slug so we can branch personal Gmail messaging for
-  // shared-inbox tenants (SunBiz etc). One DB call up front — the rest
-  // of this function already touches several tables, so the marginal
-  // cost is rounding error.
+  // shared-inbox tenants (SunBiz etc).
   let tenantSlug: string | null = null;
   if (tenantId) {
     const tenantRes = await db
@@ -70,19 +74,19 @@ export async function loadReadinessReport(args: {
   }
   const isSharedInboxTenant = checkSharedInbox(tenantSlug);
 
+  // ----- PERSONAL section -----
   const personal: ReadinessItem[] = [];
   if (tenantId && userId) {
     if (isSharedInboxTenant) {
-      // Shared-inbox tenants don't surface a personal Gmail item — every
-      // send goes via the tenant-shared identity (e.g. SunBiz's shared
-      // submissions@). Showing "Connect Gmail" here would tell the
-      // operator to do something that has no effect on their outbound.
+      // status="info" — this is a NOTE, not a verified check. Operators
+      // shouldn't see a green ✓ and assume something was validated; the
+      // shared-identity model means there's nothing to set up.
       personal.push({
         key: "gmail_shared_inbox",
         label: "Shared inbox",
-        status: "ok",
+        status: "info",
         detail:
-          "This tenant uses a shared outbound identity. You don't need to connect personal Gmail; replies to deals will be CC'd to you automatically.",
+          "This workspace uses a shared outbound identity (e.g. SunBiz's submissions@). You don't need to connect personal Gmail — replies to deals you're assigned to will be CC'd to you automatically.",
       });
     } else {
       const personalRows = await db
@@ -116,56 +120,111 @@ export async function loadReadinessReport(args: {
 
   const tenant: ReadinessItem[] = [];
 
-  // 1. Required tenant-shared API keys
-  const tenantRows = await db
-    .from("tenant_integration_credentials")
-    .select("service,field_key")
-    .eq("tenant_id", tenantId)
-    .in(
-      "service",
-      TENANT_REQUIRED_SERVICES.map((s) => s.service),
-    );
-  const presentByService = new Set<string>();
-  for (const row of (tenantRows.data || []) as { service: string }[]) {
-    presentByService.add(row.service);
-  }
-  for (const req of TENANT_REQUIRED_SERVICES) {
-    const present = presentByService.has(req.service);
+  // ----- TENANT section, manifest-driven -----
+  const manifest = await getTenantManifestForUser(tenantId);
+  const requiredServices =
+    (manifest?.required_services && manifest.required_services.length > 0)
+      ? manifest.required_services
+      : DEFAULT_REQUIRED_SERVICES;
+
+  // Pre-compute the credential presence sets in parallel so each
+  // required-service item can resolve in O(1) below.
+  const credentialServices = requiredServices
+    .filter((s) => (s.kind || "tenant_credential") === "tenant_credential")
+    .map((s) => s.service);
+  const needsAiCheck = requiredServices.some((s) => s.kind === "ai_provider");
+
+  const [credentialRows, aiKeySet] = await Promise.all([
+    credentialServices.length > 0
+      ? db
+          .from("tenant_integration_credentials")
+          .select("service,field_key")
+          .eq("tenant_id", tenantId)
+          .in("service", credentialServices)
+          .then((r) => (r.data || []) as { service: string }[])
+      : Promise.resolve([] as { service: string }[]),
+    needsAiCheck ? aiServicesWithKey(tenantId) : Promise.resolve(new Set<string>()),
+  ]);
+
+  const credentialPresent = new Set<string>();
+  for (const row of credentialRows) credentialPresent.add(row.service);
+
+  for (const req of requiredServices) {
+    const kind = req.kind || "tenant_credential";
+
+    if (kind === "shared_inbox_info") {
+      tenant.push({
+        key: `tenant.${req.service}`,
+        label: req.label,
+        status: "info",
+        detail: req.detail || "Informational only.",
+      });
+      continue;
+    }
+
+    if (kind === "ai_provider") {
+      const haveAny = aiKeySet.size > 0;
+      tenant.push({
+        key: `tenant.${req.service}`,
+        label: req.label,
+        status: haveAny ? "ok" : "warn",
+        detail: haveAny
+          ? `Connected: ${Array.from(aiKeySet).sort().join(", ")}.`
+          : req.detail || "No AI provider key on file — backend automations cannot run.",
+        cta: haveAny
+          ? undefined
+          : req.cta || { href: "/settings#agents", label: "Add AI key" },
+      });
+      continue;
+    }
+
+    // kind === "tenant_credential" (default)
+    const present = credentialPresent.has(req.service);
     tenant.push({
       key: `tenant.${req.service}`,
       label: req.label,
       status: present ? "ok" : "warn",
-      detail: present ? "Key on file." : "Not yet wired.",
+      detail: present ? "Key on file." : req.detail || "Not yet wired.",
       cta: present
         ? undefined
-        : { href: "/settings#integrations", label: "Add key" },
+        : req.cta || { href: "/settings#integrations", label: "Add key" },
     });
   }
 
-  // 2. Lender catalog (Shop Out can't rank without lenders)
-  const lendersRes = await db
-    .from("tenant_records")
-    .select("id", { count: "exact", head: true })
-    .eq("tenant_id", tenantId)
-    .eq("entity_type", "lender");
-  const lenderCount = lendersRes.count || 0;
-  tenant.push({
-    key: "tenant.lenders",
-    label: "Lender catalog",
-    status: lenderCount === 0 ? "fail" : lenderCount < 3 ? "warn" : "ok",
-    detail:
-      lenderCount === 0
-        ? "0 lenders — Shop Out cannot rank without a catalog."
-        : lenderCount < 3
-          ? `${lenderCount} lender(s) — add 2+ more for meaningful ranking.`
-          : `${lenderCount} lenders.`,
-    cta:
-      lenderCount < 3
-        ? { href: "/lenders", label: "Add lenders" }
-        : undefined,
-  });
+  // ----- Universal infra checks (not manifest-driven) -----
 
-  // 3. Bridge paired + fresh
+  // Lender catalog (Shop Out can't rank without lenders). Only surfaced
+  // for SunBiz-style tenants that actually have a lender entity in their
+  // manifest data_model.
+  const hasLenderEntity = (manifest?.data_model || []).some(
+    (e: { name: string }) => e.name === "lender",
+  );
+  if (hasLenderEntity) {
+    const lendersRes = await db
+      .from("tenant_records")
+      .select("id", { count: "exact", head: true })
+      .eq("tenant_id", tenantId)
+      .eq("entity_type", "lender");
+    const lenderCount = lendersRes.count || 0;
+    tenant.push({
+      key: "tenant.lenders",
+      label: "Lender catalog",
+      status: lenderCount === 0 ? "fail" : lenderCount < 3 ? "warn" : "ok",
+      detail:
+        lenderCount === 0
+          ? "0 lenders — Shop Out cannot rank without a catalog."
+          : lenderCount < 3
+            ? `${lenderCount} lender(s) — add 2+ more for meaningful ranking.`
+            : `${lenderCount} lenders.`,
+      cta:
+        lenderCount < 3
+          ? { href: "/lenders", label: "Add lenders" }
+          : undefined,
+    });
+  }
+
+  // Bridge paired + fresh — universal: every tenant needs a bridge for
+  // automations / crons / daily plan to fire.
   const bridgeRes = await db
     .from("bridge_pairings")
     .select("id,revoked_at,last_seen_at")
@@ -196,11 +255,9 @@ export async function loadReadinessReport(args: {
         : undefined,
   });
 
-  // 4. Per-employee Gmail status (owner-visible — surfaces "Alex hasn't
-  //    connected" without forcing the owner to chase). Skipped entirely
-  //    for shared-inbox tenants since per-user OAuth is a no-op under
-  //    that model (every send goes via the shared identity; the
-  //    assigned-rep CC layer covers per-deal visibility).
+  // Per-employee Gmail status — only meaningful for tenants on the
+  // per-user OAuth model. Skipped entirely for shared-inbox tenants
+  // since per-user OAuth is a no-op under that model.
   if (!isSharedInboxTenant) {
     const teamGmailItem = await checkTeamGmail(db, tenantId);
     if (teamGmailItem) tenant.push(teamGmailItem);
