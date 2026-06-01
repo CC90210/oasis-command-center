@@ -78,22 +78,51 @@ export default function SignupPage() {
             // breaks the onboarding loop. Auto-confirm + redeem server-side,
             // then bounce to /login with the email pre-filled so they sign
             // in with the password they just created.
-            const r = await fetch("/api/auth/finalize-invite-signup", {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({
-                raw_token: inviteToken,
-                user_id: data.user.id,
-              }),
-            });
-            const body = (await r.json().catch(() => ({}))) as {
+            //
+            // RETRY: a transient failure here used to ORPHAN the auth.users
+            // row Supabase just created — invite never redeemed, profile
+            // never made, user stuck on "unauthorized" forever (caught
+            // 2026-06-01 when Emily hit this). The finalize route is
+            // fully idempotent (email_confirm=true is a no-op on already-
+            // confirmed users; redeemInvite has an explicit already-redeemed
+            // branch returning ok=true), so retrying on network / 5xx
+            // errors is safe. Two attempts with 1s backoff covers the
+            // common transient-blip class without delaying the happy path.
+            let body: {
               ok?: boolean;
               error?: string;
               message?: string;
               tenant_slug?: string | null;
-            };
-            if (!r.ok || !body.ok) {
-              setErr(body.message || body.error || "Invite finalization failed");
+            } = {};
+            let lastStatus = 0;
+            for (let attempt = 0; attempt < 2; attempt++) {
+              if (attempt > 0) await new Promise((r) => setTimeout(r, 1000));
+              try {
+                const r = await fetch("/api/auth/finalize-invite-signup", {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({
+                    raw_token: inviteToken,
+                    user_id: data.user.id,
+                  }),
+                });
+                lastStatus = r.status;
+                body = (await r.json().catch(() => ({}))) as typeof body;
+                if (r.ok && body.ok) break;
+              } catch {
+                lastStatus = 0;
+                body = {};
+              }
+            }
+            if (!body.ok) {
+              // Surface a clear, actionable message so the invitee knows
+              // they aren't simply locked out — their account exists but
+              // the workspace link didn't finish. Support can finish it
+              // server-side (the repair path used for Emily).
+              setErr(
+                (body.message || body.error || `Finalization failed (HTTP ${lastStatus || "?"})`) +
+                  " — your account was created but couldn't be linked to the workspace. Reach out to your workspace admin and they can finish the setup in one step."
+              );
               return;
             }
             // Intentionally omit ?invite= from the /login URL — the
