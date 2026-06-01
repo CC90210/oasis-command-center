@@ -48,6 +48,7 @@ import { loadReadinessReport } from "@/lib/setup-readiness";
 import { SafeBoundary } from "@/components/SafeBoundary";
 import { MyAgentsCard } from "@/components/settings/MyAgentsCard";
 import { AgentMarketplaceCard } from "@/components/settings/AgentMarketplaceCard";
+import { KixieWebhookSyncCard } from "@/components/settings/KixieWebhookSyncCard";
 import { DevicesEditor } from "@/components/settings/DevicesEditor";
 import { ProviderAccountsCard } from "@/components/settings/ProviderAccountsCard";
 import { LocalCliProvidersCard } from "@/components/settings/LocalCliProvidersCard";
@@ -211,6 +212,16 @@ export async function SettingsContent({
           <SafeBoundary label="Integration keys">
             <IntegrationKeysPanel canManage={canManageTenant} />
           </SafeBoundary>
+
+          {/* Kixie webhook auto-registration — only when the tenant
+              actually declares Kixie in its required_services list.
+              Avoids cluttering non-Kixie tenants (OASIS, etc.) with a
+              button that has no effect. */}
+          {!previewMode && (manifest?.required_services || []).some((s) => s.service === "kixie") && (
+            <SafeBoundary label="Kixie webhooks">
+              <KixieWebhookSyncCard isOwner={canManageTenant} />
+            </SafeBoundary>
+          )}
 
           {/* Phase 4 of SunBiz multi-employee personalization (2026-05-29):
               per-user credentials section. Today this hosts Gmail OAuth
