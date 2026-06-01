@@ -89,13 +89,20 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  // 3. Set primary_agent from the tenant manifest's default. The redeem
-  //    RPC stamps platform default 'bravo' on new profile rows; for
-  //    tenants like SunBiz whose first-touch agent is Solara, that
-  //    leaves the new invitee chatting with the wrong persona. Look up
-  //    the manifest's primary agent and stamp it onto the profile.
-  //    Soft-fail — if the manifest is missing or doesn't declare a
-  //    primary, we leave the profile's primary_agent as-is.
+  // 3. Set primary_agent + agents_enabled from the tenant manifest. The
+  //    redeem RPC stamps platform defaults (primary_agent='bravo',
+  //    agents_enabled=['bravo']) on new profile rows; for tenants like
+  //    SunBiz whose actual agent package is [solara, helios], that leaves
+  //    the new invitee chatting with the wrong persona AND with Bravo
+  //    surfacing in the /agent chat picker (which reads agents_enabled).
+  //
+  //    BOTH columns must be overwritten — fixing primary_agent alone left
+  //    agents_enabled stuck at ['bravo'], so the chat shell still rendered
+  //    Bravo as the user's enabled agent. Caught 2026-06-01 when a SunBiz
+  //    user was about to ship without this fix.
+  //
+  //    Soft-fail — if the manifest is missing or carries no enabled agents,
+  //    leave the profile as-is (default 'bravo' is at least functional).
   try {
     const { data: manifestRow } = await db
       .from("tenant_manifests")
@@ -103,11 +110,17 @@ export async function POST(req: NextRequest) {
       .eq("tenant_id", result.tenantId)
       .maybeSingle();
     const manifest = manifestRow?.manifest as { agents?: Array<{ slug: string; primary?: boolean; enabled?: boolean }> } | null;
+    const enabledSlugs = (manifest?.agents || [])
+      .filter((a) => a.enabled !== false)
+      .map((a) => a.slug);
     const primarySlug = manifest?.agents?.find((a) => a.primary && a.enabled !== false)?.slug;
-    if (primarySlug) {
+    const patch: Record<string, unknown> = {};
+    if (primarySlug) patch.primary_agent = primarySlug;
+    if (enabledSlugs.length > 0) patch.agents_enabled = enabledSlugs;
+    if (Object.keys(patch).length > 0) {
       await db
         .from("user_profiles")
-        .update({ primary_agent: primarySlug })
+        .update(patch)
         .eq("auth_user_id", userId);
     }
   } catch {

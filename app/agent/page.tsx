@@ -48,9 +48,23 @@ export default async function ClientAgentPage({
     safe("agent.manifest", getTenantManifestForUser(profile?.tenant_id ?? null), null),
   ]);
   // Tenant-scoped: only the agents this tenant has purchased / been provisioned for.
-  // Normalize legacy slugs (sunbiz → solara, suga_sean/lyra* → maven) so old DB rows still resolve.
-  const enabled = (profile?.agents_enabled || []).filter(Boolean).map(resolveAgentKey);
-  const profilePrimary = resolveAgentKey(profile?.primary_agent || enabled[0] || "solara");
+  // SOURCE OF TRUTH ORDER (matches /agents page):
+  //   1. tenant_manifests.manifest.agents (the canonical "what this tenant has")
+  //   2. profile.agents_enabled (legacy / per-user override)
+  //
+  // Reading the profile column ALONE would surface Bravo to fresh SunBiz
+  // invitees whose redeem RPC stamped the platform default 'bravo' but
+  // whose finalize-invite step didn't overwrite agents_enabled.
+  // Normalize legacy slugs (sunbiz → solara, suga_sean/lyra* → maven).
+  const manifestEnabledSlugs = (manifest?.agents || [])
+    .filter((a) => a.enabled)
+    .map((a) => a.slug.toLowerCase());
+  const enabled = (manifestEnabledSlugs.length > 0
+    ? manifestEnabledSlugs
+    : (profile?.agents_enabled || [])
+  ).filter(Boolean).map(resolveAgentKey);
+  const manifestPrimary = manifest?.agents?.find((a) => a.primary && a.enabled)?.slug;
+  const profilePrimary = resolveAgentKey(manifestPrimary || profile?.primary_agent || enabled[0] || "solara");
   // Honor ?agent=<slug> only if the user actually has that agent enabled —
   // prevents an arbitrary URL param from making us claim an agent the user
   // didn't purchase. Falls back to their provisioned primary.
