@@ -67,11 +67,13 @@ export const INTEGRATION_SCHEMAS: IntegrationSchema[] = [
     service: "kixie",
     label: "Kixie",
     description:
-      "Click-to-call + SMS via Kixie. Powers the call button on the lead drawer and per-employee outbound numbers. Goal is full centralization — operators never need to open the Kixie app.",
+      "Click-to-call + SMS via Kixie. Powers the call button on the lead drawer, per-employee outbound numbers, and every call/SMS lifecycle webhook. Goal is full centralization — operators never need to open the Kixie app.",
     fields: [
       { key: "api_key", label: "API Key", sensitive: true, hint: "Kixie PowerCall → Settings → Integrations → REST API." },
       { key: "business_id", label: "Business ID", sensitive: false, hint: "Numeric tenant identifier shown next to the API key." },
       { key: "from_number", label: "Default Business Number", sensitive: false, validation: "phone_e164", hint: "E.164 format, e.g. +14165551212. Used when no per-employee Kixie line is set." },
+      { key: "default_agent_email", label: "Default Agent Email", sensitive: false, validation: "email", hint: "Kixie agent that rings when no per-employee agent is specified. Usually Ezra's Kixie login (submissions@sunbizfunding.com)." },
+      { key: "webhook_secret", label: "Webhook Secret (HMAC-SHA256)", sensitive: true, hint: "Shared secret Kixie signs inbound webhooks with — set the same value in Kixie's webhook config UI. Required so we can verify webhook authenticity." },
     ],
   },
   {
