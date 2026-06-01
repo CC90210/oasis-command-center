@@ -126,9 +126,42 @@ export const BUSINESS_FUNDING_TEMPLATE: TenantManifest = {
   },
   agents: [
     // Operational primary — backend admin, Chrome jobs, data collection, workflow runner.
-    { slug: "solara", display_name: "Solara", enabled: true, primary: true },
+    { slug: "solara", display_name: "Solara", enabled: true, primary: true, core: true },
     // Brand-facing sales persona — outreach, SMS follow-ups, closing voice.
-    { slug: "helios", display_name: "Helios", enabled: true },
+    { slug: "helios", display_name: "Helios", enabled: true, core: true },
+  ],
+  // Mirrors SUN_SEED — funding-shop stack. New tenants created from this
+  // template inherit the readiness opinion so their Setup Readiness card
+  // surfaces Kixie + TextTorrent + Gmail App Password from day one.
+  required_services: [
+    {
+      service: "ai_provider",
+      label: "AI provider key (Anthropic / OpenRouter / Gemini / OpenAI)",
+      kind: "ai_provider",
+      detail:
+        "Powers Solara + Helios backend automations (drip cadence, lender response classifier, daily plan generator). Configure under Settings → Agents → AI keys.",
+    },
+    {
+      service: "gws",
+      label: "Gmail App Password (shared submissions@)",
+      kind: "tenant_credential",
+      detail:
+        "Shared outbound identity for shop-out + drawer email. send_gateway.py on the bridge reads from .env.agents today; adding the key to the tenant store here is required for production deploys (VPS / hosted bridge) so credentials migrate with the workspace.",
+    },
+    {
+      service: "kixie",
+      label: "Kixie (click-to-call + business SMS)",
+      kind: "tenant_credential",
+      detail:
+        "Centralizes Kixie inside the command center — call buttons, dialer, SMS, and call logs all surface in the lead drawer. Operators stop opening the Kixie app.",
+    },
+    {
+      service: "texttorrent",
+      label: "TextTorrent (bulk + 1:1 SMS)",
+      kind: "tenant_credential",
+      detail:
+        "TT API powers the Text Torrent button + bulk sequences. Goal: full embedding — every TT feature reachable from the command center, no app switching.",
+    },
   ],
   nav: [
     { href: "/", label: "Dashboard", icon: "LayoutDashboard", group: "Operations" },

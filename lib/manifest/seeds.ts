@@ -293,7 +293,7 @@ export const SUN_SEED: TenantManifest = {
       label: "Gmail App Password (shared submissions@)",
       kind: "tenant_credential",
       detail:
-        "Outbound email + shop-out routing all go through the shared submissions@sunbizfunding.com identity; the assigned rep is auto-CC'd per deal. send_gateway.py consumes this on the bridge.",
+        "Shared outbound identity for shop-out + drawer email; assigned rep is auto-CC'd per deal. send_gateway.py on the bridge reads from the local secrets file today — adding the key to the tenant store here is required before the SunBiz VPS deploy so credentials migrate with the workspace.",
     },
     {
       service: "kixie",
