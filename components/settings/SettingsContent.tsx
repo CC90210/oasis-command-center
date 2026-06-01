@@ -47,6 +47,7 @@ import { SetupReadinessCard } from "@/components/settings/SetupReadinessCard";
 import { loadReadinessReport } from "@/lib/setup-readiness";
 import { SafeBoundary } from "@/components/SafeBoundary";
 import { MyAgentsCard } from "@/components/settings/MyAgentsCard";
+import { AgentMarketplaceCard } from "@/components/settings/AgentMarketplaceCard";
 import { DevicesEditor } from "@/components/settings/DevicesEditor";
 import { ProviderAccountsCard } from "@/components/settings/ProviderAccountsCard";
 import { LocalCliProvidersCard } from "@/components/settings/LocalCliProvidersCard";
@@ -381,6 +382,30 @@ export async function SettingsContent({
               </SafeBoundary>
             </div>
           </details>
+
+          {/* Workspace agents (Bravo / Atlas / Maven add-on picker).
+              Owner-only — non-owners see a read-only view of which
+              agents the workspace has, but cannot toggle. Core agents
+              (Solara/Helios for SunBiz) render as locked. */}
+          {!previewMode && manifest?.agents && (
+            <Card
+              title="Workspace agents"
+              subtitle="Manage which agents this workspace can use. Core agents are always on; add C-suite agents (Bravo / Atlas / Maven / Aura / Hermes) when your team needs them."
+            >
+              <SafeBoundary label="Workspace agents">
+                <AgentMarketplaceCard
+                  initialAgents={(manifest.agents || []).map((a) => ({
+                    slug: a.slug,
+                    display_name: a.display_name || a.slug,
+                    enabled: a.enabled,
+                    primary: a.primary,
+                    core: a.core,
+                  }))}
+                  isOwner={canManageTenant}
+                />
+              </SafeBoundary>
+            </Card>
+          )}
 
           <Card title="Weekday template" subtitle="Monday–Friday recurring schedule. Materializes nightly via cron.">
             <SafeBoundary label="Weekday template">

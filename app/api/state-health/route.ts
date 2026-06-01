@@ -1,5 +1,8 @@
 import { NextResponse } from "next/server";
-import { getServiceSupabase } from "@/lib/supabase-server";
+import { getServiceSupabase, getSessionUser } from "@/lib/supabase-server";
+import { getActiveProfile } from "@/lib/queries";
+import { getTenantAwareEnabledAgents } from "@/lib/manifest/tenant-scope";
+import { isOperatorEmail } from "@/lib/operator-credentials";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -25,6 +28,19 @@ const STATE_API_URL = process.env.STATE_API_URL || "http://state-api:8500";
  * envelope tells the operator which path delivered the data.
  */
 export async function GET() {
+  // Authn + tenant scope. Caller MUST be signed in; non-operators only
+  // see agents enabled on their tenant. Operators see the full empire.
+  const user = await getSessionUser().catch(() => null);
+  if (!user) {
+    return NextResponse.json({ available: false, error: "unauthorized" }, { status: 401 });
+  }
+  const isOperator = isOperatorEmail(user.email || undefined);
+  const profile = await getActiveProfile().catch(() => null);
+  const agentNames = await getTenantAwareEnabledAgents({
+    userTenantId: profile?.tenant_id ?? null,
+    profileAgentsEnabled: profile?.agents_enabled ?? null,
+  });
+
   // Path 1 — state-api passthrough.
   try {
     const res = await fetch(`${STATE_API_URL}/status`, {
@@ -42,7 +58,7 @@ export async function GET() {
 
   // Path 2 — Supabase mirror fallback.
   try {
-    const data = await fetchFromSupabaseMirror();
+    const data = await fetchFromSupabaseMirror({ agentNames, isOperator });
     return NextResponse.json(data);
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : "supabase fallback failed";
@@ -64,26 +80,55 @@ export async function GET() {
  * Fields the mirror DOESN'T carry (FTS5 stats, guard logs) are omitted —
  * the page renders those sections conditionally.
  */
-async function fetchFromSupabaseMirror() {
+async function fetchFromSupabaseMirror(args: {
+  agentNames: string[];
+  isOperator: boolean;
+}) {
   const db = getServiceSupabase();
+
+  // Tenant-scope every read against agent_state_snapshot / agent_events
+  // (neither carries tenant_id). Non-operators see only the agents
+  // their manifest enables; operators see the empire-wide view.
+
+  // Tenants with no enabled agents render empty rather than empire-wide.
+  if (!args.isOperator && args.agentNames.length === 0) {
+    return {
+      available: true,
+      source: "supabase-mirror" as const,
+      agents: [],
+      counts: { sessions: 0, events: 0 },
+      last_event: null,
+      last_session: null,
+    };
+  }
+
+  // Build the two scoped queries inline — chaining .in() conditionally
+  // after .select() keeps the type narrowing PostgREST relies on.
+  const snapQuery = (() => {
+    const base = db
+      .from("agent_state_snapshot")
+      .select(
+        "agent_name, tick_count, last_tick_at, working_memory, health_status",
+      );
+    return args.isOperator ? base : base.in("agent_name", args.agentNames);
+  })();
+  const lastEventQuery = (() => {
+    const base = db
+      .from("agent_events")
+      .select("published_at, source_agent, event_type");
+    return args.isOperator ? base : base.in("source_agent", args.agentNames);
+  })();
 
   const [agentSnap, sessionCount, eventCount, lastEvent, lastSession] =
     await Promise.all([
-      db
-        .from("agent_state_snapshot")
-        .select(
-          "agent_name, tick_count, last_tick_at, working_memory, health_status",
-        )
-        .order("last_tick_at", { ascending: false }),
+      snapQuery.order("last_tick_at", { ascending: false }),
       // `count: "estimated"` reads pg_class.reltuples — O(1), index-only,
       // no full table scan. The dashboard health view shows "~12,400" not
       // "12,387" and that's fine; both tables grow continuously and an
       // exact count forced a sequential scan on every load.
       db.from("session_logs").select("id", { count: "estimated", head: true }),
       db.from("agent_events").select("id", { count: "estimated", head: true }),
-      db
-        .from("agent_events")
-        .select("published_at, source_agent, event_type")
+      lastEventQuery
         .order("published_at", { ascending: false })
         .limit(1)
         .maybeSingle(),

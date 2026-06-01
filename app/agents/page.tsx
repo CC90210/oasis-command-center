@@ -65,7 +65,14 @@ export default async function AgentsPage() {
       isOperator: isAdmin,
     }),
     integrationsHealth(profile?.tenant_id || null),
-    getAgentStats(profile?.primary_agent || "bravo"),
+    getAgentStats(
+      // Manifest-validated primary so a stale profile.primary_agent
+      // ("bravo" left over from redeem defaults) doesn't pull empire-
+      // wide stats for a SunBiz tenant.
+      manifestEnabledSlugs.find(
+        (s) => s === (profile?.primary_agent || "").toLowerCase()
+      ) || manifestEnabledSlugs[0] || profile?.primary_agent || "bravo"
+    ),
     _tenantHasNoBridge(profile?.tenant_id || null),
     aiServicesWithKey(profile?.tenant_id || null),
     // ADR-0006: the tenant's bridge owner — used by ChatWidget to render
@@ -80,17 +87,22 @@ export default async function AgentsPage() {
   const noCloudProvider = aiServices.size === 0;
   const showProviderNudge = noCloudProvider && noBridge && !isAdmin;
 
+  // Strict tenant scoping — manifest first, then per-user profile column.
+  // NEVER falls back to FAMILY_AGENT_KEYS — that previously leaked the
+  // empire-wide list (Bravo/Atlas/Maven/Aura/Hermes) to fresh tenants
+  // with empty manifests AND empty profile columns. Empty state is the
+  // correct UI for "no agents enabled yet"; the Family card just shows
+  // an empty-state message rather than every empire agent.
   const familySet = new Set(FAMILY_AGENT_KEYS);
-  // For the "Agent family" card below we still want the rich metadata from
-  // AGENT_REGISTRY — so the enabled list intersects manifest.agents with the
-  // family registry when both are populated, otherwise falls back gracefully.
   const enabledList = manifestEnabledSlugs.length > 0
     ? manifestEnabledSlugs
-    : profile?.agents_enabled?.length
-      ? profile.agents_enabled
-      : FAMILY_AGENT_KEYS;
-  const explicitTenantAgents = manifestEnabledSlugs.length > 0 || !!profile?.agents_enabled?.length;
-  const enabled = enabledList.filter((k) => explicitTenantAgents || familySet.has(k));
+    : (profile?.agents_enabled || []);
+  // Intersect with the family registry only when the agents came from
+  // profile.agents_enabled (legacy column); manifest-declared slugs
+  // pass through verbatim so custom tenant-only agents render too.
+  const enabled = manifestEnabledSlugs.length > 0
+    ? enabledList
+    : enabledList.filter((k) => familySet.has(k));
   const byName = new Map(states.map((s) => [s.agent_name, s]));
   const integrationByName = new Map(integrations.map((i) => [i.service, i]));
 

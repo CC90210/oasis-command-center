@@ -107,6 +107,44 @@ export async function getTenantEnabledAgents(
 }
 
 /**
+ * Single source of truth for "which agents should THIS user surface in
+ * dashboards / heartbeats / event filters?" — replaces the 5+ duplicated
+ * "manifest first, profile second, hardcoded last" chains scattered across
+ * /agent, /agents, /integrations, /reasoning, /operations, /feed.
+ *
+ * Returns an array of lowercased agent slugs. NEVER falls back to a global
+ * default like ["bravo"] or FAMILY_AGENT_KEYS — cross-tenant data leaks
+ * traced to those defaults firing for users whose manifest + profile were
+ * both empty (fresh invitees, broken backfills). Callers that need a
+ * "last resort" should render an empty-state UI, not silently surface
+ * empire-wide agents.
+ *
+ * Order of precedence:
+ *   1. tenant_manifests.manifest.agents.filter(enabled) — the canonical
+ *      "what this tenant has" list.
+ *   2. user_profiles.agents_enabled — legacy per-user override (kept for
+ *      back-compat with tenants that haven't fully migrated to manifest).
+ *   3. empty array — caller decides what empty means.
+ *
+ * Operator-bypass: when isOperator is true the caller can do its own
+ * full-fleet read (e.g. CC's /agents page showing every empire agent).
+ * The helper does NOT apply the bypass itself — keeps the contract pure
+ * so non-operator code paths can't accidentally inherit it.
+ */
+export async function getTenantAwareEnabledAgents(args: {
+  userTenantId: string | null;
+  profileAgentsEnabled?: string[] | null;
+}): Promise<string[]> {
+  const manifestSlugs = await getTenantEnabledAgents(args.userTenantId);
+  if (manifestSlugs.length > 0) return manifestSlugs;
+  const profileSlugs = (args.profileAgentsEnabled || [])
+    .filter(Boolean)
+    .map((s) => s.toLowerCase());
+  return profileSlugs;
+}
+
+
+/**
  * The set of agent slugs THIS tenant is allowed to chat with — the union of
  * (a) their manifest's enabled agents (covers custom slugs like
  * "renewal_specialist" that the operator added through the manifest editor

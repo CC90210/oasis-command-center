@@ -15,8 +15,11 @@
 import { headers } from "next/headers";
 import { Activity, Radio, ArrowUpRight } from "lucide-react";
 import { Card, PageHeader, Tag } from "@/components/Card";
-import { getServiceSupabase } from "@/lib/supabase-server";
+import { getServiceSupabase, getSessionUser } from "@/lib/supabase-server";
 import { formatEventType, formatPublisher } from "@/lib/event-bus-display";
+import { getActiveProfile } from "@/lib/queries";
+import { getTenantAwareEnabledAgents } from "@/lib/manifest/tenant-scope";
+import { isOperatorEmail } from "@/lib/operator-credentials";
 import { FeedRefresher } from "./refresher";
 
 export const dynamic = "force-dynamic";
@@ -66,11 +69,14 @@ function severityTone(s: string | null): "neutral" | "accent" | "warm" | "hot" {
   return "neutral";
 }
 
-async function fetchInitial(): Promise<{ rows: EventRow[]; error?: string }> {
+async function fetchInitial(args: {
+  agentNames: string[];
+  isOperator: boolean;
+}): Promise<{ rows: EventRow[]; error?: string }> {
   try {
     const db = getServiceSupabase();
     const cutoff = new Date(Date.now() - 60 * 60 * 1000).toISOString();
-    const r = await db
+    let q = db
       .from("agent_events")
       .select(
         "id, event_type, source_agent, target_agent, severity, payload, " +
@@ -79,6 +85,17 @@ async function fetchInitial(): Promise<{ rows: EventRow[]; error?: string }> {
       .gte("created_at", cutoff)
       .order("created_at", { ascending: false })
       .limit(100);
+    // Cross-tenant scoping. agent_events has no tenant_id column —
+    // proxy-filter by source_agent against the caller's tenant-enabled
+    // agents so a SunBiz user can't see CC's Bravo/Atlas/Maven events
+    // (and vice versa). Operators bypass via the empire-wide view.
+    if (!args.isOperator) {
+      if (args.agentNames.length === 0) {
+        return { rows: [] };
+      }
+      q = q.in("source_agent", args.agentNames);
+    }
+    const r = await q;
     if (r.error) return { rows: [], error: r.error.message };
     return { rows: ((r.data || []) as unknown) as EventRow[] };
   } catch (err) {
@@ -88,7 +105,16 @@ async function fetchInitial(): Promise<{ rows: EventRow[]; error?: string }> {
 
 export default async function FeedPage() {
   await headers();
-  const { rows, error } = await fetchInitial();
+  const [profile, user] = await Promise.all([
+    getActiveProfile().catch(() => null),
+    getSessionUser().catch(() => null),
+  ]);
+  const isOperator = isOperatorEmail(user?.email || undefined);
+  const agentNames = await getTenantAwareEnabledAgents({
+    userTenantId: profile?.tenant_id ?? null,
+    profileAgentsEnabled: profile?.agents_enabled ?? null,
+  });
+  const { rows, error } = await fetchInitial({ agentNames, isOperator });
 
   const sources = Array.from(new Set(rows.map((r) => r.source_agent || "unknown"))).sort();
 

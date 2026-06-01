@@ -84,6 +84,15 @@ export type ManifestAgentBinding = {
   enabled: boolean;
   /** Whether this agent is the tenant's "primary" — drives the sidebar live indicator. */
   primary?: boolean;
+  /**
+   * Whether this agent is part of the tenant's core (locked) package —
+   * cannot be toggled off via the Settings UI, cannot be removed by an
+   * operator. For SunBiz: Solara + Helios are core; Bravo / Atlas / Maven
+   * may be added as add-ons but never become core for that tenant. For
+   * OASIS: all C-suite agents are core. Defaults to false so non-core
+   * add-on rows don't need to set the flag explicitly.
+   */
+  core?: boolean;
   /** Optional model override (e.g. force Opus for a premium tier). */
   model_override?: string;
   /** Optional prompt overlay appended to the agent's base prompt for this tenant. */
@@ -520,6 +529,7 @@ function parseAgent(v: Json, path: string): ManifestAgentBinding {
     display_name: requireString(v, "display_name", path),
     enabled: requireBoolean(v, "enabled", path),
     primary: optionalBoolean(v, "primary"),
+    core: optionalBoolean(v, "core"),
     model_override: optionalString(v, "model_override"),
     prompt_overlay: optionalString(v, "prompt_overlay"),
   };

@@ -15,10 +15,13 @@ export default async function ReasoningPage() {
   const profile = await safe("reasoning.profile", getActiveProfile(), null);
   const manifestEnabledSlugs = await getTenantEnabledAgents(profile?.tenant_id ?? null);
 
+  // Strict tenant scoping. Empty array yields an empty state — never
+  // falls back to ["bravo"] which would leak Bravo's decisions to a
+  // SunBiz tenant whose manifest + profile were both unpopulated.
   const enabled =
     manifestEnabledSlugs.length > 0
       ? manifestEnabledSlugs
-      : profile?.agents_enabled || ["bravo"];
+      : (profile?.agents_enabled || []);
 
   // Agent decisions tape is scoped by tenant_id + enabled agents — see
   // recentDecisions() docstring for the schema-debt explanation. Without

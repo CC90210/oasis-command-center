@@ -230,12 +230,16 @@ export const SUN_SEED: TenantManifest = {
   },
   agents: [
     // Operational primary — backend admin, Chrome jobs, data collection, workflow runner.
-    // Where Ezra goes when they need work done.
-    { slug: "solara", display_name: "Solara", enabled: true, primary: true },
+    // Where Ezra goes when they need work done. CORE: locked, cannot
+    // be toggled off; the SunBiz CRM depends on Solara's data model.
+    { slug: "solara", display_name: "Solara", enabled: true, primary: true, core: true },
     // Brand-facing sales persona — personable, sales-driven outreach, SMS follow-ups.
     // The voice SunBiz leads experience. Name TBD with CC; helios is the working default
-    // (sun-themed, matches the Solara linguistic family).
-    { slug: "helios", display_name: "Helios", enabled: true },
+    // (sun-themed, matches the Solara linguistic family). CORE: locked.
+    { slug: "helios", display_name: "Helios", enabled: true, core: true },
+    // Non-core add-ons (Bravo, Atlas, Maven, Aura, Hermes) can be appended
+    // by the operator via /t/sun/settings#agents — they render in the
+    // standard agent grid but stay clearly opt-in.
   ],
   // Nav reorganized per the Jordan/Oasis 2026-05-23 meeting (migration 064):
   //   OPERATIONS  Dashboard · Agents · Reasoning · Playbook

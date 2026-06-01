@@ -131,7 +131,12 @@ export async function POST(req: NextRequest) {
       .select("agents_enabled")
       .eq("id", profileId)
       .maybeSingle();
-    const enabled = new Set<string>(cur.data?.agents_enabled || ["bravo"]);
+    // Strict: never default to ["bravo"] when the column is null —
+    // that previously leaked Bravo into a SunBiz operator's enabled
+    // set when the CLI extension path fired before the profile's
+    // legit defaults landed. Start empty; the agentToAdd below is
+    // the only guaranteed entry.
+    const enabled = new Set<string>(cur.data?.agents_enabled || []);
     if (!enabled.has(agentToAdd)) {
       enabled.add(agentToAdd);
       await db

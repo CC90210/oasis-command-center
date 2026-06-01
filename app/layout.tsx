@@ -18,6 +18,7 @@ import {
   manifestPrimaryAgentSlug,
 } from "@/lib/manifest/loader";
 import { SEED_MANIFESTS } from "@/lib/manifest/seeds";
+import { getTenantManifestForUser } from "@/lib/manifest/tenant-scope";
 import { canPreviewTenantSlug } from "@/lib/tenant-access";
 
 // Default metadata — tenant-neutral. Individual pages override via
@@ -127,8 +128,23 @@ export default async function RootLayout({
         ? normalisedDemo
         : null;
 
-    const agent = profile?.primary_agent || "bravo";
     const tenantId = profile?.tenant_id || null;
+    // Validate primary_agent against the tenant's manifest-enabled agents
+    // before using it for the heartbeat lookup. A corrupted profile carrying
+    // primary_agent="atlas" or stale "bravo" would otherwise read another
+    // tenant's heartbeat — cross-tenant signal leak. Fall back to the
+    // manifest's primary slug (or first enabled) when the column is invalid.
+    const manifestForAgent = await getTenantManifestForUser(tenantId);
+    const manifestEnabledForAgent = (manifestForAgent?.agents || [])
+      .filter((a) => a.enabled)
+      .map((a) => a.slug.toLowerCase());
+    const requestedAgent = (profile?.primary_agent || "").toLowerCase();
+    const manifestPrimary = manifestForAgent?.agents?.find(
+      (a) => a.primary && a.enabled,
+    )?.slug?.toLowerCase();
+    const agent = manifestEnabledForAgent.includes(requestedAgent)
+      ? requestedAgent
+      : (manifestPrimary || manifestEnabledForAgent[0] || requestedAgent || "bravo");
 
     // Resolve the operator's tenant slug FIRST so the path-override gate
     // below can share the same access policy the /t/[slug] page uses
