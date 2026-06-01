@@ -48,6 +48,7 @@ type InteractionRow = {
   id: string;
   channel: string | null;
   direction: string | null;
+  type: string | null;
   subject: string | null;
   content_preview: string | null;
   created_at: string | null;
@@ -55,6 +56,13 @@ type InteractionRow = {
   to_email: string | null;
   to_phone: string | null;
   metadata: Record<string, unknown> | null;
+  // Call lifecycle columns added in migration 093 (2026-06-01).
+  recording_url: string | null;
+  transcript_url: string | null;
+  disposition: string | null;
+  call_outcome: string | null;
+  call_duration_sec: number | null;
+  kixie_call_id: string | null;
 };
 type EmailOpenRow = {
   id: string;
@@ -125,33 +133,90 @@ export async function GET(
     try {
       const { data, error } = await db
         .from(table)
-        .select("id, channel, direction, subject, content_preview, created_at, sent_at, to_email, to_phone, metadata")
+        .select(
+          "id, channel, direction, type, subject, content_preview, " +
+            "created_at, sent_at, to_email, to_phone, metadata, " +
+            "recording_url, transcript_url, disposition, call_outcome, " +
+            "call_duration_sec, kixie_call_id",
+        )
         .eq("tenant_id", tenantId)
         .eq("lead_id", leadId)
         .order("created_at", { ascending: false })
         .limit(150);
       if (error) throw error;
       interactionLoaded = true;
-      for (const row of (data || []) as InteractionRow[]) {
+      for (const row of (data || []) as unknown as InteractionRow[]) {
         const at = row.sent_at || row.created_at;
         if (!at) continue;
         const direction = row.direction || "outbound";
         const channel = row.channel || "unknown";
         const isNote = channel === "note";
+        const rowType = row.type || "";
+
+        // Call-specific rendering. The phone channel + the call_* type
+        // values from migration 093 / Phase 2 webhook give us a richer
+        // headline than "Sent phone" / "Received phone."
+        let title: string;
+        let body: string | undefined = row.content_preview || undefined;
+
+        if (isNote) {
+          title = "📝 Note";
+        } else if (channel === "phone") {
+          const callLabel =
+            rowType === "call_voicemail"
+              ? "📞 Voicemail"
+              : rowType === "call_ci_summary"
+                ? "🧠 CI Summary"
+                : rowType === "call_dispositioned"
+                  ? "📞 Disposition set"
+                  : rowType === "call_answered"
+                    ? "📞 Answered"
+                    : rowType === "call_ended"
+                      ? "📞 Call ended"
+                      : direction === "inbound"
+                        ? "📞 Inbound call"
+                        : "📞 Outbound call";
+          const durationLabel = row.call_duration_sec
+            ? `${Math.round(row.call_duration_sec / 60 * 10) / 10}m`
+            : null;
+          const dispositionLabel = row.disposition || row.call_outcome;
+          title = [
+            callLabel,
+            durationLabel ? `· ${durationLabel}` : null,
+            dispositionLabel ? `· ${dispositionLabel}` : null,
+          ]
+            .filter(Boolean)
+            .join(" ");
+          // Surface the recording / transcript URL inline when present
+          // — operators can click straight from the timeline.
+          const extras: string[] = [];
+          if (row.recording_url) extras.push(`▶ Recording: ${row.recording_url}`);
+          if (row.transcript_url) extras.push(`📄 Transcript: ${row.transcript_url}`);
+          if (extras.length > 0) {
+            body = [body, ...extras].filter(Boolean).join("\n");
+          }
+        } else {
+          title = `${direction === "outbound" ? "Sent" : "Received"} ${channel}${row.subject ? `: ${row.subject}` : ""}`;
+        }
+
         events.push({
           source: "interaction",
-          type: isNote ? "note" : `${channel}_${direction}`,
+          type: isNote ? "note" : rowType || `${channel}_${direction}`,
           at,
-          title: isNote
-            ? "📝 Note"
-            : `${direction === "outbound" ? "Sent" : "Received"} ${channel}${row.subject ? `: ${row.subject}` : ""}`,
-          body: row.content_preview || undefined,
+          title,
+          body,
           meta: {
             id: row.id,
             channel,
             to_email: row.to_email,
             to_phone: row.to_phone,
             metadata: row.metadata,
+            recording_url: row.recording_url,
+            transcript_url: row.transcript_url,
+            disposition: row.disposition,
+            call_outcome: row.call_outcome,
+            call_duration_sec: row.call_duration_sec,
+            kixie_call_id: row.kixie_call_id,
           },
         });
       }
