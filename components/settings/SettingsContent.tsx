@@ -233,11 +233,16 @@ export async function SettingsContent({
               ignores it for these tenants — see user_gmail_oauth.py
               _SHARED_INBOX_SLUGS). Showing the panel would tell the
               operator to do something that doesn't change their sends. */}
-          {!isSharedInboxTenant(tenant?.slug ?? null) && (
-            <SafeBoundary label="Personal integrations">
-              <PersonalIntegrationsPanel />
-            </SafeBoundary>
-          )}
+          {/* Personal integrations: always render so every employee can
+              set their Kixie agent email (Phase 5 of TT + Kixie embedding).
+              Gmail row is suppressed for shared-inbox tenants since
+              outbound goes through the shared submissions@ identity
+              and a personal Gmail OAuth has no effect. */}
+          <SafeBoundary label="Personal integrations">
+            <PersonalIntegrationsPanel
+              showGmail={!isSharedInboxTenant(tenant?.slug ?? null)}
+            />
+          </SafeBoundary>
 
           {canManageTenant && (
             <Card

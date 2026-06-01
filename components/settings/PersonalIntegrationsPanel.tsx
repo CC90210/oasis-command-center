@@ -32,10 +32,26 @@ type PersonalStatus = {
   expires_at?: string | null;
 };
 
-export function PersonalIntegrationsPanel() {
+export function PersonalIntegrationsPanel({
+  // When false (shared-inbox tenants like SunBiz), suppress the personal
+  // Gmail row — outbound goes through the shared submissions@ identity so
+  // a personal Gmail OAuth does nothing. The Kixie agent email row still
+  // renders because click-to-call IS per-employee even on shared-inbox
+  // setups.
+  showGmail = true,
+}: {
+  showGmail?: boolean;
+} = {}) {
   const [statuses, setStatuses] = useState<PersonalStatus[] | null>(null);
   const [busyService, setBusyService] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Phase 5 of TT + Kixie embedding (2026-06-01): per-employee Kixie agent
+  // email. Stored encrypted in user_integration_credentials so the call
+  // button on the lead drawer rings THIS employee's Kixie line when they
+  // trigger a call. Defaults to user_profiles.email server-side if absent.
+  const [kixieAgentEmail, setKixieAgentEmail] = useState<string | null>(null);
+  const [kixieDraft, setKixieDraft] = useState("");
+  const [kixieFlash, setKixieFlash] = useState<string | null>(null);
   const searchParams = useSearchParams();
 
   // OAuth callback flash messages — surfaced as a banner on first
@@ -60,11 +76,72 @@ export function PersonalIntegrationsPanel() {
       setError(e instanceof Error ? e.message : "Failed to load");
       setStatuses([]);
     }
+    // Load the user's Kixie agent email override (if any) in parallel.
+    try {
+      const k = await fetch("/api/integrations/personal/kixie", { cache: "no-store" });
+      const kbody = (await k.json().catch(() => ({}))) as {
+        ok?: boolean;
+        kixie_agent_email?: string | null;
+      };
+      if (kbody.ok) {
+        setKixieAgentEmail(kbody.kixie_agent_email || null);
+        setKixieDraft(kbody.kixie_agent_email || "");
+      }
+    } catch {
+      // Soft-fail — the rest of the panel is independent.
+    }
   }
 
   useEffect(() => {
     void refresh();
   }, []);
+
+  async function saveKixieAgentEmail() {
+    setBusyService("kixie");
+    setError(null);
+    setKixieFlash(null);
+    try {
+      const r = await fetch("/api/integrations/personal/kixie", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ kixie_agent_email: kixieDraft.trim() }),
+      });
+      const body = (await r.json().catch(() => ({}))) as {
+        ok?: boolean;
+        kixie_agent_email?: string;
+        error?: string;
+        message?: string;
+      };
+      if (!r.ok || !body.ok) {
+        setError(body.message || body.error || `save_failed:${r.status}`);
+        return;
+      }
+      setKixieAgentEmail(body.kixie_agent_email || null);
+      setKixieFlash("Saved — your Kixie line will ring next time you call from the dashboard.");
+    } finally {
+      setBusyService(null);
+    }
+  }
+
+  async function clearKixieAgentEmail() {
+    if (!confirm("Clear your Kixie agent email override? Calls will ring whichever Kixie account matches your workspace email.")) return;
+    setBusyService("kixie");
+    setError(null);
+    setKixieFlash(null);
+    try {
+      const r = await fetch("/api/integrations/personal/kixie", { method: "DELETE" });
+      if (!r.ok) {
+        const body = (await r.json().catch(() => ({}))) as { message?: string };
+        setError(body.message || `clear_failed:${r.status}`);
+        return;
+      }
+      setKixieAgentEmail(null);
+      setKixieDraft("");
+      setKixieFlash("Cleared.");
+    } finally {
+      setBusyService(null);
+    }
+  }
 
   async function connectGmail() {
     setBusyService("gmail_oauth");
@@ -166,6 +243,7 @@ export function PersonalIntegrationsPanel() {
         </div>
       ) : (
         <ul className="space-y-3">
+          {showGmail && (
           <li className="rounded-lg border border-bg-border bg-bg-deep/40 p-4">
             <div className="flex items-start justify-between gap-3">
               <div>
@@ -211,6 +289,65 @@ export function PersonalIntegrationsPanel() {
                   </button>
                 )}
               </div>
+            </div>
+          </li>
+          )}
+
+          {/* Per-employee Kixie agent email — Phase 5 of TT + Kixie
+              embedding. Drawer click-to-call rings THIS Kixie agent
+              when set; falls back to user_profiles.email otherwise. */}
+          <li className="rounded-lg border border-bg-border bg-bg-deep/40 p-4">
+            <div className="flex flex-col gap-2">
+              <div className="flex items-center gap-2">
+                <span className="font-semibold text-sm text-fg">Kixie agent email</span>
+                {kixieAgentEmail ? (
+                  <span className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-bold bg-emerald-500/15 text-emerald-300 border border-emerald-500/30">
+                    <Check className="w-3 h-3" />
+                    Override set
+                  </span>
+                ) : (
+                  <span className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-medium bg-bg-elev/60 text-fg-dim border border-bg-border">
+                    Using your workspace email
+                  </span>
+                )}
+              </div>
+              <div className="text-[11.5px] text-fg-muted leading-relaxed">
+                Only needed if your Kixie login email is different from your
+                workspace email. When set, click-to-call from the lead
+                drawer rings THIS Kixie account first (the alley-oop), then
+                bridges to the prospect.
+              </div>
+              <div className="flex items-center gap-2 flex-wrap">
+                <input
+                  type="email"
+                  value={kixieDraft}
+                  onChange={(e) => setKixieDraft(e.target.value)}
+                  placeholder="alex@your-kixie-login.com"
+                  className="flex-1 min-w-[200px] rounded-md border border-bg-border bg-bg-elev px-3 py-1.5 text-[12.5px] text-fg placeholder:text-fg-dim focus:outline-none focus:border-accent"
+                />
+                <button
+                  type="button"
+                  onClick={saveKixieAgentEmail}
+                  disabled={busyService === "kixie" || !kixieDraft.trim()}
+                  className="inline-flex items-center gap-1.5 rounded-md bg-accent text-bg-deep px-3 py-1.5 text-[12.5px] font-bold hover:bg-accent/90 disabled:opacity-60 transition-colors"
+                >
+                  {busyService === "kixie" ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : null}
+                  Save
+                </button>
+                {kixieAgentEmail && (
+                  <button
+                    type="button"
+                    onClick={clearKixieAgentEmail}
+                    disabled={busyService === "kixie"}
+                    className="inline-flex items-center gap-1.5 rounded-md border border-bg-border bg-bg-elev px-3 py-1.5 text-[12.5px] font-bold text-fg-muted hover:text-red-300 hover:border-red-500/40 disabled:opacity-50 transition-colors"
+                  >
+                    Clear
+                  </button>
+                )}
+              </div>
+              {kixieFlash && (
+                <div className="text-[11.5px] text-emerald-300">{kixieFlash}</div>
+              )}
             </div>
           </li>
         </ul>
