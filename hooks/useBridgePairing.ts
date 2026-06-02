@@ -29,9 +29,19 @@ export type OS = "windows" | "macos" | "linux";
 
 export type Phase = "mint" | "command" | "watching" | "connected";
 
+/**
+ * "install" = the full bootstrap (clone + deps + wizard + pair) — for a
+ * brand-new machine. "pair" = pair-only — for a machine that ALREADY has the
+ * agent installed (e.g. a provisioned VPS); it just redeems the code and
+ * writes ~/.oasis/bridge_token, no clone/deps/wizard.
+ */
+export type PairMode = "install" | "pair";
+
 export type BridgePairing = {
   os: OS;
   setOs: (os: OS) => void;
+  mode: PairMode;
+  setMode: (m: PairMode) => void;
   code: string | null;
   oneLiner: string;
   /** Seconds remaining on the current code's TTL. 0 if no code yet. */
@@ -59,10 +69,46 @@ function oneLinerFor(os: OS, code: string): string {
   return os === "windows" ? winShell : nixShell;
 }
 
+/**
+ * Pair-only command — for a machine that ALREADY has the agent installed.
+ * It does NOT clone, install deps, or run the wizard. It just calls the
+ * unauthenticated redeem endpoint (the pair code is the credential),
+ * receives the bridge token, and writes it to ~/.oasis/bridge_token (0600) —
+ * exactly what bravo_cli/local_bridge.py reads on every heartbeat. The
+ * operator then starts/restarts their bridge daemon to pick it up.
+ *
+ * Self-contained on purpose (one paste, no repo dependency): bash uses the
+ * always-present python3; Windows uses Invoke-RestMethod. BRAVO_DASHBOARD_URL
+ * overrides the default dashboard host if set.
+ */
+function oneLinerForPair(os: OS, code: string): string {
+  const nixPair =
+    `BRAVO_PAIR_CODE="${code}" python3 -c "` +
+    "import os,json,platform,socket,urllib.request as u;from pathlib import Path;" +
+    "c=os.environ['BRAVO_PAIR_CODE'].strip().upper();" +
+    "b=os.environ.get('BRAVO_DASHBOARD_URL','https://agent-dashboard-cc90210.vercel.app').rstrip('/');" +
+    "d=json.dumps({'code':c,'machine':{'label':platform.node() or 'machine','fingerprint':platform.system()+'|'+platform.machine()+'|'+socket.gethostname()}}).encode();" +
+    "r=u.Request(b+'/api/auth/pair-code/redeem',data=d,headers={'content-type':'application/json'},method='POST');" +
+    "t=json.loads(u.urlopen(r,timeout=20).read())['bridge']['token'];" +
+    "p=Path.home()/'.oasis';p.mkdir(parents=True,exist_ok=True);f=p/'bridge_token';f.write_text(t);os.chmod(f,0o600);" +
+    "print('paired ->',str(f))\"";
+  const winPair =
+    `$env:BRAVO_PAIR_CODE="${code}"; ` +
+    "$b=if($env:BRAVO_DASHBOARD_URL){$env:BRAVO_DASHBOARD_URL.TrimEnd('/')}else{'https://agent-dashboard-cc90210.vercel.app'}; " +
+    "$body=@{code=$env:BRAVO_PAIR_CODE.ToUpper();machine=@{label=$env:COMPUTERNAME;fingerprint=('windows|'+$env:PROCESSOR_ARCHITECTURE+'|'+$env:COMPUTERNAME)}} | ConvertTo-Json -Compress; " +
+    "$r=Invoke-RestMethod -Method Post -Uri ($b+'/api/auth/pair-code/redeem') -ContentType 'application/json' -Body $body; " +
+    "$d=Join-Path $HOME '.oasis'; New-Item -ItemType Directory -Force -Path $d | Out-Null; " +
+    "Set-Content -Path (Join-Path $d 'bridge_token') -Value $r.bridge.token -NoNewline; Write-Host 'paired'";
+  return os === "windows" ? winPair : nixPair;
+}
+
 type DeviceLite = { id: string; created_at: string; revoked_at: string | null };
 
 export function useBridgePairing(): BridgePairing {
   const [os, setOs] = useState<OS>("windows");
+  // Default "install" preserves the existing fresh-machine behavior; the
+  // operator flips to "pair" for an already-provisioned machine.
+  const [mode, setMode] = useState<PairMode>("install");
   const [code, setCode] = useState<string | null>(null);
   const [expiresAt, setExpiresAt] = useState<string | null>(null);
   const [mintedAt, setMintedAt] = useState<number | null>(null);
@@ -165,11 +211,16 @@ export function useBridgePairing(): BridgePairing {
     };
   }, [phase, mintedAt]);
 
-  const oneLiner = useMemo(() => (code ? oneLinerFor(os, code) : ""), [os, code]);
+  const oneLiner = useMemo(
+    () => (code ? (mode === "pair" ? oneLinerForPair(os, code) : oneLinerFor(os, code)) : ""),
+    [os, code, mode],
+  );
 
   return {
     os,
     setOs,
+    mode,
+    setMode,
     code,
     oneLiner,
     secondsLeft,

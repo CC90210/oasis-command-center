@@ -26,7 +26,7 @@ import {
 import { useBridgePairing, type OS } from "@/hooks/useBridgePairing";
 
 export function InstallBridgeWizard() {
-  const { os, setOs, code, oneLiner, secondsLeft, phase, error, retryMint } =
+  const { os, setOs, mode, setMode, code, oneLiner, secondsLeft, phase, error, retryMint } =
     useBridgePairing();
   const [copied, setCopied] = useState(false);
 
@@ -78,6 +78,41 @@ export function InstallBridgeWizard() {
         <>
           <div className="space-y-2">
             <div className="text-[11px] uppercase tracking-wider font-bold text-fg-dim">
+              This machine
+            </div>
+            <div className="flex gap-2">
+              <button
+                type="button"
+                onClick={() => setMode("install")}
+                className={`flex-1 inline-flex items-center justify-center gap-2 py-2 px-3 rounded-md border text-sm transition ${
+                  mode === "install"
+                    ? "border-accent bg-accent/10 text-accent font-bold"
+                    : "border-bg-border text-fg-muted hover:border-bg-border-strong"
+                }`}
+              >
+                New machine — full install
+              </button>
+              <button
+                type="button"
+                onClick={() => setMode("pair")}
+                className={`flex-1 inline-flex items-center justify-center gap-2 py-2 px-3 rounded-md border text-sm transition ${
+                  mode === "pair"
+                    ? "border-accent bg-accent/10 text-accent font-bold"
+                    : "border-bg-border text-fg-muted hover:border-bg-border-strong"
+                }`}
+              >
+                Already set up — pair only
+              </button>
+            </div>
+            <p className="text-[11px] text-fg-dim leading-relaxed">
+              {mode === "install"
+                ? "Clones the agent, installs dependencies, then pairs. Use on a brand-new machine."
+                : "Just pairs this machine's bridge — no clone, no install. Use when the agent is already installed (e.g. your VPS). After it runs, start your bridge so it picks up the token."}
+            </p>
+          </div>
+
+          <div className="space-y-2">
+            <div className="text-[11px] uppercase tracking-wider font-bold text-fg-dim">
               Step 1 — confirm your OS
             </div>
             <div className="flex gap-2">
@@ -127,9 +162,11 @@ export function InstallBridgeWizard() {
             <div className="flex items-center gap-2 text-sm text-fg-muted">
               <Loader2 className="w-4 h-4 animate-spin text-accent" />
               <span>
-                {phase === "command"
-                  ? "Run the command — we're listening for your bridge to come online."
-                  : "Watching for your bridge… this usually takes 60–90 seconds while pip installs."}
+                {mode === "pair"
+                  ? "Run the command to pair this machine — then start your bridge so it connects with the new token."
+                  : phase === "command"
+                    ? "Run the command — we're listening for your bridge to come online."
+                    : "Watching for your bridge… this usually takes 60–90 seconds while pip installs."}
               </span>
             </div>
             <div className="text-[11px] text-fg-dim mt-1.5">
@@ -155,10 +192,20 @@ export function InstallBridgeWizard() {
           <div className="rounded-lg border border-status-engaged/40 bg-status-engaged/10 p-4 flex items-start gap-3">
             <Check className="w-5 h-5 text-status-engaged shrink-0 mt-0.5" />
             <div>
-              <div className="font-bold text-fg">Bridge is online.</div>
+              <div className="font-bold text-fg">{mode === "pair" ? "Paired ✓" : "Bridge is online."}</div>
               <div className="text-sm text-fg-muted mt-1">
-                Open any agent chat. The mode picker in the chat header will start defaulting to{" "}
-                <span className="text-accent font-mono">CLI (bridge)</span> on Auto. Your chat now runs through this machine&apos;s Claude subscription with full file + script access.
+                {mode === "pair" ? (
+                  <>
+                    Token issued and written to{" "}
+                    <span className="font-mono">~/.oasis/bridge_token</span>. Start (or restart) your bridge daemon —
+                    e.g. <span className="font-mono">pm2 restart claude-bridge-ping</span> — and it&apos;ll connect with the new token.
+                  </>
+                ) : (
+                  <>
+                    Open any agent chat. The mode picker in the chat header will start defaulting to{" "}
+                    <span className="text-accent font-mono">CLI (bridge)</span> on Auto. Your chat now runs through this machine&apos;s Claude subscription with full file + script access.
+                  </>
+                )}
               </div>
             </div>
           </div>
