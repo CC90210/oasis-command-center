@@ -30,6 +30,7 @@ const PUBLIC_PATH_PREFIXES = [
   "/api/demo/sun",         // sets Sun demo shell cookie; never exposes live tenant data
   "/api/download/desktop", // public OS-aware desktop download redirect
   "/api/bridge",           // local-bridge daemon heartbeat (Bearer token gated inside)
+  "/api/cron-jobs/poll",   // local-bridge cron poll — Bearer bridge_pairings token gated + rate-limited INSIDE the route (resolveBridge), no session. MUST be public or the bridge's cron poll 401s before its bearer-auth runs (the `/api/cron` entry can't cover it — matchesPathPrefix needs prefix+"/", and it's `cron-jobs`). This is what blocks all cron automations from firing. Only `/poll` is public; the session-authed `/api/cron-jobs` CRUD stays gated.
   "/api/integrations/registry",  // canonical service+env_key list — used by the bridge to decide what to ping; non-sensitive (names only, no values), 5min Cache-Control
   "/api/exec-override",    // POST = external HMAC fallback for override approvals; GET is now session-gated inside the route (Codex pass 4, 2026-05-18).
   "/api/outbound/log",     // outbound logging from local backend (HMAC auth inside)
