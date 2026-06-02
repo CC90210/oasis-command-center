@@ -25,6 +25,7 @@ const PUBLIC_PATH_PREFIXES = [
   "/api/inbound",          // n8n inbound webhook (Bearer-auth gated inside the route)
   "/api/auth/signout",
   "/api/auth/provision",   // legacy + setup-wizard provision (Bearer-auth gated inside)
+  "/api/auth/provision-cli", // setup-wizard operator-account creation, called by install/bootstrap.py — CLI_SIGNUP_SECRET bearer gated INSIDE the route, no session. MUST be public or installer account-creation 401s before its secret check ("/api/auth/provision" can't cover the "-cli" suffix — matchesPathPrefix needs prefix+"/").
   "/api/auth/pair",        // setup-wizard pairing (Bearer-auth gated inside)
   "/api/auth/pair-code/redeem", // machine-facing pair-code redemption — the CODE is the auth (no session); the route is IP-rate-limited + code-shape-validated + single-use + 15-min TTL. MUST be public or every machine pairing 401s before reaching the handler (matchesPathPrefix won't let the `/api/auth/pair` entry cover `pair-code`). NOTE: the mint endpoint `/api/auth/pair-code` stays session-gated — only `/redeem` is public.
   "/api/demo/sun",         // sets Sun demo shell cookie; never exposes live tenant data
