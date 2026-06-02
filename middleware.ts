@@ -57,6 +57,7 @@ const PUBLIC_PATH_PREFIXES = [
 
   "/api/cron",
   "/api/webhook",          // public webhooks for clients (HMAC/Bearer gated inside)
+  "/api/webhooks/",        // inbound provider webhooks — Kixie / TextTorrent / Twilio (and future). Each route self-authenticates via a timing-safe HMAC signature check INSIDE the route, so the prefix is public. Trailing slash → matchesPathPrefix covers every /api/webhooks/* sub-path. MUST be public or registered Kixie/TT/Twilio callbacks 401 before their signature verification runs — the singular "/api/webhook" entry can't cover the plural "/api/webhooks/" (matchesPathPrefix needs prefix+"/").
   "/_next",
   "/favicon",
 ];
