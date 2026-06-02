@@ -47,6 +47,12 @@ const REPO_BY_AGENT: Record<string, string> = {
   aura: "AURA",
   hermes: "hermes",
   "life-preservation": "life-preservation",
+  // SunBiz personas both live in the SunBiz repo — without these the synthetic
+  // trace falls back to bravo's repo and shows the wrong cd path (the real
+  // bridge resolves the correct cwd via agent_roots).
+  sunbiz: "SunBiz-Agent",
+  solara: "SunBiz-Agent",
+  helios: "SunBiz-Agent",
 };
 
 const SCAN: Array<{ kind: string; label: string; detail: string }> = [

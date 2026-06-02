@@ -12,6 +12,11 @@ export const AGENT_REPO_HINTS: Record<string, string> = {
   maven: "~/CMO-Agent",
   aura: "~/AURA",
   hermes: "~/hermes",
+  // SunBiz: the chat targets the `solara`/`helios` personas; both live in the
+  // SunBiz repo (~/SunBiz-Agent dev, /srv/sunbiz/sunbiz-agent on the VPS).
+  sunbiz: "~/SunBiz-Agent",
+  solara: "~/SunBiz-Agent",
+  helios: "~/SunBiz-Agent",
 };
 
 /** Endpoint the local bridge serves chat from. */
