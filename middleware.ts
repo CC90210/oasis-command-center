@@ -26,6 +26,7 @@ const PUBLIC_PATH_PREFIXES = [
   "/api/auth/signout",
   "/api/auth/provision",   // legacy + setup-wizard provision (Bearer-auth gated inside)
   "/api/auth/pair",        // setup-wizard pairing (Bearer-auth gated inside)
+  "/api/auth/pair-code/redeem", // machine-facing pair-code redemption — the CODE is the auth (no session); the route is IP-rate-limited + code-shape-validated + single-use + 15-min TTL. MUST be public or every machine pairing 401s before reaching the handler (matchesPathPrefix won't let the `/api/auth/pair` entry cover `pair-code`). NOTE: the mint endpoint `/api/auth/pair-code` stays session-gated — only `/redeem` is public.
   "/api/demo/sun",         // sets Sun demo shell cookie; never exposes live tenant data
   "/api/download/desktop", // public OS-aware desktop download redirect
   "/api/bridge",           // local-bridge daemon heartbeat (Bearer token gated inside)
