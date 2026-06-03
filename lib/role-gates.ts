@@ -68,6 +68,55 @@ export function isReadOnlyRole(teamRole: string | null | undefined): boolean {
 }
 
 /**
+ * VPS-bridge tool gating (distinct from READ_ONLY_DENIED_TOOLS above).
+ *
+ * READ_ONLY_DENIED_TOOLS lists CLOUD tool / marker names (snake_case:
+ * write_file, bash, send_email...) the cloud /api/chat path strips for
+ * read_only operators. THIS list is the Claude Code CLI tool names
+ * (PascalCase: Bash, Write, Edit...) passed to the bridge spawn as
+ * `--disallowed-tools` — the hard wall that prevents a non-owner SunBiz
+ * employee from getting a shell on the shared VPS.
+ *
+ * Enforcement: the /api/bridge/chat proxy computes this server-side from the
+ * DB-resolved team_role, forwards it as `disallowed_tools`, and the bridge
+ * appends `--disallowed-tools Bash Write Edit MultiEdit NotebookEdit WebFetch`
+ * to BOTH the cold-spawn and warm-pool claude argv. See
+ * CEO-Agent/bravo_cli/bridge_chat_server.py and warm_claude_pool.py. Claude
+ * Code itself refuses to invoke a denied tool, so the model literally cannot
+ * shell out — this is not advisory persona text, it is the CLI boundary.
+ */
+export const BRIDGE_MUTATING_TOOLS = [
+  "Bash",
+  "Write",
+  "Edit",
+  "MultiEdit",
+  "NotebookEdit",
+  "WebFetch",
+] as const;
+
+/**
+ * Map a team_role to the Claude Code CLI tools to deny at bridge spawn time.
+ *
+ *   owner / admin  → []  (full harness, same power CC has)
+ *   every other role (read_only, member, loan_officer, processor, ...)
+ *                  → the full mutating set (no shell, no file writes, no WebFetch
+ *                    SSRF surface). Read / Glob / Grep stay allowed so the agent
+ *                    can still answer business questions.
+ *
+ * Fail-closed by construction: an unknown / null / empty role falls into the
+ * non-owner branch and gets the full deny list. Callers should ALSO default
+ * teamRole to 'read_only' on any resolution error so the least-privilege path
+ * is taken twice over.
+ */
+export function bridgeDisallowedToolsForRole(
+  teamRole: string | null | undefined,
+): string[] {
+  const r = (teamRole || "").trim().toLowerCase();
+  if (r === "owner" || r === "admin") return [];
+  return [...BRIDGE_MUTATING_TOOLS];
+}
+
+/**
  * V6.9.3 — Field-level permission enforcement.
  *
  * Manifest extension (lib/manifest/schema.ts ManifestAgentBinding):

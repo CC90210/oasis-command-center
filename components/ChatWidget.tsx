@@ -175,6 +175,14 @@ const CLI_RUNTIME_LABELS: Record<CliRuntime, string> = {
   codex: "Codex CLI",
   gemini: "Gemini CLI",
 };
+// Proxy mode — when NEXT_PUBLIC_BRIDGE_CHAT_BASE is set to anything other than
+// the operator's localhost default, the bridge is a remote (private) VPS that
+// the browser must NOT touch directly. In that case all bridge traffic routes
+// through same-origin /api/bridge/* proxies (Supabase-cookie-authed; the
+// server attaches the VPS bearer). When false (CC's localhost), every bridge
+// call hits ${BRIDGE_CHAT_BASE} directly, byte-for-byte as before.
+const isProxyMode = BRIDGE_CHAT_BASE !== "http://127.0.0.1:9100";
+
 const MAX_ATTACHMENTS_PER_TURN = 5;
 const TEXT_ATTACHMENT_READ_BYTES = 512 * 1024;
 const MAX_ATTACHMENT_EXCERPT_CHARS = 120_000;
@@ -866,7 +874,13 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
       try {
         const ctl = new AbortController();
         const t = setTimeout(() => ctl.abort(), 1500);
-        const r = await fetch(`${BRIDGE_CHAT_BASE}/health`, { signal: ctl.signal });
+        // Proxy mode: probe the same-origin proxy (which forwards the bearer
+        // to the VPS server-side) so the browser never touches the VPS and
+        // never needs the bearer. Operator localhost: probe the bridge directly.
+        const r = await fetch(
+          isProxyMode ? "/api/bridge/health" : `${BRIDGE_CHAT_BASE}/health`,
+          { signal: ctl.signal },
+        );
         clearTimeout(t);
         if (alive) setBridgeOnline(r.ok);
       } catch {
@@ -894,7 +908,9 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
   useEffect(() => {
     if (bridgeOnline !== true) return;
     if (cliRuntime !== "claude") return;
-    void fetch(`${BRIDGE_CHAT_BASE}/prewarm`, {
+    // Proxy mode routes through the same-origin proxy so the prewarm POST
+    // isn't a cross-origin (CORS-blocked, bearer-less) hit on the VPS.
+    void fetch(isProxyMode ? "/api/bridge/prewarm" : `${BRIDGE_CHAT_BASE}/prewarm`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ agent, tab_id: tabId }),
@@ -1009,7 +1025,9 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
     // catches up. Fire-and-forget; bridge offline / 404 is fine since
     // the reaper is the safety net.
     if (bridgeOnline === true) {
-      void fetch(`${BRIDGE_CHAT_BASE}/chat-reset`, {
+      // Proxy mode routes through the same-origin proxy so reset (which kills
+      // the warm VPS process) isn't a cross-origin (CORS-blocked) hit.
+      void fetch(isProxyMode ? "/api/bridge/chat-reset" : `${BRIDGE_CHAT_BASE}/chat-reset`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         // tab_id is the canonical pool key; session_id sent for legacy
@@ -1543,12 +1561,24 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
       //           body field below — the URL is the same.
       const isOllama = cfg?.provider === "ollama";
       const useBridge = wantsBridge;
-      const useLocalChat = useBridge && isOllama && cliRuntime === "claude";
+      // Ollama local-chat is a localhost-operator feature only — its URL is the
+      // direct bridge (browser->127.0.0.1). In proxy mode that bridge is the
+      // private VPS (unreachable from the browser, no bearer), so disable the
+      // direct local-chat path and fall through to the same-origin proxy
+      // (/api/bridge/chat). Employees use the subscription CLIs, not Ollama.
+      const useLocalChat = useBridge && isOllama && cliRuntime === "claude" && !isProxyMode;
+      // Proxy mode: bridge chat goes through the same-origin proxy
+      // (/api/bridge/chat), which authenticates via the Supabase cookie and
+      // attaches the VPS bearer server-side. The request body shape is
+      // unchanged — the proxy forwards it through and overrides identity
+      // fields server-side. Operator localhost keeps the direct path.
       const url = useLocalChat
         ? `${BRIDGE_CHAT_BASE}/local-chat`
-        : useBridge
-          ? `${BRIDGE_CHAT_BASE}/chat`
-          : "/api/chat";
+        : useBridge && isProxyMode
+          ? "/api/bridge/chat"
+          : useBridge
+            ? `${BRIDGE_CHAT_BASE}/chat`
+            : "/api/chat";
       const body = useLocalChat
         ? {
             // Bridge `/local-chat` payload: model + messages. The bridge
