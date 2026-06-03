@@ -12,6 +12,7 @@ import {
   sendSmsDirectTwilio,
 } from "@/lib/sms-direct-twilio";
 import { cookies } from "next/headers";
+import { isDryRun } from "@/lib/integrations/send-mode";
 
 /**
  * POST /api/sms/send — client-agent SMS dispatch.
@@ -85,6 +86,16 @@ export async function POST(req: Request) {
     return NextResponse.json(
       { ok: false, error: "body exceeds 1600 chars", status: "validation_error" },
       { status: 400 }
+    );
+  }
+
+  // Dry-run gate (2026-06-02): the dashboard defaults to dry-run so no SMS
+  // route can send live before DASHBOARD_LIVE_SEND=1 is set. Short-circuit
+  // after validation, before either the direct-Twilio or client-agent path.
+  if (isDryRun()) {
+    return NextResponse.json(
+      { ok: true, dry_run: true, status: "dry_run", would_send: { to, body } },
+      { status: 200 }
     );
   }
 

@@ -9,7 +9,7 @@
     "start": "next start --port 3100",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",
-    "test:sunbiz": "tsx tests/sunbiz-import-routing.test.ts && tsx tests/auth-routing.test.ts && tsx tests/middleware-prefix.test.ts && tsx tests/onboarding-gate.test.ts && tsx tests/agent-display-name.test.ts && tsx tests/employee-scoped-pipeline.test.ts && tsx tests/user-credential-resolver.test.ts && tsx tests/team-invites.test.ts && tsx tests/url-safety.test.ts && tsx tests/lead-staleness.test.ts && tsx tests/setup-readiness.test.ts && tsx tests/seat-warning.test.ts && tsx tests/role-agent-defaults.test.ts",
+    "test:sunbiz": "tsx tests/sunbiz-import-routing.test.ts && tsx tests/auth-routing.test.ts && tsx tests/middleware-prefix.test.ts && tsx tests/onboarding-gate.test.ts && tsx tests/agent-display-name.test.ts && tsx tests/employee-scoped-pipeline.test.ts && tsx tests/user-credential-resolver.test.ts && tsx tests/team-invites.test.ts && tsx tests/url-safety.test.ts && tsx tests/lead-staleness.test.ts && tsx tests/setup-readiness.test.ts && tsx tests/seat-warning.test.ts && tsx tests/role-agent-defaults.test.ts && tsx tests/conversations-grouping.test.ts && tsx tests/dashboard-send-mode.test.ts",
     "test:chat-modes": "tsx tests/chat-modes.test.ts",
     "test:event-bus": "tsx tests/event-bus-display.test.ts",
     "test:streaming-redactor": "tsx tests/streaming-redactor.test.ts"

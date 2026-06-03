@@ -23,23 +23,13 @@ import { NextResponse, type NextRequest } from "next/server";
 import { getServiceSupabase, getSessionUser } from "@/lib/supabase-server";
 import { getUserIntegrationValue } from "@/lib/user-integration-store";
 import { getKixieCredentials, makeCall } from "@/lib/integrations/kixie";
+import { normalizePhoneE164 } from "@/lib/lead-interactions-queries";
+import { isDryRun } from "@/lib/integrations/send-mode";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-
-function normalizePhoneE164(raw: string): string | null {
-  if (!raw) return null;
-  const digits = raw.replace(/\D+/g, "");
-  if (raw.trim().startsWith("+") && digits.length >= 8 && digits.length <= 15) {
-    return `+${digits}`;
-  }
-  if (digits.length === 11 && digits.startsWith("1")) return `+${digits}`;
-  if (digits.length === 10) return `+1${digits}`;
-  if (digits.length >= 8 && digits.length <= 15) return `+${digits}`;
-  return null;
-}
 
 export async function POST(
   req: NextRequest,
@@ -152,22 +142,29 @@ export async function POST(
     );
   }
 
-  try {
-    await makeCall(creds, {
-      target: targetPhone,
-      agentEmail,
-      displayName,
-      leadId, // echoed back via customField1 on webhook events
-    });
-  } catch (err) {
-    return NextResponse.json(
-      {
-        ok: false,
-        error: "kixie_call_failed",
-        message: err instanceof Error ? err.message : "Kixie call request failed.",
-      },
-      { status: 502 },
-    );
+  // Dry-run gate (2026-06-02): the dashboard defaults to dry-run so the
+  // Call button can't place a live call the moment Kixie creds land. We
+  // still validate everything above (phone, agent email, creds) and log
+  // the attempt; we just skip the actual Kixie request.
+  const dryRun = isDryRun();
+  if (!dryRun) {
+    try {
+      await makeCall(creds, {
+        target: targetPhone,
+        agentEmail,
+        displayName,
+        leadId, // echoed back via customField1 on webhook events
+      });
+    } catch (err) {
+      return NextResponse.json(
+        {
+          ok: false,
+          error: "kixie_call_failed",
+          message: err instanceof Error ? err.message : "Kixie call request failed.",
+        },
+        { status: 502 },
+      );
+    }
   }
 
   // Log the initiation immediately so the drawer timeline reflects the
@@ -182,12 +179,15 @@ export async function POST(
       agent_source: "dashboard_drawer",
       from_phone: null,
       to_phone: targetPhone,
-      content_preview: `Call initiated by ${agentEmail}`,
+      content_preview: dryRun
+        ? `Dry-run call to ${targetPhone} (not placed)`
+        : `Call initiated by ${agentEmail}`,
       actor_user_id: user.id,
       metadata: {
         kixie_agent_email: agentEmail,
         requested_by_email: fallbackEmail,
         display_name: displayName,
+        dry_run: dryRun,
       },
     });
   } catch (err) {
@@ -196,8 +196,11 @@ export async function POST(
 
   return NextResponse.json({
     ok: true,
+    dry_run: dryRun,
     agent_email: agentEmail,
     target_phone: targetPhone,
-    message: `Ringing your line at ${agentEmail} — pick up to bridge to the lead.`,
+    message: dryRun
+      ? `Dry-run — would ring your line at ${agentEmail} then bridge to ${targetPhone}. No call placed (dashboard is in dry-run mode).`
+      : `Ringing your line at ${agentEmail} — pick up to bridge to the lead.`,
   });
 }

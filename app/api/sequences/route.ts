@@ -14,8 +14,9 @@
  */
 
 import { NextRequest, NextResponse } from "next/server";
-import { getSessionUser, getServiceSupabase } from "@/lib/supabase-server";
+import { getServiceSupabase } from "@/lib/supabase-server";
 import { resolveTenantId } from "@/lib/api-auth";
+import { getSessionContext, canManageTeam } from "@/lib/team";
 import { isMissingTableError, missingTablePayload } from "@/lib/api-helpers";
 import {
   parseDripSteps,
@@ -25,11 +26,6 @@ import {
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
-
-async function resolveUserId(): Promise<string | null> {
-  const user = await getSessionUser();
-  return user?.id ?? null;
-}
 
 export async function GET() {
   const tenantId = await resolveTenantId();
@@ -60,9 +56,18 @@ export async function GET() {
 }
 
 export async function POST(req: NextRequest) {
-  const tenantId = await resolveTenantId();
-  if (!tenantId) return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
-  const userId = await resolveUserId();
+  // Admin-only: creating a drip sequence defines a campaign that fires real
+  // SMS/email. Non-admin members can view (GET) but not create.
+  const ctx = await getSessionContext();
+  if (!ctx) return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
+  if (!canManageTeam(ctx.teamRole)) {
+    return NextResponse.json(
+      { ok: false, error: "forbidden", message: "Only owners/admins can create drip sequences." },
+      { status: 403 },
+    );
+  }
+  const tenantId = ctx.tenantId;
+  const userId = ctx.authUserId;
 
   let body: Record<string, unknown>;
   try {

@@ -12,16 +12,24 @@
  */
 
 import { NextRequest, NextResponse } from "next/server";
-import { resolveTenantId } from "@/lib/api-auth";
+import { getSessionContext, canManageTeam } from "@/lib/team";
 import { draftAutomation } from "@/lib/ai-automation-drafter";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 export async function POST(req: NextRequest) {
-  const tenantId = await resolveTenantId();
-  if (!tenantId) {
+  // Admin-only: drafting an automation is the first step of creating a
+  // scheduled job (script_run etc.). Gate it like the save step.
+  const ctx = await getSessionContext();
+  if (!ctx) {
     return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
+  }
+  if (!canManageTeam(ctx.teamRole)) {
+    return NextResponse.json(
+      { ok: false, error: "forbidden", message: "Only owners/admins can create automations." },
+      { status: 403 },
+    );
   }
 
   let body: { description?: unknown };

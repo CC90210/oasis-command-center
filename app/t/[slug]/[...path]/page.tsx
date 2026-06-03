@@ -14,6 +14,9 @@ import { ShoppingOutClient } from "@/components/shopping-out/ShoppingOutClient";
 import { OffersByDealClient } from "@/components/offers/OffersByDealClient";
 import { LendersDirectoryClient } from "@/components/lenders/LendersDirectoryClient";
 import { RenewalsV2 } from "@/components/renewals/RenewalsV2";
+import { ConversationsClient } from "@/components/conversations/ConversationsClient";
+import { CampaignsClient } from "@/components/campaigns/CampaignsClient";
+import { listThreadsForTenant } from "@/lib/lead-interactions-queries";
 import { TenantSettings } from "@/components/settings/TenantSettings";
 import { TenantAutomations } from "@/components/automations/TenantAutomations";
 import { LeadTimelinePanel } from "@/components/leads/LeadTimelinePanel";
@@ -378,6 +381,8 @@ function renderSubtitle(brand: string, page: ManifestPageDef): string {
     case "renewals_v2": return "Funded deals ranked by renewal urgency.";
     case "settings": return "Tenant-scoped — owner sees full settings, preview shows scaffold only.";
     case "automations": return "Tenant-scoped automations — cron jobs, bridge status, AI-described drafts.";
+    case "conversations": return "Unified inbox — SMS, calls, and email replies threaded by contact.";
+    case "campaigns": return "Bulk SMS campaigns — analytics and create.";
     default: return brand;
   }
 }
@@ -470,6 +475,24 @@ async function PageBody({
     case "automations":
       // Tenant-scoped Automations — same Option A pattern as Settings.
       return <TenantAutomations tenantSlug={slug} tenantId={tenantId} />;
+    case "conversations":
+      // Phase 3b (2026-06-02). Unified inbox over lead_interactions,
+      // threaded by contact. Server-side initial fetch (PageBody is async,
+      // same precedent as RenewalsV2); the client component handles filter
+      // chips, search, and reply / AI-reply actions. Preview mode (no owned
+      // tenant) gets an empty list — shell visible, no cross-tenant data.
+      return (
+        <ConversationsClient
+          tenantSlug={slug}
+          tenantId={tenantId}
+          initialThreads={tenantId ? await listThreadsForTenant(tenantId, {}) : []}
+        />
+      );
+    case "campaigns":
+      // Phase 3c. TextTorrent bulk-campaign analytics + create. The client
+      // does its own fetches (per-campaign counts fan-out is better lazy
+      // client-side than blocking SSR against TT's 60/min limiter).
+      return <CampaignsClient tenantSlug={slug} tenantId={tenantId} />;
     case "pipeline": {
       // Stacked superview — Lead Pipeline above Opportunity Pipeline.
       // Each section has its own chevron bar + filtered table. Filter

@@ -197,6 +197,11 @@ export type ManifestPageKind =
                       // wired tel:/mailto: buttons. Replaces the generic
                       // kind="kanban" rendering of the (unused) `renewal`
                       // entity in tenant_records for the SunBiz tenant.
+  | "conversations"   // Phase 3b (TT + Kixie embedding, 2026-06-02). Unified
+                      // inbox — TT chats + Kixie SMS + email replies threaded
+                      // by contact. Renders ConversationsClient. SunBiz first.
+  | "campaigns"       // Phase 3c. TextTorrent bulk-campaign analytics +
+                      // create form. Renders CampaignsClient.
   | "automations"     // Tenant-scoped Automations (Option A, 2026-05-25).
                       // Same pattern as settings — routes through
                       // /t/<slug>/automations via catch-all so
@@ -510,6 +515,9 @@ const PAGE_KINDS = new Set<ManifestPageKind>([
   "renewals_v2",
   "settings",
   "automations",
+  // Phase 3b/3c (TT + Kixie embedding, 2026-06-02).
+  "conversations",
+  "campaigns",
 ]);
 const ENTITY_FIELD_TYPES = new Set(["string", "number", "boolean", "date", "datetime", "enum", "json"]);
 const INTEGRATION_KINDS = new Set<ManifestIntegrationKind>([
@@ -586,8 +594,58 @@ function parseRequiredService(v: Json, path: string): ManifestRequiredService {
   };
 }
 
+/**
+ * Lenient parse of an agent's setup_answers map. Returns undefined when
+ * absent / not an object; otherwise keeps the string|number|boolean entries
+ * and drops anything else. Never throws — a stray non-scalar value must not
+ * fail the whole manifest and fall the tenant back to seed.
+ */
+function parseSetupAnswers(v: Json): Record<string, string | number | boolean> | undefined {
+  if (!isObject(v)) return undefined;
+  const out: Record<string, string | number | boolean> = {};
+  for (const [k, val] of Object.entries(v)) {
+    if (typeof val === "string" || typeof val === "number" || typeof val === "boolean") {
+      out[k] = val;
+    }
+  }
+  return out;
+}
+
+/**
+ * Lenient parse of an agent's field_permissions array. Returns undefined
+ * only when the value is absent / not an array — an EMPTY array is preserved
+ * because [] is meaningful (zero field access / metadata-only, per the
+ * default-deny model). Malformed entries are skipped, never thrown.
+ */
+function parseFieldPermissions(v: Json): ManifestAgentBinding["field_permissions"] {
+  if (!isArray(v)) return undefined;
+  const out: NonNullable<ManifestAgentBinding["field_permissions"]> = [];
+  for (const item of v) {
+    if (!isObject(item)) continue;
+    const entityType = item.entity_type;
+    const mode = item.mode;
+    const fields = item.fields;
+    if (!isString(entityType)) continue;
+    if (mode !== "read" && mode !== "write") continue;
+    if (!isArray(fields)) continue;
+    out.push({ entity_type: entityType, mode, fields: fields.filter(isString) });
+  }
+  return out;
+}
+
 function parseAgent(v: Json, path: string): ManifestAgentBinding {
   if (!isObject(v)) throw new ManifestParseError(path, "expected object");
+  // Carry through tool_palette / setup_answers / field_permissions. These
+  // are declared on ManifestAgentBinding and consumed downstream (the chat
+  // route reads tool_palette, agent-personas folds setup_answers, role-gates
+  // enforces field_permissions) but parseAgent historically DROPPED all
+  // three — so any DB-loaded manifest silently lost them and only in-code
+  // seeds preserved them. Empty arrays are preserved (tool_palette:[] =
+  // chat-only; field_permissions:[] = metadata-only) — never coerced to
+  // undefined, which would flip the meaning to "full access".
+  const toolPalette = isArray(v.tool_palette)
+    ? (v.tool_palette as Json[]).filter(isString)
+    : undefined;
   return {
     slug: requireString(v, "slug", path),
     display_name: requireString(v, "display_name", path),
@@ -596,6 +654,9 @@ function parseAgent(v: Json, path: string): ManifestAgentBinding {
     core: optionalBoolean(v, "core"),
     model_override: optionalString(v, "model_override"),
     prompt_overlay: optionalString(v, "prompt_overlay"),
+    tool_palette: toolPalette,
+    setup_answers: parseSetupAnswers(v.setup_answers),
+    field_permissions: parseFieldPermissions(v.field_permissions),
   };
 }
 

@@ -16,6 +16,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { resolveTenantId } from "@/lib/api-auth";
+import { getSessionContext, canManageTeam } from "@/lib/team";
 import {
   parseDripSteps,
   parseDripTriggerFilter,
@@ -53,8 +54,15 @@ export async function PATCH(
   req: NextRequest,
   ctx: { params: Promise<{ id: string }> },
 ) {
-  const tenantId = await resolveTenantId();
-  if (!tenantId) return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
+  const session = await getSessionContext();
+  if (!session) return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
+  if (!canManageTeam(session.teamRole)) {
+    return NextResponse.json(
+      { ok: false, error: "forbidden", message: "Only owners/admins can edit drip sequences." },
+      { status: 403 },
+    );
+  }
+  const tenantId = session.tenantId;
   const { id } = await ctx.params;
 
   let body: Record<string, unknown>;
@@ -127,8 +135,15 @@ export async function DELETE(
   _req: NextRequest,
   ctx: { params: Promise<{ id: string }> },
 ) {
-  const tenantId = await resolveTenantId();
-  if (!tenantId) return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
+  const session = await getSessionContext();
+  if (!session) return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
+  if (!canManageTeam(session.teamRole)) {
+    return NextResponse.json(
+      { ok: false, error: "forbidden", message: "Only owners/admins can delete drip sequences." },
+      { status: 403 },
+    );
+  }
+  const tenantId = session.tenantId;
   const { id } = await ctx.params;
 
   const db = getServiceSupabase();

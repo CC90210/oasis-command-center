@@ -62,6 +62,24 @@ import {
   setTenantIntegrationValue,
   VAULT_CUSTOM_SERVICE,
 } from "./tenant-integration-store";
+import { isDryRun } from "./integrations/send-mode";
+import { normalizePhoneE164, isPhoneOptedOut } from "./lead-interactions-queries";
+import { getUserIntegrationValue } from "./user-integration-store";
+import {
+  getKixieCredentials,
+  makeCall as kixieMakeCall,
+  sendSms as kixieSendSms,
+} from "./integrations/kixie";
+import {
+  getTextTorrentCredentials,
+  sendSms as ttSendSms,
+  replyToThread as ttReplyToThread,
+  createCampaign as ttCreateCampaign,
+  createList as ttCreateList,
+  addContact as ttAddContact,
+  blockContact as ttBlockContact,
+  unblockContact as ttUnblockContact,
+} from "./integrations/texttorrent";
 
 const ANTHROPIC_VERSION = "2023-06-01";
 const MAX_TOOL_ITERATIONS = 8; // safety cap — prevents runaway tool loops
@@ -437,6 +455,139 @@ export const TOOL_DEFINITIONS: ToolDef[] = [
   },
 
   // ──────────────────────────────────────────────────────────────────
+  // SunBiz comms tools (Phase 3d, 2026-06-02) — Kixie click-to-call/SMS +
+  // TextTorrent SMS / blasts / list management. defer:false — they run
+  // server-side on Vercel via the typed clients (lib/integrations/*), same
+  // as the drawer Call button. Every send respects the dashboard dry-run
+  // gate (lib/integrations/send-mode.ts). Send-capable tools are in
+  // READ_ONLY_DENIED_TOOLS and only reach Helios via HELIOS_TOOL_PALETTE.
+  // ──────────────────────────────────────────────────────────────────
+  {
+    name: "kixie_call",
+    description:
+      "Place a Kixie click-to-call (alley-oop: rings the acting employee's line first, then bridges to the prospect). Pass lead_id to dial the lead's stored phone, or target for an explicit E.164 number. Respects dry-run.",
+    input_schema: {
+      type: "object",
+      properties: {
+        lead_id: { type: "string", description: "Lead UUID — the stored phone is dialed." },
+        target: { type: "string", description: "Explicit phone (E.164, e.g. +14165551212). Used when no lead_id." },
+        display_name: { type: "string", description: "Optional call-card label." },
+      },
+    },
+  },
+  {
+    name: "kixie_send_sms",
+    description:
+      "Send an SMS via Kixie, attributed to the acting employee. Pass lead_id (uses the lead's phone) or target. Include opt-out language on first touch (Reply STOP to opt out) — TCPA. Respects dry-run.",
+    input_schema: {
+      type: "object",
+      properties: {
+        lead_id: { type: "string", description: "Lead UUID — uses the lead's stored phone." },
+        target: { type: "string", description: "Explicit recipient phone (E.164). Used when no lead_id." },
+        message: { type: "string", description: "SMS body." },
+      },
+      required: ["message"],
+    },
+  },
+  {
+    name: "texttorrent_send",
+    description:
+      "Send a 1:1 SMS via TextTorrent to a phone number. Include opt-out language on first touch (TCPA). Respects dry-run.",
+    input_schema: {
+      type: "object",
+      properties: {
+        number: { type: "string", description: "Recipient phone (E.164)." },
+        message: { type: "string", description: "SMS body." },
+      },
+      required: ["number", "message"],
+    },
+  },
+  {
+    name: "texttorrent_blast",
+    description:
+      "Create a TextTorrent bulk campaign to a contact list. High blast radius — confirm with the operator first. Include opt-out language. Respects dry-run.",
+    input_schema: {
+      type: "object",
+      properties: {
+        list_id: { type: "string", description: "TextTorrent contact list ID (see texttorrent_create_list / the Campaigns page)." },
+        message: { type: "string", description: "Campaign message body." },
+        scheduled_time: { type: "string", description: "Optional ISO 8601 send time. Omit to send immediately." },
+      },
+      required: ["list_id", "message"],
+    },
+  },
+  {
+    name: "texttorrent_inbox_reply",
+    description:
+      "Reply to an existing TextTorrent 1:1 conversation by phone number (threads on TT's side). Respects dry-run.",
+    input_schema: {
+      type: "object",
+      properties: {
+        number: { type: "string", description: "The contact's phone (E.164)." },
+        message: { type: "string", description: "Reply body." },
+      },
+      required: ["number", "message"],
+    },
+  },
+  {
+    name: "texttorrent_create_list",
+    description:
+      "Create a new TextTorrent contact list. Name max 15 chars (TT limit).",
+    input_schema: {
+      type: "object",
+      properties: {
+        name: { type: "string", description: "List name (≤15 chars)." },
+      },
+      required: ["name"],
+    },
+  },
+  {
+    name: "texttorrent_add_contact",
+    description:
+      "Add a contact to a TextTorrent list. Use before a blast so the list is populated.",
+    input_schema: {
+      type: "object",
+      properties: {
+        first_name: { type: "string", description: "Contact first name." },
+        number: { type: "string", description: "Contact phone (E.164)." },
+        list_id: { type: "string", description: "Target TextTorrent list ID." },
+        last_name: { type: "string", description: "Optional last name." },
+        email: { type: "string", description: "Optional email." },
+        company: { type: "string", description: "Optional company." },
+      },
+      required: ["first_name", "number", "list_id"],
+    },
+  },
+  {
+    name: "texttorrent_block",
+    description:
+      "Block a contact from TextTorrent sends (opt-out / do-not-contact). Pass contact_id or number.",
+    input_schema: {
+      type: "object",
+      properties: {
+        contact_id: { type: "string", description: "TextTorrent contact ID." },
+        number: { type: "string", description: "Phone to block (E.164). Used when no contact_id." },
+      },
+    },
+  },
+  {
+    name: "texttorrent_unblock",
+    description:
+      "Unblock previously-blocked TextTorrent contacts by their contact IDs.",
+    input_schema: {
+      type: "object",
+      properties: {
+        contact_ids: {
+          type: "array",
+          items: { type: "string" },
+          description: "TextTorrent contact IDs to unblock.",
+        },
+      },
+      required: ["contact_ids"],
+    },
+  },
+
+  // ──────────────────────────────────────────────────────────────────
   // Bridge-proxied tools (defer: true) — these execute on the operator's
   // local machine via bravo_cli/bridge_tools.py. The runner pauses on
   // tool_use, the browser POSTs to localhost:9100/exec-tool, the result
@@ -763,6 +914,24 @@ async function dispatch(
       return await toolImportLeadsFromAttachment(input, ctx);
     case "advance_lead_stage":
       return await toolAdvanceLeadStage(input, ctx);
+    case "kixie_call":
+      return await toolKixieCall(input, ctx);
+    case "kixie_send_sms":
+      return await toolKixieSendSms(input, ctx);
+    case "texttorrent_send":
+      return await toolTextTorrentSend(input, ctx);
+    case "texttorrent_blast":
+      return await toolTextTorrentBlast(input, ctx);
+    case "texttorrent_inbox_reply":
+      return await toolTextTorrentInboxReply(input, ctx);
+    case "texttorrent_create_list":
+      return await toolTextTorrentCreateList(input, ctx);
+    case "texttorrent_add_contact":
+      return await toolTextTorrentAddContact(input, ctx);
+    case "texttorrent_block":
+      return await toolTextTorrentBlock(input, ctx);
+    case "texttorrent_unblock":
+      return await toolTextTorrentUnblock(input, ctx);
     default:
       throw new Error(`unknown_tool:${name}`);
   }
@@ -1334,6 +1503,244 @@ async function toolSearchRecords(input: Record<string, unknown>, ctx: ToolContex
   };
 }
 
+// ----------------------------------------------------------------------------
+// SunBiz comms tools (Phase 3d, 2026-06-02) — Kixie + TextTorrent.
+//
+// Sends (call / sms / blast / inbox_reply) are dry-run gated via isDryRun().
+// List management (create_list / add_contact / block / unblock) runs live —
+// it never contacts a prospect, only shapes TT-side data — but still
+// requires the tenant's TT credentials, so it no-ops until those are wired.
+// Thrown TextTorrentError / KixieError propagate to executeTool's wrapper,
+// which surfaces them to the model as a tool error.
+// ----------------------------------------------------------------------------
+
+function leadIdArg(input: Record<string, unknown>): string | null {
+  return typeof input.lead_id === "string" && input.lead_id.trim() ? input.lead_id.trim() : null;
+}
+
+/** Resolve a lead's stored phone (normalized E.164) from tenant_records. */
+async function resolveLeadPhone(tenantId: string, leadId: string): Promise<string | null> {
+  const db = getServiceSupabase();
+  const r = await db
+    .from("tenant_records")
+    .select("data")
+    .eq("id", leadId)
+    .eq("tenant_id", tenantId)
+    .maybeSingle();
+  const data = (r.data as { data?: Record<string, unknown> } | null)?.data || {};
+  return normalizePhoneE164(typeof data.phone === "string" ? data.phone : "");
+}
+
+/** 3-tier Kixie agent email: per-user override → profile email → tenant default. */
+async function resolveKixieAgentEmail(ctx: ToolContext, fallback: string | undefined): Promise<string> {
+  let email = "";
+  try {
+    const ov = await getUserIntegrationValue(ctx.tenantId, ctx.userId, "kixie", "kixie_agent_email");
+    if (ov) email = ov;
+  } catch {
+    /* soft-fail */
+  }
+  if (!email) {
+    try {
+      const db = getServiceSupabase();
+      const r = await db
+        .from("user_profiles")
+        .select("email")
+        .eq("auth_user_id", ctx.authUserId)
+        .maybeSingle();
+      const e = (r.data as { email?: string | null } | null)?.email;
+      if (e) email = e;
+    } catch {
+      /* soft-fail */
+    }
+  }
+  return email || fallback || "";
+}
+
+/** Best-effort timeline log for chat-initiated sends. Never throws. */
+async function logCommsInteraction(args: {
+  tenantId: string;
+  leadId: string | null;
+  toPhone: string;
+  preview: string;
+  userId: string;
+  type: string;
+  channel: string;
+  provider: string;
+  dryRun: boolean;
+}) {
+  try {
+    const db = getServiceSupabase();
+    await db.from("lead_interactions").insert({
+      tenant_id: args.tenantId,
+      lead_id: args.leadId,
+      type: args.type,
+      channel: args.channel,
+      direction: "outbound",
+      agent_source: "chat_tool",
+      to_phone: args.toPhone,
+      content_preview: args.preview.slice(0, 1024),
+      actor_user_id: args.userId,
+      metadata: { provider: args.provider, dry_run: args.dryRun },
+    });
+  } catch (err) {
+    console.error("[cloud-tool comms] interaction log failed", err);
+  }
+}
+
+async function toolKixieCall(input: Record<string, unknown>, ctx: ToolContext) {
+  const leadId = leadIdArg(input);
+  let phone = normalizePhoneE164(typeof input.target === "string" ? input.target : "");
+  if (!phone && leadId) phone = await resolveLeadPhone(ctx.tenantId, leadId);
+  if (!phone) throw new Error("no_phone: pass target (E.164) or a lead_id with a stored phone.");
+  const displayName =
+    typeof input.display_name === "string" && input.display_name.trim()
+      ? input.display_name.trim()
+      : "Outbound call";
+
+  if (isDryRun()) {
+    await logCommsInteraction({ tenantId: ctx.tenantId, leadId, toPhone: phone, preview: `Call ${phone}`, userId: ctx.userId, type: "call_initiated", channel: "phone", provider: "kixie", dryRun: true });
+    return { ok: true, dry_run: true, would_call: { target: phone, lead_id: leadId } };
+  }
+  const creds = await getKixieCredentials(ctx.tenantId);
+  const agentEmail = await resolveKixieAgentEmail(ctx, creds.defaultAgentEmail);
+  if (!agentEmail) throw new Error("no_agent_email: set your Kixie agent email in Settings → Personal integrations.");
+  await kixieMakeCall(creds, { target: phone, agentEmail, displayName, leadId: leadId ?? undefined });
+  await logCommsInteraction({ tenantId: ctx.tenantId, leadId, toPhone: phone, preview: `Call initiated by ${agentEmail}`, userId: ctx.userId, type: "call_initiated", channel: "phone", provider: "kixie", dryRun: false });
+  return { ok: true, dry_run: false, target: phone, agent_email: agentEmail };
+}
+
+async function toolKixieSendSms(input: Record<string, unknown>, ctx: ToolContext) {
+  const message = typeof input.message === "string" ? input.message.trim() : "";
+  if (!message) throw new Error("message_required");
+  const leadId = leadIdArg(input);
+  let phone = normalizePhoneE164(typeof input.target === "string" ? input.target : "");
+  if (!phone && leadId) phone = await resolveLeadPhone(ctx.tenantId, leadId);
+  if (!phone) throw new Error("no_phone: pass target (E.164) or a lead_id with a stored phone.");
+
+  if (isDryRun()) {
+    await logCommsInteraction({ tenantId: ctx.tenantId, leadId, toPhone: phone, preview: message, userId: ctx.userId, type: "sms_sent", channel: "sms", provider: "kixie", dryRun: true });
+    return { ok: true, dry_run: true, would_send: { target: phone, message, lead_id: leadId } };
+  }
+  if (await isPhoneOptedOut(ctx.tenantId, phone)) {
+    throw new Error("opted_out: recipient previously replied STOP — send blocked.");
+  }
+  const creds = await getKixieCredentials(ctx.tenantId);
+  const agentEmail = await resolveKixieAgentEmail(ctx, creds.defaultAgentEmail);
+  if (!agentEmail) throw new Error("no_agent_email: set your Kixie agent email in Settings → Personal integrations.");
+  await kixieSendSms(creds, { target: phone, message, agentEmail, leadId: leadId ?? undefined });
+  await logCommsInteraction({ tenantId: ctx.tenantId, leadId, toPhone: phone, preview: message, userId: ctx.userId, type: "sms_sent", channel: "sms", provider: "kixie", dryRun: false });
+  return { ok: true, dry_run: false, target: phone };
+}
+
+async function toolTextTorrentSend(input: Record<string, unknown>, ctx: ToolContext) {
+  const number = normalizePhoneE164(typeof input.number === "string" ? input.number : "");
+  const message = typeof input.message === "string" ? input.message.trim() : "";
+  if (!number) throw new Error("no_phone: number must be E.164.");
+  if (!message) throw new Error("message_required");
+
+  if (isDryRun()) {
+    await logCommsInteraction({ tenantId: ctx.tenantId, leadId: null, toPhone: number, preview: message, userId: ctx.userId, type: "sms_sent", channel: "sms", provider: "texttorrent", dryRun: true });
+    return { ok: true, dry_run: true, would_send: { number, message } };
+  }
+  if (await isPhoneOptedOut(ctx.tenantId, number)) {
+    throw new Error("opted_out: recipient previously replied STOP — send blocked.");
+  }
+  const creds = await getTextTorrentCredentials(ctx.tenantId);
+  await ttSendSms(creds, { number, message });
+  await logCommsInteraction({ tenantId: ctx.tenantId, leadId: null, toPhone: number, preview: message, userId: ctx.userId, type: "sms_sent", channel: "sms", provider: "texttorrent", dryRun: false });
+  return { ok: true, dry_run: false, number };
+}
+
+async function toolTextTorrentInboxReply(input: Record<string, unknown>, ctx: ToolContext) {
+  const number = normalizePhoneE164(typeof input.number === "string" ? input.number : "");
+  const message = typeof input.message === "string" ? input.message.trim() : "";
+  if (!number) throw new Error("no_phone: number must be E.164.");
+  if (!message) throw new Error("message_required");
+
+  if (isDryRun()) {
+    await logCommsInteraction({ tenantId: ctx.tenantId, leadId: null, toPhone: number, preview: message, userId: ctx.userId, type: "sms_sent", channel: "sms", provider: "texttorrent", dryRun: true });
+    return { ok: true, dry_run: true, would_send: { number, message } };
+  }
+  if (await isPhoneOptedOut(ctx.tenantId, number)) {
+    throw new Error("opted_out: recipient previously replied STOP — send blocked.");
+  }
+  const creds = await getTextTorrentCredentials(ctx.tenantId);
+  await ttReplyToThread(creds, { number, message });
+  await logCommsInteraction({ tenantId: ctx.tenantId, leadId: null, toPhone: number, preview: message, userId: ctx.userId, type: "sms_sent", channel: "sms", provider: "texttorrent", dryRun: false });
+  return { ok: true, dry_run: false, number };
+}
+
+async function toolTextTorrentBlast(input: Record<string, unknown>, ctx: ToolContext) {
+  // Owner/admin only (Codex P1, 2026-06-02) — mirrors the dashboard campaign
+  // endpoint's gate. A blast hits many recipients; a non-admin Helios user
+  // must not be able to launch one via chat.
+  if (!ctx.isAdmin) {
+    throw new Error("forbidden: launching a bulk campaign is owner/admin only.");
+  }
+  const listId = typeof input.list_id === "string" ? input.list_id.trim() : "";
+  const message = typeof input.message === "string" ? input.message.trim() : "";
+  const scheduledTime =
+    typeof input.scheduled_time === "string" && input.scheduled_time.trim()
+      ? input.scheduled_time.trim()
+      : undefined;
+  if (!listId) throw new Error("list_id_required");
+  if (!message) throw new Error("message_required");
+
+  if (isDryRun()) {
+    return { ok: true, dry_run: true, would_create: { list_id: listId, message, scheduled_time: scheduledTime } };
+  }
+  const creds = await getTextTorrentCredentials(ctx.tenantId);
+  const r = await ttCreateCampaign(creds, { list_id: listId, message, scheduled_time: scheduledTime });
+  return { ok: true, dry_run: false, campaign: r.data };
+}
+
+async function toolTextTorrentCreateList(input: Record<string, unknown>, ctx: ToolContext) {
+  const name = typeof input.name === "string" ? input.name.trim() : "";
+  if (!name) throw new Error("name_required");
+  const creds = await getTextTorrentCredentials(ctx.tenantId);
+  const r = await ttCreateList(creds, name);
+  return { ok: true, list: r.data };
+}
+
+async function toolTextTorrentAddContact(input: Record<string, unknown>, ctx: ToolContext) {
+  const firstName = typeof input.first_name === "string" ? input.first_name.trim() : "";
+  const number = normalizePhoneE164(typeof input.number === "string" ? input.number : "");
+  const listId = typeof input.list_id === "string" ? input.list_id.trim() : "";
+  if (!firstName) throw new Error("first_name_required");
+  if (!number) throw new Error("no_phone: number must be E.164.");
+  if (!listId) throw new Error("list_id_required");
+  const creds = await getTextTorrentCredentials(ctx.tenantId);
+  const r = await ttAddContact(creds, {
+    first_name: firstName,
+    number,
+    list_id: listId,
+    last_name: typeof input.last_name === "string" ? input.last_name : undefined,
+    email: typeof input.email === "string" ? input.email : undefined,
+    company: typeof input.company === "string" ? input.company : undefined,
+  });
+  return { ok: true, contact: r.data };
+}
+
+async function toolTextTorrentBlock(input: Record<string, unknown>, ctx: ToolContext) {
+  const contactId = typeof input.contact_id === "string" && input.contact_id.trim() ? input.contact_id.trim() : undefined;
+  const number = typeof input.number === "string" && input.number.trim() ? input.number.trim() : undefined;
+  if (!contactId && !number) throw new Error("contact_id_or_number_required");
+  const creds = await getTextTorrentCredentials(ctx.tenantId);
+  await ttBlockContact(creds, { contact_id: contactId, number });
+  return { ok: true, blocked: contactId || number };
+}
+
+async function toolTextTorrentUnblock(input: Record<string, unknown>, ctx: ToolContext) {
+  const ids = Array.isArray(input.contact_ids)
+    ? (input.contact_ids as unknown[]).filter((x): x is string => typeof x === "string" && x.trim().length > 0)
+    : [];
+  if (ids.length === 0) throw new Error("contact_ids_required");
+  const creds = await getTextTorrentCredentials(ctx.tenantId);
+  await ttUnblockContact(creds, ids);
+  return { ok: true, unblocked_count: ids.length };
+}
+
 // create_record / update_record / delete_record are dispatched directly to
 // runAction in agent-actions.ts (see switch above) — no per-tool wrapper
 // needed here. That keeps validation, manifest-scoping, and audit-logging
@@ -1615,6 +2022,33 @@ function humanSummary(name: string, input: Record<string, unknown>, data: unknow
       return d.dry_run
         ? `parsed ${d.parsed_rows || 0} lead rows from attachment`
         : `imported ${d.inserted || 0} lead rows from attachment`;
+    }
+    case "kixie_call": {
+      const d = data as { dry_run?: boolean; target?: string };
+      return `${d.dry_run ? "(dry-run) " : ""}calling ${d.target || String(input.target || input.lead_id || "")} via Kixie`;
+    }
+    case "kixie_send_sms": {
+      const d = data as { dry_run?: boolean; target?: string };
+      return `${d.dry_run ? "(dry-run) " : ""}Kixie SMS → ${d.target || String(input.target || input.lead_id || "")}`;
+    }
+    case "texttorrent_send":
+    case "texttorrent_inbox_reply": {
+      const d = data as { dry_run?: boolean; number?: string };
+      return `${d.dry_run ? "(dry-run) " : ""}TextTorrent SMS → ${d.number || String(input.number || "")}`;
+    }
+    case "texttorrent_blast": {
+      const d = data as { dry_run?: boolean };
+      return `${d.dry_run ? "(dry-run) " : ""}TextTorrent blast to list ${String(input.list_id || "")}`;
+    }
+    case "texttorrent_create_list":
+      return `created TextTorrent list "${String(input.name || "")}"`;
+    case "texttorrent_add_contact":
+      return `added contact to TextTorrent list ${String(input.list_id || "")}`;
+    case "texttorrent_block":
+      return `blocked TextTorrent contact`;
+    case "texttorrent_unblock": {
+      const d = data as { unblocked_count?: number };
+      return `unblocked ${d.unblocked_count || 0} TextTorrent contact${d.unblocked_count === 1 ? "" : "s"}`;
     }
     default:
       return name;

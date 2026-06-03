@@ -24,7 +24,7 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { getServiceSupabase } from "@/lib/supabase-server";
-import { resolveSessionContext } from "@/lib/api-auth";
+import { getSessionContext, canManageTeam } from "@/lib/team";
 import type { AutomationDraft } from "@/lib/ai-automation-drafter";
 
 export const runtime = "nodejs";
@@ -41,9 +41,16 @@ function isValidCron(expr: string): boolean {
 }
 
 export async function POST(req: NextRequest) {
-  const ctx = await resolveSessionContext();
-  if (!ctx.ok) {
-    return NextResponse.json({ ok: false, error: "unauthorized", message: ctx.reason }, { status: 401 });
+  // Admin-only: persists a tenant_cron_jobs row (a scheduled script_run).
+  const ctx = await getSessionContext();
+  if (!ctx) {
+    return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
+  }
+  if (!canManageTeam(ctx.teamRole)) {
+    return NextResponse.json(
+      { ok: false, error: "forbidden", message: "Only owners/admins can save automations." },
+      { status: 403 },
+    );
   }
 
   let body: { draft?: Partial<AutomationDraft>; confirmed?: boolean };

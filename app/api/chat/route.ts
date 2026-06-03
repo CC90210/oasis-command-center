@@ -36,6 +36,7 @@ import { composeDashboardContextV2 } from "@/lib/agent-context";
 import { markReadDb } from "@/lib/agent-inbox-db";
 import { rateLimit } from "@/lib/rate-limit";
 import { extractActionMarkers, runAction } from "@/lib/agent-actions";
+import { SAFE_TENANT_TOOL_PALETTE } from "@/lib/chat-tool-palettes";
 import {
   READ_ONLY_DENIED_TOOLS,
   READ_ONLY_DENIED_MARKERS,
@@ -74,71 +75,9 @@ export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 export const maxDuration = 300; // 5 min — enough for long Sonnet/Opus runs
 
-/**
- * Safe-default tool palette for non-operator tenants.
- *
- * When a tenant's manifest doesn't pin an explicit per-agent tool_palette,
- * client tenants (SunBiz, future PropFlow, etc.) get THIS list — not the
- * full TOOL_DEFINITIONS palette. The omitted tools are:
- *
- *   - `bash` / `write_file` / `read_file` — arbitrary filesystem access on
- *     whichever machine hosts the bridge. Today that's CC's host; tomorrow
- *     it might be a client VPS. Either way, an end-user chatting with
- *     their agent should not be able to coax the LLM into shell commands.
- *   - `run_script` — arbitrary Python execution. Same blast-radius
- *     concern; per-tenant agents should drive scripts via typed
- *     endpoints (/api/applications/.../match-lenders etc.), not raw
- *     subprocess.
- *   - `delete_record` — no undo. Tenants can update_record to soft-delete
- *     via a status field; hard delete is operator-only.
- *
- * Operators (CC's account, anyone in ADMIN_EMAILS) bypass this filter —
- * their chats keep the full unrestricted palette so the operator's
- * own multi-tool workflows aren't crippled.
- */
-const SAFE_TENANT_TOOL_PALETTE: string[] = [
-  // Data tools — tenant_records CRUD, all RLS-scoped at the data layer.
-  "list_records",
-  "get_record",
-  "search_records",
-  "create_record",
-  "update_record",
-  "lookup_lead_by_name",
-  "list_open_leads",
-  "import_leads_from_attachment",
-  "integration_status",
-  // HTTP — fetchWithCap enforces an SSRF block list (see cloud-tool-
-  // runner.ts after the 2026-05-16 hardening). Tenants can hit public
-  // URLs and the dashboard's own API but not internal services.
-  "http_get",
-  // http_post removed from default palette 2026-05-22 (Codex Finding #7):
-  // SSRF protection doesn't stop prompt-injection exfiltration to a
-  // public endpoint or unintended POSTs to webhook URLs. Re-enable
-  // per-tenant via the manifest tool_palette when a domain allowlist +
-  // operator confirmation flow is in place.
-  // Bridge sends — already routed through send_gateway (CASL/TCPA
-  // enforced) per the 2026-05-16 hardening of bridge_tools.py.
-  "send_email",
-  "send_sms",
-  // KNOWN FACTS append — per-user, can only write to the calling user's
-  // own user_profiles row (auth_user_id-scoped in the tool itself). No
-  // blast radius across the tenant. Lets the cloud system prompt's
-  // "I'll save this for next time" promise actually do something.
-  "save_known_fact",
-  // Custom credentials vault read — tenant-scoped lookup against the
-  // service="custom" rows of tenant_integration_credentials. Returns
-  // decrypted value (AES-256-GCM) for the tool to use; the model is
-  // instructed not to echo it back. Lets agents actually consume the
-  // KEY=VALUE secrets the operator pasted in Settings → Custom
-  // credentials without having to ask for them every turn. Admin-gated
-  // inside the tool (ctx.isAdmin) — non-admin tenants see {forbidden}.
-  "get_credential",
-  // Admin-only mirror of get_credential — lets an admin tell the agent
-  // in chat "save this as STRIPE_WEBHOOK_SECRET" and have it persisted
-  // to the vault without navigating to Settings. Same admin gate;
-  // every call is audit-logged.
-  "add_credential",
-];
+// SAFE_TENANT_TOOL_PALETTE moved to lib/chat-tool-palettes.ts (Phase 3d,
+// 2026-06-02) so the SunBiz seed manifest can compose Helios's palette from
+// it without duplicating the list. Imported at the top of this file.
 
 type IncomingPayload = {
   agent_key?: string;

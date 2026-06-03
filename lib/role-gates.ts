@@ -25,6 +25,18 @@ export const READ_ONLY_DENIED_TOOLS = new Set<string>([
   "write_file",
   "bash",
   "run_script",
+  // Phase 3d (2026-06-02) Kixie/TextTorrent comms tools. All mutate or
+  // send outbound, so a read_only member must never trigger them via chat
+  // — even though the dashboard's dry-run gate is a second backstop.
+  "kixie_call",
+  "kixie_send_sms",
+  "texttorrent_send",
+  "texttorrent_blast",
+  "texttorrent_inbox_reply",
+  "texttorrent_create_list",
+  "texttorrent_add_contact",
+  "texttorrent_block",
+  "texttorrent_unblock",
 ]);
 
 /**

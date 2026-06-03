@@ -13,7 +13,7 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { getSessionUser, getServiceSupabase } from "@/lib/supabase-server";
-import { resolveTenantId } from "@/lib/api-auth";
+import { getSessionContext, canManageTeam } from "@/lib/team";
 import { isMissingTableError, missingTablePayload } from "@/lib/api-helpers";
 import { isOperatorEmail } from "@/lib/operator-credentials";
 import { getTenantEnabledAgents } from "@/lib/manifest/tenant-scope";
@@ -67,11 +67,6 @@ function isValidCron(expr: string): boolean {
   const parts = expr.trim().split(/\s+/);
   if (parts.length !== 5) return false;
   return parts.every((p) => CRON_FIELD.test(p));
-}
-
-async function resolveUserId(): Promise<string | null> {
-  const user = await getSessionUser();
-  return user?.id ?? null;
 }
 
 export async function GET() {
@@ -203,9 +198,18 @@ function normalizeEmpireRow(row: EmpireCronRow) {
 }
 
 export async function POST(req: NextRequest) {
-  const tenantId = await resolveTenantId();
-  if (!tenantId) return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
-  const userId = await resolveUserId();
+  // Admin-only: creating a scheduled job (script_run / agent_prompt /
+  // webhook_post / snapshot_run). Non-admin members can view (GET) only.
+  const ctx = await getSessionContext();
+  if (!ctx) return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
+  if (!canManageTeam(ctx.teamRole)) {
+    return NextResponse.json(
+      { ok: false, error: "forbidden", message: "Only owners/admins can create automations." },
+      { status: 403 },
+    );
+  }
+  const tenantId = ctx.tenantId;
+  const userId = ctx.authUserId;
 
   let body: Record<string, unknown>;
   try {
