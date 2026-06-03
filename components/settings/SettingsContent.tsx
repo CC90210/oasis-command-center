@@ -43,8 +43,6 @@ import { PlanTemplateEditor } from "@/components/settings/PlanTemplateEditor";
 import { AgentConfigEditor } from "@/components/settings/AgentConfigEditor";
 import { IntegrationKeysPanel } from "@/components/settings/IntegrationKeysPanel";
 import { PersonalIntegrationsPanel } from "@/components/settings/PersonalIntegrationsPanel";
-import { SetupReadinessCard } from "@/components/settings/SetupReadinessCard";
-import { loadReadinessReport } from "@/lib/setup-readiness";
 import { SafeBoundary } from "@/components/SafeBoundary";
 import { MyAgentsCard } from "@/components/settings/MyAgentsCard";
 import { AgentMarketplaceCard } from "@/components/settings/AgentMarketplaceCard";
@@ -133,18 +131,6 @@ export async function SettingsContent({
   const visibleServices = new Set(visibleDefs.map((d) => d.service));
   const visibleIntegrations = integrations.filter((h: IntegrationHealth) => visibleServices.has(h.service));
 
-  // Server-fetch the per-user + per-tenant readiness in one call so the
-  // top-of-Settings card renders with zero client round-trips.
-  const readiness = await safe(
-    "settings.readiness",
-    loadReadinessReport({
-      tenantId: profile?.tenant_id ?? null,
-      authUserId: user?.id ?? null,
-      isOwnerOrAdmin: canManageTenant,
-    }),
-    { personal: [], tenant: null },
-  );
-
   return (
     <div className="space-y-6 animate-fade-in">
       {!hideHeader && (
@@ -160,13 +146,6 @@ export async function SettingsContent({
         </Card>
       ) : (
         <>
-          {(readiness.personal.length > 0 || (readiness.tenant && readiness.tenant.length > 0)) && (
-            <SetupReadinessCard
-              personal={readiness.personal}
-              tenant={readiness.tenant}
-            />
-          )}
-
           <Card
             title="Profile"
             subtitle={`Signed in as ${profile.email}`}
