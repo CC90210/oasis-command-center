@@ -13,6 +13,7 @@
  */
 
 import { CC_NAV, type NavItem } from "../nav-config";
+import { HELIOS_TOOL_PALETTE } from "../chat-tool-palettes";
 import {
   MANIFEST_SCHEMA_VERSION,
   type ManifestNavItem,
@@ -267,7 +268,11 @@ export const SUN_SEED: TenantManifest = {
     // Brand-facing sales persona — personable, sales-driven outreach, SMS follow-ups.
     // The voice SunBiz leads experience. Name TBD with CC; helios is the working default
     // (sun-themed, matches the Solara linguistic family). CORE: locked.
-    { slug: "helios", display_name: "Helios", enabled: true, core: true },
+    // Phase 3d (2026-06-02): Helios gets the Kixie/TextTorrent comms send
+    // tools. tool_palette is an allowlist REPLACE, so HELIOS_TOOL_PALETTE
+    // = safe base + comms tools. Solara has NO palette → safe default
+    // (no comms tools) = "opt-in" for the back-office persona.
+    { slug: "helios", display_name: "Helios", enabled: true, core: true, tool_palette: HELIOS_TOOL_PALETTE },
     // Non-core add-ons (Bravo, Atlas, Maven, Aura, Hermes) can be appended
     // by the operator via /t/sun/settings#agents — they render in the
     // standard agent grid but stay clearly opt-in.
@@ -335,6 +340,9 @@ export const SUN_SEED: TenantManifest = {
     { href: "/t/sun/leads", label: "Leads", icon: "Users", group: "Pipeline" },
     { href: "/t/sun/shopping-out", label: "Shopping Out", icon: "ShoppingBag", group: "Pipeline" },
     { href: "/t/sun/applications", label: "Applications", icon: "FileText", group: "Pipeline" },
+    // Phase 3b/3c (2026-06-02). Unified inbox + bulk-campaign analytics.
+    { href: "/t/sun/conversations", label: "Conversations", icon: "MessageSquare", group: "Pipeline" },
+    { href: "/t/sun/campaigns", label: "Campaigns", icon: "Megaphone", group: "Pipeline" },
     // Deals — post-shop lifecycle: offers in, renewals tracked, commissions
     // booked, lenders managed. Lenders moved here from the (now-deleted)
     // Network group — it's a deal-context entity, not a separate domain.
@@ -637,6 +645,9 @@ export const SUN_SEED: TenantManifest = {
     // get the generic table primitive.
     { path: "lenders", label: "Lenders", kind: "lenders_v2", entity: "lender" },
     { path: "import", label: "Import leads", kind: "import" },
+    // Phase 3b/3c (2026-06-02). Rendered by the catch-all dispatcher.
+    { path: "conversations", label: "Conversations", kind: "conversations" },
+    { path: "campaigns", label: "Campaigns", kind: "campaigns" },
     // Settings — tenant-scoped, routed via the catch-all so
     // resolveDataTenant() can gate previewMode for non-owners. See
     // schema.ts ManifestPageKind / TenantSettings for the full rules.
@@ -684,10 +695,13 @@ export const SUN_SEED: TenantManifest = {
     { kind: "twilio", enabled: true, credential_env_key: "SUNBIZ_AGENT_HMAC_SECRET" },
     { kind: "turso", enabled: true },
   ],
-  // End-user tenant — hide the 4-mode chat picker. Ezra at SunBiz doesn't
-  // need to think about CLI vs API; Auto-mode routing handles it silently.
+  // SunBiz employees run the shared VPS bridge across Claude Code / Codex /
+  // Gemini and need to pick the runtime per chat — expose the picker (was
+  // hidden when SunBiz was single-operator). The CLI selector still only
+  // renders once the bridge is reachable (NEXT_PUBLIC_BRIDGE_CHAT_BASE -> the
+  // VPS bridge); Auto-mode is the fallback when offline.
   ui: {
-    advanced_picker: false,
+    advanced_picker: true,
   },
   meta: {
     created_at: FROZEN_AT,
