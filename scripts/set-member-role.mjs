@@ -75,7 +75,7 @@ if (!p.data) {
   process.exit(5);
 }
 
-console.log("Tenant:", { slug: t.data.slug, name: t.data.name });
+console.log("Tenant:", { slug: tenantSlug, tenant_id: tenantId });
 console.log("Member (before):", { email: p.data.email, full_name: p.data.full_name, team_role: p.data.team_role, is_owner: p.data.is_owner });
 
 if (p.data.is_owner && role !== "owner") {
