@@ -19,5 +19,9 @@ export const AGENT_REPO_HINTS: Record<string, string> = {
   helios: "~/SunBiz-Agent",
 };
 
-/** Endpoint the local bridge serves chat from. */
-export const BRIDGE_CHAT_BASE = "http://127.0.0.1:9100";
+/** Endpoint the bridge serves chat from. Defaults to the local desktop bridge,
+ *  but reads NEXT_PUBLIC_BRIDGE_CHAT_BASE so a hosted deploy (e.g. the SunBiz
+ *  VPS bridge behind nginx/TLS) can point every employee's browser at the shared
+ *  always-on bridge instead of their own localhost. Mirrors BridgeCliPanel.tsx. */
+export const BRIDGE_CHAT_BASE =
+  process.env.NEXT_PUBLIC_BRIDGE_CHAT_BASE || "http://127.0.0.1:9100";
