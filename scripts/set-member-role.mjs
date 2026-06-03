@@ -45,9 +45,21 @@ if (!url || !key) {
 const db = createClient(url, key, { auth: { persistSession: false } });
 
 // Resolve tenant
-const t = await db.from("tenants").select("id, slug, name").eq("slug", tenantSlug).maybeSingle();
-if (t.error || !t.data) { console.error(`ERROR: tenant slug "${tenantSlug}" not found (${t.error?.message || "no row"})`); process.exit(3); }
-const tenantId = t.data.id;
+// Resolve tenant by slug OR custom_fields.command_center_profile_slug. SunBiz is
+// stored as tenants.slug='submissions' with command_center_profile_slug='sun', so a
+// naive .eq("slug","sun") misses it — mirror provision_secrets._resolve_tenant.
+async function resolveTenantId(client, wanted) {
+  const direct = await client.from("tenants").select("id").eq("slug", wanted).limit(1).maybeSingle();
+  if (direct.data?.id) return direct.data.id;
+  const all = await client.from("tenants").select("id, custom_fields");
+  for (const row of (all.data || [])) {
+    const cf = row.custom_fields || {};
+    if (cf.command_center_profile_slug === wanted) return row.id;
+  }
+  return null;
+}
+const tenantId = await resolveTenantId(db, tenantSlug);
+if (!tenantId) { console.error(`ERROR: tenant "${tenantSlug}" not found by slug or command_center_profile_slug.`); process.exit(3); }
 
 // Resolve member profile by email within tenant
 const p = await db.from("user_profiles")
