@@ -182,11 +182,11 @@ async function persistLeadInteraction(
         raw_eventname: eventname,
       },
     };
-    try {
-      await db.from("lead_interactions").insert(row);
-    } catch (err) {
-      // Likely a unique conflict on a future messageid index; safe to ignore.
-      console.warn("[webhooks.kixie] sms insert (likely dup):", err);
+    // supabase-js does NOT throw on DB errors — check .error explicitly or the
+    // failure is invisible. 23505 (unique violation) means already-stored → ok.
+    const { error } = await db.from("lead_interactions").insert(row);
+    if (error && error.code !== "23505") {
+      throw new Error(`sms insert failed: ${error.message}`);
     }
     return;
   }
@@ -243,12 +243,11 @@ async function persistLeadInteraction(
 
   // ON CONFLICT (kixie_call_id) DO UPDATE — supported via PostgREST upsert
   // with onConflict pointing at the unique index from migration 093.
-  try {
-    await db
-      .from("lead_interactions")
-      .upsert(patch, { onConflict: "kixie_call_id" });
-  } catch (err) {
-    console.error("[webhooks.kixie] lead_interactions upsert failed", err);
+  const { error } = await db
+    .from("lead_interactions")
+    .upsert(patch, { onConflict: "kixie_call_id" });
+  if (error) {
+    throw new Error(`lead_interactions upsert failed: ${error.message}`);
   }
 }
 
@@ -330,7 +329,15 @@ export async function POST(req: NextRequest) {
   }
 
   // 2. Persist to lead_interactions (mutating call lifecycle / SMS thread).
-  await persistLeadInteraction(db, { tenantId, eventname, evt });
+  //    Fail-CLOSED: a DB error returns non-2xx so Kixie RETRIES rather than
+  //    marking the event delivered and dropping it forever (the prior code
+  //    swallowed supabase-js .error and returned 200).
+  try {
+    await persistLeadInteraction(db, { tenantId, eventname, evt });
+  } catch (err) {
+    console.error("[webhooks.kixie] persist failed", err);
+    return NextResponse.json({ ok: false, error: "persist_failed" }, { status: 500 });
+  }
 
   return NextResponse.json({ ok: true, event_type: eventType });
 }
