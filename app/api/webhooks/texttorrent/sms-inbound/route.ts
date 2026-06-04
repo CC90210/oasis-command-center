@@ -210,29 +210,31 @@ export async function POST(req: NextRequest) {
     }
   }
 
-  try {
-    await db.from("lead_interactions").insert({
-      tenant_id: tenantId,
-      lead_id: leadId, // null when we couldn't resolve — still useful in the conversations view
-      type: "sms_received",
-      channel: "sms",
-      direction: "inbound",
-      agent_source: "texttorrent",
-      from_phone: from,
-      to_phone: to,
-      content: messageText,
-      content_preview: messageText.slice(0, 1024),
-      metadata: {
-        tt_message_id: messageId || null,
-        tt_chat_id: typeof payload.chat_id === "string" ? payload.chat_id : null,
-        opt_out_detected: isStopCommand(messageText),
-        raw_received_at:
-          typeof payload.received_at === "string" ? payload.received_at : null,
-      },
-    });
-  } catch (err) {
-    console.error("[webhooks.tt.sms-inbound] interaction insert failed", err);
-    // Swallow + 200 — TT retrying won't help if our DB is the problem.
+  // supabase-js does NOT throw on DB errors — check .error and fail-CLOSED so
+  // TT retries instead of us silently dropping an inbound reply (the prior code
+  // swallowed the error and returned 200, losing the message permanently).
+  const { error } = await db.from("lead_interactions").insert({
+    tenant_id: tenantId,
+    lead_id: leadId, // null when we couldn't resolve — still useful in the conversations view
+    type: "sms_received",
+    channel: "sms",
+    direction: "inbound",
+    agent_source: "texttorrent",
+    from_phone: from,
+    to_phone: to,
+    content: messageText,
+    content_preview: messageText.slice(0, 1024),
+    metadata: {
+      tt_message_id: messageId || null,
+      tt_chat_id: typeof payload.chat_id === "string" ? payload.chat_id : null,
+      opt_out_detected: isStopCommand(messageText),
+      raw_received_at:
+        typeof payload.received_at === "string" ? payload.received_at : null,
+    },
+  });
+  if (error) {
+    console.error("[webhooks.tt.sms-inbound] interaction insert failed", error);
+    return NextResponse.json({ ok: false, error: "persist_failed" }, { status: 500 });
   }
 
   return NextResponse.json({ ok: true, lead_id: leadId, tenant_id: tenantId });
