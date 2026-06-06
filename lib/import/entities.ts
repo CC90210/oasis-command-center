@@ -15,7 +15,19 @@
  * registry — no other file changes required.
  */
 
-export type DedupStrategy = "email" | "phone" | "business" | "name" | "lender_name";
+export type DedupStrategy =
+  | "email"
+  | "phone"
+  | "business"
+  | "name"
+  | "lender_name"
+  // Build B (2026-06-06) — EIN-first dedup for funding pipelines.
+  // "ein" matches on a normalized 9-digit Employer Identification
+  // Number; "legal_state" is the composite normalize(legal_name)+state
+  // fallback for when EIN isn't on the import sheet. Both strategies
+  // are routed in lib/import/service.ts:dedupKeyFor.
+  | "ein"
+  | "legal_state";
 
 export type EntityDefinition = {
   /** URL slug used as the [entity] segment in /api/import/[entity]. */
