@@ -57,7 +57,7 @@ const MANUAL_STEPS = [
 ];
 
 const DEMO_HEALTH: IntegrationHealth[] = [
-  demoHealthRow("jotform", "healthy"),
+  demoHealthRow("lead_forms", "healthy"),
   demoHealthRow("text_torrent", "healthy"),
   demoHealthRow("turso", "healthy"),
 ];
@@ -120,14 +120,13 @@ function rankLeads(leads: Lead[]): Lead[] {
   });
 }
 
-function serviceMessage(service: "jotform" | "text_torrent" | "turso", status: ServiceStatus): string {
-  // service key "jotform" retained internally as the integration-row
-  // discriminator (legacy). User-facing labels say "Lead Forms" and
-  // point at the dashboard's native /forms designer — SunBiz never
-  // used JotForm and the third-party integration was removed
-  // 2026-06-06. The status flips to healthy when the tenant has at
-  // least one published form on /forms.
-  if (service === "jotform") {
+function serviceMessage(service: "lead_forms" | "text_torrent" | "turso", status: ServiceStatus): string {
+  // Service key renamed from "jotform" -> "lead_forms" on 2026-06-06.
+  // The integration_health table carries zero historical rows under
+  // either name (verified live), so the rename was code-only with no
+  // data migration. Status flips to healthy when the tenant has at
+  // least one published form on /forms feeding /api/inbound/lead.
+  if (service === "lead_forms") {
     return status === "healthy"
       ? "Ready to receive new lead forms."
       : "Set up your first lead-intake form on /forms.";
@@ -143,7 +142,7 @@ function serviceMessage(service: "jotform" | "text_torrent" | "turso", status: S
 }
 
 function readyLine(service: string, status: ServiceStatus): string {
-  if (service === "jotform") {
+  if (service === "lead_forms") {
     return status === "healthy"
       ? "Solara is connected to your lead forms. She is ready to receive new leads."
       : "Publish your first form on /forms to start receiving leads.";
@@ -188,17 +187,17 @@ export async function SunBizDashboard({ demoMode = false }: Props) {
       ]);
 
   const healthByService = new Map(liveHealthRows.map((row) => [row.service, row] as const));
-  const jotform = healthByService.get("jotform") || demoHealthRow("jotform", "unconfigured");
+  const leadForms = healthByService.get("lead_forms") || demoHealthRow("lead_forms", "unconfigured");
   const textTorrent = healthByService.get("text_torrent") || demoHealthRow("text_torrent", "unconfigured");
   const localBrain = healthByService.get("turso") || demoHealthRow("turso", "unconfigured");
-  const combinedStatus = automationStatus([jotform.status, textTorrent.status, localBrain.status]);
+  const combinedStatus = automationStatus([leadForms.status, textTorrent.status, localBrain.status]);
 
   const sortedLeads = rankLeads(liveLeads);
   const priorityLead = sortedLeads[0] || null;
   const actionableLeads = liveLeads.filter((lead) => !["won", "lost", "archived"].includes(lead.status || "")).length;
   const hotLeads = liveLeads.filter((lead) => (lead.score || 0) >= 80).length;
   const clientName = firstNameOf(profile?.display_name || profile?.full_name, demoMode ? "Jordan" : "there");
-  const liveConnections = [jotform, textTorrent, localBrain].filter((row) => row.status === "healthy").length;
+  const liveConnections = [leadForms, textTorrent, localBrain].filter((row) => row.status === "healthy").length;
 
   return (
     <div className="space-y-6 animate-fade-in">
@@ -249,7 +248,7 @@ export async function SunBizDashboard({ demoMode = false }: Props) {
           </p>
 
           <div className="mt-6 grid gap-3">
-            <PulseLine label="Lead Forms" status={jotform.status} body={readyLine("jotform", jotform.status)} />
+            <PulseLine label="Lead Forms" status={leadForms.status} body={readyLine("lead_forms", leadForms.status)} />
             <PulseLine label="Text Torrent" status={textTorrent.status} body={readyLine("text_torrent", textTorrent.status)} />
             <PulseLine label="Local Brain" status={localBrain.status} body={readyLine("turso", localBrain.status)} />
           </div>
@@ -374,9 +373,9 @@ export async function SunBizDashboard({ demoMode = false }: Props) {
         <div className="grid gap-4">
           <PulseCard
             title="Lead Forms"
-            status={jotform.status}
-            body={serviceMessage("jotform", jotform.status)}
-            stamp={demoMode ? "Demo connection" : timeAgo(jotform.last_ping_at)}
+            status={leadForms.status}
+            body={serviceMessage("lead_forms", leadForms.status)}
+            stamp={demoMode ? "Demo connection" : timeAgo(leadForms.last_ping_at)}
           />
           <PulseCard
             title="Text Torrent"

@@ -72,12 +72,13 @@ export default async function ClientAgentPage({
       ? `Chat with the ${agentKeys.length} agents on this workspace. Switch between them in the chat header.`
       : primaryMeta.pitch;
   const clientName = firstNameOf(profile?.display_name || profile?.full_name);
-  // "jotform" is the legacy service key for lead-form health — see
-  // SunBizDashboard.tsx for the rename rationale. The status flips to
-  // healthy when the tenant has at least one published form on /forms.
+  // Service key renamed from "jotform" → "lead_forms" on 2026-06-06
+  // (zero data migration cost — integration_health table doesn't carry
+  // any historical rows). Status flips to healthy when the tenant has
+  // at least one published form on /forms feeding /api/inbound/lead.
   const formsHealthy =
     primary === "solara" &&
-    healthRows.some((row) => row.service === "jotform" && row.status === "healthy");
+    healthRows.some((row) => row.service === "lead_forms" && row.status === "healthy");
   const welcomeMessages =
     primary === "solara"
       ? {
