@@ -40,6 +40,10 @@ export async function POST(
   }
 
   const db = getServiceSupabase();
+
+  // Read the current drip state — the patch is a XOR of the prior value,
+  // so we need to know what was set. This single-key read is fast and
+  // doesn't carry the same lost-update risk as a multi-key write.
   const cur = await db
     .from("tenant_records")
     .select("data")
@@ -59,20 +63,19 @@ export async function POST(
   const wasPaused = currentData.drip_paused === true;
   const nextPaused = !wasPaused;
 
-  const upd = await db
-    .from("tenant_records")
-    .update({
-      data: {
-        ...currentData,
-        drip_paused: nextPaused,
-        drip_paused_at: nextPaused ? new Date().toISOString() : null,
-        drip_paused_by_user_id: nextPaused ? sess.userId : null,
-      },
-      updated_at: new Date().toISOString(),
-    })
-    .eq("tenant_id", sess.tenantId)
-    .eq("entity_type", "lead")
-    .eq("id", id);
+  // 2026-06-06 (Codex audit) — atomic shallow merge so concurrent
+  // sibling edits aren't clobbered. The previous {...currentData, drip_paused}
+  // pattern silently overwrote any lead-detail field change that landed
+  // between our read and write.
+  const upd = await db.rpc("patch_tenant_record_data", {
+    p_id: id,
+    p_tenant_id: sess.tenantId,
+    p_patch: {
+      drip_paused: nextPaused,
+      drip_paused_at: nextPaused ? new Date().toISOString() : null,
+      drip_paused_by_user_id: nextPaused ? sess.userId : null,
+    },
+  });
   if (upd.error) {
     return NextResponse.json({ ok: false, error: upd.error.message }, { status: 500 });
   }

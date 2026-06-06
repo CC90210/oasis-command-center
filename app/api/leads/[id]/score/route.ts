@@ -87,19 +87,20 @@ export async function POST(
     );
   }
 
-  const merged = {
-    ...leadData,
-    ai_score: result.score,
-    ai_reasoning: result.reasoning,
-    ai_scored_at: result.scored_at,
-  };
-
-  const upd = await db
-    .from("tenant_records")
-    .update({ data: merged })
-    .eq("tenant_id", tenantId)
-    .eq("entity_type", "lead")
-    .eq("id", leadId);
+  // 2026-06-06 (Codex audit) — atomic shallow merge via the
+  // patch_tenant_record_data RPC. The previous read-then-write would
+  // silently overwrite any concurrent edit (stage change, drip toggle,
+  // operator field edit) that landed while we were waiting for Claude.
+  // Migration 099 added the merge RPC; we send only the three ai_* keys.
+  const upd = await db.rpc("patch_tenant_record_data", {
+    p_id: leadId,
+    p_tenant_id: tenantId,
+    p_patch: {
+      ai_score: result.score,
+      ai_reasoning: result.reasoning,
+      ai_scored_at: result.scored_at,
+    },
+  });
   if (upd.error) {
     return NextResponse.json(
       { ok: false, error: "write_failed", message: upd.error.message },

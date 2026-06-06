@@ -577,11 +577,27 @@ export type MomentumMetrics = {
   contentPublished7d: number | null;
 };
 
+/**
+ * The OASIS empire tenant — only this tenant is allowed to surface the
+ * empire-wide content_calendar count via momentumMetrics. Any other
+ * tenant landing here gets contentPublished7d=null so they never see
+ * CC's content metrics rendered as their own.
+ *
+ * Set OASIS_TENANT_ID in Vercel env to override (e.g., during a
+ * migration). Falls back to the live CC tenant uuid.
+ *
+ * Codex audit 2026-06-06: the previous "rely on /t/sun redirect to
+ * prevent cross-tenant leak" was implicit; this is the explicit gate.
+ */
+const OASIS_TENANT_ID =
+  process.env.OASIS_TENANT_ID || "ef8d389e-3f15-43f2-ae00-3660f69a1452";
+
 export async function momentumMetrics(
   tenantId: string,
 ): Promise<MomentumMetrics> {
   const db = getServiceSupabase();
   const since = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+  const isOasis = tenantId === OASIS_TENANT_ID;
   const [outbound, content] = await Promise.all([
     db
       .from("lead_interactions")
@@ -589,20 +605,23 @@ export async function momentumMetrics(
       .eq("tenant_id", tenantId)
       .in("type", ["email_sent", "email_queued", "dm_sent", "linkedin_sent", "call_made"])
       .gte("created_at", since),
-    // content_calendar is empire-scoped (CC's CMO output) — no tenant_id
-    // column. This metric belongs to the OASIS Today page (only CC's
-    // tenant currently lands here; SunBiz redirects to /t/sun before
-    // this query fires). If a future tenant-scoped content surface
-    // ships, gate this call on tenantId matching the OASIS tenant.
-    db
-      .from("content_calendar")
-      .select("id", { count: "exact", head: true })
-      .gte("posted_at", since)
-      .neq("status", "archived"),
+    // content_calendar has no tenant_id column — it's an empire-wide
+    // CMO table. We surface its count ONLY when the active tenant is
+    // OASIS. Every other tenant (including future client tenants) gets
+    // contentPublished7d=null so they don't see CC's content count
+    // rendered as theirs.
+    isOasis
+      ? db
+          .from("content_calendar")
+          .select("id", { count: "exact", head: true })
+          .gte("posted_at", since)
+          .neq("status", "archived")
+      : Promise.resolve({ count: null, error: null } as { count: number | null; error: null }),
   ]);
   return {
     outboundVelocity7d: outbound.error ? null : outbound.count ?? 0,
-    contentPublished7d: content.error ? null : content.count ?? 0,
+    contentPublished7d:
+      !isOasis || ("error" in content && content.error) ? null : content.count ?? 0,
   };
 }
 

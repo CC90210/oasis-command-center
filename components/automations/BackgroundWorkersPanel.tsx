@@ -21,6 +21,23 @@ import { Cpu, CheckCircle2, AlertCircle, MinusCircle, HelpCircle, Activity, Play
 const BRIDGE_BASE =
   process.env.NEXT_PUBLIC_BRIDGE_CHAT_BASE || "http://localhost:9100";
 
+/**
+ * Workers whose Stop or Restart action could break the dashboard's
+ * connection back to the operator's machine. Codex audit 2026-06-06
+ * flagged that the optimistic-flip pattern is especially risky for
+ * these because the bridge's 60s heartbeat is what would correct any
+ * stale UI state — stopping the bridge itself stops the corrective
+ * signal.
+ *
+ * For these workers we still allow the action (CC needs the control)
+ * but force a confirm() dialog so it's deliberate.
+ */
+const CRITICAL_WORKERS: ReadonlySet<string> = new Set([
+  "pm2.claude-bridge",
+  "pm2.claude-bridge-ping",
+  "pm2.bravo-scheduler",
+]);
+
 type Worker = {
   service: string;
   label: string;
@@ -301,23 +318,36 @@ function WorkerActions({
   const [feedback, setFeedback] = useState<{ ok: boolean; text: string } | null>(null);
 
   async function handle(action: WorkerAction) {
+    // Codex audit 2026-06-06 — critical workers need an explicit confirm
+    // because stopping them severs the heartbeat that would correct any
+    // stale UI state. Browser-native confirm() is the lowest-friction guard.
+    const isCritical = CRITICAL_WORKERS.has(service);
+    if (isCritical && action !== "start") {
+      const ok = window.confirm(
+        `You're about to ${action} ${service.replace(/^pm2\./, "")} — this is a CRITICAL worker. ` +
+          (action === "stop"
+            ? "Stopping it will break the dashboard's ability to refresh worker state until you re-start it from terminal. "
+            : "Restarting it will briefly drop the dashboard's connection (~10-30s). ") +
+          "Continue?",
+      );
+      if (!ok) return;
+    }
+
     setBusy(action);
     setFeedback(null);
     const result = await runWorkerAction(service, action);
     setBusy(null);
 
-    if (result.ok) {
-      // Optimistically reflect the action. pm2 stop → "down"; pm2 start +
-      // restart → "healthy" (the daemon should be up post-action). The
-      // bridge's next 60s ping will overwrite this with the real
-      // integrations_health status, and we clear the override then.
+    // Codex audit — DON'T optimistically flip critical workers. The 90s
+    // clear timer relies on the bridge pushing a fresh heartbeat;
+    // stopping claude-bridge or claude-bridge-ping prevents exactly
+    // that, so the override would never clear and the tile would lie.
+    // For criticals we wait for the next genuine heartbeat (or the
+    // operator's manual refresh) to update the tile.
+    if (result.ok && !isCritical) {
       const nextStatus: Worker["status"] =
         action === "stop" ? "down" : "healthy";
       onOptimistic(nextStatus);
-      // Clear the optimistic override after 90s — by then the bridge has
-      // definitely pinged at least once with real data. If the action
-      // didn't actually take effect on the daemon, the next heartbeat
-      // will reveal the truth.
       setTimeout(() => onOptimistic(null), 90_000);
     }
 
