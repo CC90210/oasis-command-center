@@ -20,12 +20,13 @@ import {
   getLeadById,
   mrrSnapshot,
   mrrHistory,
-  recentInbound,
+  priorityInbound,
   topClientConcentration,
   outreachReplyRate,
   activePipeline,
   topOpenLead,
   getTenant,
+  momentumMetrics,
 } from "@/lib/queries";
 import { computeStreak } from "@/lib/streak";
 import { safe } from "@/lib/api-helpers";
@@ -87,19 +88,23 @@ export default async function TodayPage() {
   // every dynamic page so one bad reader can't 500 the whole render. The
   // label tags failures in Vercel logs ([safe:today.counts] ...) so a
   // silently-empty Stat is debuggable. This is the Hermes-toggle bug class.
-  const [counts, pipeline, mrr, history, plan, inbound, concentration, replyRate, activePipe, topLead, streak] =
+  const [counts, pipeline, mrr, history, plan, inbound, concentration, replyRate, activePipe, topLead, streak, momentum] =
     await Promise.all([
       safe("today.counts", todayCounts(tenantId), { outbound: 0, inbound: 0, decisions: 0, hot: 0 }),
       safe("today.pipeline_breakdown", pipelineBreakdown(tenantId), { stages: {} as Record<string, number>, total: 0, sources: {} as Record<string, number> }),
       safe("today.mrr_snapshot", mrrSnapshot(), { current: 0, target: 5000, pct: 0 }),
       safe("today.mrr_history", mrrHistory(30), [] as Array<{ date: string; mrr: number; synthetic: boolean }>),
       safe("today.plan", getTodayPlan(profile.id), null),
-      safe("today.recent_inbound", recentInbound(tenantId, 5), []),
+      // Critical/hot-intent only — drops transactional + noreply noise.
+      // Falls back to the full firehose only when the classifier hasn't
+      // tagged anything yet (see priorityInbound in lib/queries.ts).
+      safe("today.priority_inbound", priorityInbound(tenantId, 5), []),
       safe("today.top_client_concentration", topClientConcentration(tenantId), { client_name: "—", pct_of_mrr: 0, is_at_risk: false }),
       safe("today.outreach_reply_rate", outreachReplyRate(tenantId, 7), { sends: 0, replies: 0, rate_pct: 0 }),
       safe("today.active_pipeline", activePipeline(tenantId), { total_active: 0, qualified: 0, proposal: 0 }),
       safe("today.top_open_lead", topOpenLead(tenantId), null),
       safe("today.streak", computeStreak(profile.id, 7), { streak: 0, missed: 0, daysWithPlan: 0, byDay: [] }),
+      safe("today.momentum", momentumMetrics(tenantId), { outboundVelocity7d: null, contentPublished7d: null }),
     ]);
 
   const primaryLead = plan?.primary_lead_id
@@ -204,6 +209,52 @@ export default async function TodayPage() {
           label="Pipeline (all)"
           value={pipeline.total}
           hint={`${pipeline.stages.qualified || 0} qualified · ${pipeline.stages.won || 0} won`}
+        />
+      </section>
+
+      {/* Momentum band — non-money signals that still measure direction.
+          Money is the north star; momentum is whether you're aimed at
+          it. Reps + content + streak together show whether the dial is
+          moving even on days the MRR number doesn't budge. */}
+      <section className="grid grid-cols-3 gap-4">
+        <Stat
+          label="Outbound (7d)"
+          value={
+            momentum.outboundVelocity7d === null
+              ? "—"
+              : `${momentum.outboundVelocity7d}`
+          }
+          hint={
+            momentum.outboundVelocity7d === null
+              ? "metric unavailable"
+              : momentum.outboundVelocity7d > 0
+                ? "emails + DMs + calls"
+                : "no reps this week"
+          }
+        />
+        <Stat
+          label="Content (7d)"
+          value={
+            momentum.contentPublished7d === null
+              ? "—"
+              : `${momentum.contentPublished7d}`
+          }
+          hint={
+            momentum.contentPublished7d === null
+              ? "metric unavailable"
+              : momentum.contentPublished7d > 0
+                ? "posts shipped"
+                : "0 vs 22 target — distribution dark"
+          }
+        />
+        <Stat
+          label="Streak"
+          value={`${streak.streak}d`}
+          hint={
+            streak.streak > 0
+              ? `${streak.daysWithPlan}/${streak.daysWithPlan + streak.missed} days planned`
+              : "kick off today's plan"
+          }
         />
       </section>
 
@@ -386,10 +437,10 @@ export default async function TodayPage() {
       <section className="grid lg:grid-cols-3 gap-6">
         <div className="lg:col-span-2">
           <Card
-            title="Recent inbound"
+            title="Critical inbound"
             subtitle={
               inbound.length > 0
-                ? `${inbound.length} latest · most recent ${timeAgo(inbound[0].created_at)}`
+                ? `${inbound.length} high-signal · most recent ${timeAgo(inbound[0].created_at)} · transactional + noreply filtered`
                 : "n8n inbound bridge — see diagnostic if stale"
             }
             action={

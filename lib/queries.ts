@@ -513,6 +513,94 @@ export async function recentInbound(tenantId: string, limit = 20): Promise<LeadI
   return (r.data as LeadInteraction[]) || [];
 }
 
+/**
+ * High-signal inbound only. Filters recentInbound's output to rows the
+ * n8n classifier marked as priority='high' / 'critical' OR intent in
+ * the set of "operator should look at this" signals (hot_lead, sales,
+ * partnership, frustrated). Drops transactional, noreply, and low-signal
+ * classifications so CC's Today page widget shows what matters instead
+ * of every newsletter that landed.
+ *
+ * Falls back to recentInbound's full list when the classifier hasn't
+ * tagged anything yet (e.g., during the brief period after migration
+ * 094 when historical rows have no classification metadata). Over-fetch
+ * 5x to give the filter headroom.
+ */
+const PRIORITY_INBOUND_INTENTS = new Set([
+  "hot_lead",
+  "sales",
+  "partnership",
+  "frustrated",
+  "billing_issue",
+  "support_urgent",
+  "introduction",
+  "referral",
+]);
+
+export async function priorityInbound(
+  tenantId: string,
+  limit = 5,
+): Promise<LeadInteraction[]> {
+  const all = await recentInbound(tenantId, limit * 5);
+  if (all.length === 0) return [];
+
+  const highSignal = all.filter((row) => {
+    const meta = (row.metadata as Record<string, unknown> | null) ?? {};
+    const cls = (meta.classification as Record<string, unknown> | null) ?? {};
+    const priority = typeof cls.priority === "string" ? cls.priority.toLowerCase() : "";
+    const intent = typeof cls.intent === "string" ? cls.intent.toLowerCase() : "";
+    if (priority === "high" || priority === "critical" || priority === "urgent") return true;
+    if (PRIORITY_INBOUND_INTENTS.has(intent)) return true;
+    return false;
+  });
+
+  // If the classifier hasn't tagged anything yet (e.g., n8n workflow
+  // wasn't running, or this is the brief window after migration 094),
+  // surface the full list so CC isn't staring at an empty widget.
+  if (highSignal.length === 0) return all.slice(0, limit);
+  return highSignal.slice(0, limit);
+}
+
+/**
+ * Three momentum signals beyond pure money: outbound velocity, content
+ * output, and operator streak. Powers the Momentum card on the Today
+ * page — direction matters too, not just MRR. Each metric is a 7-day
+ * rolling count except streak which is the current run.
+ *
+ * Streak comes in from the caller (computeStreak already runs on Today
+ * for the day-plan widget); we accept it as a parameter so we don't
+ * double-query. Returns null on any single failure so the section
+ * still renders the other two values.
+ */
+export type MomentumMetrics = {
+  outboundVelocity7d: number | null;
+  contentPublished7d: number | null;
+};
+
+export async function momentumMetrics(
+  tenantId: string,
+): Promise<MomentumMetrics> {
+  const db = getServiceSupabase();
+  const since = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+  const [outbound, content] = await Promise.all([
+    db
+      .from("lead_interactions")
+      .select("id", { count: "exact", head: true })
+      .eq("tenant_id", tenantId)
+      .in("type", ["email_sent", "email_queued", "dm_sent", "linkedin_sent", "call_made"])
+      .gte("created_at", since),
+    db
+      .from("content_calendar")
+      .select("id", { count: "exact", head: true })
+      .gte("posted_at", since)
+      .neq("status", "archived"),
+  ]);
+  return {
+    outboundVelocity7d: outbound.error ? null : outbound.count ?? 0,
+    contentPublished7d: content.error ? null : content.count ?? 0,
+  };
+}
+
 export async function recentOutbound(tenantId: string, limit = 20): Promise<LeadInteraction[]> {
   const db = getServiceSupabase();
   const r = await db
