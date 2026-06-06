@@ -577,9 +577,15 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
   >([]);
   const [bridgeOnline, setBridgeOnline] = useState<boolean | null>(null);
   // Chat-mode picker — see the type docs at the top of this file. SSR-safe
-  // initializer (always returns "auto" on the server, then localStorage
-  // hydration runs in the mount effect below).
-  const [chatMode, setChatModeState] = useState<ChatMode>("auto");
+  // initializer (always returns the same value on the server, then
+  // localStorage hydration runs in the mount effect below).
+  //
+  // Phase 4.1 (2026-06-06): default is "cli" so the 4-option picker
+  // renders "Claude Code CLI" on first paint instead of flashing "API"
+  // for the frame between SSR and useEffect hydration. The mount effect
+  // still normalizes any legacy "auto" / "cloud_bridge_tools" stored
+  // values to "cli" so behavior is consistent.
+  const [chatMode, setChatModeState] = useState<ChatMode>("cli");
   const [cliRuntime, setCliRuntimeState] = useState<CliRuntime>("claude");
   // Plan vs Build mode (2026-05-22 OpenCode-style). Build = default, full
   // tool registry. Plan = read-only tools + plan-mode prompt overlay.
