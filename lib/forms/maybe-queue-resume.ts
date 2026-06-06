@@ -84,7 +84,7 @@ export async function maybeQueueResumeEmail(
         : null;
     const brand = brandFromCustom || tenantData?.name || input.link.tenant;
 
-    await queueResumeEmail({
+    const result = await queueResumeEmail({
       db: input.db,
       tenant: {
         tenant_id: input.form.tenant_id,
@@ -98,6 +98,25 @@ export async function maybeQueueResumeEmail(
       to_email: rawEmail,
       to_name: typeof leadName === "string" ? leadName : null,
     });
+    // queueResumeEmail returns ok:false on configuration errors
+    // (FORM_LINK_HMAC_KEY missing) and on DB write failures. The
+    // submission still succeeded — these are recoverable degradations
+    // but operators want to know about them in the logs so they can
+    // fix the env var or follow up manually.
+    if (!result.ok) {
+      console.error("[forms.submit.resume_email] queue returned not-ok", {
+        lead_id: input.link.lead_id,
+        form_id: input.form.id,
+        error: result.error,
+      });
+    } else if (result.skipped) {
+      // skipped path is informational only (idempotency dedup or bad
+      // email) — log at debug level via a tag the operator can filter.
+      console.log("[forms.submit.resume_email] skipped", {
+        lead_id: input.link.lead_id,
+        reason: result.reason,
+      });
+    }
   } catch (err) {
     // Soft fail — every other side of the submission still runs.
     console.error("[forms.submit.resume_email]", {

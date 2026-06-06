@@ -23,8 +23,8 @@ import {
   Loader2,
   ArrowRight,
   ArrowLeft,
-  Trash2,
   RefreshCw,
+  Search,
   User as UserIcon,
   Building2,
   FileText,
@@ -54,6 +54,25 @@ type ImportResponse = {
   dry_run?: boolean;
 };
 
+// Build C UI affordance — Result row from /api/merchants/fuzzy-match-batch.
+// Lets the confirm step surface "this row's business name looks similar
+// to an existing merchant" warnings so operators catch near-duplicates
+// the exact-match dedup misses.
+type FuzzyMatchRow = {
+  record_id: string;
+  entity_type: string;
+  business_name: string;
+  state: string | null;
+  similarity: number;
+  ein: string | null;
+  email: string | null;
+  phone: string | null;
+};
+type FuzzyBatchResult = {
+  idx: number;
+  matches: FuzzyMatchRow[];
+};
+
 type Step = "pick" | "upload" | "preview" | "confirm" | "done";
 
 function IconFor({ name }: { name: EntityDefinition["icon"] }) {
@@ -79,6 +98,13 @@ export function ImportWizard() {
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  // Build C — fuzzy-match suggestions in the confirm step. Populated
+  // on-demand by clicking "Check for similar merchants"; kept as a
+  // separate state so operators who don't care about it never pay the
+  // round-trip cost.
+  const [fuzzyResults, setFuzzyResults] = useState<FuzzyBatchResult[] | null>(null);
+  const [fuzzyLoading, setFuzzyLoading] = useState(false);
+  const [fuzzyError, setFuzzyError] = useState<string | null>(null);
 
   const entity = entityKey ? getEntityDefinition(entityKey) : null;
 
@@ -105,6 +131,53 @@ export function ImportWizard() {
     setFinalResult(null);
     setError(null);
     setSubmitting(false);
+    setFuzzyResults(null);
+    setFuzzyLoading(false);
+    setFuzzyError(null);
+  }
+
+  // Build C — call the batch fuzzy-match endpoint on the rows the
+  // dry-run says will insert. We pick the first 50 (the endpoint cap)
+  // so the operator sees the most-likely-conflict candidates without
+  // an expensive multi-round trip. Only fires for entities that
+  // actually have a business-name field — lenders are already deduped
+  // by lender_name in the exact-match pass.
+  async function runFuzzyCheck() {
+    if (!entity || !parsed) return;
+    if (!parsed.coveredFields.includes("business_name") && !parsed.coveredFields.includes("legal_name")) {
+      setFuzzyError("This import doesn't include a business name column — nothing to check.");
+      return;
+    }
+    setFuzzyLoading(true);
+    setFuzzyError(null);
+    try {
+      const submitRows = parsed.mapped.slice(0, 50).map((row, idx) => ({
+        idx,
+        business_name:
+          (typeof row.legal_name === "string" && row.legal_name) ||
+          (typeof row.business_name === "string" && row.business_name) ||
+          (typeof row.name === "string" && row.name) ||
+          "",
+        state:
+          (typeof row.state === "string" && row.state) || null,
+      }));
+      const res = await fetch("/api/merchants/fuzzy-match-batch", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ rows: submitRows, threshold: 0.5, per_row_limit: 3 }),
+      });
+      const body = await res.json();
+      if (!res.ok || !body.ok) {
+        setFuzzyError(body.message || body.error || `HTTP ${res.status}`);
+        setFuzzyLoading(false);
+        return;
+      }
+      setFuzzyResults(body.results as FuzzyBatchResult[]);
+    } catch (e) {
+      setFuzzyError((e as Error).message);
+    } finally {
+      setFuzzyLoading(false);
+    }
   }
 
   // ---- parser memo + diagnostics ----
@@ -492,6 +565,83 @@ export function ImportWizard() {
               </ul>
             </div>
           )}
+
+          {/* Build C — fuzzy merchant match suggestions. The exact-match
+              dedup ABOVE catches identical entries; this catches "did
+              you mean…?" cases — typos, entity-suffix drift, abbreviations. */}
+          <div className="rounded-lg border border-bg-border bg-bg-elev/30 p-4 space-y-3">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <div className="text-xs font-semibold text-fg">Potential merchant matches</div>
+                <div className="text-[11px] text-fg-muted mt-0.5">
+                  Look for {entity.label.toLowerCase()} in your existing data whose business names
+                  are similar (e.g. typos, &quot;Inc&quot; vs &quot;LLC&quot;). Catches near-duplicates the exact-match
+                  dedup above misses.
+                </div>
+              </div>
+              <button
+                onClick={runFuzzyCheck}
+                disabled={fuzzyLoading || parsed.mapped.length === 0}
+                className="btn-secondary text-xs inline-flex items-center gap-1.5 shrink-0"
+              >
+                {fuzzyLoading
+                  ? <><Loader2 className="w-3.5 h-3.5 animate-spin" /> Scanning…</>
+                  : <><Search className="w-3.5 h-3.5" /> Check first {Math.min(parsed.mapped.length, 50)} rows</>}
+              </button>
+            </div>
+            {fuzzyError && <div className="text-xs text-red-400">⚠ {fuzzyError}</div>}
+            {fuzzyResults && (() => {
+              const flagged = fuzzyResults.filter((r) => r.matches.length > 0);
+              if (flagged.length === 0) {
+                return (
+                  <div className="text-xs text-green-400 flex items-center gap-1.5">
+                    <CheckCircle2 className="w-3.5 h-3.5" /> No similar merchants found — these all look new.
+                  </div>
+                );
+              }
+              return (
+                <div className="space-y-2">
+                  <div className="text-xs text-yellow-400 font-semibold">
+                    {flagged.length} row{flagged.length === 1 ? "" : "s"} look similar to existing merchants:
+                  </div>
+                  <ul className="text-xs space-y-2 max-h-64 overflow-y-auto">
+                    {flagged.slice(0, 20).map((r) => {
+                      const row = parsed.mapped[r.idx];
+                      const rowBiz =
+                        (typeof row?.legal_name === "string" && row.legal_name) ||
+                        (typeof row?.business_name === "string" && row.business_name) ||
+                        (typeof row?.name === "string" && row.name) ||
+                        `(row ${r.idx + 1})`;
+                      const best = r.matches[0];
+                      return (
+                        <li key={r.idx} className="rounded border border-bg-border bg-bg-elev/40 p-2.5">
+                          <div className="text-fg font-mono text-[11px] mb-1">
+                            <span className="text-fg-muted">Row {r.idx + 1}:</span> {rowBiz}
+                          </div>
+                          <div className="text-fg-muted text-[11px] leading-relaxed">
+                            ↳ <span className="text-yellow-300">{Math.round(best.similarity * 100)}% match</span>{" "}
+                            against existing <span className="text-fg font-mono">{best.business_name}</span>
+                            {best.state ? <> in {best.state}</> : null}
+                            {best.ein ? <> · EIN ···{best.ein.slice(-4)}</> : null}
+                          </div>
+                          {r.matches.length > 1 && (
+                            <div className="text-[10px] text-fg-dim mt-1">
+                              + {r.matches.length - 1} other candidate{r.matches.length === 2 ? "" : "s"}
+                            </div>
+                          )}
+                        </li>
+                      );
+                    })}
+                  </ul>
+                  <div className="text-[10px] text-fg-dim">
+                    These are suggestions only — committing the import still inserts them.
+                    Use this list to review + delete rows from your CSV before re-uploading
+                    if any are actually duplicates.
+                  </div>
+                </div>
+              );
+            })()}
+          </div>
 
           {error && <div className="text-sm text-red-400">⚠ {error}</div>}
 
