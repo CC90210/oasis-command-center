@@ -1,8 +1,7 @@
 import { Card, PageHeader, EmptyState, Tag } from "@/components/Card";
 import ChatWidget from "@/components/ChatWidget";
-import { timeAgo, truncate } from "@/lib/fmt";
-import { formatEventType, formatPublisher } from "@/lib/event-bus-display";
-import { agentStates, recentEvents, getActiveProfile, integrationsHealth, aiServicesWithKey, getTenantBridgeOwner } from "@/lib/queries";
+import { timeAgo } from "@/lib/fmt";
+import { agentStates, getActiveProfile, integrationsHealth, aiServicesWithKey, getTenantBridgeOwner } from "@/lib/queries";
 import { FAMILY_AGENT_KEYS, getAgentInfo } from "@/lib/agents";
 import { getTenantManifestForUser } from "@/lib/manifest/tenant-scope";
 import { catalogFor } from "@/lib/agent-catalog";
@@ -54,16 +53,11 @@ export default async function AgentsPage() {
     .filter((a) => a.enabled)
     .map((a) => a.slug.toLowerCase());
 
-  const [states, events, integrations, stats, noBridge, aiServices, tenantBridgeOwner] = await Promise.all([
+  const [states, integrations, stats, noBridge, aiServices, tenantBridgeOwner] = await Promise.all([
     agentStates(manifestEnabledSlugs),
-    // sinceDays: 0 — same fix as /operations. Default 7-day window left
-    // the Event Bus card looking empty when crons / inbound traffic had
-    // been quiet for a week, even though the table had history.
-    recentEvents(25, {
-      sinceDays: 0,
-      agentNames: manifestEnabledSlugs,
-      isOperator: isAdmin,
-    }),
+    // recentEvents() removed 2026-06-06 with the Event Bus card. The same
+    // feed renders on /operations as the Activity Tape, so this query was
+    // burning Supabase round-trips for data the page no longer surfaced.
     integrationsHealth(profile?.tenant_id || null),
     getAgentStats(
       // Manifest-validated primary so a stale profile.primary_agent
