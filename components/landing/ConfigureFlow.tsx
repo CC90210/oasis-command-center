@@ -302,12 +302,10 @@ export function ConfigureFlow() {
               If you&apos;d rather not run the bridge yourself, OASIS AI offers managed deploys — we host the agent on your behalf with full support and SOC 2 compliance.
             </p>
             <a
-              href="https://oasisai.work#pricing"
-              target="_blank"
-              rel="noopener noreferrer"
+              href="mailto:conaugh@oasisai.work?subject=Managed%20deploy%20enquiry"
               className="btn-secondary inline-flex items-center gap-1.5 text-xs"
             >
-              See pricing on oasisai.work <ExternalLink className="w-3 h-3" />
+              Contact us about a managed deploy <ExternalLink className="w-3 h-3" />
             </a>
           </div>
 

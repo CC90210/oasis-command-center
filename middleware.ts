@@ -16,6 +16,8 @@ const PUBLIC_PATH_PREFIXES = [
   "/download",             // public OASIS Desktop downloads
   "/configure",            // public agent configurator (pre-signup)
   "/demo/sun",             // public Sun Biz review shell; demo data only
+  "/unsubscribe",          // CASL-compliant email unsubscribe landing — reached from email footers (DEFAULT_UNSUBSCRIBE_BASE in BEA/scripts/casl_compliance.py). Recipients may not have an account; the confirmation page reads ?email=&brand=&token= from the URL and POSTs to /api/unsubscribe (also public, service-role insert into email_suppressions). MUST be public or every unsub link 401s before the form renders, which is itself a CASL violation.
+  "/api/unsubscribe",      // companion API for /unsubscribe — POST records the suppression via service-role Supabase client. Token-validated INSIDE the route when OASIS_UNSUBSCRIBE_HMAC_SECRET is set; otherwise email-only opt-out is accepted (matches the URL format casl_compliance.py emits today).
   "/login",
   "/signup",
   "/forgot-password",

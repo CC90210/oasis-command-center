@@ -50,14 +50,9 @@ export default async function ConfigurePage() {
           <Link href="/login" className="text-fg-muted hover:text-fg transition-colors">
             Sign in
           </Link>
-          <a
-            href="https://oasisai.work"
-            target="_blank"
-            rel="noopener noreferrer"
-            className="text-fg-muted hover:text-fg transition-colors"
-          >
-            oasisai.work
-          </a>
+          <Link href="/welcome" className="text-fg-muted hover:text-fg transition-colors">
+            Back to home
+          </Link>
         </div>
       </header>
 
@@ -104,7 +99,7 @@ export default async function ConfigurePage() {
               <strong className="text-fg">No third-party data sharing.</strong> Your file contents, agent prompts, and chat transcripts route browser → localhost direct. The model provider you chose (Anthropic / OpenRouter / etc.) sees the prompt + tool calls because that&apos;s how the model runs — but only through your key, billed to your account. We do not proxy your traffic through our servers.
             </li>
             <li>
-              <strong className="text-fg">Open the loop with payment</strong> only if you want a managed deploy or premium support — <a href="https://oasisai.work" target="_blank" rel="noopener noreferrer" className="text-accent hover:underline">oasisai.work</a> handles checkout via Stripe.
+              <strong className="text-fg">Want a managed deploy?</strong> The local install above is fully self-serve and free to run. If you&apos;d rather have us host the agent (managed deploys + premium support are billed monthly), reach out at <a href="mailto:conaugh@oasisai.work?subject=Managed%20deploy%20enquiry" className="text-accent hover:underline">conaugh@oasisai.work</a> and we&apos;ll set you up.
             </li>
           </ol>
         </div>
