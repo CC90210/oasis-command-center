@@ -93,12 +93,11 @@ export async function POST(
     }
   }
 
-  // Fetch the existing row so we can preserve the rest of data and just
-  // patch assigned_to. The record must belong to this tenant AND be a
-  // type that supports assignment (matches the CHECK constraint scope).
+  // Existence + entity-type check — patch_tenant_record_data has tenant
+  // scoping but doesn't restrict entity_type, so we still gate here.
   const existing = await db
     .from("tenant_records")
-    .select("id, entity_type, data")
+    .select("id, entity_type")
     .eq("tenant_id", tenantId)
     .in("entity_type", ["lead", "application", "funded_deal", "renewal"])
     .eq("id", recordId)
@@ -107,19 +106,17 @@ export async function POST(
     return NextResponse.json({ ok: false, error: "record_not_found" }, { status: 404 });
   }
 
-  const prevData = ((existing.data as { data: Record<string, unknown> }).data) || {};
-  const nextData: Record<string, unknown> = { ...prevData };
-  if (nextAssignedTo) {
-    nextData.assigned_to = nextAssignedTo;
-  } else {
-    delete nextData.assigned_to;
-  }
-
-  const update = await db
-    .from("tenant_records")
-    .update({ data: nextData, updated_at: new Date().toISOString() })
-    .eq("id", recordId)
-    .eq("tenant_id", tenantId);
+  // 2026-06-06 (Codex audit self-review extension) — atomic merge via
+  // the patch_tenant_record_data RPC. The previous read-then-spread-then-
+  // write pattern silently dropped concurrent sibling edits on the
+  // tenant_records.data blob. Unassign sets the key to null (consumers
+  // already treat null as "not assigned") rather than deleting the key,
+  // which keeps this on the same RPC.
+  const update = await db.rpc("patch_tenant_record_data", {
+    p_id: recordId,
+    p_tenant_id: tenantId,
+    p_patch: { assigned_to: nextAssignedTo },
+  });
   if (update.error) {
     return NextResponse.json(
       { ok: false, error: "update_failed", message: update.error.message },

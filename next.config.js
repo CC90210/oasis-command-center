@@ -13,6 +13,18 @@ process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ||= process.env.BRAVO_SUPABASE_ANON_KE
 const nextConfig = {
   reactStrictMode: true,
   outputFileTracingRoot: path.join(__dirname),
+  // R3F / drei / postprocessing / three.js ship modern ESM. Next 15's standalone
+  // build pipeline requires these to be transpiled for the server bundle even
+  // though the WebGL component is client-only (dynamic { ssr: false }) —
+  // without this, `npm run build` fails on `Cannot use import statement
+  // outside a module` from three's example loaders. See the AgentFigureWebGL
+  // lazy-import wired from components/landing/agent-assembly/AgentFigureSprite.tsx.
+  transpilePackages: [
+    "three",
+    "@react-three/fiber",
+    "@react-three/drei",
+    "@react-three/postprocessing",
+  ],
   // lib/prompts/index.ts reads the .txt + .json prompt files at module init
   // via fs.readFileSync. Next.js's static tracer doesn't follow runtime paths,
   // so without an explicit include the prompts don't ship and the AI scoring
