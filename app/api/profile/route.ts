@@ -63,6 +63,28 @@ export async function PATCH(req: NextRequest) {
   if (Object.keys(update).length === 0) return bad(400, "no editable fields provided");
 
   const db = getServiceSupabase();
+
+  // 2026-06-06 — custom_fields is a shared JSONB blob (timezone,
+  // briefing_channel, photo_url, quick_facts, plan_template_id, etc.).
+  // A naked .update({ custom_fields: { quick_facts: "..." } }) replaces
+  // the ENTIRE blob, silently wiping the other keys. KnownFactsEditor
+  // does its own read-modify-write, but other writers may not, and CC
+  // reported having to re-enter Known Facts repeatedly — likely from
+  // a different code path overwriting his blob without RMW. The safest
+  // fix is server-side merge: when custom_fields is being patched, read
+  // the existing value and shallow-merge.
+  if (update.custom_fields && typeof update.custom_fields === "object" && !Array.isArray(update.custom_fields)) {
+    const existing = await db
+      .from("user_profiles")
+      .select("custom_fields")
+      .eq("auth_user_id", user.id)
+      .maybeSingle();
+    if (existing.error) return bad(500, existing.error.message);
+    const prev =
+      (existing.data?.custom_fields as Record<string, unknown> | null) ?? {};
+    update.custom_fields = { ...prev, ...(update.custom_fields as Record<string, unknown>) };
+  }
+
   const r = await db
     .from("user_profiles")
     .update(update)

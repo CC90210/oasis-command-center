@@ -135,8 +135,12 @@ export async function SettingsContent({
     <div className="space-y-6 animate-fade-in">
       {!hideHeader && (
         <PageHeader
-          title="Settings"
-          subtitle="Profile, AI setup, business app keys, team controls, and read-only integration health."
+          title={tenant?.name ? `Settings · ${tenant.name}` : "Settings"}
+          subtitle={
+            tenant?.name
+              ? `Editing the ${tenant.name} tenant. Switch tenants to manage a different one — integrations + creds + team are all per-tenant.`
+              : "Profile, AI setup, business app keys, team controls, and read-only integration health."
+          }
         />
       )}
 
