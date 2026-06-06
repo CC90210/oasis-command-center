@@ -11,12 +11,19 @@
  * missing badge, the resolved path, and the --version string. Refreshes
  * every 20s while the page is visible.
  *
- * Falls back to a clear "bridge offline" state when the local probe fails
- * so the operator never wonders whether the panel itself is broken.
+ * Two-state fallback when the localhost probe fails (matters because the
+ * sidebar reads a different signal — bridge_pairings.last_seen_at — and
+ * we used to contradict it):
+ *   - serverBridgeOnline === true → AMBER "online but unreachable from
+ *     this browser". The daemon is heartbeating to the DB; this browser
+ *     just can't reach localhost:9100 (common when on a different machine
+ *     or when the browser is blocking localhost calls).
+ *   - serverBridgeOnline === false / null → RED "bridge isn't reachable".
+ *     Neither signal is fresh; the daemon is genuinely down.
  */
 
 import { useEffect, useState } from "react";
-import { CheckCircle2, XCircle, AlertTriangle, Loader2 } from "lucide-react";
+import { CheckCircle2, XCircle, AlertTriangle, Info, Loader2 } from "lucide-react";
 
 const BRIDGE_BASE =
   process.env.NEXT_PUBLIC_BRIDGE_CHAT_BASE || "http://localhost:9100";
@@ -43,7 +50,14 @@ type FetchState = {
   error: string | null;
 };
 
-export function BridgeCliPanel() {
+export function BridgeCliPanel({
+  serverBridgeOnline = null,
+}: {
+  /** Server-side bridge_pairings freshness check from the page's
+   * getBridgeOnline() call. When the localhost probe fails but this is
+   * true, we render the amber "online elsewhere" state instead of red. */
+  serverBridgeOnline?: boolean | null;
+}) {
   const [state, setState] = useState<FetchState>({
     loading: true,
     reachable: false,
@@ -97,13 +111,39 @@ export function BridgeCliPanel() {
   }
 
   if (!state.reachable) {
+    // The localhost probe failed. Decide tone from the server-side
+    // heartbeat: if the daemon is heartbeating to bridge_pairings, the
+    // bridge IS running — this browser just can't reach it (common when
+    // you're on the dashboard from a phone or a different machine than
+    // the one running the daemon). Render amber instead of red so the
+    // signal matches the sidebar's "BRIDGE ONLINE" badge.
+    if (serverBridgeOnline === true) {
+      return (
+        <div className="rounded-lg border border-accent/40 bg-accent/5 px-3 py-2.5 text-sm flex items-start gap-2">
+          <Info className="w-4 h-4 mt-0.5 text-accent flex-shrink-0" />
+          <div>
+            <div className="font-bold text-accent">Bridge online — but this browser can&apos;t reach it directly</div>
+            <div className="text-xs text-fg-muted mt-1 font-sans leading-relaxed">
+              Your bridge daemon is heartbeating to the database (sidebar
+              shows BRIDGE ONLINE), but this browser can&apos;t reach
+              <code className="text-accent"> {BRIDGE_BASE}/diagnostics/cli</code>. That&apos;s normal when
+              you&apos;re viewing the dashboard from a different machine
+              than the one running the bridge. Per-CLI status will populate
+              when you load this page on the bridge machine.
+            </div>
+          </div>
+        </div>
+      );
+    }
+
     return (
       <div className="rounded-lg border border-status-warm/40 bg-status-warm/5 px-3 py-2.5 text-sm flex items-start gap-2">
         <AlertTriangle className="w-4 h-4 mt-0.5 text-status-warm flex-shrink-0" />
         <div>
           <div className="font-bold text-status-warm">Local bridge isn&apos;t reachable</div>
           <div className="text-xs text-fg-muted mt-1 font-sans leading-relaxed">
-            The dashboard couldn&apos;t reach <code className="text-accent">{BRIDGE_BASE}/diagnostics/cli</code>.
+            The dashboard couldn&apos;t reach <code className="text-accent">{BRIDGE_BASE}/diagnostics/cli</code> and
+            no recent heartbeat is on file in <code className="text-accent">bridge_pairings</code>.
             Either the bridge daemon isn&apos;t running or your browser blocked the localhost call.
             Install the desktop app to host the bridge, or run <code className="text-accent">pm2 logs claude-bridge</code> in Terminal.
           </div>

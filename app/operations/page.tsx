@@ -27,7 +27,16 @@ import { BridgeCliPanel } from "@/components/BridgeCliPanel";
 export const dynamic = "force-dynamic";
 
 const FRESH_AGENT_MS = 15 * 60 * 1000;
-const FRESH_BRIDGE_MS = 5 * 60 * 1000;
+// Bridge ping cadence is 60s (see app/api/automations/background-workers/route.ts
+// — `claude-bridge-ping` heartbeats every minute). 90s = one-miss tolerance.
+// Anything beyond 90s but under 5 min counts as "idle" (heartbeat skipped a
+// beat, daemon probably still alive); >5 min is fully "offline".
+//
+// Previous value of 5 min for the online cutoff was the bug CC saw: a
+// machine that had pinged ~3 min before sleeping would still show "online
+// · 3m ago" — visually contradicting the fact that the machine was off.
+const FRESH_BRIDGE_MS = 90 * 1000;
+const IDLE_BRIDGE_MS = 5 * 60 * 1000;
 
 type AgentSnap = {
   agent_name: string;
@@ -241,8 +250,8 @@ export default async function OperationsPage({
         title="Operations"
         subtitle="Background workers, paired machines, and the live event tape — what's running right now."
         action={
-          <Tag tone={pairings.some((p) => isFresh(p.last_seen_at, now, FRESH_BRIDGE_MS)) ? "engaged" : "warm"}>
-            {pairings.filter((p) => isFresh(p.last_seen_at, now, FRESH_BRIDGE_MS)).length} bridge{pairings.length === 1 ? "" : "s"} online
+          <Tag tone={pairings.some((p) => isFresh(p.last_seen_at, now, IDLE_BRIDGE_MS)) ? "engaged" : "warm"}>
+            {pairings.filter((p) => isFresh(p.last_seen_at, now, IDLE_BRIDGE_MS)).length} bridge{pairings.length === 1 ? "" : "s"} online
           </Tag>
         }
       />
@@ -319,12 +328,16 @@ export default async function OperationsPage({
         ) : (
           <ul className="divide-y divide-bg-border">
             {pairings.map((p) => {
-              const online = isFresh(p.last_seen_at, now, FRESH_BRIDGE_MS);
+              const state = bridgeState(p.last_seen_at, now);
               return (
                 <li key={p.id} className="py-3 flex items-center justify-between gap-3">
                   <div className="flex items-center gap-3 min-w-0">
                     <span className={`w-2 h-2 rounded-full shrink-0 ${
-                      online ? "bg-accent animate-pulse-slow" : "bg-fg-faint"
+                      state === "online"
+                        ? "bg-accent animate-pulse-slow"
+                        : state === "idle"
+                          ? "bg-status-warm"
+                          : "bg-fg-faint"
                     }`} />
                     <div className="min-w-0">
                       <div className="text-sm text-fg truncate">{p.label}</div>
@@ -334,8 +347,14 @@ export default async function OperationsPage({
                     </div>
                   </div>
                   <div className="text-xs text-fg-muted text-right shrink-0">
-                    <div className={online ? "text-accent" : "text-fg-dim"}>
-                      {online ? "online" : "offline"}
+                    <div className={
+                      state === "online"
+                        ? "text-accent"
+                        : state === "idle"
+                          ? "text-status-warm"
+                          : "text-fg-dim"
+                    }>
+                      {state}
                     </div>
                     <div className="text-[10px] text-fg-dim font-mono">
                       {p.last_seen_at ? `last ${timeAgo(p.last_seen_at)}` : "never"}
@@ -352,7 +371,7 @@ export default async function OperationsPage({
         title="Local CLI status"
         subtitle="Per-CLI install probe on your local bridge. Green = the bridge found the binary and could run --version. Red = chat-via-CLI will fall back to API-key mode for that provider."
       >
-        <BridgeCliPanel />
+        <BridgeCliPanel serverBridgeOnline={pairings.some((p) => isFresh(p.last_seen_at, now, IDLE_BRIDGE_MS))} />
       </Card>
 
       <Card
@@ -458,4 +477,20 @@ function HealthMiniTile({
 function isFresh(ts: string | null, now: number, threshold: number): boolean {
   if (!ts) return false;
   return now - new Date(ts).getTime() < threshold;
+}
+
+/**
+ * Three-state freshness for paired bridge machines. The 90s "online" cutoff
+ * is one-miss tolerance against the daemon's 60s heartbeat cadence. The
+ * 5-minute "idle" cutoff acknowledges that occasional network jitter can
+ * stretch the ping interval without meaning the daemon is dead. Beyond
+ * 5 minutes we call it offline — the daemon has either died or the
+ * machine is genuinely off.
+ */
+function bridgeState(ts: string | null, now: number): "online" | "idle" | "offline" {
+  if (!ts) return "offline";
+  const age = now - new Date(ts).getTime();
+  if (age < FRESH_BRIDGE_MS) return "online";
+  if (age < IDLE_BRIDGE_MS) return "idle";
+  return "offline";
 }
