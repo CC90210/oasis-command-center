@@ -46,6 +46,14 @@ const EXPECTED_WORKERS: Array<{
   service: string;
   label: string;
   purpose: string;
+  /**
+   * When false, the dashboard's pm2 Start/Stop/Restart buttons are hidden
+   * for this worker. Used for standalone Python daemons that own their
+   * own lock files and aren't registered with pm2 (Skool engine, etc) —
+   * sending `pm2 start skool_engine` would fail because pm2 doesn't
+   * know about it.
+   */
+  manageable_via_pm2?: boolean;
   archived_on?: string;
   archived_reason?: string;
 }> = [
@@ -107,9 +115,16 @@ const EXPECTED_WORKERS: Array<{
   {
     service: "skool_engine",
     label: "Skool daemon",
-    purpose: "Standalone (NOT in PM2 — owns its own lock). Posts/replies in a Skool community.",
-    archived_on: "2026-05-18",
-    archived_reason: "Paused — operator no longer manages the community it was posting into. Code preserved at scripts/_archive/skool/ for revival when the operator launches their own community.",
+    // CC 2026-06-06: treat as a normal stopped worker, not "archived". The
+    // archive flag was making it render with strikethrough + archive icon
+    // which suggested it was retired permanently. It's just stopped — code
+    // is still on disk at scripts/_archive/skool/ for revival when the
+    // operator launches their own community.
+    purpose: "Stopped. Posts/replies in a Skool community. Code preserved at scripts/_archive/skool/ — revive only when the operator launches their own community.",
+    // Standalone Python script — owns its own lock file. pm2 doesn't know
+    // about it, so the Start/Stop/Restart buttons are hidden for this
+    // tile (sending `pm2 start skool_engine` would fail).
+    manageable_via_pm2: false,
   },
 ];
 
@@ -182,6 +197,9 @@ export async function GET() {
         : ((h?.status as "healthy" | "degraded" | "down" | "unconfigured") || "unconfigured"),
       metadata: h?.metadata || {},
       last_ping_at: h?.last_ping_at || null,
+      // Default to true so existing pm2-managed workers keep their action
+      // buttons. Skool (the one non-pm2 standalone) flips this false.
+      manageable_via_pm2: w.manageable_via_pm2 !== false,
       ...(archived && {
         archived_on: w.archived_on,
         archived_reason: w.archived_reason,

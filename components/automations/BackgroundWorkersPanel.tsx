@@ -16,7 +16,7 @@
  */
 
 import { useEffect, useState } from "react";
-import { Cpu, CheckCircle2, AlertCircle, MinusCircle, HelpCircle, Activity, Archive, Play, Square, RotateCw, Loader2 } from "lucide-react";
+import { Cpu, CheckCircle2, AlertCircle, MinusCircle, HelpCircle, Activity, Play, Square, RotateCw, Loader2 } from "lucide-react";
 
 const BRIDGE_BASE =
   process.env.NEXT_PUBLIC_BRIDGE_CHAT_BASE || "http://localhost:9100";
@@ -28,6 +28,10 @@ type Worker = {
   status: "healthy" | "degraded" | "down" | "unconfigured" | "archived";
   metadata: Record<string, unknown>;
   last_ping_at: string | null;
+  /** True when the worker is registered with pm2 and the dashboard's
+   * Start/Stop/Restart buttons can drive it. False for standalone
+   * Python scripts (Skool engine) — UI hides the buttons. */
+  manageable_via_pm2?: boolean;
   archived_on?: string;
   archived_reason?: string;
 };
@@ -169,53 +173,35 @@ function WorkerRow({
   bridgeOnline: boolean;
   onChange: () => void | Promise<void>;
 }) {
-  if (worker.status === "archived") {
-    return (
-      <div
-        className="rounded-lg border border-bg-border bg-bg-deep/30 p-3 opacity-60"
-        title={`Archived ${worker.archived_on || ""}`}
-      >
-        <div className="flex items-start gap-2">
-          <Archive className="w-4 h-4 shrink-0 mt-0.5 text-fg-dim" />
-          <div className="flex-1 min-w-0">
-            <div className="flex items-center gap-2">
-              <div className="font-bold text-sm text-fg-muted truncate line-through">
-                {worker.label}
-              </div>
-              <span className="text-[10px] uppercase tracking-wider text-fg-dim border border-bg-border rounded-full px-1.5 py-0.5">
-                Archived{worker.archived_on ? ` ${worker.archived_on}` : ""}
-              </span>
-            </div>
-            <div className="text-[11px] text-fg-dim mt-1 leading-relaxed">
-              {worker.archived_reason || "Not currently running or live."}
-            </div>
-          </div>
-        </div>
-      </div>
-    );
-  }
+  // Local "optimistic" override — when the operator clicks Stop/Start/Restart
+  // and pm2 returns success, we flip this immediately so the tile reflects
+  // the new state without waiting for the bridge's next 60s heartbeat.
+  // null = no override, fall through to worker.status from the server.
+  const [optimisticStatus, setOptimisticStatus] = useState<Worker["status"] | null>(null);
+  const effectiveStatus = optimisticStatus ?? worker.status;
+
   const Icon =
-    worker.status === "healthy"
+    effectiveStatus === "healthy"
       ? CheckCircle2
-      : worker.status === "down"
+      : effectiveStatus === "down"
         ? MinusCircle
-        : worker.status === "degraded"
+        : effectiveStatus === "degraded"
           ? AlertCircle
           : HelpCircle;
   const iconClass =
-    worker.status === "healthy"
+    effectiveStatus === "healthy"
       ? "text-status-engaged"
-      : worker.status === "down"
+      : effectiveStatus === "down"
         ? "text-status-warm"
-        : worker.status === "degraded"
+        : effectiveStatus === "degraded"
           ? "text-accent"
           : "text-fg-dim";
-  // metadata fields the bridge pushes: pm2_status, pid, restart_count,
-  // uptime_ms, memory_bytes, cpu_pct. Render the operator-meaningful
-  // subset on the row; pid + memory + cpu live in the hover-only tooltip
-  // (title attr) so the card stays scannable.
-  // Metadata field names mirror what detect_pm2_daemons() in
-  // bravo_cli/local_bridge.py writes — keep these two in sync.
+
+  // Operator-facing status pill — one word per state, no jargon. Replaces
+  // the prior "up 12d · 5 restarts · 12MB" line which was too dense
+  // (CC 2026-06-06: "make the metrics a little more simplified but still
+  // useful"). Detail (pid + memory + cpu + restart count) survives in the
+  // tooltip (title attr) for when you actually need it.
   const meta = worker.metadata || {};
   const pid = (meta.pid as number) || 0;
   const restartCount = (meta.restart_count as number) || 0;
@@ -225,16 +211,35 @@ function WorkerRow({
   const memMb = memBytes ? Math.round(memBytes / 1024 / 1024) : 0;
   const uptimeStr = uptimeMs ? formatUptime(Date.now() - uptimeMs) : null;
 
+  const statusLabel =
+    effectiveStatus === "healthy"
+      ? uptimeStr
+        ? `Running · up ${uptimeStr}`
+        : "Running"
+      : effectiveStatus === "down"
+        ? "Stopped"
+        : effectiveStatus === "degraded"
+          ? "Degraded — check logs"
+          : "Not running on your machine";
+
+  // Detailed pm2 fields land in the tooltip. Operators who care about
+  // memory + cpu + restart count + PID can hover; everyone else sees
+  // the clean one-line status.
+  const detailTooltip =
+    pid
+      ? `PID ${pid}${memMb > 0 ? ` · ${memMb}MB` : ""}${cpuPct > 0 ? ` · ${cpuPct}% CPU` : ""}${restartCount > 0 ? ` · ${restartCount} restart${restartCount === 1 ? "" : "s"}` : ""}`
+      : worker.service;
+
   return (
     <div
       className={`rounded-lg border p-3 ${
-        worker.status === "healthy"
+        effectiveStatus === "healthy"
           ? "border-bg-border bg-bg-elev/30"
-          : worker.status === "down"
+          : effectiveStatus === "down"
             ? "border-status-warm/30 bg-status-warm/5"
             : "border-bg-border bg-bg-deep/40 opacity-80"
       }`}
-      title={pid ? `PID ${pid} · ${memMb}MB · ${cpuPct}% CPU · ${restartCount} restarts` : worker.service}
+      title={detailTooltip}
     >
       <div className="flex items-start gap-2">
         <Icon className={`w-4 h-4 shrink-0 mt-0.5 ${iconClass}`} />
@@ -246,19 +251,25 @@ function WorkerRow({
             </span>
           </div>
           <div className="text-[11px] text-fg-muted mt-0.5 leading-relaxed">{worker.purpose}</div>
-          {uptimeStr && (
-            <div className="text-[10px] text-fg-dim mt-1 font-mono">
-              up {uptimeStr}
-              {restartCount > 0 ? ` · ${restartCount} restart${restartCount === 1 ? "" : "s"}` : ""}
-              {memMb > 0 ? ` · ${memMb}MB` : ""}
+          <div className="text-[11px] text-fg-dim mt-1">
+            {statusLabel}
+          </div>
+          {worker.manageable_via_pm2 !== false ? (
+            <WorkerActions
+              service={worker.service}
+              bridgeOnline={bridgeOnline}
+              status={effectiveStatus}
+              onOptimistic={setOptimisticStatus}
+              onChange={onChange}
+            />
+          ) : (
+            // Standalone daemon — not in pm2. Don't render the action
+            // row at all so the operator isn't tempted to click buttons
+            // that would fail with "pm2: <name> not found".
+            <div className="mt-2 text-[10px] text-fg-dim italic">
+              Standalone — start / stop via direct CLI (not in pm2).
             </div>
           )}
-          {worker.status === "unconfigured" && (
-            <div className="text-[10px] text-fg-dim mt-1 italic">
-              Not running on your machine.
-            </div>
-          )}
-          <WorkerActions service={worker.service} bridgeOnline={bridgeOnline} status={worker.status} onChange={onChange} />
         </div>
       </div>
     </div>
@@ -274,11 +285,16 @@ function WorkerActions({
   service,
   bridgeOnline,
   status,
+  onOptimistic,
   onChange,
 }: {
   service: string;
   bridgeOnline: boolean;
   status: Worker["status"];
+  /** Optimistic local-state flip so the tile reflects success before the
+   * bridge's next 60s heartbeat lands. Passing null clears the override
+   * and falls back to server data. */
+  onOptimistic: (s: Worker["status"] | null) => void;
   onChange: () => void | Promise<void>;
 }) {
   const [busy, setBusy] = useState<WorkerAction | null>(null);
@@ -289,12 +305,31 @@ function WorkerActions({
     setFeedback(null);
     const result = await runWorkerAction(service, action);
     setBusy(null);
+
+    if (result.ok) {
+      // Optimistically reflect the action. pm2 stop → "down"; pm2 start +
+      // restart → "healthy" (the daemon should be up post-action). The
+      // bridge's next 60s ping will overwrite this with the real
+      // integrations_health status, and we clear the override then.
+      const nextStatus: Worker["status"] =
+        action === "stop" ? "down" : "healthy";
+      onOptimistic(nextStatus);
+      // Clear the optimistic override after 90s — by then the bridge has
+      // definitely pinged at least once with real data. If the action
+      // didn't actually take effect on the daemon, the next heartbeat
+      // will reveal the truth.
+      setTimeout(() => onOptimistic(null), 90_000);
+    }
+
     setFeedback({ ok: result.ok, text: result.ok ? `${action} ✓` : `${action} failed: ${result.output.slice(0, 80)}` });
-    // Hide feedback after 3s.
     setTimeout(() => setFeedback(null), 3000);
-    // Whether the call succeeded or failed, refresh the panel so the
-    // operator sees the current pm2 state.
+
+    // Trigger an immediate server refetch + a delayed one at 5s. The
+    // immediate refetch won't show the change (bridge ping cadence is
+    // 60s), but the 5s one starts catching faster bridges that ping on
+    // demand. Background polling at 30s also handles it for us.
     await onChange();
+    setTimeout(() => { void onChange(); }, 5_000);
   }
 
   const canStart = status !== "healthy";
