@@ -170,6 +170,52 @@ function computeExpectedRuntime(args: {
 const PLAN_MODE_STORAGE_KEY = "oasis.chat.planMode.v1";
 const isCliRuntime = (s: unknown): s is CliRuntime =>
   s === "claude" || s === "codex" || s === "gemini";
+
+/** Single-source-of-truth label suffix for the three CLI options in
+ *  the advanced picker. Keeps the three nearly-identical <option>
+ *  blocks in the dropdown tight + makes adding a fourth CLI a one-line
+ *  change instead of a 12-line ternary copy.
+ *
+ *  - bridgeOnline=true: just the runtime name, no suffix
+ *  - bridgeOnline=null (probe in flight): "(checking…)"
+ *  - bridgeOnline=false + serverBridgeOnline=true: heartbeating but
+ *    this browser can't reach it — usually CORS, different machine,
+ *    or a Firefox/Safari HTTPS→HTTP localhost block
+ *  - bridgeOnline=false + serverBridgeOnline=false: daemon actually down
+ */
+const UNREACHABLE_TOOLTIP =
+  "Your bridge IS heartbeating — this browser just can't reach it directly (CORS, different machine, or HTTPS→HTTP localhost block). Run `pm2 restart claude-bridge` to pick up the latest allowed-origins, or open the dashboard on the machine the bridge runs on.";
+
+function renderCliOption(args: {
+  value: string;
+  displayName: string;
+  onlineTooltip: string;
+  offlineTooltip: string;
+  bridgeOnline: boolean | null;
+  serverBridgeOnline?: boolean;
+}) {
+  const { value, displayName, onlineTooltip, offlineTooltip, bridgeOnline, serverBridgeOnline } = args;
+  const suffix =
+    bridgeOnline === true
+      ? ""
+      : bridgeOnline === null
+        ? " (checking…)"
+        : serverBridgeOnline === true
+          ? " (unreachable from this browser)"
+          : " (bridge offline)";
+  const title =
+    bridgeOnline === true
+      ? onlineTooltip
+      : serverBridgeOnline === true
+        ? UNREACHABLE_TOOLTIP
+        : offlineTooltip;
+  return (
+    <option key={value} value={value} disabled={bridgeOnline !== true} title={title}>
+      {displayName}
+      {suffix}
+    </option>
+  );
+}
 const CLI_RUNTIME_LABELS: Record<CliRuntime, string> = {
   claude: "Claude Code",
   codex: "Codex CLI",
@@ -2536,69 +2582,34 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
             aria-label="Chat route"
             title={accessTitle}
           >
-            {/* Label helpers — distinguish three states:
-                  - online: just the runtime name
-                  - browser can't reach but daemon IS heartbeating to DB
-                    ("unreachable from this browser"): real cause is
-                    CORS / different machine / mixed-content. Not "offline".
-                  - daemon actually down: "(bridge offline)". */}
-            <option
-              value="cli:codex"
-              disabled={bridgeOnline !== true}
-              title={
-                bridgeOnline === true
-                  ? "OpenAI Codex on your machine. Best for backend, deep debugging, code review."
-                  : serverBridgeOnline === true
-                    ? "Your bridge IS heartbeating — this browser just can't reach it directly (CORS, different machine, or HTTPS→HTTP localhost block). Run `pm2 restart claude-bridge` to pick up the latest allowed-origins, or open the dashboard on the machine the bridge runs on."
-                    : "Bridge offline — start the daemon on the machine that runs Codex."
-              }
-            >
-              Codex CLI{bridgeOnline === true
-                ? ""
-                : bridgeOnline === null
-                  ? " (checking…)"
-                  : serverBridgeOnline === true
-                    ? " (unreachable from this browser)"
-                    : " (bridge offline)"}
-            </option>
-            <option
-              value="cli:gemini"
-              disabled={bridgeOnline !== true}
-              title={
-                bridgeOnline === true
-                  ? "Google Gemini on your machine. Cheaper for high-volume reasoning."
-                  : serverBridgeOnline === true
-                    ? "Your bridge IS heartbeating — this browser just can't reach it directly (CORS, different machine, or HTTPS→HTTP localhost block). Run `pm2 restart claude-bridge` to pick up the latest allowed-origins, or open the dashboard on the machine the bridge runs on."
-                    : "Bridge offline — start the daemon on the machine that runs Gemini."
-              }
-            >
-              Gemini CLI{bridgeOnline === true
-                ? ""
-                : bridgeOnline === null
-                  ? " (checking…)"
-                  : serverBridgeOnline === true
-                    ? " (unreachable from this browser)"
-                    : " (bridge offline)"}
-            </option>
-            <option
-              value="cli:claude"
-              disabled={bridgeOnline !== true}
-              title={
-                bridgeOnline === true
-                  ? "Anthropic Claude on your machine. Best for architecture, conversation, writing."
-                  : serverBridgeOnline === true
-                    ? "Your bridge IS heartbeating — this browser just can't reach it directly (CORS, different machine, or HTTPS→HTTP localhost block). Run `pm2 restart claude-bridge` to pick up the latest allowed-origins, or open the dashboard on the machine the bridge runs on."
-                    : "Bridge offline — start the daemon on the machine that runs Claude Code."
-              }
-            >
-              Claude Code CLI{bridgeOnline === true
-                ? ""
-                : bridgeOnline === null
-                  ? " (checking…)"
-                  : serverBridgeOnline === true
-                    ? " (unreachable from this browser)"
-                    : " (bridge offline)"}
-            </option>
+            {/* Three near-identical CLI options — extracted via renderCliOption
+                below. The label distinguishes three states (online / online
+                but unreachable from this browser / daemon offline) and the
+                tooltip explains each. */}
+            {renderCliOption({
+              value: "cli:codex",
+              displayName: "Codex CLI",
+              onlineTooltip: "OpenAI Codex on your machine. Best for backend, deep debugging, code review.",
+              offlineTooltip: "Bridge offline — start the daemon on the machine that runs Codex.",
+              bridgeOnline,
+              serverBridgeOnline,
+            })}
+            {renderCliOption({
+              value: "cli:gemini",
+              displayName: "Gemini CLI",
+              onlineTooltip: "Google Gemini on your machine. Cheaper for high-volume reasoning.",
+              offlineTooltip: "Bridge offline — start the daemon on the machine that runs Gemini.",
+              bridgeOnline,
+              serverBridgeOnline,
+            })}
+            {renderCliOption({
+              value: "cli:claude",
+              displayName: "Claude Code CLI",
+              onlineTooltip: "Anthropic Claude on your machine. Best for architecture, conversation, writing.",
+              offlineTooltip: "Bridge offline — start the daemon on the machine that runs Claude Code.",
+              bridgeOnline,
+              serverBridgeOnline,
+            })}
             <option
               value="api"
               title="Uses your saved API key. No local files. Always available — fallback when the CLIs aren't reachable."
