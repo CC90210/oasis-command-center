@@ -53,7 +53,7 @@ export default function UnsubscribeForm({ email, brand, token }: Props) {
             <polyline points="20 6 9 17 4 12" />
           </svg>
         </div>
-        <h2 className="text-lg font-semibold mb-2">You're unsubscribed</h2>
+        <h2 className="text-lg font-semibold mb-2">You&apos;re unsubscribed</h2>
         <p className="text-[#a8b0bd] text-sm leading-relaxed">
           <span className="text-white font-medium">{email}</span> will no
           longer receive marketing emails

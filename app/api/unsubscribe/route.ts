@@ -101,18 +101,24 @@ export async function POST(req: NextRequest) {
   const rawToken = String(body.token ?? "").trim();
 
   if (!rawEmail || rawEmail.length > MAX_EMAIL_LEN || !EMAIL_RE.test(rawEmail)) {
+    await recordPairAttempt(rateKey, "code_invalid_shape", ip);
     return bad(400, "invalid_email");
   }
   if (rawBrand.length > MAX_BRAND_LEN) {
+    await recordPairAttempt(rateKey, "code_invalid_shape", ip);
     return bad(400, "invalid_brand");
   }
   if (rawToken.length > MAX_TOKEN_LEN) {
+    await recordPairAttempt(rateKey, "code_invalid_shape", ip);
     return bad(400, "invalid_token");
   }
 
   // ---- Token verification (no-op without OASIS_UNSUBSCRIBE_HMAC_SECRET) ----
+  // The rate-limit helper exposes outcomes scoped to the pair-code flow; map
+  // this unsubscribe-specific "invalid_token" to its closest match
+  // ("invalid_hmac") so the limiter's failure-counter still trips.
   if (!verifyToken(rawEmail, rawBrand, rawToken)) {
-    await recordPairAttempt(rateKey, "invalid_token", ip);
+    await recordPairAttempt(rateKey, "invalid_hmac", ip);
     return bad(401, "invalid_token");
   }
 
@@ -138,7 +144,9 @@ export async function POST(req: NextRequest) {
     });
 
   if (error) {
-    await recordPairAttempt(rateKey, "db_error", ip);
+    // Map DB errors to the limiter's "code_redeem_failed" bucket — closest
+    // existing outcome for "we couldn't finish the write."
+    await recordPairAttempt(rateKey, "code_redeem_failed", ip);
     return bad(500, `db_error: ${error.message.slice(0, 120)}`);
   }
 

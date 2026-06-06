@@ -51,7 +51,7 @@ export default async function UnsubscribePage({
             Unsubscribe
           </h1>
           <p className="text-[#a8b0bd] text-sm leading-relaxed">
-            You're about to stop receiving marketing emails
+            You&apos;re about to stop receiving marketing emails
             {brand ? <> from <span className="text-white font-medium">{brand}</span></> : ""}.
             {email ? <> One-click confirmation is required by law (CASL).</> : ""}
           </p>
