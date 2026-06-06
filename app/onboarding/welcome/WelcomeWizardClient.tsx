@@ -74,6 +74,13 @@ export function WelcomeWizardClient({
     setError(null);
     setStep("saving");
     try {
+      // Send ONLY the custom_fields keys this wizard owns. /api/profile
+      // (Phase 5.2, 2026-06-06) merges server-side, so we don't need to
+      // re-send siblings like quick_facts, photo_url, or stored
+      // plan_template_id — they're preserved automatically. Spreading
+      // initialProfile.custom_fields here previously caused stale-read
+      // clobbers when a sibling tab updated quick_facts between wizard
+      // mount and submit.
       const r = await fetch("/api/profile", {
         method: "PATCH",
         headers: { "content-type": "application/json" },
@@ -82,7 +89,6 @@ export function WelcomeWizardClient({
           display_name: displayName.trim() || fullName.trim().split(" ")[0] || "Member",
           primary_agent: primaryAgent,
           custom_fields: {
-            ...initialProfile.custom_fields,
             timezone,
             briefing_channel: briefingChannel,
             welcomed_at: new Date().toISOString(),

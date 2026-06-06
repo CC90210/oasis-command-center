@@ -61,20 +61,21 @@ export function KnownFactsEditor() {
     setErr(null);
     setMsg(null);
     try {
-      // Read-modify-write on custom_fields to preserve unrelated keys
-      // (timezone, briefing_channel, photo url, etc.) that the welcome
-      // wizard or other settings write to the same blob.
-      const r = await fetch("/api/profile", { cache: "no-store" });
-      const j = (await r.json().catch(() => ({}))) as {
-        profile?: { custom_fields?: Record<string, unknown> | null };
-      };
-      const cf = { ...(j.profile?.custom_fields || {}) } as Record<string, unknown>;
-      cf[PROFILE_CUSTOM_FIELD_KEYS.QUICK_FACTS] = text;
-
+      // Send ONLY the key we're changing. /api/profile (Phase 5.2,
+      // 2026-06-06) does a server-side shallow merge into the existing
+      // custom_fields blob, so siblings (timezone, briefing_channel,
+      // photo_url, etc.) are preserved automatically.
+      //
+      // The previous client-side GET → spread → POST pattern also worked,
+      // but had a stale-read window: a sibling tab editing timezone
+      // between our GET and POST would lose its update. Single-key POST
+      // eliminates that race.
       const patch = await fetch("/api/profile", {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ custom_fields: cf }),
+        body: JSON.stringify({
+          custom_fields: { [PROFILE_CUSTOM_FIELD_KEYS.QUICK_FACTS]: text },
+        }),
       });
       const patchBody = (await patch.json().catch(() => ({}))) as {
         ok?: boolean;
