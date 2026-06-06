@@ -14,8 +14,9 @@
  *   2. data.last_touch_at      — legacy field, written by some Python
  *      daemons before send_gateway / lead_interactions was unified.
  *   3. data.submitted_at /
- *      data.date_submitted     — SunBiz JotForm intake stamp. Real touch
- *      signal — initial application receipt resets the SLA clock.
+ *      data.date_submitted     — SunBiz lead-form intake stamp (set by
+ *      /api/forms/submit when a published form posts a new lead). Real
+ *      touch signal — initial application receipt resets the SLA clock.
  *   4. row.created_at          — when this lead/application entered the
  *      system. For a never-contacted lead, the SLA clock SHOULD start
  *      here; we want a 30-day-old uncontacted lead to surface as overdue.
