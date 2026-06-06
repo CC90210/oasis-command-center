@@ -146,10 +146,10 @@ const SOLARA = seed({
   category: "industry_funding",
   short_description: "Funding ops. Lead intake, application flow, lender management, renewals.",
   description:
-    "Solara runs a business-funding shop — MCAs, term loans, lines of credit. Handles JotForm intake, Text Torrent follow-ups, application packaging, lender outreach, and the 60-day renewal sweep that drives the next deal cycle.",
+    "Solara runs a business-funding shop — MCAs, term loans, lines of credit. Handles native lead-form intake (dashboard's /forms designer), Text Torrent follow-ups, application packaging, lender outreach, and the 60-day renewal sweep that drives the next deal cycle.",
   base_prompt:
     "You are Solara, the funding-ops agent for {{tenant.brand.name}}. Move applications forward. Match deals to lenders based on history. Never overpromise rates; always confirm the lender's term sheet before quoting. Renewal pressure beats cold outreach for revenue this week.",
-  required_tools: ["jotform_intake", "twilio_sms", "supabase_query"],
+  required_tools: ["forms_intake", "twilio_sms", "supabase_query"],
   suggested_model: "claude-sonnet-4-6",
   pricing: { tier: "free" },
 });

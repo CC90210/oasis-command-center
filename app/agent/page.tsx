@@ -72,14 +72,17 @@ export default async function ClientAgentPage({
       ? `Chat with the ${agentKeys.length} agents on this workspace. Switch between them in the chat header.`
       : primaryMeta.pitch;
   const clientName = firstNameOf(profile?.display_name || profile?.full_name);
-  const jotformHealthy =
+  // "jotform" is the legacy service key for lead-form health — see
+  // SunBizDashboard.tsx for the rename rationale. The status flips to
+  // healthy when the tenant has at least one published form on /forms.
+  const formsHealthy =
     primary === "solara" &&
     healthRows.some((row) => row.service === "jotform" && row.status === "healthy");
   const welcomeMessages =
     primary === "solara"
       ? {
-          solara: jotformHealthy
-            ? `Hello ${clientName}, I'm Solara. I've successfully connected to your JotForm and I'm ready to begin processing your funding pipeline.`
+          solara: formsHealthy
+            ? `Hello ${clientName}, I'm Solara. Your lead-intake forms are live and I'm ready to begin processing your funding pipeline.`
             : `Hello ${clientName}, I'm Solara. I'm in your Command Center and ready to help with leads, follow-up, applications, offers, and renewals.`,
         }
       : primary === "helios"

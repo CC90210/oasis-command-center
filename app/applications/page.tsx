@@ -7,7 +7,7 @@ export default function ApplicationsPage() {
   return (
     <ComingSoon
       title="Applications"
-      subtitle="Funding applications from JotForm, processors, and your team"
+      subtitle="Funding applications from your inbound forms, processors, and your team"
       icon={FileText}
       phase2Bullets={[
         "New applications appear here as they come in through your forms and inbound channels.",

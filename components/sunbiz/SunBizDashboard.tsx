@@ -121,10 +121,16 @@ function rankLeads(leads: Lead[]): Lead[] {
 }
 
 function serviceMessage(service: "jotform" | "text_torrent" | "turso", status: ServiceStatus): string {
+  // service key "jotform" retained internally as the integration-row
+  // discriminator (legacy). User-facing labels say "Lead Forms" and
+  // point at the dashboard's native /forms designer — SunBiz never
+  // used JotForm and the third-party integration was removed
+  // 2026-06-06. The status flips to healthy when the tenant has at
+  // least one published form on /forms.
   if (service === "jotform") {
     return status === "healthy"
       ? "Ready to receive new lead forms."
-      : "Connect JotForm so Solara can receive new leads.";
+      : "Set up your first lead-intake form on /forms.";
   }
   if (service === "text_torrent") {
     return status === "healthy"
@@ -139,8 +145,8 @@ function serviceMessage(service: "jotform" | "text_torrent" | "turso", status: S
 function readyLine(service: string, status: ServiceStatus): string {
   if (service === "jotform") {
     return status === "healthy"
-      ? "Solara is connected to JotForm. She is ready to receive leads."
-      : "Connect JotForm to start new inbound leads.";
+      ? "Solara is connected to your lead forms. She is ready to receive new leads."
+      : "Publish your first form on /forms to start receiving leads.";
   }
   if (service === "text_torrent") {
     return status === "healthy"
@@ -243,7 +249,7 @@ export async function SunBizDashboard({ demoMode = false }: Props) {
           </p>
 
           <div className="mt-6 grid gap-3">
-            <PulseLine label="JotForm" status={jotform.status} body={readyLine("jotform", jotform.status)} />
+            <PulseLine label="Lead Forms" status={jotform.status} body={readyLine("jotform", jotform.status)} />
             <PulseLine label="Text Torrent" status={textTorrent.status} body={readyLine("text_torrent", textTorrent.status)} />
             <PulseLine label="Local Brain" status={localBrain.status} body={readyLine("turso", localBrain.status)} />
           </div>
@@ -336,10 +342,10 @@ export async function SunBizDashboard({ demoMode = false }: Props) {
             ) : (
               <ActionRow
                 icon={<Workflow className="h-4 w-4" />}
-                title="Connect your first inbound lane"
-                body="Once JotForm is connected, new lead forms will start landing here automatically for Solara to sort and follow up."
-                href={link("/integrations")}
-                cta="Open Integrations"
+                title="Publish your first lead-intake form"
+                body="Build a form on /forms and share the link with your prospects. Submissions land in Leads automatically for Solara to sort and follow up."
+                href={link("/forms")}
+                cta="Open Forms"
               />
             )}
 
@@ -367,7 +373,7 @@ export async function SunBizDashboard({ demoMode = false }: Props) {
 
         <div className="grid gap-4">
           <PulseCard
-            title="JotForm"
+            title="Lead Forms"
             status={jotform.status}
             body={serviceMessage("jotform", jotform.status)}
             stamp={demoMode ? "Demo connection" : timeAgo(jotform.last_ping_at)}
