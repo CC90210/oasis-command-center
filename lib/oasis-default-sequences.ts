@@ -70,7 +70,7 @@ export const OASIS_DEFAULT_SEQUENCES: DefaultSequence[] = [
         from_label: "CC",
         subject: "Quick look at what we'd build for {{lead.company}}",
         body:
-          "Hi {{lead.name}},\n\nThanks for the reply — picking up from where we left off.\n\nFor context, our most recent build was a funding-shop CRM (SunBiz) that replaced their Salesforce + JotForm + a manual underwriting workflow in 3 weeks. The agent now handles lead follow-up, application intake, lender shop-out, and AI-powered underwriting end-to-end.\n\nFor {{lead.company}} the equivalent depends on what's eating your time. Want to grab 20 min this week to scope it?\n\n— CC, OASIS AI",
+          "Hi {{lead.name}},\n\nThanks for the reply — picking up from where we left off.\n\nFor context, our most recent build was a funding-shop CRM (SunBiz) that replaced their spreadsheet pipeline + manual underwriting workflow in 3 weeks. The agent now handles lead intake (native forms), follow-up, application packaging, lender shop-out, and AI-powered underwriting end-to-end.\n\nFor {{lead.company}} the equivalent depends on what's eating your time. Want to grab 20 min this week to scope it?\n\n— CC, OASIS AI",
       },
       {
         channel: "email",

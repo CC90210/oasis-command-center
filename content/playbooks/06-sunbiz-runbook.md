@@ -81,7 +81,7 @@ The wizard's "Dashboard pairing" step auto-opens the client's browser to `/setti
 ### Demo data → real data
 Three sub-tasks:
 
-1. **Leads import.** Their existing CRM export (JotForm / Excel / HubSpot) goes into `/import` page. The agent dedupes against existing leads on email/phone.
+1. **Leads import.** Their existing CRM export (Excel / HubSpot / any CSV) goes into `/import` page. The agent dedupes against existing leads on email/phone. The dashboard's multi-entity import wizard supports leads, applications, lenders, and funded deals as separate entity types.
 2. **Lenders.** Walk through `/lenders` page with them. Add their lender contacts (name, email, fee structure). Solara uses this to route applications.
 3. **Templates.** Their existing SMS scripts and email templates go in `/templates`. The agent reads from this set when drafting follow-ups.
 
@@ -112,12 +112,14 @@ Wire the third-party services that close the loop.
 ### n8n workflows (optional, defer to week two)
 If the client uses n8n for lead enrichment or lender callbacks, import the SunBiz starter workflows from `scripts/n8n_workflows/sunbiz/*.json` via the n8n MCP. Skip if they're not on n8n.
 
-### JotForm (lead ingestion)
-Their existing JotForm webhook URL needs to point to `<dashboard>/api/inbound/lead`. The HMAC secret is in their `n8n_webhook_secrets` row — give them the value to paste into JotForm's webhook config.
+### Lead intake forms (native, no third party)
+The dashboard's `/forms` designer is the canonical intake mechanism. Walk Ezra through building a form there, then share the published link (`/f/<tenant>/<form>` for anonymous, `/f/<tenant>/<form>/<lead_token>` for personalized via Solara mint). Submissions land in `tenant_records` (entity_type=lead) automatically and trigger the `viewed_application` drip via `/api/forms/view`.
+
+If the client wants to keep an existing third-party form temporarily, point its webhook at `<dashboard>/api/inbound/lead` with the HMAC secret from their `n8n_webhook_secrets` row. New deployments should use the native designer.
 
 ### Verify
 - Send a test SMS from `/sms`. Confirm delivery on the client's phone.
-- POST a fake lead to the JotForm endpoint. Confirm it appears in `/leads` within 10 seconds.
+- Submit a fake lead via the published form URL. Confirm it appears in `/leads` within 10 seconds.
 
 ---
 

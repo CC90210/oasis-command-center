@@ -139,7 +139,7 @@ Ezra signs in as `Submissions@sunbizfunding.com`:
 
 5. **Ezra connects an AI provider** under Settings → AI setup. OpenRouter is the easiest single key. Without this, Solara / Helios chat doesn't have a model.
 
-6. **Ezra connects JotForm + Twilio** under Settings → Integration keys. Inbound forms + outbound SMS / email.
+6. **Ezra publishes his first form on `/forms`** for inbound lead capture, then connects Twilio under Settings → Integration keys for outbound SMS. Email goes through the shared Gmail submissions mailbox — no additional setup.
 
 7. **Ezra creates his first lender** under Deals → Lenders → "+ New lender". Without at least one lender, Shopping Out has nothing to rank.
 

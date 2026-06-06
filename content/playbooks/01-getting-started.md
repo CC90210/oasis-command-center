@@ -10,7 +10,7 @@ Solara is your digital employee inside Sun Biz Funding.
 
 She helps your team with:
 
-- New lead intake from JotForm
+- New lead intake from your published forms (`/forms`)
 - Text follow-up through Text Torrent
 - Application progress
 - Offer tracking
