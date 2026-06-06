@@ -111,27 +111,20 @@ export function BridgeCliPanel({
   }
 
   if (!state.reachable) {
-    // The localhost probe failed. Decide tone from the server-side
-    // heartbeat: if the daemon is heartbeating to bridge_pairings, the
-    // bridge IS running — this browser just can't reach it (common when
-    // you're on the dashboard from a phone or a different machine than
-    // the one running the daemon). Render amber instead of red so the
-    // signal matches the sidebar's "BRIDGE ONLINE" badge.
+    // The localhost probe failed. Decide what to show from the server-side
+    // heartbeat:
+    //   - server bridge ONLINE → just a quiet one-liner. The sidebar already
+    //     shows BRIDGE ONLINE; no need to confuse the operator with a
+    //     warning. Per-CLI status simply isn't visible from this browser
+    //     (Vercel-hosted dashboard can't reach the operator's localhost —
+    //     fundamental mixed-content + cross-origin constraint, NOT a bug).
+    //   - server bridge OFFLINE → the actual red state. Daemon isn't
+    //     heartbeating; something is wrong.
     if (serverBridgeOnline === true) {
       return (
-        <div className="rounded-lg border border-accent/40 bg-accent/5 px-3 py-2.5 text-sm flex items-start gap-2">
-          <Info className="w-4 h-4 mt-0.5 text-accent flex-shrink-0" />
-          <div>
-            <div className="font-bold text-accent">Bridge online — but this browser can&apos;t reach it directly</div>
-            <div className="text-xs text-fg-muted mt-1 font-sans leading-relaxed">
-              Your bridge daemon is heartbeating to the database (sidebar
-              shows BRIDGE ONLINE), but this browser can&apos;t reach
-              <code className="text-accent"> {BRIDGE_BASE}/diagnostics/cli</code>. That&apos;s normal when
-              you&apos;re viewing the dashboard from a different machine
-              than the one running the bridge. Per-CLI status will populate
-              when you load this page on the bridge machine.
-            </div>
-          </div>
+        <div className="text-xs text-fg-muted font-sans leading-relaxed flex items-center gap-2">
+          <Info className="w-3.5 h-3.5 text-accent flex-shrink-0" />
+          Bridge is online. Per-CLI install status only renders when you load this page on the bridge machine itself.
         </div>
       );
     }

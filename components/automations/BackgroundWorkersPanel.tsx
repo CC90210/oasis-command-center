@@ -16,7 +16,10 @@
  */
 
 import { useEffect, useState } from "react";
-import { Cpu, CheckCircle2, AlertCircle, MinusCircle, HelpCircle, Activity, Archive } from "lucide-react";
+import { Cpu, CheckCircle2, AlertCircle, MinusCircle, HelpCircle, Activity, Archive, Play, Square, RotateCw, Loader2 } from "lucide-react";
+
+const BRIDGE_BASE =
+  process.env.NEXT_PUBLIC_BRIDGE_CHAT_BASE || "http://localhost:9100";
 
 type Worker = {
   service: string;
@@ -111,14 +114,61 @@ export function BackgroundWorkersPanel() {
 
       <div className="grid sm:grid-cols-2 gap-2">
         {data.workers.map((w) => (
-          <WorkerRow key={w.service} worker={w} />
+          <WorkerRow key={w.service} worker={w} bridgeOnline={data.bridge_online} onChange={refresh} />
         ))}
       </div>
     </div>
   );
 }
 
-function WorkerRow({ worker }: { worker: Worker }) {
+/** PM2 control actions exposed in the UI. */
+type WorkerAction = "start" | "stop" | "restart";
+
+/**
+ * Drive pm2 from the dashboard via the bridge's exec-tool endpoint.
+ * The bridge listens on localhost:9100 so the browser POSTs directly
+ * (same pattern ChatWidget uses for cloud_bridge_tools). Server-side
+ * proxying from Vercel isn't possible because Vercel can't reach the
+ * operator's localhost.
+ *
+ * service is the full Worker.service string ("pm2.claude-bridge"). The
+ * pm2 CLI wants the name without the prefix.
+ */
+async function runWorkerAction(service: string, action: WorkerAction): Promise<{ ok: boolean; output: string }> {
+  // Strip "pm2." prefix if present; defense-in-depth allowlist of allowed
+  // characters keeps the bash injection surface to literal pm2 names.
+  const name = service.replace(/^pm2\./, "");
+  if (!/^[a-z0-9._-]+$/i.test(name)) {
+    return { ok: false, output: "invalid_service_name" };
+  }
+  try {
+    const res = await fetch(`${BRIDGE_BASE}/exec-tool`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        tool_name: "bash",
+        input: { command: `pm2 ${action} ${name}` },
+      }),
+    });
+    const data = (await res.json()) as { ok?: boolean; output?: string; is_error?: boolean; error?: string };
+    if (!res.ok || data.ok === false || data.is_error === true) {
+      return { ok: false, output: data.error || data.output || `http_${res.status}` };
+    }
+    return { ok: true, output: data.output || "ok" };
+  } catch (e) {
+    return { ok: false, output: e instanceof Error ? e.message : "network_failure" };
+  }
+}
+
+function WorkerRow({
+  worker,
+  bridgeOnline,
+  onChange,
+}: {
+  worker: Worker;
+  bridgeOnline: boolean;
+  onChange: () => void | Promise<void>;
+}) {
   if (worker.status === "archived") {
     return (
       <div
@@ -208,9 +258,118 @@ function WorkerRow({ worker }: { worker: Worker }) {
               Not running on your machine.
             </div>
           )}
+          <WorkerActions service={worker.service} bridgeOnline={bridgeOnline} status={worker.status} onChange={onChange} />
         </div>
       </div>
     </div>
+  );
+}
+
+/** Three icon buttons (Start / Stop / Restart) plus inline feedback.
+ *  Buttons grey out when the bridge isn't online (browser can't reach
+ *  localhost) and during in-flight requests. The result text shows for
+ *  ~3s after each click so the operator gets a confirmation without a
+ *  modal. */
+function WorkerActions({
+  service,
+  bridgeOnline,
+  status,
+  onChange,
+}: {
+  service: string;
+  bridgeOnline: boolean;
+  status: Worker["status"];
+  onChange: () => void | Promise<void>;
+}) {
+  const [busy, setBusy] = useState<WorkerAction | null>(null);
+  const [feedback, setFeedback] = useState<{ ok: boolean; text: string } | null>(null);
+
+  async function handle(action: WorkerAction) {
+    setBusy(action);
+    setFeedback(null);
+    const result = await runWorkerAction(service, action);
+    setBusy(null);
+    setFeedback({ ok: result.ok, text: result.ok ? `${action} ✓` : `${action} failed: ${result.output.slice(0, 80)}` });
+    // Hide feedback after 3s.
+    setTimeout(() => setFeedback(null), 3000);
+    // Whether the call succeeded or failed, refresh the panel so the
+    // operator sees the current pm2 state.
+    await onChange();
+  }
+
+  const canStart = status !== "healthy";
+  const canStop = status === "healthy" || status === "degraded";
+  const disabledHint = !bridgeOnline
+    ? "Bridge offline — can't reach pm2"
+    : undefined;
+
+  return (
+    <div className="mt-2 flex items-center gap-1.5">
+      <ActionButton
+        icon={busy === "start" ? Loader2 : Play}
+        spin={busy === "start"}
+        label="Start"
+        disabled={!bridgeOnline || busy !== null || !canStart}
+        title={
+          disabledHint ||
+          (!canStart ? "Already running" : "Start this worker via pm2")
+        }
+        onClick={() => handle("start")}
+      />
+      <ActionButton
+        icon={busy === "stop" ? Loader2 : Square}
+        spin={busy === "stop"}
+        label="Stop"
+        disabled={!bridgeOnline || busy !== null || !canStop}
+        title={
+          disabledHint ||
+          (!canStop ? "Already stopped" : "Stop this worker via pm2")
+        }
+        onClick={() => handle("stop")}
+      />
+      <ActionButton
+        icon={busy === "restart" ? Loader2 : RotateCw}
+        spin={busy === "restart"}
+        label="Restart"
+        disabled={!bridgeOnline || busy !== null}
+        title={disabledHint || "Restart this worker via pm2"}
+        onClick={() => handle("restart")}
+      />
+      {feedback && (
+        <span className={`text-[10px] font-mono ${feedback.ok ? "text-status-engaged" : "text-status-warm"}`}>
+          {feedback.text}
+        </span>
+      )}
+    </div>
+  );
+}
+
+function ActionButton({
+  icon: Icon,
+  spin,
+  label,
+  disabled,
+  title,
+  onClick,
+}: {
+  icon: typeof Play;
+  spin?: boolean;
+  label: string;
+  disabled?: boolean;
+  title?: string;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      title={title}
+      className="inline-flex items-center gap-1 rounded-md border border-bg-border bg-bg-elev/50 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider text-fg-muted hover:bg-bg-elev hover:text-fg transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+    >
+      <Icon className={`w-3 h-3 ${spin ? "animate-spin" : ""}`} />
+      {label}
+    </button>
   );
 }
 

@@ -404,7 +404,7 @@ export default async function HealthPage() {
                 <li key={l.id} className="rounded-lg border border-bg-border bg-bg-deep/40 p-3 flex items-center justify-between gap-2">
                   <div>
                     <Link
-                      href={`/t/${tenantSlug}/leads/${l.id}`}
+                      href={`/pipeline/${l.id}`}
                       className="font-bold text-fg hover:text-accent"
                     >
                       {name}

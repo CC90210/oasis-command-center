@@ -192,9 +192,46 @@ export async function SettingsContent({
             </SafeBoundary>
           </Card>
 
-          <SafeBoundary label="Integration keys">
-            <IntegrationKeysPanel canManage={canManageTenant} />
-          </SafeBoundary>
+          {/* Credentials — single parent Card with two clearly-labeled
+              sub-sections. Was previously two top-level cards
+              (Integration Keys + Custom Credentials) which CC read as
+              redundant ("there are two sections for uploading and
+              storing your credentials"). They actually serve different
+              purposes — structured known integrations with health
+              checks vs raw KEY=VALUE for anything else — but the
+              parent grouping makes that obvious. */}
+          <Card
+            title="Credentials"
+            subtitle="All your API keys, OAuth tokens, and webhook URLs in one place. Known integrations get health-checked; custom KEY=VALUE secrets cover anything else your agents need."
+          >
+            <div className="space-y-6">
+              <div>
+                <div className="text-xs font-bold uppercase tracking-wider text-fg-muted mb-2">
+                  Known integrations
+                </div>
+                <div className="text-[11px] text-fg-dim mb-3 leading-relaxed">
+                  Pre-configured slots for the services your agents already know how to use (Gmail, Stripe, Telegram, etc). Includes a live health check + paste-once setup.
+                </div>
+                <SafeBoundary label="Integration keys">
+                  <IntegrationKeysPanel canManage={canManageTenant} />
+                </SafeBoundary>
+              </div>
+
+              {canManageTenant && (
+                <div>
+                  <div className="text-xs font-bold uppercase tracking-wider text-fg-muted mb-2">
+                    Custom secrets
+                  </div>
+                  <div className="text-[11px] text-fg-dim mb-3 leading-relaxed">
+                    Anything that doesn&apos;t fit the known-integration slots above — client-specific tokens, one-off webhook URLs, internal API keys. Encrypted at rest; agents read them via <code className="text-accent">get_credential</code>.
+                  </div>
+                  <SafeBoundary label="Custom credentials vault">
+                    <CustomCredentialsVault />
+                  </SafeBoundary>
+                </div>
+              )}
+            </div>
+          </Card>
 
           {/* Kixie webhook auto-registration — only when the tenant
               actually declares Kixie in its required_services list.
@@ -259,16 +296,10 @@ export async function SettingsContent({
             </SafeBoundary>
           </Card>
 
-          {canManageTenant && (
-            <Card
-              title="Custom credentials"
-              subtitle="Drop in any KEY=VALUE secret your agents need — API keys, webhook URLs, client-specific tokens. Encrypted at rest. Agents retrieve them by name via get_credential; values never appear in chat."
-            >
-              <SafeBoundary label="Custom credentials vault">
-                <CustomCredentialsVault />
-              </SafeBoundary>
-            </Card>
-          )}
+          {/* Custom Credentials card removed 2026-06-06 — moved into the
+              unified "Credentials" parent Card above so the operator sees
+              one credentials surface, not two separate top-level cards
+              that look redundant. */}
 
           <Card title="Password" subtitle="Change your sign-in password">
             <SafeBoundary label="Password form">

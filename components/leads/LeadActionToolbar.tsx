@@ -325,9 +325,12 @@ export function LeadActionToolbar({
 }
 
 function MarkStaleButton({ leadId }: { leadId: string }) {
-  // Toggles lead.data.drip_paused. We don't pre-fetch the state — instead
-  // we PATCH and let the API tell us what it set. Keeps this component
-  // stateless beyond the optimistic toggle.
+  // Toggles lead.data.drip_paused. The OASIS drip / nurture sequence is
+  // the background job that sends scheduled follow-up emails over time
+  // (Day 2 check-in, Day 5 break-up, Day 14 final, etc) — driven by the
+  // Sequence runner daemon. Pausing skips this specific lead from the
+  // sequence so the operator can take it over manually; resuming
+  // re-enrolls it.
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<"paused" | "active" | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -362,31 +365,39 @@ function MarkStaleButton({ leadId }: { leadId: string }) {
       <PlayCircle className="w-4 h-4 text-fg" />
     );
 
+  const title =
+    result === "paused"
+      ? "Auto follow-ups paused on this lead. Click to resume — Sequence runner will pick the lead back up on its next pass and send the next scheduled follow-up."
+      : result === "active"
+        ? "Auto follow-ups will continue. Sequence runner sends the next scheduled email on its next pass."
+        : "Pause / resume the OASIS auto follow-up sequence for THIS lead. The sequence sends scheduled check-ins over time (Day 2, Day 5, Day 14 etc). Pause if you're taking the conversation over manually; resume to let the daemon take it back.";
+
   return (
     <button
       type="button"
       onClick={toggle}
       disabled={busy}
+      title={title}
       className="rounded-lg border border-bg-border bg-bg-elev/50 hover:bg-bg-elev px-4 py-3 transition-all text-left disabled:opacity-50"
     >
       <div className="flex items-center gap-2">
         {busy ? <Loader2 className="w-4 h-4 animate-spin text-fg" /> : icon}
         <span className="text-sm font-bold text-fg">
           {result === "paused"
-            ? "Drip paused"
+            ? "Auto follow-ups paused"
             : result === "active"
-              ? "Drip running"
-              : "Toggle drip"}
+              ? "Auto follow-ups on"
+              : "Pause auto follow-ups"}
         </span>
       </div>
       <div className="text-xs text-fg-muted mt-1">
         {error
           ? `Error: ${error}`
           : result === "paused"
-            ? "OASIS sequence will skip this lead"
+            ? "OASIS won't auto-send scheduled check-ins to this lead. Click to re-enable."
             : result === "active"
-              ? "Sequence resumed"
-              : "Pause / resume the OASIS drip sequence"}
+              ? "OASIS will auto-send the next scheduled check-in"
+              : "Stop OASIS from auto-sending scheduled check-ins to this lead"}
       </div>
     </button>
   );
