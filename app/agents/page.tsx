@@ -1,7 +1,7 @@
 import { Card, PageHeader, Tag } from "@/components/Card";
 import ChatWidget from "@/components/ChatWidget";
 import { timeAgo } from "@/lib/fmt";
-import { agentStates, getActiveProfile, integrationsHealth, aiServicesWithKey, getTenantBridgeOwner } from "@/lib/queries";
+import { agentStates, getActiveProfile, integrationsHealth, aiServicesWithKey, getTenantBridgeOwner, getBridgeOnline } from "@/lib/queries";
 import { FAMILY_AGENT_KEYS, getAgentInfo } from "@/lib/agents";
 import { getTenantManifestForUser } from "@/lib/manifest/tenant-scope";
 import { catalogFor } from "@/lib/agent-catalog";
@@ -53,7 +53,7 @@ export default async function AgentsPage() {
     .filter((a) => a.enabled)
     .map((a) => a.slug.toLowerCase());
 
-  const [states, integrations, stats, noBridge, aiServices, tenantBridgeOwner] = await Promise.all([
+  const [states, integrations, stats, noBridge, aiServices, tenantBridgeOwner, serverBridgeOnline] = await Promise.all([
     agentStates(manifestEnabledSlugs),
     // recentEvents() removed 2026-06-06 with the Event Bus card. The same
     // feed renders on /operations as the Activity Tape, so this query was
@@ -73,6 +73,13 @@ export default async function AgentsPage() {
     // "Bridge runs on <owner>'s machine" when this browser's localhost
     // probe fails but the tenant has a bridge online elsewhere.
     getTenantBridgeOwner(profile?.tenant_id || null),
+    // Authoritative bridge-up signal from bridge_pairings.last_seen_at.
+    // ChatWidget uses this to label the CLI options correctly when the
+    // browser's localhost probe fails (e.g., CORS or wrong-machine) but
+    // the daemon IS heartbeating. Without it, the picker says "(bridge
+    // offline)" for valid CLI routes that are merely unreachable from
+    // THIS browser.
+    getBridgeOnline(profile?.tenant_id || null),
   ]);
   // No provider keys on file AND bridge offline AND non-operator. Operators
   // have the platform fallback so chat works without a per-agent key — they
@@ -227,6 +234,12 @@ export default async function AgentsPage() {
           // localhost probe fails but the tenant DOES have a bridge
           // running on another teammate's machine.
           tenantBridgeOwner={tenantBridgeOwner}
+          // Authoritative server-side bridge status. ChatWidget uses
+          // this as a fallback when the localhost probe fails but the
+          // daemon IS heartbeating to the DB — the CLI options then
+          // render as "(unreachable from this browser)" instead of
+          // "(bridge offline)", which is the truth.
+          serverBridgeOnline={serverBridgeOnline}
         />
       </section>
 

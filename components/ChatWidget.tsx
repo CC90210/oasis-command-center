@@ -418,6 +418,20 @@ type Props = {
     machine_label: string | null;
     owner_display_name: string | null;
   };
+  /**
+   * Authoritative server-side bridge-up signal (bridge_pairings.last_seen_at
+   * within 5 min). Distinguishes three CLI dropdown states:
+   *   - bridgeOnline=true   → "Codex CLI" (works)
+   *   - bridgeOnline=false + serverBridgeOnline=true →
+   *       "Codex CLI (unreachable from this browser)" — daemon IS heartbeating;
+   *       this browser just can't get to localhost (CORS, different machine,
+   *       Firefox mixed-content block, etc).
+   *   - bridgeOnline=false + serverBridgeOnline=false →
+   *       "Codex CLI (bridge offline)" — daemon is genuinely down.
+   * Without this distinction CC saw "(bridge offline)" on oasisai.work while
+   * the sidebar simultaneously said BRIDGE ONLINE — confusing and incorrect.
+   */
+  serverBridgeOnline?: boolean;
 };
 
 function seedMessagesForAgent(
@@ -429,7 +443,7 @@ function seedMessagesForAgent(
   return [{ role: "assistant", content, at: Date.now() }];
 }
 
-export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMessages, advancedPicker, tenantBridgeOwner }: Props) {
+export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMessages, advancedPicker, tenantBridgeOwner, serverBridgeOnline }: Props) {
   const searchParams = useSearchParams();
   const router = useRouter();
   const pathname = usePathname();
@@ -2522,16 +2536,30 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
             aria-label="Chat route"
             title={accessTitle}
           >
+            {/* Label helpers — distinguish three states:
+                  - online: just the runtime name
+                  - browser can't reach but daemon IS heartbeating to DB
+                    ("unreachable from this browser"): real cause is
+                    CORS / different machine / mixed-content. Not "offline".
+                  - daemon actually down: "(bridge offline)". */}
             <option
               value="cli:codex"
               disabled={bridgeOnline !== true}
               title={
                 bridgeOnline === true
                   ? "OpenAI Codex on your machine. Best for backend, deep debugging, code review."
-                  : "Bridge offline — start the daemon on the machine that runs Codex."
+                  : serverBridgeOnline === true
+                    ? "Your bridge IS heartbeating — this browser just can't reach it directly (CORS, different machine, or HTTPS→HTTP localhost block). Run `pm2 restart claude-bridge` to pick up the latest allowed-origins, or open the dashboard on the machine the bridge runs on."
+                    : "Bridge offline — start the daemon on the machine that runs Codex."
               }
             >
-              Codex CLI{bridgeOnline === true ? "" : bridgeOnline === null ? " (checking…)" : " (bridge offline)"}
+              Codex CLI{bridgeOnline === true
+                ? ""
+                : bridgeOnline === null
+                  ? " (checking…)"
+                  : serverBridgeOnline === true
+                    ? " (unreachable from this browser)"
+                    : " (bridge offline)"}
             </option>
             <option
               value="cli:gemini"
@@ -2539,10 +2567,18 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
               title={
                 bridgeOnline === true
                   ? "Google Gemini on your machine. Cheaper for high-volume reasoning."
-                  : "Bridge offline — start the daemon on the machine that runs Gemini."
+                  : serverBridgeOnline === true
+                    ? "Your bridge IS heartbeating — this browser just can't reach it directly (CORS, different machine, or HTTPS→HTTP localhost block). Run `pm2 restart claude-bridge` to pick up the latest allowed-origins, or open the dashboard on the machine the bridge runs on."
+                    : "Bridge offline — start the daemon on the machine that runs Gemini."
               }
             >
-              Gemini CLI{bridgeOnline === true ? "" : bridgeOnline === null ? " (checking…)" : " (bridge offline)"}
+              Gemini CLI{bridgeOnline === true
+                ? ""
+                : bridgeOnline === null
+                  ? " (checking…)"
+                  : serverBridgeOnline === true
+                    ? " (unreachable from this browser)"
+                    : " (bridge offline)"}
             </option>
             <option
               value="cli:claude"
@@ -2550,10 +2586,18 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
               title={
                 bridgeOnline === true
                   ? "Anthropic Claude on your machine. Best for architecture, conversation, writing."
-                  : "Bridge offline — start the daemon on the machine that runs Claude Code."
+                  : serverBridgeOnline === true
+                    ? "Your bridge IS heartbeating — this browser just can't reach it directly (CORS, different machine, or HTTPS→HTTP localhost block). Run `pm2 restart claude-bridge` to pick up the latest allowed-origins, or open the dashboard on the machine the bridge runs on."
+                    : "Bridge offline — start the daemon on the machine that runs Claude Code."
               }
             >
-              Claude Code CLI{bridgeOnline === true ? "" : bridgeOnline === null ? " (checking…)" : " (bridge offline)"}
+              Claude Code CLI{bridgeOnline === true
+                ? ""
+                : bridgeOnline === null
+                  ? " (checking…)"
+                  : serverBridgeOnline === true
+                    ? " (unreachable from this browser)"
+                    : " (bridge offline)"}
             </option>
             <option
               value="api"

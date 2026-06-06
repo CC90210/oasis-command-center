@@ -73,10 +73,18 @@ function buildCalendarUrl({
   leadName,
   leadCompany,
   leadEmail,
+  operatorEmail,
 }: {
   leadName: string | null;
   leadCompany: string | null;
   leadEmail: string | null;
+  /** Operator's Google account email. Passed to Calendar via authuser=
+   * so the event creator opens against THIS account, not whichever
+   * Google account is the browser's default. Without this, CC's "Gold
+   * Storm" personal browser was popping up its own primary account
+   * instead of the conaugh@oasisai.work one he's signed into the
+   * dashboard with. */
+  operatorEmail: string | null;
 }): string {
   const titleParts = ["Call"];
   if (leadName) titleParts.push(leadName);
@@ -91,6 +99,7 @@ function buildCalendarUrl({
   const params = new URLSearchParams({ text: title });
   if (details) params.set("details", details);
   if (leadEmail) params.set("add", leadEmail);
+  if (operatorEmail) params.set("authuser", operatorEmail);
   return `https://calendar.google.com/calendar/r/eventedit?${params.toString()}`;
 }
 
@@ -106,6 +115,7 @@ export function LeadActionToolbar({
   leadCompany,
   leadEmail,
   daysSinceLastTouch,
+  operatorEmail,
   aiToolsSlot,
 }: {
   leadId: string;
@@ -113,6 +123,12 @@ export function LeadActionToolbar({
   leadCompany: string | null;
   leadEmail: string | null;
   daysSinceLastTouch: number | null;
+  /** Operator's signed-in Google account. Used to deep-link Google
+   * Calendar to the right authuser so the event editor opens against
+   * the operator's connected account instead of whichever Google
+   * account the browser defaults to. Null is fine — Calendar falls
+   * back to the browser default. */
+  operatorEmail?: string | null;
   /** Rendered inside the "AI tools" disclosure. The page passes the
    * existing ScoreLeadButton + NextActionButton as a server-rendered
    * fragment so we don't have to import them from a bracketed-route path. */
@@ -130,7 +146,12 @@ export function LeadActionToolbar({
   const [sendState, setSendState] = useState<SendState>({ kind: "idle" });
   const [aiToolsOpen, setAiToolsOpen] = useState(false);
 
-  const calendarUrl = buildCalendarUrl({ leadName, leadCompany, leadEmail });
+  const calendarUrl = buildCalendarUrl({
+    leadName,
+    leadCompany,
+    leadEmail,
+    operatorEmail: operatorEmail ?? null,
+  });
   const canEmail = !!leadEmail;
 
   async function handleSend(e: FormEvent<HTMLFormElement>) {
