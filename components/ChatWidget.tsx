@@ -2455,47 +2455,77 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
         */}
         {advancedPicker && (
           <select
-            value={chatMode}
+            /* Single 4-option route picker. CC's feedback 2026-06-06: the
+               old 4 options (Best path / On my computer / Cloud chat only /
+               Cloud + my files) didn't match his mental model and the
+               secondary CLI-runtime dropdown was confusing in addition.
+               One picker, four routes, the only ones that exist:
+                 - Codex CLI         (cli + codex runtime)
+                 - Gemini CLI        (cli + gemini runtime)
+                 - Claude Code CLI   (cli + claude runtime)
+                 - API (cloud)       (cloud_only — uses operator's API key)
+               CLI options grey out when the bridge is offline; API lights
+               up as the only usable choice. */
+            value={chatMode === "cli" ? `cli:${cliRuntime}` : "api"}
             onChange={(e) => {
               const v = e.target.value;
-              if (isChatMode(v)) setChatMode(v);
+              if (v === "cli:codex") {
+                setChatMode("cli");
+                setCliRuntime("codex");
+              } else if (v === "cli:gemini") {
+                setChatMode("cli");
+                setCliRuntime("gemini");
+              } else if (v === "cli:claude") {
+                setChatMode("cli");
+                setCliRuntime("claude");
+              } else if (v === "api") {
+                setChatMode("cloud_only");
+              }
             }}
-            /* Hidden on mobile — Auto mode handles routing silently and
-               there is no useful way to scan four long option labels on
-               a 375px phone. Settings page still exposes the same modes
-               for any deliberate override. */
+            /* Hidden on mobile — route choice is a desktop concern; phones
+               default to whatever the bridge last used. */
             className="hidden md:block bg-bg-elev border border-bg-border rounded-lg px-2 py-2 text-[11px] text-fg-muted focus:outline-none focus:border-accent transition-colors cursor-pointer"
-            aria-label="Chat routing mode"
+            aria-label="Chat route"
             title={accessTitle}
           >
-            {/* Routing dropdown — end-user-readable labels. CC's feedback
-                2026-05-22: "this is very technical, I wish the options
-                were easier to select." Reframed in terms of what the
-                operator actually gets:
-                  - Best path: agent picks the right transport
-                  - On my computer: subscription + full local access
-                  - Cloud (chat only): API key, no local files
-                  - Cloud + my files: API key + bridge tools mixed
-            */}
-            <option value="auto">Best path (recommended)</option>
-            <option value="cli">On my computer (subscription)</option>
-            <option value="cloud_only">Cloud — chat only, no files</option>
             <option
-              value="cloud_bridge_tools"
+              value="cli:codex"
               disabled={bridgeOnline !== true}
               title={
-                bridgeOnline === false
-                  ? "Disabled: the bridge isn't running. Open Settings → Bridge to install it."
-                  : bridgeOnline === null
-                    ? "Checking bridge status..."
-                    : undefined
+                bridgeOnline === true
+                  ? "OpenAI Codex on your machine. Best for backend, deep debugging, code review."
+                  : "Bridge offline — start the daemon on the machine that runs Codex."
               }
             >
-              {bridgeOnline === true
-                ? "Cloud + my files"
-                : bridgeOnline === null
-                  ? "Cloud + my files (checking…)"
-                  : "Cloud + my files (bridge offline)"}
+              Codex CLI{bridgeOnline === true ? "" : bridgeOnline === null ? " (checking…)" : " (bridge offline)"}
+            </option>
+            <option
+              value="cli:gemini"
+              disabled={bridgeOnline !== true}
+              title={
+                bridgeOnline === true
+                  ? "Google Gemini on your machine. Cheaper for high-volume reasoning."
+                  : "Bridge offline — start the daemon on the machine that runs Gemini."
+              }
+            >
+              Gemini CLI{bridgeOnline === true ? "" : bridgeOnline === null ? " (checking…)" : " (bridge offline)"}
+            </option>
+            <option
+              value="cli:claude"
+              disabled={bridgeOnline !== true}
+              title={
+                bridgeOnline === true
+                  ? "Anthropic Claude on your machine. Best for architecture, conversation, writing."
+                  : "Bridge offline — start the daemon on the machine that runs Claude Code."
+              }
+            >
+              Claude Code CLI{bridgeOnline === true ? "" : bridgeOnline === null ? " (checking…)" : " (bridge offline)"}
+            </option>
+            <option
+              value="api"
+              title="Uses your saved API key. No local files. Always available — fallback when the CLIs aren't reachable."
+            >
+              API (cloud){bridgeOnline === true ? "" : " — recommended now"}
             </option>
           </select>
         )}
@@ -2528,26 +2558,12 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
             ● PLAN MODE
           </button>
         )}
-        {bridgeReady && effectiveMode === "cli" && (
-          <select
-            value={cliRuntime}
-            onChange={(e) => {
-              const v = e.target.value;
-              if (isCliRuntime(v)) setCliRuntime(v);
-            }}
-            disabled={streaming}
-            /* Hidden on mobile — CLI runtime choice is a desktop
-               operator concern; phones default to whatever the bridge
-               last used. */
-            className="hidden md:block bg-bg-elev border border-bg-border rounded-lg px-2 py-2 text-[11px] text-fg-muted focus:outline-none focus:border-accent transition-colors cursor-pointer disabled:opacity-60"
-            aria-label="Local CLI runtime"
-            title="Choose which local CLI the desktop bridge uses for this chat. This is separate from API-key provider overrides."
-          >
-            <option value="claude">CLI: Claude Code</option>
-            <option value="codex">CLI: Codex</option>
-            <option value="gemini">CLI: Gemini</option>
-          </select>
-        )}
+        {/* Secondary CLI-runtime select removed 2026-06-06. The runtime
+            is now baked into the primary route picker above (Codex CLI /
+            Gemini CLI / Claude Code CLI / API), so this dropdown was
+            duplicating the same choice with worse labels. Non-advanced
+            tenants (advancedPicker=false) didn't see the picker but also
+            don't see this — they keep whatever the bridge defaults to. */}
         {usage && (
           <span
             className="text-[10px] font-mono text-fg-dim border border-bg-border bg-bg-elev rounded-full px-2 py-0.5 hidden sm:inline-flex items-center gap-1"

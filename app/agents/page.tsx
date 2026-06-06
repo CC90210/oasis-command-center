@@ -367,68 +367,21 @@ export default async function AgentsPage() {
         </div>
       </Card>
 
-      <Card
-        title="Event bus"
-        subtitle="A live tape of every signal your agents publish — emails opened, leads bumped, statuses changed. Most recent first."
-      >
-        {events.length === 0 ? (
-          <EmptyState message="No events yet. The bus fills up when a lead opens an email, an outbound goes out, or the reasoning loop ticks." />
-        ) : (
-          <ul className="divide-y divide-bg-border">
-            {events.map((e) => {
-              const payload = (e.payload || {}) as Record<string, unknown>;
-              const cls = payload.classification as Record<string, unknown> | undefined;
-              const subject = payload.subject as string | undefined;
-              const prettyEvent = formatEventType(e.event_type);
-              const prettyPublisher = formatPublisher(e.publisher_agent);
-              // Subject-fallback caption — when a producer didn't include
-              // payload.subject (legacy email_opened rows, lead-stage
-              // transitions, dashboard actions) compose a meaningful
-              // line from other payload fields so the row isn't blank.
-              // Keeps the event tape scannable: every row has SOMETHING
-              // identifying the entity it touched.
-              const fallbackCaption = (() => {
-                if (subject) return null;
-                const recipient = (payload.recipient || payload.to) as string | undefined;
-                const leadName = (payload.lead_name || payload.lead) as string | undefined;
-                const action = payload.action_type as string | undefined;
-                const recordId = (payload.record_id || payload.lead_id) as string | undefined;
-                if (recipient) return `to ${recipient}`;
-                if (leadName) return `lead: ${leadName}`;
-                if (action) return `action: ${action}`;
-                if (recordId) return `record ${String(recordId).slice(0, 8)}`;
-                return null;
-              })();
-              return (
-                <li key={e.id} className="py-2.5">
-                  <div className="flex justify-between items-baseline gap-3">
-                    <span title={e.event_type} className="inline-block">
-                      <Tag tone="accent">{prettyEvent}</Tag>
-                    </span>
-                    <span className="text-xs text-fg-dim">
-                      <span title={e.publisher_agent}>{prettyPublisher}</span>
-                      {" · "}
-                      {timeAgo(e.published_at)}
-                    </span>
-                  </div>
-                  {subject ? (
-                    <div className="text-fg mt-1.5 text-sm">{truncate(subject, 100)}</div>
-                  ) : fallbackCaption ? (
-                    <div className="text-fg-muted mt-1.5 text-xs italic">{fallbackCaption}</div>
-                  ) : null}
-                  {cls && (
-                    <div className="text-xs text-fg-muted mt-1">
-                      intent: {String(cls.intent || "—")} · priority:{" "}
-                      {String(cls.priority || "—")} · sentiment:{" "}
-                      {String(cls.sentiment || "—")}
-                    </div>
-                  )}
-                </li>
-              );
-            })}
-          </ul>
-        )}
-      </Card>
+      {/* Event Bus widget moved off Agents 2026-06-06.
+          The same recentEvents() feed renders on Operations as the
+          "Activity tape" with richer per-event projection. Showing
+          it on both surfaces was confusing CC ("what does this do?
+          is it connected to chat or to automations?"). Operations
+          owns the autonomous-operations audit log; Agents stays
+          focused on the chat + agent family roster. The events
+          themselves are still feeding — Operations just gets the
+          singular view. */}
+      <div className="text-xs text-fg-muted text-right">
+        Looking for the live event bus?{" "}
+        <Link href="/operations#activity-tape" className="text-accent hover:underline">
+          See Operations → Activity tape →
+        </Link>
+      </div>
     </div>
   );
 }
