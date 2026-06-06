@@ -238,9 +238,17 @@ const FUNDED_DEALS: EntityDefinition = {
   description: "Closed deals — fuels the renewals + commission pipeline.",
   icon: "trophy",
   entity_type: "funded_deal",
-  defaultDedupBy: ["business", "lender_name"],
+  // Build B (2026-06-06) — funded deals are merchant-level rows. EIN
+  // is the strongest dedup signal (one EIN per business per IRS);
+  // legal_state catches the "Velocity Logistics LLC in FL" vs "Velocity
+  // Logistics LLC in NY" case. business + lender_name retained for
+  // operator imports that don't carry EIN.
+  defaultDedupBy: ["ein", "legal_state", "business", "lender_name"],
   canonicalFields: [
-    { key: "business_name", label: "Business", requirement: "required", type: "text", maxLen: 200 },
+    { key: "ein", label: "EIN / Tax ID", requirement: "optional", type: "text", maxLen: 16 },
+    { key: "legal_name", label: "Legal business name", requirement: "optional", type: "text", maxLen: 200 },
+    { key: "business_name", label: "Business (DBA)", requirement: "required", type: "text", maxLen: 200 },
+    { key: "state", label: "Business state", requirement: "optional", type: "text", maxLen: 80 },
     { key: "funded_amount", label: "Funded $", requirement: "required", type: "money" },
     { key: "lender_name", label: "Lender", requirement: "optional", type: "text", maxLen: 200 },
     { key: "funding_date", label: "Funding date", requirement: "optional", type: "date" },
@@ -255,8 +263,11 @@ const FUNDED_DEALS: EntityDefinition = {
     { key: "notes", label: "Notes", requirement: "optional", type: "text", maxLen: 2000 },
   ],
   headerAliases: {
+    ein: "ein", federaltaxid: "ein", fein: "ein", taxid: "ein", einnumber: "ein",
+    legalname: "legal_name", legalbusinessname: "legal_name", entityname: "legal_name",
     business: "business_name", businessname: "business_name", merchant: "business_name",
-    company: "business_name", dba: "business_name", legalname: "business_name",
+    company: "business_name", dba: "business_name",
+    state: "state", businessstate: "state", entitystate: "state",
     fundedamount: "funded_amount", funded: "funded_amount", amount: "funded_amount",
     fundamount: "funded_amount", advance: "funded_amount",
     lender: "lender_name", funder: "lender_name", lendername: "lender_name",
