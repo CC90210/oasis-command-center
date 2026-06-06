@@ -261,6 +261,11 @@ export async function SettingsContent({
           <SafeBoundary label="Personal integrations">
             <PersonalIntegrationsPanel
               showGmail={!isSharedInboxTenant(tenant?.slug ?? null)}
+              // Kixie row only renders for tenants that have Helios enabled
+              // (the SunBiz click-to-call agent that consumes the per-employee
+              // Kixie email). CC 2026-06-06: OASIS personal (bravo/atlas/maven/
+              // aura) was showing the row even though it doesn't use Kixie.
+              showKixie={enabledAgents.includes("helios")}
             />
           </SafeBoundary>
 

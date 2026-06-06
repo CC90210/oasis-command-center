@@ -35,12 +35,19 @@ type PersonalStatus = {
 export function PersonalIntegrationsPanel({
   // When false (shared-inbox tenants like SunBiz), suppress the personal
   // Gmail row — outbound goes through the shared submissions@ identity so
-  // a personal Gmail OAuth does nothing. The Kixie agent email row still
-  // renders because click-to-call IS per-employee even on shared-inbox
-  // setups.
+  // a personal Gmail OAuth does nothing.
   showGmail = true,
+  // When false (tenants whose enabled agents don't include Helios — e.g.
+  // CC's personal OASIS which runs bravo/atlas/maven/aura only),
+  // suppress the Kixie agent-email row entirely. Kixie is the click-to-
+  // call dialer the SunBiz Helios agent uses; rendering its row on
+  // tenants that don't have Helios just confuses operators with a
+  // setting that does nothing. CC 2026-06-06: "we don't use Kixie for
+  // OASIS AI or TextTorrent."
+  showKixie = true,
 }: {
   showGmail?: boolean;
+  showKixie?: boolean;
 } = {}) {
   const [statuses, setStatuses] = useState<PersonalStatus[] | null>(null);
   const [busyService, setBusyService] = useState<string | null>(null);
@@ -200,7 +207,7 @@ export function PersonalIntegrationsPanel({
           Personal integrations
         </h3>
         <p className="text-[12px] text-fg-muted leading-relaxed mt-1">
-          Connect your OWN accounts. Sends from your seat will go from your address — teammates keep using their own. The workspace-shared keys (TextTorrent, Kixie, etc.) stay above; this is just for the credentials that must be you personally.
+          Connect your OWN accounts. Sends from your seat will go from your address — teammates keep using their own. Workspace-shared keys{showKixie ? " (TextTorrent, Kixie, etc.)" : ""} stay above; this section is just for credentials that must be you personally.
         </p>
       </header>
 
@@ -295,7 +302,10 @@ export function PersonalIntegrationsPanel({
 
           {/* Per-employee Kixie agent email — Phase 5 of TT + Kixie
               embedding. Drawer click-to-call rings THIS Kixie agent
-              when set; falls back to user_profiles.email otherwise. */}
+              when set; falls back to user_profiles.email otherwise.
+              CC 2026-06-06: gated by showKixie so OASIS personal
+              (no Helios → no Kixie usage) doesn't render this row. */}
+          {showKixie && (
           <li className="rounded-lg border border-bg-border bg-bg-deep/40 p-4">
             <div className="flex flex-col gap-2">
               <div className="flex items-center gap-2">
@@ -350,6 +360,7 @@ export function PersonalIntegrationsPanel({
               )}
             </div>
           </li>
+          )}
         </ul>
       )}
     </div>
