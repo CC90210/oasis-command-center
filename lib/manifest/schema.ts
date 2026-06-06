@@ -255,6 +255,11 @@ export type ManifestObjectMetadataRef = {
 
 export type ManifestIntegrationKind =
   | "twilio"
+  // "jotform" kept in the union for backward compat with tenant manifests
+  // seeded before 2026-06-06. New tenants do NOT receive it (see seeds.ts +
+  // templates.ts). SunBiz intake is the dashboard's native /forms designer
+  // + /f/<tenant>/<form>/<lead_token> public flow. Audit + strip from live
+  // manifests when convenient.
   | "jotform"
   | "stripe"
   | "google_workspace"

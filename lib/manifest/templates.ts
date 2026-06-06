@@ -333,8 +333,9 @@ export const BUSINESS_FUNDING_TEMPLATE: TenantManifest = {
       opt_out_phrase: "Reply STOP to opt out.",
     },
   },
+  // jotform removed 2026-06-06 — see seeds.ts for the canonical SunBiz
+  // pattern; intake is the dashboard's native /forms designer.
   integrations: [
-    { kind: "jotform", enabled: true },
     { kind: "twilio", enabled: true },
   ],
   meta: { created_at: NOW, updated_at: NOW, schema_version: MANIFEST_SCHEMA_VERSION },

@@ -690,8 +690,10 @@ export const SUN_SEED: TenantManifest = {
       opt_out_phrase: "Reply STOP to opt out.",
     },
   },
+  // jotform integration removed 2026-06-06 — SunBiz intake is the
+  // dashboard's native /forms designer + /f/<tenant>/<form>/<lead_token>
+  // public flow. Twilio is kept for SMS; Turso for the per-tenant cache.
   integrations: [
-    { kind: "jotform", enabled: true, credential_env_key: "SUNBIZ_AGENT_API_URL" },
     { kind: "twilio", enabled: true, credential_env_key: "SUNBIZ_AGENT_HMAC_SECRET" },
     { kind: "turso", enabled: true },
   ],

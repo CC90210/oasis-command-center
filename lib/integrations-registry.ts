@@ -407,19 +407,9 @@ export const KNOWN_INTEGRATIONS: IntegrationDef[] = [
     developer_only: true,
     env_key: "N8N_API_KEY",
   },
-  {
-    service: "jotform",
-    label: "JotForm",
-    category: "data",
-    description: "Lead capture form that feeds Solara's funding pipeline",
-    connection_kind: "api_key",
-    signup_url: "https://www.jotform.com/",
-    api_key_url: "https://www.jotform.com/",
-    setup_complexity: "simple",
-    // Intake forms feed Solara's operational pipeline.
-    used_by: ["solara"],
-    env_key: "JOTFORM_WEBHOOK_URL",
-  },
+  // JotForm entry removed 2026-06-06 — SunBiz uses the dashboard's
+  // native /forms designer + /f/<tenant>/<form>/<lead_token> public flow
+  // for intake (lib/forms-render/). No third-party form vendor.
   {
     service: "turso",
     // Renamed from "Local Brain" 2026-05-15 — the prior label was internal
