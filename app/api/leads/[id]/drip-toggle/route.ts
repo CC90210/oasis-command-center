@@ -1,0 +1,81 @@
+/**
+ * POST /api/leads/[id]/drip-toggle — flip the lead's drip_paused flag.
+ *
+ * Stored in tenant_records.data.drip_paused (boolean). The OASIS drip
+ * sequence runner (scripts/funnel_nurture.py and friends) honors this
+ * flag: when true, the lead is skipped on every pass. Operators flip
+ * it from the lead drawer's action toolbar when a lead is genuinely
+ * stale and shouldn't be auto-poked anymore, or when they're picking
+ * the conversation back up manually.
+ *
+ * Returns the resulting state so the UI doesn't have to optimistically
+ * guess + roll back. Idempotent in the sense that two callers racing
+ * to toggle will land on whichever read+write wins — small race window
+ * is acceptable here since the operator is the only writer.
+ *
+ * Auth: session-cookie → tenant. Read-modify-write inside one request
+ * so we don't clobber unrelated fields in the data jsonb.
+ */
+
+import { NextResponse, type NextRequest } from "next/server";
+import { getServiceSupabase } from "@/lib/supabase-server";
+import { resolveSessionContext } from "@/lib/api-auth";
+
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+export async function POST(
+  _req: NextRequest,
+  ctx: { params: Promise<{ id: string }> },
+) {
+  const { id } = await ctx.params;
+  if (!UUID_RE.test(id)) {
+    return NextResponse.json({ ok: false, error: "invalid_id" }, { status: 400 });
+  }
+  const sess = await resolveSessionContext();
+  if (!sess.ok) {
+    return NextResponse.json({ ok: false, error: sess.reason }, { status: 401 });
+  }
+
+  const db = getServiceSupabase();
+  const cur = await db
+    .from("tenant_records")
+    .select("data")
+    .eq("tenant_id", sess.tenantId)
+    .eq("entity_type", "lead")
+    .eq("id", id)
+    .maybeSingle();
+  if (cur.error) {
+    return NextResponse.json({ ok: false, error: cur.error.message }, { status: 500 });
+  }
+  if (!cur.data) {
+    return NextResponse.json({ ok: false, error: "lead_not_found" }, { status: 404 });
+  }
+
+  const currentData =
+    (cur.data.data as Record<string, unknown> | null) ?? {};
+  const wasPaused = currentData.drip_paused === true;
+  const nextPaused = !wasPaused;
+
+  const upd = await db
+    .from("tenant_records")
+    .update({
+      data: {
+        ...currentData,
+        drip_paused: nextPaused,
+        drip_paused_at: nextPaused ? new Date().toISOString() : null,
+        drip_paused_by_user_id: nextPaused ? sess.userId : null,
+      },
+      updated_at: new Date().toISOString(),
+    })
+    .eq("tenant_id", sess.tenantId)
+    .eq("entity_type", "lead")
+    .eq("id", id);
+  if (upd.error) {
+    return NextResponse.json({ ok: false, error: upd.error.message }, { status: 500 });
+  }
+
+  return NextResponse.json({ ok: true, paused: nextPaused });
+}

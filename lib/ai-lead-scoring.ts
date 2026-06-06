@@ -44,8 +44,24 @@ export interface LeadScoreResult {
   scored_at: string;
 }
 
+/** Compact shape we hand Claude so the interaction tape is readable
+ * without ballooning the prompt. We keep only what matters for the
+ * scoring decision: when it happened, what direction, what type, and
+ * (for inbound rows) the classification + a short snippet. */
+export interface LeadScoringInteraction {
+  type: string;
+  direction?: string | null;
+  channel?: string | null;
+  created_at: string;
+  agent_source?: string | null;
+  subject?: string | null;
+  content_preview?: string | null;
+  metadata?: Record<string, unknown> | null;
+}
+
 export async function scoreLead(
   leadData: Record<string, unknown>,
+  interactions: LeadScoringInteraction[] = [],
 ): Promise<LeadScoreResult> {
   const apiKey = (process.env.BRAVO_ANTHROPIC_API_KEY || process.env.ANTHROPIC_API_KEY || "").trim();
   if (!apiKey) {
@@ -63,7 +79,31 @@ export async function scoreLead(
     }
   }
 
-  const userPrompt = `Score this lead:\n\n${JSON.stringify(relevant, null, 2)}`;
+  // Compact interactions tape — Claude needs recency + signal direction
+  // but doesn't need full email bodies. Limit to most-recent 15 rows and
+  // strip everything that isn't decision-relevant.
+  const tape = interactions.slice(0, 15).map((i) => ({
+    type: i.type,
+    direction: i.direction || null,
+    channel: i.channel || null,
+    at: i.created_at,
+    days_ago: daysAgo(i.created_at),
+    source: i.agent_source || null,
+    subject: i.subject ? i.subject.slice(0, 120) : null,
+    snippet: i.content_preview ? i.content_preview.slice(0, 200) : null,
+    classification:
+      (i.metadata && typeof i.metadata === "object"
+        ? (i.metadata as Record<string, unknown>).classification
+        : null) || null,
+  }));
+
+  const userPrompt = `Score this lead.
+
+Lead data:
+${JSON.stringify(relevant, null, 2)}
+
+Interactions (most recent first, ${tape.length} of ${interactions.length} shown):
+${tape.length === 0 ? "[none recorded — score from lead data only, note 'limited signal' in reasoning if so]" : JSON.stringify(tape, null, 2)}`;
 
   const res = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
@@ -118,4 +158,11 @@ export async function scoreLead(
     reasoning,
     scored_at: new Date().toISOString(),
   };
+}
+
+function daysAgo(iso: string | null | undefined): number | null {
+  if (!iso) return null;
+  const t = new Date(iso).getTime();
+  if (!Number.isFinite(t)) return null;
+  return Math.max(0, Math.floor((Date.now() - t) / 86_400_000));
 }

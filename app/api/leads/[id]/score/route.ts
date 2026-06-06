@@ -37,21 +37,35 @@ export async function POST(
   }
 
   const db = getServiceSupabase();
-  const r = await db
-    .from("tenant_records")
-    .select("id, data")
-    .eq("tenant_id", tenantId)
-    .eq("entity_type", "lead")
-    .eq("id", leadId)
-    .maybeSingle();
+  const [r, interactionsRes] = await Promise.all([
+    db
+      .from("tenant_records")
+      .select("id, data")
+      .eq("tenant_id", tenantId)
+      .eq("entity_type", "lead")
+      .eq("id", leadId)
+      .maybeSingle(),
+    // Pull recent interactions so Claude scores against current signals,
+    // not just the static lead fields. Without this, the scorer was
+    // returning the same number on every re-score because the input was
+    // identical — see ai-lead-scoring.ts header.
+    db
+      .from("lead_interactions")
+      .select("type, direction, channel, created_at, agent_source, subject, content_preview, metadata")
+      .eq("tenant_id", tenantId)
+      .eq("lead_id", leadId)
+      .order("created_at", { ascending: false })
+      .limit(15),
+  ]);
   if (r.error || !r.data) {
     return NextResponse.json({ ok: false, error: "lead_not_found" }, { status: 404 });
   }
   const leadData = ((r.data as { data: Record<string, unknown> }).data) || {};
+  const interactions = (interactionsRes.data || []) as Parameters<typeof scoreLead>[1];
 
   let result;
   try {
-    result = await scoreLead(leadData);
+    result = await scoreLead(leadData, interactions);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     // Specific status codes for diagnostics that surface clearly in the UI.

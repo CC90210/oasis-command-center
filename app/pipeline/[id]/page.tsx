@@ -29,6 +29,8 @@ import { ScoreLeadButton } from "./ScoreLeadButton";
 import { NextActionButton } from "./NextActionButton";
 import { LeadDocumentsPanel } from "@/components/leads/LeadDocumentsPanel";
 import { LeadLifecycleActions } from "./LeadLifecycleActions";
+import { CollapsibleSection } from "@/components/leads/CollapsibleSection";
+import { LeadActionToolbar } from "@/components/leads/LeadActionToolbar";
 
 export const dynamic = "force-dynamic";
 
@@ -104,32 +106,55 @@ export default async function PipelineLeadDetailPage({
           </Link>
         }
       />
-      <LeadContactBand data={record.data} />
+      <CollapsibleSection
+        title="Contact"
+        storageKey="oasis.pipeline.contactBand.collapsed"
+        defaultCollapsed={false}
+        collapsedPreview={renderContactPreview(record.data)}
+      >
+        <LeadContactBand data={record.data} />
+      </CollapsibleSection>
       <LeadMetricsBand metrics={metrics} />
-      <div className="grid lg:grid-cols-2 gap-3">
-        <ScoreLeadButton
-          leadId={id}
-          existingScore={typeof record.data.ai_score === "number" ? record.data.ai_score : null}
-          existingReasoning={typeof record.data.ai_reasoning === "string" ? record.data.ai_reasoning : null}
-          existingScoredAt={typeof record.data.ai_scored_at === "string" ? record.data.ai_scored_at : null}
-        />
-        <NextActionButton
-          leadId={id}
-          existingAction={typeof record.data.ai_next_action === "string" ? record.data.ai_next_action : null}
-          existingRationale={typeof record.data.ai_next_action_rationale === "string" ? record.data.ai_next_action_rationale : null}
-          existingAt={typeof record.data.ai_next_action_at === "string" ? record.data.ai_next_action_at : null}
-        />
-      </div>
+      <LeadActionToolbar
+        leadId={id}
+        leadName={typeof record.data.name === "string" ? record.data.name : null}
+        leadCompany={typeof record.data.company === "string" ? record.data.company : null}
+        leadEmail={typeof record.data.email === "string" ? record.data.email : null}
+        daysSinceLastTouch={metrics.daysSinceLastTouch}
+        aiToolsSlot={
+          <>
+            <ScoreLeadButton
+              leadId={id}
+              existingScore={typeof record.data.ai_score === "number" ? record.data.ai_score : null}
+              existingReasoning={typeof record.data.ai_reasoning === "string" ? record.data.ai_reasoning : null}
+              existingScoredAt={typeof record.data.ai_scored_at === "string" ? record.data.ai_scored_at : null}
+            />
+            <NextActionButton
+              leadId={id}
+              existingAction={typeof record.data.ai_next_action === "string" ? record.data.ai_next_action : null}
+              existingRationale={typeof record.data.ai_next_action_rationale === "string" ? record.data.ai_next_action_rationale : null}
+              existingAt={typeof record.data.ai_next_action_at === "string" ? record.data.ai_next_action_at : null}
+            />
+          </>
+        }
+      />
       <LeadLifecycleActions leadId={id} currentStage={metrics.stageKey} />
       <LeadTimelinePanel leadId={id} />
-      <ManifestRecordForm
-        tenantSlug="oasis"
-        entity={leadEntity}
-        backPath="pipeline"
-        backHref="/pipeline"
-        initial={record.data}
-        editId={id}
-      />
+      <CollapsibleSection
+        title="Edit lead fields"
+        subtitle={`${leadEntity.fields.length} fields — open to edit name, company, email, value, etc.`}
+        storageKey="oasis.pipeline.editForm.collapsed"
+        defaultCollapsed={true}
+      >
+        <ManifestRecordForm
+          tenantSlug="oasis"
+          entity={leadEntity}
+          backPath="pipeline"
+          backHref="/pipeline"
+          initial={record.data}
+          editId={id}
+        />
+      </CollapsibleSection>
       <LeadDocumentsPanel tenantId={tenantId} leadId={id} />
     </div>
   );
@@ -373,4 +398,21 @@ function daysSince(iso: string): number {
 
 function titleCase(value: string): string {
   return value.replace(/_/g, " ").replace(/\b\w/g, (m) => m.toUpperCase());
+}
+
+/**
+ * Compact one-line preview rendered when the Contact section is
+ * collapsed — name · company · email tag — so the operator still sees
+ * the essentials at a glance without expanding the band.
+ */
+function renderContactPreview(data: Record<string, unknown>): ReactNode {
+  const parts: string[] = [];
+  const name = nonEmptyString(data.name);
+  const company = nonEmptyString(data.company);
+  const email = nonEmptyString(data.email);
+  if (name) parts.push(name);
+  if (company) parts.push(company);
+  if (email) parts.push(email);
+  if (parts.length === 0) return null;
+  return <span className="font-mono text-xs">{parts.join(" · ")}</span>;
 }
