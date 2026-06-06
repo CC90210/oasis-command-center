@@ -589,6 +589,11 @@ export async function momentumMetrics(
       .eq("tenant_id", tenantId)
       .in("type", ["email_sent", "email_queued", "dm_sent", "linkedin_sent", "call_made"])
       .gte("created_at", since),
+    // content_calendar is empire-scoped (CC's CMO output) — no tenant_id
+    // column. This metric belongs to the OASIS Today page (only CC's
+    // tenant currently lands here; SunBiz redirects to /t/sun before
+    // this query fires). If a future tenant-scoped content surface
+    // ships, gate this call on tenantId matching the OASIS tenant.
     db
       .from("content_calendar")
       .select("id", { count: "exact", head: true })

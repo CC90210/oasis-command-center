@@ -840,16 +840,44 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
   // Phase 3 migration: if the operator's machine still has the v2 vocabulary
   // ("bridge" / "cloud"), translate it into v3 once and drop the legacy
   // entry. Subsequent reads always come from v3.
+  //
+  // Phase 4.1 follow-up (2026-06-06): the new advanced picker only renders
+  // 4 routes — Codex/Gemini/Claude CLI + API. Legacy "auto" and
+  // "cloud_bridge_tools" don't have a dedicated picker slot, so the value
+  // derivation collapses them to "api" visually. To prevent the picker
+  // from showing API while internal routing keeps using the bridge,
+  // auto-normalize those legacy values to "cli" on load. The picker
+  // then matches what's actually running.
   useEffect(() => {
     if (typeof window === "undefined") return;
     try {
       const stored = window.localStorage.getItem(CHAT_MODE_STORAGE_KEY);
       if (isChatMode(stored)) {
+        if (stored === "auto" || stored === "cloud_bridge_tools") {
+          setChatModeState("cli");
+          try {
+            window.localStorage.setItem(CHAT_MODE_STORAGE_KEY, "cli");
+          } catch {
+            // localStorage may be disabled — the in-memory state is enough.
+          }
+          return;
+        }
         setChatModeState(stored);
         return;
       }
       const migrated = migrateLegacyChatMode();
-      if (migrated) setChatModeState(migrated);
+      if (migrated) {
+        if (migrated === "auto" || migrated === "cloud_bridge_tools") {
+          setChatModeState("cli");
+          try {
+            window.localStorage.setItem(CHAT_MODE_STORAGE_KEY, "cli");
+          } catch {
+            // localStorage may be disabled — the in-memory state is enough.
+          }
+          return;
+        }
+        setChatModeState(migrated);
+      }
     } catch {
       // Privacy mode / disabled storage — leave default "auto".
     }
