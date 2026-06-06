@@ -254,13 +254,12 @@ export type ManifestObjectMetadataRef = {
 // ---------------------------------------------------------------------------
 
 export type ManifestIntegrationKind =
+  // "jotform" removed 2026-06-06 — SunBiz intake is the dashboard's
+  // native /forms designer + /f/<tenant>/<form>/<lead_token> public
+  // flow. The one live tenant_manifests row that had it (SunBiz
+  // tenant aa04fa1f…) was PATCHed clean during the same commit, so
+  // there's no backward-compat surface left to maintain.
   | "twilio"
-  // "jotform" kept in the union for backward compat with tenant manifests
-  // seeded before 2026-06-06. New tenants do NOT receive it (see seeds.ts +
-  // templates.ts). SunBiz intake is the dashboard's native /forms designer
-  // + /f/<tenant>/<form>/<lead_token> public flow. Audit + strip from live
-  // manifests when convenient.
-  | "jotform"
   | "stripe"
   | "google_workspace"
   | "supabase"
@@ -526,7 +525,7 @@ const PAGE_KINDS = new Set<ManifestPageKind>([
 ]);
 const ENTITY_FIELD_TYPES = new Set(["string", "number", "boolean", "date", "datetime", "enum", "json"]);
 const INTEGRATION_KINDS = new Set<ManifestIntegrationKind>([
-  "twilio", "jotform", "stripe", "google_workspace", "supabase", "turso", "custom",
+  "twilio", "stripe", "google_workspace", "supabase", "turso", "custom",
 ]);
 const ONBOARDING_INDUSTRIES = new Set<ManifestOnboardingIndustry>([
   "real_estate", "business_funding", "ecommerce", "agency", "custom",
