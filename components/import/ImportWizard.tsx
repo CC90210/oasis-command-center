@@ -169,7 +169,6 @@ export function ImportWizard() {
       const body = await res.json();
       if (!res.ok || !body.ok) {
         setFuzzyError(body.message || body.error || `HTTP ${res.status}`);
-        setFuzzyLoading(false);
         return;
       }
       setFuzzyResults(body.results as FuzzyBatchResult[]);
