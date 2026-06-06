@@ -161,9 +161,17 @@ const APPLICATIONS: EntityDefinition = {
   description: "Deals already collecting documents or submitted to lenders.",
   icon: "file-text",
   entity_type: "application",
-  defaultDedupBy: ["business", "email"],
+  // Build B (2026-06-06) — EIN-first dedup. One EIN per business entity
+  // (IRS), so an exact EIN match is the single strongest dedup signal
+  // for funding deals. Legal name + state is the canonical fallback
+  // when EIN isn't on the import sheet. Business name + email retained
+  // as final fallbacks for lower-quality sources.
+  defaultDedupBy: ["ein", "legal_state", "business", "email"],
   canonicalFields: [
-    { key: "business_name", label: "Business", requirement: "required", type: "text", maxLen: 200 },
+    { key: "ein", label: "EIN / Tax ID", requirement: "optional", type: "text", maxLen: 16 },
+    { key: "legal_name", label: "Legal business name", requirement: "optional", type: "text", maxLen: 200 },
+    { key: "business_name", label: "Business (DBA)", requirement: "required", type: "text", maxLen: 200 },
+    { key: "state", label: "Business state", requirement: "optional", type: "text", maxLen: 80 },
     { key: "contact_name", label: "Owner", requirement: "optional", type: "text", maxLen: 200 },
     { key: "email", label: "Email", requirement: "optional", type: "email" },
     { key: "phone", label: "Phone", requirement: "optional", type: "phone" },
@@ -180,8 +188,11 @@ const APPLICATIONS: EntityDefinition = {
     { key: "notes", label: "Notes", requirement: "optional", type: "text", maxLen: 2000 },
   ],
   headerAliases: {
+    ein: "ein", federaltaxid: "ein", fein: "ein", taxid: "ein", einnumber: "ein",
+    legalname: "legal_name", legalbusinessname: "legal_name", entityname: "legal_name",
     business: "business_name", businessname: "business_name", company: "business_name",
-    legalname: "business_name", dba: "business_name", merchant: "business_name",
+    dba: "business_name", merchant: "business_name",
+    state: "state", businessstate: "state", entitystate: "state",
     contact: "contact_name", contactname: "contact_name", owner: "contact_name",
     ownername: "contact_name",
     email: "email", emailaddress: "email",

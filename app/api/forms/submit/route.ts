@@ -44,6 +44,7 @@ import { createRecord, updateRecord, RecordsError } from "@/lib/manifest/data";
 import { uploadLeadDocument } from "@/lib/lead-documents";
 import { dispatchLeadStageEvent } from "@/lib/lead-stage-dispatcher";
 import { resolvePublicForm } from "@/lib/forms/public-resolver";
+import { queueResumeEmail } from "@/lib/forms/resume-link";
 import { createHash } from "node:crypto";
 
 export const runtime = "nodejs";
@@ -569,6 +570,70 @@ export async function POST(req: NextRequest) {
         reason,
       });
       stageWarning = { reason, target_stage: targetStage };
+    }
+  }
+
+  // Build A — Resume-submission link. After step 0 commits successfully
+  // AND we have a real email, queue a tokenized "pick up where you left
+  // off" email via send_gateway. Idempotent on (form_id, lead_id), so
+  // a refresh-resubmit of step 0 doesn't re-spam. Failure here NEVER
+  // aborts the submission — the lead is already saved; a missing
+  // resume email is a soft degradation we log + carry on.
+  if (stepIndex === 0) {
+    const leadEmail =
+      typeof payload.email === "string"
+        ? payload.email.trim()
+        : null;
+    if (leadEmail) {
+      try {
+        const leadRow = await db
+          .from("tenant_records")
+          .select("data")
+          .eq("id", link.lead_id)
+          .maybeSingle();
+        const leadData = (leadRow.data as { data: Record<string, unknown> | null } | null)?.data ?? {};
+        const leadName =
+          (typeof leadData.contact_name === "string" && leadData.contact_name) ||
+          (typeof leadData.name === "string" && leadData.name) ||
+          (typeof payload.contact_name === "string" && payload.contact_name) ||
+          (typeof payload.name === "string" && payload.name) ||
+          null;
+        const tenantRow2 = await db
+          .from("tenants")
+          .select("name, slug, custom_fields")
+          .eq("id", form.tenant_id)
+          .maybeSingle();
+        const tenantData =
+          tenantRow2.data as
+            | { name: string | null; slug: string | null; custom_fields: Record<string, unknown> | null }
+            | null;
+        const brandFromCustom =
+          typeof tenantData?.custom_fields?.brand === "string"
+            ? (tenantData.custom_fields.brand as string)
+            : null;
+        const brand = brandFromCustom || tenantData?.name || link.tenant;
+        await queueResumeEmail({
+          db,
+          tenant: {
+            tenant_id: form.tenant_id,
+            tenant_slug: link.tenant,
+            brand,
+          },
+          lead_id: link.lead_id,
+          form_id: form.id,
+          form_slug: form.slug,
+          form_label: null,
+          to_email: leadEmail,
+          to_name: typeof leadName === "string" ? leadName : null,
+        });
+      } catch (err) {
+        // Soft failure — every other side of the submission still runs.
+        console.error("[forms.submit.resume_email]", {
+          lead_id: link.lead_id,
+          form_id: form.id,
+          reason: err instanceof Error ? err.message : "unknown",
+        });
+      }
     }
   }
 
