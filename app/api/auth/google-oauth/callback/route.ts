@@ -133,7 +133,7 @@ export async function GET(req: NextRequest) {
       }).toString(),
     });
     tokenResp = (await r.json()) as typeof tokenResp;
-  } catch (e) {
+  } catch {
     return settingsRedirect(req, {
       gmail_oauth: "error",
       reason: "token_exchange_network_error",

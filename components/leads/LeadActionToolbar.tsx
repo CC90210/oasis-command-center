@@ -50,7 +50,6 @@ function buildCheckInTemplate({
   daysSinceLastTouch: number | null;
 }): CheckInTemplate {
   const firstName = (leadName || "").split(/\s+/)[0] || "there";
-  const companyClause = leadCompany ? ` at ${leadCompany}` : "";
   const contextLine =
     daysSinceLastTouch !== null && daysSinceLastTouch > 7
       ? `It's been a minute since we last connected — wanted to make sure I didn't drop the thread.`

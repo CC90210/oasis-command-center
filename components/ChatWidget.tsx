@@ -535,7 +535,7 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
       return flat;
     }
     return [];
-  }, [slashArgCommand, agentKeys, configs]);
+  }, [slashArgCommand, agentKeys, configs, agentDisplayName]);
 
   const slashArgOpen =
     hasSlashArgTrigger &&
