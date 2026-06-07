@@ -12,7 +12,8 @@ import { BlendFunction } from "postprocessing";
 import { Vector2 } from "three";
 import { type MotionValue } from "framer-motion";
 import { SceneBridge } from "./SceneBridge";
-import { HumanoidRig } from "./HumanoidRig";
+import { ParticleAvatar } from "./ParticleAvatar";
+import { HoloAccents } from "./HoloAccents";
 import { SystemOnlinePill } from "./SystemOnlinePill";
 import { useCompactViewport } from "../useCompactViewport";
 
@@ -30,9 +31,9 @@ import { useCompactViewport } from "../useCompactViewport";
  *     back-left, ambient base. Environment preset "city" gives the
  *     shell its subtle reflections without needing custom HDRs.
  *   - SceneBridge subscribes to the 11 framer-motion MotionValues
- *     ONCE and exposes them via context as a ref; HumanoidRig and its
- *     subassemblies read the ref in useFrame, so scroll ticks never
- *     trigger React re-renders.
+ *     ONCE and exposes them via context as a ref; ParticleAvatar reads
+ *     the ref inside useFrame, so scroll ticks never trigger React
+ *     re-renders.
  *   - EffectComposer chain (bloom + chromatic aberration + vignette)
  *     runs on desktop only. Gated on window.innerWidth at mount; mobile
  *     skips it entirely for thermal headroom.
@@ -109,7 +110,8 @@ export function AgentFigureWebGL({
           installProgresses={installProgresses}
           compactionProgress={compactionProgress}
         >
-          <HumanoidRig forceInstalled={forceInstalled} />
+          <HoloAccents forceInstalled={forceInstalled} />
+          <ParticleAvatar forceInstalled={forceInstalled} />
         </SceneBridge>
 
         {/* Desktop-only postprocessing — bloom on emissive seams +
