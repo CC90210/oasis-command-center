@@ -20,6 +20,8 @@
  *     the raw text slice so the route can fall back to the template path
  */
 
+import { OASIS_CHECKIN_COMPOSE_PROMPT } from "./prompts";
+
 const ANTHROPIC_VERSION = "2023-06-01";
 const COMPOSE_MODEL = "claude-sonnet-4-6";
 const MAX_TOKENS = 800;
@@ -54,37 +56,6 @@ export interface ComposeCheckinResult {
   body: string;
   composed_at: string;
 }
-
-const SYSTEM_PROMPT = `You are writing ONE personalized check-in email on behalf of an OASIS AI Solutions operator.
-
-OASIS AI Solutions builds custom AI agents for service businesses — receptionists, lead qualifiers, booking automators, follow-up systems. The operator is reaching out to a lead that has gone quiet (or never replied). Goal: get THIS specific lead to respond. Not to close them. Not to pitch. To start a conversation.
-
-Hard rules:
-1. Address the lead by first name on the first line ("Hey Tom,"). If no name, "Hey there,".
-2. Reference the lead's company name or industry organically in the first or second sentence — show you remember who they are, NOT generic.
-3. Acknowledge the time gap if days_since_last_touch > 7 ("It's been a few weeks since we last touched base" — natural, not apologetic).
-4. Provide ONE specific value hook tailored to their business. Examples by industry:
-   - Physiotherapy/healthcare → "I've been working with a couple of clinics on AI no-show reduction — averaging 30% fewer empty slots."
-   - Roofing/trades → "I just shipped an AI estimator for a roofing crew that's cutting bid turnaround from 3 days to 20 minutes."
-   - Wellness/spa → "Helping a wellness practice automate their booking + follow-up flow — they recovered ~15% in lost rebookings."
-   - Generic SMB → "I've been quietly rolling out AI receptionists for service businesses this month — happy to share what's working."
-   Pick ONE that fits, don't list multiple. If you can't tell the industry, default to the generic SMB hook.
-5. Soft CTA: offer a 10-15 minute conversation. Make it easy to say no. NEVER attach a calendar link or hard-pitch — just "happy to find a time" or "shoot me a thought".
-6. Tone: warm + curious + low-pressure. Like a colleague checking in. NOT corporate. NOT salesy. NOT "I hope this email finds you well."
-7. AVOID these phrases: "just checking in", "circling back", "touching base" (overused — pick a different phrasing), "I hope this email finds you well", "synergy", "leverage", "robust".
-8. Length: 4-6 short paragraphs. Max ~120 words total body. Email-friendly: short lines, blank line between paragraphs.
-9. Sign off with operator's first name on its own line, then "OASIS AI Solutions" on the next line. NOTHING else — no calendar links, no signatures, no email/phone.
-10. Subject line: under 60 chars. Specific to their company OR situation. Curiosity-driven if possible. Never "Quick check-in" generic.
-
-Trust signals you may weave in if they fit naturally:
-- "Most of my conversations these days are coming from referrals — figured I'd reach out direct."
-- "I won't pitch you; just wanted to see where your head's at on AI for [their industry] right now."
-- A specific micro-detail that proves you remember them (their location if you know it, the industry if no name match).
-
-Output ONLY a single JSON object on one line — no markdown, no prose around it, no code fence. Shape:
-{"subject":"...","body":"..."}
-
-Body MUST use real \\n newlines between paragraphs.`;
 
 function operatorFirstName(operator: ComposeCheckinInput["operator"]): string {
   const name = (operator.full_name || operator.display_name || "").trim();
@@ -165,7 +136,7 @@ export async function composeCheckin(
     body: JSON.stringify({
       model: COMPOSE_MODEL,
       max_tokens: MAX_TOKENS,
-      system: SYSTEM_PROMPT,
+      system: OASIS_CHECKIN_COMPOSE_PROMPT,
       messages: [{ role: "user", content: buildUserPrompt(input) }],
     }),
   });

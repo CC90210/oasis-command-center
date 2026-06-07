@@ -31,7 +31,11 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 function fallbackTemplate(
   leadData: Record<string, unknown>,
   daysSinceLastTouch: number | null,
-  operatorFirstName: string,
+  // operatorFirstName is intentionally unused — the OASIS email template
+  // appends the operator's name + brand signature automatically when
+  // send_gateway / dashboard_email_consumer wraps the body in branded
+  // HTML. Adding our own sign-off here would surface it twice.
+  _operatorFirstName: string,
 ): { subject: string; body: string } {
   const leadName =
     (typeof leadData.name === "string" && leadData.name) ||
@@ -48,15 +52,14 @@ function fallbackTemplate(
   const contextLine =
     daysSinceLastTouch !== null && daysSinceLastTouch > 7
       ? `It's been a few weeks since we last touched base.`
-      : `Wanted to circle back briefly.`;
+      : `Wanted to share a quick thought.`;
   const body = `Hey ${firstName},
 
 ${contextLine}
 
-If now's a better moment to chat — even 10 minutes — happy to find a time that works. Otherwise, totally fine to circle back later in the month.
+If 10-15 minutes works on your end this week, happy to find a time. Otherwise, no pressure — just shoot back a thought if anything's on your mind.
 
-${operatorFirstName}
-OASIS AI Solutions`;
+Either way, let me know.`;
   return { subject, body };
 }
 

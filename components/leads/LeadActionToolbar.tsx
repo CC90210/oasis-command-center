@@ -46,23 +46,27 @@ type CheckInTemplate = {
  * server-side fallback. The API route's fallback (which knows the
  * operator's actual name) is strictly better and overrides this when
  * it lands.
+ *
+ * NO sign-off block — the OASIS email template's HTML wrap appends
+ * the operator's name + brand signature automatically at send time
+ * (see scripts/email_template.py _signature_block). Adding our own
+ * "— FirstName / OASIS AI Solutions" here would surface it twice
+ * to the recipient.
  */
 function buildCheckInTemplate({
   leadName,
   leadCompany,
   daysSinceLastTouch,
-  operatorFirstName,
 }: {
   leadName: string | null;
   leadCompany: string | null;
   daysSinceLastTouch: number | null;
-  operatorFirstName: string;
 }): CheckInTemplate {
   const firstName = (leadName || "").split(/\s+/)[0] || "there";
   const contextLine =
     daysSinceLastTouch !== null && daysSinceLastTouch > 7
-      ? `It's been a minute since we last connected — wanted to make sure I didn't drop the thread.`
-      : `Wanted to circle back on the conversation we had going.`;
+      ? `It's been a few weeks since we last touched base.`
+      : `Wanted to share a quick thought.`;
   const subject = leadCompany
     ? `Quick check-in — ${leadCompany}`
     : `Quick check-in`;
@@ -70,10 +74,9 @@ function buildCheckInTemplate({
 
 ${contextLine}
 
-If now's a better moment to chat — even 10 minutes — happy to find a time that works. Otherwise, totally fine to circle back later in the month.
+If 10-15 minutes works on your end this week, happy to find a time. Otherwise, no pressure — just shoot back a thought if anything's on your mind.
 
-${operatorFirstName}
-OASIS AI Solutions`;
+Either way, let me know.`;
   return { subject, body };
 }
 
@@ -148,18 +151,15 @@ export function LeadActionToolbar({
    * fragment so we don't have to import them from a bracketed-route path. */
   aiToolsSlot?: ReactNode;
 }) {
-  const operatorFirstName = (() => {
-    const name = (operatorFullName || "").trim();
-    if (name) return name.split(/\s+/)[0];
-    if (operatorEmail) return operatorEmail.split("@")[0];
-    return "Operator";
-  })();
-
+  // operatorFullName + operatorEmail flow into the AI compose path (the
+  // server-side endpoint reads them from getActiveProfile + threads
+  // them into the prompt). The local fallback intentionally does NOT
+  // use them — see buildCheckInTemplate header comment.
+  void operatorFullName;
   const initialTemplate = buildCheckInTemplate({
     leadName,
     leadCompany,
     daysSinceLastTouch,
-    operatorFirstName,
   });
 
   const [checkInOpen, setCheckInOpen] = useState(false);

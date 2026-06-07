@@ -40,6 +40,14 @@ function loadPrompt(filename: string): string {
 export const OASIS_LEAD_SCORING_PROMPT = loadPrompt("oasis-lead-scoring.txt");
 
 /**
+ * System prompt for the per-lead check-in email composer
+ * (POST /api/leads/[id]/compose-checkin). Lives next to oasis-lead-scoring
+ * so future prompt edits keep the canonical AI surface area in one
+ * directory + show up in git diffs as plain-text changes.
+ */
+export const OASIS_CHECKIN_COMPOSE_PROMPT = loadPrompt("oasis-checkin-compose.txt");
+
+/**
  * Fields Claude is allowed to weight when scoring a lead. Keep this in
  * lockstep with scripts/auto_score_leads.py:INCLUDED_FIELDS — the JSON
  * mirror file is at lib/prompts/included-fields.json which Python reads.
