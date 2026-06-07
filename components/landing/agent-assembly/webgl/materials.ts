@@ -8,29 +8,31 @@ import * as THREE from "three";
  * carries its own shader uniforms. We keep ONE material per type per
  * subassembly via the create*Material() factories below.
  *
- * Material palette (V2 — adds darker chassis + circuit + bright accent
- * tiers so each subassembly can layer ARMOR PLATING over EXPOSED
- * MECHANISMS over GLOWING SEAMS, instead of everything reading as
- * one flat plastic shell):
+ * Material palette (V2):
  *
  *   shellMaterial    — matte white plastic armor (top layer)
  *   chassisMaterial  — darker brushed metal (under-armor frame)
- *   accentMaterial   — cool green PCB substrate (exposed circuits)
  *   emissiveMaterial — OASIS green glow (seams, heart core, eyes)
- *   warmMaterial     — amber glow (status indicators, podium ring)
+ *   accentMaterial   — cool cyan glow (used sparingly for variety)
+ *   warmMaterial     — amber glow (status indicators, podium markers)
  *
  * The shell and chassis materials are NEVER emissive (they reflect
- * scene lighting). The emissive/warm materials ignore lighting and
- * drive bloom. Mixing the two tiers is what turns a plastic toy into
- * a layered mechanical assembly.
+ * scene lighting). The emissive / accent / warm materials ignore
+ * lighting and drive bloom. Layering the two tiers is what turns a
+ * plastic toy into a mechanical assembly.
+ *
+ * Only EMISSIVE_COLOR and SHELL_COLOR are exported — the other colour
+ * constants are internal to the factories and would only cause drift
+ * if consumers reached for them directly. Subassemblies that need to
+ * tint an Edges line use EMISSIVE_COLOR.
  */
 
 export const SHELL_COLOR = "#f5f5f4";       // matte off-white plastic
-export const CHASSIS_COLOR = "#2a2f33";     // brushed gunmetal
 export const EMISSIVE_COLOR = "#86efac";    // OASIS green
-export const ACCENT_COLOR = "#5eead4";      // cyan accent
-export const WARM_COLOR = "#fcd34d";        // amber status
-export const CIRCUIT_COLOR = "#0a1a14";     // very dark green PCB substrate
+
+const CHASSIS_COLOR = "#2a2f33";   // brushed gunmetal (chassis tier)
+const ACCENT_COLOR = "#5eead4";    // cyan emissive (rarely used)
+const WARM_COLOR = "#fcd34d";      // amber status
 
 export function createShellMaterial(): THREE.MeshStandardMaterial {
   const m = new THREE.MeshStandardMaterial({
@@ -57,21 +59,6 @@ export function createChassisMaterial(): THREE.MeshStandardMaterial {
     opacity: 0,
   });
   m.name = "chassisMaterial";
-  return m;
-}
-
-/** Circuit / PCB substrate — very dark green that catches a hint of the
- *  scene lights but lets emissive overlays pop. Used for "exposed
- *  motherboard" patches behind grilles. */
-export function createCircuitMaterial(): THREE.MeshStandardMaterial {
-  const m = new THREE.MeshStandardMaterial({
-    color: CIRCUIT_COLOR,
-    metalness: 0.4,
-    roughness: 0.6,
-    transparent: true,
-    opacity: 0,
-  });
-  m.name = "chassisMaterial"; // share opacity bucket with chassis
   return m;
 }
 
