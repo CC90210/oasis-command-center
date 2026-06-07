@@ -12,17 +12,22 @@ import { BlendFunction } from "postprocessing";
 import { Vector2 } from "three";
 import { type MotionValue } from "framer-motion";
 import { SceneBridge } from "./SceneBridge";
-import { OasisCore } from "./OasisCore";
-import { OrbitalRig } from "./OrbitalRig";
+import { OasisOrb } from "./OasisOrb";
 import { HoloAccents } from "./HoloAccents";
 import { SystemOnlinePill } from "./SystemOnlinePill";
 import { useCompactViewport } from "../useCompactViewport";
 
 /**
- * AgentFigureWebGL — V5 entry. The agent is no longer a humanoid figure;
- * it's a central reactor core (OasisCore) with 10 distinct geometric
- * modules (OrbitalRig) that fly in and dock into orbital choreography
- * around it as each scroll phase fires.
+ * AgentFigureWebGL — V6 entry. The agent is rendered as a single
+ * unified glowing orb (OasisOrb) where each install scroll phase
+ * adds a CAPABILITY LAYER to the same orb (inner geodesic, equator
+ * ring, polar ring, security lattice, halo dots, corona) rather
+ * than as separate floating pieces.
+ *
+ * V5 split the agent into a core + 10 orbiting modules; the result
+ * read as "disconnected fragments." V6 collapses everything into
+ * concentric layers of one form so the agent reads as a single
+ * intelligence growing more powerful with scroll.
  *
  *   - Camera: pulled to z=4 with fov 36 so the ~2-unit orbital diameter
  *     fills the frame with room for the scatter origins.
@@ -85,8 +90,7 @@ export function AgentFigureWebGL({
           compactionProgress={compactionProgress}
         >
           <HoloAccents forceInstalled={forceInstalled} />
-          <OasisCore forceInstalled={forceInstalled} />
-          <OrbitalRig forceInstalled={forceInstalled} />
+          <OasisOrb forceInstalled={forceInstalled} />
         </SceneBridge>
 
         {/* Desktop-only postprocessing. Bloom tuned LOWER than V4 so
