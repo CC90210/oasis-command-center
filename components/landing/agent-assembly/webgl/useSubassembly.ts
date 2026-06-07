@@ -172,7 +172,8 @@ function paintOpacity(
     if ((obj as THREE.Mesh).isMesh) {
       const m = (obj as THREE.Mesh).material as THREE.MeshStandardMaterial;
       if (!m) return;
-      if (m.name === "shellMaterial") {
+      // Shell + chassis tiers ramp together (both are reflective, non-emissive).
+      if (m.name === "shellMaterial" || m.name === "chassisMaterial") {
         m.opacity = shellOp;
       } else if (m.name === "emissiveMaterial" || m.name === "accentMaterial") {
         m.opacity = emissiveOp;
