@@ -13,6 +13,8 @@ import {
 import { AgentFigureSprite, SPRITE_LAYER_COUNT } from "./agent-assembly/AgentFigureSprite";
 import { useScrollPhase } from "./agent-assembly/useScrollPhase";
 import { useAutoplayProgress } from "./agent-assembly/useAutoplayProgress";
+import { FlowFieldBackdrop } from "./agent-assembly/FlowFieldBackdrop";
+import { useCompactViewport } from "./agent-assembly/useCompactViewport";
 
 // 11 scroll phases — 10 drive the layer installs (1:1 with sprite layers),
 // the 11th drives the final compaction beat where floating fragments fade
@@ -124,21 +126,8 @@ const COSMIC_STARS = [
   { left: 32, top: 70, size: 0.8, twinkle: 4.6 },
 ];
 
-function useCompactViewport() {
-  const [isCompact, setIsCompact] = useState(false);
-
-  useEffect(() => {
-    const media = window.matchMedia("(max-width: 640px)");
-    const update = () => setIsCompact(media.matches);
-
-    update();
-    media.addEventListener("change", update);
-
-    return () => media.removeEventListener("change", update);
-  }, []);
-
-  return isCompact;
-}
+// useCompactViewport extracted to ./agent-assembly/useCompactViewport.ts
+// (2026-06-06) so this scene and the WebGL figure share one source.
 
 /** Maps progress (0→1) to a 0→1 ramp over a single phase window.
  *  Used for both per-layer installs (narrow window) and the compaction
@@ -267,6 +256,13 @@ export function AgentAssemblyScrollScene() {
           aria-hidden="true"
           className="pointer-events-none absolute inset-0 bg-[radial-gradient(ellipse_at_30%_25%,rgba(76,29,149,0.32),transparent_38%),radial-gradient(ellipse_at_72%_75%,rgba(15,118,110,0.28),transparent_40%),radial-gradient(ellipse_at_50%_55%,rgba(52,211,153,0.13),transparent_55%),linear-gradient(180deg,#02060c_0%,#03070a_55%,#02050a_100%)]"
         />
+
+        {/* Layer 1.5 — Perlin flow-field particle stream (Canvas 2D).
+            Adapted from the Odysseus reference (pewdiepie-archdaemon).
+            Sits between the gradient and the nebula clouds so the
+            cyan/green/amber threads read as electric currents inside
+            the cosmic atmosphere. Skips itself on prefers-reduced-motion. */}
+        {forceInstalled ? null : <FlowFieldBackdrop />}
 
         {/* Layer 2 — coloured nebula clouds (large soft-blurred shapes that
             drift very slowly so the universe feels alive without distracting
@@ -496,7 +492,7 @@ export function AgentAssemblyScrollScene() {
                 screen vertically and the scattered fragments orbit
                 comfortably around it. */}
             <div
-              className="relative flex aspect-[540/1435] w-[52vw] max-w-[230px] items-center justify-center min-[641px]:h-[min(88vh,860px)] min-[641px]:w-auto min-[641px]:max-w-none"
+              className="relative flex aspect-[3/4] w-[88vw] max-w-[400px] items-center justify-center min-[641px]:h-[min(92vh,920px)] min-[641px]:aspect-[3/4] min-[641px]:w-auto min-[641px]:max-w-none"
             >
               <AgentFigureSprite
                 installProgresses={layerProgresses}

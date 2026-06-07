@@ -120,7 +120,7 @@ type SopId = (typeof SOP_ITEMS)[number]["id"];
 const PANE_CONFIG: Array<{
   category: ItemCategory;
   label: string;
-  Icon: React.ElementType;
+  Icon: React.ElementType<{ className?: string }>;
   summaryKey: keyof DailyPlanSummary;
 }> = [
   { category: "priority_call", label: "Priority Calls", Icon: Phone, summaryKey: "priority_calls" },
@@ -267,7 +267,7 @@ function PlanPane({
   onDismiss,
 }: {
   label: string;
-  Icon: React.ElementType;
+  Icon: React.ElementType<{ className?: string }>;
   count: number;
   items: DailyPlanItem[];
   tenantSlug: string;
