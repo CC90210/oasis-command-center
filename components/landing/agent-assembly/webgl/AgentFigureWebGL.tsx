@@ -1,7 +1,7 @@
 "use client";
 
 import { Canvas } from "@react-three/fiber";
-import { AdaptiveDpr, PerformanceMonitor, Environment } from "@react-three/drei";
+import { AdaptiveDpr, PerformanceMonitor } from "@react-three/drei";
 import {
   EffectComposer,
   Bloom,
@@ -12,33 +12,30 @@ import { BlendFunction } from "postprocessing";
 import { Vector2 } from "three";
 import { type MotionValue } from "framer-motion";
 import { SceneBridge } from "./SceneBridge";
-import { ParticleAvatar } from "./ParticleAvatar";
+import { OasisCore } from "./OasisCore";
+import { OrbitalRig } from "./OrbitalRig";
 import { HoloAccents } from "./HoloAccents";
 import { SystemOnlinePill } from "./SystemOnlinePill";
 import { useCompactViewport } from "../useCompactViewport";
 
 /**
- * AgentFigureWebGL — the live R3F entry. Replaces the legacy PNG-sliced
- * AgentFigureSprite. Mounted via dynamic({ ssr: false }) from
- * AgentFigureSprite.tsx so the WebGL chunk doesn't ship in the SSR
- * bundle and doesn't run during reduced-motion edge cases until the
- * silhouette fallback paints.
+ * AgentFigureWebGL — V5 entry. The agent is no longer a humanoid figure;
+ * it's a central reactor core (OasisCore) with 10 distinct geometric
+ * modules (OrbitalRig) that fly in and dock into orbital choreography
+ * around it as each scroll phase fires.
  *
- *   - Camera: perspective, fov 32, positioned slightly above eye-level
- *     and pulled back so the full 3.5-unit-tall figure plus podium
- *     fits with comfortable headroom.
- *   - Lights: a key directional from front-top, fill directional from
- *     back-left, ambient base. Environment preset "city" gives the
- *     shell its subtle reflections without needing custom HDRs.
- *   - SceneBridge subscribes to the 11 framer-motion MotionValues
- *     ONCE and exposes them via context as a ref; ParticleAvatar reads
+ *   - Camera: pulled to z=4 with fov 36 so the ~2-unit orbital diameter
+ *     fills the frame with room for the scatter origins.
+ *   - Lighting: ambient + soft front directional only (everything is
+ *     additive-blended emissive, so no environment reflections needed).
+ *   - SceneBridge subscribes to the 11 framer-motion MotionValues once
+ *     and exposes them via context as a ref; OrbitalRig modules read
  *     the ref inside useFrame, so scroll ticks never trigger React
  *     re-renders.
- *   - EffectComposer chain (bloom + chromatic aberration + vignette)
- *     runs on desktop only. Gated on window.innerWidth at mount; mobile
- *     skips it entirely for thermal headroom.
+ *   - EffectComposer (bloom + chromatic aberration + vignette) runs on
+ *     desktop only.
  *   - frameloop is "demand" for reduced-motion (one static frame) and
- *     "always" otherwise (continuous animation).
+ *     "always" otherwise.
  *
  * The DOM "SYSTEM ONLINE" pill renders OUTSIDE the canvas so the text
  * stays crisp at any DPR.
@@ -63,75 +60,53 @@ export function AgentFigureWebGL({
   return (
     <div className={className} style={{ position: "absolute", inset: 0 }}>
       <Canvas
-        // Square-ish aspect window; camera fov chosen to frame the
-        // 3.5-unit figure with headroom + foot room. dpr capped at 2
-        // to keep texture memory reasonable on Retina displays.
         dpr={[1, 2]}
-        // Camera framing: figure is 3.3 units tall, scatter origins extend
-        // out to ±1.5 horizontal + ±2.0 vertical. At fov 36 and z = 7.2,
-        // vertical visible extent is ~4.7u — figure fills ~70% with plenty
-        // of room for scattered parts to drift visibly around it.
-        camera={{ position: [0, -0.1, 7.2], fov: 36, near: 0.1, far: 30 }}
+        // OASIS Core sits at origin; modules orbit at radius 0.95-1.3.
+        // Scatter origins reach ~2.6u out. fov 38 at z=4.2 gives a
+        // visible vertical extent of ~2.9u — fills the frame.
+        camera={{ position: [0, 0.05, 4.2], fov: 38, near: 0.1, far: 30 }}
         gl={{
           antialias: true,
           alpha: true,
           powerPreference: "high-performance",
         }}
-        // demand frameloop for reduced-motion means we render once and
-        // pause. always for everyone else.
         frameloop={forceInstalled ? "demand" : "always"}
         style={{ width: "100%", height: "100%", touchAction: "none" }}
         aria-hidden
       >
-        {/* Lighting rig — three-point. Cool key from above-front, warm
-            fill from back-left, soft ambient base. Tuned so the shell
-            reads as matte plastic-armor, not as polished metal. */}
-        <ambientLight intensity={0.35} color="#cfeae0" />
-        <directionalLight
-          position={[3, 5, 4]}
-          intensity={1.4}
-          color="#ffffff"
-          castShadow={false}
-        />
-        <directionalLight
-          position={[-4, 2, -3]}
-          intensity={0.6}
-          color="#86efac"
-        />
-        {/* Rim accent — subtle warm fill from below to lift the legs */}
-        <pointLight position={[0, -3, 2]} intensity={0.4} color="#fcd34d" distance={8} />
-
-        {/* Environment preset gives free PBR reflections without
-            bundling a custom HDR. "city" reads as crisp daylight,
-            which keeps the shell from going dull. */}
-        <Environment preset="city" />
+        {/* Minimal lighting — everything in OasisCore + OrbitalRig is
+            emissive (MeshBasicMaterial + additive blending), so we only
+            need a faint ambient to register accidental MeshStandard
+            materials. No directional rim needed. */}
+        <ambientLight intensity={0.4} color="#cfeae0" />
 
         <SceneBridge
           installProgresses={installProgresses}
           compactionProgress={compactionProgress}
         >
           <HoloAccents forceInstalled={forceInstalled} />
-          <ParticleAvatar forceInstalled={forceInstalled} />
+          <OasisCore forceInstalled={forceInstalled} />
+          <OrbitalRig forceInstalled={forceInstalled} />
         </SceneBridge>
 
-        {/* Desktop-only postprocessing — bloom on emissive seams +
-            slight chromatic aberration + vignette finish. Mobile +
-            reduced-motion skip this entirely. */}
+        {/* Desktop-only postprocessing. Bloom tuned LOWER than V4 so
+            additive emissive layers don't blow out to white smear —
+            keeps the wireframe + ring structure readable. */}
         {usePostprocessing ? (
           <EffectComposer multisampling={0}>
             <Bloom
-              intensity={0.55}
-              luminanceThreshold={0.65}
-              luminanceSmoothing={0.22}
+              intensity={0.42}
+              luminanceThreshold={0.72}
+              luminanceSmoothing={0.28}
               mipmapBlur
             />
             <ChromaticAberration
               blendFunction={BlendFunction.NORMAL}
-              offset={new Vector2(0.0008, 0.0012)}
+              offset={new Vector2(0.0006, 0.0009)}
               radialModulation={false}
               modulationOffset={0}
             />
-            <Vignette eskil={false} offset={0.18} darkness={0.55} />
+            <Vignette eskil={false} offset={0.22} darkness={0.6} />
           </EffectComposer>
         ) : null}
 
@@ -147,4 +122,3 @@ export function AgentFigureWebGL({
     </div>
   );
 }
-
