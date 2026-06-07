@@ -32,6 +32,13 @@ const nextConfig = {
   outputFileTracingIncludes: {
     "/api/leads/*/score": ["./lib/prompts/**/*"],
     "/api/leads/*/next-action": ["./lib/prompts/**/*"],
+    // Added 2026-06-07 after Playwright UI sweep caught the new
+    // compose-checkin route 500'ing in production with ENOENT on
+    // oasis-lead-scoring.txt — same root cause as the prior two
+    // routes: lib/prompts/index.ts loads the .txt files at module
+    // init via fs.readFileSync, which Next.js's static tracer doesn't
+    // follow. Explicit include solves it.
+    "/api/leads/*/compose-checkin": ["./lib/prompts/**/*"],
   },
   // Standalone output for Docker — produces .next/standalone with a
   // self-contained server.js + trimmed node_modules. No effect on Vercel
