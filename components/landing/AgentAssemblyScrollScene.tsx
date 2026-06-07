@@ -199,17 +199,20 @@ export function AgentAssemblyScrollScene() {
   const commandCentreProgress  = usePhaseWindow(effectiveProgress, 9, INSTALL_WINDOW);
   const compactionProgress     = usePhaseWindow(effectiveProgress, COMPACTION_PHASE_INDEX, COMPACTION_WINDOW);
 
+  // Indexed by manifestIdx — each WebGL subassembly in webgl/subassemblies/
+  // reads its progress via useSubassembly({ manifestIdx }) which indexes
+  // into this array. Order MUST match MODULE_MANIFEST above.
   const layerProgresses = [
-    reasoningCoreProgress,     // → 01-head
-    statePulseProgress,        // → 02-neural-cube
-    memorySpineProgress,       // → 03-neural-disc
-    browserOpticsProgress,     // → 04-memory-ring
-    bridgeToolsProgress,       // → 05-sensors
-    guardShieldProgress,       // → 06-reasoning-torso
-    outputChannelsProgress,    // → 07-communication
-    securityMeshProgress,      // → 08-ethics-hip
-    businessLayerProgress,     // → 09-body-pelvis
-    commandCentreProgress,     // → 10-activation
+    reasoningCoreProgress,     // → 0  Reasoning Core   (head + dome)
+    statePulseProgress,        // → 1  State Pulse      (chest gem in torus)
+    memorySpineProgress,       // → 2  Memory Spine     (7 vertebrae)
+    browserOpticsProgress,     // → 3  Browser Optics   (visor + eyes)
+    bridgeToolsProgress,       // → 4  Bridge Tools     (forearms + hands)
+    guardShieldProgress,       // → 5  Guard Shield     (pauldrons + chest plates)
+    outputChannelsProgress,    // → 6  Output Channels  (neck + clavicle)
+    securityMeshProgress,      // → 7  Security Mesh    (pelvis + hip sockets)
+    businessLayerProgress,     // → 8  Business Layer   (upper arms + sternum)
+    commandCentreProgress,     // → 9  Command Centre   (legs + podium)
   ];
 
   const progressScale = forceInstalled ? 1 : scrollProgress;
