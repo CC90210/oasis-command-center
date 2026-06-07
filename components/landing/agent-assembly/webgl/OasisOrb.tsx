@@ -139,22 +139,27 @@ export function OasisOrb({ forceInstalled = false }: Props) {
     // Compaction adds a brightness boost across every layer.
     const compBoost = 1 + compP * 0.35;
 
+    /** Helper — opacity must stay in [0,1] for three.js renderers.
+     *  Stacking lit*compBoost*pulse can exceed 1; clamp explicitly so
+     *  intent is visible and renderers behave consistently. */
+    const op = (v: number) => THREE.MathUtils.clamp(v, 0, 1);
+
     // === Layer opacity ramps ===
     // Phase 0 — nucleus is ALWAYS lit at a base value (the agent has to
     // exist before its first install), then brightens as ip(0) progresses.
     const nucleusPulse = 1 + Math.sin(t * 1.8) * 0.06;
-    mNucleus.opacity = (0.55 + smooth(ip(0)) * (LIT_OPACITY.nucleus - 0.55)) * compBoost * nucleusPulse;
-    mNucleusCore.opacity = (0.7 + smooth(ip(0)) * 0.3) * compBoost;
+    mNucleus.opacity = op((0.55 + smooth(ip(0)) * (LIT_OPACITY.nucleus - 0.55)) * compBoost * nucleusPulse);
+    mNucleusCore.opacity = op((0.7 + smooth(ip(0)) * 0.3) * compBoost);
 
-    mHeart.opacity = smooth(ip(1)) * LIT_OPACITY.heart * compBoost;
-    mSpine.opacity = smooth(ip(2)) * LIT_OPACITY.spine * compBoost;
-    mInnerGeo.opacity = smooth(ip(3)) * LIT_OPACITY.innerGeodesic * compBoost;
-    mEquator.opacity = smooth(ip(4)) * LIT_OPACITY.equator * compBoost;
-    mShell.opacity = smooth(ip(5)) * LIT_OPACITY.shell * compBoost;
-    mPolar.opacity = smooth(ip(6)) * LIT_OPACITY.polar * compBoost;
-    mLattice.opacity = smooth(ip(7)) * LIT_OPACITY.lattice * compBoost;
-    mHaloDot.opacity = smooth(ip(8)) * LIT_OPACITY.haloDots * compBoost;
-    mCorona.opacity = smooth(ip(9)) * LIT_OPACITY.corona * compBoost;
+    mHeart.opacity = op(smooth(ip(1)) * LIT_OPACITY.heart * compBoost);
+    mSpine.opacity = op(smooth(ip(2)) * LIT_OPACITY.spine * compBoost);
+    mInnerGeo.opacity = op(smooth(ip(3)) * LIT_OPACITY.innerGeodesic * compBoost);
+    mEquator.opacity = op(smooth(ip(4)) * LIT_OPACITY.equator * compBoost);
+    mShell.opacity = op(smooth(ip(5)) * LIT_OPACITY.shell * compBoost);
+    mPolar.opacity = op(smooth(ip(6)) * LIT_OPACITY.polar * compBoost);
+    mLattice.opacity = op(smooth(ip(7)) * LIT_OPACITY.lattice * compBoost);
+    mHaloDot.opacity = op(smooth(ip(8)) * LIT_OPACITY.haloDots * compBoost);
+    mCorona.opacity = op(smooth(ip(9)) * LIT_OPACITY.corona * compBoost);
 
     // === Per-frame transforms ===
     // Heart breathing (only when installed)

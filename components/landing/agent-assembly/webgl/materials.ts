@@ -20,7 +20,6 @@ import * as THREE from "three";
 export const PRIMARY_GREEN = "#86efac";
 export const ACCENT_CYAN = "#5eead4";
 export const WARM_AMBER = "#fcd34d";
-export const SHELL_WHITE = "#f5f5f4";
 
 type AdditiveOpts = {
   color: string;
