@@ -4,6 +4,7 @@ import { useMemo, useRef } from "react";
 import { useFrame } from "@react-three/fiber";
 import * as THREE from "three";
 import { useSceneBridge } from "./SceneBridge";
+import { buildAdditiveMaterial, PRIMARY_GREEN } from "./materials";
 
 /**
  * HoloAccents — V5 simplified. The OasisCore now owns the atmosphere
@@ -19,28 +20,24 @@ import { useSceneBridge } from "./SceneBridge";
 
 type Props = { forceInstalled?: boolean };
 
-const PRIMARY = "#86efac";
-
-function buildHoloMat(color: string, opacity: number): THREE.MeshBasicMaterial {
-  return new THREE.MeshBasicMaterial({
-    color,
-    transparent: true,
-    opacity,
-    blending: THREE.AdditiveBlending,
-    depthWrite: false,
-    side: THREE.DoubleSide,
-  });
-}
-
 export function HoloAccents({ forceInstalled = false }: Props) {
   const bridge = useSceneBridge();
 
   const platformRef = useRef<THREE.Mesh | null>(null);
   const beamRef = useRef<THREE.Mesh | null>(null);
 
-  const platformMat = useMemo(() => buildHoloMat(PRIMARY, 0.5), []);
-  const haloMat = useMemo(() => buildHoloMat(PRIMARY, 0.3), []);
-  const beamMat = useMemo(() => buildHoloMat(PRIMARY, 0), []);
+  const platformMat = useMemo(
+    () => buildAdditiveMaterial({ color: PRIMARY_GREEN, opacity: 0.5, doubleSide: true }),
+    [],
+  );
+  const haloMat = useMemo(
+    () => buildAdditiveMaterial({ color: PRIMARY_GREEN, opacity: 0.3, doubleSide: true }),
+    [],
+  );
+  const beamMat = useMemo(
+    () => buildAdditiveMaterial({ color: PRIMARY_GREEN, opacity: 0, doubleSide: true }),
+    [],
+  );
 
   useFrame((state) => {
     if (forceInstalled) {

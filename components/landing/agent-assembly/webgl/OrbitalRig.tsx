@@ -4,6 +4,13 @@ import { useMemo, useRef } from "react";
 import { useFrame } from "@react-three/fiber";
 import * as THREE from "three";
 import { useSceneBridge } from "./SceneBridge";
+import {
+  buildAdditiveMaterial,
+  PRIMARY_GREEN,
+  ACCENT_CYAN,
+  WARM_AMBER,
+  SHELL_WHITE,
+} from "./materials";
 
 /**
  * OrbitalRig — 11 distinct geometric modules orbiting the OasisCore.
@@ -35,10 +42,13 @@ import { useSceneBridge } from "./SceneBridge";
 
 type Props = { forceInstalled?: boolean };
 
-const PRIMARY = "#86efac";
-const ACCENT = "#5eead4";
-const WARM = "#fcd34d";
-const WHITE = "#f5f5f4";
+// Module palette aliases — alias to the shared constants so the
+// MODULES table reads with short names while the source of truth
+// stays in materials.ts.
+const PRIMARY = PRIMARY_GREEN;
+const ACCENT = ACCENT_CYAN;
+const WARM = WARM_AMBER;
+const WHITE = SHELL_WHITE;
 
 type ModuleConfig = {
   /** Which install phase fires this module's docking animation (0-9) */
@@ -179,26 +189,13 @@ function OrbitalModule({
     [config.spinAxis],
   );
 
-  // Pre-compute geometry + materials so they're stable refs.
+  // Pre-compute materials via the shared factory so they're stable refs.
   const material = useMemo(
-    () => new THREE.MeshBasicMaterial({
-      color: config.color,
-      wireframe: true,
-      transparent: true,
-      opacity: 0.85,
-      blending: THREE.AdditiveBlending,
-      depthWrite: false,
-    }),
+    () => buildAdditiveMaterial({ color: config.color, opacity: 0.85, wireframe: true }),
     [config.color],
   );
   const solidMaterial = useMemo(
-    () => new THREE.MeshBasicMaterial({
-      color: config.color,
-      transparent: true,
-      opacity: 0.35,
-      blending: THREE.AdditiveBlending,
-      depthWrite: false,
-    }),
+    () => buildAdditiveMaterial({ color: config.color, opacity: 0.35 }),
     [config.color],
   );
 
