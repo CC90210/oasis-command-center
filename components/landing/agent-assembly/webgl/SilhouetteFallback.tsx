@@ -13,11 +13,10 @@
  *
  * Pure SVG + CSS — no React state, no client JS, ~1KB.
  */
-export function SilhouetteFallback({ className }: { className?: string }) {
+export function SilhouetteFallback() {
   return (
     <div
       aria-hidden
-      className={className}
       style={{
         position: "absolute",
         inset: 0,
