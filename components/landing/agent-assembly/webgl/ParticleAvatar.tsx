@@ -34,7 +34,6 @@ const PARTICLE_DATA = buildParticleData();
 
 export function ParticleAvatar({ forceInstalled = false }: Props) {
   const pointsRef = useRef<THREE.Points | null>(null);
-  const materialRef = useRef<THREE.ShaderMaterial | null>(null);
   const bridge = useSceneBridge();
   const { size, viewport } = useThree();
 
@@ -88,21 +87,19 @@ export function ParticleAvatar({ forceInstalled = false }: Props) {
     }
   }, [forceInstalled, material]);
 
-  useFrame((state, dt) => {
-    if (!materialRef.current) return;
+  useFrame((_state, dt) => {
     if (forceInstalled) return;
 
     const install = bridge.current.install;
     const compP = bridge.current.compaction;
 
-    // Pack the 10 install scalars into the 3 vec4 uniforms.
-    materialRef.current.uniforms.uInstall0.value.set(install[0], install[1], install[2], install[3]);
-    materialRef.current.uniforms.uInstall1.value.set(install[4], install[5], install[6], install[7]);
-    materialRef.current.uniforms.uInstall2.value.set(install[8], install[9], 0, 0);
-    materialRef.current.uniforms.uCompaction.value = THREE.MathUtils.clamp(compP, 0, 1);
-
-    // uTime accumulator (dt-safe so animations stay smooth across pauses).
-    materialRef.current.uniforms.uTime.value += dt;
+    // Pack the 10 install scalars into the 3 vec4 uniforms. The `material`
+    // identity is stable (useMemo with []), so closing over it is safe.
+    material.uniforms.uInstall0.value.set(install[0], install[1], install[2], install[3]);
+    material.uniforms.uInstall1.value.set(install[4], install[5], install[6], install[7]);
+    material.uniforms.uInstall2.value.set(install[8], install[9], 0, 0);
+    material.uniforms.uCompaction.value = THREE.MathUtils.clamp(compP, 0, 1);
+    material.uniforms.uTime.value += dt;
 
     // Idle rotation once fully assembled — the whole points object rotates,
     // not just the camera, so the breathing + drift uniforms still work.
@@ -113,15 +110,7 @@ export function ParticleAvatar({ forceInstalled = false }: Props) {
         pointsRef.current.rotation.y, 0, 4, dt,
       );
     }
-
-    // Sync ref on first frame.
-    if (materialRef.current !== material) {
-      materialRef.current = material;
-    }
   });
-
-  // Bind the material ref on every render since useMemo identity is stable.
-  materialRef.current = material;
 
   return (
     <points ref={pointsRef} geometry={geometry} material={material} frustumCulled={false} />

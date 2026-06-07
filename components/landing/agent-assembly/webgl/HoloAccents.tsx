@@ -18,65 +18,52 @@ import { useSceneBridge } from "./SceneBridge";
  *
  * Everything is emissive + additive-blended so it adds light to the
  * particle field instead of looking like opaque mesh stuck through it.
+ *
+ * All materials are memoized so they have stable identity across renders;
+ * useFrame closes over them directly and mutates opacity per frame.
  */
 
 type Props = { forceInstalled?: boolean };
 
 const PRIMARY = "#86efac";
+const ACCENT = "#5eead4";
 const WARM = "#fcd34d";
+
+function buildHoloMat(color: string, opacity: number): THREE.MeshBasicMaterial {
+  return new THREE.MeshBasicMaterial({
+    color,
+    transparent: true,
+    opacity,
+    blending: THREE.AdditiveBlending,
+    depthWrite: false,
+    side: THREE.DoubleSide,
+  });
+}
 
 export function HoloAccents({ forceInstalled = false }: Props) {
   const bridge = useSceneBridge();
 
+  const platformRef = useRef<THREE.Mesh | null>(null);
   const ringARef = useRef<THREE.Mesh | null>(null);
   const ringBRef = useRef<THREE.Mesh | null>(null);
   const ringCRef = useRef<THREE.Mesh | null>(null);
   const beamRef = useRef<THREE.Mesh | null>(null);
-  const beamMatRef = useRef<THREE.MeshBasicMaterial | null>(null);
-  const platformRef = useRef<THREE.Mesh | null>(null);
-  const platformMatRef = useRef<THREE.MeshBasicMaterial | null>(null);
-  const ringAMatRef = useRef<THREE.MeshBasicMaterial | null>(null);
-  const ringBMatRef = useRef<THREE.MeshBasicMaterial | null>(null);
-  const ringCMatRef = useRef<THREE.MeshBasicMaterial | null>(null);
 
-  // Glowing podium disc material — additive blend, no z-write.
-  const platformMat = useMemo(() => {
-    const m = new THREE.MeshBasicMaterial({
-      color: PRIMARY,
-      transparent: true,
-      opacity: 0.55,
-      blending: THREE.AdditiveBlending,
-      depthWrite: false,
-      side: THREE.DoubleSide,
-    });
-    return m;
-  }, []);
-
-  const ringMat = (color: string, opacity: number) => {
-    const m = new THREE.MeshBasicMaterial({
-      color,
-      transparent: true,
-      opacity,
-      blending: THREE.AdditiveBlending,
-      depthWrite: false,
-      side: THREE.DoubleSide,
-    });
-    return m;
-  };
-
-  const ringAMat = useMemo(() => ringMat(PRIMARY, 0), []);
-  const ringBMat = useMemo(() => ringMat("#5eead4", 0), []);
-  const ringCMat = useMemo(() => ringMat(WARM, 0), []);
-  const beamMat = useMemo(() => ringMat(PRIMARY, 0), []);
+  // Stable material instances. useFrame mutates their .opacity per frame —
+  // mutating a material uniform/opacity does NOT trigger a React re-render.
+  const platformMat = useMemo(() => buildHoloMat(PRIMARY, 0.55), []);
+  const ringAMat = useMemo(() => buildHoloMat(PRIMARY, 0), []);
+  const ringBMat = useMemo(() => buildHoloMat(ACCENT, 0), []);
+  const ringCMat = useMemo(() => buildHoloMat(WARM, 0), []);
+  const beamMat = useMemo(() => buildHoloMat(PRIMARY, 0), []);
 
   useFrame((state) => {
     if (forceInstalled) {
-      // Static fully-installed pose.
-      if (ringAMatRef.current) ringAMatRef.current.opacity = 0.7;
-      if (ringBMatRef.current) ringBMatRef.current.opacity = 0.55;
-      if (ringCMatRef.current) ringCMatRef.current.opacity = 0.45;
-      if (platformMatRef.current) platformMatRef.current.opacity = 0.65;
-      if (beamMatRef.current) beamMatRef.current.opacity = 0.18;
+      platformMat.opacity = 0.65;
+      ringAMat.opacity = 0.7;
+      ringBMat.opacity = 0.55;
+      ringCMat.opacity = 0.45;
+      beamMat.opacity = 0.18;
       return;
     }
 
@@ -85,19 +72,15 @@ export function HoloAccents({ forceInstalled = false }: Props) {
     const overall = Math.min(1, bridge.current.install.reduce((a, b) => a + b, 0) / 10);
     const compP = THREE.MathUtils.clamp(bridge.current.compaction, 0, 1);
 
-    // ─── Podium platform ─── always visible, brightens with overall progress
-    if (platformMatRef.current) {
-      platformMatRef.current.opacity = 0.35 + overall * 0.4 + compP * 0.25;
-    }
-    if (platformRef.current) {
-      platformRef.current.rotation.y = t * 0.18;
-    }
+    // Podium: always-on, brightens with overall progress + compaction pulse
+    platformMat.opacity = 0.35 + overall * 0.4 + compP * 0.25;
+    if (platformRef.current) platformRef.current.rotation.y = t * 0.18;
 
-    // ─── 3 orbital rings ─── fade in once State Pulse phase fires
+    // 3 orbital rings: fade in once State Pulse phase fires
     const ringFade = THREE.MathUtils.smoothstep(statePulseP, 0, 1) * 0.7;
-    if (ringAMatRef.current) ringAMatRef.current.opacity = ringFade + compP * 0.2;
-    if (ringBMatRef.current) ringBMatRef.current.opacity = ringFade * 0.8 + compP * 0.15;
-    if (ringCMatRef.current) ringCMatRef.current.opacity = ringFade * 0.65 + compP * 0.1;
+    ringAMat.opacity = ringFade + compP * 0.2;
+    ringBMat.opacity = ringFade * 0.8 + compP * 0.15;
+    ringCMat.opacity = ringFade * 0.65 + compP * 0.1;
 
     if (ringARef.current) {
       ringARef.current.rotation.z = t * 0.4;
@@ -112,23 +95,10 @@ export function HoloAccents({ forceInstalled = false }: Props) {
       ringCRef.current.rotation.z = Math.sin(t * 0.41) * 0.3;
     }
 
-    // ─── Scan beam ─── pulses during compaction
-    if (beamMatRef.current) {
-      // Pre-compaction: faint vertical hint. Compaction: bright pulse.
-      const beamPulse = 0.05 + compP * 0.45 + Math.sin(t * 3.0) * 0.06 * compP;
-      beamMatRef.current.opacity = beamPulse;
-    }
-    if (beamRef.current) {
-      beamRef.current.scale.y = 1 + compP * 0.08;
-    }
+    // Scan beam: faint always, bright pulse during compaction
+    beamMat.opacity = 0.05 + compP * 0.45 + Math.sin(t * 3.0) * 0.06 * compP;
+    if (beamRef.current) beamRef.current.scale.y = 1 + compP * 0.08;
   });
-
-  // Wire refs through the closures above.
-  platformMatRef.current = platformMat;
-  ringAMatRef.current = ringAMat;
-  ringBMatRef.current = ringBMat;
-  ringCMatRef.current = ringCMat;
-  beamMatRef.current = beamMat;
 
   return (
     <group>
@@ -141,7 +111,7 @@ export function HoloAccents({ forceInstalled = false }: Props) {
       >
         <ringGeometry args={[0.0, 0.78, 64, 1]} />
       </mesh>
-      {/* Podium accent ring — outer glow */}
+      {/* Podium accent ring — outer glow halo */}
       <mesh
         position={[0, -1.715, 0]}
         rotation={[-Math.PI / 2, 0, 0]}
