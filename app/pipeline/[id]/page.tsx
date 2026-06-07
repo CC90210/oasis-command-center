@@ -122,6 +122,7 @@ export default async function PipelineLeadDetailPage({
         leadEmail={typeof record.data.email === "string" ? record.data.email : null}
         daysSinceLastTouch={metrics.daysSinceLastTouch}
         operatorEmail={profile?.email ?? null}
+        operatorFullName={profile?.full_name ?? profile?.display_name ?? null}
         aiToolsSlot={
           <>
             <ScoreLeadButton

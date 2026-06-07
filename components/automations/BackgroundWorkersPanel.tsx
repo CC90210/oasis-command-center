@@ -271,22 +271,18 @@ function WorkerRow({
           <div className="text-[11px] text-fg-dim mt-1">
             {statusLabel}
           </div>
-          {worker.manageable_via_pm2 !== false ? (
-            <WorkerActions
-              service={worker.service}
-              bridgeOnline={bridgeOnline}
-              status={effectiveStatus}
-              onOptimistic={setOptimisticStatus}
-              onChange={onChange}
-            />
-          ) : (
-            // Standalone daemon — not in pm2. Don't render the action
-            // row at all so the operator isn't tempted to click buttons
-            // that would fail with "pm2: <name> not found".
-            <div className="mt-2 text-[10px] text-fg-dim italic">
-              Standalone — start / stop via direct CLI (not in pm2).
-            </div>
-          )}
+          <WorkerActions
+            service={worker.service}
+            bridgeOnline={bridgeOnline}
+            status={effectiveStatus}
+            // pm2-controllable? Pass through so WorkerActions can disable
+            // the buttons for standalones (Skool) without hiding them —
+            // hiding was confusing CC ("I don't see the three buttons").
+            // Disabled + tooltip is clearer than absent.
+            pm2Managed={worker.manageable_via_pm2 !== false}
+            onOptimistic={setOptimisticStatus}
+            onChange={onChange}
+          />
         </div>
       </div>
     </div>
@@ -302,12 +298,18 @@ function WorkerActions({
   service,
   bridgeOnline,
   status,
+  pm2Managed = true,
   onOptimistic,
   onChange,
 }: {
   service: string;
   bridgeOnline: boolean;
   status: Worker["status"];
+  /** When false, the worker isn't registered with pm2 (e.g., Skool engine
+   * owns its own lock file). Buttons render but stay disabled with a
+   * tooltip explaining why — hiding them confused CC ("I don't see the
+   * three buttons under it to start or stop it"). */
+  pm2Managed?: boolean;
   /** Optimistic local-state flip so the tile reflects success before the
    * bridge's next 60s heartbeat lands. Passing null clears the override
    * and falls back to server data. */
@@ -364,9 +366,13 @@ function WorkerActions({
 
   const canStart = status !== "healthy";
   const canStop = status === "healthy" || status === "degraded";
-  const disabledHint = !bridgeOnline
-    ? "Bridge offline — can't reach pm2"
+  // Disable reasons stack. Most specific wins (non-pm2 wins over bridge
+  // offline wins over already-running/stopped) so the tooltip always
+  // surfaces the most actionable reason.
+  const nonPm2Hint = !pm2Managed
+    ? "Standalone — manages its own lifecycle outside pm2. Start / stop via direct CLI."
     : undefined;
+  const disabledHint = nonPm2Hint || (!bridgeOnline ? "Bridge offline — can't reach pm2" : undefined);
 
   return (
     <div className="mt-2 flex items-center gap-1.5">
@@ -374,7 +380,7 @@ function WorkerActions({
         icon={busy === "start" ? Loader2 : Play}
         spin={busy === "start"}
         label="Start"
-        disabled={!bridgeOnline || busy !== null || !canStart}
+        disabled={!pm2Managed || !bridgeOnline || busy !== null || !canStart}
         title={
           disabledHint ||
           (!canStart ? "Already running" : "Start this worker via pm2")
@@ -385,7 +391,7 @@ function WorkerActions({
         icon={busy === "stop" ? Loader2 : Square}
         spin={busy === "stop"}
         label="Stop"
-        disabled={!bridgeOnline || busy !== null || !canStop}
+        disabled={!pm2Managed || !bridgeOnline || busy !== null || !canStop}
         title={
           disabledHint ||
           (!canStop ? "Already stopped" : "Stop this worker via pm2")
@@ -396,7 +402,7 @@ function WorkerActions({
         icon={busy === "restart" ? Loader2 : RotateCw}
         spin={busy === "restart"}
         label="Restart"
-        disabled={!bridgeOnline || busy !== null}
+        disabled={!pm2Managed || !bridgeOnline || busy !== null}
         title={disabledHint || "Restart this worker via pm2"}
         onClick={() => handle("restart")}
       />

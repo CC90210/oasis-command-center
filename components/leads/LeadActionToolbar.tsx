@@ -40,14 +40,23 @@ type CheckInTemplate = {
   body: string;
 };
 
+/**
+ * Synchronous fallback template used while the AI compose request is
+ * in flight, and as a last-resort if the API errors out without a
+ * server-side fallback. The API route's fallback (which knows the
+ * operator's actual name) is strictly better and overrides this when
+ * it lands.
+ */
 function buildCheckInTemplate({
   leadName,
   leadCompany,
   daysSinceLastTouch,
+  operatorFirstName,
 }: {
   leadName: string | null;
   leadCompany: string | null;
   daysSinceLastTouch: number | null;
+  operatorFirstName: string;
 }): CheckInTemplate {
   const firstName = (leadName || "").split(/\s+/)[0] || "there";
   const contextLine =
@@ -63,9 +72,8 @@ ${contextLine}
 
 If now's a better moment to chat — even 10 minutes — happy to find a time that works. Otherwise, totally fine to circle back later in the month.
 
-Either way, let me know.
-
-— Sent via OASIS`;
+${operatorFirstName}
+OASIS AI Solutions`;
   return { subject, body };
 }
 
@@ -116,6 +124,7 @@ export function LeadActionToolbar({
   leadEmail,
   daysSinceLastTouch,
   operatorEmail,
+  operatorFullName,
   aiToolsSlot,
 }: {
   leadId: string;
@@ -129,15 +138,28 @@ export function LeadActionToolbar({
    * account the browser defaults to. Null is fine — Calendar falls
    * back to the browser default. */
   operatorEmail?: string | null;
+  /** Operator's full name from user_profiles.full_name (or display_name
+   * fallback). Used as the sign-off when the AI compose API isn't
+   * reachable and the local template is the only path. Falls back to
+   * the email-local-part, then "Operator". */
+  operatorFullName?: string | null;
   /** Rendered inside the "AI tools" disclosure. The page passes the
    * existing ScoreLeadButton + NextActionButton as a server-rendered
    * fragment so we don't have to import them from a bracketed-route path. */
   aiToolsSlot?: ReactNode;
 }) {
+  const operatorFirstName = (() => {
+    const name = (operatorFullName || "").trim();
+    if (name) return name.split(/\s+/)[0];
+    if (operatorEmail) return operatorEmail.split("@")[0];
+    return "Operator";
+  })();
+
   const initialTemplate = buildCheckInTemplate({
     leadName,
     leadCompany,
     daysSinceLastTouch,
+    operatorFirstName,
   });
 
   const [checkInOpen, setCheckInOpen] = useState(false);
@@ -145,6 +167,52 @@ export function LeadActionToolbar({
   const [body, setBody] = useState(initialTemplate.body);
   const [sendState, setSendState] = useState<SendState>({ kind: "idle" });
   const [aiToolsOpen, setAiToolsOpen] = useState(false);
+  // AI compose state. The first time CC opens the check-in modal we fire
+  // /api/leads/[id]/compose-checkin and replace the deterministic
+  // template with the personalized draft. Subsequent opens reuse what
+  // was loaded so we don't burn Claude calls every time the modal toggles.
+  const [composeState, setComposeState] = useState<
+    | { kind: "idle" }
+    | { kind: "loading" }
+    | { kind: "loaded"; at: string }
+    | { kind: "failed"; reason: string }
+  >({ kind: "idle" });
+
+  async function openCheckInAndCompose() {
+    setCheckInOpen(true);
+    if (composeState.kind !== "idle" || !canEmail) return;
+    setComposeState({ kind: "loading" });
+    try {
+      const res = await fetch(`/api/leads/${leadId}/compose-checkin`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+      });
+      const data = (await res.json()) as
+        | { ok: true; subject: string; body: string; composed_at: string }
+        | { ok: false; error: string; fallback?: { subject: string; body: string } };
+      if (res.ok && data.ok === true) {
+        setSubject(data.subject);
+        setBody(data.body);
+        setComposeState({ kind: "loaded", at: data.composed_at });
+        return;
+      }
+      // Server-side fallback is operator-name-aware — prefer it over
+      // the local one even when the AI step fails.
+      if ("fallback" in data && data.fallback) {
+        setSubject(data.fallback.subject);
+        setBody(data.fallback.body);
+      }
+      setComposeState({
+        kind: "failed",
+        reason: ("error" in data && data.error) || `http_${res.status}`,
+      });
+    } catch (e) {
+      setComposeState({
+        kind: "failed",
+        reason: e instanceof Error ? e.message : "network_failure",
+      });
+    }
+  }
 
   const calendarUrl = buildCalendarUrl({
     leadName,
@@ -194,9 +262,15 @@ export function LeadActionToolbar({
       <div className="grid gap-2 sm:grid-cols-3">
         <button
           type="button"
-          onClick={() => setCheckInOpen((v) => !v)}
+          onClick={() => {
+            if (checkInOpen) {
+              setCheckInOpen(false);
+            } else {
+              void openCheckInAndCompose();
+            }
+          }}
           disabled={!canEmail}
-          title={canEmail ? "Compose a check-in email" : "Add an email to send"}
+          title={canEmail ? "AI drafts a personalized check-in. You edit, then queue send." : "Add an email to send"}
           className={`group relative rounded-lg border px-4 py-3 text-left transition-all ${
             canEmail
               ? "border-accent/40 bg-accent/5 hover:bg-accent/10"
@@ -238,6 +312,33 @@ export function LeadActionToolbar({
           onSubmit={handleSend}
           className="rounded-lg border border-accent/40 bg-bg-elev/40 p-4 space-y-3"
         >
+          {/* AI compose status banner. Lets CC know the draft below was
+              AI-personalized (or fell back), so he can edit with context. */}
+          {composeState.kind === "loading" && (
+            <div className="rounded-md border border-accent/30 bg-accent/5 px-3 py-2 text-xs text-fg-muted flex items-center gap-2">
+              <Loader2 className="w-3.5 h-3.5 animate-spin text-accent" />
+              <span>
+                <span className="font-bold text-fg">Drafting a personalized check-in…</span>
+                {" "}lead context, last touch, and your name are being woven in.
+              </span>
+            </div>
+          )}
+          {composeState.kind === "loaded" && (
+            <div className="rounded-md border border-status-engaged/30 bg-status-engaged/5 px-3 py-2 text-xs text-fg-muted flex items-center gap-2">
+              <Sparkles className="w-3.5 h-3.5 text-status-engaged" />
+              <span>
+                <span className="font-bold text-fg">AI-drafted.</span> Edit anything before queueing — your name is the sign-off; the OASIS HTML wrap happens at send time.
+              </span>
+            </div>
+          )}
+          {composeState.kind === "failed" && (
+            <div className="rounded-md border border-status-warm/30 bg-status-warm/5 px-3 py-2 text-xs text-fg-muted flex items-center gap-2">
+              <XCircle className="w-3.5 h-3.5 text-status-warm" />
+              <span>
+                AI compose failed ({composeState.reason}) — fell back to a deterministic template. Edit normally.
+              </span>
+            </div>
+          )}
           <div>
             <label className="text-[10px] uppercase tracking-wider font-bold text-fg-dim">
               To

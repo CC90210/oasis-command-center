@@ -82,21 +82,19 @@ const EXPECTED_WORKERS: Array<{
     label: "Event router",
     purpose: "Tails Postgres agent_events into state/event_router.log — feeds /feed page.",
   },
-  {
-    service: "pm2.override-consumer",
-    label: "Override consumer",
-    purpose: "Pulls Approve/Deny decisions for exec_guard-blocked actions from Supabase to local state DB.",
-  },
-  {
-    service: "pm2.sequence-runner",
-    label: "Sequence runner",
-    purpose: "Drip-campaign engine — enrolls leads on stage changes, fires due sequence steps.",
-  },
-  {
-    service: "pm2.lender-response-classifier",
-    label: "Lender response classifier",
-    purpose: "Polls Gmail threads for shop-out replies, classifies via Claude Haiku 4.5.",
-  },
+  // Removed 2026-06-06 — three stale workers that aren't actually
+  // running on CC's local machine for the OASIS personal Command Center:
+  //   - pm2.override-consumer was deleted 2026-05-22 with the exec_guard
+  //     approval-request system (see Business-Empire-Agent/ecosystem.config.js
+  //     line 272 comment). Listing it was making the dashboard
+  //     misreport phantom "running" daemons.
+  //   - pm2.sequence-runner + pm2.lender-response-classifier are now
+  //     SunBiz VPS-only daemons (sunbiz-sequence-runner,
+  //     sunbiz-lender-response-classifier in SunBiz-Agent/ecosystem.config.js).
+  //     They aren't on CC's local pm2 and don't apply to the OASIS
+  //     personal Command Center. If a future SunBiz operator-facing
+  //     panel ships on /t/sun, it should source from a tenant-scoped
+  //     worker list, not this one.
   {
     service: "pm2.dashboard-email-consumer",
     label: "Dashboard email sender",
@@ -188,14 +186,27 @@ export async function GET() {
   const workers = EXPECTED_WORKERS.map((w) => {
     const archived = Boolean(w.archived_on);
     const h = archived ? undefined : healthMap.get(w.service);
+    // Standalone (non-pm2) workers don't have their lifecycle in pm2's
+    // jlist, so the bridge's heartbeat sometimes reports a stale
+    // "healthy" status row (e.g., Skool was once running months ago,
+    // the integrations_health row was never reset). Force these to
+    // "down" so the tile honestly says Stopped. CC 2026-06-06:
+    // "the Skool daemon is showing a checkmark, but it hasn't stopped."
+    const reportedStatus = (h?.status as "healthy" | "degraded" | "down" | "unconfigured") || "unconfigured";
+    const status = archived
+      ? ("archived" as const)
+      : w.manageable_via_pm2 === false
+        ? ("down" as const)
+        : reportedStatus;
     return {
       service: w.service,
       label: w.label,
       purpose: w.purpose,
-      status: archived
-        ? ("archived" as const)
-        : ((h?.status as "healthy" | "degraded" | "down" | "unconfigured") || "unconfigured"),
-      metadata: h?.metadata || {},
+      status,
+      // Strip stale metadata for forced-down standalones so the
+      // tooltip doesn't show a phantom 5-restart count from when it
+      // last ran.
+      metadata: w.manageable_via_pm2 === false ? {} : h?.metadata || {},
       last_ping_at: h?.last_ping_at || null,
       // Default to true so existing pm2-managed workers keep their action
       // buttons. Skool (the one non-pm2 standalone) flips this false.
