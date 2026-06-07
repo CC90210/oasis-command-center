@@ -13,18 +13,23 @@ import {
 } from "../materials";
 
 /**
- * 01 — Reasoning Core (V2). Full AI-helmet assembly:
+ * 01 — Reasoning Core (V3). AI-helmet redesigned around the FACE as the
+ * focal point.
  *
- *   - Cranial dome:        Layered hemisphere (outer shell + inner chassis seam)
- *   - Crown antenna array: 4 spike antennas + central emitter spike
- *   - Side sensor fins:    Angled radar fins on each temple
- *   - Face plate:          Tapered helmet visor frame (chassis tier)
- *   - Jaw guard:           Two-piece jaw assembly with mandible seam
- *   - Forehead sensor:     3-dot LED cluster above the brow
- *   - Cheek armor:         Beveled cheek panels with vertical seams
- *   - Neural conduit:      Cable ports on the back of the skull
+ * The V2 face plate was a solid shell box that obscured the visor and
+ * eyes — making the figure read as "blocky robot without features".
+ * V3 rebuilds the head as:
  *
- * Anchor (0, 1.35, 0). Reads as "a helmet, not a basketball."
+ *   - Elongated cranial dome (deeper back-of-skull, slimmer crown)
+ *   - SKULL FRAME — narrow chassis ring that defines the head outline
+ *   - DARK FACE CAVITY — recessed chassis "screen" behind a thin shell
+ *     frame, so BrowserOptics' visor + eyes have somewhere to sit and
+ *     dominate
+ *   - Cheek armor angled inward (V-shaped jawline, not blocky)
+ *   - Chin / vocal grille — slim chassis bar with horizontal slats
+ *   - Crown antenna trio (centered + 2 side angled) — fewer but cleaner
+ *   - Side ear plates (radar discs) — repositioned + smaller
+ *   - Forehead amber LED + side temple status dots
  */
 
 const TARGET = new THREE.Vector3(0, 1.35, 0);
@@ -44,118 +49,137 @@ export function ReasoningCore({ forceInstalled = false }: { forceInstalled?: boo
 
   return (
     <group ref={groupRef}>
-      {/* ───────── CRANIAL DOME ───────── */}
-      {/* Outer shell — flattened hemisphere */}
-      <mesh material={shell} position={[0, 0.1, 0]} scale={[1, 0.92, 1.02]}>
-        <sphereGeometry args={[0.22, 32, 20, 0, Math.PI * 2, 0, Math.PI * 0.58]} />
+      {/* ───────── CRANIAL DOME (taller, deeper, elongated) ───────── */}
+      <mesh material={shell} position={[0, 0.1, -0.015]} scale={[0.94, 1.02, 1.08]}>
+        <sphereGeometry args={[0.22, 32, 22, 0, Math.PI * 2, 0, Math.PI * 0.62]} />
         <Edges threshold={35} color={EMISSIVE_COLOR} scale={1.003} renderOrder={1} />
       </mesh>
-      {/* Inner chassis ring at dome base — visible seam */}
-      <mesh material={chassis} position={[0, 0.06, 0]} rotation={[Math.PI / 2, 0, 0]}>
-        <torusGeometry args={[0.215, 0.012, 8, 32]} />
+      {/* Crown ridge — central panel from front to back */}
+      <mesh material={chassis} position={[0, 0.22, -0.02]}>
+        <boxGeometry args={[0.05, 0.04, 0.36]} />
       </mesh>
-      {/* Top emissive panel — central crown plate */}
-      <mesh material={emissive} position={[0, 0.28, 0]} rotation={[Math.PI / 2, 0, 0]}>
-        <ringGeometry args={[0.018, 0.052, 16]} />
+      {/* Top crown emissive accent */}
+      <mesh material={emissive} position={[0, 0.245, -0.02]}>
+        <boxGeometry args={[0.025, 0.005, 0.3]} />
+      </mesh>
+      {/* Inner dome chassis seam */}
+      <mesh material={chassis} position={[0, 0.06, -0.015]} rotation={[Math.PI / 2, 0, 0]}>
+        <torusGeometry args={[0.215, 0.011, 8, 32]} />
       </mesh>
 
-      {/* ───────── ANTENNA ARRAY ───────── */}
-      {/* Central tall antenna with amber tip */}
-      <mesh material={chassis} position={[0, 0.34, 0]}>
-        <cylinderGeometry args={[0.008, 0.012, 0.12, 8]} />
+      {/* ───────── ANTENNA TRIO ───────── */}
+      {/* Central tall pylon with warm tip */}
+      <mesh material={chassis} position={[0, 0.32, -0.02]}>
+        <cylinderGeometry args={[0.008, 0.013, 0.14, 8]} />
       </mesh>
-      <mesh material={warm} position={[0, 0.41, 0]}>
-        <sphereGeometry args={[0.012, 8, 8]} />
+      <mesh material={warm} position={[0, 0.4, -0.02]}>
+        <sphereGeometry args={[0.014, 8, 8]} />
       </mesh>
-      {/* 4 side antennas — short spikes around the crown */}
-      {[
-        [0.08, 0.05, -0.08],
-        [-0.08, 0.05, -0.08],
-        [0.08, 0.05, 0.08],
-        [-0.08, 0.05, 0.08],
-      ].map(([x, dy, z], i) => (
-        <group key={i} position={[x, 0.27 + dy, z]}>
+      {/* 2 angled side antennas — swept back */}
+      {[-1, 1].map((sign) => (
+        <group key={sign} position={[sign * 0.07, 0.26, -0.06]} rotation={[0.4, 0, sign * -0.4]}>
           <mesh material={chassis}>
-            <coneGeometry args={[0.012, 0.08, 6]} />
+            <cylinderGeometry args={[0.007, 0.01, 0.1, 6]} />
           </mesh>
-          <mesh material={emissive} position={[0, 0.045, 0]}>
-            <sphereGeometry args={[0.008, 6, 6]} />
+          <mesh material={emissive} position={[0, 0.055, 0]}>
+            <sphereGeometry args={[0.009, 6, 6]} />
           </mesh>
         </group>
       ))}
 
-      {/* ───────── SIDE SENSOR FINS (radar dishes on each temple) ───────── */}
+      {/* ───────── SIDE EAR PLATES (smaller, repositioned) ───────── */}
       {[-1, 1].map((sign) => (
-        <group key={sign} position={[sign * 0.21, 0.06, 0]} rotation={[0, sign * -0.3, sign * 0.5]}>
+        <group key={sign} position={[sign * 0.2, 0.04, -0.02]} rotation={[0, sign * -0.15, sign * 0.25]}>
+          {/* Chassis backing */}
           <mesh material={chassis}>
-            <boxGeometry args={[0.04, 0.14, 0.04]} />
+            <boxGeometry args={[0.025, 0.12, 0.08]} />
           </mesh>
-          <mesh material={shell} position={[sign * 0.04, 0, 0]} rotation={[0, sign * Math.PI / 2, 0]}>
-            <cylinderGeometry args={[0.05, 0.05, 0.012, 12]} />
+          {/* Outer disc */}
+          <mesh material={shell} position={[sign * 0.018, 0, 0]} rotation={[0, sign * Math.PI / 2, 0]}>
+            <cylinderGeometry args={[0.038, 0.038, 0.012, 14]} />
             <Edges threshold={35} color={EMISSIVE_COLOR} scale={1.003} renderOrder={1} />
           </mesh>
-          {/* Dish emissive center */}
-          <mesh material={emissive} position={[sign * 0.047, 0, 0]} rotation={[0, sign * Math.PI / 2, 0]}>
-            <ringGeometry args={[0.008, 0.03, 12]} />
+          {/* Centre emissive dot */}
+          <mesh material={emissive} position={[sign * 0.024, 0, 0]} rotation={[0, sign * Math.PI / 2, 0]}>
+            <cylinderGeometry args={[0.009, 0.009, 0.003, 8]} />
           </mesh>
         </group>
       ))}
 
-      {/* ───────── FACE PLATE / JAW ───────── */}
-      {/* Upper face plate — front-facing recessed panel for the visor */}
-      <mesh material={chassis} position={[0, -0.02, 0.16]} rotation={[-0.05, 0, 0]}>
-        <boxGeometry args={[0.26, 0.18, 0.02]} />
-      </mesh>
-      {/* Outer face plate — wraps the face */}
-      <mesh material={shell} position={[0, -0.04, 0.01]}>
-        <boxGeometry args={[0.32, 0.22, 0.28]} />
-        <Edges threshold={35} color={EMISSIVE_COLOR} scale={1.003} renderOrder={1} />
-      </mesh>
-      {/* Jaw guard — upper jaw piece */}
-      <mesh material={shell} position={[0, -0.18, 0.03]}>
-        <boxGeometry args={[0.24, 0.06, 0.22]} />
-        <Edges threshold={35} color={EMISSIVE_COLOR} scale={1.003} renderOrder={1} />
-      </mesh>
-      {/* Jaw chin guard — lower piece, slightly narrower */}
-      <mesh material={shell} position={[0, -0.235, 0.025]}>
-        <boxGeometry args={[0.2, 0.05, 0.18]} />
-        <Edges threshold={35} color={EMISSIVE_COLOR} scale={1.003} renderOrder={1} />
-      </mesh>
-      {/* Mandible seam — horizontal emissive line between jaw pieces */}
-      <mesh material={emissive} position={[0, -0.21, 0.142]}>
-        <boxGeometry args={[0.16, 0.006, 0.005]} />
+      {/* ───────── FACE CAVITY ─────────
+          Dark chassis "screen" recessed BEHIND a thin shell frame.
+          This is the negative space that BrowserOptics sits in. */}
+      {/* Recessed face cavity — dark chassis backdrop for the visor */}
+      <mesh material={chassis} position={[0, -0.025, 0.135]}>
+        <boxGeometry args={[0.26, 0.18, 0.04]} />
       </mesh>
 
-      {/* ───────── FOREHEAD SENSOR CLUSTER ───────── */}
-      {/* Brow band — large horizontal emissive bar */}
-      <mesh material={emissive} position={[0, 0.06, 0.151]}>
-        <boxGeometry args={[0.18, 0.018, 0.005]} />
+      {/* Face frame — thin shell border around the cavity (top bar) */}
+      <mesh material={shell} position={[0, 0.075, 0.158]}>
+        <boxGeometry args={[0.3, 0.025, 0.02]} />
+        <Edges threshold={35} color={EMISSIVE_COLOR} scale={1.003} renderOrder={1} />
       </mesh>
-      {/* 3 small LED dots above the brow */}
-      {[-0.06, 0, 0.06].map((x, i) => (
-        <mesh key={i} material={warm} position={[x, 0.085, 0.152]}>
-          <boxGeometry args={[0.012, 0.008, 0.004]} />
+      {/* Face frame — bottom bar */}
+      <mesh material={shell} position={[0, -0.118, 0.158]}>
+        <boxGeometry args={[0.3, 0.025, 0.02]} />
+        <Edges threshold={35} color={EMISSIVE_COLOR} scale={1.003} renderOrder={1} />
+      </mesh>
+      {/* Face frame — left vertical pillar */}
+      <mesh material={shell} position={[-0.143, -0.025, 0.158]}>
+        <boxGeometry args={[0.025, 0.18, 0.02]} />
+        <Edges threshold={35} color={EMISSIVE_COLOR} scale={1.003} renderOrder={1} />
+      </mesh>
+      {/* Face frame — right vertical pillar */}
+      <mesh material={shell} position={[0.143, -0.025, 0.158]}>
+        <boxGeometry args={[0.025, 0.18, 0.02]} />
+        <Edges threshold={35} color={EMISSIVE_COLOR} scale={1.003} renderOrder={1} />
+      </mesh>
+
+      {/* Skull rear/sides — wrap the back of the head */}
+      <mesh material={shell} position={[0, -0.02, -0.05]}>
+        <boxGeometry args={[0.32, 0.2, 0.2]} />
+        <Edges threshold={35} color={EMISSIVE_COLOR} scale={1.003} renderOrder={1} />
+      </mesh>
+
+      {/* ───────── ANGLED CHEEK ARMOR (V-jaw, not blocky) ───────── */}
+      {[-1, 1].map((sign) => (
+        <mesh
+          key={sign}
+          material={shell}
+          position={[sign * 0.14, -0.14, 0.04]}
+          rotation={[0, sign * 0.25, sign * 0.18]}
+        >
+          <boxGeometry args={[0.055, 0.12, 0.14]} />
+          <Edges threshold={35} color={EMISSIVE_COLOR} scale={1.003} renderOrder={1} />
         </mesh>
       ))}
 
-      {/* ───────── CHEEK ARMOR with vertical seams ───────── */}
-      {[-1, 1].map((sign) => (
-        <group key={sign}>
-          {/* Cheek panel — beveled outward */}
-          <mesh material={shell} position={[sign * 0.155, -0.07, 0.08]} rotation={[0, sign * -0.15, 0]}>
-            <boxGeometry args={[0.04, 0.18, 0.14]} />
-            <Edges threshold={35} color={EMISSIVE_COLOR} scale={1.003} renderOrder={1} />
-          </mesh>
-          {/* Vertical cheek seam */}
-          <mesh material={emissive} position={[sign * 0.175, -0.07, 0.142]}>
-            <boxGeometry args={[0.005, 0.14, 0.005]} />
-          </mesh>
-        </group>
+      {/* ───────── CHIN + VOCAL GRILLE ─────────  */}
+      {/* Chin chassis bar — thinner than V2's blocky jaw */}
+      <mesh material={chassis} position={[0, -0.21, 0.07]}>
+        <boxGeometry args={[0.16, 0.05, 0.1]} />
+      </mesh>
+      {/* Vocal grille — 4 horizontal slats */}
+      {[-0.022, -0.007, 0.008, 0.023].map((dy, i) => (
+        <mesh key={i} material={emissive} position={[0, -0.215 + dy * 0.5, 0.12]}>
+          <boxGeometry args={[0.08, 0.005, 0.005]} />
+        </mesh>
       ))}
 
+      {/* ───────── FOREHEAD STATUS LEDs (above the face frame) ───────── */}
+      <mesh material={warm} position={[0, 0.095, 0.171]}>
+        <boxGeometry args={[0.018, 0.01, 0.005]} />
+      </mesh>
+      <mesh material={emissive} position={[-0.03, 0.095, 0.171]}>
+        <boxGeometry args={[0.01, 0.008, 0.005]} />
+      </mesh>
+      <mesh material={emissive} position={[0.03, 0.095, 0.171]}>
+        <boxGeometry args={[0.01, 0.008, 0.005]} />
+      </mesh>
+
       {/* ───────── NEURAL CONDUIT PORTS (back of skull) ───────── */}
-      {[-0.06, 0.06].map((x, i) => (
-        <group key={i} position={[x, 0, -0.16]}>
+      {[-0.07, 0.07].map((x, i) => (
+        <group key={i} position={[x, 0.02, -0.16]}>
           <mesh material={chassis}>
             <cylinderGeometry args={[0.018, 0.018, 0.04, 8]} />
           </mesh>

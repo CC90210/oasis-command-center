@@ -70,6 +70,14 @@ export function BridgeTools({ forceInstalled = false }: { forceInstalled?: boole
           <mesh material={emissive} position={[sign * 0.072, 0, 0]}>
             <boxGeometry args={[0.004, 0.36, 0.014]} />
           </mesh>
+          {/* Forearm chassis stripe — front diagonal accent */}
+          <mesh material={chassis} position={[0, 0.05, 0.072]} rotation={[0, 0, sign * 0.5]}>
+            <boxGeometry args={[0.014, 0.08, 0.003]} />
+          </mesh>
+          {/* Forearm seam ring divider on the front */}
+          <mesh material={chassis} position={[0, 0.02, 0.072]}>
+            <boxGeometry args={[0.08, 0.005, 0.003]} />
+          </mesh>
           {/* Wrist coupler ring */}
           <mesh material={chassis} position={[0, -0.24, 0]}>
             <cylinderGeometry args={[0.058, 0.058, 0.04, 14]} />

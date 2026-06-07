@@ -110,6 +110,24 @@ export function BusinessLayer({ forceInstalled = false }: { forceInstalled?: boo
         <boxGeometry args={[0.2, 0.012, 0.003]} />
       </mesh>
 
+      {/* ───────── CHEST EMBLEM (OASIS glyph) ───────── */}
+      {/* Outer chassis emblem plate — recessed dark backdrop */}
+      <mesh material={chassis} position={[0, 0.1, 0.195]} rotation={[0.04, 0, 0]}>
+        <cylinderGeometry args={[0.045, 0.045, 0.008, 24]} />
+      </mesh>
+      {/* OASIS "O" outer ring — emissive torus */}
+      <mesh material={emissive} position={[0, 0.1, 0.2]} rotation={[Math.PI / 2 + 0.04, 0, 0]}>
+        <torusGeometry args={[0.034, 0.0055, 8, 28]} />
+      </mesh>
+      {/* OASIS "O" inner ring — second concentric ring */}
+      <mesh material={emissive} position={[0, 0.1, 0.2]} rotation={[Math.PI / 2 + 0.04, 0, 0]}>
+        <torusGeometry args={[0.018, 0.004, 6, 22]} />
+      </mesh>
+      {/* Centre warm dot — the "heart" of the glyph */}
+      <mesh material={warm} position={[0, 0.1, 0.202]}>
+        <sphereGeometry args={[0.007, 8, 8]} />
+      </mesh>
+
       {/* ───────── STATUS INDICATOR ROW (collar bar) ───────── */}
       {[-0.06, -0.036, -0.012, 0.012, 0.036].map((x, i) => (
         <mesh key={i} material={emissive} position={[x, 0.295, 0.191]} rotation={[0.04, 0, 0]}>

@@ -88,6 +88,14 @@ export function CommandCentre({ forceInstalled = false }: { forceInstalled?: boo
           <mesh material={emissive} position={[sign * 0.062, 0.1, 0]}>
             <boxGeometry args={[0.004, THIGH_LEN * 0.7, 0.016]} />
           </mesh>
+          {/* Thigh chassis stripe — diagonal dark accent on front armor */}
+          <mesh material={chassis} position={[sign * 0.035, 0.18, 0.091]} rotation={[0, 0, sign * 0.5]}>
+            <boxGeometry args={[0.018, 0.09, 0.004]} />
+          </mesh>
+          {/* Thigh side panel divider (horizontal seam) */}
+          <mesh material={chassis} position={[0, -0.01, 0.091]}>
+            <boxGeometry args={[0.115, 0.008, 0.003]} />
+          </mesh>
 
           {/* ───────── KNEE SERVO CLUSTER ───────── */}
           {/* Central servo sphere */}
@@ -139,24 +147,36 @@ export function CommandCentre({ forceInstalled = false }: { forceInstalled?: boo
             <torusGeometry args={[0.058, 0.006, 6, 18]} />
           </mesh>
 
-          {/* ───────── FOOT (toe + heel + sole) ───────── */}
-          {/* Toe segment (forward) */}
-          <mesh material={shell} position={[0, -0.58, 0.075]}>
-            <boxGeometry args={[0.11, 0.05, 0.12]} />
+          {/* ───────── FOOT (sleek profile: rounded toe + tapered heel) ───────── */}
+          {/* Main foot body — rounded box (uses scale to elongate front-to-back) */}
+          <mesh material={shell} position={[0, -0.58, 0.025]}>
+            <boxGeometry args={[0.11, 0.05, 0.21]} />
             <Edges threshold={35} color={EMISSIVE_COLOR} scale={1.005} renderOrder={1} />
           </mesh>
-          {/* Heel segment (back) */}
-          <mesh material={shell} position={[0, -0.58, -0.045]}>
-            <boxGeometry args={[0.105, 0.05, 0.09]} />
+          {/* Rounded toe cap — half-cylinder shaping the front of the foot */}
+          <mesh
+            material={shell}
+            position={[0, -0.58, 0.13]}
+            rotation={[0, 0, Math.PI / 2]}
+          >
+            <cylinderGeometry args={[0.025, 0.025, 0.11, 14, 1, false, 0, Math.PI]} />
             <Edges threshold={35} color={EMISSIVE_COLOR} scale={1.005} renderOrder={1} />
+          </mesh>
+          {/* Tapered heel cap */}
+          <mesh material={chassis} position={[0, -0.595, -0.082]}>
+            <boxGeometry args={[0.095, 0.025, 0.04]} />
           </mesh>
           {/* Sole plate — thin chassis underneath */}
-          <mesh material={chassis} position={[0, -0.612, 0.02]}>
-            <boxGeometry args={[0.12, 0.015, 0.23]} />
+          <mesh material={chassis} position={[0, -0.61, 0.025]}>
+            <boxGeometry args={[0.12, 0.012, 0.24]} />
           </mesh>
           {/* Toe accent strip */}
-          <mesh material={emissive} position={[0, -0.555, 0.137]}>
-            <boxGeometry args={[0.06, 0.005, 0.005]} />
+          <mesh material={emissive} position={[0, -0.555, 0.157]}>
+            <boxGeometry args={[0.055, 0.004, 0.005]} />
+          </mesh>
+          {/* Mid-foot side seam — emissive line down each outer face */}
+          <mesh material={emissive} position={[sign * 0.055, -0.58, 0.04]}>
+            <boxGeometry args={[0.003, 0.005, 0.12]} />
           </mesh>
         </group>
       ))}
