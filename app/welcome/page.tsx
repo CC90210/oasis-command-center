@@ -27,7 +27,7 @@ export default async function WelcomePage() {
   if (user) redirect("/");
 
   return (
-    <main className="relative h-screen w-screen overflow-hidden bg-[#02050a] text-fg">
+    <main className="relative min-h-screen w-full overflow-x-hidden bg-[#02050a] text-fg md:h-screen md:overflow-hidden">
       {/* SSR-vs-cookie race guard — bounces a signed-in user into the
           app even if the just-set auth cookie missed the SSR pass.
           (CC reported 2026-05-24.) */}
@@ -36,8 +36,8 @@ export default async function WelcomePage() {
       {/* Fixed animated atmosphere — sits under everything */}
       <HeroBackdrop />
 
-      {/* Single-viewport flex column: header + hero + (no scroll) */}
-      <div className="relative z-10 flex h-full w-full flex-col">
+      {/* Flex column — natural scroll on mobile, locked single-viewport on md+ */}
+      <div className="relative z-10 flex min-h-screen w-full flex-col md:h-full md:min-h-0">
         {/* Header */}
         <header className="mx-auto flex w-full max-w-7xl shrink-0 items-center justify-between px-5 py-4 sm:px-8 sm:py-5">
           <Link href="/welcome" className="flex items-center gap-3">
@@ -61,8 +61,9 @@ export default async function WelcomePage() {
           </nav>
         </header>
 
-        {/* Centred hero — fills remaining vertical space, centres content */}
-        <section className="mx-auto flex w-full max-w-6xl flex-1 flex-col items-center justify-center overflow-hidden px-5 pb-6 sm:px-8 sm:pb-10">
+        {/* Centred hero — flex-1 so it fills remaining vertical space on md+,
+            content can grow naturally on mobile (where main allows scroll). */}
+        <section className="mx-auto flex w-full max-w-6xl flex-1 flex-col items-center justify-center px-5 pb-8 pt-6 sm:px-8 sm:pb-10 md:overflow-hidden md:pt-0">
           <div className="welcome-fade mb-3 inline-flex shrink-0 items-center gap-2 border-l border-emerald-300/[0.45] bg-emerald-300/[0.08] px-3 py-1.5 text-[10px] font-mono uppercase tracking-[0.22em] text-emerald-100/[0.85] backdrop-blur-md sm:mb-4">
             Pick your entry path
           </div>
@@ -70,7 +71,7 @@ export default async function WelcomePage() {
           <h1 className="welcome-fade welcome-fade-d1 shrink-0 text-center text-[clamp(2rem,5.5vw,4.4rem)] font-black leading-[0.98] tracking-tight text-white">
             Build the agent
             <br />
-            <span className="bg-gradient-to-br from-emerald-200 via-emerald-300 to-teal-300 bg-clip-text text-transparent drop-shadow-[0_0_28px_rgba(134,239,172,0.18)]">
+            <span className="welcome-shimmer bg-clip-text text-transparent drop-shadow-[0_0_28px_rgba(134,239,172,0.22)]">
               before you enter.
             </span>
           </h1>
@@ -111,8 +112,8 @@ export default async function WelcomePage() {
         </section>
       </div>
 
-      {/* Local styles — entrance fade stagger. Respects
-          prefers-reduced-motion via the @media gate below. */}
+      {/* Local styles — entrance fade stagger + gradient shimmer + card
+          hover lift. All respect prefers-reduced-motion. */}
       <style>{`
         .welcome-fade {
           opacity: 0;
@@ -127,12 +128,54 @@ export default async function WelcomePage() {
         @keyframes welcome-fade-in {
           to { opacity: 1; transform: translateY(0); }
         }
+
+        /* Shimmer on the gradient headline. Background is 3x text width so
+           the gradient stripe slowly slides across without ever blanking. */
+        .welcome-shimmer {
+          background-image: linear-gradient(
+            110deg,
+            #a7f3d0 0%,
+            #86efac 22%,
+            #5eead4 44%,
+            #67e8f9 56%,
+            #86efac 78%,
+            #a7f3d0 100%
+          );
+          background-size: 280% 100%;
+          background-position: 0% 50%;
+          animation: welcome-shimmer 9s ease-in-out infinite;
+        }
+        @keyframes welcome-shimmer {
+          0%, 100% { background-position: 0% 50%; }
+          50%      { background-position: 100% 50%; }
+        }
+
+        /* Card hover: subtle lift + amplified glow on the primary card. */
+        .welcome-card {
+          transition: transform 0.35s cubic-bezier(.2,.7,.2,1),
+                      box-shadow 0.35s cubic-bezier(.2,.7,.2,1),
+                      border-color 0.25s ease,
+                      background-color 0.25s ease;
+        }
+        .welcome-card:hover {
+          transform: translateY(-3px);
+        }
+        .welcome-card-primary:hover {
+          box-shadow: 0 0 56px -14px rgba(52, 211, 153, 0.95);
+        }
+
         @media (prefers-reduced-motion: reduce) {
           .welcome-fade {
             opacity: 1;
             transform: none;
             animation: none;
           }
+          .welcome-shimmer {
+            animation: none;
+            background-position: 25% 50%;
+          }
+          .welcome-card { transition: none; }
+          .welcome-card:hover { transform: none; }
         }
       `}</style>
     </main>
@@ -159,7 +202,9 @@ function EntryChoice({
   return (
     <Link
       href={href}
-      className={`welcome-fade ${delayClass} group flex min-h-[10.5rem] flex-col justify-between rounded-xl border p-4 backdrop-blur-sm transition-all sm:min-h-[12rem] sm:p-5 ${
+      className={`welcome-fade welcome-card ${delayClass} ${
+        primary ? "welcome-card-primary" : ""
+      } group flex min-h-[10.5rem] flex-col justify-between rounded-xl border p-4 backdrop-blur-sm sm:min-h-[12rem] sm:p-5 ${
         primary
           ? "border-emerald-200/[0.35] bg-emerald-300/[0.06] shadow-[0_0_42px_-18px_rgba(52,211,153,0.85)] hover:border-emerald-200/[0.6] hover:bg-emerald-300/[0.1]"
           : "border-white/10 bg-white/[0.045] hover:border-white/[0.22] hover:bg-white/[0.075]"
