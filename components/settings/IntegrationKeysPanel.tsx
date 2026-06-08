@@ -184,7 +184,7 @@ export function IntegrationKeysPanel({
         </div>
       ) : (
         <div className="space-y-5">
-          {INTEGRATION_SCHEMAS.map((schema) => {
+          {INTEGRATION_SCHEMAS.filter((s) => !s.advanced).map((schema) => {
             const fieldStatuses = schema.fields.map((f) => ({
               field: f,
               status: statusFor(schema.service, f.key),

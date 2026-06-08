@@ -195,8 +195,21 @@ function renderCliOption(args: {
   serverBridgeOnline?: boolean;
 }) {
   const { value, displayName, onlineTooltip, offlineTooltip, bridgeOnline, serverBridgeOnline } = args;
+  // 2026-06-08 fix: when proxy mode is active AND the server confirms the
+  // bridge is heartbeating, the browser's failed localhost probe is
+  // IRRELEVANT — all bridge traffic routes through /api/bridge/* anyway.
+  // Treat as effectively online so the operator can actually select the CLI.
+  //
+  // Bug this fixes: CC (Ezra session) saw all CLI options showing
+  // "(bridge offline)" and disabled, even though srv1723601 was pinging
+  // every few seconds and the footer correctly showed BRIDGE ONLINE. The
+  // dropdown gated on bridgeOnline (browser probe of localhost:9100)
+  // which can NEVER succeed when the bridge is on a remote VPS — but
+  // since proxy mode is on, the chat works just fine.
+  const usingProxy = isProxyMode && serverBridgeOnline === true;
+  const effectivelyOnline = bridgeOnline === true || usingProxy;
   const suffix =
-    bridgeOnline === true
+    effectivelyOnline
       ? ""
       : bridgeOnline === null
         ? " (checking…)"
@@ -204,13 +217,13 @@ function renderCliOption(args: {
           ? " (unreachable from this browser)"
           : " (bridge offline)";
   const title =
-    bridgeOnline === true
+    effectivelyOnline
       ? onlineTooltip
       : serverBridgeOnline === true
         ? UNREACHABLE_TOOLTIP
         : offlineTooltip;
   return (
-    <option key={value} value={value} disabled={bridgeOnline !== true} title={title}>
+    <option key={value} value={value} disabled={!effectivelyOnline} title={title}>
       {displayName}
       {suffix}
     </option>

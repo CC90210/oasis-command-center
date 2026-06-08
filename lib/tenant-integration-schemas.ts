@@ -41,6 +41,14 @@ export type IntegrationSchema = {
    *     section instead of the tenant integrations grid.
    */
   scope?: "tenant" | "user_only";
+  /**
+   * 2026-06-08 — collapse advanced/edge-case integrations behind a
+   * "Show advanced" toggle so the default view is clean for non-
+   * technical operators. CC pass: Custom SMTP creates redundancy with
+   * Google Workspace (Gmail) for most tenants; ngrok / self-hosted
+   * SMTP / etc. only matter to operators who explicitly need them.
+   */
+  advanced?: boolean;
 };
 
 export const INTEGRATION_SCHEMAS: IntegrationSchema[] = [
@@ -88,7 +96,8 @@ export const INTEGRATION_SCHEMAS: IntegrationSchema[] = [
   {
     service: "smtp",
     label: "Custom SMTP",
-    description: "Direct SMTP for outbound email (alternative to Gmail App Password).",
+    description: "Direct SMTP for outbound email (alternative to Gmail App Password — only set this if you're using SendGrid, AWS SES, or a self-hosted MTA instead of Gmail).",
+    advanced: true,
     fields: [
       { key: "host", label: "Host", sensitive: false, hint: "e.g. smtp.sendgrid.net" },
       { key: "port", label: "Port", sensitive: false, hint: "Usually 587 (STARTTLS) or 465 (SSL)" },
