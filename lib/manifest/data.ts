@@ -156,11 +156,18 @@ const STAGES_NEEDING_APPLY_URL = new Set([
 
 /**
  * Look up the tenant's primary lead-intake form. Returns null if the
- * tenant has no published form (cleanly skips URL stamping — sequence
+ * tenant has no enabled form (cleanly skips URL stamping — sequence
  * templates handle the empty variable as plain text). Picks the form
- * whose slug looks intake-shaped, falling back to the oldest published
- * form if no slug match. Memoized per request via a local cache map
- * since list / create / update can fire repeatedly during a batch.
+ * whose slug looks intake-shaped, falling back to the oldest enabled
+ * form if no slug match.
+ *
+ * Uses Supabase's foreign-table embed (`tenant:tenants!inner(slug)`)
+ * to fetch tenant.slug in ONE query — matches the pattern used by
+ * app/api/forms/submit/route.ts:225 + mint-link/route.ts:38.
+ *
+ * Schema source of truth: database/042_tenant_forms.sql.
+ *   - Table is `forms` (NOT `tenant_forms` despite the migration filename).
+ *   - Active flag is `enabled` (NOT `published`).
  */
 async function resolveIntakeForm(
   db: ReturnType<typeof getServiceSupabase>,
@@ -168,12 +175,17 @@ async function resolveIntakeForm(
 ): Promise<{ id: string; slug: string; tenant_slug: string } | null> {
   try {
     const formsRes = await db
-      .from("tenant_forms")
-      .select("id, slug")
+      .from("forms")
+      .select("id, slug, tenant:tenants!inner(slug)")
       .eq("tenant_id", tenantId)
-      .eq("published", true)
+      .eq("enabled", true)
       .order("created_at", { ascending: true });
-    const forms = (formsRes.data || []) as { id: string; slug: string }[];
+    type FormRow = {
+      id: string;
+      slug: string;
+      tenant: { slug: string } | { slug: string }[] | null;
+    };
+    const forms = (formsRes.data || []) as FormRow[];
     if (forms.length === 0) return null;
     const intakeMatch = forms.find((f) => {
       const s = (f.slug || "").toLowerCase();
@@ -186,15 +198,11 @@ async function resolveIntakeForm(
       );
     });
     const chosen = intakeMatch || forms[0];
-    // Tenant slug needed for the public URL — separate query but cached
-    // implicitly by Postgres at this volume.
-    const tenantRes = await db
-      .from("tenants")
-      .select("slug")
-      .eq("id", tenantId)
-      .limit(1)
-      .maybeSingle();
-    const tenantSlug = (tenantRes.data as { slug?: string } | null)?.slug;
+    // Supabase REST may flatten or array-wrap the embed depending on
+    // FK shape — handle both.
+    const tenantSlug = Array.isArray(chosen.tenant)
+      ? chosen.tenant[0]?.slug
+      : chosen.tenant?.slug;
     if (!tenantSlug) return null;
     return { id: chosen.id, slug: chosen.slug, tenant_slug: tenantSlug };
   } catch {
