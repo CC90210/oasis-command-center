@@ -50,6 +50,10 @@ export function IntegrationKeysPanel({
   const [errors, setErrors] = useState<LastError>({});
   const [testing, setTesting] = useState<Record<string, boolean>>({});
   const [loaded, setLoaded] = useState(false);
+  // 2026-06-08: rows with `advanced: true` on their schema are hidden by
+  // default. Most operators want Gmail not SMTP, etc. When this is true,
+  // the panel also renders the rows tagged advanced (SMTP, etc.).
+  const [showAdvanced, setShowAdvanced] = useState(false);
 
   const [loadError, setLoadError] = useState<string | null>(null);
 
@@ -184,7 +188,7 @@ export function IntegrationKeysPanel({
         </div>
       ) : (
         <div className="space-y-5">
-          {INTEGRATION_SCHEMAS.filter((s) => !s.advanced).map((schema) => {
+          {INTEGRATION_SCHEMAS.filter((s) => !s.advanced || showAdvanced).map((schema) => {
             const fieldStatuses = schema.fields.map((f) => ({
               field: f,
               status: statusFor(schema.service, f.key),
@@ -306,6 +310,19 @@ export function IntegrationKeysPanel({
               </div>
             );
           })}
+          {/* Show advanced toggle — reveals SMTP and other edge-case
+              integrations that most operators don't need. Keeps the
+              default view clean while still letting power users find
+              the option. */}
+          {INTEGRATION_SCHEMAS.some((s) => s.advanced) && (
+            <button
+              type="button"
+              onClick={() => setShowAdvanced((v) => !v)}
+              className="text-[11px] text-fg-muted hover:text-fg inline-flex items-center gap-1 pl-1"
+            >
+              {showAdvanced ? "Hide" : "Show"} advanced integrations (SMTP, etc.)
+            </button>
+          )}
         </div>
       )}
     </Card>

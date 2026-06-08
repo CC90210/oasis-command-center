@@ -1614,9 +1614,20 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
     const wantsBridge =
       activeMode === "cli" ||
       (activeMode === "auto" && bridgeOnline === true);
-    if (activeMode === "cli" && bridgeOnline !== true) {
-      // Pinned to bridge but THIS browser's localhost probe failed. Two
-      // very different situations to surface differently (ADR-0006):
+    // 2026-06-08 stub-fix: proxy mode + serverBridgeOnline means the bridge
+    // is reachable via the same-origin /api/bridge/chat proxy — the
+    // browser's failed localhost probe is irrelevant. Without this guard,
+    // the previous code errored out on every CLI send from a browser that
+    // can't see localhost:9100 (i.e., every browser on a remote VPS deploy),
+    // even though the proxy path below at line ~1684 would handle it just
+    // fine. Matches the renderCliOption gate at the dropdown layer.
+    const effectiveBridgeOnline =
+      bridgeOnline === true ||
+      (isProxyMode && serverBridgeOnline === true);
+    if (activeMode === "cli" && !effectiveBridgeOnline) {
+      // Pinned to bridge but neither the local probe NOR the proxy path
+      // can reach the bridge. Two very different situations to surface
+      // differently (ADR-0006):
       //
       //   A. The tenant has a bridge online elsewhere (typical multi-
       //      employee model: admin's always-on machine). Tell the
