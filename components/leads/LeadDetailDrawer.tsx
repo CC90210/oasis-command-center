@@ -174,11 +174,14 @@ export function LeadDetailDrawer({
         className="flex-1 bg-black/60 backdrop-blur-sm cursor-default"
       />
       <aside className="relative w-full sm:w-[580px] h-full bg-bg-elev border-l border-bg-border shadow-[-12px_0_32px_-8px_rgba(0,0,0,0.6)] flex flex-col">
-        <header className="px-5 py-4 border-b border-bg-border space-y-4">
+        {/* Header — 2026-06-08 refinement: softer divider, slightly wider
+            inner spacing on the label row, stage chip is now rounded-full +
+            uppercase letter-spacing to feel less rectangular. */}
+        <header className="px-5 py-4 border-b border-bg-border/60 space-y-4">
           {/* Row 1: MERCHANT label + stage chip + close */}
           <div className="flex items-start gap-3">
             <div className="min-w-0 flex-1">
-              <div className="text-[10px] uppercase tracking-wider text-fg-dim font-semibold mb-1">
+              <div className="text-[10px] uppercase tracking-[0.12em] text-fg-dim/80 font-semibold mb-1">
                 {entity === "application" ? "Application" : "Merchant"}
               </div>
               <h2 className="text-lg font-bold text-fg truncate leading-tight">{title}</h2>
@@ -187,7 +190,7 @@ export function LeadDetailDrawer({
             <div className="flex items-center gap-2 shrink-0">
               {stageChip && (
                 <span
-                  className="inline-block px-2 py-1 rounded text-[10.5px] font-semibold whitespace-nowrap"
+                  className="inline-block px-2.5 py-1 rounded-full text-[10px] font-semibold uppercase tracking-[0.06em] whitespace-nowrap"
                   style={{ background: stageChip.bg, color: stageChip.fg }}
                 >
                   {stageChip.label}
@@ -198,7 +201,7 @@ export function LeadDetailDrawer({
                 type="button"
                 onClick={close}
                 aria-label="Close"
-                className="p-1 rounded-md text-fg-muted hover:text-fg hover:bg-bg-deep"
+                className="p-1 rounded-md text-fg-muted hover:text-fg hover:bg-bg-deep transition-colors"
               >
                 <X className="w-4 h-4" />
               </button>
@@ -259,21 +262,25 @@ export function LeadDetailDrawer({
           </div>
         </header>
 
-        <nav className="flex gap-1 px-5 pt-3 border-b border-bg-border overflow-x-auto">
+        {/* Tab nav — softened 2026-06-08: subtle hover bg, tighter padding,
+            border-bg-border/50 so the divider doesn't compete with the
+            header underline above */}
+        <nav className="flex gap-0.5 px-5 pt-3 border-b border-bg-border/50 overflow-x-auto">
           {TABS.map((t) => {
             const isDocs = t.key === "documents";
             const missingCount = isDocs && data
               ? computeMissingDocCount(data.documents)
               : 0;
+            const isActive = activeTab === t.key;
             return (
               <button
                 key={t.key}
                 type="button"
                 onClick={() => setActiveTab(t.key)}
-                className={`text-[11px] uppercase tracking-wider px-2.5 py-1.5 rounded-t-md border-b-2 inline-flex items-center gap-1.5 ${
-                  activeTab === t.key
+                className={`text-[11px] uppercase tracking-[0.08em] px-2.5 py-1.5 rounded-t-md border-b-2 inline-flex items-center gap-1.5 transition-colors ${
+                  isActive
                     ? "border-accent text-fg"
-                    : "border-transparent text-fg-muted hover:text-fg"
+                    : "border-transparent text-fg-muted hover:text-fg hover:bg-bg-deep/30"
                 }`}
               >
                 <span>{t.label}</span>
@@ -1474,7 +1481,11 @@ function EmailComposer({
       />
       <div className="flex items-center justify-between">
         <div className="text-[11px] text-fg-dim">
-          {status ? status : `${body.length}/32000 · queues for send_gateway`}
+          {status
+            ? status
+            : body.length > 0
+              ? `${body.length.toLocaleString()} / 32,000`
+              : "Ready when you are"}
         </div>
         <button
           type="button"
@@ -1801,12 +1812,29 @@ function StatTile({
   primary: string;
   secondary: string | null;
 }) {
+  // Empty tiles (primary === "—") get a softer treatment so the stark
+  // em-dash doesn't read as broken UI when a lead hasn't been graded yet.
+  // 2026-06-08: refined per CC's "less blocky" pass — softer border,
+  // rounded-lg, faded primary on empty, tighter label letter-spacing.
+  const isEmpty = primary === "—";
   return (
-    <div className="rounded-md border border-bg-border bg-bg-deep/40 px-2.5 py-2">
-      <div className="text-[9.5px] uppercase tracking-wider text-fg-dim leading-tight">
+    <div
+      className={`rounded-lg border px-2.5 py-2 transition-colors ${
+        isEmpty
+          ? "border-bg-border/40 bg-bg-deep/20"
+          : "border-bg-border/70 bg-bg-deep/40"
+      }`}
+    >
+      <div className="text-[9.5px] uppercase tracking-[0.08em] text-fg-dim/80 leading-tight">
         {label}
       </div>
-      <div className="text-[14px] font-bold text-fg leading-tight mt-1">{primary}</div>
+      <div
+        className={`text-[14px] font-bold leading-tight mt-1 ${
+          isEmpty ? "text-fg-dim/60" : "text-fg"
+        }`}
+      >
+        {primary}
+      </div>
       {secondary && (
         <div className="text-[9.5px] text-fg-dim mt-0.5 truncate">{secondary}</div>
       )}
@@ -1825,31 +1853,36 @@ function OwnerAssignedRow({ record }: { record: Record<string, unknown> }) {
     null;
   const lastTouchIso = lastTouchIsoFlat(record);
 
+  // 2026-06-08 refinement (CC "less blocky" pass): softer label weight,
+  // tighter line-height, vertical stack for the contact lines so phone +
+  // email don't smash into each other on long values.
   return (
-    <div className="grid grid-cols-2 gap-3">
-      <div>
-        <div className="text-[9.5px] uppercase tracking-wider text-fg-dim font-semibold mb-1">
+    <div className="grid grid-cols-2 gap-4">
+      <div className="min-w-0">
+        <div className="text-[9.5px] uppercase tracking-[0.08em] text-fg-dim/80 mb-1.5">
           Owner / Signer
         </div>
-        <div className="text-[13px] font-medium text-fg">{ownerName}</div>
-        {ownerPhone && (
-          <div className="text-[11px] text-fg-muted mt-0.5 inline-flex items-center gap-1">
-            <Phone className="w-3 h-3" />
-            {ownerPhone}
-          </div>
-        )}
-        {ownerEmail && (
-          <div className="text-[11px] text-fg-muted truncate inline-flex items-center gap-1">
-            <Mail className="w-3 h-3" />
-            {ownerEmail}
-          </div>
-        )}
+        <div className="text-[13px] font-medium text-fg leading-tight">{ownerName}</div>
+        <div className="mt-1 space-y-0.5">
+          {ownerPhone && (
+            <div className="text-[11px] text-fg-muted/90 inline-flex items-center gap-1.5">
+              <Phone className="w-3 h-3 opacity-70" />
+              <span className="truncate">{ownerPhone}</span>
+            </div>
+          )}
+          {ownerEmail && (
+            <div className="text-[11px] text-fg-muted/90 truncate inline-flex items-center gap-1.5 w-full">
+              <Mail className="w-3 h-3 opacity-70 shrink-0" />
+              <span className="truncate">{ownerEmail}</span>
+            </div>
+          )}
+        </div>
       </div>
-      <div>
-        <div className="text-[9.5px] uppercase tracking-wider text-fg-dim font-semibold mb-1">
+      <div className="min-w-0">
+        <div className="text-[9.5px] uppercase tracking-[0.08em] text-fg-dim/80 mb-1.5">
           Assigned to
         </div>
-        <div className="text-[13px] font-medium text-fg">{assignedName || "Unassigned"}</div>
+        <div className="text-[13px] font-medium text-fg leading-tight">{assignedName || "Unassigned"}</div>
         {lastTouchIso && (
           <div className="text-[10.5px] text-fg-dim mt-1.5">
             <span className="uppercase tracking-wider mr-1">Last touch</span>

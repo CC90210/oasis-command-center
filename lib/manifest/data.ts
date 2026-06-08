@@ -24,6 +24,7 @@
 
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { detectStatusTransitions, publishStatusChange } from "./events";
+import { signFormLink } from "@/lib/form-links";
 
 export class RecordsError extends Error {
   constructor(
@@ -134,6 +135,109 @@ export async function getRecord(input: { tenant_id: string; entity: string; id: 
   return (result.data || null) as TenantRecord | null;
 }
 
+// Stages at which the merchant-facing application URL is useful to have
+// stamped on the lead row. Drip templates reference {{lead.application_url}}
+// for the apply-now CTA — if the lead's data doesn't carry the URL, that
+// substitution comes out empty and the message lands broken. Phase 2 of
+// Adon's MCA architecture (2026-06-08) closes this by auto-stamping the
+// URL at the moment the lead enters one of these stages.
+//
+// Stages NOT in this list (declined, default, opted_out, renewed_elsewhere)
+// don't need a fresh URL — the merchant's path is closed.
+const STAGES_NEEDING_APPLY_URL = new Set([
+  "hot_lead",
+  "new_contact",
+  "missing_info",
+  "follow_up",
+  "sent_application",
+  "viewed_application",
+  "ghost", // re-engagement merchants still need a working link
+]);
+
+/**
+ * Look up the tenant's primary lead-intake form. Returns null if the
+ * tenant has no published form (cleanly skips URL stamping — sequence
+ * templates handle the empty variable as plain text). Picks the form
+ * whose slug looks intake-shaped, falling back to the oldest published
+ * form if no slug match. Memoized per request via a local cache map
+ * since list / create / update can fire repeatedly during a batch.
+ */
+async function resolveIntakeForm(
+  db: ReturnType<typeof getServiceSupabase>,
+  tenantId: string,
+): Promise<{ id: string; slug: string; tenant_slug: string } | null> {
+  try {
+    const formsRes = await db
+      .from("tenant_forms")
+      .select("id, slug")
+      .eq("tenant_id", tenantId)
+      .eq("published", true)
+      .order("created_at", { ascending: true });
+    const forms = (formsRes.data || []) as { id: string; slug: string }[];
+    if (forms.length === 0) return null;
+    const intakeMatch = forms.find((f) => {
+      const s = (f.slug || "").toLowerCase();
+      return (
+        s === "initial-lead-capture" ||
+        s === "intake" ||
+        s.includes("apply") ||
+        s.includes("intake") ||
+        s.includes("lead-capture")
+      );
+    });
+    const chosen = intakeMatch || forms[0];
+    // Tenant slug needed for the public URL — separate query but cached
+    // implicitly by Postgres at this volume.
+    const tenantRes = await db
+      .from("tenants")
+      .select("slug")
+      .eq("id", tenantId)
+      .limit(1)
+      .maybeSingle();
+    const tenantSlug = (tenantRes.data as { slug?: string } | null)?.slug;
+    if (!tenantSlug) return null;
+    return { id: chosen.id, slug: chosen.slug, tenant_slug: tenantSlug };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * If the lead row needs an application URL (relevant stage, no URL yet,
+ * lead entity), mint one via signFormLink and return the URL string.
+ * Returns null when nothing should be stamped — caller treats null as
+ * "leave data alone." Best-effort: any failure (no form, no HMAC key,
+ * supabase blip) returns null silently so the parent create/update
+ * never crashes on a side-effect.
+ */
+async function maybeMintApplicationUrl(
+  db: ReturnType<typeof getServiceSupabase>,
+  tenantId: string,
+  entity: string,
+  recordId: string,
+  data: Record<string, unknown>,
+): Promise<string | null> {
+  if (entity !== "lead") return null;
+  if (typeof data.application_url === "string" && data.application_url.trim()) {
+    return null; // already stamped
+  }
+  const stage = typeof data.stage === "string" ? data.stage : "";
+  if (!STAGES_NEEDING_APPLY_URL.has(stage)) return null;
+  const form = await resolveIntakeForm(db, tenantId);
+  if (!form) return null;
+  const token = signFormLink({
+    tenant: form.tenant_slug,
+    form_id: form.id,
+    lead_id: recordId,
+  });
+  if (!token) return null; // HMAC key missing in production — fail-closed
+  const origin =
+    process.env.OASIS_PUBLIC_ORIGIN ||
+    process.env.NEXT_PUBLIC_SITE_URL ||
+    "https://oasisai.work";
+  return `${origin.replace(/\/$/, "")}/f/${form.tenant_slug}/${form.slug}/${token}`;
+}
+
 export type CreateRecordInput = {
   tenant_id: string;
   entity: string;
@@ -158,10 +262,35 @@ export async function createRecord(input: CreateRecordInput): Promise<TenantReco
   if (result.error) throw new RecordsError("db", result.error.message);
   const row = result.data as TenantRecord;
 
+  // Adon Phase 2 (2026-06-08): stamp data.application_url so drip
+  // templates can substitute the apply-now CTA. Best-effort — failure
+  // returns null and we proceed without the URL.
+  const mintedUrl = await maybeMintApplicationUrl(
+    db,
+    row.tenant_id,
+    row.entity_type,
+    row.id,
+    row.data,
+  );
+  if (mintedUrl) {
+    const updated = { ...row.data, application_url: mintedUrl };
+    const patchRes = await db
+      .from("tenant_records")
+      .update({ data: updated, updated_at: new Date().toISOString() })
+      .eq("id", row.id)
+      .select("data, updated_at")
+      .single();
+    if (!patchRes.error && patchRes.data) {
+      row.data = (patchRes.data as { data: Record<string, unknown> }).data;
+      row.updated_at = (patchRes.data as { updated_at: string }).updated_at;
+    }
+  }
+
   // Phase 2: emit BRAVO_RECORD_STATUS_CHANGED for the initial stage/status
   // value so the drip engine (Phase 4) can fire the "new lead" sequence
   // when a lead lands with stage="cold". detectStatusTransitions treats
-  // before=null as a real transition for this case.
+  // before=null as a real transition for this case. URL stamp above runs
+  // FIRST so the sequence_runner sees the URL when it renders the template.
   const transitions = detectStatusTransitions(null, row.data);
   for (const t of transitions) {
     await publishStatusChange({
@@ -200,7 +329,32 @@ export async function updateRecord(input: UpdateRecordInput): Promise<TenantReco
     .select("id, tenant_id, entity_type, data, created_at, updated_at")
     .single();
   if (result.error) throw new RecordsError("db", result.error.message);
-  const row = result.data as TenantRecord;
+  let row = result.data as TenantRecord;
+
+  // Adon Phase 2: stamp data.application_url on every transition into a
+  // stage that needs the apply-now CTA. Only mints when the URL is
+  // missing (idempotent) — operator overrides via the dashboard are
+  // preserved. Runs BEFORE publishStatusChange so the sequence_runner
+  // always reads the URL-stamped state.
+  const mintedUrl = await maybeMintApplicationUrl(
+    db,
+    row.tenant_id,
+    row.entity_type,
+    row.id,
+    row.data,
+  );
+  if (mintedUrl) {
+    const updated = { ...row.data, application_url: mintedUrl };
+    const patchRes = await db
+      .from("tenant_records")
+      .update({ data: updated, updated_at: new Date().toISOString() })
+      .eq("id", row.id)
+      .select("id, tenant_id, entity_type, data, created_at, updated_at")
+      .single();
+    if (!patchRes.error && patchRes.data) {
+      row = patchRes.data as TenantRecord;
+    }
+  }
 
   // Phase 2: emit BRAVO_RECORD_STATUS_CHANGED on every stage/status
   // transition. Drip engine (Phase 4) subscribes to fire next sequence
