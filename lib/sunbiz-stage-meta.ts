@@ -29,8 +29,27 @@ export type StageMeta = {
 
 // Lead Pipeline order — slimmed 2026-05-23 (Jordan/Oasis meeting, migration
 // 064). Active funnel left-to-right (hot_lead → submitted), then terminal
-// states (declined, default) on the right. imported / not_interested /
-// approved removed; existing rows were remapped in migration 064.
+// states (declined, default) on the right.
+//
+// 2026-06-08 — Phase 1 expansion (Adon MCA brief): added 5 stages to cover
+// the post-funding lifecycle the existing 9 didn't model. The new stages
+// sit AFTER `submitted` in the active funnel and BEFORE the terminal
+// states. They give the operator a queryable view into the renewal and
+// re-engagement segments Adon's brief identifies as highest-ROI:
+//   - funded:            money hit the merchant's account (handoff from
+//                         opportunity-side `funded` into the lead's lifecycle
+//                         so we can run the Onboarding/Mid-Term/Renewal
+//                         sequences off the lead row).
+//   - renewal_eligible:  funded_at + term_days × 0.65 elapsed; ready for
+//                         the renewal pitch.
+//   - ghost:             applied but stopped responding (highest-ROI
+//                         re-engagement segment per brief §2).
+//   - renewed_elsewhere: funded the renewal with another broker — cold
+//                         for 6mo then re-engageable.
+//   - opted_out:         STOP received OR /unsubscribe POST landed.
+//                         Distinct from `data.opted_out=true` because
+//                         the stage is visible in the kanban; the flag
+//                         is what send_gateway reads to block sends.
 export const LEAD_PIPELINE_STAGES: StageMeta[] = [
   { key: "hot_lead",           label: "Hot Lead",           bg: "#C0842F", fg: "#FFFFFF" },
   { key: "missing_info",       label: "Missing Info",       bg: "#3978BE", fg: "#FFFFFF" },
@@ -39,8 +58,13 @@ export const LEAD_PIPELINE_STAGES: StageMeta[] = [
   { key: "viewed_application", label: "Viewed Application", bg: "#2E8392", fg: "#FFFFFF" },
   { key: "signed_application", label: "Signed Application", bg: "#32876B", fg: "#FFFFFF" },
   { key: "submitted",          label: "Submitted",          bg: "#4C6580", fg: "#FFFFFF" },
+  { key: "funded",             label: "Funded",             bg: "#1F7A56", fg: "#FFFFFF" },
+  { key: "renewal_eligible",   label: "Renewal Eligible",   bg: "#3F8F73", fg: "#FFFFFF" },
+  { key: "ghost",              label: "Ghost",              bg: "#6F6F75", fg: "#FFFFFF" },
+  { key: "renewed_elsewhere",  label: "Renewed Elsewhere",  bg: "#7B5A3D", fg: "#FFFFFF" },
   { key: "declined",           label: "Declined",           bg: "#9B3D45", fg: "#FFFFFF" },
   { key: "default",            label: "Default",            bg: "#62666F", fg: "#FFFFFF" },
+  { key: "opted_out",          label: "Opted Out",          bg: "#5C4147", fg: "#FFFFFF" },
 ];
 
 // Opportunity Pipeline order — slimmed to 10 stages 2026-05-23
