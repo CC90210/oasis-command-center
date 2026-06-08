@@ -1013,7 +1013,13 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
   // chat falls back to cold-spawn naturally.
   const [prewarmEpoch, setPrewarmEpoch] = useState(0);
   useEffect(() => {
-    if (bridgeOnline !== true) return;
+    // Codebase-consistency fix: gate matches the dropdown + send gates —
+    // proxy mode + serverBridgeOnline means the prewarm POST works via
+    // /api/bridge/prewarm even when the browser can't see localhost:9100.
+    const effective =
+      bridgeOnline === true ||
+      (isProxyMode && serverBridgeOnline === true);
+    if (!effective) return;
     if (cliRuntime !== "claude") return;
     // Proxy mode routes through the same-origin proxy so the prewarm POST
     // isn't a cross-origin (CORS-blocked, bearer-less) hit on the VPS.
@@ -1069,7 +1075,17 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
   const hasOwnKey = cfg?.has_key && cfg?.enabled;
   const cloudProviderReachable = cfg?.provider !== "ollama";
   const cloudReady = configsLoaded && (hasOwnKey || isAdmin) && cloudProviderReachable;
-  const bridgeReady = bridgeOnline === true;
+  // 2026-06-08 codebase-consistency fix: bridgeReady is the single source
+  // of truth for ~10 downstream UI affordances (tool-access badge, "API
+  // recommended now" nudge, effective-mode default in auto picker, etc.).
+  // The OLD `bridgeOnline === true` was the browser's localhost probe —
+  // false on every remote-VPS deploy. With proxy mode on and the server
+  // confirming the bridge heartbeats, the dashboard CAN talk to the
+  // bridge via /api/bridge/* — so it's "ready" for every practical
+  // purpose. One change here cascades to every consumer below.
+  const bridgeReady =
+    bridgeOnline === true ||
+    (isProxyMode && serverBridgeOnline === true);
   const effectiveMode: "cli" | "cloud_only" | "cloud_bridge_tools" =
     chatMode === "cli"
       ? "cli"
@@ -1131,7 +1147,13 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
     // process pins ~50-200MB of RAM until the 15-min idle reaper
     // catches up. Fire-and-forget; bridge offline / 404 is fine since
     // the reaper is the safety net.
-    if (bridgeOnline === true) {
+    // Codebase-consistency fix: same effective-online check as the send
+    // gate. In proxy mode the chat-reset POST goes through /api/bridge/*
+    // server-side, so a failed browser localhost probe is irrelevant.
+    if (
+      bridgeOnline === true ||
+      (isProxyMode && serverBridgeOnline === true)
+    ) {
       // Proxy mode routes through the same-origin proxy so reset (which kills
       // the warm VPS process) isn't a cross-origin (CORS-blocked) hit.
       void fetch(isProxyMode ? "/api/bridge/chat-reset" : `${BRIDGE_CHAT_BASE}/chat-reset`, {
