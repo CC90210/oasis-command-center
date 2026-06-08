@@ -32,6 +32,20 @@ const nextConfig = {
   // self-contained server.js + trimmed node_modules. No effect on Vercel
   // (Vercel uses its own builder).
   output: "standalone",
+  // Cached / external links to retired routes land cleanly on /welcome
+  // instead of bouncing through middleware (which would return 307→/login
+  // for unauthenticated visitors because the path is no longer in
+  // PUBLIC_PATH_PREFIXES). 308 = permanent redirect so search engines
+  // update the canonical URL.
+  async redirects() {
+    return [
+      {
+        source: "/command-centre-explained",
+        destination: "/welcome",
+        permanent: true,
+      },
+    ];
+  },
   // Production security headers — applied to every response (including
   // static assets and 404s). Added 2026-06-06 alongside the oasisai.work
   // migration to harden the dashboard surface now that it sits at the
