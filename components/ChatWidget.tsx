@@ -206,8 +206,7 @@ function renderCliOption(args: {
   // dropdown gated on bridgeOnline (browser probe of localhost:9100)
   // which can NEVER succeed when the bridge is on a remote VPS — but
   // since proxy mode is on, the chat works just fine.
-  const usingProxy = isProxyMode && serverBridgeOnline === true;
-  const effectivelyOnline = bridgeOnline === true || usingProxy;
+  const effectivelyOnline = computeEffectiveBridgeOnline(bridgeOnline, serverBridgeOnline);
   const suffix =
     effectivelyOnline
       ? ""
@@ -241,6 +240,27 @@ const CLI_RUNTIME_LABELS: Record<CliRuntime, string> = {
 // server attaches the VPS bearer). When false (CC's localhost), every bridge
 // call hits ${BRIDGE_CHAT_BASE} directly, byte-for-byte as before.
 const isProxyMode = BRIDGE_CHAT_BASE !== "http://127.0.0.1:9100";
+
+/**
+ * Effective-online check used by 5 sites (dropdown gate, send gate,
+ * bridgeReady ground-truth, prewarm gate, chat-reset gate). All of them
+ * need to treat "proxy mode active AND server confirms bridge is
+ * heartbeating" as functionally identical to "browser can see localhost"
+ * — because every bridge request routes through /api/bridge/* regardless
+ * of whether the browser can reach localhost:9100 directly.
+ *
+ * Extracted 2026-06-08 — was duplicated as inline expressions in every
+ * call site, which meant a future fix would have to hit 5 places.
+ */
+function computeEffectiveBridgeOnline(
+  bridgeOnline: boolean | null,
+  serverBridgeOnline: boolean | undefined,
+): boolean {
+  return (
+    bridgeOnline === true ||
+    (isProxyMode && serverBridgeOnline === true)
+  );
+}
 
 const MAX_ATTACHMENTS_PER_TURN = 5;
 const TEXT_ATTACHMENT_READ_BYTES = 512 * 1024;
@@ -1013,13 +1033,8 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
   // chat falls back to cold-spawn naturally.
   const [prewarmEpoch, setPrewarmEpoch] = useState(0);
   useEffect(() => {
-    // Codebase-consistency fix: gate matches the dropdown + send gates —
-    // proxy mode + serverBridgeOnline means the prewarm POST works via
-    // /api/bridge/prewarm even when the browser can't see localhost:9100.
-    const effective =
-      bridgeOnline === true ||
-      (isProxyMode && serverBridgeOnline === true);
-    if (!effective) return;
+    // Prewarm fires when bridge is effectively reachable (local OR proxy).
+    if (!computeEffectiveBridgeOnline(bridgeOnline, serverBridgeOnline)) return;
     if (cliRuntime !== "claude") return;
     // Proxy mode routes through the same-origin proxy so the prewarm POST
     // isn't a cross-origin (CORS-blocked, bearer-less) hit on the VPS.
@@ -1075,17 +1090,12 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
   const hasOwnKey = cfg?.has_key && cfg?.enabled;
   const cloudProviderReachable = cfg?.provider !== "ollama";
   const cloudReady = configsLoaded && (hasOwnKey || isAdmin) && cloudProviderReachable;
-  // 2026-06-08 codebase-consistency fix: bridgeReady is the single source
-  // of truth for ~10 downstream UI affordances (tool-access badge, "API
-  // recommended now" nudge, effective-mode default in auto picker, etc.).
-  // The OLD `bridgeOnline === true` was the browser's localhost probe —
-  // false on every remote-VPS deploy. With proxy mode on and the server
-  // confirming the bridge heartbeats, the dashboard CAN talk to the
-  // bridge via /api/bridge/* — so it's "ready" for every practical
-  // purpose. One change here cascades to every consumer below.
-  const bridgeReady =
-    bridgeOnline === true ||
-    (isProxyMode && serverBridgeOnline === true);
+  // bridgeReady is the single source of truth for ~10 downstream UI
+  // affordances (tool-access badge, "API recommended now" nudge,
+  // effective-mode default in auto picker, etc.). Goes through the
+  // shared helper so the proxy-mode handling stays in lockstep with
+  // the dropdown + send gates.
+  const bridgeReady = computeEffectiveBridgeOnline(bridgeOnline, serverBridgeOnline);
   const effectiveMode: "cli" | "cloud_only" | "cloud_bridge_tools" =
     chatMode === "cli"
       ? "cli"
@@ -1147,13 +1157,9 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
     // process pins ~50-200MB of RAM until the 15-min idle reaper
     // catches up. Fire-and-forget; bridge offline / 404 is fine since
     // the reaper is the safety net.
-    // Codebase-consistency fix: same effective-online check as the send
-    // gate. In proxy mode the chat-reset POST goes through /api/bridge/*
-    // server-side, so a failed browser localhost probe is irrelevant.
-    if (
-      bridgeOnline === true ||
-      (isProxyMode && serverBridgeOnline === true)
-    ) {
+    // Chat-reset POST goes through /api/bridge/chat-reset in proxy mode,
+    // so reuse the shared effective-online check.
+    if (computeEffectiveBridgeOnline(bridgeOnline, serverBridgeOnline)) {
       // Proxy mode routes through the same-origin proxy so reset (which kills
       // the warm VPS process) isn't a cross-origin (CORS-blocked) hit.
       void fetch(isProxyMode ? "/api/bridge/chat-reset" : `${BRIDGE_CHAT_BASE}/chat-reset`, {
@@ -1636,17 +1642,10 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
     const wantsBridge =
       activeMode === "cli" ||
       (activeMode === "auto" && bridgeOnline === true);
-    // 2026-06-08 stub-fix: proxy mode + serverBridgeOnline means the bridge
-    // is reachable via the same-origin /api/bridge/chat proxy — the
-    // browser's failed localhost probe is irrelevant. Without this guard,
-    // the previous code errored out on every CLI send from a browser that
-    // can't see localhost:9100 (i.e., every browser on a remote VPS deploy),
-    // even though the proxy path below at line ~1684 would handle it just
-    // fine. Matches the renderCliOption gate at the dropdown layer.
-    const effectiveBridgeOnline =
-      bridgeOnline === true ||
-      (isProxyMode && serverBridgeOnline === true);
-    if (activeMode === "cli" && !effectiveBridgeOnline) {
+    // The send-side gate respects the same effective-online rule as the
+    // dropdown gate — so picking a CLI option from the picker actually
+    // results in a working send via /api/bridge/chat when proxy mode is on.
+    if (activeMode === "cli" && !computeEffectiveBridgeOnline(bridgeOnline, serverBridgeOnline)) {
       // Pinned to bridge but neither the local probe NOR the proxy path
       // can reach the bridge. Two very different situations to surface
       // differently (ADR-0006):
