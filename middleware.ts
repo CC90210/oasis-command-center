@@ -12,7 +12,6 @@ import { shouldRedirectToOnboarding } from "./lib/onboarding-gate";
 
 const PUBLIC_PATH_PREFIXES = [
   "/welcome",              // public marketing landing
-  "/command-centre-explained", // public end-to-end product explanation
   "/download",             // public OASIS Desktop downloads
   "/configure",            // public agent configurator (pre-signup)
   "/demo/sun",             // public Sun Biz review shell; demo data only
