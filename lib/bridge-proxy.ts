@@ -64,7 +64,14 @@ export function isBridgeProxyEnabled(): boolean {
  * status. FAIL CLOSED on any lookup error (treated as 403, not "allow").
  */
 export type BridgeAuthResult =
-  | { ok: true; target: BridgeTarget; tenantId: string; userId: string; teamRole: string }
+  | {
+      ok: true;
+      target: BridgeTarget;
+      tenantId: string;
+      tenantSlug: string;
+      userId: string;
+      teamRole: string;
+    }
   | { ok: false; status: number; error: string };
 
 export async function authorizeBridgeRequest(): Promise<BridgeAuthResult> {
@@ -120,5 +127,12 @@ export async function authorizeBridgeRequest(): Promise<BridgeAuthResult> {
 
   const target = resolveBridgeTarget(tenantRow);
   if (!target) return { ok: false, status: 503, error: "bridge_not_configured" };
-  return { ok: true, target, tenantId, userId: user.id, teamRole };
+  return {
+    ok: true,
+    target,
+    tenantId,
+    tenantSlug: tenantRow.slug,
+    userId: user.id,
+    teamRole,
+  };
 }
