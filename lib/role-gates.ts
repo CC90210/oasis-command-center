@@ -129,15 +129,25 @@ export function bridgeDisallowedToolsForRole(
  * read_file and read CC's empire code, brain notes, memory — a clear
  * tenant-boundary break.
  *
- * Surviving non-admin allowlist:
- *   - list_scripts — enumerates filenames, no file CONTENTS.
- *   - list_skills  — enumerates skill names + frontmatter triggers.
+ * Codex audit 2026-06-09 round-8 [medium]: list_scripts and list_skills
+ * were ALSO removed. The bridge implementations don't return names
+ * only — list_scripts extracts first-line docstrings from each script,
+ * list_skills returns SKILL.md frontmatter (description, triggers, tags).
+ * That's operator-repo authored content, not pure enumeration. The
+ * surviving allowlist:
  *   - cli_status   — daemon health probe (uptime, last error). No data.
  *
- * Every other tool in TOOL_REGISTRY (read_file, load_skill, write_file,
- * bash, send_email, send_sms, run_script, stripe, supabase, n8n,
- * firecrawl, notebooklm, underwriting_run, shop_out_send_batch,
- * install_cli, cli_auth_start) is denied for non-owner/non-admin.
+ * For non-admin SunBiz operators who legitimately want a "what can
+ * Solara do?" surface, the proper long-term fix is a tenant-safe
+ * static catalog served from the dashboard (filtered to the tenant's
+ * enabled agents/skills, with copy CC explicitly authors for non-admin
+ * consumption). Tracked as ADR-0009.
+ *
+ * Every other tool in TOOL_REGISTRY (read_file, load_skill, list_scripts,
+ * list_skills, write_file, bash, send_email, send_sms, run_script,
+ * stripe, supabase, n8n, firecrawl, notebooklm, underwriting_run,
+ * shop_out_send_batch, install_cli, cli_auth_start) is denied for
+ * non-owner/non-admin.
  *
  * Allowlist over denylist: when a new tool gets added to the bridge registry
  * it MUST default to "denied for non-admin" rather than "allowed by accident."
@@ -149,8 +159,6 @@ export function bridgeDisallowedToolsForRole(
  * passed straight through.
  */
 export const BRIDGE_EXEC_TOOL_READ_ONLY: ReadonlySet<string> = new Set([
-  "list_scripts",
-  "list_skills",
   "cli_status",
 ]);
 
