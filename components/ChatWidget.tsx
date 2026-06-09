@@ -233,13 +233,32 @@ const CLI_RUNTIME_LABELS: Record<CliRuntime, string> = {
   codex: "Codex CLI",
   gemini: "Gemini CLI",
 };
-// Proxy mode — when NEXT_PUBLIC_BRIDGE_CHAT_BASE is set to anything other than
-// the operator's localhost default, the bridge is a remote (private) VPS that
-// the browser must NOT touch directly. In that case all bridge traffic routes
-// through same-origin /api/bridge/* proxies (Supabase-cookie-authed; the
-// server attaches the VPS bearer). When false (CC's localhost), every bridge
-// call hits ${BRIDGE_CHAT_BASE} directly, byte-for-byte as before.
-const isProxyMode = BRIDGE_CHAT_BASE !== "http://127.0.0.1:9100";
+// Proxy mode — when the bridge is a remote (private) VPS the browser must NOT
+// touch directly, all bridge traffic routes through same-origin /api/bridge/*
+// proxies (Supabase-cookie-authed; the server attaches the VPS bearer). When
+// false (CC's localhost), bridge calls hit ${BRIDGE_CHAT_BASE} directly.
+//
+// 2026-06-09 incident: every SunBiz employee (Ezra, Jordan, Emily, Alex) saw
+// "(bridge offline)" on all three CLI options on oasisai.work despite the
+// sidebar showing BRIDGE ONLINE. Root cause: NEXT_PUBLIC_BRIDGE_CHAT_BASE
+// was registered in Vercel as "Encrypted" — and the production webpack
+// bundle ended up with a literal `process.env.NEXT_PUBLIC_BRIDGE_CHAT_BASE`
+// reference instead of the inlined string. At runtime in the browser that
+// resolves to undefined, fall back to the localhost default, isProxyMode
+// flips false, and the dropdown ignores serverBridgeOnline=true.
+//
+// Fix: derive proxy mode from window.location.hostname at runtime in the
+// browser — it's authoritative regardless of env inlining. On the server
+// (SSR / API routes) we still trust the build-time env, which works there
+// because Vercel decrypts env vars for server runtime even when build-time
+// inlining for NEXT_PUBLIC_* misses.
+function isProxyModeRuntime(): boolean {
+  if (typeof window !== "undefined") {
+    const h = window.location.hostname;
+    return h !== "localhost" && h !== "127.0.0.1";
+  }
+  return BRIDGE_CHAT_BASE !== "http://127.0.0.1:9100";
+}
 
 /**
  * Effective-online check used by 5 sites (dropdown gate, send gate,
@@ -258,7 +277,7 @@ function computeEffectiveBridgeOnline(
 ): boolean {
   return (
     bridgeOnline === true ||
-    (isProxyMode && serverBridgeOnline === true)
+    (isProxyModeRuntime() && serverBridgeOnline === true)
   );
 }
 
@@ -1005,7 +1024,7 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
         // to the VPS server-side) so the browser never touches the VPS and
         // never needs the bearer. Operator localhost: probe the bridge directly.
         const r = await fetch(
-          isProxyMode ? "/api/bridge/health" : `${BRIDGE_CHAT_BASE}/health`,
+          isProxyModeRuntime() ? "/api/bridge/health" : `${BRIDGE_CHAT_BASE}/health`,
           { signal: ctl.signal },
         );
         clearTimeout(t);
@@ -1038,7 +1057,7 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
     if (cliRuntime !== "claude") return;
     // Proxy mode routes through the same-origin proxy so the prewarm POST
     // isn't a cross-origin (CORS-blocked, bearer-less) hit on the VPS.
-    void fetch(isProxyMode ? "/api/bridge/prewarm" : `${BRIDGE_CHAT_BASE}/prewarm`, {
+    void fetch(isProxyModeRuntime() ? "/api/bridge/prewarm" : `${BRIDGE_CHAT_BASE}/prewarm`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ agent, tab_id: tabId }),
@@ -1162,7 +1181,7 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
     if (computeEffectiveBridgeOnline(bridgeOnline, serverBridgeOnline)) {
       // Proxy mode routes through the same-origin proxy so reset (which kills
       // the warm VPS process) isn't a cross-origin (CORS-blocked) hit.
-      void fetch(isProxyMode ? "/api/bridge/chat-reset" : `${BRIDGE_CHAT_BASE}/chat-reset`, {
+      void fetch(isProxyModeRuntime() ? "/api/bridge/chat-reset" : `${BRIDGE_CHAT_BASE}/chat-reset`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         // tab_id is the canonical pool key; session_id sent for legacy
@@ -1705,7 +1724,8 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
       // private VPS (unreachable from the browser, no bearer), so disable the
       // direct local-chat path and fall through to the same-origin proxy
       // (/api/bridge/chat). Employees use the subscription CLIs, not Ollama.
-      const useLocalChat = useBridge && isOllama && cliRuntime === "claude" && !isProxyMode;
+      const proxyMode = isProxyModeRuntime();
+      const useLocalChat = useBridge && isOllama && cliRuntime === "claude" && !proxyMode;
       // Proxy mode: bridge chat goes through the same-origin proxy
       // (/api/bridge/chat), which authenticates via the Supabase cookie and
       // attaches the VPS bearer server-side. The request body shape is
@@ -1713,7 +1733,7 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
       // fields server-side. Operator localhost keeps the direct path.
       const url = useLocalChat
         ? `${BRIDGE_CHAT_BASE}/local-chat`
-        : useBridge && isProxyMode
+        : useBridge && proxyMode
           ? "/api/bridge/chat"
           : useBridge
             ? `${BRIDGE_CHAT_BASE}/chat`
