@@ -26,19 +26,50 @@ export type BridgeTarget = {
 };
 
 /**
- * Resolve the bridge target for a tenant. Currently single-tenant for SunBiz
- * (one shared VPS serving the `submissions` tenant), so the resolution is
- * driven entirely by the two server env vars. The `tenant` argument is taken
- * for future per-tenant extensibility (tenants.custom_fields.bridge_url +
- * a per-slug bearer) but is not consulted today.
+ * Resolve the bridge target for a tenant.
  *
- * Returns null when either env var is unset — callers map null to a 503
- * (chat) or a clean {ok:false} fallback (health) so the widget degrades to
+ * Resolution precedence (per-tenant first, then global fallback):
+ *   1. tenant.custom_fields.bridge_url is set → that tenant has its own
+ *      bridge (e.g. CC's home machine via Cloudflare Tunnel for the OASIS
+ *      tenant). Bearer token is read from a tenant-scoped env var whose
+ *      name comes from tenant.custom_fields.bridge_bearer_token_env (or
+ *      defaults to BRIDGE_BEARER_TOKEN_<SLUG_UPPER>).
+ *   2. Otherwise → falls back to the global BRIDGE_VPS_URL + BRIDGE_BEARER_TOKEN
+ *      env vars (today's SunBiz VPS path; backward compatible).
+ *
+ * Security: secrets never go in tenants.custom_fields directly. We store
+ * the env var NAME there so the dashboard can be configured by ops, but
+ * the actual bearer value lives only in Vercel's encrypted env vars.
+ *
+ * Returns null when no URL+token pair resolves — callers map null to a
+ * 503 (chat) or {ok:false} fallback (health) so the widget degrades to
  * the cloud path instead of hanging.
  */
 export function resolveBridgeTarget(
-  _tenant: { slug: string; custom_fields: Record<string, unknown> | null },
+  tenant: { slug: string; custom_fields: Record<string, unknown> | null },
 ): BridgeTarget | null {
+  // Per-tenant override path (the OASIS-portal-targets-CC's-home case).
+  const cf = tenant.custom_fields ?? {};
+  const tenantUrl = typeof cf.bridge_url === "string" ? cf.bridge_url.trim() : "";
+  if (tenantUrl) {
+    const tokenEnvName =
+      typeof cf.bridge_bearer_token_env === "string" && cf.bridge_bearer_token_env.trim()
+        ? cf.bridge_bearer_token_env.trim()
+        : `BRIDGE_BEARER_TOKEN_${tenant.slug.toUpperCase()}`;
+    const tenantToken = process.env[tokenEnvName];
+    if (tenantToken) {
+      const baseUrl = tenantUrl.replace(/\/+$/, "");
+      if (baseUrl) return { baseUrl, bearerToken: tenantToken };
+    }
+    // Per-tenant override declared but token env missing → DO NOT fall
+    // through to the global default. The operator was explicit that this
+    // tenant uses its own bridge; silently failing to a different VPS
+    // would route this tenant's traffic to the wrong place. Return null
+    // so callers surface bridge_not_configured.
+    return null;
+  }
+
+  // Global fallback (default SunBiz/operator path).
   const rawUrl = process.env.BRIDGE_VPS_URL;
   const bearerToken = process.env.BRIDGE_BEARER_TOKEN;
   if (!rawUrl || !bearerToken) return null;
@@ -47,18 +78,18 @@ export function resolveBridgeTarget(
   return { baseUrl, bearerToken };
 }
 
-/** True when the server is configured to proxy to a VPS bridge. */
+/** True when the server is configured to proxy to a VPS bridge (global default). */
 export function isBridgeProxyEnabled(): boolean {
   return Boolean(process.env.BRIDGE_VPS_URL && process.env.BRIDGE_BEARER_TOKEN);
 }
 
 /**
- * Shared authorization for the ancillary bridge proxy routes (health,
- * prewarm, chat-reset). Resolves the authenticated user's tenant SERVER-SIDE,
- * applies the SunBiz tenant gate (slug==='submissions' OR operator), and
- * resolves the VPS target. The /chat route does NOT use this — it has extra
- * concerns (body parsing, role->disallowed_tools, rate limit) and inlines the
- * same resolution so the security-critical path is fully visible in one file.
+ * Shared authorization for ALL bridge proxy routes (chat, health, prewarm,
+ * chat-reset). Resolves the authenticated user's tenant SERVER-SIDE, applies
+ * the SunBiz tenant gate (slug==='submissions' OR operator), and resolves the
+ * VPS target. /chat was inlined for "visibility in one file" until 2026-06-10
+ * when it was consolidated through this helper — divergence-prevention beats
+ * inline visibility for a security-critical path.
  *
  * Returns a discriminated result so callers can map each outcome to the right
  * status. FAIL CLOSED on any lookup error (treated as 403, not "allow").

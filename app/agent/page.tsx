@@ -56,17 +56,21 @@ export default async function ClientAgentPage({
   });
   const enabled = enabledRaw.map(resolveAgentKey);
   const manifestPrimary = manifest?.agents?.find((a) => a.primary && a.enabled)?.slug;
-  // Fallback chain: manifest → profile → enabled[0] → empire-default "bravo".
-  // Was "solara" until 2026-06-09 — Codex adversarial review caught that an
-  // OASIS/operator tenant with a missing manifest, empty agents_enabled, or
-  // transient lookup failure would render Solara as the chat target. The new
-  // tenant-aware /api/bridge/* allowlist (commit 9af2197) would then reject
-  // Solara as agent_not_enabled_for_tenant on the first bridge turn, leaving
-  // CC's personal portal with a broken chat. "bravo" is the empire-default
-  // flagship and lives in OASIS_BRIDGE_AGENTS; SunBiz never hits this fallback
-  // in normal state because the manifest is seeded with solara+helios at
-  // tenant creation.
-  const profilePrimary = resolveAgentKey(manifestPrimary || profile?.primary_agent || enabled[0] || "bravo");
+  // Fallback chain: manifest.primary → profile.primary_agent → enabled[0] →
+  // tenant-family default. The family default discriminates by tenant_slug
+  // (manifest carries it for free — no extra DB call):
+  //   SunBiz (slug='submissions') → 'solara' (ops primary)
+  //   OASIS / unknown → 'bravo' (empire flagship)
+  // 2026-06-09 history: this used to be hardcoded 'solara' (Codex caught
+  // it during the bridge-allowlist refactor). The 2026-06-09 evening
+  // hotfix flipped it to hardcoded 'bravo' — correct for OASIS but wrong
+  // for a degraded SunBiz manifest (would 400 against the SunBiz allowlist).
+  // This is the tenant-aware closure: each family gets its own correct
+  // degraded-state default, and the chat allowlist always accepts it.
+  const familyDefault = manifest?.tenant_slug === "submissions" ? "solara" : "bravo";
+  const profilePrimary = resolveAgentKey(
+    manifestPrimary || profile?.primary_agent || enabled[0] || familyDefault,
+  );
   // Honor ?agent=<slug> only if the user actually has that agent enabled —
   // prevents an arbitrary URL param from making us claim an agent the user
   // didn't purchase. Falls back to their provisioned primary.

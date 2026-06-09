@@ -22,11 +22,9 @@
  */
 
 import { NextRequest } from "next/server";
-import { getServiceSupabase, getSessionUser } from "@/lib/supabase-server";
 import { rateLimit } from "@/lib/rate-limit";
 import { bridgeDisallowedToolsForRole } from "@/lib/role-gates";
-import { isOperatorEmail } from "@/lib/operator-credentials";
-import { resolveBridgeTarget } from "@/lib/bridge-proxy";
+import { authorizeBridgeRequest } from "@/lib/bridge-proxy";
 import { validateBridgeAgent } from "@/lib/agent-roots";
 
 export const dynamic = "force-dynamic";
@@ -57,10 +55,6 @@ type IncomingBody = {
 };
 
 export async function POST(req: NextRequest) {
-  // ---- HOP 1: same-origin Supabase session ---------------------------------
-  const user = await getSessionUser();
-  if (!user) return jsonError(401, "unauthenticated");
-
   // ---- Body-size guard BEFORE parse ----------------------------------------
   // content-length is advisory (a client can lie / omit it) but it's a cheap
   // first cut; the post-parse structural caps below are the real backstop.
@@ -109,81 +103,23 @@ export async function POST(req: NextRequest) {
   // costs nothing measurable and keeps the security check centralized.
   const agent = String(clientBody.agent || "").trim().toLowerCase();
 
-  // ---- HOP 2: resolve identity SERVER-SIDE (fail closed) -------------------
-  // Mirrors app/api/chat/route.ts:390-457 — default teamRole='read_only'
-  // on ANY error so a DB hiccup yields the full disallowed set, never a
-  // shell. The browser CANNOT influence tenant/role: we read them from the
-  // authenticated user.id only.
-  const svc = getServiceSupabase();
-  let tenantId = "";
-  let teamRole = "read_only"; // fail-closed default (least privilege)
-  let email: string | null = user.email ?? null;
-  try {
-    const opRow = await svc
-      .from("user_profiles")
-      .select("tenant_id, team_role, is_owner, email")
-      .eq("auth_user_id", user.id)
-      .maybeSingle();
-    const op = opRow.data as
-      | {
-          tenant_id: string | null;
-          team_role: string | null;
-          is_owner: boolean | null;
-          email: string | null;
-        }
-      | null;
-    if (!op) {
-      // No profile row — don't guess a tenant. (Matches the spec: 403, not
-      // a silent fallback.) teamRole stays read_only regardless.
-      return jsonError(403, "no_profile");
-    }
-    tenantId = String(op.tenant_id || "");
-    // Trust the DB row's team_role; null column on a valid profile means the
-    // operator was never assigned a role -> read_only is the right default.
-    teamRole = (op.team_role || "read_only").trim().toLowerCase();
-    // is_owner promotes to owner power even if team_role column is unset.
-    if (op.is_owner === true && teamRole !== "owner" && teamRole !== "admin") {
-      teamRole = "owner";
-    }
-    if (op.email) email = op.email;
-  } catch {
-    // teamRole stays "read_only" — failure -> safe default. We still need a
-    // tenant to gate on; without one we cannot proceed safely.
-    return jsonError(403, "profile_lookup_failed");
-  }
-  if (!tenantId) return jsonError(403, "no_tenant");
-
-  // ---- SunBiz tenant gate --------------------------------------------------
-  // The shared VPS bridge is reachable ONLY by the SunBiz ('submissions')
-  // tenant OR the platform operator (CC). Every other tenant -> 403, so the
-  // bridge can never be reached cross-tenant.
-  const isOperator = isOperatorEmail(email);
-  let tenantRow: { slug: string; custom_fields: Record<string, unknown> | null };
-  try {
-    const r = await svc
-      .from("tenants")
-      .select("slug, custom_fields")
-      .eq("id", tenantId)
-      .maybeSingle();
-    const t = r.data as { slug?: string; custom_fields?: Record<string, unknown> | null } | null;
-    tenantRow = { slug: (t?.slug || "").toLowerCase(), custom_fields: t?.custom_fields ?? null };
-  } catch {
-    return jsonError(403, "tenant_lookup_failed");
-  }
-  if (tenantRow.slug !== "submissions" && !isOperator) {
-    return jsonError(403, "bridge_not_enabled_for_tenant");
-  }
+  // ---- HOPs 1-3: auth + tenant gate + bridge target (shared helper) --------
+  // Consolidated 2026-06-10 — used to inline ~60 lines duplicating
+  // authorizeBridgeRequest. Same gate logic, single source of truth. Any
+  // change to the security boundary (slug==='submissions' OR isOperator,
+  // fail-closed teamRole='read_only', etc.) now lives in one file —
+  // lib/bridge-proxy.ts — instead of two. The /chat-reset + /prewarm
+  // routes already use this helper; bringing /chat into line eliminates
+  // the privilege-escalation-via-drift bug class.
+  const auth = await authorizeBridgeRequest();
+  if (!auth.ok) return jsonError(auth.status, auth.error);
 
   // ---- Agent allowlist (both gates: known-universe + tenant-specific) ------
-  const agentCheck = validateBridgeAgent(agent, tenantRow.slug);
+  const agentCheck = validateBridgeAgent(agent, auth.tenantSlug);
   if (!agentCheck.ok) return jsonError(agentCheck.status, agentCheck.error);
 
-  // ---- Resolve the VPS target (server-only secret) -------------------------
-  const target = resolveBridgeTarget(tenantRow);
-  if (!target) return jsonError(503, "bridge_not_configured");
-
   // ---- Per-tenant rate limit (same shape as /api/chat) ---------------------
-  const limit = rateLimit({ key: `bridge-chat:${tenantId}`, capacity: 30, refillPerSec: 1 / 15 });
+  const limit = rateLimit({ key: `bridge-chat:${auth.tenantId}`, capacity: 30, refillPerSec: 1 / 15 });
   if (!limit.allowed) {
     return new Response(
       JSON.stringify({ ok: false, error: "rate_limited", retry_in_sec: limit.resetIn }),
@@ -192,7 +128,7 @@ export async function POST(req: NextRequest) {
   }
 
   // ---- Compute role-derived disallowed tools (server-side) -----------------
-  const disallowedTools = bridgeDisallowedToolsForRole(teamRole);
+  const disallowedTools = bridgeDisallowedToolsForRole(auth.teamRole);
 
   // Confine non-privileged roles to Claude Code — the ONLY runtime whose
   // --disallowed-tools spawn flag enforces the no-shell wall. Codex/Gemini
@@ -200,7 +136,7 @@ export async function POST(req: NextRequest) {
   // could bypass the gate entirely (Codex audit P1). Force claude for anyone
   // who isn't owner/admin; owner/admin already get the full toolset, so their
   // runtime choice is unrestricted. The server value wins in the forward body.
-  const isPrivileged = teamRole === "owner" || teamRole === "admin";
+  const isPrivileged = auth.teamRole === "owner" || auth.teamRole === "admin";
   const effectiveCliProvider = isPrivileged ? cliProvider : "claude";
 
   // ---- HOP 3: forward to the VPS bridge ------------------------------------
@@ -210,9 +146,9 @@ export async function POST(req: NextRequest) {
     ...clientBody,
     agent, // pinned
     cli_provider: effectiveCliProvider, // forced to claude for non-owner/admin
-    tenant_id: tenantId,
-    user_id: user.id,
-    team_role: teamRole,
+    tenant_id: auth.tenantId,
+    user_id: auth.userId,
+    team_role: auth.teamRole,
     disallowed_tools: disallowedTools,
   };
 
@@ -221,11 +157,11 @@ export async function POST(req: NextRequest) {
   // stops). req.signal fires on client abort.
   let upstream: Response;
   try {
-    upstream = await fetch(`${target.baseUrl}/chat`, {
+    upstream = await fetch(`${auth.target.baseUrl}/chat`, {
       method: "POST",
       headers: {
         "content-type": "application/json",
-        authorization: `Bearer ${target.bearerToken}`,
+        authorization: `Bearer ${auth.target.bearerToken}`,
       },
       body: JSON.stringify(forwardBody),
       signal: req.signal,
