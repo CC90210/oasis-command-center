@@ -259,6 +259,27 @@ function tenant(
   );
 }
 
+// Defense-in-depth: a hypothetical slug that contains other non-POSIX
+// chars (only possible if SLUG_RE is ever loosened upstream) still
+// produces a valid env var name — the resolver never silently emits
+// a malformed name.
+{
+  const r = resolveBridgeTarget(
+    // SLUG_RE today doesn't allow dots, but if it ever does, we don't
+    // want the resolver to emit BRIDGE_BEARER_TOKEN_FOO.BAR (invalid).
+    tenant("foo.bar", { bridge_url: "https://example.oasisai.work" }),
+    { BRIDGE_BEARER_TOKEN_FOO_BAR: "hypothetical-bearer" },
+  );
+  assert.deepEqual(
+    r,
+    {
+      baseUrl: "https://example.oasisai.work",
+      bearerToken: "hypothetical-bearer",
+    },
+    "any non-[A-Z0-9_] char in slug is normalized to underscore in env var name",
+  );
+}
+
 // ─────────────────────────────────────────────────────────────────────
 // Rule 6 — trailing slash normalization
 // ─────────────────────────────────────────────────────────────────────

@@ -82,14 +82,19 @@ export function resolveBridgeTarget(
     // another tenant's bearer (or the global SunBiz bearer), making the
     // proxy send that secret to a tenant-chosen URL.
     //
-    // Slug sanitization: hyphens → underscores so a slug like 'oasis-ai-cc'
-    // becomes BRIDGE_BEARER_TOKEN_OASIS_AI_CC. POSIX env var names cannot
-    // contain hyphens, and the Vercel UI's env var form rejects them — the
-    // sanitizer keeps slugs portable across hosting environments and
-    // matches what an operator would intuitively type when setting it.
+    // Slug sanitization: any non-[A-Z0-9_] character is replaced with an
+    // underscore. POSIX env var names + the Vercel UI's env var form both
+    // restrict to that set. Today the upstream slug grammar (SLUG_RE in
+    // lib/manifest/wizard-finalize.ts) is [a-z0-9_-], so the only char
+    // that actually changes is '-' → '_'. The broader pattern is
+    // defense-in-depth: if SLUG_RE is ever loosened (e.g. to allow
+    // dots), this code still produces a valid POSIX name. Collision
+    // risk between e.g. 'foo-bar' and 'foo.bar' would be the upstream
+    // PR's problem to think about — but at least the resolver never
+    // produces a malformed env var name silently.
     const tokenEnvName = `BRIDGE_BEARER_TOKEN_${tenant.slug
       .toUpperCase()
-      .replace(/-/g, "_")}`;
+      .replace(/[^A-Z0-9_]/g, "_")}`;
     const tenantToken = env[tokenEnvName];
     if (tenantToken) {
       const baseUrl = tenantUrl.replace(/\/+$/, "");
