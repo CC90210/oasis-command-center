@@ -44,24 +44,15 @@
  */
 
 import { authorizeBridgeRequest } from "@/lib/bridge-proxy";
+import {
+  type BridgeHealthReason,
+  isBridgeHealthReason,
+} from "@/lib/bridge-health-types";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
-type HealthReason =
-  | "ok"
-  | "unauthenticated"
-  | "no_profile"
-  | "no_tenant"
-  | "tenant_lookup_failed"
-  | "bridge_not_enabled_for_tenant"
-  | "bridge_not_configured"
-  | "vps_timeout"
-  | "vps_unauthorized"
-  | "vps_upstream_error"
-  | "vps_unreachable";
-
-const REASON_DETAIL: Record<HealthReason, string | null> = {
+const REASON_DETAIL: Record<BridgeHealthReason, string | null> = {
   ok: null,
   unauthenticated: "Sign in to probe the bridge.",
   no_profile:
@@ -84,7 +75,7 @@ const REASON_DETAIL: Record<HealthReason, string | null> = {
     "Couldn't reach the VPS at all (DNS, TCP, or TLS error). Verify BRIDGE_VPS_URL points at a live hostname.",
 };
 
-function payload(reason: HealthReason) {
+function payload(reason: BridgeHealthReason) {
   return {
     ok: reason === "ok",
     reason,
@@ -92,7 +83,7 @@ function payload(reason: HealthReason) {
   };
 }
 
-function json(reason: HealthReason, status: number = 200) {
+function json(reason: BridgeHealthReason, status: number = 200) {
   return new Response(JSON.stringify(payload(reason)), {
     status,
     headers: {
@@ -107,9 +98,14 @@ export async function GET() {
   if (!auth.ok) {
     // 401 for anon; structured body for every other failure so the UI can
     // surface the exact reason. r.ok is false either way.
-    const reason = (auth.error as HealthReason) ?? "vps_unreachable";
-    const knownReason: HealthReason = reason in REASON_DETAIL ? reason : "vps_unreachable";
-    return json(knownReason, auth.status === 401 ? 401 : 200);
+    // Validated narrow via isBridgeHealthReason so a renamed auth.error
+    // string can't sneak past the type. Unknown errors collapse to
+    // vps_unreachable, which is the closest "generic upstream failure" code.
+    const errStr = auth.error;
+    const reason: BridgeHealthReason = isBridgeHealthReason(errStr)
+      ? errStr
+      : "vps_unreachable";
+    return json(reason, auth.status === 401 ? 401 : 200);
   }
   try {
     const r = await fetch(`${auth.target.baseUrl}/health`, {

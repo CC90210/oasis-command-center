@@ -50,6 +50,7 @@ import {
   DROPDOWN_SUFFIX,
   isDropdownEnabled,
 } from "@/lib/bridge-dropdown-state";
+import type { BridgeHealthResponse } from "@/lib/bridge-health-types";
 import { getBrowserSupabase } from "@/lib/supabase-browser";
 import { parseInput, renderHelp, type SlashCommandName } from "@/lib/chat-modes/slash-parser";
 import { usePlanMode } from "@/lib/chat-modes/use-plan-mode";
@@ -1031,11 +1032,10 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
         // The legacy localhost probe doesn't — fall through to ok=r.ok.
         if (isProxyModeRuntime()) {
           try {
-            const body = (await r.json().catch(() => null)) as {
-              ok?: boolean;
-              reason?: string;
-              detail?: string | null;
-            } | null;
+            // Typed against the shared BridgeHealthResponse so any rename of
+            // a reason code in /api/bridge/health surfaces here at compile
+            // time rather than silently displaying the old code to operators.
+            const body = (await r.json().catch(() => null)) as Partial<BridgeHealthResponse> | null;
             if (body && typeof body.ok === "boolean") {
               setBridgeOnline(body.ok);
               setBridgeProbeReason(body.ok ? null : (body.reason || "unknown"));
