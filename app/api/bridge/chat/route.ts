@@ -27,26 +27,11 @@ import { rateLimit } from "@/lib/rate-limit";
 import { bridgeDisallowedToolsForRole } from "@/lib/role-gates";
 import { isOperatorEmail } from "@/lib/operator-credentials";
 import { resolveBridgeTarget } from "@/lib/bridge-proxy";
-import {
-  SUNBIZ_BRIDGE_AGENTS,
-  OASIS_BRIDGE_AGENTS,
-  allowedBridgeAgentsForTenant,
-} from "@/lib/agent-roots";
+import { validateBridgeAgent } from "@/lib/agent-roots";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 export const maxDuration = 300; // 5 min — matches /api/chat + bridge watchdog ceiling
-
-// Defense-in-depth: the *universe* of valid agent slugs across all tenants.
-// Used for the early 400 (fast rejection of malformed/unknown slugs before any
-// DB work). The TENANT-SPECIFIC subset is enforced after tenant resolution —
-// see allowedBridgeAgentsForTenant. The 2026-06-09 bug: this was a global
-// SunBiz-only set, so CC's Bravo chat from his personal OASIS tenant 400'd
-// with invalid_agent even though the tenant gate would have admitted him.
-const KNOWN_BRIDGE_AGENTS: ReadonlySet<string> = new Set([
-  ...SUNBIZ_BRIDGE_AGENTS,
-  ...OASIS_BRIDGE_AGENTS,
-]);
 
 // Body-size + attachment caps — an authed employee must not be able to push
 // unbounded payloads to the VPS spawn. Mirrors the /api/chat attachment cap
@@ -118,13 +103,11 @@ export async function POST(req: NextRequest) {
   }
 
   // ---- Pin the agent server-side -------------------------------------------
-  // Early reject for unknown slugs. The per-tenant subset is enforced after
-  // tenant resolution below — that's where SunBiz gets locked to solara/helios
-  // and CC's personal OASIS tenant gets the full operator family.
+  // Slug is validated AFTER tenant resolution below (one helper, both gates).
+  // The body-size + cli_provider checks above already filter the bulk of
+  // malformed requests, so deferring agent validation past the auth path
+  // costs nothing measurable and keeps the security check centralized.
   const agent = String(clientBody.agent || "").trim().toLowerCase();
-  if (!KNOWN_BRIDGE_AGENTS.has(agent)) {
-    return jsonError(400, "invalid_agent");
-  }
 
   // ---- HOP 2: resolve identity SERVER-SIDE (fail closed) -------------------
   // Mirrors app/api/chat/route.ts:390-457 — default teamRole='read_only'
@@ -191,15 +174,9 @@ export async function POST(req: NextRequest) {
     return jsonError(403, "bridge_not_enabled_for_tenant");
   }
 
-  // ---- Per-tenant agent allowlist ------------------------------------------
-  // SunBiz tenant is restricted to solara/helios; operator's personal OASIS
-  // tenant gets the full operator family (bravo/atlas/maven/aura/hermes/
-  // life-preservation). The tenant gate above guarantees only CC reaches the
-  // OASIS branch, so widening the allowlist here is safe.
-  const tenantAgents = allowedBridgeAgentsForTenant(tenantRow.slug);
-  if (!tenantAgents.has(agent)) {
-    return jsonError(400, "agent_not_enabled_for_tenant");
-  }
+  // ---- Agent allowlist (both gates: known-universe + tenant-specific) ------
+  const agentCheck = validateBridgeAgent(agent, tenantRow.slug);
+  if (!agentCheck.ok) return jsonError(agentCheck.status, agentCheck.error);
 
   // ---- Resolve the VPS target (server-only secret) -------------------------
   const target = resolveBridgeTarget(tenantRow);

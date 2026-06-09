@@ -12,21 +12,11 @@
  */
 
 import { authorizeBridgeRequest } from "@/lib/bridge-proxy";
-import {
-  SUNBIZ_BRIDGE_AGENTS,
-  OASIS_BRIDGE_AGENTS,
-  allowedBridgeAgentsForTenant,
-} from "@/lib/agent-roots";
+import { validateBridgeAgent } from "@/lib/agent-roots";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
-// Universe of valid bridge slugs (defense-in-depth early reject). Per-tenant
-// subset enforced after auth via allowedBridgeAgentsForTenant.
-const KNOWN_BRIDGE_AGENTS: ReadonlySet<string> = new Set([
-  ...SUNBIZ_BRIDGE_AGENTS,
-  ...OASIS_BRIDGE_AGENTS,
-]);
 const MAX_BODY_BYTES = 16_000; // {agent, tab_id, session_id, cli_provider}
 
 export async function POST(req: Request) {
@@ -56,17 +46,12 @@ export async function POST(req: Request) {
   }
 
   const agent = String(body.agent || "").trim().toLowerCase();
-  if (!KNOWN_BRIDGE_AGENTS.has(agent)) {
-    return new Response(JSON.stringify({ ok: false, error: "invalid_agent" }), {
-      status: 400,
+  const agentCheck = validateBridgeAgent(agent, auth.tenantSlug);
+  if (!agentCheck.ok) {
+    return new Response(JSON.stringify({ ok: false, error: agentCheck.error }), {
+      status: agentCheck.status,
       headers: { "content-type": "application/json" },
     });
-  }
-  if (!allowedBridgeAgentsForTenant(auth.tenantSlug).has(agent)) {
-    return new Response(
-      JSON.stringify({ ok: false, error: "agent_not_enabled_for_tenant" }),
-      { status: 400, headers: { "content-type": "application/json" } },
-    );
   }
   const forwardBody = { ...body, agent };
 

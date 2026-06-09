@@ -64,6 +64,41 @@ export function allowedBridgeAgentsForTenant(
   return OASIS_BRIDGE_AGENTS;
 }
 
+/**
+ * Universe of valid bridge agent slugs across all tenants. Defense-in-depth
+ * before tenant resolution: a malformed/unknown slug fails fast without a
+ * tenant DB lookup. Per-tenant restriction is enforced separately via
+ * allowedBridgeAgentsForTenant.
+ */
+export const KNOWN_BRIDGE_AGENTS: ReadonlySet<string> = new Set([
+  ...SUNBIZ_BRIDGE_AGENTS,
+  ...OASIS_BRIDGE_AGENTS,
+]);
+
+export type BridgeAgentValidation =
+  | { ok: true }
+  | { ok: false; status: number; error: string };
+
+/**
+ * Validate that an agent slug is BOTH (a) known to the proxy at all AND
+ * (b) permitted for this tenant. Centralizes the two-tier security check
+ * the /api/bridge/* routes (chat, chat-reset, prewarm) all need to apply
+ * identically — extracting it here prevents divergence between routes
+ * (which would be a privilege-escalation bug class).
+ */
+export function validateBridgeAgent(
+  agent: string,
+  tenantSlug: string,
+): BridgeAgentValidation {
+  if (!KNOWN_BRIDGE_AGENTS.has(agent)) {
+    return { ok: false, status: 400, error: "invalid_agent" };
+  }
+  if (!allowedBridgeAgentsForTenant(tenantSlug).has(agent)) {
+    return { ok: false, status: 400, error: "agent_not_enabled_for_tenant" };
+  }
+  return { ok: true };
+}
+
 /** Endpoint the bridge serves chat from. Defaults to the local desktop bridge,
  *  but reads NEXT_PUBLIC_BRIDGE_CHAT_BASE so a hosted deploy (e.g. the SunBiz
  *  VPS bridge behind nginx/TLS) can point every employee's browser at the shared
