@@ -59,6 +59,8 @@ const REASON_DETAIL: Record<BridgeHealthReason, string | null> = {
     "Your user has no profile row. Contact the operator to provision one.",
   no_tenant:
     "Your profile has no tenant binding. Contact the operator.",
+  profile_lookup_failed:
+    "Supabase user_profiles lookup failed. Check the Vercel function logs and Supabase project health — this is a database availability issue, not a VPS networking issue.",
   tenant_lookup_failed:
     "Supabase tenant lookup failed. Check the Vercel function logs.",
   bridge_not_enabled_for_tenant:

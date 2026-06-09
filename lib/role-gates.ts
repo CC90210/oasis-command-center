@@ -121,29 +121,36 @@ export function bridgeDisallowedToolsForRole(
  * SAFE for non-owner/non-admin roles. Source of truth:
  * Business-Empire-Agent/bravo_cli/bridge_tools.py:TOOL_REGISTRY.
  *
- * These tools either return data (read_file, list_scripts, list_skills,
- * load_skill) or report state (cli_status) without mutating anything.
- * Every other tool in TOOL_REGISTRY (write_file, bash, send_email, send_sms,
- * run_script, stripe, supabase, n8n, firecrawl, notebooklm, underwriting_run,
- * shop_out_send_batch, install_cli, cli_auth_start) is mutating + denied
- * for non-owner/non-admin roles.
+ * Codex audit 2026-06-09 round-7 [high]: read_file and load_skill were
+ * REMOVED from this allowlist. Both are "read-only" in the local-machine
+ * sense but the bridge implementation lets them read under all registered
+ * agent repo roots (Bravo/Atlas/Maven/Aura/Hermes). A non-admin SunBiz
+ * employee (read_only, loan_officer, processor) could POST tool_name=
+ * read_file and read CC's empire code, brain notes, memory — a clear
+ * tenant-boundary break.
+ *
+ * Surviving non-admin allowlist:
+ *   - list_scripts — enumerates filenames, no file CONTENTS.
+ *   - list_skills  — enumerates skill names + frontmatter triggers.
+ *   - cli_status   — daemon health probe (uptime, last error). No data.
+ *
+ * Every other tool in TOOL_REGISTRY (read_file, load_skill, write_file,
+ * bash, send_email, send_sms, run_script, stripe, supabase, n8n,
+ * firecrawl, notebooklm, underwriting_run, shop_out_send_batch,
+ * install_cli, cli_auth_start) is denied for non-owner/non-admin.
  *
  * Allowlist over denylist: when a new tool gets added to the bridge registry
  * it MUST default to "denied for non-admin" rather than "allowed by accident."
  *
- * Codex audit 2026-06-09 round-3 [critical]: the previous gate reused
- * bridgeDisallowedToolsForRole() (which returns Claude CLI PascalCase
- * names like Bash/Write/Edit) against bridge registry names (lowercase
- * snake_case like bash/write_file/send_email). The exact-match comparison
- * never triggered, so a non-admin POST with tool_name="bash" passed
- * straight through. This allowlist closes that gap with the actual
- * dispatched tool namespace.
+ * Codex audit 2026-06-09 round-3 [critical] context: the previous gate
+ * reused bridgeDisallowedToolsForRole() (Claude CLI PascalCase names)
+ * against bridge registry names (lowercase snake_case). The exact-match
+ * comparison never triggered, so a non-admin POST with tool_name="bash"
+ * passed straight through.
  */
 export const BRIDGE_EXEC_TOOL_READ_ONLY: ReadonlySet<string> = new Set([
-  "read_file",
   "list_scripts",
   "list_skills",
-  "load_skill",
   "cli_status",
 ]);
 

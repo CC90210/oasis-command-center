@@ -16,6 +16,11 @@ export const BRIDGE_HEALTH_REASONS = [
   "unauthenticated",
   "no_profile",
   "no_tenant",
+  // Round-7 [medium]: authorizeBridgeRequest can return profile_lookup_failed
+  // when the user_profiles SELECT throws. Without this entry it would
+  // collapse to vps_unreachable in the response narrow, misdirecting the
+  // operator to debug DNS/TLS when the broken leg is Supabase.
+  "profile_lookup_failed",
   "tenant_lookup_failed",
   "bridge_not_enabled_for_tenant",
   "bridge_not_configured",

@@ -20,8 +20,14 @@ import {
 // If a future hand re-introduces the PascalCase mistake, these tests
 // fail on the actual dispatched namespace.
 
-// ---- Mutating bridge tools (from bravo_cli/bridge_tools.py:TOOL_REGISTRY) ----
-const MUTATING_BRIDGE_TOOLS = [
+// ---- Tools DENIED for non-admin roles ----
+// Codex round-7 [high] added read_file + load_skill to this list. Both
+// are read-only on the local filesystem but the bridge implementation
+// allows reads under all registered agent repo roots (Bravo/Atlas/Maven/
+// Aura/Hermes). A non-admin SunBiz user must NOT be able to read CC's
+// empire code, brain notes, or memory via these tools.
+const NON_ADMIN_DENIED_TOOLS = [
+  // Round-3 deny list (mutating / dangerous):
   "bash",
   "write_file",
   "send_email",
@@ -36,26 +42,29 @@ const MUTATING_BRIDGE_TOOLS = [
   "shop_out_send_batch",
   "install_cli",
   "cli_auth_start",
+  // Round-7 confidentiality additions:
+  "read_file",
+  "load_skill",
 ];
 
-// ---- Read-only bridge tools ----
-const READ_ONLY_BRIDGE_TOOLS = [
-  "read_file",
+// ---- Tools ALLOWED for non-admin roles (post round-7) ----
+// Only enumerate-without-content + status. No file contents, no
+// invocation-able skill bodies.
+const NON_ADMIN_ALLOWED_TOOLS = [
   "list_scripts",
   "list_skills",
-  "load_skill",
   "cli_status",
 ];
 
 // 1. The read-only allowlist matches the documented set verbatim.
 assert.deepEqual(
   Array.from(BRIDGE_EXEC_TOOL_READ_ONLY).sort(),
-  READ_ONLY_BRIDGE_TOOLS.slice().sort(),
+  NON_ADMIN_ALLOWED_TOOLS.slice().sort(),
   "BRIDGE_EXEC_TOOL_READ_ONLY must contain exactly the documented read-only tools",
 );
 
 // 2. owner and admin can call every bridge tool (mutating + read-only).
-for (const tool of [...MUTATING_BRIDGE_TOOLS, ...READ_ONLY_BRIDGE_TOOLS]) {
+for (const tool of [...NON_ADMIN_DENIED_TOOLS, ...NON_ADMIN_ALLOWED_TOOLS]) {
   assert.ok(
     bridgeExecToolAllowedForRole("owner", tool),
     `owner must be allowed to call '${tool}'`,
@@ -84,7 +93,7 @@ const NON_ADMIN_ROLES: (string | null | undefined)[] = [
   "garbage_role",
 ];
 for (const role of NON_ADMIN_ROLES) {
-  for (const tool of MUTATING_BRIDGE_TOOLS) {
+  for (const tool of NON_ADMIN_DENIED_TOOLS) {
     assert.equal(
       bridgeExecToolAllowedForRole(role, tool),
       false,
@@ -96,7 +105,7 @@ for (const role of NON_ADMIN_ROLES) {
 // 4. Non-admin roles can still call the read-only tools (so a read_only
 // employee can use the chat to inspect leads / files / status).
 for (const role of NON_ADMIN_ROLES) {
-  for (const tool of READ_ONLY_BRIDGE_TOOLS) {
+  for (const tool of NON_ADMIN_ALLOWED_TOOLS) {
     assert.ok(
       bridgeExecToolAllowedForRole(role, tool),
       `role ${JSON.stringify(role)} should still be allowed read-only tool '${tool}'`,
@@ -119,5 +128,32 @@ assert.ok(
   bridgeExecToolAllowedForRole("owner", "unregistered_future_tool"),
   "owner should be allowed to call unknown tools; bridge rejects on its end",
 );
+
+// ---- 7. Round-7 confidentiality regression locks ----
+// read_file and load_skill must be DENIED for every non-admin role.
+// The bridge tools.py implementation reads under all registered agent
+// repo roots (Bravo/Atlas/Maven/Aura/Hermes). A non-admin SunBiz user
+// must not be able to read CC's empire code via these tools.
+for (const role of NON_ADMIN_ROLES) {
+  for (const tool of ["read_file", "load_skill"]) {
+    assert.equal(
+      bridgeExecToolAllowedForRole(role, tool),
+      false,
+      `Codex round-7 [high]: ${tool} MUST be denied for non-admin role ${JSON.stringify(role)} (operator-repo confidentiality)`,
+    );
+  }
+}
+// But owner/admin DO retain access (they need it for normal operator
+// workflows where Bravo / Atlas / Maven legitimately read their own files).
+for (const role of ["owner", "admin"]) {
+  assert.ok(
+    bridgeExecToolAllowedForRole(role, "read_file"),
+    `${role} must retain read_file access`,
+  );
+  assert.ok(
+    bridgeExecToolAllowedForRole(role, "load_skill"),
+    `${role} must retain load_skill access`,
+  );
+}
 
 console.log("bridge-exec-tool-role-gate.test.ts: OK");
