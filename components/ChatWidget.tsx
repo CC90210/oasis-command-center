@@ -1090,7 +1090,10 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ agent, tab_id: tabId }),
     }).catch(() => null);
-  }, [bridgeOnline, agent, tabId, prewarmEpoch, cliRuntime]);
+    // serverBridgeOnline included so the prewarm fires when only the
+    // server-side signal transitions to true (degraded-proxy case where
+    // bridgeOnline=false but daemon IS heartbeating per DB).
+  }, [bridgeOnline, serverBridgeOnline, agent, tabId, prewarmEpoch, cliRuntime]);
 
   useEffect(() => {
     if (awayFromBottom) return;
