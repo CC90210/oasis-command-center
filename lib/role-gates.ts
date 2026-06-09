@@ -117,6 +117,53 @@ export function bridgeDisallowedToolsForRole(
 }
 
 /**
+ * Bridge `/exec-tool` registry tool names (lowercase, snake_case) that are
+ * SAFE for non-owner/non-admin roles. Source of truth:
+ * Business-Empire-Agent/bravo_cli/bridge_tools.py:TOOL_REGISTRY.
+ *
+ * These tools either return data (read_file, list_scripts, list_skills,
+ * load_skill) or report state (cli_status) without mutating anything.
+ * Every other tool in TOOL_REGISTRY (write_file, bash, send_email, send_sms,
+ * run_script, stripe, supabase, n8n, firecrawl, notebooklm, underwriting_run,
+ * shop_out_send_batch, install_cli, cli_auth_start) is mutating + denied
+ * for non-owner/non-admin roles.
+ *
+ * Allowlist over denylist: when a new tool gets added to the bridge registry
+ * it MUST default to "denied for non-admin" rather than "allowed by accident."
+ *
+ * Codex audit 2026-06-09 round-3 [critical]: the previous gate reused
+ * bridgeDisallowedToolsForRole() (which returns Claude CLI PascalCase
+ * names like Bash/Write/Edit) against bridge registry names (lowercase
+ * snake_case like bash/write_file/send_email). The exact-match comparison
+ * never triggered, so a non-admin POST with tool_name="bash" passed
+ * straight through. This allowlist closes that gap with the actual
+ * dispatched tool namespace.
+ */
+export const BRIDGE_EXEC_TOOL_READ_ONLY: ReadonlySet<string> = new Set([
+  "read_file",
+  "list_scripts",
+  "list_skills",
+  "load_skill",
+  "cli_status",
+]);
+
+/**
+ * Return true when the given bridge-registry tool name is callable by the
+ * given team role via /api/bridge/exec-tool. owner / admin can call any
+ * registered tool; every other role can only call the read-only allowlist.
+ *
+ * Fail-closed: unknown role => non-admin path => allowlist-only.
+ */
+export function bridgeExecToolAllowedForRole(
+  teamRole: string | null | undefined,
+  toolName: string,
+): boolean {
+  const r = (teamRole || "").trim().toLowerCase();
+  if (r === "owner" || r === "admin") return true;
+  return BRIDGE_EXEC_TOOL_READ_ONLY.has(toolName);
+}
+
+/**
  * V6.9.3 — Field-level permission enforcement.
  *
  * Manifest extension (lib/manifest/schema.ts ManifestAgentBinding):
