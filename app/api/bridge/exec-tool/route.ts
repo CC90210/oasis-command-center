@@ -16,11 +16,21 @@
  * online (dropdown enabled, isProxyModeRuntime=true on health) but
  * tool execution failed silently for every non-localhost user.
  *
- * Auth: same Supabase session + SunBiz tenant gate as /api/bridge/chat.
- * Tool calls are server-relayed; the browser never touches the VPS.
+ * Codex round-2 [critical] hardening: the proxy MUST enforce the same
+ * role-based tool allowlist that /api/bridge/chat uses. Otherwise a
+ * read-only / loan_officer / processor authenticated user can POST
+ * directly to this route with tool_name='Bash' or 'Write' and execute
+ * arbitrary operations on the operator's machine, bypassing the role
+ * boundary that the chat dispatcher would have enforced. Same per-tenant
+ * rate limit as the chat path so the tool surface can not be spammed.
+ *
+ * Auth: same Supabase session + SunBiz tenant gate as /api/bridge/chat,
+ * plus role->disallowed-tool gate, plus per-tenant rate limit.
  */
 
 import { authorizeBridgeRequest } from "@/lib/bridge-proxy";
+import { bridgeDisallowedToolsForRole } from "@/lib/role-gates";
+import { rateLimit } from "@/lib/rate-limit";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -41,6 +51,20 @@ export async function POST(req: Request) {
       status: auth.status,
       headers: { "content-type": "application/json" },
     });
+  }
+
+  // Per-tenant rate limit. Mirrors /api/bridge/chat to prevent a malicious
+  // browser session from spamming long-running bridge tool calls.
+  const limit = rateLimit({
+    key: `bridge-exec-tool:${auth.tenantId}`,
+    capacity: 30,
+    refillPerSec: 1 / 15,
+  });
+  if (!limit.allowed) {
+    return new Response(
+      JSON.stringify({ ok: false, error: "rate_limited", retry_in_sec: limit.resetIn }),
+      { status: 429, headers: { "content-type": "application/json" } },
+    );
   }
 
   let body: Record<string, unknown> = {};
@@ -65,6 +89,26 @@ export async function POST(req: Request) {
     return new Response(
       JSON.stringify({ ok: false, error: "missing_tool_name" }),
       { status: 400, headers: { "content-type": "application/json" } },
+    );
+  }
+
+  // Role-based tool gate. /api/bridge/chat computes the disallowed_tools list
+  // from team_role and injects it into the bridge invocation; the bridge then
+  // refuses those tools at spawn time. But a direct POST to /exec-tool would
+  // bypass that gate, so we enforce the SAME allowlist here. Codex audit
+  // 2026-06-09 round-2 [critical]: without this, a read-only employee can
+  // call tool_name='Bash' / 'Write' / 'Edit' and run arbitrary operator-
+  // machine ops despite not being able to use them through the chat path.
+  const disallowedTools = bridgeDisallowedToolsForRole(auth.teamRole);
+  if (disallowedTools.includes(toolName)) {
+    return new Response(
+      JSON.stringify({
+        ok: false,
+        error: "tool_disallowed_for_role",
+        tool_name: toolName,
+        team_role: auth.teamRole,
+      }),
+      { status: 403, headers: { "content-type": "application/json" } },
     );
   }
 
