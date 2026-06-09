@@ -2215,13 +2215,23 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
         pendingToolUse = null;
         resumeCount += 1;
 
-        // 1) Hit the local bridge to execute the tool. Bridge must be
-        //    online for this to work — if it's not, fall through with
-        //    is_error so the model sees the failure and can adapt.
+        // 1) Hit the bridge to execute the tool. Bridge must be online
+        //    for this to work — if it's not, fall through with is_error so
+        //    the model sees the failure and can adapt.
+        //
+        //    Proxy mode: route through /api/bridge/exec-tool (Supabase-
+        //    cookie-authed; server attaches the VPS bearer). Without this,
+        //    every cloud_bridge_tools tool call from a non-localhost
+        //    employee browser fails with bridge_unreachable even though
+        //    the bridge is heartbeating — same class of bug as the
+        //    dropdown labels (Codex audit 2026-06-09 [medium]).
         let toolOutput = "";
         let toolIsError = false;
         try {
-          const bridgeRes = await fetchWithTimeout(`${BRIDGE_CHAT_BASE}/exec-tool`, {
+          const execToolUrl = isProxyModeRuntime()
+            ? "/api/bridge/exec-tool"
+            : `${BRIDGE_CHAT_BASE}/exec-tool`;
+          const bridgeRes = await fetchWithTimeout(execToolUrl, {
             method: "POST",
             headers: { "content-type": "application/json" },
             body: JSON.stringify({
