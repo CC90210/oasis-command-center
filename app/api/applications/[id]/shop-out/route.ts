@@ -42,6 +42,107 @@ import { buildShopOutPlan, recordShopOutThreads } from "@/lib/lenders/shop-out";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+// Generous bound for the synchronous auto-dispatch below. Each lender
+// SMTP send takes 1-3s through send_gateway; with the 20-lender cap
+// (Codex 2026-05-24) plus the 65s exec-tool proxy ceiling, 120s gives
+// comfortable headroom for the full batch + the network round trip.
+export const maxDuration = 120;
+
+/**
+ * Auto-trigger the physical SMTP dispatch for every pending thread on
+ * this application by calling the bridge tool `shop_out_send_batch`
+ * through the existing /api/bridge/exec-tool proxy (which enforces the
+ * role gate — owner/admin only — and forwards to the operator's bridge).
+ *
+ * Closes Phase 6.3-bis: shop-out used to insert threads at status=pending
+ * and require the operator to manually fire the send via Solara chat.
+ * The bridge tool was wired (bravo_cli/bridge_tools.py::_tool_shop_out_send_batch)
+ * but never auto-triggered from here. 2026-06-10: CC clicked Send and
+ * nothing left the VPS. Wiring it up.
+ *
+ * Best-effort: any failure (timeout, role gate, bridge down) leaves the
+ * threads at pending so the operator can retry. Never blocks the queue
+ * confirmation.
+ */
+async function triggerPhysicalSend(
+  req: NextRequest,
+  applicationId: string,
+): Promise<{
+  status: "sent" | "partial" | "error" | "skipped";
+  sent_count?: number;
+  failed_count?: number;
+  total_pending?: number;
+  message?: string;
+}> {
+  try {
+    const url = new URL("/api/bridge/exec-tool", req.url);
+    const cookie = req.headers.get("cookie") || "";
+    const sendRes = await fetch(url, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie },
+      body: JSON.stringify({
+        tool_name: "shop_out_send_batch",
+        application_id: applicationId,
+      }),
+      // 110s — comfortably under the route's maxDuration (120s) and the
+      // /api/bridge/exec-tool proxy's PROXY_TIMEOUT_MS (65s) governs the
+      // upstream wait, so this is mostly the network buffer.
+      signal: AbortSignal.timeout(110_000),
+    });
+    const sendData = await sendRes.json();
+    if (!sendRes.ok) {
+      return {
+        status: "error",
+        message: sendData?.error || `exec-tool HTTP ${sendRes.status}`,
+      };
+    }
+    // /api/bridge/exec-tool returns the bridge's response verbatim. The
+    // shop_out_send_batch tool wraps its result in the standard exec-tool
+    // envelope: { output: "<json string>", is_error: false }.
+    if (sendData?.is_error) {
+      return {
+        status: "error",
+        message: String(sendData?.output || "bridge tool returned is_error=true"),
+      };
+    }
+    let parsed: {
+      sent?: number;
+      failed?: number;
+      total_pending?: number;
+      failures?: unknown[];
+    };
+    try {
+      parsed = JSON.parse(sendData?.output || "{}");
+    } catch {
+      return { status: "error", message: "bridge tool returned non-JSON output" };
+    }
+    const sent = typeof parsed.sent === "number" ? parsed.sent : 0;
+    const failed = typeof parsed.failed === "number" ? parsed.failed : 0;
+    const totalPending = typeof parsed.total_pending === "number" ? parsed.total_pending : 0;
+    let status: "sent" | "partial" | "error";
+    if (totalPending === 0) {
+      // No pending threads (e.g. operator double-fired) → not an error.
+      status = "sent";
+    } else if (sent > 0 && failed === 0) {
+      status = "sent";
+    } else if (sent > 0 && failed > 0) {
+      status = "partial";
+    } else {
+      status = "error";
+    }
+    return {
+      status,
+      sent_count: sent,
+      failed_count: failed,
+      total_pending: totalPending,
+    };
+  } catch (e) {
+    return {
+      status: "error",
+      message: e instanceof Error ? e.message : "auto-trigger threw unknown error",
+    };
+  }
+}
 
 export async function POST(
   req: NextRequest,
@@ -315,6 +416,16 @@ export async function POST(
 
   const queued = entries.filter((e) => !e.error).length;
   const blocked = entries.length - queued;
+
+  // Phase 6.3-bis: auto-fire the physical SMTP dispatch for every thread
+  // we just queued at status='pending'. Synchronous so the response
+  // carries the real sent/failed counts. Best-effort: any failure
+  // leaves threads at pending so the operator can retry.
+  const physicalSend =
+    queued > 0
+      ? await triggerPhysicalSend(req, applicationId)
+      : { status: "skipped" as const, message: "no threads queued (all blocked)" };
+
   return NextResponse.json({
     ok: true,
     plan: planResult.plan,
@@ -325,13 +436,9 @@ export async function POST(
     // silently dropping foreign-tenant paths before, which gave
     // operators a false-positive "package complete" signal.
     rejected_attachments: rejectedAttachments,
-    // Surface the physical-send gap honestly in the response so the
-    // operator UI doesn't misreport "5 lenders contacted" when no
-    // SMTP fired. Phase 6.3-bis closes this.
-    physical_send: {
-      status: "pending",
-      hint:
-        "Lender threads queued at status='pending'. Physical SMTP send via send_gateway is Phase 6.3-bis (bridge /exec-tool shop_out_send_batch handler). Until that ships, run `python scripts/send_gateway.py send` per thread, or trigger via Solara chat.",
-    },
+    // Real result from the bridge tool (or error message if the
+    // auto-trigger failed). UI uses this to decide whether to render
+    // "5 lenders contacted" vs. "queued, retry the send" vs. partial.
+    physical_send: physicalSend,
   });
 }
