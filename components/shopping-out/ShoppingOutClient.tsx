@@ -155,6 +155,7 @@ export function ShoppingOutClient({
   const [selectedLenderIds, setSelectedLenderIds] = useState<Set<string>>(new Set());
   const [notes, setNotes] = useState("");
   const [threads, setThreads] = useState<Thread[]>([]);
+  const [retrying, setRetrying] = useState<Set<string>>(new Set());
   const [docs, setDocs] = useState<DocRow[]>([]);
   const [selectedDocIds, setSelectedDocIds] = useState<Set<string>>(new Set());
   const [sending, setSending] = useState(false);
@@ -338,6 +339,41 @@ export function ShoppingOutClient({
   useEffect(() => {
     if (selectedAppId && lenders) refreshPlanAndThreads();
   }, [selectedAppId, lenders, refreshPlanAndThreads]);
+
+  // Retry one error-status thread. Optimistically marks the row as
+  // "pending" the moment the POST returns so the operator sees immediate
+  // feedback; the next refresh confirms the daemon picked it up.
+  const retryThread = useCallback(
+    async (threadId: string) => {
+      if (!selectedAppId) return;
+      setRetrying((prev) => new Set(prev).add(threadId));
+      try {
+        const r = await fetch(
+          `/api/applications/${selectedAppId}/lender-threads/${threadId}/retry`,
+          { method: "POST" },
+        );
+        const j = await r.json().catch(() => ({}));
+        if (r.ok && j.ok) {
+          setThreads((prev) =>
+            prev.map((t) =>
+              t.id === threadId
+                ? { ...t, status: j.new_status || "pending", last_error: null }
+                : t,
+            ),
+          );
+        }
+      } catch {
+        // Fail-silent on network blip; the daemon picks up on next refresh.
+      } finally {
+        setRetrying((prev) => {
+          const next = new Set(prev);
+          next.delete(threadId);
+          return next;
+        });
+      }
+    },
+    [selectedAppId],
+  );
 
   const toggleLender = (id: string) => {
     setSelectedLenderIds((prev) => {
@@ -765,7 +801,7 @@ export function ShoppingOutClient({
                           <div className="text-[11px] text-rose-300 mt-1">&#9888; {t.last_error}</div>
                         )}
                       </div>
-                      <div className="text-right shrink-0 space-y-1">
+                      <div className="text-right shrink-0 space-y-1 flex flex-col items-end">
                         <span
                           className={`inline-block text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded border ${tone}`}
                         >
@@ -776,6 +812,22 @@ export function ShoppingOutClient({
                             ? new Date(t.sent_at).toLocaleDateString()
                             : new Date(t.created_at).toLocaleDateString()}
                         </div>
+                        {t.status === "error" && (
+                          <button
+                            type="button"
+                            onClick={() => retryThread(t.id)}
+                            disabled={retrying.has(t.id)}
+                            className="inline-flex items-center gap-1 text-[10px] font-mono px-2 py-0.5 rounded border border-amber-500/40 bg-amber-500/10 text-amber-200 hover:bg-amber-500/20 disabled:opacity-50 disabled:cursor-wait"
+                            title="Reset this thread to pending so the sender re-fires it on its next tick."
+                          >
+                            {retrying.has(t.id) ? (
+                              <Loader2 className="w-3 h-3 animate-spin" />
+                            ) : (
+                              <RefreshCcw className="w-3 h-3" />
+                            )}
+                            Retry
+                          </button>
+                        )}
                       </div>
                     </div>
                   );
