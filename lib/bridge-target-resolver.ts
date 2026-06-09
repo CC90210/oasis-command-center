@@ -81,7 +81,15 @@ export function resolveBridgeTarget(
     // row name the env var lets a corrupted row pair its bridge_url with
     // another tenant's bearer (or the global SunBiz bearer), making the
     // proxy send that secret to a tenant-chosen URL.
-    const tokenEnvName = `BRIDGE_BEARER_TOKEN_${tenant.slug.toUpperCase()}`;
+    //
+    // Slug sanitization: hyphens → underscores so a slug like 'oasis-ai-cc'
+    // becomes BRIDGE_BEARER_TOKEN_OASIS_AI_CC. POSIX env var names cannot
+    // contain hyphens, and the Vercel UI's env var form rejects them — the
+    // sanitizer keeps slugs portable across hosting environments and
+    // matches what an operator would intuitively type when setting it.
+    const tokenEnvName = `BRIDGE_BEARER_TOKEN_${tenant.slug
+      .toUpperCase()
+      .replace(/-/g, "_")}`;
     const tenantToken = env[tokenEnvName];
     if (tenantToken) {
       const baseUrl = tenantUrl.replace(/\/+$/, "");

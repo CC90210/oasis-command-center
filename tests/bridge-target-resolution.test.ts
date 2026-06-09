@@ -220,6 +220,46 @@ function tenant(
 }
 
 // ─────────────────────────────────────────────────────────────────────
+// Rule 6b — slug hyphens are sanitized to underscores in env var name
+// CC's actual OASIS tenant slug is "oasis-ai-cc" — POSIX env vars can't
+// contain hyphens, and Vercel UI rejects them on form submit. The
+// resolver MUST translate hyphens → underscores so the operator can
+// set a sane var name.
+// ─────────────────────────────────────────────────────────────────────
+{
+  const r = resolveBridgeTarget(
+    tenant("oasis-ai-cc", { bridge_url: "https://bridge-cc.oasisai.work" }),
+    { "BRIDGE_BEARER_TOKEN_OASIS_AI_CC": "cc-personal-bearer" },
+  );
+  assert.deepEqual(
+    r,
+    {
+      baseUrl: "https://bridge-cc.oasisai.work",
+      bearerToken: "cc-personal-bearer",
+    },
+    "hyphenated slug 'oasis-ai-cc' → underscored env var BRIDGE_BEARER_TOKEN_OASIS_AI_CC",
+  );
+}
+
+// And the WRONG var name (with hyphens) is NOT consulted — defense
+// against a Vercel UI that accepted hyphens at one point but won't now.
+{
+  const r = resolveBridgeTarget(
+    tenant("oasis-ai-cc", { bridge_url: "https://bridge-cc.oasisai.work" }),
+    {
+      // Wrong (hyphenated) form — must be IGNORED.
+      "BRIDGE_BEARER_TOKEN_OASIS-AI-CC": "wrong-name-token",
+      // No underscored form set → fail closed.
+    },
+  );
+  assert.equal(
+    r,
+    null,
+    "hyphen-form env var must NOT be consulted (only underscore form is canonical)",
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────
 // Rule 6 — trailing slash normalization
 // ─────────────────────────────────────────────────────────────────────
 {
