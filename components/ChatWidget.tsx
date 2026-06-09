@@ -44,6 +44,7 @@ import { useSearchParams, useRouter, usePathname } from "next/navigation";
 import { getAgentInfo } from "@/lib/agents";
 import { useAgentDisplayNames } from "@/lib/use-agent-display-names";
 import { BRIDGE_CHAT_BASE } from "@/lib/agent-roots";
+import { computeEffectiveBridgeOnline } from "@/lib/bridge-effective-online";
 import { getBrowserSupabase } from "@/lib/supabase-browser";
 import { parseInput, renderHelp, type SlashCommandName } from "@/lib/chat-modes/slash-parser";
 import { usePlanMode } from "@/lib/chat-modes/use-plan-mode";
@@ -265,36 +266,10 @@ function isProxyModeRuntime(): boolean {
   return BRIDGE_CHAT_BASE !== "http://127.0.0.1:9100";
 }
 
-/**
- * Effective-online check used by 5 sites (dropdown gate, send gate,
- * bridgeReady ground-truth, prewarm gate, chat-reset gate).
- *
- * Either signal is independently authoritative — bridgeOnline (client-side
- * probe of /api/bridge/health or localhost:9100/health) OR serverBridgeOnline
- * (bridge_pairings.last_seen_at < 5min, set server-side from the daemon's
- * outbound /api/bridge/ping calls).
- *
- * 2026-06-09 round-3 simplification: the previous gate required
- * (isProxyModeRuntime() AND serverBridgeOnline). That correctly handled the
- * "browser can't probe localhost on a remote VPS" case, but ALSO failed when
- * the Vercel→VPS proxy was broken (env vars cleared by encryption rotation)
- * even though the daemon itself was heartbeating fine. The new logic trusts
- * the DB heartbeat as a primary signal — if the daemon is alive, the picker
- * should let the user select a CLI; if the proxy is degraded the tool call
- * will surface a clear error, not a silently-disabled dropdown.
- *
- * isProxyModeRuntime() is still used at the URL-builder sites (chat,
- * health, prewarm, chat-reset, exec-tool) to pick proxy vs direct routes.
- *
- * Extracted 2026-06-08 — was duplicated as inline expressions in every
- * call site, which meant a future fix would have to hit 5 places.
- */
-function computeEffectiveBridgeOnline(
-  bridgeOnline: boolean | null,
-  serverBridgeOnline: boolean | undefined,
-): boolean {
-  return bridgeOnline === true || serverBridgeOnline === true;
-}
+// computeEffectiveBridgeOnline lives in lib/bridge-effective-online.ts so it
+// can be unit-tested and reused by other components (Sidebar, BridgeCliPanel)
+// without dragging in this client component. See that file for the full
+// contract + history.
 
 const MAX_ATTACHMENTS_PER_TURN = 5;
 const TEXT_ATTACHMENT_READ_BYTES = 512 * 1024;
