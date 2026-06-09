@@ -18,65 +18,17 @@
 
 import "server-only";
 
-export type BridgeTarget = {
-  /** e.g. "http://10.0.0.5:9100" or the internal nginx TLS hostname. No trailing slash. */
-  baseUrl: string;
-  /** Shared secret; transmitted ONLY on the Vercel->VPS leg. Never returned to a browser. */
-  bearerToken: string;
-};
+// Pure resolution rules + types live in bridge-target-resolver.ts so tests
+// can import them without triggering this file's server-only guard. The
+// re-exports here mean route handlers continue to import from "@/lib/bridge-proxy"
+// exactly as before.
+import {
+  resolveBridgeTarget as _resolveBridgeTarget,
+  type BridgeTarget as _BridgeTarget,
+} from "./bridge-target-resolver";
 
-/**
- * Resolve the bridge target for a tenant.
- *
- * Resolution precedence (per-tenant first, then global fallback):
- *   1. tenant.custom_fields.bridge_url is set → that tenant has its own
- *      bridge (e.g. CC's home machine via Cloudflare Tunnel for the OASIS
- *      tenant). Bearer token is read from a tenant-scoped env var whose
- *      name comes from tenant.custom_fields.bridge_bearer_token_env (or
- *      defaults to BRIDGE_BEARER_TOKEN_<SLUG_UPPER>).
- *   2. Otherwise → falls back to the global BRIDGE_VPS_URL + BRIDGE_BEARER_TOKEN
- *      env vars (today's SunBiz VPS path; backward compatible).
- *
- * Security: secrets never go in tenants.custom_fields directly. We store
- * the env var NAME there so the dashboard can be configured by ops, but
- * the actual bearer value lives only in Vercel's encrypted env vars.
- *
- * Returns null when no URL+token pair resolves — callers map null to a
- * 503 (chat) or {ok:false} fallback (health) so the widget degrades to
- * the cloud path instead of hanging.
- */
-export function resolveBridgeTarget(
-  tenant: { slug: string; custom_fields: Record<string, unknown> | null },
-): BridgeTarget | null {
-  // Per-tenant override path (the OASIS-portal-targets-CC's-home case).
-  const cf = tenant.custom_fields ?? {};
-  const tenantUrl = typeof cf.bridge_url === "string" ? cf.bridge_url.trim() : "";
-  if (tenantUrl) {
-    const tokenEnvName =
-      typeof cf.bridge_bearer_token_env === "string" && cf.bridge_bearer_token_env.trim()
-        ? cf.bridge_bearer_token_env.trim()
-        : `BRIDGE_BEARER_TOKEN_${tenant.slug.toUpperCase()}`;
-    const tenantToken = process.env[tokenEnvName];
-    if (tenantToken) {
-      const baseUrl = tenantUrl.replace(/\/+$/, "");
-      if (baseUrl) return { baseUrl, bearerToken: tenantToken };
-    }
-    // Per-tenant override declared but token env missing → DO NOT fall
-    // through to the global default. The operator was explicit that this
-    // tenant uses its own bridge; silently failing to a different VPS
-    // would route this tenant's traffic to the wrong place. Return null
-    // so callers surface bridge_not_configured.
-    return null;
-  }
-
-  // Global fallback (default SunBiz/operator path).
-  const rawUrl = process.env.BRIDGE_VPS_URL;
-  const bearerToken = process.env.BRIDGE_BEARER_TOKEN;
-  if (!rawUrl || !bearerToken) return null;
-  const baseUrl = rawUrl.replace(/\/+$/, ""); // strip trailing slash(es)
-  if (!baseUrl) return null;
-  return { baseUrl, bearerToken };
-}
+export type BridgeTarget = _BridgeTarget;
+export const resolveBridgeTarget = _resolveBridgeTarget;
 
 /** True when the server is configured to proxy to a VPS bridge (global default). */
 export function isBridgeProxyEnabled(): boolean {

@@ -1,7 +1,7 @@
 import ChatWidget from "@/components/ChatWidget";
 import { Card, PageHeader, Tag } from "@/components/Card";
 import { safe } from "@/lib/api-helpers";
-import { getActiveProfile, integrationsHealth } from "@/lib/queries";
+import { getActiveProfile, getTenant, integrationsHealth } from "@/lib/queries";
 import { getSessionUser } from "@/lib/supabase-server";
 import { isOperatorEmail } from "@/lib/operator-credentials";
 import { resolveAgentKey } from "@/lib/agents";
@@ -39,13 +39,21 @@ export default async function ClientAgentPage({
     getSessionUser().catch(() => null),
     searchParams ?? Promise.resolve({} as { agent?: string }),
   ]);
-  const [healthRows, manifest] = await Promise.all([
+  const [healthRows, manifest, tenant] = await Promise.all([
     safe(
       "agent.health",
       integrationsHealth(profile?.tenant_id || null),
       [] as IntegrationHealth[]
     ),
     safe("agent.manifest", getTenantManifestForUser(profile?.tenant_id ?? null), null),
+    // Tenant row — needed for the degraded-state family discriminator
+    // below. Codex finding 2026-06-10 [medium]: the manifest's tenant_slug
+    // field is "sun" for SunBiz (not "submissions"), AND is null when the
+    // manifest lookup fails. Family default must come from the tenants.slug
+    // column (= "submissions" for SunBiz), which is authoritative.
+    profile?.tenant_id
+      ? safe("agent.tenant", getTenant(profile.tenant_id), null)
+      : Promise.resolve(null),
   ]);
   // Manifest-first precedence via the shared helper. Returns lowercased
   // slugs from the manifest, OR falls through to profile.agents_enabled,
@@ -57,17 +65,15 @@ export default async function ClientAgentPage({
   const enabled = enabledRaw.map(resolveAgentKey);
   const manifestPrimary = manifest?.agents?.find((a) => a.primary && a.enabled)?.slug;
   // Fallback chain: manifest.primary → profile.primary_agent → enabled[0] →
-  // tenant-family default. The family default discriminates by tenant_slug
-  // (manifest carries it for free — no extra DB call):
-  //   SunBiz (slug='submissions') → 'solara' (ops primary)
+  // tenant-family default. The family default is keyed off the TENANT ROW
+  // slug (authoritative — matches what the bridge proxy gates on at
+  // lib/bridge-proxy.ts:GLOBAL_FALLBACK_TENANT_SLUGS), NOT the manifest's
+  // `tenant_slug` field (which is "sun" for SunBiz — different concept,
+  // and null when the manifest fetch fails — Codex 2026-06-10 [medium]).
+  //   SunBiz (tenant.slug='submissions') → 'solara' (ops primary)
   //   OASIS / unknown → 'bravo' (empire flagship)
-  // 2026-06-09 history: this used to be hardcoded 'solara' (Codex caught
-  // it during the bridge-allowlist refactor). The 2026-06-09 evening
-  // hotfix flipped it to hardcoded 'bravo' — correct for OASIS but wrong
-  // for a degraded SunBiz manifest (would 400 against the SunBiz allowlist).
-  // This is the tenant-aware closure: each family gets its own correct
-  // degraded-state default, and the chat allowlist always accepts it.
-  const familyDefault = manifest?.tenant_slug === "submissions" ? "solara" : "bravo";
+  const tenantFamily = (tenant?.slug || "").toLowerCase();
+  const familyDefault = tenantFamily === "submissions" ? "solara" : "bravo";
   const profilePrimary = resolveAgentKey(
     manifestPrimary || profile?.primary_agent || enabled[0] || familyDefault,
   );
