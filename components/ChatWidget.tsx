@@ -45,6 +45,11 @@ import { getAgentInfo } from "@/lib/agents";
 import { useAgentDisplayNames } from "@/lib/use-agent-display-names";
 import { BRIDGE_CHAT_BASE } from "@/lib/agent-roots";
 import { computeEffectiveBridgeOnline } from "@/lib/bridge-effective-online";
+import {
+  deriveDropdownState,
+  DROPDOWN_SUFFIX,
+  isDropdownEnabled,
+} from "@/lib/bridge-dropdown-state";
 import { getBrowserSupabase } from "@/lib/supabase-browser";
 import { parseInput, renderHelp, type SlashCommandName } from "@/lib/chat-modes/slash-parser";
 import { usePlanMode } from "@/lib/chat-modes/use-plan-mode";
@@ -184,9 +189,9 @@ const isCliRuntime = (s: unknown): s is CliRuntime =>
  *    or a Firefox/Safari HTTPS→HTTP localhost block
  *  - bridgeOnline=false + serverBridgeOnline=false: daemon actually down
  */
-const UNREACHABLE_TOOLTIP =
-  "Bridge daemon IS heartbeating to the dashboard (you see ping/30s in the logs), but the Vercel→VPS proxy can't reach it back. Most common cause: BRIDGE_VPS_URL or BRIDGE_BEARER_TOKEN got cleared on Vercel production env (re-set them in the project Settings).";
-
+// deriveDropdownState / DROPDOWN_SUFFIX / isDropdownEnabled live in
+// lib/bridge-dropdown-state.ts so they can be unit-tested and reused.
+// See that file for the full state-machine contract.
 function renderCliOption(args: {
   value: string;
   displayName: string;
@@ -194,41 +199,38 @@ function renderCliOption(args: {
   offlineTooltip: string;
   bridgeOnline: boolean | null;
   serverBridgeOnline?: boolean;
+  bridgeProbeReason?: string | null;
+  bridgeProbeDetail?: string | null;
 }) {
-  const { value, displayName, onlineTooltip, offlineTooltip, bridgeOnline, serverBridgeOnline } = args;
-  // 2026-06-09 round-3 finding: the Vercel→VPS proxy can fail (BRIDGE_VPS_URL
-  // / BRIDGE_BEARER_TOKEN env vars cleared by an encryption-key rotation)
-  // while the bridge daemon itself is alive and heartbeating outbound to
-  // /api/bridge/ping. The previous logic disabled CLI options when the
-  // client probe (/api/bridge/health, which depends on the proxy) failed —
-  // so a broken proxy looked indistinguishable from a dead daemon.
-  //
-  // New rule:
-  //   - serverBridgeOnline=true  → daemon IS up (DB heartbeat fresh). Show
-  //     CLI options as available so the user can select them. If the proxy
-  //     is broken, the actual tool call will surface a clear error — but
-  //     we no longer preemptively block the picker.
-  //   - bridgeOnline=true        → user-side probe succeeded. Same outcome.
-  //   - Both false               → daemon genuinely down. Block.
-  const effectivelyOnline = computeEffectiveBridgeOnline(bridgeOnline, serverBridgeOnline);
-  // Suffix is honest about three distinct states even when the option
-  // is enabled — daemon online via either signal gets called out.
-  const suffix =
-    effectivelyOnline
-      ? bridgeOnline === true
-        ? ""
-        : " (daemon online · proxy degraded)"
-      : bridgeOnline === null
-        ? " (checking…)"
-        : " (bridge offline)";
-  const title =
-    effectivelyOnline
-      ? bridgeOnline === true
-        ? onlineTooltip
-        : UNREACHABLE_TOOLTIP
+  const {
+    value,
+    displayName,
+    onlineTooltip,
+    offlineTooltip,
+    bridgeOnline,
+    serverBridgeOnline,
+    bridgeProbeReason,
+    bridgeProbeDetail,
+  } = args;
+  const state = deriveDropdownState(bridgeOnline, serverBridgeOnline);
+  const enabled = isDropdownEnabled(state);
+  const suffix = DROPDOWN_SUFFIX[state];
+  // Tooltip surfaces the structured probe reason when available, otherwise
+  // falls back to the caller-supplied generic copy. The reason names the
+  // exact failure mode (bridge_not_configured / vps_unauthorized / etc.)
+  // and `detail` holds the operator-actionable next step.
+  let title = onlineTooltip;
+  if (state === "degraded") {
+    title = bridgeProbeReason && bridgeProbeDetail
+      ? `${bridgeProbeReason}: ${bridgeProbeDetail}`
+      : "Daemon online · proxy degraded. Hover the bridge status icon for diagnostic detail.";
+  } else if (state === "offline") {
+    title = bridgeProbeDetail
+      ? `${bridgeProbeReason || "offline"}: ${bridgeProbeDetail}`
       : offlineTooltip;
+  }
   return (
-    <option key={value} value={value} disabled={!effectivelyOnline} title={title}>
+    <option key={value} value={value} disabled={!enabled} title={title}>
       {displayName}
       {suffix}
     </option>
@@ -678,6 +680,12 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
     }>
   >([]);
   const [bridgeOnline, setBridgeOnline] = useState<boolean | null>(null);
+  // Machine-readable failure reason from /api/bridge/health when probe fails.
+  // Surfaced in the dropdown tooltip so the operator can see WHY the bridge
+  // is degraded ("bridge_not_configured", "vps_unauthorized", etc.) instead
+  // of just "(bridge offline)". null when probe succeeded or inflight.
+  const [bridgeProbeReason, setBridgeProbeReason] = useState<string | null>(null);
+  const [bridgeProbeDetail, setBridgeProbeDetail] = useState<string | null>(null);
   // Chat-mode picker — see the type docs at the top of this file. SSR-safe
   // initializer (always returns the same value on the server, then
   // localStorage hydration runs in the mount effect below).
@@ -1018,9 +1026,39 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
           { signal: ctl.signal },
         );
         clearTimeout(t);
-        if (alive) setBridgeOnline(r.ok);
+        if (!alive) return;
+        // /api/bridge/health (proxy mode) returns a structured JSON body.
+        // The legacy localhost probe doesn't — fall through to ok=r.ok.
+        if (isProxyModeRuntime()) {
+          try {
+            const body = (await r.json().catch(() => null)) as {
+              ok?: boolean;
+              reason?: string;
+              detail?: string | null;
+            } | null;
+            if (body && typeof body.ok === "boolean") {
+              setBridgeOnline(body.ok);
+              setBridgeProbeReason(body.ok ? null : (body.reason || "unknown"));
+              setBridgeProbeDetail(body.ok ? null : (body.detail || null));
+              return;
+            }
+          } catch {
+            // Body wasn't JSON — fall through to status-code-only handling.
+          }
+        }
+        setBridgeOnline(r.ok);
+        if (!r.ok) {
+          setBridgeProbeReason("vps_unreachable");
+          setBridgeProbeDetail("Probe failed without a structured reason. Tail the Vercel function logs for the actual error.");
+        } else {
+          setBridgeProbeReason(null);
+          setBridgeProbeDetail(null);
+        }
       } catch {
-        if (alive) setBridgeOnline(false);
+        if (!alive) return;
+        setBridgeOnline(false);
+        setBridgeProbeReason("vps_unreachable");
+        setBridgeProbeDetail("Couldn't reach /api/bridge/health (likely network / DNS).");
       }
     };
     probe();
@@ -2658,6 +2696,8 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
               offlineTooltip: "Bridge offline — start the daemon on the machine that runs Codex.",
               bridgeOnline,
               serverBridgeOnline,
+              bridgeProbeReason,
+              bridgeProbeDetail,
             })}
             {renderCliOption({
               value: "cli:gemini",
@@ -2666,6 +2706,8 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
               offlineTooltip: "Bridge offline — start the daemon on the machine that runs Gemini.",
               bridgeOnline,
               serverBridgeOnline,
+              bridgeProbeReason,
+              bridgeProbeDetail,
             })}
             {renderCliOption({
               value: "cli:claude",
@@ -2674,6 +2716,8 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
               offlineTooltip: "Bridge offline — start the daemon on the machine that runs Claude Code.",
               bridgeOnline,
               serverBridgeOnline,
+              bridgeProbeReason,
+              bridgeProbeDetail,
             })}
             <option
               value="api"
