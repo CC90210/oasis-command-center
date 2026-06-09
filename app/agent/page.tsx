@@ -56,7 +56,17 @@ export default async function ClientAgentPage({
   });
   const enabled = enabledRaw.map(resolveAgentKey);
   const manifestPrimary = manifest?.agents?.find((a) => a.primary && a.enabled)?.slug;
-  const profilePrimary = resolveAgentKey(manifestPrimary || profile?.primary_agent || enabled[0] || "solara");
+  // Fallback chain: manifest → profile → enabled[0] → empire-default "bravo".
+  // Was "solara" until 2026-06-09 — Codex adversarial review caught that an
+  // OASIS/operator tenant with a missing manifest, empty agents_enabled, or
+  // transient lookup failure would render Solara as the chat target. The new
+  // tenant-aware /api/bridge/* allowlist (commit 9af2197) would then reject
+  // Solara as agent_not_enabled_for_tenant on the first bridge turn, leaving
+  // CC's personal portal with a broken chat. "bravo" is the empire-default
+  // flagship and lives in OASIS_BRIDGE_AGENTS; SunBiz never hits this fallback
+  // in normal state because the manifest is seeded with solara+helios at
+  // tenant creation.
+  const profilePrimary = resolveAgentKey(manifestPrimary || profile?.primary_agent || enabled[0] || "bravo");
   // Honor ?agent=<slug> only if the user actually has that agent enabled —
   // prevents an arbitrary URL param from making us claim an agent the user
   // didn't purchase. Falls back to their provisioned primary.
