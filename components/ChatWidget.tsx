@@ -184,7 +184,7 @@ const isCliRuntime = (s: unknown): s is CliRuntime =>
  *  - bridgeOnline=false + serverBridgeOnline=false: daemon actually down
  */
 const UNREACHABLE_TOOLTIP =
-  "Your bridge IS heartbeating — this browser just can't reach it directly (CORS, different machine, or HTTPS→HTTP localhost block). Run `pm2 restart claude-bridge` to pick up the latest allowed-origins, or open the dashboard on the machine the bridge runs on.";
+  "Bridge daemon IS heartbeating to the dashboard (you see ping/30s in the logs), but the Vercel→VPS proxy can't reach it back. Most common cause: BRIDGE_VPS_URL or BRIDGE_BEARER_TOKEN got cleared on Vercel production env (re-set them in the project Settings).";
 
 function renderCliOption(args: {
   value: string;
@@ -195,32 +195,37 @@ function renderCliOption(args: {
   serverBridgeOnline?: boolean;
 }) {
   const { value, displayName, onlineTooltip, offlineTooltip, bridgeOnline, serverBridgeOnline } = args;
-  // 2026-06-08 fix: when proxy mode is active AND the server confirms the
-  // bridge is heartbeating, the browser's failed localhost probe is
-  // IRRELEVANT — all bridge traffic routes through /api/bridge/* anyway.
-  // Treat as effectively online so the operator can actually select the CLI.
+  // 2026-06-09 round-3 finding: the Vercel→VPS proxy can fail (BRIDGE_VPS_URL
+  // / BRIDGE_BEARER_TOKEN env vars cleared by an encryption-key rotation)
+  // while the bridge daemon itself is alive and heartbeating outbound to
+  // /api/bridge/ping. The previous logic disabled CLI options when the
+  // client probe (/api/bridge/health, which depends on the proxy) failed —
+  // so a broken proxy looked indistinguishable from a dead daemon.
   //
-  // Bug this fixes: CC (Ezra session) saw all CLI options showing
-  // "(bridge offline)" and disabled, even though srv1723601 was pinging
-  // every few seconds and the footer correctly showed BRIDGE ONLINE. The
-  // dropdown gated on bridgeOnline (browser probe of localhost:9100)
-  // which can NEVER succeed when the bridge is on a remote VPS — but
-  // since proxy mode is on, the chat works just fine.
+  // New rule:
+  //   - serverBridgeOnline=true  → daemon IS up (DB heartbeat fresh). Show
+  //     CLI options as available so the user can select them. If the proxy
+  //     is broken, the actual tool call will surface a clear error — but
+  //     we no longer preemptively block the picker.
+  //   - bridgeOnline=true        → user-side probe succeeded. Same outcome.
+  //   - Both false               → daemon genuinely down. Block.
   const effectivelyOnline = computeEffectiveBridgeOnline(bridgeOnline, serverBridgeOnline);
+  // Suffix is honest about three distinct states even when the option
+  // is enabled — daemon online via either signal gets called out.
   const suffix =
     effectivelyOnline
-      ? ""
+      ? bridgeOnline === true
+        ? ""
+        : " (daemon online · proxy degraded)"
       : bridgeOnline === null
         ? " (checking…)"
-        : serverBridgeOnline === true
-          ? " (unreachable from this browser)"
-          : " (bridge offline)";
+        : " (bridge offline)";
   const title =
     effectivelyOnline
-      ? onlineTooltip
-      : serverBridgeOnline === true
-        ? UNREACHABLE_TOOLTIP
-        : offlineTooltip;
+      ? bridgeOnline === true
+        ? onlineTooltip
+        : UNREACHABLE_TOOLTIP
+      : offlineTooltip;
   return (
     <option key={value} value={value} disabled={!effectivelyOnline} title={title}>
       {displayName}
@@ -262,11 +267,24 @@ function isProxyModeRuntime(): boolean {
 
 /**
  * Effective-online check used by 5 sites (dropdown gate, send gate,
- * bridgeReady ground-truth, prewarm gate, chat-reset gate). All of them
- * need to treat "proxy mode active AND server confirms bridge is
- * heartbeating" as functionally identical to "browser can see localhost"
- * — because every bridge request routes through /api/bridge/* regardless
- * of whether the browser can reach localhost:9100 directly.
+ * bridgeReady ground-truth, prewarm gate, chat-reset gate).
+ *
+ * Either signal is independently authoritative — bridgeOnline (client-side
+ * probe of /api/bridge/health or localhost:9100/health) OR serverBridgeOnline
+ * (bridge_pairings.last_seen_at < 5min, set server-side from the daemon's
+ * outbound /api/bridge/ping calls).
+ *
+ * 2026-06-09 round-3 simplification: the previous gate required
+ * (isProxyModeRuntime() AND serverBridgeOnline). That correctly handled the
+ * "browser can't probe localhost on a remote VPS" case, but ALSO failed when
+ * the Vercel→VPS proxy was broken (env vars cleared by encryption rotation)
+ * even though the daemon itself was heartbeating fine. The new logic trusts
+ * the DB heartbeat as a primary signal — if the daemon is alive, the picker
+ * should let the user select a CLI; if the proxy is degraded the tool call
+ * will surface a clear error, not a silently-disabled dropdown.
+ *
+ * isProxyModeRuntime() is still used at the URL-builder sites (chat,
+ * health, prewarm, chat-reset, exec-tool) to pick proxy vs direct routes.
  *
  * Extracted 2026-06-08 — was duplicated as inline expressions in every
  * call site, which meant a future fix would have to hit 5 places.
@@ -275,10 +293,7 @@ function computeEffectiveBridgeOnline(
   bridgeOnline: boolean | null,
   serverBridgeOnline: boolean | undefined,
 ): boolean {
-  return (
-    bridgeOnline === true ||
-    (isProxyModeRuntime() && serverBridgeOnline === true)
-  );
+  return bridgeOnline === true || serverBridgeOnline === true;
 }
 
 const MAX_ATTACHMENTS_PER_TURN = 5;
