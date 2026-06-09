@@ -581,7 +581,11 @@ export const SUN_SEED: TenantManifest = {
     },
   ],
   pages: [
-    { path: "", label: "Solara — Today", kind: "dashboard" },
+    // CRM dashboard. Label kept neutral so the heading is product-shaped
+    // ("Today") not agent-shaped ("Solara — Today"). The agent the operator
+    // works WITH is shown in the chat picker; the dashboard itself is just
+    // the daily metrics surface. Per CC 2026-06-09.
+    { path: "", label: "Today", kind: "dashboard" },
     { path: "reasoning", label: "Reasoning", kind: "reasoning" },
     // Two-pipeline superview — Salesforce-replacement overview per the
     // 2026-05-16 meeting. Renders Lead Pipeline (lead.stage) over
