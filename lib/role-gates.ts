@@ -163,9 +163,41 @@ export const BRIDGE_EXEC_TOOL_READ_ONLY: ReadonlySet<string> = new Set([
 ]);
 
 /**
+ * Business-write tools — members CAN fire these even though they mutate
+ * state. Distinct from technical-write tools (Bash, Write, Edit,
+ * run_script, install_cli, etc) which stay admin+ only because they
+ * can run arbitrary code or alter the operator's machine.
+ *
+ * Rationale (2026-06-10, CC directive):
+ *   - SunBiz members (Alex, future Matt) do operator-initiated B2B
+ *     outreach as their job. Shop-out to lenders, lead-drawer email,
+ *     lead-drawer SMS are CORE WORKFLOWS — gating them to admin+
+ *     blocks the daily job.
+ *   - The send paths these wrap (send_gateway) already enforce
+ *     COMPLIANCE gates (CASL suppression, kill switch, manual_pause,
+ *     TCPA for SMS) that are non-negotiable regardless of role.
+ *   - The role-gate concern is TECHNICAL EXPOSURE (shell access,
+ *     filesystem mutation, code execution) — none of which these
+ *     business tools provide.
+ *
+ * Before this expansion, Alex (member role) clicking "Send to N lenders"
+ * in the Shopping Out tab hit a silent 403 from /api/bridge/exec-tool
+ * with tool_disallowed_for_role. Threads stayed at status='pending'
+ * forever because the auto-trigger never fired. That was the
+ * "pending too long" speed bug CC reported.
+ */
+export const BRIDGE_EXEC_TOOL_MEMBER_BUSINESS: ReadonlySet<string> = new Set([
+  "shop_out_send_batch", // fires send_gateway per lender thread — operator-initiated B2B
+  "send_email",          // single transactional/manual email via send_gateway
+  "send_sms",            // single transactional SMS — TCPA gate still fires in send_gateway
+]);
+
+/**
  * Return true when the given bridge-registry tool name is callable by the
  * given team role via /api/bridge/exec-tool. owner / admin can call any
- * registered tool; every other role can only call the read-only allowlist.
+ * registered tool; member roles can call read-only tools PLUS the
+ * business-write tools enumerated above (the send_gateway compliance
+ * gates remain the operator-safety wall there).
  *
  * Fail-closed: unknown role => non-admin path => allowlist-only.
  */
@@ -175,7 +207,10 @@ export function bridgeExecToolAllowedForRole(
 ): boolean {
   const r = (teamRole || "").trim().toLowerCase();
   if (r === "owner" || r === "admin") return true;
-  return BRIDGE_EXEC_TOOL_READ_ONLY.has(toolName);
+  return (
+    BRIDGE_EXEC_TOOL_READ_ONLY.has(toolName) ||
+    BRIDGE_EXEC_TOOL_MEMBER_BUSINESS.has(toolName)
+  );
 }
 
 /**

@@ -37,8 +37,9 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { getServiceSupabase } from "@/lib/supabase-server";
-import { resolveTenantId } from "@/lib/api-auth";
+import { resolveSessionContext } from "@/lib/api-auth";
 import { buildShopOutPlan, recordShopOutThreads } from "@/lib/lenders/shop-out";
+import { findAgentByEmail } from "@/lib/config/agents";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -67,6 +68,7 @@ export const maxDuration = 120;
 async function triggerPhysicalSend(
   req: NextRequest,
   applicationId: string,
+  signer: { name: string; email: string; phone: string },
 ): Promise<{
   status: "sent" | "partial" | "error" | "skipped";
   sent_count?: number;
@@ -83,6 +85,17 @@ async function triggerPhysicalSend(
       body: JSON.stringify({
         tool_name: "shop_out_send_batch",
         application_id: applicationId,
+        // 2026-06-10 per-user signing: dashboard resolves the operator
+        // who clicked Send → looks up their agent entry in
+        // agents.config.json → passes signer name/email/phone. Bridge
+        // tool sets BRAVO_FROM_DISPLAY/BRAVO_FROM_EMAIL env vars when
+        // spawning send_gateway, so each rep's email signs with THEIR
+        // name (Jordan signs Jordan, Alex signs Alex, Ezra/Matt signs
+        // Matt). When the operator isn't in agents.config.json, the
+        // signer is the shared "SunBiz Submissions" identity.
+        signer_name: signer.name,
+        signer_email: signer.email,
+        signer_phone: signer.phone,
       }),
       // 110s — comfortably under the route's maxDuration (120s) and the
       // /api/bridge/exec-tool proxy's PROXY_TIMEOUT_MS (65s) governs the
@@ -148,11 +161,34 @@ export async function POST(
   req: NextRequest,
   ctx: { params: Promise<{ id: string }> },
 ) {
-  const tenantId = await resolveTenantId();
-  if (!tenantId) {
+  // Switched from resolveTenantId() to the fuller resolveSessionContext()
+  // so we have the operator's email + userId for per-user signing.
+  const sess = await resolveSessionContext();
+  if (!sess.ok) {
     return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
   }
+  const tenantId = sess.tenantId;
   const { id: applicationId } = await ctx.params;
+
+  // Resolve the operator → agent entry → signer that the bridge tool
+  // will use for BRAVO_FROM_DISPLAY when spawning send_gateway. When
+  // sess.email isn't in agents.config.json (non-SunBiz operator, future
+  // tenant), the agent is null and the signer falls back to the shared
+  // submissions identity — exactly Adon's spec §2.4 "zero CC → SunBiz
+  // Submissions" rule, just driven by operator identity instead of CC
+  // list.
+  const operatorAgent = findAgentByEmail(sess.email);
+  const signer = operatorAgent
+    ? {
+        name: operatorAgent.name,
+        email: operatorAgent.email,
+        phone: operatorAgent.phone,
+      }
+    : {
+        name: "SunBiz Submissions",
+        email: "Submissions@sunbizfunding.com",
+        phone: "",
+      };
 
   let body: {
     lender_ids?: string[];
@@ -423,7 +459,7 @@ export async function POST(
   // leaves threads at pending so the operator can retry.
   const physicalSend =
     queued > 0
-      ? await triggerPhysicalSend(req, applicationId)
+      ? await triggerPhysicalSend(req, applicationId, signer)
       : { status: "skipped" as const, message: "no threads queued (all blocked)" };
 
   return NextResponse.json({
