@@ -25,6 +25,7 @@ import { getServiceSupabase } from "@/lib/supabase-server";
 import { resolveSessionContext } from "@/lib/api-auth";
 import { publishAgentEvent } from "@/lib/manifest/events";
 import { dispatchLeadStageEvent } from "@/lib/lead-stage-dispatcher";
+import { findAgentByEmail } from "@/lib/config/agents";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -54,6 +55,7 @@ async function triggerImmediateSend(
     body: string;
     leadId: string;
     brand?: string;
+    signer: { name: string; email: string; phone: string };
   },
 ): Promise<
   | { status: "sent"; agent_source?: string }
@@ -73,6 +75,13 @@ async function triggerImmediateSend(
         lead_id: args.leadId,
         brand: args.brand,
         intent: "transactional",
+        // Per-operator signing — bridge tool sets BRAVO_FROM_*_SUNBIZ
+        // env on the send_gateway subprocess so the signature renders
+        // THIS operator's identity (Jordan / Alex / Matt) instead of
+        // the brand default. Same pattern as shop-out.
+        signer_name: args.signer.name,
+        signer_email: args.signer.email,
+        signer_phone: args.signer.phone,
       }),
       signal: AbortSignal.timeout(50_000),
     });
@@ -229,6 +238,25 @@ export async function POST(
   const brand =
     tenantSlug === "submissions" ? "sunbiz" : tenantSlug ? "oasis" : undefined;
 
+  // Resolve the operator → agent entry → signer identity. Same shape
+  // as the shop-out route — looks up sess.email in agents.config.json
+  // and falls back to the shared "SunBiz Submissions" inbox when the
+  // operator isn't on the SunBiz team. Bridge tool sets the per-rep
+  // env vars on the send_gateway subprocess so the email signs THIS
+  // operator's name in the SunBiz shell.
+  const operatorAgent = findAgentByEmail(sess.email);
+  const signer = operatorAgent
+    ? {
+        name: operatorAgent.name,
+        email: operatorAgent.email,
+        phone: operatorAgent.phone,
+      }
+    : {
+        name: "SunBiz Submissions",
+        email: "Submissions@sunbizfunding.com",
+        phone: "",
+      };
+
   // Auto-fire the send via the bridge. Best-effort: on failure the row
   // stays at metadata.status='queued' and the daemon (when running) or
   // the operator can retry.
@@ -238,6 +266,7 @@ export async function POST(
     body: truncatedBody,
     leadId,
     brand,
+    signer,
   });
 
   // If the send actually fired, flip the queued row to 'auto_sent' so
