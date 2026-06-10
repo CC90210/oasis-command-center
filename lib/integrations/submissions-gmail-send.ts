@@ -68,13 +68,18 @@ export type SendResult =
   | { ok: false; error: string };
 
 /**
- * Synthesize a deterministic-shaped Message-Id. Format:
- *   <{uuid}@sunbiz-submissions>
- * Angle-bracketed per RFC2822. uuid is random per-message so the
- * recipient's mail client doesn't dedupe.
+ * Synthesize an RFC 5322-compliant Message-Id. Format:
+ *   <{uuid}@sunbizfunding.com>
+ * Angle-bracketed per spec. The domain part MUST be a real domain (not
+ * a label like 'sunbiz-submissions') — some lender mail systems run
+ * SPF / Message-Id sanity checks and reject messages whose Message-Id
+ * domain doesn't resolve. uuid is random per-message; Gmail's SMTP
+ * relay preserves client-set Message-Ids when the format is valid,
+ * which is what makes our chain-via-References work on the recipient
+ * side without needing the Gmail API.
  */
 function synthesizeMessageId(): string {
-  return `<${randomUUID()}@sunbiz-submissions>`;
+  return `<${randomUUID()}@sunbizfunding.com>`;
 }
 
 async function sendOnce(
