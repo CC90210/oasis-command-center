@@ -22,6 +22,7 @@
 
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { deriveSignerName } from "@/lib/lenders/derive-signer-label";
 
 export type AgentEntry = {
   /** Stable lowercase identifier — used as agents[].key in the config. */
@@ -87,25 +88,27 @@ export function findAgentByEmail(email: string | null | undefined): AgentEntry |
 }
 
 /**
- * Derive the signer label + phone from the final CC list (Adon spec 2.4).
- * Final-list mutation by the operator (uncheck) happens before this is
- * called — pass the post-checkbox emails.
+ * Derive the full signer (name + email + phone) from the final CC list
+ * (Adon spec 2.4). Server-side wrapper around the pure deriveSignerName
+ * rule — adds the email + phone lookup that needs the fs-touching
+ * roster + env var read.
  */
 export function deriveSigner(
   ccEmails: string[],
 ): { name: string; email: string; phone: string } {
-  if (ccEmails.length === 1) {
-    const agent = findAgentByEmail(ccEmails[0]);
-    if (agent) {
-      return {
-        name: agent.name,
-        email: agent.email,
-        phone: agent.phone,
-      };
+  const roster = getAgents();
+  const name = deriveSignerName(ccEmails, roster);
+  // Sole-agent path: deriveSignerName already returned that agent's name —
+  // find the rest of their contact info via the same roster.
+  if (ccEmails.length === 1 && name !== "SunBiz Submissions") {
+    const target = ccEmails[0].trim().toLowerCase();
+    for (const agent of roster) {
+      if (agent.email.trim().toLowerCase() === target) {
+        return { name: agent.name, email: agent.email, phone: agent.phone };
+      }
     }
   }
-  // Zero or multiple agents → submissions identity, phone omitted (empty
-  // string flows through the template's "skip the line if empty" rule).
+  // Shared identity (zero or multiple agents): submissions inbox + no phone.
   return {
     name: "SunBiz Submissions",
     email: process.env.SUNBIZ_SUBMISSIONS_EMAIL || "submissions@sunbizfunding.com",

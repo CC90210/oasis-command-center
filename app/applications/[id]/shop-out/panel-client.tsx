@@ -15,6 +15,7 @@ import DerivedCcList, {
 } from "@/components/shop-out/derived-cc-list";
 import EmailPreview from "@/components/shop-out/email-preview";
 import ConfirmModal from "@/components/shop-out/confirm-modal";
+import { deriveSignerName } from "@/lib/lenders/derive-signer-label";
 
 type Preview = {
   funderName: string;
@@ -66,17 +67,13 @@ export default function ShopOutPanelClient({
     | { ok: false; error: string; missing?: string[]; detail?: string }
   >(null);
 
-  // Signer derivation: mirror server-side rule from lib/config/agents.ts
-  // so the modal displays the same label the route will use.
-  const signerName = useMemo(() => {
-    if (checkedEmails.length === 1) {
-      const match = derivedAgents.find(
-        (a) => a.email.toLowerCase().trim() === checkedEmails[0].toLowerCase().trim(),
-      );
-      if (match) return match.name;
-    }
-    return "SunBiz Submissions";
-  }, [checkedEmails, derivedAgents]);
+  // Signer derivation — uses the same pure rule the server uses (via
+  // lib/lenders/derive-signer-label.ts). No drift risk: change the rule
+  // in one file and both sides update.
+  const signerName = useMemo(
+    () => deriveSignerName(checkedEmails, derivedAgents),
+    [checkedEmails, derivedAgents],
+  );
 
   const blocked = missingFields.length > 0 || lenderIds.length === 0;
 

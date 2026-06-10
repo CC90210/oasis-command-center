@@ -37,7 +37,8 @@ import { resolveSessionContext } from "@/lib/api-auth";
 import { isOperatorEmail } from "@/lib/operator-credentials";
 import { executeShopOutRun } from "@/lib/lenders/shop-out-run";
 import { getAgents, deriveSigner, findAgentByEmail } from "@/lib/config/agents";
-import type { SubmissionDeal } from "@/lib/lenders/templates/jordan-submission";
+import { extractSubmissionDeal } from "@/lib/lenders/extract-submission-deal";
+import { deriveAgentCcs } from "@/lib/lenders/derive-agent-ccs";
 import type { ApplicationProfile } from "@/lib/lenders/match-fitness";
 
 export const runtime = "nodejs";
@@ -129,24 +130,7 @@ export async function POST(
   // Build the SubmissionDeal from application.data. validateSubmissionDeal
   // inside the engine catches any missing/wrong-typed fields and returns
   // 400 with the missing[] array (spec 8.7).
-  const deal: SubmissionDeal = {
-    merchant_legal_name: String(appData.merchant_legal_name || appData.business_name || ""),
-    industry: String(appData.industry || ""),
-    time_in_business: String(appData.time_in_business || ""),
-    monthly_revenue: typeof appData.monthly_revenue === "number" ? appData.monthly_revenue : NaN,
-    requested_amount: typeof appData.requested_amount === "number" ? appData.requested_amount : NaN,
-    position_count: typeof appData.position_count === "number" ? appData.position_count : NaN,
-    positions_balance: typeof appData.positions_balance === "number" ? appData.positions_balance : NaN,
-    positions_payment: typeof appData.positions_payment === "number" ? appData.positions_payment : NaN,
-    positions_payment_frequency: String(appData.positions_payment_frequency || ""),
-    bank_statements_months: typeof appData.bank_statements_months === "number" ? appData.bank_statements_months : NaN,
-    bank_statements_trend: String(appData.bank_statements_trend || ""),
-    narrative_summary: String(appData.narrative_summary || ""),
-    open_to_best_offer: typeof appData.open_to_best_offer === "boolean" ? appData.open_to_best_offer : false,
-    stip_labels: Array.isArray(appData.stip_labels)
-      ? (appData.stip_labels as unknown[]).filter((s): s is string => typeof s === "string")
-      : [],
-  };
+  const deal = extractSubmissionDeal(appData);
 
   // ApplicationProfile shape for buildShopOutPlan match scoring.
   const application: ApplicationProfile = {
@@ -158,42 +142,11 @@ export async function POST(
     desired_product: typeof appData.desired_product === "string" ? appData.desired_product : undefined,
   };
 
-  // Derive the agent CC list (Adon spec section 2).
-  // We look at application.data fields that name reps and intersect
-  // against agents.config.json. The operator's checkbox finalization
-  // (body.cc_emails) is the source of truth IF present — otherwise we
-  // start from the derived list.
-  const repFields: Array<unknown> = [
-    appData.assigned_rep_email,
-    appData.assigned_rep_id,
-    appData.owner_id,
-    appData.assignee_id,
-    appData.rep,
-    appData.agent,
-    appData.assigned,
-    appData.owner,
-  ];
-  const repEmails: string[] = [];
-  for (const f of repFields) {
-    if (typeof f === "string" && f.includes("@")) repEmails.push(f.toLowerCase().trim());
-  }
-  // For id-shaped fields (uuid), look up via user_profiles.email.
-  const idFields = repFields.filter(
-    (f): f is string => typeof f === "string" && UUID_RE.test(f),
-  );
-  if (idFields.length > 0) {
-    const profiles = await db
-      .from("user_profiles")
-      .select("auth_user_id, email")
-      .in("auth_user_id", idFields);
-    for (const p of (profiles.data || []) as Array<{ email: string | null }>) {
-      if (p.email) repEmails.push(p.email.toLowerCase().trim());
-    }
-  }
+  // Derive the agent CC list — single source of truth for the rep-fields
+  // scan + UUID resolution + agents.config.json intersection.
+  const derivedAgents = await deriveAgentCcs(db, appData);
   const agentEmails = new Set(getAgents().map((a) => a.email.toLowerCase().trim()));
-  const derivedCcs = Array.from(
-    new Set(repEmails.filter((e) => agentEmails.has(e))),
-  );
+  const derivedCcs = derivedAgents.map((a) => a.email.toLowerCase().trim());
 
   // Final CC list: operator's checkbox-finalized list if present,
   // otherwise the derived list. Extra emails the operator typed are

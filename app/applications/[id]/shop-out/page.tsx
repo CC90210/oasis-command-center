@@ -19,18 +19,18 @@ import { notFound } from "next/navigation";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { resolveSessionContext } from "@/lib/api-auth";
 import { isOperatorEmail } from "@/lib/operator-credentials";
-import { getAgents, deriveSigner } from "@/lib/config/agents";
+import { deriveSigner } from "@/lib/config/agents";
 import {
   jordanSubject,
   jordanBody,
   validateSubmissionDeal,
-  type SubmissionDeal,
   type SubmissionSigner,
 } from "@/lib/lenders/templates/jordan-submission";
+import { extractSubmissionDeal } from "@/lib/lenders/extract-submission-deal";
+import { deriveAgentCcs } from "@/lib/lenders/derive-agent-ccs";
 import { buildShopOutPlan } from "@/lib/lenders/shop-out";
 import type { ApplicationProfile } from "@/lib/lenders/match-fitness";
 import ShopOutPanelClient from "./panel-client";
-import type { DerivedAgentEntry } from "@/components/shop-out/derived-cc-list";
 
 export const dynamic = "force-dynamic";
 
@@ -98,67 +98,12 @@ export default async function ShopOutPage({ params, searchParams }: PageProps) {
   if (appRow.error || !appRow.data) notFound();
   const appData = ((appRow.data as { data: Record<string, unknown> }).data) || {};
 
-  const deal: SubmissionDeal = {
-    merchant_legal_name: String(appData.merchant_legal_name || appData.business_name || ""),
-    industry: String(appData.industry || ""),
-    time_in_business: String(appData.time_in_business || ""),
-    monthly_revenue: typeof appData.monthly_revenue === "number" ? appData.monthly_revenue : NaN,
-    requested_amount: typeof appData.requested_amount === "number" ? appData.requested_amount : NaN,
-    position_count: typeof appData.position_count === "number" ? appData.position_count : NaN,
-    positions_balance: typeof appData.positions_balance === "number" ? appData.positions_balance : NaN,
-    positions_payment: typeof appData.positions_payment === "number" ? appData.positions_payment : NaN,
-    positions_payment_frequency: String(appData.positions_payment_frequency || ""),
-    bank_statements_months: typeof appData.bank_statements_months === "number" ? appData.bank_statements_months : NaN,
-    bank_statements_trend: String(appData.bank_statements_trend || ""),
-    narrative_summary: String(appData.narrative_summary || ""),
-    open_to_best_offer: typeof appData.open_to_best_offer === "boolean" ? appData.open_to_best_offer : false,
-    stip_labels: Array.isArray(appData.stip_labels)
-      ? (appData.stip_labels as unknown[]).filter((s): s is string => typeof s === "string")
-      : [],
-  };
+  // Extract deal + derive CC list — both via single-source helpers
+  // shared with /api/.../shop-out/run/route.ts so the two surfaces
+  // cannot drift on rep-field universe / field-name aliases.
+  const deal = extractSubmissionDeal(appData);
   const missing = validateSubmissionDeal(deal);
-
-  // Derive CC list from application rep fields.
-  const repFields: Array<unknown> = [
-    appData.assigned_rep_email,
-    appData.assigned_rep_id,
-    appData.owner_id,
-    appData.assignee_id,
-    appData.rep,
-    appData.agent,
-    appData.assigned,
-    appData.owner,
-  ];
-  const repEmails: string[] = [];
-  for (const f of repFields) {
-    if (typeof f === "string" && f.includes("@")) repEmails.push(f.toLowerCase().trim());
-  }
-  const idFields = repFields.filter(
-    (f): f is string => typeof f === "string" && UUID_RE.test(f),
-  );
-  if (idFields.length > 0) {
-    const profiles = await db
-      .from("user_profiles")
-      .select("auth_user_id, email")
-      .in("auth_user_id", idFields);
-    for (const p of (profiles.data || []) as Array<{ email: string | null }>) {
-      if (p.email) repEmails.push(p.email.toLowerCase().trim());
-    }
-  }
-  const roster = getAgents();
-  const agentByEmail = new Map(
-    roster.map((a) => [a.email.toLowerCase().trim(), a]),
-  );
-  const derivedAgents: DerivedAgentEntry[] = [];
-  const derivedEmails = new Set<string>();
-  for (const email of repEmails) {
-    if (derivedEmails.has(email)) continue;
-    const agent = agentByEmail.get(email);
-    if (agent) {
-      derivedAgents.push({ key: agent.key, name: agent.name, email: agent.email });
-      derivedEmails.add(email);
-    }
-  }
+  const derivedAgents = await deriveAgentCcs(db, appData);
 
   // Render the first-lender preview server-side so it's instant when the
   // page paints. Only do this when we actually have a lender + valid deal.
