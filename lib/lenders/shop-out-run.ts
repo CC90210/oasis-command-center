@@ -284,38 +284,37 @@ export async function executeShopOutRun(
       failedCount += 1;
       // Persist the failure to the per-(deal, lender) tracker so the
       // operator sees error state in the UI even when the run fails.
-      await db.from("application_lender_threads").upsert(
-        {
-          application_id: args.applicationId,
-          lender_id: planRow.lender_id,
-          tenant_id: args.tenantId,
-          subject,
-          cc_emails: planRow.recipient_cc_emails,
-          status: "error",
-          last_error: sendRes.error.slice(0, 500),
-        },
-        { onConflict: "application_id,lender_id" },
-      );
-      continue;
-    }
-
-    // Success path — persist all thread metadata so the reply endpoint
-    // can chain subsequent messages into the same Gmail thread.
-    await db.from("application_lender_threads").upsert(
-      {
+      // INSERT (not upsert) per 2026-06-10 fix: the UNIQUE
+      // (application_id, lender_id) was dropped in migration 073 so
+      // operators can re-shop a lender multiple times. Each /run call
+      // creates a fresh thread row.
+      await db.from("application_lender_threads").insert({
         application_id: args.applicationId,
         lender_id: planRow.lender_id,
         tenant_id: args.tenantId,
-        gmail_thread_id: sendRes.thread_id,
-        last_message_id: sendRes.rfc822_message_id,
-        message_id_history: sendRes.rfc822_message_id ? [sendRes.rfc822_message_id] : [],
         subject,
         cc_emails: planRow.recipient_cc_emails,
-        status: "sent",
-        sent_at: nowIso,
-      },
-      { onConflict: "application_id,lender_id" },
-    );
+        status: "error",
+        last_error: sendRes.error.slice(0, 500),
+      });
+      continue;
+    }
+
+    // Success path — INSERT a fresh thread row with the new gmail_thread_id
+    // + Message-Id chain. Multiple rows per (application, lender) are now
+    // permitted; each is its own independent Gmail conversation.
+    await db.from("application_lender_threads").insert({
+      application_id: args.applicationId,
+      lender_id: planRow.lender_id,
+      tenant_id: args.tenantId,
+      gmail_thread_id: sendRes.thread_id,
+      last_message_id: sendRes.rfc822_message_id,
+      message_id_history: sendRes.rfc822_message_id ? [sendRes.rfc822_message_id] : [],
+      subject,
+      cc_emails: planRow.recipient_cc_emails,
+      status: "sent",
+      sent_at: nowIso,
+    });
 
     const entry: ShopOutResultEntry = {
       funder: funderName,
