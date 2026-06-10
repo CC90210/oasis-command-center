@@ -114,10 +114,13 @@ export async function executeShopOutRun(
     return { ok: false, status: 400, error: "missing_required_fields", missing };
   }
 
-  // Step 2 — connection gate. Adon spec 8.8: bad refresh token returns
-  // 503 with zero rows and a high_risk agent_event for the audit trail.
+  // Step 2 — connection gate. Adon spec 8.8: missing/invalid app password
+  // returns 503 with zero rows and a high_risk agent_event for the audit
+  // trail. Pivoted to SMTP — testConnection now opens an actual SMTP
+  // session via tenant_integration_credentials.gws.app_password rather
+  // than an OAuth refresh.
   if (!args.dryRun) {
-    const conn = await testConnection();
+    const conn = await testConnection(args.tenantId);
     if (!conn.ok) {
       // Severity-mapped audit event so it shows up in the operator's
       // event feed as a meaningful red flag (not a routine warn).
@@ -262,6 +265,7 @@ export async function executeShopOutRun(
       cc: planRow.recipient_cc_emails,
       subject,
       body,
+      tenantId: args.tenantId,
     });
 
     if (!sendRes.ok) {

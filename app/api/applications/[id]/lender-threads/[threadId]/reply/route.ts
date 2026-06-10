@@ -164,6 +164,7 @@ export async function POST(
     threadId: thread.gmail_thread_id,
     inReplyTo: inReplyTo || undefined,
     references: history.length > 0 ? history : undefined,
+    tenantId: sess.tenantId,
   });
 
   if (!sendRes.ok) {
