@@ -70,11 +70,14 @@ export default async function PipelinePage({
       }
     }
   } catch (err) {
-    // next/navigation's redirect() throws to signal — let it propagate.
-    if (err && typeof err === "object" && "digest" in err && typeof (err as { digest: unknown }).digest === "string" && ((err as { digest: string }).digest as string).startsWith("NEXT_REDIRECT")) {
+    // next/navigation's redirect() throws with digest "NEXT_REDIRECT;..."
+    // to signal — re-throw so Next can complete the navigation. Any
+    // other failure (DB hiccup, no session, etc.) falls through to the
+    // OASIS render, strictly no worse than the pre-redirect behavior.
+    const digest = (err as { digest?: unknown } | null)?.digest;
+    if (typeof digest === "string" && digest.startsWith("NEXT_REDIRECT")) {
       throw err;
     }
-    // Any other failure: fall through to the OASIS render.
   }
 
   const sp = (await searchParams) || {};
