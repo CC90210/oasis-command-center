@@ -26,7 +26,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { resolveSessionContext } from "@/lib/api-auth";
-import { findAgentByEmail } from "@/lib/config/agents";
+import { resolveSignerForOperator } from "@/lib/config/agents";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -118,18 +118,7 @@ export async function POST(
   // mirroring the main /shop-out route's behavior. The bridge tool loops
   // over every pending thread on this application, so retrying ONE row
   // also catches any other pending rows that drifted.
-  const operatorAgent = findAgentByEmail(sess.email);
-  const signer = operatorAgent
-    ? {
-        name: operatorAgent.name,
-        email: operatorAgent.email,
-        phone: operatorAgent.phone,
-      }
-    : {
-        name: "SunBiz Submissions",
-        email: "Submissions@sunbizfunding.com",
-        phone: "",
-      };
+  const signer = resolveSignerForOperator(sess.email);
 
   let physicalSend: {
     status: "sent" | "partial" | "error" | "skipped";

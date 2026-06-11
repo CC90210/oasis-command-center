@@ -88,6 +88,32 @@ export function findAgentByEmail(email: string | null | undefined): AgentEntry |
 }
 
 /**
+ * Resolve the signer identity for the OPERATOR who clicked a send
+ * button (lead-drawer email, shop-out batch, lender-thread retry). If
+ * their session email matches an agent in agents.config.json, sign as
+ * THAT agent. Otherwise fall back to the shared SunBiz Submissions
+ * identity (no phone). Returns the same shape every send-flow route
+ * needs to pass to the bridge tool's signer_* fields.
+ *
+ * This is distinct from deriveSigner() below, which works off the
+ * final CC list (Adon spec 2.4). Operator-driven sends use THIS path:
+ * who is the human who clicked send, regardless of CCs.
+ */
+export function resolveSignerForOperator(
+  operatorEmail: string | null | undefined,
+): { name: string; email: string; phone: string } {
+  const agent = findAgentByEmail(operatorEmail);
+  if (agent) {
+    return { name: agent.name, email: agent.email, phone: agent.phone };
+  }
+  return {
+    name: "SunBiz Submissions",
+    email: process.env.SUNBIZ_SUBMISSIONS_EMAIL || "Submissions@sunbizfunding.com",
+    phone: "",
+  };
+}
+
+/**
  * Derive the full signer (name + email + phone) from the final CC list
  * (Adon spec 2.4). Server-side wrapper around the pure deriveSignerName
  * rule — adds the email + phone lookup that needs the fs-touching

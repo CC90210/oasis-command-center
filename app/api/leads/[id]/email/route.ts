@@ -25,7 +25,7 @@ import { getServiceSupabase } from "@/lib/supabase-server";
 import { resolveSessionContext } from "@/lib/api-auth";
 import { publishAgentEvent } from "@/lib/manifest/events";
 import { dispatchLeadStageEvent } from "@/lib/lead-stage-dispatcher";
-import { findAgentByEmail } from "@/lib/config/agents";
+import { resolveSignerForOperator } from "@/lib/config/agents";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -238,24 +238,9 @@ export async function POST(
   const brand =
     tenantSlug === "submissions" ? "sunbiz" : tenantSlug ? "oasis" : undefined;
 
-  // Resolve the operator → agent entry → signer identity. Same shape
-  // as the shop-out route — looks up sess.email in agents.config.json
-  // and falls back to the shared "SunBiz Submissions" inbox when the
-  // operator isn't on the SunBiz team. Bridge tool sets the per-rep
-  // env vars on the send_gateway subprocess so the email signs THIS
-  // operator's name in the SunBiz shell.
-  const operatorAgent = findAgentByEmail(sess.email);
-  const signer = operatorAgent
-    ? {
-        name: operatorAgent.name,
-        email: operatorAgent.email,
-        phone: operatorAgent.phone,
-      }
-    : {
-        name: "SunBiz Submissions",
-        email: "Submissions@sunbizfunding.com",
-        phone: "",
-      };
+  // Resolve operator → signer (shared helper, same shape as shop-out
+  // and lender-threads retry).
+  const signer = resolveSignerForOperator(sess.email);
 
   // Auto-fire the send via the bridge. Best-effort: on failure the row
   // stays at metadata.status='queued' and the daemon (when running) or

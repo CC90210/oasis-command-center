@@ -39,7 +39,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { resolveSessionContext } from "@/lib/api-auth";
 import { buildShopOutPlan, recordShopOutThreads } from "@/lib/lenders/shop-out";
-import { findAgentByEmail } from "@/lib/config/agents";
+import { resolveSignerForOperator } from "@/lib/config/agents";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -170,25 +170,11 @@ export async function POST(
   const tenantId = sess.tenantId;
   const { id: applicationId } = await ctx.params;
 
-  // Resolve the operator → agent entry → signer that the bridge tool
-  // will use for BRAVO_FROM_DISPLAY when spawning send_gateway. When
-  // sess.email isn't in agents.config.json (non-SunBiz operator, future
-  // tenant), the agent is null and the signer falls back to the shared
-  // submissions identity — exactly Adon's spec §2.4 "zero CC → SunBiz
-  // Submissions" rule, just driven by operator identity instead of CC
-  // list.
-  const operatorAgent = findAgentByEmail(sess.email);
-  const signer = operatorAgent
-    ? {
-        name: operatorAgent.name,
-        email: operatorAgent.email,
-        phone: operatorAgent.phone,
-      }
-    : {
-        name: "SunBiz Submissions",
-        email: "Submissions@sunbizfunding.com",
-        phone: "",
-      };
+  // Resolve the operator → agent entry → signer the bridge tool will
+  // use for BRAVO_FROM_DISPLAY when spawning send_gateway. Shared with
+  // /api/leads/[id]/email + lender-threads/[threadId]/retry — see
+  // lib/config/agents.ts:resolveSignerForOperator.
+  const signer = resolveSignerForOperator(sess.email);
 
   let body: {
     lender_ids?: string[];
