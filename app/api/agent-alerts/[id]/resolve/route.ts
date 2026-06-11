@@ -52,13 +52,26 @@ export async function POST(
   }
 
   // Form-submit path: 303 redirect back so the dashboard re-renders
-  // without the dismissed row. Sets `Location` to the Referer if
-  // present (the page they clicked from), otherwise the dashboard.
+  // without the dismissed row. Same-origin gate on Referer prevents
+  // an attacker-set Referer header from being used as an open redirect
+  // — a referer pointing off-origin falls back to "/".
   const accept = req.headers.get("accept") || "";
   const isFormSubmit = !accept.includes("application/json");
   if (isFormSubmit) {
-    const back = req.headers.get("referer") || "/";
-    return NextResponse.redirect(back, { status: 303 });
+    const rawReferer = req.headers.get("referer") || "";
+    let safeRedirect = "/";
+    if (rawReferer) {
+      try {
+        const refUrl = new URL(rawReferer);
+        const reqUrl = new URL(req.url);
+        if (refUrl.origin === reqUrl.origin) {
+          safeRedirect = refUrl.pathname + refUrl.search;
+        }
+      } catch {
+        // malformed referer — fall through to "/"
+      }
+    }
+    return NextResponse.redirect(new URL(safeRedirect, req.url), { status: 303 });
   }
 
   return NextResponse.json({
