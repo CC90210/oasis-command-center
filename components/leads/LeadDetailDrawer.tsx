@@ -702,6 +702,23 @@ function BankTab({
     fetchLatestRun();
   }, [fetchLatestRun]);
 
+  // Auto-poll while underwriting is in flight. The kick-orchestrator-once
+  // fix (SunBiz-Agent 25932e7) makes Re-run complete in ~2 min, but
+  // without polling the drawer kept showing "in progress…" forever
+  // because fetchLatestRun() only ran once after Re-run, when the row
+  // was still pending. Now: re-fetch every 5s while pending/parsing,
+  // stop on complete/error. Visibility-aware so we don't hammer when
+  // the tab is hidden. Same pattern as ShoppingOutClient polling.
+  useEffect(() => {
+    if (uwRun?.status !== "pending" && uwRun?.status !== "parsing") return;
+    const interval = setInterval(() => {
+      if (document.visibilityState === "visible") {
+        void fetchLatestRun();
+      }
+    }, 5000);
+    return () => clearInterval(interval);
+  }, [uwRun?.status, fetchLatestRun]);
+
   // FIXME(api): /api/applications/[id]/underwriting/run — Phase ε
   const handleRerun = async () => {
     if (!applicationId) return;
