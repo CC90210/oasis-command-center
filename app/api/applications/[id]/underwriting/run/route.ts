@@ -85,8 +85,7 @@ export async function POST(
     );
   }
 
-  // Insert the new underwriting run at status='pending'. The daemon polls
-  // for rows in this state and begins processing within ~30s.
+  // Insert the new underwriting run at status='pending'.
   const insert = await db
     .from("application_underwriting")
     .insert({
@@ -107,8 +106,63 @@ export async function POST(
     );
   }
 
+  const runId = (insert.data as { id: string }).id;
+
+  // 2026-06-11: previously this route stopped at INSERT and trusted the
+  // underwriting_orchestrator cron to pick it up. The orchestrator is a
+  // */15 cron — meaning Re-run could sit at "Underwriting in progress…"
+  // for up to 15 minutes (CC bug report 2026-06-11: stuck for 5+ min).
+  // Now we ALSO fire the bridge tool synchronously so it runs IMMEDIATELY.
+  // The cron stays as a safety net for any pending row the bridge missed.
+  // Best-effort: bridge offline / failure keeps the row at 'pending' so
+  // the cron's next tick picks it up.
+  try {
+    const execUrl = new URL("/api/bridge/exec-tool", req.url);
+    const cookie = req.headers.get("cookie") || "";
+    // Fire-and-forget POST. We don't await the bridge's full underwriting
+    // pipeline (can take 30-300s) because that'd hold the UI's POST
+    // open. Instead we just kick the bridge tool — it runs async on the
+    // VPS, updates application_underwriting.status to 'complete' when
+    // done, and the dashboard's /latest polling picks up the result.
+    fetch(execUrl, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie },
+      body: JSON.stringify({
+        tool_name: "underwriting_run",
+        application_id: applicationId,
+        tenant_id: tenantId,
+        run_id: runId,
+        source: "dashboard_rerun",
+      }),
+      // Long upper bound — the bridge itself has its own timeout, but
+      // if Vercel's edge proxy enforces a shorter one we don't want
+      // the fetch to AbortError noisily.
+      signal: AbortSignal.timeout(180_000),
+    }).catch((e) => {
+      console.error("[underwriting.run.bridge_dispatch_failed]", {
+        application_id: applicationId,
+        run_id: runId,
+        error: e instanceof Error ? e.message : String(e),
+      });
+    });
+  } catch (e) {
+    console.error("[underwriting.run.bridge_dispatch_threw]", {
+      application_id: applicationId,
+      run_id: runId,
+      error: e instanceof Error ? e.message : String(e),
+    });
+  }
+
   return NextResponse.json(
-    { ok: true, run_id: (insert.data as { id: string }).id },
+    {
+      ok: true,
+      run_id: runId,
+      // UX hint: tells the dashboard's polling loop the run is actually
+      // firing now (not just queued for cron). Polling at /latest will
+      // see status change from pending → parsing → complete within
+      // seconds-to-minutes depending on statement count.
+      bridge_dispatched: true,
+    },
     { status: 201 },
   );
 }

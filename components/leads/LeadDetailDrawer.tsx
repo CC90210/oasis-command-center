@@ -560,7 +560,14 @@ function UnderwritingBadge({
   onRerun: () => void;
   rerunPending: boolean;
 }) {
-  const underwritingHref = `/t/${tenantSlug}/underwriting?application=${applicationId}`;
+  // 2026-06-11 CC bug: /t/<slug>/underwriting page doesn't exist in the
+  // SunBiz manifest, so the old underwritingHref Link 404'd. The drawer
+  // (this component's parent) is the canonical surface — UnderwritingPanel
+  // further down renders the metric card + banking signals + risk flags
+  // + sales angle inline. The link is removed; "Run underwriting →" is
+  // now a button calling onRerun directly. applicationId + tenantSlug
+  // retained on the type signature for future re-introduction.
+  void applicationId; void tenantSlug;
 
   if (!run) {
     return (
@@ -568,9 +575,14 @@ function UnderwritingBadge({
         <span className="inline-flex items-center px-2 py-0.5 rounded text-[10.5px] font-semibold bg-bg-deep border border-bg-border text-fg-dim">
           Not underwritten
         </span>
-        <Link href={underwritingHref} className="text-[10.5px] text-accent hover:underline">
-          Run underwriting →
-        </Link>
+        <button
+          type="button"
+          onClick={onRerun}
+          disabled={rerunPending}
+          className="text-[10.5px] text-accent hover:underline disabled:opacity-40"
+        >
+          {rerunPending ? "Starting…" : "Run underwriting →"}
+        </button>
       </div>
     );
   }
@@ -787,9 +799,10 @@ function BankTab({
   }));
 
   const isRunInProgress = uwRun?.status === "pending" || uwRun?.status === "parsing";
-  const underwritingHref = applicationId
-    ? `/t/${tenantSlug}/underwriting?application=${applicationId}`
-    : null;
+  // 2026-06-11: /t/<slug>/underwriting page doesn't exist; link removed.
+  // Drawer is the canonical underwriting surface (UnderwritingPanel below).
+  const underwritingHref: string | null = null;
+  void tenantSlug; void applicationId;
 
   return (
     <div className="space-y-4">
