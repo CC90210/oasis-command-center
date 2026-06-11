@@ -543,32 +543,24 @@ function Sparkline({
 
 /* -------------------------------------------------------------------------- */
 /* UnderwritingBadge                                                           */
-/* FIXME(api): /api/applications/[id]/underwriting/latest and                 */
-/*             /api/applications/[id]/underwriting/run — Phase ε endpoints.   */
+/* Wired to /api/applications/[id]/underwriting/latest + /run since 2026-05-25.*/
+/* Re-run dispatches the bridge tool immediately + drawer auto-polls.          */
 /* -------------------------------------------------------------------------- */
 
 function UnderwritingBadge({
-  applicationId,
-  tenantSlug,
   run,
   onRerun,
   rerunPending,
 }: {
-  applicationId: string;
-  tenantSlug: string;
   run: UnderwritingRun | null;
   onRerun: () => void;
   rerunPending: boolean;
 }) {
-  // 2026-06-11 CC bug: /t/<slug>/underwriting page doesn't exist in the
-  // SunBiz manifest, so the old underwritingHref Link 404'd. The drawer
-  // (this component's parent) is the canonical surface — UnderwritingPanel
-  // further down renders the metric card + banking signals + risk flags
-  // + sales angle inline. The link is removed; "Run underwriting →" is
-  // now a button calling onRerun directly. applicationId + tenantSlug
-  // retained on the type signature for future re-introduction.
-  void applicationId; void tenantSlug;
-
+  // The drawer (this component's parent) is the canonical underwriting
+  // surface — UnderwritingPanel further down renders the metric card +
+  // banking signals + risk flags + sales angle inline. There's no
+  // per-application detail page to deep-link to, so "Run underwriting →"
+  // is a button calling onRerun directly rather than a Link.
   if (!run) {
     return (
       <div className="flex items-center gap-2 flex-wrap">
@@ -670,8 +662,8 @@ function BankTab({
 
   // Underwriting run state.
   // undefined = fetch still in flight (shows "Loading…")
-  // null      = no run yet, or Phase ε endpoint not built (shows "Not underwritten")
-  // FIXME(api): /api/applications/[id]/underwriting/latest — Phase ε
+  // null      = no run yet for this application (shows "Not underwritten")
+  // populated = the latest run row from /api/applications/[id]/underwriting/latest
   const [uwRun, setUwRun] = useState<UnderwritingRun | null | undefined>(undefined);
   const [uwError, setUwError] = useState<string | null>(null);
   const [rerunPending, setRerunPending] = useState(false);
@@ -684,9 +676,11 @@ function BankTab({
         cache: "no-store",
       });
       const j = await r.json().catch(() => ({}));
-      // Non-ok (including 404 while Phase ε endpoint isn't built yet) →
-      // resolve to null so the badge shows "Not underwritten", not "Loading…"
-      // indefinitely.
+      // Non-ok → resolve to null so the badge shows "Not underwritten",
+      // not "Loading…" indefinitely. Auth failures and 404s both fall
+      // through here; the dashboard's auth middleware bounces unauth
+      // requests before they reach the drawer, so any non-ok here is
+      // genuinely "no run yet" or a transient backend issue.
       if (!r.ok) {
         setUwRun(null);
         return;
@@ -719,7 +713,6 @@ function BankTab({
     return () => clearInterval(interval);
   }, [uwRun?.status, fetchLatestRun]);
 
-  // FIXME(api): /api/applications/[id]/underwriting/run — Phase ε
   const handleRerun = async () => {
     if (!applicationId) return;
     setRerunPending(true);
@@ -816,10 +809,6 @@ function BankTab({
   }));
 
   const isRunInProgress = uwRun?.status === "pending" || uwRun?.status === "parsing";
-  // 2026-06-11: /t/<slug>/underwriting page doesn't exist; link removed.
-  // Drawer is the canonical underwriting surface (UnderwritingPanel below).
-  const underwritingHref: string | null = null;
-  void tenantSlug; void applicationId;
 
   return (
     <div className="space-y-4">
@@ -833,8 +822,6 @@ function BankTab({
             <div className="text-[11px] text-fg-dim italic">Loading…</div>
           ) : (
             <UnderwritingBadge
-              applicationId={applicationId}
-              tenantSlug={tenantSlug}
               run={uwRun}
               onRerun={handleRerun}
               rerunPending={rerunPending}
@@ -913,14 +900,6 @@ function BankTab({
           >
             {rerunPending ? "Running…" : "Re-run underwriting"}
           </button>
-          {underwritingHref && (
-            <Link
-              href={underwritingHref}
-              className="text-xs text-fg-dim hover:text-fg underline-offset-2 hover:underline"
-            >
-              View full underwriting report →
-            </Link>
-          )}
         </div>
       )}
     </div>
