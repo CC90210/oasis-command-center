@@ -167,11 +167,21 @@ export async function buildShopOutPlan(input: ShopOutPlanInput): Promise<{
             .filter((s): s is string => typeof s === "string" && s.trim().length === 2)
             .map((s) => s.toUpperCase())
         : undefined,
-      restricted_industries: Array.isArray(data.restricted_industries)
-        ? (data.restricted_industries as unknown[])
-            .filter((s): s is string => typeof s === "string" && s.trim().length > 0)
-            .map((s) => s.trim().toLowerCase())
-        : undefined,
+      // Defensive read: schema rename 2026-06-11 from industry_restrictions
+      // → restricted_industries. If any legacy lender row still uses the
+      // old key, read it too so the SOP §4 filter fires correctly during
+      // transition. Adon's seed CLI writes only the new name.
+      restricted_industries: (() => {
+        const raw = Array.isArray(data.restricted_industries)
+          ? (data.restricted_industries as unknown[])
+          : Array.isArray(data.industry_restrictions)
+            ? (data.industry_restrictions as unknown[])
+            : null;
+        if (!raw) return undefined;
+        return raw
+          .filter((s): s is string => typeof s === "string" && s.trim().length > 0)
+          .map((s) => s.trim().toLowerCase());
+      })(),
     };
 
     // Adon SOP §3 — "source from the lender record (prefer an address

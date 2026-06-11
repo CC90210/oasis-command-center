@@ -559,7 +559,12 @@ export const SUN_SEED: TenantManifest = {
         { name: "term_range_min_months", type: "number" },
         { name: "term_range_max_months", type: "number" },
         { name: "industry_preferences", type: "json" },     // array of strings
-        { name: "industry_restrictions", type: "json" },    // array of strings
+        // Adon MCA SOP §4 (2026-06-11): name MUST be 'restricted_industries'
+        // — match-fitness scorer + scripts/adon_seed_lender_constraints.py
+        // both read this exact key. Was 'industry_restrictions' until
+        // 2026-06-11; rename caught a silent bug where Adon could populate
+        // via the manifest editor and the filter would never fire.
+        { name: "restricted_industries", type: "json" },    // array of lowercase industry slugs
         { name: "restricted_states", type: "json" },        // array of state codes
         { name: "required_documents", type: "json" },       // array of doc-type keys
         { name: "common_decline_reasons", type: "json" },   // array of strings
