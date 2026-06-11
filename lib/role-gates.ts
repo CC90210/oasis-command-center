@@ -194,12 +194,21 @@ export const BRIDGE_EXEC_TOOL_MEMBER_BUSINESS: ReadonlySet<string> = new Set([
 
 /**
  * Return true when the given bridge-registry tool name is callable by the
- * given team role via /api/bridge/exec-tool. owner / admin can call any
- * registered tool; member roles can call read-only tools PLUS the
- * business-write tools enumerated above (the send_gateway compliance
- * gates remain the operator-safety wall there).
+ * given team role via /api/bridge/exec-tool. Tiers (matches CC's documented
+ * model — admin=technical-write, member=business-write, read_only=read-only):
+ *   - owner / admin : any registered tool
+ *   - member        : read-only tools PLUS the business-write tools above
+ *                     (send_gateway compliance gates remain the safety wall)
+ *   - everyone else : read-only tools ONLY
  *
- * Fail-closed: unknown role => non-admin path => allowlist-only.
+ * 2026-06-11 fix: the previous body checked only the tool name on the
+ * non-admin path, so a read_only (or unknown/null) role could fire the
+ * MEMBER_BUSINESS tools — shop_out_send_batch / send_email / send_sms,
+ * each of which ships real outbound mail. That contradicts
+ * "read_only = read-only". Business-write now requires member explicitly;
+ * any unrecognized role falls through to read-only-only.
+ *
+ * Fail-closed: unknown/empty/null role => read-only tools only.
  */
 export function bridgeExecToolAllowedForRole(
   teamRole: string | null | undefined,
@@ -207,10 +216,12 @@ export function bridgeExecToolAllowedForRole(
 ): boolean {
   const r = (teamRole || "").trim().toLowerCase();
   if (r === "owner" || r === "admin") return true;
-  return (
-    BRIDGE_EXEC_TOOL_READ_ONLY.has(toolName) ||
-    BRIDGE_EXEC_TOOL_MEMBER_BUSINESS.has(toolName)
-  );
+  // Read-only tools are safe for any authenticated role.
+  if (BRIDGE_EXEC_TOOL_READ_ONLY.has(toolName)) return true;
+  // Business-write tools require member+ explicitly (owner/admin already
+  // returned above). read_only / unknown / null do NOT qualify.
+  if (r === "member") return BRIDGE_EXEC_TOOL_MEMBER_BUSINESS.has(toolName);
+  return false;
 }
 
 /**
