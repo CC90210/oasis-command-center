@@ -16,6 +16,7 @@ type AgentAlertRow = {
   subject_id: string | null;
   title: string;
   body: string | null;
+  payload: Record<string, unknown> | null;
   created_at: string;
 };
 
@@ -88,13 +89,27 @@ export async function ManifestDashboard({ manifest, tenantId, demoRowsByEntity }
       const sb = getServiceSupabase();
       const { data, error } = await sb
         .from("agent_alerts")
-        .select("id, alert_type, severity, subject_type, subject_id, title, body, created_at")
+        .select("id, alert_type, severity, subject_type, subject_id, title, body, payload, created_at")
         .eq("tenant_id", tenantId)
         .is("resolved_at", null)
         .order("created_at", { ascending: false })
-        .limit(10);
+        .limit(50);
       if (error) return [];
-      return (data || []) as AgentAlertRow[];
+      // Dedupe by alert_type — health_check runs hourly and creates a
+      // new row every 6h even when the underlying issue is unchanged.
+      // Showing 10 stale "Health check: N HIGH" rows is noise; keep
+      // only the most-recent of each type. Operator clears via the
+      // dismiss button which sets resolved_at.
+      const seen = new Set<string>();
+      const deduped: AgentAlertRow[] = [];
+      for (const row of (data || []) as AgentAlertRow[]) {
+        const dedupeKey = `${row.alert_type}:${row.subject_type || ""}:${row.subject_id || ""}`;
+        if (seen.has(dedupeKey)) continue;
+        seen.add(dedupeKey);
+        deduped.push(row);
+        if (deduped.length >= 10) break;
+      }
+      return deduped;
     } catch {
       return [];
     }
@@ -104,8 +119,6 @@ export async function ManifestDashboard({ manifest, tenantId, demoRowsByEntity }
 
   return (
     <div className="space-y-6">
-      {openAlerts.length > 0 && <OpenAlertsRow alerts={openAlerts} slug={slug} />}
-
       {isSunBizShape ? (
         <>
           <SunBizHeroKpis
@@ -148,6 +161,8 @@ export async function ManifestDashboard({ manifest, tenantId, demoRowsByEntity }
           <RenewalsDueSoon slug={slug} fundedDeals={rowsByEntity.funded_deal || []} />
         </div>
       )}
+
+      {openAlerts.length > 0 && <OpenAlertsRow alerts={openAlerts} slug={slug} />}
 
       {enabledAgents.length > 0 && (
         <Card
@@ -196,57 +211,103 @@ export async function ManifestDashboard({ manifest, tenantId, demoRowsByEntity }
  * ----------------------------------------------------------------- */
 
 function OpenAlertsRow({ alerts, slug }: { alerts: AgentAlertRow[]; slug: string }) {
+  const subtitleText =
+    alerts.length === 1
+      ? "What needs your attention today."
+      : `${alerts.length} distinct issues across your tenant. Dismiss the ones you've handled.`;
   return (
-    <Card
-      title={`${alerts.length} open alert${alerts.length === 1 ? "" : "s"}`}
-      subtitle="What your agents flagged for you. Click in to resolve."
-    >
+    <Card title="System health" subtitle={subtitleText}>
       <ul className="space-y-2">
-        {alerts.map((alert) => {
-          const palette =
-            alert.severity === "urgent"
-              ? "border-red-500/50 bg-red-500/10 text-red-100 hover:bg-red-500/15"
-              : alert.severity === "warn"
-                ? "border-amber-400/50 bg-amber-400/10 text-amber-100 hover:bg-amber-400/15"
-                : "border-bg-border bg-bg-elev/40 text-fg-muted hover:bg-bg-elev/70";
-          const href =
-            alert.subject_type === "lead" && alert.subject_id
-              ? `/t/${slug}/leads/${alert.subject_id}`
-              : alert.subject_type === "application" && alert.subject_id
-                ? `/t/${slug}/applications/${alert.subject_id}`
-                : null;
-          const Inner = (
-            <div className={`rounded-lg border px-3 py-2.5 text-[12.5px] transition-colors ${palette}`}>
-              <div className="flex items-baseline justify-between gap-2">
-                <span className="font-semibold inline-flex items-center gap-1.5">
-                  <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
-                  {alert.title}
-                </span>
-                <span className="text-[10.5px] font-mono opacity-70 shrink-0">
-                  {timeAgo(alert.created_at)}
-                </span>
-              </div>
-              {alert.body && (
-                <div className="mt-1 text-[11.5px] opacity-90 break-words leading-relaxed">
-                  {alert.body}
-                </div>
-              )}
-            </div>
-          );
-          return (
-            <li key={alert.id}>
-              {href ? (
-                <Link href={href} className="block">
-                  {Inner}
-                </Link>
-              ) : (
-                Inner
-              )}
-            </li>
-          );
-        })}
+        {alerts.map((alert) => (
+          <AlertRow key={alert.id} alert={alert} slug={slug} />
+        ))}
       </ul>
     </Card>
+  );
+}
+
+function AlertRow({ alert, slug }: { alert: AgentAlertRow; slug: string }) {
+  const palette =
+    alert.severity === "urgent"
+      ? "border-red-500/50 bg-red-500/10 text-red-100"
+      : alert.severity === "warn"
+        ? "border-amber-400/50 bg-amber-400/10 text-amber-100"
+        : "border-bg-border bg-bg-elev/40 text-fg-muted";
+
+  // Three subject types we route deep into. Tenant-scoped (system
+  // health check, cross-tenant audit) has no per-record drill-in,
+  // so the row stays inline — no misleading "Click in to resolve".
+  const href =
+    alert.subject_type === "lead" && alert.subject_id
+      ? `/t/${slug}/leads/${alert.subject_id}`
+      : alert.subject_type === "application" && alert.subject_id
+        ? `/t/${slug}/applications/${alert.subject_id}`
+        : null;
+
+  // Surface the actual issues from the payload jsonb so the operator
+  // sees WHAT is wrong, not just "Health check: N HIGH issue(s)".
+  // sunbiz_health_check.py writes payload.summary + payload.issues[].
+  const summary = alert.payload && typeof alert.payload.summary === "string" ? alert.payload.summary : null;
+  const issues = alert.payload && Array.isArray(alert.payload.issues) ? alert.payload.issues : [];
+  const highIssues = issues
+    .filter((i): i is { message: string; severity: string } =>
+      typeof i === "object" && i !== null && "severity" in i && (i as { severity: unknown }).severity === "HIGH",
+    )
+    .slice(0, 5);
+
+  return (
+    <li>
+      <div className={`rounded-lg border px-3 py-2.5 text-[12.5px] ${palette}`}>
+        <div className="flex items-baseline justify-between gap-2">
+          <span className="font-semibold inline-flex items-center gap-1.5">
+            <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+            {alert.title}
+          </span>
+          <div className="flex items-center gap-2 shrink-0">
+            <span className="text-[10.5px] font-mono opacity-70">{timeAgo(alert.created_at)}</span>
+            <DismissAlertButton alertId={alert.id} />
+          </div>
+        </div>
+        {alert.body && (
+          <div className="mt-1 text-[11.5px] opacity-90 break-words leading-relaxed">{alert.body}</div>
+        )}
+        {summary && (
+          <div className="mt-1 text-[11.5px] opacity-80 break-words leading-relaxed">{summary}</div>
+        )}
+        {highIssues.length > 0 && (
+          <ul className="mt-1.5 space-y-0.5 text-[11px] opacity-90 list-disc list-inside">
+            {highIssues.map((i, idx) => (
+              <li key={idx}>{i.message}</li>
+            ))}
+          </ul>
+        )}
+        {href && (
+          <Link
+            href={href}
+            className="mt-1.5 inline-flex items-center gap-1 text-[11px] underline-offset-2 hover:underline opacity-90"
+          >
+            Open <ArrowRight className="w-3 h-3" />
+          </Link>
+        )}
+      </div>
+    </li>
+  );
+}
+
+function DismissAlertButton({ alertId }: { alertId: string }) {
+  // Client-side dismiss. Hides the row immediately, fires POST to
+  // /api/agent-alerts/[id]/resolve which sets resolved_at. Page
+  // reload picks up the persisted state.
+  return (
+    <form action={`/api/agent-alerts/${alertId}/resolve`} method="POST" className="inline">
+      <button
+        type="submit"
+        className="text-[10px] uppercase tracking-wider font-semibold opacity-60 hover:opacity-100 px-1.5 py-0.5 rounded border border-current/40 hover:border-current"
+        title="Mark this alert as resolved"
+      >
+        Dismiss
+      </button>
+    </form>
   );
 }
 
