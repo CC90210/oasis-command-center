@@ -25,19 +25,29 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { getServiceSupabase } from "@/lib/supabase-server";
-import { resolveTenantId } from "@/lib/api-auth";
+import { resolveSessionContext } from "@/lib/api-auth";
+import { findAgentByEmail } from "@/lib/config/agents";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+// 2026-06-10: Retry now ALSO fires the physical send via the bridge
+// tool so the operator sees an actual send within seconds, not a
+// pending-forever row waiting for a daemon. Same maxDuration as
+// /shop-out for the bridge round trip.
+export const maxDuration = 120;
 
 export async function POST(
-  _req: NextRequest,
+  req: NextRequest,
   ctx: { params: Promise<{ id: string; threadId: string }> },
 ) {
-  const tenantId = await resolveTenantId();
-  if (!tenantId) {
+  // Switched from resolveTenantId() to the fuller session context so we
+  // have sess.email for per-operator signing (same shape as the main
+  // shop-out route — Retry should sign as the rep who clicked it).
+  const sess = await resolveSessionContext();
+  if (!sess.ok) {
     return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
   }
+  const tenantId = sess.tenantId;
   const { id: applicationId, threadId } = await ctx.params;
 
   const db = getServiceSupabase();
@@ -99,11 +109,85 @@ export async function POST(
     );
   }
   const updatedCount = Array.isArray(updateRes.data) ? updateRes.data.length : 0;
+
+  // 2026-06-10: previously this endpoint stopped here — flipped the row
+  // to 'pending' and trusted shop_out_sender.py to pick it up on its next
+  // poll. That meant CC clicked Retry, saw the row go pending, and waited
+  // (sometimes forever — the daemon might not be running). Now we fire
+  // the bridge tool immediately so the send happens in this request,
+  // mirroring the main /shop-out route's behavior. The bridge tool loops
+  // over every pending thread on this application, so retrying ONE row
+  // also catches any other pending rows that drifted.
+  const operatorAgent = findAgentByEmail(sess.email);
+  const signer = operatorAgent
+    ? {
+        name: operatorAgent.name,
+        email: operatorAgent.email,
+        phone: operatorAgent.phone,
+      }
+    : {
+        name: "SunBiz Submissions",
+        email: "Submissions@sunbizfunding.com",
+        phone: "",
+      };
+
+  let physicalSend: {
+    status: "sent" | "partial" | "error" | "skipped";
+    sent_count?: number;
+    failed_count?: number;
+    message?: string;
+  } = { status: "skipped", message: "thread was not in error state" };
+
+  if (updatedCount > 0) {
+    try {
+      const execUrl = new URL("/api/bridge/exec-tool", req.url);
+      const cookie = req.headers.get("cookie") || "";
+      const sendRes = await fetch(execUrl, {
+        method: "POST",
+        headers: { "content-type": "application/json", cookie },
+        body: JSON.stringify({
+          tool_name: "shop_out_send_batch",
+          application_id: applicationId,
+          signer_name: signer.name,
+          signer_email: signer.email,
+          signer_phone: signer.phone,
+        }),
+        signal: AbortSignal.timeout(110_000),
+      });
+      const sendData = await sendRes.json();
+      if (!sendRes.ok || sendData?.is_error) {
+        physicalSend = {
+          status: "error",
+          message: String(sendData?.error || sendData?.output || `exec-tool HTTP ${sendRes.status}`).slice(0, 240),
+        };
+      } else {
+        try {
+          const parsed = JSON.parse(sendData?.output || "{}");
+          const sent = typeof parsed.sent === "number" ? parsed.sent : 0;
+          const failed = typeof parsed.failed === "number" ? parsed.failed : 0;
+          physicalSend = {
+            status: sent > 0 && failed === 0 ? "sent" : sent > 0 ? "partial" : "error",
+            sent_count: sent,
+            failed_count: failed,
+          };
+        } catch {
+          physicalSend = { status: "error", message: "bridge tool returned non-JSON output" };
+        }
+      }
+    } catch (e) {
+      physicalSend = {
+        status: "error",
+        message: e instanceof Error ? e.message : "retry auto-trigger threw",
+      };
+    }
+  }
+
   return NextResponse.json({
     ok: true,
     thread_id: thread.id,
     previous_status: "error",
     new_status: updatedCount > 0 ? "pending" : thread.status,
     noop: updatedCount === 0,
+    physical_send: physicalSend,
   });
 }
