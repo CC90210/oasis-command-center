@@ -24,6 +24,7 @@ import { getServiceSupabase } from "@/lib/supabase-server";
 import type { LenderProfile, ApplicationProfile, LenderWarning } from "./match-fitness";
 import { scoreLenderMatch } from "./match-fitness";
 import { buildLenderNarrative } from "./match-narrative";
+import { findAgentByEmail } from "@/lib/config/agents";
 
 export type ShopOutAttachment = {
   /** Display filename — e.g. "bank-statements-mar-may.pdf". */
@@ -52,19 +53,26 @@ export type ShopOutPlanInput = {
   assigned_rep_email?: string | null;
 };
 
-const DEFAULT_SUBJECT = "Funding application — {{application.business_name}}";
-const DEFAULT_BODY = `Hi {{lender.name}} team,
+// Subject per Adon's MCA shop-out SOP §3 (2026-06-11): identical across
+// re-sends to the same lender so the email client threads them. "deal
+// name" = merchant/business name. Keep the parens — funders look for
+// that exact prefix when filing.
+const DEFAULT_SUBJECT = "New Deal ({{application.business_name}})";
 
-We've got a strong submission for your review. Quick summary:
+// Minimal body per Adon SOP §3 — funders skim. Merge fields use the
+// short {merchant} / {monthly_revenue} / {positions} / {requested} /
+// {agent_first_name} names from the spec. Operator can edit per send.
+const DEFAULT_BODY = `New submission attached.
 
-  Business: {{application.business_name}}
-  Monthly revenue: {{application.monthly_revenue}}
-  Time in business: {{application.time_in_business_months}} months
-  Requested: {{application.requested_amount}}
+Business:        {{application.business_name}}
+Monthly Revenue: \${{application.monthly_revenue}}
+Positions:       {{application.position_count}}
+Requested:       \${{application.requested_amount}}
 
-Bank statements attached. Looking forward to your offer.
+Statements + application attached. Let me know what you can do.
 
-— Solara, SunBiz Funding
+{{agent.first_name}}
+SunBiz Funding
 `;
 
 function renderSimple(template: string, vars: Record<string, unknown>): string {
@@ -127,6 +135,16 @@ export async function buildShopOutPlan(input: ShopOutPlanInput): Promise<{
   const plan: ShopOutPlanRow[] = [];
   const missing_recipients: string[] = [];
 
+  // Adon SOP §3 — body signs "{agent_first_name}". Resolve the assigned
+  // rep's first name from agents.config.json so the body matches the
+  // signature the bridge tool will render (resolveSignerForOperator).
+  // Falls back to "SunBiz Submissions" wordmark first-token when there's
+  // no match, mirroring the signature-fallback rule.
+  const assignedAgent = findAgentByEmail(input.assigned_rep_email || null);
+  const agentFirstName = assignedAgent
+    ? assignedAgent.name.split(/\s+/)[0]
+    : "SunBiz Submissions";
+
   for (const row of lenderRows.data || []) {
     const r = row as { id: string; data: Record<string, unknown> };
     const data = r.data || {};
@@ -143,12 +161,44 @@ export async function buildShopOutPlan(input: ShopOutPlanInput): Promise<{
         ? (data.submission_cc_emails as unknown[])
             .filter((s): s is string => typeof s === "string" && s.includes("@"))
         : undefined,
+      // SOP §1 restricted lists — populated from lender's tenant_records.data.
+      restricted_states: Array.isArray(data.restricted_states)
+        ? (data.restricted_states as unknown[])
+            .filter((s): s is string => typeof s === "string" && s.trim().length === 2)
+            .map((s) => s.toUpperCase())
+        : undefined,
+      restricted_industries: Array.isArray(data.restricted_industries)
+        ? (data.restricted_industries as unknown[])
+            .filter((s): s is string => typeof s === "string" && s.trim().length > 0)
+            .map((s) => s.trim().toLowerCase())
+        : undefined,
     };
-    const recipient = typeof data.contact === "string" ? data.contact : null;
+
+    // Adon SOP §3 — "source from the lender record (prefer an address
+    // matching /submission|submit/i, else the primary contact)". The
+    // lender row carries `contact` (primary) and optionally a list of
+    // submission-routing addresses in `submission_emails`. Walk them and
+    // pick the first match; fall back to `contact`.
+    const submissionEmails = Array.isArray(data.submission_emails)
+      ? (data.submission_emails as unknown[]).filter(
+          (s): s is string => typeof s === "string" && s.includes("@"),
+        )
+      : [];
+    const allCandidates = [
+      ...submissionEmails,
+      ...(typeof data.contact === "string" && data.contact.includes("@") ? [data.contact] : []),
+    ];
+    const recipient =
+      allCandidates.find((e) => /submission|submit/i.test(e)) ||
+      (typeof data.contact === "string" && data.contact.includes("@") ? data.contact : null);
     if (!recipient) missing_recipients.push(lender.name);
 
     const score = scoreLenderMatch(lender, input.application);
-    const vars = { lender, application: input.application };
+    const vars = {
+      lender,
+      application: input.application,
+      agent: { first_name: agentFirstName },
+    };
 
     // Per-lender CC list = operator's global cc_emails ∪ lender's stored
     // submission_cc_emails ∪ the assigned rep's email (so the rep stays

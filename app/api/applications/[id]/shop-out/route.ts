@@ -206,12 +206,21 @@ export async function POST(
       { status: 400 },
     );
   }
-  // 20-cap only applies to real sends. Dry-run scoring needs to look at
-  // every lender so the Shopping Out UI can rank a directory of any size
-  // without 21+ lenders making the page unusable (Codex review 2026-05-24).
-  if (!body.dry_run && lenderIds.length > 20) {
+  // Adon MCA SOP §4 (2026-06-11) — hard cap ~12 lenders per action.
+  // "Prevents an accidental 40-lender blast that burns the deal's
+  // reputation with funders." Override via x-shopout-override: 1
+  // header — operator must explicitly acknowledge the rep risk.
+  // Dry-run scoring still looks at every lender so the UI can rank a
+  // directory of any size without 13+ lenders making the page unusable.
+  const operatorOverride = req.headers.get("x-shopout-override") === "1";
+  const HARD_CAP = 12;
+  if (!body.dry_run && lenderIds.length > HARD_CAP && !operatorOverride) {
     return NextResponse.json(
-      { ok: false, error: "too_many_lenders", hint: "Max 20 lenders per shop-out. Re-shop unfunded leads next month with a different cohort." },
+      {
+        ok: false,
+        error: "too_many_lenders",
+        hint: `Adon MCA SOP §4: max ${HARD_CAP} lenders per shop-out (you selected ${lenderIds.length}). Trim to ${HARD_CAP} OR send header x-shopout-override: 1 to acknowledge the rep risk.`,
+      },
       { status: 400 },
     );
   }
@@ -275,6 +284,21 @@ export async function POST(
     applicant_fico: typeof appData.applicant_fico === "number" ? appData.applicant_fico : undefined,
     requested_amount: typeof appData.requested_amount === "number" ? appData.requested_amount : undefined,
     desired_product: typeof appData.desired_product === "string" ? appData.desired_product : undefined,
+    // Adon SOP §1/§4 — merchant identity for restricted-list matching.
+    // Forms collect business_state (ISO 2-letter) and industry (slug);
+    // map them onto the ApplicationProfile shape match-fitness consumes.
+    merchant_state:
+      typeof appData.business_state === "string"
+        ? appData.business_state
+        : typeof appData.merchant_state === "string"
+          ? appData.merchant_state
+          : undefined,
+    industry: typeof appData.industry === "string" ? appData.industry : undefined,
+    // Position count flows from the underwriter chain (debt_detector
+    // output) → application.data.position_count. match-fitness's
+    // position-range gate uses it; the body template's {{position_count}}
+    // shows it to the lender.
+    position_count: typeof appData.position_count === "number" ? appData.position_count : undefined,
   };
 
   // SunBiz directive 2026-05-31: under the shared-inbox From: model

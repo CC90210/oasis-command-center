@@ -44,6 +44,18 @@ export type LenderProfile = {
    * with cc rummi@" for Maison. The shop-out send path merges this with
    * the operator's global cc list so the catalog routing flows end-to-end. */
   submission_cc_emails?: string[];
+  /**
+   * Adon MCA SOP §1/§4 (2026-06-11) — funder restricted lists.
+   * `restricted_states`: ISO 2-letter state codes the lender won't fund in
+   *   (e.g. ["NY", "CA"]). Matched against application.merchant_state.
+   * `restricted_industries`: lowercase industry slugs the lender excludes
+   *   (e.g. ["trucking", "gas_station", "cannabis"]). Matched against
+   *   application.industry. Match is exact, lower-cased; if a lender's
+   *   exclusion list uses different naming than the catalog the operator
+   *   sees an info warning rather than a silent skip.
+   */
+  restricted_states?: string[];
+  restricted_industries?: string[];
 };
 
 export type ApplicationProfile = {
@@ -64,6 +76,15 @@ export type ApplicationProfile = {
   default_satisfied?: boolean;
   negative_days?: number;
   deal_kind?: "fresh_capital" | "reverse_consolidation";
+  /**
+   * Adon MCA SOP §1/§4 — merchant identity for restricted-list matching.
+   * `merchant_state`: ISO 2-letter (e.g. "FL", "NY"); upper-cased before
+   *   compare. Absence = info warning when lender has restricted_states.
+   * `industry`: lowercase slug (e.g. "trucking", "restaurant"); absence
+   *   = info warning when lender has restricted_industries.
+   */
+  merchant_state?: string;
+  industry?: string;
 };
 
 /**
@@ -307,6 +328,54 @@ export function scoreLenderMatch(
         "high_risk",
         "reverses_only_lender",
         "Lender funds reverse-consolidation only; this deal is fresh capital",
+      );
+    }
+  }
+
+  // ── Restricted states (high_risk) — Adon SOP §1/§4 ─────────────────
+  if (lender.restricted_states && lender.restricted_states.length > 0) {
+    if (application.merchant_state) {
+      const merchantState = application.merchant_state.trim().toUpperCase();
+      const restricted = lender.restricted_states.map((s) => s.trim().toUpperCase());
+      if (restricted.includes(merchantState)) {
+        flag(
+          "high_risk",
+          "restricted_state",
+          `Merchant in ${merchantState}; lender does not fund this state`,
+        );
+      } else {
+        reasons.push(`${merchantState} not in lender's restricted-states list`);
+      }
+    } else {
+      score -= 3;
+      flag(
+        "info",
+        "missing_merchant_state",
+        "Lender has restricted-states list; deal doesn't report merchant_state",
+      );
+    }
+  }
+
+  // ── Restricted industries (high_risk) — Adon SOP §1/§4 ─────────────
+  if (lender.restricted_industries && lender.restricted_industries.length > 0) {
+    if (application.industry) {
+      const industry = application.industry.trim().toLowerCase();
+      const restricted = lender.restricted_industries.map((s) => s.trim().toLowerCase());
+      if (restricted.includes(industry)) {
+        flag(
+          "high_risk",
+          "restricted_industry",
+          `Industry "${industry}" is on lender's restricted-industries list`,
+        );
+      } else {
+        reasons.push(`Industry "${industry}" not restricted by lender`);
+      }
+    } else {
+      score -= 3;
+      flag(
+        "info",
+        "missing_industry",
+        "Lender has restricted-industries list; deal doesn't report industry",
       );
     }
   }
