@@ -461,6 +461,63 @@ export function ColdOutreachClient({
   const [dailyCap, setDailyCap] = useState(500);
   const [recipientFilter, setRecipientFilter] = useState<RecipientFilter>({});
 
+  // ── HTML template picker (email channel) ─────────────────────────────────
+  // The SunBiz marketing template library (SunBiz-Agent/docs/*.html),
+  // served by /api/manifest/[slug]/cold-outreach/templates. Picking one
+  // loads its HTML into messageBody + its suggested subject; the runner
+  // substitutes {{first_name}} {{business_name}} {{year}}
+  // {{unsubscribe_url}} per recipient at send time.
+  const [htmlTemplates, setHtmlTemplates] = useState<
+    Array<{ key: string; name: string; subject: string; size_bytes: number }> | null
+  >(null);
+  const [selectedTemplateKey, setSelectedTemplateKey] = useState("");
+  const [applyingTemplate, setApplyingTemplate] = useState(false);
+
+  useEffect(() => {
+    if (channel !== "email" || htmlTemplates !== null || !tenantId) return;
+    (async () => {
+      try {
+        const res = await fetch(
+          `/api/manifest/${tenantSlug}/cold-outreach/templates`,
+          { credentials: "include" },
+        );
+        const json = await res.json();
+        setHtmlTemplates(json.ok ? (json.templates ?? []) : []);
+      } catch {
+        setHtmlTemplates([]);
+      }
+    })();
+  }, [channel, htmlTemplates, tenantId, tenantSlug]);
+
+  const applyTemplate = useCallback(
+    async (key: string) => {
+      if (!key) return;
+      setApplyingTemplate(true);
+      try {
+        const res = await fetch(
+          `/api/manifest/${tenantSlug}/cold-outreach/templates?key=${encodeURIComponent(key)}`,
+          { credentials: "include" },
+        );
+        const json = await res.json();
+        if (json.ok && json.template) {
+          setMessageBody(json.template.html);
+          setSubject(json.template.subject);
+          setPreviewOpen(false);
+        }
+      } catch {
+        // Network blip — leave the compose state untouched.
+      } finally {
+        setApplyingTemplate(false);
+      }
+    },
+    [tenantSlug],
+  );
+
+  // Looks like a full HTML email (vs hand-typed plain text)? Drives the
+  // rendered iframe preview below the textarea.
+  const bodyIsHtmlEmail =
+    channel === "email" && /^\s*(<!doctype|<html)/i.test(messageBody);
+
   // ── Preview state ─────────────────────────────────────────────────────────
   const [previewLeads, setPreviewLeads] = useState<ColdLead[] | null>(null);
   const [filteredTotal, setFilteredTotal] = useState<number | null>(null);
@@ -873,6 +930,39 @@ export function ColdOutreachClient({
           <ChannelPicker value={channel} onChange={(c) => { setChannel(c); setPreviewOpen(false); }} />
 
           {channel === "email" && (
+            <div className="flex items-center gap-2">
+              <select
+                value={selectedTemplateKey}
+                onChange={(e) => setSelectedTemplateKey(e.target.value)}
+                disabled={applyingTemplate || htmlTemplates === null}
+                className="flex-1 text-sm px-3 py-2 rounded-md bg-bg-deep border border-bg-border text-fg disabled:opacity-50"
+              >
+                <option value="">
+                  {htmlTemplates === null
+                    ? "Loading HTML templates…"
+                    : "HTML template (optional) — or write plain text below"}
+                </option>
+                {(htmlTemplates ?? []).map((t) => (
+                  <option key={t.key} value={t.key}>
+                    {t.name} · {Math.round(t.size_bytes / 1024)} KB
+                  </option>
+                ))}
+              </select>
+              <button
+                type="button"
+                onClick={() => applyTemplate(selectedTemplateKey)}
+                disabled={!selectedTemplateKey || applyingTemplate}
+                className="inline-flex items-center gap-1.5 text-[12px] px-3 py-2 rounded-md border border-bg-border text-fg-muted hover:text-fg hover:bg-bg-elev disabled:opacity-40 shrink-0"
+              >
+                {applyingTemplate ? (
+                  <Loader2 className="w-3 h-3 animate-spin" />
+                ) : null}
+                Apply
+              </button>
+            </div>
+          )}
+
+          {channel === "email" && (
             <input
               type="text"
               value={subject}
@@ -907,6 +997,21 @@ export function ColdOutreachClient({
               Stays under {SMS_CHAR_LIMIT} chars for SMS to avoid splits. Respects CASL + carrier limits via send_gateway.
             </div>
           </div>
+
+          {bodyIsHtmlEmail && (
+            <div className="space-y-1">
+              <div className="text-[10.5px] text-fg-dim">
+                Rendered preview (tokens shown raw — substituted per
+                recipient at send time):
+              </div>
+              <iframe
+                title="Email template preview"
+                sandbox=""
+                srcDoc={messageBody}
+                className="w-full h-96 rounded-md border border-bg-border bg-white"
+              />
+            </div>
+          )}
 
           <div className="flex items-center gap-3">
             <label className="text-[11px] text-fg-dim shrink-0">Daily cap</label>

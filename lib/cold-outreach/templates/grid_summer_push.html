@@ -1,0 +1,727 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+  <title>Summer Capital — SunBiz Funding</title>
+  <!--[if mso]>
+  <noscript>
+    <xml>
+      <o:OfficeDocumentSettings>
+        <o:PixelsPerInch>96</o:PixelsPerInch>
+      </o:OfficeDocumentSettings>
+    </xml>
+  </noscript>
+  <![endif]-->
+  <style type="text/css">
+    /* Reset */
+    body, table, td, a { -webkit-text-size-adjust: 100%; -ms-text-size-adjust: 100%; }
+    table, td { mso-table-lspace: 0pt; mso-table-rspace: 0pt; }
+    img { -ms-interpolation-mode: bicubic; border: 0; outline: none; text-decoration: none; }
+
+    /* Base */
+    body {
+      margin: 0 !important;
+      padding: 0 !important;
+      background-color: #f0f4f8;
+      font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif;
+    }
+
+    /* Wrapper */
+    .email-wrapper {
+      width: 100%;
+      background-color: #f0f4f8;
+    }
+
+    .email-container {
+      max-width: 600px;
+      margin: 0 auto;
+      background-color: #ffffff;
+    }
+
+    /* Header — warm summer gradient */
+    .header {
+      background: linear-gradient(135deg, #D4A843 0%, #FF6B35 50%, #001F54 100%);
+      padding: 32px 40px 28px;
+      text-align: center;
+    }
+
+    .header-logo-text {
+      font-size: 28px;
+      font-weight: 800;
+      color: #ffffff;
+      letter-spacing: 3px;
+      text-transform: uppercase;
+      margin: 0;
+    }
+
+    .header-logo-text span {
+      color: #fef3c7;
+    }
+
+    .header-tagline {
+      font-size: 13px;
+      color: rgba(255,255,255,0.85);
+      margin: 6px 0 0;
+      letter-spacing: 1px;
+    }
+
+    .header-headline {
+      font-size: 22px;
+      font-weight: 800;
+      color: #ffffff;
+      margin: 18px 0 0;
+      line-height: 1.3;
+      letter-spacing: 0.5px;
+    }
+
+    .header-sub {
+      font-size: 14px;
+      color: rgba(255,255,255,0.9);
+      margin: 8px 0 0;
+      font-weight: 600;
+    }
+
+    /* Status Banner */
+    .status-banner {
+      background-color: #FF6B35;
+      text-align: center;
+      padding: 10px 20px;
+    }
+
+    .status-banner p {
+      margin: 0;
+      font-size: 13px;
+      font-weight: 700;
+      color: #ffffff;
+      letter-spacing: 0.5px;
+    }
+
+    /* Main Body */
+    .body-content {
+      padding: 36px 40px 28px;
+    }
+
+    .greeting {
+      font-size: 15px;
+      color: #64748b;
+      margin: 0 0 8px;
+    }
+
+    .headline {
+      font-size: 26px;
+      font-weight: 800;
+      color: #001F54;
+      line-height: 1.25;
+      margin: 0 0 16px;
+    }
+
+    .headline span {
+      color: #FF6B35;
+    }
+
+    .intro-text {
+      font-size: 15px;
+      color: #475569;
+      line-height: 1.7;
+      margin: 0 0 28px;
+    }
+
+    /* Urgency Box */
+    .urgency-box {
+      background: linear-gradient(135deg, #fff7ed 0%, #fef3c7 100%);
+      border: 2px solid #FF6B35;
+      border-radius: 10px;
+      padding: 18px 20px;
+      margin-bottom: 28px;
+      text-align: center;
+    }
+
+    .urgency-box p {
+      margin: 0;
+      font-size: 15px;
+      font-weight: 700;
+      color: #001F54;
+    }
+
+    .urgency-box .urgency-stat {
+      font-size: 13px;
+      color: #ea580c;
+      font-weight: 600;
+      margin: 6px 0 0;
+    }
+
+    /* Requirements Box */
+    .requirements-box {
+      background-color: #fff7ed;
+      border-left: 4px solid #FF6B35;
+      border-radius: 0 8px 8px 0;
+      padding: 18px 20px;
+      margin-bottom: 28px;
+    }
+
+    .requirements-box h3 {
+      font-size: 13px;
+      font-weight: 700;
+      color: #ea580c;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      margin: 0 0 12px;
+    }
+
+    .req-item {
+      display: flex;
+      align-items: center;
+      margin-bottom: 8px;
+      font-size: 14px;
+      color: #1e293b;
+    }
+
+    .req-item:last-child { margin-bottom: 0; }
+
+    .req-check {
+      color: #FF6B35;
+      font-weight: 700;
+      margin-right: 8px;
+      font-size: 16px;
+    }
+
+    /* Use Cases Box */
+    .use-cases-box {
+      background-color: #f0fdf4;
+      border-left: 4px solid #10b981;
+      border-radius: 0 8px 8px 0;
+      padding: 18px 20px;
+      margin-bottom: 28px;
+    }
+
+    .use-cases-box h3 {
+      font-size: 13px;
+      font-weight: 700;
+      color: #059669;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      margin: 0 0 12px;
+    }
+
+    .use-case-item {
+      display: flex;
+      align-items: center;
+      margin-bottom: 8px;
+      font-size: 14px;
+      color: #1e293b;
+    }
+
+    .use-case-item:last-child { margin-bottom: 0; }
+
+    .use-case-icon {
+      margin-right: 10px;
+      font-size: 16px;
+    }
+
+    /* Funding Amounts Grid */
+    .section-title {
+      font-size: 14px;
+      font-weight: 700;
+      color: #001F54;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      margin: 0 0 14px;
+    }
+
+    .amounts-table {
+      width: 100%;
+      border-collapse: separate;
+      border-spacing: 8px;
+      margin: 0 -8px 28px;
+    }
+
+    .amount-cell {
+      background-color: #f8fafc;
+      border: 2px solid #e2e8f0;
+      border-radius: 10px;
+      text-align: center;
+      padding: 14px 8px;
+      width: 33.33%;
+      cursor: pointer;
+    }
+
+    .amount-cell:hover {
+      border-color: #FF6B35;
+      background-color: #fff7ed;
+    }
+
+    .amount-cell a {
+      text-decoration: none;
+      display: block;
+    }
+
+    .amount-value {
+      font-size: 20px;
+      font-weight: 800;
+      color: #001F54;
+      display: block;
+    }
+
+    .amount-weekly {
+      font-size: 11px;
+      color: #64748b;
+      margin-top: 4px;
+      display: block;
+    }
+
+    /* CTA Button */
+    .cta-wrapper {
+      text-align: center;
+      margin: 8px 0 32px;
+    }
+
+    .cta-button {
+      display: inline-block;
+      background-color: #FF6B35;
+      color: #ffffff !important;
+      text-decoration: none;
+      font-size: 16px;
+      font-weight: 700;
+      padding: 16px 44px;
+      border-radius: 8px;
+      letter-spacing: 0.5px;
+      border: none;
+    }
+
+    .cta-subtext {
+      font-size: 12px;
+      color: #94a3b8;
+      margin: 10px 0 0;
+    }
+
+    /* Divider */
+    .divider {
+      border: none;
+      border-top: 1px solid #e2e8f0;
+      margin: 0 0 28px;
+    }
+
+    /* Stats Row */
+    .stats-table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-bottom: 28px;
+      background-color: #001F54;
+      border-radius: 10px;
+      overflow: hidden;
+    }
+
+    .stat-cell {
+      text-align: center;
+      padding: 18px 8px;
+      width: 33.33%;
+      vertical-align: top;
+      border-right: 1px solid rgba(255,255,255,0.1);
+    }
+
+    .stat-cell:last-child {
+      border-right: none;
+    }
+
+    .stat-value {
+      font-size: 22px;
+      font-weight: 800;
+      color: #D4A843;
+      display: block;
+    }
+
+    .stat-label {
+      font-size: 11px;
+      color: rgba(255,255,255,0.75);
+      display: block;
+      margin-top: 4px;
+      line-height: 1.4;
+    }
+
+    /* Value Props */
+    .value-props-table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-bottom: 28px;
+    }
+
+    .value-prop-cell {
+      text-align: center;
+      padding: 12px 8px;
+      width: 33.33%;
+      vertical-align: top;
+    }
+
+    .vp-icon {
+      font-size: 24px;
+      display: block;
+      margin-bottom: 6px;
+    }
+
+    .vp-title {
+      font-size: 13px;
+      font-weight: 700;
+      color: #001F54;
+      display: block;
+      margin-bottom: 4px;
+    }
+
+    .vp-desc {
+      font-size: 12px;
+      color: #64748b;
+      line-height: 1.5;
+    }
+
+    /* Disclaimer */
+    .disclaimer {
+      font-size: 11px;
+      color: #94a3b8;
+      line-height: 1.6;
+      margin-bottom: 28px;
+      padding: 12px 16px;
+      background-color: #f8fafc;
+      border-radius: 6px;
+    }
+
+    /* Footer */
+    .footer {
+      background-color: #0f172a;
+      padding: 28px 40px;
+      text-align: center;
+    }
+
+    .footer-brand {
+      font-size: 16px;
+      font-weight: 700;
+      color: #ffffff;
+      letter-spacing: 2px;
+      text-transform: uppercase;
+      margin: 0 0 8px;
+    }
+
+    .footer-brand span {
+      color: #D4A843;
+    }
+
+    .footer-address {
+      font-size: 12px;
+      color: #64748b;
+      margin: 0 0 16px;
+      line-height: 1.6;
+    }
+
+    .footer-links {
+      margin: 0 0 12px;
+    }
+
+    .footer-links a {
+      font-size: 12px;
+      color: #94a3b8;
+      text-decoration: underline;
+      margin: 0 8px;
+    }
+
+    .footer-legal {
+      font-size: 11px;
+      color: #475569;
+      line-height: 1.6;
+    }
+
+    /* -----------------------------------------------------------------------
+       Mobile-First Responsive — 600px breakpoint
+    ----------------------------------------------------------------------- */
+    @media screen and (max-width: 600px) {
+      .email-container {
+        width: 100% !important;
+      }
+
+      .header {
+        padding: 24px 20px 20px !important;
+      }
+
+      .header-logo-text {
+        font-size: 22px !important;
+        letter-spacing: 2px !important;
+      }
+
+      .header-headline {
+        font-size: 18px !important;
+      }
+
+      .body-content {
+        padding: 24px 20px 20px !important;
+      }
+
+      .headline {
+        font-size: 21px !important;
+      }
+
+      /* Stack the 3-column amounts grid into 2 columns on mobile */
+      .amounts-table,
+      .amounts-table tbody,
+      .amounts-table tr {
+        display: block !important;
+        width: 100% !important;
+      }
+
+      .amounts-table tr {
+        display: flex !important;
+        flex-wrap: wrap !important;
+        margin-bottom: 0 !important;
+      }
+
+      .amount-cell {
+        width: calc(50% - 8px) !important;
+        display: inline-block !important;
+        margin: 4px !important;
+        box-sizing: border-box !important;
+      }
+
+      /* Stats stack on mobile */
+      .stats-table,
+      .stats-table tbody,
+      .stats-table tr,
+      .stat-cell {
+        display: block !important;
+        width: 100% !important;
+      }
+
+      .stat-cell {
+        border-right: none !important;
+        border-bottom: 1px solid rgba(255,255,255,0.1) !important;
+        padding: 14px 20px !important;
+      }
+
+      /* Value props stack vertically */
+      .value-props-table,
+      .value-props-table tbody,
+      .value-props-table tr,
+      .value-prop-cell {
+        display: block !important;
+        width: 100% !important;
+      }
+
+      .value-prop-cell {
+        padding: 10px 0 !important;
+      }
+
+      .cta-button {
+        padding: 14px 32px !important;
+        font-size: 15px !important;
+      }
+
+      .footer {
+        padding: 20px !important;
+      }
+    }
+  </style>
+</head>
+<body>
+
+
+<div class="email-wrapper">
+  <table class="email-container" role="presentation" cellspacing="0" cellpadding="0" border="0" align="center" width="600">
+
+    <!-- ================================================================
+         HEADER
+    ================================================================ -->
+    <tr>
+      <td class="header">
+        <p class="header-logo-text">SUN<span>BIZ</span> FUNDING</p>
+        <p class="header-tagline">Private Lending &amp; Working Capital</p>
+        <p class="header-headline">SUMMER CAPITAL FOR YOUR BUSINESS</p>
+        <p class="header-sub">Q3 is your busiest quarter — are you ready?</p>
+      </td>
+    </tr>
+
+    <!-- ================================================================
+         STATUS BANNER
+    ================================================================ -->
+    <tr>
+      <td class="status-banner">
+        <p>&#9728; APPLY BEFORE THE SUMMER RUSH &nbsp;|&nbsp; AVG. APPROVAL: 4 HOURS &nbsp;|&nbsp; SAME-DAY FUNDING</p>
+      </td>
+    </tr>
+
+    <!-- ================================================================
+         MAIN BODY
+    ================================================================ -->
+    <tr>
+      <td class="body-content">
+
+        <!-- Greeting -->
+        <p class="greeting">Hi {{first_name}},</p>
+
+        <!-- Headline -->
+        <h1 class="headline">
+          Don't Let {{business_name}} Miss Its <span>Best Quarter of the Year</span>
+        </h1>
+
+        <!-- Intro -->
+        <p class="intro-text">
+          Summer moves fast. The businesses that win Q3 are the ones that showed up
+          capitalized and ready — with inventory stocked, staff hired, and marketing
+          running before the rush hit. SunBiz Funding gets working capital into your
+          account within 24 hours. Apply now, beat the summer deadline.
+        </p>
+
+        <!-- Urgency Box -->
+        <div class="urgency-box">
+          <p>&#9201; Apply before the summer rush — funding positions fill fast</p>
+          <p class="urgency-stat">Average approval time: 4 hours &bull; Average funding time: same business day</p>
+        </div>
+
+        <!-- Requirements Box -->
+        <div class="requirements-box">
+          <h3>Simple Qualification Requirements</h3>
+          <p class="req-item"><span class="req-check">&#10003;</span> Business checking account in good standing</p>
+          <p class="req-item"><span class="req-check">&#10003;</span> $250K+ annual revenue ($20K+/month)</p>
+          <p class="req-item"><span class="req-check">&#10003;</span> 1+ year in business</p>
+          <p class="req-item"><span class="req-check">&#10003;</span> U.S.-based business</p>
+        </div>
+
+        <!-- Use Cases -->
+        <div class="use-cases-box">
+          <h3>Put Summer Capital to Work</h3>
+          <p class="use-case-item"><span class="use-case-icon">&#128230;</span> Seasonal inventory stocking before demand peaks</p>
+          <p class="use-case-item"><span class="use-case-icon">&#128101;</span> Summer staffing &amp; seasonal hiring</p>
+          <p class="use-case-item"><span class="use-case-icon">&#128200;</span> Marketing push to capture peak-season customers</p>
+          <p class="use-case-item"><span class="use-case-icon">&#128295;</span> Equipment upgrades before your busy period</p>
+        </div>
+
+        <!-- Funding Amounts -->
+        <p class="section-title">Select Your Summer Funding Amount</p>
+        <table class="amounts-table" role="presentation" cellspacing="0" cellpadding="0" border="0">
+          <tr>
+            <td class="amount-cell">
+              <a href="https://form.jotform.com/253155026259254" target="_blank" rel="noopener">
+                <span class="amount-value">$5K</span>
+                <span class="amount-weekly">~$125/wk</span>
+              </a>
+            </td>
+            <td class="amount-cell">
+              <a href="https://form.jotform.com/253155026259254" target="_blank" rel="noopener">
+                <span class="amount-value">$10K</span>
+                <span class="amount-weekly">~$250/wk</span>
+              </a>
+            </td>
+            <td class="amount-cell">
+              <a href="https://form.jotform.com/253155026259254" target="_blank" rel="noopener">
+                <span class="amount-value">$25K</span>
+                <span class="amount-weekly">~$600/wk</span>
+              </a>
+            </td>
+          </tr>
+          <tr>
+            <td class="amount-cell">
+              <a href="https://form.jotform.com/253155026259254" target="_blank" rel="noopener">
+                <span class="amount-value">$50K</span>
+                <span class="amount-weekly">~$1,100/wk</span>
+              </a>
+            </td>
+            <td class="amount-cell">
+              <a href="https://form.jotform.com/253155026259254" target="_blank" rel="noopener">
+                <span class="amount-value">$75K</span>
+                <span class="amount-weekly">~$1,600/wk</span>
+              </a>
+            </td>
+            <td class="amount-cell">
+              <a href="https://form.jotform.com/253155026259254" target="_blank" rel="noopener">
+                <span class="amount-value">$100K</span>
+                <span class="amount-weekly">~$2,100/wk</span>
+              </a>
+            </td>
+          </tr>
+        </table>
+
+        <!-- Primary CTA -->
+        <div class="cta-wrapper">
+          <a href="https://form.jotform.com/253155026259254" target="_blank" rel="noopener" class="cta-button">
+            Apply Before the Rush &rarr;
+          </a>
+          <p class="cta-subtext">Takes under 3 minutes &bull; No credit pull &bull; Avg. approval in 4 hours</p>
+        </div>
+
+        <hr class="divider" />
+
+        <!-- Stats Row -->
+        <table class="stats-table" role="presentation" cellspacing="0" cellpadding="0" border="0">
+          <tr>
+            <td class="stat-cell">
+              <span class="stat-value">4 hrs</span>
+              <span class="stat-label">Average approval time</span>
+            </td>
+            <td class="stat-cell">
+              <span class="stat-value">24 hrs</span>
+              <span class="stat-label">Average time to funding</span>
+            </td>
+            <td class="stat-cell">
+              <span class="stat-value">$5K–$100K</span>
+              <span class="stat-label">Capital range available</span>
+            </td>
+          </tr>
+        </table>
+
+        <!-- Value Props -->
+        <table class="value-props-table" role="presentation" cellspacing="0" cellpadding="0" border="0">
+          <tr>
+            <td class="value-prop-cell">
+              <span class="vp-icon">&#9728;</span>
+              <span class="vp-title">Summer-Ready</span>
+              <span class="vp-desc">Get funded before Q3 peaks — stock, staff, and market first</span>
+            </td>
+            <td class="value-prop-cell">
+              <span class="vp-icon">&#9889;</span>
+              <span class="vp-title">4-Hour Approvals</span>
+              <span class="vp-desc">Same-day decisions. Capital in your account within 24 hours</span>
+            </td>
+            <td class="value-prop-cell">
+              <span class="vp-icon">&#128200;</span>
+              <span class="vp-title">Revenue-Based</span>
+              <span class="vp-desc">Approval driven by your sales volume — not your credit score</span>
+            </td>
+          </tr>
+        </table>
+
+        <!-- Compliance Disclaimer -->
+        <div class="disclaimer">
+          Business funding products. Terms and conditions vary based on business qualifications.
+          Subject to underwriting approval. Past performance does not guarantee future results.
+          Weekly payment estimates are illustrative and will vary based on your specific funding terms.
+          Approval and funding timelines are averages and are not guaranteed.
+        </div>
+
+      </td>
+    </tr>
+
+    <!-- ================================================================
+         FOOTER
+    ================================================================ -->
+    <tr>
+      <td class="footer">
+        <p class="footer-brand">SUN<span>BIZ</span> FUNDING</p>
+        <p class="footer-address">
+          1234 Business Ave, Suite 100 &bull; Miami, FL 33101<br />
+          &copy; {{year}} SunBiz Funding. All rights reserved.
+        </p>
+        <div class="footer-links">
+          <a href="https://form.jotform.com/253155026259254" target="_blank" rel="noopener">Apply for Funding</a>
+          <a href="{{unsubscribe_url}}">Unsubscribe</a>
+        </div>
+        <p class="footer-legal">
+          You are receiving this email because your business information is publicly available
+          or you previously expressed interest in business funding. This is a commercial
+          communication from SunBiz Funding.<br /><br />
+          To stop receiving these emails, <a href="{{unsubscribe_url}}" style="color:#94a3b8;">click here to unsubscribe</a>.
+          We will honor your request within 10 business days as required by CAN-SPAM.
+        </p>
+      </td>
+    </tr>
+
+  </table>
+</div>
+
+</body>
+</html>
