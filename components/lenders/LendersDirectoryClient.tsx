@@ -46,7 +46,7 @@ type LenderData = {
   term_range_min_months: number | null;
   term_range_max_months: number | null;
   industry_preferences: string[];
-  industry_restrictions: string[];
+  restricted_industries: string[];
   restricted_states: string[];
   required_documents: string[];
   common_decline_reasons: string[];
@@ -152,7 +152,7 @@ function toLenderData(raw: Record<string, unknown>): LenderData {
     term_range_min_months: num(raw.term_range_min_months),
     term_range_max_months: num(raw.term_range_max_months),
     industry_preferences: arr(raw.industry_preferences),
-    industry_restrictions: arr(raw.industry_restrictions),
+    restricted_industries: arr(raw.restricted_industries),
     restricted_states: arr(raw.restricted_states),
     required_documents: arr(raw.required_documents),
     common_decline_reasons: arr(raw.common_decline_reasons),
@@ -186,7 +186,7 @@ const BLANK_DATA: LenderData = {
   term_range_min_months: null,
   term_range_max_months: null,
   industry_preferences: [],
-  industry_restrictions: [],
+  restricted_industries: [],
   restricted_states: [],
   required_documents: [],
   common_decline_reasons: [],
@@ -945,8 +945,8 @@ function LenderDrawer({
             </Field>
             <Field label="Industry restrictions">
               <TagInput
-                tags={form.industry_restrictions}
-                onChange={(v) => set("industry_restrictions", v)}
+                tags={form.restricted_industries}
+                onChange={(v) => set("restricted_industries", v)}
                 placeholder="e.g. cannabis, adult…"
               />
             </Field>
