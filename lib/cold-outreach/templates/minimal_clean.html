@@ -1,0 +1,406 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+  <title>A Note for {{business_name}} — SunBiz Funding</title>
+  <!--[if mso]>
+  <noscript>
+    <xml>
+      <o:OfficeDocumentSettings>
+        <o:PixelsPerInch>96</o:PixelsPerInch>
+      </o:OfficeDocumentSettings>
+    </xml>
+  </noscript>
+  <![endif]-->
+  <style type="text/css">
+    /* -----------------------------------------------------------------------
+       Reset
+    ----------------------------------------------------------------------- */
+    body, table, td, a { -webkit-text-size-adjust: 100%; -ms-text-size-adjust: 100%; }
+    table, td { mso-table-lspace: 0pt; mso-table-rspace: 0pt; }
+    img { -ms-interpolation-mode: bicubic; border: 0; outline: none; text-decoration: none; }
+
+    /* -----------------------------------------------------------------------
+       Base
+    ----------------------------------------------------------------------- */
+    body {
+      margin: 0 !important;
+      padding: 0 !important;
+      background-color: #f8fafc;
+      font-family: Georgia, 'Times New Roman', serif;
+    }
+
+    /* -----------------------------------------------------------------------
+       Wrapper
+    ----------------------------------------------------------------------- */
+    .email-wrapper {
+      width: 100%;
+      background-color: #f8fafc;
+    }
+
+    .email-container {
+      max-width: 580px;
+      margin: 0 auto;
+      background-color: #ffffff;
+    }
+
+    /* -----------------------------------------------------------------------
+       Top Bar — letterhead feel
+    ----------------------------------------------------------------------- */
+    .top-bar {
+      padding: 32px 48px 20px;
+      border-bottom: 1px solid #e2e8f0;
+    }
+
+    .logo-text {
+      font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif;
+      font-size: 15px;
+      font-weight: 800;
+      color: #001F54;
+      letter-spacing: 2.5px;
+      text-transform: uppercase;
+      margin: 0;
+      display: block;
+    }
+
+    .logo-text span {
+      color: #D4A843;
+    }
+
+    .logo-tagline {
+      font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif;
+      font-size: 10px;
+      color: #94a3b8;
+      letter-spacing: 0.5px;
+      margin: 3px 0 0;
+      display: block;
+    }
+
+    /* -----------------------------------------------------------------------
+       Letter Body
+    ----------------------------------------------------------------------- */
+    .letter-body {
+      padding: 40px 48px 36px;
+    }
+
+    .greeting {
+      font-size: 16px;
+      color: #1e293b;
+      margin: 0 0 20px;
+      font-style: normal;
+    }
+
+    .para {
+      font-size: 16px;
+      color: #334155;
+      line-height: 1.8;
+      margin: 0 0 20px;
+    }
+
+    .para strong {
+      color: #001F54;
+      font-weight: bold;
+    }
+
+    .highlight-line {
+      font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif;
+      font-size: 15px;
+      font-weight: 700;
+      color: #001F54;
+      border-left: 3px solid #059669;
+      padding: 10px 16px;
+      background-color: #f0fdf4;
+      margin: 24px 0;
+      line-height: 1.5;
+    }
+
+    /* -----------------------------------------------------------------------
+       CTA — intentionally understated width
+    ----------------------------------------------------------------------- */
+    .cta-wrapper {
+      margin: 32px 0 28px;
+    }
+
+    .cta-button {
+      display: inline-block;
+      background-color: #FF6B35;
+      color: #ffffff !important;
+      text-decoration: none;
+      font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif;
+      font-size: 15px;
+      font-weight: 700;
+      padding: 14px 32px;
+      border-radius: 6px;
+      letter-spacing: 0.3px;
+    }
+
+    /* -----------------------------------------------------------------------
+       Sign-off
+    ----------------------------------------------------------------------- */
+    .signoff {
+      font-size: 15px;
+      color: #334155;
+      line-height: 1.9;
+      margin: 0 0 4px;
+    }
+
+    .signoff-name {
+      font-size: 15px;
+      font-weight: 700;
+      color: #001F54;
+      margin: 0 0 2px;
+      line-height: 1.6;
+    }
+
+    .signoff-contact {
+      font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif;
+      font-size: 13px;
+      color: #64748b;
+      line-height: 1.8;
+      margin: 10px 0 0;
+    }
+
+    .signoff-contact a {
+      color: #64748b;
+      text-decoration: none;
+    }
+
+    /* -----------------------------------------------------------------------
+       Divider
+    ----------------------------------------------------------------------- */
+    .divider {
+      border: none;
+      border-top: 1px solid #e2e8f0;
+      margin: 0;
+    }
+
+    /* -----------------------------------------------------------------------
+       Disclaimer
+    ----------------------------------------------------------------------- */
+    .disclaimer-row {
+      padding: 16px 48px;
+    }
+
+    .disclaimer {
+      font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif;
+      font-size: 10.5px;
+      color: #94a3b8;
+      line-height: 1.6;
+      margin: 0;
+    }
+
+    /* -----------------------------------------------------------------------
+       Footer
+    ----------------------------------------------------------------------- */
+    .footer {
+      background-color: #0f172a;
+      padding: 24px 48px;
+      text-align: center;
+    }
+
+    .footer-brand {
+      font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif;
+      font-size: 13px;
+      font-weight: 700;
+      color: #ffffff;
+      letter-spacing: 2px;
+      text-transform: uppercase;
+      margin: 0 0 8px;
+    }
+
+    .footer-brand span {
+      color: #D4A843;
+    }
+
+    .footer-address {
+      font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif;
+      font-size: 11px;
+      color: #64748b;
+      margin: 0 0 12px;
+      line-height: 1.7;
+    }
+
+    .footer-links {
+      margin: 0 0 10px;
+    }
+
+    .footer-links a {
+      font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif;
+      font-size: 11px;
+      color: #94a3b8;
+      text-decoration: underline;
+      margin: 0 8px;
+    }
+
+    .footer-legal {
+      font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif;
+      font-size: 10px;
+      color: #475569;
+      line-height: 1.6;
+    }
+
+    .footer-legal a {
+      color: #94a3b8;
+    }
+
+    /* -----------------------------------------------------------------------
+       Mobile — 600px breakpoint
+    ----------------------------------------------------------------------- */
+    @media screen and (max-width: 600px) {
+      .email-container {
+        width: 100% !important;
+      }
+
+      .top-bar {
+        padding: 24px 24px 16px !important;
+      }
+
+      .letter-body {
+        padding: 28px 24px 24px !important;
+      }
+
+      .disclaimer-row {
+        padding: 14px 24px !important;
+      }
+
+      .footer {
+        padding: 20px 24px !important;
+      }
+
+      .para {
+        font-size: 15px !important;
+      }
+
+      .cta-button {
+        display: block !important;
+        text-align: center !important;
+        padding: 15px 20px !important;
+      }
+    }
+  </style>
+</head>
+<body>
+
+
+<div class="email-wrapper">
+  <table class="email-container" role="presentation" cellspacing="0" cellpadding="0" border="0" align="center" width="580">
+
+    <!-- ================================================================
+         LETTERHEAD TOP BAR
+    ================================================================ -->
+    <tr>
+      <td class="top-bar">
+        <span class="logo-text">SUN<span>BIZ</span> FUNDING</span>
+        <span class="logo-tagline">Private Lending &amp; Working Capital</span>
+      </td>
+    </tr>
+
+    <!-- ================================================================
+         LETTER BODY
+    ================================================================ -->
+    <tr>
+      <td class="letter-body">
+
+        <p class="greeting">Hi {{first_name}},</p>
+
+        <p class="para">
+          I came across <strong>{{business_name}}</strong> and wanted to reach out personally.
+          We work with businesses in your space and typically help owners access
+          <strong>$25K&ndash;$250K in growth capital</strong> &mdash; structured around your
+          revenue, not your credit score.
+        </p>
+
+        <p class="highlight-line">
+          Most of our clients are funded within 24 hours of applying.
+        </p>
+
+        <p class="para">
+          If {{business_name}} is doing <strong>$20K+ per month in revenue</strong>, I&rsquo;d
+          love to run a quick analysis &mdash; no cost, no commitment, and no impact to your
+          credit. Takes about three minutes.
+        </p>
+
+        <!-- CTA -->
+        <div class="cta-wrapper">
+          <!--[if mso]>
+          <v:roundrect xmlns:v="urn:schemas-microsoft-com:vml" xmlns:w="urn:schemas-microsoft-com:office:word"
+            href="https://form.jotform.com/253155026259254"
+            style="height:46px;v-text-anchor:middle;width:220px;" arcsize="13%"
+            fillcolor="#FF6B35" strokecolor="#FF6B35">
+            <w:anchorlock/>
+            <center style="color:#ffffff;font-family:sans-serif;font-size:15px;font-weight:bold;">
+              Check Your Options &rarr;
+            </center>
+          </v:roundrect>
+          <![endif]-->
+          <!--[if !mso]><!-->
+          <a href="https://form.jotform.com/253155026259254" target="_blank" rel="noopener" class="cta-button">
+            Check Your Options &rarr;
+          </a>
+          <!--<![endif]-->
+        </div>
+
+        <!-- Sign-off -->
+        <p class="signoff">Best,</p>
+        <p class="signoff-name">The SunBiz Funding Team</p>
+        <p class="signoff-contact">
+          &#128222;&nbsp; <a href="tel:8885553863">(888) 555-FUND</a><br />
+          &#128231;&nbsp; <a href="mailto:funding@sunbizfunding.com">funding@sunbizfunding.com</a>
+        </p>
+
+      </td>
+    </tr>
+
+    <!-- ================================================================
+         DIVIDER
+    ================================================================ -->
+    <tr>
+      <td><hr class="divider" /></td>
+    </tr>
+
+    <!-- ================================================================
+         DISCLAIMER
+    ================================================================ -->
+    <tr>
+      <td class="disclaimer-row">
+        <p class="disclaimer">
+          Business funding products. Terms and conditions vary based on business qualifications.
+          Subject to underwriting approval. Approval and funding amounts are not guaranteed.
+          Terms and factor rates vary based on individual business qualifications. This
+          communication does not constitute an offer or commitment to provide capital.
+        </p>
+      </td>
+    </tr>
+
+    <!-- ================================================================
+         FOOTER
+    ================================================================ -->
+    <tr>
+      <td class="footer">
+        <p class="footer-brand">SUN<span>BIZ</span> FUNDING</p>
+        <p class="footer-address">
+          1234 Business Ave, Suite 100 &bull; Miami, FL 33101<br />
+          &copy; {{year}} SunBiz Funding. All rights reserved.
+        </p>
+        <div class="footer-links">
+          <a href="https://form.jotform.com/253155026259254" target="_blank" rel="noopener">Apply for Funding</a>
+          <a href="{{unsubscribe_url}}">Unsubscribe</a>
+        </div>
+        <p class="footer-legal">
+          You are receiving this email because your business information is publicly available
+          or you previously expressed interest in business funding. This is a commercial
+          communication from SunBiz Funding.<br /><br />
+          To stop receiving these emails,
+          <a href="{{unsubscribe_url}}">click here to unsubscribe</a>.
+          We will honor your request within 10 business days as required by CAN-SPAM.
+        </p>
+      </td>
+    </tr>
+
+  </table>
+</div>
+
+</body>
+</html>

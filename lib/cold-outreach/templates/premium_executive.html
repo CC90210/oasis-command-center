@@ -1,0 +1,584 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+  <title>Exclusive Capital Solutions — SunBiz Funding</title>
+  <!--[if mso]>
+  <noscript>
+    <xml>
+      <o:OfficeDocumentSettings>
+        <o:PixelsPerInch>96</o:PixelsPerInch>
+      </o:OfficeDocumentSettings>
+    </xml>
+  </noscript>
+  <![endif]-->
+  <style type="text/css">
+    /* -----------------------------------------------------------------------
+       CSS Reset — email client normalization
+    ----------------------------------------------------------------------- */
+    body, table, td, a { -webkit-text-size-adjust: 100%; -ms-text-size-adjust: 100%; }
+    table, td { mso-table-lspace: 0pt; mso-table-rspace: 0pt; }
+    img { -ms-interpolation-mode: bicubic; border: 0; outline: none; text-decoration: none; display: block; }
+
+    /* -----------------------------------------------------------------------
+       Base
+    ----------------------------------------------------------------------- */
+    body {
+      margin: 0 !important;
+      padding: 0 !important;
+      background-color: #e8edf4;
+      font-family: Georgia, 'Times New Roman', serif;
+    }
+
+    .email-wrapper {
+      width: 100%;
+      background-color: #e8edf4;
+    }
+
+    .email-container {
+      max-width: 600px;
+      margin: 0 auto;
+      background-color: #ffffff;
+    }
+
+    /* -----------------------------------------------------------------------
+       Header — dark navy, understated luxury
+    ----------------------------------------------------------------------- */
+    .header {
+      background-color: #001F54;
+      padding: 40px 48px 32px;
+      text-align: center;
+    }
+
+    .header-logo-text {
+      font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif;
+      font-size: 26px;
+      font-weight: 800;
+      color: #ffffff;
+      letter-spacing: 5px;
+      text-transform: uppercase;
+      margin: 0 0 20px;
+    }
+
+    .header-logo-text span {
+      color: #D4A843;
+    }
+
+    .header-gold-rule {
+      width: 80px;
+      height: 1px;
+      background-color: #D4A843;
+      margin: 0 auto 16px;
+      border: none;
+    }
+
+    .header-tagline {
+      font-family: Georgia, 'Times New Roman', serif;
+      font-size: 12px;
+      font-style: italic;
+      color: rgba(212, 168, 67, 0.75);
+      margin: 0;
+      letter-spacing: 1.5px;
+    }
+
+    /* -----------------------------------------------------------------------
+       Main Body — generous whitespace, premium feel
+    ----------------------------------------------------------------------- */
+    .body-content {
+      padding: 48px 52px 40px;
+    }
+
+    .greeting {
+      font-family: Georgia, 'Times New Roman', serif;
+      font-size: 15px;
+      color: #374151;
+      margin: 0 0 28px;
+      font-style: italic;
+    }
+
+    .headline {
+      font-family: Georgia, 'Times New Roman', serif;
+      font-size: 28px;
+      font-weight: 700;
+      color: #001F54;
+      line-height: 1.3;
+      margin: 0 0 20px;
+      letter-spacing: -0.3px;
+    }
+
+    .intro-text {
+      font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif;
+      font-size: 15px;
+      color: #4b5563;
+      line-height: 1.8;
+      margin: 0 0 36px;
+    }
+
+    /* -----------------------------------------------------------------------
+       Elegant gold divider
+    ----------------------------------------------------------------------- */
+    .gold-divider {
+      border: none;
+      border-top: 1px solid #D4A843;
+      margin: 0 0 36px;
+      opacity: 0.5;
+    }
+
+    /* -----------------------------------------------------------------------
+       2x2 Benefits Grid — refined cards
+    ----------------------------------------------------------------------- */
+    .benefits-label {
+      font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif;
+      font-size: 11px;
+      font-weight: 700;
+      color: #D4A843;
+      text-transform: uppercase;
+      letter-spacing: 2px;
+      margin: 0 0 20px;
+    }
+
+    .benefits-table {
+      width: 100%;
+      border-collapse: separate;
+      border-spacing: 10px;
+      margin: 0 -10px 36px;
+    }
+
+    .benefit-cell {
+      background-color: #fafafa;
+      border: 1px solid #e5e7eb;
+      border-radius: 6px;
+      text-align: center;
+      padding: 24px 16px;
+      width: 50%;
+      vertical-align: top;
+    }
+
+    .benefit-number {
+      display: block;
+      font-family: Georgia, 'Times New Roman', serif;
+      font-size: 26px;
+      font-weight: 700;
+      color: #D4A843;
+      margin-bottom: 6px;
+      letter-spacing: -0.5px;
+    }
+
+    .benefit-label {
+      display: block;
+      font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif;
+      font-size: 11px;
+      font-weight: 700;
+      color: #001F54;
+      text-transform: uppercase;
+      letter-spacing: 1.5px;
+    }
+
+    /* -----------------------------------------------------------------------
+       Consultation section
+    ----------------------------------------------------------------------- */
+    .consult-text {
+      font-family: Georgia, 'Times New Roman', serif;
+      font-size: 15px;
+      color: #374151;
+      line-height: 1.8;
+      margin: 0 0 32px;
+      font-style: italic;
+    }
+
+    /* -----------------------------------------------------------------------
+       CTA — navy, premium
+    ----------------------------------------------------------------------- */
+    .cta-wrapper {
+      text-align: center;
+      margin: 0 0 12px;
+    }
+
+    .cta-button {
+      display: inline-block;
+      background-color: #001F54;
+      color: #ffffff !important;
+      text-decoration: none;
+      font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif;
+      font-size: 14px;
+      font-weight: 700;
+      padding: 16px 48px;
+      border-radius: 4px;
+      letter-spacing: 1.5px;
+      text-transform: uppercase;
+      border: 2px solid #001F54;
+    }
+
+    .cta-phone {
+      font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif;
+      font-size: 12px;
+      color: #9ca3af;
+      margin: 14px 0 0;
+      text-align: center;
+      letter-spacing: 0.3px;
+    }
+
+    /* -----------------------------------------------------------------------
+       Testimonial
+    ----------------------------------------------------------------------- */
+    .testimonial-section {
+      margin: 36px 0 0;
+    }
+
+    .testimonial-box {
+      border-left: 3px solid #D4A843;
+      padding: 20px 24px;
+      background-color: #f9fafb;
+      border-radius: 0 6px 6px 0;
+    }
+
+    .testimonial-quote {
+      font-family: Georgia, 'Times New Roman', serif;
+      font-size: 15px;
+      font-style: italic;
+      color: #374151;
+      line-height: 1.7;
+      margin: 0 0 12px;
+    }
+
+    .testimonial-attribution {
+      font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif;
+      font-size: 11px;
+      font-weight: 700;
+      color: #001F54;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      margin: 0;
+    }
+
+    /* -----------------------------------------------------------------------
+       Disclaimer — refined
+    ----------------------------------------------------------------------- */
+    .disclaimer {
+      font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif;
+      font-size: 10px;
+      color: #9ca3af;
+      line-height: 1.7;
+      margin: 36px 0 0;
+      padding: 16px 20px;
+      background-color: #f9fafb;
+      border-radius: 4px;
+      border: 1px solid #f3f4f6;
+    }
+
+    /* -----------------------------------------------------------------------
+       Footer — dark, elegant spacing
+    ----------------------------------------------------------------------- */
+    .footer {
+      background-color: #0f172a;
+      padding: 36px 48px 32px;
+      text-align: center;
+    }
+
+    .footer-gold-rule {
+      width: 60px;
+      height: 1px;
+      background-color: #D4A843;
+      margin: 0 auto 20px;
+      border: none;
+      opacity: 0.6;
+    }
+
+    .footer-brand {
+      font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif;
+      font-size: 14px;
+      font-weight: 700;
+      color: #ffffff;
+      letter-spacing: 4px;
+      text-transform: uppercase;
+      margin: 0 0 10px;
+    }
+
+    .footer-brand span {
+      color: #D4A843;
+    }
+
+    .footer-address {
+      font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif;
+      font-size: 11px;
+      color: #475569;
+      margin: 0 0 18px;
+      line-height: 1.7;
+    }
+
+    .footer-links {
+      margin: 0 0 16px;
+    }
+
+    .footer-links a {
+      font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif;
+      font-size: 11px;
+      color: #94a3b8;
+      text-decoration: underline;
+      margin: 0 10px;
+      letter-spacing: 0.3px;
+    }
+
+    .footer-legal {
+      font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif;
+      font-size: 10px;
+      color: #334155;
+      line-height: 1.7;
+    }
+
+    .footer-legal a {
+      color: #64748b;
+    }
+
+    /* -----------------------------------------------------------------------
+       Mobile-First Responsive — 600px breakpoint
+    ----------------------------------------------------------------------- */
+    @media screen and (max-width: 600px) {
+      .email-container {
+        width: 100% !important;
+      }
+
+      .header {
+        padding: 28px 24px 24px !important;
+      }
+
+      .header-logo-text {
+        font-size: 20px !important;
+        letter-spacing: 3px !important;
+      }
+
+      .body-content {
+        padding: 32px 24px 28px !important;
+      }
+
+      .headline {
+        font-size: 22px !important;
+      }
+
+      /* 2x2 grid stacks to single column on very small screens */
+      .benefits-table,
+      .benefits-table tbody,
+      .benefits-table tr {
+        display: block !important;
+        width: 100% !important;
+      }
+
+      .benefits-table tr {
+        display: flex !important;
+        flex-wrap: wrap !important;
+      }
+
+      .benefit-cell {
+        width: calc(50% - 12px) !important;
+        display: inline-block !important;
+        margin: 5px !important;
+        box-sizing: border-box !important;
+      }
+
+      .cta-button {
+        padding: 14px 32px !important;
+        font-size: 13px !important;
+      }
+
+      .footer {
+        padding: 28px 20px !important;
+      }
+    }
+  </style>
+</head>
+<body>
+
+
+<div class="email-wrapper">
+  <table class="email-container" role="presentation" cellspacing="0" cellpadding="0" border="0" align="center" width="600">
+
+    <!-- ================================================================
+         HEADER — Dark navy, gold accent rule, understated
+    ================================================================ -->
+    <tr>
+      <td class="header">
+        <p class="header-logo-text">SUN<span>BIZ</span> FUNDING</p>
+        <!--[if mso]>
+        <table role="presentation" cellspacing="0" cellpadding="0" border="0" align="center" width="80">
+          <tr><td height="1" bgcolor="#D4A843">&nbsp;</td></tr>
+        </table>
+        <![endif]-->
+        <!--[if !mso]><!-->
+        <div class="header-gold-rule"></div>
+        <!--<![endif]-->
+        <p class="header-tagline">Premium Capital &amp; Advisory for Established Businesses</p>
+      </td>
+    </tr>
+
+    <!-- ================================================================
+         MAIN BODY
+    ================================================================ -->
+    <tr>
+      <td class="body-content">
+
+        <!-- Formal Greeting -->
+        <p class="greeting">Dear {{first_name}},</p>
+
+        <!-- Headline — serif, navy -->
+        <h1 class="headline">
+          Exclusive Capital Solutions for Established Businesses
+        </h1>
+
+        <!-- Intro -->
+        <p class="intro-text">
+          For businesses generating $50K or more in monthly revenue, we offer premium funding
+          with preferred terms, a dedicated account manager, and same-day decisions — all without
+          the 60-day wait of a traditional bank.
+        </p>
+
+        <!-- Gold divider -->
+        <!--[if mso]>
+        <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%">
+          <tr><td height="1" bgcolor="#D4A843" style="opacity:0.5;">&nbsp;</td></tr>
+        </table>
+        <![endif]-->
+        <!--[if !mso]><!-->
+        <hr class="gold-divider" />
+        <!--<![endif]-->
+
+        <!-- Benefits label -->
+        <p class="benefits-label">Preferred Program Highlights</p>
+
+        <!-- 2x2 Benefits Grid -->
+        <table class="benefits-table" role="presentation" cellspacing="0" cellpadding="0" border="0">
+          <tr>
+            <td class="benefit-cell">
+              <span class="benefit-number">$50K &ndash; $500K</span>
+              <span class="benefit-label">Funding Range</span>
+            </td>
+            <td class="benefit-cell">
+              <span class="benefit-number">24 Hours</span>
+              <span class="benefit-label">Funding Speed</span>
+            </td>
+          </tr>
+          <tr>
+            <td class="benefit-cell">
+              <span class="benefit-number">Dedicated</span>
+              <span class="benefit-label">Account Manager</span>
+            </td>
+            <td class="benefit-cell">
+              <span class="benefit-number">Preferred</span>
+              <span class="benefit-label">Terms &amp; Rates</span>
+            </td>
+          </tr>
+        </table>
+
+        <!-- Gold divider -->
+        <!--[if mso]>
+        <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%">
+          <tr><td height="1" bgcolor="#D4A843" style="opacity:0.5;">&nbsp;</td></tr>
+        </table>
+        <![endif]-->
+        <!--[if !mso]><!-->
+        <hr class="gold-divider" />
+        <!--<![endif]-->
+
+        <!-- Consultation copy -->
+        <p class="consult-text">
+          We have reserved time to discuss {{business_name}}'s specific capital needs and explore
+          whether our preferred program is the right fit. There is no obligation, and the
+          conversation itself takes fewer than fifteen minutes.
+        </p>
+
+        <!-- CTA Button — navy -->
+        <div class="cta-wrapper">
+          <!--[if mso]>
+          <table role="presentation" cellspacing="0" cellpadding="0" border="0" align="center">
+            <tr>
+              <td bgcolor="#001F54" style="border-radius:4px; padding:16px 48px;">
+                <a href="https://form.jotform.com/253155026259254" target="_blank" rel="noopener"
+                   style="font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;font-size:14px;font-weight:700;color:#ffffff;text-decoration:none;letter-spacing:1.5px;text-transform:uppercase;display:inline-block;">
+                  Schedule Your Consultation &rarr;
+                </a>
+              </td>
+            </tr>
+          </table>
+          <![endif]-->
+          <!--[if !mso]><!-->
+          <a href="https://form.jotform.com/253155026259254" target="_blank" rel="noopener" class="cta-button">
+            Schedule Your Consultation &rarr;
+          </a>
+          <!--<![endif]-->
+        </div>
+
+        <p class="cta-phone">Or call directly: (888) 555-FUND</p>
+
+        <!-- Gold divider -->
+        <!--[if mso]>
+        <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%" style="margin-top:36px;">
+          <tr><td height="1" bgcolor="#D4A843" style="opacity:0.5;">&nbsp;</td></tr>
+        </table>
+        <![endif]-->
+        <!--[if !mso]><!-->
+        <hr class="gold-divider" style="margin-top: 36px;" />
+        <!--<![endif]-->
+
+        <!-- Testimonial -->
+        <div class="testimonial-section">
+          <div class="testimonial-box">
+            <p class="testimonial-quote">
+              &ldquo;SunBiz Funding didn't just provide capital — they gave us a partner who understood
+              our business. The process was seamless, the terms were fair, and the funds were in our
+              account the same day we signed.&rdquo;
+            </p>
+            <p class="testimonial-attribution">— Michael R., CEO &middot; Regional Distribution Co. &middot; $250K in Working Capital</p>
+          </div>
+        </div>
+
+        <!-- Compliance Disclaimer -->
+        <div class="disclaimer">
+          Business funding products. Terms and conditions vary based on business qualifications.
+          Subject to underwriting approval. All funding is subject to underwriting review and
+          approval based on business qualifications. Terms, rates, and funding amounts vary by
+          business profile and are not guaranteed. Past performance does not guarantee future
+          results. This communication is for informational purposes only and does not constitute
+          a binding offer or commitment to provide capital.
+        </div>
+
+      </td>
+    </tr>
+
+    <!-- ================================================================
+         FOOTER — Dark, elegant spacing
+    ================================================================ -->
+    <tr>
+      <td class="footer">
+        <!--[if mso]>
+        <table role="presentation" cellspacing="0" cellpadding="0" border="0" align="center" width="60">
+          <tr><td height="1" bgcolor="#D4A843">&nbsp;</td></tr>
+        </table>
+        <![endif]-->
+        <!--[if !mso]><!-->
+        <div class="footer-gold-rule"></div>
+        <!--<![endif]-->
+        <p class="footer-brand">SUN<span>BIZ</span> FUNDING</p>
+        <p class="footer-address">
+          1234 Business Ave, Suite 100 &bull; Miami, FL 33101<br />
+          &copy; {{year}} SunBiz Funding. All rights reserved.
+        </p>
+        <div class="footer-links">
+          <a href="https://form.jotform.com/253155026259254" target="_blank" rel="noopener">Apply for Funding</a>
+          <a href="{{unsubscribe_url}}">Unsubscribe</a>
+        </div>
+        <p class="footer-legal">
+          You are receiving this email because your business information is publicly available
+          or you previously expressed interest in business funding. This is a commercial
+          communication from SunBiz Funding.<br /><br />
+          To stop receiving these emails, <a href="{{unsubscribe_url}}">click here to unsubscribe</a>.
+          We will honor your request within 10 business days as required by CAN-SPAM.
+        </p>
+      </td>
+    </tr>
+
+  </table>
+</div>
+
+</body>
+</html>
