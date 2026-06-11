@@ -17,22 +17,66 @@
  * The funnel + recent surfaces still exist on /today (the dashboard
  * home), so they aren't lost — just stop competing for screen real
  * estate on the lead-list view.
+ *
+ * 2026-06-11 tenant-aware redirect: SunBiz / non-OASIS operators
+ * landing on this page saw the OASIS variant (CC's personal stages,
+ * usually 0 leads to them) — a real footgun (CC bug 2026-06-11). If
+ * the session belongs to a non-OASIS tenant, we redirect to that
+ * tenant's catch-all leads page (e.g. /t/sun/leads for Ezra/Jordan/
+ * Alex). CC's own OASIS sessions still see /pipeline as-is.
  */
 
+import { redirect } from "next/navigation";
 import { PageHeader, Card, EmptyState } from "@/components/Card";
 import { getActiveProfile } from "@/lib/queries";
 import { listRecords, type TenantRecord } from "@/lib/manifest/data";
 import { safe } from "@/lib/api-helpers";
 import { LeadPipelineView } from "@/components/manifest/LeadPipelineView";
 import { OASIS_LEAD_STAGES } from "@/lib/oasis-stage-meta";
+import { resolveSessionContext } from "@/lib/api-auth";
+import { getServiceSupabase } from "@/lib/supabase-server";
 
 export const dynamic = "force-dynamic";
+
+/**
+ * Slugs that render the OASIS-variant pipeline directly at /pipeline.
+ * Anyone else gets redirected to their tenant-scoped catch-all leads
+ * page. Add a slug here ONLY if that tenant wants /pipeline to be
+ * their canonical leads URL (rare — almost everyone wants the catch-all).
+ */
+const OASIS_PIPELINE_SLUGS = new Set(["oasis"]);
 
 export default async function PipelinePage({
   searchParams,
 }: {
   searchParams?: Promise<{ stage?: string; q?: string }>;
 }) {
+  // Tenant-aware redirect. Non-OASIS operators land in their own
+  // tenant's leads view rather than seeing CC's OASIS personal stages.
+  // Try/catch so an unexpected DB hiccup falls through to the OASIS
+  // render — strictly no worse than the pre-redirect behavior.
+  try {
+    const sessionResult = await resolveSessionContext();
+    if (sessionResult.ok) {
+      const db = getServiceSupabase();
+      const tenantRow = await db
+        .from("tenants")
+        .select("slug")
+        .eq("id", sessionResult.tenantId)
+        .maybeSingle();
+      const slug = (tenantRow.data as { slug: string | null } | null)?.slug;
+      if (slug && !OASIS_PIPELINE_SLUGS.has(slug)) {
+        redirect(`/t/${slug}/leads`);
+      }
+    }
+  } catch (err) {
+    // next/navigation's redirect() throws to signal — let it propagate.
+    if (err && typeof err === "object" && "digest" in err && typeof (err as { digest: unknown }).digest === "string" && ((err as { digest: string }).digest as string).startsWith("NEXT_REDIRECT")) {
+      throw err;
+    }
+    // Any other failure: fall through to the OASIS render.
+  }
+
   const sp = (await searchParams) || {};
   const stageFilter = typeof sp.stage === "string" && sp.stage.trim() ? sp.stage.trim() : null;
   const query = typeof sp.q === "string" && sp.q.trim() ? sp.q.trim() : null;
