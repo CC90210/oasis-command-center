@@ -1,3 +1,5 @@
+"use client";
+
 /**
  * SalesMetricCard — Adon MCA SOP §7 sales-focused metric card.
  *

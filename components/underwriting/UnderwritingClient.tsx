@@ -116,6 +116,19 @@ function RunStatusPill({ status }: { status: string }) {
   );
 }
 
+/**
+ * MetricsGrid — banking-operational metrics that complement (don't duplicate)
+ * the SOP §7 SalesMetricCard above. The 5 metrics that USED to live here
+ * (Avg Monthly Revenue, NSF Count, Debt Service / Mo, Debt-to-Revenue, Open
+ * MCA Positions) all have SOP-aware equivalents in SalesMetricCard
+ * (true_monthly_revenue, nsfs_90d, mca_monthly_burden, mca_leverage_pct,
+ * active_mca_positions). The SOP versions use TRUE revenue + verified-only
+ * position counting, so showing both produced two divergent numbers for the
+ * same metric — confusing for the agent.
+ *
+ * Kept here: Avg Daily Balance, Deposit Consistency, Readiness Score.
+ * These are unique signals the SOP card doesn't surface.
+ */
 function MetricsGrid({ run }: { run: UnderwritingRun }) {
   const score = Math.min(100, Math.max(0, run.readiness_score ?? 0));
   const scoreColor =
@@ -128,50 +141,34 @@ function MetricsGrid({ run }: { run: UnderwritingRun }) {
   const fmt = (n: number | null, prefix = "", suffix = "") =>
     n == null ? "—" : `${prefix}${n.toLocaleString()}${suffix}`;
   const fmtPct = (n: number | null) => (n == null ? "—" : `${n.toFixed(1)}%`);
-  const fmtRatio = (n: number | null) => (n == null ? "—" : n.toFixed(2));
-
-  const cells: { label: string; value: string; badge?: string }[] = [
-    { label: "Avg Monthly Revenue", value: fmt(run.avg_monthly_revenue, "$") },
-    { label: "Avg Daily Balance", value: fmt(run.avg_daily_balance, "$") },
-    { label: "NSF Count", value: fmt(run.nsf_count) },
-    { label: "Deposit Consistency", value: fmtPct(run.deposit_consistency_pct) },
-    { label: "Debt Service / Mo", value: fmt(run.debt_service_monthly, "$") },
-    { label: "Debt-to-Revenue", value: fmtRatio(run.debt_to_revenue_ratio) },
-    {
-      label: "Open MCA Positions",
-      value: fmt(run.lender_count),
-      badge:
-        run.lender_count != null && run.lender_count > 0
-          ? `${run.lender_count} detected`
-          : undefined,
-    },
-  ];
 
   return (
-    <div className="space-y-3">
-      <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
-        {cells.map((c) => (
-          <div
-            key={c.label}
-            className="rounded-lg border border-bg-border bg-bg-deep p-3"
-          >
-            <div className="text-[10px] uppercase tracking-wider text-fg-muted font-semibold mb-1">
-              {c.label}
-            </div>
-            <div className="text-[15px] font-bold text-fg tabular-nums">
-              {c.value}
-            </div>
-            {c.badge && (
-              <div className="mt-1 text-[10px] text-amber-300">{c.badge}</div>
-            )}
+    <div className="space-y-1.5">
+      <div className="text-[10px] uppercase tracking-wider text-fg-dim font-semibold">
+        Banking signals
+      </div>
+      <div className="grid grid-cols-3 gap-2">
+        <div className="rounded-lg border border-bg-border bg-bg-deep p-3">
+          <div className="text-[10px] uppercase tracking-wider text-fg-muted font-semibold mb-1">
+            Avg Daily Balance
           </div>
-        ))}
-        {/* Readiness Score — always last, spans full row on xs */}
-        <div className="rounded-lg border border-bg-border bg-bg-deep p-3 sm:col-span-1 col-span-2">
+          <div className="text-[15px] font-bold text-fg tabular-nums">
+            {fmt(run.avg_daily_balance, "$")}
+          </div>
+        </div>
+        <div className="rounded-lg border border-bg-border bg-bg-deep p-3">
+          <div className="text-[10px] uppercase tracking-wider text-fg-muted font-semibold mb-1">
+            Deposit Consistency
+          </div>
+          <div className="text-[15px] font-bold text-fg tabular-nums">
+            {fmtPct(run.deposit_consistency_pct)}
+          </div>
+        </div>
+        <div className="rounded-lg border border-bg-border bg-bg-deep p-3">
           <div className="text-[10px] uppercase tracking-wider text-fg-muted font-semibold mb-1">
             Readiness Score
           </div>
-          <div className={`text-[22px] font-black tabular-nums ${scoreColor}`}>
+          <div className={`text-[22px] font-black tabular-nums leading-none ${scoreColor}`}>
             {score}
             <span className="text-[12px] text-fg-muted font-normal"> / 100</span>
           </div>
