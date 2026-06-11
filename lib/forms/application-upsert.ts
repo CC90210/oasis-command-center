@@ -117,6 +117,15 @@ export async function upsertApplicationFromFormStep(input: {
   stepIndex: number;
   payload: Record<string, unknown>;
 }): Promise<UpsertResult> {
+  // Defensive: the form-link token's lead_id should always be present
+  // (it's part of the verified token shape) but a missing value would
+  // make the application orphan or upsert the wrong row. Skip cleanly.
+  if (!input.leadId || typeof input.leadId !== "string" || !input.leadId.trim()) {
+    return { ok: true, skipped: true, reason: "missing or invalid lead_id" };
+  }
+  if (!input.tenantId || typeof input.tenantId !== "string" || !input.tenantId.trim()) {
+    return { ok: true, skipped: true, reason: "missing or invalid tenant_id" };
+  }
   const fields = extractAppFields(input.payload);
   if (Object.keys(fields).length === 0) {
     return { ok: true, skipped: true, reason: "no application-shaped fields in this step's payload" };
