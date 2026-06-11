@@ -45,6 +45,7 @@ import { uploadLeadDocument } from "@/lib/lead-documents";
 import { dispatchLeadStageEvent } from "@/lib/lead-stage-dispatcher";
 import { resolvePublicForm } from "@/lib/forms/public-resolver";
 import { maybeQueueResumeEmail } from "@/lib/forms/maybe-queue-resume";
+import { upsertApplicationFromFormStep } from "@/lib/forms/application-upsert";
 import { createHash } from "node:crypto";
 
 export const runtime = "nodejs";
@@ -571,6 +572,40 @@ export async function POST(req: NextRequest) {
       });
       stageWarning = { reason, target_stage: targetStage };
     }
+  }
+
+  // 2026-06-11 SOP §4 closeout — bridge form payload to application
+  // record. Adon MCA SOP §4 match-fitness scorer reads business_state +
+  // industry off tenant_records.data on the application row. Before this
+  // hook, form-collected fields lived only in form_submissions.payload
+  // and never reached the application — so SOP §4 high-risk blocks were
+  // dormant on every form-originated deal. Now: each step's payload
+  // upserts into the application record (creates one when none exists,
+  // merges into the existing one when found). Best-effort: failure here
+  // never aborts the form submission — the form_submissions row stays
+  // the audit trail.
+  try {
+    const appUpsert = await upsertApplicationFromFormStep({
+      tenantId: form.tenant_id,
+      leadId: link.lead_id,
+      formId: form.id,
+      stepIndex,
+      payload,
+    });
+    if ("created" in appUpsert) {
+      console.log("[forms.submit.application_upsert]", {
+        lead_id: link.lead_id,
+        step: stepIndex,
+        action: appUpsert.created ? "created" : "updated",
+        keys: appUpsert.updated_keys,
+      });
+    }
+  } catch (err) {
+    console.error("[forms.submit.application_upsert.failed]", {
+      lead_id: link.lead_id,
+      step: stepIndex,
+      error: err instanceof Error ? err.message : String(err),
+    });
   }
 
   // Build A — Resume-submission link. Extracted to maybe-queue-resume.ts
