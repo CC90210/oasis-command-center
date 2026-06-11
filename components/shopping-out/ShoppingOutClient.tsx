@@ -340,6 +340,40 @@ export function ShoppingOutClient({
     if (selectedAppId && lenders) refreshPlanAndThreads();
   }, [selectedAppId, lenders, refreshPlanAndThreads]);
 
+  // Thread-only refresh for the live poller below. Deliberately NOT
+  // refreshPlanAndThreads — that re-runs the dry-run plan-scoring POST
+  // (match fitness over the whole lender directory), which is far too
+  // heavy to fire every 5s.
+  const refreshThreads = useCallback(async () => {
+    if (!selectedAppId) return;
+    try {
+      const r = await fetch(`/api/applications/${selectedAppId}/lender-threads`, {
+        credentials: "include",
+      });
+      const j = await r.json();
+      if (j.ok) setThreads(j.threads || []);
+    } catch {
+      // Network blip — keep the stale list; next tick retries.
+    }
+  }, [selectedAppId]);
+
+  // Live status polling — Adon fires shop-outs in real time on merchant
+  // calls; a stale pending/sent chip means he reads the merchant the
+  // wrong status. Poll while any thread is still in flight (pending =
+  // queued for the sender daemon, sent = awaiting lender reply), stop
+  // once everything settles. Hidden tabs skip the fetch but keep the
+  // timer so the list catches up as soon as the operator tabs back.
+  const hasInFlightThreads = threads.some(
+    (t) => t.status === "pending" || t.status === "sent",
+  );
+  useEffect(() => {
+    if (!selectedAppId || !hasInFlightThreads) return;
+    const interval = setInterval(() => {
+      if (document.visibilityState === "visible") void refreshThreads();
+    }, 5000);
+    return () => clearInterval(interval);
+  }, [selectedAppId, hasInFlightThreads, refreshThreads]);
+
   // Retry one error-status thread. Optimistically marks the row as
   // "pending" the moment the POST returns so the operator sees immediate
   // feedback; the next refresh confirms the daemon picked it up.
