@@ -279,6 +279,15 @@ export async function POST(
   const appData = (appRow.data as { data: Record<string, unknown> }).data || {};
   const application = {
     id: applicationId,
+    // Merchant name — drives the SOP subject "New Deal ({{business_name}})"
+    // and the body's Business: line. Was missing — caused "New Deal ()" with
+    // empty parens + blank Business: in the test on 2026-06-11.
+    business_name:
+      typeof appData.business_name === "string" && appData.business_name.trim()
+        ? appData.business_name.trim()
+        : typeof appData.merchant_name === "string"
+          ? appData.merchant_name.trim()
+          : undefined,
     monthly_revenue: typeof appData.monthly_revenue === "number" ? appData.monthly_revenue : undefined,
     time_in_business_months: typeof appData.time_in_business_months === "number" ? appData.time_in_business_months : undefined,
     applicant_fico: typeof appData.applicant_fico === "number" ? appData.applicant_fico : undefined,

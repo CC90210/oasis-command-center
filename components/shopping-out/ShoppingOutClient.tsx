@@ -154,6 +154,14 @@ export function ShoppingOutClient({
   const [planLoading, setPlanLoading] = useState(false);
   const [selectedLenderIds, setSelectedLenderIds] = useState<Set<string>>(new Set());
   const [notes, setNotes] = useState("");
+  // Per-deal CC: agent preset checkboxes (Jordan / Alex) + free-text
+  // custom email. The shop-out POST forwards the resolved cc_emails to
+  // the bridge tool, which passes them to send_gateway via --cc. SOP §3
+  // intent is "the assigned agent stays on the thread"; Jordan and Alex
+  // are the two reps the SunBiz team needs to CC routinely.
+  const [ccJordan, setCcJordan] = useState(false);
+  const [ccAlex, setCcAlex] = useState(false);
+  const [ccCustom, setCcCustom] = useState("");
   const [threads, setThreads] = useState<Thread[]>([]);
   const [retrying, setRetrying] = useState<Set<string>>(new Set());
   const [docs, setDocs] = useState<DocRow[]>([]);
@@ -469,7 +477,14 @@ export function ShoppingOutClient({
         credentials: "include",
         body: JSON.stringify({
           lender_ids: Array.from(selectedLenderIds),
-          cc_emails: [],
+          // Resolve per-deal CC selection. Two preset checkboxes (Jordan /
+          // Alex) + a free-text custom field. The route validates each is
+          // a valid-looking email; bad entries are filtered server-side.
+          cc_emails: [
+            ccJordan ? "jordan@sunbizfunding.com" : null,
+            ccAlex ? "alex@sunbizfunding.com" : null,
+            ccCustom.trim() && ccCustom.includes("@") ? ccCustom.trim() : null,
+          ].filter((e): e is string => Boolean(e)),
           attachments,
           body_template: notes.trim() || undefined,
           acknowledged_warnings: acknowledged.length > 0 ? acknowledged : undefined,
@@ -746,12 +761,56 @@ export function ShoppingOutClient({
         </Card>
       )}
 
-      {/* Step 4 — Notes + Send */}
+      {/* Step 4 — Agent CC + Notes + Send */}
       {selectedAppId && plan && plan.length > 0 && (
         <Card>
           <div className="space-y-3">
+            {/* Agent CC selector — Jordan / Alex / custom. Stays on the
+                thread when the lender replies; SOP §3 "the assigned agent
+                gets CC'd." Custom field handles anyone outside the two
+                presets (e.g. CC'ing a syndicator or processor on a deal). */}
+            <div className="space-y-2">
+              <div className="text-[11px] uppercase tracking-wider text-fg-dim font-semibold">
+                4 · CC agent on every lender thread
+              </div>
+              <div className="flex flex-wrap items-center gap-2.5">
+                <label className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md border border-bg-border bg-bg-deep cursor-pointer hover:bg-bg-elev">
+                  <input
+                    type="checkbox"
+                    checked={ccJordan}
+                    onChange={(e) => setCcJordan(e.target.checked)}
+                    className="accent-accent"
+                  />
+                  <span className="text-[12.5px] text-fg font-semibold">Jordan</span>
+                  <span className="text-[10.5px] text-fg-dim font-mono">jordan@sunbizfunding.com</span>
+                </label>
+                <label className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md border border-bg-border bg-bg-deep cursor-pointer hover:bg-bg-elev">
+                  <input
+                    type="checkbox"
+                    checked={ccAlex}
+                    onChange={(e) => setCcAlex(e.target.checked)}
+                    className="accent-accent"
+                  />
+                  <span className="text-[12.5px] text-fg font-semibold">Alex</span>
+                  <span className="text-[10.5px] text-fg-dim font-mono">alex@sunbizfunding.com</span>
+                </label>
+                <input
+                  type="email"
+                  value={ccCustom}
+                  onChange={(e) => setCcCustom(e.target.value)}
+                  placeholder="Custom CC email (optional)"
+                  className="flex-1 min-w-[200px] text-[12.5px] px-2.5 py-1 rounded-md bg-bg-deep border border-bg-border text-fg"
+                />
+              </div>
+              {(ccJordan || ccAlex || (ccCustom && ccCustom.includes("@"))) && (
+                <div className="text-[10.5px] text-fg-dim">
+                  CCs every lender thread on this shop-out only — saved per send, not stored on the deal.
+                </div>
+              )}
+            </div>
+
             <div className="text-[11px] uppercase tracking-wider text-fg-dim font-semibold">
-              4 · Notes (optional — injected into email body)
+              5 · Notes (optional — injected into email body)
             </div>
             <textarea
               value={notes}

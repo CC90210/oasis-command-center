@@ -60,6 +60,9 @@ export type LenderProfile = {
 
 export type ApplicationProfile = {
   id: string;
+  /** Merchant / business name — rendered in shop-out subject "New Deal ({{business_name}})"
+   *  and the body's Business: line. Source: tenant_records.data.business_name. */
+  business_name?: string;
   /** From the form_submissions or manual operator entry. */
   monthly_revenue?: number;
   time_in_business_months?: number;
