@@ -21,6 +21,7 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { useRouter } from "next/navigation";
 import { Card } from "@/components/Card";
+import { SalesMetricCard } from "@/components/underwriting/SalesMetricCard";
 import {
   FileSearch,
   Upload,
@@ -779,6 +780,12 @@ export function UnderwritingClient({
                   }
                 >
                   <div className="space-y-4">
+                    {/* Adon MCA SOP §7 sales metric card — grade + recommendation +
+                        positions + leverage. Read from debt_analysis.metric_card
+                        (grader.py output). Renders an empty-state for legacy
+                        pre-2026-06-11 runs that predate the grader. */}
+                    <SalesMetricCard debtAnalysis={latestRun.debt_analysis} />
+
                     <MetricsGrid run={latestRun} />
 
                     {latestRun.risk_flags.length > 0 && (
