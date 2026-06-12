@@ -29,7 +29,12 @@ import { validateBridgeAgent } from "@/lib/agent-roots";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
-export const maxDuration = 300; // 5 min — matches /api/chat + bridge watchdog ceiling
+// 2026-06-11: bumped 300 → 1800 (5 min → 30 min) to match the warm-pool
+// turn budget in CEO-Agent bridge_chat_server.py:2196. Vercel caps this
+// per plan (Hobby 60s, Pro 300s, Fluid/Enterprise higher) — Vercel will
+// enforce the actual ceiling on whatever plan you're on. Setting it
+// generously here so we don't artificially cap below the plan's max.
+export const maxDuration = 1800;
 
 // Body-size + attachment caps — an authed employee must not be able to push
 // unbounded payloads to the VPS spawn. Mirrors the /api/chat attachment cap

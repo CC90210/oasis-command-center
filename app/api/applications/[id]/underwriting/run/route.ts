@@ -133,6 +133,17 @@ export async function POST(
         tenant_id: tenantId,
         run_id: runId,
         source: "dashboard_rerun",
+        // 2026-06-11: Tell the bridge tool NOT to wait for the
+        // orchestrator to complete. The drawer auto-polls
+        // /api/applications/[id]/underwriting/latest every 5s
+        // (LeadDetailDrawer 4344713), so we just need the bridge to
+        // ENQUEUE + kick the orchestrator subprocess. Without this,
+        // /api/bridge/exec-tool's 65s proxy timeout would kill the
+        // call long before the orchestrator finishes (vision parse
+        // alone is ~2 min), and the dashboard would log a "bridge
+        // dispatch failed" error even though the underwriting was
+        // running successfully.
+        wait_for_complete: false,
       }),
       // Long upper bound — the bridge itself has its own timeout, but
       // if Vercel's edge proxy enforces a shorter one we don't want
