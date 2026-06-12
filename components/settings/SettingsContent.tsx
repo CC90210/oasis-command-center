@@ -48,6 +48,7 @@ import { MyAgentsCard } from "@/components/settings/MyAgentsCard";
 import { AgentMarketplaceCard } from "@/components/settings/AgentMarketplaceCard";
 import { KixieWebhookSyncCard } from "@/components/settings/KixieWebhookSyncCard";
 import { DevicesEditor } from "@/components/settings/DevicesEditor";
+import { OperationsTrackerPanel } from "@/components/settings/OperationsTrackerPanel";
 import { ProviderAccountsCard } from "@/components/settings/ProviderAccountsCard";
 import { LocalCliProvidersCard } from "@/components/settings/LocalCliProvidersCard";
 import { TOOL_DEFINITIONS } from "@/lib/cloud-tool-runner";
@@ -477,6 +478,14 @@ export async function SettingsContent({
               )}
             </div>
           </Card>
+
+          {/* CC ask 2026-06-11: "an overall tracker [hidden in Settings],
+              very important feature." Read-only operations view at the
+              very bottom — daemons, sequences, employee activity in
+              one place. Mutations live on the surfaces it tracks. */}
+          <SafeBoundary label="operations-tracker">
+            <OperationsTrackerPanel tenantId={profile?.tenant_id ?? null} />
+          </SafeBoundary>
         </>
       )}
     </div>
