@@ -30,13 +30,14 @@ import { validateBridgeAgent } from "@/lib/agent-roots";
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 // Vercel plan caps maxDuration as a HARD validation at build time (not
-// a silent runtime cap). Hobby = 60s, Pro = 300s, Fluid Compute = 800s.
-// 6533c1b set this to 1800 which failed the build on Pro. Reverted to
-// 300 (Pro plan max). For genuinely long Solara operations (>5 min),
-// either upgrade to Fluid Compute (bump to 800) or route the chat SSE
-// directly through the Cloudflare tunnel to the VPS, bypassing this
-// Vercel function entirely.
-export const maxDuration = 300;
+// a silent runtime cap). Hobby = 60s, Pro = 300s, Pro+Fluid Compute =
+// 800s. CC upgraded to Fluid Compute 2026-06-11, so this can ride at
+// 800s — ~13 min — which covers every Solara operation observed
+// in production so far (Mamaws underwriting + exploration sequence
+// took ~10 min in the VPS-side test). For anything genuinely longer
+// than 13 min, route the chat SSE directly through the Cloudflare
+// tunnel to the VPS bridge, bypassing this Vercel function entirely.
+export const maxDuration = 800;
 
 // Body-size + attachment caps — an authed employee must not be able to push
 // unbounded payloads to the VPS spawn. Mirrors the /api/chat attachment cap
