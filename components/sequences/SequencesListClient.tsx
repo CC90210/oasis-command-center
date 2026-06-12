@@ -195,15 +195,24 @@ export function SequencesListClient({ initialRows }: { initialRows: SequenceRow[
               {rows.map((r) => (
                 <tr key={r.id} className="hover:bg-bg-elev/30">
                   <td className="px-4 py-3">
-                    <div className="font-bold text-fg">{r.name}</div>
+                    <Link
+                      href={`/sequences/${r.id}/edit`}
+                      className="font-bold text-fg hover:text-accent transition-colors block"
+                      title="Open sequence to view steps"
+                    >
+                      {r.name}
+                    </Link>
                     {r.description && (
-                      <div className="text-xs text-fg-muted truncate max-w-md">
+                      <div className="text-xs text-fg-muted line-clamp-2 max-w-md mt-0.5">
                         {r.description}
                       </div>
                     )}
                   </td>
-                  <td className="px-4 py-3 font-mono text-xs text-fg-muted">
-                    {summarize(r)}
+                  <td className="px-4 py-3">
+                    <div className="font-mono text-xs text-fg-muted">{summarize(r)}</div>
+                    <div className="text-[10.5px] text-fg-dim mt-0.5">
+                      Fires on event — no interval
+                    </div>
                   </td>
                   <td className="px-4 py-3">
                     <button
