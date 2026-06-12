@@ -29,12 +29,14 @@ import { validateBridgeAgent } from "@/lib/agent-roots";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
-// 2026-06-11: bumped 300 → 1800 (5 min → 30 min) to match the warm-pool
-// turn budget in CEO-Agent bridge_chat_server.py:2196. Vercel caps this
-// per plan (Hobby 60s, Pro 300s, Fluid/Enterprise higher) — Vercel will
-// enforce the actual ceiling on whatever plan you're on. Setting it
-// generously here so we don't artificially cap below the plan's max.
-export const maxDuration = 1800;
+// Vercel plan caps maxDuration as a HARD validation at build time (not
+// a silent runtime cap). Hobby = 60s, Pro = 300s, Fluid Compute = 800s.
+// 6533c1b set this to 1800 which failed the build on Pro. Reverted to
+// 300 (Pro plan max). For genuinely long Solara operations (>5 min),
+// either upgrade to Fluid Compute (bump to 800) or route the chat SSE
+// directly through the Cloudflare tunnel to the VPS, bypassing this
+// Vercel function entirely.
+export const maxDuration = 300;
 
 // Body-size + attachment caps — an authed employee must not be able to push
 // unbounded payloads to the VPS spawn. Mirrors the /api/chat attachment cap
