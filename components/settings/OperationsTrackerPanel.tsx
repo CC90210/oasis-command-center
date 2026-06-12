@@ -21,6 +21,7 @@
 import Link from "next/link";
 import { Card } from "@/components/Card";
 import { getServiceSupabase } from "@/lib/supabase-server";
+import { timeAgo } from "@/lib/fmt";
 import { ArrowRight, Workflow, Bot, Mail, MessageSquare, Send, FileText } from "lucide-react";
 
 type AuditRow = {
@@ -34,12 +35,8 @@ type AuditRow = {
 };
 
 type InteractionRow = {
-  agent_source: string | null;
   channel: string | null;
-  type: string | null;
-  to_email: string | null;
-  metadata: { acted_by_user_id?: string; requested_by_email?: string } | null;
-  created_at: string;
+  metadata: { requested_by_email?: string } | null;
 };
 
 type EmployeeRollup = {
@@ -48,14 +45,6 @@ type EmployeeRollup = {
   sms_sends: number;
   recent_actions: number;
 };
-
-function relTime(iso: string): string {
-  const diff = Date.now() - new Date(iso).getTime();
-  if (diff < 60_000) return "just now";
-  if (diff < 3_600_000) return `${Math.floor(diff / 60_000)}m ago`;
-  if (diff < 86_400_000) return `${Math.floor(diff / 3_600_000)}h ago`;
-  return `${Math.floor(diff / 86_400_000)}d ago`;
-}
 
 function iconForAction(actionType: string | null) {
   const t = (actionType || "").toLowerCase();
@@ -93,7 +82,7 @@ async function loadEmployeeRollup(tenantId: string): Promise<EmployeeRollup[]> {
     // user_profiles email join gives us the actor.
     const r = await db
       .from("lead_interactions")
-      .select("agent_source, channel, type, metadata, created_at")
+      .select("channel, metadata")
       .eq("tenant_id", tenantId)
       .gte("created_at", since)
       .in("agent_source", ["manual_cc", "dashboard_drawer", "shop_out_send_batch"])
@@ -247,7 +236,7 @@ export async function OperationsTrackerPanel({ tenantId }: { tenantId: string | 
                     </div>
                   </div>
                   <span className="text-[10px] font-mono text-fg-dim shrink-0">
-                    {relTime(row.created_at)}
+                    {timeAgo(row.created_at)}
                   </span>
                 </li>
               ))}
