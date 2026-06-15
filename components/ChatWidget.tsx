@@ -523,6 +523,17 @@ type Props = {
    * the sidebar simultaneously said BRIDGE ONLINE — confusing and incorrect.
    */
   serverBridgeOnline?: boolean;
+  /**
+   * Layout variant. "card" (default) = the historical fixed-height
+   * (md:h-[640px]) bordered card embedded on a normal page — every
+   * existing call site keeps this behavior byte-for-byte. "fullscreen" =
+   * fill the parent's full height/width with no border/radius, for the
+   * Claude-style Agents-tab shell (the parent owns 100dvh via the
+   * chat-shell layout mode). In fullscreen the in-widget HISTORY button
+   * and native-fullscreen expand toggle are suppressed (the shell's
+   * conversation rail + the already-full surface make them redundant).
+   */
+  variant?: "card" | "fullscreen";
 };
 
 function seedMessagesForAgent(
@@ -534,7 +545,8 @@ function seedMessagesForAgent(
   return [{ role: "assistant", content, at: Date.now() }];
 }
 
-export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMessages, advancedPicker, tenantBridgeOwner, serverBridgeOnline }: Props) {
+export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMessages, advancedPicker, tenantBridgeOwner, serverBridgeOnline, variant = "card" }: Props) {
+  const isFullscreenVariant = variant === "fullscreen";
   const searchParams = useSearchParams();
   const router = useRouter();
   const pathname = usePathname();
@@ -2556,7 +2568,17 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
          leaving the chat to fill the rest. Uses 100dvh so iOS Safari's
          dynamic toolbar collapse doesn't cause layout jumps as the URL
          bar shows/hides. */
-      className={`chat-container agent-${agent} flex flex-col h-[calc(100dvh-13rem)] min-h-[28rem] md:h-[640px] md:min-h-0`}
+      className={
+        isFullscreenVariant
+          ? // Fullscreen: fill the parent (the chat-shell <main> owns
+            // 100dvh). No fixed height, no border/radius — the surface IS
+            // the page. min-h-0 lets the inner flex-1 scroll region bound
+            // correctly instead of overflowing.
+            `chat-container agent-${agent} flex flex-col h-full min-h-0 rounded-none border-0`
+          : // Card (default, unchanged): fixed 640px desktop panel; mobile
+            // sizes to viewport minus ~13rem of page chrome.
+            `chat-container agent-${agent} flex flex-col h-[calc(100dvh-13rem)] min-h-[28rem] md:h-[640px] md:min-h-0`
+      }
     >
       {/* Aurora wash inside the bordered container */}
       <div className="chat-aurora absolute inset-0 pointer-events-none" />
@@ -2787,20 +2809,26 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
             <RefreshCw className="w-4 h-4" />
           </button>
         )}
-        <button
-          type="button"
-          onClick={toggleFullscreen}
-          /* Hidden on mobile — fullscreen toggle is a desktop affordance.
-             Phones are already full-bleed. */
-          className="hidden md:inline-flex text-fg-dim hover:text-accent transition-colors p-1"
-          title={isFullscreen ? "Exit fullscreen (Esc)" : "Open chat fullscreen"}
-        >
-          {isFullscreen ? (
-            <Minimize2 className="w-4 h-4" />
-          ) : (
-            <Maximize2 className="w-4 h-4" />
-          )}
-        </button>
+        {/* Native-fullscreen toggle — only in the card variant. In the
+            fullscreen shell variant the chat already fills the viewport,
+            so a "go fullscreen" button is redundant + the browser
+            fullscreen API on a sub-element would actually be a regression. */}
+        {!isFullscreenVariant && (
+          <button
+            type="button"
+            onClick={toggleFullscreen}
+            /* Hidden on mobile — fullscreen toggle is a desktop affordance.
+               Phones are already full-bleed. */
+            className="hidden md:inline-flex text-fg-dim hover:text-accent transition-colors p-1"
+            title={isFullscreen ? "Exit fullscreen (Esc)" : "Open chat fullscreen"}
+          >
+            {isFullscreen ? (
+              <Minimize2 className="w-4 h-4" />
+            ) : (
+              <Maximize2 className="w-4 h-4" />
+            )}
+          </button>
+        )}
         <Link
           href="/settings#agents"
           className="text-fg-dim hover:text-accent transition-colors p-1"

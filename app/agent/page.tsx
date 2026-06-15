@@ -1,5 +1,4 @@
 import ChatWidget from "@/components/ChatWidget";
-import { Card, PageHeader, Tag } from "@/components/Card";
 import { safe } from "@/lib/api-helpers";
 import { getActiveProfile, getTenant, integrationsHealth } from "@/lib/queries";
 import { getSessionUser } from "@/lib/supabase-server";
@@ -9,19 +8,6 @@ import { getTenantAwareEnabledAgents, getTenantManifestForUser } from "@/lib/man
 import type { IntegrationHealth } from "@/lib/supabase";
 
 export const dynamic = "force-dynamic";
-
-const AGENT_LABELS: Record<string, { label: string; pitch: string }> = {
-  solara: {
-    label: "Solara",
-    pitch:
-      "Your Sun Biz operations brain. Solara runs the back office — pipeline reports, application packaging, lender matching, renewal sweeps — so the team always knows what's moving and what's stuck.",
-  },
-  helios: {
-    label: "Helios",
-    pitch:
-      "Your Sun Biz sales voice. Personable, results-driven, sharp on cadence — drafts first-touch SMS, runs revival sequences for ghosted leads, brings expired offers back to the table.",
-  },
-};
 
 function firstNameOf(name: string | null | undefined, fallback = "Jordan"): string {
   const raw = (name || "").trim();
@@ -85,12 +71,6 @@ export default async function ClientAgentPage({
   // Primary first, then siblings, dedup. If no agents enabled (fresh tenant),
   // fall back to the primary alone so the page still renders something.
   const agentKeys = Array.from(new Set([primary, ...enabled])).filter(Boolean);
-  const primaryMeta = AGENT_LABELS[primary] ?? { label: "Agents", pitch: "Chat with the agents enabled on this workspace." };
-  const headerTitle = agentKeys.length > 1 ? "Agents" : primaryMeta.label;
-  const headerSubtitle =
-    agentKeys.length > 1
-      ? `Chat with the ${agentKeys.length} agents on this workspace. Switch between them in the chat header.`
-      : primaryMeta.pitch;
   const clientName = firstNameOf(profile?.display_name || profile?.full_name);
   // Service key renamed from "jotform" → "lead_forms" on 2026-06-06
   // (zero data migration cost — integration_health table doesn't carry
@@ -111,36 +91,26 @@ export default async function ClientAgentPage({
           helios: `Hello ${clientName}, I'm Helios. I'll draft your outreach, run the follow-up cadence, and bring expired offers back to the table — just tell me which lead to open with.`,
         }
       : undefined;
-  const cardSubtitle =
-    primary === "solara"
-      ? "Talk to Solara in plain English. She can help you organize the funding pipeline, draft follow-up, and explain what needs attention next."
-      : primary === "helios"
-      ? "Helios drafts the outreach, runs the cadence, and keeps deals warm. Sales voice, not corporate."
-      : "Cloud mode works once a model key is configured. Local bridge mode unlocks client-machine files and tools.";
-
+  // Full-screen Claude-style chat shell (2026-06-15). The page is now a
+  // thin full-height host — the layout's chat-shell mode (app/layout.tsx
+  // isChatShell) gives <main> 100dvh with no constrained wrapper/footer,
+  // and ChatWidget variant="fullscreen" fills it. The PageHeader + Card
+  // chrome is gone; the chat IS the page. Conversation rail (left) +
+  // agent-roster panel (right) are layered in by AgentsChatShell next.
   return (
-    <div className="space-y-6 animate-fade-in">
-      <PageHeader
-        title={headerTitle}
-        subtitle={headerSubtitle}
-        action={<Tag tone="accent">{primary}</Tag>}
+    <div className="h-full">
+      <ChatWidget
+        agentKeys={agentKeys}
+        defaultAgent={primary}
+        isAdmin={isOperatorEmail(user?.email)}
+        welcomeMessages={welcomeMessages}
+        // Phase 1 of SunBiz CRM build — read the per-tenant manifest
+        // flag. SunBiz / SUGA tenants see no picker (Auto-mode silently
+        // routes). Operator-only tenants like OASIS keep the 4-mode
+        // dropdown for billing-path control.
+        advancedPicker={manifest?.ui?.advanced_picker ?? false}
+        variant="fullscreen"
       />
-      <Card
-        title={agentKeys.length > 1 ? "Agent chat" : `${primaryMeta.label} chat`}
-        subtitle={cardSubtitle}
-      >
-        <ChatWidget
-          agentKeys={agentKeys}
-          defaultAgent={primary}
-          isAdmin={isOperatorEmail(user?.email)}
-          welcomeMessages={welcomeMessages}
-          // Phase 1 of SunBiz CRM build — read the per-tenant manifest
-          // flag. SunBiz / SUGA tenants see no picker (Auto-mode silently
-          // routes). Operator-only tenants like OASIS keep the 4-mode
-          // dropdown for billing-path control.
-          advancedPicker={manifest?.ui?.advanced_picker ?? false}
-        />
-      </Card>
     </div>
   );
 }

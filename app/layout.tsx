@@ -231,6 +231,17 @@ export default async function RootLayout({
   const manifest = isFullBleed ? null : await getManifest(manifestSlug);
   const isCrmWideShell = /^\/t\/[a-z0-9_-]+\/(leads|applications|pipeline)(?:\/|$)/i.test(pathname);
   const contentWidthClass = isCrmWideShell ? "max-w-none" : "max-w-7xl";
+  // Chat-shell mode: the Agents tab (app/agent/page.tsx, nav href "/agent")
+  // renders a full-screen Claude-style chat. Unlike isFullBleed, the nav
+  // sidebar STAYS (collapsible via the existing toggle) — we only drop the
+  // constrained content wrapper + footer so the chat owns the viewport.
+  // Precise matcher: exactly /agent or /agent/* (NOT the legacy plural
+  // /agents, which isn't navigated to anyway). Also covers the /t/<slug>/agent
+  // preview path for completeness.
+  const isChatShell =
+    pathname === "/agent" ||
+    pathname.startsWith("/agent/") ||
+    /^\/t\/[a-z0-9_-]+\/agent(?:\/|$)/i.test(pathname);
 
   return (
     <html lang="en">
@@ -305,17 +316,29 @@ export default async function RootLayout({
                 <html>. Expanded: ml-60. Collapsed: ml-0. The transition
                 class is applied at md+ only so mobile (where sidebar is
                 position:fixed overlay) isn't affected. */}
-            <main className="ml-0 md:ml-[var(--sidebar-w,15rem)] min-h-screen relative z-10 pt-14 md:pt-0 transition-[margin] duration-200">
-              <div className={`mx-auto ${contentWidthClass} px-4 md:px-8 py-6 md:py-8`}>
+            {isChatShell ? (
+              // Chat-shell: full viewport height, NO constrained wrapper,
+              // NO footer. Children (app/agent/page.tsx) own the layout and
+              // fill 100dvh. overflow-hidden so the chat's own scroll region
+              // is the only scroller — no double scrollbars. Sidebar margin
+              // still tracks the collapse var so the chat reflows when the
+              // nav collapses.
+              <main className="ml-0 md:ml-[var(--sidebar-w,15rem)] h-[100dvh] relative z-10 pt-14 md:pt-0 transition-[margin] duration-200 overflow-hidden">
                 {children}
-              </div>
-              <footer className={`mx-auto ${contentWidthClass} px-8 py-6 text-xs text-fg-faint`}>
-                <div className="border-t border-bg-border pt-4 flex justify-between">
-                  <span>{manifest.brand.footer_label}</span>
-                  <span>{manifest.brand.footer_tagline}</span>
+              </main>
+            ) : (
+              <main className="ml-0 md:ml-[var(--sidebar-w,15rem)] min-h-screen relative z-10 pt-14 md:pt-0 transition-[margin] duration-200">
+                <div className={`mx-auto ${contentWidthClass} px-4 md:px-8 py-6 md:py-8`}>
+                  {children}
                 </div>
-              </footer>
-            </main>
+                <footer className={`mx-auto ${contentWidthClass} px-8 py-6 text-xs text-fg-faint`}>
+                  <div className="border-t border-bg-border pt-4 flex justify-between">
+                    <span>{manifest.brand.footer_label}</span>
+                    <span>{manifest.brand.footer_tagline}</span>
+                  </div>
+                </footer>
+              </main>
+            )}
           </>
         )}
       </body>
