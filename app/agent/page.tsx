@@ -91,14 +91,23 @@ export default async function ClientAgentPage({
           helios: `Hello ${clientName}, I'm Helios. I'll draft your outreach, run the follow-up cadence, and bring expired offers back to the table — just tell me which lead to open with.`,
         }
       : undefined;
-  // Full-screen Claude-style chat shell (2026-06-15). The page is now a
-  // thin full-height host — the layout's chat-shell mode (app/layout.tsx
-  // isChatShell) gives <main> 100dvh with no constrained wrapper/footer,
-  // and ChatWidget variant="fullscreen" fills it. The PageHeader + Card
-  // chrome is gone; the chat IS the page. Conversation rail (left) +
-  // agent-roster panel (right) are layered in by AgentsChatShell next.
+  // Full-screen Claude-style chat (2026-06-15, hardened). The chat is
+  // pinned to the viewport via `fixed` so it fills the screen REGARDLESS
+  // of whether the root layout detected this route (the earlier version
+  // depended on the layout's isChatShell pathname match — which can be
+  // false when middleware doesn't set x-pathname, collapsing the chat to
+  // a tiny box). This approach is self-sufficient:
+  //   - left tracks the nav sidebar's --sidebar-w var (15rem expanded,
+  //     0 collapsed) so the chat reflows when the sidebar toggles, with a
+  //     matching transition. On mobile the sidebar is an overlay drawer,
+  //     so the chat is full-width (left-0) below the 3.5rem mobile topbar.
+  //   - z-20 sits above page content (z-10) but below the sidebar (z-40
+  //     mobile / md:z-20, no horizontal overlap) + the floating reopen
+  //     button (z-30), so navigation still works.
+  // ChatWidget variant="fullscreen" fills this fixed box (definite height
+  // from the inset), so the transcript scrolls internally — no collapse.
   return (
-    <div className="h-full">
+    <div className="fixed top-14 md:top-0 left-0 md:left-[var(--sidebar-w,15rem)] right-0 bottom-0 z-20 transition-[left] duration-200">
       <ChatWidget
         agentKeys={agentKeys}
         defaultAgent={primary}

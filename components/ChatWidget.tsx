@@ -823,6 +823,25 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
     document.addEventListener("fullscreenchange", onFsChange);
     return () => document.removeEventListener("fullscreenchange", onFsChange);
   }, []);
+
+  // Fullscreen-variant body scroll lock. The fullscreen chat is rendered
+  // in a fixed, viewport-filling container by app/agent/page.tsx. If the
+  // root layout's chat-shell mode didn't engage (it can't always detect
+  // the route), the normal constrained <main> + footer still exist behind
+  // the fixed chat — locking body scroll keeps them unreachable so the
+  // surface reads as a clean full-screen app, never a chat with empty
+  // page + footer scrolling underneath. No-op for the card variant.
+  useEffect(() => {
+    if (!isFullscreenVariant || typeof document === "undefined") return;
+    const prevBody = document.body.style.overflow;
+    const prevHtml = document.documentElement.style.overflow;
+    document.body.style.overflow = "hidden";
+    document.documentElement.style.overflow = "hidden";
+    return () => {
+      document.body.style.overflow = prevBody;
+      document.documentElement.style.overflow = prevHtml;
+    };
+  }, [isFullscreenVariant]);
   // A0c: status phase + elapsed-time counter so CC sees "starting Atlas in
   // CFO-Agent…" → "thinking… (0:12)" instead of a static "thinking…" during
   // the first 30s of a Claude Code subprocess cold start.
