@@ -107,7 +107,7 @@ export default async function ClientAgentPage({
   // ChatWidget variant="fullscreen" fills this fixed box (definite height
   // from the inset), so the transcript scrolls internally — no collapse.
   return (
-    <div className="fixed top-14 md:top-0 left-0 md:left-[var(--sidebar-w,15rem)] right-0 bottom-0 z-20 bg-bg-deep transition-[left] duration-200">
+    <div className="fixed top-14 md:top-0 left-0 md:left-[var(--sidebar-w,15rem)] right-0 bottom-0 z-20 bg-bg transition-[left] duration-200">
       <ChatWidget
         agentKeys={agentKeys}
         defaultAgent={primary}
