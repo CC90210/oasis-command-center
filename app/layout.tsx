@@ -242,6 +242,12 @@ export default async function RootLayout({
     pathname === "/agent" ||
     pathname.startsWith("/agent/") ||
     /^\/t\/[a-z0-9_-]+\/agent(?:\/|$)/i.test(pathname);
+  // Shared <main> base: sidebar-margin tracking (responds to the
+  // data-sidebar collapse var), z-index, mobile-topbar top padding, and
+  // the margin transition. Both layout modes (chat-shell + constrained)
+  // build on this so the sidebar-reflow behavior is defined once.
+  const mainBaseClass =
+    "ml-0 md:ml-[var(--sidebar-w,15rem)] relative z-10 pt-14 md:pt-0 transition-[margin] duration-200";
 
   return (
     <html lang="en">
@@ -323,11 +329,11 @@ export default async function RootLayout({
               // is the only scroller — no double scrollbars. Sidebar margin
               // still tracks the collapse var so the chat reflows when the
               // nav collapses.
-              <main className="ml-0 md:ml-[var(--sidebar-w,15rem)] h-[100dvh] relative z-10 pt-14 md:pt-0 transition-[margin] duration-200 overflow-hidden">
+              <main className={`${mainBaseClass} h-[100dvh] overflow-hidden`}>
                 {children}
               </main>
             ) : (
-              <main className="ml-0 md:ml-[var(--sidebar-w,15rem)] min-h-screen relative z-10 pt-14 md:pt-0 transition-[margin] duration-200">
+              <main className={`${mainBaseClass} min-h-screen`}>
                 <div className={`mx-auto ${contentWidthClass} px-4 md:px-8 py-6 md:py-8`}>
                   {children}
                 </div>
