@@ -21,6 +21,7 @@ import { TenantSettings } from "@/components/settings/TenantSettings";
 import { TenantAutomations } from "@/components/automations/TenantAutomations";
 import { LeadTimelinePanel } from "@/components/leads/LeadTimelinePanel";
 import { LeadDocumentsPanel } from "@/components/leads/LeadDocumentsPanel";
+import { ApplicationUnderwritingReport } from "@/components/underwriting/ApplicationUnderwritingReport";
 import { StageRail } from "@/components/manifest/StageRail";
 import { PipelineSearchableTable } from "@/components/manifest/PipelineSearchableTable";
 import { PageSearchBar } from "@/components/manifest/PageSearchBar";
@@ -235,6 +236,17 @@ export default async function TenantCatchAllPage({
               </div>
             );
           })()}
+          {/* Full SOP underwriting report — application detail only. This is
+              the dedicated "full underwriting" view (grade / verified
+              positions / leverage / red flags / sales angle) the Bank drawer
+              links to. Reuses SalesMetricCard + the /underwriting endpoints
+              so there's one source of truth. */}
+          {entity.name === "application" && (
+            <ApplicationUnderwritingReport
+              applicationId={recordDetailId}
+              tenantSlug={normalised}
+            />
+          )}
           <ManifestRecordForm
             tenantSlug={normalised}
             entity={entity}

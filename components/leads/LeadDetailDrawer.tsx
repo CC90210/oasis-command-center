@@ -24,6 +24,7 @@ import { X, FileText, ImageIcon, Phone, Mail, ShoppingBag, Loader2 } from "lucid
 import { LeadTimelinePanel } from "./LeadTimelinePanel";
 import { AssignmentControl } from "./AssignmentControl";
 import { humanLeadDocSize, leadDocTypeLabel, LEAD_DOC_TYPES } from "@/lib/lead-doc-display";
+import { SalesMetricCard } from "@/components/underwriting/SalesMetricCard";
 import { LEAD_PIPELINE_STAGES, OPPORTUNITY_PIPELINE_STAGES, type StageMeta } from "@/lib/sunbiz-stage-meta";
 import { formatMoney, relTime } from "@/lib/format-helpers";
 import { lastTouchIsoFlat } from "@/lib/lead-staleness";
@@ -487,6 +488,13 @@ type UnderwritingRun = {
   readiness_score: number | null;
   risk_flags: string[] | null;
   error_message: string | null;
+  // debt_analysis carries the SOP §7 metric_card (grade / true revenue /
+  // verified positions / leverage / red flags). The /underwriting/latest
+  // route already returns it — the drawer previously discarded it, which
+  // is why the BankTab only showed the readiness badge. Now rendered via
+  // SalesMetricCard when status === "complete".
+  debt_analysis?: unknown;
+  sales_angle?: string | null;
 };
 
 /* -------------------------------------------------------------------------- */
@@ -840,6 +848,30 @@ function BankTab({
                   {flag.replace(/_/g, " ")}
                 </span>
               ))}
+            </div>
+          )}
+
+          {/* Full SOP §7 metric card — grade / true revenue / verified
+              positions / leverage / red flags. The data already arrives in
+              uwRun.debt_analysis; before this it was fetched and thrown
+              away, leaving only the readiness badge above. Renders its own
+              empty-state for legacy pre-grader runs. */}
+          {uwRun?.status === "complete" && (
+            <div className="pt-2">
+              <SalesMetricCard debtAnalysis={uwRun.debt_analysis} />
+              {uwRun.sales_angle && (
+                <blockquote className="mt-3 border-l-2 border-accent pl-3 text-[12px] text-fg-muted italic leading-relaxed">
+                  {uwRun.sales_angle}
+                </blockquote>
+              )}
+              {applicationId && (
+                <Link
+                  href={`/t/${tenantSlug}/applications/${applicationId}`}
+                  className="mt-3 inline-flex items-center gap-1 text-[11px] font-semibold text-accent hover:underline"
+                >
+                  View full underwriting report →
+                </Link>
+              )}
             </div>
           )}
         </div>
