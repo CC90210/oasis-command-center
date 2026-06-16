@@ -29,7 +29,7 @@ import {
 import { extractSubmissionDeal } from "@/lib/lenders/extract-submission-deal";
 import { deriveAgentCcs } from "@/lib/lenders/derive-agent-ccs";
 import { buildShopOutPlan } from "@/lib/lenders/shop-out";
-import type { ApplicationProfile } from "@/lib/lenders/match-fitness";
+import { type ApplicationProfile, complianceProfileInputs } from "@/lib/lenders/match-fitness";
 import ShopOutPanelClient from "./panel-client";
 
 export const dynamic = "force-dynamic";
@@ -116,6 +116,10 @@ export default async function ShopOutPage({ params, searchParams }: PageProps) {
     matchNarrative?: string;
   } | null = null;
   if (lenderIds.length > 0 && missing.length === 0) {
+    // merchant_state + industry (via complianceProfileInputs) ensure this
+    // server-rendered preview reflects the SAME restricted-lender gates the
+    // live send applies — without them the operator could see a restricted
+    // lender previewed as a clean match.
     const application: ApplicationProfile = {
       id: applicationId,
       monthly_revenue: typeof appData.monthly_revenue === "number" ? appData.monthly_revenue : undefined,
@@ -123,6 +127,7 @@ export default async function ShopOutPage({ params, searchParams }: PageProps) {
       applicant_fico: typeof appData.applicant_fico === "number" ? appData.applicant_fico : undefined,
       requested_amount: typeof appData.requested_amount === "number" ? appData.requested_amount : undefined,
       desired_product: typeof appData.desired_product === "string" ? appData.desired_product : undefined,
+      ...complianceProfileInputs(appData),
     };
     const plan = await buildShopOutPlan({
       tenant_id: sess.tenantId,

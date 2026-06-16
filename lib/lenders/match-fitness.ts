@@ -91,6 +91,31 @@ export type ApplicationProfile = {
 };
 
 /**
+ * Resolve the SOP §4 restricted-list inputs (merchant_state + industry) from an
+ * application's stored data. SINGLE source of truth so every scoring entry point
+ * — the planning route, the live Gmail send, the match preview, and the
+ * server-rendered shop-out page — applies the identical mapping. Forms persist
+ * business_state (ISO 2-letter) + industry (slug); a legacy merchant_state is
+ * honored as a fallback. Spread into an ApplicationProfile literal:
+ *   const application: ApplicationProfile = { id, ..., ...complianceProfileInputs(appData) };
+ * Centralizing this prevents the drift that left these inputs missing on some
+ * scoring paths (compliance gates dormant) while present on others.
+ */
+export function complianceProfileInputs(
+  appData: Record<string, unknown>,
+): Pick<ApplicationProfile, "merchant_state" | "industry"> {
+  return {
+    merchant_state:
+      typeof appData.business_state === "string"
+        ? appData.business_state
+        : typeof appData.merchant_state === "string"
+          ? appData.merchant_state
+          : undefined,
+    industry: typeof appData.industry === "string" ? appData.industry : undefined,
+  };
+}
+
+/**
  * Severity tiers for lender warnings — replaces the prior hard-block
  * model per the 2026-05-25 second SunBiz product meeting. The operator
  * can still send to a lender flagged 'high_risk', but they hit a

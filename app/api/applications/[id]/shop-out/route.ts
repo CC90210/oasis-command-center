@@ -39,6 +39,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { resolveSessionContext } from "@/lib/api-auth";
 import { buildShopOutPlan, recordShopOutThreads } from "@/lib/lenders/shop-out";
+import { complianceProfileInputs } from "@/lib/lenders/match-fitness";
 import { deriveDealSigner, resolveSignerForOperator } from "@/lib/config/agents";
 
 export const runtime = "nodejs";
@@ -293,16 +294,10 @@ export async function POST(
     applicant_fico: typeof appData.applicant_fico === "number" ? appData.applicant_fico : undefined,
     requested_amount: typeof appData.requested_amount === "number" ? appData.requested_amount : undefined,
     desired_product: typeof appData.desired_product === "string" ? appData.desired_product : undefined,
-    // Adon SOP §1/§4 — merchant identity for restricted-list matching.
-    // Forms collect business_state (ISO 2-letter) and industry (slug);
-    // map them onto the ApplicationProfile shape match-fitness consumes.
-    merchant_state:
-      typeof appData.business_state === "string"
-        ? appData.business_state
-        : typeof appData.merchant_state === "string"
-          ? appData.merchant_state
-          : undefined,
-    industry: typeof appData.industry === "string" ? appData.industry : undefined,
+    // Adon SOP §1/§4 — merchant identity for restricted-list matching
+    // (merchant_state + industry), via the shared resolver so every scoring
+    // path maps these identically.
+    ...complianceProfileInputs(appData),
     // Position count flows from the underwriter chain (debt_detector
     // output) → application.data.position_count. match-fitness's
     // position-range gate uses it; the body template's {{position_count}}
