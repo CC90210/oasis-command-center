@@ -170,6 +170,19 @@ export async function POST(
     appData.deal_kind === "reverse_consolidation" || appData.deal_kind === "fresh_capital"
       ? (appData.deal_kind as "reverse_consolidation" | "fresh_capital")
       : null;
+  // SOP §4 restricted-state / restricted-industry inputs. Forms collect
+  // business_state (ISO 2-letter) + industry (slug). Thread them so the match
+  // preview reflects the SAME restricted-lender gates the live shop-out send
+  // applies — otherwise the operator sees a restricted lender as matchable here
+  // but the send correctly blocks it.
+  const merchantState =
+    typeof appData.business_state === "string"
+      ? (appData.business_state as string)
+      : typeof appData.merchant_state === "string"
+        ? (appData.merchant_state as string)
+        : null;
+  const dealIndustry =
+    typeof appData.industry === "string" ? (appData.industry as string) : null;
 
   // Pull every lender for this tenant. Tenants typically have <50
   // lenders so we score in-memory.
@@ -199,6 +212,8 @@ export async function POST(
     default_satisfied: defaultSatisfied ?? undefined,
     negative_days: negativeDays ?? undefined,
     deal_kind: dealKind ?? undefined,
+    merchant_state: merchantState ?? undefined,
+    industry: dealIndustry ?? undefined,
   };
 
   // Build a lookup of raw lender data for LenderProfile construction later.

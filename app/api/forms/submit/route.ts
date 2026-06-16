@@ -614,6 +614,34 @@ export async function POST(req: NextRequest) {
     });
   }
 
+  // Surface owner KYC onto the lead so the operator's Owner tab populates for
+  // form-originated deals (it reads flat owner_* keys off the lead record).
+  // Raw merge-write, best-effort — never aborts the submission. Only the SSN
+  // last-4 lands on the lead; the full value stays on form_submissions.payload.
+  try {
+    const ownerFields = mapOwnerFields(payload);
+    if (Object.keys(ownerFields).length > 0) {
+      const cur = await db
+        .from("tenant_records")
+        .select("data")
+        .eq("id", link.lead_id)
+        .eq("tenant_id", form.tenant_id)
+        .maybeSingle();
+      const curData =
+        (cur.data as { data?: Record<string, unknown> } | null)?.data || {};
+      await db
+        .from("tenant_records")
+        .update({ data: { ...curData, ...ownerFields } })
+        .eq("id", link.lead_id)
+        .eq("tenant_id", form.tenant_id);
+    }
+  } catch (err) {
+    console.error("[forms.submit.owner_map.failed]", {
+      lead_id: link.lead_id,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+
   // Build A — Resume-submission link. Extracted to maybe-queue-resume.ts
   // so the route's flow stays focused on submission. The helper handles
   // step-0 gating + email-presence check + tenant brand resolution +
@@ -812,4 +840,34 @@ async function initAnonymousLead(input: {
  *  without persisting raw IPs in tenant data. */
 function hashIp(ip: string): string {
   return createHash("sha256").update(ip).digest("hex").slice(0, 16);
+}
+
+/**
+ * Map the full-application's flat owner_* fields onto the lead's data using the
+ * key shape the operator Owner tab reads (components/leads/LeadDetailDrawer.tsx
+ * OwnerTab → owner_name, owner_ssn_last4, owner_dob, ownership_pct,
+ * owner_address_line1). Without this, owner KYC stayed only on
+ * form_submissions.payload and the Owner tab rendered blank for form-originated
+ * deals.
+ *
+ * PII discipline: only the SSN's last 4 are copied to the lead JSONB (which the
+ * pipeline + drawer read broadly). The full SSN stays on form_submissions.payload
+ * — the audited source-of-truth — and never enters the lead record.
+ */
+function mapOwnerFields(payload: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  const s = (k: string) =>
+    typeof payload[k] === "string" ? (payload[k] as string).trim() : "";
+  const name = s("owner_full_name");
+  if (name) out.owner_name = name;
+  const ssnDigits = s("owner_ssn").replace(/\D/g, "");
+  if (ssnDigits.length >= 4) out.owner_ssn_last4 = ssnDigits.slice(-4);
+  const dob = s("owner_dob");
+  if (dob) out.owner_dob = dob;
+  const pct = payload.owner_ownership_pct;
+  if (typeof pct === "number" || (typeof pct === "string" && pct.trim()))
+    out.ownership_pct = pct;
+  const addr = s("owner_home_address");
+  if (addr) out.owner_address_line1 = addr;
+  return out;
 }

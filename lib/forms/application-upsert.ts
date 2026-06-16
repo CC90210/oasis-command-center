@@ -93,11 +93,35 @@ function normalize(key: string, value: unknown): unknown {
   return value;
 }
 
+/**
+ * Form fields whose NAME differs from the canonical application key.
+ * The SunBiz full-application form collects `requested_advance` (MCA
+ * vocabulary), but every downstream reader — match-fitness.ts (max-funded
+ * gate), the lender-submission builder, and the CSV import path — reads
+ * `requested_amount`. Map at extraction so the form value lands under the
+ * canonical key WITHOUT renaming the whitelist (which would break all of
+ * those consumers). Keyed canonical-key -> accepted source field names.
+ */
+const FIELD_ALIASES: Record<string, string[]> = {
+  requested_amount: ["requested_advance"],
+};
+
+/** Read a whitelisted key from the payload, falling back to any aliased
+ * source name. The canonical key wins if both are present. */
+function readField(payload: Record<string, unknown>, key: string): unknown {
+  if (key in payload) return payload[key];
+  for (const alias of FIELD_ALIASES[key] ?? []) {
+    if (alias in payload) return payload[alias];
+  }
+  return undefined;
+}
+
 function extractAppFields(payload: Record<string, unknown>): Record<string, unknown> {
   const out: Record<string, unknown> = {};
   for (const key of APPLICATION_FIELD_KEYS) {
-    if (key in payload) {
-      const normalized = normalize(key, payload[key]);
+    const raw = readField(payload, key);
+    if (raw !== undefined) {
+      const normalized = normalize(key, raw);
       if (normalized !== undefined && normalized !== null && normalized !== "") {
         out[key] = normalized;
       }

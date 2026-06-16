@@ -114,6 +114,11 @@ export const SUNBIZ_DEFAULT_SEQUENCES: DefaultSequence[] = [
     description:
       "Fires when a lead's application is fully submitted. Sets expectations + asks them to stay reachable.",
     trigger_event: "BRAVO_RECORD_STATUS_CHANGED",
+    // Fires when a lead's application is fully submitted. The bank-statement-upload
+    // form transitions the lead to 'submitted'; the full-application form ends at
+    // 'signed_application' (a separate "bank statements nag" sequence covers that
+    // stage). Keep 'submitted' here so this wait message doesn't collide with that
+    // sequence or stop firing for the bank-statement-upload path.
     trigger_filter: { entity: "lead", field: "stage", to: "submitted" },
     one_per_lead: true,
     steps: [

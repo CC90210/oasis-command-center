@@ -34,6 +34,37 @@ const SUNBIZ_SLUGS = new Set([
   "bank-statement-upload",
 ]);
 
+// ---------------------------------------------------------------------------
+// SOP §4 compliance inputs. business_state (2-letter) + industry (slug) feed
+// the lender restricted-states / restricted-industries hard-gates in
+// lib/lenders/match-fitness.ts. These MUST match scripts/seed_sunbiz_application_form_fields.py
+// (US_STATES / SUNBIZ_INDUSTRIES) verbatim so a template regenerate and a live
+// re-seed produce identical option sets. application-upsert.ts normalize()
+// upper-cases the state + lower-cases the industry, so the stored value matches
+// the lender catalog regardless of display label.
+// ---------------------------------------------------------------------------
+const US_STATES = [
+  "AL", "AK", "AZ", "AR", "CA", "CO", "CT", "DE", "DC", "FL", "GA", "HI",
+  "ID", "IL", "IN", "IA", "KS", "KY", "LA", "ME", "MD", "MA", "MI", "MN",
+  "MS", "MO", "MT", "NE", "NV", "NH", "NJ", "NM", "NY", "NC", "ND", "OH",
+  "OK", "OR", "PA", "RI", "SC", "SD", "TN", "TX", "UT", "VT", "VA", "WA",
+  "WV", "WI", "WY",
+];
+
+const SUNBIZ_INDUSTRIES = [
+  "restaurant", "retail", "ecommerce", "trucking", "transportation",
+  "construction", "auto", "auto_repair", "auto_sales", "beauty_salon",
+  "barbershop", "spa", "medical_practice", "dental_practice", "veterinary",
+  "fitness_gym", "professional_services", "law_firm", "accounting",
+  "real_estate", "wholesale", "manufacturing", "agriculture", "landscaping",
+  "cleaning", "moving_storage", "hospitality_hotel", "bar_nightclub",
+  "convenience_store", "gas_station", "liquor_store", "pharmacy",
+  "cannabis", "staffing", "childcare", "other",
+];
+
+const titleCase = (slug: string) =>
+  slug.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+
 type SunBizStep =
   | "initial-lead-capture"
   | "full-application"
@@ -147,6 +178,25 @@ const TEMPLATES: Record<
             type: "textarea",
             required: true,
             placeholder: "Brief description of your product or service",
+          },
+          // SOP §4 compliance inputs — discrete, machine-matchable fields on
+          // top of the free-text business_address. Without these the lender
+          // restricted-states / restricted-industries hard-gates stay dormant.
+          {
+            name: "business_state",
+            label: "Business state",
+            type: "select",
+            required: true,
+            help: "The state your business operates in — used to match you with lenders that fund your state.",
+            options: US_STATES.map((s) => ({ value: s, label: s })),
+          },
+          {
+            name: "industry",
+            label: "Industry",
+            type: "select",
+            required: true,
+            help: "Pick the closest match — routes your file to lenders that fund your industry.",
+            options: SUNBIZ_INDUSTRIES.map((v) => ({ value: v, label: titleCase(v) })),
           },
         ],
       },

@@ -133,6 +133,12 @@ export async function POST(
   const deal = extractSubmissionDeal(appData);
 
   // ApplicationProfile shape for buildShopOutPlan match scoring.
+  // merchant_state + industry are the SOP §4 restricted-state / restricted-
+  // industry inputs. They MUST be threaded here (the LIVE Gmail send path),
+  // not just in the planning /shop-out route — otherwise scoreLenderMatch
+  // never sees them and the compliance hard-gates stay dormant on real sends.
+  // Forms collect business_state (ISO 2-letter) + industry (slug); match-fitness
+  // upper-cases the state + lower-cases the industry at compare time.
   const application: ApplicationProfile = {
     id: applicationId,
     monthly_revenue: typeof appData.monthly_revenue === "number" ? appData.monthly_revenue : undefined,
@@ -140,6 +146,13 @@ export async function POST(
     applicant_fico: typeof appData.applicant_fico === "number" ? appData.applicant_fico : undefined,
     requested_amount: typeof appData.requested_amount === "number" ? appData.requested_amount : undefined,
     desired_product: typeof appData.desired_product === "string" ? appData.desired_product : undefined,
+    merchant_state:
+      typeof appData.business_state === "string"
+        ? appData.business_state
+        : typeof appData.merchant_state === "string"
+          ? appData.merchant_state
+          : undefined,
+    industry: typeof appData.industry === "string" ? appData.industry : undefined,
   };
 
   // Derive the agent CC list — single source of truth for the rep-fields
