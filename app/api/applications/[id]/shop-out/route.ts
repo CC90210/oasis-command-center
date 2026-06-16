@@ -39,7 +39,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { resolveSessionContext } from "@/lib/api-auth";
 import { buildShopOutPlan, recordShopOutThreads } from "@/lib/lenders/shop-out";
-import { getAgents, resolveSignerForOperator } from "@/lib/config/agents";
+import { deriveDealSigner, resolveSignerForOperator } from "@/lib/config/agents";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -343,20 +343,10 @@ export async function POST(
   // operator signer (no regression for the shared-inbox case).
   let effectiveSigner = signer;
   let effectiveAgentEmail = assignedRepEmail;
-  {
-    const agentByEmail = new Map(
-      getAgents().map((a) => [a.email.toLowerCase().trim(), a]),
-    );
-    const dealAgentEmails = new Set(
-      [...ccEmails, ...(assignedRepEmail ? [assignedRepEmail] : [])]
-        .map((e) => e.toLowerCase().trim())
-        .filter((e) => agentByEmail.has(e)),
-    );
-    if (dealAgentEmails.size === 1) {
-      const a = agentByEmail.get([...dealAgentEmails][0])!;
-      effectiveSigner = { name: a.name, email: a.email, phone: a.phone || signer.phone };
-      effectiveAgentEmail = a.email;
-    }
+  const dealSigner = deriveDealSigner([...ccEmails, assignedRepEmail]);
+  if (dealSigner) {
+    effectiveSigner = { ...dealSigner, phone: dealSigner.phone || signer.phone };
+    effectiveAgentEmail = dealSigner.email;
   }
 
   // Build the plan first — operator sees this on dry_run and we use

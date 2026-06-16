@@ -114,6 +114,35 @@ export function resolveSignerForOperator(
 }
 
 /**
+ * Derive the signer for a DEAL email from every agent-relevant address on it —
+ * the operator's CC list plus the auto-CC'd assigned rep. When exactly ONE
+ * distinct roster agent appears, the deal is theirs and they sign (name +
+ * email + phone). Otherwise returns null and the caller falls back to the
+ * operator signer / shared "SunBiz Submissions" identity.
+ *
+ * Unlike deriveSigner (sole-CC-element only), this tolerates a mixed list
+ * (lender CCs, dupes, the assigned rep) and isolates the single roster agent.
+ * One home for the "CC an agent → that agent signs" rule (Adon spec 2.4 +
+ * CC 2026-06-16) so the shop-out route, the lender-thread retry, and the
+ * lead-email path all personalize identically.
+ */
+export function deriveDealSigner(
+  emails: Array<string | null | undefined>,
+): { name: string; email: string; phone: string } | null {
+  const roster = getAgents();
+  const byEmail = new Map(roster.map((a) => [a.email.toLowerCase().trim(), a]));
+  const agentEmails = new Set<string>();
+  for (const e of emails) {
+    if (typeof e !== "string") continue;
+    const k = e.trim().toLowerCase();
+    if (k && byEmail.has(k)) agentEmails.add(k);
+  }
+  if (agentEmails.size !== 1) return null;
+  const a = byEmail.get([...agentEmails][0])!;
+  return { name: a.name, email: a.email, phone: a.phone };
+}
+
+/**
  * Derive the full signer (name + email + phone) from the final CC list
  * (Adon spec 2.4). Server-side wrapper around the pure deriveSignerName
  * rule — adds the email + phone lookup that needs the fs-touching
