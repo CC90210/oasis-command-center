@@ -715,6 +715,11 @@ async function initAnonymousLead(input: {
   if (repAssign) {
     leadData.assigned_to = repAssign.auth_user_id;
     leadData.assigned_agent_name = repAssign.name;
+  } else {
+    // No (or unknown) rep → lead is unassigned, but still give the Inquiry
+    // Welcomer drip a sane signer so {{lead.assigned_agent_name}} never renders
+    // blank ("Hi X, the SunBiz team at SunBiz Funding …").
+    leadData.assigned_agent_name = "the SunBiz team";
   }
 
   let lead;

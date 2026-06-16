@@ -353,6 +353,94 @@ function StepCard({
 }
 
 // ---------------------------------------------------------------------------
+// Per-agent interest links
+// ---------------------------------------------------------------------------
+
+// The SunBiz roster. rep keys are validated server-side against tenant members
+// (lib/forms/agent-routing.ts resolveRepAssignment) — these are just the
+// operator-facing labels for the copyable links. A new agent works the moment
+// they have a user_profiles row; add a row here to surface their link.
+const SUNBIZ_AGENTS: Array<{ key: string; label: string }> = [
+  { key: "jordan", label: "Jordan" },
+  { key: "alex", label: "Alex" },
+  { key: "ezra", label: "Ezra" },
+];
+
+function PerAgentLinksCard({
+  tenantSlug,
+  interestForm,
+}: {
+  tenantSlug: string | null;
+  interestForm: FormRow | null;
+}) {
+  const [copiedKey, setCopiedKey] = useState<string | null>(null);
+  if (!tenantSlug || !interestForm) return null;
+  const origin = typeof window !== "undefined" ? window.location.origin : "";
+
+  async function copy(key: string, url: string) {
+    try {
+      await navigator.clipboard.writeText(url);
+      setCopiedKey(key);
+      setTimeout(() => setCopiedKey(null), 1800);
+    } catch {
+      window.prompt("Copy this link:", url);
+    }
+  }
+
+  return (
+    <section className="space-y-3">
+      <div className="text-[10px] font-bold uppercase tracking-[0.14em] text-fg-muted">
+        Per-agent interest links
+      </div>
+      <div className="rounded-xl border border-bg-border bg-bg-panel shadow-card p-5 space-y-3">
+        <div className="text-xs text-fg-muted leading-relaxed">
+          Share each agent&apos;s own link to the Initial Lead Capture form. A submission lands in the
+          Opportunity Pipeline <strong className="text-fg">assigned to that agent</strong>, and the
+          Inquiry Welcomer drip texts + emails the applicant the full application — signed by them.
+          {!interestForm.enabled && (
+            <span className="text-amber-400">
+              {" "}
+              Heads up: the Initial Lead Capture form is currently disabled — enable it (open the
+              editor above) before sharing these links.
+            </span>
+          )}
+        </div>
+        <div className="space-y-2">
+          {SUNBIZ_AGENTS.map((a) => {
+            const url = `${origin}/f/${tenantSlug}/${interestForm.slug}?rep=${a.key}`;
+            return (
+              <div key={a.key} className="flex items-center gap-2">
+                <span className="w-14 shrink-0 text-sm font-bold text-fg">{a.label}</span>
+                <code className="flex-1 truncate rounded-md bg-bg-deep border border-bg-border px-2.5 py-1.5 font-mono text-[11px] text-fg-muted">
+                  {url}
+                </code>
+                <button
+                  type="button"
+                  onClick={() => copy(a.key, url)}
+                  className="inline-flex shrink-0 items-center gap-1.5 rounded-lg bg-bg-elev border border-bg-border text-fg-muted hover:text-fg hover:border-accent/40 px-3 py-1.5 text-xs font-bold transition-colors"
+                >
+                  {copiedKey === a.key ? (
+                    <>
+                      <Check className="w-3.5 h-3.5" />
+                      Copied
+                    </>
+                  ) : (
+                    <>
+                      <Copy className="w-3.5 h-3.5" />
+                      Copy
+                    </>
+                  )}
+                </button>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    </section>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Main export
 // ---------------------------------------------------------------------------
 
@@ -413,6 +501,14 @@ export function SunBizFormsClient({
           ))}
         </div>
       </section>
+
+      {/* ------------------------------------------------------------------ */}
+      {/* Per-agent interest links                                             */}
+      {/* ------------------------------------------------------------------ */}
+      <PerAgentLinksCard
+        tenantSlug={tenantSlug}
+        interestForm={slugMap.get("initial-lead-capture") ?? null}
+      />
 
       {/* ------------------------------------------------------------------ */}
       {/* Other forms                                                          */}
