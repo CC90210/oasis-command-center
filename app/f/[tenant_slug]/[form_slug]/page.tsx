@@ -128,10 +128,18 @@ async function loadForm(params: RouteParams): Promise<LoadResult> {
 
 export default async function AnonymousFormPage({
   params,
+  searchParams,
 }: {
   params: Promise<RouteParams>;
+  // ?rep=<jordan|alex|ezra> — per-agent routing. Each agent shares this same
+  // interest form with their own rep param; the submit route resolves it to
+  // assigned_to so the lead lands under that agent. Spoofing only reassigns
+  // among real tenant members (resolved server-side), never an outsider.
+  searchParams?: Promise<{ rep?: string }>;
 }) {
   const resolved = await params;
+  const sp = (await searchParams) || {};
+  const rep = typeof sp.rep === "string" && sp.rep.trim() ? sp.rep.trim().toLowerCase() : undefined;
   const result = await loadForm(resolved);
 
   if (!result.ok) {
@@ -152,6 +160,7 @@ export default async function AnonymousFormPage({
       anonymousInit={{
         tenant_slug: result.tenant_slug,
         form_slug: result.form.slug,
+        ...(rep ? { rep } : {}),
       }}
     />
   );

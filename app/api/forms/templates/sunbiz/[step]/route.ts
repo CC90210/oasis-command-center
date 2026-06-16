@@ -66,8 +66,15 @@ const TEMPLATES: Record<
         fields: [
           { name: "business_name", label: "Business name", type: "text", required: true },
           { name: "contact_name", label: "Your name", type: "text", required: true },
-          { name: "phone", label: "Phone", type: "phone", required: true },
           { name: "email", label: "Email", type: "email", required: true },
+          { name: "phone", label: "Phone", type: "phone", required: true },
+          {
+            name: "monthly_revenue",
+            label: "Monthly revenue",
+            type: "currency",
+            required: false,
+            help: "Rough average is fine — helps us route your file faster.",
+          },
           {
             name: "note",
             label: "Anything we should know?",
@@ -79,8 +86,10 @@ const TEMPLATES: Record<
         ],
       },
     ],
-    step_outcomes: { "0": "contacted" },
-    on_complete_stage: "contacted",
+    // Lands at hot_lead (the prospect actively engaged) so the Inquiry
+    // Welcomer drip fires and texts/emails the full-application link.
+    step_outcomes: { "0": "hot_lead" },
+    on_complete_stage: "hot_lead",
   },
 
   "full-application": {
@@ -265,19 +274,19 @@ const TEMPLATES: Record<
           },
           {
             name: "drivers_license",
-            label: "Driver's license (front)",
+            label: "Driver's license (front) — optional",
             type: "file_upload",
-            required: true,
+            required: false,
             accept: ["image/*", "application/pdf"],
-            help: "Clear photo of the front of the primary owner's license.",
+            help: "Optional — speeds up underwriting. Clear photo of the primary owner's license front.",
           },
           {
             name: "voided_check",
-            label: "Voided check",
+            label: "Voided check — optional",
             type: "file_upload",
-            required: true,
+            required: false,
             accept: ["application/pdf", "image/*"],
-            help: "From the business bank account that will receive funding.",
+            help: "Optional — speeds up funding. From the business bank account that will receive funds.",
           },
         ],
       },

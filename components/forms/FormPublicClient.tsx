@@ -42,7 +42,8 @@ type Props = {
    * token + lead on the first submit.
    */
   token: string | null;
-  anonymousInit?: { tenant_slug: string; form_slug: string };
+  // rep flows straight into submitBody.anonymous_init (per-agent routing).
+  anonymousInit?: { tenant_slug: string; form_slug: string; rep?: string };
 };
 
 type SubmitResponse = {

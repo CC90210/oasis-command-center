@@ -133,6 +133,27 @@ export async function upsertApplicationFromFormStep(input: {
 
   const db = getServiceSupabase();
 
+  // Propagate the lead's agent assignment to the application so the
+  // Opportunity Pipeline shows the deal under the right agent's name (the
+  // pipeline injects assigned_to_name from assigned_to via
+  // lib/assigned-names.ts). Best-effort — never blocks the upsert.
+  let leadAssignedTo: string | null = null;
+  try {
+    const leadRow = await db
+      .from("tenant_records")
+      .select("data")
+      .eq("tenant_id", input.tenantId)
+      .eq("entity_type", "lead")
+      .eq("id", input.leadId)
+      .maybeSingle();
+    const ld = (leadRow.data as { data?: Record<string, unknown> } | null)?.data;
+    if (ld && typeof ld.assigned_to === "string" && ld.assigned_to) {
+      leadAssignedTo = ld.assigned_to;
+    }
+  } catch {
+    // best-effort
+  }
+
   // Pick the most-recent application linked to this lead. Multiple rows
   // shouldn't happen but the .order().limit(1) is a defensive choice — if
   // a duplicate ever lands (operator manually created one + form created
@@ -157,12 +178,17 @@ export async function upsertApplicationFromFormStep(input: {
     // arrives, the form values overwrite — but typically the form leads
     // the operator, not the other way around).
     const existingData = existing.data || {};
-    const merged = {
+    const merged: Record<string, unknown> = {
       ...existingData,
       ...fields,
       last_form_step_index: input.stepIndex,
       last_form_submitted_at: new Date().toISOString(),
     };
+    // Set assigned_to only if the application doesn't already have one — don't
+    // clobber an operator's manual reassignment with the lead's value.
+    if (leadAssignedTo && !existingData.assigned_to) {
+      merged.assigned_to = leadAssignedTo;
+    }
     const updateRes = await db
       .from("tenant_records")
       .update({ data: merged })
@@ -182,6 +208,7 @@ export async function upsertApplicationFromFormStep(input: {
     data: {
       lead_id: input.leadId,
       ...fields,
+      ...(leadAssignedTo ? { assigned_to: leadAssignedTo } : {}),
       created_via: "form_submission",
       source_form_id: input.formId,
       last_form_step_index: input.stepIndex,

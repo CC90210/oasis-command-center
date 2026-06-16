@@ -46,6 +46,7 @@ import { dispatchLeadStageEvent } from "@/lib/lead-stage-dispatcher";
 import { resolvePublicForm } from "@/lib/forms/public-resolver";
 import { maybeQueueResumeEmail } from "@/lib/forms/maybe-queue-resume";
 import { upsertApplicationFromFormStep } from "@/lib/forms/application-upsert";
+import { resolveRepAssignment, mintFullApplicationLink } from "@/lib/forms/agent-routing";
 import { createHash } from "node:crypto";
 
 export const runtime = "nodejs";
@@ -68,6 +69,9 @@ type SubmitBody = {
   anonymous_init?: {
     tenant_slug?: string;
     form_slug?: string;
+    // ?rep=<jordan|alex|ezra> from the per-agent interest link — resolved to
+    // assigned_to so the lead lands under that agent.
+    rep?: string;
   };
 };
 
@@ -157,6 +161,8 @@ export async function POST(req: NextRequest) {
       formSlug,
       payload: body.payload || {},
       ip,
+      rep: body.anonymous_init.rep,
+      origin: req.nextUrl.origin,
     });
     if (!anonResult.ok) {
       return NextResponse.json(
@@ -659,6 +665,10 @@ async function initAnonymousLead(input: {
   formSlug: string;
   payload: Record<string, unknown>;
   ip: string | null;
+  /** ?rep=<agent> from a per-agent interest link → resolved to assigned_to. */
+  rep?: string;
+  /** Request origin, for minting the absolute full-application link. */
+  origin: string;
 }): Promise<
   | { ok: true; link: FormLinkPayload; token: string }
   | { ok: false; error: string; status: number }
@@ -696,6 +706,17 @@ async function initAnonymousLead(input: {
   const phone = pick("phone");
   if (phone) leadData.phone = phone;
 
+  // Per-agent routing: resolve ?rep → the agent's user_profiles.auth_user_id
+  // and stamp it as assigned_to (the pipeline + drawer show the agent's NAME
+  // via lib/assigned-names.ts). assigned_agent_name is stashed for the
+  // Inquiry Welcomer drip's {{lead.assigned_agent_name}}. Unknown rep → the
+  // lead lands unassigned (resolveRepAssignment returns null), never crashes.
+  const repAssign = await resolveRepAssignment(form.tenant_id, input.rep);
+  if (repAssign) {
+    leadData.assigned_to = repAssign.auth_user_id;
+    leadData.assigned_agent_name = repAssign.name;
+  }
+
   let lead;
   try {
     lead = await createRecord({
@@ -715,6 +736,25 @@ async function initAnonymousLead(input: {
   });
   if (token === null) {
     return { ok: false, error: "form_links_misconfigured", status: 503 };
+  }
+
+  // Mint the per-lead FULL application form link + stash on lead.data so the
+  // Inquiry Welcomer drip's {{lead.application_url}} resolves (sequence_runner
+  // spreads lead.data into the drip context). Best-effort: no enabled
+  // full-application form yet, or signing unconfigured → leave it unset and
+  // the drip step degrades rather than sending a broken link.
+  const applicationUrl = await mintFullApplicationLink(
+    input.origin,
+    form.tenant_id,
+    tenantSlug,
+    lead.id,
+  );
+  if (applicationUrl) {
+    await db
+      .from("tenant_records")
+      .update({ data: { ...leadData, application_url: applicationUrl } })
+      .eq("id", lead.id)
+      .eq("tenant_id", form.tenant_id);
   }
 
   return {
