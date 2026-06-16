@@ -31,25 +31,28 @@ export type StageMeta = {
 // 064). Active funnel left-to-right (hot_lead → submitted), then terminal
 // states (declined, default) on the right.
 //
-// 2026-06-08 — Phase 1 expansion (Adon MCA brief): added 5 stages to cover
-// the post-funding lifecycle the existing 9 didn't model. The new stages
-// sit AFTER `submitted` in the active funnel and BEFORE the terminal
-// states. They give the operator a queryable view into the renewal and
-// re-engagement segments Adon's brief identifies as highest-ROI:
+// 2026-06-08 — Phase 1 expansion (Adon MCA brief): added post-funding lifecycle
+// stages the original 9 didn't model. They sit AFTER `submitted` and BEFORE the
+// terminal states:
 //   - funded:            money hit the merchant's account (handoff from
 //                         opportunity-side `funded` into the lead's lifecycle
-//                         so we can run the Onboarding/Mid-Term/Renewal
-//                         sequences off the lead row).
-//   - renewal_eligible:  funded_at + term_days × 0.65 elapsed; ready for
-//                         the renewal pitch.
+//                         so we can run the Onboarding/Mid-Term sequences off
+//                         the lead row).
 //   - ghost:             applied but stopped responding (highest-ROI
 //                         re-engagement segment per brief §2).
-//   - renewed_elsewhere: funded the renewal with another broker — cold
-//                         for 6mo then re-engageable.
 //   - opted_out:         STOP received OR /unsubscribe POST landed.
 //                         Distinct from `data.opted_out=true` because
 //                         the stage is visible in the kanban; the flag
 //                         is what send_gateway reads to block sends.
+//
+// 2026-06-16 — renewal_eligible + renewed_elsewhere REMOVED from the lead
+// pipeline (CC). The renewal lifecycle is owned entirely by the dedicated
+// Renewals page (/renewals), which derives renewal urgency from funded_deals
+// (funded_at + term) and the funded_deal.status enum [funded, renewal_due,
+// renewed, lost, default] — NOT from a lead stage. Keeping renewal columns in
+// the lead kanban was redundant org clutter (nothing ever wrote those stages —
+// they were absent from the lead.stage enum). Funded leads still show under
+// `funded`; their renewal tracking lives on the Renewals page.
 export const LEAD_PIPELINE_STAGES: StageMeta[] = [
   { key: "hot_lead",           label: "Hot Lead",           bg: "#C0842F", fg: "#FFFFFF" },
   { key: "missing_info",       label: "Missing Info",       bg: "#3978BE", fg: "#FFFFFF" },
@@ -59,9 +62,7 @@ export const LEAD_PIPELINE_STAGES: StageMeta[] = [
   { key: "signed_application", label: "Signed Application", bg: "#32876B", fg: "#FFFFFF" },
   { key: "submitted",          label: "Submitted",          bg: "#4C6580", fg: "#FFFFFF" },
   { key: "funded",             label: "Funded",             bg: "#1F7A56", fg: "#FFFFFF" },
-  { key: "renewal_eligible",   label: "Renewal Eligible",   bg: "#3F8F73", fg: "#FFFFFF" },
   { key: "ghost",              label: "Ghost",              bg: "#6F6F75", fg: "#FFFFFF" },
-  { key: "renewed_elsewhere",  label: "Renewed Elsewhere",  bg: "#7B5A3D", fg: "#FFFFFF" },
   { key: "declined",           label: "Declined",           bg: "#9B3D45", fg: "#FFFFFF" },
   { key: "default",            label: "Default",            bg: "#62666F", fg: "#FFFFFF" },
   { key: "opted_out",          label: "Opted Out",          bg: "#5C4147", fg: "#FFFFFF" },
