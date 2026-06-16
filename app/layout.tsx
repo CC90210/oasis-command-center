@@ -229,8 +229,13 @@ export default async function RootLayout({
     ? demoProfileSlug
     : pathOverrideSlug ?? tenantProfileSlug;
   const manifest = isFullBleed ? null : await getManifest(manifestSlug);
-  const isCrmWideShell = /^\/t\/[a-z0-9_-]+\/(leads|applications|pipeline)(?:\/|$)/i.test(pathname);
-  const contentWidthClass = isCrmWideShell ? "max-w-none" : "max-w-7xl";
+  // All constrained pages share one width (max-w-7xl) so the CRM routes
+  // (leads/applications/pipeline) match the Agents tab, Dashboard, and every
+  // other surface instead of stretching edge-to-edge. The pipeline's stat
+  // grid is responsive (grid-cols-2 → xl:grid-cols-6) and reflows cleanly at
+  // this width, so it no longer needs the full-bleed max-w-none that
+  // 832872e ("Fix SunBiz CRM pipeline grids", 2026-05-20) introduced.
+  const contentWidthClass = "max-w-7xl";
   // Chat-shell mode: the Agents tab (app/agent/page.tsx, nav href "/agent")
   // renders a full-screen Claude-style chat. Unlike isFullBleed, the nav
   // sidebar STAYS (collapsible via the existing toggle) — we only drop the
