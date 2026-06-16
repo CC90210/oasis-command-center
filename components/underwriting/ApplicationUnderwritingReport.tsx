@@ -331,7 +331,7 @@ export function ApplicationUnderwritingReport({
             Raw audit data
             <span className="ml-1 text-fg-muted">(parser + debt analysis JSON)</span>
           </summary>
-          <div className="mt-2 rounded-md bg-bg-deep border border-bg-border p-3 max-h-80 overflow-y-auto">
+          <div className="mt-2 rounded-md bg-bg-panel border border-bg-border p-3 max-h-80 overflow-y-auto">
             <pre className="text-[10.5px] font-mono text-fg-muted whitespace-pre-wrap break-all">
               {JSON.stringify(
                 { parser_output: run.parser_output, debt_analysis: run.debt_analysis },
@@ -365,8 +365,11 @@ export function ApplicationUnderwritingReport({
 }
 
 function Signal({ label, value }: { label: string; value: string }) {
+  // bg-bg-panel/60 mirrors SalesMetricCard's Metric tiles (same view) — keeps
+  // these banking-signal tiles visually identical to the SOP card's tiles.
+  // (bg-bg-deep would be transparent — there's no `deep` key in the bg scale.)
   return (
-    <div className="rounded-lg border border-bg-border bg-bg-deep p-3">
+    <div className="rounded-lg border border-bg-border bg-bg-panel/60 p-3">
       <div className="text-[10px] uppercase tracking-wider text-fg-muted font-semibold mb-1">
         {label}
       </div>

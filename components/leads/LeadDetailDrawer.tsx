@@ -564,11 +564,11 @@ function UnderwritingBadge({
   onRerun: () => void;
   rerunPending: boolean;
 }) {
-  // The drawer (this component's parent) is the canonical underwriting
-  // surface — UnderwritingPanel further down renders the metric card +
-  // banking signals + risk flags + sales angle inline. There's no
-  // per-application detail page to deep-link to, so "Run underwriting →"
-  // is a button calling onRerun directly rather than a Link.
+  // Compact status line. The BankTab below now renders the full SOP
+  // SalesMetricCard inline on completion, plus a "View full underwriting
+  // report →" link to the per-application page (/t/[slug]/applications/[id]).
+  // The no-run "Run underwriting →" affordance calls onRerun directly rather
+  // than navigating, since there's nothing to view until a run exists.
   if (!run) {
     return (
       <div className="flex items-center gap-2 flex-wrap">
