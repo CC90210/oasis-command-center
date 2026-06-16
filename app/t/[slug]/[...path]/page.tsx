@@ -22,6 +22,7 @@ import { TenantAutomations } from "@/components/automations/TenantAutomations";
 import { LeadTimelinePanel } from "@/components/leads/LeadTimelinePanel";
 import { LeadDocumentsPanel } from "@/components/leads/LeadDocumentsPanel";
 import { ApplicationUnderwritingReport } from "@/components/underwriting/ApplicationUnderwritingReport";
+import { attachAssignedNames } from "@/lib/assigned-names";
 import { StageRail } from "@/components/manifest/StageRail";
 import { PipelineSearchableTable } from "@/components/manifest/PipelineSearchableTable";
 import { PageSearchBar } from "@/components/manifest/PageSearchBar";
@@ -973,6 +974,12 @@ async function SingleEntityPipeline({
   // SunBiz is the first full implementation, but the mechanics are the
   // standard leads/applications surface for Oasis and future tenants too.
   if (entity.name === "lead" || entity.name === "application") {
+    // Resolve assigned_to (auth_user_id) → assigned_to_name so the pipeline's
+    // "Agent" column shows the operator's name, not the raw UUID. rowModel
+    // already reads assigned_to_name with a UUID fallback; this populates it.
+    const namedRows = tenantId
+      ? await attachAssignedNames(searched, tenantId)
+      : searched;
     return (
       <LeadPipelineView
         slug={slug}
@@ -980,7 +987,7 @@ async function SingleEntityPipeline({
         entityLabel={entity.label}
         stages={stages}
         stageField={stageField}
-        rows={searched}
+        rows={namedRows}
         stageFilter={stageFilter}
         query={query}
         basePath={page.path}

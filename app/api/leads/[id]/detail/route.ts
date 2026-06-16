@@ -14,6 +14,7 @@ import { NextResponse, type NextRequest } from "next/server";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { getRecord, listRecords } from "@/lib/manifest/data";
 import { resolveTenantId } from "@/lib/api-auth";
+import { buildMemberNameMap, withAssignedName } from "@/lib/assigned-names";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -82,11 +83,23 @@ export async function GET(
 
   const [docsRes, apps] = await Promise.all([docsPromise, appPromise]);
 
+  // Resolve assigned_to (auth_user_id) → assigned_to_name so the drawer's
+  // "Assigned to" field shows the operator's name instead of the raw UUID.
+  // One member-map fetch covers both the record and its linked application.
+  const nameMap = await buildMemberNameMap(tenantId);
+  const recordData = withAssignedName(
+    record.data as Record<string, unknown>,
+    nameMap,
+  );
+
   let linkedApplication: { id: string; data: Record<string, unknown> } | null = null;
   if (apps.rows[0]) {
     linkedApplication = {
       id: apps.rows[0].id,
-      data: apps.rows[0].data as Record<string, unknown>,
+      data: withAssignedName(
+        apps.rows[0].data as Record<string, unknown>,
+        nameMap,
+      ),
     };
   }
 
@@ -95,7 +108,7 @@ export async function GET(
     record: {
       id: record.id,
       entity,
-      data: record.data,
+      data: recordData,
       created_at: record.created_at,
       updated_at: record.updated_at,
     },
