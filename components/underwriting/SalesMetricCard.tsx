@@ -44,6 +44,39 @@ type MetricCard = {
   }>;
   red_flags: string[];
   target_lender_tier: string | null;
+  // SOP Parts 3-5 extensions — all emitted by grader.py build_metric_card as
+  // of 2026-06-16. Optional + render-if-present so legacy rows + any future
+  // contract drift degrade gracefully instead of crashing.
+  positioning_merchant_safe?: string | null;
+  grade_justification?: string | null;
+  gross_deposits_total?: number | null;
+  avg_daily_balance?: number | null;
+  time_in_business_months?: number | null;
+  data_source?: string | null;
+  review_period?: {
+    start?: string | null;
+    end?: string | null;
+    months?: number | null;
+  } | null;
+  confidence_notes?: string[] | null;
+  proposed_play?: {
+    type?: string | null;
+    target_amount?: number | null;
+    target_funder_tier_internal?: string | null;
+    expected_terms?: string | null;
+    commission_est?: number | null;
+  } | null;
+  collections?: Array<{
+    servicer?: string | null;
+    original_lender?: string | null;
+    payment?: number | null;
+    status?: string | null;
+  }> | null;
+  other_debt?: Array<{
+    vendor?: string | null;
+    type?: string | null;
+    payment?: number | null;
+  }> | null;
 };
 
 const GRADE_TONE: Record<string, string> = {
@@ -57,8 +90,8 @@ const GRADE_TONE: Record<string, string> = {
 function formatUsd(n: number | null | undefined): string {
   // Fail-closed: a missing/non-finite number renders "—", never crashes the
   // whole card on n.toLocaleString(). Valid numbers are unchanged. Guards
-  // against the contract drift the VPS grader + Plaid partial-sync work
-  // introduces (a graded card that, mid-change, omits a numeric field).
+  // against grader contract drift (a graded card that, mid-change, omits a
+  // numeric field).
   if (typeof n !== "number" || !Number.isFinite(n)) return "—";
   return n.toLocaleString("en-US", { maximumFractionDigits: 0 });
 }
@@ -203,6 +236,43 @@ export function SalesMetricCard({ debtAnalysis }: { debtAnalysis: unknown }) {
           tone={card.nsfs_90d > 6 ? "bad" : card.nsfs_90d > 3 ? "warn" : "ok"}
         />
       </div>
+
+      {/* MCA leverage bar (SOP Part 3) — the "how over-leveraged" visual.
+          Green <25% · amber 25-70% · red >70%, matching the grade bands. */}
+      {card.mca_leverage_pct !== null && (
+        <div className="px-0.5">
+          <div className="flex items-center justify-between text-[10px] uppercase tracking-wider text-fg-dim font-semibold mb-1">
+            <span>MCA leverage</span>
+            <span className="tabular-nums">{card.mca_leverage_pct.toFixed(1)}% of true revenue</span>
+          </div>
+          <div className="h-1.5 w-full rounded-full bg-bg-panel overflow-hidden">
+            <div
+              className={`h-full rounded-full ${
+                card.mca_leverage_pct < 25
+                  ? "bg-emerald-500"
+                  : card.mca_leverage_pct < 70
+                    ? "bg-amber-500"
+                    : "bg-red-500"
+              }`}
+              style={{ width: `${Math.min(100, Math.max(2, card.mca_leverage_pct))}%` }}
+            />
+          </div>
+        </div>
+      )}
+
+      {/* Suggested positioning (SOP Part 3) — the merchant-safe one-liner the
+          rep uses to work the deal. NEVER contains lender names (grader
+          guarantees this; SOP Hard Rule). */}
+      {card.positioning_merchant_safe && (
+        <div className="rounded-lg border border-bg-border bg-bg-panel/40 px-3 py-2">
+          <div className="text-[10px] uppercase tracking-wider text-fg-dim font-semibold mb-0.5">
+            Suggested positioning
+          </div>
+          <div className="text-[12.5px] text-fg-muted leading-relaxed">
+            {card.positioning_merchant_safe}
+          </div>
+        </div>
+      )}
 
       {/* DEATH-BLOW collections strip — only when flagged, full red. */}
       {card.collections_flag && (

@@ -258,6 +258,11 @@ export function ApplicationUnderwritingReport({
 
   // status === "complete"
   const riskFlags = Array.isArray(run.risk_flags) ? run.risk_flags : [];
+  // SOP Part 4 detailed-tab sections read from the metric_card the grader
+  // emits (grade justification, proposed play, collections, other debt,
+  // provenance). All render-if-present so legacy rows degrade gracefully.
+  const card = extractMetricCard(run.debt_analysis);
+  const play = card?.proposed_play;
   return (
     <Card
       title="Underwriting"
@@ -280,6 +285,99 @@ export function ApplicationUnderwritingReport({
       <div className="space-y-4">
         {/* SOP §7 grade + verified positions + leverage + red flags. */}
         <SalesMetricCard debtAnalysis={run.debt_analysis} />
+
+        {/* SOP Part 4 §6 — grade justification (numbers behind the grade). */}
+        {card?.grade_justification && (
+          <div className="space-y-1.5">
+            <div className="text-[10px] uppercase tracking-wider text-fg-dim font-semibold">
+              Grade justification
+            </div>
+            <p className="text-[13px] text-fg-muted leading-relaxed">{card.grade_justification}</p>
+          </div>
+        )}
+
+        {/* SOP Part 4 §7 — proposed play. Funder tier is INTERNAL-only. */}
+        {play && (play.type || play.target_amount != null) && (
+          <div className="rounded-lg border border-accent/30 bg-accent/5 px-3 py-2.5 space-y-1.5">
+            <div className="text-[10px] uppercase tracking-wider text-accent font-semibold">
+              Proposed play
+            </div>
+            <div className="text-[14px] font-semibold text-fg">{play.type || "—"}</div>
+            <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 text-[12px]">
+              {play.target_amount != null && (
+                <div>
+                  <span className="text-fg-dim">Target </span>
+                  <span className="font-semibold text-fg tabular-nums">{fmt(play.target_amount, "$")}</span>
+                </div>
+              )}
+              {play.target_funder_tier_internal && (
+                <div>
+                  <span className="text-fg-dim">Tier </span>
+                  <span className="font-mono text-fg">{play.target_funder_tier_internal}</span>{" "}
+                  <span className="text-[9px] uppercase tracking-wider text-amber-300/70">internal</span>
+                </div>
+              )}
+              {play.commission_est != null && (
+                <div>
+                  <span className="text-fg-dim">Est. commission </span>
+                  <span className="font-semibold text-emerald-300 tabular-nums">{fmt(play.commission_est, "$")}</span>
+                </div>
+              )}
+            </div>
+            {play.expected_terms && (
+              <div className="text-[11.5px] text-fg-dim">Expected terms: {play.expected_terms}</div>
+            )}
+          </div>
+        )}
+
+        {/* SOP Part 4 §4 — collections / defaulted MCAs (death-blow detail). */}
+        {Array.isArray(card?.collections) && card!.collections!.length > 0 && (
+          <div className="space-y-1.5">
+            <div className="text-[10px] uppercase tracking-wider text-red-300 font-semibold">
+              Collections / defaulted MCAs
+            </div>
+            <div className="rounded-lg border border-red-500/30 bg-red-500/5 divide-y divide-red-500/15">
+              {card!.collections!.map((c, i) => (
+                <div key={i} className="px-3 py-2 flex items-center gap-3 text-[12px]">
+                  <div className="flex-1 font-semibold text-red-200 truncate">
+                    {c.servicer || "Unknown servicer"}
+                    {c.original_lender ? ` (orig: ${c.original_lender})` : ""}
+                  </div>
+                  {c.payment != null && (
+                    <div className="font-mono tabular-nums text-red-200/80">{fmt(c.payment, "$")}/mo</div>
+                  )}
+                  {c.status && (
+                    <div className="text-red-300/70 text-[10.5px] uppercase tracking-wider">{c.status}</div>
+                  )}
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* SOP Part 4 §5 — equipment / other debt (NOT counted as positions). */}
+        {Array.isArray(card?.other_debt) && card!.other_debt!.length > 0 && (
+          <div className="space-y-1.5">
+            <div className="text-[10px] uppercase tracking-wider text-fg-dim font-semibold">
+              Equipment / other debt <span className="normal-case text-fg-dim/70">(not MCA positions)</span>
+            </div>
+            <div className="rounded-lg border border-bg-border bg-bg-panel/40 divide-y divide-bg-border">
+              {card!.other_debt!.map((d, i) => (
+                <div key={i} className="px-3 py-2 flex items-center gap-3 text-[12px]">
+                  <div className="flex-1 text-fg truncate">{d.vendor || "—"}</div>
+                  {d.type && (
+                    <div className="text-fg-dim text-[10.5px] uppercase tracking-wider">
+                      {String(d.type).replace(/_/g, " ")}
+                    </div>
+                  )}
+                  {d.payment != null && (
+                    <div className="font-mono tabular-nums text-fg-muted">{fmt(d.payment, "$")}/mo</div>
+                  )}
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
 
         {/* Banking signals the SOP card doesn't surface. */}
         <div className="space-y-1.5">
@@ -328,6 +426,36 @@ export function ApplicationUnderwritingReport({
             </div>
           </div>
         )}
+
+        {/* SOP Part 4 §10 — data provenance + confidence. Which numbers are
+            confirmed vs estimated, the review window, and the data source. */}
+        {card &&
+          (card.data_source ||
+            card.review_period ||
+            (Array.isArray(card.confidence_notes) && card.confidence_notes.length > 0)) && (
+            <div className="space-y-1.5">
+              <div className="text-[10px] uppercase tracking-wider text-fg-dim font-semibold">
+                Data provenance &amp; confidence
+              </div>
+              <div className="space-y-0.5 text-[11.5px] text-fg-dim leading-relaxed">
+                {(card.data_source || card.review_period) && (
+                  <div>
+                    {card.data_source ? `Source: ${card.data_source}` : ""}
+                    {card.review_period && (card.review_period.start || card.review_period.months)
+                      ? `${card.data_source ? " · " : ""}Review period: ${card.review_period.months ?? "?"} mo (${card.review_period.start ?? "?"} → ${card.review_period.end ?? "?"})`
+                      : ""}
+                  </div>
+                )}
+                {Array.isArray(card.confidence_notes) &&
+                  card.confidence_notes.map((n, i) => (
+                    <div key={i} className="flex items-start gap-1.5">
+                      <span className="text-fg-dim/60">•</span>
+                      <span>{n}</span>
+                    </div>
+                  ))}
+              </div>
+            </div>
+          )}
 
         <details className="group">
           <summary className="cursor-pointer text-[11px] text-fg-dim hover:text-fg select-none flex items-center gap-1">
