@@ -39,7 +39,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { resolveSessionContext } from "@/lib/api-auth";
 import { buildShopOutPlan, recordShopOutThreads } from "@/lib/lenders/shop-out";
-import { resolveSignerForOperator } from "@/lib/config/agents";
+import { getAgents, resolveSignerForOperator } from "@/lib/config/agents";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -331,6 +331,34 @@ export async function POST(
     }
   }
 
+  // ── Personalize the signer to the CC'd agent (Adon spec 2.4 + CC 2026-06-16).
+  // When exactly ONE roster agent is on the deal's email — the operator's CC
+  // list OR the auto-CC'd assigned rep — the deal is theirs, so they sign the
+  // body ({{agent.first_name}}), the signature (— Name), AND the footer
+  // ("receiving this from Name at SunBiz Funding"). All three flow from the
+  // `signer` payload below + the body's assigned_rep_email. This makes the SENT
+  // email match the client-side preview (deriveSignerName), which previously
+  // diverged because the send signed as whoever clicked Send
+  // (resolveSignerForOperator → "Matt"). Zero or multiple agents → keep the
+  // operator signer (no regression for the shared-inbox case).
+  let effectiveSigner = signer;
+  let effectiveAgentEmail = assignedRepEmail;
+  {
+    const agentByEmail = new Map(
+      getAgents().map((a) => [a.email.toLowerCase().trim(), a]),
+    );
+    const dealAgentEmails = new Set(
+      [...ccEmails, ...(assignedRepEmail ? [assignedRepEmail] : [])]
+        .map((e) => e.toLowerCase().trim())
+        .filter((e) => agentByEmail.has(e)),
+    );
+    if (dealAgentEmails.size === 1) {
+      const a = agentByEmail.get([...dealAgentEmails][0])!;
+      effectiveSigner = { name: a.name, email: a.email, phone: a.phone || signer.phone };
+      effectiveAgentEmail = a.email;
+    }
+  }
+
   // Build the plan first — operator sees this on dry_run and we use
   // it for the actual send pass below.
   const planResult = await buildShopOutPlan({
@@ -341,7 +369,7 @@ export async function POST(
     attachments,
     subject_template: body.subject_template,
     body_template: body.body_template,
-    assigned_rep_email: assignedRepEmail,
+    assigned_rep_email: effectiveAgentEmail,
   });
   if (!planResult.ok) {
     return NextResponse.json({ ok: false, error: planResult.error }, { status: 500 });
@@ -478,7 +506,7 @@ export async function POST(
   // leaves threads at pending so the operator can retry.
   const physicalSend =
     queued > 0
-      ? await triggerPhysicalSend(req, applicationId, signer)
+      ? await triggerPhysicalSend(req, applicationId, effectiveSigner)
       : { status: "skipped" as const, message: "no threads queued (all blocked)" };
 
   return NextResponse.json({
