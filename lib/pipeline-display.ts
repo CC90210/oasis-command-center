@@ -32,8 +32,10 @@ export const PIPELINE_COLUMNS: Record<string, PipelineColumn[]> = {
     { key: "monthly_revenue", label: "Monthly Rev" },
   ],
   application: [
-    { key: "lead_id", label: "Lead" },
-    { key: "lender_id", label: "Lender" },
+    // Merchant name lives on the application row (business_name, required) —
+    // show it instead of the raw lead_id UUID hash the superview used to
+    // render under "Lead". Matches LeadPipelineView, which reads business_name.
+    { key: "business_name", label: "Merchant" },
     { key: "requested_amount", label: "Requested Amt" },
     { key: "submitted_at", label: "Submitted" },
   ],

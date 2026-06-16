@@ -96,6 +96,19 @@ export function SalesMetricCard({ debtAnalysis }: { debtAnalysis: unknown }) {
   const tone = GRADE_TONE[card.grade] || GRADE_TONE.D;
   const isJunk = card.grade === "JUNK";
 
+  // True-vs-gross revenue — SOP Part 3 calls this one of the four signals
+  // that most change how a rep works the deal. Gross = true + excluded
+  // credits (transfers / MCA wires / owner injections the grader stripped).
+  const grossDeposits = card.true_monthly_revenue + (card.excluded_credits_monthly || 0);
+  const pctExcluded =
+    grossDeposits > 0
+      ? Math.round((card.excluded_credits_monthly / grossDeposits) * 100)
+      : 0;
+  const revenueSub =
+    card.excluded_credits_monthly > 0
+      ? `Gross $${formatUsd(grossDeposits)} · ${pctExcluded}% excluded`
+      : card.revenue_note;
+
   return (
     <div className="space-y-3">
       {/* Header strip — Grade + Recommendation, big and unmissable. */}
@@ -131,7 +144,7 @@ export function SalesMetricCard({ debtAnalysis }: { debtAnalysis: unknown }) {
         <Metric
           label="True monthly revenue"
           value={`$${formatUsd(card.true_monthly_revenue)}`}
-          sub={card.revenue_note}
+          sub={revenueSub}
         />
         <Metric
           label="Active MCA positions"
