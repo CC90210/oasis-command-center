@@ -189,6 +189,11 @@ export async function upsertApplicationFromFormStep(input: {
     if (leadAssignedTo && !existingData.assigned_to) {
       merged.assigned_to = leadAssignedTo;
     }
+    // Backfill a pipeline status if the application never got one — don't
+    // clobber an operator who has already advanced the deal.
+    if (!existingData.status) {
+      merged.status = "application_in";
+    }
     const updateRes = await db
       .from("tenant_records")
       .update({ data: merged })
@@ -209,6 +214,10 @@ export async function upsertApplicationFromFormStep(input: {
       lead_id: input.leadId,
       ...fields,
       ...(leadAssignedTo ? { assigned_to: leadAssignedTo } : {}),
+      // Land in the first Opportunity Pipeline stage so the deal actually shows
+      // up on the Applications page (the pipeline groups by `status`; a null
+      // status would leave the form-created application invisible).
+      status: "application_in",
       created_via: "form_submission",
       source_form_id: input.formId,
       last_form_step_index: input.stepIndex,

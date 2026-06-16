@@ -46,7 +46,7 @@ import { dispatchLeadStageEvent } from "@/lib/lead-stage-dispatcher";
 import { resolvePublicForm } from "@/lib/forms/public-resolver";
 import { maybeQueueResumeEmail } from "@/lib/forms/maybe-queue-resume";
 import { upsertApplicationFromFormStep } from "@/lib/forms/application-upsert";
-import { resolveRepAssignment, mintFullApplicationLink } from "@/lib/forms/agent-routing";
+import { resolveRepAssignment, mintFullApplicationLink, findExistingLead } from "@/lib/forms/agent-routing";
 import { createHash } from "node:crypto";
 
 export const runtime = "nodejs";
@@ -687,51 +687,80 @@ async function initAnonymousLead(input: {
   // raw payload in the form_submissions row.
   const pick = (k: string) =>
     typeof input.payload[k] === "string" ? (input.payload[k] as string) : undefined;
-  const leadData: Record<string, unknown> = {
-    // Migration 064 (2026-05-23): public-form submissions land as
-    // hot_lead (the prospect actively engaged by filling out the form,
-    // which is the literal definition of hot). Replaces the old
-    // "imported" landing stage which was a cold-CSV-ingest concept.
-    stage: "hot_lead",
-    source: "public_form",
-    created_from_form_id: form.id,
-    created_from_ip_hash: input.ip ? hashIp(input.ip) : null,
-  };
+
+  // Merchant-entered contact fields — seed a new lead OR merge into an existing
+  // one (smart matching below). Email lowercased so dedup matches reliably.
+  const contactFields: Record<string, unknown> = {};
   const name = pick("contact_name") || pick("name") || pick("full_name");
-  if (name) leadData.contact_name = name;
+  if (name) contactFields.contact_name = name;
   const business = pick("business_name") || pick("company");
-  if (business) leadData.business_name = business;
-  const email = pick("email");
-  if (email) leadData.email = email;
+  if (business) contactFields.business_name = business;
+  const emailRaw = pick("email");
+  const email = emailRaw ? emailRaw.trim().toLowerCase() : undefined;
+  if (email) contactFields.email = email;
   const phone = pick("phone");
-  if (phone) leadData.phone = phone;
+  if (phone) contactFields.phone = phone;
+  const monthlyRev = pick("monthly_revenue");
+  if (monthlyRev) contactFields.monthly_revenue = monthlyRev;
 
-  // Per-agent routing: resolve ?rep → the agent's user_profiles.auth_user_id
-  // and stamp it as assigned_to (the pipeline + drawer show the agent's NAME
-  // via lib/assigned-names.ts). assigned_agent_name is stashed for the
-  // Inquiry Welcomer drip's {{lead.assigned_agent_name}}. Unknown rep → the
-  // lead lands unassigned (resolveRepAssignment returns null), never crashes.
+  // Per-agent routing: resolve ?rep → the agent's user_profiles.auth_user_id.
   const repAssign = await resolveRepAssignment(form.tenant_id, input.rep);
-  if (repAssign) {
-    leadData.assigned_to = repAssign.auth_user_id;
-    leadData.assigned_agent_name = repAssign.name;
-  } else {
-    // No (or unknown) rep → lead is unassigned, but still give the Inquiry
-    // Welcomer drip a sane signer so {{lead.assigned_agent_name}} never renders
-    // blank ("Hi X, the SunBiz team at SunBiz Funding …").
-    leadData.assigned_agent_name = "the SunBiz team";
-  }
 
-  let lead;
-  try {
-    lead = await createRecord({
-      tenant_id: form.tenant_id,
-      entity: "lead",
-      data: leadData,
-    });
-  } catch (err) {
-    const detail = err instanceof Error ? err.message : "unknown";
-    return { ok: false, error: `lead_create_failed: ${detail}`, status: 500 };
+  // SMART MATCHING (CC 2026-06-16): a returning merchant who opens a fresh form
+  // link + re-enters their details must NOT spawn a duplicate lead. Match an
+  // existing lead by email/phone and route the new info into that SAME file
+  // (uploads attach to lead_id, so they land on the existing file too).
+  const existing = await findExistingLead(form.tenant_id, { email, phone });
+
+  let lead: { id: string; data: Record<string, unknown> };
+  if (existing) {
+    // Merge the new contact info; PRESERVE the existing assignment + stage +
+    // application_url — a re-submission shouldn't steal the deal from the
+    // original agent or reset pipeline progress. Adopt a rep only if the
+    // existing lead was never assigned.
+    const merged: Record<string, unknown> = { ...existing.data, ...contactFields };
+    if (existing.data.stage) merged.stage = existing.data.stage;
+    if (existing.data.assigned_to) {
+      merged.assigned_to = existing.data.assigned_to;
+      merged.assigned_agent_name = existing.data.assigned_agent_name;
+    } else if (repAssign) {
+      merged.assigned_to = repAssign.auth_user_id;
+      merged.assigned_agent_name = repAssign.name;
+    }
+    await db
+      .from("tenant_records")
+      .update({ data: merged })
+      .eq("id", existing.id)
+      .eq("tenant_id", form.tenant_id);
+    lead = { id: existing.id, data: merged };
+  } else {
+    // Migration 064: public-form submissions land at hot_lead (active engagement).
+    const leadData: Record<string, unknown> = {
+      stage: "hot_lead",
+      source: "public_form",
+      created_from_form_id: form.id,
+      created_from_ip_hash: input.ip ? hashIp(input.ip) : null,
+      ...contactFields,
+    };
+    if (repAssign) {
+      leadData.assigned_to = repAssign.auth_user_id;
+      leadData.assigned_agent_name = repAssign.name;
+    } else {
+      // Unassigned → still give the drip a sane signer so
+      // {{lead.assigned_agent_name}} never renders blank.
+      leadData.assigned_agent_name = "the SunBiz team";
+    }
+    try {
+      const created = await createRecord({
+        tenant_id: form.tenant_id,
+        entity: "lead",
+        data: leadData,
+      });
+      lead = { id: created.id, data: leadData };
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : "unknown";
+      return { ok: false, error: `lead_create_failed: ${detail}`, status: 500 };
+    }
   }
 
   const token = signFormLink({
@@ -743,21 +772,26 @@ async function initAnonymousLead(input: {
     return { ok: false, error: "form_links_misconfigured", status: 503 };
   }
 
-  // Mint the per-lead FULL application form link + stash on lead.data so the
-  // Inquiry Welcomer drip's {{lead.application_url}} resolves (sequence_runner
-  // spreads lead.data into the drip context). Best-effort: no enabled
-  // full-application form yet, or signing unconfigured → leave it unset and
-  // the drip step degrades rather than sending a broken link.
-  const applicationUrl = await mintFullApplicationLink(
-    input.origin,
-    form.tenant_id,
-    tenantSlug,
-    lead.id,
-  );
-  if (applicationUrl) {
+  // Ensure the lead carries application_url (the per-lead FULL application link)
+  // + a sane assigned_agent_name so the Inquiry Welcomer drip resolves them
+  // (sequence_runner spreads lead.data into the drip context). Best-effort.
+  const patch: Record<string, unknown> = {};
+  if (!lead.data.application_url) {
+    const applicationUrl = await mintFullApplicationLink(
+      input.origin,
+      form.tenant_id,
+      tenantSlug,
+      lead.id,
+    );
+    if (applicationUrl) patch.application_url = applicationUrl;
+  }
+  if (!lead.data.assigned_agent_name) {
+    patch.assigned_agent_name = repAssign?.name || "the SunBiz team";
+  }
+  if (Object.keys(patch).length > 0) {
     await db
       .from("tenant_records")
-      .update({ data: { ...leadData, application_url: applicationUrl } })
+      .update({ data: { ...lead.data, ...patch } })
       .eq("id", lead.id)
       .eq("tenant_id", form.tenant_id);
   }

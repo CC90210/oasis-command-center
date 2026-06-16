@@ -52,6 +52,38 @@ export async function resolveRepAssignment(
 }
 
 /**
+ * Smart matching: find an existing lead for this tenant by email or phone, so a
+ * returning merchant who opens a fresh form link + re-enters their details
+ * routes into their EXISTING file instead of spawning a duplicate lead. Email
+ * is matched lowercased (new leads are stored lowercased); phone exact. Returns
+ * the most-recent match, or null when nothing matches (caller creates fresh).
+ */
+export async function findExistingLead(
+  tenantId: string,
+  match: { email?: string | null; phone?: string | null },
+): Promise<{ id: string; data: Record<string, unknown> } | null> {
+  const email = (match.email || "").trim().toLowerCase();
+  const phone = (match.phone || "").trim();
+  const ors: string[] = [];
+  if (email) ors.push(`data->>email.eq.${email}`);
+  if (phone) ors.push(`data->>phone.eq.${phone}`);
+  if (ors.length === 0) return null;
+  const db = getServiceSupabase();
+  const q = await db
+    .from("tenant_records")
+    .select("id, data, created_at")
+    .eq("tenant_id", tenantId)
+    .eq("entity_type", "lead")
+    .or(ors.join(","))
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (q.error || !q.data) return null;
+  const row = q.data as { id: string; data: Record<string, unknown> | null };
+  return { id: row.id, data: row.data || {} };
+}
+
+/**
  * Mint an absolute, HMAC-signed URL to the tenant's FULL application form for
  * one lead. Returns null when the tenant has no enabled "full-application"
  * form yet, or when form-link signing is unconfigured (fail-closed) — the
