@@ -14,6 +14,7 @@
 
 import { PageHeader } from "@/components/Card";
 import { getActiveProfile, getTenant } from "@/lib/queries";
+import { resolveClientProfileSlug } from "@/lib/client-profiles";
 import { getSessionUser, getServiceSupabase } from "@/lib/supabase-server";
 import { safe, isMissingTableError } from "@/lib/api-helpers";
 import { FormsListClient } from "@/components/forms/FormsListClient";
@@ -68,8 +69,16 @@ export default async function FormsPage() {
   const tenantLogoUrl = tenant?.logo_url ?? null;
   // Tenant slug threads through so the per-row Copy button can produce
   // a real public form URL (/f/<tenant_slug>/<form_slug>) instead of an
-  // operator-only edit URL.
+  // operator-only edit URL. This is the TENANT-ROW slug ("submissions" for
+  // SunBiz) — the value the public /f/ route + mint-link resolve.
   const tenantSlug = tenant?.slug ?? null;
+  // The SunBiz funnel UI is gated on the PROFILE slug ("sun"), NOT the tenant
+  // row slug ("submissions"). They differ: tenant.slug="submissions" but
+  // custom_fields.command_center_profile_slug="sun" (resolveClientProfileSlug
+  // reads the latter). Gating on tenant.slug silently fell through to the
+  // generic FormsListClient — so the SunBiz step cards + per-agent links
+  // never rendered. (Fixed 2026-06-16.)
+  const profileSlug = resolveClientProfileSlug(tenant);
 
   return (
     <div className="space-y-6 animate-fade-in">
@@ -111,7 +120,7 @@ export default async function FormsPage() {
         </div>
       )}
 
-      {result.ok && tenantSlug === "sun" ? (
+      {result.ok && profileSlug === "sun" ? (
         <SunBizFormsClient
           initialRows={result.rows}
           tenantSlug={tenantSlug}
