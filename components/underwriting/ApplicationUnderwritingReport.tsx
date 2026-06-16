@@ -263,6 +263,8 @@ export function ApplicationUnderwritingReport({
   // provenance). All render-if-present so legacy rows degrade gracefully.
   const card = extractMetricCard(run.debt_analysis);
   const play = card?.proposed_play;
+  const collections = card?.collections;
+  const otherDebt = card?.other_debt;
   return (
     <Card
       title="Underwriting"
@@ -331,13 +333,13 @@ export function ApplicationUnderwritingReport({
         )}
 
         {/* SOP Part 4 §4 — collections / defaulted MCAs (death-blow detail). */}
-        {Array.isArray(card?.collections) && card!.collections!.length > 0 && (
+        {Array.isArray(collections) && collections.length > 0 && (
           <div className="space-y-1.5">
             <div className="text-[10px] uppercase tracking-wider text-red-300 font-semibold">
               Collections / defaulted MCAs
             </div>
             <div className="rounded-lg border border-red-500/30 bg-red-500/5 divide-y divide-red-500/15">
-              {card!.collections!.map((c, i) => (
+              {collections.map((c, i) => (
                 <div key={i} className="px-3 py-2 flex items-center gap-3 text-[12px]">
                   <div className="flex-1 font-semibold text-red-200 truncate">
                     {c.servicer || "Unknown servicer"}
@@ -356,13 +358,13 @@ export function ApplicationUnderwritingReport({
         )}
 
         {/* SOP Part 4 §5 — equipment / other debt (NOT counted as positions). */}
-        {Array.isArray(card?.other_debt) && card!.other_debt!.length > 0 && (
+        {Array.isArray(otherDebt) && otherDebt.length > 0 && (
           <div className="space-y-1.5">
             <div className="text-[10px] uppercase tracking-wider text-fg-dim font-semibold">
               Equipment / other debt <span className="normal-case text-fg-dim/70">(not MCA positions)</span>
             </div>
             <div className="rounded-lg border border-bg-border bg-bg-panel/40 divide-y divide-bg-border">
-              {card!.other_debt!.map((d, i) => (
+              {otherDebt.map((d, i) => (
                 <div key={i} className="px-3 py-2 flex items-center gap-3 text-[12px]">
                   <div className="flex-1 text-fg truncate">{d.vendor || "—"}</div>
                   {d.type && (
