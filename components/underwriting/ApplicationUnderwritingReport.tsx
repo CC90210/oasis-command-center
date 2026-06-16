@@ -394,7 +394,8 @@ export function ApplicationUnderwritingReport({
  */
 function buildHandoffText(run: UnderwritingRun, businessName?: string): string {
   const card = extractMetricCard(run.debt_analysis);
-  const usd = (n: number) => `$${Math.round(n).toLocaleString("en-US")}`;
+  const usd = (n: number) =>
+    Number.isFinite(n) ? `$${Math.round(n).toLocaleString("en-US")}` : "$—";
   const L: string[] = [];
   L.push(
     `I'd like a second opinion on this underwriting${businessName ? ` for ${businessName}` : ""}. Review the grade + recommendation below, tell me if you agree, and flag anything that looks off. I'll add my own context under "MY CONTEXT" before sending.`,

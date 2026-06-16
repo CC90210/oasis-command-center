@@ -54,7 +54,12 @@ const GRADE_TONE: Record<string, string> = {
   JUNK: "from-red-500/40 to-red-800/15 border-red-500/60 text-red-200",
 };
 
-function formatUsd(n: number): string {
+function formatUsd(n: number | null | undefined): string {
+  // Fail-closed: a missing/non-finite number renders "—", never crashes the
+  // whole card on n.toLocaleString(). Valid numbers are unchanged. Guards
+  // against the contract drift the VPS grader + Plaid partial-sync work
+  // introduces (a graded card that, mid-change, omits a numeric field).
+  if (typeof n !== "number" || !Number.isFinite(n)) return "—";
   return n.toLocaleString("en-US", { maximumFractionDigits: 0 });
 }
 
@@ -183,7 +188,7 @@ export function SalesMetricCard({ debtAnalysis }: { debtAnalysis: unknown }) {
         <Metric
           label="Est. total MCA balance"
           value={`~$${formatUsd(card.estimated_total_mca_balance)}`}
-          sub={`${card.estimate_quality.replace(/_/g, " ")} — confirm with funder`}
+          sub={`${String(card.estimate_quality || "estimate").replace(/_/g, " ")} — confirm with funder`}
         />
         <Metric
           label="NSFs (window) · neg days"
