@@ -23,6 +23,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { resolveTenantId } from "@/lib/api-auth";
+import { buildMemberNameMap } from "@/lib/assigned-names";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -76,5 +77,16 @@ export async function GET(
     );
   }
 
-  return NextResponse.json({ run: result.data ?? null });
+  // Resolve the trigger attribution: triggered_by_user_id (auth_user_id) →
+  // operator display name. The UI shows triggered_by_user_name, never the raw
+  // `triggered_by` enum ("manual"/"automatic"). Automatic/system runs have no
+  // user id → no name → the UI shows no attribution.
+  const run = result.data as Record<string, unknown> | null;
+  if (run && typeof run.triggered_by_user_id === "string" && run.triggered_by_user_id) {
+    const nameMap = await buildMemberNameMap(tenantId);
+    const name = nameMap.get(run.triggered_by_user_id);
+    if (name) run.triggered_by_user_name = name;
+  }
+
+  return NextResponse.json({ run });
 }

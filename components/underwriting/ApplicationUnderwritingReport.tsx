@@ -20,7 +20,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { Card } from "@/components/Card";
-import { SalesMetricCard } from "@/components/underwriting/SalesMetricCard";
+import { SalesMetricCard, extractMetricCard } from "@/components/underwriting/SalesMetricCard";
 import {
   RefreshCw,
   AlertTriangle,
@@ -29,6 +29,7 @@ import {
   Database,
   Loader2,
   FileSearch,
+  MessageSquarePlus,
 } from "lucide-react";
 
 type UnderwritingRun = {
@@ -36,6 +37,7 @@ type UnderwritingRun = {
   run_at: string;
   triggered_by: string | null;
   status: "pending" | "parsing" | "complete" | "error";
+  triggered_by_user_name: string | null;
   avg_monthly_revenue: number | null;
   avg_daily_balance: number | null;
   nsf_count: number | null;
@@ -56,9 +58,11 @@ const POLL_INTERVAL_MS = 5_000;
 export function ApplicationUnderwritingReport({
   applicationId,
   tenantSlug,
+  businessName,
 }: {
   applicationId: string;
   tenantSlug: string;
+  businessName?: string;
 }) {
   // undefined = loading; null = no run yet; object = latest run.
   const [run, setRun] = useState<UnderwritingRun | null | undefined>(undefined);
@@ -349,19 +353,107 @@ export function ApplicationUnderwritingReport({
               dateStyle: "medium",
               timeStyle: "short",
             })}
-            {run.triggered_by ? ` · by ${run.triggered_by}` : ""}
+            {/* Resolved operator name (triggered_by_user_name), never the raw
+                triggered_by enum. Automatic/system runs have no user → no
+                attribution shown. */}
+            {run.triggered_by_user_name ? ` · by ${run.triggered_by_user_name}` : ""}
           </div>
-          <Link
-            href={`/t/${tenantSlug}/shopping-out?app=${applicationId}`}
-            className="inline-flex items-center gap-1.5 text-[12.5px] font-semibold px-4 py-2 rounded-md bg-accent text-bg-deep"
-          >
-            Push to Lender Recommender
-            <ArrowRight className="w-3.5 h-3.5" />
-          </Link>
+          <div className="flex flex-wrap items-center gap-2">
+            {/* Hand the full report to the Agents-tab chat composer for a
+                second opinion. Reuses ChatWidget's ?prompt= hydration (it
+                pre-fills the composer and does NOT auto-send), so the operator
+                can add their own context before sending. */}
+            <Link
+              href={`/agent?prompt=${encodeURIComponent(buildHandoffText(run, businessName))}`}
+              className="inline-flex items-center gap-1.5 text-[12.5px] font-semibold px-4 py-2 rounded-md border border-bg-border text-fg hover:bg-bg-elev"
+            >
+              <MessageSquarePlus className="w-3.5 h-3.5" />
+              Send to chat agent
+            </Link>
+            <Link
+              href={`/t/${tenantSlug}/shopping-out?app=${applicationId}`}
+              className="inline-flex items-center gap-1.5 text-[12.5px] font-semibold px-4 py-2 rounded-md bg-accent text-bg-deep"
+            >
+              Push to Lender Recommender
+              <ArrowRight className="w-3.5 h-3.5" />
+            </Link>
+          </div>
         </div>
       </div>
     </Card>
   );
+}
+
+/**
+ * Build the plain-text underwriting summary handed to the chat agent for a
+ * second opinion. Deduped red flags, capped to keep the /agent?prompt= URL
+ * well under length limits (the agent gets the full grade + metrics +
+ * positions + sales angle either way; the raw 40-row flag dump isn't needed
+ * to assess). Ends with a "MY CONTEXT" stub so the operator adds their own
+ * notes in the composer before sending.
+ */
+function buildHandoffText(run: UnderwritingRun, businessName?: string): string {
+  const card = extractMetricCard(run.debt_analysis);
+  const usd = (n: number) => `$${Math.round(n).toLocaleString("en-US")}`;
+  const L: string[] = [];
+  L.push(
+    `I'd like a second opinion on this underwriting${businessName ? ` for ${businessName}` : ""}. Review the grade + recommendation below, tell me if you agree, and flag anything that looks off. I'll add my own context under "MY CONTEXT" before sending.`,
+  );
+  L.push("");
+  L.push("--- UNDERWRITING SUMMARY ---");
+  if (businessName) L.push(`Business: ${businessName}`);
+  if (card && card.grade) {
+    L.push(`Grade: ${card.grade} — Recommendation: ${card.recommendation || "—"}`);
+    L.push(
+      `True monthly revenue: ${usd(card.true_monthly_revenue)}` +
+        (card.excluded_credits_monthly
+          ? ` (excludes ${usd(card.excluded_credits_monthly)} non-revenue credits)`
+          : ""),
+    );
+    L.push(
+      `Active MCA positions: ${card.active_mca_positions} · Monthly burden: ${usd(card.mca_monthly_burden)} · Leverage: ${
+        card.mca_leverage_pct != null ? `${card.mca_leverage_pct.toFixed(1)}%` : "n/a"
+      }`,
+    );
+    L.push(
+      `Est. total MCA balance: ~${usd(card.estimated_total_mca_balance)} (${card.estimate_quality.replace(/_/g, " ")})`,
+    );
+    L.push(
+      `NSFs: ${card.nsfs_90d} · Negative-balance days: ${card.negative_balance_days} · Collections: ${card.collections_flag ? "YES" : "no"}`,
+    );
+    if (card.positions.length) {
+      L.push(`Verified positions (${card.positions.length}):`);
+      for (const p of card.positions) {
+        L.push(`  - ${p.lender_hint}: ~${usd(p.estimated_monthly_payment)}/mo (${p.frequencies_observed.join(", ")})`);
+      }
+    }
+    const seen = new Set<string>();
+    const flags: string[] = [];
+    for (const f of card.red_flags) {
+      const k = f.trim().toLowerCase();
+      if (!k || seen.has(k)) continue;
+      seen.add(k);
+      flags.push(f);
+    }
+    if (flags.length) {
+      const CAP = 15;
+      L.push(`Red flags (${flags.length}):`);
+      for (const f of flags.slice(0, CAP)) L.push(`  - ${f}`);
+      if (flags.length > CAP) L.push(`  …and ${flags.length - CAP} more (see the full report).`);
+    }
+  } else {
+    if (run.avg_monthly_revenue != null) L.push(`Avg monthly revenue: ${usd(run.avg_monthly_revenue)}`);
+    if (run.readiness_score != null) L.push(`Readiness: ${run.readiness_score}/100`);
+    if (run.risk_flags && run.risk_flags.length) L.push(`Risk flags: ${run.risk_flags.join(", ")}`);
+  }
+  if (run.sales_angle) {
+    L.push("");
+    L.push(`Sales angle: ${run.sales_angle}`);
+  }
+  L.push("");
+  L.push("--- MY CONTEXT (add anything the report missed, then send) ---");
+  L.push("");
+  return L.join("\n");
 }
 
 function Signal({ label, value }: { label: string; value: string }) {

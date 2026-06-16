@@ -19,7 +19,7 @@
  * stale or absent data.
  */
 
-import { AlertOctagon, AlertTriangle, ShieldAlert } from "lucide-react";
+import { AlertOctagon, AlertTriangle, ChevronRight, ShieldAlert } from "lucide-react";
 
 // Shape matches SunBiz-Agent/scripts/underwriting/grader.py:build_metric_card.
 type MetricCard = {
@@ -222,22 +222,40 @@ export function SalesMetricCard({ debtAnalysis }: { debtAnalysis: unknown }) {
         </div>
       )}
 
-      {/* Red flags — including the SOP-required "unverified biller" callouts. */}
-      {card.red_flags.length > 0 && (
-        <div className="rounded-lg border border-amber-500/30 bg-amber-500/5 px-3 py-2">
-          <div className="text-[10px] uppercase tracking-wider text-amber-300 font-semibold mb-1">
-            Red flags ({card.red_flags.length})
-          </div>
-          <ul className="space-y-1 text-[12px] text-amber-100/85">
-            {card.red_flags.map((flag, i) => (
-              <li key={i} className="flex items-start gap-1.5">
-                <AlertTriangle className="w-3 h-3 flex-shrink-0 mt-0.5" />
-                <span>{flag}</span>
-              </li>
-            ))}
-          </ul>
-        </div>
-      )}
+      {/* Red flags — including the SOP-required "unverified biller" callouts.
+          Collapsed by default (the grader can emit 40+ rows) and deduped
+          case-insensitively, since the parser frequently re-flags the same
+          biller across statements. <details> = native collapse, no state. */}
+      {card.red_flags.length > 0 && (() => {
+        const seen = new Set<string>();
+        const uniqueFlags: string[] = [];
+        for (const f of card.red_flags) {
+          const k = f.trim().toLowerCase();
+          if (!k || seen.has(k)) continue;
+          seen.add(k);
+          uniqueFlags.push(f);
+        }
+        const dupCount = card.red_flags.length - uniqueFlags.length;
+        return (
+          <details className="group rounded-lg border border-amber-500/30 bg-amber-500/5">
+            <summary className="flex cursor-pointer select-none items-center gap-2 px-3 py-2 text-[10px] uppercase tracking-wider text-amber-300 font-semibold">
+              <ChevronRight className="w-3 h-3 transition-transform group-open:rotate-90" />
+              Red flags ({uniqueFlags.length})
+              <span className="ml-auto normal-case tracking-normal text-amber-200/55 font-normal">
+                {dupCount > 0 ? `${dupCount} dup hidden · ` : ""}expand
+              </span>
+            </summary>
+            <ul className="space-y-1 px-3 pb-2.5 pt-0.5 text-[12px] text-amber-100/85">
+              {uniqueFlags.map((flag, i) => (
+                <li key={i} className="flex items-start gap-1.5">
+                  <AlertTriangle className="w-3 h-3 flex-shrink-0 mt-0.5" />
+                  <span>{flag}</span>
+                </li>
+              ))}
+            </ul>
+          </details>
+        );
+      })()}
     </div>
   );
 }

@@ -246,6 +246,7 @@ export default async function TenantCatchAllPage({
             <ApplicationUnderwritingReport
               applicationId={recordDetailId}
               tenantSlug={normalised}
+              businessName={title}
             />
           )}
           <ManifestRecordForm
