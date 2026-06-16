@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import { cookies, headers } from "next/headers";
 import "./globals.css";
 import { SidebarShell } from "@/components/SidebarShell";
+import { MainShell } from "@/components/MainShell";
 import { SIDEBAR_BOOT_SCRIPT } from "@/lib/useSidebarCollapsed";
 import { getActiveProfile, getBridgeOnline } from "@/lib/queries";
 import { getServiceSupabase } from "@/lib/supabase-server";
@@ -229,30 +230,15 @@ export default async function RootLayout({
     ? demoProfileSlug
     : pathOverrideSlug ?? tenantProfileSlug;
   const manifest = isFullBleed ? null : await getManifest(manifestSlug);
-  // All constrained pages share one width (max-w-7xl) so the CRM routes
-  // (leads/applications/pipeline) match the Agents tab, Dashboard, and every
-  // other surface instead of stretching edge-to-edge. The pipeline's stat
-  // grid is responsive (grid-cols-2 → xl:grid-cols-6) and reflows cleanly at
-  // this width, so it no longer needs the full-bleed max-w-none that
-  // 832872e ("Fix SunBiz CRM pipeline grids", 2026-05-20) introduced.
-  const contentWidthClass = "max-w-7xl";
-  // Chat-shell mode: the Agents tab (app/agent/page.tsx, nav href "/agent")
-  // renders a full-screen Claude-style chat. Unlike isFullBleed, the nav
-  // sidebar STAYS (collapsible via the existing toggle) — we only drop the
-  // constrained content wrapper + footer so the chat owns the viewport.
-  // Precise matcher: exactly /agent or /agent/* (NOT the legacy plural
-  // /agents, which isn't navigated to anyway). Also covers the /t/<slug>/agent
-  // preview path for completeness.
-  const isChatShell =
-    pathname === "/agent" ||
-    pathname.startsWith("/agent/") ||
-    /^\/t\/[a-z0-9_-]+\/agent(?:\/|$)/i.test(pathname);
-  // Shared <main> base: sidebar-margin tracking (responds to the
-  // data-sidebar collapse var), z-index, mobile-topbar top padding, and
-  // the margin transition. Both layout modes (chat-shell + constrained)
-  // build on this so the sidebar-reflow behavior is defined once.
-  const mainBaseClass =
-    "ml-0 md:ml-[var(--sidebar-w,15rem)] relative z-10 pt-14 md:pt-0 transition-[margin] duration-200";
+  // The chat-shell-vs-constrained <main> decision lives in MainShell (a CLIENT
+  // component using usePathname) — NOT here. This root layout is a Server
+  // Component that reads headers() once per full load and does NOT re-render on
+  // soft navigation, so deciding the layout mode here froze it at the
+  // first-loaded path: loading /agent (chat shell) then clicking another tab
+  // left that tab rendering full-bleed inside the frozen Agents <main>. See
+  // components/MainShell.tsx. (This is the real cause behind the recurring
+  // "every tab looks zoomed-in" report — two prior width-only fixes couldn't
+  // fix a decision that was frozen at load time.)
 
   return (
     <html lang="en">
@@ -323,33 +309,17 @@ export default async function RootLayout({
               demoMode={demoMode}
               demoLabel={`${manifest.brand.name} demo`}
             />
-            {/* Main element responds to the data-sidebar attribute on
-                <html>. Expanded: ml-60. Collapsed: ml-0. The transition
-                class is applied at md+ only so mobile (where sidebar is
-                position:fixed overlay) isn't affected. */}
-            {isChatShell ? (
-              // Chat-shell: full viewport height, NO constrained wrapper,
-              // NO footer. Children (app/agent/page.tsx) own the layout and
-              // fill 100dvh. overflow-hidden so the chat's own scroll region
-              // is the only scroller — no double scrollbars. Sidebar margin
-              // still tracks the collapse var so the chat reflows when the
-              // nav collapses.
-              <main className={`${mainBaseClass} h-[100dvh] overflow-hidden`}>
-                {children}
-              </main>
-            ) : (
-              <main className={`${mainBaseClass} min-h-screen`}>
-                <div className={`mx-auto ${contentWidthClass} px-4 md:px-8 py-6 md:py-8`}>
-                  {children}
-                </div>
-                <footer className={`mx-auto ${contentWidthClass} px-8 py-6 text-xs text-fg-faint`}>
-                  <div className="border-t border-bg-border pt-4 flex justify-between">
-                    <span>{manifest.brand.footer_label}</span>
-                    <span>{manifest.brand.footer_tagline}</span>
-                  </div>
-                </footer>
-              </main>
-            )}
+            {/* MainShell (client) picks chat-shell vs constrained from
+                usePathname, so it re-evaluates on EVERY navigation — the
+                chat shell stays scoped to /agent and never leaks onto other
+                tabs via soft nav. The <main> still responds to the
+                data-sidebar attribute for the collapsible sidebar margin. */}
+            <MainShell
+              footerLabel={manifest.brand.footer_label}
+              footerTagline={manifest.brand.footer_tagline}
+            >
+              {children}
+            </MainShell>
           </>
         )}
       </body>
