@@ -587,7 +587,11 @@ export async function POST(req: NextRequest) {
         // FAIL CLOSED: a stage read we can't trust must not lead to an overwrite
         // — preserve the existing stage rather than risk re-engaging a
         // terminal/opted_out lead (CASL). (Codex audit 2026-06-18 [high].)
+        // Surface the skipped advance so the operator isn't left in the dark
+        // that a returning lead didn't move (Codex [medium]). Not flagged for an
+        // INTENTIONAL downgrade-skip below — that's correct, not a stall.
         isDowngrade = true;
+        stageWarning = { reason: "stage_read_failed", target_stage: targetStage };
       } else {
         const curStage = (curRes.data as { data?: Record<string, unknown> } | null)?.data?.stage;
         // Forward-only with terminal-stage policy: ghost/declined reactivate on a
@@ -602,6 +606,7 @@ export async function POST(req: NextRequest) {
     } catch {
       // Read threw — FAIL CLOSED (preserve the existing stage), same reasoning.
       isDowngrade = true;
+      stageWarning = { reason: "stage_read_threw", target_stage: targetStage };
     }
     if (isDowngrade) {
       // Preserve the lead's more-advanced stage; the submission is still
