@@ -220,13 +220,29 @@ export async function maybeSendNextStepsEmail(
     // the address ever reaches the bridge. (Codex audit 2026-06-17 [high]:
     // public relay / suppression-bypass.) Case-insensitive on email; any
     // suppression for this (email, tenant) — regardless of brand — blocks.
+    // Escape LIKE wildcards: `_` and `%` are valid in an email local-part
+    // (john_doe@…), and ilike would otherwise treat them as pattern
+    // metacharacters. Match the recipient LITERALLY (case-insensitive). Same
+    // escape the lead matcher uses (agent-routing.ts).
+    const suppPattern = toEmail.replace(/[%_\\]/g, "\\$&");
     const supp = await db
       .from("email_suppressions")
       .select("email")
       .eq("tenant_id", form.tenant_id)
-      .ilike("email", toEmail)
+      .ilike("email", suppPattern)
       .limit(1);
-    if (!supp.error && (supp.data?.length ?? 0) > 0) {
+    // FAIL CLOSED. If the suppression lookup errors we cannot prove the address
+    // is safe to email, so we do NOT send — a gate that fails open would let an
+    // opted-out recipient through on any transient DB/RLS error. (Codex audit
+    // 2026-06-17 re-verify [high]: suppression check must not fail open.)
+    if (supp.error) {
+      console.error("[forms.submit.next_steps] suppression check errored — skipping (fail-closed)", {
+        lead_id: link.lead_id,
+        error: supp.error.message,
+      });
+      return;
+    }
+    if ((supp.data?.length ?? 0) > 0) {
       console.log("[forms.submit.next_steps] recipient suppressed — skipping", {
         lead_id: link.lead_id,
       });
