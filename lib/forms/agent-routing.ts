@@ -114,24 +114,25 @@ export async function findExistingLead(
 }
 
 /**
- * Mint an absolute, HMAC-signed URL to the tenant's FULL application form for
- * one lead. Returns null when the tenant has no enabled "full-application"
- * form yet, or when form-link signing is unconfigured (fail-closed) — the
- * caller leaves application_url unset and the drip step degrades rather than
- * sending a broken link.
+ * Mint an absolute, HMAC-signed URL to one of the tenant's enabled forms for a
+ * specific lead. Returns null when no enabled form with that slug exists, or
+ * when form-link signing is unconfigured (fail-closed) — callers leave the
+ * link unset and degrade (skip the step / omit the link) rather than emit a
+ * broken URL.
  */
-export async function mintFullApplicationLink(
+export async function mintFormLinkBySlug(
   origin: string,
   tenantId: string,
   tenantSlug: string,
   leadId: string,
+  slug: string,
 ): Promise<string | null> {
   const db = getServiceSupabase();
   const res = await db
     .from("forms")
     .select("id, slug")
     .eq("tenant_id", tenantId)
-    .eq("slug", "full-application")
+    .eq("slug", slug)
     .eq("enabled", true)
     .maybeSingle();
   if (res.error || !res.data) return null;
@@ -139,4 +140,19 @@ export async function mintFullApplicationLink(
   const token = signFormLink({ tenant: tenantSlug, form_id: form.id, lead_id: leadId });
   if (!token) return null;
   return `${origin}/f/${tenantSlug}/${form.slug}/${token}`;
+}
+
+/**
+ * Mint an absolute, HMAC-signed URL to the tenant's FULL application form for
+ * one lead. Thin wrapper over mintFormLinkBySlug for the canonical
+ * "full-application" slug — used by the form-submit route to stamp
+ * lead.data.application_url.
+ */
+export async function mintFullApplicationLink(
+  origin: string,
+  tenantId: string,
+  tenantSlug: string,
+  leadId: string,
+): Promise<string | null> {
+  return mintFormLinkBySlug(origin, tenantId, tenantSlug, leadId, "full-application");
 }

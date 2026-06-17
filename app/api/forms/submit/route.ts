@@ -45,6 +45,7 @@ import { uploadLeadDocument } from "@/lib/lead-documents";
 import { dispatchLeadStageEvent } from "@/lib/lead-stage-dispatcher";
 import { resolvePublicForm } from "@/lib/forms/public-resolver";
 import { maybeQueueResumeEmail } from "@/lib/forms/maybe-queue-resume";
+import { maybeSendNextStepsEmail } from "@/lib/forms/next-steps-email";
 import { upsertApplicationFromFormStep } from "@/lib/forms/application-upsert";
 import { resolveRepAssignment, mintFullApplicationLink, findExistingLead } from "@/lib/forms/agent-routing";
 import { createHash } from "node:crypto";
@@ -642,18 +643,33 @@ export async function POST(req: NextRequest) {
     });
   }
 
-  // Build A — Resume-submission link. Extracted to maybe-queue-resume.ts
-  // so the route's flow stays focused on submission. The helper handles
-  // step-0 gating + email-presence check + tenant brand resolution +
-  // soft-fail logging internally. Fire-and-forget: the response below
-  // doesn't wait for or surface the result.
-  await maybeQueueResumeEmail({
-    db,
-    step_index: stepIndex,
-    form: { id: form.id, tenant_id: form.tenant_id, slug: form.slug },
-    link: { tenant: link.tenant, lead_id: link.lead_id, form_id: link.form_id },
-    payload,
-  });
+  // Post-step-0 follow-up email. Two paths:
+  //   - Interest/entry form (initial-lead-capture): send the HANDOFF email
+  //     with the next two steps (full application + bank statements) via the
+  //     proven bridge send_email path (the resume queue is never drained for
+  //     SunBiz — see next-steps-email.ts). This is the automation that fires
+  //     the moment a prospect submits their info.
+  //   - Any other multi-step form: the legacy resume-link queue (resume where
+  //     you left off). Left intact for non-interest forms.
+  // Both are fire-and-forget + soft-fail: the response never waits on or is
+  // aborted by the email side.
+  if (stepIndex === 0 && form.slug === "initial-lead-capture") {
+    await maybeSendNextStepsEmail({
+      db,
+      form: { id: form.id, tenant_id: form.tenant_id, slug: form.slug },
+      link: { tenant: link.tenant, lead_id: link.lead_id },
+      payload,
+      origin: req.nextUrl.origin,
+    });
+  } else {
+    await maybeQueueResumeEmail({
+      db,
+      step_index: stepIndex,
+      form: { id: form.id, tenant_id: form.tenant_id, slug: form.slug },
+      link: { tenant: link.tenant, lead_id: link.lead_id, form_id: link.form_id },
+      payload,
+    });
+  }
 
   return NextResponse.json({
     ok: true,
