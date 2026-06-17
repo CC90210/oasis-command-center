@@ -23,21 +23,13 @@ import { NextRequest, NextResponse } from "next/server";
 import { getSessionUser, getServiceSupabase } from "@/lib/supabase-server";
 import { getTenant } from "@/lib/queries";
 import { resolveClientProfileSlug } from "@/lib/client-profiles";
+import { SUNBIZ_WORKER_NAMES } from "@/lib/automations/sunbiz-workers";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-// The only daemons this route may control. Must match SUNBIZ_WORKERS in the
-// sibling GET route (service strings minus the "pm2." prefix).
-const ALLOWED_WORKERS = new Set([
-  "sunbiz-sequence-runner",
-  "sunbiz-lender-response-classifier",
-  "sunbiz-cold-outreach-runner",
-  "sunbiz-sentinel",
-  "claude-bridge",
-  "claude-bridge-ping",
-  "event-router",
-]);
+// The only daemons this route may control — derived from the shared
+// SUNBIZ_WORKERS list, so the allowlist can never drift from the displayed set.
 const ALLOWED_ACTIONS = new Set(["start", "stop", "restart"]);
 
 export async function POST(req: NextRequest) {
@@ -56,7 +48,7 @@ export async function POST(req: NextRequest) {
   if (!ALLOWED_ACTIONS.has(action)) {
     return NextResponse.json({ ok: false, error: "invalid_action" }, { status: 400 });
   }
-  if (!ALLOWED_WORKERS.has(name)) {
+  if (!SUNBIZ_WORKER_NAMES.has(name)) {
     return NextResponse.json({ ok: false, error: "unknown_worker" }, { status: 400 });
   }
 

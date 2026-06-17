@@ -34,6 +34,7 @@ import { NextResponse } from "next/server";
 import { getSessionUser, getServiceSupabase } from "@/lib/supabase-server";
 import { getTenant } from "@/lib/queries";
 import { resolveClientProfileSlug } from "@/lib/client-profiles";
+import { SUNBIZ_WORKERS } from "@/lib/automations/sunbiz-workers";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -125,51 +126,6 @@ const EXPECTED_WORKERS: Array<{
     // about it, so the Start/Stop/Restart buttons are hidden for this
     // tile (sending `pm2 start skool_engine` would fail).
     manageable_via_pm2: false,
-  },
-];
-
-/**
- * SunBiz tenant background workers — the PM2 daemons running on the VPS
- * (SunBiz-Agent + the shared CEO-Agent bridge). The VPS bridge pushes their
- * health to integrations_health (keyed by the SunBiz tenant_id) on every
- * heartbeat, exactly like the operator's local bridge does for EXPECTED_WORKERS.
- * Service strings match what the VPS bridge reports (verified live 2026-06-17).
- */
-const SUNBIZ_WORKERS: typeof EXPECTED_WORKERS = [
-  {
-    service: "pm2.sunbiz-sequence-runner",
-    label: "Sequence + underwriting runner",
-    purpose: "Runs the drip sequences and auto-fires underwriting when a deal is fully submitted. The heart of the follow-up + underwriting automation.",
-  },
-  {
-    service: "pm2.sunbiz-lender-response-classifier",
-    label: "Lender reply classifier",
-    purpose: "Reads inbound lender email replies and classifies them (offer / decline / info-requested) onto each deal's lender threads.",
-  },
-  {
-    service: "pm2.sunbiz-cold-outreach-runner",
-    label: "Cold outreach runner",
-    purpose: "Drains active cold-outreach campaigns and fires due steps via send_gateway (CASL + opt-out enforced).",
-  },
-  {
-    service: "pm2.sunbiz-sentinel",
-    label: "Conversation sentinel",
-    purpose: "Watches conversations for frustration / STOP signals and pauses sequences before they annoy a lead.",
-  },
-  {
-    service: "pm2.claude-bridge",
-    label: "Chat bridge",
-    purpose: "The VPS chat bridge — powers the Agents chat and the agent tool proxy.",
-  },
-  {
-    service: "pm2.claude-bridge-ping",
-    label: "Bridge heartbeat + cron poller",
-    purpose: "Heartbeats every 60s and polls tenant_cron_jobs for due work — this is what runs the scheduled automations above.",
-  },
-  {
-    service: "pm2.event-router",
-    label: "Event router",
-    purpose: "Streams agent events into the activity log that feeds the dashboard.",
   },
 ];
 
