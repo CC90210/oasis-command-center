@@ -58,6 +58,9 @@ type ApiResponse = {
   bridge_online: boolean;
   last_seen_at: string | null;
   workers: Worker[];
+  /** When true, worker actions route through the server-side bridge proxy
+   * (SunBiz VPS daemons) instead of the operator's localhost bridge. */
+  remote_control?: boolean;
   error?: string;
 };
 
@@ -135,7 +138,13 @@ export function BackgroundWorkersPanel() {
 
       <div className="grid sm:grid-cols-2 gap-2">
         {data.workers.map((w) => (
-          <WorkerRow key={w.service} worker={w} bridgeOnline={data.bridge_online} onChange={refresh} />
+          <WorkerRow
+            key={w.service}
+            worker={w}
+            bridgeOnline={data.bridge_online}
+            remoteControl={data.remote_control || false}
+            onChange={refresh}
+          />
         ))}
       </div>
     </div>
@@ -146,16 +155,22 @@ export function BackgroundWorkersPanel() {
 type WorkerAction = "start" | "stop" | "restart";
 
 /**
- * Drive pm2 from the dashboard via the bridge's exec-tool endpoint.
- * The bridge listens on localhost:9100 so the browser POSTs directly
- * (same pattern ChatWidget uses for cloud_bridge_tools). Server-side
- * proxying from Vercel isn't possible because Vercel can't reach the
- * operator's localhost.
+ * Drive pm2 from the dashboard. Two routes:
+ *   - LOCAL (operator's machine): the browser POSTs the bridge's localhost
+ *     exec-tool directly (Vercel can't reach localhost).
+ *   - REMOTE (SunBiz VPS daemons): route through the server-side proxy
+ *     /api/automations/background-workers/control, which holds the bridge
+ *     bearer + allowlists the command. The browser never sees the bearer and
+ *     can only ask for `pm2 <action> <allowlisted-name>`.
  *
  * service is the full Worker.service string ("pm2.claude-bridge"). The
  * pm2 CLI wants the name without the prefix.
  */
-async function runWorkerAction(service: string, action: WorkerAction): Promise<{ ok: boolean; output: string }> {
+async function runWorkerAction(
+  service: string,
+  action: WorkerAction,
+  remoteControl: boolean,
+): Promise<{ ok: boolean; output: string }> {
   // Strip "pm2." prefix if present; defense-in-depth allowlist of allowed
   // characters keeps the bash injection surface to literal pm2 names.
   const name = service.replace(/^pm2\./, "");
@@ -163,14 +178,20 @@ async function runWorkerAction(service: string, action: WorkerAction): Promise<{
     return { ok: false, output: "invalid_service_name" };
   }
   try {
-    const res = await fetch(`${BRIDGE_BASE}/exec-tool`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        tool_name: "bash",
-        input: { command: `pm2 ${action} ${name}` },
-      }),
-    });
+    const res = remoteControl
+      ? await fetch(`/api/automations/background-workers/control`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ service, action }),
+        })
+      : await fetch(`${BRIDGE_BASE}/exec-tool`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            tool_name: "bash",
+            input: { command: `pm2 ${action} ${name}` },
+          }),
+        });
     const data = (await res.json()) as { ok?: boolean; output?: string; is_error?: boolean; error?: string };
     if (!res.ok || data.ok === false || data.is_error === true) {
       return { ok: false, output: data.error || data.output || `http_${res.status}` };
@@ -184,10 +205,13 @@ async function runWorkerAction(service: string, action: WorkerAction): Promise<{
 function WorkerRow({
   worker,
   bridgeOnline,
+  remoteControl,
   onChange,
 }: {
   worker: Worker;
   bridgeOnline: boolean;
+  /** Route actions through the server-side bridge proxy (SunBiz VPS). */
+  remoteControl: boolean;
   onChange: () => void | Promise<void>;
 }) {
   // Local "optimistic" override — when the operator clicks Stop/Start/Restart
@@ -274,6 +298,7 @@ function WorkerRow({
           <WorkerActions
             service={worker.service}
             bridgeOnline={bridgeOnline}
+            remoteControl={remoteControl}
             status={effectiveStatus}
             // pm2-controllable? Pass through so WorkerActions can disable
             // the buttons for standalones (Skool) without hiding them —
@@ -297,6 +322,7 @@ function WorkerRow({
 function WorkerActions({
   service,
   bridgeOnline,
+  remoteControl,
   status,
   pm2Managed = true,
   onOptimistic,
@@ -304,6 +330,8 @@ function WorkerActions({
 }: {
   service: string;
   bridgeOnline: boolean;
+  /** Route actions through the server-side bridge proxy (SunBiz VPS). */
+  remoteControl: boolean;
   status: Worker["status"];
   /** When false, the worker isn't registered with pm2 (e.g., Skool engine
    * owns its own lock file). Buttons render but stay disabled with a
@@ -337,7 +365,7 @@ function WorkerActions({
 
     setBusy(action);
     setFeedback(null);
-    const result = await runWorkerAction(service, action);
+    const result = await runWorkerAction(service, action, remoteControl);
     setBusy(null);
 
     // Codex audit — DON'T optimistically flip critical workers. The 90s

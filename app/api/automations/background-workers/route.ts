@@ -192,6 +192,10 @@ export async function GET() {
   const tenant = await getTenant(tenantId);
   const isSun = (tenant ? resolveClientProfileSlug(tenant) : null) === "sun";
   const workerSet = isSun ? SUNBIZ_WORKERS : EXPECTED_WORKERS;
+  // SunBiz daemons live on the VPS — start/stop/restart routes through the
+  // server-side bridge proxy (control/route.ts), which only works once the
+  // VPS bridge URL + bearer are configured. Until then SunBiz is read-only.
+  const sunbizControl = isSun && !!process.env.SUNBIZ_BRIDGE_URL && !!process.env.SUNBIZ_BRIDGE_BEARER;
 
   // Bridge liveness — the heartbeat tells us when the bridge last pushed
   // anything. Older than 2 minutes means daemon snapshots are stale.
@@ -272,10 +276,10 @@ export async function GET() {
       last_ping_at: h?.last_ping_at || null,
       // Default to true so existing pm2-managed workers keep their action
       // buttons. Skool (the one non-pm2 standalone) flips this false. SunBiz
-      // workers live on the VPS — start/stop/restart needs a server->VPS-bridge
-      // proxy (not the operator's localhost), so controls stay hidden (read-only)
-      // until that ships; the daemons are still managed on the VPS directly.
-      manageable_via_pm2: isSun ? false : w.manageable_via_pm2 !== false,
+      // workers are controllable only once the VPS bridge proxy is configured
+      // (sunbizControl); their actions route through the server proxy, not the
+      // operator's localhost.
+      manageable_via_pm2: isSun ? sunbizControl : w.manageable_via_pm2 !== false,
       ...(archived && {
         archived_on: w.archived_on,
         archived_reason: w.archived_reason,
@@ -287,9 +291,10 @@ export async function GET() {
     ok: true,
     bridge_online: bridgeOnline,
     last_seen_at: lastSeenAt,
-    // SunBiz workers run on the VPS — the dashboard shows live status but
-    // start/stop/restart is managed on the VPS (control proxy is a follow-up).
-    read_only: isSun,
+    // True when this tenant's worker actions must route through the server-side
+    // bridge proxy (/api/automations/background-workers/control) instead of the
+    // operator's localhost bridge. SunBiz (VPS daemons) with bridge env set.
+    remote_control: sunbizControl,
     workers,
   });
 }
