@@ -73,26 +73,54 @@ export function resolveAgent(source: string | null | undefined): ActorName | nul
   return null;
 }
 
-/** Build email→name and authUserId→name maps for the 5 people (well, the
- *  tenant's real members). Reused for human attribution across sources. */
+const KNOWN_HUMANS = ["Ezra", "Jordan", "Alex"] as const;
+
+/** Canonicalize a member's stored name to one of the known actor labels so the
+ *  actor chips match even when the profile name is "Jordan Colleson" rather
+ *  than "Jordan". (Codex audit 2026-06-18: exact-name filter could miss.) */
+function canonHuman(name: string): string {
+  const first = name.trim().split(/\s+/)[0]?.toLowerCase() || "";
+  return KNOWN_HUMANS.find((k) => k.toLowerCase() === first) || name;
+}
+
+/** Build email→name and authUserId→name maps for the tenant's real members,
+ *  canonicalized to the known actor labels. Reused for human attribution. */
 function buildHumanMaps(
   members: Array<{ auth_user_id: string | null; email: string; full_name: string; display_name: string | null }>,
 ): { byEmail: Map<string, string>; byId: Map<string, string> } {
   const byEmail = new Map<string, string>();
   const byId = new Map<string, string>();
   for (const m of members) {
-    const name = (m.display_name || m.full_name || m.email || "").trim();
-    if (!name) continue;
+    const raw = (m.display_name || m.full_name || m.email || "").trim();
+    if (!raw) continue;
+    const name = canonHuman(raw);
     if (m.email) byEmail.set(m.email.trim().toLowerCase(), name);
     if (m.auth_user_id) byId.set(m.auth_user_id, name);
   }
   return { byEmail, byId };
 }
 
-function jsonPreview(value: unknown, max = 160): string {
+// Keys whose VALUES must never be rendered into the admin activity feed: signed
+// form-link tokens (grant access to a merchant's application), and KYC / banking
+// fields. (Codex audit 2026-06-18 [medium]: raw payload preview leaked these.)
+const SENSITIVE_KEY = /(url|token|signature|ssn|dob|birth|tax_id|ein|account_number|routing|secret|password)/i;
+
+/** Redacting preview for the admin feed: shallow-renders an object with
+ *  sensitive keys masked and nested objects collapsed, so a raw event payload
+ *  (esp. agent_events.payload.data — the full post-update record) is never
+ *  dumped. Strings/scalars pass through (truncated). */
+function safeDetail(value: unknown, max = 160): string {
   if (value == null) return "";
+  if (typeof value === "string") return value.slice(0, max);
+  if (typeof value !== "object") return String(value).slice(0, max);
+  const safe: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+    if (SENSITIVE_KEY.test(k)) safe[k] = "[redacted]";
+    else if (v !== null && typeof v === "object") safe[k] = "{…}";
+    else safe[k] = v;
+  }
   try {
-    const s = typeof value === "string" ? value : JSON.stringify(value);
+    const s = JSON.stringify(safe);
     return s.length > max ? `${s.slice(0, max)}…` : s;
   } catch {
     return "";
@@ -114,8 +142,11 @@ export async function getActivityFeed(
 
   const members = await getTenantMembers(tenantId).catch(() => []);
   const { byEmail, byId } = buildHumanMaps(members);
+  // auth_user_id is the authoritative, server-stamped identity; resolve it
+  // FIRST and only fall back to a metadata-supplied email (which can be stale /
+  // operator-typed). (Codex audit 2026-06-18 [medium].)
   const human = (email?: string | null, userId?: string | null): string | null =>
-    (email && byEmail.get(email.trim().toLowerCase())) || (userId && byId.get(userId)) || null;
+    (userId && byId.get(userId)) || (email && byEmail.get(email.trim().toLowerCase())) || null;
 
   const out: ActivityRow[] = [];
 
@@ -140,7 +171,7 @@ export async function getActivityFeed(
         actorType: actor ? "human" : "system",
         action: String(row.action_type || "change"),
         target: String(row.target_table || ""),
-        detail: jsonPreview(row.after),
+        detail: safeDetail(row.after),
         source: "team/settings",
       });
     }
@@ -165,7 +196,10 @@ export async function getActivityFeed(
       const md = (row.metadata && typeof row.metadata === "object" ? row.metadata : {}) as Record<string, unknown>;
       const reqEmail = typeof md.requested_by_email === "string" ? md.requested_by_email : null;
       const h = human(reqEmail, row.actor_user_id as string);
-      const agent = h ? null : resolveAgent(row.agent_source as string);
+      // Inbound is the MERCHANT replying — never an internal agent's action.
+      // Only attribute an AI agent to outbound/system automated rows. (Codex
+      // audit 2026-06-18 [medium]: inbound texttorrent was credited to Helios.)
+      const agent = h || row.direction === "inbound" ? null : resolveAgent(row.agent_source as string);
       const actor = h || agent || "System";
       out.push({
         id: `li:${row.id}`,
@@ -201,6 +235,12 @@ export async function getActivityFeed(
       // through the audit + comms sources already.
       if (!agent) continue;
       const payload = (row.payload && typeof row.payload === "object" ? row.payload : {}) as Record<string, unknown>;
+      // Defensive tenant boundary: agent_events has no tenant_id column (scoped
+      // by correlation_id, a generic text field with no DB constraint). If a
+      // payload carries an explicit tenant_id that disagrees, drop it so a
+      // mis-stamped producer can't leak another tenant's event into this admin
+      // feed. (Codex audit 2026-06-18 [medium].)
+      if (typeof payload.tenant_id === "string" && payload.tenant_id !== tenantId) continue;
       const target = payload.entity
         ? `${payload.entity}${payload.record_id ? ` ${String(payload.record_id).slice(0, 8)}` : ""}`
         : "";
@@ -211,7 +251,7 @@ export async function getActivityFeed(
         actorType: "agent",
         action: String(row.event_type || "event"),
         target,
-        detail: jsonPreview(payload),
+        detail: safeDetail(payload),
         source: "automation",
       });
     }
