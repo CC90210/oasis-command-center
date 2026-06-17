@@ -94,6 +94,28 @@ export const FRIENDLY_DESCRIPTIONS: Record<string, string> = {
   // Cron watchdog.
   "Cron Watchdog":
     "Checks every other automation once a night for failures. If one of your daily jobs errored, you get a Telegram with the job name and the error — so silent breakage doesn't sit dead for days.",
+
+  // ── SunBiz Funding scheduled jobs ─────────────────────────────────────
+  // Operator-facing copy for the SunBiz tenant. These run on the VPS (polled
+  // every ~60s) and report results IN THE DASHBOARD — SunBiz has no Telegram
+  // (its outbound channels are Kixie calls + TextTorrent SMS via send_gateway).
+  // Keys MUST match tenant_cron_jobs.name exactly.
+  "SunBiz Follow-up Generator":
+    "Every morning at 6am, scans your leads for ones that have gone quiet — stuck deals, missing paperwork, no reply yet — and builds that day's follow-up task list. You work the list from the Follow-Up Machine tab.",
+  "SunBiz Daily Plan Generator":
+    "Every morning at 6:30am (right after the follow-up list), sorts the day's work into buckets — priority calls, missing info, stuck deals, new offers, deals to shop today, renewals coming due — and fills the Daily Plan tab so the team opens to a ready-made plan.",
+  "SunBiz Renewal Reminder":
+    "Every morning at 9am, checks funded deals that are 40-50% through their term and flags them on the Daily Plan (under \"renewal eligible\") so the team can re-shop them before a competitor does. No alert is sent anywhere else — it shows up in the dashboard.",
+  "SunBiz Underwriting Orchestrator":
+    "Every 15 minutes, picks up any application whose bank statements are in and runs underwriting automatically — parses the statements, finds existing debt/positions, drafts the sales angle — so a deal is graded without anyone clicking \"Run Underwriting.\" Nothing is sent out; results land on the deal.",
+  "SunBiz Shop-Out Sender":
+    "Every minute, sends any lender submissions you've queued in Shopping Out — one email per lender, through the compliance gates (suppression, daily cap, send window). Turn it off here to pause all outbound lender sends instantly.",
+  "SunBiz Cold Outreach Runner":
+    "Every 15 minutes, works through your active cold-outreach campaigns and sends the next due touch (call/SMS) to each prospect — capped per day and screened against opt-outs and the do-not-contact list. Turn it off to pause cold outreach.",
+  "SunBiz Health Check":
+    "Every 30 minutes, runs a read-only self-check of the whole SunBiz system — are the scheduled jobs firing on time, are any queues backed up or erroring, is the data clean. If it finds a serious problem it raises an alert in the dashboard. It never sends or changes anything.",
+  "VERIFY 3 — full gate dry-run (one-shot)":
+    "A nightly safety drill, not a business job: it runs one fake send through every outbound guardrail (kill-switch, cooldown, daily cap, send-window, CASL suppression, dedup) WITHOUT sending anything, to prove the guardrails still work. You don't need to act on it.",
 };
 
 /**

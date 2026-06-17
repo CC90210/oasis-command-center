@@ -132,7 +132,7 @@ const SUNBIZ_MODULES: Module[] = [
     key: "renewal_reminder_agent",
     name: "Renewal Reminder Agent",
     description:
-      "Daily 9am sweep of funded deals. Flags any deal 40-50% through its term (configurable via manifest.settings.renewal_eligibility_threshold_pct, default 40) and pushes a Telegram alert so the team has time to re-shop.",
+      "Daily 9am sweep of funded deals. Flags any deal 40-50% through its term (configurable via manifest.settings.renewal_eligibility_threshold_pct, default 40) and drops it onto the Daily Plan (renewal_eligible) so the team has time to re-shop.",
     status: "live",
     icon: Clock,
     connected:

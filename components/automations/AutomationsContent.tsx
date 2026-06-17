@@ -150,13 +150,27 @@ export async function AutomationsContent({
             own Gmail / Twilio with no markup.
           </p>
           <p>
-            <span className="text-fg font-bold">Where output ends up.</span> Telegram (alerts +
-            briefs), local files (snapshots), or back into the dashboard (scoring + sync jobs).
+            <span className="text-fg font-bold">Where output ends up.</span>{" "}
+            {tenantSlug === "sun"
+              ? "Back in the dashboard — the Daily Plan, the deal records, and alerts. Calls and texts to merchants go out through Kixie and TextTorrent. (SunBiz has no Telegram, so nothing is sent there.)"
+              : "Telegram (alerts + briefs), local files (snapshots), or back into the dashboard (scoring + sync jobs)."}
           </p>
           <p>
             <span className="text-fg font-bold">Switching jobs on/off.</span> Each row has a
             toggle. Flip it off and the job stops within a minute — spec stays saved.
           </p>
+          {tenantSlug === "sun" && (
+            <p>
+              <span className="text-fg font-bold">The three sections below.</span>{" "}
+              <span className="text-fg">Modules</span> is what the system can do — your live
+              capabilities, for reference (nothing to switch).{" "}
+              <span className="text-fg">Scheduled jobs</span> are the timed automations; flip one
+              off to pause it (takes effect within ~60s on the VPS).{" "}
+              <span className="text-fg">Background workers</span> are the always-on processes that
+              power those jobs — Start, Stop, or Restart each one and the signal goes straight to
+              the VPS.
+            </p>
+          )}
           <p>
             <span className="text-fg font-bold">Making your own.</span> Describe what you want
             in the box below and your agent writes the script, shows you what it does, and

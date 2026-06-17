@@ -5,36 +5,52 @@
  * Why a server-side proxy (unlike the OASIS local-bridge path, which the
  * browser hits directly on localhost): the SunBiz daemons run on the VPS, not
  * the operator's machine. The VPS bridge is reachable from Vercel via its
- * Cloudflare tunnel (SUNBIZ_BRIDGE_URL) — but the bearer must NOT live in the
- * browser, and the public tunnel must never receive arbitrary bash. So this
- * route:
- *   - authenticates the caller as the SunBiz tenant operator,
- *   - allowlists action ∈ {start,stop,restart} and the daemon name (the 7
- *     SunBiz pm2 services — mirrors SUNBIZ_WORKERS in ../route.ts),
+ * Cloudflare tunnel — but the bearer must NOT live in the browser, and the
+ * public tunnel must never receive arbitrary bash.
+ *
+ * Bridge resolution + auth reuse the SAME hardened path every other VPS proxy
+ * uses (chat, shop-out, underwriting): `authorizeBridgeRequest()` resolves the
+ * session → SunBiz tenant gate → `{ baseUrl, bearerToken }` from BRIDGE_VPS_URL
+ * + BRIDGE_BEARER_TOKEN (already configured in the dashboard env — the chat
+ * proves it). This route then:
+ *   - allowlists action ∈ {start,stop,restart} and the daemon name (the SunBiz
+ *     pm2 services — SUNBIZ_WORKER_NAMES in @/lib/automations/sunbiz-workers),
+ *   - gates to owner/admin only — bouncing a production daemon is a shell-tier
+ *     privilege, identical to "can this role run bash on the VPS"
+ *     (bridgeExecToolAllowedForRole(role, "bash")), so members / read_only /
+ *     loan_officer / processor are rejected,
  *   - then, and only then, forwards `pm2 <action> <name>` to the bridge with
  *     the server-held bearer. The tunnel can only ever receive that exact,
  *     constrained command from us — never operator-supplied bash.
- *
- * Env: SUNBIZ_BRIDGE_URL (e.g. https://bridge.oasisai.work) + SUNBIZ_BRIDGE_BEARER.
- * If unset, returns 503 bridge_not_configured (controls stay hidden until set).
  */
 
-import { NextRequest, NextResponse } from "next/server";
-import { getSessionUser, getServiceSupabase } from "@/lib/supabase-server";
-import { getTenant } from "@/lib/queries";
-import { resolveClientProfileSlug } from "@/lib/client-profiles";
+import { NextResponse } from "next/server";
+import { authorizeBridgeRequest } from "@/lib/bridge-proxy";
+import { bridgeExecToolAllowedForRole } from "@/lib/role-gates";
 import { SUNBIZ_WORKER_NAMES } from "@/lib/automations/sunbiz-workers";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-// The only daemons this route may control — derived from the shared
-// SUNBIZ_WORKERS list, so the allowlist can never drift from the displayed set.
 const ALLOWED_ACTIONS = new Set(["start", "stop", "restart"]);
 
-export async function POST(req: NextRequest) {
-  const user = await getSessionUser();
-  if (!user) return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
+export async function POST(req: Request) {
+  // Auth + tenant gate + VPS target resolution, all server-side. SunBiz
+  // ('submissions') tenant or operator passes; everyone else 403/503.
+  const auth = await authorizeBridgeRequest();
+  if (!auth.ok) {
+    return NextResponse.json({ ok: false, error: auth.error }, { status: auth.status });
+  }
+
+  // pm2 start/stop/restart is a shell-tier action on the shared VPS. Gate it to
+  // the same roles that may run `bash` via the bridge (owner / admin only) —
+  // a member doing day-to-day deals must not be able to bounce the daemons.
+  if (!bridgeExecToolAllowedForRole(auth.teamRole, "bash")) {
+    return NextResponse.json(
+      { ok: false, error: "tool_disallowed_for_role", team_role: auth.teamRole },
+      { status: 403 },
+    );
+  }
 
   let body: { service?: string; action?: string };
   try {
@@ -52,37 +68,13 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ ok: false, error: "unknown_worker" }, { status: 400 });
   }
 
-  // Caller must be the SunBiz tenant operator.
-  const db = getServiceSupabase();
-  const profile = await db
-    .from("user_profiles")
-    .select("tenant_id")
-    .eq("auth_user_id", user.id)
-    .maybeSingle();
-  const tenantId = (profile.data as { tenant_id: string | null } | null)?.tenant_id ?? null;
-  if (!tenantId) return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
-  const tenant = await getTenant(tenantId);
-  if (!tenant || resolveClientProfileSlug(tenant) !== "sun") {
-    return NextResponse.json({ ok: false, error: "not_enabled_for_tenant" }, { status: 403 });
-  }
-
-  const bridgeUrl = (process.env.SUNBIZ_BRIDGE_URL || "").replace(/\/$/, "");
-  const bearer = process.env.SUNBIZ_BRIDGE_BEARER || "";
-  if (!bridgeUrl || !bearer) {
-    return NextResponse.json(
-      {
-        ok: false,
-        error: "bridge_not_configured",
-        detail: "Set SUNBIZ_BRIDGE_URL + SUNBIZ_BRIDGE_BEARER in the dashboard environment.",
-      },
-      { status: 503 },
-    );
-  }
-
   try {
-    const res = await fetch(`${bridgeUrl}/exec-tool`, {
+    const res = await fetch(`${auth.target.baseUrl}/exec-tool`, {
       method: "POST",
-      headers: { "content-type": "application/json", Authorization: `Bearer ${bearer}` },
+      headers: {
+        "content-type": "application/json",
+        Authorization: `Bearer ${auth.target.bearerToken}`,
+      },
       body: JSON.stringify({ tool_name: "bash", input: { command: `pm2 ${action} ${name}` } }),
       signal: AbortSignal.timeout(20_000),
     });
