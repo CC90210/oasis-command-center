@@ -105,23 +105,36 @@ function buildHumanMaps(
 // fields. (Codex audit 2026-06-18 [medium]: raw payload preview leaked these.)
 const SENSITIVE_KEY = /(url|token|signature|ssn|dob|birth|tax_id|ein|account_number|routing|secret|password)/i;
 
+/** VALUE-side scrub: redact sensitive content regardless of its key — a signed
+ *  form-link URL (grants access to a merchant's application), an SSN, or a long
+ *  account/EIN/routing digit-run can ride under a benign key like `message` or
+ *  `value`. (Codex audit 2026-06-18 [high]: key-only masking leaked these.) */
+function scrubValue(s: string): string {
+  return s
+    .replace(/https?:\/\/[^\s"'<>]+/gi, "[link]")
+    .replace(/\b\d{3}-?\d{2}-?\d{4}\b/g, "[redacted]") // SSN-shaped
+    .replace(/\b\d{9,}\b/g, "[redacted]"); // EIN / account / routing / long ids
+}
+
 /** Redacting preview for the admin feed: shallow-renders an object with
- *  sensitive keys masked and nested objects collapsed, so a raw event payload
- *  (esp. agent_events.payload.data — the full post-update record) is never
- *  dumped. Strings/scalars pass through (truncated). */
+ *  sensitive KEYS masked, nested objects collapsed (so agent_events.payload.data
+ *  — the full post-update record — can't dump), and every scalar VALUE scrubbed
+ *  for sensitive content. Defense-in-depth: the serialized output is scrubbed
+ *  once more as a catch-all. */
 function safeDetail(value: unknown, max = 160): string {
   if (value == null) return "";
-  if (typeof value === "string") return value.slice(0, max);
+  if (typeof value === "string") return scrubValue(value).slice(0, max);
   if (typeof value !== "object") return String(value).slice(0, max);
   const safe: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
     if (SENSITIVE_KEY.test(k)) safe[k] = "[redacted]";
     else if (v !== null && typeof v === "object") safe[k] = "{…}";
+    else if (typeof v === "string") safe[k] = scrubValue(v);
     else safe[k] = v;
   }
   try {
-    const s = JSON.stringify(safe);
-    return s.length > max ? `${s.slice(0, max)}…` : s;
+    const scrubbed = scrubValue(JSON.stringify(safe));
+    return scrubbed.length > max ? `${scrubbed.slice(0, max)}…` : scrubbed;
   } catch {
     return "";
   }
