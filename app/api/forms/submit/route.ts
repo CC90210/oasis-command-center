@@ -583,17 +583,25 @@ export async function POST(req: NextRequest) {
         .eq("id", link.lead_id)
         .eq("tenant_id", form.tenant_id)
         .maybeSingle();
-      const curStage = (curRes.data as { data?: Record<string, unknown> } | null)?.data?.stage;
-      // Forward-only with terminal-stage policy: ghost/declined reactivate on a
-      // new submission, default/opted_out are preserved, active leads are never
-      // downgraded. See lib/forms/stage-transition.ts.
-      isDowngrade = isFormStageDowngrade(
-        typeof curStage === "string" ? curStage : null,
-        targetStage,
-        LEAD_PIPELINE_STAGES.map((s) => s.key),
-      );
+      if (curRes.error) {
+        // FAIL CLOSED: a stage read we can't trust must not lead to an overwrite
+        // — preserve the existing stage rather than risk re-engaging a
+        // terminal/opted_out lead (CASL). (Codex audit 2026-06-18 [high].)
+        isDowngrade = true;
+      } else {
+        const curStage = (curRes.data as { data?: Record<string, unknown> } | null)?.data?.stage;
+        // Forward-only with terminal-stage policy: ghost/declined reactivate on a
+        // new submission, default/opted_out are preserved, active + unknown
+        // stages are never downgraded/overwritten. See lib/forms/stage-transition.ts.
+        isDowngrade = isFormStageDowngrade(
+          typeof curStage === "string" ? curStage : null,
+          targetStage,
+          LEAD_PIPELINE_STAGES.map((s) => s.key),
+        );
+      }
     } catch {
-      // Best-effort pre-check; if it fails, fall through and apply as before.
+      // Read threw — FAIL CLOSED (preserve the existing stage), same reasoning.
+      isDowngrade = true;
     }
     if (isDowngrade) {
       // Preserve the lead's more-advanced stage; the submission is still

@@ -32,9 +32,15 @@ export function isFormStageDowngrade(
   if (HARD_TERMINAL_STAGES.has(curStage)) return true;
   // Reactivatable-terminal: a re-submission re-engages → apply the target.
   if (REACTIVATABLE_TERMINAL_STAGES.has(curStage)) return false;
-  // Active funnel: downgrade only when both are known stages and current is
-  // strictly later. Unknown/equal stages → not a downgrade (apply).
   const ci = stageOrder.indexOf(curStage);
   const ti = stageOrder.indexOf(targetStage);
-  return ci >= 0 && ti >= 0 && ci > ti;
+  // FAIL CLOSED on an UNKNOWN current stage (legacy/custom value not in the
+  // funnel, e.g. "imported"): we can't prove it's safe to overwrite, so
+  // preserve it rather than risk clobbering an opt-out/terminal-equivalent
+  // stage we don't recognize. (Codex audit 2026-06-18 [high]: unknown stages
+  // fail-open.) A new lead is unaffected — it's already at the target, so the
+  // equal-stage short-circuit above returns false (apply) before reaching here.
+  if (ci === -1) return true;
+  // Active funnel: downgrade only when the current stage is strictly later.
+  return ti >= 0 && ci > ti;
 }

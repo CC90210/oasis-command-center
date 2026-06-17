@@ -43,6 +43,11 @@ check(isFormStageDowngrade("ghost", "sent_application", order) === false, "ghost
 check(isFormStageDowngrade("default", ENTRY, order) === true, "default preserved");
 check(isFormStageDowngrade("opted_out", ENTRY, order) === true, "opted_out preserved (CASL)");
 
+// Unknown / legacy current stage (not in the funnel) → FAIL CLOSED: preserve,
+// don't overwrite a value we can't classify. (Codex audit 2026-06-18 [high].)
+check(isFormStageDowngrade("imported", ENTRY, order) === true, "unknown/legacy stage preserved");
+check(isFormStageDowngrade("some_custom_stage", "sent_application", order) === true, "unknown stage never overwritten");
+
 // Forward move on an active lead → apply.
 check(isFormStageDowngrade(ENTRY, "sent_application", order) === false, "forward move applies");
 check(isFormStageDowngrade("sent_application", "signed_application", order) === false, "forward app step applies");
@@ -58,4 +63,4 @@ if (failures > 0) {
   console.error(`intent-inquiry-lifecycle: ${failures} failure(s)`);
   process.exit(1);
 }
-console.log("intent-inquiry-lifecycle ok (15 cases)");
+console.log("intent-inquiry-lifecycle ok (17 cases)");
