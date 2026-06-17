@@ -1,6 +1,5 @@
 import Link from "next/link";
 import { cookies } from "next/headers";
-import { ArrowRight, BookOpen, MessageSquareText, RefreshCcw, Users } from "lucide-react";
 import { Card, PageHeader, Tag } from "@/components/Card";
 import { safe } from "@/lib/api-helpers";
 import {
@@ -85,6 +84,47 @@ const SECTIONS: PlaybookSection[] = [
     subtitle: "Multi-tenant RLS - AES-256-GCM at rest - SHA-256 bridge tokens - HMAC self-pair",
     body:
       "How tenant isolation, encryption, and bridge authentication actually work. Every tenant-scoped table is RLS-protected at the Postgres layer. Provider API keys encrypted at rest with AES-256-GCM (scrypt KDF, deploy-wide BRAVO_FIELD_ENCRYPTION_KEY). Bridge tokens are SHA-256 hashed before storage. Self-pair from the daemon uses HMAC headers verified server-side. Migration 030 enforces one live pairing per (tenant, machine_fingerprint) at the DB layer. Read brain/SECURITY_MODEL.md for the full architecture.",
+  },
+];
+
+// SunBiz feature manual — the card grid the SunBiz operator sees on /playbook.
+// Each card opens a rich-markdown guide in content/playbooks/sun-1X-*.md. This
+// mirrors the OASIS SECTIONS grid above so the two portals read the same way.
+const SUNBIZ_SECTIONS: PlaybookSection[] = [
+  {
+    href: "/playbook/sun-10-getting-started",
+    title: "Getting Started",
+    subtitle: "The golden path - meet your agents - daily rhythm - golden rules",
+    body:
+      "Start here. The whole job in eight steps, your two AI teammates (Solara + Helios), your personal lead link, the daily rhythm to work, and the rules that keep deals moving.",
+  },
+  {
+    href: "/playbook/sun-11-operations",
+    title: "Operations",
+    subtitle: "Dashboard - Agents - Reasoning - Playbook",
+    body:
+      "Your cockpit. The Dashboard KPI cards and action band, chatting with Solara and Helios, the one-click Reasoning launchpad, and this manual.",
+  },
+  {
+    href: "/playbook/sun-12-pipeline",
+    title: "Pipeline",
+    subtitle: "Leads - Shopping Out - Applications - Conversations - Campaigns",
+    body:
+      "Prospect to application. The lead board and detail drawer, the 5-step Shopping Out flow, the deal board, your unified inbox, and bulk texting.",
+  },
+  {
+    href: "/playbook/sun-13-deals",
+    title: "Deals",
+    subtitle: "Offers - Renewals - Commissions - Lenders",
+    body:
+      "Post-shop. Reading lender offers, tracking renewals by urgency, your commission ledger, and the lender book that powers every match.",
+  },
+  {
+    href: "/playbook/sun-14-system",
+    title: "System",
+    subtitle: "Import - Forms - Sequences - Team - Automations - Settings",
+    body:
+      "The plumbing. Importing leads, your intake forms and personal links, the drip campaigns, your team, automations, and settings.",
   },
 ];
 
@@ -281,98 +321,80 @@ function SunBizPlaybookIndex({
   manualFiles: PlaybookFile[];
   demoMode?: boolean;
 }) {
-  const chatHref = demoHref("/agent", { demoMode });
-  const renewalsHref = demoHref("/renewals", { demoMode });
   const playbookEntryHref = (slug: string) => demoHref(`/playbook/${slug}`, { demoMode });
   return (
     <div className="space-y-8 animate-fade-in">
       <PageHeader
         title="Playbook"
-        subtitle="The guide your team uses to work with Solara day to day."
+        subtitle="Your operating manual. Click any card to open that guide — start with Getting Started."
         action={<Tag tone="engaged">client guide</Tag>}
       />
 
-      <section className="grid gap-6 xl:grid-cols-[1.2fr,0.8fr]">
-        <section className="rounded-[28px] border border-amber-300/30 bg-[radial-gradient(circle_at_top_left,rgba(251,191,36,0.2),transparent_34%),linear-gradient(135deg,rgba(24,24,27,0.96),rgba(15,23,42,0.94))] p-6 shadow-[0_24px_80px_-36px_rgba(251,191,36,0.55)]">
-          <div className="inline-flex items-center gap-2 rounded-full border border-amber-300/25 bg-amber-300/10 px-3 py-1 text-[11px] font-bold uppercase tracking-[0.18em] text-amber-100">
-            <BookOpen className="h-3.5 w-3.5" />
-            Unified Onboarding Manual
-          </div>
-          <h2 className="mt-4 text-3xl font-black tracking-tight text-white">
-            Four short pages. One shared operating rhythm.
-          </h2>
-          <p className="mt-3 max-w-2xl text-sm leading-7 text-amber-50/80 sm:text-base">
-            This is the version your Sun Biz team should actually read. No system language. No setup clutter. Just how to work with Solara, when to review something, when to call CC, and how to pause changes if something feels off.
-          </p>
-          <div className="mt-6 flex flex-wrap gap-3">
-            <Link href={chatHref} className="btn-send inline-flex items-center gap-2">
-              Chat with Solara <MessageSquareText className="h-4 w-4" />
-            </Link>
-            <Link href={renewalsHref} className="btn-secondary inline-flex items-center gap-2">
-              Review renewals <RefreshCcw className="h-4 w-4" />
-            </Link>
-          </div>
-        </section>
+      {/* Feature manual — one card per area of the Command Center, mirroring
+          the OASIS Playbook grid. Each opens a rich-markdown guide. */}
+      <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-5">
+        {SUNBIZ_SECTIONS.map((section, index) => (
+          <Link
+            key={section.href}
+            href={playbookEntryHref(section.href.replace("/playbook/", ""))}
+            className="group block h-full"
+          >
+            <Card className="h-full">
+              <div className="flex items-start gap-4 h-full">
+                <div className="w-11 h-11 rounded-lg bg-accent-soft border border-accent-muted/30 flex items-center justify-center shrink-0 text-accent font-bold tracking-[0.16em] group-hover:bg-accent group-hover:text-bg transition-all">
+                  {(index + 1).toString().padStart(2, "0")}
+                </div>
+                <div className="flex-1 min-w-0 flex flex-col">
+                  <div className="text-fg font-bold text-base group-hover:text-accent transition-colors">
+                    {section.title}
+                  </div>
+                  <div className="text-xs text-fg-muted mt-0.5 uppercase tracking-wider font-medium">
+                    {section.subtitle}
+                  </div>
+                  <p className="text-sm text-fg-muted mt-3 leading-relaxed line-clamp-5">
+                    {section.body}
+                  </p>
+                </div>
+              </div>
+            </Card>
+          </Link>
+        ))}
+      </div>
 
-        <Card title="Where to start" subtitle="Read these once in order, then keep them nearby.">
-          <div className="space-y-3">
+      {manualFiles.length > 0 && (
+        <section className="space-y-4">
+          <div>
+            <h2 className="text-lg font-bold text-fg">Onboarding manual</h2>
+            <p className="text-sm text-fg-muted">
+              Four short pages on working with Solara: getting started, safe
+              interaction, when to call CC, and how to pause or roll back.
+            </p>
+          </div>
+          <div className="grid md:grid-cols-2 lg:grid-cols-4 gap-4">
             {manualFiles.map((file, index) => {
               const meta = SUN_MANUAL_META[file.slug] || {
                 eyebrow: `Step ${(index + 1).toString().padStart(2, "0")}`,
                 summary: file.title,
               };
               return (
-                <Link
-                  key={file.slug}
-                  href={playbookEntryHref(file.slug)}
-                  className="group flex items-start gap-3 rounded-2xl border border-bg-border bg-bg-elev/35 px-4 py-3 transition-all hover:border-amber-300/35 hover:bg-amber-300/6"
-                >
-                  <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-2xl border border-amber-300/25 bg-amber-300/10 text-xs font-black tracking-[0.16em] text-amber-100">
-                    {(index + 1).toString().padStart(2, "0")}
-                  </div>
-                  <div className="min-w-0">
-                    <div className="text-[10px] uppercase tracking-[0.16em] text-fg-dim font-bold">
-                      {meta.eyebrow}
+                <Link key={file.slug} href={playbookEntryHref(file.slug)} className="group block h-full">
+                  <Card className="h-full">
+                    <div className="space-y-2">
+                      <div className="text-[10px] uppercase tracking-[0.16em] font-bold text-accent">
+                        {meta.eyebrow}
+                      </div>
+                      <div className="text-fg font-semibold group-hover:text-accent transition-colors">
+                        {file.title}
+                      </div>
+                      <p className="text-xs text-fg-muted leading-relaxed line-clamp-3">{meta.summary}</p>
                     </div>
-                    <div className="mt-1 text-sm font-semibold text-fg group-hover:text-amber-200">
-                      {file.title}
-                    </div>
-                    <div className="mt-1 text-xs leading-6 text-fg-muted">{meta.summary}</div>
-                  </div>
+                  </Card>
                 </Link>
               );
             })}
           </div>
-        </Card>
-      </section>
-
-      <section className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-        {manualFiles.map((file) => {
-          const meta = SUN_MANUAL_META[file.slug] || {
-            eyebrow: "Guide",
-            summary: file.title,
-          };
-          return (
-            <Link key={file.slug} href={playbookEntryHref(file.slug)} className="group block">
-              <Card>
-                <div className="space-y-3">
-                  <div className="inline-flex items-center gap-2 text-[10px] uppercase tracking-[0.16em] font-bold text-amber-200">
-                    <Users className="h-3.5 w-3.5" />
-                    {meta.eyebrow}
-                  </div>
-                  <div className="text-fg font-bold text-base group-hover:text-amber-200 transition-colors">
-                    {file.title}
-                  </div>
-                  <p className="text-sm text-fg-muted leading-relaxed">{meta.summary}</p>
-                  <div className="inline-flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.14em] text-amber-200">
-                    Read now <ArrowRight className="h-3.5 w-3.5" />
-                  </div>
-                </div>
-              </Card>
-            </Link>
-          );
-        })}
-      </section>
+        </section>
+      )}
     </div>
   );
 }

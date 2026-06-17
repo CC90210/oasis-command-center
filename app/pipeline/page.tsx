@@ -43,8 +43,14 @@ export const dynamic = "force-dynamic";
  * Anyone else gets redirected to their tenant-scoped catch-all leads
  * page. Add a slug here ONLY if that tenant wants /pipeline to be
  * their canonical leads URL (rare — almost everyone wants the catch-all).
+ *
+ * 2026-06-16 fix: CC's own OASIS empire tenant has slug "oasis-ai-cc"
+ * (not "oasis"), so the original single-slug set redirected CC off his
+ * own /pipeline to /t/oasis-ai-cc/leads, which 404s — breaking the OASIS
+ * empire dashboard's Pipeline tab. CC's empire nav (CC_NAV) uses /pipeline
+ * as the canonical leads URL, so his slug belongs here.
  */
-const OASIS_PIPELINE_SLUGS = new Set(["oasis"]);
+const OASIS_PIPELINE_SLUGS = new Set(["oasis", "oasis-ai-cc"]);
 
 export default async function PipelinePage({
   searchParams,
