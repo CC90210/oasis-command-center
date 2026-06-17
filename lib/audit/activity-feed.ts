@@ -233,6 +233,37 @@ export async function getActivityFeed(
     errors.push(`chat_sessions: ${e instanceof Error ? e.message : "failed"}`);
   }
 
+  // 5. tenant_cron_jobs — agent automation runs, attributed by agent_key
+  //    (helios / solara). The table keeps only the LATEST run per job (not full
+  //    history), so this surfaces the most recent run of each scheduled job —
+  //    the clearest "Solara ran the daily plan" / "Helios ran cold outreach"
+  //    signal, which agent_events doesn't currently attribute to a named agent.
+  try {
+    const r = await db
+      .from("tenant_cron_jobs")
+      .select("id, name, agent_key, schedule, last_run_at, last_run_status, run_count")
+      .eq("tenant_id", tenantId)
+      .not("last_run_at", "is", null)
+      .order("last_run_at", { ascending: false })
+      .limit(perSource);
+    for (const row of (r.data || []) as Array<Record<string, unknown>>) {
+      const agent = resolveAgent(row.agent_key as string);
+      if (!agent) continue;
+      out.push({
+        id: `cron:${row.id}`,
+        time: String(row.last_run_at || ""),
+        actor: agent,
+        actorType: "agent",
+        action: `ran "${row.name}"`,
+        target: String(row.schedule || ""),
+        detail: `${row.last_run_status || ""}${row.run_count ? ` · ${row.run_count} runs` : ""}`.trim(),
+        source: "automation",
+      });
+    }
+  } catch (e) {
+    errors.push(`cron_jobs: ${e instanceof Error ? e.message : "failed"}`);
+  }
+
   // Merge, newest first, optional actor filter, cap.
   let rows = out.sort((a, b) => (a.time < b.time ? 1 : a.time > b.time ? -1 : 0));
   const wantActor = (opts.actor || "").trim();
