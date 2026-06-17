@@ -170,7 +170,7 @@ export async function AutomationsContent({
           <DescribeAutomationFlow />
           <AgentsModulesStatusBoard tenantSlug={tenantSlug} />
           <CronJobsManager agentKeys={automationAgentKeys} />
-          {isOperator && (
+          {(isOperator || tenantSlug === "sun") && (
             <div className="border-t border-bg-border pt-6">
               <BackgroundWorkersPanel />
             </div>

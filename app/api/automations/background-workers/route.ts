@@ -32,6 +32,8 @@
 
 import { NextResponse } from "next/server";
 import { getSessionUser, getServiceSupabase } from "@/lib/supabase-server";
+import { getTenant } from "@/lib/queries";
+import { resolveClientProfileSlug } from "@/lib/client-profiles";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -126,6 +128,51 @@ const EXPECTED_WORKERS: Array<{
   },
 ];
 
+/**
+ * SunBiz tenant background workers — the PM2 daemons running on the VPS
+ * (SunBiz-Agent + the shared CEO-Agent bridge). The VPS bridge pushes their
+ * health to integrations_health (keyed by the SunBiz tenant_id) on every
+ * heartbeat, exactly like the operator's local bridge does for EXPECTED_WORKERS.
+ * Service strings match what the VPS bridge reports (verified live 2026-06-17).
+ */
+const SUNBIZ_WORKERS: typeof EXPECTED_WORKERS = [
+  {
+    service: "pm2.sunbiz-sequence-runner",
+    label: "Sequence + underwriting runner",
+    purpose: "Runs the drip sequences and auto-fires underwriting when a deal is fully submitted. The heart of the follow-up + underwriting automation.",
+  },
+  {
+    service: "pm2.sunbiz-lender-response-classifier",
+    label: "Lender reply classifier",
+    purpose: "Reads inbound lender email replies and classifies them (offer / decline / info-requested) onto each deal's lender threads.",
+  },
+  {
+    service: "pm2.sunbiz-cold-outreach-runner",
+    label: "Cold outreach runner",
+    purpose: "Drains active cold-outreach campaigns and fires due steps via send_gateway (CASL + opt-out enforced).",
+  },
+  {
+    service: "pm2.sunbiz-sentinel",
+    label: "Conversation sentinel",
+    purpose: "Watches conversations for frustration / STOP signals and pauses sequences before they annoy a lead.",
+  },
+  {
+    service: "pm2.claude-bridge",
+    label: "Chat bridge",
+    purpose: "The VPS chat bridge — powers the Agents chat and the agent tool proxy.",
+  },
+  {
+    service: "pm2.claude-bridge-ping",
+    label: "Bridge heartbeat + cron poller",
+    purpose: "Heartbeats every 60s and polls tenant_cron_jobs for due work — this is what runs the scheduled automations above.",
+  },
+  {
+    service: "pm2.event-router",
+    label: "Event router",
+    purpose: "Streams agent events into the activity log that feeds the dashboard.",
+  },
+];
+
 export async function GET() {
   const user = await getSessionUser();
   if (!user) return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
@@ -138,6 +185,13 @@ export async function GET() {
   const profileId = (profile.data as { id: string | null } | null)?.id ?? null;
   const tenantId = (profile.data as { tenant_id: string | null } | null)?.tenant_id ?? null;
   if (!tenantId) return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
+
+  // Tenant-aware worker set. SunBiz operators see the VPS daemons (pushed by
+  // the VPS bridge under the tenant_id); everyone else sees the operator's
+  // local empire daemons (pushed under their own profile_id).
+  const tenant = await getTenant(tenantId);
+  const isSun = (tenant ? resolveClientProfileSlug(tenant) : null) === "sun";
+  const workerSet = isSun ? SUNBIZ_WORKERS : EXPECTED_WORKERS;
 
   // Bridge liveness — the heartbeat tells us when the bridge last pushed
   // anything. Older than 2 minutes means daemon snapshots are stale.
@@ -156,34 +210,42 @@ export async function GET() {
 
   // integrations_health is keyed (profile_id, service). When the bridge
   // hasn't pushed (no profile_id, or no rows), fall back to "unconfigured".
-  const services = EXPECTED_WORKERS.map((w) => w.service);
+  const services = workerSet.map((w) => w.service);
   const healthMap = new Map<
     string,
     { status: string; metadata: Record<string, unknown>; last_ping_at: string | null }
   >();
-  if (profileId) {
-    const rows = await db
-      .from("integrations_health")
-      .select("service, status, metadata, last_ping_at")
-      .eq("profile_id", profileId)
-      .in("service", services);
-    if (!rows.error && Array.isArray(rows.data)) {
-      for (const r of rows.data as Array<{
-        service: string;
-        status: string;
-        metadata: Record<string, unknown> | null;
-        last_ping_at: string | null;
-      }>) {
-        healthMap.set(r.service, {
-          status: r.status,
-          metadata: r.metadata || {},
-          last_ping_at: r.last_ping_at,
-        });
-      }
+  // SunBiz workers are pushed under the tenant_id (VPS bridge); operator
+  // workers under the session profile_id (local bridge).
+  const healthRows = isSun
+    ? await db
+        .from("integrations_health")
+        .select("service, status, metadata, last_ping_at")
+        .eq("tenant_id", tenantId)
+        .in("service", services)
+    : profileId
+      ? await db
+          .from("integrations_health")
+          .select("service, status, metadata, last_ping_at")
+          .eq("profile_id", profileId)
+          .in("service", services)
+      : null;
+  if (healthRows && !healthRows.error && Array.isArray(healthRows.data)) {
+    for (const r of healthRows.data as Array<{
+      service: string;
+      status: string;
+      metadata: Record<string, unknown> | null;
+      last_ping_at: string | null;
+    }>) {
+      healthMap.set(r.service, {
+        status: r.status,
+        metadata: r.metadata || {},
+        last_ping_at: r.last_ping_at,
+      });
     }
   }
 
-  const workers = EXPECTED_WORKERS.map((w) => {
+  const workers = workerSet.map((w) => {
     const archived = Boolean(w.archived_on);
     const h = archived ? undefined : healthMap.get(w.service);
     // Standalone (non-pm2) workers don't have their lifecycle in pm2's
@@ -209,8 +271,11 @@ export async function GET() {
       metadata: w.manageable_via_pm2 === false ? {} : h?.metadata || {},
       last_ping_at: h?.last_ping_at || null,
       // Default to true so existing pm2-managed workers keep their action
-      // buttons. Skool (the one non-pm2 standalone) flips this false.
-      manageable_via_pm2: w.manageable_via_pm2 !== false,
+      // buttons. Skool (the one non-pm2 standalone) flips this false. SunBiz
+      // workers live on the VPS — start/stop/restart needs a server->VPS-bridge
+      // proxy (not the operator's localhost), so controls stay hidden (read-only)
+      // until that ships; the daemons are still managed on the VPS directly.
+      manageable_via_pm2: isSun ? false : w.manageable_via_pm2 !== false,
       ...(archived && {
         archived_on: w.archived_on,
         archived_reason: w.archived_reason,
@@ -222,6 +287,9 @@ export async function GET() {
     ok: true,
     bridge_online: bridgeOnline,
     last_seen_at: lastSeenAt,
+    // SunBiz workers run on the VPS — the dashboard shows live status but
+    // start/stop/restart is managed on the VPS (control proxy is a follow-up).
+    read_only: isSun,
     workers,
   });
 }
