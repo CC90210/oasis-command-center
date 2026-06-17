@@ -698,6 +698,10 @@ function PipelineGlanceCard({
 // the urgency scorer ranks the active funnel cleanly without zombie keys.
 const STAGE_WEIGHT: Record<string, number> = {
   hot_lead: 100,
+  // Fresh inquiry — they just submitted the form. Rank near the very top of
+  // Today's Focus so the team works it (or confirms Helios's auto-email landed)
+  // before it cools, just under an already-engaged hot_lead.
+  intent_inquiry_submitted: 98,
   signed_application: 90,
   viewed_application: 80,
   sent_application: 70,
@@ -759,7 +763,7 @@ function TopUrgentLeads({ slug, leads }: { slug: string; leads: TenantRecord[] }
             return (
               <li key={lead.id}>
                 <Link
-                  href={`/t/${slug}/leads/${lead.id}`}
+                  href={`/t/${slug}?lead=${lead.id}`}
                   className="flex items-center justify-between gap-3 py-2 px-1 hover:bg-bg-elev/40 rounded transition-colors"
                 >
                   <div className="min-w-0">

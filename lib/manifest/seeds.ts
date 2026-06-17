@@ -415,7 +415,7 @@ export const SUN_SEED: TenantManifest = {
         //                         Opportunity Pipeline; see application.status)
         //   declined            — lender or operator passed (terminal)
         //   default             — repayment failure / bankruptcy (terminal)
-        { name: "stage", type: "enum", enum_values: ["hot_lead", "missing_info", "follow_up", "sent_application", "viewed_application", "signed_application", "submitted", "declined", "default"], required: true },
+        { name: "stage", type: "enum", enum_values: ["intent_inquiry_submitted", "hot_lead", "missing_info", "follow_up", "sent_application", "viewed_application", "signed_application", "submitted", "declined", "default"], required: true },
         // missing_info — Phase 20 (2026-05-17) classifier output. Array
         // of canonical doc-type strings the lead still owes us before
         // an application can advance. Populated by

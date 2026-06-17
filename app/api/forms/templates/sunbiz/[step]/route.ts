@@ -117,10 +117,12 @@ const TEMPLATES: Record<
         ],
       },
     ],
-    // Lands at hot_lead (the prospect actively engaged) so the Inquiry
-    // Welcomer drip fires and texts/emails the full-application link.
-    step_outcomes: { "0": "hot_lead" },
-    on_complete_stage: "hot_lead",
+    // Lands at intent_inquiry_submitted — the merchant has expressed intent
+    // (name/business/email/phone/revenue) but hasn't applied yet. The handoff
+    // email (full-application + bank-statement links) fires on submit; the lead
+    // advances when they complete the full application.
+    step_outcomes: { "0": "intent_inquiry_submitted" },
+    on_complete_stage: "intent_inquiry_submitted",
   },
 
   "full-application": {

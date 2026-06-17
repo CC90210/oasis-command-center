@@ -156,18 +156,6 @@ export async function SettingsContent({
             subtitle={`Signed in as ${profile.email}`}
             action={
               <div className="flex items-center gap-2">
-                {tenant && (
-                  <Tag tone={tenant.purchase_status === "active" ? "engaged" : "warm"}>
-                    {tenant.plan_tier} · {tenant.purchase_status}
-                  </Tag>
-                )}
-                <a
-                  href="/onboarding/welcome?settings=1"
-                  className="text-xs text-accent hover:text-accent/80 underline underline-offset-2"
-                  title="Re-open the personalisation wizard to edit timezone / default agent / briefing channel"
-                >
-                  Open personalisation wizard →
-                </a>
                 {canManageTenant && (
                   <a
                     href="/settings/audit-log"

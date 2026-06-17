@@ -585,17 +585,18 @@ export async function POST(req: NextRequest) {
     }
   }
 
-  // 2026-06-11 SOP §4 closeout — bridge form payload to application
-  // record. Adon MCA SOP §4 match-fitness scorer reads business_state +
-  // industry off tenant_records.data on the application row. Before this
-  // hook, form-collected fields lived only in form_submissions.payload
-  // and never reached the application — so SOP §4 high-risk blocks were
-  // dormant on every form-originated deal. Now: each step's payload
-  // upserts into the application record (creates one when none exists,
-  // merges into the existing one when found). Best-effort: failure here
-  // never aborts the form submission — the form_submissions row stays
-  // the audit trail.
-  try {
+  // Bridge form payload → application record. Adon MCA SOP §4 match-fitness
+  // scorer reads business_state + industry off the application row; each step's
+  // payload upserts into the application (creates when none exists, merges when
+  // found). Best-effort: failure never aborts the submission.
+  //
+  // 2026-06-18 (lead-first lifecycle): the INTEREST form (initial-lead-capture)
+  // must NOT create an application — an inquiry isn't an application yet. The
+  // application comes into existence only when the merchant submits the FULL
+  // application (full-application / bank-statement-upload). This is what keeps
+  // the Opportunity Pipeline holding REAL applications instead of premature
+  // "Application In" rows for every inquiry.
+  if (form.slug !== "initial-lead-capture") try {
     const appUpsert = await upsertApplicationFromFormStep({
       tenantId: form.tenant_id,
       leadId: link.lead_id,
@@ -790,9 +791,12 @@ async function initAnonymousLead(input: {
       .eq("tenant_id", form.tenant_id);
     lead = { id: existing.id, data: merged };
   } else {
-    // Migration 064: public-form submissions land at hot_lead (active engagement).
+    // Public-form submissions enter the lifecycle at intent_inquiry_submitted —
+    // they've expressed intent (contact + revenue) but haven't applied yet.
+    // (The form's step_outcomes/on_complete_stage also resolve to this stage;
+    // this default covers the create before that transition runs.)
     const leadData: Record<string, unknown> = {
-      stage: "hot_lead",
+      stage: "intent_inquiry_submitted",
       source: "public_form",
       created_from_form_id: form.id,
       created_from_ip_hash: input.ip ? hashIp(input.ip) : null,

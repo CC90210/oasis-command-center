@@ -54,6 +54,7 @@ export type StageMeta = {
 // they were absent from the lead.stage enum). Funded leads still show under
 // `funded`; their renewal tracking lives on the Renewals page.
 export const LEAD_PIPELINE_STAGES: StageMeta[] = [
+  { key: "intent_inquiry_submitted", label: "Intent Inquiry Submitted", bg: "#0E9AA7", fg: "#FFFFFF" },
   { key: "hot_lead",           label: "Hot Lead",           bg: "#C0842F", fg: "#FFFFFF" },
   { key: "missing_info",       label: "Missing Info",       bg: "#3978BE", fg: "#FFFFFF" },
   { key: "follow_up",          label: "Follow Up",          bg: "#8A6A3B", fg: "#FFFFFF" },

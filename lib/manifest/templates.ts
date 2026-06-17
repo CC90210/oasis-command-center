@@ -194,7 +194,7 @@ export const BUSINESS_FUNDING_TEMPLATE: TenantManifest = {
         { name: "monthly_revenue", type: "number" },
         // Aligned with SUN_SEED post migration 064 (Jordan/Oasis
         // 2026-05-23). Dropped imported / not_interested / approved.
-        { name: "stage", type: "enum", enum_values: ["hot_lead", "missing_info", "follow_up", "sent_application", "viewed_application", "signed_application", "submitted", "declined", "default"], required: true },
+        { name: "stage", type: "enum", enum_values: ["intent_inquiry_submitted", "hot_lead", "missing_info", "follow_up", "sent_application", "viewed_application", "signed_application", "submitted", "declined", "default"], required: true },
         { name: "missing_info", type: "json" },
       ],
     },

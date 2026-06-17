@@ -98,9 +98,13 @@ export function MyActiveDealsCard({
           {visible.map((r) => {
             const stage = r.deal_stage || r.stage || "—";
             const tone = STAGE_TONE[stage] || "bg-zinc-500/15 text-zinc-300 border-zinc-500/30";
+            // Open the SAME right-side drawer the pipelines use (in-place on the
+            // dashboard — the overlay is mounted on every /t/sun page), instead
+            // of navigating to the full-page record editor. The full editor
+            // stays reachable via the drawer's "Edit full record →".
             const href = r.entity_type === "application"
-              ? `/applications/${r.id}`
-              : `/leads/${r.id}`;
+              ? `/t/sun?application=${r.id}`
+              : `/t/sun?lead=${r.id}`;
             return (
               <li
                 key={r.id}
