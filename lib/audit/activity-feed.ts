@@ -127,6 +127,10 @@ export async function getActivityFeed(
       .eq("tenant_id", tenantId)
       .order("created_at", { ascending: false })
       .limit(perSource);
+    // Supabase query errors don't throw — surface them via the per-source catch
+    // below (each pushes a labelled entry to `errors`) instead of silently
+    // rendering the source empty. (Codex audit 2026-06-18 [medium].)
+    if (r.error) throw new Error(r.error.message);
     for (const row of (r.data || []) as Array<Record<string, unknown>>) {
       const actor = human(row.actor_email as string, row.actor_user_id as string);
       out.push({
@@ -153,6 +157,10 @@ export async function getActivityFeed(
       .eq("tenant_id", tenantId)
       .order("created_at", { ascending: false })
       .limit(perSource);
+    // Supabase query errors don't throw — surface them via the per-source catch
+    // below (each pushes a labelled entry to `errors`) instead of silently
+    // rendering the source empty. (Codex audit 2026-06-18 [medium].)
+    if (r.error) throw new Error(r.error.message);
     for (const row of (r.data || []) as Array<Record<string, unknown>>) {
       const md = (row.metadata && typeof row.metadata === "object" ? row.metadata : {}) as Record<string, unknown>;
       const reqEmail = typeof md.requested_by_email === "string" ? md.requested_by_email : null;
@@ -183,6 +191,10 @@ export async function getActivityFeed(
       .eq("correlation_id", tenantId)
       .order("created_at", { ascending: false })
       .limit(perSource);
+    // Supabase query errors don't throw — surface them via the per-source catch
+    // below (each pushes a labelled entry to `errors`) instead of silently
+    // rendering the source empty. (Codex audit 2026-06-18 [medium].)
+    if (r.error) throw new Error(r.error.message);
     for (const row of (r.data || []) as Array<Record<string, unknown>>) {
       const agent = resolveAgent(row.publisher_agent as string);
       // Only surface AI-attributable events here; operator/system events come
@@ -215,6 +227,10 @@ export async function getActivityFeed(
       .eq("tenant_id", tenantId)
       .order("created_at", { ascending: false })
       .limit(perSource);
+    // Supabase query errors don't throw — surface them via the per-source catch
+    // below (each pushes a labelled entry to `errors`) instead of silently
+    // rendering the source empty. (Codex audit 2026-06-18 [medium].)
+    if (r.error) throw new Error(r.error.message);
     for (const row of (r.data || []) as Array<Record<string, unknown>>) {
       const h = human(null, row.user_id as string);
       const agentKey = resolveAgent(row.agent_key as string);
@@ -246,6 +262,10 @@ export async function getActivityFeed(
       .not("last_run_at", "is", null)
       .order("last_run_at", { ascending: false })
       .limit(perSource);
+    // Supabase query errors don't throw — surface them via the per-source catch
+    // below (each pushes a labelled entry to `errors`) instead of silently
+    // rendering the source empty. (Codex audit 2026-06-18 [medium].)
+    if (r.error) throw new Error(r.error.message);
     for (const row of (r.data || []) as Array<Record<string, unknown>>) {
       const agent = resolveAgent(row.agent_key as string);
       if (!agent) continue;

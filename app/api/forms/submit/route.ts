@@ -48,6 +48,7 @@ import { maybeQueueResumeEmail } from "@/lib/forms/maybe-queue-resume";
 import { maybeSendNextStepsEmail } from "@/lib/forms/next-steps-email";
 import { upsertApplicationFromFormStep } from "@/lib/forms/application-upsert";
 import { resolveRepAssignment, mintFullApplicationLink, findExistingLead } from "@/lib/forms/agent-routing";
+import { LEAD_PIPELINE_STAGES } from "@/lib/sunbiz-stage-meta";
 import { createHash } from "node:crypto";
 
 export const runtime = "nodejs";
@@ -566,22 +567,54 @@ export async function POST(req: NextRequest) {
   // pipeline didn't advance.
   let stageWarning: { reason: string; target_stage: string } | null = null;
   if (targetStage) {
+    // Forward-only guard. A returning merchant who re-submits the interest form
+    // is smart-matched into their EXISTING (often more-advanced) lead — applying
+    // the entry form's step_outcome would DOWNGRADE them to the entry stage.
+    // Skip the write when the lead is already further down the funnel. Only
+    // treats it as a downgrade when BOTH stages are known lead stages and the
+    // current one is strictly later; unknown stages fall through and apply as
+    // before. (Codex audit 2026-06-18 [high]: reused leads were downgraded.)
+    let isDowngrade = false;
     try {
-      await updateRecord({
-        tenant_id: form.tenant_id,
-        entity: "lead",
-        id: link.lead_id,
-        patch: { stage: targetStage },
-      });
-      appliedStage = targetStage;
-    } catch (err) {
-      const reason = err instanceof RecordsError ? err.code : "unknown";
-      console.error("[forms.submit.stage_transition]", {
-        lead_id: link.lead_id,
-        target_stage: targetStage,
-        reason,
-      });
-      stageWarning = { reason, target_stage: targetStage };
+      const curRes = await db
+        .from("tenant_records")
+        .select("data")
+        .eq("id", link.lead_id)
+        .eq("tenant_id", form.tenant_id)
+        .maybeSingle();
+      const curStage = (curRes.data as { data?: Record<string, unknown> } | null)?.data?.stage;
+      if (typeof curStage === "string" && curStage !== targetStage) {
+        const order = LEAD_PIPELINE_STAGES.map((s) => s.key);
+        const ci = order.indexOf(curStage);
+        const ti = order.indexOf(targetStage);
+        if (ci >= 0 && ti >= 0 && ci > ti) isDowngrade = true;
+      }
+    } catch {
+      // Best-effort pre-check; if it fails, fall through and apply as before.
+    }
+    if (isDowngrade) {
+      // Preserve the lead's more-advanced stage; the submission is still
+      // recorded (form_submissions row above) and the application upsert /
+      // handoff email still run.
+      appliedStage = null;
+    } else {
+      try {
+        await updateRecord({
+          tenant_id: form.tenant_id,
+          entity: "lead",
+          id: link.lead_id,
+          patch: { stage: targetStage },
+        });
+        appliedStage = targetStage;
+      } catch (err) {
+        const reason = err instanceof RecordsError ? err.code : "unknown";
+        console.error("[forms.submit.stage_transition]", {
+          lead_id: link.lead_id,
+          target_stage: targetStage,
+          reason,
+        });
+        stageWarning = { reason, target_stage: targetStage };
+      }
     }
   }
 
