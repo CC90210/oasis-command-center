@@ -138,7 +138,10 @@ export function groupRowsIntoThreads(
         contact_email: email,
         channels: [],
         last_at: at, // first row for a key is newest (rows are desc)
-        last_preview: row.content_preview || "",
+        // Email sends logged via the gateway may carry a null content_preview
+        // (the gateway omits body_preview); fall back to the subject so the
+        // thread list shows the subject line instead of an empty "—".
+        last_preview: row.content_preview || row.subject || "",
         last_direction: direction,
         inbound_count: 0,
         tt_chat_id: ttChatId,
@@ -157,7 +160,9 @@ export function groupRowsIntoThreads(
       direction,
       type: row.type,
       subject: row.subject,
-      preview: row.content_preview || "",
+      // Same fallback as last_preview: a gateway-logged email with no
+      // content_preview still renders its subject in the message bubble.
+      preview: row.content_preview || row.subject || "",
       at,
       recording_url: row.recording_url,
       transcript_url: row.transcript_url,
