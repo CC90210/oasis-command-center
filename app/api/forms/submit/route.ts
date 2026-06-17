@@ -30,7 +30,7 @@
  * one IP could legitimately submit forms for multiple leads.
  */
 
-import { NextRequest, NextResponse } from "next/server";
+import { NextRequest, NextResponse, after } from "next/server";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { getClientIp } from "@/lib/api-helpers";
 import { verifyFormLink, signFormLink, type FormLinkPayload } from "@/lib/form-links";
@@ -52,6 +52,10 @@ import { createHash } from "node:crypto";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+// Headroom for the post-response handoff-email send (Next `after`): the bridge
+// send_email round-trip can take up to ~20s. The prospect's response returns
+// immediately regardless; this only bounds the background `after` callback.
+export const maxDuration = 30;
 
 type SubmitBody = {
   token?: string;
@@ -654,13 +658,21 @@ export async function POST(req: NextRequest) {
   // Both are fire-and-forget + soft-fail: the response never waits on or is
   // aborted by the email side.
   if (stepIndex === 0 && form.slug === "initial-lead-capture") {
-    await maybeSendNextStepsEmail({
-      db,
-      form: { id: form.id, tenant_id: form.tenant_id, slug: form.slug },
-      link: { tenant: link.tenant, lead_id: link.lead_id },
-      payload,
-      origin: req.nextUrl.origin,
-    });
+    // Run the handoff send AFTER the response is returned (Next 15 `after`) so
+    // a slow/offline bridge can never delay or time out the prospect's
+    // submission. The helper is fully soft-fail. (Codex audit 2026-06-17
+    // [medium]: awaited bridge send blocked the public response.) Capture the
+    // origin now — req must not be touched inside the post-response callback.
+    const origin = req.nextUrl.origin;
+    after(() =>
+      maybeSendNextStepsEmail({
+        db,
+        form: { id: form.id, tenant_id: form.tenant_id, slug: form.slug },
+        link: { tenant: link.tenant, lead_id: link.lead_id },
+        payload,
+        origin,
+      }),
+    );
   } else {
     await maybeQueueResumeEmail({
       db,

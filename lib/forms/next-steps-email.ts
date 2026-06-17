@@ -233,6 +233,26 @@ export async function maybeSendNextStepsEmail(
 
     if (await alreadySent(db, form.tenant_id, link.lead_id)) return;
 
+    // Honor unsubscribes even though this send is transactional. A PUBLIC form
+    // must never become a relay that re-emails someone who opted out — and
+    // intent='transactional' bypasses send_gateway's own suppression gate, so
+    // we re-check here against the dashboard's email_suppressions table before
+    // the address ever reaches the bridge. (Codex audit 2026-06-17 [high]:
+    // public relay / suppression-bypass.) Case-insensitive on email; any
+    // suppression for this (email, tenant) — regardless of brand — blocks.
+    const supp = await db
+      .from("email_suppressions")
+      .select("email")
+      .eq("tenant_id", form.tenant_id)
+      .ilike("email", toEmail)
+      .limit(1);
+    if (!supp.error && (supp.data?.length ?? 0) > 0) {
+      console.log("[forms.submit.next_steps] recipient suppressed — skipping", {
+        lead_id: link.lead_id,
+      });
+      return;
+    }
+
     // Tenant context — slug + custom_fields for bridge resolution, name +
     // brand for the email copy.
     const tenantRow = await db
