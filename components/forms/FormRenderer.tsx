@@ -14,13 +14,14 @@
  * just paints what it's given.
  *
  * Field types covered: text, textarea, email, phone, currency, number,
- * date, select, multiselect, signature (deferred to v2), file_upload,
+ * date, select, multiselect, signature (canvas e-signature), file_upload,
  * hidden, rating.
  */
 
 import { useId } from "react";
 import type { FormStep, FormField, FormBranding } from "@/lib/forms/types";
 import { DEFAULT_PRIMARY_COLOR, DEFAULT_ACCENT_COLOR } from "@/lib/forms/themes";
+import { SignatureField } from "./SignaturePad";
 
 type Props = {
   step: FormStep;
@@ -322,17 +323,13 @@ function renderInput(
     }
 
     case "signature":
-      // Deferred to v2 — a canvas-based signature widget needs more
-      // care than the v1 schema editor warrants. For v1, operators
-      // can ask the prospect to type their name as confirmation.
+      // Canvas-based e-signature (draw with finger/cursor). Emits a PNG
+      // data-URI string up through onChange like any other field value, and
+      // "" when the canvas is empty so a `required` signature blocks submit.
       return (
-        <input
-          id={inputId}
-          type="text"
+        <SignatureField
           value={typeof value === "string" ? value : ""}
-          onChange={(e) => onChange(e.target.value)}
-          placeholder="Type your full name as signature"
-          className={base}
+          onChange={(v) => onChange(v)}
         />
       );
 

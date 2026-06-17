@@ -61,6 +61,39 @@ assert.equal(
 assert.equal(homePathForTenant({ commandCenterProfileSlug: "sun" }), "/t/sun");
 assert.equal(homePathForTenant({ commandCenterProfileSlug: "oasis-ai-cc" }), "/");
 
+// Fresh-session landing (CC 2026-06-17): a SunBiz member who logs in with no
+// explicit ?next= (so next="/") must land DETERMINISTICALLY on their tenant
+// dashboard, not on "/" (which double-hops through app/page.tsx and was
+// surfacing the chat-first /reasoning view). Operators + other tenants still
+// resolve to "/".
+assert.equal(
+  normalizePostLoginRedirect("/", {
+    tenantSlug: "submissions",
+    commandCenterProfileSlug: "sun",
+    isEmpireOperator: false,
+  }),
+  "/t/sun",
+  "Fresh SunBiz member login (no ?next=) lands on the dashboard",
+);
+assert.equal(
+  normalizePostLoginRedirect("/", {
+    tenantSlug: "suga-tenant",
+    commandCenterProfileSlug: "suga",
+    isEmpireOperator: false,
+  }),
+  "/t/suga",
+  "Fresh suga member login (no ?next=) lands on the suga dashboard",
+);
+assert.equal(
+  normalizePostLoginRedirect("/", {
+    tenantSlug: "oasis-ai-cc",
+    commandCenterProfileSlug: "oasis-ai-cc",
+    isEmpireOperator: false,
+  }),
+  "/",
+  "OASIS member with no ?next= stays on / (their home dashboard)",
+);
+
 // Empire-operator chrome-bleed regression (2026-05-24): CC signed in with
 // his personal OASIS account and got dropped on /t/sun because his profile
 // resolves to the SunBiz tenant (he's the listed operator on that row).

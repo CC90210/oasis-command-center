@@ -46,6 +46,7 @@ import { dispatchLeadStageEvent } from "@/lib/lead-stage-dispatcher";
 import { resolvePublicForm } from "@/lib/forms/public-resolver";
 import { maybeQueueResumeEmail } from "@/lib/forms/maybe-queue-resume";
 import { maybeSendNextStepsEmail } from "@/lib/forms/next-steps-email";
+import { maybeGenerateApplicationDocument } from "@/lib/forms/application-document";
 import { upsertApplicationFromFormStep } from "@/lib/forms/application-upsert";
 import { resolveRepAssignment, mintFullApplicationLink, findExistingLead } from "@/lib/forms/agent-routing";
 import { LEAD_PIPELINE_STAGES } from "@/lib/sunbiz-stage-meta";
@@ -731,6 +732,23 @@ export async function POST(req: NextRequest) {
       link: { tenant: link.tenant, lead_id: link.lead_id, form_id: link.form_id },
       payload,
     });
+  }
+
+  // Final step of the FULL application → generate the signed application PDF
+  // (exact SunBiz layout, populated with the merchant's submitted data + their
+  // drawn signature), file it to the lead's documents ("Final Application
+  // Form"), and record it on the timeline. Runs AFTER the response (Next 15
+  // `after`) so PDF generation never delays the merchant's submit; the helper
+  // is fully soft-fail. Gated to the full application's last step so the
+  // interest + bank-statement forms don't trigger it.
+  if (isLastStep && form.slug === "full-application") {
+    after(() =>
+      maybeGenerateApplicationDocument({
+        db,
+        form: { id: form.id, tenant_id: form.tenant_id, slug: form.slug },
+        link: { tenant: link.tenant, lead_id: link.lead_id },
+      }),
+    );
   }
 
   return NextResponse.json({

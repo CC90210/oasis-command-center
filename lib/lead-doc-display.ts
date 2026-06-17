@@ -25,6 +25,9 @@ export const LEAD_DOC_TYPES: { key: string; label: string; required: boolean }[]
   // Jordan/Oasis 2026-05-23 restructure — Shopping Out attaches these
   // alongside bank statements when shopping to multiple lenders).
   { key: "signed_application", label: "Signed application", required: false },
+  // Auto-generated on full-application completion (signature + all fields →
+  // PDF). See lib/forms/application-document.ts.
+  { key: "final_application_form", label: "Final Application Form", required: false },
   { key: "second_application_form", label: "Second application form", required: false },
   { key: "underwriting_docs", label: "Underwriting docs", required: false },
   { key: "portal_docs", label: "Portal docs", required: false },

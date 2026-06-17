@@ -347,9 +347,16 @@ const TEMPLATES: Record<
         key: "signature",
         title: "Sign and submit",
         description:
-          "By typing your name and checking the box below you confirm that all information provided is accurate to the best of your knowledge.",
+          "Sign below, type your name, and check the box to confirm that all information provided is accurate to the best of your knowledge.",
         cta_label: "Submit application",
         fields: [
+          {
+            name: "applicant_signature",
+            label: "Sign here",
+            type: "signature",
+            required: true,
+            help: "Draw your signature — works with your finger on a phone or your mouse on a computer.",
+          },
           {
             name: "signature_name",
             label: "Type your full legal name",
