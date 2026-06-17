@@ -157,7 +157,15 @@ const SUN_PLAYBOOK_SLUGS = new Set<string>([
 function isSunBizPlaybook(file: PlaybookFile): boolean {
   if (SUN_PLAYBOOK_SLUGS.has(file.slug)) return true;
   const lowered = file.slug.toLowerCase();
-  if (lowered.includes("sunbiz") || lowered.includes("solara") || lowered.includes("helios")) {
+  if (
+    lowered.includes("sunbiz") ||
+    lowered.includes("solara") ||
+    lowered.includes("helios") ||
+    // The SunBiz feature manual docs (sun-10-getting-started, sun-11-operations,
+    // ...). Slug-based so it survives the frontmatter strip in lib/playbooks.ts
+    // (which removes the tags: line the body checks below rely on).
+    lowered.startsWith("sun-")
+  ) {
     return true;
   }
   // Bound the scan to the document head so giant playbooks don't pay a

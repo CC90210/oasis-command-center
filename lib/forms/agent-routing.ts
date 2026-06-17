@@ -60,27 +60,57 @@ export async function resolveRepAssignment(
  */
 export async function findExistingLead(
   tenantId: string,
-  match: { email?: string | null; phone?: string | null },
+  match: { email?: string | null; phone?: string | null; business?: string | null },
 ): Promise<{ id: string; data: Record<string, unknown> } | null> {
+  const db = getServiceSupabase();
+
+  // 1. Strong identity keys — email (lowercased) OR phone (exact). These
+  //    uniquely identify a returning merchant no matter which of the three
+  //    forms they filled, in any order (interest, full app, bank statements).
   const email = (match.email || "").trim().toLowerCase();
   const phone = (match.phone || "").trim();
   const ors: string[] = [];
   if (email) ors.push(`data->>email.eq.${email}`);
   if (phone) ors.push(`data->>phone.eq.${phone}`);
-  if (ors.length === 0) return null;
-  const db = getServiceSupabase();
-  const q = await db
-    .from("tenant_records")
-    .select("id, data, created_at")
-    .eq("tenant_id", tenantId)
-    .eq("entity_type", "lead")
-    .or(ors.join(","))
-    .order("created_at", { ascending: false })
-    .limit(1)
-    .maybeSingle();
-  if (q.error || !q.data) return null;
-  const row = q.data as { id: string; data: Record<string, unknown> | null };
-  return { id: row.id, data: row.data || {} };
+  if (ors.length > 0) {
+    const q = await db
+      .from("tenant_records")
+      .select("id, data, created_at")
+      .eq("tenant_id", tenantId)
+      .eq("entity_type", "lead")
+      .or(ors.join(","))
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    if (!q.error && q.data) {
+      const row = q.data as { id: string; data: Record<string, unknown> | null };
+      return { id: row.id, data: row.data || {} };
+    }
+  }
+
+  // 2. Secondary key — company name (case-insensitive exact). Catches a
+  //    returning merchant who used a different contact email/number on a
+  //    later form. LIKE wildcards in the name are escaped so it stays an
+  //    exact match, never a broad one.
+  const business = (match.business || "").trim();
+  if (business) {
+    const safe = business.replace(/[%_\\]/g, "\\$&");
+    const q = await db
+      .from("tenant_records")
+      .select("id, data, created_at")
+      .eq("tenant_id", tenantId)
+      .eq("entity_type", "lead")
+      .ilike("data->>business_name", safe)
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    if (!q.error && q.data) {
+      const row = q.data as { id: string; data: Record<string, unknown> | null };
+      return { id: row.id, data: row.data || {} };
+    }
+  }
+
+  return null;
 }
 
 /**

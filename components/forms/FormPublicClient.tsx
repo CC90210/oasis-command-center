@@ -110,6 +110,7 @@ export function FormPublicClient({
   }, [token]);
 
   const step = steps[currentStep];
+
   // Memoise so `values` is stable across renders when stepValues[currentStep]
   // hasn't changed — keeps the validate() useCallback below from re-creating
   // every render and re-triggering downstream effects.
@@ -279,34 +280,41 @@ export function FormPublicClient({
     }
   }
 
-  const primary = branding.primary_color || "#0ea5e9";
+  const primary = branding.primary_color || "#E0A53F";
+  const headline = branding.headline || formName;
   const thanksMessage =
     branding.thanks_message ||
-    "Thanks — your submission landed. Your contact at OASIS will reach out shortly.";
+    "Thanks — your details are in. A specialist will reach out within one business day.";
 
   return (
     <main className="min-h-screen bg-bg-deep text-fg flex items-start sm:items-center justify-center px-4 py-10">
       <div className="w-full max-w-xl space-y-6">
-        {/* Brand header */}
-        <header className="text-center space-y-2">
-          {branding.logo_url && (
+        {/* Brand header — logo if the tenant set one, otherwise a clean
+            branded sun mark so the form reads as the brand (not the
+            internal form name). */}
+        <header className="text-center space-y-3">
+          {branding.logo_url ? (
             // eslint-disable-next-line @next/next/no-img-element
-            <img
-              src={branding.logo_url}
-              alt="Logo"
-              className="mx-auto h-12"
+            <img src={branding.logo_url} alt={headline} className="mx-auto h-12" />
+          ) : (
+            <div
+              className="mx-auto flex h-14 w-14 items-center justify-center rounded-2xl"
+              style={{ background: `${primary}1f`, border: `1px solid ${primary}55` }}
+            >
+              <SunMark color={primary} />
+            </div>
+          )}
+          <div className="space-y-2">
+            <h1 className="text-2xl font-black tracking-tight text-fg">{headline}</h1>
+            <div
+              className="mx-auto h-0.5 w-12 rounded-full"
+              style={{ background: primary }}
             />
-          )}
-          {branding.headline && (
-            <h1 className="text-2xl font-bold text-fg">{branding.headline}</h1>
-          )}
+          </div>
           {branding.subheadline && (
-            <p className="text-sm text-fg-muted">{branding.subheadline}</p>
-          )}
-          {!branding.headline && (
-            // Fallback when branding has no headline — use the form name
-            // so the prospect at least sees what they're submitting to.
-            <h1 className="text-2xl font-bold text-fg">{formName}</h1>
+            <p className="mx-auto max-w-sm text-sm leading-relaxed text-fg-muted">
+              {branding.subheadline}
+            </p>
           )}
         </header>
 
@@ -373,6 +381,11 @@ export function FormPublicClient({
           )}
         </div>
 
+        {/* Footer note — light, brand-neutral reassurance. */}
+        <p className="text-center text-[11px] text-fg-dim">
+          Your information is kept private and used only to evaluate your funding request.
+        </p>
+
         {/* Hardcoded "Powered by OASIS AI" footer removed 2026-05-25
             (CC cross-tenant audit). A Sun Biz lead filling out a Sun
             Biz application form shouldn't see OASIS AI attribution
@@ -381,5 +394,32 @@ export function FormPublicClient({
             FormBranding with a footer_label field. */}
       </div>
     </main>
+  );
+}
+
+/** Gold SunBiz sun glyph — rendered in the form header when the tenant
+ *  hasn't uploaded a logo, so the form still reads as the brand. */
+function SunMark({ color }: { color: string }) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      width="30"
+      height="30"
+      fill="none"
+      stroke={color}
+      strokeWidth="2"
+      strokeLinecap="round"
+      aria-hidden="true"
+    >
+      <circle cx="12" cy="12" r="4" fill={color} stroke="none" />
+      <line x1="12" y1="2.5" x2="12" y2="5" />
+      <line x1="12" y1="19" x2="12" y2="21.5" />
+      <line x1="2.5" y1="12" x2="5" y2="12" />
+      <line x1="19" y1="12" x2="21.5" y2="12" />
+      <line x1="5.4" y1="5.4" x2="7" y2="7" />
+      <line x1="17" y1="17" x2="18.6" y2="18.6" />
+      <line x1="5.4" y1="18.6" x2="7" y2="17" />
+      <line x1="17" y1="7" x2="18.6" y2="5.4" />
+    </svg>
   );
 }

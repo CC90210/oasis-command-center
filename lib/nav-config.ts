@@ -85,7 +85,10 @@ export const CC_NAV: NavItem[] = [
   // confusing operators.
   { group: "Operations", href: "/", label: "Today", icon: "LayoutDashboard" },
   { group: "Operations", href: "/pipeline", label: "Pipeline", icon: "GitBranch" },
-  { group: "Operations", href: "/agents", label: "Agents", icon: "Bot" },
+  // Agents -> the full-screen chat (/agent), same as SunBiz, so CC's chat runs
+  // full-bleed (isChatShellPath matches /agent). The richer /agents dashboard
+  // page — agent states, stats, integration health — stays reachable by URL.
+  { group: "Operations", href: "/agent", label: "Agents", icon: "Bot" },
   { group: "Operations", href: "/reasoning", label: "Reasoning", icon: "Brain" },
   { group: "Operations", href: "/playbook", label: "Playbook", icon: "BookOpen" },
   // System group — observability + control surfaces.

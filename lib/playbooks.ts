@@ -47,6 +47,23 @@ function extractTitle(body: string, fallback: string): string {
   return firstH1?.[1]?.trim() || fallback;
 }
 
+/**
+ * Strip metadata that shouldn't render to the reader: a leading YAML
+ * frontmatter block (--- ... ---) and a standalone "Audience: ..." line.
+ * Title + audience are still inferred from the RAW file; this only cleans
+ * the body that gets handed to the markdown renderer so docs don't show
+ * "tags: [...]" / "Audience: ..." at the top.
+ */
+function stripForDisplay(raw: string): string {
+  let s = raw;
+  if (s.startsWith("---")) {
+    const fm = s.match(/^---\r?\n[\s\S]*?\r?\n---\r?\n?/);
+    if (fm) s = s.slice(fm[0].length);
+  }
+  s = s.replace(/^[ \t]*Audience:[^\n]*\r?\n+/im, "");
+  return s.replace(/^\s+/, "");
+}
+
 export async function listPlaybooks(): Promise<PlaybookFile[]> {
   let entries: string[] = [];
   try {
@@ -63,7 +80,7 @@ export async function listPlaybooks(): Promise<PlaybookFile[]> {
       out.push({
         slug,
         title: extractTitle(body, slug),
-        body,
+        body: stripForDisplay(body),
         audience: inferAudience(slug, body),
       });
     } catch {
@@ -81,7 +98,7 @@ export async function loadPlaybook(slug: PlaybookSlug): Promise<PlaybookFile | n
     return {
       slug,
       title: extractTitle(body, slug),
-      body,
+      body: stripForDisplay(body),
       audience: inferAudience(slug, body),
     };
   } catch {

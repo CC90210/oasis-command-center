@@ -738,7 +738,7 @@ async function initAnonymousLead(input: {
   // link + re-enters their details must NOT spawn a duplicate lead. Match an
   // existing lead by email/phone and route the new info into that SAME file
   // (uploads attach to lead_id, so they land on the existing file too).
-  const existing = await findExistingLead(form.tenant_id, { email, phone });
+  const existing = await findExistingLead(form.tenant_id, { email, phone, business });
 
   let lead: { id: string; data: Record<string, unknown> };
   if (existing) {

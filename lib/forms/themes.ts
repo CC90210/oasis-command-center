@@ -29,15 +29,15 @@ export const FORM_THEMES: FormTheme[] = [
   {
     id: "sunbiz_standard",
     label: "SunBiz Standard",
-    description: "Default SunBiz Funding intake — blue + warm gold accents.",
+    description: "Default SunBiz Funding intake — warm gold on charcoal, branded header.",
     branding: {
-      primary_color: "#0ea5e9",
+      primary_color: "#E0A53F",
       accent_color: "#FFB81C",
-      headline: "Tell us about your business",
+      headline: "SunBiz Funding",
       subheadline:
-        "A few quick questions, then upload the documents we need to underwrite.",
+        "Business funding, fast — tell us about your business and we'll match you with the right capital.",
       thanks_message:
-        "Thanks — we received your application. A funding specialist will reach out within one business day.",
+        "Thanks — we've got your details. A SunBiz Funding specialist will reach out within one business day.",
     },
   },
   {
