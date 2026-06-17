@@ -20,6 +20,7 @@
 
 import { useId } from "react";
 import type { FormStep, FormField, FormBranding } from "@/lib/forms/types";
+import { DEFAULT_PRIMARY_COLOR, DEFAULT_ACCENT_COLOR } from "@/lib/forms/themes";
 
 type Props = {
   step: FormStep;
@@ -51,8 +52,8 @@ export function FormRenderer({
   onBack,
   ctaLabelOverride,
 }: Props) {
-  const primary = branding?.primary_color || "#0ea5e9";
-  const accent = branding?.accent_color || "#06b6d4";
+  const primary = branding?.primary_color || DEFAULT_PRIMARY_COLOR;
+  const accent = branding?.accent_color || DEFAULT_ACCENT_COLOR;
 
   return (
     <form

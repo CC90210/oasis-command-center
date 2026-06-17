@@ -22,6 +22,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { CheckCircle2, AlertCircle } from "lucide-react";
 import { FormRenderer } from "./FormRenderer";
 import type { FormStep, FormBranding } from "@/lib/forms/types";
+import { DEFAULT_PRIMARY_COLOR } from "@/lib/forms/themes";
 
 // Submit-side route (api/forms/submit) now decodes the base64 and uploads
 // to Supabase Storage instead of holding the bytes in form_submissions.
@@ -280,7 +281,7 @@ export function FormPublicClient({
     }
   }
 
-  const primary = branding.primary_color || "#E0A53F";
+  const primary = branding.primary_color || DEFAULT_PRIMARY_COLOR;
   const headline = branding.headline || formName;
   const thanksMessage =
     branding.thanks_message ||

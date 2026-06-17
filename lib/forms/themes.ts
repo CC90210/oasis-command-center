@@ -14,6 +14,15 @@
  */
 import type { FormBranding } from "./types";
 
+/**
+ * Shared fallback colors for forms with no branding set. Both the prospect
+ * render (FormPublicClient) and the shared FormRenderer use these so an
+ * unbranded form is one consistent color, not two-tone (gold header + cyan
+ * button). Match the SunBiz Standard theme.
+ */
+export const DEFAULT_PRIMARY_COLOR = "#E0A53F";
+export const DEFAULT_ACCENT_COLOR = "#FFB81C";
+
 export type FormTheme = {
   /** Stable key written into the branding object so the next load picks it back up. */
   id: string;
