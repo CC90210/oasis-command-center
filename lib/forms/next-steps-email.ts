@@ -38,6 +38,7 @@ import "server-only";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { resolveBridgeTarget, callBridgeExecTool } from "@/lib/bridge-proxy";
 import { getAgents } from "@/lib/config/agents";
+import { getTenantMembers } from "@/lib/team";
 import { mintFormLinkBySlug } from "@/lib/forms/agent-routing";
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -75,12 +76,16 @@ async function sendViaBridge(input: {
   brand?: string;
   leadId: string;
   signer: SignerCtx;
+  /** Assigned-agent email to CC (so the rep whose form it was gets a copy). */
+  cc?: string | null;
 }): Promise<{ sent: boolean; reason?: string }> {
   const target = resolveBridgeTarget(input.tenant);
   if (!target) return { sent: false, reason: "bridge_not_configured" };
 
   // Mirror the lead-drawer send_email payload shape EXACTLY (proven path):
-  // send_email params are top-level siblings of tool_name, not nested.
+  // send_email params are top-level siblings of tool_name, not nested. The
+  // bridge send_email tool runs `cc` through send_gateway.normalize_cc (header-
+  // injection validated), so the CC value is forwarded safely.
   const toolBody: Record<string, unknown> = {
     tool_name: "send_email",
     to: input.to,
@@ -93,6 +98,7 @@ async function sendViaBridge(input: {
   };
   if (input.signer.email) toolBody.signer_email = input.signer.email;
   if (input.signer.phone) toolBody.signer_phone = input.signer.phone;
+  if (input.cc) toolBody.cc = input.cc;
 
   const r = await callBridgeExecTool(target, toolBody);
   if (!r.ok) {
@@ -125,6 +131,40 @@ function resolveSigner(agentName: string | null | undefined): SignerCtx {
     // the from-address). Non-fatal.
   }
   return { name, email: "", phone: "" };
+}
+
+/**
+ * Resolve the assigned agent's email to CC them on their own lead's handoff —
+ * so the rep whose form the merchant used (Jordan / Alex / Ezra) gets a copy.
+ * Two sources, in order:
+ *   1. The signing roster (agents.config.json) by name — Jordan/Alex match and
+ *      give the canonical @sunbizfunding.com address.
+ *   2. The tenant member by auth_user_id (lead.assigned_to) — handles Ezra,
+ *      whose roster entry is keyed "Matt", so name-matching in step 1 misses.
+ * Returns null when there's no assigned agent (lead lands unassigned → no CC).
+ */
+async function resolveAgentCc(
+  tenantId: string,
+  assignedTo: string | null,
+  agentName: string,
+): Promise<string | null> {
+  try {
+    const roster = getAgents();
+    const m = roster.find((a) => a.name.trim().toLowerCase() === agentName.trim().toLowerCase());
+    if (m?.email) return m.email;
+  } catch {
+    // roster read failed — fall through to the auth_user_id lookup.
+  }
+  if (assignedTo) {
+    try {
+      const members = await getTenantMembers(tenantId);
+      const member = members.find((x) => x.auth_user_id === assignedTo);
+      if (member?.email) return member.email;
+    } catch {
+      // member lookup failed — send without the CC rather than not at all.
+    }
+  }
+  return null;
 }
 
 /** Render the plain-text handoff email. Short + direct — funding prospects
@@ -294,6 +334,13 @@ export async function maybeSendNextStepsEmail(
       "the SunBiz team";
     const signer = resolveSigner(agentName);
 
+    // CC the rep whose form the merchant submitted (Jordan / Alex / Ezra), so
+    // the assigned agent gets a copy of their lead's handoff. Null when the
+    // lead is unassigned → no CC.
+    const assignedTo =
+      typeof leadData.assigned_to === "string" ? leadData.assigned_to : null;
+    const ccEmail = await resolveAgentCc(form.tenant_id, assignedTo, agentName);
+
     const { subject, body } = renderBody({
       brand: brandLabel,
       toName,
@@ -310,6 +357,7 @@ export async function maybeSendNextStepsEmail(
       brand: brandSlug,
       leadId: link.lead_id,
       signer,
+      cc: ccEmail,
     });
 
     // Record the interaction for the lead timeline + idempotency. When the
@@ -334,6 +382,7 @@ export async function maybeSendNextStepsEmail(
         next_steps: true,
         full_application_url: fullAppUrl,
         bank_statement_url: bankStatementUrl,
+        cc_email: ccEmail,
         intent: "transactional",
       },
     });
