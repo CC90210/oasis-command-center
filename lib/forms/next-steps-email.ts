@@ -115,56 +115,61 @@ async function sendViaBridge(input: {
   }
 }
 
-/** Resolve the signing identity from the lead's assigned agent name. We sign
- *  with the tenant-member display name the lead actually carries (Jordan /
- *  Alex / Ezra), and enrich email + phone only when that name matches the
- *  signing roster (agents.config.json). Falls back to the shared SunBiz
- *  identity so the signature never renders blank. */
-function resolveSigner(agentName: string | null | undefined): SignerCtx {
-  const name = (agentName || "").trim() || "the SunBiz team";
-  try {
-    const roster = getAgents();
-    const match = roster.find((a) => a.name.trim().toLowerCase() === name.toLowerCase());
-    if (match) return { name: match.name, email: match.email, phone: match.phone };
-  } catch {
-    // roster read failed — fall through to name-only signer (brand supplies
-    // the from-address). Non-fatal.
-  }
-  return { name, email: "", phone: "" };
-}
+type AssignedAgent = SignerCtx & {
+  /** Email to CC — non-null ONLY when authoritatively resolved from assigned_to.
+   *  Never derived from the cached name, so we can't CC a stale/wrong rep. */
+  ccEmail: string | null;
+};
 
 /**
- * Resolve the assigned agent's email to CC them on their own lead's handoff —
- * so the rep whose form the merchant used (Jordan / Alex / Ezra) gets a copy.
- * Two sources, in order:
- *   1. The signing roster (agents.config.json) by name — Jordan/Alex match and
- *      give the canonical @sunbizfunding.com address.
- *   2. The tenant member by auth_user_id (lead.assigned_to) — handles Ezra,
- *      whose roster entry is keyed "Matt", so name-matching in step 1 misses.
- * Returns null when there's no assigned agent (lead lands unassigned → no CC).
+ * Resolve the assigned agent for both the signature AND the CC, from the lead.
+ *
+ * `assigned_to` (auth_user_id) is AUTHORITATIVE. We resolve the tenant member by
+ * it and use their real name + email. We deliberately do NOT use the cached
+ * `assigned_agent_name` as a resolution source: the reassignment endpoint
+ * (app/api/leads/[id]/assign) updates assigned_to but leaves
+ * assigned_agent_name stale, so trusting the name could CC the PREVIOUS rep and
+ * leak merchant details to the wrong internal recipient. (Codex audit
+ * 2026-06-18 [high].)
+ *
+ * Precedence:
+ *   - assigned_to resolves to a member → sign as that member (name + email),
+ *     enrich phone from the roster by EMAIL match, and CC that member's email.
+ *   - assigned_to null OR unresolvable → sign with the cached name as a
+ *     display-only fallback (so the signature never renders blank) and CC
+ *     NOBODY (ccEmail=null). We never guess a CC recipient.
  */
-async function resolveAgentCc(
+async function resolveAssignedAgent(
   tenantId: string,
   assignedTo: string | null,
-  agentName: string,
-): Promise<string | null> {
-  try {
-    const roster = getAgents();
-    const m = roster.find((a) => a.name.trim().toLowerCase() === agentName.trim().toLowerCase());
-    if (m?.email) return m.email;
-  } catch {
-    // roster read failed — fall through to the auth_user_id lookup.
-  }
+  fallbackName: string,
+): Promise<AssignedAgent> {
+  const safeName = (fallbackName || "").trim() || "the SunBiz team";
   if (assignedTo) {
     try {
       const members = await getTenantMembers(tenantId);
       const member = members.find((x) => x.auth_user_id === assignedTo);
-      if (member?.email) return member.email;
+      const email = (member?.email || "").trim();
+      if (email) {
+        const name = (member?.display_name || member?.full_name || "").trim() || safeName;
+        // Phone isn't on the member row — pull it from the signing roster by
+        // EMAIL match (member email is the canonical address). Best-effort.
+        let phone = "";
+        try {
+          const roster = getAgents();
+          const r = roster.find((a) => a.email.trim().toLowerCase() === email.toLowerCase());
+          if (r) phone = r.phone;
+        } catch {
+          /* roster read failed — phone stays blank, non-fatal */
+        }
+        return { name, email, phone, ccEmail: email };
+      }
     } catch {
-      // member lookup failed — send without the CC rather than not at all.
+      // member lookup failed — fall through to name-only signer + no CC.
     }
   }
-  return null;
+  // Unassigned / unresolvable: display name only, never a guessed CC.
+  return { name: safeName, email: "", phone: "", ccEmail: null };
 }
 
 /** Render the plain-text handoff email. Short + direct — funding prospects
@@ -329,22 +334,22 @@ export async function maybeSendNextStepsEmail(
       (typeof payload.contact_name === "string" && payload.contact_name) ||
       (typeof payload.name === "string" && payload.name) ||
       null;
-    const agentName =
-      (typeof leadData.assigned_agent_name === "string" && leadData.assigned_agent_name) ||
-      "the SunBiz team";
-    const signer = resolveSigner(agentName);
-
-    // CC the rep whose form the merchant submitted (Jordan / Alex / Ezra), so
-    // the assigned agent gets a copy of their lead's handoff. Null when the
-    // lead is unassigned → no CC.
+    // Resolve the assigned rep for BOTH the signature and the CC. assigned_to
+    // (auth_user_id) is authoritative; the cached assigned_agent_name is only a
+    // display fallback (never a CC source) — see resolveAssignedAgent.
     const assignedTo =
       typeof leadData.assigned_to === "string" ? leadData.assigned_to : null;
-    const ccEmail = await resolveAgentCc(form.tenant_id, assignedTo, agentName);
+    const fallbackName =
+      (typeof leadData.assigned_agent_name === "string" && leadData.assigned_agent_name) ||
+      "the SunBiz team";
+    const agent = await resolveAssignedAgent(form.tenant_id, assignedTo, fallbackName);
+    const signer: SignerCtx = { name: agent.name, email: agent.email, phone: agent.phone };
+    const ccEmail = agent.ccEmail;
 
     const { subject, body } = renderBody({
       brand: brandLabel,
       toName,
-      agentName,
+      agentName: agent.name,
       fullAppUrl,
       bankStatementUrl,
     });
