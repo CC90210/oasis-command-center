@@ -148,6 +148,7 @@ export const ENTITY_STAGE_TONES: Record<string, Record<string, StageTone>> = {
   // the tones below are the semantic-palette fallback the Kanban uses
   // when it can't reach the per-stage style.
   lead: {
+    intent_inquiry_submitted: "info",
     imported: "neutral",
     not_interested: "warm",
     hot_lead: "hot",
@@ -160,6 +161,8 @@ export const ENTITY_STAGE_TONES: Record<string, Record<string, StageTone>> = {
     default: "warm",
     submitted: "engaged",
     approved: "engaged",
+    ghost: "neutral",
+    opted_out: "warm",
     // Legacy status values still in the wild (pre-2026-05-17 enum) — keep
     // mapping so any backfilled rows in old shape don't render invisible.
     cold: "neutral",

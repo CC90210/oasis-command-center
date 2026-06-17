@@ -49,6 +49,7 @@ import { maybeSendNextStepsEmail } from "@/lib/forms/next-steps-email";
 import { upsertApplicationFromFormStep } from "@/lib/forms/application-upsert";
 import { resolveRepAssignment, mintFullApplicationLink, findExistingLead } from "@/lib/forms/agent-routing";
 import { LEAD_PIPELINE_STAGES } from "@/lib/sunbiz-stage-meta";
+import { isFormStageDowngrade } from "@/lib/forms/stage-transition";
 import { createHash } from "node:crypto";
 
 export const runtime = "nodejs";
@@ -583,12 +584,14 @@ export async function POST(req: NextRequest) {
         .eq("tenant_id", form.tenant_id)
         .maybeSingle();
       const curStage = (curRes.data as { data?: Record<string, unknown> } | null)?.data?.stage;
-      if (typeof curStage === "string" && curStage !== targetStage) {
-        const order = LEAD_PIPELINE_STAGES.map((s) => s.key);
-        const ci = order.indexOf(curStage);
-        const ti = order.indexOf(targetStage);
-        if (ci >= 0 && ti >= 0 && ci > ti) isDowngrade = true;
-      }
+      // Forward-only with terminal-stage policy: ghost/declined reactivate on a
+      // new submission, default/opted_out are preserved, active leads are never
+      // downgraded. See lib/forms/stage-transition.ts.
+      isDowngrade = isFormStageDowngrade(
+        typeof curStage === "string" ? curStage : null,
+        targetStage,
+        LEAD_PIPELINE_STAGES.map((s) => s.key),
+      );
     } catch {
       // Best-effort pre-check; if it fails, fall through and apply as before.
     }
