@@ -33,6 +33,7 @@ const FIELD_TYPE_LABELS: Record<FormFieldType, string> = {
   date: "Date",
   select: "Single-select dropdown",
   multiselect: "Multi-select",
+  address: "Address (autocomplete)",
   rating: "Rating (1–5)",
   file_upload: "File upload",
   signature: "Signature",
@@ -49,6 +50,7 @@ const FIELD_TYPES_ORDERED: FormFieldType[] = [
   "date",
   "select",
   "multiselect",
+  "address",
   "rating",
   "file_upload",
   "signature",
@@ -110,7 +112,9 @@ function blankField(type: FormFieldType): FormField {
         ? "Email"
         : type === "phone"
           ? "Phone"
-          : "New field";
+          : type === "address"
+            ? "Address"
+            : "New field";
   const field: FormField = {
     name: slugifyName(label),
     label,

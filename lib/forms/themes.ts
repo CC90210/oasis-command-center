@@ -97,6 +97,31 @@ export function getFormTheme(id: string | null | undefined): FormTheme | null {
 }
 
 /**
+ * Pick a readable text color (near-black or white) for text laid over the
+ * tenant's brand color. The default SunBiz gold (#E0A53F) is light, so the
+ * hardcoded white CTA text scored ~2.2:1 — below WCAG AA. Compute from the
+ * background's relative luminance instead so light brands get dark text and
+ * dark brands get white. Used by every primary CTA (form submit + the
+ * interest-form continue-now buttons).
+ */
+export function getContrastingTextColor(hex: string | null | undefined): string {
+  const raw = (hex || "").replace("#", "").trim();
+  const full = raw.length === 3 ? raw.split("").map((c) => c + c).join("") : raw;
+  const n = Number.parseInt(full, 16);
+  if (full.length !== 6 || Number.isNaN(n)) return "#ffffff";
+  const channel = (c: number) => {
+    const s = c / 255;
+    return s <= 0.03928 ? s / 12.92 : Math.pow((s + 0.055) / 1.055, 2.4);
+  };
+  const r = (n >> 16) & 255;
+  const g = (n >> 8) & 255;
+  const b = n & 255;
+  const luminance = 0.2126 * channel(r) + 0.7152 * channel(g) + 0.0722 * channel(b);
+  // Threshold ~0.4: dark text for gold/light brands, white for navy/charcoal.
+  return luminance > 0.4 ? "#111827" : "#ffffff";
+}
+
+/**
  * Detects which preset (if any) matches the current branding, so the
  * builder can highlight the active theme even on a form created before
  * the picker existed. Match is by primary_color + headline because those

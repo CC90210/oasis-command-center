@@ -55,6 +55,7 @@ const PUBLIC_PATH_PREFIXES = [
   // gets a broken form.
   "/api/forms/submit",     // POST per-step → inserts form_submissions row + maybe stage-transitions the lead.
   "/api/forms/view",       // POST on form-page mount → records form_views + fires viewed_application drip.
+  "/api/forms/address-autocomplete", // GET ?q=… → server-side address-autocomplete proxy for the public form. Public (the personalized form isn't session-authed) and IP rate-limited; returns only formatted-address strings, never provider keys (those stay server-side). See app/api/forms/address-autocomplete/route.ts.
   "/f/",                   // Public prospect-facing form pages. Two shapes: /f/<tenant>/<form>/<lead_token> (personalized, HMAC-signed via Solara mint) and /f/<tenant>/<form> (anonymous share — server creates a fresh lead on submit). Both must be reachable without a session cookie or every inbound form return 401 — verified failure mode 2026-05-18 (CC opened a copied link in incognito and landed on /login).
 
   "/api/cron",

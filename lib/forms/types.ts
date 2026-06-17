@@ -31,6 +31,7 @@ export type FormFieldType =
   | "date"
   | "select"
   | "multiselect"
+  | "address"
   | "signature"
   | "file_upload"
   | "hidden"
@@ -139,6 +140,7 @@ const VALID_FIELD_TYPES: ReadonlySet<FormFieldType> = new Set([
   "date",
   "select",
   "multiselect",
+  "address",
   "signature",
   "file_upload",
   "hidden",

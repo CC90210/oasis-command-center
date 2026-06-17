@@ -148,9 +148,9 @@ const TEMPLATES: Record<
           {
             name: "business_address",
             label: "Business address",
-            type: "text",
+            type: "address",
             required: true,
-            placeholder: "Street, city, state, ZIP",
+            placeholder: "Start typing your business address…",
           },
           {
             name: "tax_id_ein",
@@ -231,9 +231,9 @@ const TEMPLATES: Record<
           {
             name: "owner_home_address",
             label: "Home address",
-            type: "text",
+            type: "address",
             required: true,
-            placeholder: "Street, city, state, ZIP",
+            placeholder: "Start typing your home address…",
           },
         ],
       },
@@ -267,9 +267,9 @@ const TEMPLATES: Record<
           {
             name: "partner_home_address",
             label: "Home address",
-            type: "text",
+            type: "address",
             required: false,
-            placeholder: "Street, city, state, ZIP",
+            placeholder: "Start typing your home address…",
           },
         ],
       },

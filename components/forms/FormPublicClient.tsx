@@ -22,7 +22,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { CheckCircle2, AlertCircle } from "lucide-react";
 import { FormRenderer } from "./FormRenderer";
 import type { FormStep, FormBranding } from "@/lib/forms/types";
-import { DEFAULT_PRIMARY_COLOR } from "@/lib/forms/themes";
+import { DEFAULT_PRIMARY_COLOR, getContrastingTextColor } from "@/lib/forms/themes";
 
 // Submit-side route (api/forms/submit) now decodes the base64 and uploads
 // to Supabase Storage instead of holding the bytes in form_submissions.
@@ -56,6 +56,9 @@ type SubmitResponse = {
   error?: string;
   /** Set on the first anonymous-flow submit so subsequent steps re-use it. */
   minted_token?: string | null;
+  /** Personalized "continue now" links — present on the interest form's
+   *  completion only; the thank-you screen renders them as buttons. */
+  next_forms?: Array<{ slug: string; label: string; url: string }> | null;
 };
 
 export function FormPublicClient({
@@ -91,6 +94,11 @@ export function FormPublicClient({
   const [submitting, setSubmitting] = useState(false);
   const [done, setDone] = useState(false);
   const [serverError, setServerError] = useState<string | null>(null);
+  // Personalized links to the next forms (interest-form completion only),
+  // rendered as "continue now" buttons on the thank-you screen.
+  const [nextForms, setNextForms] = useState<
+    Array<{ slug: string; label: string; url: string }>
+  >([]);
 
   // Fire view-ping exactly once on mount. Anonymous flows can't ping
   // /api/forms/view yet — there's no lead until the first submit — so
@@ -265,6 +273,9 @@ export function FormPublicClient({
       if (data.next_step !== null && data.next_step !== undefined) {
         setCurrentStep(data.next_step);
       } else {
+        // Final step done. Capture any continue-now links the server returned
+        // (interest form only) so the thank-you screen can offer them.
+        setNextForms(data.next_forms ?? []);
         const target = data.redirect_url || redirectUrl;
         if (target) {
           window.location.href = target;
@@ -346,7 +357,7 @@ export function FormPublicClient({
         {/* Body */}
         <div className="rounded-2xl border border-bg-border bg-bg-elev/40 p-6 shadow-lg">
           {done ? (
-            <div className="text-center space-y-3 py-8">
+            <div className="text-center space-y-4 py-8">
               <CheckCircle2
                 className="w-12 h-12 mx-auto"
                 style={{ color: primary }}
@@ -355,6 +366,28 @@ export function FormPublicClient({
               <p className="text-sm text-fg-muted max-w-md mx-auto">
                 {thanksMessage}
               </p>
+              {nextForms.length > 0 && (
+                <div className="pt-3 space-y-3">
+                  <div className="text-[11px] font-bold uppercase tracking-wider text-fg-dim">
+                    Have a few minutes? Keep going
+                  </div>
+                  <div className="mx-auto flex max-w-sm flex-col gap-2">
+                    {nextForms.map((f) => (
+                      <a
+                        key={f.slug}
+                        href={f.url}
+                        className="flex min-h-[44px] w-full items-center justify-center rounded-lg px-4 py-3 text-sm font-bold shadow-sm transition-opacity hover:opacity-90"
+                        style={{ backgroundColor: primary, color: getContrastingTextColor(primary) }}
+                      >
+                        {f.label} →
+                      </a>
+                    ))}
+                  </div>
+                  <p className="text-[11px] text-fg-dim">
+                    No rush — we&apos;ve emailed these links too, so you can finish anytime.
+                  </p>
+                </div>
+              )}
             </div>
           ) : (
             <>

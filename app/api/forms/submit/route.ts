@@ -47,6 +47,7 @@ import { resolvePublicForm } from "@/lib/forms/public-resolver";
 import { maybeQueueResumeEmail } from "@/lib/forms/maybe-queue-resume";
 import { maybeSendNextStepsEmail } from "@/lib/forms/next-steps-email";
 import { maybeGenerateApplicationDocument } from "@/lib/forms/application-document";
+import { mintFormLinkBySlug } from "@/lib/forms/agent-routing";
 import { upsertApplicationFromFormStep } from "@/lib/forms/application-upsert";
 import { resolveRepAssignment, mintFullApplicationLink, findExistingLead } from "@/lib/forms/agent-routing";
 import { LEAD_PIPELINE_STAGES } from "@/lib/sunbiz-stage-meta";
@@ -554,6 +555,10 @@ export async function POST(req: NextRequest) {
   // publisher fires automatically; the Phase 4 drip engine consumes it.
   // The final step also honors on_complete_stage as a fallback.
   let appliedStage: string | null = null;
+  // The returning lead's current stage (read below for the forward-only guard),
+  // reused to suppress the interest-form continue-now links for a merchant who
+  // has already completed/submitted their application.
+  let currentLeadStage: string | null = null;
   const stepOutcomes = form.step_outcomes || {};
   const isLastStep = stepIndex === steps.length - 1;
   const targetStage =
@@ -595,6 +600,7 @@ export async function POST(req: NextRequest) {
         stageWarning = { reason: "stage_read_failed", target_stage: targetStage };
       } else {
         const curStage = (curRes.data as { data?: Record<string, unknown> } | null)?.data?.stage;
+        currentLeadStage = typeof curStage === "string" ? curStage : null;
         // Forward-only with terminal-stage policy: ghost/declined reactivate on a
         // new submission, default/opted_out are preserved, active + unknown
         // stages are never downgraded/overwritten. See lib/forms/stage-transition.ts.
@@ -708,6 +714,12 @@ export async function POST(req: NextRequest) {
   //     you left off). Left intact for non-interest forms.
   // Both are fire-and-forget + soft-fail: the response never waits on or is
   // aborted by the email side.
+  // next_forms: personalized links to the full application + bank-statement
+  // forms, returned in the response so the interest form's completion screen
+  // can offer "continue now" buttons — the SAME links the handoff email sends.
+  // Minted only on the interest-form submission.
+  let nextForms: Array<{ slug: string; label: string; url: string }> | null = null;
+
   if (stepIndex === 0 && form.slug === "initial-lead-capture") {
     // Run the handoff send AFTER the response is returned (Next 15 `after`) so
     // a slow/offline bridge can never delay or time out the prospect's
@@ -715,6 +727,30 @@ export async function POST(req: NextRequest) {
     // [medium]: awaited bridge send blocked the public response.) Capture the
     // origin now — req must not be touched inside the post-response callback.
     const origin = req.nextUrl.origin;
+    // Mint the continue-now links synchronously so they ride the response. Both
+    // are quick indexed lookups; run them in parallel. Null entries (a form
+    // missing/disabled) are dropped, so we only surface links that resolve.
+    const [fullAppUrl, bankUrl] = await Promise.all([
+      mintFormLinkBySlug(origin, form.tenant_id, link.tenant, link.lead_id, "full-application"),
+      mintFormLinkBySlug(origin, form.tenant_id, link.tenant, link.lead_id, "bank-statement-upload"),
+    ]);
+    const minted = [
+      fullAppUrl ? { slug: "full-application", label: "Complete your full application", url: fullAppUrl } : null,
+      bankUrl ? { slug: "bank-statement-upload", label: "Upload your bank statements", url: bankUrl } : null,
+    ].filter((x): x is { slug: string; label: string; url: string } => x !== null);
+    // Don't re-invite a returning merchant who has ALREADY completed/submitted
+    // their application (smart-matched into an advanced lead) — the links are
+    // valid, but the buttons would ask them to re-fill finished forms. (review
+    // 2026-06-17 [low].) sent/viewed are still pending → keep offering them.
+    const APPLIED_STAGES = new Set([
+      "signed_application",
+      "submitted",
+      "approved",
+      "funded",
+      "default",
+    ]);
+    const alreadyApplied = !!currentLeadStage && APPLIED_STAGES.has(currentLeadStage);
+    nextForms = !alreadyApplied && minted.length > 0 ? minted : null;
     after(() =>
       maybeSendNextStepsEmail({
         db,
@@ -757,6 +793,10 @@ export async function POST(req: NextRequest) {
     next_step: isLastStep ? null : stepIndex + 1,
     lead_stage: appliedStage,
     redirect_url: isLastStep ? form.redirect_url : null,
+    // Personalized continue-now links (interest form completion only) — the
+    // public form's thank-you screen renders these as buttons. Null for every
+    // other form/step.
+    next_forms: nextForms,
     // Non-null when the prospect's submission landed but the lead's
     // stage didn't advance — drip didn't fire, operator needs to look
     // (typical causes: lead row was deleted between view + submit;

@@ -20,8 +20,9 @@
 
 import { useId } from "react";
 import type { FormStep, FormField, FormBranding } from "@/lib/forms/types";
-import { DEFAULT_PRIMARY_COLOR, DEFAULT_ACCENT_COLOR } from "@/lib/forms/themes";
+import { DEFAULT_PRIMARY_COLOR, DEFAULT_ACCENT_COLOR, getContrastingTextColor } from "@/lib/forms/themes";
 import { SignatureField } from "./SignaturePad";
+import { AddressAutocompleteField } from "./AddressAutocompleteField";
 
 type Props = {
   step: FormStep;
@@ -96,8 +97,8 @@ export function FormRenderer({
         <button
           type="submit"
           disabled={submitting || previewMode}
-          className="ml-auto inline-flex items-center justify-center rounded-lg px-5 py-2.5 text-sm font-bold text-white shadow-sm transition-colors disabled:opacity-50"
-          style={{ backgroundColor: primary }}
+          className="ml-auto inline-flex items-center justify-center rounded-lg px-5 py-2.5 text-sm font-bold shadow-sm transition-colors disabled:opacity-50"
+          style={{ backgroundColor: primary, color: getContrastingTextColor(primary) }}
         >
           {submitting
             ? "Submitting…"
@@ -184,6 +185,19 @@ function renderInput(
           placeholder={field.placeholder}
           maxLength={field.maxLength}
           className={base}
+        />
+      );
+
+    case "address":
+      // Predictive address autocomplete (US/CA/global). Stores the selected
+      // formatted address as a plain string, so downstream (PDF, lead record)
+      // is unaffected — identical to a text field's value.
+      return (
+        <AddressAutocompleteField
+          inputId={inputId}
+          value={typeof value === "string" ? value : ""}
+          onChange={(v) => onChange(v)}
+          placeholder={field.placeholder}
         />
       );
 
