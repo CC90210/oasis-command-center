@@ -66,6 +66,72 @@ export function bridgeControlEligibility(
   };
 }
 
+export type BridgeExecResult = {
+  /** True when the HTTP call succeeded AND the bridge tool did not error. */
+  ok: boolean;
+  /** The bridge's is_error flag. */
+  isError: boolean;
+  /** The bridge tool's `output` string (callers parse this — e.g. the
+   *  send_gateway JSON blob, or pm2's stdout). Empty string when absent. */
+  output: string;
+  /** The bridge's structured error, if any. */
+  error?: string;
+  /** Upstream HTTP status (0 when the fetch threw before a response). */
+  httpStatus: number;
+};
+
+/**
+ * Single transport for the VPS bridge `/exec-tool` endpoint from trusted
+ * server code. Callers pass an already-resolved target (from
+ * authorizeBridgeRequest for session routes, or resolveBridgeTarget for public
+ * server-to-server sends) plus the full tool body; this POSTs it with the
+ * server bearer and normalizes the bridge's response envelope so each caller
+ * only interprets `output`. Never throws — failures return { ok:false, ... }.
+ *
+ * This is the ONE home for the "POST the raw bridge with the bearer" shape,
+ * shared by the worker-control proxy (bash / pm2) and the form handoff email
+ * (send_email). NOT used by /api/bridge/exec-tool, which is the session-gated
+ * BROWSER proxy (role gate + rate limit + raw response passthrough).
+ */
+export async function callBridgeExecTool(
+  target: BridgeTarget,
+  body: Record<string, unknown>,
+  opts?: { timeoutMs?: number },
+): Promise<BridgeExecResult> {
+  try {
+    const res = await fetch(`${target.baseUrl}/exec-tool`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${target.bearerToken}`,
+      },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(opts?.timeoutMs ?? 20_000),
+    });
+    const data = (await res.json().catch(() => ({}))) as {
+      ok?: boolean;
+      output?: string;
+      is_error?: boolean;
+      error?: string;
+    };
+    return {
+      ok: res.ok && data.ok !== false && data.is_error !== true,
+      isError: data.is_error === true,
+      output: typeof data.output === "string" ? data.output : "",
+      error: data.error,
+      httpStatus: res.status,
+    };
+  } catch (e) {
+    return {
+      ok: false,
+      isError: true,
+      output: "",
+      error: e instanceof Error ? e.message : "bridge_unreachable",
+      httpStatus: 0,
+    };
+  }
+}
+
 /**
  * Shared authorization for ALL bridge proxy routes (chat, health, prewarm,
  * chat-reset). Resolves the authenticated user's tenant SERVER-SIDE, applies

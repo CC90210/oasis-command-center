@@ -25,7 +25,7 @@
  */
 
 import { NextResponse } from "next/server";
-import { authorizeBridgeRequest } from "@/lib/bridge-proxy";
+import { authorizeBridgeRequest, callBridgeExecTool } from "@/lib/bridge-proxy";
 import { bridgeExecToolAllowedForRole } from "@/lib/role-gates";
 import { SUNBIZ_WORKER_NAMES } from "@/lib/automations/sunbiz-workers";
 
@@ -68,33 +68,15 @@ export async function POST(req: Request) {
     return NextResponse.json({ ok: false, error: "unknown_worker" }, { status: 400 });
   }
 
-  try {
-    const res = await fetch(`${auth.target.baseUrl}/exec-tool`, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        Authorization: `Bearer ${auth.target.bearerToken}`,
-      },
-      body: JSON.stringify({ tool_name: "bash", input: { command: `pm2 ${action} ${name}` } }),
-      signal: AbortSignal.timeout(20_000),
-    });
-    const data = (await res.json().catch(() => ({}))) as {
-      ok?: boolean;
-      output?: string;
-      is_error?: boolean;
-      error?: string;
-    };
-    if (!res.ok || data.ok === false || data.is_error === true) {
-      return NextResponse.json(
-        { ok: false, error: data.error || data.output || `bridge_http_${res.status}` },
-        { status: 502 },
-      );
-    }
-    return NextResponse.json({ ok: true, output: data.output || "ok" });
-  } catch (e) {
+  const result = await callBridgeExecTool(auth.target, {
+    tool_name: "bash",
+    input: { command: `pm2 ${action} ${name}` },
+  });
+  if (!result.ok) {
     return NextResponse.json(
-      { ok: false, error: e instanceof Error ? e.message : "bridge_unreachable" },
+      { ok: false, error: result.error || result.output || `bridge_http_${result.httpStatus}` },
       { status: 502 },
     );
   }
+  return NextResponse.json({ ok: true, output: result.output || "ok" });
 }

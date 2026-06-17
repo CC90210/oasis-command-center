@@ -36,7 +36,7 @@
 
 import "server-only";
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { resolveBridgeTarget } from "@/lib/bridge-proxy";
+import { resolveBridgeTarget, callBridgeExecTool } from "@/lib/bridge-proxy";
 import { getAgents } from "@/lib/config/agents";
 import { mintFormLinkBySlug } from "@/lib/forms/agent-routing";
 
@@ -94,38 +94,18 @@ async function sendViaBridge(input: {
   if (input.signer.email) toolBody.signer_email = input.signer.email;
   if (input.signer.phone) toolBody.signer_phone = input.signer.phone;
 
+  const r = await callBridgeExecTool(target, toolBody);
+  if (!r.ok) {
+    return { sent: false, reason: (r.error || r.output || `bridge_http_${r.httpStatus}`).slice(0, 200) };
+  }
+  // send_gateway returns its --json blob in `output`; status:"sent" means the
+  // gates walked AND SMTP fired.
   try {
-    const res = await fetch(`${target.baseUrl}/exec-tool`, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        authorization: `Bearer ${target.bearerToken}`,
-      },
-      body: JSON.stringify(toolBody),
-      signal: AbortSignal.timeout(20_000),
-    });
-    if (!res.ok) {
-      const txt = await res.text().catch(() => "");
-      return { sent: false, reason: `bridge_http_${res.status}: ${txt.slice(0, 120)}` };
-    }
-    const data = (await res.json().catch(() => ({}))) as {
-      is_error?: boolean;
-      output?: string;
-    };
-    if (data.is_error) {
-      return { sent: false, reason: String(data.output || "is_error").slice(0, 200) };
-    }
-    // send_gateway returns its --json blob in `output`; status:"sent" means the
-    // gates walked AND SMTP fired.
-    try {
-      const parsed = JSON.parse(data.output || "{}") as { status?: string; reason?: string };
-      if (parsed.status === "sent") return { sent: true };
-      return { sent: false, reason: `send_gateway status=${parsed.status || "unknown"}: ${parsed.reason || ""}`.slice(0, 200) };
-    } catch {
-      return { sent: false, reason: "bridge returned non-JSON output" };
-    }
-  } catch (e) {
-    return { sent: false, reason: e instanceof Error ? e.message : "bridge_unreachable" };
+    const parsed = JSON.parse(r.output || "{}") as { status?: string; reason?: string };
+    if (parsed.status === "sent") return { sent: true };
+    return { sent: false, reason: `send_gateway status=${parsed.status || "unknown"}: ${parsed.reason || ""}`.slice(0, 200) };
+  } catch {
+    return { sent: false, reason: "bridge returned non-JSON output" };
   }
 }
 
