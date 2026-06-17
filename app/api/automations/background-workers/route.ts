@@ -34,7 +34,7 @@ import { NextResponse } from "next/server";
 import { getSessionUser, getServiceSupabase } from "@/lib/supabase-server";
 import { getTenant } from "@/lib/queries";
 import { resolveClientProfileSlug } from "@/lib/client-profiles";
-import { isBridgeProxyEnabled } from "@/lib/bridge-proxy";
+import { bridgeControlEligibility } from "@/lib/bridge-proxy";
 import { SUNBIZ_WORKERS } from "@/lib/automations/sunbiz-workers";
 
 export const runtime = "nodejs";
@@ -151,7 +151,6 @@ export async function GET() {
   const role = (profileRow?.is_owner === true ? "owner" : (profileRow?.team_role || "read_only"))
     .trim()
     .toLowerCase();
-  const isOwnerAdmin = role === "owner" || role === "admin";
 
   // Tenant-aware worker set. SunBiz operators see the VPS daemons (pushed by
   // the VPS bridge under the tenant_id); everyone else sees the operator's
@@ -160,11 +159,12 @@ export async function GET() {
   const isSun = (tenant ? resolveClientProfileSlug(tenant) : null) === "sun";
   const workerSet = isSun ? SUNBIZ_WORKERS : EXPECTED_WORKERS;
   // SunBiz daemons live on the VPS — start/stop/restart routes through the
-  // server-side bridge proxy (control/route.ts). That proxy resolves the bridge
-  // via the SAME BRIDGE_VPS_URL + BRIDGE_BEARER_TOKEN env the chat/shop-out/
-  // underwriting proxies use (already configured in prod), so control is live
-  // whenever the bridge proxy is enabled AND the viewer is owner/admin.
-  const sunbizControl = isSun && isBridgeProxyEnabled() && isOwnerAdmin;
+  // server-side bridge proxy (control/route.ts). Decide whether to show the
+  // controls with the SAME resolver + role gate POST enforces, via the shared
+  // bridgeControlEligibility() helper, so the displayed state can't drift from
+  // what POST will accept (Codex audit 2026-06-17).
+  const { targetConfigured, roleAllowed } = bridgeControlEligibility(tenant, role);
+  const sunbizControl = isSun && targetConfigured && roleAllowed;
 
   // Bridge liveness — the heartbeat tells us when the bridge last pushed
   // anything. Older than 2 minutes means daemon snapshots are stale.

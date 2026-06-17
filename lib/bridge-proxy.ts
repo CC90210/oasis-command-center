@@ -26,6 +26,7 @@ import {
   resolveBridgeTarget as _resolveBridgeTarget,
   type BridgeTarget as _BridgeTarget,
 } from "./bridge-target-resolver";
+import { bridgeExecToolAllowedForRole } from "./role-gates";
 
 export type BridgeTarget = _BridgeTarget;
 export const resolveBridgeTarget = _resolveBridgeTarget;
@@ -33,6 +34,36 @@ export const resolveBridgeTarget = _resolveBridgeTarget;
 /** True when the server is configured to proxy to a VPS bridge (global default). */
 export function isBridgeProxyEnabled(): boolean {
   return Boolean(process.env.BRIDGE_VPS_URL && process.env.BRIDGE_BEARER_TOKEN);
+}
+
+/**
+ * Single source of truth for "can this user control VPS daemons for this tenant"
+ * — used by BOTH the read path (GET background-workers, to decide whether to
+ * show Start/Stop/Restart) and conceptually mirrors the write path (POST
+ * .../control, which gates on authorizeBridgeRequest → resolveBridgeTarget +
+ * bridgeExecToolAllowedForRole(role,"bash")).
+ *
+ * Codex audit 2026-06-17 [medium]: the GET path previously decided eligibility
+ * with `isBridgeProxyEnabled()` (global env only) + a hand-rolled owner/admin
+ * check, while POST resolved the actual target via resolveBridgeTarget(). For
+ * SunBiz ('submissions') those coincide today, but the predicates could drift
+ * (e.g. a future per-tenant bridge_url tenant), showing buttons that 503 or
+ * hiding buttons POST would allow. Routing both through this helper makes the
+ * displayed control state provably match what POST will accept.
+ *
+ *   - targetConfigured: the SAME resolveBridgeTarget() POST uses (handles both
+ *     the global SunBiz env AND a per-tenant bridge_url + BRIDGE_BEARER_TOKEN_<SLUG>).
+ *   - roleAllowed: the SAME bridgeExecToolAllowedForRole(role,"bash") gate POST
+ *     applies (owner/admin only — bouncing a prod daemon is shell-tier).
+ */
+export function bridgeControlEligibility(
+  tenant: { slug: string; custom_fields: Record<string, unknown> | null } | null,
+  teamRole: string | null | undefined,
+): { targetConfigured: boolean; roleAllowed: boolean } {
+  return {
+    targetConfigured: tenant ? resolveBridgeTarget(tenant) !== null : false,
+    roleAllowed: bridgeExecToolAllowedForRole(teamRole, "bash"),
+  };
 }
 
 /**

@@ -131,8 +131,19 @@ export function BackgroundWorkersPanel() {
 
       {!data.bridge_online && (
         <div className="rounded-lg border border-bg-border bg-bg-deep/40 p-3 text-xs text-fg-muted">
-          Bridge hasn&apos;t pinged in the last 2 minutes — worker statuses
-          below may be stale. Run <span className="font-mono text-fg">pm2 restart claude-bridge-ping</span> on your machine.
+          {data.remote_control ? (
+            <>
+              The VPS heartbeat hasn&apos;t landed in the last 2 minutes — the
+              statuses below may be lagging. The controls still work: hit{" "}
+              <span className="font-mono text-fg">Restart</span> on the
+              &ldquo;Bridge heartbeat&rdquo; worker to recover it.
+            </>
+          ) : (
+            <>
+              Bridge hasn&apos;t pinged in the last 2 minutes — worker statuses
+              below may be stale. Run <span className="font-mono text-fg">pm2 restart claude-bridge-ping</span> on your machine.
+            </>
+          )}
         </div>
       )}
 
@@ -400,7 +411,16 @@ function WorkerActions({
   const nonPm2Hint = !pm2Managed
     ? "Standalone — manages its own lifecycle outside pm2. Start / stop via direct CLI."
     : undefined;
-  const disabledHint = nonPm2Hint || (!bridgeOnline ? "Bridge offline — can't reach pm2" : undefined);
+  // Heartbeat freshness only blocks the LOCAL path (browser → localhost bridge):
+  // if that bridge is offline the browser can't reach it. For the REMOTE path
+  // the control POST goes server-side to the VPS exec-tool (hosted by
+  // pm2.claude-bridge), which is independent of the heartbeat (pushed by
+  // pm2.claude-bridge-ping). Codex audit 2026-06-17 [medium]: gating remote
+  // actions on a stale heartbeat disabled the exact Restart that recovers a
+  // dead claude-bridge-ping. So remote stays actionable; a truly-down bridge
+  // surfaces a clear error from the POST instead of a greyed-out button.
+  const bridgeBlocks = !remoteControl && !bridgeOnline;
+  const disabledHint = nonPm2Hint || (bridgeBlocks ? "Bridge offline — can't reach pm2" : undefined);
 
   return (
     <div className="mt-2 flex items-center gap-1.5">
@@ -408,7 +428,7 @@ function WorkerActions({
         icon={busy === "start" ? Loader2 : Play}
         spin={busy === "start"}
         label="Start"
-        disabled={!pm2Managed || !bridgeOnline || busy !== null || !canStart}
+        disabled={!pm2Managed || bridgeBlocks || busy !== null || !canStart}
         title={
           disabledHint ||
           (!canStart ? "Already running" : "Start this worker via pm2")
@@ -419,7 +439,7 @@ function WorkerActions({
         icon={busy === "stop" ? Loader2 : Square}
         spin={busy === "stop"}
         label="Stop"
-        disabled={!pm2Managed || !bridgeOnline || busy !== null || !canStop}
+        disabled={!pm2Managed || bridgeBlocks || busy !== null || !canStop}
         title={
           disabledHint ||
           (!canStop ? "Already stopped" : "Stop this worker via pm2")
@@ -430,7 +450,7 @@ function WorkerActions({
         icon={busy === "restart" ? Loader2 : RotateCw}
         spin={busy === "restart"}
         label="Restart"
-        disabled={!pm2Managed || !bridgeOnline || busy !== null}
+        disabled={!pm2Managed || bridgeBlocks || busy !== null}
         title={disabledHint || "Restart this worker via pm2"}
         onClick={() => handle("restart")}
       />
