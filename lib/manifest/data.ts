@@ -145,6 +145,7 @@ export async function getRecord(input: { tenant_id: string; entity: string; id: 
 // Stages NOT in this list (declined, default, opted_out, renewed_elsewhere)
 // don't need a fresh URL — the merchant's path is closed.
 const STAGES_NEEDING_APPLY_URL = new Set([
+  "intent_inquiry_submitted",
   "hot_lead",
   "new_contact",
   "missing_info",

@@ -18,6 +18,8 @@
 export const STAGE_SLA_DAYS: Record<string, number> = {
   // Lead stages (migration 064 — imported / not_interested / approved
   // retired). Terminal stages keep 999d so they never count as overdue.
+  // Fresh inquiry — speed-to-lead is everything; contact within a day.
+  intent_inquiry_submitted: 1,
   hot_lead: 1,
   missing_info: 3,
   declined: 999,
@@ -56,6 +58,7 @@ export const STAGE_SLA_DAYS: Record<string, number> = {
  *  data.stage values (retained until Phase 5 retires the old variant). */
 export const ACTIVE_STAGES = new Set<string>([
   // Lead-side active
+  "intent_inquiry_submitted",
   "hot_lead",
   "missing_info",
   "follow_up",
@@ -79,6 +82,7 @@ export const ACTIVE_STAGES = new Set<string>([
 
 export const VISIBLE_TARGET_STAGES = new Set<string>([
   // Lead-side
+  "intent_inquiry_submitted",
   "hot_lead",
   "missing_info",
   "follow_up",

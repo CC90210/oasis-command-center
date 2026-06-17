@@ -80,6 +80,7 @@ type Props = {
  *  Must stay in sync with SUN_SEED.data_model.lead.stage in
  *  lib/manifest/seeds.ts AND the colors in lib/sunbiz-stage-meta.ts. */
 const SUNBIZ_STAGES: LeadsTableStage[] = [
+  { value: "intent_inquiry_submitted", label: "Intent inquiry",     tone: "text-status-info" },
   { value: "hot_lead",           label: "Hot lead",           tone: "text-accent" },
   { value: "missing_info",       label: "Missing info",       tone: "text-status-info" },
   { value: "follow_up",          label: "Follow up",          tone: "text-status-info" },
