@@ -12,7 +12,7 @@ Welcome to the SunBiz Agent Command Center — your cockpit for running a fundin
 
 1. **A prospect fills out your interest form.** You share your personal link (see the Forms tab). They enter business name, their name, phone, email, and monthly revenue.
 2. **They land in Leads as a "Hot Lead," assigned to you** — by name, automatically, because they used your link.
-3. **The system texts and emails them the full-application link**, signed by you. (This is the Inquiry Welcomer drip in Sequences.)
+3. **The instant they submit, the system automatically emails them their next steps** — the Full Application link *and* the Bank Statement Upload link — signed by you. They just click through; nothing for you to send.
 4. **They complete the Full Application and upload 3 months of bank statements.**
 5. **An Application appears** in the Applications board at "Application In," and **underwriting runs automatically** — the system grades the deal.
 6. **You shop it out.** Open Shopping Out, pick the deal, review the lenders ranked by fit, attach the statements, CC your teammates, and hit Send.

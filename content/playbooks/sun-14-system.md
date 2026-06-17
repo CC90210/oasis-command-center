@@ -30,7 +30,8 @@ The automatic drip campaigns — welcome messages, reminders, nudges that fire o
 
 - **The list** shows each sequence with a **Live / Paused** toggle, **Edit**, and **Delete**.
 - **New sequence** — start one from a template.
-- The **Inquiry Welcomer** is the auto-welcome that texts and emails new leads their application link, signed by their agent.
+- The **new-lead welcome email** — Full Application + Bank Statement links, signed by the assigned agent — is sent **automatically the instant a prospect submits the interest form**. That's a built-in form action, *not* a drip you manage here; the sequences in this list are the **follow-up nudges** that fire on later stage changes (viewed, sent, signed, missing info, declined, …).
+- An older **Inquiry Welcomer** drip ships **Paused** — leave it off. The automatic welcome email above replaces it; turning it on would double-message new leads.
 
 Mostly set-and-forget. You'll rarely touch this beyond toggling one on or off.
 
@@ -48,7 +49,7 @@ The scheduled background jobs running for SunBiz (lead scoring, follow-up checks
 - **New automation** — name it, pick an agent, set a schedule (friendly Preset or raw Custom cron).
 - **Draft with AI** — describe what you want in plain English ("every Monday 7am, pull funded deals and text me a summary") and the agent writes the script; **Inspect generated Python** to see it; Save, then flip the toggle on.
 - **Toggle / Edit / Delete** existing jobs.
-- **Background workers** — health of the system daemons; mostly informational.
+- **Background workers** — the always-on VPS daemons that run the pipeline (sequence runner, lender-reply classifier, cold-outreach runner, sentinel, chat bridge, cron poller, event router). You see each one's health, and as an **owner/admin** you can **Start / Stop / Restart** any of them — the signal goes straight to the server. Other roles see them read-only.
 
 Agents rarely need this. It's here for power moves later.
 
