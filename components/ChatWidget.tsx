@@ -705,6 +705,11 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
   // form in the DOM, which could be a different widget when the persistent
   // instance and a page-level instance coexist (e.g. on /agents).
   const composerFormRef = useRef<HTMLFormElement | null>(null);
+  // Set true while loadPastSession is switching agent so the agent-switch reset
+  // effect doesn't reseed the welcome message over the just-restored transcript
+  // (loading a past chat that belongs to a DIFFERENT agent than the one
+  // selected — common with SunBiz's solara+helios).
+  const loadingPastSessionRef = useRef(false);
   const [error, setError] = useState<string | null>(null);
   // Structured error code surfaced by /api/chat (lib/chat-auth.ts).
   // When set, the error render branch picks the matching friendly UI
@@ -1172,6 +1177,13 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
       }
       activeStreamControllerRef.current = null;
     }
+    // If this agent change came from loadPastSession, the restored transcript
+    // (+ session/tab ids) is already set — DON'T reseed the welcome over it.
+    // One-shot: clear the flag and skip the reset.
+    if (loadingPastSessionRef.current) {
+      loadingPastSessionRef.current = false;
+      return;
+    }
     setMessages(seedMessagesForAgent(agent, welcomeMessages));
     setSessionId(null);
     setError(null);
@@ -1389,8 +1401,11 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
         setError(j.error || `http_${r.status}`);
         return;
       }
-      // Switch agent if the loaded session belongs to a different one.
+      // Switch agent if the loaded session belongs to a different one. Flag the
+      // load so the agent-switch reset effect doesn't wipe the restored
+      // transcript with the welcome seed.
       if (j.session.agent_key && j.session.agent_key !== agent) {
+        loadingPastSessionRef.current = true;
         setAgent(j.session.agent_key);
       }
       // Map server-shape -> client Msg shape. created_at strings -> ms

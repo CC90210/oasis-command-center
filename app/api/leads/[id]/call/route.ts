@@ -25,6 +25,7 @@ import { getUserIntegrationValue } from "@/lib/user-integration-store";
 import { getKixieCredentials, makeCall } from "@/lib/integrations/kixie";
 import { normalizePhoneE164 } from "@/lib/lead-interactions-queries";
 import { isDryRun } from "@/lib/integrations/send-mode";
+import { isReadOnlyRole } from "@/lib/role-gates";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -61,13 +62,23 @@ export async function POST(
   // Resolve the acting user's tenant + email.
   const profile = await db
     .from("user_profiles")
-    .select("tenant_id,email,full_name,display_name")
+    .select("tenant_id,email,full_name,display_name,team_role")
     .eq("auth_user_id", user.id)
     .maybeSingle();
   const tenantId = (profile.data as { tenant_id?: string | null } | null)?.tenant_id;
   const fallbackEmail = (profile.data as { email?: string | null } | null)?.email || "";
   if (!tenantId) {
     return NextResponse.json({ ok: false, error: "no_tenant" }, { status: 400 });
+  }
+  // Role gate (2026-06-18): placing an outbound call is a member+ capability —
+  // read_only members are denied, for parity with the SMS send path
+  // (/api/conversations/reply) and the bridge/exec-tool wall.
+  const teamRole = (profile.data as { team_role?: string | null } | null)?.team_role;
+  if (isReadOnlyRole(teamRole)) {
+    return NextResponse.json(
+      { ok: false, error: "forbidden_role", message: "Read-only members can't place calls." },
+      { status: 403 },
+    );
   }
 
   // Resolve the lead's phone from tenant_records (works for both lead +

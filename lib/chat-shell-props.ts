@@ -52,10 +52,13 @@ function firstNameOf(name: string | null | undefined, fallback = "Jordan"): stri
 }
 
 /**
- * Returns null when there's no tenant (no chat to render) — e.g. a brand-new
- * signup before tenant provisioning. Never throws; each side query is
- * safe()-wrapped so one failure degrades gracefully rather than blanking the
- * whole layout.
+ * Resolve the persistent ChatWidget's props for an operator. When there's no
+ * tenant (fresh signup pre-provisioning, or an unlinked profile) it returns a
+ * Bravo fallback rather than null, so the persistent chat still mounts instead
+ * of leaving /agent stuck on its loading fallback. Never throws; each side
+ * query is safe()-wrapped so one failure degrades gracefully. (The layout call
+ * site still treats the result as nullable because its safe() wrapper yields
+ * null if resolution itself throws.)
  */
 export async function resolveChatShellProps(args: {
   profile: ProfileLike;
