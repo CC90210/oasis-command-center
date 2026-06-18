@@ -20,6 +20,7 @@
 
 import { useId } from "react";
 import type { FormStep, FormField, FormBranding } from "@/lib/forms/types";
+import { isFieldVisible } from "@/lib/forms/visibility";
 import { DEFAULT_PRIMARY_COLOR, DEFAULT_ACCENT_COLOR, getContrastingTextColor } from "@/lib/forms/themes";
 import { SignatureField } from "./SignaturePad";
 import { AddressAutocompleteField } from "./AddressAutocompleteField";
@@ -73,15 +74,19 @@ export function FormRenderer({
       </header>
 
       <div className="space-y-4">
-        {step.fields.map((field) => (
-          <FieldRow
-            key={field.name}
-            field={field}
-            value={values[field.name]}
-            error={errors[field.name]}
-            onChange={(v) => onFieldChange(field.name, v)}
-          />
-        ))}
+        {/* `values` is the MERGED cross-step map (parent supplies it) so a
+            field's show_if can react to a selection on an earlier step. */}
+        {step.fields
+          .filter((field) => isFieldVisible(field, values))
+          .map((field) => (
+            <FieldRow
+              key={field.name}
+              field={field}
+              value={values[field.name]}
+              error={errors[field.name]}
+              onChange={(v) => onFieldChange(field.name, v)}
+            />
+          ))}
       </div>
 
       <div className="flex items-center gap-3 pt-2">

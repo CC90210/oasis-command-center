@@ -44,6 +44,27 @@ export type FormFieldOption = {
   label: string;
 };
 
+/**
+ * Conditional-display predicate. When present on a field (or step), the field
+ * is shown only when the condition holds. `field` names ANOTHER field in the
+ * same form (any step) — visibility is evaluated against a merged map of all
+ * answered values (see lib/forms/visibility.ts). Multiple predicates AND.
+ * A missing target value evaluates FALSE (hidden) — correct before the
+ * controlling field is answered.
+ */
+export type FormShowIf = {
+  /** `name` of the controlling field. Must match /^[a-z][a-z0-9_]*$/. */
+  field: string;
+  /** Scalar equality: controlling value === equals. */
+  equals?: string;
+  /** Array membership: controlling value (a multiselect) includes this. */
+  includes?: string;
+  /** Scalar set membership: controlling value is one of these. */
+  in?: string[];
+  /** Array intersection: controlling array shares ≥1 value with these. */
+  any_of?: string[];
+};
+
 export type FormField = {
   /** Key under form_submissions.payload. Must match /^[a-z][a-z0-9_]*$/. */
   name: string;
@@ -66,6 +87,8 @@ export type FormField = {
   accept?: string[];
   /** For hidden fields — the static value written into the submission. */
   value?: string;
+  /** Conditional display — show this field only when the predicate holds. */
+  show_if?: FormShowIf;
 };
 
 // ---------------------------------------------------------------------------
@@ -82,6 +105,8 @@ export type FormStep = {
   /** Submit-button label. Defaults to "Continue" (or "Submit" on last step). */
   cta_label?: string;
   fields: FormField[];
+  /** Conditional display — show this whole step only when the predicate holds. */
+  show_if?: FormShowIf;
 };
 
 export type FormBranding = {
@@ -164,6 +189,51 @@ function optionalString(obj: Record<string, unknown>, key: string): string | und
   return typeof v === "string" && v.length > 0 ? v : undefined;
 }
 
+function parseShowIf(v: unknown, path: string): FormShowIf {
+  if (!isStringRecord(v)) throw new FormDefinitionError(path, "expected object");
+  const field = requireString(v, "field", path);
+  if (!FIELD_NAME_RE.test(field)) {
+    throw new FormDefinitionError(`${path}.field`, `must match /^[a-z][a-z0-9_]{0,62}$/`);
+  }
+  const out: FormShowIf = { field };
+  if (v.equals !== undefined) {
+    if (typeof v.equals !== "string") {
+      throw new FormDefinitionError(`${path}.equals`, "expected string");
+    }
+    out.equals = v.equals;
+  }
+  if (v.includes !== undefined) {
+    if (typeof v.includes !== "string") {
+      throw new FormDefinitionError(`${path}.includes`, "expected string");
+    }
+    out.includes = v.includes;
+  }
+  if (v.in !== undefined) {
+    if (!Array.isArray(v.in) || v.in.some((x) => typeof x !== "string")) {
+      throw new FormDefinitionError(`${path}.in`, "expected string[]");
+    }
+    out.in = v.in as string[];
+  }
+  if (v.any_of !== undefined) {
+    if (!Array.isArray(v.any_of) || v.any_of.some((x) => typeof x !== "string")) {
+      throw new FormDefinitionError(`${path}.any_of`, "expected string[]");
+    }
+    out.any_of = v.any_of as string[];
+  }
+  if (
+    out.equals === undefined &&
+    out.includes === undefined &&
+    out.in === undefined &&
+    out.any_of === undefined
+  ) {
+    throw new FormDefinitionError(
+      path,
+      "must specify at least one predicate (equals/includes/in/any_of)",
+    );
+  }
+  return out;
+}
+
 function parseField(v: unknown, path: string): FormField {
   if (!isStringRecord(v)) throw new FormDefinitionError(path, "expected object");
   const name = requireString(v, "name", path);
@@ -200,6 +270,9 @@ function parseField(v: unknown, path: string): FormField {
   if (Array.isArray(v.accept)) {
     field.accept = v.accept.filter((m): m is string => typeof m === "string");
   }
+  if (v.show_if !== undefined) {
+    field.show_if = parseShowIf(v.show_if, `${path}.show_if`);
+  }
   return field;
 }
 
@@ -212,13 +285,17 @@ function parseStep(v: unknown, path: string): FormStep {
   if (!Array.isArray(v.fields) || v.fields.length === 0) {
     throw new FormDefinitionError(`${path}.fields`, "expected non-empty array");
   }
-  return {
+  const step: FormStep = {
     key,
     title: requireString(v, "title", path),
     description: optionalString(v, "description"),
     cta_label: optionalString(v, "cta_label"),
     fields: v.fields.map((f, idx) => parseField(f, `${path}.fields[${idx}]`)),
   };
+  if (v.show_if !== undefined) {
+    step.show_if = parseShowIf(v.show_if, `${path}.show_if`);
+  }
+  return step;
 }
 
 /**

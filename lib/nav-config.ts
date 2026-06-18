@@ -85,6 +85,13 @@ export const CC_NAV: NavItem[] = [
   // confusing operators.
   { group: "Operations", href: "/", label: "Today", icon: "LayoutDashboard" },
   { group: "Operations", href: "/pipeline", label: "Pipeline", icon: "GitBranch" },
+  // Forms — CC's native lead-capture funnel (replaces the retired standalone
+  // cc-funnel Vercel app, 2026-06-18). Submissions ingest straight into the
+  // pipeline above as `inbound` leads, with a Telegram ping + personalized
+  // welcome email. Tenant-scoped: this array feeds ONLY the OASIS manifest, so
+  // adding /forms here does NOT leak it onto SunBiz/Suga (they use SUN_NAV /
+  // SUGA_NAV). Public form lives at /f/oasis-ai-cc/<slug>.
+  { group: "Operations", href: "/forms", label: "Forms", icon: "FileCode2" },
   // Agents -> the full-screen chat (/agent), same as SunBiz, so CC's chat runs
   // full-bleed (isChatShellPath matches /agent). The richer /agents dashboard
   // page — agent states, stats, integration health — stays reachable by URL.
@@ -122,8 +129,10 @@ export const CC_NAV: NavItem[] = [
   //                    state-api daemon is reachable. On public Vercel it's
   //                    always "Off" by design (noise without the local stack).
   //
-  // /forms + /sequences intentionally absent — SunBiz CRM features that
-  // surface only on the SunBiz tenant nav (see SUN_NAV below).
+  // /forms is now present (above, Operations) — CC's native funnel replaced the
+  // standalone cc-funnel app (2026-06-18). /sequences stays absent: it's the
+  // SunBiz drip-cadence surface; CC's funnel uses a direct welcome email + the
+  // pipeline, not the multi-step sequence engine (see SUN_NAV below).
 ];
 
 /**

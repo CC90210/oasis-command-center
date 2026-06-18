@@ -39,6 +39,7 @@ import {
   type FormStep,
   FormDefinitionError,
 } from "@/lib/forms/types";
+import { isFieldVisible } from "@/lib/forms/visibility";
 import { rateLimit } from "@/lib/rate-limit";
 import { createRecord, updateRecord, RecordsError } from "@/lib/manifest/data";
 import { uploadLeadDocument } from "@/lib/lead-documents";
@@ -46,6 +47,8 @@ import { dispatchLeadStageEvent } from "@/lib/lead-stage-dispatcher";
 import { resolvePublicForm } from "@/lib/forms/public-resolver";
 import { maybeQueueResumeEmail } from "@/lib/forms/maybe-queue-resume";
 import { maybeSendNextStepsEmail } from "@/lib/forms/next-steps-email";
+import { notifyOasisFunnelSubmission } from "@/lib/forms/oasis-funnel-notify";
+import { OASIS_FUNNEL_SLUG } from "@/lib/forms/oasis-funnel-seed";
 import { maybeGenerateApplicationDocument } from "@/lib/forms/application-document";
 import { mintFormLinkBySlug } from "@/lib/forms/agent-routing";
 import { upsertApplicationFromFormStep } from "@/lib/forms/application-upsert";
@@ -296,15 +299,24 @@ export async function POST(req: NextRequest) {
   // 2. Required fields on the SUBMITTED step must be present in the
   //    payload (string fields non-empty; file_upload fields either in
   //    inlineFiles or referenced as already-uploaded storage_path).
+  // mergedAnswers = every prior step's payload + this step's, so server-side
+  // show_if evaluation matches exactly what the client rendered. This is the
+  // AUTHORITATIVE visibility check — the client's is advisory. A field hidden
+  // by its condition is never enforced as required here (an AI-only lead is
+  // not blocked by the Music branch's fields). Field names are unique
+  // form-wide, so a flat merge is lossless.
+  const mergedAnswers: Record<string, unknown> = {};
   if (stepIndex > 0) {
     const priorQ = await db
       .from("form_submissions")
-      .select("step_index")
+      .select("step_index, payload")
       .eq("form_id", form.id)
       .eq("lead_id", link.lead_id);
-    const completedSteps = new Set(
-      (priorQ.data || []).map((r) => Number((r as { step_index: number }).step_index)),
-    );
+    const priorRows = (priorQ.data || []) as Array<{
+      step_index: number;
+      payload: unknown;
+    }>;
+    const completedSteps = new Set(priorRows.map((r) => Number(r.step_index)));
     for (let i = 0; i < stepIndex; i++) {
       if (!completedSteps.has(i)) {
         return NextResponse.json(
@@ -313,11 +325,21 @@ export async function POST(req: NextRequest) {
         );
       }
     }
+    for (const r of priorRows) {
+      if (r.payload && typeof r.payload === "object" && !Array.isArray(r.payload)) {
+        Object.assign(mergedAnswers, r.payload as Record<string, unknown>);
+      }
+    }
   }
+  Object.assign(mergedAnswers, payload);
+
   const currentStep = steps[stepIndex];
   const inlineFileNames = new Set(inlineFiles.map((f) => f.fieldName));
   for (const field of currentStep.fields) {
     if (!field.required) continue;
+    // Hidden-by-condition fields are not required (mirrors the renderer + the
+    // client validator). Evaluated against mergedAnswers, never client-trusted.
+    if (!isFieldVisible(field, mergedAnswers)) continue;
     const v = payload[field.name];
     if (field.type === "file_upload") {
       // Either an inline file in THIS request OR a previously-uploaded
@@ -787,6 +809,24 @@ export async function POST(req: NextRequest) {
     );
   }
 
+  // OASIS personal-brand funnel (CC): on the final step, ping CC's Telegram +
+  // send the lead a Claude-personalized welcome email — the two instant
+  // automations ported from the retired cc-funnel app. The lead already landed
+  // in the pipeline above. Tenant-gated to CC's funnel (oasis* tenant + the
+  // "start" slug) so SunBiz is untouched. Fire-and-forget + soft-fail via
+  // `after()`; mergedAnswers carries interests + branch details + contact.
+  if (isLastStep && link.tenant.startsWith("oasis") && form.slug === OASIS_FUNNEL_SLUG) {
+    const answers = { ...mergedAnswers };
+    after(() =>
+      notifyOasisFunnelSubmission({
+        db,
+        tenantId: form.tenant_id,
+        leadId: link.lead_id,
+        answers,
+      }),
+    );
+  }
+
   return NextResponse.json({
     ok: true,
     submission_id: submissionId,
@@ -816,6 +856,20 @@ export async function POST(req: NextRequest) {
     // steps. Null on every personalized (Solara-minted) submit.
     minted_token: mintedTokenForResponse,
   });
+}
+
+/**
+ * Tenant policy for anonymous public-form leads. SunBiz (the funding tenant,
+ * row slug "submissions" / manifest slug "sun") keeps its EXACT original
+ * behavior — funding-pipeline stage, "public_form" source, full-application
+ * link minting, SunBiz signer. Every other tenant (OASIS personal brand +
+ * client agencies) uses the agency lead lifecycle: stage from the form's
+ * own on_complete_stage, "inbound" source, no full-application link.
+ * Keyed off the tenant ROW slug.
+ */
+function isFundingTenant(tenantSlug: string): boolean {
+  const s = (tenantSlug || "").toLowerCase();
+  return s === "sun" || s === "submissions";
 }
 
 /**
@@ -898,13 +952,25 @@ async function initAnonymousLead(input: {
       .eq("tenant_id", form.tenant_id);
     lead = { id: existing.id, data: merged };
   } else {
-    // Public-form submissions enter the lifecycle at intent_inquiry_submitted —
-    // they've expressed intent (contact + revenue) but haven't applied yet.
-    // (The form's step_outcomes/on_complete_stage also resolve to this stage;
-    // this default covers the create before that transition runs.)
+    // Stage/source/signer are tenant-aware. SunBiz keeps its exact prior
+    // values (funding pipeline). Other tenants (OASIS etc.) start the lead at
+    // the form's own on_complete_stage — its lifecycle's first stage — because
+    // "intent_inquiry_submitted" isn't a valid OASIS stage and would render as
+    // a phantom kanban column.
+    const funding = isFundingTenant(tenantSlug);
+    const defaultStage = funding
+      ? // Unchanged SunBiz behavior: intent expressed (contact + revenue),
+        // not yet applied. The form's step_outcomes/on_complete_stage resolve
+        // to the same stage; this covers the create before that runs.
+        "intent_inquiry_submitted"
+      : form.on_complete_stage ||
+        (form.step_outcomes as Record<string, string> | null | undefined)?.["0"] ||
+        "new_contact";
     const leadData: Record<string, unknown> = {
-      stage: "intent_inquiry_submitted",
-      source: "public_form",
+      stage: defaultStage,
+      // OASIS lead source enum has no "public_form" — map to "inbound" (a
+      // social/funnel lead came to us). SunBiz keeps "public_form".
+      source: funding ? "public_form" : "inbound",
       created_from_form_id: form.id,
       created_from_ip_hash: input.ip ? hashIp(input.ip) : null,
       ...contactFields,
@@ -915,7 +981,7 @@ async function initAnonymousLead(input: {
     } else {
       // Unassigned → still give the drip a sane signer so
       // {{lead.assigned_agent_name}} never renders blank.
-      leadData.assigned_agent_name = "the SunBiz team";
+      leadData.assigned_agent_name = funding ? "the SunBiz team" : "the OASIS AI team";
     }
     try {
       const created = await createRecord({
@@ -942,8 +1008,10 @@ async function initAnonymousLead(input: {
   // Ensure the lead carries application_url (the per-lead FULL application link)
   // + a sane assigned_agent_name so the Inquiry Welcomer drip resolves them
   // (sequence_runner spreads lead.data into the drip context). Best-effort.
+  // The application_url is funding-specific (there's no full-application form
+  // for OASIS) — only mint it for the funding tenant.
   const patch: Record<string, unknown> = {};
-  if (!lead.data.application_url) {
+  if (isFundingTenant(tenantSlug) && !lead.data.application_url) {
     const applicationUrl = await mintFullApplicationLink(
       input.origin,
       form.tenant_id,
@@ -953,7 +1021,8 @@ async function initAnonymousLead(input: {
     if (applicationUrl) patch.application_url = applicationUrl;
   }
   if (!lead.data.assigned_agent_name) {
-    patch.assigned_agent_name = repAssign?.name || "the SunBiz team";
+    patch.assigned_agent_name =
+      repAssign?.name || (isFundingTenant(tenantSlug) ? "the SunBiz team" : "the OASIS AI team");
   }
   if (Object.keys(patch).length > 0) {
     await db

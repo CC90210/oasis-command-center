@@ -22,6 +22,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { CheckCircle2, AlertCircle } from "lucide-react";
 import { FormRenderer } from "./FormRenderer";
 import type { FormStep, FormBranding } from "@/lib/forms/types";
+import { isFieldVisible } from "@/lib/forms/visibility";
 import { DEFAULT_PRIMARY_COLOR, getContrastingTextColor } from "@/lib/forms/themes";
 
 // Submit-side route (api/forms/submit) now decodes the base64 and uploads
@@ -128,6 +129,15 @@ export function FormPublicClient({
     [stepValues, currentStep],
   );
 
+  // Flattened map of every answered field across all steps. Field names are
+  // unique form-wide, so a plain assign is lossless. The renderer + validators
+  // evaluate `show_if` against this so a step-1 field can react to a step-0
+  // selection (the CC funnel: interest picked on step 0 → branch on step 1).
+  const mergedValues = useMemo(
+    () => Object.assign({}, ...Object.values(stepValues)),
+    [stepValues],
+  );
+
   const setFieldValue = useCallback(
     (name: string, value: unknown) => {
       setStepValues((prev) => ({
@@ -148,6 +158,9 @@ export function FormPublicClient({
     const next: Partial<Record<string, string>> = {};
     for (const field of step.fields) {
       if (!field.required) continue;
+      // A field hidden by show_if is never required (matches the renderer + the
+      // server-side validator). An AI-only lead isn't blocked by Music fields.
+      if (!isFieldVisible(field, mergedValues)) continue;
       const v = values[field.name];
       if (v === undefined || v === null || v === "" || (Array.isArray(v) && v.length === 0)) {
         next[field.name] = "Required";
@@ -155,7 +168,7 @@ export function FormPublicClient({
     }
     setErrors(next);
     return Object.keys(next).length === 0;
-  }, [step.fields, values]);
+  }, [step.fields, values, mergedValues]);
 
   async function fileToBase64(file: File): Promise<string> {
     return new Promise((resolve, reject) => {
@@ -193,6 +206,10 @@ export function FormPublicClient({
     }> = [];
 
     for (const field of step.fields) {
+      // Drop fields hidden by show_if so an abandoned branch (pick AI, fill it,
+      // then de-select AI) never ships stale answers that the lead record or
+      // the AI welcome email would otherwise reference.
+      if (!isFieldVisible(field, mergedValues)) continue;
       const v = values[field.name];
       if (field.type === "file_upload" && v instanceof File) {
         if (v.size > INLINE_FILE_MAX_BYTES) {
@@ -399,7 +416,7 @@ export function FormPublicClient({
               )}
               <FormRenderer
                 step={step}
-                values={values}
+                values={mergedValues}
                 errors={errors}
                 branding={branding}
                 onFieldChange={setFieldValue}
