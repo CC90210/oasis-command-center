@@ -121,6 +121,34 @@ export async function GET(
   const events: TimelineEvent[] = [];
   const errors: { feed: string; message: string }[] = [];
 
+  // Email opens are merged across BOTH feeds that record them — email_open_events
+  // (the tracking-pixel store) AND agent_events BRAVO_EMAIL_OPENED (the event-bus
+  // mirror) — keyed by the outbound message each open belongs to. Two things made
+  // a single open render as 2-3 "Email opened" rows (the bug CC reported
+  // 2026-06-18): (a) the same open can land in both tables, and (b) Apple Mail
+  // Privacy Protection + Gmail's image proxy PREFETCH the pixel from a rotating
+  // IP fleet, so one message generated multiple prefetch hits. We collapse to ONE
+  // timeline event per message and count only GENUINE (non-prefetch) opens — a
+  // prefetch is the proxy fetching the image, not the recipient reading it.
+  type OpenAgg = { earliestAt: string; genuineCount: number; messageId: string | null };
+  const opensByMessage = new Map<string, OpenAgg>();
+  const recordOpen = (
+    key: string,
+    messageId: string | null,
+    at: string,
+    prefetch: boolean,
+  ) => {
+    if (prefetch) return; // proxy prefetch — not a real open
+    const prev = opensByMessage.get(key);
+    if (!prev) {
+      opensByMessage.set(key, { earliestAt: at, genuineCount: 1, messageId });
+    } else {
+      if (at < prev.earliestAt) prev.earliestAt = at;
+      prev.genuineCount += 1;
+      if (!prev.messageId && messageId) prev.messageId = messageId;
+    }
+  };
+
   // 1. lead_interactions — both directions; the table mixes them via a
   //    direction column. Table name varies across legacy migrations; try
   //    lead_interactions first, then interactions. Record EACH failure
@@ -237,16 +265,13 @@ export async function GET(
     if (error) throw error;
     for (const row of (data || []) as EmailOpenRow[]) {
       if (!row.opened_at) continue;
-      events.push({
-        source: "email_open",
-        type: row.suspicious_prefetch ? "open_prefetch" : "open",
-        at: row.opened_at,
-        title: row.suspicious_prefetch ? "📨 Email open (prefetch)" : "👁 Email opened",
-        meta: {
-          outbound_message_id: row.outbound_message_id,
-          user_agent: row.user_agent,
-        },
-      });
+      // Merge (don't push) — emitted as one collapsed event per message below.
+      recordOpen(
+        row.outbound_message_id || `open:${row.id}`,
+        row.outbound_message_id,
+        row.opened_at,
+        !!row.suspicious_prefetch,
+      );
     }
   } catch (e: unknown) {
     errors.push({ feed: "email_open_events", message: errMessage(e) });
@@ -298,6 +323,19 @@ export async function GET(
     for (const row of (data || []) as AgentEventRow[]) {
       const at = row.published_at || row.created_at;
       if (!at) continue;
+      // BRAVO_EMAIL_OPENED is the event-bus mirror of an email open — route it
+      // into the same merge as email_open_events instead of rendering its own
+      // "Email opened" row, so opens aren't double-counted across the two feeds
+      // and proxy prefetches don't each show as an open.
+      if (row.event_type === "BRAVO_EMAIL_OPENED") {
+        const p = row.payload || {};
+        const mid =
+          typeof p.outbound_message_id === "string" ? p.outbound_message_id : null;
+        const prefetch =
+          p.suspicious_prefetch === true || p.suspicious_prefetch === "true";
+        recordOpen(mid || `evt:${row.id}`, mid, at, prefetch);
+        continue;
+      }
       events.push({
         source: "system",
         type: row.event_type,
@@ -337,6 +375,20 @@ export async function GET(
     }
   } catch (e: unknown) {
     errors.push({ feed: "agent_alerts", message: errMessage(e) });
+  }
+
+  // Emit one collapsed "Email opened" per message that had ≥1 genuine open.
+  // Messages with only proxy prefetches contribute nothing here (genuineCount
+  // stays 0), so a prefetched-but-unread email never shows as "opened". A real
+  // re-open is surfaced as a "(N×)" suffix rather than N separate rows.
+  for (const agg of opensByMessage.values()) {
+    events.push({
+      source: "email_open",
+      type: "open",
+      at: agg.earliestAt,
+      title: agg.genuineCount > 1 ? `👁 Email opened (${agg.genuineCount}×)` : "👁 Email opened",
+      meta: { outbound_message_id: agg.messageId, open_count: agg.genuineCount },
+    });
   }
 
   events.sort((a, b) => (a.at < b.at ? 1 : a.at > b.at ? -1 : 0));

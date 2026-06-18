@@ -55,6 +55,31 @@ export type UploadLeadDocumentInput = {
 };
 
 /**
+ * Infer a canonical doc_type from the filename when the caller didn't supply
+ * one ("unclassified"/empty). Bank statements uploaded via import or a form
+ * file-field often arrive untyped — without this they never count toward the
+ * lead's required-docs tracker, and the underwriting orchestrator has to fall
+ * back to its own filename heuristic. Classifying at write time keeps doc_type
+ * correct for every consumer (tracker, underwriting, shop-out attachments).
+ * Mirrors the VPS orchestrator's _looks_like_bank_statement heuristic.
+ */
+export function classifyDocTypeByFilename(filename: string): string {
+  const n = (filename || "").toLowerCase();
+  // More-specific KYC docs first so a void cheque / driver's license never
+  // falls through to bank_statements.
+  if (/(driver|licen[sc]e|(^|[_\-\s])dl([_\-\s]|$)|id[_\-]?card|passport)/.test(n)) {
+    return "drivers_license";
+  }
+  if (/(void|cheque)/.test(n)) {
+    return "void_cheque";
+  }
+  if (/(statement|stmt|checking|savings|\bbank\b)/.test(n)) {
+    return "bank_statements_3mo";
+  }
+  return "unclassified";
+}
+
+/**
  * Upload a single lead-document. Writes to Supabase Storage first, then
  * inserts the metadata row; if the metadata insert fails the blob is
  * cleaned up so we don't leak orphaned objects. Returns a structured
@@ -77,6 +102,14 @@ export async function uploadLeadDocument(
     return { ok: false, error: `upload_failed: ${upload.error.message}` };
   }
 
+  // Auto-classify untyped uploads by filename so they count toward the lead's
+  // required-docs tracker AND underwriting picks them up with the right
+  // doc_type (no more "STILL NEEDS: BANK STATEMENTS" when statements are on file).
+  const docType =
+    !input.docType || input.docType === "unclassified"
+      ? classifyDocTypeByFilename(cleanName)
+      : input.docType;
+
   const ins = await db
     .from("lead_documents")
     .insert({
@@ -86,7 +119,7 @@ export async function uploadLeadDocument(
       storage_path: storagePath,
       mime_type: input.mimeType,
       size_bytes: input.sizeBytes,
-      doc_type: input.docType,
+      doc_type: docType,
       uploaded_by: input.uploadedBy,
       metadata: {
         source: input.source,

@@ -212,7 +212,27 @@ function renderBody(input: {
   return { subject, body: lines.join("\n") };
 }
 
-/** Has a next-steps email already been recorded for this lead? One per lead. */
+/** Subject prefix every next-steps email carries (renderBody → `Your next steps
+ *  with ${brand}`). Used to detect the CANONICAL send_gateway log row, whose
+ *  agent_source is the gateway default ('manual_cc'), not NEXT_STEPS_SOURCE. */
+const NEXT_STEPS_SUBJECT_PREFIX = "your next steps with ";
+
+/**
+ * Has a next-steps email already been recorded for this lead? One per lead.
+ *
+ * Two row shapes can mark a prior send, because send_gateway ALWAYS logs its own
+ * canonical lead_interactions row for every send (agent_source defaults to
+ * 'manual_cc'), and this module also logs a NEXT_STEPS_SOURCE row on the
+ * FAILURE path (so the operator can see + retry a send that didn't fire):
+ *   1. agent_source = NEXT_STEPS_SOURCE  → our failure-path marker.
+ *   2. an outbound email whose subject starts "Your next steps with …"
+ *      → send_gateway's canonical row for a SUCCESSFUL send.
+ * Matching either keeps re-submits idempotent whether the first attempt
+ * succeeded (gateway row) or failed (our row). Pre-2026-06-18 this checked only
+ * (1), which missed the gateway's success row and — combined with this module
+ * ALSO inserting its own success row — produced the duplicate "Sent email"
+ * timeline entry CC reported.
+ */
 async function alreadySent(
   db: SupabaseClient,
   tenantId: string,
@@ -220,12 +240,19 @@ async function alreadySent(
 ): Promise<boolean> {
   const res = await db
     .from("lead_interactions")
-    .select("id")
+    .select("agent_source, subject")
     .eq("tenant_id", tenantId)
     .eq("lead_id", leadId)
-    .eq("agent_source", NEXT_STEPS_SOURCE)
-    .limit(1);
-  return !res.error && (res.data?.length ?? 0) > 0;
+    .eq("channel", "email")
+    .eq("direction", "outbound")
+    .limit(50);
+  if (res.error) return false; // can't prove a prior send — let it through (send_gateway's own cooldown/dedup gates are the backstop)
+  return (res.data ?? []).some(
+    (r) =>
+      r.agent_source === NEXT_STEPS_SOURCE ||
+      (typeof r.subject === "string" &&
+        r.subject.trim().toLowerCase().startsWith(NEXT_STEPS_SUBJECT_PREFIX)),
+  );
 }
 
 /**
@@ -365,40 +392,50 @@ export async function maybeSendNextStepsEmail(
       cc: ccEmail,
     });
 
-    // Record the interaction for the lead timeline + idempotency. When the
-    // bridge send fired we log type='email_sent'; when it didn't (bridge
-    // offline / gate refused), log a 'queued'-status row the operator can see
-    // and resend from the drawer rather than silently dropping it.
-    await db.from("lead_interactions").insert({
-      tenant_id: form.tenant_id,
-      lead_id: link.lead_id,
-      type: result.sent ? "email_sent" : "email_queued",
-      channel: "email",
-      direction: "outbound",
-      agent_source: NEXT_STEPS_SOURCE,
-      subject: subject.slice(0, 200),
-      content: body,
-      content_preview: body.slice(0, 1024),
-      to_email: toEmail,
-      metadata: {
-        status: result.sent ? "sent" : "failed",
-        sent_at: result.sent ? new Date().toISOString() : null,
-        send_error: result.sent ? null : result.reason || "unknown",
-        next_steps: true,
-        full_application_url: fullAppUrl,
-        bank_statement_url: bankStatementUrl,
-        cc_email: ccEmail,
-        intent: "transactional",
-      },
-    });
-
+    // Record the interaction — but ONLY on the failure path.
+    //
+    // On SUCCESS we do NOT insert here. The send went through send_gateway
+    // (via the bridge send_email tool), and send_gateway ALWAYS logs its own
+    // canonical lead_interactions row for every send. Inserting a second row
+    // here is exactly what produced the duplicate "Sent email: Your next steps
+    // with SunBiz" CC reported on 2026-06-18 (one email, two timeline rows:
+    // the gateway's 'manual_cc' row + this module's 'form_intake_next_steps'
+    // row). The gateway's row is the single source of truth for a successful
+    // send; idempotency still works because alreadySent() now also matches it
+    // by subject prefix.
+    //
+    // On FAILURE (bridge offline / gate refused), send_gateway did NOT log a
+    // completed row, so we record a 'queued'/'failed' row the operator can see
+    // and resend from the drawer rather than silently dropping the handoff.
     if (!result.sent) {
+      await db.from("lead_interactions").insert({
+        tenant_id: form.tenant_id,
+        lead_id: link.lead_id,
+        type: "email_queued",
+        channel: "email",
+        direction: "outbound",
+        agent_source: NEXT_STEPS_SOURCE,
+        subject: subject.slice(0, 200),
+        content: body,
+        content_preview: body.slice(0, 1024),
+        to_email: toEmail,
+        metadata: {
+          status: "failed",
+          sent_at: null,
+          send_error: result.reason || "unknown",
+          next_steps: true,
+          full_application_url: fullAppUrl,
+          bank_statement_url: bankStatementUrl,
+          cc_email: ccEmail,
+          intent: "transactional",
+        },
+      });
       console.error("[forms.submit.next_steps] send did not fire", {
         lead_id: link.lead_id,
         reason: result.reason,
       });
     } else {
-      console.log("[forms.submit.next_steps] sent", {
+      console.log("[forms.submit.next_steps] sent (logged by send_gateway)", {
         lead_id: link.lead_id,
         to: toEmail,
       });
