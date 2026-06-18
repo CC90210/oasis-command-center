@@ -204,6 +204,9 @@ export async function POST(req: NextRequest) {
     userId: auth.userId,
     agent,
     cliProvider: effectiveCliProvider,
+    // Stable per-conversation key = the client's tab_id (NOT Claude's per-turn
+    // session id, which forks every --resume turn and would shatter history).
+    conversationId: String(clientBody.tab_id || ""),
     userMessage: String(lastUserMsg.content || ""),
     startedAt,
   });

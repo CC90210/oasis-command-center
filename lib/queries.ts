@@ -9,6 +9,7 @@
  * for when client-side reads are added.
  */
 
+import { cache } from "react";
 import {
   getServiceSupabase,
   getSessionUser,
@@ -99,12 +100,19 @@ function chooseActiveProfile(rows: ActiveUserProfile[], email: string | null | u
   );
 }
 
-export async function getTenant(tenantId: string): Promise<Tenant | null> {
-  const db = getServiceSupabase();
-  const r = await db.from("tenants").select("*").eq("id", tenantId).maybeSingle();
-  if (r.error || !r.data) return null;
-  return r.data as Tenant;
-}
+// Memoized per-request (React cache): getTenant is called several times per
+// page render (layout + getTenantManifestForUser + chat-shell props all bottom
+// out here). cache() collapses those into one tenants SELECT within a request;
+// outside a request scope it's a transparent passthrough. No staleness risk —
+// the cache is per-request only.
+export const getTenant = cache(
+  async (tenantId: string): Promise<Tenant | null> => {
+    const db = getServiceSupabase();
+    const r = await db.from("tenants").select("*").eq("id", tenantId).maybeSingle();
+    if (r.error || !r.data) return null;
+    return r.data as Tenant;
+  },
+);
 
 /**
  * Tenant bridge status — canonical single-query source of truth.

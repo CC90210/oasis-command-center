@@ -63,7 +63,19 @@ export async function resolveChatShellProps(args: {
 }): Promise<ChatShellProps | null> {
   const { profile, userEmail } = args;
   const tenantId = profile?.tenant_id ?? null;
-  if (!tenantId) return null;
+  if (!tenantId) {
+    // No tenant yet (fresh signup pre-provisioning, or a profile that isn't
+    // tenant-linked). The OLD /agent page rendered a working Bravo chat here
+    // rather than a dead screen — preserve that so the persistent ChatWidget
+    // still mounts. (Returning null would leave /agent stuck on its fallback.)
+    return {
+      agentKeys: ["bravo"],
+      defaultAgent: "bravo",
+      isAdmin: isOperatorEmail(userEmail),
+      welcomeMessages: undefined,
+      advancedPicker: false,
+    };
+  }
 
   const [healthRows, manifest, tenant] = await Promise.all([
     safe("chatshell.health", integrationsHealth(tenantId), [] as IntegrationHealth[]),

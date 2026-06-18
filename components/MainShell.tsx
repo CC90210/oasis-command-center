@@ -28,7 +28,7 @@
  */
 
 import { usePathname } from "next/navigation";
-import { useEffect, useState } from "react";
+import { useRef } from "react";
 import ChatWidget from "@/components/ChatWidget";
 import type { ChatShellProps } from "@/lib/chat-shell-props";
 
@@ -82,14 +82,14 @@ export function MainShell({
   const chatShell = isChatShellPath(pathname);
 
   // Lazy-mount: don't pay the ChatWidget's prewarm / bridge-probe / config
-  // fetches on pages where chat was never opened. Initialise from the first
-  // path so a direct hard-load of /agent renders the chat immediately (no
-  // flash); once the operator visits /agent, keep it mounted forever so the
+  // fetches on pages where chat was never opened. Latch activation DURING
+  // render (not via a post-paint effect) so the first soft-nav to /agent mounts
+  // the chat overlay in the SAME render — no one-frame flash of the page
+  // fallback. Once true, it stays true for the shell's lifetime so the
   // transcript survives every subsequent navigation.
-  const [chatActivated, setChatActivated] = useState(onAgent);
-  useEffect(() => {
-    if (onAgent && !chatActivated) setChatActivated(true);
-  }, [onAgent, chatActivated]);
+  const activatedRef = useRef(onAgent);
+  if (onAgent) activatedRef.current = true;
+  const chatActivated = activatedRef.current;
 
   const mainEl = chatShell ? (
     // Full-screen chat shell: NO constrained wrapper, NO footer. The page (and,
@@ -135,6 +135,10 @@ export function MainShell({
             welcomeMessages={chat.welcomeMessages}
             advancedPicker={chat.advancedPicker}
             variant="fullscreen"
+            // Off /agent the instance stays mounted (transcript survives) but
+            // pauses its prewarm + 30s health poll so it isn't working on every
+            // page. The live stream reader is unaffected.
+            active={onAgent}
           />
         </div>
       )}

@@ -108,7 +108,10 @@ export async function POST(req: NextRequest) {
 
   if (hasFrom) {
     const normalized = normalizePhoneE164((body.kixie_from_number as string).trim());
-    if (!normalized) {
+    // normalizePhoneE164 is lenient (accepts digit-only, assumes +1 for 10
+    // digits). Require a strict E.164 result so a typo'd DID is rejected at
+    // save time instead of failing later as a Kixie 502 at send time.
+    if (!normalized || !/^\+[1-9]\d{7,14}$/.test(normalized)) {
       return NextResponse.json(
         { ok: false, error: "invalid_from_number", message: "Provide a valid number in E.164 format, e.g. +17542127833." },
         { status: 400 },

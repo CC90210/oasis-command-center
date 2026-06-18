@@ -22,6 +22,8 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { resolveSessionContext } from "@/lib/api-auth";
+import { getSessionContext } from "@/lib/team";
+import { isReadOnlyRole } from "@/lib/role-gates";
 import { getUserIntegrationValue } from "@/lib/user-integration-store";
 import { normalizePhoneE164, isPhoneOptedOut } from "@/lib/lead-interactions-queries";
 import { isDryRun } from "@/lib/integrations/send-mode";
@@ -79,6 +81,20 @@ export async function POST(req: NextRequest) {
     );
   }
   const { tenantId, userId, email } = session;
+
+  // Role gate (2026-06-18): sending SMS is a member+ capability — read_only
+  // members are denied, matching lib/role-gates (send_sms ∈ READ_ONLY_DENIED)
+  // and the bridge/exec-tool wall. The chat + bridge paths already enforce
+  // this; this is the direct HTTP send path, so it needs the same gate. Fail
+  // CLOSED if the role can't be resolved (a passing resolveSessionContext means
+  // a profile+tenant exist, so a null here is an anomaly, not a normal member).
+  const roleCtx = await getSessionContext();
+  if (!roleCtx || isReadOnlyRole(roleCtx.teamRole)) {
+    return NextResponse.json(
+      { ok: false, error: "forbidden_role", message: "Read-only members can't send messages." },
+      { status: 403 },
+    );
+  }
 
   let body: {
     lead_id?: unknown;

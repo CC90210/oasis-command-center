@@ -534,6 +534,15 @@ type Props = {
    * conversation rail + the already-full surface make them redundant).
    */
   variant?: "card" | "fullscreen";
+  /**
+   * Whether this instance is the on-screen one (default true). The persistent
+   * shell mounts ONE ChatWidget that stays mounted but CSS-hidden off the
+   * /agent route; it passes active={false} there so the hidden instance stops
+   * its proactive background work (bridge prewarm + the 30s health poll) on
+   * every other page. The live stream reader is NEVER gated on this — a running
+   * turn still survives navigation; only the not-yet-needed prewarm/poll pause.
+   */
+  active?: boolean;
 };
 
 function seedMessagesForAgent(
@@ -545,7 +554,14 @@ function seedMessagesForAgent(
   return [{ role: "assistant", content, at: Date.now() }];
 }
 
-export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMessages, advancedPicker, tenantBridgeOwner, serverBridgeOnline, variant = "card" }: Props) {
+/** Mint a fresh warm-pool / conversation tab id (a UUID when available). */
+function mintTabId(): string {
+  return typeof crypto !== "undefined" && crypto.randomUUID
+    ? crypto.randomUUID()
+    : `tab-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMessages, advancedPicker, tenantBridgeOwner, serverBridgeOnline, variant = "card", active = true }: Props) {
   const isFullscreenVariant = variant === "fullscreen";
   const searchParams = useSearchParams();
   const router = useRouter();
@@ -561,6 +577,16 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
     ? urlAgent
     : (defaultAgent || agentKeys[0] || "bravo");
   const [agent, setAgent] = useState<string>(initialAgent);
+  // The persistent shell never remounts this widget, so a /agent?agent=<slug>
+  // deep-link (e.g. the per-agent "Chat" links on the tenant dashboard) must
+  // switch the agent REACTIVELY, not only on first mount. Deps deliberately
+  // exclude `agent` so a later manual pick isn't reverted by a stale URL param.
+  useEffect(() => {
+    if (urlAgent && agentKeys.includes(urlAgent) && urlAgent !== agent) {
+      setAgent(urlAgent);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [urlAgent, agentKeys]);
   const [configs, setConfigs] = useState<AgentConfig[]>([]);
   const [configsLoaded, setConfigsLoaded] = useState(false);
   // Per-user display names (Solara → "Ada" etc). The hook fetches
@@ -669,11 +695,16 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
   // bridge keys its warm pool by `agent:tab_id` so even turn 1 (before
   // claude has minted a session_id) lands in the pool. See
   // bravo_cli/warm_claude_pool.py for the architecture.
-  const [tabId] = useState(() =>
-    typeof crypto !== "undefined" && crypto.randomUUID
-      ? crypto.randomUUID()
-      : `tab-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
-  );
+  // Re-mintable so "New chat" (reset) starts a fresh CONVERSATION key and
+  // loadPastSession can re-pin it to a loaded thread. tab_id is now the stable
+  // per-conversation id the bridge-history persistence keys on (see
+  // lib/bridge-chat-persistence.ts) AND the warm-pool key.
+  const [tabId, setTabId] = useState(() => mintTabId());
+  // Scoped ref to THIS instance's composer form so urlAutosend submits the
+  // right one — a global document.querySelector would hit the first matching
+  // form in the DOM, which could be a different widget when the persistent
+  // instance and a page-level instance coexist (e.g. on /agents).
+  const composerFormRef = useRef<HTMLFormElement | null>(null);
   const [error, setError] = useState<string | null>(null);
   // Structured error code surfaced by /api/chat (lib/chat-auth.ts).
   // When set, the error render branch picks the matching friendly UI
@@ -933,9 +964,9 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
     // operator review + edit before firing.
     if (urlAutosend) {
       setTimeout(() => {
-        // send() is defined later — trigger via the form submit affordance
-        const f = document.querySelector("form[data-chat-composer]") as HTMLFormElement | null;
-        f?.requestSubmit();
+        // send() is defined later — trigger via THIS instance's own form ref
+        // (not a global querySelector, which could submit another widget's form).
+        composerFormRef.current?.requestSubmit();
       }, 200);
     } else {
       setTimeout(() => inputRef.current?.focus(), 50);
@@ -1035,6 +1066,9 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
   // `pm2 restart claude-bridge`, this flips true and desktop-enabled runtimes can
   // target their machine instead of /api/chat.
   useEffect(() => {
+    // Hidden persistent instance (active=false off /agent): skip the 30s poll
+    // entirely so we don't hit /api/bridge/health on every dashboard page.
+    if (!active) return;
     let alive = true;
     const probe = async () => {
       try {
@@ -1088,7 +1122,7 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
       alive = false;
       clearInterval(id);
     };
-  }, []);
+  }, [active]);
 
   // Pre-warm the bridge's claude process for the active agent as soon
   // as we know the bridge is online. The operator's first turn skips
@@ -1101,6 +1135,9 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
   // chat falls back to cold-spawn naturally.
   const [prewarmEpoch, setPrewarmEpoch] = useState(0);
   useEffect(() => {
+    // Hidden persistent instance: don't keep a warm claude process hot for a
+    // widget the operator isn't looking at.
+    if (!active) return;
     // Prewarm fires when bridge is effectively reachable (local OR proxy).
     if (!computeEffectiveBridgeOnline(bridgeOnline, serverBridgeOnline)) return;
     if (cliRuntime !== "claude") return;
@@ -1114,7 +1151,7 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
     // serverBridgeOnline included so the prewarm fires when only the
     // server-side signal transitions to true (degraded-proxy case where
     // bridgeOnline=false but daemon IS heartbeating per DB).
-  }, [bridgeOnline, serverBridgeOnline, agent, tabId, prewarmEpoch, cliRuntime]);
+  }, [bridgeOnline, serverBridgeOnline, agent, tabId, prewarmEpoch, cliRuntime, active]);
 
   useEffect(() => {
     if (awayFromBottom) return;
@@ -1269,6 +1306,11 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
       // the first message after reset would cold-spawn (~5-30s).
       setPrewarmEpoch((e) => e + 1);
     }
+    // Mint a fresh conversation key so this "New chat" persists as its OWN
+    // thread (bridge history keys on tab_id). The chat-reset POST above used the
+    // OLD tab_id to kill that conversation's warm process; the next turn warms +
+    // persists under the new id.
+    setTabId(mintTabId());
     setMessages(seedMessagesForAgent(agent, welcomeMessages));
     setSessionId(null);
     setError(null);
@@ -1339,7 +1381,7 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
       });
       const j = (await r.json().catch(() => ({}))) as {
         ok?: boolean;
-        session?: { id: string; agent_key: string; title: string | null };
+        session?: { id: string; agent_key: string; title: string | null; provider?: string | null };
         messages?: Array<{ role: string; content: string; created_at: string }>;
         error?: string;
       };
@@ -1362,7 +1404,18 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
           at: new Date(m.created_at).getTime() || Date.now(),
         }));
       setMessages(restored);
-      setSessionId(j.session.id);
+      if (j.session.provider === "bridge") {
+        // Bridge/CLI thread: history is keyed on tab_id, and the original
+        // Claude --resume session is long gone. Re-pin tab_id to this thread so
+        // the next turn APPENDS to it (and warms a fresh process under it), and
+        // clear sessionId so the bridge cold-starts cleanly — the restored
+        // transcript above carries the context forward.
+        setTabId(j.session.id);
+        setSessionId(null);
+      } else {
+        // Cloud thread: /api/chat appends by session_id.
+        setSessionId(j.session.id);
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : "session_load_failed");
     }
@@ -3282,6 +3335,7 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
 
       {/* Composer */}
       <form
+        ref={composerFormRef}
         data-chat-composer
         onSubmit={(e) => {
           e.preventDefault();

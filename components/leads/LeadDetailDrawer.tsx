@@ -1634,17 +1634,20 @@ function SmsComposer({
               });
               const j = await r.json().catch(() => ({}));
               if (r.ok && j.ok !== false) {
-                // Fire-and-forget the stage transition so SMS counts as
-                // outbound contact same as queued email. conversations/reply
-                // logs the interaction timeline row but does NOT advance the
-                // lead stage, so we still publish it here. Safe even if the
-                // lead is past sent_application — engine guards block re-entry.
-                fetch(`/api/leads/${recordId}/stage-event`, {
-                  method: "POST",
-                  credentials: "include",
-                  headers: { "Content-Type": "application/json" },
-                  body: JSON.stringify({ type: "outbound_email_sent" }),
-                }).catch(() => undefined);
+                // Advance the lead stage ONLY on a real (live) send — a dry-run
+                // sends nothing, so advancing the pipeline to "contacted" would
+                // be a false signal. conversations/reply logs the interaction
+                // timeline row itself; this just publishes the stage transition.
+                // Safe even if the lead is past sent_application — engine guards
+                // block re-entry.
+                if (j.dry_run !== true) {
+                  fetch(`/api/leads/${recordId}/stage-event`, {
+                    method: "POST",
+                    credentials: "include",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ type: "outbound_email_sent" }),
+                  }).catch(() => undefined);
+                }
                 setStatus(j.dry_run ? "Queued (dry-run — not sent live)" : "Sent");
                 setBody("");
                 if (onChange) await onChange();

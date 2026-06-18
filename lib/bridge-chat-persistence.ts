@@ -7,21 +7,28 @@
  * /api/bridge/chat is a transparent SSE relay to the VPS bridge — it writes
  * NOTHING to Supabase, and the VPS bridge persists only Claude Code's local
  * --resume store, not our chat tables. SunBiz employees default to the bridge
- * (CLI) path, so their Previous-chats drawer was permanently empty. Only the
- * cloud path (/api/chat) persisted. This tees the relay so bridge turns persist
- * too — scoped to (tenant_id, user_id, agent_key), so every employee + agent
- * gets their own isolated, accurate history.
+ * (CLI) path, so their Previous-chats drawer was permanently empty.
  *
- * HOW IT WORKS (no migration, no client change, no SSE rewrite):
- * The bridge emits a `session` SSE event carrying Claude Code's own session
- * UUID, which the client stores and sends back as session_id for --resume on
- * the next turn. We reuse that SAME UUID as chat_sessions.id, so the client's
- * single sessionId already matches what GET /api/chat/sessions[/id] keys on —
- * loadPastSession + the drawer work unchanged. The relay byte-stream is passed
- * through UNCHANGED; we only OBSERVE a decoded copy for bookkeeping.
+ * THE THREAD KEY (fixed after adversarial review, 2026-06-18):
+ * We DO NOT key on the session id the bridge emits — that's Claude Code's own
+ * session UUID, and `claude --resume <id>` FORKS a new id every turn, so keying
+ * on it would write a fresh one-turn chat_sessions row per message and shatter
+ * one conversation into N drawer entries. Instead we key on the client's
+ * `tab_id` — a stable per-conversation UUID the client mints once per
+ * conversation (re-minted on "New chat", set to the loaded id on resume) and
+ * sends on every bridge turn. tab_id is ALSO the bridge's warm-pool key, so the
+ * persistence thread and the runtime thread line up. Claude's per-turn session
+ * id stays the bridge's --resume key only; it never touches our history id.
+ *
+ * Because we hold tab_id from the REQUEST (not the SSE stream), we create the
+ * session row + write the user message UP FRONT (mirroring the cloud path),
+ * then persist the assistant turn on the terminal `done`/`error` frame (so it
+ * survives a client disconnect that skips TransformStream.flush()), with flush
+ * as an idempotent fallback for the normal-close path.
  *
  * Failure isolation: every DB op soft-fails (logs, never throws) — a
- * persistence hiccup must never break the live chat relay.
+ * persistence hiccup must never break the live chat relay, and the byte stream
+ * is passed through UNCHANGED (we only observe a decoded copy).
  */
 
 import "server-only";
@@ -39,6 +46,9 @@ export type BridgePersistCtx = {
   userId: string;
   agent: string;
   cliProvider: string;
+  /** Stable per-conversation key = the client's tab_id (a UUID). This is the
+   *  chat_sessions.id we persist under. */
+  conversationId: string;
   /** This turn's user message (last user message in the request). */
   userMessage: string;
   /** Date.now() at request start, for latency_ms. */
@@ -56,47 +66,82 @@ export function teeBridgeChatPersistence(
 ): ReadableStream<Uint8Array> {
   const decoder = new TextDecoder();
   let buf = "";
-  let sessionId: string | null = null;
   let assistant = "";
   let errorMsg: string | null = null;
-  // The session row + user message are written once, as soon as we learn the
-  // session id (early in the stream). flush() awaits this before persisting the
-  // assistant turn so the assistant row never races ahead of its session row.
-  let ensurePromise: Promise<void> | null = null;
+  let persisted = false;
+  const valid = UUID_RE.test(ctx.conversationId);
 
-  async function ensureSessionAndUser(sid: string): Promise<void> {
+  // Create the session row + write this turn's user message UP FRONT — we
+  // already hold the stable conversation key, so there's no need to wait for the
+  // SSE `session` event (which carries Claude's per-turn id). If the request
+  // carries no valid tab_id (older client), skip persistence entirely.
+  const ensurePromise: Promise<void> = valid
+    ? ensureSessionAndUser()
+    : Promise.resolve();
+
+  async function ensureSessionAndUser(): Promise<void> {
     try {
       const db = getServiceSupabase();
-      // Insert the session row if new; ignoreDuplicates so a later turn never
-      // overwrites the original title/created_at.
+      // Insert the session row if new; ignoreDuplicates so later turns never
+      // overwrite the original title/created_at.
       await db.from("chat_sessions").upsert(
         {
-          id: sid,
+          id: ctx.conversationId,
           tenant_id: ctx.tenantId,
           user_id: ctx.userId,
           agent_key: ctx.agent,
           provider: "bridge",
-          model: ctx.cliProvider,
+          // For bridge rows `model` holds the CLI runtime, not an LLM model id —
+          // namespaced so analytics can't conflate it with a real model name.
+          model: `bridge:${ctx.cliProvider}`,
           title: ctx.userMessage.slice(0, 80) || "New chat",
         },
         { onConflict: "id", ignoreDuplicates: true },
       );
-      // Bump updated_at so active threads sort to the top of Previous chats.
-      await db
-        .from("chat_sessions")
-        .update({ updated_at: new Date().toISOString() })
-        .eq("id", sid);
       // Persist THIS turn's user message (incremental — mirrors /api/chat,
-      // which writes only the latest user message per turn, not the whole
-      // transcript the client re-sends each turn).
+      // which writes only the latest user message per turn).
       await db.from("chat_messages").insert({
-        session_id: sid,
+        session_id: ctx.conversationId,
         tenant_id: ctx.tenantId,
         role: "user",
         content: ctx.userMessage,
       });
     } catch (err) {
       console.error("[bridge-chat-persistence.ensure]", (err as Error).message);
+    }
+  }
+
+  // Persist the assistant turn exactly once. Called on the terminal `done`/
+  // `error` frame (so it runs even when a client disconnect skips flush()) and
+  // again from flush() (normal close) — the `persisted` latch makes it
+  // idempotent so there's no double-write.
+  async function persistAssistant(): Promise<void> {
+    if (persisted || !valid) return;
+    persisted = true;
+    try {
+      await ensurePromise;
+      const vaultSecrets = await fetchTenantVaultSecretsForRedaction(
+        ctx.tenantId,
+      ).catch(() => []);
+      await persistAssistantTurn({
+        sessionId: ctx.conversationId,
+        tenantId: ctx.tenantId,
+        content: assistant,
+        inputTokens: 0,
+        outputTokens: 0,
+        latencyMs: Math.max(0, Date.now() - ctx.startedAt),
+        error: errorMsg,
+        vaultSecrets,
+      });
+      // Bump updated_at so active threads sort to the top of Previous chats.
+      // (trg_chat_sessions_updated_at sets the value on any UPDATE; we pass it
+      // explicitly too for clarity.)
+      await getServiceSupabase()
+        .from("chat_sessions")
+        .update({ updated_at: new Date().toISOString() })
+        .eq("id", ctx.conversationId);
+    } catch (err) {
+      console.error("[bridge-chat-persistence.persist]", (err as Error).message);
     }
   }
 
@@ -107,6 +152,13 @@ export function teeBridgeChatPersistence(
       if (line.startsWith("event:")) event = line.slice(6).trim();
       else if (line.startsWith("data:")) data = line.slice(5).trim();
     }
+    // Terminal frame — persist now (the full assistant text has already
+    // streamed) so the turn survives even if the client disconnects before
+    // flush() would run.
+    if (event === "done") {
+      void persistAssistant();
+      return;
+    }
     if (!data) return;
     let parsed: Record<string, unknown> | null = null;
     try {
@@ -115,19 +167,12 @@ export function teeBridgeChatPersistence(
       return;
     }
     if (!parsed) return;
-    if (event === "session" && typeof parsed.session_id === "string") {
-      // First valid session id wins. Skip the synthetic "provider-timestamp"
-      // fallback the bridge emits when Claude didn't surface a session id —
-      // it isn't a valid uuid PK, so persisting it would error.
-      if (!sessionId && UUID_RE.test(parsed.session_id)) {
-        sessionId = parsed.session_id;
-        ensurePromise = ensureSessionAndUser(parsed.session_id);
-      }
-    } else if (event === "delta" && typeof parsed.text === "string") {
+    if (event === "delta" && typeof parsed.text === "string") {
       assistant += parsed.text;
     } else if (event === "error") {
       const m = parsed.message ?? parsed.error;
       if (typeof m === "string" && !errorMsg) errorMsg = m;
+      void persistAssistant();
     }
   }
 
@@ -150,25 +195,8 @@ export function teeBridgeChatPersistence(
       }
     },
     async flush() {
-      try {
-        if (ensurePromise) await ensurePromise;
-        if (!sessionId) return; // no real session id seen → nothing to persist
-        const vaultSecrets = await fetchTenantVaultSecretsForRedaction(
-          ctx.tenantId,
-        ).catch(() => []);
-        await persistAssistantTurn({
-          sessionId,
-          tenantId: ctx.tenantId,
-          content: assistant,
-          inputTokens: 0,
-          outputTokens: 0,
-          latencyMs: Math.max(0, Date.now() - ctx.startedAt),
-          error: errorMsg,
-          vaultSecrets,
-        });
-      } catch (err) {
-        console.error("[bridge-chat-persistence.flush]", (err as Error).message);
-      }
+      // Normal-close fallback (idempotent with the terminal-frame persist).
+      await persistAssistant();
     },
   });
 

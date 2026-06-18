@@ -57,7 +57,7 @@ export async function GET(
   const service = getServiceSupabase();
   const { data: sessionRow, error: sessionErr } = await service
     .from("chat_sessions")
-    .select("id, agent_key, title, created_at, updated_at")
+    .select("id, agent_key, title, provider, created_at, updated_at")
     .eq("id", sessionId)
     .eq("tenant_id", tenantId)
     .eq("user_id", userId)
@@ -73,6 +73,9 @@ export async function GET(
     id: string;
     agent_key: string;
     title: string | null;
+    // "bridge" for CLI/bridge-path threads, an LLM provider for cloud threads.
+    // The client uses this to resume on the correct id (tab_id vs session_id).
+    provider: string | null;
     created_at: string;
     updated_at: string | null;
   };
