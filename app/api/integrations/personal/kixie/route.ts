@@ -1,31 +1,38 @@
 /**
- * /api/integrations/personal/kixie — per-employee Kixie agent email mapping.
+ * /api/integrations/personal/kixie — per-employee Kixie overrides.
  *
- * Phase 5 of TT + Kixie full embedding (2026-06-01). Lets each employee
- * tell us "when a call fires on my behalf, ring THIS Kixie agent email"
- * — needed when the rep's Kixie login email differs from their
- * user_profiles.email (which is the default fallback).
+ * Phase 5 of TT + Kixie full embedding (2026-06-01), extended 2026-06-18
+ * to add a per-rep from-number. Two independent overrides per employee:
+ *   - kixie_agent_email — "when a call/SMS fires on my behalf, attribute it
+ *     to THIS Kixie agent email" (needed when the rep's Kixie login differs
+ *     from their user_profiles.email, the default fallback).
+ *   - kixie_from_number — "send my SMS from THIS Kixie DID" (my own number);
+ *     falls back to the tenant default Kixie number when unset.
  *
- * GET   — returns the user's current kixie_agent_email (if set)
- * POST  — { kixie_agent_email: string } — set or update
- * DELETE — clear the override (drawer falls back to user_profiles.email)
+ * GET    — returns the user's current kixie_agent_email + kixie_from_number
+ * POST   — { kixie_agent_email?: string, kixie_from_number?: string } —
+ *          set/update whichever field(s) are present
+ * DELETE — ?field=kixie_agent_email | kixie_from_number clears one field;
+ *          no ?field clears the whole service (legacy behavior)
  *
- * Stored encrypted in user_integration_credentials under
- * service="kixie", field_key="kixie_agent_email". Per-tenant per-user.
+ * Stored encrypted in user_integration_credentials, per-tenant per-user.
  */
 
 import { NextResponse, type NextRequest } from "next/server";
 import { getServiceSupabase, getSessionUser } from "@/lib/supabase-server";
+import { normalizePhoneE164 } from "@/lib/lead-interactions-queries";
 import {
   getUserIntegrationValue,
   setUserIntegrationValue,
   clearUserIntegration,
+  clearUserIntegrationField,
 } from "@/lib/user-integration-store";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const KIXIE_FIELDS = ["kixie_agent_email", "kixie_from_number"] as const;
 
 async function resolveTenantId(userId: string): Promise<string | null> {
   const db = getServiceSupabase();
@@ -46,13 +53,15 @@ export async function GET() {
   if (!tenantId) {
     return NextResponse.json({ ok: false, error: "no_tenant" }, { status: 400 });
   }
-  const value = await getUserIntegrationValue(
-    tenantId,
-    user.id,
-    "kixie",
-    "kixie_agent_email",
-  );
-  return NextResponse.json({ ok: true, kixie_agent_email: value || null });
+  const [agentEmail, fromNumber] = await Promise.all([
+    getUserIntegrationValue(tenantId, user.id, "kixie", "kixie_agent_email"),
+    getUserIntegrationValue(tenantId, user.id, "kixie", "kixie_from_number"),
+  ]);
+  return NextResponse.json({
+    ok: true,
+    kixie_agent_email: agentEmail || null,
+    kixie_from_number: fromNumber || null,
+  });
 }
 
 export async function POST(req: NextRequest) {
@@ -64,36 +73,58 @@ export async function POST(req: NextRequest) {
   if (!tenantId) {
     return NextResponse.json({ ok: false, error: "no_tenant" }, { status: 400 });
   }
-  let body: { kixie_agent_email?: unknown };
+  let body: { kixie_agent_email?: unknown; kixie_from_number?: unknown };
   try {
-    body = (await req.json()) as { kixie_agent_email?: unknown };
+    body = (await req.json()) as { kixie_agent_email?: unknown; kixie_from_number?: unknown };
   } catch {
     return NextResponse.json({ ok: false, error: "invalid_json" }, { status: 400 });
   }
-  const email = typeof body.kixie_agent_email === "string" ? body.kixie_agent_email.trim() : "";
-  if (!email || !EMAIL_RE.test(email)) {
+
+  const hasEmail = typeof body.kixie_agent_email === "string";
+  const hasFrom = typeof body.kixie_from_number === "string";
+  if (!hasEmail && !hasFrom) {
     return NextResponse.json(
-      { ok: false, error: "invalid_email", message: "Provide a valid email like alex@kixie.account.com." },
+      { ok: false, error: "nothing_to_update", message: "Provide kixie_agent_email and/or kixie_from_number." },
       { status: 400 },
     );
   }
-  const result = await setUserIntegrationValue(
-    tenantId,
-    user.id,
-    "kixie",
-    "kixie_agent_email",
-    email,
-  );
-  if (!result.ok) {
-    return NextResponse.json(
-      { ok: false, error: "save_failed", message: result.error },
-      { status: 500 },
-    );
+
+  const out: { kixie_agent_email?: string; kixie_from_number?: string } = {};
+
+  if (hasEmail) {
+    const email = (body.kixie_agent_email as string).trim();
+    if (!email || !EMAIL_RE.test(email)) {
+      return NextResponse.json(
+        { ok: false, error: "invalid_email", message: "Provide a valid email like alex@kixie.account.com." },
+        { status: 400 },
+      );
+    }
+    const result = await setUserIntegrationValue(tenantId, user.id, "kixie", "kixie_agent_email", email);
+    if (!result.ok) {
+      return NextResponse.json({ ok: false, error: "save_failed", message: result.error }, { status: 500 });
+    }
+    out.kixie_agent_email = email;
   }
-  return NextResponse.json({ ok: true, kixie_agent_email: email });
+
+  if (hasFrom) {
+    const normalized = normalizePhoneE164((body.kixie_from_number as string).trim());
+    if (!normalized) {
+      return NextResponse.json(
+        { ok: false, error: "invalid_from_number", message: "Provide a valid number in E.164 format, e.g. +17542127833." },
+        { status: 400 },
+      );
+    }
+    const result = await setUserIntegrationValue(tenantId, user.id, "kixie", "kixie_from_number", normalized);
+    if (!result.ok) {
+      return NextResponse.json({ ok: false, error: "save_failed", message: result.error }, { status: 500 });
+    }
+    out.kixie_from_number = normalized;
+  }
+
+  return NextResponse.json({ ok: true, ...out });
 }
 
-export async function DELETE() {
+export async function DELETE(req: NextRequest) {
   const user = await getSessionUser();
   if (!user) {
     return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
@@ -102,8 +133,20 @@ export async function DELETE() {
   if (!tenantId) {
     return NextResponse.json({ ok: false, error: "no_tenant" }, { status: 400 });
   }
-  // clearUserIntegration drops every field for (tenant, user, service);
-  // here we only have one field, so it's effectively a single-field clear.
+  const field = req.nextUrl.searchParams.get("field");
+  // ?field=<one of KIXIE_FIELDS> clears just that override; no ?field clears
+  // the whole Kixie personal service (legacy behavior, kept for callers that
+  // expect a full disconnect).
+  if (field) {
+    if (!(KIXIE_FIELDS as readonly string[]).includes(field)) {
+      return NextResponse.json({ ok: false, error: "unknown_field" }, { status: 400 });
+    }
+    const result = await clearUserIntegrationField(tenantId, user.id, "kixie", field);
+    if (!result.ok) {
+      return NextResponse.json({ ok: false, error: "clear_failed", message: result.error }, { status: 500 });
+    }
+    return NextResponse.json({ ok: true, cleared: field });
+  }
   const result = await clearUserIntegration(tenantId, user.id, "kixie");
   if (!result.ok) {
     return NextResponse.json(

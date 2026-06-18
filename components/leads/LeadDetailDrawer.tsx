@@ -1615,30 +1615,41 @@ function SmsComposer({
             setPending(true);
             setStatus(null);
             try {
-              const r = await fetch("/api/sms/send", {
+              // Per-rep Kixie SMS: route through /api/conversations/reply,
+              // which resolves the acting employee's Kixie identity (agent
+              // email + optional per-rep from-number) the same way the Call
+              // button does — so the text is attributed to THIS rep, not a
+              // generic tenant Twilio line. Falls back to the tenant default
+              // Kixie number when the rep hasn't set their own.
+              const r = await fetch("/api/conversations/reply", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 credentials: "include",
-                body: JSON.stringify({ to: toPhone, body }),
+                body: JSON.stringify({
+                  lead_id: recordId,
+                  to_phone: toPhone,
+                  message: body,
+                  provider: "kixie",
+                }),
               });
               const j = await r.json().catch(() => ({}));
               if (r.ok && j.ok !== false) {
-                // Fire-and-forget the stage transition. /api/sms/send
-                // doesn't yet emit it server-side; we publish from the
-                // client so SMS counts as outbound contact same as
-                // queued email. Safe even if the lead is past
-                // sent_application — engine guards block re-entry.
+                // Fire-and-forget the stage transition so SMS counts as
+                // outbound contact same as queued email. conversations/reply
+                // logs the interaction timeline row but does NOT advance the
+                // lead stage, so we still publish it here. Safe even if the
+                // lead is past sent_application — engine guards block re-entry.
                 fetch(`/api/leads/${recordId}/stage-event`, {
                   method: "POST",
                   credentials: "include",
                   headers: { "Content-Type": "application/json" },
                   body: JSON.stringify({ type: "outbound_email_sent" }),
                 }).catch(() => undefined);
-                setStatus("Sent");
+                setStatus(j.dry_run ? "Queued (dry-run — not sent live)" : "Sent");
                 setBody("");
                 if (onChange) await onChange();
               } else {
-                setStatus(j.error || `Failed (${r.status})`);
+                setStatus(j.message || j.error || `Failed (${r.status})`);
               }
             } catch (e) {
               setStatus(String((e as Error).message || e));

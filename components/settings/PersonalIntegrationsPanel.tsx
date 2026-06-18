@@ -59,6 +59,11 @@ export function PersonalIntegrationsPanel({
   const [kixieAgentEmail, setKixieAgentEmail] = useState<string | null>(null);
   const [kixieDraft, setKixieDraft] = useState("");
   const [kixieFlash, setKixieFlash] = useState<string | null>(null);
+  // Per-rep "text from my own number" (2026-06-18): each employee can set
+  // their own Kixie DID so drawer SMS sends from THEIR number; falls back to
+  // the tenant default Kixie number server-side when unset.
+  const [kixieFromNumber, setKixieFromNumber] = useState<string | null>(null);
+  const [kixieFromDraft, setKixieFromDraft] = useState("");
   const searchParams = useSearchParams();
 
   // OAuth callback flash messages — surfaced as a banner on first
@@ -89,10 +94,13 @@ export function PersonalIntegrationsPanel({
       const kbody = (await k.json().catch(() => ({}))) as {
         ok?: boolean;
         kixie_agent_email?: string | null;
+        kixie_from_number?: string | null;
       };
       if (kbody.ok) {
         setKixieAgentEmail(kbody.kixie_agent_email || null);
         setKixieDraft(kbody.kixie_agent_email || "");
+        setKixieFromNumber(kbody.kixie_from_number || null);
+        setKixieFromDraft(kbody.kixie_from_number || "");
       }
     } catch {
       // Soft-fail — the rest of the panel is independent.
@@ -136,7 +144,7 @@ export function PersonalIntegrationsPanel({
     setError(null);
     setKixieFlash(null);
     try {
-      const r = await fetch("/api/integrations/personal/kixie", { method: "DELETE" });
+      const r = await fetch("/api/integrations/personal/kixie?field=kixie_agent_email", { method: "DELETE" });
       if (!r.ok) {
         const body = (await r.json().catch(() => ({}))) as { message?: string };
         setError(body.message || `clear_failed:${r.status}`);
@@ -144,6 +152,54 @@ export function PersonalIntegrationsPanel({
       }
       setKixieAgentEmail(null);
       setKixieDraft("");
+      setKixieFlash("Cleared.");
+    } finally {
+      setBusyService(null);
+    }
+  }
+
+  async function saveKixieFromNumber() {
+    setBusyService("kixie");
+    setError(null);
+    setKixieFlash(null);
+    try {
+      const r = await fetch("/api/integrations/personal/kixie", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ kixie_from_number: kixieFromDraft.trim() }),
+      });
+      const body = (await r.json().catch(() => ({}))) as {
+        ok?: boolean;
+        kixie_from_number?: string;
+        error?: string;
+        message?: string;
+      };
+      if (!r.ok || !body.ok) {
+        setError(body.message || body.error || `save_failed:${r.status}`);
+        return;
+      }
+      setKixieFromNumber(body.kixie_from_number || null);
+      if (body.kixie_from_number) setKixieFromDraft(body.kixie_from_number);
+      setKixieFlash("Saved — your texts will send from your own Kixie number.");
+    } finally {
+      setBusyService(null);
+    }
+  }
+
+  async function clearKixieFromNumber() {
+    if (!confirm("Clear your Kixie from-number? Your texts will send from the workspace default Kixie number.")) return;
+    setBusyService("kixie");
+    setError(null);
+    setKixieFlash(null);
+    try {
+      const r = await fetch("/api/integrations/personal/kixie?field=kixie_from_number", { method: "DELETE" });
+      if (!r.ok) {
+        const body = (await r.json().catch(() => ({}))) as { message?: string };
+        setError(body.message || `clear_failed:${r.status}`);
+        return;
+      }
+      setKixieFromNumber(null);
+      setKixieFromDraft("");
       setKixieFlash("Cleared.");
     } finally {
       setBusyService(null);
@@ -348,6 +404,63 @@ export function PersonalIntegrationsPanel({
                   <button
                     type="button"
                     onClick={clearKixieAgentEmail}
+                    disabled={busyService === "kixie"}
+                    className="inline-flex items-center gap-1.5 rounded-md border border-bg-border bg-bg-elev px-3 py-1.5 text-[12.5px] font-bold text-fg-muted hover:text-red-300 hover:border-red-500/40 disabled:opacity-50 transition-colors"
+                  >
+                    Clear
+                  </button>
+                )}
+              </div>
+            </div>
+          </li>
+          )}
+
+          {/* Per-rep Kixie from-number — "text from my own number"
+              (2026-06-18). Drawer SMS sends from THIS DID when set; falls
+              back to the tenant default Kixie number otherwise. Gated by
+              showKixie like the agent-email row above. */}
+          {showKixie && (
+          <li className="rounded-lg border border-bg-border bg-bg-deep/40 p-4">
+            <div className="flex flex-col gap-2">
+              <div className="flex items-center gap-2">
+                <span className="font-semibold text-sm text-fg">Kixie from-number</span>
+                {kixieFromNumber ? (
+                  <span className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-bold bg-emerald-500/15 text-emerald-300 border border-emerald-500/30">
+                    <Check className="w-3 h-3" />
+                    {kixieFromNumber}
+                  </span>
+                ) : (
+                  <span className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-medium bg-bg-elev/60 text-fg-dim border border-bg-border">
+                    Using the workspace number
+                  </span>
+                )}
+              </div>
+              <div className="text-[11.5px] text-fg-muted leading-relaxed">
+                Your own Kixie phone number (DID). When set, texts you send from
+                the lead drawer go out from THIS number; otherwise they use the
+                workspace default Kixie number. E.164 format, e.g. +17542127833.
+              </div>
+              <div className="flex items-center gap-2 flex-wrap">
+                <input
+                  type="tel"
+                  value={kixieFromDraft}
+                  onChange={(e) => setKixieFromDraft(e.target.value)}
+                  placeholder="+17542127833"
+                  className="flex-1 min-w-[200px] rounded-md border border-bg-border bg-bg-elev px-3 py-1.5 text-[12.5px] text-fg placeholder:text-fg-dim focus:outline-none focus:border-accent"
+                />
+                <button
+                  type="button"
+                  onClick={saveKixieFromNumber}
+                  disabled={busyService === "kixie" || !kixieFromDraft.trim()}
+                  className="inline-flex items-center gap-1.5 rounded-md bg-accent text-bg-deep px-3 py-1.5 text-[12.5px] font-bold hover:bg-accent/90 disabled:opacity-60 transition-colors"
+                >
+                  {busyService === "kixie" ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : null}
+                  Save
+                </button>
+                {kixieFromNumber && (
+                  <button
+                    type="button"
+                    onClick={clearKixieFromNumber}
                     disabled={busyService === "kixie"}
                     className="inline-flex items-center gap-1.5 rounded-md border border-bg-border bg-bg-elev px-3 py-1.5 text-[12.5px] font-bold text-fg-muted hover:text-red-300 hover:border-red-500/40 disabled:opacity-50 transition-colors"
                   >

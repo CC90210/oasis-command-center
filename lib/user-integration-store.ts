@@ -232,3 +232,30 @@ export async function clearUserIntegration(
   if (error) return { ok: false, error: error.message };
   return { ok: true };
 }
+
+/**
+ * Clear a SINGLE field for this user without touching the service's other
+ * fields. Needed where one service holds multiple independent per-rep
+ * overrides (e.g. Kixie's kixie_agent_email + kixie_from_number) and the
+ * operator should be able to clear one without nuking the other.
+ */
+export async function clearUserIntegrationField(
+  tenantId: string,
+  userId: string,
+  service: string,
+  fieldKey: string,
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  if (!tenantId || !userId || !service || !fieldKey) {
+    return { ok: false, error: "missing_required_field" };
+  }
+  const db = getServiceSupabase();
+  const { error } = await db
+    .from("user_integration_credentials")
+    .delete()
+    .eq("tenant_id", tenantId)
+    .eq("user_id", userId)
+    .eq("service", service)
+    .eq("field_key", fieldKey);
+  if (error) return { ok: false, error: error.message };
+  return { ok: true };
+}

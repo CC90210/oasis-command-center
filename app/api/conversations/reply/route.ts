@@ -110,6 +110,28 @@ export async function POST(req: NextRequest) {
     );
   }
 
+  // Tenant lead-ownership guard (hardening 2026-06-18, mirrors the Call route
+  // at app/api/leads/[id]/call/route.ts): when a lead_id is supplied, confirm
+  // it belongs to the caller's tenant before we attach an interaction row to
+  // it. The credentials are already tenant-scoped so a forged lead_id can
+  // never send AS another tenant, but without this check it could mis-attribute
+  // a timeline row to a foreign record. 404 on mismatch, same as Call.
+  if (leadId) {
+    const db = getServiceSupabase();
+    const { data: ownedLead } = await db
+      .from("tenant_records")
+      .select("id")
+      .eq("id", leadId)
+      .eq("tenant_id", tenantId)
+      .maybeSingle();
+    if (!ownedLead) {
+      return NextResponse.json(
+        { ok: false, error: "lead_not_found", message: "Lead not found for this workspace." },
+        { status: 404 },
+      );
+    }
+  }
+
   // DRY-RUN: short-circuit before any network call. Still log the attempt.
   if (isDryRun()) {
     await logInteraction({ tenantId, leadId, toPhone, message, userId, provider, dryRun: true });
@@ -154,10 +176,23 @@ export async function POST(req: NextRequest) {
           { status: 400 },
         );
       }
+      // Per-rep "text from my own number": if the employee has set a personal
+      // Kixie from-number (their own DID) in Settings → Personal integrations,
+      // send from it; otherwise kixie.sendSms falls back to the tenant default
+      // (creds.defaultFromNumber). Attribution-by-agent-email already happens
+      // above; this makes the literal sending DID per-rep when configured.
+      let fromOverride: string | undefined;
+      try {
+        const f = await getUserIntegrationValue(tenantId, userId, "kixie", "kixie_from_number");
+        if (f) fromOverride = f;
+      } catch {
+        // soft-fail; tenant default from-number applies
+      }
       await kixieSendSms(creds, {
         target: toPhone,
         message,
         agentEmail,
+        from: fromOverride,
         leadId: leadId ?? undefined,
       });
     } else {
