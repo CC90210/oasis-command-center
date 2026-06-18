@@ -308,7 +308,7 @@ export function LeadDetailDrawer({
           {data && activeTab === "owner" && <OwnerTab record={data.record.data} />}
           {data && activeTab === "lenders" && <LendersTab application={data.application} />}
           {data && activeTab === "bank" && (
-            <BankTab record={data.record.data} application={data.application} tenantSlug={tenantSlug} />
+            <BankTab record={data.record.data} application={data.application} tenantSlug={tenantSlug} leadId={recordId} />
           )}
           {data && activeTab === "notes" && <NotesTab leadId={recordId} />}
           {data && activeTab === "documents" && (
@@ -661,12 +661,20 @@ function BankTab({
   record,
   application,
   tenantSlug,
+  leadId,
 }: {
   record: Record<string, unknown>;
   application: { id: string; data: Record<string, unknown> } | null;
   tenantSlug: string;
+  leadId: string;
 }) {
-  const applicationId = application?.id ?? null;
+  // applicationId = the linked application OR one we just created on demand.
+  // When a lead has no application yet (manually-created, or lead-first
+  // lifecycle), the "Run underwriting" CTA below creates it then runs; setting
+  // createdAppId flips this id, and fetchLatestRun + polling take over.
+  const [createdAppId, setCreatedAppId] = useState<string | null>(null);
+  const [startPending, setStartPending] = useState(false);
+  const applicationId = application?.id ?? createdAppId;
 
   // Underwriting run state.
   // undefined = fetch still in flight (shows "Loading…")
@@ -745,6 +753,46 @@ function BankTab({
     }
   };
 
+  // No application yet — create one on demand, then kick underwriting. The
+  // applicationId memo flips to the new id, so fetchLatestRun + the polling
+  // effect surface the run automatically.
+  const handleStartUnderwriting = async () => {
+    if (applicationId) return handleRerun();
+    setStartPending(true);
+    setUwError(null);
+    try {
+      const cr = await fetch(`/api/leads/${leadId}/create-application`, {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: "{}",
+      });
+      const cj = await cr.json().catch(() => ({}));
+      if (!cr.ok || !cj.application_id) {
+        setUwError(cj.message || cj.error || `create_failed_${cr.status}`);
+        return;
+      }
+      const appId = cj.application_id as string;
+      const rr = await fetch(`/api/applications/${appId}/underwriting/run`, {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ triggered_by: "manual" }),
+      });
+      if (!rr.ok) {
+        const rj = await rr.json().catch(() => ({}));
+        setUwError(rj.error || `run_failed_${rr.status}`);
+      }
+      // Flip to the created application either way so the underwriting section
+      // takes over (with the run status, or the error + a Re-run button).
+      setCreatedAppId(appId);
+    } catch (e) {
+      setUwError(String((e as Error).message || e));
+    } finally {
+      setStartPending(false);
+    }
+  };
+
   // Extract sparkline series from parser_output.
   // Phase ε — absent until the parser daemon writes them.
   // Only render Sparkline when the series has ≥ 2 data points.
@@ -820,8 +868,9 @@ function BankTab({
 
   return (
     <div className="space-y-4">
-      {/* Underwriting status — application-only; hidden on the lead drawer */}
-      {applicationId && (
+      {/* Underwriting — when the lead has no application yet, the else-branch
+          CTA creates one on demand then runs (one click). */}
+      {applicationId ? (
         <div className="rounded-md border border-bg-border bg-bg-deep/40 p-3 space-y-2">
           <div className="text-[10px] uppercase tracking-wider text-fg-dim font-semibold mb-1">
             Underwriting
@@ -874,6 +923,25 @@ function BankTab({
               )}
             </div>
           )}
+        </div>
+      ) : (
+        <div className="rounded-md border border-bg-border bg-bg-deep/40 p-3 space-y-2">
+          <div className="text-[10px] uppercase tracking-wider text-fg-dim font-semibold mb-1">
+            Underwriting
+          </div>
+          <div className="text-[11px] text-fg-dim leading-relaxed">
+            Run underwriting against this lead&apos;s uploaded bank statements.
+            This creates the application record automatically.
+          </div>
+          <button
+            type="button"
+            onClick={handleStartUnderwriting}
+            disabled={startPending}
+            className="inline-flex items-center gap-1.5 rounded-md bg-accent text-bg-deep px-3 py-1.5 text-[12px] font-bold hover:bg-accent/90 disabled:opacity-60 transition-colors"
+          >
+            {startPending ? "Starting…" : "Run underwriting →"}
+          </button>
+          {uwError && <div className="text-[11px] text-red-300">{uwError}</div>}
         </div>
       )}
 
