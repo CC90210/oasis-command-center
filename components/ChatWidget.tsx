@@ -1122,6 +1122,19 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
   }, [messages, streaming, awayFromBottom]);
 
   useEffect(() => {
+    // Persistent-shell hoist (2026-06-18): this widget no longer unmounts on
+    // navigation, so a stream still running for the PREVIOUS agent would keep
+    // writing into the reseeded transcript when the operator switches agent.
+    // Abort it first. No-op on first mount / stable-prop re-renders (the ref
+    // is null until a send is in flight). Mirrors the Stop button's abort.
+    if (activeStreamControllerRef.current) {
+      try {
+        activeStreamControllerRef.current.abort();
+      } catch {
+        /* already aborted / no signal */
+      }
+      activeStreamControllerRef.current = null;
+    }
     setMessages(seedMessagesForAgent(agent, welcomeMessages));
     setSessionId(null);
     setError(null);
@@ -1223,6 +1236,17 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
     : `Message ${agentDisplayName(agent).toUpperCase()}…  (Shift+Enter for newline)`;
 
   function reset() {
+    // New chat: abort any in-flight stream first so a running turn can't bleed
+    // into the fresh conversation (the persistent shell keeps this widget
+    // mounted, so the stream is no longer torn down by navigation).
+    if (activeStreamControllerRef.current) {
+      try {
+        activeStreamControllerRef.current.abort();
+      } catch {
+        /* already aborted / no signal */
+      }
+      activeStreamControllerRef.current = null;
+    }
     // Best-effort: tell the bridge to kill the warm claude subprocess
     // for the session we're abandoning. Without this, the orphaned
     // process pins ~50-200MB of RAM until the 15-min idle reaper
@@ -1286,6 +1310,17 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
    *     starts clean.
    */
   async function loadPastSession(id: string) {
+    // Loading a past chat replaces the whole transcript — abort any in-flight
+    // stream first so a running turn can't keep appending into the loaded
+    // thread (the persistent shell no longer tears the stream down on nav).
+    if (activeStreamControllerRef.current) {
+      try {
+        activeStreamControllerRef.current.abort();
+      } catch {
+        /* already aborted / no signal */
+      }
+      activeStreamControllerRef.current = null;
+    }
     setError(null);
     setErrorCode(null);
     setLastFailedMode(null);

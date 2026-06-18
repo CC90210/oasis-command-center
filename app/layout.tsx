@@ -21,6 +21,7 @@ import {
 import { SEED_MANIFESTS } from "@/lib/manifest/seeds";
 import { getTenantManifestForUser } from "@/lib/manifest/tenant-scope";
 import { canPreviewTenantSlug } from "@/lib/tenant-access";
+import { resolveChatShellProps, type ChatShellProps } from "@/lib/chat-shell-props";
 
 // Default metadata — tenant-neutral. Individual pages override via
 // generateMetadata (forms, leads, etc.) with their own titles. Keeping
@@ -70,6 +71,10 @@ export default async function RootLayout({
   let tenantProfileSlug: string | null = null;
   let demoProfileSlug: string | null = null;
   let pathOverrideSlug: string | null = null;
+  // Props for the persistent ChatWidget hoisted into MainShell (2026-06-18).
+  // Resolved against the operator's OWN tenant so the persistent chat always
+  // speaks as their own agent, even while previewing another tenant's shell.
+  let chatProps: ChatShellProps | null = null;
   if (!isFullBleed) {
     const cookieStore = await cookies();
     // Path-based tenant slug (Phase 1): `/t/<slug>/...` URLs anchor the shell to
@@ -200,7 +205,7 @@ export default async function RootLayout({
     // header dot, Settings page, and any future caller agree on what
     // "online" means (last_seen_at within 5 minutes, revoked_at IS NULL).
     const emptySnap: { data: { last_tick_at?: string | null } | null } = { data: null };
-    const [snapRes, bridgeOnlineResolved] = await Promise.all([
+    const [snapRes, bridgeOnlineResolved, chatPropsResolved] = await Promise.all([
       safe(
         "layout.agent_state_snapshot",
         (async () => {
@@ -215,6 +220,13 @@ export default async function RootLayout({
         emptySnap
       ),
       safe("layout.bridge_online", getBridgeOnline(tenantId), false),
+      // Persistent-chat props, resolved in parallel so this adds no
+      // wall-clock latency to the layout (just one more concurrent query set).
+      safe(
+        "layout.chat_props",
+        resolveChatShellProps({ profile, userEmail: profile?.email }),
+        null,
+      ),
     ]);
     const snap = snapRes.data;
     if (snap?.last_tick_at) {
@@ -222,6 +234,7 @@ export default async function RootLayout({
         Date.now() - new Date(snap.last_tick_at).getTime() < 15 * 60 * 1000;
     }
     bridgeOnline = bridgeOnlineResolved;
+    chatProps = chatPropsResolved;
     // tenantProfileSlug already resolved above so canPreviewTenantSlug
     // could use it on the path-override gate. Nothing more to do here.
   }
@@ -317,6 +330,7 @@ export default async function RootLayout({
             <MainShell
               footerLabel={manifest.brand.footer_label}
               footerTagline={manifest.brand.footer_tagline}
+              chat={chatProps}
             >
               {children}
             </MainShell>
