@@ -39,7 +39,7 @@ import {
   type FormStep,
   FormDefinitionError,
 } from "@/lib/forms/types";
-import { isFieldVisible } from "@/lib/forms/visibility";
+import { isFieldVisible, buildAnswerContext } from "@/lib/forms/visibility";
 import { rateLimit } from "@/lib/rate-limit";
 import { createRecord, updateRecord, RecordsError } from "@/lib/manifest/data";
 import { uploadLeadDocument } from "@/lib/lead-documents";
@@ -48,7 +48,8 @@ import { resolvePublicForm } from "@/lib/forms/public-resolver";
 import { maybeQueueResumeEmail } from "@/lib/forms/maybe-queue-resume";
 import { maybeSendNextStepsEmail } from "@/lib/forms/next-steps-email";
 import { notifyOasisFunnelSubmission } from "@/lib/forms/oasis-funnel-notify";
-import { OASIS_FUNNEL_SLUG } from "@/lib/forms/oasis-funnel-seed";
+import { buildOasisLeadPatch } from "@/lib/forms/oasis-funnel-format";
+import { OASIS_FUNNEL_SLUG, OASIS_FUNNEL_TENANT_ID } from "@/lib/forms/oasis-funnel-seed";
 import { maybeGenerateApplicationDocument } from "@/lib/forms/application-document";
 import { mintFormLinkBySlug } from "@/lib/forms/agent-routing";
 import { upsertApplicationFromFormStep } from "@/lib/forms/application-upsert";
@@ -299,23 +300,19 @@ export async function POST(req: NextRequest) {
   // 2. Required fields on the SUBMITTED step must be present in the
   //    payload (string fields non-empty; file_upload fields either in
   //    inlineFiles or referenced as already-uploaded storage_path).
-  // mergedAnswers = every prior step's payload + this step's, so server-side
-  // show_if evaluation matches exactly what the client rendered. This is the
-  // AUTHORITATIVE visibility check — the client's is advisory. A field hidden
-  // by its condition is never enforced as required here (an AI-only lead is
-  // not blocked by the Music branch's fields). Field names are unique
-  // form-wide, so a flat merge is lossless.
-  const mergedAnswers: Record<string, unknown> = {};
+  // Fetch prior submissions for (a) the sequential-progress check and (b) the
+  // server-authoritative show_if context. mergedAnswers is built by
+  // buildAnswerContext, which whitelists every payload to its OWN step's
+  // declared fields — so a crafted body can't override a controller field on
+  // another step to dodge a required field. (Codex audit 2026-06-18 [critical].)
+  let priorRows: Array<{ step_index: number; payload: unknown }> = [];
   if (stepIndex > 0) {
     const priorQ = await db
       .from("form_submissions")
       .select("step_index, payload")
       .eq("form_id", form.id)
       .eq("lead_id", link.lead_id);
-    const priorRows = (priorQ.data || []) as Array<{
-      step_index: number;
-      payload: unknown;
-    }>;
+    priorRows = (priorQ.data || []) as Array<{ step_index: number; payload: unknown }>;
     const completedSteps = new Set(priorRows.map((r) => Number(r.step_index)));
     for (let i = 0; i < stepIndex; i++) {
       if (!completedSteps.has(i)) {
@@ -325,13 +322,8 @@ export async function POST(req: NextRequest) {
         );
       }
     }
-    for (const r of priorRows) {
-      if (r.payload && typeof r.payload === "object" && !Array.isArray(r.payload)) {
-        Object.assign(mergedAnswers, r.payload as Record<string, unknown>);
-      }
-    }
   }
-  Object.assign(mergedAnswers, payload);
+  const mergedAnswers = buildAnswerContext(steps, priorRows, stepIndex, payload);
 
   const currentStep = steps[stepIndex];
   const inlineFileNames = new Set(inlineFiles.map((f) => f.fieldName));
@@ -674,7 +666,11 @@ export async function POST(req: NextRequest) {
   // application (full-application / bank-statement-upload). This is what keeps
   // the Opportunity Pipeline holding REAL applications instead of premature
   // "Application In" rows for every inquiry.
-  if (form.slug !== "initial-lead-capture") try {
+  // Funding-only: an application entity (Opportunity Pipeline) is a funding
+  // construct. The OASIS funnel ("start") must NOT create applications — it
+  // feeds the lead pipeline only. Gate to the funding tenant so non-funding
+  // tenants' non-interest forms don't spawn phantom application rows.
+  if (isFundingTenant(link.tenant) && form.slug !== "initial-lead-capture") try {
     const appUpsert = await upsertApplicationFromFormStep({
       tenantId: form.tenant_id,
       leadId: link.lead_id,
@@ -809,14 +805,46 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  // OASIS personal-brand funnel (CC): on the final step, ping CC's Telegram +
-  // send the lead a Claude-personalized welcome email — the two instant
-  // automations ported from the retired cc-funnel app. The lead already landed
-  // in the pipeline above. Tenant-gated to CC's funnel (oasis* tenant + the
-  // "start" slug) so SunBiz is untouched. Fire-and-forget + soft-fail via
-  // `after()`; mergedAnswers carries interests + branch details + contact.
-  if (isLastStep && link.tenant.startsWith("oasis") && form.slug === OASIS_FUNNEL_SLUG) {
+  // OASIS personal-brand funnel (CC): final step. Gated to CC's EXACT tenant +
+  // form so no other tenant can fire CC's Telegram/Gmail notifications. (Codex
+  // audit 2026-06-18 [high]: a startsWith("oasis") gate matched other tenants.)
+  if (
+    isLastStep &&
+    form.tenant_id === OASIS_FUNNEL_TENANT_ID &&
+    form.slug === OASIS_FUNNEL_SLUG
+  ) {
     const answers = { ...mergedAnswers };
+    // (a) Enrich the lead with canonical OASIS fields. The pipeline reads
+    // data.name/company/email/phone/notes, but the funnel collects contact on
+    // the LAST step and the create path stored contact_name/business_name — so
+    // without this the lead would render blank in the pipeline. Awaited so the
+    // pipeline is correct the moment CC looks. Best-effort.
+    try {
+      const patch = buildOasisLeadPatch(answers);
+      if (Object.keys(patch).length > 0) {
+        const cur = await db
+          .from("tenant_records")
+          .select("data")
+          .eq("id", link.lead_id)
+          .eq("tenant_id", form.tenant_id)
+          .maybeSingle();
+        const curData =
+          (cur.data as { data?: Record<string, unknown> } | null)?.data || {};
+        await db
+          .from("tenant_records")
+          .update({ data: { ...curData, ...patch } })
+          .eq("id", link.lead_id)
+          .eq("tenant_id", form.tenant_id);
+      }
+    } catch (err) {
+      console.error("[forms.submit.oasis_enrich.failed]", {
+        lead_id: link.lead_id,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+    // (b) Ping CC's Telegram + send the Claude welcome email. Fire-and-forget +
+    // soft-fail via `after()`. mergedAnswers carries interests + branch details
+    // + contact (built from whitelisted answers across steps).
     after(() =>
       notifyOasisFunnelSubmission({
         db,

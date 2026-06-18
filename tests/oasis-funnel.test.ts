@@ -8,7 +8,7 @@ import {
   OASIS_FUNNEL_ON_COMPLETE_STAGE,
   buildOasisFunnelRow,
 } from "../lib/forms/oasis-funnel-seed";
-import { buildOasisFunnelAlert } from "../lib/forms/oasis-funnel-format";
+import { buildOasisFunnelAlert, buildOasisLeadPatch } from "../lib/forms/oasis-funnel-format";
 
 // ---------------------------------------------------------------------------
 // Definition validity — the seed must parse through the canonical validators.
@@ -86,5 +86,35 @@ assert.ok(alert.includes("⚡ AI Audit"), "alert maps interest label");
 assert.ok(alert.includes("Acme &amp; Co &lt;b&gt;"), "alert HTML-escapes business name");
 assert.ok(alert.includes("Jane &lt;script&gt;"), "alert HTML-escapes lead name");
 assert.ok(!alert.includes("<script>"), "no raw user angle-brackets leak into HTML message");
+
+// ---------------------------------------------------------------------------
+// buildOasisLeadPatch — maps funnel answers → canonical OASIS lead fields the
+// pipeline reads (data.name/company/email/phone/notes). Without this the lead
+// renders blank (contact is collected last + stored as contact_name).
+// ---------------------------------------------------------------------------
+const patch = buildOasisLeadPatch({
+  name: "Jane Doe",
+  email: "JANE@Example.com",
+  phone: "555-1212",
+  instagram: "@janed",
+  interests: ["ai", "brand"],
+  business_name: "Acme Co",
+  business_type: "service",
+  biggest_pain: ["lead-followup", "scheduling"],
+  brand_goal: "grow",
+  audience: ["entrepreneurs"],
+  current_following: "2k-10k",
+});
+assert.equal(patch.name, "Jane Doe", "patch.name set (pipeline reads data.name)");
+assert.equal(patch.email, "jane@example.com", "patch.email lowercased");
+assert.equal(patch.phone, "555-1212", "patch.phone set");
+assert.equal(patch.company, "Acme Co", "patch.company from business_name");
+assert.equal(patch.instagram, "janed", "patch.instagram stripped @");
+assert.ok(typeof patch.notes === "string" && (patch.notes as string).includes("AI & Automation"));
+assert.ok((patch.notes as string).includes("Personal Brand"), "notes summarize both interests");
+
+// Falls back to contact_name when name absent; empty when nothing usable.
+assert.equal(buildOasisLeadPatch({ contact_name: "Bob" }).name, "Bob", "contact_name fallback");
+assert.deepEqual(buildOasisLeadPatch({}), {}, "no usable fields → empty patch");
 
 console.log("oasis-funnel ok");

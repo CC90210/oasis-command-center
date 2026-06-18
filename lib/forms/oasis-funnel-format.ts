@@ -64,3 +64,58 @@ export function buildOasisFunnelAlert(a: Record<string, unknown>): string {
     details
   );
 }
+
+const INTEREST_NAMES: Record<string, string> = {
+  ai: "AI & Automation",
+  music: "DJing & Music",
+  brand: "Personal Brand",
+};
+
+/** Human-readable summary of the funnel answers → lead.notes. */
+export function buildFunnelNotes(a: Record<string, unknown>): string {
+  const interests = asArray(a.interests);
+  const lines: string[] = [];
+  if (interests.length) {
+    lines.push(`Interested in: ${interests.map((i) => INTEREST_NAMES[i] || i).join(", ")}`);
+  }
+  if (interests.includes("ai")) {
+    const bits = [str(a.business_name), str(a.business_type), asArray(a.biggest_pain).join(", ")]
+      .filter(Boolean)
+      .join(" · ");
+    if (bits) lines.push(`AI: ${bits}`);
+  }
+  if (interests.includes("music")) {
+    const bits = [str(a.event_type), str(a.event_date), str(a.music_vibe)].filter(Boolean).join(" · ");
+    if (bits) lines.push(`Music: ${bits}`);
+  }
+  if (interests.includes("brand")) {
+    const bits = [str(a.brand_goal), asArray(a.audience).join(", "), str(a.current_following)]
+      .filter(Boolean)
+      .join(" · ");
+    if (bits) lines.push(`Brand: ${bits}`);
+  }
+  return lines.join("\n");
+}
+
+/**
+ * Map funnel answers → the canonical OASIS lead fields the pipeline reads
+ * (data.name / company / email / phone / notes). The form collects contact on
+ * the LAST step and stores contact_name/business_name, so without this an OASIS
+ * funnel lead would render blank in the pipeline. Returns only the keys present.
+ */
+export function buildOasisLeadPatch(a: Record<string, unknown>): Record<string, unknown> {
+  const patch: Record<string, unknown> = {};
+  const name = str(a.name) || str(a.contact_name);
+  if (name) patch.name = name;
+  const email = str(a.email).trim().toLowerCase();
+  if (email) patch.email = email;
+  const phone = str(a.phone);
+  if (phone) patch.phone = phone;
+  const company = str(a.business_name) || str(a.company);
+  if (company) patch.company = company;
+  const ig = str(a.instagram).replace(/^@/, "");
+  if (ig) patch.instagram = ig;
+  const notes = buildFunnelNotes(a);
+  if (notes) patch.notes = notes;
+  return patch;
+}

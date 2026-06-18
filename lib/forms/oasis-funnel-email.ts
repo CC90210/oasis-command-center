@@ -142,9 +142,21 @@ function fallback(
   };
 }
 
-/** OASIS-branded HTML wrap (gold/black/cream), ported from cc-funnel. */
+function escapeHtml(s: string): string {
+  return s
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+/** OASIS-branded HTML wrap (gold/black/cream), ported from cc-funnel. The body
+ *  is HTML-escaped first — it's built from user answers (fallback path) and
+ *  LLM output seeded with user answers (Claude path), so a crafted name /
+ *  business name / model response must not inject markup into the email HTML.
+ *  (Codex audit 2026-06-18 [high].) The plain-text part stays raw. */
 function wrapInHtml(body: string): string {
-  const htmlBody = body
+  const htmlBody = escapeHtml(body)
     .split("\n\n")
     .map(
       (p) =>

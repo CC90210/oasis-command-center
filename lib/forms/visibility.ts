@@ -59,3 +59,33 @@ export function isStepVisible(
 ): boolean {
   return !step.show_if || isConditionMet(step.show_if, values);
 }
+
+/**
+ * Build the server-authoritative answer context for `show_if` evaluation +
+ * notifications. CRITICAL trust boundary: each submission's payload (prior
+ * STORED rows AND the current request) contributes ONLY keys declared as fields
+ * on ITS OWN step. This blocks a crafted body from (a) injecting a key the form
+ * never declared, or (b) overriding a controller field that lives on a different
+ * step — e.g. forging `interests: []` in the step-1 body to make a required AI
+ * field evaluate as hidden and skip its required check. Field names are unique
+ * form-wide, so the per-step whitelist is lossless for legitimate answers.
+ */
+export function buildAnswerContext(
+  steps: ReadonlyArray<{ fields: ReadonlyArray<{ name: string }> }>,
+  priorRows: ReadonlyArray<{ step_index: number; payload: unknown }>,
+  currentStepIndex: number,
+  currentPayload: Record<string, unknown>,
+): Record<string, unknown> {
+  const allowedByStep = steps.map((s) => new Set(s.fields.map((f) => f.name)));
+  const ctx: Record<string, unknown> = {};
+  const mergeWhitelisted = (stepIdx: number, payload: unknown) => {
+    const allowed = allowedByStep[stepIdx];
+    if (!allowed || !payload || typeof payload !== "object" || Array.isArray(payload)) return;
+    for (const [k, v] of Object.entries(payload as Record<string, unknown>)) {
+      if (allowed.has(k)) ctx[k] = v;
+    }
+  };
+  for (const r of priorRows) mergeWhitelisted(Number(r.step_index), r.payload);
+  mergeWhitelisted(currentStepIndex, currentPayload);
+  return ctx;
+}
