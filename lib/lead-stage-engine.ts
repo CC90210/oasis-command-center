@@ -130,11 +130,11 @@ const RULES: Record<LeadStageEvent["type"], Rule> = {
   },
 
   // Inbound classifier flagged the reply as negative ("not interested,
-  // remove me, etc."). Always overrides forward progression — a lead
-  // that explicitly opts out goes to declined regardless of what stage
-  // they were in.
-  // 2026-05-23: target rewired not_interested → declined (not_interested
-  // retired in migration 064); from-set drops "imported" (also retired).
+  // remove me, etc."). Always overrides forward progression.
+  // 2026-06-18 (CC): the `declined` stage was removed → route to `ghost`
+  // (re-engageable). A genuine STOP/unsubscribe sets the data.opted_out
+  // compliance flag separately; this soft "not interested right now" case
+  // belongs in ghost so it stays revivable.
   lead_replied_negative: {
     from: new Set<string>([
       "hot_lead",
@@ -143,16 +143,16 @@ const RULES: Record<LeadStageEvent["type"], Rule> = {
       "sent_application",
       "viewed_application",
     ]),
-    to: "declined",
+    to: "ghost",
     reasonCode: "lead_replied_negative",
   },
 
   // sequence_runner.py hits the last step of a follow-up sequence
-  // without a reply. Lead drops to declined; operator can still
-  // resurrect manually.
+  // without a reply. 2026-06-18 (CC): drops to `ghost` (was `declined`,
+  // now removed); operator can still resurrect manually.
   sequence_exhausted: {
     from: new Set<string>(["follow_up", "sent_application", "missing_info"]),
-    to: "declined",
+    to: "ghost",
     reasonCode: "sequence_exhausted_no_response",
   },
 };

@@ -22,13 +22,11 @@ export const STAGE_SLA_DAYS: Record<string, number> = {
   intent_inquiry_submitted: 1,
   hot_lead: 1,
   missing_info: 3,
-  declined: 999,
   follow_up: 2,
   sent_application: 5,
   viewed_application: 2,
   signed_application: 2,
   default: 7,
-  submitted: 5,
   // Opportunity stages — 2026-05-28 v3 (Adon's 7-stage spec, migration
   // 065+066). Keys are Adon's canonical labels (Title Case) since they
   // come from the merchant_summary view directly.
@@ -65,7 +63,6 @@ export const ACTIVE_STAGES = new Set<string>([
   "sent_application",
   "viewed_application",
   "signed_application",
-  "submitted",
   // Application-side active — Adon 7-stage
   "Application In",
   "Missing Info",
@@ -89,7 +86,6 @@ export const VISIBLE_TARGET_STAGES = new Set<string>([
   "sent_application",
   "viewed_application",
   "signed_application",
-  "submitted",
   // Application-side — Adon 7-stage
   "Application In",
   "Missing Info",

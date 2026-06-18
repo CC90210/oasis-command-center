@@ -106,41 +106,24 @@ export const SUNBIZ_DEFAULT_SEQUENCES: DefaultSequence[] = [
     ],
   },
 
-  // ─────────────────────────────────────────────────────────────────
-  // 3. Submitted -> underwriting holding pattern
-  // ─────────────────────────────────────────────────────────────────
-  {
-    name: "Submitted — underwriting wait",
-    description:
-      "Fires when a lead's application is fully submitted. Sets expectations + asks them to stay reachable.",
-    trigger_event: "BRAVO_RECORD_STATUS_CHANGED",
-    // Fires when a lead's application is fully submitted. The bank-statement-upload
-    // form transitions the lead to 'submitted'; the full-application form ends at
-    // 'signed_application' (a separate "bank statements nag" sequence covers that
-    // stage). Keep 'submitted' here so this wait message doesn't collide with that
-    // sequence or stop firing for the bank-statement-upload path.
-    trigger_filter: { entity: "lead", field: "stage", to: "submitted" },
-    one_per_lead: true,
-    steps: [
-      {
-        channel: "sms",
-        delay_minutes: 15,
-        from_label: "Solara",
-        body:
-          "{{lead.contact_name}} — your file is in to underwriting. Keep your phone on for the next 24h; lenders often call to verify details. I'll be the one bringing the offers back to you.",
-      },
-    ],
-  },
+  // 2026-06-18 (CC): the "Submitted — underwriting wait" sequence was removed
+  // with the `submitted` stage. Underwriting is now an operator-driven action
+  // (the Bank-tab "Run underwriting" CTA), not an auto-stage, so there's no
+  // merchant auto-SMS on submit. An underwriting-triggered confirmation can be
+  // added later if wanted.
 
   // ─────────────────────────────────────────────────────────────────
-  // 4. Declined -> 1-month revival
+  // 4. Ghost -> 1-month revival (was "Declined", retargeted 2026-06-18)
   // ─────────────────────────────────────────────────────────────────
   {
-    name: "Declined — 1-month check-back",
+    // 2026-06-18 (CC): retargeted from the removed `declined` stage to `ghost`
+    // (where negative-reply / no-response leads now land). Same 1-month
+    // re-engagement, now serving the ghost bucket.
+    name: "Ghost — 1-month check-back",
     description:
-      "Professional 1-month re-engagement for leads declined after bank-statement review. Doesn't burn the bridge.",
+      "Professional 1-month re-engagement for leads that went cold or replied 'not now' (stage: ghost). Doesn't burn the bridge.",
     trigger_event: "BRAVO_RECORD_STATUS_CHANGED",
-    trigger_filter: { entity: "lead", field: "stage", to: "declined" },
+    trigger_filter: { entity: "lead", field: "stage", to: "ghost" },
     one_per_lead: true,
     steps: [
       {

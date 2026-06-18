@@ -26,8 +26,8 @@ const OPP_STAGE_LABELS = new Map(
 const LEAD_STAGE_ALIASES = new Map<string, string>([
   ["inbound", "hot_lead"],
   ["imported", "hot_lead"],
-  ["not interested", "declined"],
-  ["not_interested", "declined"],
+  ["not interested", "ghost"],
+  ["not_interested", "ghost"],
   ["application sent", "sent_application"],
   ["sent app", "sent_application"],
   ["app sent", "sent_application"],
@@ -39,8 +39,11 @@ const LEAD_STAGE_ALIASES = new Map<string, string>([
   ["follow up", "follow_up"],
   ["hot", "hot_lead"],
   ["missing", "missing_info"],
-  ["decline", "declined"],
-  ["approved", "submitted"],
+  // 2026-06-18 (CC): lead `declined`/`submitted` stages removed — route legacy
+  // inbound aliases to their replacements (declined→ghost, approved→signed).
+  ["decline", "ghost"],
+  ["declined", "ghost"],
+  ["approved", "signed_application"],
 ]);
 
 // Migration 064 (2026-05-23): legacy aliases that previously mapped to

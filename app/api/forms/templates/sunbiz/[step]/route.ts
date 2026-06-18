@@ -379,7 +379,10 @@ const TEMPLATES: Record<
       "0": "sent_application",
       "5": "signed_application",
     },
-    on_complete_stage: "submitted",
+    // 2026-06-18 (CC): `submitted` stage removed — completion lands on
+    // signed_application (the last lead milestone). Underwriting is now an
+    // operator-driven action from the Bank tab, not an auto-stage.
+    on_complete_stage: "signed_application",
   },
 
   "bank-statement-upload": {
@@ -427,8 +430,8 @@ const TEMPLATES: Record<
         ],
       },
     ],
-    step_outcomes: { "0": "submitted" },
-    on_complete_stage: "submitted",
+    step_outcomes: { "0": "signed_application" },
+    on_complete_stage: "signed_application",
   },
 };
 

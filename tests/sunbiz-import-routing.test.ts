@@ -53,8 +53,12 @@ assert.deepEqual(routeSunBizImportStage("Inbound"), {
   stage: "hot_lead",
   entityType: "lead",
 });
+// 2026-06-18 (CC): the lead `declined` stage was removed. A bare inbound
+// "Declined" lead (no application evidence) now routes to lead/ghost
+// (re-engageable). A "Declined" row WITH an application still routes to the
+// opportunity side (declined) — see the CSV batch assertion above.
 assert.deepEqual(routeSunBizImportStage("Declined"), {
-  stage: "declined",
+  stage: "ghost",
   entityType: "lead",
 });
 assert.deepEqual(routeSunBizImportStage(null, { hasApplicationEvidence: true }), {

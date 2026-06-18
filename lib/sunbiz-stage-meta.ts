@@ -61,12 +61,13 @@ export const LEAD_PIPELINE_STAGES: StageMeta[] = [
   { key: "sent_application",   label: "Sent Application",   bg: "#7057A7", fg: "#FFFFFF" },
   { key: "viewed_application", label: "Viewed Application", bg: "#2E8392", fg: "#FFFFFF" },
   { key: "signed_application", label: "Signed Application", bg: "#32876B", fg: "#FFFFFF" },
-  { key: "submitted",          label: "Submitted",          bg: "#4C6580", fg: "#FFFFFF" },
-  { key: "funded",             label: "Funded",             bg: "#1F7A56", fg: "#FFFFFF" },
   { key: "ghost",              label: "Ghost",              bg: "#6F6F75", fg: "#FFFFFF" },
-  { key: "declined",           label: "Declined",           bg: "#9B3D45", fg: "#FFFFFF" },
   { key: "default",            label: "Default",            bg: "#62666F", fg: "#FFFFFF" },
-  { key: "opted_out",          label: "Opted Out",          bg: "#5C4147", fg: "#FFFFFF" },
+  // 2026-06-18 (CC): removed `submitted`, `funded`, `declined`, `opted_out`
+  // from the LEAD pipeline. Funding lives on the Renewals/funded_deal side;
+  // negative-reply / no-response leads now route to `ghost` (re-engageable);
+  // opt-out COMPLIANCE is the `data.opted_out` flag + suppression list, NOT a
+  // pipeline stage. The opportunity pipeline below keeps `funded`/`declined`.
 ];
 
 // Opportunity Pipeline order — slimmed to 10 stages 2026-05-23
