@@ -17,6 +17,16 @@ jobs:
       - run: npm ci
       - run: npm run typecheck
       - run: npm run lint
+      - name: Tests
+        # Pure-logic suites (tsx) — guard security-critical behavior (role gates,
+        # public-route prefixes, cross-tenant scoping, lifecycle, form PDF). A
+        # green build with a broken role gate must NOT auto-deploy via Vercel.
+        # NOTE: test:chat-modes (harness: transitive server-only import under tsx)
+        # and test:streaming-redactor (5 real redactor assertion failures, under
+        # investigation) are intentionally NOT gated yet — add them once green.
+        run: |
+          npm run test:sunbiz
+          npm run test:event-bus
       - name: Build
         env:
           # Minimal env so the build doesn't blow up on missing required vars.
