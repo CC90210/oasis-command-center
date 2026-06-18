@@ -82,11 +82,19 @@ async function runProbe(
     case "n8n":
       return probeN8n(bundle);
     case "texttorrent":
+    case "kixie":
     case "gws":
     case "smtp":
     case "late":
       // Side-effect-free verifications for these aren't trivial:
       //   - TextTorrent: no public "account" endpoint
+      //   - Kixie: no read-only credential endpoint; a live probe would
+      //     have to place/queue a call or send a message — a real side
+      //     effect. So presence is the test, and because every Kixie
+      //     field is required (api_key, business_id, from_number,
+      //     default_agent_email, webhook_secret) the badge doubles as a
+      //     live setup checklist: it names exactly which fields are still
+      //     missing instead of the cryptic no_probe_for_kixie failure.
       //   - GWS: App Password verification = attempt SMTP STARTTLS
       //   - SMTP: same
       //   - Late: no read endpoint
