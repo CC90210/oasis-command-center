@@ -430,8 +430,17 @@ const TEMPLATES: Record<
         ],
       },
     ],
-    step_outcomes: { "0": "signed_application" },
-    on_complete_stage: "signed_application",
+    // 2026-06-18 (CC): the bank-statement-upload form is doc-collection ONLY —
+    // it does NOT advance the lead stage. (It used to land on `submitted`,
+    // removed by CC. Landing it on `signed_application` would re-fire the
+    // "upload your bank statements" nag at a merchant who just uploaded them —
+    // see lib/sunbiz-default-sequences.ts seq 7.) The operator runs underwriting
+    // from the Bank tab; "statements received" is signalled by the uploaded docs
+    // + the form's lead_interaction, not a stage. Empty step_outcomes + empty
+    // on_complete_stage ⇒ submit/route.ts targetStage resolves to null ⇒ no
+    // transition.
+    step_outcomes: {},
+    on_complete_stage: "",
   },
 };
 

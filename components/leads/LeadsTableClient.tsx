@@ -87,8 +87,9 @@ const SUNBIZ_STAGES: LeadsTableStage[] = [
   { value: "sent_application",   label: "App sent",           tone: "text-status-info" },
   { value: "viewed_application", label: "App viewed",         tone: "text-accent" },
   { value: "signed_application", label: "App signed",         tone: "text-accent" },
-  { value: "submitted",          label: "Submitted",          tone: "text-status-engaged" },
-  { value: "declined",           label: "Declined",           tone: "text-status-warm" },
+  // 2026-06-18 (CC): dropped submitted/funded/declined/opted_out; ghost is the
+  // re-engagement bucket. Kept in sync with LEAD_PIPELINE_STAGES (9 stages).
+  { value: "ghost",              label: "Ghost",              tone: "text-status-warm" },
   { value: "default",            label: "Default",            tone: "text-status-warm" },
 ];
 

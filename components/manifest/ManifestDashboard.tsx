@@ -726,9 +726,11 @@ function urgencyScore(lead: TenantRecord): number {
 }
 
 function TopUrgentLeads({ slug, leads }: { slug: string; leads: TenantRecord[] }) {
-  // Terminal states post-migration-064 — anything in this set drops off
-  // the urgency surface.
-  const TERMINAL = new Set(["default", "declined", "dead_file"]);
+  // Terminal / parked states — anything in this set drops off the urgency
+  // surface. 2026-06-18 (CC): `declined` was removed from the lead pipeline;
+  // negative-reply / no-response leads now land in `ghost` (a 1-month
+  // re-engagement bucket, not daily-attention work), so exclude ghost here.
+  const TERMINAL = new Set(["default", "ghost", "dead_file"]);
   const top = [...leads]
     .filter((l) => !TERMINAL.has(String(l.data.stage || "")))
     .sort((a, b) => urgencyScore(b) - urgencyScore(a))
