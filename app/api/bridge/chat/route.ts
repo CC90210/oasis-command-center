@@ -26,6 +26,7 @@ import { rateLimit } from "@/lib/rate-limit";
 import { bridgeDisallowedToolsForRole } from "@/lib/role-gates";
 import { authorizeBridgeRequest } from "@/lib/bridge-proxy";
 import { validateBridgeAgent } from "@/lib/agent-roots";
+import { teeBridgeChatPersistence } from "@/lib/bridge-chat-persistence";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -63,6 +64,7 @@ type IncomingBody = {
 };
 
 export async function POST(req: NextRequest) {
+  const startedAt = Date.now();
   // ---- Body-size guard BEFORE parse ----------------------------------------
   // content-length is advisory (a client can lie / omit it) but it's a cheap
   // first cut; the post-parse structural caps below are the real backstop.
@@ -178,19 +180,34 @@ export async function POST(req: NextRequest) {
     return jsonError(502, "bridge_unreachable");
   }
 
-  // ---- Transparent SSE relay ----------------------------------------------
-  // Pass upstream.body (a ReadableStream) straight through — no JSON parse,
-  // no re-encode, so every bridge SSE frame reaches the widget byte-identical.
-  // The bearer is NOT echoed in any response header.
-  return new Response(upstream.body, {
-    status: upstream.status,
-    headers: {
-      "content-type": "text/event-stream; charset=utf-8",
-      "cache-control": "no-store, no-transform",
-      connection: "keep-alive",
-      "x-accel-buffering": "no",
-    },
+  // ---- SSE relay (+ history persistence tee) -------------------------------
+  // The bytes still pass through byte-identical to the widget. On the happy
+  // path we additionally TEE the stream (lib/bridge-chat-persistence) to write
+  // chat_sessions/chat_messages scoped to (tenant_id, user_id, agent) — without
+  // this, bridge/CLI chats (the path SunBiz employees use) never land in the
+  // "Previous chats" drawer. The tee only OBSERVES a decoded copy; it never
+  // alters the bytes and soft-fails so persistence can't break the relay. The
+  // bearer is NOT echoed in any response header.
+  const sseHeaders = {
+    "content-type": "text/event-stream; charset=utf-8",
+    "cache-control": "no-store, no-transform",
+    connection: "keep-alive",
+    "x-accel-buffering": "no",
+  };
+  if (!upstream.ok || !upstream.body) {
+    // Error responses (non-2xx) or empty bodies pass straight through — nothing
+    // worth persisting, and we don't want to attach a tee to an error stream.
+    return new Response(upstream.body, { status: upstream.status, headers: sseHeaders });
+  }
+  const persistedBody = teeBridgeChatPersistence(upstream.body, {
+    tenantId: auth.tenantId,
+    userId: auth.userId,
+    agent,
+    cliProvider: effectiveCliProvider,
+    userMessage: String(lastUserMsg.content || ""),
+    startedAt,
   });
+  return new Response(persistedBody, { status: upstream.status, headers: sseHeaders });
 }
 
 function jsonError(status: number, message: string) {
