@@ -125,26 +125,40 @@ export async function GET(
   // (the tracking-pixel store) AND agent_events BRAVO_EMAIL_OPENED (the event-bus
   // mirror) — keyed by the outbound message each open belongs to. Two things made
   // a single open render as 2-3 "Email opened" rows (the bug CC reported
-  // 2026-06-18): (a) the same open can land in both tables, and (b) Apple Mail
-  // Privacy Protection + Gmail's image proxy PREFETCH the pixel from a rotating
-  // IP fleet, so one message generated multiple prefetch hits. We collapse to ONE
-  // timeline event per message and count only GENUINE (non-prefetch) opens — a
-  // prefetch is the proxy fetching the image, not the recipient reading it.
-  type OpenAgg = { earliestAt: string; genuineCount: number; messageId: string | null };
+  // 2026-06-18): (a) the same open lands in BOTH tables (they're 1:1 mirrors), and
+  // (b) Apple Mail Privacy Protection + Gmail's image proxy PREFETCH the pixel from
+  // a rotating IP fleet, so one message generated multiple prefetch hits. We
+  // collapse to ONE timeline event per message and count only GENUINE
+  // (non-prefetch) opens — a prefetch is the proxy fetching the image, not the
+  // recipient reading it.
+  //
+  // The re-open count must NOT sum across feeds: a single open written to both
+  // tables would otherwise read as "(2×)". Since the feeds mirror each other we
+  // track the genuine count PER FEED and take the max — equal (= N) when both
+  // feeds have the opens, and still N when one feed is empty (e.g. the
+  // email_open_events upsert currently no-ops, so only agent_events is populated).
+  type OpenAgg = {
+    earliestAt: string;
+    byFeed: { email_open: number; agent_event: number };
+    messageId: string | null;
+  };
   const opensByMessage = new Map<string, OpenAgg>();
   const recordOpen = (
     key: string,
     messageId: string | null,
     at: string,
     prefetch: boolean,
+    feed: "email_open" | "agent_event",
   ) => {
     if (prefetch) return; // proxy prefetch — not a real open
     const prev = opensByMessage.get(key);
     if (!prev) {
-      opensByMessage.set(key, { earliestAt: at, genuineCount: 1, messageId });
+      const byFeed = { email_open: 0, agent_event: 0 };
+      byFeed[feed] = 1;
+      opensByMessage.set(key, { earliestAt: at, byFeed, messageId });
     } else {
       if (at < prev.earliestAt) prev.earliestAt = at;
-      prev.genuineCount += 1;
+      prev.byFeed[feed] += 1;
       if (!prev.messageId && messageId) prev.messageId = messageId;
     }
   };
@@ -271,6 +285,7 @@ export async function GET(
         row.outbound_message_id,
         row.opened_at,
         !!row.suspicious_prefetch,
+        "email_open",
       );
     }
   } catch (e: unknown) {
@@ -333,7 +348,7 @@ export async function GET(
           typeof p.outbound_message_id === "string" ? p.outbound_message_id : null;
         const prefetch =
           p.suspicious_prefetch === true || p.suspicious_prefetch === "true";
-        recordOpen(mid || `evt:${row.id}`, mid, at, prefetch);
+        recordOpen(mid || `evt:${row.id}`, mid, at, prefetch, "agent_event");
         continue;
       }
       events.push({
@@ -378,16 +393,20 @@ export async function GET(
   }
 
   // Emit one collapsed "Email opened" per message that had ≥1 genuine open.
-  // Messages with only proxy prefetches contribute nothing here (genuineCount
-  // stays 0), so a prefetched-but-unread email never shows as "opened". A real
-  // re-open is surfaced as a "(N×)" suffix rather than N separate rows.
+  // Messages with only proxy prefetches contribute nothing here (count stays 0),
+  // so a prefetched-but-unread email never shows as "opened". The genuine count
+  // is the MAX across the two mirror feeds (not the sum) so the same open in both
+  // tables counts once; a real re-open is surfaced as a "(N×)" suffix rather than
+  // N separate rows.
   for (const agg of opensByMessage.values()) {
+    const count = Math.max(agg.byFeed.email_open, agg.byFeed.agent_event);
+    if (count < 1) continue;
     events.push({
       source: "email_open",
       type: "open",
       at: agg.earliestAt,
-      title: agg.genuineCount > 1 ? `👁 Email opened (${agg.genuineCount}×)` : "👁 Email opened",
-      meta: { outbound_message_id: agg.messageId, open_count: agg.genuineCount },
+      title: count > 1 ? `👁 Email opened (${count}×)` : "👁 Email opened",
+      meta: { outbound_message_id: agg.messageId, open_count: count },
     });
   }
 
@@ -405,7 +424,8 @@ function humanizeEventType(t: string): string {
   if (!t) return "Event";
   if (t === "BRAVO_RECORD_STATUS_CHANGED") return "🔄 Stage changed";
   if (t === "BRAVO_LEAD_AUTO_BUMPED") return "🔄 Stage auto-advanced";
-  if (t === "BRAVO_EMAIL_OPENED") return "👁 Email opened";
+  // BRAVO_EMAIL_OPENED is intercepted before humanize (merged into the collapsed
+  // open events above), so it never reaches here.
   if (t === "BRAVO_OUTBOUND_QUEUED_FROM_DASHBOARD") return "📤 Email queued";
   if (t === "BRAVO_LEAD_MISSING_INFO") return "⚠ Missing info detected";
   if (t === "BRAVO_OUTBOUND_SENT") return "✉ Outbound sent";
