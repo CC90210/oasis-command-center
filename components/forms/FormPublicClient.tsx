@@ -432,9 +432,11 @@ export function FormPublicClient({
           )}
         </div>
 
-        {/* Footer note — light, brand-neutral reassurance. */}
+        {/* Footer note — light, brand-neutral reassurance. Tenant-agnostic copy:
+            this renders on every tenant's public form (SunBiz funding + CC's
+            personal-brand funnel), so it must not be funding-specific. */}
         <p className="text-center text-[11px] text-fg-dim">
-          Your information is kept private and used only to evaluate your funding request.
+          Your information is kept private — only used to follow up on your request.
         </p>
 
         {/* Hardcoded "Powered by OASIS AI" footer removed 2026-05-25
