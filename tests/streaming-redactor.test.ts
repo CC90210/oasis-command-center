@@ -15,6 +15,22 @@ import assert from "node:assert/strict";
 import { StreamingRedactor, type VaultSecret } from "@/lib/secret-redaction";
 import { createRedactingSseSend } from "@/lib/chat-sse-helpers";
 
+// Isolate these unit tests from the ambient environment. StreamingRedactor's
+// constructor folds in loadEnvSecretPairs() — every *KEY/*TOKEN/*SECRET/...
+// env var >= 12 chars — and the hold-back length is the MAX over all folded
+// secrets. On a dev machine that happens to have a credential-shaped env var
+// LONGER than the 44-char test fixture, push() holds back more than these
+// length-deterministic tests assume, so they see empty output and fail (the
+// redactor is over-holding, i.e. SAFE — not leaking). Strip credential-shaped
+// vars BEFORE the first redactor is constructed (loadPairs() caches on first
+// call), so the redactor sees ONLY the explicit test secrets. Production code
+// path is unaffected — this only sanitizes the test process's env.
+for (const k of Object.keys(process.env)) {
+  if (/^[A-Z][A-Z0-9_]{2,63}$/.test(k) && /(KEY|TOKEN|SECRET|PASSWORD|API|DSN|WEBHOOK)$/.test(k)) {
+    delete process.env[k];
+  }
+}
+
 let passed = 0;
 let failed = 0;
 const fail = (label: string, err: unknown) => {

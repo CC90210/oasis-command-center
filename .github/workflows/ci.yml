@@ -19,14 +19,16 @@ jobs:
       - run: npm run lint
       - name: Tests
         # Pure-logic suites (tsx) — guard security-critical behavior (role gates,
-        # public-route prefixes, cross-tenant scoping, lifecycle, form PDF). A
-        # green build with a broken role gate must NOT auto-deploy via Vercel.
-        # NOTE: test:chat-modes (harness: transitive server-only import under tsx)
-        # and test:streaming-redactor (5 real redactor assertion failures, under
-        # investigation) are intentionally NOT gated yet — add them once green.
+        # public-route prefixes, cross-tenant scoping, lifecycle, form PDF,
+        # streamed-secret redaction). A green build with a broken role gate or a
+        # leaking redactor must NOT auto-deploy via Vercel.
+        # NOTE: test:chat-modes is still excluded — its assertions pass but the
+        # process exits 1 on a transitive server-only import under tsx (harness
+        # issue, not a product bug); re-add once that import chain is decoupled.
         run: |
           npm run test:sunbiz
           npm run test:event-bus
+          npm run test:streaming-redactor
       - name: Build
         env:
           # Minimal env so the build doesn't blow up on missing required vars.
