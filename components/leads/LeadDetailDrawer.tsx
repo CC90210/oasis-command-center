@@ -23,9 +23,9 @@ import Link from "next/link";
 import { X, FileText, ImageIcon, Phone, Mail, ShoppingBag, Loader2, Trash2, CheckCircle2, AlertCircle, UploadCloud } from "lucide-react";
 import { LeadTimelinePanel } from "./LeadTimelinePanel";
 import { AssignmentControl } from "./AssignmentControl";
+import { StagePicker } from "./StagePicker";
 import { humanLeadDocSize, leadDocTypeLabel, LEAD_DOC_TYPES } from "@/lib/lead-doc-display";
 import { SalesMetricCard } from "@/components/underwriting/SalesMetricCard";
-import { LEAD_PIPELINE_STAGES, OPPORTUNITY_PIPELINE_STAGES, type StageMeta } from "@/lib/sunbiz-stage-meta";
 import { formatMoney, relTime } from "@/lib/format-helpers";
 import { lastTouchIsoFlat } from "@/lib/lead-staleness";
 
@@ -135,18 +135,8 @@ export function LeadDetailDrawer({
     };
   }, [recordId, entity]);
 
-  // Resolve the stage chip for the header. Leads use LEAD_PIPELINE_STAGES;
-  // applications use OPPORTUNITY_PIPELINE_STAGES and key off `status` not
-  // `stage`. Returns null when there's no current stage value so the chip
-  // hides instead of showing "Unknown".
-  const stageChip: StageMeta | null = (() => {
-    if (!data) return null;
-    const d = data.record.data as Record<string, unknown>;
-    const key = String(entity === "application" ? d.status || "" : d.stage || "");
-    if (!key) return null;
-    const list = entity === "application" ? OPPORTUNITY_PIPELINE_STAGES : LEAD_PIPELINE_STAGES;
-    return list.find((s) => s.key === key) || null;
-  })();
+  // Header stage is now rendered by <StagePicker/> (Batch 6.1) which derives the
+  // current key from data.record.data[stage|status] directly.
 
   const shortId = recordId.slice(0, 8);
   const title = data
@@ -189,13 +179,19 @@ export function LeadDetailDrawer({
               <div className="text-[11px] text-fg-dim mt-1 truncate">{subtitle}</div>
             </div>
             <div className="flex items-center gap-2 shrink-0">
-              {stageChip && (
-                <span
-                  className="inline-block px-2.5 py-1 rounded-full text-[10px] font-semibold uppercase tracking-[0.06em] whitespace-nowrap"
-                  style={{ background: stageChip.bg, color: stageChip.fg }}
-                >
-                  {stageChip.label}
-                </span>
+              {data && (
+                <StagePicker
+                  recordId={recordId}
+                  entity={entity}
+                  currentStage={
+                    String(
+                      (data.record.data as Record<string, unknown>)[
+                        entity === "application" ? "status" : "stage"
+                      ] || "",
+                    ) || null
+                  }
+                  onChanged={reload}
+                />
               )}
               <button
                 ref={closeBtnRef}
