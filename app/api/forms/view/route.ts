@@ -22,22 +22,15 @@ import { getClientIp } from "@/lib/api-helpers";
 import { verifyFormLink, type FormLinkPayload } from "@/lib/form-links";
 import { rateLimit } from "@/lib/rate-limit";
 import { updateRecord, RecordsError } from "@/lib/manifest/data";
+import { LEAD_PIPELINE_STAGES } from "@/lib/sunbiz-stage-meta";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-/**
- * Stages that count as "past viewed_application" — re-firing the drip
- * after a prospect has moved deeper is wrong (it'd undo progress).
- * Ordered from earliest to latest in the funnel.
- */
-const POST_VIEWED_STAGES = new Set([
-  "viewed_application",
-  "signed_application",
-  "submitted",
-  "declined",
-  "default",
-]);
+// Change #1 (Adon, lead status defs 2026-06-19): a bare form view no longer
+// advances to viewed_application. Opening the FIRST application (initial-lead-
+// capture) without completing it sets "Intent Inquiry"; completion sets
+// "Viewed" (in /api/forms/submit). The old POST_VIEWED_STAGES guard is gone.
 
 export async function POST(req: NextRequest) {
   let body: { token?: string };
@@ -85,7 +78,7 @@ export async function POST(req: NextRequest) {
   //   3. Form row's enabled must be true
   const formRow = await db
     .from("forms")
-    .select("id, tenant_id, enabled, tenant:tenants!inner(slug)")
+    .select("id, tenant_id, slug, enabled, tenant:tenants!inner(slug)")
     .eq("id", link.form_id)
     .maybeSingle();
   if (formRow.error || !formRow.data) {
@@ -94,6 +87,7 @@ export async function POST(req: NextRequest) {
   const form = formRow.data as {
     id: string;
     tenant_id: string;
+    slug: string;
     enabled: boolean;
     tenant: { slug: string } | { slug: string }[] | null;
   };
@@ -155,15 +149,19 @@ export async function POST(req: NextRequest) {
   }
   const currentStage = ((leadRow.data as { data: Record<string, unknown> }).data?.stage ||
     "") as string;
-  if (POST_VIEWED_STAGES.has(currentStage)) {
-    // Lead is already past viewed_application — do not regress.
-    return NextResponse.json({ ok: true, viewed_application_fired: false });
+
+  // Only the FIRST application (initial-lead-capture interest form) drives the
+  // Intent-Inquiry status on open. Any other form's view is recorded (above)
+  // but is not a stage trigger under the new model.
+  if (form.slug !== "initial-lead-capture") {
+    return NextResponse.json({ ok: true, viewed_application_fired: false, intent_inquiry_fired: false });
   }
-  if (currentStage !== "sent_application") {
-    // Lead hasn't been sent the application yet — viewing happened
-    // anomalously (operator forwarded the link manually, etc.). Skip
-    // the transition; let operator manually advance if appropriate.
-    return NextResponse.json({ ok: true, viewed_application_fired: false });
+
+  // Forward-only: set "Intent Inquiry" only when the lead hasn't entered a
+  // known funnel stage yet — never regress a lead already further along.
+  const knownLeadStages = new Set(LEAD_PIPELINE_STAGES.map((s) => s.key));
+  if (currentStage && knownLeadStages.has(currentStage)) {
+    return NextResponse.json({ ok: true, viewed_application_fired: false, intent_inquiry_fired: false });
   }
 
   try {
@@ -171,13 +169,13 @@ export async function POST(req: NextRequest) {
       tenant_id: form.tenant_id,
       entity: "lead",
       id: link.lead_id,
-      patch: { stage: "viewed_application" },
+      patch: { stage: "intent_inquiry_submitted" },
     });
   } catch (err) {
     const reason = err instanceof RecordsError ? err.code : "unknown";
     console.error("[forms.view.stage_transition]", { lead_id: link.lead_id, reason });
-    return NextResponse.json({ ok: true, viewed_application_fired: false });
+    return NextResponse.json({ ok: true, viewed_application_fired: false, intent_inquiry_fired: false });
   }
 
-  return NextResponse.json({ ok: true, viewed_application_fired: true });
+  return NextResponse.json({ ok: true, viewed_application_fired: false, intent_inquiry_fired: true });
 }
