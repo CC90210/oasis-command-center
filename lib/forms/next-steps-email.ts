@@ -225,13 +225,23 @@ const NEXT_STEPS_SUBJECT_PREFIX = "your next steps with ";
  * 'manual_cc'), and this module also logs a NEXT_STEPS_SOURCE row on the
  * FAILURE path (so the operator can see + retry a send that didn't fire):
  *   1. agent_source = NEXT_STEPS_SOURCE  → our failure-path marker.
- *   2. an outbound email whose subject starts "Your next steps with …"
+ *   2. an email whose subject starts "Your next steps with …"
  *      → send_gateway's canonical row for a SUCCESSFUL send.
  * Matching either keeps re-submits idempotent whether the first attempt
  * succeeded (gateway row) or failed (our row). Pre-2026-06-18 this checked only
  * (1), which missed the gateway's success row and — combined with this module
  * ALSO inserting its own success row — produced the duplicate "Sent email"
  * timeline entry CC reported.
+ *
+ * NB: we deliberately do NOT filter on direction='outbound'. No send_gateway
+ * write path (RPC insert, fallback reservation insert, finalize update, or
+ * log_action) explicitly stamps `direction` — it relies on a column default —
+ * so a gateway success row could in principle carry NULL direction and a
+ * direction='outbound' filter would then MISS it and let a re-submit re-send.
+ * (Today live data shows 100% of these rows are 'outbound', so it's a latent
+ * risk, not a live one; verified via the 2026-06-18 audit workflow.) Scoping to
+ * channel='email' + the distinctive "your next steps with " subject prefix is
+ * enough — an inbound reply would be "Re: …" and never start with that prefix.
  */
 async function alreadySent(
   db: SupabaseClient,
@@ -244,9 +254,8 @@ async function alreadySent(
     .eq("tenant_id", tenantId)
     .eq("lead_id", leadId)
     .eq("channel", "email")
-    .eq("direction", "outbound")
     .limit(50);
-  if (res.error) return false; // can't prove a prior send — let it through (send_gateway's own cooldown/dedup gates are the backstop)
+  if (res.error) return false; // can't prove a prior send — let it through (send_gateway's own reservation dedup is the backstop)
   return (res.data ?? []).some(
     (r) =>
       r.agent_source === NEXT_STEPS_SOURCE ||
