@@ -14,7 +14,7 @@ import { NextResponse, type NextRequest } from "next/server";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { getRecord, listRecords } from "@/lib/manifest/data";
 import { resolveSessionContext } from "@/lib/api-auth";
-import { canViewLead } from "@/lib/lead-scope";
+import { canViewLead, leadScopingEnabled } from "@/lib/lead-scope";
 import { buildMemberNameMap, withAssignedName } from "@/lib/assigned-names";
 
 export const runtime = "nodejs";
@@ -51,7 +51,7 @@ export async function GET(
   // Per-agent lock: an agent must not read another agent's lead/application by
   // hitting this endpoint directly. Admins pass; agents only their own. Return
   // not_found (not 403) so the endpoint doesn't confirm the record exists.
-  if (!canViewLead({ isAdmin: sess.isAdmin, userId: sess.userId }, record.data as Record<string, unknown>)) {
+  if (!canViewLead({ isAdmin: sess.isAdmin, userId: sess.userId }, record.data as Record<string, unknown>, leadScopingEnabled())) {
     return NextResponse.json({ ok: false, error: "not_found" }, { status: 404 });
   }
 

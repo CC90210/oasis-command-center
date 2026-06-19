@@ -1,6 +1,6 @@
 import "server-only";
 import { getRecord } from "@/lib/manifest/data";
-import { canViewLead, type LeadViewer } from "@/lib/lead-scope";
+import { canViewLead, leadScopingEnabled, type LeadViewer } from "@/lib/lead-scope";
 
 /**
  * Single-lead access gate for the /api/leads/[id]/* routes (Adon Batch 2).
@@ -20,6 +20,6 @@ export async function getAccessibleLead(
   const rec = await getRecord({ tenant_id: input.tenantId, entity, id: input.id }).catch(() => null);
   if (!rec) return null;
   const data = rec.data as Record<string, unknown>;
-  if (!canViewLead(viewer, data)) return null;
+  if (!canViewLead(viewer, data, leadScopingEnabled())) return null;
   return { id: rec.id, data };
 }

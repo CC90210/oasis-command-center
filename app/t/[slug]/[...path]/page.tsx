@@ -42,6 +42,7 @@ import {
   resolveAssignedScope,
   assignedWhere,
   canViewLead,
+  leadScopingEnabled,
   type LeadViewer,
 } from "@/lib/lead-scope";
 import { Card, PageHeader, Tag } from "@/components/Card";
@@ -171,15 +172,18 @@ export default async function TenantCatchAllPage({
     isAdmin: !!profileRow?.is_owner || teamRole === "admin" || teamRole === "owner",
     userId: user?.id ?? null,
   };
-  const leadScope = resolveAssignedScope(viewer, {
-    agent: agentFilter,
-    unassigned: unassignedFilter,
-  });
+  const scopingOn = leadScopingEnabled();
+  const leadScope = resolveAssignedScope(
+    viewer,
+    { agent: agentFilter, unassigned: unassignedFilter },
+    scopingOn,
+  );
 
   // Admin lead-filter chips (All / Unassigned / per-agent) — only on the
   // lead/application surfaces, only for admins. Agents never see the bar (they
   // only ever have their own leads). Roster fetched once for the chips.
   const showLeadFilter =
+    scopingOn &&
     viewer.isAdmin &&
     !!dataTenantId &&
     (pageDef.kind === "pipeline" ||
@@ -220,7 +224,7 @@ export default async function TenantCatchAllPage({
       if (
         record &&
         (entity.name === "lead" || entity.name === "application") &&
-        !canViewLead(viewer, record.data)
+        !canViewLead(viewer, record.data, scopingOn)
       ) {
         record = null;
       }

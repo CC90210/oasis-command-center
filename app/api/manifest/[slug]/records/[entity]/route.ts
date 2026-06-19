@@ -26,7 +26,7 @@ import {
   listRecords,
   updateRecord,
 } from "@/lib/manifest/data";
-import { resolveAssignedScope, assignedWhere } from "@/lib/lead-scope";
+import { resolveAssignedScope, assignedWhere, leadScopingEnabled } from "@/lib/lead-scope";
 
 // Entities subject to per-agent lead scoping (Adon Batch 2). Other entities
 // (lender, offer, funded_deal, …) are tenant-shared, not per-agent.
@@ -118,6 +118,7 @@ export async function GET(
     const scope = resolveAssignedScope(
       { isAdmin: r.is_admin, userId: user.id },
       { agent: sp.get("agent"), unassigned: sp.get("unassigned") === "1" },
+      leadScopingEnabled(),
     );
     where = assignedWhere(scope);
   }

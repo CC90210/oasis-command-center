@@ -16,6 +16,18 @@
  *  to force an empty result set when a viewer's identity is unresolved. */
 export const NO_LEADS = "__no_access__";
 
+/**
+ * Rollout switch. Per-agent scoping is fail-closed, so flipping it on before
+ * leads are assigned would drop every agent to an empty board. It stays OFF
+ * until an admin has distributed the existing unassigned leads, then is enabled
+ * by setting LEAD_SCOPING_ENABLED=true (Vercel env). Server-only read; the pure
+ * functions below take `enabled` as a param so they stay unit-testable
+ * (defaulting to true — tests exercise the enabled behavior).
+ */
+export function leadScopingEnabled(): boolean {
+  return (process.env.LEAD_SCOPING_ENABLED || "").toLowerCase() === "true";
+}
+
 export type LeadViewer = { isAdmin: boolean; userId: string | null };
 
 export type AdminLeadFilter = { agent?: string | null; unassigned?: boolean };
@@ -29,7 +41,9 @@ export type AdminLeadFilter = { agent?: string | null; unassigned?: boolean };
 export function resolveAssignedScope(
   viewer: LeadViewer,
   requested?: AdminLeadFilter,
+  enabled = true,
 ): string | null | undefined {
+  if (!enabled) return undefined; // rollout flag off → everyone sees all (legacy behavior)
   if (!viewer.isAdmin) {
     // Agents are always locked to their own leads. Fail closed if no identity.
     return viewer.userId ? viewer.userId.toLowerCase() : NO_LEADS;
@@ -66,7 +80,12 @@ export function filterRowsByScope<T extends { data: Record<string, unknown> }>(
 /** Whether a viewer may open a single lead/application record. Admins always;
  *  agents only their own. Used to lock direct URL / API access (Adon's
  *  "guess the lead URL" requirement). */
-export function canViewLead(viewer: LeadViewer, data: Record<string, unknown>): boolean {
+export function canViewLead(
+  viewer: LeadViewer,
+  data: Record<string, unknown>,
+  enabled = true,
+): boolean {
+  if (!enabled) return true; // rollout flag off → no single-lead lock (legacy behavior)
   if (viewer.isAdmin) return true;
   if (!viewer.userId) return false;
   const owner = typeof data.assigned_to === "string" ? data.assigned_to.toLowerCase() : null;
