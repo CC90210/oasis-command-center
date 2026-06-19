@@ -14,7 +14,7 @@ import { NextResponse, type NextRequest } from "next/server";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { resolveSessionContext } from "@/lib/api-auth";
 import { getRecord } from "@/lib/manifest/data";
-import { canViewLead, type LeadViewer } from "@/lib/lead-scope";
+import { canViewLead, leadScopingEnabled, type LeadViewer } from "@/lib/lead-scope";
 import {
   uploadLeadDocument,
   OPERATOR_ALLOWED_DOC_MIME,
@@ -45,7 +45,7 @@ async function resolveDocumentTarget(
     // Per-agent lock: an agent must not read/upload another agent's lead docs by
     // guessing the id. Returning null surfaces as record_not_found (same as a
     // missing record — doesn't confirm existence).
-    if (!lead || !canViewLead(viewer, lead.data as Record<string, unknown>)) return null;
+    if (!lead || !canViewLead(viewer, lead.data as Record<string, unknown>, leadScopingEnabled())) return null;
     return { documentLeadId: id, stageLeadId: id, entity };
   }
 
@@ -54,7 +54,7 @@ async function resolveDocumentTarget(
     entity: "application",
     id,
   }).catch(() => null);
-  if (!application || !canViewLead(viewer, application.data as Record<string, unknown>)) return null;
+  if (!application || !canViewLead(viewer, application.data as Record<string, unknown>, leadScopingEnabled())) return null;
 
   const linkedLeadId = (application.data as Record<string, unknown>).lead_id;
   const stageLeadId =
