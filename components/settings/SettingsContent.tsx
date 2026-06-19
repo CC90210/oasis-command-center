@@ -39,6 +39,7 @@ import { CustomCredentialsVault } from "@/components/settings/CustomCredentialsV
 import { ProfileEditor } from "@/components/settings/ProfileEditor";
 import { BrandLogoCard } from "@/components/settings/BrandLogoCard";
 import { QuickInviteCard } from "@/components/settings/QuickInviteCard";
+import { TelegramLinkCard } from "@/components/settings/TelegramLinkCard";
 import { PlanTemplateEditor } from "@/components/settings/PlanTemplateEditor";
 import { AgentConfigEditor } from "@/components/settings/AgentConfigEditor";
 import { IntegrationKeysPanel } from "@/components/settings/IntegrationKeysPanel";
@@ -144,6 +145,9 @@ export async function SettingsContent({
           }
         />
       )}
+
+      {/* Batch 4: self-serve Telegram linking for per-lead application alerts. */}
+      <TelegramLinkCard />
 
       {!profile ? (
         <Card title="No profile loaded">
