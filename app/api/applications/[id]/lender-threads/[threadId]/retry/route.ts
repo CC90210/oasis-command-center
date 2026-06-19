@@ -58,7 +58,7 @@ export async function POST(
   // would otherwise affect the right tenant's threads under a wrong URL).
   const threadRes = await db
     .from("application_lender_threads")
-    .select("id, tenant_id, application_id, status, last_error")
+    .select("id, tenant_id, application_id, status, last_error, updated_at")
     .eq("id", threadId)
     .eq("tenant_id", tenantId)
     .eq("application_id", applicationId)
@@ -79,9 +79,21 @@ export async function POST(
     id: string;
     status: string;
     last_error: string | null;
+    updated_at: string | null;
   };
 
-  if (thread.status !== "error") {
+  // Retryable = an 'error' row OR a 'sending' row that's been stuck long
+  // enough to be an orphaned claim (the cron flips pending->sending before
+  // it sends; if that process dies mid-send the row sits in 'sending'
+  // forever and the operator can never recover it). A real in-flight send
+  // settles in seconds, so a multi-minute 'sending' is dead. We never
+  // touch sent/suppressed/responded/pending here (pending is already queued).
+  const STALE_SENDING_MS = 3 * 60 * 1000;
+  const ageMs = thread.updated_at ? Date.now() - Date.parse(thread.updated_at) : Infinity;
+  const isStaleSending = thread.status === "sending" && ageMs > STALE_SENDING_MS;
+  const retryable = thread.status === "error" || isStaleSending;
+
+  if (!retryable) {
     return NextResponse.json({
       ok: true,
       thread_id: thread.id,
@@ -91,6 +103,7 @@ export async function POST(
     });
   }
 
+  const fromStatus = thread.status; // "error" or stale "sending"
   const updateRes = await db
     .from("application_lender_threads")
     .update({
@@ -100,7 +113,7 @@ export async function POST(
     })
     .eq("id", thread.id)
     .eq("tenant_id", tenantId)
-    .eq("status", "error")
+    .eq("status", fromStatus)
     .select("id, status");
   if (updateRes.error) {
     return NextResponse.json(
@@ -174,7 +187,7 @@ export async function POST(
   return NextResponse.json({
     ok: true,
     thread_id: thread.id,
-    previous_status: "error",
+    previous_status: fromStatus,
     new_status: updatedCount > 0 ? "pending" : thread.status,
     noop: updatedCount === 0,
     physical_send: physicalSend,

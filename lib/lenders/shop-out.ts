@@ -60,20 +60,53 @@ export type ShopOutPlanInput = {
 const DEFAULT_SUBJECT = "New Deal ({{application.business_name}})";
 
 // Minimal body per Adon SOP §3 — funders skim. Merge fields use the
-// short {merchant} / {monthly_revenue} / {positions} / {requested} /
-// {agent_first_name} names from the spec. Operator can edit per send.
+// pre-formatted *_display tokens (built in buildShopOutPlan) so a missing
+// value renders "Not provided" instead of a broken "$" / empty line, and
+// currency renders "$42,000" not "42000". Closing line carries an explicit
+// ask (the draft critic flagged the old "let me know what you can do" as
+// having "no clear ask"). Operator can still edit per send.
 const DEFAULT_BODY = `New submission attached.
 
 Business:        {{application.business_name}}
-Monthly Revenue: \${{application.monthly_revenue}}
-Positions:       {{application.position_count}}
-Requested:       \${{application.requested_amount}}
+Monthly Revenue: {{application.monthly_revenue_display}}
+Positions:       {{application.position_count_display}}
+Requested:       {{application.requested_amount_display}}
 
-Statements + application attached. Let me know what you can do.
+Application + 3 months of bank statements are attached. Please review and advise on approval.
 
 {{agent.first_name}}
 SunBiz Funding
 `;
+
+/** Format a currency-ish value for the lender email. Returns "Not provided"
+ *  for empty/zero/non-numeric so the body never shows a bare "$" or "$0". */
+function moneyDisplay(v: unknown): string {
+  const n =
+    typeof v === "number"
+      ? v
+      : typeof v === "string"
+        ? Number(v.replace(/[^0-9.]/g, ""))
+        : NaN;
+  if (!Number.isFinite(n) || n <= 0) return "Not provided";
+  return "$" + Math.round(n).toLocaleString("en-US");
+}
+
+/** Render a plain field, falling back to "Not provided" for empty values. */
+function plainDisplay(v: unknown): string {
+  if (v === null || v === undefined || String(v).trim() === "") return "Not provided";
+  return String(v);
+}
+
+/** Resolve the merchant/business name with a fallback chain so the subject
+ *  is never "New Deal ()". Funders file on the "(name)" prefix, so an empty
+ *  name is worse than a generic one. */
+function resolveBusinessName(app: Record<string, unknown>): string {
+  const candidates = [app.business_name, app.merchant_name, app.legal_name, app.company, app.name];
+  for (const c of candidates) {
+    if (typeof c === "string" && c.trim()) return c.trim();
+  }
+  return "Merchant Submission";
+}
 
 function renderSimple(template: string, vars: Record<string, unknown>): string {
   return template.replace(/\{\{\s*([a-zA-Z0-9_.]+)\s*\}\}/g, (_m, path: string) => {
@@ -204,9 +237,21 @@ export async function buildShopOutPlan(input: ShopOutPlanInput): Promise<{
     if (!recipient) missing_recipients.push(lender.name);
 
     const score = scoreLenderMatch(lender, input.application);
+    // Display-safe application: business-name fallback + pre-formatted money/
+    // plain fields so the default template never emits "New Deal ()" or a bare
+    // "$". Spreads the raw application first so operator custom templates that
+    // reference the original tokens (monthly_revenue, etc.) keep working.
+    const rawApp = input.application as unknown as Record<string, unknown>;
+    const displayApplication = {
+      ...rawApp,
+      business_name: resolveBusinessName(rawApp),
+      monthly_revenue_display: moneyDisplay(rawApp.monthly_revenue),
+      position_count_display: plainDisplay(rawApp.position_count),
+      requested_amount_display: moneyDisplay(rawApp.requested_amount),
+    };
     const vars = {
       lender,
-      application: input.application,
+      application: displayApplication,
       agent: { first_name: agentFirstName },
     };
 

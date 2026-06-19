@@ -99,14 +99,54 @@ const SHOPPABLE_STATUSES = new Set<string>([
 
 const STATUS_TONE: Record<string, string> = {
   pending: "bg-amber-500/15 text-amber-300 border-amber-500/30",
+  sending: "bg-amber-500/15 text-amber-300 border-amber-500/30",
   sent: "bg-sky-500/15 text-sky-300 border-sky-500/30",
   responded: "bg-violet-500/15 text-violet-300 border-violet-500/30",
   approved: "bg-emerald-500/15 text-emerald-300 border-emerald-500/30",
   declined: "bg-red-500/15 text-red-300 border-red-500/30",
   info_requested: "bg-orange-500/15 text-orange-300 border-orange-500/30",
   no_response: "bg-slate-500/15 text-slate-300 border-slate-500/30",
+  suppressed: "bg-slate-500/15 text-slate-300 border-slate-500/30",
   error: "bg-rose-500/15 text-rose-300 border-rose-500/30",
 };
+
+// Human-readable label for a thread in a needs-attention state. Operators
+// (Ezra, Jordan, Alex, Emily) are not engineers — a raw
+// "script_failed (exit 1) --- stdout --- {...auth_failed...}" dump is noise.
+// Map the known failure classes to a plain-English message + a clear next
+// step; the raw text is preserved in the row's title= tooltip for debugging.
+function friendlyThreadError(raw: string | null): string | null {
+  if (!raw) return null;
+  const s = raw.toLowerCase();
+  if (
+    s.includes("auth_failed") ||
+    s.includes("authentication failed") ||
+    s.includes("gmail_app_password")
+  )
+    return "Email login needs reconnecting (mailbox password is being rotated). Retry shortly.";
+  if (s.includes("draft_critic") || s.includes("critic"))
+    return "Submission copy was flagged by the quality check. Retry — the fix is applied.";
+  if (s.includes("cooldown")) return "Queued — sending shortly (rate-limit cooldown).";
+  if (
+    s.includes("suppress") ||
+    s.includes("casl") ||
+    s.includes("opted out") ||
+    s.includes("unsubscrib")
+  )
+    return "Recipient opted out — this lender won't be emailed.";
+  if (
+    s.includes("missing_recipient") ||
+    s.includes("no contact") ||
+    s.includes("no submission") ||
+    s.includes("uncontactable")
+  )
+    return "No submission email on file for this lender — add one on the Lenders page.";
+  if (s.includes("claimed_by_other_sender")) return "Already being sent by another process.";
+  if (s.includes("non_json") || s.includes("non-json"))
+    return "The sender returned an unexpected response. Retry.";
+  if (s.includes("timeout") || s.includes("timed out")) return "The send timed out. Retry.";
+  return "Send failed. Retry — hover for details.";
+}
 
 export function ShoppingOutClient({
   tenantSlug,
@@ -372,7 +412,7 @@ export function ShoppingOutClient({
   // once everything settles. Hidden tabs skip the fetch but keep the
   // timer so the list catches up as soon as the operator tabs back.
   const hasInFlightThreads = threads.some(
-    (t) => t.status === "pending" || t.status === "sent",
+    (t) => t.status === "pending" || t.status === "sending" || t.status === "sent",
   );
   useEffect(() => {
     if (!selectedAppId || !hasInFlightThreads) return;
@@ -415,6 +455,32 @@ export function ShoppingOutClient({
       }
     },
     [selectedAppId],
+  );
+
+  // Retry EVERY recoverable thread (error + orphaned 'sending') on this
+  // application in one click — the recovery path for "the whole shop-out came
+  // back red." Fires the batch once server-side; refresh shows the result.
+  const [retryingAll, setRetryingAll] = useState(false);
+  const retryAll = useCallback(async () => {
+    if (!selectedAppId) return;
+    setRetryingAll(true);
+    try {
+      await fetch(`/api/applications/${selectedAppId}/lender-threads/retry-all`, {
+        method: "POST",
+      }).then((r) => r.json().catch(() => ({})));
+      await refreshThreads();
+    } catch {
+      // Network blip — next refresh / per-row retry still available.
+    } finally {
+      setRetryingAll(false);
+    }
+  }, [selectedAppId, refreshThreads]);
+
+  // Threads in a needs-retry state (error or stuck sending). Drives the
+  // "Retry all failed" button visibility + count.
+  const failedThreadCount = useMemo(
+    () => threads.filter((t) => t.status === "error" || t.status === "sending").length,
+    [threads],
   );
 
   const toggleLender = (id: string) => {
@@ -492,12 +558,22 @@ export function ShoppingOutClient({
       });
       const json = await res.json();
       if (json.ok) {
-        setSendResult({
-          ok: true,
-          message: `Queued ${json.queued} lender thread${json.queued === 1 ? "" : "s"}${
-            json.blocked ? ` · ${json.blocked} blocked` : ""
-          }. Physical SMTP fires via Solara bridge — see Automations.`,
-        });
+        // Reflect the actual physical-send outcome the route auto-triggers,
+        // not a generic "fires later" line. Falls back gracefully when the
+        // bridge result is absent (queued-only).
+        const ps = json.physical_send as
+          | { status?: string; sent_count?: number; failed_count?: number }
+          | undefined;
+        const queuedMsg = `Queued ${json.queued} lender thread${json.queued === 1 ? "" : "s"}${
+          json.blocked ? ` · ${json.blocked} blocked` : ""
+        }.`;
+        const sendMsg =
+          ps && typeof ps.sent_count === "number"
+            ? ` ${ps.sent_count} sent${
+                ps.failed_count ? ` · ${ps.failed_count} need retry (use Retry below)` : ""
+              }.`
+            : " Sending now — watch the thread statuses below.";
+        setSendResult({ ok: true, message: queuedMsg + sendMsg });
         await refreshPlanAndThreads();
       } else {
         setSendResult({ ok: false, message: json.error || "Send failed." });
@@ -862,10 +938,28 @@ export function ShoppingOutClient({
               <div className="text-[11px] uppercase tracking-wider text-fg-dim font-semibold">
                 Existing lender threads
               </div>
-              <Tag tone="info">
-                <ShoppingBag className="w-3 h-3 mr-1 inline" />
-                {threads.length}
-              </Tag>
+              <div className="flex items-center gap-2">
+                {failedThreadCount > 0 && (
+                  <button
+                    type="button"
+                    onClick={retryAll}
+                    disabled={retryingAll}
+                    className="inline-flex items-center gap-1.5 text-[10.5px] font-semibold px-2 py-1 rounded-md border border-amber-500/40 bg-amber-500/10 text-amber-200 hover:bg-amber-500/20 disabled:opacity-50 disabled:cursor-wait"
+                    title="Reset every failed/stuck thread on this deal to pending and re-send them all."
+                  >
+                    {retryingAll ? (
+                      <Loader2 className="w-3 h-3 animate-spin" />
+                    ) : (
+                      <RefreshCcw className="w-3 h-3" />
+                    )}
+                    Retry all failed ({failedThreadCount})
+                  </button>
+                )}
+                <Tag tone="info">
+                  <ShoppingBag className="w-3 h-3 mr-1 inline" />
+                  {threads.length}
+                </Tag>
+              </div>
             </div>
             {threads.length === 0 ? (
               <div className="text-xs text-fg-dim italic py-3 text-center">
@@ -876,6 +970,21 @@ export function ShoppingOutClient({
                 {threads.map((t) => {
                   const tone =
                     STATUS_TONE[t.status] || "bg-slate-500/15 text-slate-300 border-slate-500/30";
+                  // For needs-attention states, show a plain-English message
+                  // (raw kept in the tooltip). For happy-path states, show the
+                  // lender's actual reply summary verbatim.
+                  const errish =
+                    t.status === "error" || t.status === "sending" || t.status === "suppressed";
+                  const rawDetail = t.last_error || t.last_response_summary;
+                  const detailMsg = errish
+                    ? friendlyThreadError(rawDetail)
+                    : t.last_response_summary;
+                  const detailTone = errish
+                    ? t.status === "suppressed"
+                      ? "text-fg-muted"
+                      : "text-rose-300"
+                    : "text-fg-muted";
+                  const canRetry = t.status === "error" || t.status === "sending";
                   return (
                     <div key={t.id} className="px-3 py-2 flex items-start justify-between gap-3">
                       <div className="min-w-0">
@@ -885,13 +994,14 @@ export function ShoppingOutClient({
                         <div className="text-[11px] text-fg-dim truncate">
                           {t.subject || "(no subject)"}
                         </div>
-                        {t.last_response_summary && (
-                          <div className="text-[11.5px] text-fg-muted mt-1 leading-snug">
-                            &#8627; {t.last_response_summary}
+                        {detailMsg && (
+                          <div
+                            className={`text-[11.5px] mt-1 leading-snug ${detailTone}`}
+                            title={rawDetail || undefined}
+                          >
+                            {errish ? "⚠ " : "↳ "}
+                            {detailMsg}
                           </div>
-                        )}
-                        {t.last_error && (
-                          <div className="text-[11px] text-rose-300 mt-1">&#9888; {t.last_error}</div>
                         )}
                       </div>
                       <div className="text-right shrink-0 space-y-1 flex flex-col items-end">
@@ -905,13 +1015,13 @@ export function ShoppingOutClient({
                             ? new Date(t.sent_at).toLocaleDateString()
                             : new Date(t.created_at).toLocaleDateString()}
                         </div>
-                        {t.status === "error" && (
+                        {canRetry && (
                           <button
                             type="button"
                             onClick={() => retryThread(t.id)}
                             disabled={retrying.has(t.id)}
                             className="inline-flex items-center gap-1 text-[10px] font-mono px-2 py-0.5 rounded border border-amber-500/40 bg-amber-500/10 text-amber-200 hover:bg-amber-500/20 disabled:opacity-50 disabled:cursor-wait"
-                            title="Reset this thread to pending so the sender re-fires it on its next tick."
+                            title="Reset this thread to pending and re-send it now."
                           >
                             {retrying.has(t.id) ? (
                               <Loader2 className="w-3 h-3 animate-spin" />
