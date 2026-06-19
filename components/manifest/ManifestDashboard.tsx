@@ -2,6 +2,7 @@ import Link from "next/link";
 import { Bot, Flame, AlertTriangle, BadgeCheck, RefreshCw, ArrowRight, Sparkles, MessageSquare } from "lucide-react";
 import { Card } from "@/components/Card";
 import { listRecords, type TenantRecord } from "@/lib/manifest/data";
+import { assignedWhere } from "@/lib/lead-scope";
 import type { TenantManifest } from "@/lib/manifest/schema";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { getRenewalsSummary } from "@/lib/queries";
@@ -24,6 +25,10 @@ type Props = {
   manifest: TenantManifest;
   tenantId: string | null;
   demoRowsByEntity?: Record<string, TenantRecord[]>;
+  /** Per-agent lead scope (Adon Batch 2): undefined=all, string=assigned_to,
+   *  null=unassigned. Applied to lead + application reads so the dashboard
+   *  KPIs / "Today's focus" reflect only the viewer's own leads. */
+  assignedScope?: string | null | undefined;
 };
 
 /**
@@ -47,7 +52,7 @@ type Props = {
  * Tenants without the SunBiz entity model fall back to a generic
  * entity-count grid so OASIS HQ + SUGA still render sensibly.
  */
-export async function ManifestDashboard({ manifest, tenantId, demoRowsByEntity }: Props) {
+export async function ManifestDashboard({ manifest, tenantId, demoRowsByEntity, assignedScope }: Props) {
   const entities = manifest.data_model || [];
   const enabledAgents = manifest.agents.filter((a) => a.enabled);
   const isSunBizShape =
@@ -72,10 +77,13 @@ export async function ManifestDashboard({ manifest, tenantId, demoRowsByEntity }
         const demo = demoRowsByEntity?.[entity.name] || [];
         return { entity, rows: demo, total: demo.length };
       }
+      // lead + application are per-agent scoped; other entities are tenant-shared.
+      const scopedEntity = entity.name === "lead" || entity.name === "application";
       const r = await listRecords({
         tenant_id: tenantId,
         entity: entity.name,
         limit: 500,
+        where: scopedEntity ? assignedWhere(assignedScope) : undefined,
       }).catch(() => ({ rows: [], total: 0 }));
       return { entity, rows: r.rows, total: r.total };
     }),

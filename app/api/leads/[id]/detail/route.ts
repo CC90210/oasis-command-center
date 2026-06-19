@@ -13,7 +13,8 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { getRecord, listRecords } from "@/lib/manifest/data";
-import { resolveTenantId } from "@/lib/api-auth";
+import { resolveSessionContext } from "@/lib/api-auth";
+import { canViewLead } from "@/lib/lead-scope";
 import { buildMemberNameMap, withAssignedName } from "@/lib/assigned-names";
 
 export const runtime = "nodejs";
@@ -30,10 +31,11 @@ export async function GET(
     return NextResponse.json({ ok: false, error: "invalid_id" }, { status: 400 });
   }
 
-  const tenantId = await resolveTenantId();
-  if (!tenantId) {
+  const sess = await resolveSessionContext();
+  if (!sess.ok) {
     return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
   }
+  const tenantId = sess.tenantId;
 
   // `entity` query param lets the same endpoint serve the application
   // drawer (?entity=application) without a parallel route. Default is
@@ -43,6 +45,13 @@ export async function GET(
 
   const record = await getRecord({ tenant_id: tenantId, entity, id }).catch(() => null);
   if (!record) {
+    return NextResponse.json({ ok: false, error: "not_found" }, { status: 404 });
+  }
+
+  // Per-agent lock: an agent must not read another agent's lead/application by
+  // hitting this endpoint directly. Admins pass; agents only their own. Return
+  // not_found (not 403) so the endpoint doesn't confirm the record exists.
+  if (!canViewLead({ isAdmin: sess.isAdmin, userId: sess.userId }, record.data as Record<string, unknown>)) {
     return NextResponse.json({ ok: false, error: "not_found" }, { status: 404 });
   }
 

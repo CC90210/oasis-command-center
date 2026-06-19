@@ -24,7 +24,7 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { getServiceSupabase } from "@/lib/supabase-server";
-import { resolveTenantId } from "@/lib/api-auth";
+import { resolveSessionContext } from "@/lib/api-auth";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -36,10 +36,18 @@ export async function POST(
   req: NextRequest,
   ctx: { params: Promise<{ id: string }> },
 ) {
-  const tenantId = await resolveTenantId();
-  if (!tenantId) {
+  const sess = await resolveSessionContext();
+  if (!sess.ok) {
     return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
   }
+  // Admin-only (Adon Batch 2.2). Reassignment is how leads move between agents'
+  // scoped boards — leaving it open to any member would let an agent quietly
+  // pull a lead off another agent's board. Owner/admin only; agents see (and
+  // work) their assigned leads but don't redistribute them.
+  if (!sess.isAdmin) {
+    return NextResponse.json({ ok: false, error: "forbidden" }, { status: 403 });
+  }
+  const tenantId = sess.tenantId;
   const { id: recordId } = await ctx.params;
   if (!recordId || !UUID_RE.test(recordId)) {
     return NextResponse.json({ ok: false, error: "invalid_id" }, { status: 400 });
@@ -122,6 +130,33 @@ export async function POST(
       { ok: false, error: "update_failed", message: update.error.message },
       { status: 500 },
     );
+  }
+
+  // Audit trail — who reassigned this record to whom. Best-effort; a logging
+  // failure never fails the assignment. Only meaningful for lead/application
+  // (the assignee-scoped entities); funded_deal/renewal still log harmlessly.
+  try {
+    const note = nextAssignedTo
+      ? `Reassigned to ${nextAssignedTo} by ${sess.email || "an admin"}.`
+      : `Assignment cleared by ${sess.email || "an admin"}.`;
+    await db.from("lead_interactions").insert({
+      tenant_id: tenantId,
+      lead_id: recordId,
+      type: "lead_reassigned",
+      channel: "system",
+      direction: "outbound",
+      agent_source: "dashboard_assign",
+      subject: "Lead reassigned",
+      content: note,
+      content_preview: note,
+      metadata: {
+        assigned_to: nextAssignedTo,
+        assigned_by: sess.userId,
+        entity_type: existing.data.entity_type,
+      },
+    });
+  } catch {
+    /* best-effort audit */
   }
 
   return NextResponse.json({ ok: true, assigned_to: nextAssignedTo });

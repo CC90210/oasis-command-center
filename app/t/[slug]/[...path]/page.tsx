@@ -38,6 +38,12 @@ import { filterRowsByQuery } from "@/lib/search-filter";
 import { LEAD_PIPELINE_STAGES, OPPORTUNITY_PIPELINE_STAGES, findStage } from "@/lib/sunbiz-stage-meta";
 import { humanize } from "@/lib/manifest/humanize";
 import { getRecord, listRecords } from "@/lib/manifest/data";
+import {
+  resolveAssignedScope,
+  assignedWhere,
+  canViewLead,
+  type LeadViewer,
+} from "@/lib/lead-scope";
 import { Card, PageHeader, Tag } from "@/components/Card";
 import { getManifest, manifestExists } from "@/lib/manifest/loader";
 import { resolveDataTenant } from "@/lib/manifest/tenant-scope";
@@ -72,10 +78,15 @@ export default async function TenantCatchAllPage({
     q?: string;
     lead?: string;
     application?: string;
+    agent?: string;
+    unassigned?: string;
   }>;
 }) {
   const { slug, path } = await params;
   const sp = (await searchParams) || {};
+  // Admin lead-filter (ignored for non-admins by resolveAssignedScope).
+  const agentFilter = typeof sp.agent === "string" && sp.agent ? sp.agent : null;
+  const unassignedFilter = sp.unassigned === "1" || sp.unassigned === "true";
   const viewOverride: "table" | "kanban" | null =
     sp.view === "table" ? "table" : sp.view === "kanban" ? "kanban" : null;
   const stageFilter = typeof sp.stage === "string" && sp.stage ? sp.stage : null;
@@ -136,17 +147,61 @@ export default async function TenantCatchAllPage({
   const profileRes = user
     ? await service
         .from("user_profiles")
-        .select("tenant_id")
+        .select("tenant_id, team_role, is_owner")
         .eq("auth_user_id", user.id)
         .maybeSingle()
     : { data: null };
-  const userTenantId = (profileRes.data as { tenant_id: string | null } | null)?.tenant_id ?? null;
+  const profileRow = profileRes.data as
+    | { tenant_id: string | null; team_role: string | null; is_owner: boolean | null }
+    | null;
+  const userTenantId = profileRow?.tenant_id ?? null;
   // Resolve which tenant_id should scope record reads. If the caller
   // isn't the owner of this manifest, dataTenantId is null and the
   // primitives render in preview mode — shells visible, data empty.
   // Closes the cross-shell data-bleed bug.
   const dataTenantId = await resolveDataTenant(normalised, userTenantId);
   const isPreview = !!userTenantId && dataTenantId === null;
+
+  // Per-agent lead scoping (Adon Batch 2). Agents (loan_officer/processor/etc.)
+  // see only leads/applications assigned to them; owner/admin see all and can
+  // narrow via the filter chips (?agent= / ?unassigned=). Resolved here once and
+  // threaded into every server-side lead/application read below.
+  const teamRole = profileRow?.team_role || "member";
+  const viewer: LeadViewer = {
+    isAdmin: !!profileRow?.is_owner || teamRole === "admin" || teamRole === "owner",
+    userId: user?.id ?? null,
+  };
+  const leadScope = resolveAssignedScope(viewer, {
+    agent: agentFilter,
+    unassigned: unassignedFilter,
+  });
+
+  // Admin lead-filter chips (All / Unassigned / per-agent) — only on the
+  // lead/application surfaces, only for admins. Agents never see the bar (they
+  // only ever have their own leads). Roster fetched once for the chips.
+  const showLeadFilter =
+    viewer.isAdmin &&
+    !!dataTenantId &&
+    (pageDef.kind === "pipeline" ||
+      pageDef.kind === "pipeline_entity" ||
+      pageDef.kind === "dashboard");
+  let adminRoster: Array<{ id: string; name: string }> = [];
+  if (showLeadFilter && dataTenantId) {
+    const rosterRes = await service
+      .from("user_profiles")
+      .select("auth_user_id, display_name, full_name")
+      .eq("tenant_id", dataTenantId);
+    adminRoster = ((rosterRes.data || []) as Array<{
+      auth_user_id: string | null;
+      display_name: string | null;
+      full_name: string | null;
+    }>)
+      .filter((m) => m.auth_user_id)
+      .map((m) => ({
+        id: m.auth_user_id as string,
+        name: m.display_name || m.full_name || "Unnamed",
+      }));
+  }
 
   // Record-detail view — opened when an operator clicks a Kanban card or
   // a row in a manifest table. Reuses ManifestRecordForm in edit mode so
@@ -155,11 +210,20 @@ export default async function TenantCatchAllPage({
   if (recordDetailId && pageDef.entity) {
     const entity = (manifest.data_model || []).find((e) => e.name === pageDef.entity);
     if (entity && dataTenantId) {
-      const record = await getRecord({
+      let record = await getRecord({
         tenant_id: dataTenantId,
         entity: entity.name,
         id: recordDetailId,
       }).catch(() => null);
+      // Per-agent lock: an agent opening a lead/application they don't own by
+      // guessing the URL gets a clean not-found, never the data. Admins pass.
+      if (
+        record &&
+        (entity.name === "lead" || entity.name === "application") &&
+        !canViewLead(viewer, record.data)
+      ) {
+        record = null;
+      }
       if (!record) {
         return (
           <div className="space-y-4 animate-fade-in">
@@ -355,6 +419,15 @@ export default async function TenantCatchAllPage({
           <span className="font-mono">/t/{normalised}</span> tenant would see.
         </div>
       )}
+      {showLeadFilter && (
+        <LeadScopeChips
+          slug={normalised}
+          path={pageDef.path}
+          roster={adminRoster}
+          agentFilter={agentFilter}
+          unassigned={unassignedFilter}
+        />
+      )}
       <PageBody
         slug={normalised}
         tenantId={dataTenantId}
@@ -364,6 +437,7 @@ export default async function TenantCatchAllPage({
         stageFilter={stageFilter}
         oppStageFilter={oppStageFilter}
         query={query}
+        assignedScope={leadScope}
       />
       <TenantLeadDrawerMount
         slug={normalised}
@@ -412,6 +486,7 @@ async function PageBody({
   stageFilter,
   oppStageFilter,
   query,
+  assignedScope,
 }: {
   slug: string;
   tenantId: string | null;
@@ -421,6 +496,8 @@ async function PageBody({
   stageFilter: string | null;
   oppStageFilter: string | null;
   query: string | null;
+  /** Per-agent lead scope: undefined=all, string=assigned_to, null=unassigned. */
+  assignedScope: string | null | undefined;
 }) {
   switch (page.kind) {
     case "markdown":
@@ -428,7 +505,7 @@ async function PageBody({
     case "reasoning":
       return <ManifestReasoning manifest={manifest} tenantSlug={slug} />;
     case "dashboard":
-      return <ManifestDashboard manifest={manifest} tenantId={tenantId} />;
+      return <ManifestDashboard manifest={manifest} tenantId={tenantId} assignedScope={assignedScope} />;
     case "import":
       // SunBiz gets the tabbed ImportClient (warm pipeline + cold list).
       // All other tenants keep the original LeadsImportClient behaviour.
@@ -516,6 +593,7 @@ async function PageBody({
           manifest={manifest}
           stageFilter={stageFilter}
           oppStageFilter={oppStageFilter}
+          assignedScope={assignedScope}
         />
       );
     }
@@ -544,6 +622,7 @@ async function PageBody({
           stageField={stageField}
           stageFilter={stageFilter}
           query={query}
+          assignedScope={assignedScope}
         />
       );
     }
@@ -698,6 +777,7 @@ async function PipelineSuperview({
   manifest,
   stageFilter,
   oppStageFilter,
+  assignedScope,
 }: {
   slug: string;
   tenantId: string | null;
@@ -705,6 +785,7 @@ async function PipelineSuperview({
   manifest: Awaited<ReturnType<typeof getManifest>>;
   stageFilter: string | null;
   oppStageFilter: string | null;
+  assignedScope: string | null | undefined;
 }) {
   const cfg = (page.config || {}) as { lead_entity?: string; opportunity_entity?: string };
   const leadName = cfg.lead_entity || "lead";
@@ -729,12 +810,14 @@ async function PipelineSuperview({
   // Fetch every record for each pipeline once; partition client-side
   // into stage buckets. Cheaper than N round-trips (one per stage) and
   // gives us accurate counts for the chevron badges in the same query.
+  // Per-agent scope applied at the query (lead + application are scoped entities).
+  const scopeWhere = assignedWhere(assignedScope);
   const [leadRowsRes, oppRowsRes] = await Promise.all([
     tenantId
-      ? listRecords({ tenant_id: tenantId, entity: leadName, limit: 2_000 }).catch(() => ({ rows: [], total: 0 }))
+      ? listRecords({ tenant_id: tenantId, entity: leadName, limit: 2_000, where: scopeWhere }).catch(() => ({ rows: [], total: 0 }))
       : Promise.resolve({ rows: [], total: 0 }),
     tenantId
-      ? listRecords({ tenant_id: tenantId, entity: oppName, limit: 2_000 }).catch(() => ({ rows: [], total: 0 }))
+      ? listRecords({ tenant_id: tenantId, entity: oppName, limit: 2_000, where: scopeWhere }).catch(() => ({ rows: [], total: 0 }))
       : Promise.resolve({ rows: [], total: 0 }),
   ]);
 
@@ -912,6 +995,7 @@ async function SingleEntityPipeline({
   stageField,
   stageFilter,
   query,
+  assignedScope,
 }: {
   slug: string;
   tenantId: string | null;
@@ -920,6 +1004,7 @@ async function SingleEntityPipeline({
   stageField: string;
   stageFilter: string | null;
   query: string | null;
+  assignedScope: string | null | undefined;
 }) {
   const stages = entity.name === "lead"
     ? LEAD_PIPELINE_STAGES
@@ -935,8 +1020,14 @@ async function SingleEntityPipeline({
     );
   }
 
+  // lead + application are per-agent scoped entities; apply at the query.
   const rowsRes = tenantId
-    ? await listRecords({ tenant_id: tenantId, entity: entity.name, limit: 2_000 }).catch(() => ({ rows: [], total: 0 }))
+    ? await listRecords({
+        tenant_id: tenantId,
+        entity: entity.name,
+        limit: 2_000,
+        where: assignedWhere(assignedScope),
+      }).catch(() => ({ rows: [], total: 0 }))
     : { rows: [], total: 0 };
 
   // Apply ?q= search filter FIRST so the chevron stage counts reflect
@@ -1050,6 +1141,63 @@ function PipelineLayout({
     );
   }
   return <>{children}</>;
+}
+
+/**
+ * LeadScopeChips — admin-only filter bar for the lead/application surfaces.
+ * "All leads" (no params) · "Unassigned" (?unassigned=1) · one chip per agent
+ * (?agent=<auth_user_id>). Highlights the active scope + shows a "Viewing:"
+ * label. Server-rendered Links (same pattern as ViewToggle/StageRail) so the
+ * selection lives in the URL and is shareable/back-button friendly.
+ */
+function LeadScopeChips({
+  slug,
+  path,
+  roster,
+  agentFilter,
+  unassigned,
+}: {
+  slug: string;
+  path: string;
+  roster: Array<{ id: string; name: string }>;
+  agentFilter: string | null;
+  unassigned: boolean;
+}) {
+  const base = `/t/${slug}/${path}`;
+  const activeAll = !unassigned && !agentFilter;
+  const activeAgentName = agentFilter
+    ? roster.find((m) => m.id.toLowerCase() === agentFilter.toLowerCase())?.name || "agent"
+    : null;
+  const viewing = unassigned ? "Unassigned" : activeAgentName ? activeAgentName : "All leads";
+  const chip = (href: string, label: string, active: boolean) => (
+    <Link
+      key={label}
+      href={href}
+      className={`text-[11px] px-2.5 py-1 rounded-md border whitespace-nowrap ${
+        active
+          ? "border-accent/50 bg-accent/10 text-accent font-semibold"
+          : "border-bg-border bg-bg-elev/40 text-fg-muted hover:text-fg"
+      }`}
+    >
+      {label}
+    </Link>
+  );
+  return (
+    <div className="flex flex-wrap items-center gap-1.5 mb-1">
+      <span className="text-[10px] uppercase tracking-wider text-fg-dim mr-1">
+        Viewing: <span className="text-fg-muted font-semibold">{viewing}</span>
+      </span>
+      {chip(base, "All leads", activeAll)}
+      {chip(`${base}?unassigned=1`, "Unassigned", unassigned)}
+      {roster.map((m) =>
+        chip(
+          `${base}?agent=${encodeURIComponent(m.id)}`,
+          m.name,
+          !!agentFilter && agentFilter.toLowerCase() === m.id.toLowerCase(),
+        ),
+      )}
+    </div>
+  );
 }
 
 function UnknownPath({ slug, subPath }: { slug: string; subPath: string }) {

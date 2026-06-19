@@ -48,7 +48,17 @@ export async function resolveTenantId(): Promise<string | null> {
  * each field independently.
  */
 export type SessionContext =
-  | { ok: true; userId: string; profileId: string | null; tenantId: string; email: string | null }
+  | {
+      ok: true;
+      userId: string;
+      profileId: string | null;
+      tenantId: string;
+      email: string | null;
+      /** Team role from user_profiles. Drives per-agent lead scoping. */
+      teamRole: string;
+      /** owner | admin → sees all leads; everyone else is scoped to their own. */
+      isAdmin: boolean;
+    }
   | { ok: false; reason: "no_session" | "no_profile" | "no_tenant" };
 
 export async function resolveSessionContext(): Promise<SessionContext> {
@@ -57,17 +67,22 @@ export async function resolveSessionContext(): Promise<SessionContext> {
   const db = getServiceSupabase();
   const r = await db
     .from("user_profiles")
-    .select("id, tenant_id")
+    .select("id, tenant_id, team_role, is_owner")
     .eq("auth_user_id", user.id)
     .maybeSingle();
-  const profile = r.data as { id: string | null; tenant_id: string | null } | null;
+  const profile = r.data as
+    | { id: string | null; tenant_id: string | null; team_role: string | null; is_owner: boolean | null }
+    | null;
   if (!profile) return { ok: false, reason: "no_profile" };
   if (!profile.tenant_id) return { ok: false, reason: "no_tenant" };
+  const teamRole = profile.team_role || "member";
   return {
     ok: true,
     userId: user.id,
     profileId: profile.id,
     tenantId: profile.tenant_id,
     email: user.email ?? null,
+    teamRole,
+    isAdmin: !!profile.is_owner || teamRole === "admin" || teamRole === "owner",
   };
 }

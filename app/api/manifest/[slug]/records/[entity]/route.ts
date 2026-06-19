@@ -26,6 +26,11 @@ import {
   listRecords,
   updateRecord,
 } from "@/lib/manifest/data";
+import { resolveAssignedScope, assignedWhere } from "@/lib/lead-scope";
+
+// Entities subject to per-agent lead scoping (Adon Batch 2). Other entities
+// (lender, offer, funded_deal, …) are tenant-shared, not per-agent.
+const SCOPED_ENTITIES = new Set(["lead", "application"]);
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -104,13 +109,27 @@ export async function GET(
   const offset = Number(sp.get("offset") || "0");
   const sort = sp.get("sort") || undefined;
 
+  // Per-agent lead scoping. Agents see only their own leads/applications;
+  // admins see all and can narrow via ?agent=<auth_user_id> or ?unassigned=1.
+  // Enforced server-side here (RLS is bypassed by the service-role client).
+  const entityName = entity.toLowerCase();
+  let where: Record<string, string | null> | undefined;
+  if (SCOPED_ENTITIES.has(entityName)) {
+    const scope = resolveAssignedScope(
+      { isAdmin: r.is_admin, userId: user.id },
+      { agent: sp.get("agent"), unassigned: sp.get("unassigned") === "1" },
+    );
+    where = assignedWhere(scope);
+  }
+
   try {
     const result = await listRecords({
       tenant_id: r.tenant_id,
-      entity: entity.toLowerCase(),
+      entity: entityName,
       limit: Number.isFinite(limit) ? limit : 100,
       offset: Number.isFinite(offset) ? offset : 0,
       sort,
+      where,
     });
     return NextResponse.json({ ok: true, ...result });
   } catch (err) {
