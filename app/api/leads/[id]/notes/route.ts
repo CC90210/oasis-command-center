@@ -17,6 +17,7 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { resolveSessionContext } from "@/lib/api-auth";
+import { getAccessibleLead } from "@/lib/lead-access";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -44,6 +45,15 @@ export async function GET(
   if (!sess.ok) {
     return NextResponse.json({ ok: false, error: sess.reason }, { status: 401 });
   }
+  // Per-agent lock: notes disclose lead context — an agent can't read another
+  // agent's lead notes by guessing the id.
+  const lead = await getAccessibleLead(
+    { isAdmin: sess.isAdmin, userId: sess.userId },
+    { tenantId: sess.tenantId, entity: "lead", id },
+  );
+  if (!lead) {
+    return NextResponse.json({ ok: false, error: "not_found" }, { status: 404 });
+  }
   const db = getServiceSupabase();
   const r = await db
     .from("lead_interactions")
@@ -70,6 +80,13 @@ export async function POST(
   const sess = await resolveSessionContext();
   if (!sess.ok) {
     return NextResponse.json({ ok: false, error: sess.reason }, { status: 401 });
+  }
+  const lead = await getAccessibleLead(
+    { isAdmin: sess.isAdmin, userId: sess.userId },
+    { tenantId: sess.tenantId, entity: "lead", id },
+  );
+  if (!lead) {
+    return NextResponse.json({ ok: false, error: "not_found" }, { status: 404 });
   }
   let body: { note?: unknown };
   try {

@@ -27,7 +27,8 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { getServiceSupabase } from "@/lib/supabase-server";
-import { resolveTenantId } from "@/lib/api-auth";
+import { resolveSessionContext } from "@/lib/api-auth";
+import { getAccessibleLead } from "@/lib/lead-access";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -112,10 +113,18 @@ export async function GET(
   _req: NextRequest,
   ctx: { params: Promise<{ id: string }> },
 ) {
-  const tenantId = await resolveTenantId();
-  if (!tenantId) return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
+  const sess = await resolveSessionContext();
+  if (!sess.ok) return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
+  const tenantId = sess.tenantId;
   const { id: leadId } = await ctx.params;
   if (!leadId) return NextResponse.json({ ok: false, error: "missing_id" }, { status: 400 });
+
+  // Per-agent lock: an agent can't read another agent's lead timeline by id.
+  const lead = await getAccessibleLead(
+    { isAdmin: sess.isAdmin, userId: sess.userId },
+    { tenantId, entity: "lead", id: leadId },
+  );
+  if (!lead) return NextResponse.json({ ok: false, error: "not_found" }, { status: 404 });
 
   const db = getServiceSupabase();
   const events: TimelineEvent[] = [];

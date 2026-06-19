@@ -14,6 +14,7 @@ import { NextResponse, type NextRequest } from "next/server";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { resolveSessionContext } from "@/lib/api-auth";
 import { getRecord } from "@/lib/manifest/data";
+import { canViewLead, type LeadViewer } from "@/lib/lead-scope";
 import {
   uploadLeadDocument,
   OPERATOR_ALLOWED_DOC_MIME,
@@ -36,11 +37,15 @@ async function resolveDocumentTarget(
   tenantId: string,
   id: string,
   entityParam: string | null,
+  viewer: LeadViewer,
 ): Promise<DocumentTarget | null> {
   const entity = entityParam === "application" ? "application" : "lead";
   if (entity === "lead") {
     const lead = await getRecord({ tenant_id: tenantId, entity: "lead", id }).catch(() => null);
-    if (!lead) return null;
+    // Per-agent lock: an agent must not read/upload another agent's lead docs by
+    // guessing the id. Returning null surfaces as record_not_found (same as a
+    // missing record — doesn't confirm existence).
+    if (!lead || !canViewLead(viewer, lead.data as Record<string, unknown>)) return null;
     return { documentLeadId: id, stageLeadId: id, entity };
   }
 
@@ -49,7 +54,7 @@ async function resolveDocumentTarget(
     entity: "application",
     id,
   }).catch(() => null);
-  if (!application) return null;
+  if (!application || !canViewLead(viewer, application.data as Record<string, unknown>)) return null;
 
   const linkedLeadId = (application.data as Record<string, unknown>).lead_id;
   const stageLeadId =
@@ -78,6 +83,7 @@ export async function GET(
     sess.tenantId,
     id,
     req.nextUrl.searchParams.get("entity"),
+    { isAdmin: sess.isAdmin, userId: sess.userId },
   );
   if (!target) {
     return NextResponse.json({ ok: false, error: "record_not_found" }, { status: 404 });
@@ -116,6 +122,7 @@ export async function POST(
     sess.tenantId,
     id,
     req.nextUrl.searchParams.get("entity"),
+    { isAdmin: sess.isAdmin, userId: sess.userId },
   );
   if (!target) {
     return NextResponse.json({ ok: false, error: "record_not_found" }, { status: 404 });
