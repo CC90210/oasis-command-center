@@ -308,6 +308,7 @@ export async function GET(
       .select("id, filename, doc_type, uploaded_by, uploaded_at, size_bytes")
       .eq("tenant_id", tenantId)
       .eq("lead_id", leadId)
+      .is("metadata->>deleted_at", null) // Batch 5: exclude soft-deleted
       .order("uploaded_at", { ascending: false })
       .limit(50);
     if (error) throw error;

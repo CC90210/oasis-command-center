@@ -231,6 +231,53 @@ export async function registerLeadDocument(input: {
 }
 
 /**
+ * Soft-delete a lead document (Batch 5). Marks `metadata.deleted_at` so the doc
+ * is excluded from every read path (drawer, timeline, shop-out attachments, the
+ * required-doc/stage engine, AI tools, downloads) while staying recoverable +
+ * audit-traceable. Storage bytes are kept (a delayed purge can reap them later).
+ * Every lead_documents read MUST filter `.is("metadata->>deleted_at", null)`.
+ */
+export async function softDeleteLeadDocument(input: {
+  tenantId: string;
+  docId: string;
+  deletedBy: string;
+}): Promise<
+  | { ok: true; lead_id: string; doc_type: string; filename: string }
+  | { ok: false; error: string }
+> {
+  const db = getServiceSupabase();
+  const row = await db
+    .from("lead_documents")
+    .select("id, lead_id, doc_type, filename, metadata")
+    .eq("tenant_id", input.tenantId)
+    .eq("id", input.docId)
+    .maybeSingle();
+  if (row.error) return { ok: false, error: row.error.message };
+  if (!row.data) return { ok: false, error: "not_found" };
+  const r = row.data as {
+    lead_id: string;
+    doc_type: string;
+    filename: string;
+    metadata: Record<string, unknown> | null;
+  };
+  if (r.metadata?.deleted_at) {
+    return { ok: true, lead_id: r.lead_id, doc_type: r.doc_type, filename: r.filename }; // already deleted (idempotent)
+  }
+  const metadata = {
+    ...(r.metadata || {}),
+    deleted_at: new Date().toISOString(),
+    deleted_by: input.deletedBy,
+  };
+  const upd = await db
+    .from("lead_documents")
+    .update({ metadata })
+    .eq("tenant_id", input.tenantId)
+    .eq("id", input.docId);
+  if (upd.error) return { ok: false, error: upd.error.message };
+  return { ok: true, lead_id: r.lead_id, doc_type: r.doc_type, filename: r.filename };
+}
+
+/**
  * Allowed MIME types for operator uploads. Form intake is more
  * permissive (handles whatever the prospect sends) but the
  * dashboard-side upload narrows the set so an operator can't drop a

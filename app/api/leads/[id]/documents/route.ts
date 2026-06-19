@@ -17,6 +17,7 @@ import { getRecord } from "@/lib/manifest/data";
 import { canViewLead, leadScopingEnabled, type LeadViewer } from "@/lib/lead-scope";
 import {
   uploadLeadDocument,
+  softDeleteLeadDocument,
   OPERATOR_ALLOWED_DOC_MIME,
   MAX_LEAD_DOC_BYTES,
 } from "@/lib/lead-documents";
@@ -99,6 +100,7 @@ export async function GET(
     .select("id, filename, mime_type, size_bytes, doc_type, storage_path, uploaded_by, uploaded_at")
     .eq("tenant_id", sess.tenantId)
     .eq("lead_id", target.documentLeadId)
+    .is("metadata->>deleted_at", null) // Batch 5: exclude soft-deleted (also keeps them out of shop-out)
     .order("uploaded_at", { ascending: false });
   if (r.error) {
     return NextResponse.json({ ok: false, error: r.error.message }, { status: 500 });
@@ -208,4 +210,79 @@ export async function POST(
     document: result.document,
     stage_bumped: stageEvent?.fired ? stageEvent.to : null,
   });
+}
+
+/**
+ * DELETE /api/leads/[id]/documents?doc=<docId> — soft-delete one document
+ * (Batch 5). Gate: owner-agent or admin on the parent lead (reuses
+ * resolveDocumentTarget, which runs canViewLead). Soft-delete keeps the bytes
+ * but excludes the doc from every read path + shop-out. Audited to the timeline.
+ */
+export async function DELETE(
+  req: NextRequest,
+  ctx: { params: Promise<{ id: string }> },
+) {
+  const { id } = await ctx.params;
+  if (!UUID_RE.test(id)) {
+    return NextResponse.json({ ok: false, error: "invalid_id" }, { status: 400 });
+  }
+  const docId = req.nextUrl.searchParams.get("doc");
+  if (!docId || !UUID_RE.test(docId)) {
+    return NextResponse.json({ ok: false, error: "invalid_doc_id" }, { status: 400 });
+  }
+  const sess = await resolveSessionContext();
+  if (!sess.ok) {
+    return NextResponse.json({ ok: false, error: sess.reason }, { status: 401 });
+  }
+  // Owner-or-admin gate on the parent lead/application (same gate as GET/POST).
+  const target = await resolveDocumentTarget(
+    sess.tenantId,
+    id,
+    req.nextUrl.searchParams.get("entity"),
+    { isAdmin: sess.isAdmin, userId: sess.userId },
+  );
+  if (!target) {
+    return NextResponse.json({ ok: false, error: "record_not_found" }, { status: 404 });
+  }
+
+  const result = await softDeleteLeadDocument({
+    tenantId: sess.tenantId,
+    docId,
+    deletedBy: sess.email || sess.userId || "operator",
+  });
+  if (!result.ok) {
+    const status = result.error === "not_found" ? 404 : 500;
+    return NextResponse.json({ ok: false, error: result.error }, { status });
+  }
+
+  // Audit + re-evaluate required-doc/stage state (a removed bank statement may
+  // drop the lead back below the doc threshold). Both best-effort.
+  try {
+    const db = getServiceSupabase();
+    const note = `Document removed: ${result.filename}`;
+    await db.from("lead_interactions").insert({
+      tenant_id: sess.tenantId,
+      lead_id: result.lead_id,
+      type: "document_deleted",
+      channel: "system",
+      direction: "outbound",
+      agent_source: "dashboard_doc_delete",
+      subject: "Document removed",
+      content: note,
+      content_preview: note,
+      metadata: { document_id: docId, doc_type: result.doc_type, deleted_by: sess.userId },
+    });
+  } catch {
+    /* best-effort audit */
+  }
+  if (target.stageLeadId) {
+    await dispatchLeadStageEvent({
+      type: "doc_uploaded",
+      tenantId: sess.tenantId,
+      leadId: target.stageLeadId,
+      docType: result.doc_type,
+    }).catch(() => {});
+  }
+
+  return NextResponse.json({ ok: true, deleted: docId });
 }

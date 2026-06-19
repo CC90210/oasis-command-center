@@ -20,7 +20,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 // useRef intentionally imported for the file-input ref in DocumentsTab.
 import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
-import { X, FileText, ImageIcon, Phone, Mail, ShoppingBag, Loader2 } from "lucide-react";
+import { X, FileText, ImageIcon, Phone, Mail, ShoppingBag, Loader2, Trash2, CheckCircle2, AlertCircle, UploadCloud } from "lucide-react";
 import { LeadTimelinePanel } from "./LeadTimelinePanel";
 import { AssignmentControl } from "./AssignmentControl";
 import { humanLeadDocSize, leadDocTypeLabel, LEAD_DOC_TYPES } from "@/lib/lead-doc-display";
@@ -1143,7 +1143,9 @@ function DocumentsTab({
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [stageNotice, setStageNotice] = useState<string | null>(null);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const appInputRef = useRef<HTMLInputElement>(null);
 
   const refresh = useCallback(async () => {
     try {
@@ -1156,14 +1158,14 @@ function DocumentsTab({
     }
   }, [recordId, entity]);
 
-  const upload = async (file: File) => {
+  const upload = async (file: File, typeOverride?: string) => {
     setPending(true);
     setError(null);
     setStageNotice(null);
     try {
       const fd = new FormData();
       fd.append("file", file);
-      fd.append("doc_type", docType);
+      fd.append("doc_type", typeOverride || docType);
       fd.append("source", "drawer_upload");
       const qs = entity === "application" ? "?entity=application" : "";
       const r = await fetch(`/api/leads/${recordId}/documents${qs}`, {
@@ -1186,11 +1188,94 @@ function DocumentsTab({
     } finally {
       setPending(false);
       if (fileInputRef.current) fileInputRef.current.value = "";
+      if (appInputRef.current) appInputRef.current.value = "";
     }
   };
 
+  // Batch 5: soft-delete a document. Confirm, then DELETE; the doc leaves the
+  // drawer AND is excluded from shop-out (server filters metadata.deleted_at).
+  const remove = async (docId: string) => {
+    if (typeof window !== "undefined" && !window.confirm("Remove this document? It won't be sent to lenders.")) {
+      return;
+    }
+    setDeletingId(docId);
+    setError(null);
+    try {
+      const qs = entity === "application" ? "&entity=application" : "";
+      const r = await fetch(`/api/leads/${recordId}/documents?doc=${docId}${qs}`, {
+        method: "DELETE",
+        credentials: "include",
+      });
+      const j = await r.json().catch(() => ({}));
+      if (r.ok && j.ok) {
+        await refresh();
+        if (onChange) await onChange();
+      } else {
+        setError(j.error || `delete_failed_${r.status}`);
+      }
+    } catch (e) {
+      setError(String((e as Error).message || e));
+    } finally {
+      setDeletingId(null);
+    }
+  };
+
+  // Batch 3: the lead's single "Application" slot — satisfied by the auto-
+  // generated PDF (final_application_form) or a manual `application` upload.
+  const appDoc = docs.find(
+    (d) => d.doc_type === "final_application_form" || d.doc_type === "application",
+  );
+
   return (
     <div className="space-y-3">
+      {/* Batch 3 — Application slot. Red when missing (reuses the missing-doc
+          red styling); satisfied (green) by the auto-PDF or a manual add. */}
+      <div
+        className={`rounded-md border p-3 flex items-center gap-3 ${
+          appDoc
+            ? "border-emerald-500/30 bg-emerald-500/5"
+            : "border-red-500/40 bg-red-500/10"
+        }`}
+      >
+        {appDoc ? (
+          <CheckCircle2 className="w-4 h-4 shrink-0 text-emerald-300" />
+        ) : (
+          <AlertCircle className="w-4 h-4 shrink-0 text-red-300" />
+        )}
+        <div className="min-w-0 flex-1">
+          <div className="text-[11px] uppercase tracking-wider font-semibold text-fg-muted">
+            Application
+          </div>
+          <div className={`text-[12px] truncate ${appDoc ? "text-fg" : "text-red-300"}`}>
+            {appDoc ? appDoc.filename : "Missing — no application on file yet"}
+          </div>
+        </div>
+        {appDoc ? (
+          <DocDownloadButton id={appDoc.id} filename={appDoc.filename} />
+        ) : (
+          <>
+            <button
+              type="button"
+              onClick={() => appInputRef.current?.click()}
+              disabled={pending}
+              className="inline-flex items-center gap-1 text-[11px] font-semibold px-2 py-1 rounded-md border border-red-500/40 bg-red-500/10 text-red-200 hover:bg-red-500/20 disabled:opacity-50"
+            >
+              <UploadCloud className="w-3 h-3" /> Add application
+            </button>
+            <input
+              ref={appInputRef}
+              type="file"
+              accept="application/pdf,image/*"
+              className="hidden"
+              onChange={(e) => {
+                const f = e.target.files?.[0];
+                if (f) upload(f, "application");
+              }}
+            />
+          </>
+        )}
+      </div>
+
       <div className="rounded-md border border-bg-border bg-bg-deep/60 p-3 space-y-2">
         <label className="text-[11px] uppercase tracking-wider text-fg-muted">
           Upload a document
@@ -1253,6 +1338,20 @@ function DocumentsTab({
                   verified
                 </span>
                 <DocDownloadButton id={d.id} filename={d.filename} />
+                <button
+                  type="button"
+                  onClick={() => remove(d.id)}
+                  disabled={deletingId === d.id}
+                  title="Remove document"
+                  aria-label={`Remove ${d.filename}`}
+                  className="shrink-0 rounded p-1 text-fg-dim hover:bg-red-500/10 hover:text-red-300 disabled:opacity-50"
+                >
+                  {deletingId === d.id ? (
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  ) : (
+                    <Trash2 className="w-3.5 h-3.5" />
+                  )}
+                </button>
               </li>
             );
           })}

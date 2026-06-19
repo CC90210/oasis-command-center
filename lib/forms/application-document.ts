@@ -54,6 +54,7 @@ export async function maybeGenerateApplicationDocument(
       .eq("tenant_id", form.tenant_id)
       .eq("lead_id", link.lead_id)
       .eq("doc_type", APPLICATION_DOC_TYPE)
+      .is("metadata->>deleted_at", null) // Batch 5: a deleted app PDF shouldn't block regeneration
       .limit(50);
     if (existing.error) {
       // Bias toward the document EXISTING: a missing signed application is a

@@ -84,7 +84,8 @@ const RULES: Record<LeadStageEvent["type"], Rule> = {
         .from("lead_documents")
         .select("doc_type")
         .eq("tenant_id", tenantId)
-        .eq("lead_id", leadId);
+        .eq("lead_id", leadId)
+        .is("metadata->>deleted_at", null); // Batch 5: soft-deleted docs don't count toward required-docs
       if (r.error || !r.data) return false;
       const present = new Set(r.data.map((row) => (row as { doc_type: string }).doc_type));
       return REQUIRED_LEAD_DOC_TYPES.every((t) => present.has(t));

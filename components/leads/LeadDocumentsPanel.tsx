@@ -37,6 +37,7 @@ export async function LeadDocumentsPanel({
     .select("id, filename, mime_type, size_bytes, doc_type, uploaded_by, uploaded_at")
     .eq("tenant_id", tenantId)
     .eq("lead_id", leadId)
+    .is("metadata->>deleted_at", null) // Batch 5: exclude soft-deleted
     .order("uploaded_at", { ascending: false });
 
   if (error) {

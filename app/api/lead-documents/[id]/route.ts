@@ -49,6 +49,7 @@ export async function GET(
     .select("id, tenant_id, filename, storage_path, mime_type")
     .eq("id", id)
     .eq("tenant_id", tenantId)
+    .is("metadata->>deleted_at", null) // Batch 5: a soft-deleted doc isn't downloadable
     .maybeSingle();
   const doc = docRow.data as
     | {

@@ -1391,6 +1391,7 @@ async function toolListLeadDocuments(
     .select("id, filename, mime_type, size_bytes, doc_type, uploaded_by, uploaded_at, metadata")
     .eq("tenant_id", ctx.tenantId)
     .eq("lead_id", leadId)
+    .is("metadata->>deleted_at", null) // Batch 5: exclude soft-deleted
     .order("uploaded_at", { ascending: false })
     .limit(50);
   if (docTypeFilter) query = query.eq("doc_type", docTypeFilter);

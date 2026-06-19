@@ -77,6 +77,7 @@ export async function GET(
         .select("id, filename, mime_type, size_bytes, doc_type, uploaded_by, uploaded_at")
         .eq("tenant_id", tenantId)
         .eq("lead_id", docLeadId)
+        .is("metadata->>deleted_at", null) // Batch 5: exclude soft-deleted
         .order("uploaded_at", { ascending: false })
     : Promise.resolve({ data: [] as unknown[], error: null });
 
