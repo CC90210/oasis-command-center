@@ -864,9 +864,11 @@ async function dispatch(
 ): Promise<unknown> {
   switch (name) {
     case "read_brain_doc":
-      return await readBrainDoc(input);
+      // Default to the active agent's own repo; an explicit agent_slug in
+      // input still wins (spread last) so an agent can cross-read if asked.
+      return await readBrainDoc({ agent_slug: ctx.agentKey, ...input });
     case "search_memory":
-      return await searchMemory(input);
+      return await searchMemory({ agent_slug: ctx.agentKey, ...input });
     case "save_known_fact":
       return await toolSaveKnownFact(input, ctx);
     case "get_credential":

@@ -62,6 +62,19 @@ export const AGENT_CATALOG: Record<string, AgentCatalog> = {
     ],
   },
 
+  lex: {
+    crons: [],
+    processes: [
+      { name: "contract-draft", kind: "skill-bundle", description: "Draft OASIS-favorable contracts from the clause library, with governing law + disclaimer.", location: "local" },
+      { name: "contract-review", kind: "skill-bundle", description: "Adversarial review of inbound agreements; every risk clause ranked walk/negotiate/accept.", location: "local" },
+      { name: "send_gateway", kind: "process", description: "Outbound chokepoint — blocks any send missing the not-legal-advice disclaimer.", location: "local" },
+    ],
+    workflows: [
+      { name: "clause library", kind: "skill-bundle", description: "Reusable OASIS-favorable clause bank + seed templates (mutual NDA, SOW).", location: "local" },
+      { name: "lex_matters", kind: "workflow", description: "Multi-tenant matters/contracts/versions store (RLS-scoped). Schema staged in Lex-Agent/database/migrations.", location: "supabase" },
+    ],
+  },
+
   atlas: {
     crons: [
       { name: "trade_loop", kind: "cron", description: "Strategy evaluation across 12+ rule sets.", location: "local", schedule: "*/15 * * * *" },

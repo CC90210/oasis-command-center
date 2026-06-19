@@ -34,6 +34,9 @@ import { readBrainDoc, searchMemory } from "./cloud-knowledge-tools";
 export type CloudToolContext = {
   tenantId: string;
   userId: string;
+  /** Active agent slug — routes read_brain_doc / search_memory to that
+   *  agent's own repo (defaults to bravo when absent). */
+  agentKey?: string;
 };
 
 export type CloudToolResult =
@@ -60,18 +63,19 @@ type CloudTool = {
 const readBrainDocCloud: CloudTool = {
   name: "read_brain_doc",
   description:
-    "Read an allowed knowledge file from the CEO-Agent repository, such as brain/STATE.md, CONTEXT.md, memory/*.md, docs/adr/*.md, or skills/*/SKILL.md.",
+    "Read an allowed knowledge file from the ACTIVE agent's own repository (brain/STATE.md, CONTEXT.md, memory/*.md, docs/adr/*.md, skills/*/SKILL.md). Defaults to the agent you are; pass agent_slug (e.g. 'lex', 'bravo') to read another fleet agent's repo.",
   args: {
     path: "Repo-relative path, e.g. 'brain/STATE.md' or 'CONTEXT.md'.",
     max_chars: "Optional max characters to return (default 12000, max 40000).",
+    agent_slug: "Optional — which agent's repo to read (defaults to the active agent; e.g. 'lex', 'bravo').",
   },
-  async execute(input) {
-    const data = await readBrainDoc(input);
+  async execute(input, ctx) {
+    const data = await readBrainDoc({ agent_slug: ctx.agentKey, ...input });
     return {
       ok: true,
       name: "read_brain_doc",
       data,
-      summary: `Read ${data.path}${data.truncated ? " (truncated)" : ""}.`,
+      summary: `Read ${data.path} from ${data.agent}${data.truncated ? " (truncated)" : ""}.`,
     };
   },
 };
@@ -79,18 +83,19 @@ const readBrainDocCloud: CloudTool = {
 const searchMemoryCloud: CloudTool = {
   name: "search_memory",
   description:
-    "Search CEO-Agent brain and memory docs for a phrase and return ranked line-referenced snippets.",
+    "Search the ACTIVE agent's own brain and memory docs for a phrase; returns ranked line-referenced snippets. Pass agent_slug (e.g. 'lex') to search another fleet agent's repo.",
   args: {
-    query: "Search phrase, e.g. 'quiet day cron' or 'V6 architecture'.",
+    query: "Search phrase, e.g. 'quiet day cron' or 'indemnity cap'.",
     limit: "Optional max snippets to return (default 8, max 20).",
+    agent_slug: "Optional — which agent's repo to search (defaults to the active agent; e.g. 'lex', 'bravo').",
   },
-  async execute(input) {
-    const data = await searchMemory(input);
+  async execute(input, ctx) {
+    const data = await searchMemory({ agent_slug: ctx.agentKey, ...input });
     return {
       ok: true,
       name: "search_memory",
       data,
-      summary: `Found ${data.count} memory match${data.count === 1 ? "" : "es"} for "${data.query}".`,
+      summary: `Found ${data.count} memory match${data.count === 1 ? "" : "es"} for "${data.query}" in ${data.agent}.`,
     };
   },
 };

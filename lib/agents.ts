@@ -74,13 +74,13 @@ export const AGENT_REGISTRY: Record<string, AgentInfo> = {
   bravo: {
     key: "bravo",
     label: "Bravo",
-    role: "Lead architect · business ops · content voice",
-    tagline: "Lead architect · ops · voice",
+    role: "CEO · COO · CTO — strategy, operations & engineering",
+    tagline: "CEO · COO · CTO — right hand",
     location: "this repo",
     colorRgb: "0, 212, 255",
     textClass: "text-accent",
     description:
-      "Your CEO operating system. Bravo runs the day — ranks the leads worth calling first, drafts your outbound, finalizes today's plan, runs the daily briefing, and keeps the whole agent family rowing in the same direction.",
+      "Your CEO, COO, and CTO in one — your right hand and second brain. Bravo runs the day: ranks the leads worth calling first, drafts your outbound, finalizes today's plan, runs the daily briefing, ships the code, and keeps the whole agent family rowing in the same direction.",
     askMeAbout: "Run the daily briefing · Draft a follow-up to Jonathan · What's blocking $5K?",
     setup_questions: [
       {
@@ -282,6 +282,52 @@ export const AGENT_REGISTRY: Record<string, AgentInfo> = {
     description:
       "A small steady light. Lumen captures the voice, stories, and presence of someone you love before they pass — guided interviews that surface meaningful detail, voice-clone coaching, memory organization. Family-led, family-gated, never extracted.",
     askMeAbout: "Plan an interview session · What questions surface the small details · What's missing from her story?",
+  },
+  // Legal / contracts — in-house counsel. Drafts + reviews contracts and
+  // ranks legal risk in plain English. Multi-tenant product surface; never
+  // gives legal advice (UPL gate enforced in Lex-Agent/brain/COMPLIANCE.md).
+  lex: {
+    key: "lex",
+    label: "Lex",
+    role: "In-house counsel · contract drafting · review · legal risk",
+    tagline: "Counsel · contracts · risk",
+    location: "C:\\Users\\User\\APPS\\Lex-Agent",
+    colorRgb: "129, 140, 248",
+    textClass: "text-indigo-400",
+    description:
+      "Your in-house counsel. Lex drafts OASIS-favorable contracts from a vetted clause library, reviews inbound agreements adversarially, and ranks every risk clause in plain English — walk away, negotiate, or sign. Not a licensed attorney: it always flags where one is required and never gives legal advice.",
+    askMeAbout: "Draft a mutual NDA · Review this MSA for traps · What's risky in this contract?",
+    setup_questions: [
+      {
+        id: "governing_law",
+        label: "Default governing law / jurisdiction",
+        description: "Lex stamps this on every draft and review. Override per matter.",
+        type: "text",
+        required: true,
+        placeholder: "Ontario, Canada",
+      },
+      {
+        id: "entity_name",
+        label: "Your legal entity name",
+        description: "How your company is named as a party in contracts.",
+        type: "text",
+        required: true,
+        placeholder: "OASIS AI Solutions",
+      },
+      {
+        id: "risk_posture",
+        label: "Risk posture",
+        description: "How aggressively Lex protects you vs. moves the deal forward.",
+        type: "select",
+        required: true,
+        default: "balanced",
+        options: [
+          { value: "protective", label: "Protective — flag everything, hold the line" },
+          { value: "balanced", label: "Balanced — protect what matters, keep deals moving" },
+          { value: "fast", label: "Fast — only flag deal-breakers" },
+        ],
+      },
+    ],
   },
   // Backend delegation executor — powers custom agents, not a standalone
   // persona. family:false hides it from the AGENT FAMILY card on /agents.

@@ -2,8 +2,6 @@ import fs from "fs/promises";
 import os from "os";
 import path from "path";
 
-const DEFAULT_RAW_BASE = "https://raw.githubusercontent.com/CC90210/CEO-Agent/main";
-const DEFAULT_TREE_URL = "https://api.github.com/repos/CC90210/CEO-Agent/git/trees/main?recursive=1";
 const MAX_FILE_BYTES = 250_000;
 const MAX_SEARCH_FILES = 90;
 
@@ -15,6 +13,69 @@ const ROOT_DOCS = new Set([
   "README.md",
 ]);
 
+// ---------------------------------------------------------------------------
+// Per-agent repo resolution.
+//
+// Cloud-mode agents can inspect their OWN repo's brain/memory via readBrainDoc
+// and searchMemory. The repo is resolved from the agent slug so a new fleet
+// agent (Lex, future verticals) is queryable from the dashboard the moment it
+// has a row here — no per-agent code path. Bravo is the default so existing
+// callers that don't pass a slug behave exactly as before.
+//
+// Each repo is overrideable at runtime via env (set these in Vercel):
+//   <AGENT>_REPO          absolute local repo root (server-side fast path)
+//   <AGENT>_REPO_RAW_BASE raw.githubusercontent base for the fallback fetch
+//   <AGENT>_REPO_TREE_URL git trees API url for the search file list
+// ---------------------------------------------------------------------------
+type AgentRepoSpec = {
+  localRootEnv: string;
+  defaultLocalDir: string; // relative to os.homedir()
+  rawBaseEnv: string;
+  rawBaseDefault: string;
+  treeUrlEnv: string;
+  treeUrlDefault: string;
+};
+
+const AGENT_REPOS: Record<string, AgentRepoSpec> = {
+  bravo: {
+    localRootEnv: "BRAVO_REPO",
+    defaultLocalDir: "Business-Empire-Agent",
+    rawBaseEnv: "BRAVO_REPO_RAW_BASE",
+    rawBaseDefault: "https://raw.githubusercontent.com/CC90210/CEO-Agent/main",
+    treeUrlEnv: "BRAVO_REPO_TREE_URL",
+    treeUrlDefault: "https://api.github.com/repos/CC90210/CEO-Agent/git/trees/main?recursive=1",
+  },
+  lex: {
+    localRootEnv: "LEX_REPO",
+    defaultLocalDir: "APPS/Lex-Agent",
+    rawBaseEnv: "LEX_REPO_RAW_BASE",
+    rawBaseDefault: "https://raw.githubusercontent.com/CC90210/Lex-Agent/main",
+    treeUrlEnv: "LEX_REPO_TREE_URL",
+    treeUrlDefault: "https://api.github.com/repos/CC90210/Lex-Agent/git/trees/main?recursive=1",
+  },
+};
+
+const DEFAULT_AGENT = "bravo";
+
+type RepoConfig = {
+  agent: string;
+  localRoot: string | null;
+  rawBase: string;
+  treeUrl: string;
+};
+
+function resolveRepo(slugRaw: unknown): RepoConfig {
+  const slug = String(slugRaw || DEFAULT_AGENT).trim().toLowerCase() || DEFAULT_AGENT;
+  const known = AGENT_REPOS[slug] ? slug : DEFAULT_AGENT;
+  const spec = AGENT_REPOS[known];
+  const localRoot =
+    process.env[spec.localRootEnv] ||
+    path.join(os.homedir(), ...spec.defaultLocalDir.split("/"));
+  const rawBase = (process.env[spec.rawBaseEnv] || spec.rawBaseDefault).replace(/\/+$/, "");
+  const treeUrl = process.env[spec.treeUrlEnv] || spec.treeUrlDefault;
+  return { agent: known, localRoot, rawBase, treeUrl };
+}
+
 type RepoRead = {
   path: string;
   source: "local" | "github";
@@ -22,11 +83,13 @@ type RepoRead = {
 };
 
 export type ReadBrainDocResult = RepoRead & {
+  agent: string;
   chars: number;
   truncated: boolean;
 };
 
 export type SearchMemoryResult = {
+  agent: string;
   query: string;
   source: "local" | "github" | "mixed";
   count: number;
@@ -39,12 +102,14 @@ export type SearchMemoryResult = {
 };
 
 export async function readBrainDoc(input: Record<string, unknown>): Promise<ReadBrainDocResult> {
+  const repo = resolveRepo(input.agent_slug ?? input.agent);
   const repoPath = normalizeKnowledgePath(String(input.path || ""));
   const maxChars = clamp(Number(input.max_chars) || 12_000, 1_000, 40_000);
-  const read = await readRepoText(repoPath);
+  const read = await readRepoText(repoPath, repo);
   const clipped = clip(read.content, maxChars);
   return {
     ...read,
+    agent: repo.agent,
     content: clipped.text,
     chars: read.content.length,
     truncated: clipped.truncated,
@@ -52,6 +117,7 @@ export async function readBrainDoc(input: Record<string, unknown>): Promise<Read
 }
 
 export async function searchMemory(input: Record<string, unknown>): Promise<SearchMemoryResult> {
+  const repo = resolveRepo(input.agent_slug ?? input.agent);
   const query = String(input.query || "").trim();
   if (query.length < 2) throw new Error("query_too_short");
   const limit = clamp(Number(input.limit) || 8, 1, 20);
@@ -63,14 +129,14 @@ export async function searchMemory(input: Record<string, unknown>): Promise<Sear
     .slice(0, 8);
   if (terms.length === 0) throw new Error("query_too_short");
 
-  const paths = await listSearchablePaths();
+  const paths = await listSearchablePaths(repo);
   const matches: SearchMemoryResult["matches"] = [];
   const sources = new Set<"local" | "github">();
 
   for (const repoPath of paths.slice(0, MAX_SEARCH_FILES)) {
     let read: RepoRead;
     try {
-      read = await readRepoText(repoPath);
+      read = await readRepoText(repoPath, repo);
     } catch {
       continue;
     }
@@ -102,6 +168,7 @@ export async function searchMemory(input: Record<string, unknown>): Promise<Sear
   const source =
     sources.size > 1 ? "mixed" : sources.has("local") ? "local" : sources.has("github") ? "github" : "local";
   return {
+    agent: repo.agent,
     query,
     source,
     count: matches.length,
@@ -132,8 +199,8 @@ function isAllowedKnowledgePath(repoPath: string): boolean {
   return false;
 }
 
-async function readRepoText(repoPath: string): Promise<RepoRead> {
-  const localRoot = getLocalRepoRoot();
+async function readRepoText(repoPath: string, repo: RepoConfig): Promise<RepoRead> {
+  const localRoot = repo.localRoot;
   if (localRoot) {
     try {
       const root = path.resolve(localRoot);
@@ -154,7 +221,7 @@ async function readRepoText(repoPath: string): Promise<RepoRead> {
     }
   }
 
-  const url = `${rawBase()}/${repoPath.split("/").map(encodeURIComponent).join("/")}`;
+  const url = `${repo.rawBase}/${repoPath.split("/").map(encodeURIComponent).join("/")}`;
   const res = await fetchWithTimeout(url, { headers: { accept: "text/plain" } });
   if (!res.ok) throw new Error(`repo_fetch_${res.status}`);
   const content = await res.text();
@@ -162,8 +229,8 @@ async function readRepoText(repoPath: string): Promise<RepoRead> {
   return { path: repoPath, source: "github", content };
 }
 
-async function listSearchablePaths(): Promise<string[]> {
-  const localRoot = getLocalRepoRoot();
+async function listSearchablePaths(repo: RepoConfig): Promise<string[]> {
+  const localRoot = repo.localRoot;
   if (localRoot && (await dirExists(localRoot))) {
     const paths = new Set<string>();
     for (const doc of ROOT_DOCS) {
@@ -175,7 +242,7 @@ async function listSearchablePaths(): Promise<string[]> {
     return [...paths].filter(isAllowedKnowledgePath).sort();
   }
 
-  const res = await fetchWithTimeout(treeUrl(), { headers: { accept: "application/vnd.github+json" } });
+  const res = await fetchWithTimeout(repo.treeUrl, { headers: { accept: "application/vnd.github+json" } });
   if (!res.ok) throw new Error(`repo_tree_${res.status}`);
   const body = (await res.json().catch(() => null)) as
     | { tree?: Array<{ path?: string; type?: string; size?: number }> }
@@ -207,10 +274,6 @@ async function walkMarkdown(root: string, relDir: string, out: Set<string>): Pro
   }
 }
 
-function getLocalRepoRoot(): string | null {
-  return process.env.BRAVO_REPO || path.join(os.homedir(), "Business-Empire-Agent");
-}
-
 async function dirExists(dir: string): Promise<boolean> {
   try {
     return (await fs.stat(dir)).isDirectory();
@@ -225,14 +288,6 @@ async function fileExists(file: string): Promise<boolean> {
   } catch {
     return false;
   }
-}
-
-function rawBase(): string {
-  return (process.env.BRAVO_REPO_RAW_BASE || DEFAULT_RAW_BASE).replace(/\/+$/, "");
-}
-
-function treeUrl(): string {
-  return process.env.BRAVO_REPO_TREE_URL || DEFAULT_TREE_URL;
 }
 
 function clip(text: string, maxChars: number): { text: string; truncated: boolean } {

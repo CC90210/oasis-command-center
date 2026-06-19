@@ -57,6 +57,10 @@ export const OASIS_SEED: TenantManifest = {
     // wow + future voice automations). Enabled 2026-05-17 when Aura got
     // her own home directory and first cron. See agents/aura.md.
     { slug: "aura", display_name: "Aura", enabled: true, core: true },
+    // Lex — in-house counsel (legal/contracts). Non-core add-on: shows on
+    // /agents, operator can toggle off. Multi-tenant product surface; never
+    // gives legal advice (UPL gate in Lex-Agent/brain/COMPLIANCE.md).
+    { slug: "lex", display_name: "Lex", enabled: true, core: false },
   ],
   // OASIS Setup Readiness opinion — CC's empire stack. Distinct from
   // SunBiz: includes Stripe (CC bills through OASIS), n8n for inbound
