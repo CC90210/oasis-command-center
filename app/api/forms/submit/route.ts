@@ -684,10 +684,17 @@ export async function POST(req: NextRequest) {
   let currentLeadStage: string | null = null;
   const stepOutcomes = form.step_outcomes || {};
   const isLastStep = stepIndex === steps.length - 1;
+  // Change #1 (Adon, lead status defs 2026-06-19): COMPLETING the first
+  // application (the initial-lead-capture interest form) = the merchant has
+  // "Viewed" (completed) the first app → viewed_application. Opening-but-not-
+  // completing is set to "Intent Inquiry" in /api/forms/view. This overrides
+  // the interest form's stored on_complete_stage on its final step only.
   const targetStage =
-    stepOutcomes[String(stepIndex)] ||
-    (isLastStep && form.on_complete_stage) ||
-    null;
+    isLastStep && form.slug === "initial-lead-capture"
+      ? "viewed_application"
+      : stepOutcomes[String(stepIndex)] ||
+        (isLastStep && form.on_complete_stage) ||
+        null;
 
   // Round 3 R3-10: stage-transition failure used to swallow the error
   // and return ok:true, hiding from the operator that the drip never

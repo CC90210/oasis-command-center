@@ -54,12 +54,16 @@ export type StageMeta = {
 // they were absent from the lead.stage enum). Funded leads still show under
 // `funded`; their renewal tracking lives on the Renewals page.
 export const LEAD_PIPELINE_STAGES: StageMeta[] = [
-  { key: "intent_inquiry_submitted", label: "Intent Inquiry Submitted", bg: "#0E9AA7", fg: "#FFFFFF" },
+  // Change #1 (Adon, lead status defs 2026-06-19): "Intent Inquiry" = the
+  // merchant OPENED the first application (initial-lead-capture) but did NOT
+  // complete it. Set on form OPEN in /api/forms/view. "Viewed" = COMPLETED
+  // the first app (set on form submit). The two are mutually exclusive.
+  { key: "intent_inquiry_submitted", label: "Intent Inquiry", bg: "#0E9AA7", fg: "#FFFFFF" },
   { key: "hot_lead",           label: "Hot Lead",           bg: "#C0842F", fg: "#FFFFFF" },
   { key: "missing_info",       label: "Missing Info",       bg: "#3978BE", fg: "#FFFFFF" },
   { key: "follow_up",          label: "Follow Up",          bg: "#8A6A3B", fg: "#FFFFFF" },
   { key: "sent_application",   label: "Sent Application",   bg: "#7057A7", fg: "#FFFFFF" },
-  { key: "viewed_application", label: "Viewed Application", bg: "#2E8392", fg: "#FFFFFF" },
+  { key: "viewed_application", label: "Viewed", bg: "#2E8392", fg: "#FFFFFF" },
   { key: "signed_application", label: "Signed Application", bg: "#32876B", fg: "#FFFFFF" },
   { key: "ghost",              label: "Ghost",              bg: "#6F6F75", fg: "#FFFFFF" },
   { key: "default",            label: "Default",            bg: "#62666F", fg: "#FFFFFF" },
