@@ -51,6 +51,7 @@ import { notifyOasisFunnelSubmission } from "@/lib/forms/oasis-funnel-notify";
 import { buildOasisLeadPatch } from "@/lib/forms/oasis-funnel-format";
 import { OASIS_FUNNEL_SLUG, OASIS_FUNNEL_TENANT_ID } from "@/lib/forms/oasis-funnel-seed";
 import { maybeGenerateApplicationDocument } from "@/lib/forms/application-document";
+import { sendSunbizLeadEvent } from "@/lib/notify/sunbiz-events";
 import { mintFormLinkBySlug } from "@/lib/forms/agent-routing";
 import { upsertApplicationFromFormStep } from "@/lib/forms/application-upsert";
 import { resolveRepAssignment, mintFullApplicationLink, findExistingLead } from "@/lib/forms/agent-routing";
@@ -615,6 +616,23 @@ export async function POST(req: NextRequest) {
       leadId: link.lead_id,
       docType: uploadedDocs[uploadedDocs.length - 1].doc_type,
     });
+    // Batch 4 hook (c): bank-statements uploaded → 🔵 alert the owner + admins.
+    // Gated to the funding tenant + the bank/full-application forms.
+    if (
+      isFundingTenant(link.tenant) &&
+      (form.slug === "bank-statement-upload" || form.slug === "full-application")
+    ) {
+      const bankFileCount = uploadedDocs.length;
+      after(() =>
+        sendSunbizLeadEvent({
+          db,
+          tenantId: form.tenant_id,
+          leadId: link.lead_id,
+          kind: "bank_statements",
+          extra: { file_count: bankFileCount },
+        }),
+      );
+    }
   }
 
   // form_submissions.file_attachments is derived SOLELY from
@@ -869,6 +887,16 @@ export async function POST(req: NextRequest) {
         origin,
       }),
     );
+    // Batch 4 hook (a): first application → 🟢 alert owner + admins.
+    after(() =>
+      sendSunbizLeadEvent({
+        db,
+        tenantId: form.tenant_id,
+        leadId: link.lead_id,
+        kind: "first_application",
+        extra: payload,
+      }),
+    );
   } else {
     await maybeQueueResumeEmail({
       db,
@@ -893,6 +921,16 @@ export async function POST(req: NextRequest) {
         form: { id: form.id, tenant_id: form.tenant_id, slug: form.slug },
         link: { tenant: link.tenant, lead_id: link.lead_id },
         ip: ipHeader,
+      }),
+    );
+    // Batch 4 hook (b): second/full application → 🟡 alert owner + admins.
+    after(() =>
+      sendSunbizLeadEvent({
+        db,
+        tenantId: form.tenant_id,
+        leadId: link.lead_id,
+        kind: "second_application",
+        extra: payload,
       }),
     );
   }
