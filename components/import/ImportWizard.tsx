@@ -41,6 +41,7 @@ import {
   remapWithOverride,
   type ParseResult,
 } from "@/lib/import/csv-parser";
+import { combineCsvTexts } from "@/lib/csv-combine";
 
 type ImportResponse = {
   ok: boolean;
@@ -89,6 +90,7 @@ function IconFor({ name }: { name: EntityDefinition["icon"] }) {
 export function ImportWizard() {
   const [step, setStep] = useState<Step>("pick");
   const [entityKey, setEntityKey] = useState<string | null>(null);
+  const [dragging, setDragging] = useState(false);
   const [csv, setCsv] = useState<string>("");
   const [parsed, setParsed] = useState<ParseResult | null>(null);
   const [defaultSource, setDefaultSource] = useState("csv_import");
@@ -191,14 +193,25 @@ export function ImportWizard() {
 
   // ---- handlers ----
   async function handleFile(file: File) {
-    if (!entity) return;
-    if (file.size > 25 * 1024 * 1024) {
-      setError("File is over 25 MB. Split it into smaller chunks.");
+    await handleFiles([file]);
+  }
+
+  // Multi-file import (2026-06-19): operators routinely split an export into
+  // several CSVs and want to drag/select them all at once. Read every file and
+  // concatenate the data rows under one header (repeated identical headers are
+  // dropped) so they import as a single combined batch through the normal
+  // parse → preview → dedupe pipeline.
+  async function handleFiles(files: File[]) {
+    if (!entity || files.length === 0) return;
+    const oversize = files.find((f) => f.size > 25 * 1024 * 1024);
+    if (oversize) {
+      setError(`"${oversize.name}" is over 25 MB. Split it into smaller chunks.`);
       return;
     }
-    const text = await file.text();
-    setCsv(text);
-    setParsed(parseImportCsv(text, entity));
+    const texts = await Promise.all(files.map((f) => f.text()));
+    const combined = combineCsvTexts(texts);
+    setCsv(combined);
+    setParsed(parseImportCsv(combined, entity));
     setError(null);
     setStep("preview");
   }
@@ -343,21 +356,38 @@ export function ImportWizard() {
           <input
             ref={fileInputRef}
             type="file"
+            multiple
             accept=".csv,text/csv,text/plain,.tsv"
             className="hidden"
             onChange={(e) => {
-              const f = e.target.files?.[0];
-              if (f) void handleFile(f);
+              const fs = Array.from(e.target.files ?? []);
+              if (fs.length) void handleFiles(fs);
+              e.target.value = ""; // allow re-selecting the same file(s)
             }}
           />
 
           <button
             onClick={() => fileInputRef.current?.click()}
-            className="w-full rounded-xl border border-dashed border-bg-border hover:border-accent/40 bg-bg-elev/30 hover:bg-bg-elev/50 p-10 transition-colors flex flex-col items-center gap-3"
+            onDragOver={(e) => {
+              e.preventDefault();
+              setDragging(true);
+            }}
+            onDragLeave={() => setDragging(false)}
+            onDrop={(e) => {
+              e.preventDefault();
+              setDragging(false);
+              const fs = Array.from(e.dataTransfer?.files ?? []);
+              if (fs.length) void handleFiles(fs);
+            }}
+            className={`w-full rounded-xl border border-dashed p-10 transition-colors flex flex-col items-center gap-3 ${
+              dragging
+                ? "border-accent bg-accent/10"
+                : "border-bg-border hover:border-accent/40 bg-bg-elev/30 hover:bg-bg-elev/50"
+            }`}
           >
             <Upload className="w-8 h-8 text-fg-dim" />
             <div className="text-sm text-fg-muted">
-              Drop your CSV (up to 25 MB, 5 000 rows) — or click to browse
+              Drop one or more CSVs here — or click to browse (select multiple to combine)
             </div>
           </button>
 

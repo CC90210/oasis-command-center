@@ -37,6 +37,7 @@ import {
   Users,
   Trash2,
 } from "lucide-react";
+import { combineCsvTexts } from "@/lib/csv-combine";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -687,8 +688,15 @@ export function ColdListImportClient({ tenantSlug }: { tenantSlug: string }) {
   );
 
   async function handleFileUpload(file: File) {
-    const text = await file.text();
-    setCsvText(text);
+    await handleFilesUpload([file]);
+  }
+
+  // Multi-file (2026-06-19): operators drag/select several CSVs at once; combine
+  // them into the textarea buffer (repeated headers dropped) as one batch.
+  async function handleFilesUpload(files: File[]) {
+    if (files.length === 0) return;
+    const texts = await Promise.all(files.map((f) => f.text()));
+    setCsvText(combineCsvTexts(texts));
     setImportResult(null);
     setImportError(null);
   }
@@ -850,8 +858,8 @@ export function ColdListImportClient({ tenantSlug }: { tenantSlug: string }) {
             onDragOver={(e) => e.preventDefault()}
             onDrop={(e) => {
               e.preventDefault();
-              const f = e.dataTransfer.files?.[0];
-              if (f) void handleFileUpload(f);
+              const fs = Array.from(e.dataTransfer?.files ?? []);
+              if (fs.length) void handleFilesUpload(fs);
             }}
           >
             <textarea
@@ -871,14 +879,16 @@ export function ColdListImportClient({ tenantSlug }: { tenantSlug: string }) {
           <div className="flex items-center gap-3 flex-wrap">
             <label className="inline-flex items-center gap-2 text-xs text-fg-muted cursor-pointer hover:text-fg">
               <Upload className="w-3.5 h-3.5" />
-              <span>Upload .csv</span>
+              <span>Upload .csv (one or more)</span>
               <input
                 type="file"
+                multiple
                 accept=".csv,text/csv"
                 className="hidden"
                 onChange={(e) => {
-                  const f = e.target.files?.[0];
-                  if (f) void handleFileUpload(f);
+                  const fs = Array.from(e.target.files ?? []);
+                  if (fs.length) void handleFilesUpload(fs);
+                  e.target.value = "";
                 }}
               />
             </label>
