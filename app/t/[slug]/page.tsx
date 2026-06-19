@@ -6,6 +6,7 @@ import { ManifestTable } from "@/components/manifest/ManifestTable";
 import { ManifestKanban } from "@/components/manifest/ManifestKanban";
 import { ManifestMarkdown } from "@/components/manifest/ManifestMarkdown";
 import { ManifestDashboard } from "@/components/manifest/ManifestDashboard";
+import { LeadDetailDrawer } from "@/components/leads/LeadDetailDrawer";
 import { getManifest, manifestExists } from "@/lib/manifest/loader";
 import { resolveDataTenant } from "@/lib/manifest/tenant-scope";
 import { CATEGORY_LABELS } from "@/lib/agents/library";
@@ -24,10 +25,13 @@ export const dynamic = "force-dynamic";
  */
 export default async function TenantLandingPage({
   params,
+  searchParams,
 }: {
   params: Promise<{ slug: string }>;
+  searchParams?: Promise<{ lead?: string; application?: string }>;
 }) {
   const { slug } = await params;
+  const sp = (await searchParams) || {};
   const normalised = slug.toLowerCase();
   if (!(await manifestExists(normalised))) notFound();
 
@@ -36,13 +40,32 @@ export default async function TenantLandingPage({
   // hijacking the OASIS operator into the SunBiz Command Center on login.
   await requireTenantPreviewAccess(normalised);
 
+  // SunBiz lead-drawer triggers — the SAME ?lead=/?application= mechanism the
+  // catch-all (/t/[slug]/[...path]) uses (see that file's UUID_RE_DRAWER parse).
+  // Without this, the bare tenant root (where the dashboard renders) ignored
+  // ?lead= entirely, so the dashboard's "most urgent leads" rows — which link
+  // to /t/<slug>?lead=<id> — were dead clicks. Only honored on the SunBiz slug.
+  const UUID_RE_DRAWER = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  const rawLead = typeof sp.lead === "string" ? sp.lead : null;
+  const rawApp = typeof sp.application === "string" ? sp.application : null;
+  const drawerLeadId = rawLead && UUID_RE_DRAWER.test(rawLead) ? rawLead : null;
+  const drawerAppId = rawApp && UUID_RE_DRAWER.test(rawApp) ? rawApp : null;
+
   const manifest = await getManifest(normalised);
   const rootPage =
     manifest.pages?.find((p) => p.path === "" || p.path === "/") ||
     null;
 
   if (rootPage) {
-    return <RootPageRenderer slug={normalised} page={rootPage} manifest={manifest} />;
+    return (
+      <RootPageRenderer
+        slug={normalised}
+        page={rootPage}
+        manifest={manifest}
+        drawerLeadId={drawerLeadId}
+        drawerAppId={drawerAppId}
+      />
+    );
   }
 
   return <GenericSummary slug={normalised} manifest={manifest} />;
@@ -52,10 +75,14 @@ async function RootPageRenderer({
   slug,
   page,
   manifest,
+  drawerLeadId,
+  drawerAppId,
 }: {
   slug: string;
   page: NonNullable<Awaited<ReturnType<typeof getManifest>>["pages"]>[number];
   manifest: Awaited<ReturnType<typeof getManifest>>;
+  drawerLeadId: string | null;
+  drawerAppId: string | null;
 }) {
   const user = await getSessionUser();
   const service = getServiceSupabase();
@@ -98,6 +125,17 @@ async function RootPageRenderer({
         if (!entity) return <UnknownEntity name={page.entity} />;
         return <ManifestKanban tenantSlug={slug} tenantId={dataTenantId} entity={entity} page={page} />;
       })()}
+
+      {/* Lead/application detail drawer over the dashboard — same ?lead=/
+          ?application= mechanism + gate as the catch-all route, so the
+          dashboard's "most urgent leads" rows open the existing right-side
+          drawer instead of dead-ending. Lead takes precedence over app. */}
+      {slug === "sun" && !isPreview && drawerLeadId && (
+        <LeadDetailDrawer tenantSlug={slug} recordId={drawerLeadId} entity="lead" />
+      )}
+      {slug === "sun" && !isPreview && !drawerLeadId && drawerAppId && (
+        <LeadDetailDrawer tenantSlug={slug} recordId={drawerAppId} entity="application" />
+      )}
     </div>
   );
 }

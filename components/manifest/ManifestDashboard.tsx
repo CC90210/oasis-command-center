@@ -834,7 +834,12 @@ function RenewalsDueSoon({ slug, fundedDeals }: { slug: string; fundedDeals: Ten
             return (
               <li key={deal.id}>
                 <Link
-                  href={`/t/${slug}/funded-deals/${deal.id}`}
+                  // funded-deals is de-navved (renewals are computed from
+                  // funded_deals on the Renewals page); the per-deal route
+                  // lands on a raw field-edit form. Point at the Renewals
+                  // page — consistent with this card's "All renewals" link
+                  // and the "Renewals due" KPI card.
+                  href={`/t/${slug}/renewals`}
                   className="flex items-center justify-between gap-3 py-2 px-1 hover:bg-bg-elev/40 rounded transition-colors"
                 >
                   <div className="min-w-0">
