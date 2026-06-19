@@ -28,6 +28,9 @@ export const LEAD_DOC_TYPES: { key: string; label: string; required: boolean }[]
   // Auto-generated on full-application completion (signature + all fields →
   // PDF). See lib/forms/application-document.ts.
   { key: "final_application_form", label: "Final Application Form", required: false },
+  // Standalone e-signature image saved on full-application submit (Batch 7.2 —
+  // the DocuSign replacement; also embedded in the application PDF).
+  { key: "applicant_signature", label: "Applicant signature", required: false },
   { key: "second_application_form", label: "Second application form", required: false },
   { key: "underwriting_docs", label: "Underwriting docs", required: false },
   { key: "portal_docs", label: "Portal docs", required: false },

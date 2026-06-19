@@ -892,6 +892,7 @@ export async function POST(req: NextRequest) {
         db,
         form: { id: form.id, tenant_id: form.tenant_id, slug: form.slug },
         link: { tenant: link.tenant, lead_id: link.lead_id },
+        ip: ipHeader,
       }),
     );
   }

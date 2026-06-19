@@ -23,6 +23,8 @@ import { mapApplicationFields, generateApplicationPdf } from "@/lib/forms/applic
 
 /** doc_type for the generated application — matches lib/lead-doc-display.ts. */
 const APPLICATION_DOC_TYPE = "final_application_form";
+/** doc_type for the standalone e-signature image (Batch 7.2 — DocuSign replacement). */
+const SIGNATURE_DOC_TYPE = "applicant_signature";
 /** agent_source for the doc-generation audit trail (resolves to Helios in the
  *  activity feed, consistent with the form-intake family). */
 const DOC_SOURCE = "form_intake_signed_application";
@@ -33,6 +35,8 @@ export type MaybeGenerateApplicationInput = {
   form: { id: string; tenant_id: string; slug: string };
   /** Verified form-link payload (tenant slug, lead_id). */
   link: { tenant: string; lead_id: string };
+  /** Client IP at submit (for the signature audit trail). Optional. */
+  ip?: string | null;
 };
 
 export async function maybeGenerateApplicationDocument(
@@ -172,6 +176,53 @@ export async function maybeGenerateApplicationDocument(
         /* best-effort marker */
       }
       return;
+    }
+
+    // Batch 7.2: persist the e-signature as its OWN retrievable file in Storage
+    // (CC's DocuSign replacement — the signature must be accessible later, not
+    // only embedded in the PDF). Best-effort: never undoes the application PDF.
+    // The top-of-function idempotency guard means this only runs on first
+    // generation, so no separate dedup is needed.
+    if (signatureDataUri) {
+      try {
+        const m = signatureDataUri.match(/^data:(image\/[a-zA-Z0-9.+-]+);base64,(.+)$/s);
+        if (m) {
+          const sigMime = m[1];
+          const sigBuf = Buffer.from(m[2], "base64");
+          const ext = sigMime.includes("jpeg") || sigMime.includes("jpg") ? "jpg" : "png";
+          if (sigBuf.length > 0 && sigBuf.length <= 5 * 1024 * 1024) {
+            const sig = await uploadLeadDocument({
+              tenantId: form.tenant_id,
+              leadId: link.lead_id,
+              filename: `SunBiz-Signature-${safeBusiness}-${signedAt.slice(0, 10)}.${ext}`,
+              mimeType: sigMime,
+              bytes: sigBuf,
+              sizeBytes: sigBuf.length,
+              docType: SIGNATURE_DOC_TYPE,
+              uploadedBy: "form_intake",
+              source: "form_intake_signature",
+              extraMetadata: {
+                form_id: form.id,
+                signed_name: signatureName || null,
+                signed_at: signedAt,
+                signed_ip: input.ip || null,
+                application_document_id: up.document.id,
+              },
+            });
+            if (!sig.ok) {
+              console.error("[forms.submit.app_doc] signature file upload failed", {
+                lead_id: link.lead_id,
+                error: sig.error,
+              });
+            }
+          }
+        }
+      } catch (err) {
+        console.error("[forms.submit.app_doc] signature persist threw", {
+          lead_id: link.lead_id,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
     }
 
     // Timeline entry so the merchant's profile reflects the generation in the

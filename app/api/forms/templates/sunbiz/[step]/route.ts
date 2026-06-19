@@ -398,14 +398,9 @@ const TEMPLATES: Record<
             max_file_mb: 25,
             help: "Drag in your last 3 months of business bank statements (6+ if you have two accounts) — up to 12 files. PDF or a clear photo.",
           },
-          {
-            name: "confirmation",
-            label:
-              "I confirm these are the most recent 3 months of business bank statements.",
-            type: "select",
-            required: true,
-            options: [{ value: "confirmed", label: "Confirmed" }],
-          },
+          // Batch 7.3: Form 3 is upload-only. The attestation/e-signature now
+          // lives on Form 2 (full-application), so the old yes/no "confirmation"
+          // select is removed here.
         ],
       },
     ],
