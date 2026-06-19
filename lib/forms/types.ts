@@ -30,10 +30,12 @@ export type FormFieldType =
   | "currency"
   | "date"
   | "select"
+  | "combobox"
   | "multiselect"
   | "address"
   | "signature"
   | "file_upload"
+  | "file_upload_multi"
   | "hidden"
   | "rating";
 
@@ -83,10 +85,21 @@ export type FormField = {
   max?: number;
   /** For text / textarea — max character length. */
   maxLength?: number;
-  /** For file_upload — accepted MIME types (e.g. ["application/pdf"]). */
+  /** For file_upload / file_upload_multi — accepted MIME types (e.g. ["application/pdf"]). */
   accept?: string[];
+  /** For file_upload_multi — max number of files (default 12). */
+  max_files?: number;
+  /** For file_upload_multi — per-file size cap in MB (default 25). */
+  max_file_mb?: number;
   /** For hidden fields — the static value written into the submission. */
   value?: string;
+  /**
+   * Pre-fill this field's value from ANOTHER field's answer (by name) when the
+   * field is first shown and still empty — e.g. signature_name defaults to
+   * owner_full_name so the applicant doesn't retype their legal name. The user
+   * can still edit it. The source field may live on any step.
+   */
+  prefill_from?: string;
   /** Conditional display — show this field only when the predicate holds. */
   show_if?: FormShowIf;
 };
@@ -164,10 +177,12 @@ const VALID_FIELD_TYPES: ReadonlySet<FormFieldType> = new Set([
   "currency",
   "date",
   "select",
+  "combobox",
   "multiselect",
   "address",
   "signature",
   "file_upload",
+  "file_upload_multi",
   "hidden",
   "rating",
 ]);
@@ -254,8 +269,17 @@ function parseField(v: unknown, path: string): FormField {
     min: typeof v.min === "number" ? v.min : undefined,
     max: typeof v.max === "number" ? v.max : undefined,
     maxLength: typeof v.maxLength === "number" ? v.maxLength : undefined,
+    max_files: typeof v.max_files === "number" ? v.max_files : undefined,
+    max_file_mb: typeof v.max_file_mb === "number" ? v.max_file_mb : undefined,
     value: optionalString(v, "value"),
   };
+  const prefillFrom = optionalString(v, "prefill_from");
+  if (prefillFrom !== undefined) {
+    if (!FIELD_NAME_RE.test(prefillFrom)) {
+      throw new FormDefinitionError(`${path}.prefill_from`, `must match /^[a-z][a-z0-9_]{0,62}$/`);
+    }
+    field.prefill_from = prefillFrom;
+  }
   if (Array.isArray(v.options)) {
     field.options = v.options.map((o, idx) => {
       if (!isStringRecord(o)) {

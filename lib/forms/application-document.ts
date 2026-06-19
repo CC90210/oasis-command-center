@@ -116,27 +116,61 @@ export async function maybeGenerateApplicationDocument(
       business.replace(/[^A-Za-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 60) || "application";
     const filename = `SunBiz-Application-${safeBusiness}-${signedAt.slice(0, 10)}.pdf`;
 
-    const up = await uploadLeadDocument({
-      tenantId: form.tenant_id,
-      leadId: link.lead_id,
-      filename,
-      mimeType: "application/pdf",
-      bytes: buf,
-      sizeBytes: buf.length,
-      docType: APPLICATION_DOC_TYPE,
-      uploadedBy: "form_intake",
-      source: DOC_SOURCE,
-      extraMetadata: {
-        form_id: form.id,
-        generated_at: signedAt,
-        signed_name: signatureName || null,
-      },
-    });
-    if (!up.ok) {
-      console.error("[forms.submit.app_doc] upload failed", {
-        lead_id: link.lead_id,
-        error: up.error,
+    // Retry the file step. This runs in Next `after()` (fire-once, no retry), so
+    // a transient Storage/DB blip would otherwise silently lose the signed
+    // application PDF — the worst, invisible failure mode. Up to 3 attempts with
+    // a short backoff; the bytes are already generated so a retry is cheap.
+    let up: Awaited<ReturnType<typeof uploadLeadDocument>> | null = null;
+    const MAX_ATTEMPTS = 3;
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+      const result = await uploadLeadDocument({
+        tenantId: form.tenant_id,
+        leadId: link.lead_id,
+        filename,
+        mimeType: "application/pdf",
+        bytes: buf,
+        sizeBytes: buf.length,
+        docType: APPLICATION_DOC_TYPE,
+        uploadedBy: "form_intake",
+        source: DOC_SOURCE,
+        extraMetadata: {
+          form_id: form.id,
+          generated_at: signedAt,
+          signed_name: signatureName || null,
+        },
       });
+      if (result.ok) {
+        up = result;
+        break;
+      }
+      console.error(`[forms.submit.app_doc] upload failed (attempt ${attempt}/${MAX_ATTEMPTS})`, {
+        lead_id: link.lead_id,
+        error: result.error,
+      });
+      if (attempt < MAX_ATTEMPTS) {
+        await new Promise((r) => setTimeout(r, 400 * attempt));
+      }
+    }
+    if (!up) {
+      // All attempts failed. Leave a visible timeline marker so the operator
+      // knows to regenerate from the drawer rather than assuming it's filed.
+      try {
+        const failNote = "Application PDF generation failed after retries — regenerate from the lead.";
+        await db.from("lead_interactions").insert({
+          tenant_id: form.tenant_id,
+          lead_id: link.lead_id,
+          type: "application_generated",
+          channel: "system",
+          direction: "outbound",
+          agent_source: DOC_SOURCE,
+          subject: "Application PDF generation failed",
+          content: failNote,
+          content_preview: failNote,
+          metadata: { status: "failed", doc_type: APPLICATION_DOC_TYPE, form_id: form.id },
+        });
+      } catch {
+        /* best-effort marker */
+      }
       return;
     }
 

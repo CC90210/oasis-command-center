@@ -42,7 +42,7 @@ import {
 import { isFieldVisible, buildAnswerContext } from "@/lib/forms/visibility";
 import { rateLimit } from "@/lib/rate-limit";
 import { createRecord, updateRecord, RecordsError } from "@/lib/manifest/data";
-import { uploadLeadDocument } from "@/lib/lead-documents";
+import { uploadLeadDocument, registerLeadDocument, classifyDocTypeByFilename } from "@/lib/lead-documents";
 import { dispatchLeadStageEvent } from "@/lib/lead-stage-dispatcher";
 import { resolvePublicForm } from "@/lib/forms/public-resolver";
 import { maybeQueueResumeEmail } from "@/lib/forms/maybe-queue-resume";
@@ -345,6 +345,23 @@ export async function POST(req: NextRequest) {
           { status: 400 },
         );
       }
+    } else if (field.type === "file_upload_multi") {
+      // Satisfied by a non-empty array of uploaded descriptors (the client
+      // uploaded each to a signed URL and reports {storage_path,...}). The
+      // descriptors are re-validated + registered below.
+      const ok =
+        Array.isArray(v) &&
+        v.length > 0 &&
+        v.some(
+          (d) =>
+            d && typeof d === "object" && typeof (d as { storage_path?: unknown }).storage_path === "string",
+        );
+      if (!ok) {
+        return NextResponse.json(
+          { ok: false, error: "missing_required_file", field: field.name },
+          { status: 400 },
+        );
+      }
     } else {
       const present =
         (typeof v === "string" && v.trim().length > 0) ||
@@ -511,6 +528,80 @@ export async function POST(req: NextRequest) {
         reason: err instanceof Error ? err.message : "unknown",
       });
     }
+  }
+
+  // Direct-to-Storage multi-file fields (file_upload_multi). The client uploaded
+  // each file straight to Storage via a server-minted signed URL
+  // (/api/forms/upload-url) and reports {storage_path, filename, mime_type,
+  // size_bytes} descriptors in payload[field]. Register each as a lead_document.
+  // registerLeadDocument re-validates the path is inside this tenant+lead prefix
+  // AND that the object actually exists + reads its real size — so a forged or
+  // foreign-tenant descriptor (the reason inline client attachments are ignored
+  // above) is rejected here too. Caps + MIME allowlist mirror the inline path.
+  const DEFAULT_MULTI_MIME = ["application/pdf", "image/png", "image/jpeg", "image/webp", "image/heic", "image/heif"];
+  for (const field of currentStepFields.values()) {
+    if (field.type !== "file_upload_multi") continue;
+    const raw = payload[field.name];
+    if (!Array.isArray(raw)) {
+      if (raw !== undefined) delete payload[field.name];
+      continue;
+    }
+    const maxFiles = typeof field.max_files === "number" && field.max_files > 0 ? field.max_files : 12;
+    const allowedMime = field.accept && field.accept.length > 0 ? field.accept : DEFAULT_MULTI_MIME;
+    // doc_type follows the field's purpose (e.g. "bank_statements" → the canonical
+    // bank_statements_3mo) so the docs count toward the required-docs tracker.
+    const fieldDocType = classifyDocTypeByFilename(field.name);
+    const cleaned: Array<{ storage_path: string; filename: string; mime_type: string; size_bytes: number }> = [];
+    for (const d of raw.slice(0, maxFiles)) {
+      if (!d || typeof d !== "object") continue;
+      const desc = d as { storage_path?: unknown; filename?: unknown; mime_type?: unknown };
+      const sp = typeof desc.storage_path === "string" ? desc.storage_path : "";
+      const fn = typeof desc.filename === "string" && desc.filename ? desc.filename : "upload";
+      const mt = typeof desc.mime_type === "string" ? desc.mime_type : "";
+      if (!sp) {
+        uploadWarnings.push({ field_name: field.name, reason: "missing_storage_path" });
+        continue;
+      }
+      const mimeOk = allowedMime.some((rule) =>
+        rule.endsWith("/*") ? mt.startsWith(rule.slice(0, -1)) : mt === rule,
+      );
+      if (!mimeOk) {
+        uploadWarnings.push({ field_name: field.name, reason: `mime_not_allowed: ${mt}` });
+        continue;
+      }
+      const reg = await registerLeadDocument({
+        tenantId: form.tenant_id,
+        leadId: link.lead_id,
+        storagePath: sp,
+        filename: fn,
+        mimeType: mt,
+        docType: fieldDocType,
+        uploadedBy: "form_intake",
+        source: "form_intake",
+        extraMetadata: { form_id: form.id, field_name: field.name, step_index: stepIndex },
+      });
+      if (!reg.ok) {
+        uploadWarnings.push({ field_name: field.name, reason: reg.error });
+        continue;
+      }
+      uploadedDocs.push({
+        field_name: field.name,
+        storage_path: reg.document.storage_path,
+        filename: reg.document.filename,
+        mime_type: reg.document.mime_type,
+        size_bytes: reg.document.size_bytes,
+        doc_type: reg.document.doc_type,
+      });
+      cleaned.push({
+        storage_path: reg.document.storage_path,
+        filename: reg.document.filename,
+        mime_type: reg.document.mime_type,
+        size_bytes: reg.document.size_bytes,
+      });
+    }
+    // Persist the server-verified descriptors (drops anything that failed
+    // validation) so form_submissions.payload reflects what actually registered.
+    payload[field.name] = cleaned;
   }
 
   // After all uploads for this step, evaluate stage progression once.

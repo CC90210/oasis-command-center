@@ -24,6 +24,8 @@ import { isFieldVisible } from "@/lib/forms/visibility";
 import { DEFAULT_PRIMARY_COLOR, DEFAULT_ACCENT_COLOR, getContrastingTextColor } from "@/lib/forms/themes";
 import { SignatureField } from "./SignaturePad";
 import { AddressAutocompleteField } from "./AddressAutocompleteField";
+import { ComboboxField } from "./ComboboxField";
+import { MultiFileDropzone, type UploadedDescriptor } from "./MultiFileDropzone";
 
 type Props = {
   step: FormStep;
@@ -40,6 +42,9 @@ type Props = {
   onBack?: () => void;
   /** Override the CTA label. Falls back to step.cta_label, then "Continue". */
   ctaLabelOverride?: string;
+  /** HMAC form token — required by file_upload_multi fields to mint signed
+   *  upload URLs. Null in builder preview / before an anonymous token is minted. */
+  uploadToken?: string | null;
 };
 
 export function FormRenderer({
@@ -54,6 +59,7 @@ export function FormRenderer({
   showBack,
   onBack,
   ctaLabelOverride,
+  uploadToken,
 }: Props) {
   const primary = branding?.primary_color || DEFAULT_PRIMARY_COLOR;
   const accent = branding?.accent_color || DEFAULT_ACCENT_COLOR;
@@ -85,6 +91,7 @@ export function FormRenderer({
               value={values[field.name]}
               error={errors[field.name]}
               onChange={(v) => onFieldChange(field.name, v)}
+              uploadToken={uploadToken}
             />
           ))}
       </div>
@@ -139,11 +146,13 @@ function FieldRow({
   value,
   error,
   onChange,
+  uploadToken,
 }: {
   field: FormField;
   value: unknown;
   error: string | undefined;
   onChange: (v: unknown) => void;
+  uploadToken?: string | null;
 }) {
   const inputId = useId();
 
@@ -160,7 +169,7 @@ function FieldRow({
         {field.required && <span className="text-rose-400 ml-1">*</span>}
       </label>
 
-      {renderInput(field, inputId, value, onChange)}
+      {renderInput(field, inputId, value, onChange, uploadToken)}
 
       {field.help && <p className="text-[11px] text-fg-dim">{field.help}</p>}
       {error && <p className="text-[11px] text-rose-400">{error}</p>}
@@ -173,6 +182,7 @@ function renderInput(
   inputId: string,
   value: unknown,
   onChange: (v: unknown) => void,
+  uploadToken?: string | null,
 ): React.ReactNode {
   const base =
     "w-full rounded-md border border-bg-border bg-bg-elev px-3 py-2 text-sm text-fg focus:outline-none focus:ring-2 focus:ring-accent/40 focus:border-accent transition-colors placeholder-fg-dim";
@@ -269,6 +279,34 @@ function renderInput(
             </option>
           ))}
         </select>
+      );
+
+    case "combobox":
+      // Pick-from-list OR type-your-own (Industry). Stores the preset slug when
+      // picked, raw text when typed — see ComboboxField.
+      return (
+        <ComboboxField
+          inputId={inputId}
+          value={value}
+          options={field.options || []}
+          placeholder={field.placeholder}
+          onChange={(v) => onChange(v)}
+        />
+      );
+
+    case "file_upload_multi":
+      // Multi-file drag-and-drop, direct-to-Supabase-Storage (bank statements).
+      // Value = array of uploaded descriptors; submit route registers them.
+      return (
+        <MultiFileDropzone
+          inputId={inputId}
+          accept={field.accept}
+          maxFiles={field.max_files}
+          maxFileMb={field.max_file_mb}
+          value={value}
+          onChange={(v: UploadedDescriptor[]) => onChange(v)}
+          uploadToken={uploadToken ?? null}
+        />
       );
 
     case "multiselect": {

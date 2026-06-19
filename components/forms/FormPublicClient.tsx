@@ -154,6 +154,25 @@ export function FormPublicClient({
     [currentStep],
   );
 
+  // Pre-fill (Fix 1.1): when a step is shown, seed any field that declares
+  // prefill_from from the already-answered source field if it's still empty —
+  // e.g. signature_name defaults to owner_full_name so the applicant doesn't
+  // retype their legal name. The user can still edit it.
+  useEffect(() => {
+    const cur = stepValues[currentStep] || {};
+    for (const f of step.fields) {
+      if (!f.prefill_from) continue;
+      const existing = cur[f.name];
+      if (existing !== undefined && existing !== null && existing !== "") continue;
+      const src = mergedValues[f.prefill_from];
+      if (typeof src === "string" && src.trim()) {
+        setFieldValue(f.name, src);
+      }
+    }
+    // Seed only on step entry — mergedValues is current at that point.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentStep]);
+
   const validate = useCallback((): boolean => {
     const next: Partial<Record<string, string>> = {};
     for (const field of step.fields) {
@@ -427,6 +446,7 @@ export function FormPublicClient({
                 ctaLabelOverride={
                   currentStep === steps.length - 1 ? step.cta_label || "Submit" : undefined
                 }
+                uploadToken={token}
               />
             </>
           )}

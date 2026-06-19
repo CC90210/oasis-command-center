@@ -195,9 +195,9 @@ const TEMPLATES: Record<
           {
             name: "industry",
             label: "Industry",
-            type: "select",
+            type: "combobox",
             required: true,
-            help: "Pick the closest match — routes your file to lenders that fund your industry.",
+            help: "Pick the closest match — or type your own if it isn't listed.",
             options: SUNBIZ_INDUSTRIES.map((v) => ({ value: v, label: titleCase(v) })),
           },
         ],
@@ -299,30 +299,18 @@ const TEMPLATES: Record<
         key: "documents",
         title: "Upload your documents",
         description:
-          "Three required files. PDF preferred. Each can be uploaded individually.",
+          "Add your last 3 months of business bank statements. Two accounts? Add all of them.",
         cta_label: "Continue",
         fields: [
           {
-            name: "bank_statement_1",
-            label: "Bank statement — month 1 (most recent)",
-            type: "file_upload",
+            name: "bank_statements",
+            label: "Bank statements — last 3 months",
+            type: "file_upload_multi",
             required: true,
             accept: ["application/pdf", "image/*"],
-            help: "Most recent month of your business bank account.",
-          },
-          {
-            name: "bank_statement_2",
-            label: "Bank statement — month 2",
-            type: "file_upload",
-            required: true,
-            accept: ["application/pdf", "image/*"],
-          },
-          {
-            name: "bank_statement_3",
-            label: "Bank statement — month 3",
-            type: "file_upload",
-            required: true,
-            accept: ["application/pdf", "image/*"],
+            max_files: 12,
+            max_file_mb: 25,
+            help: "Drag in your last 3 months of business bank statements. Have two bank accounts? Add statements for all of them (6+ files) — up to 12. PDF or a clear photo.",
           },
           {
             name: "drivers_license",
@@ -363,6 +351,9 @@ const TEMPLATES: Record<
             type: "text",
             required: true,
             placeholder: "Full name as it appears on your ID",
+            // Defaults to the legal name captured on the Owner step so the
+            // applicant doesn't retype it (Fix 1.1). Still editable.
+            prefill_from: "owner_full_name",
           },
           {
             name: "attestation",
@@ -394,30 +385,18 @@ const TEMPLATES: Record<
         key: "upload",
         title: "Upload your bank statements",
         description:
-          "Please upload the most recent 3 months of your business bank statements. PDF preferred.",
+          "Add your last 3 months of business bank statements. Two accounts? Add all of them.",
         cta_label: "Submit",
         fields: [
           {
-            name: "statement_1",
-            label: "Bank statement — month 1 (most recent)",
-            type: "file_upload",
+            name: "bank_statements",
+            label: "Bank statements — last 3 months",
+            type: "file_upload_multi",
             required: true,
-            accept: ["application/pdf"],
-            help: "PDF of your most recent month.",
-          },
-          {
-            name: "statement_2",
-            label: "Bank statement — month 2",
-            type: "file_upload",
-            required: true,
-            accept: ["application/pdf"],
-          },
-          {
-            name: "statement_3",
-            label: "Bank statement — month 3",
-            type: "file_upload",
-            required: true,
-            accept: ["application/pdf"],
+            accept: ["application/pdf", "image/*"],
+            max_files: 12,
+            max_file_mb: 25,
+            help: "Drag in your last 3 months of business bank statements (6+ if you have two accounts) — up to 12 files. PDF or a clear photo.",
           },
           {
             name: "confirmation",
