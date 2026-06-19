@@ -9,7 +9,7 @@
  * the doc bodies in-place + edit them inline.
  */
 
-export type DocAgent = "bravo" | "atlas" | "maven" | "aura" | "hermes";
+export type DocAgent = "bravo" | "atlas" | "maven" | "aura" | "hermes" | "lex";
 export type DocPillar = "ceo" | "cfo" | "cmo" | "ops" | "legal";
 
 export type BusinessDoc = {
@@ -30,7 +30,7 @@ export const DOC_PILLARS: Record<DocPillar, { label: string; tagline: string; ag
   cfo: { label: "CFO — money + risk", tagline: "P&L, runway, tax, capital allocation", agent: "atlas" },
   cmo: { label: "CMO — brand + funnel", tagline: "Voice, content, ads, positioning", agent: "maven" },
   ops: { label: "Ops — delivery + processes", tagline: "Onboarding, fulfillment, QA, SLAs", agent: "bravo" },
-  legal: { label: "Legal + admin", tagline: "Contracts, terms, IP, incorporations", agent: "bravo" },
+  legal: { label: "Legal + admin", tagline: "Contracts, terms, IP, incorporations", agent: "lex" },
 };
 
 export const BUSINESS_DOCS: BusinessDoc[] = [
@@ -211,7 +211,7 @@ export const BUSINESS_DOCS: BusinessDoc[] = [
   // ── LEGAL ───────────────────────────────────────────────────────
   {
     id: "legal-msa-template",
-    pillar: "legal", owner: "bravo",
+    pillar: "legal", owner: "lex",
     title: "MSA template",
     description: "Master services agreement we use for retainers. Lawyer-reviewed.",
     status: "stub",
@@ -220,7 +220,7 @@ export const BUSINESS_DOCS: BusinessDoc[] = [
   },
   {
     id: "legal-privacy-policy",
-    pillar: "legal", owner: "bravo",
+    pillar: "legal", owner: "lex",
     title: "Privacy policy",
     description: "What data we collect, how we use it, how clients delete it.",
     status: "stub",
@@ -229,7 +229,7 @@ export const BUSINESS_DOCS: BusinessDoc[] = [
   },
   {
     id: "legal-incorporation-checklist",
-    pillar: "legal", owner: "bravo",
+    pillar: "legal", owner: "lex",
     title: "Incorporation + admin checklist",
     description: "Federal incorp, GST/HST registration, business bank, accountant, etc.",
     status: "stub",
