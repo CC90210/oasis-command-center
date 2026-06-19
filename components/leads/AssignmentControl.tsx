@@ -4,11 +4,11 @@
  * AssignmentControl — drawer-footer dropdown that sets
  * tenant_records.data.assigned_to to a tenant member's auth_user_id.
  *
- * Phase 3 of the SunBiz multi-employee personalization plan
- * (2026-05-29). Soft preference / surfacing only — anyone can still
- * act on any deal regardless of who's assigned. This control just
- * promotes the record into the assignee's personal "My active deals"
- * widget on their dashboard.
+ * Phase 3 of the SunBiz multi-employee personalization plan (2026-05-29);
+ * upgraded 2026-06-19 (Batch 2.2). assigned_to is now the lead's OWNER and
+ * drives per-agent visibility (lib/lead-scope) — agents see only leads
+ * assigned to them. Reassigning moves the lead between agents' boards. The
+ * /api/leads/[id]/assign route enforces owner-or-admin server-side.
  *
  * Data flow:
  *   - GET /api/team/members → populates the dropdown options
@@ -114,8 +114,8 @@ export function AssignmentControl({
       </div>
       <div className="flex-1 space-y-1">
         <div className="text-[9.5px] uppercase tracking-wider font-semibold text-fg-dim">
-          Assigned to
-          <span className="ml-1 normal-case text-fg-dim/80 font-normal">(soft preference)</span>
+          Owner
+          <span className="ml-1 normal-case text-fg-dim/80 font-normal">(controls who sees this lead)</span>
         </div>
         <select
           value={value}

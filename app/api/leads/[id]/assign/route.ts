@@ -40,13 +40,10 @@ export async function POST(
   if (!sess.ok) {
     return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
   }
-  // Admin-only (Adon Batch 2.2). Reassignment is how leads move between agents'
-  // scoped boards — leaving it open to any member would let an agent quietly
-  // pull a lead off another agent's board. Owner/admin only; agents see (and
-  // work) their assigned leads but don't redistribute them.
-  if (!sess.isAdmin) {
-    return NextResponse.json({ ok: false, error: "forbidden" }, { status: 403 });
-  }
+  // Authorization is owner-or-admin (Adon Batch 2.2): an ADMIN can reassign any
+  // lead to any user; an AGENT can only reassign a lead they currently OWN (peer
+  // handoff). The owner check happens after we read the record below — an agent
+  // must not be able to pull a lead off another agent's board.
   const tenantId = sess.tenantId;
   const { id: recordId } = await ctx.params;
   if (!recordId || !UUID_RE.test(recordId)) {
@@ -102,16 +99,28 @@ export async function POST(
   }
 
   // Existence + entity-type check — patch_tenant_record_data has tenant
-  // scoping but doesn't restrict entity_type, so we still gate here.
+  // scoping but doesn't restrict entity_type, so we still gate here. Also pull
+  // `data` so we can read the current owner for the owner-or-admin gate.
   const existing = await db
     .from("tenant_records")
-    .select("id, entity_type")
+    .select("id, entity_type, data")
     .eq("tenant_id", tenantId)
     .in("entity_type", ["lead", "application", "funded_deal", "renewal"])
     .eq("id", recordId)
     .maybeSingle();
   if (!existing.data) {
     return NextResponse.json({ ok: false, error: "record_not_found" }, { status: 404 });
+  }
+
+  // Owner-or-admin gate. Admins reassign anything; an agent may only reassign a
+  // lead they currently own. 404 (not 403) for a non-owner agent so the endpoint
+  // doesn't confirm a lead they can't see exists. Fail closed.
+  const currentOwner =
+    typeof (existing.data as { data?: Record<string, unknown> }).data?.assigned_to === "string"
+      ? ((existing.data as { data?: Record<string, unknown> }).data!.assigned_to as string).toLowerCase()
+      : null;
+  if (!sess.isAdmin && currentOwner !== (sess.userId || "").toLowerCase()) {
+    return NextResponse.json({ ok: false, error: "not_found" }, { status: 404 });
   }
 
   // 2026-06-06 (Codex audit self-review extension) — atomic merge via
