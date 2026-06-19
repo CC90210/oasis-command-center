@@ -442,6 +442,7 @@ export default async function TenantCatchAllPage({
         oppStageFilter={oppStageFilter}
         query={query}
         assignedScope={leadScope}
+        canManage={viewer.isAdmin}
       />
       <TenantLeadDrawerMount
         slug={normalised}
@@ -491,6 +492,7 @@ async function PageBody({
   oppStageFilter,
   query,
   assignedScope,
+  canManage,
 }: {
   slug: string;
   tenantId: string | null;
@@ -502,6 +504,8 @@ async function PageBody({
   query: string | null;
   /** Per-agent lead scope: undefined=all, string=assigned_to, null=unassigned. */
   assignedScope: string | null | undefined;
+  /** Owner/admin — unlocks the bulk Select mode on the lead/application board. */
+  canManage: boolean;
 }) {
   switch (page.kind) {
     case "markdown":
@@ -627,6 +631,7 @@ async function PageBody({
           stageFilter={stageFilter}
           query={query}
           assignedScope={assignedScope}
+          canManage={canManage}
         />
       );
     }
@@ -1000,6 +1005,7 @@ async function SingleEntityPipeline({
   stageFilter,
   query,
   assignedScope,
+  canManage,
 }: {
   slug: string;
   tenantId: string | null;
@@ -1009,6 +1015,7 @@ async function SingleEntityPipeline({
   stageFilter: string | null;
   query: string | null;
   assignedScope: string | null | undefined;
+  canManage: boolean;
 }) {
   const stages = entity.name === "lead"
     ? LEAD_PIPELINE_STAGES
@@ -1084,6 +1091,7 @@ async function SingleEntityPipeline({
         stageFilter={stageFilter}
         query={query}
         basePath={page.path}
+        canManage={canManage}
       />
     );
   }

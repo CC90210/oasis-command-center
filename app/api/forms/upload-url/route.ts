@@ -30,17 +30,16 @@ import { sanitizeStorageFilename } from "@/lib/storage-helpers";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-// Coarse gate at the mint step; the submit route enforces the field's exact
-// accept[] list when it registers the object. Keep in sync with the prospect-
-// facing accept set on the bank-statement fields (PDF + phone-photo formats).
-const ALLOWED_MIME = new Set<string>([
-  "application/pdf",
-  "image/png",
-  "image/jpeg",
-  "image/webp",
-  "image/heic",
-  "image/heif",
-]);
+// Coarse gate at the mint step — PDF or ANY image/* (the wildcard every SunBiz
+// file field declares: accept: ['application/pdf','image/*']). It must NOT be
+// stricter than the client-side mimeAllowed() wildcard check or the submit
+// route's per-field accept[] enforcement, else a valid image type the client
+// accepts (image/gif, image/bmp, image/tiff…) passes the browser then 400s here
+// on the signed-URL request (Codex 2026-06-19 LOW-7). The submit route remains
+// the authoritative per-field gate when it registers the object.
+function mintMimeAllowed(mime: string): boolean {
+  return mime === "application/pdf" || /^image\/[a-z0-9.+-]+$/i.test(mime);
+}
 
 type Body = {
   token?: string;
@@ -89,7 +88,7 @@ export async function POST(req: NextRequest) {
   if (!filename) {
     return NextResponse.json({ ok: false, error: "missing_filename" }, { status: 400 });
   }
-  if (!ALLOWED_MIME.has(mime)) {
+  if (!mintMimeAllowed(mime)) {
     return NextResponse.json({ ok: false, error: "mime_not_allowed" }, { status: 400 });
   }
   if (size <= 0 || size > MAX_LEAD_DOC_BYTES) {

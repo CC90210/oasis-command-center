@@ -300,13 +300,13 @@ export function LeadDetailDrawer({
           {!error && !data && (
             <div className="text-xs text-fg-dim italic py-6 text-center">Loading…</div>
           )}
-          {data && activeTab === "activity" && <LeadTimelinePanel leadId={recordId} />}
+          {data && activeTab === "activity" && <LeadTimelinePanel leadId={recordId} entity={entity} />}
           {data && activeTab === "owner" && <OwnerTab record={data.record.data} />}
           {data && activeTab === "lenders" && <LendersTab application={data.application} />}
           {data && activeTab === "bank" && (
             <BankTab record={data.record.data} application={data.application} tenantSlug={tenantSlug} leadId={recordId} />
           )}
-          {data && activeTab === "notes" && <NotesTab leadId={recordId} />}
+          {data && activeTab === "notes" && <NotesTab leadId={recordId} entity={entity} />}
           {data && activeTab === "documents" && (
             <DocumentsTab
               recordId={recordId}
@@ -1013,16 +1013,19 @@ type NoteRow = {
   metadata: Record<string, unknown> | null;
 };
 
-function NotesTab({ leadId }: { leadId: string }) {
+function NotesTab({ leadId, entity = "lead" }: { leadId: string; entity?: "lead" | "application" }) {
   const [notes, setNotes] = useState<NoteRow[] | null>(null);
   const [draft, setDraft] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
+  // Applications must send ?entity=application so the route resolves the linked
+  // lead id, else GET/POST 404 (Codex 2026-06-19).
+  const entityQ = entity === "application" ? "?entity=application" : "";
 
   const reload = useCallback(async () => {
     setError(null);
     try {
-      const r = await fetch(`/api/leads/${leadId}/notes`, { credentials: "include" });
+      const r = await fetch(`/api/leads/${leadId}/notes${entityQ}`, { credentials: "include" });
       const j = await r.json();
       if (!j.ok) {
         setError(j.error || "load_failed");
@@ -1034,7 +1037,7 @@ function NotesTab({ leadId }: { leadId: string }) {
       setError(String((e as Error).message || e));
       setNotes([]);
     }
-  }, [leadId]);
+  }, [leadId, entityQ]);
 
   useEffect(() => {
     reload();
@@ -1045,7 +1048,7 @@ function NotesTab({ leadId }: { leadId: string }) {
     setPending(true);
     setError(null);
     try {
-      const r = await fetch(`/api/leads/${leadId}/notes`, {
+      const r = await fetch(`/api/leads/${leadId}/notes${entityQ}`, {
         method: "POST",
         credentials: "include",
         headers: { "Content-Type": "application/json" },

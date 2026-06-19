@@ -17,7 +17,7 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { resolveSessionContext } from "@/lib/api-auth";
-import { getAccessibleLead } from "@/lib/lead-access";
+import { getAccessibleLeadTarget } from "@/lib/lead-access";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -34,7 +34,7 @@ type NoteRow = {
 };
 
 export async function GET(
-  _req: NextRequest,
+  req: NextRequest,
   ctx: { params: Promise<{ id: string }> },
 ) {
   const { id } = await ctx.params;
@@ -45,13 +45,14 @@ export async function GET(
   if (!sess.ok) {
     return NextResponse.json({ ok: false, error: sess.reason }, { status: 401 });
   }
-  // Per-agent lock: notes disclose lead context — an agent can't read another
-  // agent's lead notes by guessing the id.
-  const lead = await getAccessibleLead(
+  // Per-agent lock + entity resolve: notes disclose lead context — an agent can't
+  // read another agent's notes by guessing the id; the drawer opens for both lead
+  // and application records, so resolve the linked lead id (Codex 2026-06-19 MEDIUM).
+  const target = await getAccessibleLeadTarget(
     { isAdmin: sess.isAdmin, userId: sess.userId },
-    { tenantId: sess.tenantId, entity: "lead", id },
+    { tenantId: sess.tenantId, id, entityParam: req.nextUrl.searchParams.get("entity") },
   );
-  if (!lead) {
+  if (!target) {
     return NextResponse.json({ ok: false, error: "not_found" }, { status: 404 });
   }
   const db = getServiceSupabase();
@@ -59,7 +60,7 @@ export async function GET(
     .from("lead_interactions")
     .select("id, content_preview, agent_source, created_at, metadata")
     .eq("tenant_id", sess.tenantId)
-    .eq("lead_id", id)
+    .eq("lead_id", target.queryLeadId)
     .eq("channel", "note")
     .order("created_at", { ascending: false })
     .limit(100);
@@ -81,11 +82,11 @@ export async function POST(
   if (!sess.ok) {
     return NextResponse.json({ ok: false, error: sess.reason }, { status: 401 });
   }
-  const lead = await getAccessibleLead(
+  const target = await getAccessibleLeadTarget(
     { isAdmin: sess.isAdmin, userId: sess.userId },
-    { tenantId: sess.tenantId, entity: "lead", id },
+    { tenantId: sess.tenantId, id, entityParam: req.nextUrl.searchParams.get("entity") },
   );
-  if (!lead) {
+  if (!target) {
     return NextResponse.json({ ok: false, error: "not_found" }, { status: 404 });
   }
   let body: { note?: unknown };
@@ -105,7 +106,7 @@ export async function POST(
     .from("lead_interactions")
     .insert({
       tenant_id: sess.tenantId,
-      lead_id: id,
+      lead_id: target.queryLeadId,
       // type is NOT NULL in the schema — set explicitly. `channel` is
       // the medium (note, email, sms, phone, etc.); `type` is the
       // higher-level category. Existing rows use {email_sent,

@@ -241,17 +241,27 @@ export async function softDeleteLeadDocument(input: {
   tenantId: string;
   docId: string;
   deletedBy: string;
+  /**
+   * The authorized parent lead id (Codex 2026-06-19 HIGH). The caller has
+   * already gated access to THIS lead/application; binding the delete to its
+   * lead_id closes the confused-deputy hole where an agent who owns lead A
+   * passes lead A's id + another lead's document UUID to hide a file they can't
+   * see. When provided, both the read AND the update require lead_id match, so a
+   * doc that isn't attached to the authorized parent surfaces as not_found.
+   */
+  expectedLeadId?: string;
 }): Promise<
   | { ok: true; lead_id: string; doc_type: string; filename: string }
   | { ok: false; error: string }
 > {
   const db = getServiceSupabase();
-  const row = await db
+  let readQ = db
     .from("lead_documents")
     .select("id, lead_id, doc_type, filename, metadata")
     .eq("tenant_id", input.tenantId)
-    .eq("id", input.docId)
-    .maybeSingle();
+    .eq("id", input.docId);
+  if (input.expectedLeadId) readQ = readQ.eq("lead_id", input.expectedLeadId);
+  const row = await readQ.maybeSingle();
   if (row.error) return { ok: false, error: row.error.message };
   if (!row.data) return { ok: false, error: "not_found" };
   const r = row.data as {
@@ -268,11 +278,13 @@ export async function softDeleteLeadDocument(input: {
     deleted_at: new Date().toISOString(),
     deleted_by: input.deletedBy,
   };
-  const upd = await db
+  let updQ = db
     .from("lead_documents")
     .update({ metadata })
     .eq("tenant_id", input.tenantId)
     .eq("id", input.docId);
+  if (input.expectedLeadId) updQ = updQ.eq("lead_id", input.expectedLeadId);
+  const upd = await updQ;
   if (upd.error) return { ok: false, error: upd.error.message };
   return { ok: true, lead_id: r.lead_id, doc_type: r.doc_type, filename: r.filename };
 }

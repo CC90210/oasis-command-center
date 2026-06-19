@@ -65,13 +65,17 @@ export async function maybeGenerateApplicationDocument(
         lead_id: link.lead_id,
         error: existing.error.message,
       });
-    } else if (
-      (existing.data || []).some(
-        (r) => (r as { metadata?: Record<string, unknown> | null }).metadata?.form_id === form.id,
-      )
-    ) {
-      return; // already generated for this form
     }
+    // Capture (don't early-return) the existing PDF for this form — we still need
+    // to ensure the standalone signature file exists below, even when the PDF is
+    // already filed (Codex 2026-06-19 MEDIUM: a partial prior run can leave the
+    // PDF present but the signature missing).
+    const existingPdf = existing.error
+      ? null
+      : (((existing.data || []).find(
+          (r) => (r as { metadata?: Record<string, unknown> | null }).metadata?.form_id === form.id,
+        ) as { id: string; metadata?: Record<string, unknown> | null } | undefined) ?? null);
+    const pdfAlreadyExists = !!existingPdf;
 
     // Merge every step's payload for this (form, lead). Latest row wins per
     // field (a re-submitted step overwrites the earlier value).
@@ -109,9 +113,6 @@ export async function maybeGenerateApplicationDocument(
       (leadRow.data as { data?: Record<string, unknown> | null } | null)?.data || {};
 
     const { sections, signatureName } = mapApplicationFields(merged, leadData);
-    const signedAt = new Date().toISOString();
-    const bytes = await generateApplicationPdf({ sections, signatureName, signatureDataUri, signedAt });
-    const buf = Buffer.from(bytes);
 
     const business =
       (typeof merged.business_legal_name === "string" && merged.business_legal_name) ||
@@ -119,6 +120,33 @@ export async function maybeGenerateApplicationDocument(
       "application";
     const safeBusiness =
       business.replace(/[^A-Za-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 60) || "application";
+
+    // PDF already filed (idempotent). The standalone signature file (Batch 7.2)
+    // is uploaded AFTER the PDF and is best-effort, so a prior run may have filed
+    // the PDF yet failed — or been interrupted before — the signature. Ensure the
+    // signature exists now, independently of the PDF, then stop (don't regenerate
+    // the PDF). Codex 2026-06-19 MEDIUM.
+    if (pdfAlreadyExists) {
+      const priorSignedAt =
+        (existingPdf?.metadata?.generated_at as string | undefined) || new Date().toISOString();
+      await ensureApplicantSignatureFile({
+        db,
+        form,
+        leadId: link.lead_id,
+        signatureDataUri,
+        signatureName,
+        signedAt: priorSignedAt,
+        ip: input.ip ?? null,
+        safeBusiness,
+        applicationDocId: existingPdf?.id ?? null,
+      });
+      return;
+    }
+
+    const signedAt = new Date().toISOString();
+    const bytes = await generateApplicationPdf({ sections, signatureName, signatureDataUri, signedAt });
+    const buf = Buffer.from(bytes);
+
     const filename = `SunBiz-Application-${safeBusiness}-${signedAt.slice(0, 10)}.pdf`;
 
     // Retry the file step. This runs in Next `after()` (fire-once, no retry), so
@@ -181,50 +209,19 @@ export async function maybeGenerateApplicationDocument(
 
     // Batch 7.2: persist the e-signature as its OWN retrievable file in Storage
     // (CC's DocuSign replacement — the signature must be accessible later, not
-    // only embedded in the PDF). Best-effort: never undoes the application PDF.
-    // The top-of-function idempotency guard means this only runs on first
-    // generation, so no separate dedup is needed.
-    if (signatureDataUri) {
-      try {
-        const m = signatureDataUri.match(/^data:(image\/[a-zA-Z0-9.+-]+);base64,(.+)$/s);
-        if (m) {
-          const sigMime = m[1];
-          const sigBuf = Buffer.from(m[2], "base64");
-          const ext = sigMime.includes("jpeg") || sigMime.includes("jpg") ? "jpg" : "png";
-          if (sigBuf.length > 0 && sigBuf.length <= 5 * 1024 * 1024) {
-            const sig = await uploadLeadDocument({
-              tenantId: form.tenant_id,
-              leadId: link.lead_id,
-              filename: `SunBiz-Signature-${safeBusiness}-${signedAt.slice(0, 10)}.${ext}`,
-              mimeType: sigMime,
-              bytes: sigBuf,
-              sizeBytes: sigBuf.length,
-              docType: SIGNATURE_DOC_TYPE,
-              uploadedBy: "form_intake",
-              source: "form_intake_signature",
-              extraMetadata: {
-                form_id: form.id,
-                signed_name: signatureName || null,
-                signed_at: signedAt,
-                signed_ip: input.ip || null,
-                application_document_id: up.document.id,
-              },
-            });
-            if (!sig.ok) {
-              console.error("[forms.submit.app_doc] signature file upload failed", {
-                lead_id: link.lead_id,
-                error: sig.error,
-              });
-            }
-          }
-        }
-      } catch (err) {
-        console.error("[forms.submit.app_doc] signature persist threw", {
-          lead_id: link.lead_id,
-          error: err instanceof Error ? err.message : String(err),
-        });
-      }
-    }
+    // only embedded in the PDF). Idempotent + independent of the PDF (Codex
+    // 2026-06-19 MEDIUM), so a retry after a partial prior run still files it.
+    await ensureApplicantSignatureFile({
+      db,
+      form,
+      leadId: link.lead_id,
+      signatureDataUri,
+      signatureName,
+      signedAt,
+      ip: input.ip ?? null,
+      safeBusiness,
+      applicationDocId: up.document.id,
+    });
 
     // Timeline entry so the merchant's profile reflects the generation in the
     // drawer Activity tab + the actor-filtered audit feed. Best-effort: a
@@ -264,6 +261,87 @@ export async function maybeGenerateApplicationDocument(
   } catch (err) {
     console.error("[forms.submit.app_doc] threw", {
       lead_id: input.link.lead_id,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+}
+
+/**
+ * File the applicant's e-signature as its own retrievable Storage object (Batch
+ * 7.2 — the DocuSign replacement). Idempotent + INDEPENDENT of the application
+ * PDF (Codex 2026-06-19 MEDIUM): it runs its own existence check on the
+ * SIGNATURE_DOC_TYPE, so a partial prior run that filed the PDF but missed the
+ * signature still gets the signature on the next submit/retry — the PDF guard no
+ * longer permanently masks a missing legal artifact. Never throws into the
+ * caller; logs failures for operator follow-up.
+ */
+async function ensureApplicantSignatureFile(args: {
+  db: SupabaseClient;
+  form: { id: string; tenant_id: string };
+  leadId: string;
+  signatureDataUri: string;
+  signatureName: string | null;
+  signedAt: string;
+  ip: string | null;
+  safeBusiness: string;
+  applicationDocId: string | null;
+}): Promise<void> {
+  const { db, form, leadId, signatureDataUri } = args;
+  if (!signatureDataUri) return;
+  try {
+    // Idempotent on (lead, form): skip when a non-deleted signature file already
+    // exists. Independent of the PDF guard so PDF-present/signature-missing heals.
+    const existing = await db
+      .from("lead_documents")
+      .select("id, metadata")
+      .eq("tenant_id", form.tenant_id)
+      .eq("lead_id", leadId)
+      .eq("doc_type", SIGNATURE_DOC_TYPE)
+      .is("metadata->>deleted_at", null)
+      .limit(50);
+    if (
+      !existing.error &&
+      (existing.data || []).some(
+        (r) => (r as { metadata?: Record<string, unknown> | null }).metadata?.form_id === form.id,
+      )
+    ) {
+      return; // signature already filed for this form
+    }
+
+    const m = signatureDataUri.match(/^data:(image\/[a-zA-Z0-9.+-]+);base64,(.+)$/s);
+    if (!m) return;
+    const sigMime = m[1];
+    const sigBuf = Buffer.from(m[2], "base64");
+    const ext = sigMime.includes("jpeg") || sigMime.includes("jpg") ? "jpg" : "png";
+    if (sigBuf.length === 0 || sigBuf.length > 5 * 1024 * 1024) return;
+
+    const sig = await uploadLeadDocument({
+      tenantId: form.tenant_id,
+      leadId,
+      filename: `SunBiz-Signature-${args.safeBusiness}-${args.signedAt.slice(0, 10)}.${ext}`,
+      mimeType: sigMime,
+      bytes: sigBuf,
+      sizeBytes: sigBuf.length,
+      docType: SIGNATURE_DOC_TYPE,
+      uploadedBy: "form_intake",
+      source: "form_intake_signature",
+      extraMetadata: {
+        form_id: form.id,
+        signed_name: args.signatureName || null,
+        signed_at: args.signedAt,
+        signed_ip: args.ip,
+        application_document_id: args.applicationDocId,
+      },
+    });
+    if (!sig.ok) {
+      console.error("[forms.submit.app_doc] signature file upload failed", {
+        lead_id: leadId,
+        error: sig.error,
+      });
+    }
+  } catch (err) {
+    console.error("[forms.submit.app_doc] signature persist threw", {
+      lead_id: leadId,
       error: err instanceof Error ? err.message : String(err),
     });
   }

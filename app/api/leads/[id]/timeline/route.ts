@@ -28,7 +28,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { resolveSessionContext } from "@/lib/api-auth";
-import { getAccessibleLead } from "@/lib/lead-access";
+import { getAccessibleLeadTarget } from "@/lib/lead-access";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -110,21 +110,25 @@ function errMessage(e: unknown): string {
 const HARD_CAP = 250; // events returned per request — drawer paginates further if ever needed
 
 export async function GET(
-  _req: NextRequest,
+  req: NextRequest,
   ctx: { params: Promise<{ id: string }> },
 ) {
   const sess = await resolveSessionContext();
   if (!sess.ok) return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
   const tenantId = sess.tenantId;
-  const { id: leadId } = await ctx.params;
-  if (!leadId) return NextResponse.json({ ok: false, error: "missing_id" }, { status: 400 });
+  const { id: recordId } = await ctx.params;
+  if (!recordId) return NextResponse.json({ ok: false, error: "missing_id" }, { status: 400 });
 
-  // Per-agent lock: an agent can't read another agent's lead timeline by id.
-  const lead = await getAccessibleLead(
+  // Per-agent lock + entity resolve: an agent can't read another agent's
+  // timeline by id, and the drawer opens for BOTH lead and application records.
+  // For an application, the feeds are keyed by the LINKED lead id (Codex
+  // 2026-06-19 MEDIUM — a lead-only gate 404'd every application drawer).
+  const target = await getAccessibleLeadTarget(
     { isAdmin: sess.isAdmin, userId: sess.userId },
-    { tenantId, entity: "lead", id: leadId },
+    { tenantId, id: recordId, entityParam: req.nextUrl.searchParams.get("entity") },
   );
-  if (!lead) return NextResponse.json({ ok: false, error: "not_found" }, { status: 404 });
+  if (!target) return NextResponse.json({ ok: false, error: "not_found" }, { status: 404 });
+  const leadId = target.queryLeadId;
 
   const db = getServiceSupabase();
   const events: TimelineEvent[] = [];

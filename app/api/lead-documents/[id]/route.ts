@@ -9,7 +9,9 @@
  * Response: { ok: true, url, filename, mime_type } or { ok: false, error }.
  */
 import { NextResponse, type NextRequest } from "next/server";
-import { getServiceSupabase, getSessionUser } from "@/lib/supabase-server";
+import { getServiceSupabase } from "@/lib/supabase-server";
+import { resolveSessionContext } from "@/lib/api-auth";
+import { canViewLead, leadScopingEnabled } from "@/lib/lead-scope";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -20,8 +22,8 @@ export async function GET(
   _req: NextRequest,
   context: { params: Promise<{ id: string }> },
 ) {
-  const user = await getSessionUser().catch(() => null);
-  if (!user) {
+  const sess = await resolveSessionContext();
+  if (!sess.ok) {
     return NextResponse.json(
       { ok: false, error: "unauthorized" },
       { status: 401 },
@@ -29,24 +31,11 @@ export async function GET(
   }
   const { id } = await context.params;
   const db = getServiceSupabase();
-
-  const profile = await db
-    .from("user_profiles")
-    .select("tenant_id")
-    .eq("auth_user_id", user.id)
-    .maybeSingle();
-  const tenantId = (profile.data as { tenant_id: string | null } | null)
-    ?.tenant_id;
-  if (!tenantId) {
-    return NextResponse.json(
-      { ok: false, error: "no_tenant" },
-      { status: 403 },
-    );
-  }
+  const tenantId = sess.tenantId;
 
   const docRow = await db
     .from("lead_documents")
-    .select("id, tenant_id, filename, storage_path, mime_type")
+    .select("id, tenant_id, lead_id, filename, storage_path, mime_type")
     .eq("id", id)
     .eq("tenant_id", tenantId)
     .is("metadata->>deleted_at", null) // Batch 5: a soft-deleted doc isn't downloadable
@@ -55,6 +44,7 @@ export async function GET(
     | {
         id: string;
         tenant_id: string;
+        lead_id: string | null;
         filename: string;
         storage_path: string;
         mime_type: string | null;
@@ -65,6 +55,37 @@ export async function GET(
       { ok: false, error: "not_found" },
       { status: 404 },
     );
+  }
+
+  // Per-agent scope (Codex 2026-06-19 HIGH). The tenant match above is NOT
+  // enough once LEAD_SCOPING_ENABLED is on: any tenant member with a document
+  // UUID could otherwise mint a signed URL for ANOTHER agent's bank statements.
+  // Authorize the document's parent record (lead OR application — both carry
+  // assigned_to) before signing; deny with the same 404 so a foreign UUID can't
+  // even confirm the file exists.
+  if (leadScopingEnabled() && doc.lead_id) {
+    const parent = await db
+      .from("tenant_records")
+      .select("data, entity_type")
+      .eq("tenant_id", tenantId)
+      .eq("id", doc.lead_id)
+      .maybeSingle();
+    const prow = parent.data as
+      | { data?: Record<string, unknown> | null; entity_type?: string | null }
+      | null;
+    // Only lead/application records are per-agent scoped. If the parent is one of
+    // those and the viewer can't see it, deny. (A missing parent or a non-scoped
+    // entity falls through — scoping governs lead/application only.)
+    if (
+      prow &&
+      (prow.entity_type === "lead" || prow.entity_type === "application") &&
+      !canViewLead({ isAdmin: sess.isAdmin, userId: sess.userId }, prow.data || {}, true)
+    ) {
+      return NextResponse.json(
+        { ok: false, error: "not_found" },
+        { status: 404 },
+      );
+    }
   }
 
   // Confused-deputy guard. lead_documents.tenant_id matched the caller

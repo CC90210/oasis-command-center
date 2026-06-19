@@ -13,8 +13,7 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { resolveSessionContext } from "@/lib/api-auth";
-import { getRecord } from "@/lib/manifest/data";
-import { canViewLead, leadScopingEnabled, type LeadViewer } from "@/lib/lead-scope";
+import { getAccessibleLeadTarget } from "@/lib/lead-access";
 import {
   uploadLeadDocument,
   softDeleteLeadDocument,
@@ -28,46 +27,6 @@ export const dynamic = "force-dynamic";
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-type DocumentTarget = {
-  documentLeadId: string;
-  stageLeadId: string | null;
-  entity: "lead" | "application";
-};
-
-async function resolveDocumentTarget(
-  tenantId: string,
-  id: string,
-  entityParam: string | null,
-  viewer: LeadViewer,
-): Promise<DocumentTarget | null> {
-  const entity = entityParam === "application" ? "application" : "lead";
-  if (entity === "lead") {
-    const lead = await getRecord({ tenant_id: tenantId, entity: "lead", id }).catch(() => null);
-    // Per-agent lock: an agent must not read/upload another agent's lead docs by
-    // guessing the id. Returning null surfaces as record_not_found (same as a
-    // missing record — doesn't confirm existence).
-    if (!lead || !canViewLead(viewer, lead.data as Record<string, unknown>, leadScopingEnabled())) return null;
-    return { documentLeadId: id, stageLeadId: id, entity };
-  }
-
-  const application = await getRecord({
-    tenant_id: tenantId,
-    entity: "application",
-    id,
-  }).catch(() => null);
-  if (!application || !canViewLead(viewer, application.data as Record<string, unknown>, leadScopingEnabled())) return null;
-
-  const linkedLeadId = (application.data as Record<string, unknown>).lead_id;
-  const stageLeadId =
-    typeof linkedLeadId === "string" && UUID_RE.test(linkedLeadId) ? linkedLeadId : null;
-
-  return {
-    documentLeadId: stageLeadId || id,
-    stageLeadId,
-    entity,
-  };
-}
-
 export async function GET(
   req: NextRequest,
   ctx: { params: Promise<{ id: string }> },
@@ -80,11 +39,9 @@ export async function GET(
   if (!sess.ok) {
     return NextResponse.json({ ok: false, error: sess.reason }, { status: 401 });
   }
-  const target = await resolveDocumentTarget(
-    sess.tenantId,
-    id,
-    req.nextUrl.searchParams.get("entity"),
+  const target = await getAccessibleLeadTarget(
     { isAdmin: sess.isAdmin, userId: sess.userId },
+    { tenantId: sess.tenantId, id, entityParam: req.nextUrl.searchParams.get("entity") },
   );
   if (!target) {
     return NextResponse.json({ ok: false, error: "record_not_found" }, { status: 404 });
@@ -99,7 +56,7 @@ export async function GET(
     // enforced by the .eq("tenant_id") + RLS combo.
     .select("id, filename, mime_type, size_bytes, doc_type, storage_path, uploaded_by, uploaded_at")
     .eq("tenant_id", sess.tenantId)
-    .eq("lead_id", target.documentLeadId)
+    .eq("lead_id", target.queryLeadId)
     .is("metadata->>deleted_at", null) // Batch 5: exclude soft-deleted (also keeps them out of shop-out)
     .order("uploaded_at", { ascending: false });
   if (r.error) {
@@ -120,11 +77,9 @@ export async function POST(
   if (!sess.ok) {
     return NextResponse.json({ ok: false, error: sess.reason }, { status: 401 });
   }
-  const target = await resolveDocumentTarget(
-    sess.tenantId,
-    id,
-    req.nextUrl.searchParams.get("entity"),
+  const target = await getAccessibleLeadTarget(
     { isAdmin: sess.isAdmin, userId: sess.userId },
+    { tenantId: sess.tenantId, id, entityParam: req.nextUrl.searchParams.get("entity") },
   );
   if (!target) {
     return NextResponse.json({ ok: false, error: "record_not_found" }, { status: 404 });
@@ -174,7 +129,7 @@ export async function POST(
 
   const result = await uploadLeadDocument({
     tenantId: sess.tenantId,
-    leadId: target.documentLeadId,
+    leadId: target.queryLeadId,
     filename: fileObj.name,
     mimeType: mime,
     bytes: buffer,
@@ -235,11 +190,9 @@ export async function DELETE(
     return NextResponse.json({ ok: false, error: sess.reason }, { status: 401 });
   }
   // Owner-or-admin gate on the parent lead/application (same gate as GET/POST).
-  const target = await resolveDocumentTarget(
-    sess.tenantId,
-    id,
-    req.nextUrl.searchParams.get("entity"),
+  const target = await getAccessibleLeadTarget(
     { isAdmin: sess.isAdmin, userId: sess.userId },
+    { tenantId: sess.tenantId, id, entityParam: req.nextUrl.searchParams.get("entity") },
   );
   if (!target) {
     return NextResponse.json({ ok: false, error: "record_not_found" }, { status: 404 });
@@ -249,6 +202,10 @@ export async function DELETE(
     tenantId: sess.tenantId,
     docId,
     deletedBy: sess.email || sess.userId || "operator",
+    // Codex 2026-06-19 HIGH: bind the delete to the authorized parent lead so an
+    // agent can't hide a document attached to a DIFFERENT lead by passing their
+    // own lead id + a foreign doc UUID. A mismatch surfaces as not_found (404).
+    expectedLeadId: target.queryLeadId,
   });
   if (!result.ok) {
     const status = result.error === "not_found" ? 404 : 500;

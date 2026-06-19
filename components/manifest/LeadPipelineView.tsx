@@ -1,8 +1,18 @@
 "use client";
 
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useState, type CSSProperties, type ReactNode } from "react";
-import { ChevronDown, ChevronRight, Plus } from "lucide-react";
+import {
+  CheckSquare,
+  ChevronDown,
+  ChevronRight,
+  Loader2,
+  Plus,
+  Square,
+  UserPlus,
+  X,
+} from "lucide-react";
 import type { StageMeta } from "@/lib/sunbiz-stage-meta";
 import { PageSearchBar } from "@/components/manifest/PageSearchBar";
 import { pipelineRowHref } from "@/lib/pipeline-display";
@@ -50,6 +60,18 @@ type Props = {
   basePath: string;
   /** Default `"sunbiz"` so every existing caller works unchanged. */
   variant?: PipelineVariant;
+  /**
+   * Owner/admin — unlocks the opt-in bulk "Select" mode (Batch 2.2 bulk assign /
+   * Batch 6.1 bulk stage). Default false: the board renders exactly as before for
+   * agents, so there is zero change to the non-manager view.
+   */
+  canManage?: boolean;
+};
+
+type TenantMember = {
+  auth_user_id: string;
+  full_name: string | null;
+  display_name: string | null;
 };
 
 const SUN_GRID_STYLE: CSSProperties = {
@@ -121,8 +143,16 @@ export function LeadPipelineView({
   query,
   basePath,
   variant = "sunbiz",
+  canManage = false,
 }: Props) {
+  const router = useRouter();
   const [collapsedStages, setCollapsedStages] = useState<Record<string, boolean>>({});
+  const [selectMode, setSelectMode] = useState(false);
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [members, setMembers] = useState<TenantMember[] | null>(null);
+  const [membersState, setMembersState] = useState<"idle" | "loading" | "error">("idle");
+  const [bulkBusy, setBulkBusy] = useState(false);
+  const [bulkMsg, setBulkMsg] = useState<string | null>(null);
   const cfg = useMemo(() => variantConfig(variant), [variant]);
   const isLeads = entityName === "lead";
   const titleText = isLeads ? "Lead Pipeline" : "Opportunity Pipeline";
@@ -177,6 +207,92 @@ export function LeadPipelineView({
     setCollapsedStages({});
   }, [entityName, basePath]);
 
+  // Bulk select (Batch 2.2 / 6.1) — opt-in, owner/admin only. Lazy-load the
+  // member roster the first time the operator enters Select mode. On failure we
+  // surface an explicit retry in the Assign dropdown rather than a silent empty
+  // list (Codex 2026-06-19 LOW-6).
+  const [membersReloadKey, setMembersReloadKey] = useState(0);
+  useEffect(() => {
+    if (!selectMode || members !== null) return;
+    let cancelled = false;
+    setMembersState("loading");
+    fetch("/api/team/members", { cache: "no-store" })
+      .then(async (r) => (r.ok ? ((await r.json()) as { ok?: boolean; members?: TenantMember[] }) : null))
+      .then((body) => {
+        if (cancelled) return;
+        if (body?.ok && body.members) {
+          setMembers(body.members);
+          setMembersState("idle");
+        } else {
+          setMembersState("error");
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setMembersState("error");
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [selectMode, members, membersReloadKey]);
+  const retryMembers = () => {
+    setMembers(null);
+    setMembersReloadKey((k) => k + 1);
+  };
+
+  const allRenderedIds = useMemo(() => renderedRows.map((r) => r.id), [renderedRows]);
+  const allSelected = allRenderedIds.length > 0 && allRenderedIds.every((id) => selected.has(id));
+
+  function toggleSelect(id: string) {
+    setSelected((cur) => {
+      const next = new Set(cur);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
+  function toggleSelectAll() {
+    setSelected((cur) => (allRenderedIds.every((id) => cur.has(id)) ? new Set() : new Set(allRenderedIds)));
+  }
+  function exitSelectMode() {
+    setSelectMode(false);
+    setSelected(new Set());
+    setBulkMsg(null);
+  }
+
+  async function runBulk(payload: Record<string, unknown>, verb: string) {
+    if (selected.size === 0 || bulkBusy) return;
+    setBulkBusy(true);
+    setBulkMsg(null);
+    try {
+      const r = await fetch("/api/leads/bulk", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ ids: [...selected], ...payload }),
+      });
+      const body = (await r.json().catch(() => ({}))) as {
+        ok?: boolean;
+        updated?: number;
+        skipped?: number;
+        failed?: number;
+        error?: string;
+      };
+      if (!r.ok || !body.ok) {
+        setBulkMsg(body.error ? `Couldn't ${verb}: ${body.error}` : `Couldn't ${verb}.`);
+        return;
+      }
+      const bits = [`${body.updated ?? 0} ${verb}`];
+      if (body.skipped) bits.push(`${body.skipped} skipped`);
+      if (body.failed) bits.push(`${body.failed} failed`);
+      setBulkMsg(bits.join(" · "));
+      setSelected(new Set());
+      router.refresh();
+    } catch (e) {
+      setBulkMsg(`Couldn't ${verb}: ${(e as Error).message || "network error"}`);
+    } finally {
+      setBulkBusy(false);
+    }
+  }
+
   function toggleStage(stageKey: string) {
     setCollapsedStages((current) => ({
       ...current,
@@ -208,14 +324,47 @@ export function LeadPipelineView({
             <span className="font-semibold text-emerald-300">{stats.ready}</span> ready to advance
           </div>
         </div>
-        <Link
-          href={newHref}
-          className="inline-flex items-center gap-1.5 rounded-md bg-accent px-3 py-1.5 text-[11px] font-semibold uppercase tracking-wider text-bg-deep hover:bg-accent/90"
-        >
-          <Plus className="h-3.5 w-3.5" />
-          New {entityLabel.toLowerCase()}
-        </Link>
+        <div className="flex items-center gap-2">
+          {canManage && (
+            <button
+              type="button"
+              onClick={() => (selectMode ? exitSelectMode() : setSelectMode(true))}
+              className={`inline-flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-[11px] font-semibold uppercase tracking-wider transition-colors ${
+                selectMode
+                  ? "border-accent bg-accent/15 text-accent"
+                  : "border-bg-border bg-bg-elev/40 text-fg-muted hover:text-fg"
+              }`}
+              title="Select multiple to assign or move stage in one action"
+            >
+              {selectMode ? <X className="h-3.5 w-3.5" /> : <CheckSquare className="h-3.5 w-3.5" />}
+              {selectMode ? "Done" : "Select"}
+            </button>
+          )}
+          <Link
+            href={newHref}
+            className="inline-flex items-center gap-1.5 rounded-md bg-accent px-3 py-1.5 text-[11px] font-semibold uppercase tracking-wider text-bg-deep hover:bg-accent/90"
+          >
+            <Plus className="h-3.5 w-3.5" />
+            New {entityLabel.toLowerCase()}
+          </Link>
+        </div>
       </div>
+
+      {selectMode && (
+        <div className="flex flex-wrap items-center gap-3 rounded-lg border border-accent/30 bg-accent/5 px-3 py-2 text-[11px] text-fg-muted">
+          <button
+            type="button"
+            onClick={toggleSelectAll}
+            className="inline-flex items-center gap-1.5 font-semibold text-fg hover:text-accent"
+          >
+            {allSelected ? <CheckSquare className="h-3.5 w-3.5 text-accent" /> : <Square className="h-3.5 w-3.5" />}
+            {allSelected ? "Clear all" : `Select all ${allRenderedIds.length}`}
+          </button>
+          <span className="text-fg-dim">·</span>
+          <span className="font-semibold text-fg">{selected.size}</span> selected
+          {bulkMsg && <span className="ml-auto text-accent">{bulkMsg}</span>}
+        </div>
+      )}
 
       <div className="flex flex-wrap items-center gap-3">
         <div className="min-w-[260px] flex-1">
@@ -320,9 +469,130 @@ export function LeadPipelineView({
             variant={variant}
             cfg={cfg}
             basePath={basePath}
+            selectMode={selectMode}
+            selected={selected}
+            onToggleSelect={toggleSelect}
           />
         );
       })}
+
+      {selectMode && selected.size > 0 && (
+        <BulkActionBar
+          count={selected.size}
+          entityName={entityName}
+          stages={stages}
+          members={members}
+          membersState={membersState}
+          onRetryMembers={retryMembers}
+          busy={bulkBusy}
+          onAssign={(uid) => runBulk({ op: "assign", assigned_to: uid }, "assigned")}
+          onStage={(stageKey) => runBulk({ op: "stage", stage: stageKey, entity: entityName }, "moved")}
+          onClear={() => setSelected(new Set())}
+        />
+      )}
+    </div>
+  );
+}
+
+/**
+ * BulkActionBar — sticky footer shown in Select mode once ≥1 record is checked.
+ * Assign-to-agent + move-stage in one action. Posts to /api/leads/bulk which
+ * applies the owner-or-admin gate per record (an agent's bulk action only
+ * touches records they own; others come back as `denied`).
+ */
+function BulkActionBar({
+  count,
+  entityName,
+  stages,
+  members,
+  membersState,
+  onRetryMembers,
+  busy,
+  onAssign,
+  onStage,
+  onClear,
+}: {
+  count: number;
+  entityName: "lead" | "application";
+  stages: StageMeta[];
+  members: TenantMember[] | null;
+  membersState: "idle" | "loading" | "error";
+  onRetryMembers: () => void;
+  busy: boolean;
+  onAssign: (assignedTo: string | null) => void;
+  onStage: (stageKey: string) => void;
+  onClear: () => void;
+}) {
+  return (
+    <div className="sticky bottom-3 z-20 mx-auto flex w-fit max-w-full flex-wrap items-center gap-3 rounded-xl border border-accent/40 bg-bg-elev/95 px-4 py-2.5 shadow-lg backdrop-blur">
+      <span className="inline-flex items-center gap-1.5 text-[12px] font-semibold text-fg">
+        {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin text-accent" /> : <CheckSquare className="h-3.5 w-3.5 text-accent" />}
+        {count} {entityName === "application" ? "app" : "lead"}
+        {count === 1 ? "" : "s"}
+      </span>
+
+      <label className="flex items-center gap-1.5 text-[11px] text-fg-muted">
+        <UserPlus className="h-3.5 w-3.5 text-fg-dim" />
+        {membersState === "error" ? (
+          <button
+            type="button"
+            onClick={onRetryMembers}
+            className="rounded-md border border-red-400/40 bg-red-500/10 px-2 py-1 text-[11px] text-red-200 hover:bg-red-500/20"
+          >
+            Couldn't load agents — retry
+          </button>
+        ) : (
+          <select
+            defaultValue=""
+            disabled={busy || membersState === "loading"}
+            onChange={(e) => {
+              const v = e.target.value;
+              e.currentTarget.selectedIndex = 0;
+              if (v === "__unassign") onAssign(null);
+              else if (v) onAssign(v);
+            }}
+            className="rounded-md border border-bg-border bg-bg-deep px-2 py-1 text-[12px] text-fg focus:border-accent focus:outline-none disabled:opacity-60"
+          >
+            <option value="">{membersState === "loading" ? "Loading agents…" : "Assign to…"}</option>
+            {membersState !== "loading" && <option value="__unassign">— Unassign —</option>}
+            {(members || []).map((m) => (
+              <option key={m.auth_user_id} value={m.auth_user_id}>
+                {m.display_name || m.full_name || m.auth_user_id.slice(0, 8)}
+              </option>
+            ))}
+          </select>
+        )}
+      </label>
+
+      <label className="flex items-center gap-1.5 text-[11px] text-fg-muted">
+        Move to
+        <select
+          defaultValue=""
+          disabled={busy}
+          onChange={(e) => {
+            const v = e.target.value;
+            e.currentTarget.selectedIndex = 0;
+            if (v) onStage(v);
+          }}
+          className="rounded-md border border-bg-border bg-bg-deep px-2 py-1 text-[12px] text-fg focus:border-accent focus:outline-none disabled:opacity-60"
+        >
+          <option value="">Stage…</option>
+          {stages.map((s) => (
+            <option key={s.key} value={s.key}>
+              {s.label}
+            </option>
+          ))}
+        </select>
+      </label>
+
+      <button
+        type="button"
+        onClick={onClear}
+        disabled={busy}
+        className="text-[11px] text-fg-dim hover:text-fg disabled:opacity-60"
+      >
+        Clear
+      </button>
     </div>
   );
 }
@@ -337,6 +607,9 @@ function StageSection({
   variant,
   cfg,
   basePath,
+  selectMode = false,
+  selected,
+  onToggleSelect,
 }: {
   slug: string;
   entityName: "lead" | "application";
@@ -347,6 +620,9 @@ function StageSection({
   variant: PipelineVariant;
   cfg: VariantConfig;
   basePath: string;
+  selectMode?: boolean;
+  selected?: Set<string>;
+  onToggleSelect?: (id: string) => void;
 }) {
   const targetLabel = stageTargetLabelVariant(cfg, stage.key);
   return (
@@ -416,37 +692,108 @@ function StageSection({
                 </>
               )}
             </div>
-            {rows.map((r) => (
-              <DesktopRow
-                key={r.id}
-                slug={slug}
-                entityName={entityName}
-                row={r}
-                stage={stage}
-                variant={variant}
-                cfg={cfg}
-                basePath={basePath}
-              />
-            ))}
+            {rows.map((r) =>
+              selectMode ? (
+                <SelectableRow
+                  key={r.id}
+                  checked={selected?.has(r.id) ?? false}
+                  onToggle={() => onToggleSelect?.(r.id)}
+                >
+                  <DesktopRow
+                    slug={slug}
+                    entityName={entityName}
+                    row={r}
+                    stage={stage}
+                    variant={variant}
+                    cfg={cfg}
+                    basePath={basePath}
+                  />
+                </SelectableRow>
+              ) : (
+                <DesktopRow
+                  key={r.id}
+                  slug={slug}
+                  entityName={entityName}
+                  row={r}
+                  stage={stage}
+                  variant={variant}
+                  cfg={cfg}
+                  basePath={basePath}
+                />
+              ),
+            )}
           </div>
 
           <div className="divide-y divide-bg-border/50 lg:hidden">
-            {rows.map((r) => (
-              <MobileRow
-                key={r.id}
-                slug={slug}
-                entityName={entityName}
-                row={r}
-                stage={stage}
-                variant={variant}
-                cfg={cfg}
-                basePath={basePath}
-              />
-            ))}
+            {rows.map((r) =>
+              selectMode ? (
+                <SelectableRow
+                  key={r.id}
+                  checked={selected?.has(r.id) ?? false}
+                  onToggle={() => onToggleSelect?.(r.id)}
+                >
+                  <MobileRow
+                    slug={slug}
+                    entityName={entityName}
+                    row={r}
+                    stage={stage}
+                    variant={variant}
+                    cfg={cfg}
+                    basePath={basePath}
+                  />
+                </SelectableRow>
+              ) : (
+                <MobileRow
+                  key={r.id}
+                  slug={slug}
+                  entityName={entityName}
+                  row={r}
+                  stage={stage}
+                  variant={variant}
+                  cfg={cfg}
+                  basePath={basePath}
+                />
+              ),
+            )}
           </div>
         </>
       )}
     </section>
+  );
+}
+
+/**
+ * SelectableRow — wraps a pipeline row with a leading checkbox in bulk Select
+ * mode WITHOUT touching the row's internal grid/Link (the checkbox sits outside
+ * the Link, so checking a record never navigates). Keeps the default,
+ * non-select view byte-for-byte identical.
+ */
+function SelectableRow({
+  checked,
+  onToggle,
+  children,
+}: {
+  checked: boolean;
+  onToggle: () => void;
+  children: ReactNode;
+}) {
+  return (
+    <div
+      className={`flex items-stretch border-b border-bg-border/40 last:border-b-0 ${
+        checked ? "bg-accent/5" : ""
+      }`}
+    >
+      <label className="flex shrink-0 cursor-pointer items-center pl-3 pr-1">
+        <input
+          type="checkbox"
+          checked={checked}
+          onChange={onToggle}
+          className="h-4 w-4 accent-accent"
+          aria-label="Select record"
+        />
+      </label>
+      <div className="min-w-0 flex-1">{children}</div>
+    </div>
   );
 }
 

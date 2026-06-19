@@ -185,7 +185,12 @@ export function MultiFileDropzone({
     (files: FileList | File[]) => {
       setNotice(null);
       if (!uploadToken) {
-        setNotice("Please complete the earlier steps before uploading.");
+        // No HMAC token yet. The real flow (a personalized link we send the
+        // merchant) always carries one; this only fires on the anonymous/preview
+        // route, or a multi-step form before its first step is submitted.
+        setNotice(
+          "Open this form from the personalized link we sent you to upload — or complete the earlier steps first.",
+        );
         return;
       }
       const incoming = Array.from(files);

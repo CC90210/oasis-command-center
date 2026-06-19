@@ -80,7 +80,15 @@ function renderStageMetaLine(meta: Record<string, unknown> | undefined) {
   );
 }
 
-export function LeadTimelinePanel({ leadId }: { leadId: string }) {
+export function LeadTimelinePanel({
+  leadId,
+  entity = "lead",
+}: {
+  leadId: string;
+  /** Drawer entity — applications must send ?entity=application so the route
+   *  resolves the linked lead id, else it 404s (Codex 2026-06-19). */
+  entity?: "lead" | "application";
+}) {
   const [events, setEvents] = useState<TimelineEvent[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [feedErrors, setFeedErrors] = useState<{ feed: string; message: string }[]>([]);
@@ -89,7 +97,8 @@ export function LeadTimelinePanel({ leadId }: { leadId: string }) {
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
-    fetch(`/api/leads/${leadId}/timeline`, { cache: "no-store" })
+    const q = entity === "application" ? "?entity=application" : "";
+    fetch(`/api/leads/${leadId}/timeline${q}`, { cache: "no-store" })
       .then(async (r) => {
         const data = (await r.json()) as ApiResponse;
         if (cancelled) return;
@@ -112,7 +121,7 @@ export function LeadTimelinePanel({ leadId }: { leadId: string }) {
     return () => {
       cancelled = true;
     };
-  }, [leadId]);
+  }, [leadId, entity]);
 
   return (
     <div className="rounded-2xl border border-bg-border bg-bg-deep/40 p-5">
