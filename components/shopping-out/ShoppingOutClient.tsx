@@ -22,6 +22,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { Card, Tag } from "@/components/Card";
 import { ShoppingBag, Send, RefreshCcw, Loader2 } from "lucide-react";
+import { fuzzyScore } from "@/lib/fuzzy-match";
 
 type AppRow = {
   id: string;
@@ -248,25 +249,37 @@ export function ShoppingOutClient({
     })();
   }, [tenantSlug, tenantId]);
 
-  // Filter to active applications and apply free-text search.
+  // Filter to active applications + apply live, case-insensitive, typo-tolerant
+  // search (Adon Batch 6.2). A misspelled/partial query ("remmington") still
+  // surfaces the intended merchant ("Remington Builders"), ranked by closeness.
   const visibleApps = useMemo(() => {
     if (!apps) return [];
-    const needle = appSearch.trim().toLowerCase();
-    return apps.filter((a) => {
-      const status = String(a.data.status || "");
-      if (!SHOPPABLE_STATUSES.has(status)) return false;
-      if (!needle) return true;
-      const haystack = [
-        a.data.business_name,
-        a.data.contact_name,
-        a.data.email,
-        a.data.phone,
-      ]
-        .filter(Boolean)
-        .join(" ")
-        .toLowerCase();
-      return haystack.includes(needle);
-    });
+    const shoppable = apps.filter((a) =>
+      SHOPPABLE_STATUSES.has(String(a.data.status || "")),
+    );
+    const needle = appSearch.trim();
+    if (!needle) return shoppable;
+    // Score each shoppable app by its best field match; keep reasonable matches,
+    // sort closest-first. Business name is weighted strongest.
+    const scored = shoppable
+      .map((a) => {
+        const fields = [
+          a.data.business_name,
+          a.data.dba,
+          a.data.contact_name,
+          a.data.email,
+          a.data.phone,
+        ]
+          .filter((v): v is string => typeof v === "string" && v.length > 0);
+        const best = fields.reduce(
+          (min, f) => Math.min(min, fuzzyScore(needle, f)),
+          Number.POSITIVE_INFINITY,
+        );
+        return { a, score: best };
+      })
+      .filter((s) => s.score <= 0.45)
+      .sort((x, y) => x.score - y.score);
+    return scored.map((s) => s.a);
   }, [apps, appSearch]);
 
   const selectedApp = useMemo(
