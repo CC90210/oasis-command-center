@@ -70,8 +70,23 @@ type LoadResult =
       tenant_slug: string;
       lead_id: string;
       token: string;
+      /** Cross-form pre-fill: the lead's existing contact/business data so the
+       *  full application doesn't re-ask what the intake form already captured. */
+      prefill: Record<string, unknown>;
     }
   | { ok: false; reason: "token" | "tenant_mismatch" | "form_disabled" | "form_corrupt" | "not_found"; detail?: string };
+
+/** Canonical lead keys safe to surface as form pre-fill (no SSN/financials beyond
+ *  the monthly revenue the merchant volunteered). */
+const PREFILL_LEAD_KEYS = [
+  "business_name",
+  "contact_name",
+  "email",
+  "phone",
+  "monthly_revenue",
+  "business_state",
+  "industry",
+] as const;
 
 async function loadAndVerify(params: RouteParams): Promise<LoadResult> {
   const sig = verifyFormLink(params.lead_token);
@@ -150,8 +165,33 @@ async function loadAndVerify(params: RouteParams): Promise<LoadResult> {
     branding = { ...branding, logo_url: tenantRow.logo_url };
   }
 
+  // Cross-form pre-fill (2026-06-20): load the lead's existing data so the full
+  // application seeds name / phone / business / revenue the merchant already gave
+  // on intake. Best-effort — a lookup miss just yields an empty prefill (blank
+  // form), never an error.
+  const prefill: Record<string, unknown> = {};
+  try {
+    const leadRow = await db
+      .from("tenant_records")
+      .select("data")
+      .eq("tenant_id", form.tenant_id)
+      .eq("entity_type", "lead")
+      .eq("id", sig.payload.lead_id)
+      .maybeSingle();
+    const ld = (leadRow.data as { data?: Record<string, unknown> } | null)?.data;
+    if (ld) {
+      for (const k of PREFILL_LEAD_KEYS) {
+        const v = ld[k];
+        if (v !== undefined && v !== null && v !== "") prefill[k] = v;
+      }
+    }
+  } catch {
+    // best-effort — proceed with an empty prefill
+  }
+
   return {
     ok: true,
+    prefill,
     form: {
       id: form.id,
       tenant_id: form.tenant_id,
@@ -195,6 +235,7 @@ export default async function PublicFormPage({
       steps={result.form.steps}
       redirectUrl={result.form.redirect_url}
       token={result.token}
+      prefill={result.prefill}
     />
   );
 }

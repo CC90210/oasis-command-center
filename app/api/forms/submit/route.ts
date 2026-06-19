@@ -547,7 +547,7 @@ export async function POST(req: NextRequest) {
       if (raw !== undefined) delete payload[field.name];
       continue;
     }
-    const maxFiles = typeof field.max_files === "number" && field.max_files > 0 ? field.max_files : 12;
+    const maxFiles = typeof field.max_files === "number" && field.max_files > 0 ? field.max_files : 50;
     const allowedMime = field.accept && field.accept.length > 0 ? field.accept : DEFAULT_MULTI_MIME;
     // doc_type follows the field's purpose (e.g. "bank_statements" → the canonical
     // bank_statements_3mo) so the docs count toward the required-docs tracker.

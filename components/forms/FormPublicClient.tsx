@@ -46,6 +46,15 @@ type Props = {
   token: string | null;
   // rep flows straight into submitBody.anonymous_init (per-agent routing).
   anonymousInit?: { tenant_slug: string; form_slug: string; rep?: string };
+  /**
+   * Cross-form pre-fill (2026-06-20 — Ethan/Alex). When the form is opened from
+   * a personalized lead link, the server loads the lead's existing data (name,
+   * phone, email, monthly_revenue, business_name, …) and passes it here. Fields
+   * are seeded from this map — by `prefill_from` (lead key) or by matching field
+   * name — so a merchant never re-types what they already gave on the first form.
+   * Every seeded value stays editable.
+   */
+  prefill?: Record<string, unknown> | null;
 };
 
 type SubmitResponse = {
@@ -69,6 +78,7 @@ export function FormPublicClient({
   redirectUrl,
   token: initialToken,
   anonymousInit,
+  prefill,
 }: Props) {
   // The token starts as whatever the page passed in. For anonymous flows
   // it's null; the first /api/forms/submit response carries minted_token,
@@ -154,19 +164,32 @@ export function FormPublicClient({
     [currentStep],
   );
 
-  // Pre-fill (Fix 1.1): when a step is shown, seed any field that declares
-  // prefill_from from the already-answered source field if it's still empty —
-  // e.g. signature_name defaults to owner_full_name so the applicant doesn't
-  // retype their legal name. The user can still edit it.
+  // Pre-fill: when a step is shown, seed each empty field. Two sources, in order:
+  //   1. prefill_from — another field already answered IN THIS submission
+  //      (Fix 1.1: signature_name ← owner_full_name) OR a lead key from the
+  //      server `prefill` map (2026-06-20: owner_full_name ← contact_name, etc.).
+  //   2. direct name match in the server `prefill` map (e.g. email/phone the
+  //      lead already gave on the intake form).
+  // Every seeded value stays editable (we only fill when the field is empty).
   useEffect(() => {
     const cur = stepValues[currentStep] || {};
+    const seedable = (v: unknown): v is string | number =>
+      (typeof v === "string" && v.trim() !== "") || (typeof v === "number" && isFinite(v));
     for (const f of step.fields) {
-      if (!f.prefill_from) continue;
       const existing = cur[f.name];
       if (existing !== undefined && existing !== null && existing !== "") continue;
-      const src = mergedValues[f.prefill_from];
-      if (typeof src === "string" && src.trim()) {
-        setFieldValue(f.name, src);
+      // 1. prefill_from: same-submission answer first, then the lead prefill map.
+      if (f.prefill_from) {
+        const src = mergedValues[f.prefill_from] ?? prefill?.[f.prefill_from];
+        if (seedable(src)) {
+          setFieldValue(f.name, src);
+          continue;
+        }
+      }
+      // 2. direct field-name match in the lead prefill map.
+      const direct = prefill?.[f.name];
+      if (seedable(direct)) {
+        setFieldValue(f.name, direct);
       }
     }
     // Seed only on step entry — mergedValues is current at that point.

@@ -38,6 +38,7 @@ import { createRecord } from "@/lib/manifest/data";
  * + application_lender_threads.attachments handle those.
  */
 const APPLICATION_FIELD_KEYS = [
+  // Original SOP §4 + financial set.
   "business_name",
   "business_state",
   "industry",
@@ -50,6 +51,49 @@ const APPLICATION_FIELD_KEYS = [
   "requested_amount",
   "desired_product",
   "position_count",
+  // Full-application fields (2026-06-20 — Ethan/Alex): the form collects all of
+  // these but pre-fix only the 12 above survived onto the application, so the
+  // drawer / "Edit full record" / lender-submission showed blanks. Persist them
+  // all so the application record is complete. File + signature-image keys are
+  // intentionally excluded (they live on lead_documents).
+  "business_legal_name",
+  "dba",
+  "business_address",
+  "tax_id_ein",
+  "business_start_date",
+  "entity_type",
+  "product_service_description",
+  "owner_full_name",
+  "owner_name", // canonical alias of owner_full_name (drawer "Owner / Signer" reads owner_name/contact_name)
+  "owner_ssn",
+  "owner_dob",
+  "owner_cell",
+  "owner_ownership_pct",
+  "owner_home_address",
+  "partner_full_name",
+  "partner_ssn",
+  "partner_dob",
+  "partner_cell",
+  "partner_ownership_pct",
+  "partner_home_address",
+  "signature_name",
+] as const;
+
+/**
+ * Keys copied from the LEAD record onto the application when the application
+ * doesn't already carry them (2026-06-20). The full-application form collects
+ * owner_* / business_legal_name on later steps, but the contact identity the
+ * operator first sees lives on the lead (from the initial intake form). Without
+ * this backfill an application created from step 0 shows a blank "Owner / Signer"
+ * until the owner step is submitted. Only fills gaps — never clobbers a value the
+ * form/operator already set.
+ */
+const LEAD_BACKFILL_KEYS = [
+  "contact_name",
+  "phone",
+  "email",
+  "business_name",
+  "monthly_revenue",
 ] as const;
 
 /**
@@ -78,10 +122,16 @@ function normalize(key: string, value: unknown): unknown {
     }
     return undefined;
   }
-  if (key === "time_in_business_months" || key === "applicant_fico" || key === "position_count") {
+  if (
+    key === "time_in_business_months" ||
+    key === "applicant_fico" ||
+    key === "position_count" ||
+    key === "owner_ownership_pct" ||
+    key === "partner_ownership_pct"
+  ) {
     if (typeof value === "number" && isFinite(value)) return value;
     if (typeof value === "string") {
-      const n = parseInt(value.replace(/[,\s]/g, ""), 10);
+      const n = parseInt(value.replace(/[%,\s]/g, ""), 10);
       return isNaN(n) ? undefined : n;
     }
     return undefined;
@@ -104,6 +154,14 @@ function normalize(key: string, value: unknown): unknown {
  */
 const FIELD_ALIASES: Record<string, string[]> = {
   requested_amount: ["requested_advance"],
+  // The full-application form uses owner_/business_legal_ names; the drawer +
+  // lender-submission readers expect contact_name / owner_name / business_name /
+  // phone. Map at extraction so BOTH the raw form key (whitelisted above, for
+  // "Edit full record") AND the canonical reader key get written (2026-06-20).
+  contact_name: ["owner_full_name"],
+  owner_name: ["owner_full_name"],
+  business_name: ["business_legal_name"],
+  phone: ["owner_cell"],
 };
 
 /** Read a whitelisted key from the payload, falling back to any aliased
@@ -116,7 +174,7 @@ function readField(payload: Record<string, unknown>, key: string): unknown {
   return undefined;
 }
 
-function extractAppFields(payload: Record<string, unknown>): Record<string, unknown> {
+export function extractAppFields(payload: Record<string, unknown>): Record<string, unknown> {
   const out: Record<string, unknown> = {};
   for (const key of APPLICATION_FIELD_KEYS) {
     const raw = readField(payload, key);
@@ -162,6 +220,9 @@ export async function upsertApplicationFromFormStep(input: {
   // pipeline injects assigned_to_name from assigned_to via
   // lib/assigned-names.ts). Best-effort — never blocks the upsert.
   let leadAssignedTo: string | null = null;
+  // Contact/identity fields inherited from the lead when the application lacks
+  // them (so the drawer shows the merchant before the owner step is submitted).
+  const leadBackfill: Record<string, unknown> = {};
   try {
     const leadRow = await db
       .from("tenant_records")
@@ -173,6 +234,12 @@ export async function upsertApplicationFromFormStep(input: {
     const ld = (leadRow.data as { data?: Record<string, unknown> } | null)?.data;
     if (ld && typeof ld.assigned_to === "string" && ld.assigned_to) {
       leadAssignedTo = ld.assigned_to;
+    }
+    if (ld) {
+      for (const k of LEAD_BACKFILL_KEYS) {
+        const n = normalize(k, ld[k]);
+        if (n !== undefined && n !== null && n !== "") leadBackfill[k] = n;
+      }
     }
   } catch {
     // best-effort
@@ -203,6 +270,8 @@ export async function upsertApplicationFromFormStep(input: {
     // the operator, not the other way around).
     const existingData = existing.data || {};
     const merged: Record<string, unknown> = {
+      // leadBackfill first so it only fills keys absent from existingData/fields.
+      ...leadBackfill,
       ...existingData,
       ...fields,
       last_form_step_index: input.stepIndex,
@@ -236,6 +305,8 @@ export async function upsertApplicationFromFormStep(input: {
     entity: "application",
     data: {
       lead_id: input.leadId,
+      // leadBackfill first so the form's own fields win over inherited values.
+      ...leadBackfill,
       ...fields,
       ...(leadAssignedTo ? { assigned_to: leadAssignedTo } : {}),
       // Land in the first Opportunity Pipeline stage so the deal actually shows

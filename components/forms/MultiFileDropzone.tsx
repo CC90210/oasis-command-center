@@ -86,7 +86,7 @@ function putWithProgress(
 export function MultiFileDropzone({
   inputId,
   accept,
-  maxFiles = 12,
+  maxFiles = 50,
   maxFileMb = 25,
   value,
   onChange,

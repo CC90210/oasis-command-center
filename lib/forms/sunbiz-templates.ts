@@ -86,17 +86,14 @@ export const SUNBIZ_FORM_TEMPLATES: Record<SunBizStep, SunBizFormTemplate> = {
         description: "A few quick fields — takes under a minute.",
         cta_label: "Submit",
         fields: [
+          // 2026-06-20 (Ethan/Alex): monthly_revenue REMOVED from the first
+          // intake form — it's redundant with the full application's financial
+          // step, and the full application pre-fills any value the merchant gave
+          // earlier. Keep this form to the essential contact + business fields.
           { name: "business_name", label: "Business name", type: "text", required: true },
           { name: "contact_name", label: "Your name", type: "text", required: true },
           { name: "email", label: "Email", type: "email", required: true },
           { name: "phone", label: "Phone", type: "phone", required: true },
-          {
-            name: "monthly_revenue",
-            label: "Monthly revenue",
-            type: "currency",
-            required: false,
-            help: "Rough average is fine — helps us route your file faster.",
-          },
           {
             name: "note",
             label: "Anything we should know?",
@@ -128,7 +125,14 @@ export const SUNBIZ_FORM_TEMPLATES: Record<SunBizStep, SunBizFormTemplate> = {
         description: "Your company's legal details.",
         cta_label: "Continue",
         fields: [
-          { name: "business_legal_name", label: "Legal business name", type: "text", required: true },
+          {
+            name: "business_legal_name",
+            label: "Legal business name",
+            type: "text",
+            required: true,
+            // Pre-fill from the business name the merchant gave on intake (editable).
+            prefill_from: "business_name",
+          },
           {
             name: "dba",
             label: "DBA (doing business as)",
@@ -200,7 +204,14 @@ export const SUNBIZ_FORM_TEMPLATES: Record<SunBizStep, SunBizFormTemplate> = {
         description: "Primary owner's personal details.",
         cta_label: "Continue",
         fields: [
-          { name: "owner_full_name", label: "Full legal name", type: "text", required: true },
+          {
+            name: "owner_full_name",
+            label: "Full legal name",
+            type: "text",
+            required: true,
+            // Pre-fill from the contact name captured on intake (editable).
+            prefill_from: "contact_name",
+          },
           {
             name: "owner_ssn",
             label: "Social Security Number (SSN)",
@@ -209,7 +220,14 @@ export const SUNBIZ_FORM_TEMPLATES: Record<SunBizStep, SunBizFormTemplate> = {
             placeholder: "XXX-XX-XXXX",
           },
           { name: "owner_dob", label: "Date of birth", type: "date", required: true },
-          { name: "owner_cell", label: "Cell phone", type: "phone", required: true },
+          {
+            name: "owner_cell",
+            label: "Cell phone",
+            type: "phone",
+            required: true,
+            // Pre-fill from the phone captured on intake (editable).
+            prefill_from: "phone",
+          },
           {
             name: "owner_ownership_pct",
             label: "Ownership percentage",
@@ -276,6 +294,8 @@ export const SUNBIZ_FORM_TEMPLATES: Record<SunBizStep, SunBizFormTemplate> = {
             label: "Average monthly revenue",
             type: "currency",
             required: true,
+            // Pre-fill if the merchant gave revenue on a prior step (editable).
+            prefill_from: "monthly_revenue",
           },
           {
             name: "requested_advance",
@@ -285,39 +305,28 @@ export const SUNBIZ_FORM_TEMPLATES: Record<SunBizStep, SunBizFormTemplate> = {
           },
         ],
       },
-      // Step 4 — Documents
+      // Step 4 — Documents. 2026-06-20 (Ethan/Alex): ONE drag-and-drop bucket for
+      // ALL documents (bank statements, driver's license, voided check — any),
+      // no fixed sub-slots, no practical limit. The server classifies each file
+      // by filename (lib/lead-documents classifyDocTypeByFilename) so underwriting
+      // still gets the right doc_types. Field name stays `bank_statements` so the
+      // submit route's statement detection + the Telegram bank hook keep working.
       {
         key: "documents",
         title: "Upload your documents",
         description:
-          "Add your last 3 months of business bank statements. Two accounts? Add all of them.",
+          "Drag and drop everything here — bank statements, driver's license, voided check. As many files as you need.",
         cta_label: "Continue",
         fields: [
           {
             name: "bank_statements",
-            label: "Bank statements — last 3 months",
+            label: "Your documents",
             type: "file_upload_multi",
             required: true,
             accept: ["application/pdf", "image/*"],
-            max_files: 12,
+            max_files: 50,
             max_file_mb: 25,
-            help: "Drag in your last 3 months of business bank statements. Have two bank accounts? Add statements for all of them (6+ files) — up to 12. PDF or a clear photo.",
-          },
-          {
-            name: "drivers_license",
-            label: "Driver's license (front) — optional",
-            type: "file_upload",
-            required: false,
-            accept: ["image/*", "application/pdf"],
-            help: "Optional — speeds up underwriting. Clear photo of the primary owner's license front.",
-          },
-          {
-            name: "voided_check",
-            label: "Voided check — optional",
-            type: "file_upload",
-            required: false,
-            accept: ["application/pdf", "image/*"],
-            help: "Optional — speeds up funding. From the business bank account that will receive funds.",
+            help: "Drag and drop all your documents — last 3+ months of business bank statements (all accounts), plus your driver's license and a voided check if you have them. PDF or clear photos. Add as many as you need.",
           },
         ],
       },
@@ -370,28 +379,28 @@ export const SUNBIZ_FORM_TEMPLATES: Record<SunBizStep, SunBizFormTemplate> = {
   "bank-statement-upload": {
     name: "Bank Statement Upload",
     description:
-      "Lightweight follow-up form for any lead missing statements. One drag-and-drop slot for all of them.",
+      "Lightweight follow-up form for any lead missing documents. One drag-and-drop bucket for all of them.",
     steps: [
       {
         key: "upload",
-        title: "Upload your bank statements",
+        title: "Upload your documents",
         description:
-          "Add your last 3 months of business bank statements. Two accounts? Add all of them.",
+          "Drag and drop everything here — bank statements, driver's license, voided check. As many files as you need.",
         cta_label: "Submit",
         fields: [
           {
+            // 2026-06-20 (Ethan/Alex): ONE bucket for ALL document types, no
+            // practical limit. Server classifies by filename. Field name kept as
+            // `bank_statements` for submit-route detection compatibility.
             name: "bank_statements",
-            label: "Bank statements — last 3 months",
+            label: "Your documents",
             type: "file_upload_multi",
             required: true,
             accept: ["application/pdf", "image/*"],
-            max_files: 12,
+            max_files: 50,
             max_file_mb: 25,
-            help: "Drag in your last 3 months of business bank statements (6+ if you have two accounts) — up to 12 files. PDF or a clear photo.",
+            help: "Drag and drop all your documents — last 3+ months of business bank statements (all accounts), plus your driver's license and a voided check if you have them. PDF or clear photos. Add as many as you need.",
           },
-          // Batch 7.3: Form 3 is upload-only. The attestation/e-signature now
-          // lives on Form 2 (full-application), so the old yes/no "confirmation"
-          // select is removed here.
         ],
       },
     ],
