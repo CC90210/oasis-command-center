@@ -27,7 +27,8 @@ import { StageRail } from "@/components/manifest/StageRail";
 import { PipelineSearchableTable } from "@/components/manifest/PipelineSearchableTable";
 import { PageSearchBar } from "@/components/manifest/PageSearchBar";
 import { LeadPipelineView } from "@/components/manifest/LeadPipelineView";
-import { LeadDetailDrawer } from "@/components/leads/LeadDetailDrawer";
+import { TenantLeadDrawerMount } from "@/components/leads/TenantLeadDrawerMount";
+import { parseTenantDrawerIds } from "@/lib/tenant-drawer-params";
 import {
   PIPELINE_COLUMNS,
   formatPipelineCell,
@@ -80,14 +81,10 @@ export default async function TenantCatchAllPage({
   const stageFilter = typeof sp.stage === "string" && sp.stage ? sp.stage : null;
   const oppStageFilter = typeof sp.opp_stage === "string" && sp.opp_stage ? sp.opp_stage : null;
   const query = typeof sp.q === "string" && sp.q ? sp.q : null;
-  // SunBiz lead-drawer triggers. Only honored on the SunBiz slug; the
-  // catch-all silently ignores them on other tenants so an OASIS URL
-  // with ?lead= in it doesn't pop a drawer that doesn't belong there.
-  const UUID_RE_DRAWER = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-  const rawLead = typeof sp.lead === "string" ? sp.lead : null;
-  const rawApp = typeof sp.application === "string" ? sp.application : null;
-  const drawerLeadId = rawLead && UUID_RE_DRAWER.test(rawLead) ? rawLead : null;
-  const drawerAppId = rawApp && UUID_RE_DRAWER.test(rawApp) ? rawApp : null;
+  // SunBiz lead-drawer triggers. Only honored on the SunBiz slug (gate lives in
+  // TenantLeadDrawerMount); shared parse keeps the UUID guard consistent with
+  // the bare-root dashboard so an OASIS URL with ?lead= never pops a drawer.
+  const { drawerLeadId, drawerAppId } = parseTenantDrawerIds(sp);
   const normalised = slug.toLowerCase();
   if (!(await manifestExists(normalised))) notFound();
 
@@ -368,12 +365,12 @@ export default async function TenantCatchAllPage({
         oppStageFilter={oppStageFilter}
         query={query}
       />
-      {normalised === "sun" && !isPreview && drawerLeadId && (
-        <LeadDetailDrawer tenantSlug={normalised} recordId={drawerLeadId} entity="lead" />
-      )}
-      {normalised === "sun" && !isPreview && !drawerLeadId && drawerAppId && (
-        <LeadDetailDrawer tenantSlug={normalised} recordId={drawerAppId} entity="application" />
-      )}
+      <TenantLeadDrawerMount
+        slug={normalised}
+        isPreview={isPreview}
+        drawerLeadId={drawerLeadId}
+        drawerAppId={drawerAppId}
+      />
     </div>
   );
 }
