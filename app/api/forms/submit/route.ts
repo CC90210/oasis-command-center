@@ -549,8 +549,12 @@ export async function POST(req: NextRequest) {
     }
     const maxFiles = typeof field.max_files === "number" && field.max_files > 0 ? field.max_files : 50;
     const allowedMime = field.accept && field.accept.length > 0 ? field.accept : DEFAULT_MULTI_MIME;
-    // doc_type follows the field's purpose (e.g. "bank_statements" → the canonical
-    // bank_statements_3mo) so the docs count toward the required-docs tracker.
+    // 2026-06-20 (Ethan/Alex): the doc bucket is now ONE field for ALL document
+    // types, so we classify EACH file by its own filename — license.pdf →
+    // drivers_license, void.pdf → void_cheque, statement.pdf → bank_statements_3mo —
+    // and only fall back to the field's default type when a filename is ambiguous.
+    // (Pre-collapse this keyed off field.name, which would mis-type every file in
+    // the merged bucket as a bank statement and starve the required-docs tracker.)
     const fieldDocType = classifyDocTypeByFilename(field.name);
     const cleaned: Array<{ storage_path: string; filename: string; mime_type: string; size_bytes: number }> = [];
     for (const d of raw.slice(0, maxFiles)) {
@@ -570,13 +574,18 @@ export async function POST(req: NextRequest) {
         uploadWarnings.push({ field_name: field.name, reason: `mime_not_allowed: ${mt}` });
         continue;
       }
+      // Per-file classification: license/void/ID files dropped into the shared
+      // bucket get their true doc_type; ambiguous filenames fall back to the
+      // field's default (bank_statements_3mo for the statements bucket).
+      const perFileType = classifyDocTypeByFilename(fn);
+      const docTypeForFile = perFileType !== "unclassified" ? perFileType : fieldDocType;
       const reg = await registerLeadDocument({
         tenantId: form.tenant_id,
         leadId: link.lead_id,
         storagePath: sp,
         filename: fn,
         mimeType: mt,
-        docType: fieldDocType,
+        docType: docTypeForFile,
         uploadedBy: "form_intake",
         source: "form_intake",
         extraMetadata: { form_id: form.id, field_name: field.name, step_index: stepIndex },

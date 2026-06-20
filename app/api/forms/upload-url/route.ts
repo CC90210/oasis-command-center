@@ -68,12 +68,13 @@ export async function POST(req: NextRequest) {
   }
   const link = sig.payload;
 
-  // Per-lead rate limit. 6-12 statements + the odd retry → 40/min is generous
-  // for a human but bounds a script minting unbounded signed URLs.
+  // Per-lead rate limit. Capacity must exceed the form's max_files (now 50, the
+  // single all-docs bucket) so a legitimate full-bucket drop doesn't self-throttle
+  // — 60 burst + the odd retry. Still bounds a script minting unbounded URLs.
   const limit = rateLimit({
     key: `forms-upload-url:${link.lead_id}:${link.form_id}`,
-    capacity: 40,
-    refillPerSec: 40 / 60,
+    capacity: 60,
+    refillPerSec: 60 / 60,
   });
   if (!limit.allowed) {
     return NextResponse.json(
