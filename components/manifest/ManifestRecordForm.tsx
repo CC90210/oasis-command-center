@@ -19,6 +19,7 @@ import Link from "next/link";
 import type { ManifestEntityDef, ManifestEntityField } from "@/lib/manifest/schema";
 import { humanize } from "@/lib/manifest/humanize";
 import { LEAD_DOC_TYPES, humanLeadDocSize } from "@/lib/lead-doc-display";
+import { AddressAutocompleteField } from "@/components/forms/AddressAutocompleteField";
 
 type Props = {
   tenantSlug: string;
@@ -470,9 +471,28 @@ function FieldInput({
       />
     );
   }
+  const n = field.name.toLowerCase();
+  // Address fields get the same free (Photon/OSM, keyless) autocomplete the
+  // public form uses, so employees entering a merchant's address get suggestions
+  // too — not just merchants. Manifest fields are typed "string", so detect by
+  // name (business_address, owner_home_address, mailing_address, …).
+  if (n === "address" || n.endsWith("_address")) {
+    return (
+      <label className="block">
+        {label}
+        <AddressAutocompleteField
+          inputId={field.name}
+          value={(value as string) || ""}
+          onChange={(v) => onChange(v)}
+          placeholder={placeholder || "Start typing the address…"}
+          className={baseClass}
+        />
+        {errorNode}
+      </label>
+    );
+  }
   // string default — picks email/phone/url input mode from the field
   // name so the mobile keyboard surfaces the right keys.
-  const n = field.name.toLowerCase();
   const inputType =
     n === "email" || n.endsWith("_email") ? "email"
     : n === "phone" || n.endsWith("_phone") ? "tel"

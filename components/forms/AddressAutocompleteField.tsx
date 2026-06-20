@@ -19,6 +19,9 @@ type Props = {
   onChange: (v: string) => void;
   placeholder?: string;
   inputId?: string;
+  /** Override the input styling so the field matches its host surface (the
+   *  public form vs the dashboard record editor). Defaults to the form styling. */
+  className?: string;
 };
 
 const BASE_INPUT =
@@ -27,7 +30,7 @@ const BASE_INPUT =
 const MIN_CHARS = 3;
 const DEBOUNCE_MS = 300;
 
-export function AddressAutocompleteField({ value, onChange, placeholder, inputId }: Props) {
+export function AddressAutocompleteField({ value, onChange, placeholder, inputId, className }: Props) {
   const [suggestions, setSuggestions] = useState<string[]>([]);
   const [open, setOpen] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -135,7 +138,7 @@ export function AddressAutocompleteField({ value, onChange, placeholder, inputId
           blurRef.current = setTimeout(() => setOpen(false), 150);
         }}
         placeholder={placeholder || "Start typing your address…"}
-        className={BASE_INPUT}
+        className={className || BASE_INPUT}
         role="combobox"
         aria-expanded={open}
         aria-controls={`${inputId ?? "addr"}-listbox`}
