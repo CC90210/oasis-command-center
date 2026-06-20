@@ -61,39 +61,22 @@ const STARTER_FORM_TEMPLATE = {
       key: "documents",
       title: "Upload your documents",
       description:
-        "We need three files to underwrite your application. Each one's required.",
+        "Drag and drop everything here — bank statements, driver's license, voided check. As many files as you need.",
       fields: [
         {
-          name: "bank_statements_3mo",
-          label: "Last 3 months of bank statements",
-          help: "PDF preferred. One file per month is fine.",
-          type: "file_upload",
+          // 2026-06-20 (Ethan/Alex): ONE drag-and-drop bucket for ALL document
+          // types — no fixed sub-slots. Matches the canonical SunBiz templates
+          // (lib/forms/sunbiz-templates.ts); the submit route classifies each
+          // file by filename. Field name `bank_statements` for submit-route
+          // detection + the Telegram bank hook.
+          name: "bank_statements",
+          label: "Your documents",
+          help: "Last 3+ months of business bank statements (all accounts), plus your driver's license and a voided check if you have them. PDF or clear photos. Add as many as you need.",
+          type: "file_upload_multi",
           required: true,
           accept: ["application/pdf", "image/*"],
-        },
-        {
-          name: "drivers_license",
-          label: "Photo of your driver's license",
-          help: "Front of card, clear and readable.",
-          type: "file_upload",
-          required: true,
-          accept: ["image/*", "application/pdf"],
-        },
-        {
-          name: "void_cheque",
-          label: "Void cheque",
-          help: "A voided cheque from the business bank account funding will be deposited to.",
-          type: "file_upload",
-          required: true,
-          accept: ["application/pdf", "image/*"],
-        },
-        {
-          name: "proof_of_ownership",
-          label: "Proof of business ownership (optional)",
-          help: "Articles of incorporation, EIN letter, or business license. Optional — speeds up underwriting if you have it ready.",
-          type: "file_upload",
-          required: false,
-          accept: ["application/pdf", "image/*"],
+          max_files: 50,
+          max_file_mb: 25,
         },
       ],
     },
