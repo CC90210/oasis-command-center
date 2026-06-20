@@ -140,7 +140,7 @@ const HANDLERS: Record<string, ToolHandler> = {
       .limit(1)
       .maybeSingle();
     const current = Number(profile?.mrr_current_usd) || 0;
-    const target = Number(profile?.mrr_target_usd) || 5000;
+    const target = Number(profile?.mrr_target_usd) || 10000;
     const gap = Math.max(0, target - current);
     const pct = target > 0 ? Math.round((current / target) * 1000) / 10 : 0;
     let days_to_target: number | null = null;

@@ -97,8 +97,8 @@ export const AGENT_REGISTRY: Record<string, AgentInfo> = {
         description: "Bravo uses this as the daily north-star metric.",
         type: "number",
         required: true,
-        placeholder: "5000",
-        default: 5000,
+        placeholder: "10000",
+        default: 10000,
       },
       {
         id: "tone",

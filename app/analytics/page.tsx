@@ -15,7 +15,7 @@ export default async function AnalyticsPage() {
   const profile = await safe("analytics.profile", getActiveProfile(), null);
   const tenantId = profile?.tenant_id || "";
   const [mrr, history, pipeline] = await Promise.all([
-    safe("analytics.mrr_snapshot", mrrSnapshot(), { current: 0, target: 5000, pct: 0 }),
+    safe("analytics.mrr_snapshot", mrrSnapshot(), { current: 0, target: 10000, pct: 0 }),
     safe("analytics.mrr_history", mrrHistory(60), [] as Array<{ date: string; mrr: number; synthetic: boolean }>),
     safe("analytics.pipeline_breakdown", pipelineBreakdown(tenantId), { stages: {} as Record<string, number>, total: 0, sources: {} as Record<string, number> }),
   ]);

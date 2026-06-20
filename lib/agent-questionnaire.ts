@@ -49,7 +49,7 @@ export const AGENT_QUESTIONS: Record<string, Question[]> = {
     {
       key: "MRR_TARGET",
       label: "MRR target (USD)",
-      placeholder: "5000",
+      placeholder: "10000",
       type: "number",
       help: "What's the next milestone you're climbing toward?",
     },
