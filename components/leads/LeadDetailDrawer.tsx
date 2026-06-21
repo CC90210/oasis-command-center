@@ -247,6 +247,16 @@ export function LeadDetailDrawer({
                 <ShoppingBag className="w-3 h-3" />
                 Shop Out
               </Link>
+            ) : data ? (
+              // Lead drawer — the bridge into the Applications pipeline. Before
+              // promotion: "Move to Applications" (creates the application at
+              // Application In). After: Shop Out + In-Applications deep links.
+              <PromoteControl
+                tenantSlug={tenantSlug}
+                leadId={recordId}
+                application={data.application}
+                onPromoted={reload}
+              />
             ) : (
               <span />
             )}
@@ -324,6 +334,93 @@ export function LeadDetailDrawer({
           onChange={reload}
         />
       </aside>
+    </div>
+  );
+}
+
+/**
+ * PromoteControl — lead drawer's bridge into the Applications pipeline.
+ *
+ * The Leads board can't be shopped to funders directly; shopping operates on
+ * `application` records. This control creates (or reuses) the linked application
+ * via POST /api/leads/[id]/promote — landing it at Application In — then flips
+ * to Shop Out + In-Applications deep links once the link exists. Idempotent:
+ * if the lead already has an application (e.g. underwriting was run), the links
+ * show immediately with no "Move" step.
+ */
+function PromoteControl({
+  tenantSlug,
+  leadId,
+  application,
+  onPromoted,
+}: {
+  tenantSlug: string;
+  leadId: string;
+  application: { id: string; data: Record<string, unknown> } | null;
+  onPromoted: () => void;
+}) {
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  if (application) {
+    return (
+      <div className="flex items-center gap-2 min-w-0">
+        <Link
+          href={`/t/${tenantSlug}/shopping-out?app=${application.id}`}
+          className="inline-flex items-center gap-1.5 text-[10.5px] font-semibold px-2.5 py-1 rounded-md bg-accent/10 text-accent border border-accent/30 hover:bg-accent/20"
+        >
+          <ShoppingBag className="w-3 h-3" />
+          Shop Out
+        </Link>
+        <Link
+          href={`/t/${tenantSlug}/applications?application=${application.id}`}
+          className="text-[10.5px] text-fg-muted hover:text-fg underline underline-offset-2 whitespace-nowrap"
+        >
+          In Applications →
+        </Link>
+      </div>
+    );
+  }
+
+  async function promote() {
+    if (pending) return;
+    setPending(true);
+    setError(null);
+    try {
+      const r = await fetch(`/api/leads/${leadId}/promote`, {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: "{}",
+      });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok || !j.application_id) {
+        setError(j.message || j.error || `failed_${r.status}`);
+        return;
+      }
+      // Detail refetch picks up data.application → this control flips to the
+      // Shop Out / In-Applications links automatically.
+      onPromoted();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "network_error");
+    } finally {
+      setPending(false);
+    }
+  }
+
+  return (
+    <div className="flex items-center gap-2 min-w-0">
+      <button
+        type="button"
+        onClick={promote}
+        disabled={pending}
+        title="Create the application and move this deal into the Applications pipeline so you can shop it out"
+        className="inline-flex items-center gap-1.5 text-[10.5px] font-semibold px-2.5 py-1 rounded-md bg-accent text-bg-deep hover:bg-accent/90 disabled:opacity-50"
+      >
+        {pending ? <Loader2 className="w-3 h-3 animate-spin" /> : <ShoppingBag className="w-3 h-3" />}
+        {pending ? "Moving…" : "Move to Applications"}
+      </button>
+      {error && <span className="text-[10px] text-red-300 truncate">{error}</span>}
     </div>
   );
 }
