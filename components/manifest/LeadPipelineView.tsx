@@ -837,6 +837,14 @@ function DesktopRow({
             <span className="block truncate text-[10px] text-fg-dim" title={model.subtitle}>
               {model.subtitle}
             </span>
+            {entityName === "lead" && row.data.application_id ? (
+              <span
+                className="mt-0.5 inline-flex items-center gap-1 rounded border border-accent/30 bg-accent/10 px-1.5 py-0.5 text-[9px] font-semibold text-accent"
+                title="Moved to the Applications pipeline — open to shop it out"
+              >
+                Promoted →
+              </span>
+            ) : null}
           </span>
         </div>
       </Cell>
@@ -908,6 +916,11 @@ function MobileRow({
             <div className="min-w-0">
               <div className="truncate text-sm font-semibold text-fg">{model.businessName}</div>
               <div className="truncate text-[11px] text-fg-dim">{model.ownerName}</div>
+              {entityName === "lead" && row.data.application_id ? (
+                <span className="mt-1 inline-flex items-center gap-1 rounded border border-accent/30 bg-accent/10 px-1.5 py-0.5 text-[9px] font-semibold text-accent">
+                  Promoted →
+                </span>
+              ) : null}
             </div>
             <StageChip stage={stage} />
           </div>
