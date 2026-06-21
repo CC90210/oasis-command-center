@@ -21,7 +21,8 @@
  */
 
 import { PDFDocument, StandardFonts, rgb } from "pdf-lib";
-import type { PDFFont } from "pdf-lib";
+import type { PDFFont, PDFPage } from "pdf-lib";
+import { SUNBIZ_LOGO_PNG_BASE64 } from "./sunbiz-logo";
 
 export type PdfFieldRow = { label: string; value: string };
 export type PdfSection = { heading: string; rows: PdfFieldRow[] };
@@ -220,10 +221,34 @@ function formatSignedAt(iso: string): string {
   }
 }
 
+/** Greedy word-wrap to a max width; used for the authorization paragraph. */
+function wrapText(textIn: string, font: PDFFont, size: number, maxW: number): string[] {
+  const words = winAnsiSafe(textIn).split(/\s+/).filter(Boolean);
+  const lines: string[] = [];
+  let cur = "";
+  for (const w of words) {
+    const t = cur ? `${cur} ${w}` : w;
+    if (cur && font.widthOfTextAtSize(t, size) > maxW) {
+      lines.push(cur);
+      cur = w;
+    } else {
+      cur = t;
+    }
+  }
+  if (cur) lines.push(cur);
+  return lines;
+}
+
 /**
- * Render the application PDF. Returns the raw bytes (Uint8Array) for upload.
+ * Render the signed application PDF — polished, on-brand layout (SunBiz forest
+ * green + gold). Logo header, bordered section cards with green heading bars, a
+ * two-column field grid, an authorization + signature block, and a branded
+ * footer on every page. Underwriter-readable. Returns raw bytes for upload.
+ *
  * `signatureDataUri` is an optional PNG data-URI (the drawn signature); when
- * absent or malformed a ruled signature line is drawn instead.
+ * absent or malformed a ruled signature line is drawn instead. Every drawn
+ * string is WinAnsi-sanitized so merchant free-text (emoji / non-Latin) can't
+ * crash generation.
  */
 export async function generateApplicationPdf(input: {
   sections: PdfSection[];
@@ -237,22 +262,31 @@ export async function generateApplicationPdf(input: {
 
   const PAGE_W = 612;
   const PAGE_H = 792; // US Letter
-  const MARGIN = 50;
-  const ink = rgb(0.06, 0.09, 0.16);
-  const muted = rgb(0.4, 0.45, 0.52);
-  const rule = rgb(0.8, 0.83, 0.88);
-  const brand = rgb(0.055, 0.604, 0.655); // SunBiz teal ~#0E9AA7
+  const MARGIN = 46;
+  const CONTENT_W = PAGE_W - MARGIN * 2;
+
+  // Brand palette — forest green + gold on white (matches the logo).
+  const green = rgb(0.094, 0.353, 0.208); // #185A35
+  const greenDeep = rgb(0.043, 0.227, 0.129);
+  const gold = rgb(0.901, 0.682, 0.153); // #E6AE27
+  const ink = rgb(0.11, 0.13, 0.16);
+  const muted = rgb(0.42, 0.47, 0.53);
+  const line = rgb(0.83, 0.86, 0.89);
+  const cardBg = rgb(0.972, 0.984, 0.976);
+  const white = rgb(1, 1, 1);
 
   let page = doc.addPage([PAGE_W, PAGE_H]);
-  let y = PAGE_H - MARGIN;
 
-  const newPage = () => {
-    page = doc.addPage([PAGE_W, PAGE_H]);
-    y = PAGE_H - MARGIN;
-  };
-  const ensure = (need: number) => {
-    if (y - need < MARGIN + 30) newPage();
-  };
+  // Embed the brand logo once; soft-fail to a text wordmark.
+  let logo: Awaited<ReturnType<typeof doc.embedPng>> | null = null;
+  try {
+    if (SUNBIZ_LOGO_PNG_BASE64) {
+      logo = await doc.embedPng(Buffer.from(SUNBIZ_LOGO_PNG_BASE64, "base64"));
+    }
+  } catch {
+    logo = null;
+  }
+
   const text = (
     s: string,
     x: number,
@@ -260,78 +294,164 @@ export async function generateApplicationPdf(input: {
     size: number,
     f: PDFFont = font,
     color = ink,
+  ) => page.drawText(winAnsiSafe(s), { x, y: yy, size, font: f, color });
+  const rightText = (
+    s: string,
+    xRight: number,
+    yy: number,
+    size: number,
+    f: PDFFont = font,
+    color = ink,
   ) => {
-    page.drawText(winAnsiSafe(s), { x, y: yy, size, font: f, color });
-  };
-  const hline = (yy: number, thickness: number, color = rule) => {
-    page.drawLine({ start: { x: MARGIN, y: yy }, end: { x: PAGE_W - MARGIN, y: yy }, thickness, color });
+    const safe = winAnsiSafe(s);
+    page.drawText(safe, { x: xRight - f.widthOfTextAtSize(safe, size), y: yy, size, font: f, color });
   };
 
-  // Header
-  text("SunBiz Funding Submissions", MARGIN, y, 16, fontBold, brand);
-  y -= 15;
-  text(`+1 754-212-7833   ${MIDDOT}   submissions@sunbizfunding.com`, MARGIN, y, 9, font, muted);
-  y -= 9;
-  hline(y, 1, brand);
-  y -= 22;
+  const drawFooter = (p: PDFPage) => {
+    p.drawLine({ start: { x: MARGIN, y: 42 }, end: { x: PAGE_W - MARGIN, y: 42 }, thickness: 1.4, color: green });
+    p.drawRectangle({ x: MARGIN, y: 40.6, width: 84, height: 1.6, color: gold });
+    p.drawText("www.sunbizfunding.com", { x: MARGIN, y: 29, size: 8.5, font: fontBold, color: green });
+    const conf = "Confidential. For funding review only.";
+    p.drawText(conf, {
+      x: PAGE_W - MARGIN - font.widthOfTextAtSize(conf, 7.5),
+      y: 29,
+      size: 7.5,
+      font,
+      color: muted,
+    });
+  };
 
-  // Sections
-  const labelX = MARGIN;
-  const valueX = MARGIN + 170;
-  const valueMaxW = PAGE_W - MARGIN - valueX;
-  const lineH = 15;
-  for (const section of input.sections) {
-    ensure(lineH * 3);
-    text(section.heading, labelX, y, 10.5, fontBold, brand);
-    y -= 6;
-    hline(y, 0.6);
-    y -= 15;
-    for (const row of section.rows) {
-      ensure(lineH);
-      text(row.label, labelX, y, 8.5, fontBold, muted);
-      if (row.value) text(clip(row.value, font, 9, valueMaxW), valueX, y, 9, font, ink);
-      y -= lineH;
-    }
-    y -= 8;
+  // ---- Page-1 header: logo left, title + contact right, brand divider ----
+  const top = PAGE_H - MARGIN;
+  let headerBottom = top - 52;
+  if (logo) {
+    const fit = logo.scaleToFit(152, 66);
+    page.drawImage(logo, { x: MARGIN, y: top - fit.height, width: fit.width, height: fit.height });
+    headerBottom = top - fit.height;
+  } else {
+    text("SUNBIZ FUNDING", MARGIN, top - 22, 18, fontBold, green);
+    headerBottom = top - 34;
   }
+  rightText("BUSINESS FUNDING APPLICATION", PAGE_W - MARGIN, top - 14, 13, fontBold, greenDeep);
+  rightText(`+1 754-212-7833   ${MIDDOT}   submissions@sunbizfunding.com`, PAGE_W - MARGIN, top - 28, 8.5, font, muted);
+  rightText("www.sunbizfunding.com", PAGE_W - MARGIN, top - 40, 8.5, font, muted);
 
-  // Signature block -- keep it intact on one page.
-  ensure(110);
-  y -= 6;
-  hline(y, 0.6);
+  let y = Math.min(headerBottom, top - 52) - 10;
+  page.drawLine({ start: { x: MARGIN, y }, end: { x: PAGE_W - MARGIN, y }, thickness: 2, color: green });
+  page.drawRectangle({ x: MARGIN, y: y - 1, width: 96, height: 2, color: gold });
   y -= 20;
-  text("APPLICANT'S SIGNATURE", labelX, y, 10.5, fontBold, brand);
-  y -= 34;
 
-  const sigBoxW = 220;
-  const sigBoxH = 56;
+  drawFooter(page);
+
+  const newPage = () => {
+    page = doc.addPage([PAGE_W, PAGE_H]);
+    drawFooter(page);
+    y = PAGE_H - MARGIN;
+  };
+
+  // ---- Section cards: green heading bar + bordered two-column field grid ----
+  const HEAD_H = 20;
+  const ROW_H = 27;
+  const PAD = 11;
+  const colW = CONTENT_W / 2;
+
+  const sectionCard = (heading: string, rows: PdfFieldRow[]) => {
+    const gridRows = Math.max(1, Math.ceil(rows.length / 2));
+    const bodyH = PAD + gridRows * ROW_H + 3;
+    if (y - (HEAD_H + bodyH) < 64) newPage();
+
+    const barTop = y;
+    page.drawRectangle({ x: MARGIN, y: barTop - HEAD_H, width: CONTENT_W, height: HEAD_H, color: green });
+    text(heading, MARGIN + 11, barTop - HEAD_H + 6.5, 9.5, fontBold, white);
+
+    const bodyTop = barTop - HEAD_H;
+    page.drawRectangle({
+      x: MARGIN,
+      y: bodyTop - bodyH,
+      width: CONTENT_W,
+      height: bodyH,
+      color: cardBg,
+      borderColor: line,
+      borderWidth: 1,
+    });
+    page.drawLine({
+      start: { x: MARGIN + colW, y: bodyTop - 6 },
+      end: { x: MARGIN + colW, y: bodyTop - bodyH + 6 },
+      thickness: 0.8,
+      color: line,
+    });
+
+    rows.forEach((row, i) => {
+      const col = i % 2;
+      const r = Math.floor(i / 2);
+      const cellX = MARGIN + col * colW + 11;
+      const cellTop = bodyTop - PAD - r * ROW_H;
+      text(row.label.toUpperCase(), cellX, cellTop - 7.5, 6.8, fontBold, muted);
+      if (row.value) text(clip(row.value, font, 9.5, colW - 22), cellX, cellTop - 19, 9.5, font, ink);
+      if (r < gridRows - 1) {
+        page.drawLine({
+          start: { x: MARGIN + col * colW + 7, y: cellTop - ROW_H + 5 },
+          end: { x: MARGIN + col * colW + colW - 7, y: cellTop - ROW_H + 5 },
+          thickness: 0.4,
+          color: line,
+        });
+      }
+    });
+    y = bodyTop - bodyH - 14;
+  };
+
+  for (const section of input.sections) sectionCard(section.heading, section.rows);
+
+  // ---- Authorization + signature card ----
+  const authText =
+    "Applicant authorizes SunBiz Funding LLC, its assigns, agents, banks or financial institutions to obtain an investigative or consumer report from a credit bureau or a credit agency and to investigate the references given on any other statement or data obtained from applicant.";
+  const authLines = wrapText(authText, font, 7.8, CONTENT_W - 22);
+  const blockBodyH = 14 + authLines.length * 10 + 96;
+  if (y - (HEAD_H + blockBodyH) < 64) newPage();
+
+  const sBarTop = y;
+  page.drawRectangle({ x: MARGIN, y: sBarTop - HEAD_H, width: CONTENT_W, height: HEAD_H, color: green });
+  text("AUTHORIZATION & SIGNATURE", MARGIN + 11, sBarTop - HEAD_H + 6.5, 9.5, fontBold, white);
+  const sBodyTop = sBarTop - HEAD_H;
+  page.drawRectangle({
+    x: MARGIN,
+    y: sBodyTop - blockBodyH,
+    width: CONTENT_W,
+    height: blockBodyH,
+    color: cardBg,
+    borderColor: line,
+    borderWidth: 1,
+  });
+  let ty = sBodyTop - 14;
+  for (const ln of authLines) {
+    text(ln, MARGIN + 11, ty, 7.8, font, muted);
+    ty -= 10;
+  }
+  ty -= 18;
+
+  const sigBoxW = 232;
+  const sigBoxH = 48;
+  const sigX = MARGIN + 11;
   const uri = input.signatureDataUri || "";
   if (uri.startsWith("data:image")) {
     try {
       const b64 = uri.split(",")[1] || "";
-      const bytes = Buffer.from(b64, "base64");
-      const png = await doc.embedPng(bytes);
+      const png = await doc.embedPng(Buffer.from(b64, "base64"));
       const fit = png.scaleToFit(sigBoxW, sigBoxH);
-      page.drawImage(png, { x: labelX, y: y - 2, width: fit.width, height: fit.height });
+      page.drawImage(png, { x: sigX, y: ty - sigBoxH + 8, width: fit.width, height: fit.height });
     } catch {
-      /* malformed image -- fall through to the ruled line */
+      /* malformed image — fall through to the ruled line */
     }
   }
-  page.drawLine({ start: { x: labelX, y: y - 6 }, end: { x: labelX + sigBoxW, y: y - 6 }, thickness: 0.8, color: ink });
-  text("Applicant's Signature", labelX, y - 18, 8, font, muted);
+  const lineY = ty - sigBoxH + 2;
+  page.drawLine({ start: { x: sigX, y: lineY }, end: { x: sigX + sigBoxW, y: lineY }, thickness: 0.8, color: ink });
+  text("Applicant's Signature", sigX, lineY - 11, 7.5, font, muted);
 
-  const rightX = labelX + sigBoxW + 40;
-  text(input.signatureName || "", rightX, y, 11, font, ink);
-  page.drawLine({ start: { x: rightX, y: y - 6 }, end: { x: PAGE_W - MARGIN, y: y - 6 }, thickness: 0.8, color: ink });
-  text("Print Name", rightX, y - 18, 8, font, muted);
-
-  y -= 40;
-  text(`Signed at: ${formatSignedAt(input.signedAt)}`, labelX, y, 9, font, muted);
-
-  // Footer on every page
-  for (const p of doc.getPages()) {
-    p.drawText("www.sunbizfunding.com", { x: MARGIN, y: MARGIN - 14, size: 9, font: fontBold, color: brand });
-  }
+  const rX = MARGIN + colW + 16;
+  text(input.signatureName || "", rX, ty - sigBoxH + 10, 11, font, ink);
+  page.drawLine({ start: { x: rX, y: lineY }, end: { x: PAGE_W - MARGIN - 11, y: lineY }, thickness: 0.8, color: ink });
+  text("Print Name", rX, lineY - 11, 7.5, font, muted);
+  text(`Signed at: ${formatSignedAt(input.signedAt)}`, rX, lineY - 24, 8, font, muted);
 
   return await doc.save();
 }
