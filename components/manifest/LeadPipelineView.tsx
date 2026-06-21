@@ -138,7 +138,7 @@ export function LeadPipelineView({
   entityLabel,
   stages,
   stageField,
-  rows,
+  rows: rawRows,
   stageFilter,
   query,
   basePath,
@@ -155,6 +155,14 @@ export function LeadPipelineView({
   const [bulkMsg, setBulkMsg] = useState<string | null>(null);
   const cfg = useMemo(() => variantConfig(variant), [variant]);
   const isLeads = entityName === "lead";
+  // Transferred leads have moved into the Applications pipeline (Adon transfer
+  // reconstruction 2026-06-21). They live there now, so drop them from the Lead
+  // board entirely — cards AND stage counts — leaving one card per deal. Only
+  // leads carry data.transferred_at; the Applications board is untouched.
+  const rows = useMemo(
+    () => (entityName === "lead" ? rawRows.filter((r) => !r.data.transferred_at) : rawRows),
+    [rawRows, entityName],
+  );
   const titleText = isLeads ? "Lead Pipeline" : "Opportunity Pipeline";
   // For OASIS the route is empire-side (/pipeline/new); for SunBiz it
   // lives under the tenant catch-all (/t/sun/leads/new).
@@ -837,14 +845,6 @@ function DesktopRow({
             <span className="block truncate text-[10px] text-fg-dim" title={model.subtitle}>
               {model.subtitle}
             </span>
-            {entityName === "lead" && row.data.application_id ? (
-              <span
-                className="mt-0.5 inline-flex items-center gap-1 rounded border border-accent/30 bg-accent/10 px-1.5 py-0.5 text-[9px] font-semibold text-accent"
-                title="Moved to the Applications pipeline — open to shop it out"
-              >
-                Promoted →
-              </span>
-            ) : null}
           </span>
         </div>
       </Cell>
@@ -916,11 +916,6 @@ function MobileRow({
             <div className="min-w-0">
               <div className="truncate text-sm font-semibold text-fg">{model.businessName}</div>
               <div className="truncate text-[11px] text-fg-dim">{model.ownerName}</div>
-              {entityName === "lead" && row.data.application_id ? (
-                <span className="mt-1 inline-flex items-center gap-1 rounded border border-accent/30 bg-accent/10 px-1.5 py-0.5 text-[9px] font-semibold text-accent">
-                  Promoted →
-                </span>
-              ) : null}
             </div>
             <StageChip stage={stage} />
           </div>

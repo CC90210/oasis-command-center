@@ -228,6 +228,29 @@ export function LeadDetailDrawer({
             />
           )}
 
+          {/* Transfer to Application — the lead's bridge into the Applications
+              pipeline. Prominent primary action; lead drawer only. After
+              transfer the lead LEAVES the Leads board (the board filters on
+              data.transferred_at) and the deal lives as the application — one
+              card, no duplicates. Documents follow via the application's
+              data.lead_id link. */}
+          {data && entity === "lead" && (
+            <TransferControl
+              tenantSlug={tenantSlug}
+              leadId={recordId}
+              transferred={Boolean(
+                (data.record.data as Record<string, unknown>).transferred_at,
+              )}
+              applicationId={
+                data.application?.id ||
+                (typeof (data.record.data as Record<string, unknown>).application_id === "string"
+                  ? ((data.record.data as Record<string, unknown>).application_id as string)
+                  : null)
+              }
+              onTransferred={reload}
+            />
+          )}
+
           <div className="flex items-center justify-between gap-3">
             {/* Shop Out — Phase 4 entry point (Jordan/Oasis 2026-05-23).
                 Only on the application drawer; pre-selects this app on the
@@ -247,16 +270,6 @@ export function LeadDetailDrawer({
                 <ShoppingBag className="w-3 h-3" />
                 Shop Out
               </Link>
-            ) : data ? (
-              // Lead drawer — the bridge into the Applications pipeline. Before
-              // promotion: "Move to Applications" (creates the application at
-              // Application In). After: Shop Out + In-Applications deep links.
-              <PromoteControl
-                tenantSlug={tenantSlug}
-                leadId={recordId}
-                application={data.application}
-                onPromoted={reload}
-              />
             ) : (
               <span />
             )}
@@ -339,50 +352,63 @@ export function LeadDetailDrawer({
 }
 
 /**
- * PromoteControl — lead drawer's bridge into the Applications pipeline.
+ * TransferControl — lead drawer's bridge into the Applications pipeline.
  *
  * The Leads board can't be shopped to funders directly; shopping operates on
- * `application` records. This control creates (or reuses) the linked application
- * via POST /api/leads/[id]/promote — landing it at Application In — then flips
- * to Shop Out + In-Applications deep links once the link exists. Idempotent:
- * if the lead already has an application (e.g. underwriting was run), the links
- * show immediately with no "Move" step.
+ * `application` records. This is the prominent primary action that TRANSFERS the
+ * deal: POST /api/leads/[id]/promote creates (or reuses) the linked application
+ * at Application In, hardens its document link, and stamps the lead's
+ * `transferred_at` so it LEAVES the Leads board (one card, no duplicates).
+ *
+ * State is keyed on `transferred` (the explicit data.transferred_at flag), NOT
+ * merely "an application exists" — so a lead that only had underwriting run
+ * still shows the Transfer button until it's explicitly transferred. Idempotent.
  */
-function PromoteControl({
+function TransferControl({
   tenantSlug,
   leadId,
-  application,
-  onPromoted,
+  transferred,
+  applicationId,
+  onTransferred,
 }: {
   tenantSlug: string;
   leadId: string;
-  application: { id: string; data: Record<string, unknown> } | null;
-  onPromoted: () => void;
+  transferred: boolean;
+  applicationId: string | null;
+  onTransferred: () => void;
 }) {
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  if (application) {
+  // Post-transfer: this deal now lives in Applications. Surface the two next
+  // moves — shop it out, or open it in the Applications pipeline.
+  if (transferred && applicationId) {
     return (
-      <div className="flex items-center gap-2 min-w-0">
-        <Link
-          href={`/t/${tenantSlug}/shopping-out?app=${application.id}`}
-          className="inline-flex items-center gap-1.5 text-[10.5px] font-semibold px-2.5 py-1 rounded-md bg-accent/10 text-accent border border-accent/30 hover:bg-accent/20"
-        >
-          <ShoppingBag className="w-3 h-3" />
-          Shop Out
-        </Link>
-        <Link
-          href={`/t/${tenantSlug}/applications?application=${application.id}`}
-          className="text-[10.5px] text-fg-muted hover:text-fg underline underline-offset-2 whitespace-nowrap"
-        >
-          In Applications →
-        </Link>
+      <div className="flex items-center justify-between gap-3 rounded-lg border border-status-engaged/30 bg-status-engaged/10 px-3 py-2.5">
+        <span className="inline-flex items-center gap-1.5 min-w-0">
+          <CheckCircle2 className="w-4 h-4 text-status-engaged shrink-0" />
+          <span className="text-[12px] font-semibold text-fg truncate">In Applications</span>
+        </span>
+        <span className="flex items-center gap-2 shrink-0">
+          <Link
+            href={`/t/${tenantSlug}/shopping-out?app=${applicationId}`}
+            className="inline-flex items-center gap-1.5 text-[11px] font-bold px-3 py-1.5 rounded-md bg-accent text-bg-deep hover:bg-accent/90"
+          >
+            <ShoppingBag className="w-3.5 h-3.5" />
+            Shop Out
+          </Link>
+          <Link
+            href={`/t/${tenantSlug}/applications?application=${applicationId}`}
+            className="text-[11px] text-fg-muted hover:text-fg underline underline-offset-2 whitespace-nowrap"
+          >
+            Open →
+          </Link>
+        </span>
       </div>
     );
   }
 
-  async function promote() {
+  async function transfer() {
     if (pending) return;
     setPending(true);
     setError(null);
@@ -398,9 +424,9 @@ function PromoteControl({
         setError(j.message || j.error || `failed_${r.status}`);
         return;
       }
-      // Detail refetch picks up data.application → this control flips to the
-      // Shop Out / In-Applications links automatically.
-      onPromoted();
+      // Detail refetch picks up data.transferred_at + the linked application →
+      // this control flips to the "In Applications" state automatically.
+      onTransferred();
     } catch (e) {
       setError(e instanceof Error ? e.message : "network_error");
     } finally {
@@ -409,18 +435,18 @@ function PromoteControl({
   }
 
   return (
-    <div className="flex items-center gap-2 min-w-0">
+    <div>
       <button
         type="button"
-        onClick={promote}
+        onClick={transfer}
         disabled={pending}
-        title="Create the application and move this deal into the Applications pipeline so you can shop it out"
-        className="inline-flex items-center gap-1.5 text-[10.5px] font-semibold px-2.5 py-1 rounded-md bg-accent text-bg-deep hover:bg-accent/90 disabled:opacity-50"
+        title="Move this deal into the Applications pipeline so you can shop it out. It leaves the Leads board and keeps all its documents."
+        className="w-full inline-flex items-center justify-center gap-2 rounded-lg bg-accent text-bg-deep px-4 py-2.5 text-[13px] font-bold shadow-sm hover:bg-accent/90 disabled:opacity-50 transition-colors"
       >
-        {pending ? <Loader2 className="w-3 h-3 animate-spin" /> : <ShoppingBag className="w-3 h-3" />}
-        {pending ? "Moving…" : "Move to Applications"}
+        {pending ? <Loader2 className="w-4 h-4 animate-spin" /> : <ShoppingBag className="w-4 h-4" />}
+        {pending ? "Transferring…" : "Transfer to Application →"}
       </button>
-      {error && <span className="text-[10px] text-red-300 truncate">{error}</span>}
+      {error && <div className="mt-1 text-[10.5px] text-red-300">{error}</div>}
     </div>
   );
 }
