@@ -98,6 +98,17 @@ export async function listRecords(input: ListRecordsInput): Promise<ListRecordsR
     }
   }
 
+  // Transferred leads have graduated into the Applications pipeline. Exclude them
+  // from EVERY lead LIST surface (single + combined pipeline, dashboard counts,
+  // kanban, search, exports) so a transferred deal never resurfaces as a lead
+  // card. One source of truth at the read layer (Bravo follow-up 2026-06-21);
+  // the client-side LeadPipelineView filter stays as defense-in-depth. Lead
+  // DETAIL via getRecord is intentionally unaffected (a transferred lead is
+  // still openable by id). Applications never carry transferred_at.
+  if (input.entity === "lead") {
+    q = q.is("data->>transferred_at", null);
+  }
+
   if (input.sort) {
     const desc = input.sort.startsWith("-");
     const col = (desc ? input.sort.slice(1) : input.sort).trim();
