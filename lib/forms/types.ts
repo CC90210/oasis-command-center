@@ -123,6 +123,14 @@ export type FormStep = {
 };
 
 export type FormBranding = {
+  /**
+   * Canvas theme for the public form page. "dark" (default) = the original
+   * charcoal command-center look; "light" = white/cream canvas matching the
+   * sunbizfunding.com website (opt-in per form via the SunBiz Website preset).
+   * Only affects the prospect-facing /f/ render — the operator builder preview
+   * stays dark.
+   */
+  theme?: "light" | "dark";
   /** Primary brand color (CSS hex). Used for buttons + headings. */
   primary_color?: string;
   /** Accent color for secondary elements. */
@@ -343,7 +351,9 @@ export function parseFormBranding(value: unknown): FormBranding {
   if (!isStringRecord(value)) {
     throw new FormDefinitionError("$.branding", "expected object");
   }
+  const themeRaw = optionalString(value, "theme");
   return {
+    theme: themeRaw === "light" || themeRaw === "dark" ? themeRaw : undefined,
     primary_color: optionalString(value, "primary_color"),
     accent_color: optionalString(value, "accent_color"),
     logo_url: optionalString(value, "logo_url"),

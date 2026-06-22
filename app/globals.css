@@ -528,3 +528,47 @@ main > div {
   border-color: rgba(0,212,255,0.4);
   color: #00d4ff;
 }
+
+/* ============================================================================
+ * SunBiz public form — LIGHT theme (opt-in via branding.theme === "light").
+ * FormPublicClient adds `.form-light` to its <main> ONLY when the form's
+ * branding.theme is "light" (the "SunBiz Website (Light)" preset). This scopes
+ * a remap of the dark form tokens to the sunbizfunding.com palette (forest
+ * green #175637, gold #f1c036, cream, ink) so a prospect arriving from the
+ * marketing site sees a seamless, on-brand form. The operator builder preview
+ * and every other tenant's form stay dark (no .form-light wrapper).
+ * ========================================================================= */
+html:has(.form-light),
+body:has(.form-light) {
+  background: #ffffff;
+}
+.form-light {
+  background: #ffffff !important;
+  color: #10201a;
+}
+.form-light .text-fg { color: #10201a !important; }
+.form-light .text-fg-muted { color: #45514b !important; }
+.form-light .text-fg-dim { color: #707a73 !important; }
+.form-light .bg-bg-elev,
+.form-light .bg-bg-elev\/40 { background-color: #ffffff !important; }
+.form-light .bg-bg-hover { background-color: #f3ead3 !important; }
+.form-light .bg-bg-border { background-color: #e7e3d8 !important; }
+.form-light .border-bg-border { border-color: #e7e3d8 !important; }
+.form-light .placeholder-fg-dim::placeholder { color: #9aa39d !important; }
+.form-light .text-rose-400 { color: #dc2626 !important; }
+/* Inputs: white field + green focus (override the OASIS-blue accent). */
+.form-light input:focus,
+.form-light textarea:focus,
+.form-light select:focus {
+  --tw-ring-color: rgba(23, 86, 55, 0.28) !important;
+  border-color: #3d8a64 !important;
+}
+.form-light input[type="checkbox"] { accent-color: #175637 !important; }
+.form-light input[type="file"]::file-selector-button {
+  background-color: rgba(23, 86, 55, 0.10) !important;
+  color: #175637 !important;
+}
+/* Card elevation reads better as a soft, warm shadow on a light canvas. */
+.form-light .shadow-lg {
+  box-shadow: 0 1px 3px rgba(16, 32, 26, 0.05), 0 18px 40px -18px rgba(16, 32, 26, 0.16) !important;
+}

@@ -352,13 +352,18 @@ export function FormPublicClient({
   }
 
   const primary = branding.primary_color || DEFAULT_PRIMARY_COLOR;
+  // Light theme (SunBiz Website preset) — opt-in per form. `.form-light` scopes
+  // a remap of the dark form tokens to the marketing-site palette (globals.css).
+  const isLight = branding.theme === "light";
   const headline = branding.headline || formName;
   const thanksMessage =
     branding.thanks_message ||
     "Thanks — your details are in. A specialist will reach out within one business day.";
 
   return (
-    <main className="min-h-screen bg-bg-deep text-fg flex items-start sm:items-center justify-center px-4 py-10">
+    <main
+      className={`min-h-screen ${isLight ? "form-light" : "bg-bg-deep"} text-fg flex items-start sm:items-center justify-center px-4 py-10`}
+    >
       <div className="w-full max-w-xl space-y-6">
         {/* Brand header — logo if the tenant set one, otherwise a clean
             branded sun mark so the form reads as the brand (not the

@@ -36,10 +36,28 @@ export type FormTheme = {
 
 export const FORM_THEMES: FormTheme[] = [
   {
-    id: "sunbiz_standard",
-    label: "SunBiz Standard",
-    description: "Default SunBiz Funding intake — warm gold on charcoal, branded header.",
+    id: "sunbiz_website_light",
+    label: "SunBiz Website (Light)",
+    description:
+      "Matches sunbizfunding.com — white canvas, forest green + gold, branded logo. Seamless for prospects arriving from the marketing site.",
     branding: {
+      theme: "light",
+      primary_color: "#175637",
+      accent_color: "#F1C036",
+      logo_url: "/brand/sunbiz-logo.png",
+      headline: "SunBiz Funding",
+      subheadline:
+        "Business funding, fast — tell us about your business and we'll match you with the right capital.",
+      thanks_message:
+        "Thanks — we've got your details. A SunBiz Funding specialist will reach out within one business day.",
+    },
+  },
+  {
+    id: "sunbiz_standard",
+    label: "SunBiz Standard (Dark)",
+    description: "Original SunBiz Funding intake — warm gold on charcoal, branded header.",
+    branding: {
+      theme: "dark",
       primary_color: "#E0A53F",
       accent_color: "#FFB81C",
       headline: "SunBiz Funding",
