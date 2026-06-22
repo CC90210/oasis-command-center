@@ -44,6 +44,7 @@ import {
   canViewLead,
   leadScopingEnabled,
   SCOPED_ENTITIES,
+  isAdminProfile,
   type LeadViewer,
 } from "@/lib/lead-scope";
 import { Card, PageHeader, Tag } from "@/components/Card";
@@ -168,9 +169,8 @@ export default async function TenantCatchAllPage({
   // see only leads/applications assigned to them; owner/admin see all and can
   // narrow via the filter chips (?agent= / ?unassigned=). Resolved here once and
   // threaded into every server-side lead/application read below.
-  const teamRole = profileRow?.team_role || "member";
   const viewer: LeadViewer = {
-    isAdmin: !!profileRow?.is_owner || teamRole === "admin" || teamRole === "owner",
+    isAdmin: isAdminProfile(profileRow),
     userId: user?.id ?? null,
   };
   const scopingOn = leadScopingEnabled();
@@ -220,11 +220,13 @@ export default async function TenantCatchAllPage({
         entity: entity.name,
         id: recordDetailId,
       }).catch(() => null);
-      // Per-agent lock: an agent opening a lead/application they don't own by
-      // guessing the URL gets a clean not-found, never the data. Admins pass.
+      // Per-agent lock: an agent opening a scoped record (lead / application /
+      // funded_deal) they don't own or collaborate on by guessing the URL gets
+      // a clean not-found, never the data. Admins pass. Gate on SCOPED_ENTITIES
+      // (not a hardcode) so funded_deal detail URLs are locked too.
       if (
         record &&
-        (entity.name === "lead" || entity.name === "application") &&
+        SCOPED_ENTITIES.has(entity.name) &&
         !canViewLead(viewer, record.data, scopingOn)
       ) {
         record = null;

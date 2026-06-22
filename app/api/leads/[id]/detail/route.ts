@@ -102,14 +102,23 @@ export async function GET(
     nameMap,
   );
 
+  // Per-agent lock on the LINKED application (lead branch): the lead's owner can
+  // differ from the application's owner if assignments diverged — don't leak the
+  // other rep's application data. Admins pass; the application-entity branch
+  // already authorized the record itself above. (Codex audit 2026-06-22.)
   let linkedApplication: { id: string; data: Record<string, unknown> } | null = null;
-  if (apps.rows[0]) {
+  const linkedAppRow = apps.rows[0];
+  if (
+    linkedAppRow &&
+    canViewLead(
+      { isAdmin: sess.isAdmin, userId: sess.userId },
+      linkedAppRow.data as Record<string, unknown>,
+      leadScopingEnabled(),
+    )
+  ) {
     linkedApplication = {
-      id: apps.rows[0].id,
-      data: withAssignedName(
-        apps.rows[0].data as Record<string, unknown>,
-        nameMap,
-      ),
+      id: linkedAppRow.id,
+      data: withAssignedName(linkedAppRow.data as Record<string, unknown>, nameMap),
     };
   }
 

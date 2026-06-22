@@ -38,6 +38,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { resolveSessionContext } from "@/lib/api-auth";
+import { canViewLead, leadScopingEnabled } from "@/lib/lead-scope";
 import { buildShopOutPlan, recordShopOutThreads } from "@/lib/lenders/shop-out";
 import { complianceProfileInputs } from "@/lib/lenders/match-fitness";
 import { deriveDealSigner, resolveSignerForOperator } from "@/lib/config/agents";
@@ -278,6 +279,15 @@ export async function POST(
     return NextResponse.json({ ok: false, error: "application_not_found" }, { status: 404 });
   }
   const appData = (appRow.data as { data: Record<string, unknown> }).data || {};
+
+  // Per-agent lock: only the application's owner/collaborator (or an admin) may
+  // shop it out. Without this a non-owner with the app UUID could dry-run
+  // another rep's deal details and create lender-thread state on it before any
+  // per-record check. 404 (not 403) so we don't confirm it exists. (Codex audit
+  // 2026-06-22.)
+  if (!canViewLead({ isAdmin: sess.isAdmin, userId: sess.userId }, appData, leadScopingEnabled())) {
+    return NextResponse.json({ ok: false, error: "application_not_found" }, { status: 404 });
+  }
   const application = {
     id: applicationId,
     // Merchant name — drives the SOP subject "New Deal ({{business_name}})"

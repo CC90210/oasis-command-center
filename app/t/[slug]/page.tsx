@@ -11,7 +11,7 @@ import { BoardLiveRefresh } from "@/components/leads/BoardLiveRefresh";
 import { parseTenantDrawerIds } from "@/lib/tenant-drawer-params";
 import { getManifest, manifestExists } from "@/lib/manifest/loader";
 import { resolveDataTenant } from "@/lib/manifest/tenant-scope";
-import { resolveAssignedScope, leadScopingEnabled } from "@/lib/lead-scope";
+import { resolveAssignedScope, leadScopingEnabled, isAdminProfile } from "@/lib/lead-scope";
 import { CATEGORY_LABELS } from "@/lib/agents/library";
 import { getSessionUser, getServiceSupabase } from "@/lib/supabase-server";
 import { requireTenantPreviewAccess } from "@/lib/tenant-access";
@@ -103,7 +103,7 @@ async function RootPageRenderer({
   // (owner / Jordan / Matt) see all; agents see their own + collaborated. Same
   // resolution as the catch-all pipeline page, threaded into the scoped surfaces.
   const viewer = {
-    isAdmin: !!profile?.is_owner || profile?.team_role === "admin" || profile?.team_role === "owner",
+    isAdmin: isAdminProfile(profile),
     userId: user?.id ?? null,
   };
   const assignedScope = resolveAssignedScope(viewer, {}, leadScopingEnabled());

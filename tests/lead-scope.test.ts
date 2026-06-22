@@ -7,7 +7,7 @@ import {
   filterRowsByScope,
   normalizeCollaborators,
   recordMatchesViewer,
-  filterRowsByViewer,
+  isAdminProfile,
 } from "../lib/lead-scope";
 
 // Per-agent lead scoping (Adon Batch 2). These lock the fail-closed contract:
@@ -105,15 +105,12 @@ assert.equal(
 // canViewLead now honors collaborators (delegates to recordMatchesViewer)
 assert.equal(canViewLead(COLLAB, sharedDeal), true, "collaborator may open the record");
 
-// --- filterRowsByViewer (in-memory, owner OR collaborator) ---
-const vrows = [
-  { data: { assigned_to: AGENT.userId } }, // owned by AGENT
-  { data: { assigned_to: "other", collaborators: [COLLAB.userId] } }, // shared with COLLAB
-  { data: { assigned_to: "other" } }, // neither
-];
-assert.equal(filterRowsByViewer(vrows, ADMIN).length, 3, "admin sees all");
-assert.equal(filterRowsByViewer(vrows, AGENT).length, 1, "agent sees own only");
-assert.equal(filterRowsByViewer(vrows, COLLAB).length, 1, "collaborator sees shared only");
-assert.equal(filterRowsByViewer(vrows, AGENT, false).length, 3, "flag off → all");
+// --- isAdminProfile (single source of truth for admin detection) ---
+assert.equal(isAdminProfile({ is_owner: true, team_role: "member" }), true, "owner is admin");
+assert.equal(isAdminProfile({ is_owner: false, team_role: "admin" }), true, "admin role is admin");
+assert.equal(isAdminProfile({ is_owner: false, team_role: "owner" }), true, "owner role is admin");
+assert.equal(isAdminProfile({ is_owner: false, team_role: "member" }), false, "member is not admin");
+assert.equal(isAdminProfile({ is_owner: null, team_role: null }), false, "nulls → not admin");
+assert.equal(isAdminProfile(null), false, "missing profile → not admin");
 
 console.log("lead-scope tests passed");

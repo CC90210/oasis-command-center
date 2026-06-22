@@ -29,6 +29,7 @@ import { getServiceSupabase } from "@/lib/supabase-server";
 import { resolveSessionContext } from "@/lib/api-auth";
 import { resolveDataTenant } from "@/lib/manifest/tenant-scope";
 import { manifestExists } from "@/lib/manifest/loader";
+import { recordMatchesViewer, leadScopingEnabled } from "@/lib/lead-scope";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -100,11 +101,17 @@ export async function GET(
     );
   }
 
-  const apps = (appsResult.data ?? []) as Array<{
+  // Per-agent scope: a non-admin sees only applications they own or collaborate
+  // on (admins see all). Without this the queue leaked every rep's application
+  // IDs / business+contact names / revenue to any tenant member. (Codex audit
+  // 2026-06-22.) recordMatchesViewer is the same predicate the UI surfaces use.
+  const viewer = { isAdmin: session.isAdmin, userId: session.userId };
+  const scopingOn = leadScopingEnabled();
+  const apps = ((appsResult.data ?? []) as Array<{
     id: string;
     status: string | null;
     data: Record<string, unknown>;
-  }>;
+  }>).filter((a) => recordMatchesViewer(a.data, viewer, scopingOn));
 
   if (apps.length === 0) {
     return NextResponse.json({ groups: EMPTY_GROUPS });

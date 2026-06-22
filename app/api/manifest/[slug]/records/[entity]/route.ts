@@ -27,7 +27,7 @@ import {
   listByAssignedScope,
   updateRecord,
 } from "@/lib/manifest/data";
-import { resolveAssignedScope, leadScopingEnabled, SCOPED_ENTITIES } from "@/lib/lead-scope";
+import { resolveAssignedScope, leadScopingEnabled, SCOPED_ENTITIES, isAdminProfile } from "@/lib/lead-scope";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -75,7 +75,7 @@ async function resolveContext(
   return {
     ok: true,
     tenant_id: dataTenant,
-    is_admin: !!profile.is_owner || profile.team_role === "admin" || profile.team_role === "owner",
+    is_admin: isAdminProfile(profile),
   };
 }
 

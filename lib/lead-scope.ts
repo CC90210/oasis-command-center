@@ -36,6 +36,17 @@ export const SCOPED_ENTITIES = new Set(["lead", "application", "funded_deal"]);
 
 export type LeadViewer = { isAdmin: boolean; userId: string | null };
 
+/** Is this user_profiles row an admin (sees all leads)? Owner (is_owner) or an
+ *  explicit admin/owner team_role. SINGLE source of truth for admin detection —
+ *  every scoped surface (records API, catch-all pipeline, dashboards) calls this
+ *  so the security-critical check can't drift between them. */
+export function isAdminProfile(
+  profile: { is_owner?: boolean | null; team_role?: string | null } | null | undefined,
+): boolean {
+  if (!profile) return false;
+  return !!profile.is_owner || profile.team_role === "admin" || profile.team_role === "owner";
+}
+
 export type AdminLeadFilter = { agent?: string | null; unassigned?: boolean };
 
 /**
@@ -125,22 +136,6 @@ export function recordMatchesViewer(
   const owner = typeof data.assigned_to === "string" ? data.assigned_to.toLowerCase() : null;
   if (owner === me) return true;
   return normalizeCollaborators(data).includes(me);
-}
-
-/**
- * Filter already-fetched rows to those the VIEWER may see (owner OR
- * collaborator; admin = all). Use this for in-memory lists that didn't go
- * through the scoped DB query (e.g. the dashboard's listRecords calls).
- * Distinct from filterRowsByScope, which filters by a pre-resolved admin
- * scope string and is collaborator-unaware by design.
- */
-export function filterRowsByViewer<T extends { data: Record<string, unknown> }>(
-  rows: T[],
-  viewer: LeadViewer,
-  enabled = true,
-): T[] {
-  if (!enabled || viewer.isAdmin) return rows;
-  return rows.filter((r) => recordMatchesViewer(r.data, viewer, enabled));
 }
 
 /** Whether a viewer may open a single lead/application record. Admins always;
