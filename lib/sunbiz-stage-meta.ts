@@ -65,6 +65,11 @@ export const LEAD_PIPELINE_STAGES: StageMeta[] = [
   { key: "sent_application",   label: "Sent Application",   bg: "#7057A7", fg: "#FFFFFF" },
   { key: "viewed_application", label: "Viewed", bg: "#2E8392", fg: "#FFFFFF" },
   { key: "signed_application", label: "Signed Application", bg: "#32876B", fg: "#FFFFFF" },
+  // Submitted Application (Adon, 2026-06-22) — re-added directly after
+  // signed_application: the lead's application has been submitted to
+  // underwriting / funders. Leads that land here are entered into the
+  // "signed application" email drip (the drip sequence is wired separately).
+  { key: "submitted_application", label: "Submitted Application", bg: "#356B8A", fg: "#FFFFFF" },
   { key: "ghost",              label: "Ghost",              bg: "#6F6F75", fg: "#FFFFFF" },
   { key: "default",            label: "Default",            bg: "#62666F", fg: "#FFFFFF" },
   // 2026-06-18 (CC): removed `submitted`, `funded`, `declined`, `opted_out`
