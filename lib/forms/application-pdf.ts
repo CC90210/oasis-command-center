@@ -277,16 +277,25 @@ function winAnsiSafe(s: string): string {
   return out;
 }
 
-/** Truncate text with an ellipsis so a long value can't overrun the page. */
-function clip(textIn: string, font: PDFFont, size: number, maxW: number): string {
-  const safe = winAnsiSafe(textIn);
-  if (!safe) return "";
-  if (font.widthOfTextAtSize(safe, size) <= maxW) return safe;
-  let t = safe;
-  while (t.length > 1 && font.widthOfTextAtSize(t + ELLIPSIS, size) > maxW) {
-    t = t.slice(0, -1);
+/** Wrap a value to up to maxLines at maxW; ellipsis the last line if it still
+ *  overflows. Lets address / description cells render 2 lines instead of
+ *  truncating a full address (and its ZIP) to a single clipped line. */
+function wrapClip(
+  textIn: string,
+  font: PDFFont,
+  size: number,
+  maxW: number,
+  maxLines: number,
+): string[] {
+  const lines = wrapText(textIn, font, size, maxW);
+  if (lines.length <= maxLines) return lines;
+  const kept = lines.slice(0, maxLines);
+  let last = kept[maxLines - 1];
+  while (last.length > 1 && font.widthOfTextAtSize(last + ELLIPSIS, size) > maxW) {
+    last = last.slice(0, -1);
   }
-  return t + ELLIPSIS;
+  kept[maxLines - 1] = last + ELLIPSIS;
+  return kept;
 }
 
 function formatSignedAt(iso: string): string {
@@ -442,7 +451,7 @@ export async function generateApplicationPdf(input: {
   // bordered cell in a two-column grid; trailing empty slot still drawn so the
   // table reads complete.
   const HEAD_H = 19;
-  const CELL_H = 30;
+  const CELL_H = 36; // label + up to 2 wrapped value lines (no truncated addresses)
   const colW = CONTENT_W / 2;
 
   const sectionTable = (heading: string, rows: PdfFieldRow[]) => {
@@ -465,7 +474,15 @@ export async function generateApplicationPdf(input: {
       const row = rows[i];
       if (row) {
         text(row.label.toUpperCase(), cellX + 8, cellTop - 10, 6.6, fontBold, muted);
-        if (row.value) text(clip(row.value, font, 9.5, colW - 16), cellX + 8, cellTop - 22, 9.5, font, ink);
+        if (row.value) {
+          // Wrap long values (addresses, descriptions) to up to 2 lines so a
+          // full address + ZIP isn't truncated — a real application shows it all.
+          let vy = cellTop - 21;
+          for (const ln of wrapClip(row.value, font, 9, colW - 16, 2)) {
+            text(ln, cellX + 8, vy, 9, font, ink);
+            vy -= 10;
+          }
+        }
       }
     }
     y = bodyTop - bodyH - 12;
