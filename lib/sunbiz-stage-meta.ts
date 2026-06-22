@@ -88,6 +88,12 @@ export const LEAD_PIPELINE_STAGES: StageMeta[] = [
 export const OPPORTUNITY_PIPELINE_STAGES: StageMeta[] = [
   { key: "application_in",  label: "Application In",  bg: "#4C6580", fg: "#FFFFFF" },
   { key: "shopping",        label: "Shopping",        bg: "#416F9C", fg: "#FFFFFF" },
+  // Approved (Adon, 2026-06-22) — re-added after `shopping`: a funder came
+  // back with an approval and the deal is now being actively worked (chasing
+  // stipulations -> docs out -> login -> funded). This is the explicit tab an
+  // operator moves a shopped deal into post-approval; it anchors the
+  // dashboard "Active Deals" section. Blue matches ADON_DEAL_STAGES "Approved".
+  { key: "approved",        label: "Approved",        bg: "#3B82F6", fg: "#FFFFFF" },
   { key: "missing_info",    label: "Missing Info",    bg: "#3978BE", fg: "#FFFFFF" },
   { key: "requested_docs",  label: "Requested Docs",  bg: "#9B7635", fg: "#FFFFFF" },
   { key: "docs_out",        label: "Docs Out",        bg: "#2E8392", fg: "#FFFFFF" },

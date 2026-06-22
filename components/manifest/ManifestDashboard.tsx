@@ -7,6 +7,7 @@ import type { TenantManifest } from "@/lib/manifest/schema";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { getRenewalsSummary } from "@/lib/queries";
 import { LEAD_PIPELINE_STAGES, OPPORTUNITY_PIPELINE_STAGES, type StageMeta } from "@/lib/sunbiz-stage-meta";
+import { pipelineRowHref } from "@/lib/pipeline-display";
 import { formatMoney, timeAgo } from "@/lib/fmt";
 
 type AgentAlertRow = {
@@ -159,6 +160,10 @@ export async function ManifestDashboard({ manifest, tenantId, demoRowsByEntity, 
             stageField="status"
           />
         </div>
+      )}
+
+      {isSunBizShape && (
+        <ActiveDeals slug={slug} applications={rowsByEntity.application || []} />
       )}
 
       {isSunBizShape && (
@@ -731,21 +736,132 @@ function urgencyScore(lead: TenantRecord): number {
   return base + Math.sqrt(daysSinceTouch) * 8 + revBoost;
 }
 
+/* -----------------------------------------------------------------
+ * Active Deals (Adon, 2026-06-22) — the deals the team is working RIGHT
+ * NOW: post-shop-out applications a funder has engaged on. The operator
+ * moves a shopped deal into `approved` once a funder bites, then works it
+ * down the stips chain (requested_docs -> docs_out -> login -> funded).
+ *
+ * This is deliberately separate from "Biggest merchants to close" below:
+ * that box is a lead-side REWARD ranking (who to chase next); this box is
+ * the live deal board (what's on the table today). Stage is read from
+ * data.status — the same field the one-click stage changer writes
+ * (POST /api/leads/[id]/set-stage, entity=application), so moving a deal
+ * into Approved via any stage control makes it appear here. No new
+ * mutation surface — the existing stage changer IS the "move in" control.
+ * ----------------------------------------------------------------- */
+
+// Post-shop, pre-funded — the deals on the table today. Ordered by the
+// work sequence so the freshest approvals sit on top; `funded` graduates
+// out (it has its own KPI + Renewals surface).
+const ACTIVE_DEAL_RANK: Record<string, number> = {
+  approved: 0,
+  requested_docs: 1,
+  docs_out: 2,
+  login: 3,
+};
+
+function dealAmount(app: TenantRecord): number {
+  const d = app.data;
+  if (typeof d.requested_amount === "number") return d.requested_amount;
+  if (typeof d.monthly_revenue === "number") return d.monthly_revenue;
+  return 0;
+}
+
+function ActiveDeals({ slug, applications }: { slug: string; applications: TenantRecord[] }) {
+  const deals = applications
+    .filter((a) => ACTIVE_DEAL_RANK[String(a.data.status || "")] !== undefined)
+    .sort((a, b) => {
+      const ra = ACTIVE_DEAL_RANK[String(a.data.status)] ?? 99;
+      const rb = ACTIVE_DEAL_RANK[String(b.data.status)] ?? 99;
+      if (ra !== rb) return ra - rb;
+      return dealAmount(b) - dealAmount(a); // within a stage, biggest first
+    });
+
+  return (
+    <Card
+      title="Active deals — working now"
+      subtitle="Approved & in-progress deals past shop-out: chasing stips, docs out, closing."
+      action={
+        <Link
+          href={`/t/${slug}/applications?stage=approved`}
+          className="inline-flex items-center gap-1 text-xs font-semibold text-accent hover:text-accent/80"
+        >
+          All applications <ArrowRight className="w-3 h-3" />
+        </Link>
+      }
+    >
+      {deals.length === 0 ? (
+        <div className="text-sm text-fg-dim italic text-center py-4">
+          No active deals yet. Move a shopped deal to <span className="font-semibold">Approved</span> once a funder bites — it&apos;ll surface here.
+        </div>
+      ) : (
+        <ul className="divide-y divide-bg-border sm:grid sm:grid-cols-2 sm:gap-x-6 sm:divide-y-0">
+          {deals.slice(0, 8).map((app) => {
+            const stage = String(app.data.status || "");
+            const stageMeta = OPPORTUNITY_PIPELINE_STAGES.find((s) => s.key === stage);
+            const name =
+              (typeof app.data.business_name === "string" && app.data.business_name) ||
+              (typeof app.data.business_legal_name === "string" && app.data.business_legal_name) ||
+              (typeof app.data.contact_name === "string" && app.data.contact_name) ||
+              `Deal ${app.id.slice(0, 8)}`;
+            const amount = dealAmount(app);
+            return (
+              <li key={app.id} className="border-b border-bg-border sm:border-b-0">
+                <Link
+                  href={pipelineRowHref(slug, "application", app.id)}
+                  className="flex items-center justify-between gap-3 py-2 px-1 hover:bg-bg-elev/40 rounded transition-colors"
+                >
+                  <div className="min-w-0">
+                    <div className="font-semibold text-sm text-fg truncate">{name}</div>
+                    <div className="text-[11px] text-fg-dim">
+                      {amount > 0 ? formatMoney(amount) : "—"}
+                      {app.updated_at ? ` · ${timeAgo(app.updated_at)}` : ""}
+                    </div>
+                  </div>
+                  {stageMeta && (
+                    <span
+                      className="inline-block px-2 py-0.5 rounded text-[10px] font-bold whitespace-nowrap shrink-0"
+                      style={{ background: stageMeta.bg, color: stageMeta.fg }}
+                    >
+                      {stageMeta.label}
+                    </span>
+                  )}
+                </Link>
+              </li>
+            );
+          })}
+        </ul>
+      )}
+    </Card>
+  );
+}
+
 function TopUrgentLeads({ slug, leads }: { slug: string; leads: TenantRecord[] }) {
   // Terminal / parked states — anything in this set drops off the urgency
   // surface. 2026-06-18 (CC): `declined` was removed from the lead pipeline;
   // negative-reply / no-response leads now land in `ghost` (a 1-month
   // re-engagement bucket, not daily-attention work), so exclude ghost here.
   const TERMINAL = new Set(["default", "ghost", "dead_file"]);
+  // Adon (2026-06-22): rank by deal VALUE, not the urgency formula —
+  // this box is "the biggest merchants worth closing first" (highest
+  // reward), distinct from the Active Deals board above. Tie-break on the
+  // urgency score so two equally-sized leads order by who's going cold.
+  const dealValue = (l: TenantRecord): number => {
+    const d = l.data;
+    if (typeof d.monthly_revenue === "number") return d.monthly_revenue;
+    if (typeof d.requested_amount === "number") return d.requested_amount;
+    return 0;
+  };
   const top = [...leads]
     .filter((l) => !TERMINAL.has(String(l.data.stage || "")))
-    .sort((a, b) => urgencyScore(b) - urgencyScore(a))
+    .sort((a, b) => dealValue(b) - dealValue(a) || urgencyScore(b) - urgencyScore(a))
     .slice(0, 5);
 
   return (
     <Card
-      title="Today's focus — most urgent leads"
-      subtitle="Ranked by stage weight × days-since-touch × revenue."
+      title="Biggest merchants to close"
+      subtitle="Your highest-revenue active leads — the deals worth chasing first."
       action={
         <Link
           href={`/t/${slug}/leads`}
