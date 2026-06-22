@@ -305,32 +305,12 @@ export const SUNBIZ_FORM_TEMPLATES: Record<SunBizStep, SunBizFormTemplate> = {
           },
         ],
       },
-      // Step 4 — Documents. 2026-06-20 (Ethan/Alex): ONE drag-and-drop bucket for
-      // ALL documents (bank statements, driver's license, voided check — any),
-      // no fixed sub-slots, no practical limit. The server classifies each file
-      // by filename (lib/lead-documents classifyDocTypeByFilename) so underwriting
-      // still gets the right doc_types. Field name stays `bank_statements` so the
-      // submit route's statement detection + the Telegram bank hook keep working.
-      {
-        key: "documents",
-        title: "Upload your documents",
-        description:
-          "Drag and drop everything here — bank statements, driver's license, voided check. As many files as you need.",
-        cta_label: "Continue",
-        fields: [
-          {
-            name: "bank_statements",
-            label: "Your documents",
-            type: "file_upload_multi",
-            required: true,
-            accept: ["application/pdf", "image/*"],
-            max_files: 50,
-            max_file_mb: 25,
-            help: "Drag and drop all your documents — last 3+ months of business bank statements (all accounts), plus your driver's license and a voided check if you have them. PDF or clear photos. Add as many as you need.",
-          },
-        ],
-      },
-      // Step 5 — Signature
+      // Signature — the FINAL step. 2026-06-22 (CC): the duplicate document-upload
+      // step was removed from the full application. Bank statements + license +
+      // voided check are collected ONCE, in the separate bank-statement-upload
+      // form (form 3 / underwriting), not here — the application is data + the
+      // merchant's signature only. (Removing this step shifts the signature step
+      // to index 4 — see step_outcomes below.)
       {
         key: "signature",
         title: "Sign and submit",
@@ -368,11 +348,12 @@ export const SUNBIZ_FORM_TEMPLATES: Record<SunBizStep, SunBizFormTemplate> = {
     ],
     step_outcomes: {
       "0": "sent_application",
-      "5": "signed_application",
+      // Signature is now step index 4 (the documents step was removed 2026-06-22).
+      "4": "signed_application",
     },
     // 2026-06-18 (CC): `submitted` stage removed — completion lands on
-    // signed_application (the last lead milestone). Underwriting is now an
-    // operator-driven action from the Bank tab, not an auto-stage.
+    // signed_application (the last lead milestone). Underwriting auto-runs when
+    // the merchant completes the separate bank-statement-upload form.
     on_complete_stage: "signed_application",
   },
 

@@ -21,6 +21,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { resolveSessionContext } from "@/lib/api-auth";
+import { enqueueUnderwritingRun } from "@/lib/underwriting/run";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -52,61 +53,29 @@ export async function POST(
 
   const db = getServiceSupabase();
 
-  // Defense-in-depth: confirm application exists in this tenant before
-  // inserting. Prevents a cross-tenant run enqueue via a guessed UUID.
-  const appCheck = await db
-    .from("tenant_records")
-    .select("id")
-    .eq("tenant_id", tenantId)
-    .eq("entity_type", "application")
-    .eq("id", applicationId)
-    .maybeSingle();
-  if (appCheck.error || !appCheck.data) {
-    return NextResponse.json({ ok: false, error: "application_not_found" }, { status: 404 });
+  // Verify + 409-guard + insert the pending run via the shared lib (also used by
+  // the bank-statement-upload form's auto-run path). The session-cookie bridge
+  // kick below then fires the orchestrator immediately for the operator.
+  const enq = await enqueueUnderwritingRun({
+    db,
+    tenantId,
+    applicationId,
+    triggeredBy,
+    triggeredByUserId: userId,
+  });
+  if (!enq.ok) {
+    if (enq.reason === "application_not_found") {
+      return NextResponse.json({ ok: false, error: "application_not_found" }, { status: 404 });
+    }
+    if (enq.reason === "run_in_progress") {
+      return NextResponse.json(
+        { ok: false, error: "run_in_progress", existing_run_id: enq.existingRunId },
+        { status: 409 },
+      );
+    }
+    return NextResponse.json({ ok: false, error: enq.error ?? "insert_failed" }, { status: 500 });
   }
-
-  // 409 guard — don't double-fire if a run is already in flight.
-  const inFlight = await db
-    .from("application_underwriting")
-    .select("id")
-    .eq("tenant_id", tenantId)
-    .eq("application_id", applicationId)
-    .in("status", ["pending", "parsing"])
-    .limit(1)
-    .maybeSingle();
-  if (inFlight.data) {
-    return NextResponse.json(
-      {
-        ok: false,
-        error: "run_in_progress",
-        existing_run_id: (inFlight.data as { id: string }).id,
-      },
-      { status: 409 },
-    );
-  }
-
-  // Insert the new underwriting run at status='pending'.
-  const insert = await db
-    .from("application_underwriting")
-    .insert({
-      tenant_id: tenantId,
-      application_id: applicationId,
-      status: "pending",
-      triggered_by: triggeredBy,
-      triggered_by_user_id: userId,
-      run_at: new Date().toISOString(),
-    })
-    .select("id")
-    .single();
-
-  if (insert.error || !insert.data) {
-    return NextResponse.json(
-      { ok: false, error: insert.error?.message ?? "insert_failed" },
-      { status: 500 },
-    );
-  }
-
-  const runId = (insert.data as { id: string }).id;
+  const runId = enq.runId;
 
   // 2026-06-11: previously this route stopped at INSERT and trusted the
   // underwriting_orchestrator cron to pick it up. The orchestrator is a

@@ -1,37 +1,40 @@
 /**
- * next-steps-email.ts — the SunBiz interest-form handoff automation.
+ * next-steps-email.ts — the SunBiz funnel hand-off automations.
  *
- * WHAT / WHY:
- * When a prospect submits the short interest form (initial-lead-capture), they
- * should immediately receive ONE email — from the connected SunBiz mailbox —
- * with the links to continue: step 2 (the full application) and step 3 (the
- * bank-statement upload), signed by the agent the lead is assigned to.
+ * Two transactional emails, sent from the connected SunBiz mailbox, signed by
+ * the agent the lead is assigned to:
+ *   - maybeSendNextStepsEmail        → after the interest form (step 1): ONE link
+ *                                       to the full application (step 2).
+ *   - maybeSendApplicationCompleteEmail → after the full application (step 2):
+ *                                       ONE link to the bank-statement upload
+ *                                       (step 3). The follow-through that keeps
+ *                                       the funnel moving sequentially (CC
+ *                                       2026-06-22: form 1 → form 2 → form 3, one
+ *                                       step at a time — never both links at once).
  *
- * Why this exists as a NEW path instead of the old resume-email queue:
+ * Why a NEW path instead of the old resume-email queue:
  * The form-submit route used to queue a `lead_interactions` row
  * (agent_source='form_intake_resume', type='email_queued') and rely on a
  * daemon to send it. But the dashboard-email-consumer daemon ONLY drains
  * agent_source='dashboard_drawer' AND is Windows-gated in ecosystem.config.js,
  * so on the SunBiz VPS those rows sat at status='queued' forever — never sent.
- * (Verified 2026-06-17: 5/5 form_intake_resume rows stuck queued, 0 sent,
- * including the operator's own test submission.)
+ * (Verified 2026-06-17: 5/5 form_intake_resume rows stuck queued, 0 sent.)
  *
  * The proven path is the SAME one the lead-drawer email uses (27/27 sent):
  * the bridge `send_email` tool → send_gateway → SMTP from the tenant mailbox.
- * The lead-drawer route reaches it through the session-gated
- * /api/bridge/exec-tool proxy — but the form-submit route is PUBLIC (HMAC
- * token, no session), so we resolve the bridge target server-side
- * (resolveBridgeTarget) and call the raw bridge with the server-held bearer.
- * The payload is fully server-templated (no user-controlled command), so this
- * is a trusted server-to-server send, not an arbitrary-exec surface.
+ * The form-submit route is PUBLIC (HMAC token, no session), so we resolve the
+ * bridge target server-side (resolveBridgeTarget) and call the raw bridge with
+ * the server-held bearer. The payload is fully server-templated (no
+ * user-controlled command), so this is a trusted server-to-server send.
  *
- * intent='transactional': this is a direct response to the prospect's own
- * submission (their next application steps), so it bypasses the cold-outreach
- * hygiene gates but still applies the CASL footer + unsubscribe headers inside
- * send_gateway.
+ * intent='transactional': a direct response to the prospect's own submission,
+ * so it bypasses the cold-outreach hygiene gates but still applies the CASL
+ * footer + unsubscribe headers inside send_gateway. Because transactional
+ * BYPASSES send_gateway's suppression gate, every sender below re-checks
+ * email_suppressions FAIL-CLOSED before the address reaches the bridge.
  *
- * Idempotent per lead: one next-steps email per lead. A returning merchant who
- * re-submits (smart-matched into their existing lead) is not re-emailed.
+ * Idempotent per lead PER VARIANT: one next-steps email + one application-
+ * complete email per lead. A returning merchant who re-submits is not re-mailed.
  */
 
 import "server-only";
@@ -43,14 +46,14 @@ import { mintFormLinkBySlug } from "@/lib/forms/agent-routing";
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
-/** agent_source tag for the interest-form handoff email — distinct from the
- *  operator drawer ('dashboard_drawer') and the legacy resume queue
- *  ('form_intake_resume') so it's auditable + the idempotency check is clean. */
+/** agent_source tags — distinct per variant so the FAILURE-path marker + the
+ *  idempotency check are clean and don't collide across the two emails. */
 const NEXT_STEPS_SOURCE = "form_intake_next_steps";
+const APP_COMPLETE_SOURCE = "form_intake_app_complete";
 
 export type MaybeSendNextStepsInput = {
   db: SupabaseClient;
-  /** Already-fetched form row (must be the interest/entry form). */
+  /** Already-fetched form row. */
   form: { id: string; tenant_id: string; slug: string };
   /** Verified form-link payload (tenant slug, lead_id). */
   link: { tenant: string; lead_id: string };
@@ -127,17 +130,9 @@ type AssignedAgent = SignerCtx & {
  * `assigned_to` (auth_user_id) is AUTHORITATIVE. We resolve the tenant member by
  * it and use their real name + email. We deliberately do NOT use the cached
  * `assigned_agent_name` as a resolution source: the reassignment endpoint
- * (app/api/leads/[id]/assign) updates assigned_to but leaves
- * assigned_agent_name stale, so trusting the name could CC the PREVIOUS rep and
- * leak merchant details to the wrong internal recipient. (Codex audit
- * 2026-06-18 [high].)
- *
- * Precedence:
- *   - assigned_to resolves to a member → sign as that member (name + email),
- *     enrich phone from the roster by EMAIL match, and CC that member's email.
- *   - assigned_to null OR unresolvable → sign with the cached name as a
- *     display-only fallback (so the signature never renders blank) and CC
- *     NOBODY (ccEmail=null). We never guess a CC recipient.
+ * updates assigned_to but leaves assigned_agent_name stale, so trusting the name
+ * could CC the PREVIOUS rep and leak merchant details to the wrong internal
+ * recipient. (Codex audit 2026-06-18 [high].)
  */
 async function resolveAssignedAgent(
   tenantId: string,
@@ -172,81 +167,32 @@ async function resolveAssignedAgent(
   return { name: safeName, email: "", phone: "", ccEmail: null };
 }
 
-/** Render the plain-text handoff email. Short + direct — funding prospects
- *  skim. Includes whichever of the two next-step links resolved. */
-function renderBody(input: {
-  brand: string;
-  toName: string | null;
-  agentName: string;
-  fullAppUrl: string | null;
-  bankStatementUrl: string | null;
-}): { subject: string; body: string } {
-  const greeting = input.toName && input.toName.trim()
-    ? `Hi ${input.toName.trim().split(/\s+/)[0]},`
-    : "Hi there,";
-
-  const lines: string[] = [
-    greeting,
-    "",
-    `Thanks for reaching out to ${input.brand}. To get your funding moving, here are your next two steps — they take about 5 minutes:`,
-    "",
-  ];
-  let n = 1;
-  if (input.fullAppUrl) {
-    lines.push(`Step ${n}. Complete your application:`, input.fullAppUrl, "");
-    n += 1;
-  }
-  if (input.bankStatementUrl) {
-    lines.push(`Step ${n}. Upload your last few months of bank statements:`, input.bankStatementUrl, "");
-    n += 1;
-  }
-  lines.push(
-    "Your links are personalized to you — anything you've already told us is saved.",
-    "",
-    "Reply to this email if you have any questions and I'll help you through it.",
-    "",
-    `— ${input.agentName}`,
-    input.brand,
-  );
-  const subject = `Your next steps with ${input.brand}`;
-  return { subject, body: lines.join("\n") };
-}
-
-/** Subject prefix every next-steps email carries (renderBody → `Your next steps
- *  with ${brand}`). Used to detect the CANONICAL send_gateway log row, whose
- *  agent_source is the gateway default ('manual_cc'), not NEXT_STEPS_SOURCE. */
+/** Subject prefixes per variant — used both as the literal subject base and to
+ *  detect send_gateway's CANONICAL success row (whose agent_source is the
+ *  gateway default 'manual_cc', not our source) for idempotency. Keep these
+ *  lowercase + distinct; an inbound reply ("Re: …") never starts with them. */
 const NEXT_STEPS_SUBJECT_PREFIX = "your next steps with ";
+const APP_COMPLETE_SUBJECT_PREFIX = "we've received your application";
 
 /**
- * Has a next-steps email already been recorded for this lead? One per lead.
+ * Has an email of THIS variant already been recorded for this lead? One per lead
+ * per variant. Two row shapes can mark a prior send (send_gateway ALWAYS logs
+ * its own 'manual_cc' canonical row on success; this module logs its own row on
+ * the FAILURE path): match either our `source` row or the gateway's success row
+ * by the variant's subject prefix. (See the 2026-06-18 duplicate-timeline fix —
+ * we no longer insert our own success row.)
  *
- * Two row shapes can mark a prior send, because send_gateway ALWAYS logs its own
- * canonical lead_interactions row for every send (agent_source defaults to
- * 'manual_cc'), and this module also logs a NEXT_STEPS_SOURCE row on the
- * FAILURE path (so the operator can see + retry a send that didn't fire):
- *   1. agent_source = NEXT_STEPS_SOURCE  → our failure-path marker.
- *   2. an email whose subject starts "Your next steps with …"
- *      → send_gateway's canonical row for a SUCCESSFUL send.
- * Matching either keeps re-submits idempotent whether the first attempt
- * succeeded (gateway row) or failed (our row). Pre-2026-06-18 this checked only
- * (1), which missed the gateway's success row and — combined with this module
- * ALSO inserting its own success row — produced the duplicate "Sent email"
- * timeline entry CC reported.
- *
- * NB: we deliberately do NOT filter on direction='outbound'. No send_gateway
- * write path (RPC insert, fallback reservation insert, finalize update, or
- * log_action) explicitly stamps `direction` — it relies on a column default —
- * so a gateway success row could in principle carry NULL direction and a
- * direction='outbound' filter would then MISS it and let a re-submit re-send.
- * (Today live data shows 100% of these rows are 'outbound', so it's a latent
- * risk, not a live one; verified via the 2026-06-18 audit workflow.) Scoping to
- * channel='email' + the distinctive "your next steps with " subject prefix is
- * enough — an inbound reply would be "Re: …" and never start with that prefix.
+ * NB: deliberately NOT filtered on direction='outbound' — no send_gateway write
+ * path explicitly stamps direction, so a filter could miss the success row and
+ * let a re-submit re-send. channel='email' + the distinctive subject prefix is
+ * enough.
  */
 async function alreadySent(
   db: SupabaseClient,
   tenantId: string,
   leadId: string,
+  source: string,
+  subjectPrefix: string,
 ): Promise<boolean> {
   const res = await db
     .from("lead_interactions")
@@ -258,201 +204,251 @@ async function alreadySent(
   if (res.error) return false; // can't prove a prior send — let it through (send_gateway's own reservation dedup is the backstop)
   return (res.data ?? []).some(
     (r) =>
-      r.agent_source === NEXT_STEPS_SOURCE ||
+      r.agent_source === source ||
       (typeof r.subject === "string" &&
-        r.subject.trim().toLowerCase().startsWith(NEXT_STEPS_SUBJECT_PREFIX)),
+        r.subject.trim().toLowerCase().startsWith(subjectPrefix)),
   );
 }
 
+/** Resolved recipient + tenant + signer context shared by both senders. */
+type HandoffContext = {
+  toEmail: string;
+  toName: string | null;
+  tenant: { slug: string; custom_fields: Record<string, unknown> | null };
+  brandLabel: string;
+  brandSlug: string | undefined;
+  signer: SignerCtx;
+  ccEmail: string | null;
+};
+
 /**
- * Send the interest-form handoff email (step 2 + step 3 links) for a lead.
- * Soft-fail: every error is caught + logged; never aborts the submission.
- * Caller guarantees this is the interest/entry form on step 0.
+ * Resolve the lead's contact email (+ name), enforce the fail-closed suppression
+ * re-check, and resolve the tenant brand + the assigned agent (signer + CC).
+ * Returns null when there's nothing safe/usable to send (no email, suppressed,
+ * lookup error, or missing tenant) — the caller then no-ops. Shared by both
+ * variants so the security posture (fail-closed suppression, authoritative
+ * assigned-agent CC) is identical and lives in ONE place.
  */
-export async function maybeSendNextStepsEmail(
-  input: MaybeSendNextStepsInput,
+async function loadHandoffContext(
+  db: SupabaseClient,
+  form: { id: string; tenant_id: string },
+  link: { lead_id: string },
+  payload: Record<string, unknown>,
+): Promise<HandoffContext | null> {
+  const leadRow = await db
+    .from("tenant_records")
+    .select("data")
+    .eq("id", link.lead_id)
+    .eq("tenant_id", form.tenant_id)
+    .maybeSingle();
+  const leadData =
+    (leadRow.data as { data: Record<string, unknown> | null } | null)?.data ?? {};
+
+  const toEmailRaw =
+    (typeof leadData.email === "string" && leadData.email) ||
+    (typeof payload.email === "string" && payload.email) ||
+    "";
+  const toEmail = toEmailRaw.trim().toLowerCase();
+  if (!EMAIL_RE.test(toEmail)) return null; // no usable email — nothing to send
+
+  // Honor unsubscribes even though this send is transactional (which bypasses
+  // send_gateway's own suppression gate). FAIL CLOSED: any lookup error → do not
+  // send. (Codex audit 2026-06-17 [high]: public relay must not fail open.)
+  // Escape LIKE wildcards — `_`/`%` are valid in an email local-part.
+  const suppPattern = toEmail.replace(/[%_\\]/g, "\\$&");
+  const supp = await db
+    .from("email_suppressions")
+    .select("email")
+    .eq("tenant_id", form.tenant_id)
+    .ilike("email", suppPattern)
+    .limit(1);
+  if (supp.error) {
+    console.error("[forms.handoff] suppression check errored — skipping (fail-closed)", {
+      lead_id: link.lead_id,
+      error: supp.error.message,
+    });
+    return null;
+  }
+  if ((supp.data?.length ?? 0) > 0) {
+    console.log("[forms.handoff] recipient suppressed — skipping", { lead_id: link.lead_id });
+    return null;
+  }
+
+  const tenantRow = await db
+    .from("tenants")
+    .select("slug, name, custom_fields")
+    .eq("id", form.tenant_id)
+    .maybeSingle();
+  const tenant = tenantRow.data as
+    | { slug: string; name: string | null; custom_fields: Record<string, unknown> | null }
+    | null;
+  if (!tenant) return null;
+  const brandFromCustom =
+    typeof tenant.custom_fields?.brand === "string" ? (tenant.custom_fields.brand as string) : null;
+  const brandLabel = brandFromCustom || tenant.name || "SunBiz Funding";
+  // send_gateway's `brand` key is the routing slug (sunbiz / oasis), not the label.
+  const brandSlug = tenant.slug === "submissions" ? "sunbiz" : tenant.slug || undefined;
+
+  const toName =
+    (typeof leadData.contact_name === "string" && leadData.contact_name) ||
+    (typeof leadData.name === "string" && leadData.name) ||
+    (typeof payload.contact_name === "string" && payload.contact_name) ||
+    (typeof payload.name === "string" && payload.name) ||
+    null;
+  const assignedTo = typeof leadData.assigned_to === "string" ? leadData.assigned_to : null;
+  const fallbackName =
+    (typeof leadData.assigned_agent_name === "string" && leadData.assigned_agent_name) ||
+    "the SunBiz team";
+  const agent = await resolveAssignedAgent(form.tenant_id, assignedTo, fallbackName);
+
+  return {
+    toEmail,
+    toName,
+    tenant: { slug: tenant.slug, custom_fields: tenant.custom_fields },
+    brandLabel,
+    brandSlug,
+    signer: { name: agent.name, email: agent.email, phone: agent.phone },
+    ccEmail: agent.ccEmail,
+  };
+}
+
+/** Log the FAILURE-path marker (operator can see + resend). On SUCCESS we never
+ *  insert — send_gateway logs its own canonical row (avoids the duplicate
+ *  timeline entry CC reported 2026-06-18). */
+async function logFailureMarker(
+  db: SupabaseClient,
+  form: { tenant_id: string },
+  leadId: string,
+  source: string,
+  subject: string,
+  body: string,
+  toEmail: string,
+  ccEmail: string | null,
+  reason: string | undefined,
+  extraMeta: Record<string, unknown>,
 ): Promise<void> {
+  await db.from("lead_interactions").insert({
+    tenant_id: form.tenant_id,
+    lead_id: leadId,
+    type: "email_queued",
+    channel: "email",
+    direction: "outbound",
+    agent_source: source,
+    subject: subject.slice(0, 200),
+    content: body,
+    content_preview: body.slice(0, 1024),
+    to_email: toEmail,
+    metadata: { status: "failed", sent_at: null, send_error: reason || "unknown", cc_email: ccEmail, intent: "transactional", ...extraMeta },
+  });
+}
+
+/**
+ * STEP 1 → STEP 2 hand-off: email the merchant ONE link to the full application
+ * after they complete the interest form. Soft-fail; idempotent per lead.
+ */
+export async function maybeSendNextStepsEmail(input: MaybeSendNextStepsInput): Promise<void> {
   try {
     const { db, form, link, payload, origin } = input;
+    const ctx = await loadHandoffContext(db, form, link, payload);
+    if (!ctx) return;
+    if (await alreadySent(db, form.tenant_id, link.lead_id, NEXT_STEPS_SOURCE, NEXT_STEPS_SUBJECT_PREFIX)) return;
 
-    // Resolve the lead's stored contact + assignment.
-    const leadRow = await db
-      .from("tenant_records")
-      .select("data")
-      .eq("id", link.lead_id)
-      .eq("tenant_id", form.tenant_id)
-      .maybeSingle();
-    const leadData =
-      (leadRow.data as { data: Record<string, unknown> | null } | null)?.data ?? {};
-
-    const toEmailRaw =
-      (typeof leadData.email === "string" && leadData.email) ||
-      (typeof payload.email === "string" && payload.email) ||
-      "";
-    const toEmail = toEmailRaw.trim().toLowerCase();
-    if (!EMAIL_RE.test(toEmail)) return; // no usable email — nothing to send
-
-    if (await alreadySent(db, form.tenant_id, link.lead_id)) return;
-
-    // Honor unsubscribes even though this send is transactional. A PUBLIC form
-    // must never become a relay that re-emails someone who opted out — and
-    // intent='transactional' bypasses send_gateway's own suppression gate, so
-    // we re-check here against the dashboard's email_suppressions table before
-    // the address ever reaches the bridge. (Codex audit 2026-06-17 [high]:
-    // public relay / suppression-bypass.) Case-insensitive on email; any
-    // suppression for this (email, tenant) — regardless of brand — blocks.
-    // Escape LIKE wildcards: `_` and `%` are valid in an email local-part
-    // (john_doe@…), and ilike would otherwise treat them as pattern
-    // metacharacters. Match the recipient LITERALLY (case-insensitive). Same
-    // escape the lead matcher uses (agent-routing.ts).
-    const suppPattern = toEmail.replace(/[%_\\]/g, "\\$&");
-    const supp = await db
-      .from("email_suppressions")
-      .select("email")
-      .eq("tenant_id", form.tenant_id)
-      .ilike("email", suppPattern)
-      .limit(1);
-    // FAIL CLOSED. If the suppression lookup errors we cannot prove the address
-    // is safe to email, so we do NOT send — a gate that fails open would let an
-    // opted-out recipient through on any transient DB/RLS error. (Codex audit
-    // 2026-06-17 re-verify [high]: suppression check must not fail open.)
-    if (supp.error) {
-      console.error("[forms.submit.next_steps] suppression check errored — skipping (fail-closed)", {
-        lead_id: link.lead_id,
-        error: supp.error.message,
-      });
-      return;
-    }
-    if ((supp.data?.length ?? 0) > 0) {
-      console.log("[forms.submit.next_steps] recipient suppressed — skipping", {
-        lead_id: link.lead_id,
-      });
+    // CC 2026-06-22: form 1 points to form 2 ONLY (sequential funnel). The
+    // bank-statement link is sent later, by maybeSendApplicationCompleteEmail.
+    const fullAppUrl = await mintFormLinkBySlug(
+      origin, form.tenant_id, link.tenant, link.lead_id, "full-application",
+    );
+    if (!fullAppUrl) {
+      console.error("[forms.next_steps] full-application link did not resolve — skipping", { lead_id: link.lead_id });
       return;
     }
 
-    // Tenant context — slug + custom_fields for bridge resolution, name +
-    // brand for the email copy.
-    const tenantRow = await db
-      .from("tenants")
-      .select("slug, name, custom_fields")
-      .eq("id", form.tenant_id)
-      .maybeSingle();
-    const tenant = tenantRow.data as
-      | { slug: string; name: string | null; custom_fields: Record<string, unknown> | null }
-      | null;
-    if (!tenant) return;
-    const brandFromCustom =
-      typeof tenant.custom_fields?.brand === "string"
-        ? (tenant.custom_fields.brand as string)
-        : null;
-    const brandLabel = brandFromCustom || tenant.name || "SunBiz Funding";
-    // send_gateway's `brand` key is the routing slug (sunbiz / oasis), not the
-    // display label.
-    const brandSlug = tenant.slug === "submissions" ? "sunbiz" : tenant.slug || undefined;
-
-    // Mint the two next-step links. Either may be null (form missing/disabled
-    // or signing unconfigured) — we send with whatever resolved; skip entirely
-    // if neither did (a link-less "next steps" email is useless).
-    const [fullAppUrl, bankStatementUrl] = await Promise.all([
-      mintFormLinkBySlug(origin, form.tenant_id, link.tenant, link.lead_id, "full-application"),
-      mintFormLinkBySlug(origin, form.tenant_id, link.tenant, link.lead_id, "bank-statement-upload"),
-    ]);
-    if (!fullAppUrl && !bankStatementUrl) {
-      console.error("[forms.submit.next_steps] no next-step links resolved — skipping", {
-        lead_id: link.lead_id,
-      });
-      return;
-    }
-
-    const toName =
-      (typeof leadData.contact_name === "string" && leadData.contact_name) ||
-      (typeof leadData.name === "string" && leadData.name) ||
-      (typeof payload.contact_name === "string" && payload.contact_name) ||
-      (typeof payload.name === "string" && payload.name) ||
-      null;
-    // Resolve the assigned rep for BOTH the signature and the CC. assigned_to
-    // (auth_user_id) is authoritative; the cached assigned_agent_name is only a
-    // display fallback (never a CC source) — see resolveAssignedAgent.
-    const assignedTo =
-      typeof leadData.assigned_to === "string" ? leadData.assigned_to : null;
-    const fallbackName =
-      (typeof leadData.assigned_agent_name === "string" && leadData.assigned_agent_name) ||
-      "the SunBiz team";
-    const agent = await resolveAssignedAgent(form.tenant_id, assignedTo, fallbackName);
-    const signer: SignerCtx = { name: agent.name, email: agent.email, phone: agent.phone };
-    const ccEmail = agent.ccEmail;
-
-    const { subject, body } = renderBody({
-      brand: brandLabel,
-      toName,
-      agentName: agent.name,
+    const greeting = ctx.toName && ctx.toName.trim() ? `Hi ${ctx.toName.trim().split(/\s+/)[0]},` : "Hi there,";
+    const subject = `Your next steps with ${ctx.brandLabel}`;
+    const body = [
+      greeting,
+      "",
+      `Thanks for reaching out to ${ctx.brandLabel}. The next step is your application — it takes about 5 minutes:`,
+      "",
+      "Complete your application:",
       fullAppUrl,
-      bankStatementUrl,
-    });
+      "",
+      "Your link is personalized to you — anything you've already told us is saved.",
+      "",
+      "Reply to this email if you have any questions and I'll help you through it.",
+      "",
+      `— ${ctx.signer.name}`,
+      ctx.brandLabel,
+    ].join("\n");
 
     const result = await sendViaBridge({
-      tenant: { slug: tenant.slug, custom_fields: tenant.custom_fields },
-      to: toEmail,
-      subject,
-      body,
-      brand: brandSlug,
-      leadId: link.lead_id,
-      signer,
-      cc: ccEmail,
+      tenant: ctx.tenant, to: ctx.toEmail, subject, body, brand: ctx.brandSlug,
+      leadId: link.lead_id, signer: ctx.signer, cc: ctx.ccEmail,
     });
-
-    // Record the interaction — but ONLY on the failure path.
-    //
-    // On SUCCESS we do NOT insert here. The send went through send_gateway
-    // (via the bridge send_email tool), and send_gateway ALWAYS logs its own
-    // canonical lead_interactions row for every send. Inserting a second row
-    // here is exactly what produced the duplicate "Sent email: Your next steps
-    // with SunBiz" CC reported on 2026-06-18 (one email, two timeline rows:
-    // the gateway's 'manual_cc' row + this module's 'form_intake_next_steps'
-    // row). The gateway's row is the single source of truth for a successful
-    // send; idempotency still works because alreadySent() now also matches it
-    // by subject prefix.
-    //
-    // On FAILURE (bridge offline / gate refused), send_gateway did NOT log a
-    // completed row, so we record a 'queued'/'failed' row the operator can see
-    // and resend from the drawer rather than silently dropping the handoff.
     if (!result.sent) {
-      await db.from("lead_interactions").insert({
-        tenant_id: form.tenant_id,
-        lead_id: link.lead_id,
-        type: "email_queued",
-        channel: "email",
-        direction: "outbound",
-        agent_source: NEXT_STEPS_SOURCE,
-        subject: subject.slice(0, 200),
-        content: body,
-        content_preview: body.slice(0, 1024),
-        to_email: toEmail,
-        metadata: {
-          status: "failed",
-          sent_at: null,
-          send_error: result.reason || "unknown",
-          next_steps: true,
-          full_application_url: fullAppUrl,
-          bank_statement_url: bankStatementUrl,
-          cc_email: ccEmail,
-          intent: "transactional",
-        },
+      await logFailureMarker(db, form, link.lead_id, NEXT_STEPS_SOURCE, subject, body, ctx.toEmail, ctx.ccEmail, result.reason, {
+        next_steps: true, full_application_url: fullAppUrl,
       });
-      console.error("[forms.submit.next_steps] send did not fire", {
-        lead_id: link.lead_id,
-        reason: result.reason,
-      });
-    } else {
-      console.log("[forms.submit.next_steps] sent (logged by send_gateway)", {
-        lead_id: link.lead_id,
-        to: toEmail,
-      });
+      console.error("[forms.next_steps] send did not fire", { lead_id: link.lead_id, reason: result.reason });
     }
   } catch (err) {
-    console.error("[forms.submit.next_steps] threw", {
-      lead_id: input.link.lead_id,
-      error: err instanceof Error ? err.message : String(err),
+    console.error("[forms.next_steps] threw", {
+      lead_id: input.link.lead_id, error: err instanceof Error ? err.message : String(err),
+    });
+  }
+}
+
+/**
+ * STEP 2 → STEP 3 follow-through: after the merchant completes the FULL
+ * application, email them ONE link to the bank-statement upload (the last step,
+ * which feeds underwriting). Soft-fail; idempotent per lead. (CC 2026-06-22.)
+ */
+export async function maybeSendApplicationCompleteEmail(input: MaybeSendNextStepsInput): Promise<void> {
+  try {
+    const { db, form, link, payload, origin } = input;
+    const ctx = await loadHandoffContext(db, form, link, payload);
+    if (!ctx) return;
+    if (await alreadySent(db, form.tenant_id, link.lead_id, APP_COMPLETE_SOURCE, APP_COMPLETE_SUBJECT_PREFIX)) return;
+
+    const bankUrl = await mintFormLinkBySlug(
+      origin, form.tenant_id, link.tenant, link.lead_id, "bank-statement-upload",
+    );
+    if (!bankUrl) {
+      console.error("[forms.app_complete] bank-statement link did not resolve — skipping", { lead_id: link.lead_id });
+      return;
+    }
+
+    const greeting = ctx.toName && ctx.toName.trim() ? `Hi ${ctx.toName.trim().split(/\s+/)[0]},` : "Hi there,";
+    const subject = `We've received your application — ${ctx.brandLabel}`;
+    const body = [
+      greeting,
+      "",
+      `Thanks — we've received your application with ${ctx.brandLabel}. There's one last step to start your funding review:`,
+      "",
+      "Upload your last few months of business bank statements:",
+      bankUrl,
+      "",
+      "As soon as your statements are in, we begin reviewing right away. Your link is personalized to you.",
+      "",
+      "Reply to this email with any questions and I'll help you through it.",
+      "",
+      `— ${ctx.signer.name}`,
+      ctx.brandLabel,
+    ].join("\n");
+
+    const result = await sendViaBridge({
+      tenant: ctx.tenant, to: ctx.toEmail, subject, body, brand: ctx.brandSlug,
+      leadId: link.lead_id, signer: ctx.signer, cc: ctx.ccEmail,
+    });
+    if (!result.sent) {
+      await logFailureMarker(db, form, link.lead_id, APP_COMPLETE_SOURCE, subject, body, ctx.toEmail, ctx.ccEmail, result.reason, {
+        application_complete: true, bank_statement_url: bankUrl,
+      });
+      console.error("[forms.app_complete] send did not fire", { lead_id: link.lead_id, reason: result.reason });
+    }
+  } catch (err) {
+    console.error("[forms.app_complete] threw", {
+      lead_id: input.link.lead_id, error: err instanceof Error ? err.message : String(err),
     });
   }
 }

@@ -46,7 +46,7 @@ import { uploadLeadDocument, registerLeadDocument, classifyDocTypeByFilename } f
 import { dispatchLeadStageEvent } from "@/lib/lead-stage-dispatcher";
 import { resolvePublicForm } from "@/lib/forms/public-resolver";
 import { maybeQueueResumeEmail } from "@/lib/forms/maybe-queue-resume";
-import { maybeSendNextStepsEmail } from "@/lib/forms/next-steps-email";
+import { maybeSendNextStepsEmail, maybeSendApplicationCompleteEmail } from "@/lib/forms/next-steps-email";
 import { notifyOasisFunnelSubmission } from "@/lib/forms/oasis-funnel-notify";
 import { buildOasisLeadPatch } from "@/lib/forms/oasis-funnel-format";
 import { OASIS_FUNNEL_SLUG, OASIS_FUNNEL_TENANT_ID } from "@/lib/forms/oasis-funnel-seed";
@@ -54,6 +54,7 @@ import { maybeGenerateApplicationDocument } from "@/lib/forms/application-docume
 import { sendSunbizLeadEvent } from "@/lib/notify/sunbiz-events";
 import { mintFormLinkBySlug } from "@/lib/forms/agent-routing";
 import { upsertApplicationFromFormStep } from "@/lib/forms/application-upsert";
+import { autoRunUnderwritingForLead } from "@/lib/underwriting/run";
 import { resolveRepAssignment, mintFullApplicationLink, findExistingLead } from "@/lib/forms/agent-routing";
 import { LEAD_PIPELINE_STAGES } from "@/lib/sunbiz-stage-meta";
 import { isFormStageDowngrade } from "@/lib/forms/stage-transition";
@@ -881,13 +882,15 @@ export async function POST(req: NextRequest) {
     // Mint the continue-now links synchronously so they ride the response. Both
     // are quick indexed lookups; run them in parallel. Null entries (a form
     // missing/disabled) are dropped, so we only surface links that resolve.
-    const [fullAppUrl, bankUrl] = await Promise.all([
-      mintFormLinkBySlug(origin, form.tenant_id, link.tenant, link.lead_id, "full-application"),
-      mintFormLinkBySlug(origin, form.tenant_id, link.tenant, link.lead_id, "bank-statement-upload"),
-    ]);
+    // CC 2026-06-22: form 1 → form 2 ONLY (sequential funnel). The bank-statement
+    // link is offered later, on full-application completion (see the else-if
+    // below + maybeSendApplicationCompleteEmail). Mint just the full-application
+    // continue-now link here.
+    const fullAppUrl = await mintFormLinkBySlug(
+      origin, form.tenant_id, link.tenant, link.lead_id, "full-application",
+    );
     const minted = [
       fullAppUrl ? { slug: "full-application", label: "Complete your full application", url: fullAppUrl } : null,
-      bankUrl ? { slug: "bank-statement-upload", label: "Upload your bank statements", url: bankUrl } : null,
     ].filter((x): x is { slug: string; label: string; url: string } => x !== null);
     // Don't re-invite a returning merchant who has ALREADY completed/submitted
     // their application (smart-matched into an advanced lead) — the links are
@@ -919,6 +922,27 @@ export async function POST(req: NextRequest) {
         leadId: link.lead_id,
         kind: "first_application",
         extra: payload,
+      }),
+    );
+  } else if (isLastStep && form.slug === "full-application") {
+    // CC 2026-06-22: full application complete → the application is created
+    // (upsertApplicationFromFormStep above). Offer the NEXT step (bank statements)
+    // as a single continue-now button + send the follow-through email. Replaces
+    // the legacy resume queue (never drained for SunBiz).
+    const origin = req.nextUrl.origin;
+    const bankUrl = await mintFormLinkBySlug(
+      origin, form.tenant_id, link.tenant, link.lead_id, "bank-statement-upload",
+    );
+    nextForms = bankUrl
+      ? [{ slug: "bank-statement-upload", label: "Upload your bank statements", url: bankUrl }]
+      : null;
+    after(() =>
+      maybeSendApplicationCompleteEmail({
+        db,
+        form: { id: form.id, tenant_id: form.tenant_id, slug: form.slug },
+        link: { tenant: link.tenant, lead_id: link.lead_id },
+        payload,
+        origin,
       }),
     );
   } else {
@@ -955,6 +979,23 @@ export async function POST(req: NextRequest) {
         leadId: link.lead_id,
         kind: "second_application",
         extra: payload,
+      }),
+    );
+  }
+
+  // Final step of the BANK-STATEMENT form → auto-run underwriting (CC 2026-06-22:
+  // submitting bank statements kicks the underwriting pipeline automatically;
+  // previously operator-triggered only). Soft-fail + idempotent (the in-flight
+  // 409 guard inside enqueueUnderwritingRun prevents a duplicate run). Runs AFTER
+  // the response so it never delays the merchant's submit. The lead also moves to
+  // submitted_application via the stage logic above.
+  if (isLastStep && form.slug === "bank-statement-upload") {
+    after(() =>
+      autoRunUnderwritingForLead({
+        db,
+        tenantId: form.tenant_id,
+        leadId: link.lead_id,
+        source: "form_intake_bank_statements",
       }),
     );
   }
