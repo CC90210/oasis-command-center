@@ -698,12 +698,20 @@ export async function POST(req: NextRequest) {
   // "Viewed" (completed) the first app → viewed_application. Opening-but-not-
   // completing is set to "Intent Inquiry" in /api/forms/view. This overrides
   // the interest form's stored on_complete_stage on its final step only.
+  // Adon 2026-06-22: completing the THIRD form (bank-statement-upload) = bank
+  // statements received → advance the lead to "Submitted Application" (submitted
+  // to underwriting; entry stage for the signed-application drip). Like the
+  // initial-lead-capture override, this wins over the form's stored
+  // on_complete_stage on its final step. The forward-only guard below still
+  // applies (a more-advanced lead is never downgraded).
   const targetStage =
     isLastStep && form.slug === "initial-lead-capture"
       ? "viewed_application"
-      : stepOutcomes[String(stepIndex)] ||
-        (isLastStep && form.on_complete_stage) ||
-        null;
+      : isLastStep && form.slug === "bank-statement-upload"
+        ? "submitted_application"
+        : stepOutcomes[String(stepIndex)] ||
+          (isLastStep && form.on_complete_stage) ||
+          null;
 
   // Round 3 R3-10: stage-transition failure used to swallow the error
   // and return ok:true, hiding from the operator that the drip never
