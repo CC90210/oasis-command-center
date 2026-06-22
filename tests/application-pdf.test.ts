@@ -7,7 +7,12 @@
  * formatting) and that generateApplicationPdf returns real PDF bytes and
  * survives emoji / non-Latin free-text (WinAnsi sanitize).
  */
-import { mapApplicationFields, generateApplicationPdf } from "../lib/forms/application-pdf";
+import {
+  mapApplicationFields,
+  mapApplicationFieldsFromSteps,
+  generateApplicationPdf,
+} from "../lib/forms/application-pdf";
+import type { FormStep } from "../lib/forms/types";
 
 let failures = 0;
 function check(cond: boolean, msg: string) {
@@ -99,6 +104,80 @@ check(val("FINANCIAL INFORMATION", "Monthly CC Processing Revenue") === "", "cc 
   const legal = r2.sections[0].rows.find((r) => r.label === "Legal Business Name")?.value;
   check(legal === "Northwind Test LLC", "legal name falls back to lead.business_name");
 }
+
+// --- FORM-DRIVEN mapping (CC 2026-06-22): every question listed + answered ---
+const steps: FormStep[] = [
+  {
+    key: "business",
+    title: "Business information",
+    fields: [
+      { name: "business_legal_name", label: "Legal business name", type: "text" },
+      {
+        name: "entity_type",
+        label: "Type of entity",
+        type: "select",
+        options: [
+          { value: "llc", label: "LLC" },
+          { value: "s_corp", label: "S-Corp" },
+        ],
+      },
+      { name: "business_start_date", label: "Business start date", type: "date" },
+      {
+        name: "industry",
+        label: "Industry",
+        type: "select",
+        options: [{ value: "residential_construction", label: "Residential Construction" }],
+      },
+    ],
+  },
+  {
+    key: "financial",
+    title: "Financial details",
+    fields: [
+      { name: "monthly_revenue", label: "Average monthly revenue", type: "currency" },
+      { name: "requested_advance", label: "Requested advance amount", type: "currency" },
+    ],
+  },
+  {
+    key: "documents",
+    title: "Upload your documents",
+    fields: [{ name: "documents", label: "Your documents", type: "file_upload_multi" }],
+  },
+  {
+    key: "signature",
+    title: "Sign and submit",
+    fields: [
+      { name: "applicant_signature", label: "Sign here", type: "signature" },
+      { name: "signature_name", label: "Type your full legal name", type: "text" },
+      {
+        name: "agree",
+        label: "Authorization",
+        type: "select",
+        options: [{ value: "agreed", label: "I agree" }],
+      },
+    ],
+  },
+];
+const fd = mapApplicationFieldsFromSteps(steps, { ...merged, agree: "agreed" }, lead);
+const fval = (heading: string, label: string) =>
+  fd.sections.find((s) => s.heading === heading)?.rows.find((r) => r.label === label)?.value;
+check(fd.sections[0].heading === "APPLICANT", "form-driven: APPLICANT contact section first");
+check(fval("APPLICANT", "Business Name") === "Northwind Test LLC", "form-driven: business name");
+check(fval("APPLICANT", "Email") === "owner@example.com", "form-driven: email from lead");
+check(fval("BUSINESS INFORMATION", "Legal business name") === "Northwind Test LLC", "form-driven: legal name uses the form's own label");
+check(fval("BUSINESS INFORMATION", "Type of entity") === "LLC", "form-driven: select value → option label");
+check(fval("BUSINESS INFORMATION", "Business start date") === "12/20/2020", "form-driven: date formatted");
+check(fval("BUSINESS INFORMATION", "Industry") === "Residential Construction", "form-driven: industry option label");
+check(fval("FINANCIAL DETAILS", "Average monthly revenue") === "$175,000", "form-driven: currency formatted");
+check(fval("FINANCIAL DETAILS", "Requested advance amount") === "$60,000", "form-driven: requested advance currency");
+check(fval("SIGN AND SUBMIT", "Type your full legal name") === "Jordan Tester", "form-driven: name field listed");
+check(fval("SIGN AND SUBMIT", "Authorization") === "I agree", "form-driven: agree value → 'I agree'");
+check(fd.signatureName === "Jordan Tester", "form-driven: signatureName captured");
+check(!fd.sections.some((s) => s.heading === "UPLOAD YOUR DOCUMENTS"), "form-driven: file-only step omitted");
+check(
+  !fd.sections.find((s) => s.heading === "SIGN AND SUBMIT")?.rows.some((r) => r.label === "Sign here"),
+  "form-driven: signature field omitted from rows (renders in the signature block)",
+);
 
 (async () => {
   // generateApplicationPdf returns real PDF bytes (no signature image here — a

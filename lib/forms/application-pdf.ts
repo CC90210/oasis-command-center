@@ -23,6 +23,7 @@
 import { PDFDocument, StandardFonts, rgb } from "pdf-lib";
 import type { PDFFont, PDFPage } from "pdf-lib";
 import { SUNBIZ_LOGO_PNG_BASE64 } from "./sunbiz-logo";
+import type { FormField, FormStep } from "./types";
 
 export type PdfFieldRow = { label: string; value: string };
 export type PdfSection = { heading: string; rows: PdfFieldRow[] };
@@ -153,6 +154,93 @@ export function mapApplicationFields(
       ],
     },
   ];
+
+  return { sections, signatureName: str(merged.signature_name) };
+}
+
+/**
+ * Format one field's stored answer for display, by field type. select/combobox
+ * map the stored value back to its option LABEL (so "llc" → "LLC",
+ * "construction" → "Construction"); multiselect joins labels; currency → $,
+ * date → US, everything else passes through. Empty/absent → "".
+ */
+function formatFieldValue(field: FormField, raw: unknown): string {
+  if (raw == null || raw === "") return "";
+  const labelFor = (v: string): string => {
+    const opt = field.options?.find((o) => o.value === v);
+    return opt ? opt.label : titleCaseSlug(v);
+  };
+  switch (field.type) {
+    case "currency":
+      return money(raw);
+    case "number": {
+      const s = str(raw);
+      if (!s) return "";
+      // Percentage fields (ownership %, etc.) read better with a % suffix.
+      const isPct = /(percent|pct|ownership)/i.test(field.name) || /percent|%/i.test(field.label);
+      return isPct ? pct(s) : s;
+    }
+    case "date":
+      return usDate(raw);
+    case "select":
+    case "combobox":
+      return labelFor(str(raw));
+    case "multiselect":
+      return (Array.isArray(raw) ? raw : [raw])
+        .map((x) => labelFor(str(x)))
+        .filter(Boolean)
+        .join(", ");
+    default:
+      return str(raw);
+  }
+}
+
+/**
+ * FORM-DRIVEN mapping (CC 2026-06-22): list EVERY question the form asks, with
+ * the merchant's answer filled in — a real filled application form, not a fixed
+ * subset. One PDF section per form STEP (heading = step title); one row per
+ * field (label = the question, value = the formatted answer). File-upload,
+ * signature, and hidden fields are omitted (documents live on the Docs tab; the
+ * signature renders in the signature block). A leading APPLICANT section pulls
+ * business name + email + phone from the lead (the short interest form collects
+ * these; the full application doesn't re-ask them).
+ *
+ * Supersedes the hardcoded mapApplicationFields() — that one left uncollected
+ * cells blank AND silently dropped any question whose key wasn't in its map.
+ * This drives off the live `forms.steps`, so it can't drift from the form.
+ */
+export function mapApplicationFieldsFromSteps(
+  steps: FormStep[],
+  merged: Record<string, unknown>,
+  lead: Record<string, unknown>,
+): MappedApplication {
+  const sections: PdfSection[] = [];
+
+  const email = str(lead.email) || str(merged.email);
+  const phone = str(lead.phone) || str(merged.phone);
+  const bizName =
+    str(merged.business_legal_name) || str(merged.business_name) || str(lead.business_name);
+  const contactRows: PdfFieldRow[] = [];
+  if (bizName) contactRows.push({ label: "Business Name", value: bizName });
+  if (email) contactRows.push({ label: "Email", value: email });
+  if (phone) contactRows.push({ label: "Phone", value: phone });
+  if (contactRows.length) sections.push({ heading: "APPLICANT", rows: contactRows });
+
+  for (const step of steps) {
+    const rows: PdfFieldRow[] = [];
+    for (const f of step.fields) {
+      if (
+        f.type === "file_upload" ||
+        f.type === "file_upload_multi" ||
+        f.type === "signature" ||
+        f.type === "hidden"
+      ) {
+        continue;
+      }
+      rows.push({ label: f.label, value: formatFieldValue(f, merged[f.name]) });
+    }
+    if (rows.length) sections.push({ heading: step.title.toUpperCase(), rows });
+  }
 
   return { sections, signatureName: str(merged.signature_name) };
 }

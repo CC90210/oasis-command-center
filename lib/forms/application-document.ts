@@ -19,9 +19,42 @@
 import "server-only";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { uploadLeadDocument } from "@/lib/lead-documents";
-import { mapApplicationFields, generateApplicationPdf } from "@/lib/forms/application-pdf";
+import {
+  mapApplicationFields,
+  mapApplicationFieldsFromSteps,
+  generateApplicationPdf,
+} from "@/lib/forms/application-pdf";
+import { parseFormSteps } from "@/lib/forms/types";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { getRecord } from "@/lib/manifest/data";
+
+/**
+ * Resolve the application's PDF sections FORM-DRIVEN: fetch the live form's
+ * `steps` and list every question + answer (mapApplicationFieldsFromSteps).
+ * Falls back to the legacy fixed-field map only if the steps can't be read or
+ * parsed — so an unexpected schema never blocks PDF generation entirely.
+ */
+async function resolveApplicationSections(
+  db: SupabaseClient,
+  tenantId: string,
+  source: { formId?: string; slug?: string },
+  merged: Record<string, unknown>,
+  leadData: Record<string, unknown>,
+): Promise<ReturnType<typeof mapApplicationFields>> {
+  try {
+    let q = db.from("forms").select("steps").eq("tenant_id", tenantId);
+    q = source.formId ? q.eq("id", source.formId) : q.eq("slug", source.slug as string);
+    const r = await q.maybeSingle();
+    const rawSteps = (r.data as { steps?: unknown } | null)?.steps;
+    if (!r.error && rawSteps) {
+      const steps = parseFormSteps(rawSteps);
+      return mapApplicationFieldsFromSteps(steps, merged, leadData);
+    }
+  } catch {
+    /* fall through to the legacy fixed map */
+  }
+  return mapApplicationFields(merged, leadData);
+}
 
 /** doc_type for the generated application — matches lib/lead-doc-display.ts. */
 const APPLICATION_DOC_TYPE = "final_application_form";
@@ -114,7 +147,13 @@ export async function maybeGenerateApplicationDocument(
     const leadData =
       (leadRow.data as { data?: Record<string, unknown> | null } | null)?.data || {};
 
-    const { sections, signatureName } = mapApplicationFields(merged, leadData);
+    const { sections, signatureName } = await resolveApplicationSections(
+      db,
+      form.tenant_id,
+      { formId: form.id },
+      merged,
+      leadData,
+    );
 
     const business =
       (typeof merged.business_legal_name === "string" && merged.business_legal_name) ||
@@ -402,7 +441,13 @@ export async function generateApplicationDocumentFromRecord(input: {
       }
     }
 
-    const { sections, signatureName } = mapApplicationFields(appData, leadData);
+    const { sections, signatureName } = await resolveApplicationSections(
+      db,
+      input.tenantId,
+      { slug: "full-application" },
+      appData,
+      leadData,
+    );
     const signatureDataUri = typeof appData.applicant_signature === "string" ? appData.applicant_signature : "";
     const signedAt = new Date().toISOString();
     const bytes = await generateApplicationPdf({ sections, signatureName, signatureDataUri, signedAt });
