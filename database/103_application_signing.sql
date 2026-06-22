@@ -1,4 +1,13 @@
 -- 103_application_signing.sql
+-- STATUS (2026-06-22): RESERVED / NOT WIRED. These tables back an OPTIONAL
+-- operator-initiated "send a link to re-sign the application" feature that CC
+-- decided against — the merchant already signs on step 6 of the full-application
+-- form and that signature is embedded into the auto-generated PDF + filed to the
+-- lead (see lib/forms/application-document.ts). The tables are empty, isolated
+-- (forced RLS, no policies, no code references them) and left only because
+-- exec_sql guards against DROP TABLE; remove via the Supabase dashboard if the
+-- feature is never built.
+--
 -- Operator-initiated closed-loop e-signature: envelope lifecycle + immutable
 -- legal audit + short-lived OTP for signer-identity binding.
 --

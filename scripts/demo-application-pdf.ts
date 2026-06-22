@@ -6,7 +6,7 @@
  *
  * All values are OBVIOUSLY fake (demo-example.com, 000-00-* SSN, 555 phone).
  */
-import { writeFileSync } from "node:fs";
+import { writeFileSync, readFileSync } from "node:fs";
 import { SUNBIZ_FORM_TEMPLATES } from "../lib/forms/sunbiz-templates";
 import { mapApplicationFieldsFromSteps, generateApplicationPdf } from "../lib/forms/application-pdf";
 import type { FormField, FormStep } from "../lib/forms/types";
@@ -75,12 +75,20 @@ const lead = {
   phone: "(555) 010-7788",
 };
 
+// Optional argv[3]: path to a PNG of the merchant's drawn signature — mirrors
+// what the live form submits (applicant_signature data-URI). When provided it is
+// embedded at the bottom of the PDF exactly as a real submission would.
+const sigPath = process.argv[3];
+const signatureDataUri = sigPath
+  ? `data:image/png;base64,${readFileSync(sigPath).toString("base64")}`
+  : "";
+
 (async () => {
   const { sections, signatureName } = mapApplicationFieldsFromSteps(steps, merged, lead);
   const bytes = await generateApplicationPdf({
     sections,
     signatureName,
-    signatureDataUri: "",
+    signatureDataUri,
     signedAt: "2026-06-22T15:00:00.000Z",
   });
   const out = process.argv[2] || "demo-application.pdf";
