@@ -26,6 +26,7 @@ export const STAGE_SLA_DAYS: Record<string, number> = {
   sent_application: 5,
   viewed_application: 2,
   signed_application: 2,
+  submitted_application: 2,
   default: 7,
   // Opportunity stages — 2026-05-28 v3 (Adon's 7-stage spec, migration
   // 065+066). Keys are Adon's canonical labels (Title Case) since they
@@ -63,6 +64,7 @@ export const ACTIVE_STAGES = new Set<string>([
   "sent_application",
   "viewed_application",
   "signed_application",
+  "submitted_application",
   // Application-side active — Adon 7-stage
   "Application In",
   "Missing Info",
@@ -86,6 +88,7 @@ export const VISIBLE_TARGET_STAGES = new Set<string>([
   "sent_application",
   "viewed_application",
   "signed_application",
+  "submitted_application",
   // Application-side — Adon 7-stage
   "Application In",
   "Missing Info",
@@ -104,6 +107,7 @@ export const VISIBLE_TARGET_STAGES = new Set<string>([
 export const READY_TO_ADVANCE_STAGES = new Set<string>([
   "viewed_application",
   "signed_application",
+  "submitted_application",
   // Adon 7-stage
   "Application In",
   "Approved",
