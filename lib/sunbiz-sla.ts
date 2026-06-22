@@ -43,6 +43,7 @@ export const STAGE_SLA_DAYS: Record<string, number> = {
   // the legacy variant.
   application_in: 1,
   shopping: 3,
+  approved: 2, // funder approved — push for funding paperwork (mirrors "Approved")
   requested_docs: 2,
   docs_out: 2,
   login: 1,
@@ -73,6 +74,7 @@ export const ACTIVE_STAGES = new Set<string>([
   // Legacy 10-stage
   "application_in",
   "shopping",
+  "approved",
   "requested_docs",
   "docs_out",
   "login",
@@ -97,6 +99,7 @@ export const VISIBLE_TARGET_STAGES = new Set<string>([
   // Legacy 10-stage
   "application_in",
   "shopping",
+  "approved",
   "requested_docs",
   "docs_out",
   "login",
@@ -113,6 +116,7 @@ export const READY_TO_ADVANCE_STAGES = new Set<string>([
   "Approved",
   // Legacy 10-stage
   "application_in",
+  "approved",
   "docs_out",
   "login",
 ]);

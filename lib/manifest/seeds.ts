@@ -459,8 +459,10 @@ export const SUN_SEED: TenantManifest = {
         //
         //   application_in   — application received; pre-shop
         //   shopping         — out to multiple lenders (was also:
-        //                      submitted_to_underwriting, approved,
+        //                      submitted_to_underwriting,
         //                      approved_open_offers, selling)
+        //   approved         — funder approved; deal now actively worked
+        //                      (Adon 2026-06-22; anchors dashboard Active Deals)
         //   missing_info     — needs additional info before progressing
         //   requested_docs   — operator asked lender / client for docs
         //   docs_out         — contract / docs sent to client (was also:
@@ -472,7 +474,7 @@ export const SUN_SEED: TenantManifest = {
         //                      no_offers_available)
         //   dead_file        — client killed the deal (was also:
         //                      approved_never_funded)
-        { name: "status", type: "enum", enum_values: ["application_in", "shopping", "missing_info", "requested_docs", "docs_out", "login", "funded", "follow_ups", "declined", "dead_file"], required: true },
+        { name: "status", type: "enum", enum_values: ["application_in", "shopping", "approved", "missing_info", "requested_docs", "docs_out", "login", "funded", "follow_ups", "declined", "dead_file"], required: true },
         // Owner address — Phase 3 of Jordan/Oasis restructure. Lives in
         // JSONB on the application record (no DDL needed). OwnerTab in
         // the lead drawer renders these. Optional; legacy applications
@@ -499,7 +501,7 @@ export const SUN_SEED: TenantManifest = {
         // post-migration 064 (Jordan/Oasis 2026-05-23). Kept in sync so
         // the Offers page can group by either entity's stage without a
         // mismatched enum.
-        { name: "stage", type: "enum", enum_values: ["application_in", "shopping", "missing_info", "requested_docs", "docs_out", "login", "funded", "follow_ups", "declined", "dead_file"], required: true },
+        { name: "stage", type: "enum", enum_values: ["application_in", "shopping", "approved", "missing_info", "requested_docs", "docs_out", "login", "funded", "follow_ups", "declined", "dead_file"], required: true },
       ],
     },
     {
