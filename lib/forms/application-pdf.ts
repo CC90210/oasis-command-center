@@ -241,9 +241,10 @@ function wrapText(textIn: string, font: PDFFont, size: number, maxW: number): st
 
 /**
  * Render the signed application PDF — polished, on-brand layout (SunBiz forest
- * green + gold). Logo header, bordered section cards with green heading bars, a
- * two-column field grid, an authorization + signature block, and a branded
- * footer on every page. Underwriter-readable. Returns raw bytes for upload.
+ * green + gold). Classic official-application layout: logo header, green section
+ * heading bars over fully bordered two-column field cells, an authorization +
+ * signature block, and a branded footer on every page. Underwriter-readable.
+ * Returns raw bytes for upload.
  *
  * `signatureDataUri` is an optional PNG data-URI (the drawn signature); when
  * absent or malformed a ruled signature line is drawn instead. Every drawn
@@ -272,7 +273,6 @@ export async function generateApplicationPdf(input: {
   const ink = rgb(0.11, 0.13, 0.16);
   const muted = rgb(0.42, 0.47, 0.53);
   const line = rgb(0.83, 0.86, 0.89);
-  const cardBg = rgb(0.972, 0.984, 0.976);
   const white = rgb(1, 1, 1);
 
   let page = doc.addPage([PAGE_W, PAGE_H]);
@@ -349,78 +349,60 @@ export async function generateApplicationPdf(input: {
     y = PAGE_H - MARGIN;
   };
 
-  // ---- Section cards: green heading bar + bordered two-column field grid ----
-  const HEAD_H = 20;
-  const ROW_H = 27;
-  const PAD = 11;
+  // ---- Section tables: green heading bar + fully bordered field cells ----
+  // Classic official-application layout (Adon's pick): each field is its own
+  // bordered cell in a two-column grid; trailing empty slot still drawn so the
+  // table reads complete.
+  const HEAD_H = 19;
+  const CELL_H = 30;
   const colW = CONTENT_W / 2;
 
-  const sectionCard = (heading: string, rows: PdfFieldRow[]) => {
+  const sectionTable = (heading: string, rows: PdfFieldRow[]) => {
     const gridRows = Math.max(1, Math.ceil(rows.length / 2));
-    const bodyH = PAD + gridRows * ROW_H + 3;
+    const bodyH = gridRows * CELL_H;
     if (y - (HEAD_H + bodyH) < 64) newPage();
 
     const barTop = y;
     page.drawRectangle({ x: MARGIN, y: barTop - HEAD_H, width: CONTENT_W, height: HEAD_H, color: green });
-    text(heading, MARGIN + 11, barTop - HEAD_H + 6.5, 9.5, fontBold, white);
+    text(heading, MARGIN + 9, barTop - HEAD_H + 6, 9.5, fontBold, white);
 
     const bodyTop = barTop - HEAD_H;
-    page.drawRectangle({
-      x: MARGIN,
-      y: bodyTop - bodyH,
-      width: CONTENT_W,
-      height: bodyH,
-      color: cardBg,
-      borderColor: line,
-      borderWidth: 1,
-    });
-    page.drawLine({
-      start: { x: MARGIN + colW, y: bodyTop - 6 },
-      end: { x: MARGIN + colW, y: bodyTop - bodyH + 6 },
-      thickness: 0.8,
-      color: line,
-    });
-
-    rows.forEach((row, i) => {
+    const total = gridRows * 2;
+    for (let i = 0; i < total; i++) {
       const col = i % 2;
       const r = Math.floor(i / 2);
-      const cellX = MARGIN + col * colW + 11;
-      const cellTop = bodyTop - PAD - r * ROW_H;
-      text(row.label.toUpperCase(), cellX, cellTop - 7.5, 6.8, fontBold, muted);
-      if (row.value) text(clip(row.value, font, 9.5, colW - 22), cellX, cellTop - 19, 9.5, font, ink);
-      if (r < gridRows - 1) {
-        page.drawLine({
-          start: { x: MARGIN + col * colW + 7, y: cellTop - ROW_H + 5 },
-          end: { x: MARGIN + col * colW + colW - 7, y: cellTop - ROW_H + 5 },
-          thickness: 0.4,
-          color: line,
-        });
+      const cellX = MARGIN + col * colW;
+      const cellTop = bodyTop - r * CELL_H;
+      page.drawRectangle({ x: cellX, y: cellTop - CELL_H, width: colW, height: CELL_H, borderColor: line, borderWidth: 0.8 });
+      const row = rows[i];
+      if (row) {
+        text(row.label.toUpperCase(), cellX + 8, cellTop - 10, 6.6, fontBold, muted);
+        if (row.value) text(clip(row.value, font, 9.5, colW - 16), cellX + 8, cellTop - 22, 9.5, font, ink);
       }
-    });
-    y = bodyTop - bodyH - 14;
+    }
+    y = bodyTop - bodyH - 12;
   };
 
-  for (const section of input.sections) sectionCard(section.heading, section.rows);
+  for (const section of input.sections) sectionTable(section.heading, section.rows);
 
-  // ---- Authorization + signature card ----
+  // ---- Authorization + signature (green bar + bordered box) ----
   const authText =
     "Applicant authorizes SunBiz Funding LLC, its assigns, agents, banks or financial institutions to obtain an investigative or consumer report from a credit bureau or a credit agency and to investigate the references given on any other statement or data obtained from applicant.";
   const authLines = wrapText(authText, font, 7.8, CONTENT_W - 22);
-  const blockBodyH = 14 + authLines.length * 10 + 96;
+  const blockBodyH = 14 + authLines.length * 10 + 92;
   if (y - (HEAD_H + blockBodyH) < 64) newPage();
 
   const sBarTop = y;
   page.drawRectangle({ x: MARGIN, y: sBarTop - HEAD_H, width: CONTENT_W, height: HEAD_H, color: green });
-  text("AUTHORIZATION & SIGNATURE", MARGIN + 11, sBarTop - HEAD_H + 6.5, 9.5, fontBold, white);
+  text("AUTHORIZATION & SIGNATURE", MARGIN + 9, sBarTop - HEAD_H + 6, 9.5, fontBold, white);
   const sBodyTop = sBarTop - HEAD_H;
   page.drawRectangle({
     x: MARGIN,
     y: sBodyTop - blockBodyH,
     width: CONTENT_W,
     height: blockBodyH,
-    color: cardBg,
     borderColor: line,
-    borderWidth: 1,
+    borderWidth: 0.8,
   });
   let ty = sBodyTop - 14;
   for (const ln of authLines) {
@@ -430,7 +412,7 @@ export async function generateApplicationPdf(input: {
   ty -= 18;
 
   const sigBoxW = 232;
-  const sigBoxH = 48;
+  const sigBoxH = 46;
   const sigX = MARGIN + 11;
   const uri = input.signatureDataUri || "";
   if (uri.startsWith("data:image")) {
