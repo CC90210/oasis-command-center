@@ -196,6 +196,30 @@ function formatFieldValue(field: FormField, raw: unknown): string {
 }
 
 /**
+ * Form field name → alternate keys an application RECORD may store the same value
+ * under. The from-record generation path reads an application record, which keeps
+ * canonical aliases (see lib/forms/application-upsert FIELD_ALIASES): the form
+ * collects `requested_advance` but the record stores `requested_amount`, etc.
+ * Without this, a record-generated PDF would leave those cells blank. Form-submit
+ * payloads use the form names directly, so this only kicks in for empties.
+ */
+const RECORD_ALIASES: Record<string, string[]> = {
+  requested_advance: ["requested_amount"],
+  owner_full_name: ["owner_name", "contact_name"],
+  business_legal_name: ["business_name"],
+};
+
+function resolveAnswer(merged: Record<string, unknown>, name: string): unknown {
+  const v = merged[name];
+  if (v != null && v !== "") return v;
+  for (const alt of RECORD_ALIASES[name] ?? []) {
+    const av = merged[alt];
+    if (av != null && av !== "") return av;
+  }
+  return v;
+}
+
+/**
  * FORM-DRIVEN mapping (CC 2026-06-22): list EVERY question the form asks, with
  * the merchant's answer filled in — a real filled application form, not a fixed
  * subset. One PDF section per form STEP (heading = step title); one row per
@@ -237,7 +261,7 @@ export function mapApplicationFieldsFromSteps(
       ) {
         continue;
       }
-      rows.push({ label: f.label, value: formatFieldValue(f, merged[f.name]) });
+      rows.push({ label: f.label, value: formatFieldValue(f, resolveAnswer(merged, f.name)) });
     }
     if (rows.length) sections.push({ heading: step.title.toUpperCase(), rows });
   }

@@ -50,8 +50,20 @@ async function resolveApplicationSections(
       const steps = parseFormSteps(rawSteps);
       return mapApplicationFieldsFromSteps(steps, merged, leadData);
     }
-  } catch {
-    /* fall through to the legacy fixed map */
+    // Steps missing/unreadable — don't drop the PDF, but make the downgrade to
+    // the legacy fixed map LOUD (it can omit newer form fields). Codex 2026-06-22.
+    console.warn("[app_doc] form steps unavailable — using legacy field map (PDF may omit newer fields)", {
+      tenant_id: tenantId,
+      source,
+      error: r.error?.message ?? null,
+      has_steps: !!rawSteps,
+    });
+  } catch (err) {
+    console.warn("[app_doc] form-driven mapping failed — using legacy field map", {
+      tenant_id: tenantId,
+      source,
+      error: err instanceof Error ? err.message : String(err),
+    });
   }
   return mapApplicationFields(merged, leadData);
 }

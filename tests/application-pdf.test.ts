@@ -179,6 +179,18 @@ check(
   "form-driven: signature field omitted from rows (renders in the signature block)",
 );
 
+// Record-alias fallback (from-record path): an application RECORD stores the
+// canonical alias requested_amount, not the form's requested_advance — the mapper
+// must still fill it. (Codex 2026-06-22 HIGH.)
+const fdRec = mapApplicationFieldsFromSteps(
+  steps,
+  { requested_amount: 60000, monthly_revenue: 90000 },
+  {},
+);
+const recVal = (heading: string, label: string) =>
+  fdRec.sections.find((s) => s.heading === heading)?.rows.find((r) => r.label === label)?.value;
+check(recVal("FINANCIAL DETAILS", "Requested advance amount") === "$60,000", "record alias requested_amount → requested_advance field");
+
 (async () => {
   // generateApplicationPdf returns real PDF bytes (no signature image here — a
   // valid PNG isn't needed to prove the layout renders).
