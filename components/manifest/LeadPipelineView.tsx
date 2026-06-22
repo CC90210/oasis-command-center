@@ -14,6 +14,7 @@ import {
   X,
 } from "lucide-react";
 import type { StageMeta } from "@/lib/sunbiz-stage-meta";
+import { AutofillDropzone } from "@/components/leads/AutofillDropzone";
 import { PageSearchBar } from "@/components/manifest/PageSearchBar";
 import { pipelineRowHref } from "@/lib/pipeline-display";
 import { lastTouchIso } from "@/lib/lead-staleness";
@@ -355,6 +356,9 @@ export function LeadPipelineView({
             <Plus className="h-3.5 w-3.5" />
             New {entityLabel.toLowerCase()}
           </Link>
+          {/* Drop an existing application doc → AI creates a new lead + filled
+              application (Adon's drop-in autofill, new-deal flow). Leads board only. */}
+          {isLeads && <AutofillDropzone mode="new" tenantSlug={slug} />}
         </div>
       </div>
 

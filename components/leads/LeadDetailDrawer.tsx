@@ -24,6 +24,7 @@ import { X, FileText, ImageIcon, Phone, Mail, ShoppingBag, Loader2, Trash2, Chec
 import { LeadTimelinePanel } from "./LeadTimelinePanel";
 import { AssignmentControl } from "./AssignmentControl";
 import { StagePicker } from "./StagePicker";
+import { AutofillDropzone } from "./AutofillDropzone";
 import { humanLeadDocSize, leadDocTypeLabel, LEAD_DOC_TYPES } from "@/lib/lead-doc-display";
 import { SalesMetricCard } from "@/components/underwriting/SalesMetricCard";
 import { formatMoney, relTime } from "@/lib/format-helpers";
@@ -249,6 +250,12 @@ export function LeadDetailDrawer({
               }
               onTransferred={reload}
             />
+          )}
+
+          {/* Drop an existing application doc → AI extracts the fields and fills
+              this lead's application (Adon's drop-in autofill). Lead drawer only. */}
+          {data && entity === "lead" && (
+            <AutofillDropzone mode="existing" leadId={recordId} onDone={reload} />
           )}
 
           <div className="flex items-center justify-between gap-3">
