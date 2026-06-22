@@ -10,6 +10,7 @@ import { TenantLeadDrawerMount } from "@/components/leads/TenantLeadDrawerMount"
 import { parseTenantDrawerIds } from "@/lib/tenant-drawer-params";
 import { getManifest, manifestExists } from "@/lib/manifest/loader";
 import { resolveDataTenant } from "@/lib/manifest/tenant-scope";
+import { resolveAssignedScope, leadScopingEnabled } from "@/lib/lead-scope";
 import { CATEGORY_LABELS } from "@/lib/agents/library";
 import { getSessionUser, getServiceSupabase } from "@/lib/supabase-server";
 import { requireTenantPreviewAccess } from "@/lib/tenant-access";
@@ -86,13 +87,25 @@ async function RootPageRenderer({
   const profileRes = user
     ? await service
         .from("user_profiles")
-        .select("tenant_id")
+        .select("tenant_id, team_role, is_owner")
         .eq("auth_user_id", user.id)
         .maybeSingle()
     : { data: null };
-  const userTenantId = (profileRes.data as { tenant_id: string | null } | null)?.tenant_id ?? null;
+  const profile = profileRes.data as
+    | { tenant_id: string | null; team_role: string | null; is_owner: boolean | null }
+    | null;
+  const userTenantId = profile?.tenant_id ?? null;
   const dataTenantId = await resolveDataTenant(slug, userTenantId);
   const isPreview = !!userTenantId && dataTenantId === null;
+
+  // Per-agent scope for the dashboard board (Adon Batch 2 / 2026-06-22): admins
+  // (owner / Jordan / Matt) see all; agents see their own + collaborated. Same
+  // resolution as the catch-all pipeline page, threaded into the scoped surfaces.
+  const viewer = {
+    isAdmin: !!profile?.is_owner || profile?.team_role === "admin" || profile?.team_role === "owner",
+    userId: user?.id ?? null,
+  };
+  const assignedScope = resolveAssignedScope(viewer, {}, leadScopingEnabled());
 
   return (
     <div className="space-y-6 animate-fade-in">
@@ -110,17 +123,17 @@ async function RootPageRenderer({
       )}
       {page.kind === "markdown" && <ManifestMarkdown page={page} />}
       {page.kind === "dashboard" && (
-        <ManifestDashboard manifest={manifest} tenantId={dataTenantId} />
+        <ManifestDashboard manifest={manifest} tenantId={dataTenantId} assignedScope={assignedScope} />
       )}
       {(page.kind === "table" || page.kind === "form") && (() => {
         const entity = (manifest.data_model || []).find((e) => e.name === page.entity);
         if (!entity) return <UnknownEntity name={page.entity} />;
-        return <ManifestTable tenantSlug={slug} tenantId={dataTenantId} entity={entity} page={page} canCreate />;
+        return <ManifestTable tenantSlug={slug} tenantId={dataTenantId} entity={entity} page={page} canCreate assignedScope={assignedScope} />;
       })()}
       {page.kind === "kanban" && (() => {
         const entity = (manifest.data_model || []).find((e) => e.name === page.entity);
         if (!entity) return <UnknownEntity name={page.entity} />;
-        return <ManifestKanban tenantSlug={slug} tenantId={dataTenantId} entity={entity} page={page} />;
+        return <ManifestKanban tenantSlug={slug} tenantId={dataTenantId} entity={entity} page={page} assignedScope={assignedScope} />;
       })()}
 
       {/* Lead/application detail drawer over the dashboard — same gated mount

@@ -132,6 +132,121 @@ export async function listRecords(input: ListRecordsInput): Promise<ListRecordsR
   };
 }
 
+const UUID_RE_SCOPE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * List the records a single AGENT may see: those they own (`data.assigned_to`)
+ * OR collaborate on (`data.collaborators` array contains their id). Two indexed
+ * reads merged + paginated in memory — an agent's book is bounded, and this
+ * sidesteps the fragile jsonb `.or()` filter-string encoding. The owned read
+ * reuses listRecords (so the lead `transferred_at` exclusion + entity guards
+ * apply); the shared read mirrors them. NOTE: supabase-js encodes an array arg
+ * to `.contains` as a Postgres array literal `{…}`, which is WRONG for a jsonb
+ * array column — so we pass `JSON.stringify([id])` to get the jsonb `["id"]`
+ * containment (`data->collaborators @> '["id"]'`).
+ *
+ * Admin / all / unassigned reads do NOT use this — they call listRecords with a
+ * `where` (or none) so admins keep full visibility + narrowing.
+ */
+export async function listRecordsForViewer(input: {
+  tenant_id: string;
+  entity: string;
+  /** lowercased auth_user_id of the viewing agent */
+  userId: string;
+  sort?: string;
+  limit?: number;
+  offset?: number;
+}): Promise<ListRecordsResult> {
+  assertEntity(input.entity);
+  const id = input.userId.toLowerCase();
+  // Fail-closed: a non-UUID viewer id can never own/collaborate on a real row.
+  if (!UUID_RE_SCOPE.test(id)) return { rows: [], total: 0 };
+  const db = getServiceSupabase();
+
+  // Owned — reuse listRecords so the transferred_at exclusion + sort apply.
+  const owned = await listRecords({
+    tenant_id: input.tenant_id,
+    entity: input.entity,
+    where: { assigned_to: id },
+    limit: MAX_RECORD_LIST_LIMIT,
+  });
+
+  // Shared — collaborators jsonb array contains id. Mirror listRecords' lead
+  // transferred_at exclusion.
+  let sq = db
+    .from("tenant_records")
+    .select("id, tenant_id, entity_type, data, created_at, updated_at")
+    .eq("tenant_id", input.tenant_id)
+    .eq("entity_type", input.entity)
+    .contains("data->collaborators", JSON.stringify([id]))
+    .limit(MAX_RECORD_LIST_LIMIT);
+  if (input.entity === "lead") sq = sq.is("data->>transferred_at", null);
+  const sharedRes = await sq;
+  if (sharedRes.error) throw new RecordsError("db", sharedRes.error.message);
+  const shared = (sharedRes.data || []) as TenantRecord[];
+
+  // Merge unique by id (a row could be both owned and self-collaborated).
+  const byId = new Map<string, TenantRecord>();
+  for (const r of owned.rows) byId.set(r.id, r);
+  for (const r of shared) byId.set(r.id, r);
+  const merged = sortTenantRecords([...byId.values()], input.sort);
+
+  const limit = Math.max(1, Math.min(input.limit ?? 100, MAX_RECORD_LIST_LIMIT));
+  const offset = Math.max(0, input.offset ?? 0);
+  return { rows: merged.slice(offset, offset + limit), total: merged.length };
+}
+
+/**
+ * List records for a resolved assigned-scope (from lib/lead-scope
+ * resolveAssignedScope). ONE interpretation of the scope value, shared by the
+ * records API, the catch-all pipeline page, and the dashboard so visibility
+ * can't drift between surfaces:
+ *   undefined → all (admin, no narrowing)
+ *   null      → unassigned bucket (admin ?unassigned)
+ *   <userId>  → that user's board = owned OR collaborated (agent's own board,
+ *               OR admin narrowing to one rep). Non-UUID (e.g. NO_LEADS
+ *               fail-closed sentinel) → empty, via listRecordsForViewer.
+ */
+export async function listByAssignedScope(input: {
+  tenant_id: string;
+  entity: string;
+  scope: string | null | undefined;
+  limit?: number;
+  offset?: number;
+  sort?: string;
+}): Promise<ListRecordsResult> {
+  const { tenant_id, entity, scope, limit, offset, sort } = input;
+  if (scope === undefined) {
+    return listRecords({ tenant_id, entity, limit, offset, sort });
+  }
+  if (scope === null) {
+    return listRecords({ tenant_id, entity, limit, offset, sort, where: { assigned_to: null } });
+  }
+  return listRecordsForViewer({ tenant_id, entity, userId: scope, limit, offset, sort });
+}
+
+/** In-memory sort matching listRecords' semantics (default: updated_at desc).
+ *  `-field` = descending; created_at/updated_at sort on the column, anything
+ *  else on data[field]. */
+export function sortTenantRecords(rows: TenantRecord[], sort?: string): TenantRecord[] {
+  const spec = (sort || "-updated_at").trim();
+  const desc = spec.startsWith("-");
+  const col = (desc ? spec.slice(1) : spec).trim();
+  const keyOf = (r: TenantRecord): string | number => {
+    if (col === "created_at") return r.created_at || "";
+    if (col === "updated_at") return r.updated_at || "";
+    const v = r.data[col];
+    return typeof v === "number" ? v : typeof v === "string" ? v : "";
+  };
+  return [...rows].sort((a, b) => {
+    const av = keyOf(a);
+    const bv = keyOf(b);
+    if (av < bv) return desc ? 1 : -1;
+    if (av > bv) return desc ? -1 : 1;
+    return 0;
+  });
+}
+
 export async function getRecord(input: { tenant_id: string; entity: string; id: string }): Promise<TenantRecord | null> {
   assertEntity(input.entity);
   const db = getServiceSupabase();

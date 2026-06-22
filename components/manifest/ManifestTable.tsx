@@ -1,5 +1,6 @@
 import { Card, EmptyState, Tag } from "@/components/Card";
-import { listRecords, type TenantRecord } from "@/lib/manifest/data";
+import { listRecords, listByAssignedScope, type TenantRecord } from "@/lib/manifest/data";
+import { SCOPED_ENTITIES } from "@/lib/lead-scope";
 import type { ManifestEntityDef, ManifestPageDef } from "@/lib/manifest/schema";
 import { Plus, ArrowUpRight } from "lucide-react";
 import Link from "next/link";
@@ -38,6 +39,13 @@ type Props = {
    */
   where?: Record<string, string | null>;
   /**
+   * Per-agent scope (Adon Batch 2 / 2026-06-22). When the entity is a scoped
+   * entity (lead/application/funded_deal) this is applied as owner-OR-collaborator
+   * so an agent's table reflects only their book. Ignored for tenant-shared
+   * entities. undefined=all (admin), string=that rep's board, null=unassigned.
+   */
+  assignedScope?: string | null | undefined;
+  /**
    * Operator-friendly override for the empty-state copy. When provided,
    * replaces the default "No <entity> records yet..." message. Callers
    * pass tenant-specific language here (e.g. OASIS /pipeline → "Add
@@ -69,19 +77,20 @@ export async function ManifestTable({
   linkBase,
   query,
   where,
+  assignedScope,
   emptyStateMessage,
 }: Props) {
   const effectiveLinkBase = linkBase ?? `/t/${tenantSlug}/${page.path}`;
   // Read either from DB (real tenant) or the supplied demo set. When
   // tenantId is null AND no demoRows were provided we still render the
-  // empty state so the page surface is consistent.
+  // empty state so the page surface is consistent. Scoped entities
+  // (lead/application/funded_deal) read owner-OR-collaborator; others use
+  // the optional `where`.
   const fetchedRows = tenantId
-    ? (await listRecords({
-        tenant_id: tenantId,
-        entity: entity.name,
-        limit: 200,
-        where,
-      }).catch(() => ({ rows: [], total: 0 }))).rows
+    ? (await (SCOPED_ENTITIES.has(entity.name)
+        ? listByAssignedScope({ tenant_id: tenantId, entity: entity.name, scope: assignedScope, limit: 200 })
+        : listRecords({ tenant_id: tenantId, entity: entity.name, limit: 200, where })
+      ).catch(() => ({ rows: [], total: 0 }))).rows
     : demoRows || [];
   const rows = filterRowsByQuery(fetchedRows, query);
 

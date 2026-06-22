@@ -1,7 +1,8 @@
 import { Plus, Inbox } from "lucide-react";
 import Link from "next/link";
 import { Card, Tag } from "@/components/Card";
-import { listRecords, groupRecordsBy, type TenantRecord } from "@/lib/manifest/data";
+import { listRecords, listByAssignedScope, groupRecordsBy, type TenantRecord } from "@/lib/manifest/data";
+import { SCOPED_ENTITIES } from "@/lib/lead-scope";
 import type { ManifestEntityDef, ManifestEntityField, ManifestPageDef } from "@/lib/manifest/schema";
 import { OfferCardActions } from "./OfferCardActions";
 import { ApplicationCardActions } from "./ApplicationCardActions";
@@ -49,6 +50,12 @@ type Props = {
    * full unfiltered list is fetched (current behaviour).
    */
   where?: Record<string, string | null>;
+  /**
+   * Per-agent scope (2026-06-22). For scoped entities (lead/application/
+   * funded_deal) applied as owner-OR-collaborator so an agent's Kanban shows
+   * only their book. Ignored for tenant-shared entities.
+   */
+  assignedScope?: string | null | undefined;
 };
 
 // rowMatchesQuery + filterRowsByQuery moved to lib/search-filter.ts.
@@ -90,6 +97,7 @@ export async function ManifestKanban({
   sortBy,
   query,
   where,
+  assignedScope,
 }: Props) {
   const effectiveLinkBase = linkBase ?? `/t/${tenantSlug}/${page.path}`;
   // Two ways to pick the grouping key:
@@ -112,12 +120,10 @@ export async function ManifestKanban({
       "stage";
 
   const rawRows = tenantId
-    ? (await listRecords({
-        tenant_id: tenantId,
-        entity: entity.name,
-        limit: 500,
-        where,
-      }).catch(() => ({ rows: [], total: 0 }))).rows
+    ? (await (SCOPED_ENTITIES.has(entity.name)
+        ? listByAssignedScope({ tenant_id: tenantId, entity: entity.name, scope: assignedScope, limit: 500 })
+        : listRecords({ tenant_id: tenantId, entity: entity.name, limit: 500, where })
+      ).catch(() => ({ rows: [], total: 0 }))).rows
     : demoRows || [];
 
   // Stamp the synthetic group_by onto each row's data so groupRecordsBy

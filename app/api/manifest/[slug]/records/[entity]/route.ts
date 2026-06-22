@@ -24,13 +24,10 @@ import {
   createRecord,
   deleteRecord,
   listRecords,
+  listByAssignedScope,
   updateRecord,
 } from "@/lib/manifest/data";
-import { resolveAssignedScope, assignedWhere, leadScopingEnabled } from "@/lib/lead-scope";
-
-// Entities subject to per-agent lead scoping (Adon Batch 2). Other entities
-// (lender, offer, funded_deal, …) are tenant-shared, not per-agent.
-const SCOPED_ENTITIES = new Set(["lead", "application"]);
+import { resolveAssignedScope, leadScopingEnabled, SCOPED_ENTITIES } from "@/lib/lead-scope";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -105,33 +102,37 @@ export async function GET(
   if (!r.ok) return NextResponse.json({ ok: false, error: r.error }, { status: r.status });
 
   const sp = req.nextUrl.searchParams;
-  const limit = Number(sp.get("limit") || "100");
-  const offset = Number(sp.get("offset") || "0");
+  const rawLimit = Number(sp.get("limit") || "100");
+  const rawOffset = Number(sp.get("offset") || "0");
+  const limit = Number.isFinite(rawLimit) ? rawLimit : 100;
+  const offset = Number.isFinite(rawOffset) ? rawOffset : 0;
   const sort = sp.get("sort") || undefined;
 
-  // Per-agent lead scoping. Agents see only their own leads/applications;
-  // admins see all and can narrow via ?agent=<auth_user_id> or ?unassigned=1.
-  // Enforced server-side here (RLS is bypassed by the service-role client).
+  // Per-agent scoping (owner OR collaborator). Agents see only their own +
+  // shared leads/applications/funded-deals; admins see all and can narrow via
+  // ?agent=<auth_user_id> (shows THAT rep's board) or ?unassigned=1. Enforced
+  // server-side here (RLS is bypassed by the service-role client). One shared
+  // interpretation via resolveAssignedScope → listByAssignedScope.
   const entityName = entity.toLowerCase();
-  let where: Record<string, string | null> | undefined;
-  if (SCOPED_ENTITIES.has(entityName)) {
-    const scope = resolveAssignedScope(
-      { isAdmin: r.is_admin, userId: user.id },
-      { agent: sp.get("agent"), unassigned: sp.get("unassigned") === "1" },
-      leadScopingEnabled(),
-    );
-    where = assignedWhere(scope);
-  }
-
   try {
-    const result = await listRecords({
-      tenant_id: r.tenant_id,
-      entity: entityName,
-      limit: Number.isFinite(limit) ? limit : 100,
-      offset: Number.isFinite(offset) ? offset : 0,
-      sort,
-      where,
-    });
+    let result;
+    if (SCOPED_ENTITIES.has(entityName) && leadScopingEnabled()) {
+      const scope = resolveAssignedScope(
+        { isAdmin: r.is_admin, userId: user.id },
+        { agent: sp.get("agent"), unassigned: sp.get("unassigned") === "1" },
+        true,
+      );
+      result = await listByAssignedScope({
+        tenant_id: r.tenant_id,
+        entity: entityName,
+        scope,
+        limit,
+        offset,
+        sort,
+      });
+    } else {
+      result = await listRecords({ tenant_id: r.tenant_id, entity: entityName, limit, offset, sort });
+    }
     return NextResponse.json({ ok: true, ...result });
   } catch (err) {
     return handleRecordsError(err);

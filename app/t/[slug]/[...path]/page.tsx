@@ -37,12 +37,12 @@ import {
 import { filterRowsByQuery } from "@/lib/search-filter";
 import { LEAD_PIPELINE_STAGES, OPPORTUNITY_PIPELINE_STAGES, findStage } from "@/lib/sunbiz-stage-meta";
 import { humanize } from "@/lib/manifest/humanize";
-import { getRecord, listRecords } from "@/lib/manifest/data";
+import { getRecord, listRecords, listByAssignedScope } from "@/lib/manifest/data";
 import {
   resolveAssignedScope,
-  assignedWhere,
   canViewLead,
   leadScopingEnabled,
+  SCOPED_ENTITIES,
   type LeadViewer,
 } from "@/lib/lead-scope";
 import { Card, PageHeader, Tag } from "@/components/Card";
@@ -694,6 +694,7 @@ async function PageBody({
               entity={entity}
               page={page}
               query={query ?? undefined}
+              assignedScope={assignedScope}
             />
           </>
         );
@@ -709,6 +710,7 @@ async function PageBody({
             page={page}
             canCreate
             query={query ?? undefined}
+            assignedScope={assignedScope}
           />
         </>
       );
@@ -819,14 +821,15 @@ async function PipelineSuperview({
   // Fetch every record for each pipeline once; partition client-side
   // into stage buckets. Cheaper than N round-trips (one per stage) and
   // gives us accurate counts for the chevron badges in the same query.
-  // Per-agent scope applied at the query (lead + application are scoped entities).
-  const scopeWhere = assignedWhere(assignedScope);
+  // Per-agent scope applied at the query (lead + application are scoped
+  // entities). listByAssignedScope interprets the scope as owner OR collaborator
+  // for an agent/rep board, all for admins.
   const [leadRowsRes, oppRowsRes] = await Promise.all([
     tenantId
-      ? listRecords({ tenant_id: tenantId, entity: leadName, limit: 2_000, where: scopeWhere }).catch(() => ({ rows: [], total: 0 }))
+      ? listByAssignedScope({ tenant_id: tenantId, entity: leadName, scope: assignedScope, limit: 2_000 }).catch(() => ({ rows: [], total: 0 }))
       : Promise.resolve({ rows: [], total: 0 }),
     tenantId
-      ? listRecords({ tenant_id: tenantId, entity: oppName, limit: 2_000, where: scopeWhere }).catch(() => ({ rows: [], total: 0 }))
+      ? listByAssignedScope({ tenant_id: tenantId, entity: oppName, scope: assignedScope, limit: 2_000 }).catch(() => ({ rows: [], total: 0 }))
       : Promise.resolve({ rows: [], total: 0 }),
   ]);
 
@@ -1031,14 +1034,13 @@ async function SingleEntityPipeline({
     );
   }
 
-  // lead + application are per-agent scoped entities; apply at the query.
+  // Scoped entities (lead/application/funded_deal) apply owner-OR-collaborator
+  // scope at the query; non-scoped entities (lender, offer, …) are tenant-shared.
   const rowsRes = tenantId
-    ? await listRecords({
-        tenant_id: tenantId,
-        entity: entity.name,
-        limit: 2_000,
-        where: assignedWhere(assignedScope),
-      }).catch(() => ({ rows: [], total: 0 }))
+    ? await (SCOPED_ENTITIES.has(entity.name)
+        ? listByAssignedScope({ tenant_id: tenantId, entity: entity.name, scope: assignedScope, limit: 2_000 })
+        : listRecords({ tenant_id: tenantId, entity: entity.name, limit: 2_000 })
+      ).catch(() => ({ rows: [], total: 0 }))
     : { rows: [], total: 0 };
 
   // Apply ?q= search filter FIRST so the chevron stage counts reflect

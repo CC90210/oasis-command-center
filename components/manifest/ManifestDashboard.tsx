@@ -1,8 +1,8 @@
 import Link from "next/link";
 import { Bot, Flame, AlertTriangle, BadgeCheck, RefreshCw, ArrowRight, Sparkles, MessageSquare } from "lucide-react";
 import { Card } from "@/components/Card";
-import { listRecords, type TenantRecord } from "@/lib/manifest/data";
-import { assignedWhere } from "@/lib/lead-scope";
+import { listRecords, listByAssignedScope, type TenantRecord } from "@/lib/manifest/data";
+import { SCOPED_ENTITIES } from "@/lib/lead-scope";
 import type { TenantManifest } from "@/lib/manifest/schema";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { getRenewalsSummary } from "@/lib/queries";
@@ -77,14 +77,12 @@ export async function ManifestDashboard({ manifest, tenantId, demoRowsByEntity, 
         const demo = demoRowsByEntity?.[entity.name] || [];
         return { entity, rows: demo, total: demo.length };
       }
-      // lead + application are per-agent scoped; other entities are tenant-shared.
-      const scopedEntity = entity.name === "lead" || entity.name === "application";
-      const r = await listRecords({
-        tenant_id: tenantId,
-        entity: entity.name,
-        limit: 500,
-        where: scopedEntity ? assignedWhere(assignedScope) : undefined,
-      }).catch(() => ({ rows: [], total: 0 }));
+      // lead / application / funded_deal are per-agent scoped (owner OR
+      // collaborator via listByAssignedScope); other entities are tenant-shared.
+      const r = await (SCOPED_ENTITIES.has(entity.name)
+        ? listByAssignedScope({ tenant_id: tenantId, entity: entity.name, scope: assignedScope, limit: 500 })
+        : listRecords({ tenant_id: tenantId, entity: entity.name, limit: 500 })
+      ).catch(() => ({ rows: [], total: 0 }));
       return { entity, rows: r.rows, total: r.total };
     }),
   );

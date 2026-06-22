@@ -28,6 +28,12 @@ export function leadScopingEnabled(): boolean {
   return (process.env.LEAD_SCOPING_ENABLED || "").toLowerCase() === "true";
 }
 
+/** Entities subject to per-agent scoping. lead → application → funded_deal is
+ *  the personalized lifecycle (renewals render off funded_deal). Everything else
+ *  (lender, offer, …) is tenant-shared. Single source of truth — imported by the
+ *  records API, the catch-all pipeline page, and the dashboard. */
+export const SCOPED_ENTITIES = new Set(["lead", "application", "funded_deal"]);
+
 export type LeadViewer = { isAdmin: boolean; userId: string | null };
 
 export type AdminLeadFilter = { agent?: string | null; unassigned?: boolean };
