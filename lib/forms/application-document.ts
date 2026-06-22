@@ -128,11 +128,11 @@ export async function maybeGenerateApplicationDocument(
     // field (a re-submitted step overwrites the earlier value).
     const subs = await db
       .from("form_submissions")
-      .select("step_index, payload, created_at")
+      .select("step_index, payload, submitted_at")
       .eq("tenant_id", form.tenant_id) // service-role client bypasses RLS — scope by tenant explicitly so this PII-heavy merge can't cross tenant boundaries (Codex audit 2026-06-17 [P2])
       .eq("form_id", form.id)
       .eq("lead_id", link.lead_id)
-      .order("created_at", { ascending: true });
+      .order("submitted_at", { ascending: true });
     if (subs.error) {
       console.error("[forms.submit.app_doc] submissions read errored — skipping", {
         lead_id: link.lead_id,
