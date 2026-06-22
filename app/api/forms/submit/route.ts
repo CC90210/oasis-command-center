@@ -805,12 +805,24 @@ export async function POST(req: NextRequest) {
   // feeds the lead pipeline only. Gate to the funding tenant so non-funding
   // tenants' non-interest forms don't spawn phantom application rows.
   if (isFundingTenant(link.tenant) && form.slug !== "initial-lead-capture") try {
+    // Full-application is the legitimate application-data channel — pass its
+    // payload through. For OTHER funding forms (bank-statement-upload), pass ONLY
+    // the fields the form actually DECLARES, so a bank-link holder can't inject
+    // undeclared application-field mutations (requested_advance, business_legal_name,
+    // …) via a crafted POST right before the new auto-underwrite path. (Codex
+    // Rule-8 2026-06-22 finding 3.) The bank form declares only `bank_statements`,
+    // so the upsert sees no app-shaped fields → no-op, exactly like a legit submit.
+    const declaredStepFields = new Set((steps[stepIndex]?.fields || []).map((f) => f.name));
+    const appUpsertPayload =
+      form.slug === "full-application"
+        ? payload
+        : Object.fromEntries(Object.entries(payload).filter(([k]) => declaredStepFields.has(k)));
     const appUpsert = await upsertApplicationFromFormStep({
       tenantId: form.tenant_id,
       leadId: link.lead_id,
       formId: form.id,
       stepIndex,
-      payload,
+      payload: appUpsertPayload,
     });
     if ("created" in appUpsert) {
       console.log("[forms.submit.application_upsert]", {
@@ -989,7 +1001,11 @@ export async function POST(req: NextRequest) {
   // 409 guard inside enqueueUnderwritingRun prevents a duplicate run). Runs AFTER
   // the response so it never delays the merchant's submit. The lead also moves to
   // submitted_application via the stage logic above.
-  if (isLastStep && form.slug === "bank-statement-upload") {
+  if (isLastStep && form.slug === "bank-statement-upload" && uploadedDocs.length > 0) {
+    // Gate on REAL registered documents (uploadedDocs is server-derived from what
+    // actually landed in Storage, not client-claimed) — a forged descriptor with
+    // no registered file must never enqueue an empty underwriting run. (Codex
+    // Rule-8 2026-06-22 finding 1.)
     after(() =>
       autoRunUnderwritingForLead({
         db,
