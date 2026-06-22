@@ -497,12 +497,21 @@ export async function generateApplicationPdf(input: {
       page.drawRectangle({ x: cellX, y: cellTop - CELL_H, width: colW, height: CELL_H, borderColor: line, borderWidth: 0.8 });
       const row = rows[i];
       if (row) {
-        text(row.label.toUpperCase(), cellX + 8, cellTop - 10, 6.6, fontBold, muted);
+        // Wrap the LABEL to up to 2 lines within the cell so a long label (e.g.
+        // the consent sentence on the "I agree" field) reads in full instead of
+        // running off the page. A 2-line label leaves room for one value line; a
+        // 1-line label leaves room for two (full addresses, descriptions). The
+        // cell height is fixed, so this can never overflow top or bottom.
+        const labelLines = wrapClip(row.label.toUpperCase(), fontBold, 6.6, colW - 16, 2);
+        let ly = cellTop - 10;
+        for (const ln of labelLines) {
+          text(ln, cellX + 8, ly, 6.6, fontBold, muted);
+          ly -= 7;
+        }
         if (row.value) {
-          // Wrap long values (addresses, descriptions) to up to 2 lines so a
-          // full address + ZIP isn't truncated — a real application shows it all.
-          let vy = cellTop - 21;
-          for (const ln of wrapClip(row.value, font, 9, colW - 16, 2)) {
+          const twoLineLabel = labelLines.length >= 2;
+          let vy = cellTop - (twoLineLabel ? 27 : 21);
+          for (const ln of wrapClip(row.value, font, 9, colW - 16, twoLineLabel ? 1 : 2)) {
             text(ln, cellX + 8, vy, 9, font, ink);
             vy -= 10;
           }
