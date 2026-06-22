@@ -7,6 +7,7 @@ import { ManifestKanban } from "@/components/manifest/ManifestKanban";
 import { ManifestMarkdown } from "@/components/manifest/ManifestMarkdown";
 import { ManifestDashboard } from "@/components/manifest/ManifestDashboard";
 import { TenantLeadDrawerMount } from "@/components/leads/TenantLeadDrawerMount";
+import { BoardLiveRefresh } from "@/components/leads/BoardLiveRefresh";
 import { parseTenantDrawerIds } from "@/lib/tenant-drawer-params";
 import { getManifest, manifestExists } from "@/lib/manifest/loader";
 import { resolveDataTenant } from "@/lib/manifest/tenant-scope";
@@ -145,6 +146,9 @@ async function RootPageRenderer({
         drawerLeadId={drawerLeadId}
         drawerAppId={drawerAppId}
       />
+      {/* Live board refresh — reassignment / collaborator changes nudge this
+          rep's dashboard to re-render within seconds (no manual reload). */}
+      {!isPreview && <BoardLiveRefresh userId={viewer.userId} />}
     </div>
   );
 }

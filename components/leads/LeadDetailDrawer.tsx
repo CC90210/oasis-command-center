@@ -23,6 +23,7 @@ import Link from "next/link";
 import { X, FileText, ImageIcon, Phone, Mail, ShoppingBag, Loader2, Trash2, CheckCircle2, AlertCircle, UploadCloud } from "lucide-react";
 import { LeadTimelinePanel } from "./LeadTimelinePanel";
 import { AssignmentControl } from "./AssignmentControl";
+import { CollaboratorsControl } from "./CollaboratorsControl";
 import { StagePicker } from "./StagePicker";
 import { humanLeadDocSize, leadDocTypeLabel, LEAD_DOC_TYPES } from "@/lib/lead-doc-display";
 import { SalesMetricCard } from "@/components/underwriting/SalesMetricCard";
@@ -225,6 +226,28 @@ export function LeadDetailDrawer({
                   ? data.record.data.assigned_to
                   : null
               }
+              onSaved={reload}
+            />
+          )}
+
+          {/* Shared deals — add co-agents who also see + work this deal
+              (2026-06-22). Visible to owner + collaborators + admins. */}
+          {data && recordId && (
+            <CollaboratorsControl
+              recordId={recordId}
+              currentCollaborators={
+                Array.isArray(data.record.data.collaborators)
+                  ? (data.record.data.collaborators as unknown[]).filter(
+                      (x): x is string => typeof x === "string",
+                    )
+                  : []
+              }
+              ownerAssignedTo={
+                typeof data.record.data.assigned_to === "string"
+                  ? data.record.data.assigned_to
+                  : null
+              }
+              onSaved={reload}
             />
           )}
 

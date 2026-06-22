@@ -28,6 +28,7 @@ import { PipelineSearchableTable } from "@/components/manifest/PipelineSearchabl
 import { PageSearchBar } from "@/components/manifest/PageSearchBar";
 import { LeadPipelineView } from "@/components/manifest/LeadPipelineView";
 import { TenantLeadDrawerMount } from "@/components/leads/TenantLeadDrawerMount";
+import { BoardLiveRefresh } from "@/components/leads/BoardLiveRefresh";
 import { parseTenantDrawerIds } from "@/lib/tenant-drawer-params";
 import {
   PIPELINE_COLUMNS,
@@ -450,6 +451,9 @@ export default async function TenantCatchAllPage({
         drawerLeadId={drawerLeadId}
         drawerAppId={drawerAppId}
       />
+      {/* Live board refresh — reassignment / collaborator changes nudge this
+          rep's pipeline to re-render within seconds (no manual reload). */}
+      {!isPreview && <BoardLiveRefresh userId={viewer.userId} />}
     </div>
   );
 }

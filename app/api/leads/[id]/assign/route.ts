@@ -25,6 +25,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { resolveSessionContext } from "@/lib/api-auth";
+import { nudgeBoards } from "@/lib/realtime/board-nudge";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -167,6 +168,10 @@ export async function POST(
   } catch {
     /* best-effort audit */
   }
+
+  // Live nudge — the deal left the previous owner's board and joined the new
+  // owner's. Refresh both (no-op for whichever is null).
+  await nudgeBoards([currentOwner, nextAssignedTo]);
 
   return NextResponse.json({ ok: true, assigned_to: nextAssignedTo });
 }
