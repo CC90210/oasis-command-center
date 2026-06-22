@@ -77,17 +77,74 @@ export function filterRowsByScope<T extends { data: Record<string, unknown> }>(
   });
 }
 
+/** The jsonb key holding the shared-deal collaborator list (auth_user_ids). */
+export const COLLABORATORS_KEY = "collaborators";
+
+/** Max co-agents on a single deal (owner + up to this many collaborators). */
+export const MAX_COLLABORATORS = 5;
+
+/**
+ * Normalize `data.collaborators` → a deduped array of lowercased auth_user_ids
+ * (or []). Tolerates the field being absent / not-an-array / containing junk —
+ * a malformed value yields [] (fail-closed: no accidental access), never throws.
+ */
+export function normalizeCollaborators(data: Record<string, unknown>): string[] {
+  const raw = data[COLLABORATORS_KEY];
+  if (!Array.isArray(raw)) return [];
+  const out: string[] = [];
+  for (const x of raw) {
+    if (typeof x !== "string") continue;
+    const v = x.trim().toLowerCase();
+    if (v && !out.includes(v)) out.push(v);
+  }
+  return out;
+}
+
+/**
+ * Canonical visibility predicate — the SINGLE source of truth for "may this
+ * viewer see this record". Visible when scoping is off, OR the viewer is an
+ * admin, OR they own it (`assigned_to`), OR they're in its `collaborators`
+ * list. Every surface (lists, single-record gates, dashboard counts) reduces
+ * to this so the rule can't drift between them.
+ */
+export function recordMatchesViewer(
+  data: Record<string, unknown>,
+  viewer: LeadViewer,
+  enabled = true,
+): boolean {
+  if (!enabled) return true; // rollout flag off → legacy "everyone sees all"
+  if (viewer.isAdmin) return true;
+  if (!viewer.userId) return false; // fail-closed: unresolved identity sees nothing
+  const me = viewer.userId.toLowerCase();
+  const owner = typeof data.assigned_to === "string" ? data.assigned_to.toLowerCase() : null;
+  if (owner === me) return true;
+  return normalizeCollaborators(data).includes(me);
+}
+
+/**
+ * Filter already-fetched rows to those the VIEWER may see (owner OR
+ * collaborator; admin = all). Use this for in-memory lists that didn't go
+ * through the scoped DB query (e.g. the dashboard's listRecords calls).
+ * Distinct from filterRowsByScope, which filters by a pre-resolved admin
+ * scope string and is collaborator-unaware by design.
+ */
+export function filterRowsByViewer<T extends { data: Record<string, unknown> }>(
+  rows: T[],
+  viewer: LeadViewer,
+  enabled = true,
+): T[] {
+  if (!enabled || viewer.isAdmin) return rows;
+  return rows.filter((r) => recordMatchesViewer(r.data, viewer, enabled));
+}
+
 /** Whether a viewer may open a single lead/application record. Admins always;
- *  agents only their own. Used to lock direct URL / API access (Adon's
- *  "guess the lead URL" requirement). */
+ *  agents only their own OR ones they collaborate on. Used to lock direct URL /
+ *  API access (Adon's "guess the lead URL" requirement). Delegates to the
+ *  canonical predicate so single-record access and list visibility never drift. */
 export function canViewLead(
   viewer: LeadViewer,
   data: Record<string, unknown>,
   enabled = true,
 ): boolean {
-  if (!enabled) return true; // rollout flag off → no single-lead lock (legacy behavior)
-  if (viewer.isAdmin) return true;
-  if (!viewer.userId) return false;
-  const owner = typeof data.assigned_to === "string" ? data.assigned_to.toLowerCase() : null;
-  return owner === viewer.userId.toLowerCase();
+  return recordMatchesViewer(data, viewer, enabled);
 }

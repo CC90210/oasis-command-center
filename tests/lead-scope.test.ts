@@ -5,6 +5,9 @@ import {
   assignedWhere,
   canViewLead,
   filterRowsByScope,
+  normalizeCollaborators,
+  recordMatchesViewer,
+  filterRowsByViewer,
 } from "../lib/lead-scope";
 
 // Per-agent lead scoping (Adon Batch 2). These lock the fail-closed contract:
@@ -66,5 +69,51 @@ assert.equal(filterRowsByScope(rows, undefined).length, 3, "undefined = pass eve
 assert.equal(filterRowsByScope(rows, AGENT.userId).length, 1, "own only");
 assert.equal(filterRowsByScope(rows, null).length, 1, "unassigned only");
 assert.equal(filterRowsByScope(rows, NO_LEADS).length, 0, "fail-closed = nothing");
+
+// --- normalizeCollaborators ---
+assert.deepEqual(normalizeCollaborators({}), [], "absent → []");
+assert.deepEqual(normalizeCollaborators({ collaborators: "x" }), [], "non-array → []");
+assert.deepEqual(
+  normalizeCollaborators({ collaborators: ["A-B", "a-b", "  C  ", 5, null] }),
+  ["a-b", "c"],
+  "lowercased, trimmed, deduped, junk dropped",
+);
+
+// --- recordMatchesViewer (owner OR collaborator; admin = all) ---
+const COLLAB = { isAdmin: false, userId: "22222222-2222-2222-2222-222222222222" };
+const sharedDeal = { assigned_to: AGENT.userId, collaborators: [COLLAB.userId] };
+assert.equal(recordMatchesViewer(sharedDeal, AGENT), true, "owner sees shared deal");
+assert.equal(recordMatchesViewer(sharedDeal, COLLAB), true, "collaborator sees shared deal");
+assert.equal(
+  recordMatchesViewer(sharedDeal, { isAdmin: false, userId: "33333333-3333-3333-3333-333333333333" }),
+  false,
+  "non-owner non-collaborator agent denied",
+);
+assert.equal(recordMatchesViewer(sharedDeal, ADMIN), true, "admin sees shared deal");
+assert.equal(
+  recordMatchesViewer({ assigned_to: "x", collaborators: [COLLAB.userId.toUpperCase()] }, COLLAB),
+  true,
+  "collaborator match is case-insensitive",
+);
+assert.equal(recordMatchesViewer(sharedDeal, COLLAB, false), true, "flag off → everyone sees");
+assert.equal(
+  recordMatchesViewer(sharedDeal, { isAdmin: false, userId: null }),
+  false,
+  "no identity → denied even if listed nowhere",
+);
+
+// canViewLead now honors collaborators (delegates to recordMatchesViewer)
+assert.equal(canViewLead(COLLAB, sharedDeal), true, "collaborator may open the record");
+
+// --- filterRowsByViewer (in-memory, owner OR collaborator) ---
+const vrows = [
+  { data: { assigned_to: AGENT.userId } }, // owned by AGENT
+  { data: { assigned_to: "other", collaborators: [COLLAB.userId] } }, // shared with COLLAB
+  { data: { assigned_to: "other" } }, // neither
+];
+assert.equal(filterRowsByViewer(vrows, ADMIN).length, 3, "admin sees all");
+assert.equal(filterRowsByViewer(vrows, AGENT).length, 1, "agent sees own only");
+assert.equal(filterRowsByViewer(vrows, COLLAB).length, 1, "collaborator sees shared only");
+assert.equal(filterRowsByViewer(vrows, AGENT, false).length, 3, "flag off → all");
 
 console.log("lead-scope tests passed");
