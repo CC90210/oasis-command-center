@@ -20,6 +20,8 @@ import "server-only";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { uploadLeadDocument } from "@/lib/lead-documents";
 import { mapApplicationFields, generateApplicationPdf } from "@/lib/forms/application-pdf";
+import { getServiceSupabase } from "@/lib/supabase-server";
+import { getRecord } from "@/lib/manifest/data";
 
 /** doc_type for the generated application — matches lib/lead-doc-display.ts. */
 const APPLICATION_DOC_TYPE = "final_application_form";
@@ -344,5 +346,116 @@ async function ensureApplicantSignatureFile(args: {
       lead_id: leadId,
       error: err instanceof Error ? err.message : String(err),
     });
+  }
+}
+
+/**
+ * Generate the SunBiz application PDF from an APPLICATION RECORD (not a form
+ * submission) and file it as final_application_form. Used when an application is
+ * created WITHOUT the full-application form — "Transfer to Application", "Run
+ * underwriting", or after drop-in autofill — so every application carries the
+ * app PDF on its Docs tab. Builds from the record's own data (+ the linked lead
+ * for email/phone), with a ruled signature line when no e-signature exists.
+ *
+ * Idempotent by default (skips when a final_application_form already exists for
+ * the lead). Pass replace=true to regenerate (soft-deletes the prior generated
+ * copy first) — used after autofill changes the data. Never throws into callers.
+ */
+export async function generateApplicationDocumentFromRecord(input: {
+  tenantId: string;
+  applicationId: string;
+  replace?: boolean;
+}): Promise<{ ok: boolean; documentId?: string; error?: string }> {
+  try {
+    const db = getServiceSupabase();
+    const app = await getRecord({ tenant_id: input.tenantId, entity: "application", id: input.applicationId }).catch(() => null);
+    if (!app) return { ok: false, error: "application_not_found" };
+    const appData = (app.data || {}) as Record<string, unknown>;
+    const leadId = typeof appData.lead_id === "string" ? appData.lead_id : null;
+    if (!leadId) return { ok: false, error: "no_lead_id" };
+
+    // Linked lead supplies email/phone fallback; never fatal if missing.
+    const lead = await getRecord({ tenant_id: input.tenantId, entity: "lead", id: leadId }).catch(() => null);
+    const leadData = (lead?.data || {}) as Record<string, unknown>;
+
+    // Existing generated PDF for this lead?
+    const existing = await db
+      .from("lead_documents")
+      .select("id")
+      .eq("tenant_id", input.tenantId)
+      .eq("lead_id", leadId)
+      .eq("doc_type", APPLICATION_DOC_TYPE)
+      .is("metadata->>deleted_at", null)
+      .limit(10);
+    const existingRows = (existing.data || []) as Array<{ id: string }>;
+    if (existingRows.length && !input.replace) {
+      return { ok: true, documentId: existingRows[0].id }; // already filed; idempotent
+    }
+    if (existingRows.length && input.replace) {
+      // Soft-delete the prior generated copy so the new one is the live document.
+      for (const r of existingRows) {
+        await db
+          .from("lead_documents")
+          .update({ metadata: { deleted_at: new Date().toISOString(), deleted_by: "record_regenerate" } })
+          .eq("id", r.id)
+          .eq("tenant_id", input.tenantId);
+      }
+    }
+
+    const { sections, signatureName } = mapApplicationFields(appData, leadData);
+    const signatureDataUri = typeof appData.applicant_signature === "string" ? appData.applicant_signature : "";
+    const signedAt = new Date().toISOString();
+    const bytes = await generateApplicationPdf({ sections, signatureName, signatureDataUri, signedAt });
+    const buf = Buffer.from(bytes);
+
+    const business =
+      (typeof appData.business_legal_name === "string" && appData.business_legal_name) ||
+      (typeof appData.business_name === "string" && appData.business_name) ||
+      (typeof leadData.business_name === "string" && leadData.business_name) ||
+      "application";
+    const safeBusiness =
+      business.replace(/[^A-Za-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 60) || "application";
+    const filename = `SunBiz-Application-${safeBusiness}-${signedAt.slice(0, 10)}.pdf`;
+
+    const up = await uploadLeadDocument({
+      tenantId: input.tenantId,
+      leadId,
+      filename,
+      mimeType: "application/pdf",
+      bytes: buf,
+      sizeBytes: buf.length,
+      docType: APPLICATION_DOC_TYPE,
+      uploadedBy: "system",
+      source: "record_generated",
+      extraMetadata: { application_id: input.applicationId, generated_at: signedAt, generated_from: "record" },
+    });
+    if (!up.ok) return { ok: false, error: up.error };
+
+    // Timeline marker — best-effort, fixed string + ids only (no PII).
+    try {
+      const note = "Application PDF generated from the record and filed to documents.";
+      await db.from("lead_interactions").insert({
+        tenant_id: input.tenantId,
+        lead_id: leadId,
+        type: "application_generated",
+        channel: "system",
+        direction: "outbound",
+        agent_source: "record_application_pdf",
+        subject: "Application PDF generated",
+        content: note,
+        content_preview: note,
+        metadata: { status: "generated", document_id: up.document.id, doc_type: APPLICATION_DOC_TYPE, application_id: input.applicationId },
+      });
+    } catch {
+      /* best-effort marker */
+    }
+
+    return { ok: true, documentId: up.document.id };
+  } catch (err) {
+    console.error("[app_doc.from_record] threw", {
+      application_id: input.applicationId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return { ok: false, error: err instanceof Error ? err.message : "failed" };
   }
 }

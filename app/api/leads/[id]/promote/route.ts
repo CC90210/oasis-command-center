@@ -20,12 +20,13 @@
  * LEAD_SCOPING_ENABLED); read-only members denied; fail closed. Audited.
  */
 
-import { NextRequest, NextResponse } from "next/server";
+import { NextRequest, NextResponse, after } from "next/server";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { resolveSessionContext } from "@/lib/api-auth";
 import { getAccessibleLead } from "@/lib/lead-access";
 import { isReadOnlyRole } from "@/lib/role-gates";
 import { createApplicationFromLead } from "@/lib/applications/create-from-lead";
+import { generateApplicationDocumentFromRecord } from "@/lib/forms/application-document";
 import { getRecord, updateRecord, RecordsError } from "@/lib/manifest/data";
 
 export const runtime = "nodejs";
@@ -151,6 +152,11 @@ export async function POST(_req: NextRequest, ctx: { params: Promise<{ id: strin
   } catch {
     /* best-effort audit */
   }
+
+  // Generate + attach the application-form PDF from the record (best-effort,
+  // non-blocking) so a transferred deal always has its app PDF on the Docs tab,
+  // even when it never went through the full-application form.
+  after(() => generateApplicationDocumentFromRecord({ tenantId: sess.tenantId, applicationId: appId }));
 
   return NextResponse.json({ ok: true, application_id: appId, created: result.created });
 }

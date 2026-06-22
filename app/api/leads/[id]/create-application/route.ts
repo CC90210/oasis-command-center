@@ -12,9 +12,10 @@
  * reply + call routes); lead-ownership verified against the caller's tenant.
  */
 
-import { NextResponse, type NextRequest } from "next/server";
+import { NextResponse, type NextRequest, after } from "next/server";
 import { getServiceSupabase, getSessionUser } from "@/lib/supabase-server";
 import { createApplicationFromLead } from "@/lib/applications/create-from-lead";
+import { generateApplicationDocumentFromRecord } from "@/lib/forms/application-document";
 import { isReadOnlyRole } from "@/lib/role-gates";
 
 export const runtime = "nodejs";
@@ -74,6 +75,10 @@ export async function POST(
   if (!result.ok) {
     return NextResponse.json({ ok: false, error: result.error }, { status: 500 });
   }
+  // Best-effort, non-blocking: ensure the application has its app-form PDF filed
+  // (the underwriting CTA creates the app without going through the form).
+  after(() => generateApplicationDocumentFromRecord({ tenantId, applicationId: result.applicationId }));
+
   return NextResponse.json({
     ok: true,
     application_id: result.applicationId,

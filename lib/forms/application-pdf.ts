@@ -96,7 +96,7 @@ export function mapApplicationFields(
     {
       heading: "BUSINESS INFORMATION",
       rows: [
-        { label: "Legal Business Name", value: str(merged.business_legal_name) || str(lead.business_name) },
+        { label: "Legal Business Name", value: str(merged.business_legal_name) || str(merged.business_name) || str(lead.business_name) },
         { label: "DBA", value: str(merged.dba) },
         { label: "Business Address", value: str(merged.business_address) },
         { label: "Phone", value: phone },
@@ -116,14 +116,14 @@ export function mapApplicationFields(
     {
       heading: "MERCHANT / OWNER INFORMATION",
       rows: [
-        { label: "Name", value: str(merged.owner_full_name) },
+        { label: "Name", value: str(merged.owner_full_name) || str(merged.owner_name) || str(merged.contact_name) },
         { label: "Title", value: "" },
         { label: "Ownership %", value: pct(merged.owner_ownership_pct) },
         { label: "Home Address", value: str(merged.owner_home_address) },
         { label: "SSN", value: str(merged.owner_ssn) },
         { label: "Date of Birth", value: usDate(merged.owner_dob) },
         { label: "Home Phone", value: "" },
-        { label: "Cell Phone", value: str(merged.owner_cell) },
+        { label: "Cell Phone", value: str(merged.owner_cell) || str(merged.phone) },
       ],
     },
     {
@@ -145,7 +145,7 @@ export function mapApplicationFields(
         { label: "Average Monthly Revenue", value: money(merged.monthly_revenue) },
         { label: "Monthly CC Processing Revenue", value: "" },
         { label: "Terminal Type", value: "" },
-        { label: "Requested Advance", value: money(merged.requested_advance) },
+        { label: "Requested Advance", value: money(merged.requested_advance ?? merged.requested_amount) },
         { label: "Use of Funds", value: "" },
         { label: "Judgments / Bankruptcy", value: "" },
         { label: "Prior Cash Advance Company", value: "" },
