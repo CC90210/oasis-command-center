@@ -12,7 +12,12 @@
  *      the proxy is mandatory.
  *   2. MAPBOX_TOKEN          → Mapbox geocoding (autocomplete).
  *   3. (default, keyless)    → Photon / komoot (OpenStreetMap). Works with ZERO
- *      config so the feature is live out of the box — US + Canada + global.
+ *      config so the feature is live out of the box.
+ *
+ * US-ONLY (CC 2026-06-22): every provider is restricted to United States
+ * addresses — Google `components=country:us`, Mapbox `country=us`, Photon
+ * filtered to properties.countrycode==="US" + a US-center ranking bias. The
+ * dropdown must never offer a China / Canada / other-country address.
  *
  * To turn on the premium Google UX, set GOOGLE_PLACES_API_KEY in the dashboard
  * env; no code change needed.
@@ -38,6 +43,7 @@ async function googlePlaces(q: string, key: string, signal: AbortSignal): Promis
   const url = new URL("https://maps.googleapis.com/maps/api/place/autocomplete/json");
   url.searchParams.set("input", q);
   url.searchParams.set("types", "address");
+  url.searchParams.set("components", "country:us"); // US-only (CC 2026-06-22)
   url.searchParams.set("key", key);
   const r = await fetch(url, { signal });
   const d = (await r.json()) as {
@@ -61,6 +67,7 @@ async function mapbox(q: string, token: string, signal: AbortSignal): Promise<st
   url.searchParams.set("access_token", token);
   url.searchParams.set("autocomplete", "true");
   url.searchParams.set("types", "address");
+  url.searchParams.set("country", "us"); // US-only (CC 2026-06-22)
   url.searchParams.set("limit", String(LIMIT));
   const r = await fetch(url, { signal });
   if (!r.ok) console.warn("[address-autocomplete] mapbox http", r.status);
@@ -71,8 +78,17 @@ async function mapbox(q: string, token: string, signal: AbortSignal): Promise<st
 async function photon(q: string, signal: AbortSignal): Promise<string[]> {
   const url = new URL("https://photon.komoot.io/api/");
   url.searchParams.set("q", q);
-  url.searchParams.set("limit", String(LIMIT));
+  // Over-request: the US-only filter below drops non-US features, so ask for
+  // more than LIMIT to still fill the dropdown after filtering.
+  url.searchParams.set("limit", String(LIMIT * 4));
   url.searchParams.set("lang", "en");
+  // US-ONLY (CC 2026-06-22): Photon is global and was surfacing China/Canada
+  // addresses. Bias ranking toward the geographic center of the US so US
+  // results come back first, then hard-filter to countrycode US below. (A bbox
+  // filter would exclude Alaska/Hawaii; the countrycode filter keeps all 50
+  // states + DC.)
+  url.searchParams.set("lat", "39.8283");
+  url.searchParams.set("lon", "-98.5795");
   const r = await fetch(url, { signal });
   const d = (await r.json()) as {
     features?: Array<{ properties?: Record<string, string> }>;
@@ -81,10 +97,14 @@ async function photon(q: string, signal: AbortSignal): Promise<string[]> {
   const out: string[] = [];
   for (const f of d.features || []) {
     const p = f.properties || {};
+    // US ONLY — drop anything outside the United States so the dropdown never
+    // offers a foreign address (CC 2026-06-22).
+    if ((p.countrycode || "").toUpperCase() !== "US") continue;
     // Don't let a street-less house number ("12") leak as the address line —
     // only join housenumber when there's a street; else fall back to the name.
     const line1 = p.street ? [p.housenumber, p.street].filter(Boolean).join(" ") : p.name || "";
-    const label = [line1, p.city || p.county, p.state, p.postcode, p.country]
+    // Country omitted from the label — every suggestion is US, so it's implied.
+    const label = [line1, p.city || p.county, p.state, p.postcode]
       .map((s) => (s || "").trim())
       .filter(Boolean)
       .join(", ");
