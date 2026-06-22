@@ -368,11 +368,12 @@ export async function POST(req: NextRequest) {
   // see. V2 also returns the inbox message IDs we injected so we can
   // mark them read after the stream completes successfully (closes the
   // inbox loop documented on /inbox).
-  const dashboardCtxResult = await composeDashboardContextV2({ tenantId, agentKey }).catch(
-    () => ({ text: "", injectedInboxIds: [] as string[] })
-  );
-  const dashboardCtx = dashboardCtxResult.text;
-  const injectedInboxIds = dashboardCtxResult.injectedInboxIds;
+  // Composed AFTER the operator profile + admin flag resolve below, so the
+  // auto-attached pipeline state is scoped to the operator's own + collaborated
+  // leads (admins see all). Hoisted here for persona assembly + the inbox
+  // mark-read step at the end of the turn. (2026-06-22)
+  let dashboardCtx = "";
+  let injectedInboxIds: string[] = [];
 
   // OPERATOR CONTEXT — who is signed in on this turn. Without this the
   // agent treated every teammate identically: a tenant with 3 employees
@@ -519,6 +520,18 @@ export async function POST(req: NextRequest) {
   // floor, send window, TCPA language, sub-brand tone), so it should land
   // adjacent to the persona base, not after the runtime context. Empty
   // overlay returns the base unchanged. Codex Finding #2 (2026-05-22).
+  // Build the dashboard-state block now that callerIsAdmin + user.id are known,
+  // so SCOPED_ENTITIES auto-context is scoped to this operator (admins see all).
+  {
+    const dashboardCtxResult = await composeDashboardContextV2({
+      tenantId,
+      agentKey,
+      userId: user.id,
+      isAdmin: callerIsAdmin,
+    }).catch(() => ({ text: "", injectedInboxIds: [] as string[] }));
+    dashboardCtx = dashboardCtxResult.text;
+    injectedInboxIds = dashboardCtxResult.injectedInboxIds;
+  }
   const personaWithOverlay = applyAgentManifestOverlay(personaBase, agentBinding?.prompt_overlay);
   const personaPreOverlay = `${personaWithOverlay}${cloudModeNotice}${cloudToolsBlock}${setupBlock}${operatorBlock}${dashboardCtx ? `\n\n${dashboardCtx}` : ""}`;
   // Plan-mode overlay applies to BOTH provider branches (native Anthropic
@@ -777,7 +790,7 @@ export async function POST(req: NextRequest) {
             });
             continue;
           }
-          const r = await runAction(spec, { tenantId, authUserId: user.id });
+          const r = await runAction(spec, { tenantId, authUserId: user.id, userId: user.id, isAdmin: callerIsAdmin });
           send("action", r);
           // A6: audit log to agent_events. Best-effort; never throws.
           await logAction({

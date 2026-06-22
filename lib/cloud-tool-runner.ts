@@ -40,7 +40,14 @@ import { resolveClientProfileSlug } from "./client-profiles";
 import {
   getRecord as dataGet,
   listRecords as dataList,
+  listByAssignedScope,
 } from "./manifest/data";
+import {
+  resolveAssignedScope,
+  recordMatchesViewer,
+  leadScopingEnabled,
+  SCOPED_ENTITIES,
+} from "./lead-scope";
 import { runAction } from "./agent-actions";
 import { CLOUD_TOOLS } from "./cloud-tools";
 import { dispatchOasisOnlyEvent } from "./lead-stage-dispatcher";
@@ -1351,13 +1358,26 @@ async function toolListRecords(input: Record<string, unknown>, ctx: ToolContext)
   }
   const sort = typeof input.sort === "string" ? input.sort : undefined;
   const limit = Math.max(1, Math.min(Number(input.limit) || 25, 100));
-  const result = await dataList({
-    tenant_id: ctx.tenantId,
-    entity: entity.toLowerCase(),
-    where: Object.keys(where).length > 0 ? where : undefined,
-    sort,
-    limit,
-  });
+  // Per-agent scope: for SCOPED_ENTITIES (lead/application/funded_deal) a
+  // non-admin operator only sees their own + collaborated rows (admins see all).
+  // The arbitrary `where` is dropped for scoped entities (security > filter).
+  // (2026-06-22 audit.)
+  const scoped = SCOPED_ENTITIES.has(entity.toLowerCase()) && leadScopingEnabled();
+  const result = scoped
+    ? await listByAssignedScope({
+        tenant_id: ctx.tenantId,
+        entity: entity.toLowerCase(),
+        scope: resolveAssignedScope({ isAdmin: ctx.isAdmin, userId: ctx.userId }, {}, true),
+        sort,
+        limit,
+      })
+    : await dataList({
+        tenant_id: ctx.tenantId,
+        entity: entity.toLowerCase(),
+        where: Object.keys(where).length > 0 ? where : undefined,
+        sort,
+        limit,
+      });
   return {
     count: result.total,
     rows: result.rows.map((r) => ({ id: r.id, ...r.data })),
@@ -1371,6 +1391,14 @@ async function toolGetRecord(input: Record<string, unknown>, ctx: ToolContext) {
   await resolveEntity(ctx.tenantId, entity);
   const row = await dataGet({ tenant_id: ctx.tenantId, entity: entity.toLowerCase(), id });
   if (!row) throw new Error("record_not_found");
+  // Per-agent lock: a non-admin operator can't fetch a scoped record they don't
+  // own/collaborate on by id. (2026-06-22 audit.)
+  if (
+    SCOPED_ENTITIES.has(entity.toLowerCase()) &&
+    !recordMatchesViewer(row.data, { isAdmin: ctx.isAdmin, userId: ctx.userId }, leadScopingEnabled())
+  ) {
+    throw new Error("record_not_found");
+  }
   return { id: row.id, ...row.data };
 }
 
@@ -1487,11 +1515,21 @@ async function toolSearchRecords(input: Record<string, unknown>, ctx: ToolContex
   // No FTS on tenant_records.data (JSONB) — fetch a wide window then
   // substring-match in app code. Bounded at 200 rows so the memory cost
   // is fixed; if the operator has more, they should narrow via filter.
-  const result = await dataList({
-    tenant_id: ctx.tenantId,
-    entity: entity.toLowerCase(),
-    limit: 200,
-  });
+  // Per-agent scope for SCOPED_ENTITIES so search can't reach another rep's
+  // leads/applications/funded-deals. (2026-06-22 audit.)
+  const scoped = SCOPED_ENTITIES.has(entity.toLowerCase()) && leadScopingEnabled();
+  const result = scoped
+    ? await listByAssignedScope({
+        tenant_id: ctx.tenantId,
+        entity: entity.toLowerCase(),
+        scope: resolveAssignedScope({ isAdmin: ctx.isAdmin, userId: ctx.userId }, {}, true),
+        limit: 200,
+      })
+    : await dataList({
+        tenant_id: ctx.tenantId,
+        entity: entity.toLowerCase(),
+        limit: 200,
+      });
   const needle = query.toLowerCase();
   const matches = result.rows.filter((r) => {
     try {

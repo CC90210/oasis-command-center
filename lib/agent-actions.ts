@@ -19,15 +19,23 @@ import {
   deleteRecord,
   getRecord,
   listRecords,
+  listByAssignedScope,
   RecordsError,
   updateRecord,
 } from "./manifest/data";
 import { resolveClientProfileSlug } from "./client-profiles";
+import { resolveAssignedScope, leadScopingEnabled, SCOPED_ENTITIES } from "./lead-scope";
 import type { ManifestEntityDef, TenantManifest } from "./manifest/schema";
 
 export type ActionContext = {
   tenantId: string;
   authUserId: string;
+  /** Operator viewing the chat — for per-agent scoping of SCOPED_ENTITIES reads
+   *  (2026-06-22). Set by the operator chat route; absent for system callers.
+   *  When present + LEAD_SCOPING_ENABLED, lookup_records on lead/application/
+   *  funded_deal returns only the operator's own + collaborated rows. */
+  userId?: string | null;
+  isAdmin?: boolean;
 };
 
 export type ActionResult =
@@ -249,13 +257,31 @@ const ACTIONS: Record<string, Handler> = {
     const limit = Math.max(1, Math.min(Number(payload.limit) || 25, 100));
 
     try {
-      const result = await listRecords({
-        tenant_id: ctx.tenantId,
-        entity: entityName,
-        where: Object.keys(where).length > 0 ? where : undefined,
-        sort,
-        limit,
-      });
+      // Per-agent scope: for SCOPED_ENTITIES (lead/application/funded_deal), an
+      // operator chat only sees its own + collaborated rows — so the AI can't
+      // be asked to dump another rep's leads. The arbitrary field `where` is
+      // dropped for scoped entities (security > filter flexibility; the model
+      // can still reason over the scoped set). Admins / system callers see all.
+      const scoped = SCOPED_ENTITIES.has(entityName) && leadScopingEnabled();
+      const result = scoped
+        ? await listByAssignedScope({
+            tenant_id: ctx.tenantId,
+            entity: entityName,
+            scope: resolveAssignedScope(
+              { isAdmin: ctx.isAdmin ?? false, userId: ctx.userId ?? null },
+              {},
+              true,
+            ),
+            sort,
+            limit,
+          })
+        : await listRecords({
+            tenant_id: ctx.tenantId,
+            entity: entityName,
+            where: Object.keys(where).length > 0 ? where : undefined,
+            sort,
+            limit,
+          });
       const slim = result.rows.map((r) => ({ id: r.id, ...r.data }));
       return {
         ok: true,

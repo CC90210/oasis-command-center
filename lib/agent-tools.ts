@@ -27,6 +27,12 @@ export type ToolDeclaration = {
 export type ToolContext = {
   tenantId: string;
   agentKey: string;
+  /** Operator viewing this chat — for per-agent scoping of SCOPED_ENTITIES
+   *  reads (2026-06-22). Set by the operator chat route; absent for system/
+   *  internal callers. When present + LEAD_SCOPING_ENABLED, lead/application/
+   *  funded_deal reads are limited to the operator's own + collaborated rows. */
+  userId?: string | null;
+  isAdmin?: boolean;
 };
 
 export type ToolHandler = (

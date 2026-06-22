@@ -12,7 +12,8 @@
 
 import { runTool, type ToolContext } from "./agent-tools";
 import { listUnreadDb } from "./agent-inbox-db";
-import { listRecords } from "./manifest/data";
+import { listRecords, listByAssignedScope } from "./manifest/data";
+import { resolveAssignedScope, leadScopingEnabled, SCOPED_ENTITIES } from "./lead-scope";
 import { getManifest } from "./manifest/loader";
 import { resolveClientProfileSlug } from "./client-profiles";
 import { getTenant } from "./queries";
@@ -152,7 +153,7 @@ export async function composeDashboardContextV2(ctx: ToolContext): Promise<Dashb
   // Best-effort. If the tenant has no manifest or the data layer hiccups,
   // skip the block; the rest of the context still renders.
   try {
-    const manifestBlock = await composeManifestPipelineBlock(ctx.tenantId);
+    const manifestBlock = await composeManifestPipelineBlock(ctx);
     if (manifestBlock) {
       lines.push("");
       lines.push(manifestBlock);
@@ -217,11 +218,11 @@ export async function composeDashboardContextV2(ctx: ToolContext): Promise<Dashb
  * "leads" vs "applications" by name. No domain-specific filters here —
  * the entity name is the contract.
  */
-async function composeManifestPipelineBlock(tenantId: string): Promise<string | null> {
+async function composeManifestPipelineBlock(ctx: ToolContext): Promise<string | null> {
   // Resolve the manifest slug for this tenant. Same path the records
   // dashboard-action uses — keeps the answer "what data am I scoped
   // to?" consistent across the chat read path and the write path.
-  const tenant = await getTenant(tenantId).catch(() => null);
+  const tenant = await getTenant(ctx.tenantId).catch(() => null);
   if (!tenant) return null;
   const slug = resolveClientProfileSlug(tenant);
   if (!slug) return null;
@@ -235,7 +236,7 @@ async function composeManifestPipelineBlock(tenantId: string): Promise<string | 
   if (entities.length === 0) return null;
 
   const blocks = await Promise.all(
-    entities.map(async (entity) => formatEntityBlock(tenantId, entity))
+    entities.map(async (entity) => formatEntityBlock(ctx, entity))
   );
   const populated = blocks.filter((b): b is string => Boolean(b));
   if (populated.length === 0) return null;
@@ -246,14 +247,30 @@ async function composeManifestPipelineBlock(tenantId: string): Promise<string | 
   ].join("\n");
 }
 
-async function formatEntityBlock(tenantId: string, entity: ManifestEntityDef): Promise<string | null> {
+async function formatEntityBlock(ctx: ToolContext, entity: ManifestEntityDef): Promise<string | null> {
   try {
-    const result = await listRecords({
-      tenant_id: tenantId,
-      entity: entity.name,
-      limit: 3,
-      // Default sort is updated_at DESC — most-recent rows first.
-    });
+    // Per-agent scope: for SCOPED_ENTITIES (lead/application/funded_deal), an
+    // operator chat only auto-attaches the viewer's own + collaborated rows — so
+    // the AI can't surface another rep's deals. Admins / system callers (no
+    // viewer) see all. Non-scoped entities are tenant-shared. (2026-06-22 audit.)
+    const scoped = SCOPED_ENTITIES.has(entity.name) && leadScopingEnabled();
+    const result = scoped
+      ? await listByAssignedScope({
+          tenant_id: ctx.tenantId,
+          entity: entity.name,
+          scope: resolveAssignedScope(
+            { isAdmin: ctx.isAdmin ?? false, userId: ctx.userId ?? null },
+            {},
+            true,
+          ),
+          limit: 3,
+        })
+      : await listRecords({
+          tenant_id: ctx.tenantId,
+          entity: entity.name,
+          limit: 3,
+          // Default sort is updated_at DESC — most-recent rows first.
+        });
     if (result.total === 0) {
       return `- ${entity.label} (${entity.name}): 0 rows`;
     }
