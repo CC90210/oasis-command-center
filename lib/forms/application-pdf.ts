@@ -207,6 +207,12 @@ const RECORD_ALIASES: Record<string, string[]> = {
   requested_advance: ["requested_amount"],
   owner_full_name: ["owner_name", "contact_name"],
   business_legal_name: ["business_name"],
+  // Imported / legacy application records store these under shorter keys than the
+  // current full-application form asks for. Map them so a backfilled PDF isn't
+  // needlessly blank where the data DOES exist. (Adon backfill button, 2026-06-23.)
+  business_state: ["state"],
+  product_service_description: ["product_service"],
+  owner_ownership_pct: ["ownership_pct"],
 };
 
 function resolveAnswer(merged: Record<string, unknown>, name: string): unknown {
