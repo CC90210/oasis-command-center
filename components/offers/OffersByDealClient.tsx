@@ -431,6 +431,36 @@ function AccordionRow({
     return map;
   }, [offers]);
 
+  // All sent lenders have declined → surface the MANUAL "Decline deal" button.
+  // Manual-only (never auto-moves) so the operator can still open another chain
+  // to new lenders before deciding; it hides again the moment a new thread is
+  // pending/sent/approved. (Adon 2026-06-23.)
+  const allDeclined = useMemo(() => {
+    if (threads.length === 0) return false;
+    const stillOpen = new Set(["pending", "sent", "responded", "approved", "info_requested"]);
+    return (
+      threads.every((t) => !stillOpen.has(t.status)) &&
+      threads.some((t) => t.status === "declined") &&
+      appStatus !== "declined"
+    );
+  }, [threads, appStatus]);
+  const [declining, setDeclining] = useState(false);
+  async function declineDeal() {
+    if (typeof window !== "undefined" && !window.confirm(`Move "${biz}" to Declined? All lenders passed on this deal.`)) return;
+    setDeclining(true);
+    try {
+      const r = await fetch(`/api/leads/${app.id}/set-stage`, {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ entity: "application", stage: "declined" }),
+      });
+      if (r.ok && typeof window !== "undefined") window.location.reload();
+    } finally {
+      setDeclining(false);
+    }
+  }
+
   return (
     <div className="bg-bg-elev/30">
       {/* Header row */}
@@ -502,6 +532,22 @@ function AccordionRow({
       {/* Expanded thread table */}
       {isOpen && (
         <div className="border-t border-bg-border">
+          {allDeclined && (
+            <div className="px-4 py-2.5 flex items-center justify-between gap-3 bg-red-500/5 border-b border-red-500/20">
+              <span className="text-[11.5px] text-red-200">
+                All lenders passed on this deal. Move it to Declined, or open another chain to new lenders first.
+              </span>
+              <button
+                type="button"
+                onClick={declineDeal}
+                disabled={declining}
+                className="inline-flex items-center gap-1.5 shrink-0 rounded-md border border-red-500/40 bg-red-500/10 text-red-200 px-3 py-1.5 text-[11px] font-semibold hover:bg-red-500/20 disabled:opacity-50"
+              >
+                <AlertCircle className="w-3.5 h-3.5" />
+                {declining ? "Moving…" : "Decline deal"}
+              </button>
+            </div>
+          )}
           {sortedThreads.length === 0 && offers.length === 0 ? (
             <div className="px-6 py-3 text-[12px] text-fg-dim italic">
               No threads or offer records on this application.
