@@ -20,7 +20,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 // useRef intentionally imported for the file-input ref in DocumentsTab.
 import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
-import { X, FileText, ImageIcon, Phone, Mail, ShoppingBag, Loader2, Trash2, CheckCircle2, AlertCircle, UploadCloud, RefreshCw } from "lucide-react";
+import { X, FileText, ImageIcon, Phone, Mail, ShoppingBag, Loader2, Trash2, CheckCircle2, AlertCircle, UploadCloud, RefreshCw, ArrowRightLeft } from "lucide-react";
 import { LeadTimelinePanel } from "./LeadTimelinePanel";
 import { AssignmentControl } from "./AssignmentControl";
 import { CollaboratorsControl } from "./CollaboratorsControl";
@@ -1294,6 +1294,7 @@ function DocumentsTab({
   const [stageNotice, setStageNotice] = useState<string | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [generating, setGenerating] = useState(false);
+  const [generatingFundmate, setGeneratingFundmate] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const appInputRef = useRef<HTMLInputElement>(null);
 
@@ -1338,6 +1339,41 @@ function DocumentsTab({
         setError(String((e as Error).message || e));
       } finally {
         setGenerating(false);
+      }
+    },
+    [recordId, entity, refresh, onChange],
+  );
+
+  // Transfer to FundMate: generate a FundMate-branded application (separate
+  // paper-lender brand, zero SunBiz identity) from this deal's data and file it
+  // alongside the SunBiz application. FICO is auto-set server-side.
+  const generateFundmate = useCallback(
+    async (replace: boolean) => {
+      setGeneratingFundmate(true);
+      setError(null);
+      setStageNotice(null);
+      try {
+        const r = await fetch(`/api/leads/${recordId}/generate-fundmate-pdf`, {
+          method: "POST",
+          credentials: "include",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ entity, replace }),
+        });
+        const j = await r.json().catch(() => ({}));
+        if (!r.ok || !j.ok) {
+          setError(
+            j.error === "no_application"
+              ? "No application on file to build the FundMate form from."
+              : j.error || `fundmate_failed_${r.status}`,
+          );
+          return;
+        }
+        await refresh();
+        if (onChange) await onChange();
+      } catch (e) {
+        setError(String((e as Error).message || e));
+      } finally {
+        setGeneratingFundmate(false);
       }
     },
     [recordId, entity, refresh, onChange],
@@ -1410,6 +1446,8 @@ function DocumentsTab({
   const appDoc = docs.find(
     (d) => d.doc_type === "final_application_form" || d.doc_type === "application",
   );
+  // FundMate (separate paper-lender brand) application, generated on demand.
+  const fundmateDoc = docs.find((d) => d.doc_type === "fundmate_application_form");
 
   return (
     <div className="space-y-3">
@@ -1490,6 +1528,45 @@ function DocumentsTab({
           </div>
         )}
       </div>
+
+      {/* FundMate transfer — separate paper-lender brand. One click generates a
+          FundMate-branded application from this deal's data (zero SunBiz
+          identity) and files it alongside the SunBiz one. Shown whenever there
+          is an application to build from. */}
+      {canGenerateApp && (
+        <div
+          className={`rounded-md border p-3 flex items-center gap-3 ${
+            fundmateDoc ? "border-orange-500/30 bg-orange-500/5" : "border-bg-border bg-bg-deep/40"
+          }`}
+        >
+          <ArrowRightLeft className={`w-4 h-4 shrink-0 ${fundmateDoc ? "text-orange-300" : "text-fg-muted"}`} />
+          <div className="min-w-0 flex-1">
+            <div className="text-[11px] uppercase tracking-wider font-semibold text-fg-muted">
+              FundMate application
+            </div>
+            <div className={`text-[12px] truncate ${fundmateDoc ? "text-fg" : "text-fg-dim"}`}>
+              {fundmateDoc ? fundmateDoc.filename : "Transfer this deal into a FundMate application"}
+            </div>
+          </div>
+          <div className="flex items-center gap-2 shrink-0">
+            {fundmateDoc && <DocDownloadButton id={fundmateDoc.id} filename={fundmateDoc.filename} />}
+            <button
+              type="button"
+              onClick={() => generateFundmate(true)}
+              disabled={generatingFundmate}
+              title="Generate a FundMate-branded application from this deal's saved data"
+              className="inline-flex items-center gap-1 text-[11px] font-semibold px-2 py-1 rounded-md border border-orange-500/40 bg-orange-500/10 text-orange-200 hover:bg-orange-500/20 disabled:opacity-50"
+            >
+              {generatingFundmate ? (
+                <Loader2 className="w-3 h-3 animate-spin" />
+              ) : (
+                <ArrowRightLeft className="w-3 h-3" />
+              )}
+              {generatingFundmate ? "Working…" : fundmateDoc ? "Regenerate FundMate" : "Transfer to FundMate"}
+            </button>
+          </div>
+        </div>
+      )}
 
       <div className="rounded-md border border-bg-border bg-bg-deep/60 p-3 space-y-2">
         <label className="text-[11px] uppercase tracking-wider text-fg-muted">

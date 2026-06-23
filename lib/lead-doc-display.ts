@@ -28,6 +28,10 @@ export const LEAD_DOC_TYPES: { key: string; label: string; required: boolean }[]
   // Auto-generated on full-application completion (signature + all fields →
   // PDF). See lib/forms/application-document.ts.
   { key: "final_application_form", label: "Final Application Form", required: false },
+  // FundMate is a SEPARATE paper-lender brand; this is the FundMate-branded
+  // application generated via "Transfer to FundMate". Coexists with the SunBiz
+  // final_application_form above. (Adon 2026-06-23.)
+  { key: "fundmate_application_form", label: "FundMate Application", required: false },
   // Standalone e-signature image saved on full-application submit (Batch 7.2 —
   // the DocuSign replacement; also embedded in the application PDF).
   { key: "applicant_signature", label: "Applicant signature", required: false },
