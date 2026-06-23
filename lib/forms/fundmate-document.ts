@@ -64,18 +64,45 @@ export async function generateFundmateDocumentFromRecord(input: {
       }
     }
 
+    // Saved e-signature: our e-sign flow stores the drawn signature as a data-URI
+    // in the full-application's form_submissions payload (keyed by lead_id).
+    // Transfer it to the FundMate application when present; otherwise the
+    // signature line is left blank (ruled). Email/Phone are NEVER transferred
+    // (blanked in mapAppDataToFundmate) — other users on the shared FundMate
+    // account must not get our merchants' contact info. (Adon 2026-06-23.)
+    let sigUri = "", sigName = "", sigSignedAt = "";
+    if (linkedLeadId) {
+      const subs = await db
+        .from("form_submissions")
+        .select("payload, submitted_at")
+        .eq("tenant_id", input.tenantId)
+        .eq("lead_id", linkedLeadId)
+        .order("submitted_at", { ascending: false })
+        .limit(20);
+      for (const row of (subs.data || []) as Array<{ payload: Record<string, unknown> | null; submitted_at: string | null }>) {
+        const p = row.payload || {};
+        const sig = p.applicant_signature;
+        if (typeof sig === "string" && sig.startsWith("data:image")) {
+          sigUri = sig;
+          sigName = typeof p.signature_name === "string" ? p.signature_name : "";
+          sigSignedAt = row.submitted_at || "";
+          break;
+        }
+      }
+    }
+
     // Amount Requested + Monthly Revenue are bucketed into FundMate's range
     // options inside mapAppDataToFundmate; Estimated Fico is the "600 - 650"
     // bucket (Adon: keep within 600-650).
     const fields = mapAppDataToFundmate(appData);
-    const signedAt = new Date().toISOString();
-    const bytes = await renderFundmatePdf({ fields, signedAt });
+    const generatedAt = new Date().toISOString();
+    const bytes = await renderFundmatePdf({ fields, signatureDataUri: sigUri, signatureName: sigName, signedAt: sigSignedAt });
     const buf = Buffer.from(bytes);
 
     const business = fields.businessLegalName || "application";
     const safeBusiness =
       business.replace(/[^A-Za-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 60) || "application";
-    const filename = `FundMate-Application-${safeBusiness}-${signedAt.slice(0, 10)}.pdf`;
+    const filename = `FundMate-Application-${safeBusiness}-${generatedAt.slice(0, 10)}.pdf`;
 
     const up = await uploadLeadDocument({
       tenantId: input.tenantId,
@@ -87,7 +114,7 @@ export async function generateFundmateDocumentFromRecord(input: {
       docType: FUNDMATE_DOC_TYPE,
       uploadedBy: "system",
       source: "fundmate_transfer",
-      extraMetadata: { application_id: input.applicationId, generated_at: signedAt, estimated_fico: "600 - 650" },
+      extraMetadata: { application_id: input.applicationId, generated_at: generatedAt, estimated_fico: "600 - 650", signed: !!sigUri },
     });
     if (!up.ok) return { ok: false, error: up.error };
 
