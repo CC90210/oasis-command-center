@@ -29,6 +29,7 @@ import { humanLeadDocSize, leadDocTypeLabel, LEAD_DOC_TYPES } from "@/lib/lead-d
 import { SalesMetricCard } from "@/components/underwriting/SalesMetricCard";
 import { formatMoney, relTime } from "@/lib/format-helpers";
 import { lastTouchIsoFlat } from "@/lib/lead-staleness";
+import { SUNBIZ_EMAIL_TEMPLATES, renderSunbizTemplate } from "@/lib/sunbiz-templates-library";
 
 type DocRow = {
   id: string;
@@ -1766,6 +1767,8 @@ function DrawerFooter({
           recordId={recordId}
           entity={entity}
           toEmail={str(recordData.email)}
+          leadName={str(recordData.name)}
+          leadCompany={str(recordData.company)}
           onClose={() => setMode(null)}
           onChange={onChange}
         />
@@ -1790,12 +1793,16 @@ function EmailComposer({
   recordId,
   entity,
   toEmail,
+  leadName,
+  leadCompany,
   onClose,
   onChange,
 }: {
   recordId: string;
   entity: "lead" | "application";
   toEmail: string | null;
+  leadName?: string | null;
+  leadCompany?: string | null;
   onClose: () => void;
   onChange?: () => void | Promise<void>;
 }) {
@@ -1803,6 +1810,24 @@ function EmailComposer({
   const [body, setBody] = useState("");
   const [status, setStatus] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
+  // Manual SunBiz template picker (CC 2026-06-23). Selecting a template fills
+  // subject + body, personalized to this lead; the operator edits before
+  // sending. send_gateway appends the brand signature, so templates carry no
+  // sign-off. Lead drawer is SunBiz-only (TenantLeadDrawerMount), so these are
+  // always tenant-appropriate.
+  const [templateId, setTemplateId] = useState<string>("");
+  function applyTemplate(id: string) {
+    setTemplateId(id);
+    if (!id) return;
+    const tpl = SUNBIZ_EMAIL_TEMPLATES.find((t) => t.id === id);
+    if (!tpl) return;
+    const r = renderSunbizTemplate(tpl, {
+      firstName: leadName,
+      businessName: leadCompany,
+    });
+    setSubject(r.subject);
+    setBody(r.body);
+  }
   if (!toEmail) {
     return (
       <ComposerShell title="Email" onClose={onClose}>
@@ -1816,6 +1841,19 @@ function EmailComposer({
   // SMTP credentials — the daemon side does the actual delivery.
   return (
     <ComposerShell title={`Email · ${toEmail}`} onClose={onClose}>
+      <select
+        value={templateId}
+        onChange={(e) => applyTemplate(e.target.value)}
+        title="Insert a SunBiz email template, personalized to this lead. Edit before sending."
+        className="w-full text-xs px-2 py-1.5 rounded-md bg-bg-deep border border-bg-border text-fg"
+      >
+        <option value="">Template… (or write from scratch)</option>
+        {SUNBIZ_EMAIL_TEMPLATES.map((t) => (
+          <option key={t.id} value={t.id}>
+            {t.label}
+          </option>
+        ))}
+      </select>
       <input
         type="text"
         value={subject}
