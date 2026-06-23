@@ -41,7 +41,10 @@ type TemplateMeta = ColdOutreachTemplate & {
   category: Exclude<Category, "all">;
   sizeKb: number;
   tokens: string[];
+  sourcePath: string;
 };
+
+type AgentKey = "helios" | "solara";
 
 const CATEGORY_ORDER: Category[] = [
   "all",
@@ -158,9 +161,9 @@ async function copyToClipboard(text: string): Promise<boolean> {
   }
 }
 
-function agentHref(prompt: string): string {
+function agentHref(agent: AgentKey, prompt: string): string {
   const params = new URLSearchParams({
-    agent: "helios",
+    agent,
     prompt,
   });
   return `/agent?${params.toString()}`;
@@ -168,27 +171,35 @@ function agentHref(prompt: string): string {
 
 function buildUseWithAgentPrompt(template: TemplateMeta): string {
   return [
-    `Use the SunBiz HTML email template "${template.name}" (key: ${template.key}) for an outbound email.`,
+    `Use the approved SunBiz HTML email template "${template.name}" for an outbound email.`,
+    `Template key: ${template.key}`,
+    `Template source: ${template.sourcePath}`,
     `Suggested subject: ${template.subject}`,
     `Required merge fields: ${template.tokens.map((token) => `{{${token}}}`).join(", ") || "none"}.`,
     "",
-    "First ask me which lead, recipient, or campaign list this is for. Then prepare the email using this exact HTML design, fill the merge fields from the selected record where possible, and show me the merged subject plus a send-ready preview.",
+    "First ask which lead, recipient, or campaign list this is for. Then prepare the email using this exact HTML design, fill the merge fields from the selected record where possible, and show the merged subject plus a send-ready preview.",
     "",
-    "Do not send anything until I explicitly approve the recipient, variables, unsubscribe link, and final copy.",
+    "Do not send anything until the operator explicitly approves the recipient, variables, unsubscribe link, and final copy.",
   ].join("\n");
 }
 
 function buildCreateHtmlPrompt(reference?: TemplateMeta): string {
   const referenceLine = reference
-    ? `Use "${reference.name}" (key: ${reference.key}) as the visual/style reference.`
-    : "Start from the SunBiz brand style and ask me what campaign this new HTML is for.";
+    ? [
+        `Create a new variant based on "${reference.name}".`,
+        `Reference key: ${reference.key}`,
+        `Reference source: ${reference.sourcePath}`,
+        `Reference subject: ${reference.subject}`,
+        `Current merge fields: ${reference.tokens.map((token) => `{{${token}}}`).join(", ") || "none"}.`,
+      ].join("\n")
+    : "Create a brand-new SunBiz HTML email from the SunBiz brand style and ask what campaign this new asset is for.";
   return [
-    "Create a new production-ready SunBiz HTML email template.",
+    "You are Solara handling SunBiz template production, not Helios outreach.",
     referenceLine,
     "",
-    "Before writing code, ask me for: campaign goal, target audience or vertical, sender lane (Ezra, Ethan, or Matt), CTA, required merge fields, and whether this is cold outreach, follow-up, consolidation, seasonal, or vertical.",
+    "Before drafting, ask for: campaign goal, target audience or vertical, sender lane (Ezra, Ethan, or Matt), CTA, required merge fields, and whether this is cold outreach, follow-up, consolidation, seasonal, or vertical.",
     "",
-    "When drafting, include responsive email-safe HTML, SunBiz branding, the required unsubscribe link, and a concise subject line. Do not send. After I approve the HTML, tell me the source filename that should be added under lib/cold-outreach/templates/ and remind me to regenerate templates.generated.ts.",
+    "Draft responsive email-safe HTML with SunBiz branding, the required unsubscribe link, and a concise subject line. Do not send or hand off to Helios until the operator approves the asset. If your current runtime cannot write to oasis-command-center directly, return the full HTML, a proposed filename under lib/cold-outreach/templates/, and the regeneration command for templates.generated.ts.",
   ].join("\n");
 }
 
@@ -271,7 +282,7 @@ function TemplateCard({
                 Preview
               </button>
               <Link
-                href={agentHref(buildUseWithAgentPrompt(template))}
+                href={agentHref("helios", buildUseWithAgentPrompt(template))}
                 className="inline-flex items-center gap-1 rounded-md border border-status-engaged/30 bg-status-engaged/10 px-2 py-1 text-[10px] font-bold text-status-engaged transition-colors hover:bg-status-engaged/20"
               >
                 <Send className="h-3 w-3" />
@@ -280,11 +291,11 @@ function TemplateCard({
             </div>
           </div>
           <Link
-            href={agentHref(buildCreateHtmlPrompt(template))}
-            className="inline-flex w-full items-center justify-center gap-1.5 rounded-md border border-bg-border bg-bg-elev px-2 py-1.5 text-[10px] font-bold text-fg-muted transition-colors hover:border-accent/40 hover:text-fg"
+            href={agentHref("solara", buildCreateHtmlPrompt(template))}
+            className="inline-flex w-full items-center justify-center gap-1.5 rounded-md border border-status-warm/30 bg-status-warm/10 px-2 py-1.5 text-[10px] font-bold text-status-warm transition-colors hover:bg-status-warm/20"
           >
             <WandSparkles className="h-3 w-3" />
-            Create variant from this design
+            Ask Solara for variant
           </Link>
         </div>
       </div>
@@ -324,22 +335,17 @@ function PreviewModal({
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-3 backdrop-blur-sm sm:p-5"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-bg-deep/95 p-3 sm:p-5"
       role="dialog"
       aria-modal="true"
       aria-labelledby="template-preview-title"
     >
-      <div className="flex max-h-[92vh] w-full max-w-5xl flex-col overflow-hidden rounded-xl border border-bg-border bg-bg-panel shadow-2xl">
-        <header className="flex flex-col gap-3 border-b border-bg-border px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
+      <div className="flex h-[92vh] w-full max-w-5xl flex-col overflow-hidden rounded-lg border border-bg-border bg-bg-panel shadow-2xl">
+        <header className="flex flex-col gap-3 border-b border-bg-border bg-bg-panel px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
           <div className="flex min-w-0 items-center gap-3">
-            <button
-              type="button"
-              onClick={onClose}
-              className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-bg-border bg-bg-elev text-fg-muted transition-colors hover:border-accent/40 hover:text-fg"
-              aria-label="Close preview"
-            >
-              <X className="h-4 w-4" />
-            </button>
+            <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-accent-muted/30 bg-accent-soft text-accent">
+              <Mail className="h-4 w-4" />
+            </div>
             <div className="min-w-0">
               <div id="template-preview-title" className="truncate text-sm font-bold text-fg">
                 {template.name}
@@ -382,23 +388,31 @@ function PreviewModal({
               {copied ? "Copied" : "Copy HTML"}
             </button>
             <Link
-              href={agentHref(buildUseWithAgentPrompt(template))}
+              href={agentHref("helios", buildUseWithAgentPrompt(template))}
               className="inline-flex items-center gap-1.5 rounded-md border border-status-engaged/30 bg-status-engaged/10 px-3 py-1.5 text-[11px] font-bold text-status-engaged transition-colors hover:bg-status-engaged/20"
             >
               <Send className="h-3.5 w-3.5" />
               Use with Helios
             </Link>
+            <button
+              type="button"
+              onClick={onClose}
+              className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-bg-border bg-bg-elev text-fg-muted transition-colors hover:border-accent/40 hover:text-fg"
+              aria-label="Close preview"
+            >
+              <X className="h-4 w-4" />
+            </button>
           </div>
         </header>
 
         <div className="min-h-0 flex-1 overflow-auto">
           {viewMode === "preview" ? (
-            <div className="flex min-h-full justify-center bg-slate-200 p-4 sm:p-6">
+            <div className="flex min-h-full justify-center bg-slate-200 p-3 sm:p-5">
               <iframe
                 title={`Preview: ${template.name}`}
                 srcDoc={previewHtml}
                 sandbox=""
-                className="h-[70vh] min-h-[620px] w-full max-w-[680px] rounded-lg border-0 bg-white shadow-xl"
+                className="h-full min-h-[560px] w-full max-w-[680px] rounded-md border-0 bg-white shadow-xl"
               />
             </div>
           ) : (
@@ -437,6 +451,7 @@ export default function TemplatesPage() {
         category: inferCategory(template.key),
         sizeKb: Math.max(1, Math.round(template.html.length / 1024)),
         tokens: extractTokens(template.html),
+        sourcePath: `lib/cold-outreach/templates/${template.key}.html`,
       })),
     [],
   );
@@ -475,8 +490,8 @@ export default function TemplatesPage() {
   return (
     <div className="space-y-6 animate-fade-in">
       <PageHeader
-        title="Email Templates"
-        subtitle="SunBiz HTML emails for first touch, follow-up, consolidation, seasonal pushes, and vertical campaigns."
+        title="Template Library"
+        subtitle="SunBiz HTML emails Ezra can preview, copy, send with Helios, or hand to Solara for a new variant."
         action={<Tag tone="engaged">{templates.length} HTML assets</Tag>}
       />
 
@@ -489,20 +504,20 @@ export default function TemplatesPage() {
           Playbook
         </Link>
         <Link
-          href={agentHref(buildCreateHtmlPrompt())}
-          className="inline-flex items-center gap-1.5 rounded-lg border border-accent/30 bg-accent/10 px-3 py-1.5 text-xs font-bold text-accent transition-colors hover:bg-accent/20"
+          href={agentHref("solara", buildCreateHtmlPrompt())}
+          className="inline-flex items-center gap-1.5 rounded-lg border border-status-warm/30 bg-status-warm/10 px-3 py-1.5 text-xs font-bold text-status-warm transition-colors hover:bg-status-warm/20"
         >
           <PlusCircle className="h-3.5 w-3.5" />
-          Create New HTML
+          New HTML with Solara
         </Link>
         <Tag tone="accent">preview before send</Tag>
         <Tag tone="warm">unsubscribe required</Tag>
       </div>
 
-      <Card>
-        <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_340px]">
-          <div className="space-y-3">
-            <div className="relative max-w-xl">
+      <section className="rounded-lg border border-bg-border bg-bg-panel p-4 shadow-sm">
+        <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_360px]">
+          <div className="space-y-3 min-w-0">
+            <div className="relative">
               <Search className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-fg-dim" />
               <input
                 type="text"
@@ -535,7 +550,7 @@ export default function TemplatesPage() {
             </div>
           </div>
 
-          <div className="rounded-lg border border-bg-border bg-bg-deep p-3">
+          <div className="rounded-md border border-bg-border bg-bg-deep p-3">
             <div className="flex items-center gap-2 text-xs font-bold text-fg">
               <Braces className="h-3.5 w-3.5 text-accent" />
               Merge fields in use
@@ -552,7 +567,7 @@ export default function TemplatesPage() {
             </div>
           </div>
         </div>
-      </Card>
+      </section>
 
       {filteredTemplates.length === 0 ? (
         <Card>

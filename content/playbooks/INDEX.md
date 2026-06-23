@@ -1,21 +1,26 @@
 ---
-tags: [sunbiz, onboarding, playbook, index]
+tags: [sunbiz, playbook, index]
 ---
 
 # SunBiz Operating Manual
 
 Audience: Client-facing
 
-Read these SunBiz guides first:
+The SunBiz Playbook should surface working tools first, then only docs that
+carry real operating value.
 
-- `sun-15-email-templates` - HTML outreach pipeline, variables, agent send handoff, and new-template build path
+## Live working surfaces
+
+- `/templates` - the production HTML Template Library with preview, copy, Use with Helios, and Solara variant creation
+
+## Visible operating guides
+
 - `sun-10-getting-started` - SunBiz operating map for Ezra, Ethan, and Matt
 - `sun-11-operations` - Dashboard, Solara, Helios, Reasoning, and Playbook
-- `sun-12-pipeline` - Leads, applications, Shopping Out, conversations, and campaigns
-- `sun-13-deals` - Offers, renewals, commissions, and lenders
-- `sun-14-system` - Imports, forms, sequences, team, automations, and settings
 
-The old `01` to `04` onboarding docs remain in the repo for legacy reference, but the SunBiz Playbook page now surfaces the operational guides above.
+The old `01` to `04` onboarding docs and the draft `sun-12` to `sun-15`
+pages are not surfaced in the SunBiz Playbook. Rebuild those only when each
+one becomes a real working tool or a real business document.
 
 ## Operator-side (you, CC)
 

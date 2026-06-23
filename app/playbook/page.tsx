@@ -87,45 +87,22 @@ const SECTIONS: PlaybookSection[] = [
   },
 ];
 
-// SunBiz feature manual - the card grid the SunBiz operator sees on /playbook.
-// Each card opens either a rich-markdown guide in content/playbooks/sun-*.md or
-// the live HTML email template gallery. Keep this specific to SunBiz funding
-// ops; generic client onboarding belongs in the OASIS portal, not here.
+// SunBiz playbook - working surfaces first. Each visible card must either open
+// a real tool or a real operating guide the team can use during work.
 const SUNBIZ_SECTIONS: PlaybookSection[] = [
-  {
-    href: "/playbook/sun-15-email-templates",
-    title: "HTML Outreach Pipeline",
-    subtitle: "Pick design - send with Helios - create new HTML",
-    body:
-      "Start here. The workflow for turning an approved SunBiz HTML into an agent-assisted email send, plus the rules for creating brand-new HTML assets.",
-  },
   {
     href: "/templates",
     title: "Template Library",
-    subtitle: "28 templates - merge fields - preview - copy HTML",
+    subtitle: "28 live HTMLs - preview - copy - Helios send - Solara variants",
     body:
-      "The production SunBiz HTML library. Preview the design, check required variables like {{first_name}}, launch Helios with the selected template, or start a new HTML build.",
+      "The working HTML library Ezra and the team actually use. Preview the email, copy the source, send the approved design with Helios, or ask Solara to create a new variant.",
   },
   {
-    href: "/playbook/sun-12-pipeline",
-    title: "Merchant Pipeline",
-    subtitle: "Leads - applications - shopping out - conversations - campaigns",
+    href: "/playbook/sun-10-getting-started",
+    title: "Operating Map",
+    subtitle: "Agents - ownership - daily rhythm - golden rules",
     body:
-      "Prospect to application. Work the lead board, chase bank statements, move complete files into applications, shop them to lenders, and keep every merchant thread clean.",
-  },
-  {
-    href: "/playbook/sun-13-deals",
-    title: "Deals",
-    subtitle: "Offers - renewals - commissions - lender book",
-    body:
-      "Post-shop. Read lender replies, compare offers, present the right option, book funded deals, watch renewal timing, and keep the lender criteria accurate.",
-  },
-  {
-    href: "/playbook/sun-14-system",
-    title: "Systems",
-    subtitle: "Import - forms - sequences - team - automations - settings",
-    body:
-      "The plumbing Ezra, Ethan, and Matt rely on: CSV imports, per-rep form links, follow-up sequences, team access, worker health, and owner-level settings.",
+      "The short, real map of who owns what: Matt, Ezra, Ethan, Solara, and Helios. Keep this as the orientation layer while the rest of the playbook gets rebuilt.",
   },
   {
     href: "/playbook/sun-11-operations",
@@ -137,12 +114,8 @@ const SUNBIZ_SECTIONS: PlaybookSection[] = [
 ];
 
 const SUN_MANUAL_ORDER = [
-  "sun-15-email-templates",
-  "sun-12-pipeline",
-  "sun-13-deals",
-  "sun-14-system",
-  "sun-11-operations",
   "sun-10-getting-started",
+  "sun-11-operations",
 ] as const;
 
 const LEGACY_SUN_ONBOARDING_SLUGS = [
@@ -150,6 +123,10 @@ const LEGACY_SUN_ONBOARDING_SLUGS = [
   "02-safe-interaction",
   "03-when-to-call-cc",
   "04-pause-and-rollback",
+  "sun-12-pipeline",
+  "sun-13-deals",
+  "sun-14-system",
+  "sun-15-email-templates",
 ] as const;
 
 // Slugs that belong to the SunBiz operating manual and must NEVER appear on
@@ -206,29 +183,13 @@ function isSunBizPlaybook(file: PlaybookFile): boolean {
 }
 
 const SUN_MANUAL_META: Record<string, { eyebrow: string; summary: string }> = {
-  "sun-15-email-templates": {
-    eyebrow: "HTML",
-    summary: "The template-to-agent pipeline, merge fields, preview flow, send handoff, and new-template build path.",
-  },
-  "sun-12-pipeline": {
-    eyebrow: "Pipeline",
-    summary: "How leads become complete applications and lender-ready files.",
-  },
-  "sun-13-deals": {
-    eyebrow: "Deals",
-    summary: "How offers, renewals, commissions, and lender criteria stay in sync.",
-  },
-  "sun-14-system": {
-    eyebrow: "Systems",
-    summary: "Imports, forms, sequences, team access, automations, and settings.",
+  "sun-10-getting-started": {
+    eyebrow: "Map",
+    summary: "The deal spine, daily rhythm, and Ezra/Ethan/Matt ownership lanes.",
   },
   "sun-11-operations": {
     eyebrow: "Desk",
     summary: "Dashboard triage, Solara/Helios usage, and Reasoning prompt shortcuts.",
-  },
-  "sun-10-getting-started": {
-    eyebrow: "Map",
-    summary: "The deal spine, daily rhythm, and Ezra/Ethan/Matt ownership lanes.",
   },
 };
 
@@ -360,11 +321,11 @@ function SunBizPlaybookIndex({
     <div className="space-y-8 animate-fade-in">
       <PageHeader
         title="Playbook"
-        subtitle="Your SunBiz operating manual. Start with the HTML Outreach Pipeline, then work the funding flow."
-        action={<Tag tone="engaged">SunBiz ops</Tag>}
+        subtitle="Working tools and real operating material for the SunBiz team. Start with the Template Library."
+        action={<Tag tone="engaged">SunBiz live playbook</Tag>}
       />
 
-      {/* Feature manual - one card per area of the Command Center. */}
+      {/* Feature manual - working cards only. */}
       <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-5">
         {SUNBIZ_SECTIONS.map((section, index) => (
           <Link
@@ -403,8 +364,8 @@ function SunBizPlaybookIndex({
           <div>
             <h2 className="text-lg font-bold text-fg">SunBiz operating guides</h2>
             <p className="text-sm text-fg-muted">
-              Practical guides for Ezra, Ethan, and Matt. These are the live
-              operating docs behind the cards above.
+              Only real operating docs stay here. Draft pages are hidden until
+              they have business value.
             </p>
           </div>
           <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-4">
