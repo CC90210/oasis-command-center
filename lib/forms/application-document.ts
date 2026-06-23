@@ -422,11 +422,23 @@ export async function generateApplicationDocumentFromRecord(input: {
     const app = await getRecord({ tenant_id: input.tenantId, entity: "application", id: input.applicationId }).catch(() => null);
     if (!app) return { ok: false, error: "application_not_found" };
     const appData = (app.data || {}) as Record<string, unknown>;
-    const leadId = typeof appData.lead_id === "string" ? appData.lead_id : null;
-    if (!leadId) return { ok: false, error: "no_lead_id" };
+    // The lead_documents store is keyed by lead_id. Form-completed apps carry a
+    // real lead_id; standalone / bulk-imported apps often don't (Adon's backfill
+    // set: 463 of 477 apps have no lead_id). The detail + documents endpoints
+    // already fall back to the application's OWN id as the doc key when there's
+    // no valid lead_id (see detail/route.ts `docLeadId`). Mirror that EXACTLY here
+    // so a backfilled PDF for a leadless app files against the app id and shows
+    // up in its Docs tab. (Adon backfill button, 2026-06-23.)
+    const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    const linkedLeadId =
+      typeof appData.lead_id === "string" && UUID_RE.test(appData.lead_id) ? appData.lead_id : null;
+    const leadId = linkedLeadId || input.applicationId;
 
-    // Linked lead supplies email/phone fallback; never fatal if missing.
-    const lead = await getRecord({ tenant_id: input.tenantId, entity: "lead", id: leadId }).catch(() => null);
+    // Linked lead supplies email/phone fallback; never fatal if missing. Skip the
+    // lookup entirely for a leadless (standalone) application.
+    const lead = linkedLeadId
+      ? await getRecord({ tenant_id: input.tenantId, entity: "lead", id: linkedLeadId }).catch(() => null)
+      : null;
     const leadData = (lead?.data || {}) as Record<string, unknown>;
 
     // Existing generated PDF for this lead?

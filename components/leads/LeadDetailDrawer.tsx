@@ -20,7 +20,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 // useRef intentionally imported for the file-input ref in DocumentsTab.
 import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
-import { X, FileText, ImageIcon, Phone, Mail, ShoppingBag, Loader2, Trash2, CheckCircle2, AlertCircle, UploadCloud } from "lucide-react";
+import { X, FileText, ImageIcon, Phone, Mail, ShoppingBag, Loader2, Trash2, CheckCircle2, AlertCircle, UploadCloud, RefreshCw } from "lucide-react";
 import { LeadTimelinePanel } from "./LeadTimelinePanel";
 import { AssignmentControl } from "./AssignmentControl";
 import { CollaboratorsControl } from "./CollaboratorsControl";
@@ -359,6 +359,7 @@ export function LeadDetailDrawer({
               recordId={recordId}
               entity={entity}
               initialDocs={data.documents}
+              canGenerateApp={entity === "application" || !!data.application}
               onChange={reload}
             />
           )}
@@ -1277,11 +1278,13 @@ function DocumentsTab({
   recordId,
   entity,
   initialDocs,
+  canGenerateApp,
   onChange,
 }: {
   recordId: string;
   entity: "lead" | "application";
   initialDocs: DocRow[];
+  canGenerateApp?: boolean;
   onChange?: () => void | Promise<void>;
 }) {
   const [docs, setDocs] = useState<DocRow[]>(initialDocs);
@@ -1290,6 +1293,7 @@ function DocumentsTab({
   const [error, setError] = useState<string | null>(null);
   const [stageNotice, setStageNotice] = useState<string | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [generating, setGenerating] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const appInputRef = useRef<HTMLInputElement>(null);
 
@@ -1303,6 +1307,41 @@ function DocumentsTab({
       /* keep previous list */
     }
   }, [recordId, entity]);
+
+  // Backfill: build the application-form PDF from the data already saved in
+  // Supabase (same renderer as form completion). For apps created/imported
+  // before auto-PDF existed. replace=true always produces a fresh copy.
+  const generateAppPdf = useCallback(
+    async (replace: boolean) => {
+      setGenerating(true);
+      setError(null);
+      setStageNotice(null);
+      try {
+        const r = await fetch(`/api/leads/${recordId}/generate-application-pdf`, {
+          method: "POST",
+          credentials: "include",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ entity, replace }),
+        });
+        const j = await r.json().catch(() => ({}));
+        if (!r.ok || !j.ok) {
+          setError(
+            j.error === "no_application"
+              ? "No application on file to build the PDF from."
+              : j.error || `generate_failed_${r.status}`,
+          );
+          return;
+        }
+        await refresh();
+        if (onChange) await onChange();
+      } catch (e) {
+        setError(String((e as Error).message || e));
+      } finally {
+        setGenerating(false);
+      }
+    },
+    [recordId, entity, refresh, onChange],
+  );
 
   const upload = async (file: File, typeOverride?: string) => {
     setPending(true);
@@ -1397,16 +1436,46 @@ function DocumentsTab({
           </div>
         </div>
         {appDoc ? (
-          <DocDownloadButton id={appDoc.id} filename={appDoc.filename} />
+          <div className="flex items-center gap-2 shrink-0">
+            <DocDownloadButton id={appDoc.id} filename={appDoc.filename} />
+            {canGenerateApp && (
+              <button
+                type="button"
+                onClick={() => generateAppPdf(true)}
+                disabled={generating}
+                title="Rebuild the application PDF from the latest saved data"
+                className="inline-flex items-center gap-1 text-[11px] font-semibold px-2 py-1 rounded-md border border-bg-border bg-bg-elev text-fg-muted hover:text-fg hover:bg-bg-elev/70 disabled:opacity-50"
+              >
+                <RefreshCw className={`w-3 h-3 ${generating ? "animate-spin" : ""}`} />
+                {generating ? "Working…" : "Regenerate"}
+              </button>
+            )}
+          </div>
         ) : (
-          <>
+          <div className="flex items-center gap-2 shrink-0">
+            {canGenerateApp && (
+              <button
+                type="button"
+                onClick={() => generateAppPdf(true)}
+                disabled={generating || pending}
+                title="Build the application PDF from the data saved in this record"
+                className="inline-flex items-center gap-1 text-[11px] font-semibold px-2 py-1 rounded-md border border-emerald-500/40 bg-emerald-500/10 text-emerald-200 hover:bg-emerald-500/20 disabled:opacity-50"
+              >
+                {generating ? (
+                  <Loader2 className="w-3 h-3 animate-spin" />
+                ) : (
+                  <FileText className="w-3 h-3" />
+                )}
+                {generating ? "Generating…" : "Generate from saved data"}
+              </button>
+            )}
             <button
               type="button"
               onClick={() => appInputRef.current?.click()}
-              disabled={pending}
+              disabled={pending || generating}
               className="inline-flex items-center gap-1 text-[11px] font-semibold px-2 py-1 rounded-md border border-red-500/40 bg-red-500/10 text-red-200 hover:bg-red-500/20 disabled:opacity-50"
             >
-              <UploadCloud className="w-3 h-3" /> Add application
+              <UploadCloud className="w-3 h-3" /> Add manually
             </button>
             <input
               ref={appInputRef}
@@ -1418,7 +1487,7 @@ function DocumentsTab({
                 if (f) upload(f, "application");
               }}
             />
-          </>
+          </div>
         )}
       </div>
 
