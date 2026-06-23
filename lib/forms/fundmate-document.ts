@@ -8,9 +8,10 @@
  *
  * No SunBiz identity ever appears on the output document.
  *
- * FICO discipline (Adon 2026-06-23): SunBiz records don't store a credit score;
- * FundMate's form needs one. We auto-generate a value in [600,650] ONCE and
- * persist it to the record (data.fundmate_fico) so regenerations stay stable.
+ * FICO (Adon 2026-06-23): SunBiz records don't store a credit score; FundMate's
+ * form is a range dropdown, so Estimated Fico renders the "600 - 650" bucket
+ * (Adon: keep within 600-650). Amount Requested + Monthly Revenue are mapped to
+ * FundMate's range buckets from the deal's exact values (see mapAppDataToFundmate).
  *
  * Never throws into callers; mirrors generateApplicationDocumentFromRecord.
  */
@@ -19,15 +20,10 @@ import "server-only";
 import { uploadLeadDocument } from "@/lib/lead-documents";
 import { renderFundmatePdf, mapAppDataToFundmate } from "@/lib/forms/fundmate-pdf";
 import { getServiceSupabase } from "@/lib/supabase-server";
-import { getRecord, updateRecord } from "@/lib/manifest/data";
+import { getRecord } from "@/lib/manifest/data";
 
 const FUNDMATE_DOC_TYPE = "fundmate_application_form";
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-
-/** Random integer in [600, 650] — Adon: "generate it randomly... above 600... within 600 to 650". */
-function randomFico(): number {
-  return 600 + Math.floor(Math.random() * 51);
-}
 
 export async function generateFundmateDocumentFromRecord(input: {
   tenantId: string;
@@ -46,23 +42,6 @@ export async function generateFundmateDocumentFromRecord(input: {
     const linkedLeadId =
       typeof appData.lead_id === "string" && UUID_RE.test(appData.lead_id) ? appData.lead_id : null;
     const leadId = linkedLeadId || input.applicationId;
-
-    // FICO — reuse the persisted value (stable across regenerations) or mint one.
-    const stored = appData.fundmate_fico;
-    let fico =
-      typeof stored === "number" && Number.isFinite(stored)
-        ? stored
-        : typeof stored === "string" && stored.trim() && Number.isFinite(Number(stored))
-          ? Number(stored)
-          : null;
-    if (fico == null) {
-      fico = randomFico();
-      try {
-        await updateRecord({ tenant_id: input.tenantId, entity: "application", id: input.applicationId, patch: { fundmate_fico: fico } });
-      } catch {
-        /* persistence is best-effort; still render with this value */
-      }
-    }
 
     // Existing FundMate doc for this deal?
     const existing = await db
@@ -85,7 +64,10 @@ export async function generateFundmateDocumentFromRecord(input: {
       }
     }
 
-    const fields = mapAppDataToFundmate(appData, { estimatedFico: String(fico) });
+    // Amount Requested + Monthly Revenue are bucketed into FundMate's range
+    // options inside mapAppDataToFundmate; Estimated Fico is the "600 - 650"
+    // bucket (Adon: keep within 600-650).
+    const fields = mapAppDataToFundmate(appData);
     const signedAt = new Date().toISOString();
     const bytes = await renderFundmatePdf({ fields, signedAt });
     const buf = Buffer.from(bytes);
@@ -105,7 +87,7 @@ export async function generateFundmateDocumentFromRecord(input: {
       docType: FUNDMATE_DOC_TYPE,
       uploadedBy: "system",
       source: "fundmate_transfer",
-      extraMetadata: { application_id: input.applicationId, generated_at: signedAt, estimated_fico: fico },
+      extraMetadata: { application_id: input.applicationId, generated_at: signedAt, estimated_fico: "600 - 650" },
     });
     if (!up.ok) return { ok: false, error: up.error };
 
