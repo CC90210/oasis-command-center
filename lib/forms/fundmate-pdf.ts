@@ -158,7 +158,7 @@ export async function renderFundmatePdf(input: {
     }
   };
 
-  const RH = 50, VG = 9;
+  const RH = 42, VG = 8;
 
   // ---- BUSINESS INFORMATION ----
   let top = sectionHeader(PAGE_H - 92, "BUSINESS INFORMATION") - 12;
