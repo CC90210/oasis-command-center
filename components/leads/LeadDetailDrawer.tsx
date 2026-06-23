@@ -1836,8 +1836,16 @@ function DrawerFooter({
           recordId={recordId}
           entity={entity}
           toEmail={str(recordData.email)}
-          leadName={str(recordData.name)}
-          leadCompany={str(recordData.company)}
+          leadName={
+            str(recordData.contact_name) ||
+            str(recordData.owner_name) ||
+            str(recordData.name)
+          }
+          leadCompany={
+            str(recordData.business_name) ||
+            str(recordData.company) ||
+            str(recordData.name)
+          }
           onClose={() => setMode(null)}
           onChange={onChange}
         />
