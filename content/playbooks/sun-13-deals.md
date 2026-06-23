@@ -1,58 +1,45 @@
 ---
-tags: [sunbiz, onboarding, manual, deals]
+tags: [sunbiz, operations, manual, deals]
 ---
 
 # Deals
 
 Audience: Client-facing
 
-The post-shop lifecycle: lender offers, renewal tracking, commission payouts, and the lender book that powers it all.
+Deals covers everything after the lender package goes out: offers, renewals, commissions, and the lender book.
 
 ## Offers
 
-Lender responses, organized by deal. Every application with active lender threads or recorded offers.
+Offers is where lender replies become a decision.
 
-- **Accordion / Kanban toggle** — Accordion lists one row per deal (expand to see every lender thread: status, amount, term, factor, dates); Kanban shows threads as cards across 8 columns (Pending, Sent, Responded, Approved, Needs Review, Declined, No Response, Error).
-- **Needs Review badge** (orange) — a lender asked for info or a send errored; handle these first.
-- **Status pills and counts** show where each thread stands.
-
-This is where you read what came back and pick the offer to present.
+- Start with anything marked **Needs Review**.
+- Compare amount, term, payment, factor, stipulations, and lender reliability.
+- Do not present a number until it is actually in the lender response.
+- If multiple offers are live, package the real tradeoff for the merchant: speed, cost, term, and daily/weekly payment.
+- Matt gets pulled in for unusual pricing, strategic relationships, or anything that could affect lender trust.
 
 ## Renewals
 
-Funded deals approaching their re-up, ranked by urgency. This is the only place renewals live.
+Renewals is the warmest revenue lane.
 
-- **KPI cards:** Past Due, This Week, This Month (with potential volume), Est. Commission.
-- **Buckets:** Past Due, Next 60 Days, Later, No Date Set (automatic).
-- **Phone / Email icons** — call or email the merchant about renewing (the email subject is pre-filled).
-- **Progress bar** — how far through the term they are; **Needs Data** means a date is missing.
-
-Anything 50%+ through term is your re-funding focus this week.
+- Work Past Due first, then This Week, then This Month.
+- Anything beyond the renewal threshold should be contacted before they need to search elsewhere.
+- Ask Solara for a renewal sweep when the queue gets noisy.
+- Use Helios for a concise renewal message, then personalize it before sending.
 
 ## Commissions
 
-Your commission ledger — one row per funded deal's payout.
+Commissions keeps funded deals tied to payout reality.
 
-- **New commission** — record a payout (business name, funded deal, lender, broker share %, amount).
-- **Columns:** Business, Funded Deal, Lender, Broker Share %, Amount, **Paid** (checkmark toggle), Paid At.
-- **Open** (on a row) — edit the record. **Search** filters the table.
-
-Empty until deals fund — it fills as you close.
+- Record the funded business, lender, broker share, payout amount, and paid status.
+- Mark paid only when the money actually clears.
+- Keep this clean because it drives internal reporting and trust with the team.
 
 ## Lenders
 
-Your lender book — the criteria that powers the Shopping Out ranking. Keep it accurate and matches get better.
+The lender book powers matching.
 
-- **Search**, **Active only** toggle, **Product type** filter.
-- **New lender** — opens the form drawer. **Click any row** to edit. **Active toggle** turns a lender on or off inline.
-
-Inside the lender drawer, what defines a lender:
-
-- **Identity:** name, contact email, portal URL, product type, active.
-- **Match gates:** min monthly revenue, max funded amount, min time in business, FICO floor, SLA days.
-- **Hard requirements:** tier, defaults policy, position min/max, max negative days, reverses-only, paper grades accepted, submission CC emails.
-- **Buy rate and range:** buy rate, funding min/max, term min/max.
-- **Restrictions:** industry preferences, industry restrictions, restricted states, required documents, common decline reasons, notes.
-- **Save** or **Delete** at the bottom.
-
-The restricted states and industries here are exactly what auto-flags a bad lender match in Shopping Out.
+- Keep contact emails, states, industries, document requirements, position limits, minimums, and common decline reasons current.
+- Deactivate lenders that should not receive submissions.
+- If a lender rejects a pattern repeatedly, update the criteria instead of making the same bad send again.
+- The Shopping Out ranking is only as good as this book.

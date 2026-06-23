@@ -2,18 +2,20 @@
 tags: [sunbiz, onboarding, playbook, index]
 ---
 
-# Unified Onboarding Manual
+# SunBiz Operating Manual
 
 Audience: Client-facing
 
-Read these four pages in order:
+Read these SunBiz guides first:
 
-- `01-getting-started` - Meet Solara
-- `02-safe-interaction` - How to work with Solara
-- `03-when-to-call-cc` - When to loop in CC
-- `04-pause-and-rollback` - Pause and correct
+- `sun-15-email-templates` - HTML outreach pipeline, variables, agent send handoff, and new-template build path
+- `sun-10-getting-started` - SunBiz operating map for Ezra, Ethan, and Matt
+- `sun-11-operations` - Dashboard, Solara, Helios, Reasoning, and Playbook
+- `sun-12-pipeline` - Leads, applications, Shopping Out, conversations, and campaigns
+- `sun-13-deals` - Offers, renewals, commissions, and lenders
+- `sun-14-system` - Imports, forms, sequences, team, automations, and settings
 
-This is the shortest path to getting a new Sun Biz teammate comfortable with the system.
+The old `01` to `04` onboarding docs remain in the repo for legacy reference, but the SunBiz Playbook page now surfaces the operational guides above.
 
 ## Operator-side (you, CC)
 

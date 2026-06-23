@@ -1,49 +1,42 @@
 ---
-tags: [sunbiz, onboarding, manual, operations]
+tags: [sunbiz, operations, manual, agent-desk]
 ---
 
-# Operations
+# Agent Desk
 
 Audience: Client-facing
 
-Your cockpit and AI help: the home view, the agent chat, the quick-action launchpad, and this manual.
+The Agent Desk is how Ezra, Ethan, and Matt decide what to do next. Use it for triage, agent help, one-click reasoning prompts, and this playbook.
 
 ## Dashboard
 
-Your morning starting line — a live snapshot of the business with click-through to the work.
+Start here every morning.
 
-- **The five KPI cards** — Hot Leads, Missing Info, In Motion, Funded This Month (count plus dollars), Renewals Due. **Each card is a button** — click it to jump to that filtered list.
-- **The SunBiz action band** — Renewal Alerts, Offers Needing Review, Shopping Out (last 7 days). Click any to go to that tab.
-- **Lead Pipeline and Opportunity Pipeline bars** — colored stage bars; click a segment (or "Open") to open that stage filtered.
-- **Today's Focus** — your 5 most urgent leads (most dollars plus most overdue). Click a name to open it.
-- **Renewals Due Soon** — top 3 deals nearing renewal. Click the amount to open the deal.
-- **System Health** — alerts that need a human; **Dismiss** clears one.
-- **Your Agents** — **Chat** opens that agent.
-
-Start here every day. Work the top cards left to right, then Today's Focus.
+- **KPI cards** show Hot Leads, Missing Info, In Motion, Funded This Month, and Renewals Due. Each card opens the matching work queue.
+- **Action band** highlights renewal alerts, offers needing review, and recent Shopping Out activity.
+- **Pipeline bars** show where leads and applications are stuck.
+- **Today's Focus** lists the highest-value overdue files.
+- **Renewals Due Soon** keeps re-up opportunities visible before the merchant cools off.
+- **System Health** catches operational issues before they become lost deals.
 
 ## Agents
 
-Chat with Solara or Helios — like ChatGPT, but wired into your data.
+Use the Agents tab like a staffed desk.
 
-- **Agent picker (top)** — switch between Solara and Helios. Switching starts a fresh chat.
-- **Message box and Send** — type your question (Enter to send). Ask plainly: "What funding leads need action today?"
-- **Attach files (paperclip)** — drop in up to 5 files (e.g. a call transcript to score).
-- **Plan / Execute toggle** — Plan lets the agent only look (safe); Execute lets it take actions. Leave it on Plan unless you want it to do something.
-- **History (top-left menu)** — reopen past chats or start a new one.
-- **Copy / Export** on any reply — save an answer as PDF or Markdown.
-
-When in doubt, ask the agent. It can read the same dashboard you see.
+- Ask **Solara** operational questions: "Which applications are complete enough to shop out?" or "What renewals need action this week?"
+- Ask **Helios** for language: "Draft a follow-up for a merchant who opened the application but did not upload statements."
+- Keep the agent in **Plan** when you want analysis only.
+- Switch to **Execute** only when you intentionally want an action taken and have reviewed the prompt.
+- Attach files when the agent needs context, such as a bank statement PDF, call transcript, or lender reply.
 
 ## Reasoning
 
-A launchpad of one-click prompts for the agents. Each card drops a ready-made request into chat with the right agent already selected — hit Enter to send.
+Reasoning is the shortcut board. Each card opens a pre-built prompt for the right agent.
 
-- **Solara cards** cover the funding briefing, qualifying submissions, matching lenders, prepping a deal to shop out, explaining a deal's grade, recording funded deals, and renewal sweeps.
-- **Helios cards** cover first-touch SMS, revival cadences, expired-offer saves, blast drafts, chasing missing documents, and objection handling.
-
-Faster than typing. Click a card, review the prompt, hit Enter.
+- Use Solara cards for funding briefs, lender fit, underwriting context, deal prep, funded-deal recording, and renewal sweeps.
+- Use Helios cards for first touch, revival, expired-offer saves, missing-doc nudges, and objection handling.
+- Review the generated prompt before sending it. These prompts move real pipeline work.
 
 ## Playbook
 
-This manual. Each card is a clickable guide to one part of the Command Center. Come back any time you forget where a button lives.
+This page is the operating manual. The top cards are the fastest route. The guide cards below are the reference docs when someone needs exact steps.

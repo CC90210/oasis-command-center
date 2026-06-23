@@ -1,55 +1,48 @@
 ---
-tags: [sunbiz, onboarding, manual, getting-started]
+tags: [sunbiz, operations, manual, getting-started]
 ---
 
-# Getting Started
+# SunBiz Operating Map
 
 Audience: Client-facing
 
-Welcome to the SunBiz Agent Command Center — your cockpit for running a funding deal from first contact to funded and renewed. This is your map. Read **The Golden Path** first; it's the whole job in eight steps. The other cards on the Playbook break down each area tab by tab.
+This is the SunBiz Command Center in one page. The job is simple: turn a merchant from first interest into a complete lender-ready file, present the best offer, book the funded deal, then work the renewal window.
 
-## The Golden Path — the whole job, start to finish
+## Who Owns What
 
-1. **A prospect fills out your interest form.** You share your personal link (see the Forms tab). They enter business name, their name, phone, email, and monthly revenue.
-2. **They land in Leads as a "Hot Lead," assigned to you** — by name, automatically, because they used your link.
-3. **The instant they submit, the system automatically emails them their next steps** — the Full Application link *and* the Bank Statement Upload link — signed by you. They just click through; nothing for you to send.
-4. **They complete the Full Application and upload 3 months of bank statements.**
-5. **An Application appears** in the Applications board at "Application In," and **underwriting runs automatically** — the system grades the deal.
-6. **You shop it out.** Open Shopping Out, pick the deal, review the lenders ranked by fit, attach the statements, CC your teammates, and hit Send.
-7. **Lender replies land in Conversations and Offers.** You compare offers and present the best one.
-8. **The deal funds, Commissions are booked, and Renewals watches the clock** for the re-up.
+- **Matt** owns the business lane: final calls, owner approvals, settings, lender relationships, and any change that affects the whole shop.
+- **Ezra** owns first-touch momentum: new leads, cold outreach, warm follow-ups, and making sure merchants know exactly what to do next.
+- **Ethan** owns file movement: applications, missing documents, Shopping Out, lender replies, offer packaging, and deal hygiene.
+- **Solara** is the operations agent: pipeline summaries, lender fit, underwriting context, renewal sweeps, and "what needs action today?"
+- **Helios** is the sales voice: email/SMS drafts, objection handling, revival language, and template selection.
 
-Everything in the Command Center supports that spine. The four sidebar groups follow the deal's life: **Operations** (your cockpit and AI help), **Pipeline** (prospect to application), **Deals** (offers to funded to renewal), and **System** (the plumbing).
+## The Funding Spine
 
-## Meet your agents
+1. A merchant enters through the Initial Lead Capture form or a cold-outreach reply.
+2. The lead lands in Pipeline assigned to the rep whose link or outreach brought them in.
+3. Ezra or Helios gets the merchant to the Full Application and Bank Statement Upload steps.
+4. Ethan confirms the file has the application plus 3 months of statements.
+5. The application moves to Shopping Out, where lenders are ranked by fit.
+6. Ethan sends the package to selected lenders with the right documents and CCs.
+7. Lender replies show up in Conversations and Offers.
+8. Matt or Ethan presents the strongest offer and records the funded deal.
+9. Renewals watches the term so the team can re-open the file before the next need becomes urgent.
 
-You have two AI teammates. Talk to them like a coworker on the Agents tab.
+## Daily Order Of Attack
 
-- **Solara** — your funding-shop operator. She watches the pipeline, drafts follow-ups in your voice over text and email, scores applications against the lender book, explains underwriting results, and surfaces renewals before they close.
-- **Helios** — your sales voice. He runs first-touch outreach, revives ghosted deals, handles objections, and chases missing documents — the same human-sounding cadence you'd send yourself, just faster.
+1. **Dashboard** - open the KPI cards and Today's Focus.
+2. **Conversations** - clear inbound replies before starting new outreach.
+3. **Pipeline** - chase missing application links, statements, and stale leads.
+4. **Applications / Shopping Out** - send complete files to lenders.
+5. **Offers** - handle Needs Review and present real options.
+6. **Renewals** - work anything past the renewal threshold.
+7. **Templates** - use approved HTML for email outreach instead of writing from scratch.
 
-## Your login and personal link
+## Golden Rules
 
-- **Matt** — Submissions@sunbizfunding.com (owner).
-- **Alex** — alex@sunbizfunding.com.
-- **Jordan** — jordan@sunbizfunding.com.
-
-Your personal interest-form link is on the **Forms** tab (the **Copy** button next to your name). Share *that* link so every lead routes to you automatically and you're CC'd on its lender emails.
-
-## Your daily rhythm
-
-1. **Dashboard** — clear the top cards and Today's Focus.
-2. **Conversations** — reply to anything inbound.
-3. **Leads** — move warm ones forward; chase missing docs.
-4. **Applications** — anything ready? Send it to Shopping Out.
-5. **Offers** — handle "Needs Review," present offers.
-6. **Renewals** — work anything 50%+ through term.
-
-## Golden rules
-
-- **Bank statements are the gate.** No underwriting fires without the 3 months. Chase them first.
-- **Use your own link** so leads route to you.
-- **Trust the lender ranking** — restricted states and industries are auto-flagged for a reason.
-- **Keep the Lenders book accurate** — it's the engine behind every match.
-- **Campaigns are real sends** — respect opt-outs, include STOP language.
-- **Stuck? Ask Solara or Helios** on the Agents tab — they see what you see.
+- No bank statements, no real underwriting. Chase statements first.
+- Use the rep-specific form link so the lead routes correctly.
+- Do not invent terms. Offers come from lenders.
+- Keep the lender book clean. Bad criteria creates bad matches.
+- Every commercial email needs an unsubscribe link.
+- If a send, setting, or lender decision affects the whole shop, Matt approves it.

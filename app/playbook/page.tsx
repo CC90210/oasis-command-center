@@ -87,48 +87,65 @@ const SECTIONS: PlaybookSection[] = [
   },
 ];
 
-// SunBiz feature manual — the card grid the SunBiz operator sees on /playbook.
-// Each card opens a rich-markdown guide in content/playbooks/sun-1X-*.md. This
-// mirrors the OASIS SECTIONS grid above so the two portals read the same way.
+// SunBiz feature manual - the card grid the SunBiz operator sees on /playbook.
+// Each card opens either a rich-markdown guide in content/playbooks/sun-*.md or
+// the live HTML email template gallery. Keep this specific to SunBiz funding
+// ops; generic client onboarding belongs in the OASIS portal, not here.
 const SUNBIZ_SECTIONS: PlaybookSection[] = [
   {
-    href: "/playbook/sun-10-getting-started",
-    title: "Getting Started",
-    subtitle: "The golden path - meet your agents - daily rhythm - golden rules",
+    href: "/playbook/sun-15-email-templates",
+    title: "HTML Outreach Pipeline",
+    subtitle: "Pick design - send with Helios - create new HTML",
     body:
-      "Start here. The whole job in eight steps, your two AI teammates (Solara + Helios), your personal lead link, the daily rhythm to work, and the rules that keep deals moving.",
+      "Start here. The workflow for turning an approved SunBiz HTML into an agent-assisted email send, plus the rules for creating brand-new HTML assets.",
   },
   {
-    href: "/playbook/sun-11-operations",
-    title: "Operations",
-    subtitle: "Dashboard - Agents - Reasoning - Playbook",
+    href: "/templates",
+    title: "Template Library",
+    subtitle: "28 templates - merge fields - preview - copy HTML",
     body:
-      "Your cockpit. The Dashboard KPI cards and action band, chatting with Solara and Helios, the one-click Reasoning launchpad, and this manual.",
+      "The production SunBiz HTML library. Preview the design, check required variables like {{first_name}}, launch Helios with the selected template, or start a new HTML build.",
   },
   {
     href: "/playbook/sun-12-pipeline",
-    title: "Pipeline",
-    subtitle: "Leads - Shopping Out - Applications - Conversations - Campaigns",
+    title: "Merchant Pipeline",
+    subtitle: "Leads - applications - shopping out - conversations - campaigns",
     body:
-      "Prospect to application. The lead board and detail drawer, the 5-step Shopping Out flow, the deal board, your unified inbox, and bulk texting.",
+      "Prospect to application. Work the lead board, chase bank statements, move complete files into applications, shop them to lenders, and keep every merchant thread clean.",
   },
   {
     href: "/playbook/sun-13-deals",
     title: "Deals",
-    subtitle: "Offers - Renewals - Commissions - Lenders",
+    subtitle: "Offers - renewals - commissions - lender book",
     body:
-      "Post-shop. Reading lender offers, tracking renewals by urgency, your commission ledger, and the lender book that powers every match.",
+      "Post-shop. Read lender replies, compare offers, present the right option, book funded deals, watch renewal timing, and keep the lender criteria accurate.",
   },
   {
     href: "/playbook/sun-14-system",
-    title: "System",
-    subtitle: "Import - Forms - Sequences - Team - Automations - Settings",
+    title: "Systems",
+    subtitle: "Import - forms - sequences - team - automations - settings",
     body:
-      "The plumbing. Importing leads, your intake forms and personal links, the drip campaigns, your team, automations, and settings.",
+      "The plumbing Ezra, Ethan, and Matt rely on: CSV imports, per-rep form links, follow-up sequences, team access, worker health, and owner-level settings.",
+  },
+  {
+    href: "/playbook/sun-11-operations",
+    title: "Agent Desk",
+    subtitle: "Dashboard - Solara - Helios - reasoning - manual",
+    body:
+      "The command desk. Use the dashboard to pick the next file, Solara for funding ops, Helios for sales language, and Reasoning for one-click deal prompts.",
   },
 ];
 
 const SUN_MANUAL_ORDER = [
+  "sun-15-email-templates",
+  "sun-12-pipeline",
+  "sun-13-deals",
+  "sun-14-system",
+  "sun-11-operations",
+  "sun-10-getting-started",
+] as const;
+
+const LEGACY_SUN_ONBOARDING_SLUGS = [
   "01-getting-started",
   "02-safe-interaction",
   "03-when-to-call-cc",
@@ -142,6 +159,7 @@ const SUN_MANUAL_ORDER = [
 // `sun` / `sunbiz` slug prefix is auto-excluded without needing an entry here.
 const SUN_PLAYBOOK_SLUGS = new Set<string>([
   ...SUN_MANUAL_ORDER,
+  ...LEGACY_SUN_ONBOARDING_SLUGS,
   "05-customer-onboarding-script",
   "06-sunbiz-runbook",
   "08-sunbiz-production-pre-flight",
@@ -188,21 +206,29 @@ function isSunBizPlaybook(file: PlaybookFile): boolean {
 }
 
 const SUN_MANUAL_META: Record<string, { eyebrow: string; summary: string }> = {
-  "01-getting-started": {
-    eyebrow: "Step 01",
-    summary: "Meet Solara and understand what she owns across the funding pipeline.",
+  "sun-15-email-templates": {
+    eyebrow: "HTML",
+    summary: "The template-to-agent pipeline, merge fields, preview flow, send handoff, and new-template build path.",
   },
-  "02-safe-interaction": {
-    eyebrow: "Step 02",
-    summary: "Learn how to ask for work, when to review before sending, and how to keep the lane clean.",
+  "sun-12-pipeline": {
+    eyebrow: "Pipeline",
+    summary: "How leads become complete applications and lender-ready files.",
   },
-  "03-when-to-call-cc": {
-    eyebrow: "Step 03",
-    summary: "Know the moments when a human opinion, approval, or escalation matters.",
+  "sun-13-deals": {
+    eyebrow: "Deals",
+    summary: "How offers, renewals, commissions, and lender criteria stay in sync.",
   },
-  "04-pause-and-rollback": {
-    eyebrow: "Step 04",
-    summary: "See how to pause changes, correct mistakes, and move forward calmly.",
+  "sun-14-system": {
+    eyebrow: "Systems",
+    summary: "Imports, forms, sequences, team access, automations, and settings.",
+  },
+  "sun-11-operations": {
+    eyebrow: "Desk",
+    summary: "Dashboard triage, Solara/Helios usage, and Reasoning prompt shortcuts.",
+  },
+  "sun-10-getting-started": {
+    eyebrow: "Map",
+    summary: "The deal spine, daily rhythm, and Ezra/Ethan/Matt ownership lanes.",
   },
 };
 
@@ -334,17 +360,20 @@ function SunBizPlaybookIndex({
     <div className="space-y-8 animate-fade-in">
       <PageHeader
         title="Playbook"
-        subtitle="Your operating manual. Click any card to open that guide — start with Getting Started."
-        action={<Tag tone="engaged">client guide</Tag>}
+        subtitle="Your SunBiz operating manual. Start with the HTML Outreach Pipeline, then work the funding flow."
+        action={<Tag tone="engaged">SunBiz ops</Tag>}
       />
 
-      {/* Feature manual — one card per area of the Command Center, mirroring
-          the OASIS Playbook grid. Each opens a rich-markdown guide. */}
+      {/* Feature manual - one card per area of the Command Center. */}
       <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-5">
         {SUNBIZ_SECTIONS.map((section, index) => (
           <Link
             key={section.href}
-            href={playbookEntryHref(section.href.replace("/playbook/", ""))}
+            href={
+              section.href.startsWith("/playbook/")
+                ? playbookEntryHref(section.href.replace("/playbook/", ""))
+                : section.href
+            }
             className="group block h-full"
           >
             <Card className="h-full">
@@ -372,13 +401,13 @@ function SunBizPlaybookIndex({
       {manualFiles.length > 0 && (
         <section className="space-y-4">
           <div>
-            <h2 className="text-lg font-bold text-fg">Onboarding manual</h2>
+            <h2 className="text-lg font-bold text-fg">SunBiz operating guides</h2>
             <p className="text-sm text-fg-muted">
-              Four short pages on working with Solara: getting started, safe
-              interaction, when to call CC, and how to pause or roll back.
+              Practical guides for Ezra, Ethan, and Matt. These are the live
+              operating docs behind the cards above.
             </p>
           </div>
-          <div className="grid md:grid-cols-2 lg:grid-cols-4 gap-4">
+          <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-4">
             {manualFiles.map((file, index) => {
               const meta = SUN_MANUAL_META[file.slug] || {
                 eyebrow: `Step ${(index + 1).toString().padStart(2, "0")}`,
