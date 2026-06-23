@@ -52,6 +52,7 @@ import { buildOasisLeadPatch } from "@/lib/forms/oasis-funnel-format";
 import { OASIS_FUNNEL_SLUG, OASIS_FUNNEL_TENANT_ID } from "@/lib/forms/oasis-funnel-seed";
 import { maybeGenerateApplicationDocument } from "@/lib/forms/application-document";
 import { sendSunbizLeadEvent } from "@/lib/notify/sunbiz-events";
+import { sendFormCompletionEmail } from "@/lib/notify/form-completion-email";
 import { mintFormLinkBySlug } from "@/lib/forms/agent-routing";
 import { upsertApplicationFromFormStep } from "@/lib/forms/application-upsert";
 import { autoRunUnderwritingForLead } from "@/lib/underwriting/run";
@@ -642,6 +643,14 @@ export async function POST(req: NextRequest) {
           extra: { file_count: bankFileCount },
         }),
       );
+      // Email the assigned agent + submissions@ that Form 3 (bank statements)
+      // was completed. Only on the bank-statement-upload form (not when the
+      // full application happens to carry statements — that's Form 2).
+      if (form.slug === "bank-statement-upload") {
+        after(() =>
+          sendFormCompletionEmail({ db, tenantId: form.tenant_id, leadId: link.lead_id, formNumber: 3, origin: req.nextUrl.origin }),
+        );
+      }
     }
   }
 
@@ -936,6 +945,12 @@ export async function POST(req: NextRequest) {
         extra: payload,
       }),
     );
+    // Email the assigned agent + submissions@ that Form 1 was completed.
+    if (isFundingTenant(link.tenant)) {
+      after(() =>
+        sendFormCompletionEmail({ db, tenantId: form.tenant_id, leadId: link.lead_id, formNumber: 1, origin: req.nextUrl.origin }),
+      );
+    }
   } else if (isLastStep && form.slug === "full-application") {
     // CC 2026-06-22: full application complete → the application is created
     // (upsertApplicationFromFormStep above). Offer the NEXT step (bank statements)
@@ -993,6 +1008,12 @@ export async function POST(req: NextRequest) {
         extra: payload,
       }),
     );
+    // Email the assigned agent + submissions@ that Form 2 was completed.
+    if (isFundingTenant(link.tenant)) {
+      after(() =>
+        sendFormCompletionEmail({ db, tenantId: form.tenant_id, leadId: link.lead_id, formNumber: 2, origin: req.nextUrl.origin }),
+      );
+    }
   }
 
   // Final step of the BANK-STATEMENT form → auto-run underwriting (CC 2026-06-22:
