@@ -231,9 +231,10 @@ function resolveAnswer(merged: Record<string, unknown>, name: string): unknown {
  * subset. One PDF section per form STEP (heading = step title); one row per
  * field (label = the question, value = the formatted answer). File-upload,
  * signature, and hidden fields are omitted (documents live on the Docs tab; the
- * signature renders in the signature block). A leading APPLICANT section pulls
- * business name + email + phone from the lead (the short interest form collects
- * these; the full application doesn't re-ask them).
+ * signature renders in the signature block). The leading APPLICANT contact
+ * block (business name / email / phone) was removed per CC 2026-06-23 — those
+ * fields already appear under Business Information, so the top block was
+ * redundant on the generated PDF.
  *
  * Supersedes the hardcoded mapApplicationFields() — that one left uncollected
  * cells blank AND silently dropped any question whose key wasn't in its map.
@@ -242,19 +243,13 @@ function resolveAnswer(merged: Record<string, unknown>, name: string): unknown {
 export function mapApplicationFieldsFromSteps(
   steps: FormStep[],
   merged: Record<string, unknown>,
-  lead: Record<string, unknown>,
+  _lead: Record<string, unknown>,
 ): MappedApplication {
   const sections: PdfSection[] = [];
 
-  const email = str(lead.email) || str(merged.email);
-  const phone = str(lead.phone) || str(merged.phone);
-  const bizName =
-    str(merged.business_legal_name) || str(merged.business_name) || str(lead.business_name);
-  const contactRows: PdfFieldRow[] = [];
-  if (bizName) contactRows.push({ label: "Business Name", value: bizName });
-  if (email) contactRows.push({ label: "Email", value: email });
-  if (phone) contactRows.push({ label: "Phone", value: phone });
-  if (contactRows.length) sections.push({ heading: "APPLICANT", rows: contactRows });
+  // NOTE (CC 2026-06-23): the top "APPLICANT" contact section (business name /
+  // email / phone) was intentionally removed — those fields already render under
+  // the form's Business Information step, so the leading block was redundant.
 
   for (const step of steps) {
     const rows: PdfFieldRow[] = [];

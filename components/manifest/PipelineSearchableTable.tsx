@@ -22,6 +22,7 @@ import {
   pipelineRowHref,
   type PipelineColumn,
 } from "@/lib/pipeline-display";
+import { InlineStageControl } from "@/components/manifest/InlineStageControl";
 
 type Row = { id: string; data: Record<string, unknown> };
 
@@ -87,7 +88,6 @@ export function PipelineSearchableTable({
         <tbody>
           {rows.map((r) => {
             const stage = String(r.data[stageField] || "");
-            const stageMeta = stageMap[stage];
             return (
               <tr key={r.id} className="border-b border-bg-border/40 last:border-b-0 hover:bg-bg-elev/30">
                 {columns.map((c, idx) => (
@@ -102,16 +102,12 @@ export function PipelineSearchableTable({
                   </td>
                 ))}
                 <td className="px-3 py-2">
-                  {stageMeta ? (
-                    <span
-                      className="inline-block px-2 py-0.5 rounded text-[11px] font-semibold"
-                      style={{ background: stageMeta.bg, color: stageMeta.fg }}
-                    >
-                      {stageMeta.label}
-                    </span>
-                  ) : (
-                    <span className="text-fg-dim font-mono">{stage || "—"}</span>
-                  )}
+                  <InlineStageControl
+                    recordId={r.id}
+                    stage={stage}
+                    stageMap={stageMap}
+                    entity={entityName}
+                  />
                 </td>
               </tr>
             );

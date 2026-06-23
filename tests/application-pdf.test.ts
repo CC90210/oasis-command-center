@@ -161,9 +161,11 @@ const steps: FormStep[] = [
 const fd = mapApplicationFieldsFromSteps(steps, { ...merged, agree: "agreed" }, lead);
 const fval = (heading: string, label: string) =>
   fd.sections.find((s) => s.heading === heading)?.rows.find((r) => r.label === label)?.value;
-check(fd.sections[0].heading === "APPLICANT", "form-driven: APPLICANT contact section first");
-check(fval("APPLICANT", "Business Name") === "Northwind Test LLC", "form-driven: business name");
-check(fval("APPLICANT", "Email") === "owner@example.com", "form-driven: email from lead");
+// CC 2026-06-23: the leading APPLICANT contact section (business name / email /
+// phone) was removed from the generated PDF — those fields already appear under
+// the form's Business Information step, so the top block was redundant.
+check(!fd.sections.some((s) => s.heading === "APPLICANT"), "form-driven: APPLICANT section removed");
+check(fd.sections[0].heading === "BUSINESS INFORMATION", "form-driven: first section is the first form step");
 check(fval("BUSINESS INFORMATION", "Legal business name") === "Northwind Test LLC", "form-driven: legal name uses the form's own label");
 check(fval("BUSINESS INFORMATION", "Type of entity") === "LLC", "form-driven: select value → option label");
 check(fval("BUSINESS INFORMATION", "Business start date") === "12/20/2020", "form-driven: date formatted");
