@@ -152,8 +152,14 @@ function resolveLeadStage(value: string): string | null {
 }
 
 function resolveOpportunityStage(value: string): string | null {
-  if (OPP_STAGE_KEYS.has(value)) return value;
-  return OPP_STAGE_LABELS.get(value) || APPLICATION_STAGE_ALIASES.get(value) || null;
+  // Import aliases win over direct keys/labels. "Approved" in historical CSVs
+  // is not the live operator "approved" stage; it means the old offer-comparison
+  // loop, which Migration 064 consolidated into shopping.
+  return (
+    APPLICATION_STAGE_ALIASES.get(value) ||
+    OPP_STAGE_LABELS.get(value) ||
+    (OPP_STAGE_KEYS.has(value) ? value : null)
+  );
 }
 
 function normalizeStageText(value: string): string {

@@ -703,6 +703,8 @@ export async function POST(req: NextRequest) {
   let currentLeadStage: string | null = null;
   const stepOutcomes = form.step_outcomes || {};
   const isLastStep = stepIndex === steps.length - 1;
+  const fullApplicationCollectsDocuments =
+    form.slug === "full-application" && formCollectsBankStatements(steps);
   // Change #1 (Adon, lead status defs 2026-06-19): COMPLETING the first
   // application (the initial-lead-capture interest form) = the merchant has
   // "Viewed" (completed) the first app → viewed_application. Opening-but-not-
@@ -952,26 +954,28 @@ export async function POST(req: NextRequest) {
       );
     }
   } else if (isLastStep && form.slug === "full-application") {
-    // CC 2026-06-22: full application complete → the application is created
-    // (upsertApplicationFromFormStep above). Offer the NEXT step (bank statements)
-    // as a single continue-now button + send the follow-through email. Replaces
-    // the legacy resume queue (never drained for SunBiz).
-    const origin = req.nextUrl.origin;
-    const bankUrl = await mintFormLinkBySlug(
-      origin, form.tenant_id, link.tenant, link.lead_id, "bank-statement-upload",
-    );
-    nextForms = bankUrl
-      ? [{ slug: "bank-statement-upload", label: "Upload your bank statements", url: bankUrl }]
-      : null;
-    after(() =>
-      maybeSendApplicationCompleteEmail({
-        db,
-        form: { id: form.id, tenant_id: form.tenant_id, slug: form.slug },
-        link: { tenant: link.tenant, lead_id: link.lead_id },
-        payload,
-        origin,
-      }),
-    );
+    // Legacy fallback: old DB-seeded full-application forms did not collect
+    // documents, so completion had to hand the merchant to the separate upload
+    // form. The current canonical seed collects documents in-flow; in that case
+    // do not ask the merchant to upload the same statements twice.
+    if (!fullApplicationCollectsDocuments) {
+      const origin = req.nextUrl.origin;
+      const bankUrl = await mintFormLinkBySlug(
+        origin, form.tenant_id, link.tenant, link.lead_id, "bank-statement-upload",
+      );
+      nextForms = bankUrl
+        ? [{ slug: "bank-statement-upload", label: "Upload your bank statements", url: bankUrl }]
+        : null;
+      after(() =>
+        maybeSendApplicationCompleteEmail({
+          db,
+          form: { id: form.id, tenant_id: form.tenant_id, slug: form.slug },
+          link: { tenant: link.tenant, lead_id: link.lead_id },
+          payload,
+          origin,
+        }),
+      );
+    }
   } else {
     await maybeQueueResumeEmail({
       db,
@@ -1016,23 +1020,23 @@ export async function POST(req: NextRequest) {
     }
   }
 
-  // Final step of the BANK-STATEMENT form → auto-run underwriting (CC 2026-06-22:
-  // submitting bank statements kicks the underwriting pipeline automatically;
-  // previously operator-triggered only). Soft-fail + idempotent (the in-flight
-  // 409 guard inside enqueueUnderwritingRun prevents a duplicate run). Runs AFTER
-  // the response so it never delays the merchant's submit. The lead also moves to
-  // submitted_application via the stage logic above.
-  if (isLastStep && form.slug === "bank-statement-upload" && uploadedDocs.length > 0) {
-    // Gate on REAL registered documents (uploadedDocs is server-derived from what
-    // actually landed in Storage, not client-claimed) — a forged descriptor with
-    // no registered file must never enqueue an empty underwriting run. (Codex
-    // Rule-8 2026-06-22 finding 1.)
+  // Final step of either document-complete path → auto-run underwriting.
+  // Standalone bank-statement form gates on uploadedDocs from THIS request. The
+  // in-flow full application reaches this branch on the later signature step, so
+  // its required documents were already validated on the earlier upload step.
+  if (
+    (isLastStep && form.slug === "bank-statement-upload" && uploadedDocs.length > 0) ||
+    (isLastStep && fullApplicationCollectsDocuments)
+  ) {
     after(() =>
       autoRunUnderwritingForLead({
         db,
         tenantId: form.tenant_id,
         leadId: link.lead_id,
-        source: "form_intake_bank_statements",
+        source:
+          form.slug === "full-application"
+            ? "form_intake_full_application"
+            : "form_intake_bank_statements",
       }),
     );
   }
@@ -1130,6 +1134,14 @@ export async function POST(req: NextRequest) {
 function isFundingTenant(tenantSlug: string): boolean {
   const s = (tenantSlug || "").toLowerCase();
   return s === "sun" || s === "submissions";
+}
+
+function formCollectsBankStatements(steps: FormStep[]): boolean {
+  return steps.some((step) =>
+    step.fields.some(
+      (field) => field.type === "file_upload_multi" && field.name === "bank_statements",
+    ),
+  );
 }
 
 /**

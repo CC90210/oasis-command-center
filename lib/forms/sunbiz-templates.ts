@@ -14,7 +14,7 @@
  * same validator /api/forms POST runs).
  */
 
-import type { FormStep } from "./types";
+import type { FormField, FormStep } from "./types";
 
 // ---------------------------------------------------------------------------
 // Canonical slug set — the single source of truth for detection logic.
@@ -61,6 +61,20 @@ export const SUNBIZ_INDUSTRIES = [
 
 const titleCase = (slug: string) =>
   slug.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+
+const SUNBIZ_DOCUMENTS_FIELD: FormField = {
+  // One bucket for all required funding docs. The server classifies each file
+  // by filename so statements, license photos, and voided checks get their real
+  // doc_type while the public form stays simple.
+  name: "bank_statements",
+  label: "Your documents",
+  type: "file_upload_multi",
+  required: true,
+  accept: ["application/pdf", "image/*"],
+  max_files: 50,
+  max_file_mb: 25,
+  help: "Drag and drop all your documents - last 3+ months of business bank statements (all accounts), plus your driver's license and a voided check if you have them. PDF or clear photos. Add as many as you need.",
+};
 
 // ---------------------------------------------------------------------------
 // Template definitions
@@ -197,7 +211,18 @@ export const SUNBIZ_FORM_TEMPLATES: Record<SunBizStep, SunBizFormTemplate> = {
           },
         ],
       },
-      // Step 1 — Primary owner
+      // Step 1 - Documents. Anonymous full-application links mint the upload
+      // token on step 0, so placing file_upload_multi here lets merchants upload
+      // immediately in the same application flow.
+      {
+        key: "documents",
+        title: "Upload your documents",
+        description:
+          "Add the documents needed to start your funding review.",
+        cta_label: "Continue",
+        fields: [{ ...SUNBIZ_DOCUMENTS_FIELD }],
+      },
+      // Step 2 — Primary owner
       {
         key: "owner",
         title: "Owner information",
@@ -298,6 +323,16 @@ export const SUNBIZ_FORM_TEMPLATES: Record<SunBizStep, SunBizFormTemplate> = {
             prefill_from: "monthly_revenue",
           },
           {
+            name: "applicant_fico",
+            label: "Credit Score (FICO)",
+            type: "number",
+            required: true,
+            min: 300,
+            max: 850,
+            placeholder: "e.g. 680",
+            help: "An estimate is okay - this helps us match you with lenders that fit your profile.",
+          },
+          {
             name: "requested_advance",
             label: "Requested advance amount",
             type: "currency",
@@ -305,12 +340,7 @@ export const SUNBIZ_FORM_TEMPLATES: Record<SunBizStep, SunBizFormTemplate> = {
           },
         ],
       },
-      // Signature — the FINAL step. 2026-06-22 (CC): the duplicate document-upload
-      // step was removed from the full application. Bank statements + license +
-      // voided check are collected ONCE, in the separate bank-statement-upload
-      // form (form 3 / underwriting), not here — the application is data + the
-      // merchant's signature only. (Removing this step shifts the signature step
-      // to index 4 — see step_outcomes below.)
+      // Step 5 — Signature, the FINAL step.
       {
         key: "signature",
         title: "Sign and submit",
@@ -348,12 +378,13 @@ export const SUNBIZ_FORM_TEMPLATES: Record<SunBizStep, SunBizFormTemplate> = {
     ],
     step_outcomes: {
       "0": "sent_application",
-      // Signature is now step index 4 (the documents step was removed 2026-06-22).
-      "4": "signed_application",
+      // Signature is step index 5 because documents are collected in-flow after
+      // the first business step.
+      "5": "signed_application",
     },
     // 2026-06-18 (CC): `submitted` stage removed — completion lands on
     // signed_application (the last lead milestone). Underwriting auto-runs when
-    // the merchant completes the separate bank-statement-upload form.
+    // the merchant completes the full application with documents attached.
     on_complete_stage: "signed_application",
   },
 
@@ -370,17 +401,7 @@ export const SUNBIZ_FORM_TEMPLATES: Record<SunBizStep, SunBizFormTemplate> = {
         cta_label: "Submit",
         fields: [
           {
-            // 2026-06-20 (Ethan/Alex): ONE bucket for ALL document types, no
-            // practical limit. Server classifies by filename. Field name kept as
-            // `bank_statements` for submit-route detection compatibility.
-            name: "bank_statements",
-            label: "Your documents",
-            type: "file_upload_multi",
-            required: true,
-            accept: ["application/pdf", "image/*"],
-            max_files: 50,
-            max_file_mb: 25,
-            help: "Drag and drop all your documents — last 3+ months of business bank statements (all accounts), plus your driver's license and a voided check if you have them. PDF or clear photos. Add as many as you need.",
+            ...SUNBIZ_DOCUMENTS_FIELD,
           },
         ],
       },

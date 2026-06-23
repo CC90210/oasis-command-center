@@ -5,12 +5,10 @@
  * the agent the lead is assigned to:
  *   - maybeSendNextStepsEmail        → after the interest form (step 1): ONE link
  *                                       to the full application (step 2).
- *   - maybeSendApplicationCompleteEmail → after the full application (step 2):
- *                                       ONE link to the bank-statement upload
- *                                       (step 3). The follow-through that keeps
- *                                       the funnel moving sequentially (CC
- *                                       2026-06-22: form 1 → form 2 → form 3, one
- *                                       step at a time — never both links at once).
+ *   - maybeSendApplicationCompleteEmail → legacy fallback for old full-application
+ *                                       forms that did not collect statements
+ *                                       in-flow. Current SunBiz templates collect
+ *                                       docs inside the full application.
  *
  * Why a NEW path instead of the old resume-email queue:
  * The form-submit route used to queue a `lead_interactions` row
@@ -399,9 +397,10 @@ export async function maybeSendNextStepsEmail(input: MaybeSendNextStepsInput): P
 }
 
 /**
- * STEP 2 → STEP 3 follow-through: after the merchant completes the FULL
- * application, email them ONE link to the bank-statement upload (the last step,
- * which feeds underwriting). Soft-fail; idempotent per lead. (CC 2026-06-22.)
+ * Legacy STEP 2 → STEP 3 follow-through: old full-application forms lacked an
+ * in-flow upload step, so completion emailed one link to the bank-statement
+ * upload. Current full-application templates collect documents in-flow and the
+ * submit route skips this sender for those forms.
  */
 export async function maybeSendApplicationCompleteEmail(input: MaybeSendNextStepsInput): Promise<void> {
   try {
