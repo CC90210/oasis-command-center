@@ -25,6 +25,7 @@ import { LeadTimelinePanel } from "./LeadTimelinePanel";
 import { AssignmentControl } from "./AssignmentControl";
 import { CollaboratorsControl } from "./CollaboratorsControl";
 import { StagePicker } from "./StagePicker";
+import { AutofillDropzone } from "./AutofillDropzone";
 import { humanLeadDocSize, leadDocTypeLabel, LEAD_DOC_TYPES } from "@/lib/lead-doc-display";
 import { SalesMetricCard } from "@/components/underwriting/SalesMetricCard";
 import { formatMoney, relTime } from "@/lib/format-helpers";
@@ -273,6 +274,13 @@ export function LeadDetailDrawer({
               }
               onTransferred={reload}
             />
+          )}
+
+          {/* Drop-in autofill — drop a merchant's existing application (PDF or
+              photo); Claude reads it and fills THIS lead's application fields.
+              Lead drawer only; then upload statements in the Docs tab. */}
+          {data && entity === "lead" && (
+            <AutofillDropzone mode="existing" leadId={recordId} onDone={reload} />
           )}
 
           <div className="flex items-center justify-between gap-3">

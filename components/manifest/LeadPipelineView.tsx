@@ -15,6 +15,7 @@ import {
 } from "lucide-react";
 import type { StageMeta } from "@/lib/sunbiz-stage-meta";
 import { PageSearchBar } from "@/components/manifest/PageSearchBar";
+import { AutofillDropzone } from "@/components/leads/AutofillDropzone";
 import { pipelineRowHref } from "@/lib/pipeline-display";
 import { lastTouchIso } from "@/lib/lead-staleness";
 import {
@@ -355,6 +356,11 @@ export function LeadPipelineView({
             <Plus className="h-3.5 w-3.5" />
             New {entityLabel.toLowerCase()}
           </Link>
+          {/* Drop-in autofill — drop a merchant's existing application (any
+              company's PDF) to create a NEW SunBiz lead + application from it. */}
+          {isLeads && (
+            <AutofillDropzone mode="new" tenantSlug={slug} label="New from application" />
+          )}
         </div>
       </div>
 
