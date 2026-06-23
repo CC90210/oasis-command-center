@@ -98,7 +98,7 @@ export function AgentMarketplaceCard({ initialAgents, isOwner }: Props) {
             Workspace agents
           </h3>
           <p className="text-[12px] text-fg-muted leading-relaxed">
-            Only the workspace owner can add or remove agents. Ask Ezra to manage the agent lineup.
+            Only the workspace owner can add or remove agents. Ask Matt to manage the agent lineup.
           </p>
         </header>
         <ul className="mt-3 space-y-2">

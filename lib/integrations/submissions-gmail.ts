@@ -6,7 +6,7 @@
  * from per-tenant encrypted storage and connects via Gmail's SMTP relay
  * (smtp.gmail.com:587 STARTTLS). The existing tenant_integration_credentials
  * table holds `gws.app_password` + `gws.from_address` encrypted with
- * BRAVO_FIELD_ENCRYPTION_KEY — this is what Ezra provisioned weeks ago
+ * BRAVO_FIELD_ENCRYPTION_KEY — this is what Matt provisioned weeks ago
  * via Settings → Integrations.
  *
  * Why SMTP not OAuth: Adon's spec originally specified Gmail API + OAuth

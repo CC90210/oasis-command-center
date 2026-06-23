@@ -39,7 +39,7 @@ export const maxDuration = 60;
  * shop-out auto-trigger (commit 4957702): on the SunBiz VPS the
  * dashboard-email-consumer daemon is IS_WIN-gated in ecosystem.config.js,
  * so queued lead-emails sit at metadata.status='queued' forever for
- * Ezra/Jordan/Alex unless an owner/admin triggers them. This auto-trigger
+ * Matt/Jordan/Alex unless an owner/admin triggers them. This auto-trigger
  * closes that gap for owner/admin roles (members fall back to the queue —
  * /api/bridge/exec-tool's role gate rejects write tools for non-admin).
  *

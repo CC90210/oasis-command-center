@@ -22,7 +22,7 @@
  * landing on this page saw the OASIS variant (CC's personal stages,
  * usually 0 leads to them) — a real footgun (CC bug 2026-06-11). If
  * the session belongs to a non-OASIS tenant, we redirect to that
- * tenant's catch-all leads page (e.g. /t/sun/leads for Ezra/Jordan/
+ * tenant's catch-all leads page (e.g. /t/sun/leads for Matt/Jordan/
  * Alex). CC's own OASIS sessions still see /pipeline as-is.
  */
 

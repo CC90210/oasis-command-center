@@ -2,7 +2,7 @@
  * activity-feed.ts — actor-filtered activity timeline for the SunBiz audit page.
  *
  * CC's ask (2026-06-18): the audit log should show what each of the 5 actors —
- * the people Ezra / Jordan / Alex and the AI agents Helios / Solara — actually
+ * the people Matt / Jordan / Alex and the AI agents Helios / Solara — actually
  * did: team changes, sends (email/SMS/call), AI automations + stage changes,
  * and chats. v1 SURFACES signals we already capture (no new instrumentation) by
  * unioning four tables and normalizing to one row shape, resolvable + filterable
@@ -21,8 +21,8 @@ import "server-only";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { getTenantMembers } from "@/lib/team";
 
-export type ActorName = "Ezra" | "Jordan" | "Alex" | "Helios" | "Solara";
-export const KNOWN_ACTORS: ActorName[] = ["Ezra", "Jordan", "Alex", "Helios", "Solara"];
+export type ActorName = "Matt" | "Jordan" | "Alex" | "Helios" | "Solara";
+export const KNOWN_ACTORS: ActorName[] = ["Matt", "Jordan", "Alex", "Helios", "Solara"];
 
 export type ActivityRow = {
   id: string;
@@ -73,7 +73,7 @@ export function resolveAgent(source: string | null | undefined): ActorName | nul
   return null;
 }
 
-const KNOWN_HUMANS = ["Ezra", "Jordan", "Alex"] as const;
+const KNOWN_HUMANS = ["Matt", "Jordan", "Alex"] as const;
 
 /** Canonicalize a member's stored name to one of the known actor labels so the
  *  actor chips match even when the profile name is "Jordan Colleson" rather

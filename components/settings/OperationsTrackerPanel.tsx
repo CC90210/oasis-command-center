@@ -7,7 +7,7 @@
  * email, does a deal, or does anything." Single panel that surfaces:
  *
  *   1. Per-employee 7-day activity rollup (sends, threads, deals
- *      touched) — answers "what is Jordan/Alex/Ezra actually doing"
+ *      touched) — answers "what is Jordan/Alex/Matt actually doing"
  *   2. Last 15 audit events with deep-link to the full /settings/
  *      audit-log page for everything older
  *   3. Quick links to /automations (daemons + crons) and

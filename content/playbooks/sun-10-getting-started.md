@@ -30,7 +30,7 @@ You have two AI teammates. Talk to them like a coworker on the Agents tab.
 
 ## Your login and personal link
 
-- **Ezra** — Submissions@sunbizfunding.com (owner).
+- **Matt** — Submissions@sunbizfunding.com (owner).
 - **Alex** — alex@sunbizfunding.com.
 - **Jordan** — jordan@sunbizfunding.com.
 

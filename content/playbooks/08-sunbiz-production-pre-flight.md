@@ -7,7 +7,7 @@ last_updated: 2026-05-28
 
 # SunBiz production pre-flight
 
-What to do when you sit down at the Mac to pick this up — and what to verify before handing Ezra real data + credentials.
+What to do when you sit down at the Mac to pick this up — and what to verify before handing Matt real data + credentials.
 
 This is the **bring-up + smoke checklist**. For day-2 ops see [06-sunbiz-runbook.md](./06-sunbiz-runbook.md).
 
@@ -83,7 +83,7 @@ Open [`agent-dashboard-sigma-eight.vercel.app`](https://agent-dashboard-sigma-ei
 
 | Click | Expected |
 |---|---|
-| `/t/sun` (dashboard) | SunBizHeroKpis (Hot leads / Missing info / In motion / Funded this month) + SunBizActionBand (Renewal alerts / Offers needing review / Shopping out 7d) — all zeros in preview, real counts when signed in as Ezra |
+| `/t/sun` (dashboard) | SunBizHeroKpis (Hot leads / Missing info / In motion / Funded this month) + SunBizActionBand (Renewal alerts / Offers needing review / Shopping out 7d) — all zeros in preview, real counts when signed in as Matt |
 | Pipeline → **Leads** | 9-stage chevron pipeline. Imported / Not Interested / Approved should NOT appear |
 | Pipeline → **Shopping Out** | 4-step workflow (Pick app → Pick lenders → Attachments → Send). Empty app picker in preview |
 | Pipeline → **Applications** | 10-status pipeline. Click any row → detail drawer with Owner address block + Shop Out button |
@@ -104,11 +104,11 @@ Open [`agent-dashboard-sigma-eight.vercel.app`](https://agent-dashboard-sigma-ei
 
 ---
 
-## Section 3 — Hand-over to Ezra (when you're ready for real data)
+## Section 3 — Hand-over to Matt (when you're ready for real data)
 
-Ezra signs in as `Submissions@sunbizfunding.com`:
+Matt signs in as `Submissions@sunbizfunding.com`:
 
-1. **Grant Ezra owner role on the SunBiz tenant.** Without this, his Settings won't show Devices / AI setup / Team. Run from `Business-Empire-Agent`:
+1. **Grant Matt owner role on the SunBiz tenant.** Without this, his Settings won't show Devices / AI setup / Team. Run from `Business-Empire-Agent`:
    ```sql
    -- Replace <sun-tenant-id> with the value from `SELECT id FROM tenants WHERE slug = 'sun'`
    UPDATE public.user_profiles
@@ -118,9 +118,9 @@ Ezra signs in as `Submissions@sunbizfunding.com`:
    ```
    Run via Supabase SQL Editor (Management API) — apply_migration.py blocks UPDATE statements outside a `DO $$` block, and this is too small to justify a migration file.
 
-2. **Ezra signs in → lands on `/t/sun`** (welcome screen is removed).
+2. **Matt signs in → lands on `/t/sun`** (welcome screen is removed).
 
-3. **Ezra navigates to Settings → Devices (Advanced)** → mints a pair code.
+3. **Matt navigates to Settings → Devices (Advanced)** → mints a pair code.
 
 4. **VPS bring-up** for the bridge daemon (24/7 Sun Biz operations):
    ```bash
@@ -129,27 +129,27 @@ Ezra signs in as `Submissions@sunbizfunding.com`:
    cd Business-Empire-Agent
    python3 -m venv .venv && source .venv/bin/activate
    pip install -r scripts/requirements.txt
-   # Pull the same .env.agents (Ezra's password manager copy).
-   # Pair the bridge with the code Ezra minted in step 3:
+   # Pull the same .env.agents (Matt's password manager copy).
+   # Pair the bridge with the code Matt minted in step 3:
    python scripts/bridge_setup.py pair <pair-code-from-step-3>
    pm2 start scripts/bridge_runner.py --name sunbiz-bridge --interpreter python
    pm2 save && pm2 startup
    ```
    Once paired + running, the Sun Biz Settings → Devices section shows the VPS as "Online" with a recent ping. Sequences + cron jobs + the Shopping Out physical SMTP send now fire automatically.
 
-5. **Ezra connects an AI provider** under Settings → AI setup. OpenRouter is the easiest single key. Without this, Solara / Helios chat doesn't have a model.
+5. **Matt connects an AI provider** under Settings → AI setup. OpenRouter is the easiest single key. Without this, Solara / Helios chat doesn't have a model.
 
-6. **Ezra publishes his first form on `/forms`** for inbound lead capture, then connects Twilio under Settings → Integration keys for outbound SMS. Email goes through the shared Gmail submissions mailbox — no additional setup.
+6. **Matt publishes his first form on `/forms`** for inbound lead capture, then connects Twilio under Settings → Integration keys for outbound SMS. Email goes through the shared Gmail submissions mailbox — no additional setup.
 
-7. **Ezra creates his first lender** under Deals → Lenders → "+ New lender". Without at least one lender, Shopping Out has nothing to rank.
+7. **Matt creates his first lender** under Deals → Lenders → "+ New lender". Without at least one lender, Shopping Out has nothing to rank.
 
-8. **Ezra imports his lead backlog** under System → Import. CSV paste with the existing legacy-stage mapping (migration 064 aliases preserve compatibility — old "Approved" → "Submitted" etc.).
+8. **Matt imports his lead backlog** under System → Import. CSV paste with the existing legacy-stage mapping (migration 064 aliases preserve compatibility — old "Approved" → "Submitted" etc.).
 
 ---
 
 ## Section 4 — Known gaps (operator-visible honesty)
 
-These are surfaced on the Agents & Modules board with "Planned" badges. Document for Ezra so he doesn't expect them on day one:
+These are surfaced on the Agents & Modules board with "Planned" badges. Document for Matt so he doesn't expect them on day one:
 
 - **Email Offer Scanner** — Phase 6.4. No daemon yet polls Gmail for inbound lender offers; operator captures terms manually under Offers.
 - **Browser Offer Extractor** — Phase 6.5. Velocity / lender portal links from emails aren't auto-extracted.
@@ -172,7 +172,7 @@ These caught two real issues during the 2026-05-28 pass — the SunBiz cron leak
 | BRAVO Sleep last run status | `.venv/bin/python scripts/integrations/supabase_tool.py select cron_jobs --eq '{"name": "Bravo — Sleep Agent (Memory Consolidation)"}'` | `last_result` does NOT start with `ERROR:`. If it does, the script can't reach `ANTHROPIC_API_KEY` — check `scripts/bravo_sleep.py:225-235` and `scripts/lib/secret_loader.py` are in sync. |
 | OASIS automations tab clean | Open `https://agent-dashboard-sigma-eight.vercel.app/automations` signed in as CC | Only empire agents (Bravo / Atlas / Maven / Aura) render. No "SunBiz" / "Solara" / "Helios" group should be visible. |
 | Playbook page clean | Open `/playbook` signed in as CC | The "Operating manual" section lists `New Client Onboarding` but NOT `SunBiz production pre-flight`, `SunBiz Runbook`, `Customer Onboarding Script`, or any "Meet Solara" link. |
-| OASIS settings clean for SunBiz operator | Open `/t/sun/settings` as Ezra | Renders the SunBiz tenant's branding / team / integrations only. No CC empire data leaks in. |
+| OASIS settings clean for SunBiz operator | Open `/t/sun/settings` as Matt | Renders the SunBiz tenant's branding / team / integrations only. No CC empire data leaks in. |
 
 If any audit fails, see Section 10 for the architectural rules and Section 4 (Known gaps) for in-flight work.
 
@@ -182,7 +182,7 @@ If any audit fails, see Section 10 for the architectural rules and Section 4 (Kn
 |---|---|
 | Vercel deploy fails | `npx vercel inspect <deployment-url>` for build logs. Most common: missing env var on Vercel project |
 | Build warnings in Vercel | `npx eslint .` locally — must match Vercel's `npm run lint` (which is `eslint .`) |
-| Sun Biz dashboard empty when Ezra is signed in | Ezra's `user_profiles.tenant_id` doesn't match the Sun Biz tenant. Verify with `SELECT email, tenant_id, is_owner FROM user_profiles WHERE email ILIKE '%sunbiz%'` |
+| Sun Biz dashboard empty when Matt is signed in | Matt's `user_profiles.tenant_id` doesn't match the Sun Biz tenant. Verify with `SELECT email, tenant_id, is_owner FROM user_profiles WHERE email ILIKE '%sunbiz%'` |
 | Settings shows operator's data inside `/t/sun/settings` | `resolveDataTenant` returning non-null for the wrong user. Check `lib/manifest/tenant-scope.ts` matched correctly |
 | Drawer opens but no data | `/api/leads/<id>/detail?entity=application` returning 401 / 404. Check the API route + tenant scoping |
 | Bridge offline despite running | `bridge_lock.py status --agent solara --json`. Multi-host arbitration may have stalled — `release` then `acquire` |
@@ -213,7 +213,7 @@ Every shared surface audited; per-leak fix + commit:
 | Issue | Closed by |
 |---|---|
 | Migration 064 silently no-op'd (queried `tenants.slug='sun'` but actual slug is `submissions`); 10 stuck application statuses (`approved`, `submitted_to_underwriting`) | `c088dab` (migration 066) — correctly resolves via `tenant_manifests` |
-| Ezra has no `is_owner=true` on Sun Biz tenant — Settings → Devices hides | `c088dab` migration 066 idempotent grant |
+| Matt has no `is_owner=true` on Sun Biz tenant — Settings → Devices hides | `c088dab` migration 066 idempotent grant |
 | `drip_sequences` table was empty for Sun Biz despite seed updates | `3bdb437` (`scripts/reconcile_sunbiz_sequences.py`) inserted all 8 |
 | `tenant_manifests` row for slug='sun' status | `3bdb437` (`scripts/diag_manifest_drift.py`) — no row exists, in-code SUN_SEED is live (no drift to fix) |
 | send_gateway BRAND_IDENTITY missing 'sunbiz' — outbound emails to lenders used OASIS footer | `4e91145` added sunbiz brand + `shop_out_sender` picks via tenant slug |
@@ -336,7 +336,7 @@ done
 
 ### Operator-facing runbook
 
-`SunBiz-Agent/docs/VPS_BRINGUP.md` (committed 2026-05-25) walks Ezra (or anyone) through cold-starting a VPS in eight steps: clone → setup wizard → env from template → doctor → migrations → PM2 → save → smoke-test. The runbook is the operator-readable counterpart to this section.
+`SunBiz-Agent/docs/VPS_BRINGUP.md` (committed 2026-05-25) walks Matt (or anyone) through cold-starting a VPS in eight steps: clone → setup wizard → env from template → doctor → migrations → PM2 → save → smoke-test. The runbook is the operator-readable counterpart to this section.
 
 ## Section 10 — Three-repo split: what lives where (updated 2026-05-28)
 

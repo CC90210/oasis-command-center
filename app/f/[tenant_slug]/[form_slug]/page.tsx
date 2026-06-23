@@ -131,7 +131,7 @@ export default async function AnonymousFormPage({
   searchParams,
 }: {
   params: Promise<RouteParams>;
-  // ?rep=<jordan|alex|ezra> — per-agent routing. Each agent shares this same
+  // ?rep=<jordan|alex|matt> — per-agent routing. Each agent shares this same
   // interest form with their own rep param; the submit route resolves it to
   // assigned_to so the lead lands under that agent. Spoofing only reassigns
   // among real tenant members (resolved server-side), never an outsider.

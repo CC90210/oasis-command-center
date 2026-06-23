@@ -164,7 +164,7 @@ export const AGENT_REGISTRY: Record<string, AgentInfo> = {
     askMeAbout: "Status of open POs · Draft EDI 856 for the latest shipment · Yesterday's A2000 sync log",
   },
   // Sun Biz Funding — operational primary. Backend admin, Chrome jobs,
-  // data collection, workflow runner. Where Ezra goes when work needs done.
+  // data collection, workflow runner. Where Matt goes when work needs done.
   solara: {
     key: "solara",
     label: "Solara",

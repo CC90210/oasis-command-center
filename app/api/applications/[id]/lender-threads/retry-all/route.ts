@@ -2,7 +2,7 @@
  * POST /api/applications/[id]/lender-threads/retry-all
  *
  * Operator surface: one-click recovery for an ENTIRE shop-out that came back
- * with errors (the "wall of red" Ezra hit on 2026-06-19 — half the lender
+ * with errors (the "wall of red" Matt hit on 2026-06-19 — half the lender
  * threads draft_critic-rejected, half SMTP-auth-failed). Rather than clicking
  * Retry on every row, this flips every recoverable thread on the application
  * back to 'pending' and fires the send batch once.

@@ -1,15 +1,15 @@
 /**
  * agent-routing.ts — per-agent form routing for SunBiz intake.
  *
- * A shared interest form is published once; each agent (Jordan / Alex / Ezra)
+ * A shared interest form is published once; each agent (Jordan / Alex / Matt)
  * shares a link carrying ?rep=<agent>. On submit we resolve that rep to the
  * agent's user_profiles.auth_user_id and stamp it on the new lead as
  * assigned_to — so the Opportunity Pipeline + drawer show the deal under that
  * agent's NAME (lib/assigned-names.ts already resolves assigned_to → name).
  *
  * We resolve against user_profiles (the authoritative owner of assigned_to),
- * NOT agents.config.json — the config roster is keyed for email-signing and
- * uses "Matt" where the tenant member is "Ezra". Matching tenant members by
+ * NOT agents.config.json — the config roster is keyed for email-signing.
+ * Matching tenant members by
  * name / email-local also means the member list IS the allowlist: a spoofed
  * ?rep only ever reassigns among real tenant members, never an outsider.
  *
@@ -26,10 +26,15 @@ import { getServiceSupabase } from "@/lib/supabase-server";
 
 export type RepAssignment = { auth_user_id: string; name: string };
 
+// Backward-compat: per-agent links shared before the 2026-06-23 Ezra→Matt rename
+// carry ?rep=ezra. Alias the legacy key to the current member name so those
+// links still route to the owner instead of landing unassigned.
+const REP_ALIASES: Record<string, string> = { ezra: "matt" };
+
 /**
  * Resolve a ?rep=<key> to a tenant member. `key` matches the member's display
  * name / full name (case-insensitive) or their email local-part — so ?rep=jordan,
- * ?rep=alex, ?rep=ezra all resolve. Returns null for unknown reps (lead lands
+ * ?rep=alex, ?rep=matt all resolve (legacy ?rep=ezra aliases to matt). Returns null for unknown reps (lead lands
  * unassigned, not crashed).
  */
 export async function resolveRepAssignment(
@@ -37,8 +42,9 @@ export async function resolveRepAssignment(
   repKey: string | undefined | null,
 ): Promise<RepAssignment | null> {
   if (!repKey || typeof repKey !== "string") return null;
-  const key = repKey.trim().toLowerCase();
-  if (!key) return null;
+  const raw = repKey.trim().toLowerCase();
+  if (!raw) return null;
+  const key = REP_ALIASES[raw] ?? raw;
   const members = await getTenantMembers(tenantId).catch(() => []);
   for (const m of members) {
     if (!m.auth_user_id) continue;

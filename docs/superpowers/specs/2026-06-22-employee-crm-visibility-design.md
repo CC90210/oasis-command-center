@@ -1,14 +1,16 @@
 # Per-employee CRM visibility, shared deals & live updates — design (2026-06-22)
 
+> **Note (2026-06-23):** "Ezra" was a placeholder alias — the SunBiz tenant owner is **Matt** (`Submissions@sunbizfunding.com`, `is_owner=true`). Live roster is three members: **Matt** (owner), **Jordan** (admin), **Alex** (member). The body below was written assuming a separate "Matt admin" + "Ezra member"; that's one person. With the live roster, Alex is the only own-only agent; Matt + Jordan are the admin set.
+
 ## Context
 
-SunBiz reps (Ezra, Jordan, Alex, + admin Matt) currently see **every** lead in the tenant, not just their own. Alex gets 10 leads from his personalized `?rep=alex` form link but the pipeline shows him 15 — including Jordan's 5 — causing overlap and confusion. CC wants true per-employee personalization: each agent sees only the leads/applications/deals **assigned to them** (or **shared** with them), ownership is transferable, and a reassignment shows up in the new owner's pipeline **live**. Deal-making sometimes pairs two agents (Alex+Jordan, Jordan+Ezra, etc.) — those deals must be visible to exactly the agents on them.
+SunBiz reps (Matt, Jordan, Alex) currently see **every** lead in the tenant, not just their own. Alex gets 10 leads from his personalized `?rep=alex` form link but the pipeline shows him 15 — including Jordan's 5 — causing overlap and confusion. CC wants true per-employee personalization: each agent sees only the leads/applications/deals **assigned to them** (or **shared** with them), ownership is transferable, and a reassignment shows up in the new owner's pipeline **live**. Deal-making sometimes pairs two agents (Alex+Jordan, etc.) — those deals must be visible to exactly the agents on them.
 
 **Good news from exploration:** ~70% of this already exists (Adon Batch 2, 2026-06-19) and is simply turned **off**. This design *completes and activates* it, then adds the genuinely new pieces (shared deals + live updates).
 
 ## Decisions (CC, 2026-06-22)
 
-1. **Admins = owner (CC) + Jordan + Matt** — see all leads + who they're assigned to. **Agents = Ezra + Alex** — see only their own + shared.
+1. **Admins = CC + owner Matt + Jordan** — see all leads + who they're assigned to. **Agent = Alex** — sees only their own + shared.
 2. **Shared deals = a collaborators list** — one primary owner + any number of co-agents (supports the 2-agent pairings now, 3-way later, no rework).
 3. **Live updates = Supabase Realtime broadcast nudge** — instant, carries no lead data, no table-RLS prerequisite.
 4. **Scope coverage = leads + applications + funded deals** (renewals follow funded deals).
@@ -38,7 +40,7 @@ canSee(viewer, record) =
   || (record.data.collaborators ?? []).includes(viewer.userId)
 ```
 
-- **Admin set** is unchanged in mechanism (`is_owner || team_role ∈ {admin, owner}`). Action item: ensure Jordan + Matt have `team_role = admin`; Ezra + Alex are `member` (data step, part of rollout).
+- **Admin set** is unchanged in mechanism (`is_owner || team_role ∈ {admin, owner}`). Action item: ensure Jordan has `team_role = admin`; Alex is `member` (Matt is the owner — already in the admin set). Data step, part of rollout.
 - Fail-closed: non-admin with no resolved `userId` → `NO_LEADS`.
 
 ### 2. Data model
@@ -76,7 +78,7 @@ To wire (pass the viewer = `{isAdmin, userId}` and apply the scoped query / `fil
 
 ### 7. Rollout (bulk-assign first, then flip)
 
-1. Set `team_role` so Jordan + Matt = admin, Ezra + Alex = member.
+1. Set `team_role` so Jordan = admin, Alex = member (Matt = owner, already in the admin set).
 2. Use/confirm the bulk-assign tool to distribute currently-unassigned leads/applications/funded_deals to the right reps (admin-only "Select mode" already exists per Batch hardening).
 3. Set `LEAD_SCOPING_ENABLED=true` in Vercel (production). Verify each role sees the right board.
 4. New inbound leads auto-tag via `?rep=` (already working), so the assigned bucket stays populated.
@@ -96,7 +98,7 @@ Scoping is app-layer (service-role bypasses RLS); a single missed surface leaks.
 ## Testing / verification
 - Unit: extend `tests/lead-scope.test.ts` + `tests/employee-scoped-pipeline.test.ts` for the collaborator OR (owner sees; collaborator sees; non-member doesn't; admin sees all; fail-closed).
 - Integration: records-API + dashboard counts scoped per viewer; collaborators endpoint owner-or-admin gate; assign emits broadcast.
-- Manual (prod after rollout): Alex sees only Alex's; assign Alex→Jordan, Jordan's board updates live; add Ezra as collaborator on Alex's deal → both see it, Jordan (non-collab agent) doesn't; admin (Jordan/Matt) sees all.
+- Manual (prod after rollout): Alex sees only Alex's; assign Alex→Jordan, Jordan's board updates live; add a collaborator on Alex's deal → both see it, a non-collaborator member doesn't; admin (Matt/Jordan) sees all.
 - `npm run typecheck && npm run lint && npm run build` green before each push; ship to `main` (production).
 - Rule 8: Codex independent audit of the access-control changes before declaring done (this is security-sensitive).
 

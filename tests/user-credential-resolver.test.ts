@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 // This is a pure-logic regression lock on the scope tagging in the
 // integration-schemas registry: gmail_oauth is the only entry with
 // scope="user_only" today; everything else (TextTorrent, Kixie, Stripe)
-// stays tenant-scoped and uses Ezra's shared API keys regardless of
+// stays tenant-scoped and uses Matt's shared API keys regardless of
 // which employee is acting.
 
 import { INTEGRATION_SCHEMAS } from "../lib/tenant-integration-schemas";

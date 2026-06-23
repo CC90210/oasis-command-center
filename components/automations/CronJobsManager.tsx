@@ -68,7 +68,7 @@ type Props = { agentKeys: string[] };
  * agent to a tenant means adding a one-line entry here OR falling
  * back to the auto-titlecased default.
  *
- * Closes the 2026-05-25 leak where Ezra on Sun Biz was seeing
+ * Closes the 2026-05-25 leak where Matt on Sun Biz was seeing
  * "Bravo (CEO) — Business Operations / no automations yet" groups
  * for CC's empire agents.
  */
@@ -377,7 +377,7 @@ export function CronJobsManager({ agentKeys }: Props) {
         // Group by AGENT, driven by the tenant's actual agentKeys
         // (passed in from /automations after filtering by the
         // signed-in user's profile.agents_enabled). Closes the
-        // 2026-05-25 leak — Ezra on Sun Biz now sees Solara / Helios
+        // 2026-05-25 leak — Matt on Sun Biz now sees Solara / Helios
         // groups (his actual agents), not CC's empire C-suite.
         //
         // Display copy comes from AGENT_GROUP_COPY for known agents;

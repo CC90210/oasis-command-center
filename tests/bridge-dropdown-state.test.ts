@@ -52,12 +52,12 @@ assert.ok(DROPDOWN_SUFFIX.checking.includes("checking"));
 assert.ok(DROPDOWN_SUFFIX.offline.includes("offline"));
 
 // ---- 3. isDropdownEnabled — online + degraded enabled; checking + offline disabled ----
-// The Ezra scenario (round 3 / 4) is specifically that degraded must
+// The Matt scenario (round 3 / 4) is specifically that degraded must
 // remain ENABLED. The user can click and the tool call surfaces a clear
 // error if the proxy is genuinely broken — but we no longer silently
 // disable the dropdown when the daemon is alive.
 assert.equal(isDropdownEnabled("online"), true, "online → enabled");
-assert.equal(isDropdownEnabled("degraded"), true, "degraded → ENABLED (Ezra fix)");
+assert.equal(isDropdownEnabled("degraded"), true, "degraded → ENABLED (Matt fix)");
 assert.equal(isDropdownEnabled("checking"), false, "checking → disabled");
 assert.equal(isDropdownEnabled("offline"), false, "offline → disabled");
 

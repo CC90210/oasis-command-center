@@ -113,7 +113,7 @@ Wire the third-party services that close the loop.
 If the client uses n8n for lead enrichment or lender callbacks, import the SunBiz starter workflows from `scripts/n8n_workflows/sunbiz/*.json` via the n8n MCP. Skip if they're not on n8n.
 
 ### Lead intake forms (native, no third party)
-The dashboard's `/forms` designer is the canonical intake mechanism. Walk Ezra through building a form there, then share the published link (`/f/<tenant>/<form>` for anonymous, `/f/<tenant>/<form>/<lead_token>` for personalized via Solara mint). Submissions land in `tenant_records` (entity_type=lead) automatically and trigger the `viewed_application` drip via `/api/forms/view`.
+The dashboard's `/forms` designer is the canonical intake mechanism. Walk Matt through building a form there, then share the published link (`/f/<tenant>/<form>` for anonymous, `/f/<tenant>/<form>/<lead_token>` for personalized via Solara mint). Submissions land in `tenant_records` (entity_type=lead) automatically and trigger the `viewed_application` drip via `/api/forms/view`.
 
 If the client wants to keep an existing third-party form temporarily, point its webhook at `<dashboard>/api/inbound/lead` with the HMAC secret from their `n8n_webhook_secrets` row. New deployments should use the native designer.
 

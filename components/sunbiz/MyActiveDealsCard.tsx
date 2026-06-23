@@ -152,7 +152,7 @@ function EmptyState() {
       <Inbox className="mx-auto mb-2 h-6 w-6 text-fg-dim" />
       <p className="text-[12.5px] font-semibold text-fg">No deals assigned to you yet.</p>
       <p className="mx-auto mt-1 max-w-md text-[11.5px] text-fg-muted leading-relaxed">
-        Ezra (or any admin) can assign deals to you from the lead drawer. You can also self-assign a deal you&apos;re actively working on — the &ldquo;Assign to&rdquo; dropdown is at the bottom of every lead.
+        Matt (or any admin) can assign deals to you from the lead drawer. You can also self-assign a deal you&apos;re actively working on — the &ldquo;Assign to&rdquo; dropdown is at the bottom of every lead.
       </p>
     </div>
   );

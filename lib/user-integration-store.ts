@@ -6,7 +6,7 @@
  * encryption (via lib/field-encryption), same read/write semantics —
  * just scoped to a specific employee instead of the tenant. Used for
  * credentials that MUST be the employee's personally (Gmail OAuth
- * refresh tokens — Alex's emails come from Alex's address, not Ezra's
+ * refresh tokens — Alex's emails come from Alex's address, not Matt's
  * shared submissions@).
  *
  * Read precedence in the send pipeline:

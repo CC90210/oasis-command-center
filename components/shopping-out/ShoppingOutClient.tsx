@@ -112,7 +112,7 @@ const STATUS_TONE: Record<string, string> = {
 };
 
 // Human-readable label for a thread in a needs-attention state. Operators
-// (Ezra, Jordan, Alex, Emily) are not engineers — a raw
+// (Matt, Jordan, Alex, Emily) are not engineers — a raw
 // "script_failed (exit 1) --- stdout --- {...auth_failed...}" dump is noise.
 // Map the known failure classes to a plain-English message + a clear next
 // step; the raw text is preserved in the row's title= tooltip for debugging.

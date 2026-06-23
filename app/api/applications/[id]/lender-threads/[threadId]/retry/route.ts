@@ -9,7 +9,7 @@
  * status='error'. Without this endpoint the operator's only recovery
  * path is either (a) raw SQL, or (b) SSH-ing to the VPS and running
  *   `python scripts/shop_out_sender.py retry-errors --tenant-id <uuid>`.
- * Neither is acceptable for non-engineer operators (Ezra, Jordan, Emily,
+ * Neither is acceptable for non-engineer operators (Matt, Jordan, Emily,
  * Alex). One-click Retry next to the error row is.
  *
  * Auth: session cookie + tenant_id match on the application (the same

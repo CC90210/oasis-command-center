@@ -84,7 +84,7 @@ type SubmitBody = {
   anonymous_init?: {
     tenant_slug?: string;
     form_slug?: string;
-    // ?rep=<jordan|alex|ezra> from the per-agent interest link — resolved to
+    // ?rep=<jordan|alex|matt> from the per-agent interest link — resolved to
     // assigned_to so the lead lands under that agent.
     rep?: string;
   };

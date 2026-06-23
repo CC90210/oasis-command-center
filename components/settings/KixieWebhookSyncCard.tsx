@@ -66,7 +66,7 @@ export function KixieWebhookSyncCard({ isOwner }: { isOwner: boolean }) {
     >
       {!isOwner ? (
         <div className="text-sm text-fg-muted">
-          Only the workspace owner can register Kixie webhooks. Ask Ezra to run this from his Settings.
+          Only the workspace owner can register Kixie webhooks. Ask Matt to run this from his Settings.
         </div>
       ) : (
         <div className="space-y-3">

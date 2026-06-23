@@ -247,7 +247,7 @@ const CLI_RUNTIME_LABELS: Record<CliRuntime, string> = {
 // proxies (Supabase-cookie-authed; the server attaches the VPS bearer). When
 // false (CC's localhost), bridge calls hit ${BRIDGE_CHAT_BASE} directly.
 //
-// 2026-06-09 incident: every SunBiz employee (Ezra, Jordan, Emily, Alex) saw
+// 2026-06-09 incident: every SunBiz employee (Matt, Jordan, Emily, Alex) saw
 // "(bridge offline)" on all three CLI options on oasisai.work despite the
 // sidebar showing BRIDGE ONLINE. Root cause: NEXT_PUBLIC_BRIDGE_CHAT_BASE
 // was registered in Vercel as "Encrypted" — and the production webpack

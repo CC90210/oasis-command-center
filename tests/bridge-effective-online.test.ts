@@ -11,7 +11,7 @@ import { computeEffectiveBridgeOnline } from "../lib/bridge-effective-online";
 // independent now.
 //
 // These tests pin all four state combinations. If a future "tighten the
-// gate" pass re-introduces the proxyMode requirement (and the same Ezra
+// gate" pass re-introduces the proxyMode requirement (and the same Matt
 // bug returns), these fail.
 
 // ---- 1. Both signals true → online. The healthy case. ----
@@ -36,7 +36,7 @@ assert.equal(
 );
 
 // ---- 3. Only the server signal says true → STILL online. ----
-// This is the Ezra-incident case the round-3 fix targeted. The bridge
+// This is the Matt-incident case the round-3 fix targeted. The bridge
 // daemon is alive (DB heartbeat fresh from outbound ping) but the
 // Vercel→VPS proxy is broken (env vars cleared), so the client probe
 // returns false. We MUST treat this as online so the dropdown is usable.

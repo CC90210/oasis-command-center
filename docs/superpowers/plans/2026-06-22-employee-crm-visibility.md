@@ -1,5 +1,7 @@
 # Per-employee CRM Visibility Implementation Plan
 
+> **Note (2026-06-23):** "Ezra" was a placeholder alias — the SunBiz tenant owner is **Matt** (`Submissions@sunbizfunding.com`, `is_owner=true`). Live roster is three members: **Matt** (owner), **Jordan** (admin), **Alex** (member) — not the four implied below. References corrected accordingly; with this roster Alex is the only own-only agent.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: superpowers:executing-plans (inline) or subagent-driven-development. Steps use `- [ ]`.
 
 **Goal:** Each SunBiz agent sees only their own + shared leads/applications/funded-deals; admins see all; reassignment + collaborators update the right boards live.
@@ -10,7 +12,7 @@
 
 ## Global Constraints
 - Scope applies to entities: **lead, application, funded_deal** (renewal follows funded_deal). Other entities tenant-shared.
-- Admin = `user_profiles.is_owner || team_role ∈ {admin, owner}` (owner CC + Jordan + Matt). Agents = Ezra, Alex.
+- Admin = `user_profiles.is_owner || team_role ∈ {admin, owner}` (CC + owner Matt + Jordan). Agent = Alex.
 - Fail-closed: non-admin, unresolved identity → no rows (`NO_LEADS`).
 - All scope logic centralized in `lib/lead-scope.ts`; every surface calls it — never re-implement the predicate.
 - `assigned_to` + `collaborators` entries are lowercased auth_user_ids. Collaborators cap = 5.
@@ -53,7 +55,7 @@
 ### Task 5: Roles + bulk-assign + flag (rollout prep)
 **Files:** verify `app/api/leads/bulk/route.ts` (bulk assign exists); data step (SQL) for roles; doc the env flag.
 - [ ] Confirm bulk-assign supports assigning many leads to a rep (owner-or-admin gated). If a gap, add `assigned_to` to the bulk action.
-- [ ] Data step (run at rollout, not code): `user_profiles.team_role='admin'` for Jordan + Matt; `'member'` for Ezra + Alex (via supabase_tool.py). Document exact UUIDs at run time.
+- [ ] Data step (run at rollout, not code): `user_profiles.team_role='admin'` for Jordan; `'member'` for Alex (Matt is the owner — `is_owner=true`, `team_role='owner'` — already in the admin set; leave as-is). Document exact UUIDs at run time.
 - [ ] Do NOT set `LEAD_SCOPING_ENABLED=true` until P1 verified + leads distributed.
 
 ---

@@ -274,7 +274,7 @@ export default async function RootLayout({
             {/* Brand + primary-agent resolution (fixed 2026-05-25
                 Codex review caught a P2 in the first attempt — using
                 bare pathOverrideSlug also fires on the OWNER'S OWN
-                tenant route, which would override Ezra's saved
+                tenant route, which would override Matt's saved
                 profile.brand customization on /t/sun/* when he owns
                 that slug. The correct distinction is "is the URL
                 tenant DIFFERENT from the user's own tenant" — that's

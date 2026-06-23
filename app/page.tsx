@@ -70,7 +70,7 @@ export default async function TodayPage() {
           null
         )
         : null;
-  // SunBiz operators (Ezra et al.) land directly on the manifest
+  // SunBiz operators (Matt et al.) land directly on the manifest
   // dashboard at /t/sun. The prior welcome/setup-wizard screen was
   // removed 2026-05-25 per CC — real operators don't need an intro
   // screen on every login; they need the work surface. Demo previews

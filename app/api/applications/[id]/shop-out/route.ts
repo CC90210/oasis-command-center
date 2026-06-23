@@ -92,8 +92,8 @@ async function triggerPhysicalSend(
         // agents.config.json → passes signer name/email/phone. Bridge
         // tool sets BRAVO_FROM_DISPLAY/BRAVO_FROM_EMAIL env vars when
         // spawning send_gateway, so each rep's email signs with THEIR
-        // name (Jordan signs Jordan, Alex signs Alex, Ezra/Matt signs
-        // Matt). When the operator isn't in agents.config.json, the
+        // name (Jordan signs Jordan, Alex signs Alex, Matt signs Matt).
+        // When the operator isn't in agents.config.json, the
         // signer is the shared "SunBiz Submissions" identity.
         signer_name: signer.name,
         signer_email: signer.email,
@@ -433,7 +433,7 @@ export async function POST(
 
   // 2026-05-25 (migration 069) — resolve assigned-rep phone at queue
   // time so shop_out_sender.py can substitute {{owner_phone}} in body
-  // templates with the correct rep (Jordan / Ethan / Ezra / Emily).
+  // templates with the correct rep (Jordan / Ethan / Matt / Emily).
   // Stored on each thread row so reassignment AFTER queue doesn't
   // silently change the outbound.
   const ownerPhone =

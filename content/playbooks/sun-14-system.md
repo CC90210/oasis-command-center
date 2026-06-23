@@ -20,7 +20,7 @@ Bring in leads by CSV — two lanes.
 Your three application forms plus your personal links. This replaced JotForm.
 
 - **Three step cards:** Initial Lead Capture (the short interest form), Full Application (the full app), Bank Statement Upload. Each has **Open form editor** and **Preview live form**.
-- **Per-agent links** — **Copy** buttons for Jordan, Alex, and Ezra. This is the link you share with prospects — a lead from your link is assigned to you automatically.
+- **Per-agent links** — **Copy** buttons for Jordan, Alex, and Matt. This is the link you share with prospects — a lead from your link is assigned to you automatically.
 
 95% of your time here is just clicking Copy on your own link.
 
@@ -62,4 +62,4 @@ Configuration — owner-level.
 - **Integrations** — API keys for the tools (TextTorrent, Kixie, email, etc.): Save, Test, Clear.
 - Team invites, password, device pairing, and AI provider keys also live here.
 
-Ezra (owner) handles this. Alex and Jordan rarely need it.
+Matt (owner) handles this. Alex and Jordan rarely need it.

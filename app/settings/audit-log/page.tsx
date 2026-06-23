@@ -38,7 +38,7 @@ export default async function AuditLogPage({
     <div className="space-y-6 animate-fade-in">
       <PageHeader
         title="Activity Log"
-        subtitle="Read-only trail of who did what — your team (Ezra, Jordan, Alex) and your agents (Helios, Solara): sends, automations, stage changes, chats, and team changes."
+        subtitle="Read-only trail of who did what — your team (Matt, Jordan, Alex) and your agents (Helios, Solara): sends, automations, stage changes, chats, and team changes."
         action={
           <Link href="/settings" className="btn-secondary text-xs">
             Back to settings
