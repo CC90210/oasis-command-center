@@ -9,7 +9,6 @@ import {
 } from "@/lib/client-profiles";
 import { listPlaybooks, type PlaybookFile } from "@/lib/playbooks";
 import { getActiveProfile, getTenant } from "@/lib/queries";
-import { demoHref } from "@/lib/demo-href";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -95,34 +94,19 @@ const SUNBIZ_SECTIONS: PlaybookSection[] = [
     title: "Template Library",
     subtitle: "28 live HTMLs - preview - copy - Helios send - Solara variants",
     body:
-      "The working HTML library Ezra and the team actually use. Preview the email, copy the source, send the approved design with Helios, or ask Solara to create a new variant.",
-  },
-  {
-    href: "/playbook/sun-10-getting-started",
-    title: "Operating Map",
-    subtitle: "Agents - ownership - daily rhythm - golden rules",
-    body:
-      "The short, real map of who owns what: Matt, Ezra, Ethan, Solara, and Helios. Keep this as the orientation layer while the rest of the playbook gets rebuilt.",
-  },
-  {
-    href: "/playbook/sun-11-operations",
-    title: "Agent Desk",
-    subtitle: "Dashboard - Solara - Helios - reasoning - manual",
-    body:
-      "The command desk. Use the dashboard to pick the next file, Solara for funding ops, Helios for sales language, and Reasoning for one-click deal prompts.",
+      "The working HTML library Ezra and the team actually use. Preview the email at full size, copy the source, send the approved design with Helios, or ask Solara to create a new variant.",
   },
 ];
 
-const SUN_MANUAL_ORDER = [
-  "sun-10-getting-started",
-  "sun-11-operations",
-] as const;
+const SUN_MANUAL_ORDER = [] as const;
 
 const LEGACY_SUN_ONBOARDING_SLUGS = [
   "01-getting-started",
   "02-safe-interaction",
   "03-when-to-call-cc",
   "04-pause-and-rollback",
+  "sun-10-getting-started",
+  "sun-11-operations",
   "sun-12-pipeline",
   "sun-13-deals",
   "sun-14-system",
@@ -132,7 +116,7 @@ const LEGACY_SUN_ONBOARDING_SLUGS = [
 // Slugs that belong to the SunBiz operating manual and must NEVER appear on
 // the OASIS Playbook index (otherwise "Meet Solara" leaks into CC's portal).
 // The frontmatter-driven check in isSunBizPlaybook() below is the
-// future-proofing layer — any new playbook with `audience: sunbiz-*` or a
+// future-proofing layer - any new playbook with `audience: sunbiz-*` or a
 // `sun` / `sunbiz` slug prefix is auto-excluded without needing an entry here.
 const SUN_PLAYBOOK_SLUGS = new Set<string>([
   ...SUN_MANUAL_ORDER,
@@ -182,17 +166,6 @@ function isSunBizPlaybook(file: PlaybookFile): boolean {
   return false;
 }
 
-const SUN_MANUAL_META: Record<string, { eyebrow: string; summary: string }> = {
-  "sun-10-getting-started": {
-    eyebrow: "Map",
-    summary: "The deal spine, daily rhythm, and Ezra/Ethan/Matt ownership lanes.",
-  },
-  "sun-11-operations": {
-    eyebrow: "Desk",
-    summary: "Dashboard triage, Solara/Helios usage, and Reasoning prompt shortcuts.",
-  },
-};
-
 export default async function PlaybookIndex() {
   const operatingManual = await listPlaybooks();
   const profile = await safe("playbook.profile", getActiveProfile(), null);
@@ -214,10 +187,7 @@ export default async function PlaybookIndex() {
         : null;
 
   if (tenantProfileSlug === "sun") {
-    const manualFiles = SUN_MANUAL_ORDER
-      .map((slug) => operatingManual.find((file) => file.slug === slug) || null)
-      .filter((file): file is PlaybookFile => file !== null);
-    return <SunBizPlaybookIndex manualFiles={manualFiles} demoMode={demoProfile.id === "sun"} />;
+    return <SunBizPlaybookIndex />;
   }
 
   const defaultManual = operatingManual.filter((f) => !isSunBizPlaybook(f));
@@ -233,7 +203,7 @@ function DefaultPlaybookIndex({ operatingManual }: { operatingManual: PlaybookFi
         action={<Tag tone="accent">v3 - canonical</Tag>}
       />
 
-      {/* Uniform-height grid — every card stretches to match the tallest
+      {/* Uniform-height grid - every card stretches to match the tallest
           card in its row so the lineup reads as a clean lattice instead
           of the prior mangled-blocks look. `h-full` on the wrapper +
           card + content makes CSS Grid sync row heights; line-clamp on
@@ -309,32 +279,21 @@ function DefaultPlaybookIndex({ operatingManual }: { operatingManual: PlaybookFi
   );
 }
 
-function SunBizPlaybookIndex({
-  manualFiles,
-  demoMode = false,
-}: {
-  manualFiles: PlaybookFile[];
-  demoMode?: boolean;
-}) {
-  const playbookEntryHref = (slug: string) => demoHref(`/playbook/${slug}`, { demoMode });
+function SunBizPlaybookIndex() {
   return (
     <div className="space-y-8 animate-fade-in">
       <PageHeader
         title="Playbook"
-        subtitle="Working tools and real operating material for the SunBiz team. Start with the Template Library."
-        action={<Tag tone="engaged">SunBiz live playbook</Tag>}
+        subtitle="The SunBiz playbook is the live HTML Template Library. Every visible card opens a working tool."
+        action={<Tag tone="engaged">SunBiz template ops</Tag>}
       />
 
-      {/* Feature manual - working cards only. */}
-      <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-5">
+      {/* Working cards only. If a SunBiz page is not a real tool, it does not belong here. */}
+      <div className="grid max-w-2xl gap-5">
         {SUNBIZ_SECTIONS.map((section, index) => (
           <Link
             key={section.href}
-            href={
-              section.href.startsWith("/playbook/")
-                ? playbookEntryHref(section.href.replace("/playbook/", ""))
-                : section.href
-            }
+            href={section.href}
             className="group block h-full"
           >
             <Card className="h-full">
@@ -358,41 +317,6 @@ function SunBizPlaybookIndex({
           </Link>
         ))}
       </div>
-
-      {manualFiles.length > 0 && (
-        <section className="space-y-4">
-          <div>
-            <h2 className="text-lg font-bold text-fg">SunBiz operating guides</h2>
-            <p className="text-sm text-fg-muted">
-              Only real operating docs stay here. Draft pages are hidden until
-              they have business value.
-            </p>
-          </div>
-          <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-4">
-            {manualFiles.map((file, index) => {
-              const meta = SUN_MANUAL_META[file.slug] || {
-                eyebrow: `Step ${(index + 1).toString().padStart(2, "0")}`,
-                summary: file.title,
-              };
-              return (
-                <Link key={file.slug} href={playbookEntryHref(file.slug)} className="group block h-full">
-                  <Card className="h-full">
-                    <div className="space-y-2">
-                      <div className="text-[10px] uppercase tracking-[0.16em] font-bold text-accent">
-                        {meta.eyebrow}
-                      </div>
-                      <div className="text-fg font-semibold group-hover:text-accent transition-colors">
-                        {file.title}
-                      </div>
-                      <p className="text-xs text-fg-muted leading-relaxed line-clamp-3">{meta.summary}</p>
-                    </div>
-                  </Card>
-                </Link>
-              );
-            })}
-          </div>
-        </section>
-      )}
     </div>
   );
 }

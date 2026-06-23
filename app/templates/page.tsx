@@ -340,7 +340,7 @@ function PreviewModal({
       aria-modal="true"
       aria-labelledby="template-preview-title"
     >
-      <div className="flex h-[92vh] w-full max-w-5xl flex-col overflow-hidden rounded-lg border border-bg-border bg-bg-panel shadow-2xl">
+      <div className="flex h-[94vh] w-full max-w-[1180px] flex-col overflow-hidden rounded-lg border border-bg-border bg-bg-panel shadow-2xl">
         <header className="flex flex-col gap-3 border-b border-bg-border bg-bg-panel px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
           <div className="flex min-w-0 items-center gap-3">
             <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-accent-muted/30 bg-accent-soft text-accent">
@@ -407,12 +407,12 @@ function PreviewModal({
 
         <div className="min-h-0 flex-1 overflow-auto">
           {viewMode === "preview" ? (
-            <div className="flex min-h-full justify-center bg-slate-200 p-3 sm:p-5">
+            <div className="h-full min-h-[620px] bg-[#071226]">
               <iframe
                 title={`Preview: ${template.name}`}
                 srcDoc={previewHtml}
                 sandbox=""
-                className="h-full min-h-[560px] w-full max-w-[680px] rounded-md border-0 bg-white shadow-xl"
+                className="h-full w-full border-0 bg-[#071226]"
               />
             </div>
           ) : (

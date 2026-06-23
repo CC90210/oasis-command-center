@@ -13,14 +13,10 @@ carry real operating value.
 
 - `/templates` - the production HTML Template Library with preview, copy, Use with Helios, and Solara variant creation
 
-## Visible operating guides
-
-- `sun-10-getting-started` - SunBiz operating map for Ezra, Ethan, and Matt
-- `sun-11-operations` - Dashboard, Solara, Helios, Reasoning, and Playbook
-
-The old `01` to `04` onboarding docs and the draft `sun-12` to `sun-15`
-pages are not surfaced in the SunBiz Playbook. Rebuild those only when each
-one becomes a real working tool or a real business document.
+No SunBiz operating guides are surfaced right now. The old `01` to `04`
+onboarding docs and the draft `sun-10` to `sun-15` pages are not surfaced in
+the SunBiz Playbook. Rebuild those only when each one becomes a real working
+tool or a real business document.
 
 ## Operator-side (you, CC)
 

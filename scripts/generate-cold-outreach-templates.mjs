@@ -41,18 +41,18 @@ const entries = files.map((file) => {
   // titles carry for the browser-tab view of the template library.
   const titleMatch = html.match(/<title>([^<]*)<\/title>/i);
   const subject = (titleMatch ? titleMatch[1] : titleCase(key))
-    .replace(/\s*—\s*SunBiz Funding\s*$/i, "")
+    .replace(/\s*(?:\u2014|-|&mdash;|&#8212;)\s*SunBiz Funding\s*$/i, "")
     .trim();
   return { key, name: titleCase(key), subject, html };
 });
 
-const banner = `// GENERATED FILE — do not edit by hand.
+const banner = `// GENERATED FILE - do not edit by hand.
 // Run \`node scripts/generate-cold-outreach-templates.mjs\` after updating
 // the .html sources in lib/cold-outreach/templates/ (which mirror
 // SunBiz-Agent/docs/*.html).
 
 export type ColdOutreachTemplate = {
-  /** Stable key — the source filename without extension. */
+  /** Stable key - the source filename without extension. */
   key: string;
   /** Display name for the picker. */
   name: string;
