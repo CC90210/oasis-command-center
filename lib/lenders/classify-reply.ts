@@ -80,7 +80,7 @@ export async function classifyLenderReply(subject: string, body: string): Promis
       method: "POST",
       headers: { "content-type": "application/json", "x-api-key": apiKey, "anthropic-version": "2023-06-01" },
       body: JSON.stringify({
-        model: "claude-haiku-4-5",
+        model: "claude-sonnet-4-6",
         max_tokens: 200,
         system: SYSTEM,
         messages: [{ role: "user", content }],
