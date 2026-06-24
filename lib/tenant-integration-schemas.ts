@@ -65,10 +65,11 @@ export const INTEGRATION_SCHEMAS: IntegrationSchema[] = [
   {
     service: "texttorrent",
     label: "TextTorrent",
-    description: "TT API for the Text Torrent button on the lead drawer + bulk sequences.",
+    description:
+      "TT API for the Text Torrent button on the lead drawer + bulk sequences. One shared API key across the team; each rep sets their own sending number under Settings → Personal integrations.",
     fields: [
       { key: "api_key", label: "API Key", sensitive: true },
-      { key: "from_number", label: "From Number (optional)", sensitive: false, validation: "phone_e164" },
+      { key: "from_number", label: "Default Business Number", sensitive: false, validation: "phone_e164", hint: "E.164 format, e.g. +14165551212. Used for automated (Helios) sends and when a rep hasn't set their own number." },
     ],
   },
   {

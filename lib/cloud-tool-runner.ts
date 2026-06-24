@@ -87,6 +87,7 @@ import {
   blockContact as ttBlockContact,
   unblockContact as ttUnblockContact,
 } from "./integrations/texttorrent";
+import { resolveTextTorrentSenderId } from "./integrations/texttorrent-sender";
 
 const ANTHROPIC_VERSION = "2023-06-01";
 const MAX_TOOL_ITERATIONS = 8; // safety cap — prevents runaway tool loops
@@ -1688,7 +1689,12 @@ async function toolTextTorrentSend(input: Record<string, unknown>, ctx: ToolCont
     throw new Error("opted_out: recipient previously replied STOP — send blocked.");
   }
   const creds = await getTextTorrentCredentials(ctx.tenantId);
-  await ttSendSms(creds, { number, message });
+  // Per-rep "text from my own number" (2026-06-24): a chat-tool send has the
+  // operator in the loop (ctx.userId) — send from THEIR own TextTorrent number
+  // when set, else the tenant default. logCommsInteraction already attributes
+  // to the human via actor_user_id.
+  const senderId = await resolveTextTorrentSenderId({ tenantId: ctx.tenantId, userId: ctx.userId });
+  await ttSendSms(creds, { number, message, sender_id: senderId });
   await logCommsInteraction({ tenantId: ctx.tenantId, leadId: null, toPhone: number, preview: message, userId: ctx.userId, type: "sms_sent", channel: "sms", provider: "texttorrent", dryRun: false });
   return { ok: true, dry_run: false, number };
 }
@@ -1707,7 +1713,10 @@ async function toolTextTorrentInboxReply(input: Record<string, unknown>, ctx: To
     throw new Error("opted_out: recipient previously replied STOP — send blocked.");
   }
   const creds = await getTextTorrentCredentials(ctx.tenantId);
-  await ttReplyToThread(creds, { number, message });
+  // Per-rep from-number (2026-06-24): operator-in-the-loop reply → send from
+  // their own TextTorrent number when set, else the tenant default.
+  const senderId = await resolveTextTorrentSenderId({ tenantId: ctx.tenantId, userId: ctx.userId });
+  await ttReplyToThread(creds, { number, message, sender_id: senderId });
   await logCommsInteraction({ tenantId: ctx.tenantId, leadId: null, toPhone: number, preview: message, userId: ctx.userId, type: "sms_sent", channel: "sms", provider: "texttorrent", dryRun: false });
   return { ok: true, dry_run: false, number };
 }

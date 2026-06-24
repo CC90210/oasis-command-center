@@ -33,6 +33,7 @@ import {
   sendSms as ttSendSms,
   TextTorrentError,
 } from "@/lib/integrations/texttorrent";
+import { resolveTextTorrentSenderId } from "@/lib/integrations/texttorrent-sender";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -213,7 +214,13 @@ export async function POST(req: NextRequest) {
       });
     } else {
       const creds = await getTextTorrentCredentials(tenantId);
-      await ttSendSms(creds, { number: toPhone, message });
+      // Per-rep "text from my own number" (2026-06-24): send from the rep's own
+      // TextTorrent number when set; otherwise the tenant default ("Default
+      // Business Number") applies. Mirrors the Kixie from-number ladder above.
+      // Attribution stays the human rep — logInteraction already stamps
+      // actor_user_id + agent_source:"dashboard_conversations".
+      const senderId = await resolveTextTorrentSenderId({ tenantId, userId });
+      await ttSendSms(creds, { number: toPhone, message, sender_id: senderId });
     }
   } catch (err) {
     if (err instanceof TextTorrentError || err instanceof KixieError) {

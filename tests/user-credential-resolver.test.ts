@@ -9,6 +9,10 @@ import assert from "node:assert/strict";
 // which employee is acting.
 
 import { INTEGRATION_SCHEMAS } from "../lib/tenant-integration-schemas";
+import {
+  TEXTTORRENT_FROM_NUMBER_FIELD,
+  pickTextTorrentSenderId,
+} from "../lib/integrations/texttorrent-sender-core";
 
 function getIntegrationSchema(service: string) {
   return INTEGRATION_SCHEMAS.find((s) => s.service === service);
@@ -51,6 +55,49 @@ const userOnly = INTEGRATION_SCHEMAS.filter((s) => s.scope === "user_only");
 assert.ok(
   userOnly.length >= 1,
   "at least one integration must be scope=user_only (gmail_oauth)",
+);
+
+// Case 4 — per-agent TextTorrent number (2026-06-24). The tenant texttorrent
+// schema keeps a `from_number` field (now the "Default Business Number" / owner
+// fallback used for automated Helios sends); the per-rep override lives in
+// user_integration_credentials under TEXTTORRENT_FROM_NUMBER_FIELD.
+const tt = getIntegrationSchema("texttorrent");
+assert.ok(tt, "texttorrent schema must exist");
+const ttFrom = tt.fields.find((f) => f.key === "from_number");
+assert.ok(ttFrom, "texttorrent schema must keep a from_number (tenant default) field");
+assert.equal(ttFrom.validation, "phone_e164", "texttorrent from_number must validate E.164");
+assert.equal(
+  TEXTTORRENT_FROM_NUMBER_FIELD,
+  "texttorrent_from_number",
+  "per-user TT field key is the contract between the route, the panel, and the resolver",
+);
+
+// Case 5 — sender precedence ladder: rep's own number → tenant default →
+// undefined (TT account default). Whitespace-only values count as unset.
+assert.equal(
+  pickTextTorrentSenderId("+15551112222", "+19998887777"),
+  "+15551112222",
+  "the rep's own number wins when set (manual send from their own line)",
+);
+assert.equal(
+  pickTextTorrentSenderId(null, "+19998887777"),
+  "+19998887777",
+  "falls back to the tenant default (owner number) when the rep has none — the automated/Helios case",
+);
+assert.equal(
+  pickTextTorrentSenderId("   ", "+19998887777"),
+  "+19998887777",
+  "whitespace-only rep number is treated as unset",
+);
+assert.equal(
+  pickTextTorrentSenderId(undefined, undefined),
+  undefined,
+  "no rep number and no tenant default → undefined (TT account default applies)",
+);
+assert.equal(
+  pickTextTorrentSenderId("  +15551112222  ", null),
+  "+15551112222",
+  "a set rep number is trimmed",
 );
 
 console.log("ok user-credential-resolver");

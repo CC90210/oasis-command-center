@@ -64,6 +64,12 @@ export function PersonalIntegrationsPanel({
   // the tenant default Kixie number server-side when unset.
   const [kixieFromNumber, setKixieFromNumber] = useState<string | null>(null);
   const [kixieFromDraft, setKixieFromDraft] = useState("");
+  // Per-rep "text from my own TextTorrent number" (2026-06-24): each rep sets
+  // their own TT sending DID so manual sends go from THEIR number; falls back
+  // to the tenant default ("Default Business Number") server-side when unset.
+  const [ttFromNumber, setTtFromNumber] = useState<string | null>(null);
+  const [ttFromDraft, setTtFromDraft] = useState("");
+  const [ttFlash, setTtFlash] = useState<string | null>(null);
   const searchParams = useSearchParams();
 
   // OAuth callback flash messages — surfaced as a banner on first
@@ -104,6 +110,20 @@ export function PersonalIntegrationsPanel({
       }
     } catch {
       // Soft-fail — the rest of the panel is independent.
+    }
+    // Load the user's TextTorrent from-number override (if any) in parallel.
+    try {
+      const t = await fetch("/api/integrations/personal/texttorrent", { cache: "no-store" });
+      const tbody = (await t.json().catch(() => ({}))) as {
+        ok?: boolean;
+        texttorrent_from_number?: string | null;
+      };
+      if (tbody.ok) {
+        setTtFromNumber(tbody.texttorrent_from_number || null);
+        setTtFromDraft(tbody.texttorrent_from_number || "");
+      }
+    } catch {
+      // Soft-fail — independent of the rest of the panel.
     }
   }
 
@@ -201,6 +221,54 @@ export function PersonalIntegrationsPanel({
       setKixieFromNumber(null);
       setKixieFromDraft("");
       setKixieFlash("Cleared.");
+    } finally {
+      setBusyService(null);
+    }
+  }
+
+  async function saveTtFromNumber() {
+    setBusyService("texttorrent");
+    setError(null);
+    setTtFlash(null);
+    try {
+      const r = await fetch("/api/integrations/personal/texttorrent", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ texttorrent_from_number: ttFromDraft.trim() }),
+      });
+      const body = (await r.json().catch(() => ({}))) as {
+        ok?: boolean;
+        texttorrent_from_number?: string;
+        error?: string;
+        message?: string;
+      };
+      if (!r.ok || !body.ok) {
+        setError(body.message || body.error || `save_failed:${r.status}`);
+        return;
+      }
+      setTtFromNumber(body.texttorrent_from_number || null);
+      if (body.texttorrent_from_number) setTtFromDraft(body.texttorrent_from_number);
+      setTtFlash("Saved — your texts will send from your own Text Torrent number.");
+    } finally {
+      setBusyService(null);
+    }
+  }
+
+  async function clearTtFromNumber() {
+    if (!confirm("Clear your Text Torrent from-number? Your texts will send from the workspace default number.")) return;
+    setBusyService("texttorrent");
+    setError(null);
+    setTtFlash(null);
+    try {
+      const r = await fetch("/api/integrations/personal/texttorrent?field=texttorrent_from_number", { method: "DELETE" });
+      if (!r.ok) {
+        const body = (await r.json().catch(() => ({}))) as { message?: string };
+        setError(body.message || `clear_failed:${r.status}`);
+        return;
+      }
+      setTtFromNumber(null);
+      setTtFromDraft("");
+      setTtFlash("Cleared.");
     } finally {
       setBusyService(null);
     }
@@ -470,6 +538,71 @@ export function PersonalIntegrationsPanel({
               </div>
               {kixieFlash && (
                 <div className="text-[11.5px] text-emerald-300">{kixieFlash}</div>
+              )}
+            </div>
+          </li>
+          )}
+
+          {/* Per-rep Text Torrent from-number — "text from my own number"
+              (2026-06-24). The team shares ONE Text Torrent API key (set in
+              Business app keys above); each rep sets their OWN sending number
+              here. When set, texts you send from the lead/application drawer or
+              inbox go out from THIS number; otherwise they use the workspace
+              default. Gated by showKixie like the Kixie rows (both are the
+              SunBiz/Helios SMS stack). */}
+          {showKixie && (
+          <li className="rounded-lg border border-bg-border bg-bg-deep/40 p-4">
+            <div className="flex flex-col gap-2">
+              <div className="flex items-center gap-2">
+                <span className="font-semibold text-sm text-fg">Text Torrent from-number</span>
+                {ttFromNumber ? (
+                  <span className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-bold bg-emerald-500/15 text-emerald-300 border border-emerald-500/30">
+                    <Check className="w-3 h-3" />
+                    {ttFromNumber}
+                  </span>
+                ) : (
+                  <span className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-medium bg-bg-elev/60 text-fg-dim border border-bg-border">
+                    Using the workspace number
+                  </span>
+                )}
+              </div>
+              <div className="text-[11.5px] text-fg-muted leading-relaxed">
+                Your own Text Torrent sending number. The API key is shared
+                across the team — only your number is personal. When set, texts
+                you send from the lead drawer, Applications, or the inbox go out
+                from THIS number; otherwise they use the workspace default.
+                E.164 format, e.g. +17542127833.
+              </div>
+              <div className="flex items-center gap-2 flex-wrap">
+                <input
+                  type="tel"
+                  value={ttFromDraft}
+                  onChange={(e) => setTtFromDraft(e.target.value)}
+                  placeholder="+17542127833"
+                  className="flex-1 min-w-[200px] rounded-md border border-bg-border bg-bg-elev px-3 py-1.5 text-[12.5px] text-fg placeholder:text-fg-dim focus:outline-none focus:border-accent"
+                />
+                <button
+                  type="button"
+                  onClick={saveTtFromNumber}
+                  disabled={busyService === "texttorrent" || !ttFromDraft.trim()}
+                  className="inline-flex items-center gap-1.5 rounded-md bg-accent text-bg-deep px-3 py-1.5 text-[12.5px] font-bold hover:bg-accent/90 disabled:opacity-60 transition-colors"
+                >
+                  {busyService === "texttorrent" ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : null}
+                  Save
+                </button>
+                {ttFromNumber && (
+                  <button
+                    type="button"
+                    onClick={clearTtFromNumber}
+                    disabled={busyService === "texttorrent"}
+                    className="inline-flex items-center gap-1.5 rounded-md border border-bg-border bg-bg-elev px-3 py-1.5 text-[12.5px] font-bold text-fg-muted hover:text-red-300 hover:border-red-500/40 disabled:opacity-50 transition-colors"
+                  >
+                    Clear
+                  </button>
+                )}
+              </div>
+              {ttFlash && (
+                <div className="text-[11.5px] text-emerald-300">{ttFlash}</div>
               )}
             </div>
           </li>
