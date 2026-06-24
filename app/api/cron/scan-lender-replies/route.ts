@@ -71,6 +71,15 @@ export async function GET(req: NextRequest) {
   if (denied) return denied;
 
   const url = new URL(req.url);
+  // Diagnostic: ?probe=1 classifies a known clear approval so we can confirm the
+  // in-Vercel classifier (key/model) works, independent of inbox content.
+  if (url.searchParams.get("probe") === "1") {
+    const probe = await classifyLenderReply(
+      "Re: New Deal (Probe Co)",
+      "Hi team, we're pleased to approve Probe Co for $50,000.00 at a 1.35 factor rate over a 6 month term. Please send the contract.",
+    );
+    return NextResponse.json({ ok: true, probe });
+  }
   const write = url.searchParams.get("write") === "1";
   const lookbackDays = Math.min(30, Math.max(1, Number(url.searchParams.get("days")) || 5));
   const limit = Math.min(60, Math.max(1, Number(url.searchParams.get("limit")) || 30));
