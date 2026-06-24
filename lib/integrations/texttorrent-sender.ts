@@ -66,8 +66,15 @@ export async function resolveTextTorrentSenderId(args: {
   try {
     const bundle = await getTenantIntegrationBundle(tenantId, "texttorrent");
     tenantDefault = bundle.from_number;
-  } catch {
-    // soft-fail → TT account default
+  } catch (err) {
+    // Soft-fail so a transient store error never blocks a send — but make the
+    // degraded fallback visible (Codex audit 2026-06-24): without a tenant
+    // default we return undefined and TextTorrent uses its account default,
+    // which may not be the configured Default Business Number.
+    console.warn(
+      "[texttorrent-sender] tenant default lookup failed — falling back to TT account default",
+      { tenantId, err },
+    );
   }
 
   return pickTextTorrentSenderId(userNumber, tenantDefault);

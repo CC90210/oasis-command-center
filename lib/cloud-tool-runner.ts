@@ -1741,6 +1741,12 @@ async function toolTextTorrentBlast(input: Record<string, unknown>, ctx: ToolCon
     return { ok: true, dry_run: true, would_create: { list_id: listId, message, scheduled_time: scheduledTime } };
   }
   const creds = await getTextTorrentCredentials(ctx.tenantId);
+  // NOTE (per-agent SMS, 2026-06-24): TextTorrent's /campaign/create API takes
+  // no per-send sender number, so a bulk blast sends from the TextTorrent
+  // ACCOUNT default line (the owner's account) — not a resolveTextTorrentSenderId
+  // value. This is the intended invariant for automated/Helios bulk sends; the
+  // per-rep sender_id only applies to 1:1 sends (conversations/reply + the
+  // chat-tool TT send/reply). The dashboard /api/campaigns path is the same.
   const r = await ttCreateCampaign(creds, { list_id: listId, message, scheduled_time: scheduledTime });
   return { ok: true, dry_run: false, campaign: r.data };
 }

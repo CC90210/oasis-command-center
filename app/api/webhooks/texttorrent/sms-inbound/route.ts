@@ -69,46 +69,66 @@ function verifyTextTorrentSignature(rawBody: string, headerSig: string | null): 
 
 /**
  * Find which tenant owns this inbound SMS by matching the destination
- * number `to` against the from_number field stored in
- * tenant_integration_credentials.texttorrent for each tenant.
+ * number `to` against the TextTorrent sending numbers on file:
  *
- * Best-effort — returns null when no tenant has the matching number on
- * file (e.g. shared TT default number, or webhook fired before the
- * operator wired their key into the tenant store). Caller still does
- * opt-out suppression on null.
+ *   1. tenant_integration_credentials.texttorrent.from_number — the tenant
+ *      "Default Business Number" (owner / automated-Helios line).
+ *   2. user_integration_credentials.texttorrent.texttorrent_from_number — each
+ *      rep's OWN sending DID (per-agent SMS, 2026-06-24). Reps now send from
+ *      their own number, so prospect replies land on those DIDs; without this
+ *      second pass the reply matches no tenant and is silently dropped
+ *      (Codex audit 2026-06-24). Returns the owning rep so the inbound row can
+ *      be attributed to them.
+ *
+ * Best-effort — returns null when no number matches (shared/unknown TT line, or
+ * webhook fired before the key was wired in). Caller still does opt-out
+ * suppression on null. Cheap at current scale (one TT tenant, a few reps).
  */
 async function resolveTenantByInboundNumber(
   db: ReturnType<typeof getServiceSupabase>,
   toNumber: string,
-): Promise<string | null> {
+): Promise<{ tenantId: string; userId: string | null } | null> {
   if (!toNumber) return null;
   // Normalize: strip + so we match against +14165551234 vs 14165551234.
   const normalized = toNumber.replace(/^\+/, "");
-  // We need decrypted field values; tenant_integration_credentials stores
-  // encrypted_value. The bundle store has the helper but it works per
-  // (tenant, service) and we don't know which tenant yet. So we read
-  // all texttorrent.from_number rows and decrypt-match. Cheap at the
-  // current scale (one TT tenant today).
   try {
-    const r = await db
-      .from("tenant_integration_credentials")
-      .select("tenant_id,encrypted_value,field_key")
-      .eq("service", "texttorrent")
-      .eq("field_key", "from_number");
-    const rows = (r.data || []) as { tenant_id: string; encrypted_value: string; field_key: string }[];
-    if (rows.length === 0) return null;
     // Late-bind the decrypt helper so this route doesn't drag the
     // field-encryption module + scrypt key derivation onto the import path
-    // unless we actually have rows to check.
+    // unless we actually have a number to resolve.
     const { decryptField } = await import("@/lib/field-encryption");
-    for (const row of rows) {
+
+    // 1. Tenant default number.
+    const tenantRows = await db
+      .from("tenant_integration_credentials")
+      .select("tenant_id,encrypted_value")
+      .eq("service", "texttorrent")
+      .eq("field_key", "from_number");
+    for (const row of (tenantRows.data || []) as { tenant_id: string; encrypted_value: string }[]) {
       try {
-        const plain = decryptField(row.encrypted_value);
-        if (plain.replace(/^\+/, "") === normalized) return row.tenant_id;
+        if (decryptField(row.encrypted_value).replace(/^\+/, "") === normalized) {
+          return { tenantId: row.tenant_id, userId: null };
+        }
       } catch {
         // Skip rows we can't decrypt — likely a different key environment.
       }
     }
+
+    // 2. Per-rep number — match the reply back to the rep who owns the DID.
+    const userRows = await db
+      .from("user_integration_credentials")
+      .select("tenant_id,user_id,encrypted_value")
+      .eq("service", "texttorrent")
+      .eq("field_key", "texttorrent_from_number");
+    for (const row of (userRows.data || []) as { tenant_id: string; user_id: string; encrypted_value: string }[]) {
+      try {
+        if (decryptField(row.encrypted_value).replace(/^\+/, "") === normalized) {
+          return { tenantId: row.tenant_id, userId: row.user_id };
+        }
+      } catch {
+        // Skip rows we can't decrypt.
+      }
+    }
+
     return null;
   } catch (err) {
     console.error("[webhooks.tt.sms-inbound] tenant resolve failed", err);
@@ -182,12 +202,13 @@ export async function POST(req: NextRequest) {
 
   // Persist inbound to lead_interactions when we can resolve a tenant.
   const db = getServiceSupabase();
-  const tenantId = await resolveTenantByInboundNumber(db, to);
-  if (!tenantId) {
+  const resolved = await resolveTenantByInboundNumber(db, to);
+  if (!resolved) {
     // Unknown destination number — still 200 so TT doesn't retry, but
     // don't write an orphan interaction row.
     return NextResponse.json({ ok: true, ignored: "no_tenant_mapping" });
   }
+  const { tenantId, userId: routedToUserId } = resolved;
 
   const leadId = await findLeadByPhone(db, tenantId, from);
 
@@ -230,6 +251,10 @@ export async function POST(req: NextRequest) {
       opt_out_detected: isStopCommand(messageText),
       raw_received_at:
         typeof payload.received_at === "string" ? payload.received_at : null,
+      // Which rep's DID this reply came back to (null = the tenant default
+      // number). Lets Conversations thread the reply to the right rep and aids
+      // debugging of per-agent number routing.
+      routed_to_user_id: routedToUserId,
     },
   });
   if (error) {
