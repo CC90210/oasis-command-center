@@ -1394,9 +1394,11 @@ async function toolGetRecord(input: Record<string, unknown>, ctx: ToolContext) {
   if (!row) throw new Error("record_not_found");
   // Per-agent lock: a non-admin operator can't fetch a scoped record they don't
   // own/collaborate on by id. (2026-06-22 audit.)
+  // mode:"isolate" — keep the AI-agent record fetch scoped to the operator's own
+  // book exactly as before (filtered-view mode opens the human UI, not the agent).
   if (
     SCOPED_ENTITIES.has(entity.toLowerCase()) &&
-    !recordMatchesViewer(row.data, { isAdmin: ctx.isAdmin, userId: ctx.userId }, leadScopingEnabled())
+    !recordMatchesViewer(row.data, { isAdmin: ctx.isAdmin, userId: ctx.userId }, leadScopingEnabled(), "isolate")
   ) {
     throw new Error("record_not_found");
   }

@@ -285,7 +285,9 @@ export async function POST(
   // another rep's deal details and create lender-thread state on it before any
   // per-record check. 404 (not 403) so we don't confirm it exists. (Codex audit
   // 2026-06-22.)
-  if (!canViewLead({ isAdmin: sess.isAdmin, userId: sess.userId }, appData, leadScopingEnabled())) {
+  // mode:"isolate" — shop-out is an owner-gated ACTION even in filtered-view mode
+  // (a rep may VIEW any deal, but only the owner/admin may shop it out).
+  if (!canViewLead({ isAdmin: sess.isAdmin, userId: sess.userId }, appData, leadScopingEnabled(), "isolate")) {
     return NextResponse.json({ ok: false, error: "application_not_found" }, { status: 404 });
   }
   const application = {

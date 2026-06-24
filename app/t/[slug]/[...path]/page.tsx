@@ -43,6 +43,7 @@ import {
   resolveAssignedScope,
   canViewLead,
   leadScopingEnabled,
+  leadScopingMode,
   SCOPED_ENTITIES,
   isAdminProfile,
   type LeadViewer,
@@ -174,11 +175,20 @@ export default async function TenantCatchAllPage({
     userId: user?.id ?? null,
   };
   const scopingOn = leadScopingEnabled();
-  const leadScope = resolveAssignedScope(
-    viewer,
-    { agent: agentFilter, unassigned: unassignedFilter },
-    scopingOn,
-  );
+  const leadScope = (() => {
+    const base = resolveAssignedScope(
+      viewer,
+      { agent: agentFilter, unassigned: unassignedFilter },
+      scopingOn,
+    );
+    // Filtered-view model: when a non-admin is SEARCHING (?q=), the board reaches
+    // across the whole tenant so they can find ANY lead; browsing (no query) keeps
+    // it scoped to their own book for a clean pipeline. Admins keep their filter.
+    if (query && scopingOn && leadScopingMode() === "filter" && !viewer.isAdmin) {
+      return undefined;
+    }
+    return base;
+  })();
 
   // Admin lead-filter chips (All / Unassigned / per-agent) — only on the
   // lead/application surfaces, only for admins. Agents never see the bar (they

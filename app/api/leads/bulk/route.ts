@@ -176,7 +176,9 @@ export async function POST(req: NextRequest) {
     // Flag-aware owner-or-admin gate, IDENTICAL to /set-stage (Codex 2026-06-19
     // LOW-5): scoping OFF → any tenant member; ON → owner-or-admin. A no-access
     // outcome folds into `skipped` (no enumeration oracle).
-    if (!canViewLead({ isAdmin: sess.isAdmin, userId: sess.userId }, data, leadScopingEnabled())) {
+    // mode:"isolate" — bulk edit is an owner-gated ACTION even in filtered-view
+    // mode (viewing any lead is fine; mutating another rep's is not).
+    if (!canViewLead({ isAdmin: sess.isAdmin, userId: sess.userId }, data, leadScopingEnabled(), "isolate")) {
       out.skipped += 1;
       continue;
     }

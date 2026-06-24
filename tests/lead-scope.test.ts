@@ -8,6 +8,7 @@ import {
   normalizeCollaborators,
   recordMatchesViewer,
   isAdminProfile,
+  leadScopingMode,
 } from "../lib/lead-scope";
 
 // Per-agent lead scoping (Adon Batch 2). These lock the fail-closed contract:
@@ -112,5 +113,37 @@ assert.equal(isAdminProfile({ is_owner: false, team_role: "owner" }), true, "own
 assert.equal(isAdminProfile({ is_owner: false, team_role: "member" }), false, "member is not admin");
 assert.equal(isAdminProfile({ is_owner: null, team_role: null }), false, "nulls → not admin");
 assert.equal(isAdminProfile(null), false, "missing profile → not admin");
+
+// --- filter mode (Adon 2026-06-24): board scoped, but VIEW/open any lead global ---
+// Action gates pass mode:"isolate" explicitly, so the strict path must still work.
+const OTHER = { assigned_to: "someone-else" };
+assert.equal(recordMatchesViewer(OTHER, AGENT, true, "isolate"), false, "isolate: agent denied other's lead");
+assert.equal(canViewLead(AGENT, OTHER, true, "isolate"), false, "isolate: agent can't open other's lead");
+// filter: any RESOLVED member may view ANY lead
+assert.equal(recordMatchesViewer(OTHER, AGENT, true, "filter"), true, "filter: agent may VIEW any lead");
+assert.equal(canViewLead(AGENT, OTHER, true, "filter"), true, "filter: agent may OPEN any lead");
+// filter still fails closed on an unresolved identity (no fail-open)
+assert.equal(
+  recordMatchesViewer(OTHER, { isAdmin: false, userId: null }, true, "filter"),
+  false,
+  "filter: unresolved identity still denied (fail-closed)",
+);
+// filter still honors the rollout flag being off + admins unaffected by mode
+assert.equal(recordMatchesViewer(OTHER, AGENT, false, "filter"), true, "flag off → everyone sees regardless of mode");
+assert.equal(canViewLead(ADMIN, OTHER, true, "filter"), true, "admin sees all in filter mode");
+assert.equal(canViewLead(ADMIN, OTHER, true, "isolate"), true, "admin sees all in isolate mode");
+
+// --- leadScopingMode env parsing (reset env after; keep default-mode tests above pure) ---
+const _savedMode = process.env.LEAD_SCOPING_MODE;
+delete process.env.LEAD_SCOPING_MODE;
+assert.equal(leadScopingMode(), "isolate", "default mode is isolate");
+process.env.LEAD_SCOPING_MODE = "filter";
+assert.equal(leadScopingMode(), "filter", "LEAD_SCOPING_MODE=filter → filter");
+process.env.LEAD_SCOPING_MODE = "FILTER";
+assert.equal(leadScopingMode(), "filter", "case-insensitive");
+process.env.LEAD_SCOPING_MODE = "nonsense";
+assert.equal(leadScopingMode(), "isolate", "unknown value → isolate (safe default)");
+if (_savedMode === undefined) delete process.env.LEAD_SCOPING_MODE;
+else process.env.LEAD_SCOPING_MODE = _savedMode;
 
 console.log("lead-scope tests passed");

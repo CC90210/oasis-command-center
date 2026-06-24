@@ -28,6 +28,21 @@ export function leadScopingEnabled(): boolean {
   return (process.env.LEAD_SCOPING_ENABLED || "").toLowerCase() === "true";
 }
 
+/**
+ * Scoping MODE (Adon 2026-06-24).
+ *   "isolate" (default — the original model): a non-admin can't see, open, or
+ *     search a lead that isn't theirs at all.
+ *   "filter": the BOARD + dashboard stay scoped to the agent's own book (a clean,
+ *     uncluttered pipeline), but agents may OPEN and SEARCH any lead in the tenant
+ *     (full read access). Only owner-gated ACTIONS (shop-out, bulk edit, AI-mutate)
+ *     stay restricted to the owner/admin — those gates pass mode:"isolate".
+ * Set with LEAD_SCOPING_MODE=filter (Vercel env). Server-only read; pure helpers
+ * below take `mode` as a param (defaulting to this) so they stay unit-testable.
+ */
+export function leadScopingMode(): "isolate" | "filter" {
+  return (process.env.LEAD_SCOPING_MODE || "").toLowerCase() === "filter" ? "filter" : "isolate";
+}
+
 /** Entities subject to per-agent scoping. lead → application → funded_deal is
  *  the personalized lifecycle (renewals render off funded_deal). Everything else
  *  (lender, offer, …) is tenant-shared. Single source of truth — imported by the
@@ -120,18 +135,23 @@ export function normalizeCollaborators(data: Record<string, unknown>): string[] 
 /**
  * Canonical visibility predicate — the SINGLE source of truth for "may this
  * viewer see this record". Visible when scoping is off, OR the viewer is an
- * admin, OR they own it (`assigned_to`), OR they're in its `collaborators`
- * list. Every surface (lists, single-record gates, dashboard counts) reduces
- * to this so the rule can't drift between them.
+ * admin, OR (in "filter" mode) for any member, OR they own it (`assigned_to`),
+ * OR they're in its `collaborators` list. Every surface (lists, single-record
+ * gates, dashboard counts) reduces to this so the rule can't drift between them.
+ * Owner-gated ACTIONS force the strict check by passing mode:"isolate".
  */
 export function recordMatchesViewer(
   data: Record<string, unknown>,
   viewer: LeadViewer,
   enabled = true,
+  mode: "isolate" | "filter" = leadScopingMode(),
 ): boolean {
   if (!enabled) return true; // rollout flag off → legacy "everyone sees all"
   if (viewer.isAdmin) return true;
   if (!viewer.userId) return false; // fail-closed: unresolved identity sees nothing
+  // Filtered-view model: every RESOLVED member may VIEW/open any lead; the board
+  // itself is still narrowed by resolveAssignedScope. Action gates opt out (isolate).
+  if (mode === "filter") return true;
   const me = viewer.userId.toLowerCase();
   const owner = typeof data.assigned_to === "string" ? data.assigned_to.toLowerCase() : null;
   if (owner === me) return true;
@@ -146,6 +166,7 @@ export function canViewLead(
   viewer: LeadViewer,
   data: Record<string, unknown>,
   enabled = true,
+  mode: "isolate" | "filter" = leadScopingMode(),
 ): boolean {
-  return recordMatchesViewer(data, viewer, enabled);
+  return recordMatchesViewer(data, viewer, enabled, mode);
 }
