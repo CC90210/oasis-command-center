@@ -16,18 +16,32 @@
  */
 
 import { useMemo, useState } from "react";
-import type { ConversationThread, ConversationMessage } from "@/lib/lead-interactions-queries";
+import type {
+  ConversationThread,
+  ConversationMessage,
+  ConversationSource,
+} from "@/lib/lead-interactions-queries";
 import { EmptyState } from "@/components/Card";
 import { MessageSquare, Phone, Mail, Send, Sparkles, Search, StickyNote } from "lucide-react";
 
-type ChannelKey = "all" | "sms" | "phone" | "email";
+// The inbox sections by PLATFORM (not raw channel) — Adon's "section for texts,
+// emails, Twilio, Kixie". Each filters the thread list by ConversationThread.sources.
+type SectionKey = "all" | "texttorrent" | "email" | "twilio" | "kixie";
 
-const CHANNEL_FILTERS: { key: ChannelKey; label: string }[] = [
+const SECTIONS: { key: SectionKey; label: string }[] = [
   { key: "all", label: "All" },
-  { key: "sms", label: "SMS" },
-  { key: "phone", label: "Calls" },
+  { key: "texttorrent", label: "Text Torrent" },
   { key: "email", label: "Email" },
+  { key: "twilio", label: "Twilio" },
+  { key: "kixie", label: "Kixie" },
 ];
+
+// Platforms with live ingestion today. Email + Twilio sections render but their
+// full inbound sync is a later phase — show a "coming soon" affordance there.
+const COMING_SOON: Partial<Record<SectionKey, string>> = {
+  email: "Email conversations will thread here once inbound email sync is wired (coming soon).",
+  twilio: "Twilio conversations will thread here once Twilio ingestion is wired (coming soon).",
+};
 
 function relTime(iso: string): string {
   const then = new Date(iso).getTime();
@@ -84,7 +98,7 @@ export function ConversationsClient({
 }) {
   const [threads, setThreads] = useState<ConversationThread[]>(initialThreads);
   const [selectedKey, setSelectedKey] = useState<string | null>(initialThreads[0]?.key ?? null);
-  const [channel, setChannel] = useState<ChannelKey>("all");
+  const [section, setSection] = useState<SectionKey>("all");
   const [search, setSearch] = useState("");
   const [draft, setDraft] = useState("");
   const [provider, setProvider] = useState<"texttorrent" | "kixie">("texttorrent");
@@ -92,18 +106,25 @@ export function ConversationsClient({
   const [aiLoading, setAiLoading] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
 
+  // Thread count per section (drives the little badges on the section tabs).
+  const counts = useMemo(() => {
+    const c: Record<string, number> = { all: threads.length };
+    for (const t of threads) for (const s of t.sources) c[s] = (c[s] || 0) + 1;
+    return c;
+  }, [threads]);
+
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
     const qDigits = q.replace(/\D/g, "");
     return threads.filter((t) => {
-      if (channel !== "all" && !t.channels.includes(channel)) return false;
+      if (section !== "all" && !t.sources.includes(section as ConversationSource)) return false;
       if (!q) return true;
       const hay = `${t.contact_label} ${t.last_preview} ${t.contact_phone || ""} ${t.contact_email || ""}`.toLowerCase();
       if (hay.includes(q)) return true;
       if (qDigits.length >= 4 && (t.contact_phone || "").replace(/\D/g, "").includes(qDigits)) return true;
       return false;
     });
-  }, [threads, channel, search]);
+  }, [threads, section, search]);
 
   const selected = useMemo(
     () => threads.find((t) => t.key === selectedKey) ?? null,
@@ -149,6 +170,7 @@ export function ConversationsClient({
       const optimistic: ConversationMessage = {
         id: `local-${Date.now()}`,
         channel: "sms",
+        source: provider, // "texttorrent" | "kixie" — both valid ConversationSource
         direction: "outbound",
         type: "sms_sent",
         subject: null,
@@ -170,6 +192,7 @@ export function ConversationsClient({
                 last_at: optimistic.at,
                 last_direction: "outbound",
                 channels: t.channels.includes("sms") ? t.channels : [...t.channels, "sms"],
+                sources: t.sources.includes(provider) ? t.sources : [...t.sources, provider],
               }
             : t,
         ),
@@ -215,18 +238,21 @@ export function ConversationsClient({
       {/* Master list */}
       <div className="rounded-xl border border-bg-border bg-bg-panel flex flex-col max-h-[72vh]">
         <div className="border-b border-bg-border p-3 space-y-2">
-          <div className="flex items-center gap-1.5">
-            {CHANNEL_FILTERS.map((c) => (
+          <div className="flex items-center gap-1.5 flex-wrap">
+            {SECTIONS.map((s) => (
               <button
-                key={c.key}
-                onClick={() => setChannel(c.key)}
+                key={s.key}
+                onClick={() => setSection(s.key)}
                 className={`text-[11px] px-2.5 py-1 rounded-md border transition-colors ${
-                  channel === c.key
+                  section === s.key
                     ? "border-accent/50 bg-accent/10 text-accent"
                     : "border-bg-border bg-bg-elev/40 text-fg-muted hover:text-fg"
                 }`}
               >
-                {c.label}
+                {s.label}
+                {counts[s.key] ? (
+                  <span className="ml-1 text-[10px] opacity-70">{counts[s.key]}</span>
+                ) : null}
               </button>
             ))}
           </div>
@@ -242,7 +268,9 @@ export function ConversationsClient({
         </div>
         <div className="overflow-y-auto flex-1">
           {filtered.length === 0 ? (
-            <div className="p-4 text-xs text-fg-dim italic">No threads match.</div>
+            <div className="p-4 text-xs text-fg-dim italic">
+              {!search && COMING_SOON[section] ? COMING_SOON[section] : "No threads match."}
+            </div>
           ) : (
             filtered.map((t) => (
               <button

@@ -25,9 +25,18 @@ export function normalizePhoneE164(raw: string | null | undefined): string | nul
 
 export type ConversationChannel = "sms" | "phone" | "email";
 
+/**
+ * The PLATFORM a message came in on — the dimension the inbox sections by
+ * (Text Torrent / Email / Twilio / Kixie). Distinct from `channel` (sms/phone/
+ * email): Text Torrent and Twilio are both `sms`, Kixie is `phone`+sms, etc.
+ * Derived from agent_source + channel + metadata.provider via messageSource().
+ */
+export type ConversationSource = "texttorrent" | "twilio" | "kixie" | "email" | "other";
+
 export type ConversationMessage = {
   id: string;
   channel: string; // sms | phone | email | note
+  source: ConversationSource;
   direction: string; // inbound | outbound
   type: string | null;
   subject: string | null;
@@ -48,6 +57,8 @@ export type ConversationThread = {
   contact_phone: string | null;
   contact_email: string | null;
   channels: string[];
+  /** Distinct platforms this thread has messages on (for the inbox sections). */
+  sources: ConversationSource[];
   last_at: string;
   last_preview: string;
   last_direction: string;
@@ -69,6 +80,7 @@ export type RawInteractionRow = {
   from_phone: string | null;
   to_phone: string | null;
   to_email: string | null;
+  agent_source: string | null;
   metadata: Record<string, unknown> | null;
   recording_url: string | null;
   transcript_url: string | null;
@@ -79,6 +91,32 @@ export type RawInteractionRow = {
   lead_id: string | null;
   actor_user_id: string | null;
 };
+
+/**
+ * Map a row to the PLATFORM it belongs to (inbox section). Order matters:
+ * email by channel; then Kixie (its own source/provider, or any phone call);
+ * then Twilio; then Text Torrent (incl. the "helios" automated daemon + any
+ * dashboard SMS send, since TT is the primary SMS provider). Anything else
+ * (system/note) → "other" (only shows under the "All" section).
+ */
+export function messageSource(row: {
+  channel: string | null;
+  agent_source?: string | null;
+  metadata?: Record<string, unknown> | null;
+}): ConversationSource {
+  const ch = (row.channel || "").toLowerCase();
+  if (ch === "email") return "email";
+  const src = (row.agent_source || "").toLowerCase();
+  const provider =
+    row.metadata && typeof row.metadata.provider === "string"
+      ? (row.metadata.provider as string).toLowerCase()
+      : "";
+  if (src === "kixie" || provider === "kixie" || ch === "phone") return "kixie";
+  if (src === "twilio" || provider === "twilio") return "twilio";
+  if (src === "texttorrent" || src === "helios" || provider === "texttorrent") return "texttorrent";
+  if (ch === "sms") return "texttorrent"; // dashboard SMS send → primary provider
+  return "other";
+}
 
 /** The prospect-side phone for a row, regardless of send direction. */
 function counterpartPhone(row: RawInteractionRow): string | null {
@@ -122,6 +160,7 @@ export function groupRowsIntoThreads(
     if (!at) continue;
     const { key, phone, email } = groupKey(row);
     const channel = row.channel || "unknown";
+    const source = messageSource(row);
     const direction = row.direction || "outbound";
     const ttChatId =
       row.metadata && typeof row.metadata.tt_chat_id === "string"
@@ -137,6 +176,7 @@ export function groupRowsIntoThreads(
         contact_phone: phone,
         contact_email: email,
         channels: [],
+        sources: [],
         last_at: at, // first row for a key is newest (rows are desc)
         // Email sends logged via the gateway may carry a null content_preview
         // (the gateway omits body_preview); fall back to the subject so the
@@ -150,6 +190,7 @@ export function groupRowsIntoThreads(
       threads.set(key, thread);
     }
     if (!thread.channels.includes(channel)) thread.channels.push(channel);
+    if (source !== "other" && !thread.sources.includes(source)) thread.sources.push(source);
     if (direction === "inbound") thread.inbound_count += 1;
     if (!thread.tt_chat_id && ttChatId) thread.tt_chat_id = ttChatId;
     if (!thread.contact_phone && phone) thread.contact_phone = phone;
@@ -157,6 +198,7 @@ export function groupRowsIntoThreads(
     thread.messages.push({
       id: row.id,
       channel,
+      source,
       direction,
       type: row.type,
       subject: row.subject,

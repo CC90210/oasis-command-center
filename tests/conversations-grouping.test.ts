@@ -8,8 +8,24 @@ import assert from "node:assert/strict";
 import {
   groupRowsIntoThreads,
   normalizePhoneE164,
+  messageSource,
   type RawInteractionRow,
 } from "../lib/conversation-threading";
+
+// --- messageSource (platform/section mapping) ------------------------------
+assert.equal(messageSource({ channel: "email" }), "email", "email channel → Email");
+assert.equal(messageSource({ channel: "phone" }), "kixie", "any call → Kixie");
+assert.equal(messageSource({ channel: "sms", agent_source: "kixie" }), "kixie", "kixie SMS → Kixie");
+assert.equal(messageSource({ channel: "sms", agent_source: "twilio" }), "twilio", "twilio SMS → Twilio");
+assert.equal(messageSource({ channel: "sms", agent_source: "texttorrent" }), "texttorrent", "TT SMS → Text Torrent");
+assert.equal(messageSource({ channel: "sms", agent_source: "helios" }), "texttorrent", "helios daemon → Text Torrent");
+assert.equal(
+  messageSource({ channel: "sms", agent_source: "dashboard_conversations", metadata: { provider: "kixie" } }),
+  "kixie",
+  "dashboard send uses metadata.provider",
+);
+assert.equal(messageSource({ channel: "sms", agent_source: "dashboard_conversations" }), "texttorrent", "dashboard SMS defaults to TT");
+assert.equal(messageSource({ channel: "note" }), "other", "note → other (All-only)");
 
 // --- normalizePhoneE164 ----------------------------------------------------
 assert.equal(normalizePhoneE164("+14165551212"), "+14165551212", "already E.164 passes through");
@@ -42,6 +58,7 @@ function row(over: Partial<RawInteractionRow>): RawInteractionRow {
     kixie_call_id: null,
     lead_id: null,
     actor_user_id: null,
+    agent_source: null,
     ...over,
   };
 }
@@ -74,6 +91,8 @@ assert.equal(lead.last_preview, "Newest", "last_preview is the newest row");
 assert.equal(lead.last_at, "2026-06-02T10:00:00Z", "last_at is the newest timestamp");
 assert.equal(lead.inbound_count, 1, "one inbound in the lead thread");
 assert.equal(lead.tt_chat_id, "chat123", "tt_chat_id surfaced for AI-reply availability");
+assert.deepEqual(lead.sources, ["texttorrent"], "lead thread sectioned under Text Torrent");
+assert.ok(lead.messages.every((m) => m.source === "texttorrent"), "each message carries its source");
 
 const phone = threads.find((t) => t.key === "phone:+14165550000");
 assert.ok(phone, "bare-phone thread exists");

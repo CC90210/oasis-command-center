@@ -22,11 +22,12 @@ import {
   type ConversationThread,
 } from "./conversation-threading";
 
-export { normalizePhoneE164 };
+export { normalizePhoneE164, messageSource } from "./conversation-threading";
 export type {
   ConversationThread,
   ConversationMessage,
   ConversationChannel,
+  ConversationSource,
 } from "./conversation-threading";
 
 /**
@@ -76,7 +77,7 @@ export async function isPhoneOptedOut(
 // recording/transcript/disposition just like the lead timeline.
 const INTERACTION_COLUMNS =
   "id, channel, direction, type, subject, content_preview, created_at, " +
-  "sent_at, from_phone, to_phone, to_email, metadata, recording_url, " +
+  "sent_at, from_phone, to_phone, to_email, agent_source, metadata, recording_url, " +
   "transcript_url, disposition, call_outcome, call_duration_sec, " +
   "kixie_call_id, lead_id, actor_user_id";
 
