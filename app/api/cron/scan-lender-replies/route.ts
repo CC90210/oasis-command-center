@@ -74,28 +74,13 @@ export async function GET(req: NextRequest) {
   // Diagnostic: ?probe=1 classifies a known clear approval so we can confirm the
   // in-Vercel classifier (key/model) works, independent of inbox content.
   if (url.searchParams.get("probe") === "1") {
-    const apiKey = (process.env.BRAVO_ANTHROPIC_API_KEY || process.env.ANTHROPIC_API_KEY || "").trim();
-    let status = 0;
-    let snippet = "";
-    try {
-      const rp = await fetch("https://api.anthropic.com/v1/messages", {
-        method: "POST",
-        headers: { "content-type": "application/json", "x-api-key": apiKey, "anthropic-version": "2023-06-01" },
-        body: JSON.stringify({ model: "claude-sonnet-4-6", max_tokens: 40, messages: [{ role: "user", content: "Reply with the single word OK." }] }),
-      });
-      status = rp.status;
-      snippet = (await rp.text()).slice(0, 240);
-    } catch (e) {
-      snippet = "threw: " + (e instanceof Error ? e.message : String(e));
-    }
-    return NextResponse.json({
-      ok: true,
-      hasBravoKey: !!process.env.BRAVO_ANTHROPIC_API_KEY,
-      hasAnthropicKey: !!process.env.ANTHROPIC_API_KEY,
-      keyLen: apiKey.length,
-      status,
-      snippet,
-    });
+    // Health check: classify a known clear approval. Should return approved +
+    // $50,000 / 6mo / 1.35. Confirms the classifier (key + model) is alive.
+    const probe = await classifyLenderReply(
+      "Re: New Deal (Probe Co)",
+      "Hi team, we're pleased to approve Probe Co for $50,000.00 at a 1.35 factor rate over a 6 month term. Please send the contract.",
+    );
+    return NextResponse.json({ ok: true, probe });
   }
   const write = url.searchParams.get("write") === "1";
   const lookbackDays = Math.min(30, Math.max(1, Number(url.searchParams.get("days")) || 5));
@@ -199,15 +184,19 @@ export async function GET(req: NextRequest) {
       };
 
       // ---- write side (gated) ----
-      if (write && thread && !already && cls.category !== "unknown") {
-        const newStatus = statusFor(cls.category);
+      if (write && !already && cls.category !== "unknown") {
         const summary = `${cls.category}${cls.amount ? ` $${cls.amount}` : ""}${cls.term_months ? ` / ${cls.term_months}mo` : ""}${cls.factor_rate ? ` / ${cls.factor_rate}` : ""}`.slice(0, 480);
-        const upd = await db.from("application_lender_threads")
-          .update({ status: newStatus, last_response_at: date ? date.toISOString() : new Date().toISOString(), last_response_summary: summary, updated_at: new Date().toISOString() })
-          .eq("id", thread.id).eq("tenant_id", SUNBIZ_TENANT_ID);
-        if (!upd.error) applied++;
+        // 1) thread status — only when a thread row exists (drives the pill).
+        if (thread) {
+          const newStatus = statusFor(cls.category);
+          const upd = await db.from("application_lender_threads")
+            .update({ status: newStatus, last_response_at: date ? date.toISOString() : new Date().toISOString(), last_response_summary: summary, updated_at: new Date().toISOString() })
+            .eq("id", thread.id).eq("tenant_id", SUNBIZ_TENANT_ID);
+          if (!upd.error) { applied++; row.wrote = newStatus; }
+        }
 
-        // populate the Offers tab on an approval/counter with usable terms
+        // 2) offer record — populates the Offers tab Amount/Term/Factor on an
+        // approval/counter with usable terms, EVEN when no thread row exists.
         if ((cls.category === "approved" || cls.category === "counter_offer") && (cls.amount || cls.term_months || cls.factor_rate) && lender) {
           const existing = await db.from("tenant_records").select("id, data")
             .eq("tenant_id", SUNBIZ_TENANT_ID).eq("entity_type", "offer")
@@ -229,8 +218,9 @@ export async function GET(req: NextRequest) {
           } else {
             await db.from("tenant_records").insert({ tenant_id: SUNBIZ_TENANT_ID, entity_type: "offer", data: offerData });
           }
+          row.offer = `${cls.amount ?? "-"}/${cls.term_months ?? "-"}mo/${cls.factor_rate ?? "-"}`;
+          if (!thread) applied++; // count offer-only writes (no thread to update)
         }
-        row.wrote = newStatus;
       }
 
       results.push(row);
