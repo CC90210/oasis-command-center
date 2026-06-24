@@ -38,6 +38,7 @@ import {
   OASIS_STAGE_SLA_DAYS,
   OASIS_VISIBLE_TARGET_STAGES,
 } from "@/lib/oasis-sla";
+import { InlineStageControl } from "@/components/manifest/InlineStageControl";
 
 type Row = { id: string; data: Record<string, unknown>; updated_at?: string; created_at?: string };
 
@@ -155,6 +156,10 @@ export function LeadPipelineView({
   const [bulkBusy, setBulkBusy] = useState(false);
   const [bulkMsg, setBulkMsg] = useState<string | null>(null);
   const cfg = useMemo(() => variantConfig(variant), [variant]);
+  const stageMap = useMemo(
+    () => Object.fromEntries(stages.map((stage) => [stage.key, stage])) as Record<string, StageMeta>,
+    [stages],
+  );
   const isLeads = entityName === "lead";
   // Transferred leads have moved into the Applications pipeline (Adon transfer
   // reconstruction 2026-06-21). They live there now, so drop them from the Lead
@@ -483,6 +488,7 @@ export function LeadPipelineView({
             variant={variant}
             cfg={cfg}
             basePath={basePath}
+            stageMap={stageMap}
             selectMode={selectMode}
             selected={selected}
             onToggleSelect={toggleSelect}
@@ -621,6 +627,7 @@ function StageSection({
   variant,
   cfg,
   basePath,
+  stageMap,
   selectMode = false,
   selected,
   onToggleSelect,
@@ -634,6 +641,7 @@ function StageSection({
   variant: PipelineVariant;
   cfg: VariantConfig;
   basePath: string;
+  stageMap: Record<string, StageMeta>;
   selectMode?: boolean;
   selected?: Set<string>;
   onToggleSelect?: (id: string) => void;
@@ -641,7 +649,7 @@ function StageSection({
   const targetLabel = stageTargetLabelVariant(cfg, stage.key);
   return (
     <section
-      className="overflow-hidden rounded-lg border border-bg-border bg-bg-deep/30"
+      className="overflow-visible rounded-lg border border-bg-border bg-bg-deep/30"
       style={{ borderLeftWidth: 4, borderLeftColor: stage.bg }}
     >
       <button
@@ -721,6 +729,7 @@ function StageSection({
                     variant={variant}
                     cfg={cfg}
                     basePath={basePath}
+                    stageMap={stageMap}
                   />
                 </SelectableRow>
               ) : (
@@ -733,6 +742,7 @@ function StageSection({
                   variant={variant}
                   cfg={cfg}
                   basePath={basePath}
+                  stageMap={stageMap}
                 />
               ),
             )}
@@ -754,6 +764,7 @@ function StageSection({
                     variant={variant}
                     cfg={cfg}
                     basePath={basePath}
+                    stageMap={stageMap}
                   />
                 </SelectableRow>
               ) : (
@@ -766,6 +777,7 @@ function StageSection({
                   variant={variant}
                   cfg={cfg}
                   basePath={basePath}
+                  stageMap={stageMap}
                 />
               ),
             )}
@@ -819,6 +831,7 @@ function DesktopRow({
   variant,
   cfg,
   basePath,
+  stageMap,
 }: {
   slug: string;
   entityName: "lead" | "application";
@@ -827,16 +840,27 @@ function DesktopRow({
   variant: PipelineVariant;
   cfg: VariantConfig;
   basePath: string;
+  stageMap: Record<string, StageMeta>;
 }) {
+  const router = useRouter();
   if (variant === "oasis") {
     return <OasisDesktopRow row={row} stage={stage} cfg={cfg} basePath={basePath} />;
   }
   const model = rowModel(row, stage);
   const href = pipelineRowHref(slug, entityName, row.id);
   return (
-    <Link
-      href={href}
-      className="grid border-b border-bg-border/40 text-[11px] transition-colors last:border-b-0 hover:bg-bg-elev/40"
+    <div
+      role="link"
+      tabIndex={0}
+      aria-label={`Open ${model.businessName}`}
+      onClick={() => router.push(href)}
+      onKeyDown={(event) => {
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          router.push(href);
+        }
+      }}
+      className="grid cursor-pointer border-b border-bg-border/40 text-[11px] transition-colors last:border-b-0 hover:bg-bg-elev/40 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/70"
       style={cfg.gridStyle}
     >
       <Cell>
@@ -876,8 +900,13 @@ function DesktopRow({
         )}
       </Cell>
       <Cell className={model.cold ? "font-semibold text-red-300" : ""}>{model.lastTouchLabel}</Cell>
-      <Cell>
-        <StageChip stage={stage} />
+      <Cell clip={false}>
+        <InlineStageControl
+          recordId={row.id}
+          stage={stage.key}
+          stageMap={stageMap}
+          entity={entityName}
+        />
       </Cell>
       <Cell mono>{model.paper}</Cell>
       <Cell mono>{model.leverage}</Cell>
@@ -885,7 +914,7 @@ function DesktopRow({
         {model.monthlyRev}
       </Cell>
       <Cell mono>{model.years}</Cell>
-    </Link>
+    </div>
   );
 }
 
@@ -897,6 +926,7 @@ function MobileRow({
   variant,
   cfg,
   basePath,
+  stageMap,
 }: {
   slug: string;
   entityName: "lead" | "application";
@@ -905,14 +935,28 @@ function MobileRow({
   variant: PipelineVariant;
   cfg: VariantConfig;
   basePath: string;
+  stageMap: Record<string, StageMeta>;
 }) {
+  const router = useRouter();
   if (variant === "oasis") {
     return <OasisMobileRow row={row} stage={stage} cfg={cfg} basePath={basePath} />;
   }
   const model = rowModel(row, stage);
   const href = pipelineRowHref(slug, entityName, row.id);
   return (
-    <Link href={href} className="block px-4 py-3 transition-colors hover:bg-bg-elev/40">
+    <div
+      role="link"
+      tabIndex={0}
+      aria-label={`Open ${model.businessName}`}
+      onClick={() => router.push(href)}
+      onKeyDown={(event) => {
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          router.push(href);
+        }
+      }}
+      className="block cursor-pointer px-4 py-3 transition-colors hover:bg-bg-elev/40 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/70"
+    >
       <div className="flex items-start gap-3">
         <span className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-bg-border bg-bg-elev text-[10px] font-bold uppercase text-fg-muted">
           {initialsOf(model.businessName)}
@@ -923,7 +967,13 @@ function MobileRow({
               <div className="truncate text-sm font-semibold text-fg">{model.businessName}</div>
               <div className="truncate text-[11px] text-fg-dim">{model.ownerName}</div>
             </div>
-            <StageChip stage={stage} />
+            <InlineStageControl
+              recordId={row.id}
+              stage={stage.key}
+              stageMap={stageMap}
+              entity={entityName}
+              menuAlign="right"
+            />
           </div>
           <div className="mt-2 grid grid-cols-2 gap-x-3 gap-y-1 text-[11px] text-fg-muted">
             <MiniMetric label="Phone" value={model.phone} mono />
@@ -935,7 +985,7 @@ function MobileRow({
           </div>
         </div>
       </div>
-    </Link>
+    </div>
   );
 }
 
@@ -1095,16 +1145,18 @@ function Cell({
   mono = false,
   title,
   className = "",
+  clip = true,
 }: {
   children: ReactNode;
   align?: "left" | "right";
   mono?: boolean;
   title?: string;
   className?: string;
+  clip?: boolean;
 }) {
   return (
     <div
-      className={`min-w-0 overflow-hidden truncate px-2 py-2.5 text-fg-muted ${
+      className={`min-w-0 px-2 py-2.5 text-fg-muted ${clip ? "overflow-hidden truncate" : "overflow-visible"} ${
         align === "right" ? "text-right" : ""
       } ${mono ? "font-mono" : ""} ${className}`}
       title={title}

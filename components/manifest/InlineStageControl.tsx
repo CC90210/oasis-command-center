@@ -22,9 +22,10 @@ type Props = {
   stageMap: Record<string, StageMeta>;
   /** "lead" | "application" — tells the API which field (stage vs status) to set. */
   entity: string;
+  menuAlign?: "left" | "right";
 };
 
-export function InlineStageControl({ recordId, stage, stageMap, entity }: Props) {
+export function InlineStageControl({ recordId, stage, stageMap, entity, menuAlign = "left" }: Props) {
   const router = useRouter();
   const [current, setCurrent] = useState(stage);
   const [open, setOpen] = useState(false);
@@ -95,7 +96,11 @@ export function InlineStageControl({ recordId, stage, stageMap, entity }: Props)
         </svg>
       </button>
       {open && (
-        <div className="absolute z-50 mt-1 left-0 min-w-[160px] max-h-64 overflow-auto rounded-md border border-bg-border bg-bg-deep shadow-xl py-1">
+        <div
+          className={`absolute z-50 mt-1 min-w-[160px] max-h-64 overflow-auto rounded-md border border-bg-border bg-bg-deep shadow-xl py-1 ${
+            menuAlign === "right" ? "right-0" : "left-0"
+          }`}
+        >
           {options.map((s) => (
             <button
               key={s.key}
