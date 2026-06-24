@@ -93,13 +93,32 @@ async function loadAndVerify(params: RouteParams): Promise<LoadResult> {
   if (!sig.ok) {
     return { ok: false, reason: "token", detail: sig.reason };
   }
-  if (sig.payload.tenant !== params.tenant_slug.toLowerCase()) {
-    // The URL's tenant_slug doesn't match the signed token. Means
-    // someone copied the token into a different tenant's URL space.
-    return { ok: false, reason: "tenant_mismatch" };
-  }
 
   const db = getServiceSupabase();
+  const urlTenantSlug = params.tenant_slug.toLowerCase();
+  if (sig.payload.tenant !== urlTenantSlug) {
+    // SunBiz uses tenant.slug="submissions" but profile slug "sun". Accept
+    // that alias in the URL while still requiring the signed token's canonical
+    // tenant to own the form below.
+    const aliasQ = await db
+      .from("tenants")
+      .select("slug, custom_fields")
+      .eq("slug", sig.payload.tenant)
+      .maybeSingle();
+    const aliasRow = aliasQ.data as
+      | { slug: string; custom_fields?: { command_center_profile_slug?: unknown } | null }
+      | null;
+    const profileSlug =
+      typeof aliasRow?.custom_fields?.command_center_profile_slug === "string"
+        ? aliasRow.custom_fields.command_center_profile_slug.toLowerCase()
+        : null;
+    if (profileSlug !== urlTenantSlug) {
+      // The URL's tenant_slug doesn't match the signed token. Means someone
+      // copied the token into a different tenant's URL space.
+      return { ok: false, reason: "tenant_mismatch" };
+    }
+  }
+
   const row = await db
     .from("forms")
     .select(

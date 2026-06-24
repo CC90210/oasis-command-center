@@ -43,13 +43,25 @@ export async function resolvePublicForm(
   const formSlug = formSlugRaw.trim().toLowerCase();
   if (!tenantSlug || !formSlug) return { ok: false, reason: "not_found" };
 
-  const tenantQ = await db
+  let tenantQ = await db
     .from("tenants")
-    .select("id, slug, logo_url")
+    .select("id, slug, logo_url, custom_fields")
     .eq("slug", tenantSlug)
     .maybeSingle();
+
+  // SunBiz is stored as tenant.slug="submissions" but rendered in the command
+  // center as profile slug "sun". Accept the profile slug on public form URLs
+  // so /f/sun/<form> works the same as /f/submissions/<form>.
+  if (!tenantQ.data && !tenantQ.error) {
+    tenantQ = await db
+      .from("tenants")
+      .select("id, slug, logo_url, custom_fields")
+      .eq("custom_fields->>command_center_profile_slug", tenantSlug)
+      .maybeSingle();
+  }
+
   const tenantRow = tenantQ.data as
-    | { id: string; slug: string; logo_url: string | null }
+    | { id: string; slug: string; logo_url: string | null; custom_fields?: Record<string, unknown> | null }
     | null;
   if (!tenantRow) return { ok: false, reason: "not_found" };
 

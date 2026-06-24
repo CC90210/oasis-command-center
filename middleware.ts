@@ -10,7 +10,7 @@ import { createServerClient } from "@supabase/ssr";
 import { matchesPathPrefix } from "./lib/path-prefix";
 import { shouldRedirectToOnboarding } from "./lib/onboarding-gate";
 
-const PUBLIC_PATH_PREFIXES = [
+export const PUBLIC_PATH_PREFIXES = [
   "/welcome",              // public marketing landing
   "/download",             // public OASIS Desktop downloads
   "/configure",            // public agent configurator (pre-signup)
@@ -54,6 +54,7 @@ const PUBLIC_PATH_PREFIXES = [
   // application-form flow returns 401 — every inbound SunBiz lead
   // gets a broken form.
   "/api/forms/submit",     // POST per-step → inserts form_submissions row + maybe stage-transitions the lead.
+  "/api/forms/upload-url", // POST HMAC-token file upload signer for public form direct-to-Storage uploads.
   "/api/forms/view",       // POST on form-page mount → records form_views + fires viewed_application drip.
   "/api/forms/address-autocomplete", // GET ?q=… → server-side address-autocomplete proxy for the public form. Public (the personalized form isn't session-authed) and IP rate-limited; returns only formatted-address strings, never provider keys (those stay server-side). See app/api/forms/address-autocomplete/route.ts.
   "/f/",                   // Public prospect-facing form pages. Two shapes: /f/<tenant>/<form>/<lead_token> (personalized, HMAC-signed via Solara mint) and /f/<tenant>/<form> (anonymous share — server creates a fresh lead on submit). Both must be reachable without a session cookie or every inbound form return 401 — verified failure mode 2026-05-18 (CC opened a copied link in incognito and landed on /login).
@@ -93,7 +94,7 @@ const PUBLIC_FILE_EXTENSIONS = [
  * the exact-match case still hits and the prefix+`/` case is identical
  * to the original startsWith for those entries.
  */
-function isPublic(pathname: string): boolean {
+export function isPublic(pathname: string): boolean {
   if (PUBLIC_PATH_PREFIXES.some((p) => matchesPathPrefix(pathname, p))) return true;
   const lower = pathname.toLowerCase();
   return PUBLIC_FILE_EXTENSIONS.some((ext) => lower.endsWith(ext));
