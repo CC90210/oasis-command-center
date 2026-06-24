@@ -74,11 +74,28 @@ export async function GET(req: NextRequest) {
   // Diagnostic: ?probe=1 classifies a known clear approval so we can confirm the
   // in-Vercel classifier (key/model) works, independent of inbox content.
   if (url.searchParams.get("probe") === "1") {
-    const probe = await classifyLenderReply(
-      "Re: New Deal (Probe Co)",
-      "Hi team, we're pleased to approve Probe Co for $50,000.00 at a 1.35 factor rate over a 6 month term. Please send the contract.",
-    );
-    return NextResponse.json({ ok: true, probe });
+    const apiKey = (process.env.BRAVO_ANTHROPIC_API_KEY || process.env.ANTHROPIC_API_KEY || "").trim();
+    let status = 0;
+    let snippet = "";
+    try {
+      const rp = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-api-key": apiKey, "anthropic-version": "2023-06-01" },
+        body: JSON.stringify({ model: "claude-sonnet-4-6", max_tokens: 40, messages: [{ role: "user", content: "Reply with the single word OK." }] }),
+      });
+      status = rp.status;
+      snippet = (await rp.text()).slice(0, 240);
+    } catch (e) {
+      snippet = "threw: " + (e instanceof Error ? e.message : String(e));
+    }
+    return NextResponse.json({
+      ok: true,
+      hasBravoKey: !!process.env.BRAVO_ANTHROPIC_API_KEY,
+      hasAnthropicKey: !!process.env.ANTHROPIC_API_KEY,
+      keyLen: apiKey.length,
+      status,
+      snippet,
+    });
   }
   const write = url.searchParams.get("write") === "1";
   const lookbackDays = Math.min(30, Math.max(1, Number(url.searchParams.get("days")) || 5));
