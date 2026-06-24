@@ -70,6 +70,7 @@ export function PersonalIntegrationsPanel({
   const [ttFromNumber, setTtFromNumber] = useState<string | null>(null);
   const [ttFromDraft, setTtFromDraft] = useState("");
   const [ttFlash, setTtFlash] = useState<string | null>(null);
+  const [ttSyncing, setTtSyncing] = useState(false);
   const searchParams = useSearchParams();
 
   // OAuth callback flash messages — surfaced as a banner on first
@@ -271,6 +272,36 @@ export function PersonalIntegrationsPanel({
       setTtFlash("Cleared.");
     } finally {
       setBusyService(null);
+    }
+  }
+
+  async function syncTtHistory() {
+    setTtSyncing(true);
+    setError(null);
+    setTtFlash(null);
+    try {
+      const r = await fetch("/api/integrations/texttorrent/sync", { method: "POST" });
+      const body = (await r.json().catch(() => ({}))) as {
+        ok?: boolean;
+        inserted?: number;
+        chats?: number;
+        error?: string;
+        message?: string;
+      };
+      if (!r.ok || !body.ok) {
+        setError(body.message || body.error || `sync_failed:${r.status}`);
+        return;
+      }
+      const n = body.inserted ?? 0;
+      setTtFlash(
+        n > 0
+          ? `Synced — imported ${n} message${n === 1 ? "" : "s"} from ${body.chats ?? 0} thread${body.chats === 1 ? "" : "s"} into your inbox.`
+          : "Synced — your inbox is already up to date.",
+      );
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "sync_failed");
+    } finally {
+      setTtSyncing(false);
     }
   }
 
@@ -600,6 +631,22 @@ export function PersonalIntegrationsPanel({
                     Clear
                   </button>
                 )}
+              </div>
+              {/* Pull existing TT threads into the Conversations inbox. The
+                  inbound webhook only captures NEW texts; this backfills history. */}
+              <div className="flex items-center gap-2 flex-wrap pt-1">
+                <button
+                  type="button"
+                  onClick={syncTtHistory}
+                  disabled={ttSyncing}
+                  className="inline-flex items-center gap-1.5 rounded-md border border-bg-border bg-bg-elev px-3 py-1.5 text-[12.5px] font-bold text-fg-muted hover:text-accent hover:border-accent/40 disabled:opacity-50 transition-colors"
+                >
+                  {ttSyncing ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : null}
+                  {ttSyncing ? "Syncing…" : "Sync my Text Torrent history"}
+                </button>
+                <span className="text-[10.5px] text-fg-dim">
+                  Pulls your recent threads into the Conversations inbox.
+                </span>
               </div>
               {ttFlash && (
                 <div className="text-[11.5px] text-emerald-300">{ttFlash}</div>
