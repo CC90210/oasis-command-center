@@ -147,8 +147,15 @@ export function routeSunBizImportStage(
 }
 
 function resolveLeadStage(value: string): string | null {
-  if (LEAD_STAGE_KEYS.has(value)) return value;
-  return LEAD_STAGE_LABELS.get(value) || LEAD_STAGE_ALIASES.get(value) || null;
+  // Import aliases win over direct keys/labels (mirrors resolveOpportunityStage,
+  // fixed for the same trap). A historical "Declined"/"Dead" lead in a CSV is
+  // re-engageable (ghost), NOT the new manual terminal stages — those are
+  // operator-set-only (the dropdown + set-stage validate against LEAD keys).
+  return (
+    LEAD_STAGE_ALIASES.get(value) ||
+    LEAD_STAGE_LABELS.get(value) ||
+    (LEAD_STAGE_KEYS.has(value) ? value : null)
+  );
 }
 
 function resolveOpportunityStage(value: string): string | null {

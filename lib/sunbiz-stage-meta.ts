@@ -70,6 +70,13 @@ export const LEAD_PIPELINE_STAGES: StageMeta[] = [
   // underwriting / funders. Leads that land here are entered into the
   // "signed application" email drip (the drip sequence is wired separately).
   { key: "submitted_application", label: "Submitted Application", bg: "#356B8A", fg: "#FFFFFF" },
+  // Ezra 2026-06-24: manual terminal stages on the leads board (mirror the
+  // opportunity Declined/Dead so the labels/colors match "in application").
+  // Operators can move a lead straight to declined/dead from the leads page.
+  // Import routing still aliases a bare "Declined"/"Dead" lead to ghost
+  // (re-engageable) — preserved via resolveLeadStage's alias-first order.
+  { key: "declined",           label: "Declined",           bg: "#9B3D45", fg: "#FFFFFF" },
+  { key: "dead_file",          label: "Dead",               bg: "#6F2D34", fg: "#FFFFFF" },
   { key: "ghost",              label: "Ghost",              bg: "#6F6F75", fg: "#FFFFFF" },
   { key: "default",            label: "Default",            bg: "#62666F", fg: "#FFFFFF" },
   // 2026-06-18 (CC): removed `submitted`, `funded`, `declined`, `opted_out`
