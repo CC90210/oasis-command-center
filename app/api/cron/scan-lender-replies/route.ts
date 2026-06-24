@@ -23,7 +23,7 @@ import { simpleParser } from "mailparser";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { getSubmissionsCreds } from "@/lib/integrations/submissions-gmail";
 import { classifyLenderReply, type LenderReplyCategory } from "@/lib/lenders/classify-reply";
-import { checkCronAuth } from "@/lib/cron-auth";
+import { timingSafeEqual } from "crypto";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -50,8 +50,24 @@ function statusFor(cat: LenderReplyCategory): string {
   return "responded";
 }
 
+// Auth: a self-managed bearer secret (SCAN_TRIGGER_SECRET) so our JARVIS
+// scheduler can drive the scan without depending on Vercel's CRON_SECRET.
+// Constant-time compare; FAIL-CLOSED (deny if the secret isn't configured).
+function checkTrigger(req: NextRequest): NextResponse | null {
+  const secret = process.env.SCAN_TRIGGER_SECRET;
+  if (!secret) return NextResponse.json({ ok: false, error: "trigger_not_configured" }, { status: 500 });
+  const auth = req.headers.get("authorization") || "";
+  const bearer = auth.startsWith("Bearer ") ? auth.slice(7) : "";
+  const a = Buffer.from(bearer);
+  const b = Buffer.from(secret);
+  if (a.length !== b.length || !timingSafeEqual(a, b)) {
+    return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
+  }
+  return null;
+}
+
 export async function GET(req: NextRequest) {
-  const denied = checkCronAuth(req);
+  const denied = checkTrigger(req);
   if (denied) return denied;
 
   const url = new URL(req.url);
