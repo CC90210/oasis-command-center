@@ -17,6 +17,7 @@ import { NextResponse, type NextRequest } from "next/server";
 import { resolveTenantId, resolveSessionContext } from "@/lib/api-auth";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { isDryRun } from "@/lib/integrations/send-mode";
+import { sanitizeBlastMessage } from "@/lib/integrations/blast-safety";
 import {
   getTextTorrentCredentials,
   listCampaigns,
@@ -151,11 +152,22 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ ok: false, error: "message_required" }, { status: 400 });
   }
 
+  // Merchant-facing safety guard (fail-closed): block any lender name, strip
+  // em dashes. A blast is the highest-volume merchant-facing surface.
+  const safe = await sanitizeBlastMessage(session.tenantId, message);
+  if (!safe.ok) {
+    return NextResponse.json(
+      { ok: false, error: safe.reason, message: safe.message, lender_hits: safe.lenderHits },
+      { status: 400 },
+    );
+  }
+  const cleanMessage = safe.cleaned;
+
   if (isDryRun()) {
     return NextResponse.json({
       ok: true,
       dry_run: true,
-      would_create: { list_id: listId, message, scheduled_time: scheduledTime },
+      would_create: { list_id: listId, message: cleanMessage, scheduled_time: scheduledTime },
     });
   }
 
@@ -163,7 +175,7 @@ export async function POST(req: NextRequest) {
     const creds = await getTextTorrentCredentials(session.tenantId);
     const r = await createCampaign(creds, {
       list_id: listId,
-      message,
+      message: cleanMessage,
       scheduled_time: scheduledTime,
     });
     return NextResponse.json({ ok: true, dry_run: false, campaign: r.data });
