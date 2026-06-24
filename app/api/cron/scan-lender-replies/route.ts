@@ -131,14 +131,19 @@ export async function GET(req: NextRequest) {
       const bizName = extractBusinessName(subject);
       if (!bizName) continue; // not a deal reply
 
+      // Only genuine inbound LENDER replies. Skip our own outbound (submissions@,
+      // incl. the form-completion + shop-out emails), bounces, and system mail —
+      // otherwise an outbound shop-out could be mis-read as a lender reply.
+      const fromLc = from.toLowerCase();
+      const sdom = domainOf(from);
+      if (!from || sdom === "sunbizfunding.com" || /mailer-daemon|postmaster|no-?reply/.test(fromLc)) continue;
+
       const bn = bizName.toLowerCase();
       const app = apps.find((a) => a.name === bn || a.name.includes(bn) || bn.includes(a.name));
       if (!app) {
         results.push({ subject, from, bizName, match: "no_application" });
         continue;
       }
-      const fromLc = from.toLowerCase();
-      const sdom = domainOf(from);
       const lender = lenders.find((l) => l.email && (l.email === fromLc || (l.domain && sdom && l.domain === sdom))) || null;
       const appThreads = threads.filter((t) => t.application_id === app.id);
       const thread = (lender ? appThreads.find((t) => t.lender_id === lender.id) : null) || (appThreads.length === 1 ? appThreads[0] : null);
@@ -163,6 +168,7 @@ export async function GET(req: NextRequest) {
         thread_id: thread?.id || null,
         date: date ? date.toISOString() : null,
         already,
+        bodyLen: body.length,
         classification: cls,
       };
 
