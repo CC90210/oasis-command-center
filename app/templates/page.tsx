@@ -200,6 +200,7 @@ function buildCreateHtmlPrompt(reference?: TemplateMeta): string {
     "Before drafting, ask for: campaign goal, target audience or vertical, sender lane (Ezra, Ethan, or Matt), CTA, required merge fields, and whether this is cold outreach, follow-up, consolidation, seasonal, or vertical.",
     "",
     "Draft responsive email-safe HTML with SunBiz branding, the required unsubscribe link, and a concise subject line. Do not send or hand off to Helios until the operator approves the asset. If your current runtime cannot write to oasis-command-center directly, return the full HTML, a proposed filename under lib/cold-outreach/templates/, and the regeneration command for templates.generated.ts.",
+    "MANDATORY in EVERY email — regardless of campaign, audience, vertical, or season — include the standard SunBiz \"Your Funding Options\" block showing all three tiers in DESCENDING order, with these EXACT figures: $250,000 ($2,083/week, 36-month term), $100,000 ($1,302/week, 24-month term), and $50,000 ($868/week, 18-month term). These exact amounts, estimated WEEKLY payments, and terms must appear in every template — never omit, alter, round, or relabel them (payments are WEEKLY, not monthly). Mirror the canonical markup/branding from an existing tier template such as business_capital_tiers.html.",
   ].join("\n");
 }
 

@@ -15,6 +15,11 @@ const config: Config = {
       colors: {
         bg: {
           DEFAULT: "#06070a",
+          // `deep` was referenced by ~85 components (dropdowns, menus, modals,
+          // recessed inputs) but never defined — so `bg-bg-deep` resolved to no
+          // background and every overlay rendered transparent (options bled
+          // through). Defining it here fixes all of them at once. (Ezra 2026-06-24)
+          deep: "#0a0c10",
           panel: "#0e1014",
           raised: "#15181e",
           elev: "#1c2028",

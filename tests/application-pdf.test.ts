@@ -71,7 +71,7 @@ check(val("BUSINESS INFORMATION", "Type of Entity") === "LLC", "entity value →
 check(val("BUSINESS INFORMATION", "State") === "TX", "state uppercased");
 check(val("BUSINESS INFORMATION", "Industry") === "Residential Construction", "industry slug title-cased");
 check(val("BUSINESS INFORMATION", "Email") === "owner@example.com", "email from lead record");
-check(val("BUSINESS INFORMATION", "Phone") === "(555) 010-1234", "phone from lead record");
+check(val("BUSINESS INFORMATION", "Phone") === "", "merchant phone suppressed on the app PDF (Ezra 2026-06-24, lender-facing)");
 check(val("BUSINESS INFORMATION", "Product / Service") === "Residential construction", "product/service mapped");
 
 // Uncollected fields render blank (CC: keep form as-is).
@@ -84,7 +84,7 @@ check(val("BUSINESS INFORMATION", "Length of Ownership") === "", "length of owne
 check(val("MERCHANT / OWNER INFORMATION", "Name") === "Jordan Tester", "owner name mapped");
 check(val("MERCHANT / OWNER INFORMATION", "Ownership %") === "100%", "ownership pct gets % suffix");
 check(val("MERCHANT / OWNER INFORMATION", "Date of Birth") === "06/15/1985", "owner dob → US format");
-check(val("MERCHANT / OWNER INFORMATION", "Cell Phone") === "(555) 010-1234", "owner cell mapped");
+check(val("MERCHANT / OWNER INFORMATION", "Cell Phone") === "", "merchant cell suppressed on the app PDF (Ezra 2026-06-24, lender-facing)");
 check(val("MERCHANT / OWNER INFORMATION", "Title") === "", "owner title blank (uncollected)");
 check(val("MERCHANT / OWNER INFORMATION", "Home Phone") === "", "owner home phone blank (uncollected)");
 

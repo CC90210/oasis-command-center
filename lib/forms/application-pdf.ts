@@ -91,7 +91,8 @@ export function mapApplicationFields(
   lead: Record<string, unknown>,
 ): MappedApplication {
   const email = str(lead.email) || str(merged.email);
-  const phone = str(lead.phone) || str(merged.phone);
+  // Ezra 2026-06-24: the merchant's phone is intentionally omitted from the
+  // application PDF (lender-facing) — see the blanked Phone/Cell Phone rows below.
 
   const sections: PdfSection[] = [
     {
@@ -100,7 +101,7 @@ export function mapApplicationFields(
         { label: "Legal Business Name", value: str(merged.business_legal_name) || str(merged.business_name) || str(lead.business_name) },
         { label: "DBA", value: str(merged.dba) },
         { label: "Business Address", value: str(merged.business_address) },
-        { label: "Phone", value: phone },
+        { label: "Phone", value: "" },
         { label: "Fax", value: "" },
         { label: "Federal Tax ID / EIN", value: str(merged.tax_id_ein) },
         { label: "Date Started", value: usDate(merged.business_start_date) },
@@ -124,7 +125,7 @@ export function mapApplicationFields(
         { label: "SSN", value: str(merged.owner_ssn) },
         { label: "Date of Birth", value: usDate(merged.owner_dob) },
         { label: "Home Phone", value: "" },
-        { label: "Cell Phone", value: str(merged.owner_cell) || str(merged.phone) },
+        { label: "Cell Phone", value: "" },
       ],
     },
     {
@@ -137,7 +138,7 @@ export function mapApplicationFields(
         { label: "SSN", value: str(merged.partner_ssn) },
         { label: "Date of Birth", value: usDate(merged.partner_dob) },
         { label: "Home Phone", value: "" },
-        { label: "Cell Phone", value: str(merged.partner_cell) },
+        { label: "Cell Phone", value: "" },
       ],
     },
     {
@@ -262,7 +263,14 @@ export function mapApplicationFieldsFromSteps(
       ) {
         continue;
       }
-      rows.push({ label: f.label, value: formatFieldValue(f, resolveAnswer(merged, f.name)) });
+      // Ezra 2026-06-24: never expose the merchant's phone on the generated
+      // application PDF (it is lender-facing once shopped out) — keep the
+      // labelled field but blank the value so funders can't contact the
+      // merchant directly. Covers phone / owner_cell / partner_cell (all type=phone).
+      rows.push({
+        label: f.label,
+        value: f.type === "phone" ? "" : formatFieldValue(f, resolveAnswer(merged, f.name)),
+      });
     }
     if (rows.length) sections.push({ heading: step.title.toUpperCase(), rows });
   }

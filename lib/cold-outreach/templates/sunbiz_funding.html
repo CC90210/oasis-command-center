@@ -147,57 +147,6 @@
       font-size: 16px;
     }
 
-    /* Funding Amounts Grid */
-    .section-title {
-      font-size: 14px;
-      font-weight: 700;
-      color: #001F54;
-      text-transform: uppercase;
-      letter-spacing: 1px;
-      margin: 0 0 14px;
-    }
-
-    .amounts-table {
-      width: 100%;
-      border-collapse: separate;
-      border-spacing: 8px;
-      margin: 0 -8px 28px;
-    }
-
-    .amount-cell {
-      background-color: #f8fafc;
-      border: 2px solid #e2e8f0;
-      border-radius: 10px;
-      text-align: center;
-      padding: 14px 8px;
-      width: 33.33%;
-      cursor: pointer;
-    }
-
-    .amount-cell:hover {
-      border-color: #10b981;
-      background-color: #f0fdf4;
-    }
-
-    .amount-cell a {
-      text-decoration: none;
-      display: block;
-    }
-
-    .amount-value {
-      font-size: 20px;
-      font-weight: 800;
-      color: #001F54;
-      display: block;
-    }
-
-    .amount-weekly {
-      font-size: 11px;
-      color: #64748b;
-      margin-top: 4px;
-      display: block;
-    }
-
     /* CTA Button */
     .cta-wrapper {
       text-align: center;
@@ -344,27 +293,6 @@
         font-size: 21px !important;
       }
 
-      /* Stack the 3-column amounts grid into 2 columns on mobile */
-      .amounts-table,
-      .amounts-table tbody,
-      .amounts-table tr {
-        display: block !important;
-        width: 100% !important;
-      }
-
-      .amounts-table tr {
-        display: flex !important;
-        flex-wrap: wrap !important;
-        margin-bottom: 0 !important;
-      }
-
-      .amount-cell {
-        width: calc(50% - 8px) !important;
-        display: inline-block !important;
-        margin: 4px !important;
-        box-sizing: border-box !important;
-      }
-
       /* Value props stack vertically */
       .value-props-table,
       .value-props-table tbody,
@@ -445,49 +373,65 @@
         </div>
 
         <!-- Funding Amounts -->
-        <p class="section-title">Select Your Funding Amount</p>
-        <table class="amounts-table" role="presentation" cellspacing="0" cellpadding="0" border="0">
-          <tr>
-            <td class="amount-cell">
-              <a href="https://form.jotform.com/253155026259254" target="_blank" rel="noopener">
-                <span class="amount-value">$5K</span>
-                <span class="amount-weekly">~$125/wk</span>
-              </a>
-            </td>
-            <td class="amount-cell">
-              <a href="https://form.jotform.com/253155026259254" target="_blank" rel="noopener">
-                <span class="amount-value">$10K</span>
-                <span class="amount-weekly">~$250/wk</span>
-              </a>
-            </td>
-            <td class="amount-cell">
-              <a href="https://form.jotform.com/253155026259254" target="_blank" rel="noopener">
-                <span class="amount-value">$25K</span>
-                <span class="amount-weekly">~$600/wk</span>
-              </a>
-            </td>
-          </tr>
-          <tr>
-            <td class="amount-cell">
-              <a href="https://form.jotform.com/253155026259254" target="_blank" rel="noopener">
-                <span class="amount-value">$50K</span>
-                <span class="amount-weekly">~$1,100/wk</span>
-              </a>
-            </td>
-            <td class="amount-cell">
-              <a href="https://form.jotform.com/253155026259254" target="_blank" rel="noopener">
-                <span class="amount-value">$75K</span>
-                <span class="amount-weekly">~$1,600/wk</span>
-              </a>
-            </td>
-            <td class="amount-cell">
-              <a href="https://form.jotform.com/253155026259254" target="_blank" rel="noopener">
-                <span class="amount-value">$100K</span>
-                <span class="amount-weekly">~$2,100/wk</span>
-              </a>
-            </td>
-          </tr>
-        </table>
+        <!-- ============================================================
+     SUNBIZ STANDARD FUNDING OPTIONS BLOCK (canonical — Ezra 2026-06-24)
+     Drop into EVERY email template. Self-contained + inline-styled so it
+     renders identically regardless of the template's own CSS. Fixed metrics:
+     amount / estimated weekly payment / term. Descending; $250k is the hero.
+============================================================ -->
+<table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="margin:24px 0;">
+  <tr>
+    <td style="padding:0 0 10px 0; font-family:Arial,Helvetica,sans-serif; font-size:13px; font-weight:700; letter-spacing:.04em; text-transform:uppercase; color:#175637;">
+      Your Funding Options
+    </td>
+  </tr>
+  <tr>
+    <td>
+      <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="border-collapse:separate; border-spacing:0;">
+        <tr>
+          <!-- TIER: $250,000 (hero) -->
+          <td width="33.33%" valign="top" style="padding:0 6px;">
+            <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="background:#175637; border:1px solid #175637; border-top:3px solid #f1c036; border-radius:10px;">
+              <tr><td style="padding:16px 12px; text-align:center; font-family:Arial,Helvetica,sans-serif;">
+                <div style="font-size:22px; font-weight:800; color:#ffffff; line-height:1;">$250,000</div>
+                <div style="font-size:11px; color:#bcd3c8; margin:6px 0 12px;">amount you receive</div>
+                <div style="font-size:15px; font-weight:700; color:#f1c036;">$2,083<span style="font-size:11px; font-weight:400; color:#bcd3c8;">/week</span></div>
+                <div style="font-size:11px; color:#bcd3c8; margin-top:2px;">36-month term</div>
+              </td></tr>
+            </table>
+          </td>
+          <!-- TIER: $100,000 -->
+          <td width="33.33%" valign="top" style="padding:0 6px;">
+            <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="background:#f7faf8; border:1px solid #e2ebe6; border-top:3px solid #f1c036; border-radius:10px;">
+              <tr><td style="padding:16px 12px; text-align:center; font-family:Arial,Helvetica,sans-serif;">
+                <div style="font-size:22px; font-weight:800; color:#175637; line-height:1;">$100,000</div>
+                <div style="font-size:11px; color:#6b7c73; margin:6px 0 12px;">amount you receive</div>
+                <div style="font-size:15px; font-weight:700; color:#1a1a1a;">$1,302<span style="font-size:11px; font-weight:400; color:#6b7c73;">/week</span></div>
+                <div style="font-size:11px; color:#6b7c73; margin-top:2px;">24-month term</div>
+              </td></tr>
+            </table>
+          </td>
+          <!-- TIER: $50,000 -->
+          <td width="33.33%" valign="top" style="padding:0 6px;">
+            <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="background:#f7faf8; border:1px solid #e2ebe6; border-top:3px solid #f1c036; border-radius:10px;">
+              <tr><td style="padding:16px 12px; text-align:center; font-family:Arial,Helvetica,sans-serif;">
+                <div style="font-size:22px; font-weight:800; color:#175637; line-height:1;">$50,000</div>
+                <div style="font-size:11px; color:#6b7c73; margin:6px 0 12px;">amount you receive</div>
+                <div style="font-size:15px; font-weight:700; color:#1a1a1a;">$868<span style="font-size:11px; font-weight:400; color:#6b7c73;">/week</span></div>
+                <div style="font-size:11px; color:#6b7c73; margin-top:2px;">18-month term</div>
+              </td></tr>
+            </table>
+          </td>
+        </tr>
+      </table>
+    </td>
+  </tr>
+  <tr>
+    <td style="padding:8px 6px 0; font-family:Arial,Helvetica,sans-serif; font-size:11px; color:#9aa8a0;">
+      Estimated payments shown. Final amount and terms are based on your business's monthly revenue — no credit check to see what you qualify for.
+    </td>
+  </tr>
+</table>
 
         <!-- Primary CTA -->
         <div class="cta-wrapper">

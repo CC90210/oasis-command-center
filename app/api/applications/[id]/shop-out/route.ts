@@ -42,6 +42,7 @@ import { canViewLead, leadScopingEnabled } from "@/lib/lead-scope";
 import { buildShopOutPlan, recordShopOutThreads } from "@/lib/lenders/shop-out";
 import { complianceProfileInputs } from "@/lib/lenders/match-fitness";
 import { deriveDealSigner, resolveSignerForOperator } from "@/lib/config/agents";
+import { updateRecord } from "@/lib/manifest/data";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -494,6 +495,33 @@ export async function POST(
 
   const queued = entries.filter((e) => !e.error).length;
   const blocked = entries.length - queued;
+
+  // Ezra 2026-06-24: shopping a deal out auto-advances it to the "shopping"
+  // stage so the operator never has to drag it across the board by hand. Routes
+  // through updateRecord (same path as a manual stage change), so it fires
+  // BRAVO_RECORD_STATUS_CHANGED and the pipeline/board updates live. Best-effort
+  // — a stage-write failure must NOT fail the shop-out (the sends already
+  // queued). Never downgrade a deal already past shopping (a funder bit, or it
+  // died) — only advance pre-shopping stages.
+  if (queued > 0) {
+    const cur = typeof appData.status === "string" ? appData.status : "";
+    const DONT_DOWNGRADE = new Set([
+      "shopping", "approved", "requested_docs", "docs_out", "login",
+      "funded", "follow_ups", "declined", "dead_file",
+    ]);
+    if (!DONT_DOWNGRADE.has(cur)) {
+      try {
+        await updateRecord({
+          tenant_id: tenantId,
+          entity: "application",
+          id: applicationId,
+          patch: { status: "shopping" },
+        });
+      } catch (err) {
+        console.error("[shop-out] auto-move to shopping stage failed:", err);
+      }
+    }
+  }
 
   // Phase 6.3-bis: auto-fire the physical SMTP dispatch for every thread
   // we just queued at status='pending'. Synchronous so the response

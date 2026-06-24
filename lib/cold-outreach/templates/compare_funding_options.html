@@ -850,196 +850,68 @@
         <!-- Section Label -->
         <p class="section-label">Choose Your Growth Tier</p>
 
-        <!-- Scale Visual - seedling > plant > tree -->
-        <div class="scale-container">
-          <table class="scale-table" role="presentation" cellspacing="0" cellpadding="0" border="0">
-            <!-- Amount labels row -->
-            <tr>
-              <td class="scale-amount-cell">
-                <span class="scale-amount">$75,000</span>
-              </td>
-              <td class="scale-amount-cell">
-                <span class="scale-amount">$200,000</span>
-              </td>
-              <td class="scale-amount-cell">
-                <span class="scale-amount">$250,000</span>
-              </td>
-            </tr>
-            <!-- Progress bar row -->
-            <tr class="scale-bar-row">
-              <td style="text-align:center; padding:0; vertical-align:middle; width:33.33%;">
-                <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%">
-                  <tr>
-                    <td style="width:50%; padding:0;"></td>
-                    <td style="width:0; padding:0; text-align:center; vertical-align:middle;">
-                      <div style="width:18px; height:18px; border-radius:50%; background-color:#e2e8f0; border:3px solid #001F54; display:inline-block;"></div>
-                    </td>
-                    <td style="padding:0;">
-                      <div style="height:4px; background:linear-gradient(to right,#001F54,#D4A843);"></div>
-                    </td>
-                  </tr>
-                </table>
-              </td>
-              <td style="text-align:center; padding:0; vertical-align:middle; width:33.33%;">
-                <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%">
-                  <tr>
-                    <td style="padding:0;">
-                      <div style="height:4px; background:#D4A843;"></div>
-                    </td>
-                    <td style="width:0; padding:0; text-align:center; vertical-align:middle;">
-                      <div style="width:22px; height:22px; border-radius:50%; background-color:#D4A843; display:inline-block; border:3px solid #b8891e;"></div>
-                    </td>
-                    <td style="padding:0;">
-                      <div style="height:4px; background:linear-gradient(to right,#D4A843,#001F54);"></div>
-                    </td>
-                  </tr>
-                </table>
-              </td>
-              <td style="text-align:center; padding:0; vertical-align:middle; width:33.33%;">
-                <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%">
-                  <tr>
-                    <td style="padding:0;">
-                      <div style="height:4px; background-color:#001F54;"></div>
-                    </td>
-                    <td style="width:0; padding:0; text-align:center; vertical-align:middle;">
-                      <div style="width:26px; height:26px; border-radius:50%; background-color:#001F54; display:inline-block; border:3px solid #D4A843;"></div>
-                    </td>
-                    <td style="width:50%; padding:0;"></td>
-                  </tr>
-                </table>
-              </td>
-            </tr>
-            <!-- Growth icons row -->
-            <tr>
-              <td class="scale-label-cell">
-                <span style="font-size:24px; display:block; text-align:center; padding-top:8px;">&#127807;</span>
-                <span class="scale-tier-label">Starter</span>
-              </td>
-              <td class="scale-label-cell">
-                <span style="font-size:28px; display:block; text-align:center; padding-top:8px;">&#127794;</span>
-                <span class="scale-tier-label">Growth</span>
-              </td>
-              <td class="scale-label-cell">
-                <span style="font-size:32px; display:block; text-align:center; padding-top:8px;">&#127795;</span>
-                <span class="scale-tier-label">Scale</span>
-              </td>
-            </tr>
-          </table>
-        </div>
-
         <!-- ============================================================
-             TIER 1 - STARTER $75,000
+             SUNBIZ STANDARD FUNDING OPTIONS BLOCK (canonical — Ezra 2026-06-24)
         ============================================================ -->
-        <div class="tiers-section">
-
-          <div class="tier-card tier-card-starter">
-            <table class="tier-header-table" role="presentation" cellspacing="0" cellpadding="0" border="0">
-              <tr>
-                <td class="tier-header-left">
-                  <span class="tier-badge tier-badge-starter">Starter</span>
-                  <span class="tier-amount tier-amount-starter">$75,000</span>
-                  <span class="tier-receive-label tier-receive-starter">You Receive</span>
-                </td>
-                <td class="tier-header-right">
-                  <span class="tier-plant-art">&#127807;</span>
-                  <span class="tier-payment tier-payment-starter">Pay Only $362/mo</span>
-                  <span class="tier-payment-note tier-payment-note-starter">Est. weekly payment</span>
-                </td>
-              </tr>
+<!-- ============================================================
+     SUNBIZ STANDARD FUNDING OPTIONS BLOCK (canonical — Ezra 2026-06-24)
+     Drop into EVERY email template. Self-contained + inline-styled so it
+     renders identically regardless of the template's own CSS. Fixed metrics:
+     amount / estimated weekly payment / term. Descending; $250k is the hero.
+============================================================ -->
+<table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="margin:24px 0;">
+  <tr>
+    <td style="padding:0 0 10px 0; font-family:Arial,Helvetica,sans-serif; font-size:13px; font-weight:700; letter-spacing:.04em; text-transform:uppercase; color:#175637;">
+      Your Funding Options
+    </td>
+  </tr>
+  <tr>
+    <td>
+      <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="border-collapse:separate; border-spacing:0;">
+        <tr>
+          <!-- TIER: $250,000 (hero) -->
+          <td width="33.33%" valign="top" style="padding:0 6px;">
+            <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="background:#175637; border:1px solid #175637; border-top:3px solid #f1c036; border-radius:10px;">
+              <tr><td style="padding:16px 12px; text-align:center; font-family:Arial,Helvetica,sans-serif;">
+                <div style="font-size:22px; font-weight:800; color:#ffffff; line-height:1;">$250,000</div>
+                <div style="font-size:11px; color:#bcd3c8; margin:6px 0 12px;">amount you receive</div>
+                <div style="font-size:15px; font-weight:700; color:#f1c036;">$2,083<span style="font-size:11px; font-weight:400; color:#bcd3c8;">/week</span></div>
+                <div style="font-size:11px; color:#bcd3c8; margin-top:2px;">36-month term</div>
+              </td></tr>
             </table>
-            <div class="tier-divider tier-divider-starter"></div>
-            <div class="tier-footer">
-              <table class="tier-features-table" role="presentation" cellspacing="0" cellpadding="0" border="0">
-                <tr>
-                  <td class="tier-feature tier-feature-starter">
-                    <span class="tier-feature-icon">&#9733;</span> Same-day qualification
-                    &nbsp;&nbsp;<span class="tier-feature-icon">&#9733;</span> No collateral required
-                  </td>
-                  <td class="tier-cta-cell">
-                    <a href="https://form.jotform.com/253155026259254" target="_blank" rel="noopener" class="tier-cta-btn tier-cta-btn-starter">
-                      See If I Qualify &rarr;
-                    </a>
-                  </td>
-                </tr>
-              </table>
-            </div>
-          </div>
-
-          <!-- ============================================================
-               TIER 2 - GROWTH $200,000 (Most Popular)
-          ============================================================ -->
-          <div class="tier-card tier-card-growth">
-            <div class="most-popular-ribbon">&#9733; &nbsp;Most Popular Choice&nbsp; &#9733;</div>
-            <table class="tier-header-table" role="presentation" cellspacing="0" cellpadding="0" border="0">
-              <tr>
-                <td class="tier-header-left">
-                  <span class="tier-badge tier-badge-growth">Growth</span>
-                  <span class="tier-amount tier-amount-growth">$200,000</span>
-                  <span class="tier-receive-label tier-receive-growth">You Receive</span>
-                </td>
-                <td class="tier-header-right">
-                  <span class="tier-plant-art">&#127794;</span>
-                  <span class="tier-payment tier-payment-growth">Pay Only $966/mo</span>
-                  <span class="tier-payment-note tier-payment-note-growth">Est. weekly payment</span>
-                </td>
-              </tr>
+          </td>
+          <!-- TIER: $100,000 -->
+          <td width="33.33%" valign="top" style="padding:0 6px;">
+            <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="background:#f7faf8; border:1px solid #e2ebe6; border-top:3px solid #f1c036; border-radius:10px;">
+              <tr><td style="padding:16px 12px; text-align:center; font-family:Arial,Helvetica,sans-serif;">
+                <div style="font-size:22px; font-weight:800; color:#175637; line-height:1;">$100,000</div>
+                <div style="font-size:11px; color:#6b7c73; margin:6px 0 12px;">amount you receive</div>
+                <div style="font-size:15px; font-weight:700; color:#1a1a1a;">$1,302<span style="font-size:11px; font-weight:400; color:#6b7c73;">/week</span></div>
+                <div style="font-size:11px; color:#6b7c73; margin-top:2px;">24-month term</div>
+              </td></tr>
             </table>
-            <div class="tier-divider tier-divider-growth"></div>
-            <div class="tier-footer">
-              <table class="tier-features-table" role="presentation" cellspacing="0" cellpadding="0" border="0">
-                <tr>
-                  <td class="tier-feature tier-feature-growth">
-                    <span class="tier-feature-icon">&#9733;</span> Priority processing
-                    &nbsp;&nbsp;<span class="tier-feature-icon">&#9733;</span> Dedicated advisor
-                  </td>
-                  <td class="tier-cta-cell">
-                    <a href="https://form.jotform.com/253155026259254" target="_blank" rel="noopener" class="tier-cta-btn tier-cta-btn-growth">
-                      See If I Qualify &rarr;
-                    </a>
-                  </td>
-                </tr>
-              </table>
-            </div>
-          </div>
-
-          <!-- ============================================================
-               TIER 3 - SCALE $250,000 (Premium / Navy card)
-          ============================================================ -->
-          <div class="tier-card tier-card-scale">
-            <table class="tier-header-table" role="presentation" cellspacing="0" cellpadding="0" border="0">
-              <tr>
-                <td class="tier-header-left">
-                  <span class="tier-badge tier-badge-scale">Scale</span>
-                  <span class="tier-amount tier-amount-scale">$250,000</span>
-                  <span class="tier-receive-label tier-receive-scale">You Receive</span>
-                </td>
-                <td class="tier-header-right">
-                  <span class="tier-plant-art" style="text-align:right;">&#127795;</span>
-                  <span class="tier-payment tier-payment-scale">Pay Only $1,208/mo</span>
-                  <span class="tier-payment-note tier-payment-note-scale">Est. weekly payment</span>
-                </td>
-              </tr>
+          </td>
+          <!-- TIER: $50,000 -->
+          <td width="33.33%" valign="top" style="padding:0 6px;">
+            <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="background:#f7faf8; border:1px solid #e2ebe6; border-top:3px solid #f1c036; border-radius:10px;">
+              <tr><td style="padding:16px 12px; text-align:center; font-family:Arial,Helvetica,sans-serif;">
+                <div style="font-size:22px; font-weight:800; color:#175637; line-height:1;">$50,000</div>
+                <div style="font-size:11px; color:#6b7c73; margin:6px 0 12px;">amount you receive</div>
+                <div style="font-size:15px; font-weight:700; color:#1a1a1a;">$868<span style="font-size:11px; font-weight:400; color:#6b7c73;">/week</span></div>
+                <div style="font-size:11px; color:#6b7c73; margin-top:2px;">18-month term</div>
+              </td></tr>
             </table>
-            <div class="tier-divider tier-divider-scale"></div>
-            <div class="tier-footer">
-              <table class="tier-features-table" role="presentation" cellspacing="0" cellpadding="0" border="0">
-                <tr>
-                  <td class="tier-feature tier-feature-scale">
-                    <span class="tier-feature-icon">&#9733;</span> White-glove service
-                    &nbsp;&nbsp;<span class="tier-feature-icon">&#9733;</span> Preferred terms
-                  </td>
-                  <td class="tier-cta-cell">
-                    <a href="https://form.jotform.com/253155026259254" target="_blank" rel="noopener" class="tier-cta-btn tier-cta-btn-scale">
-                      See If I Qualify &rarr;
-                    </a>
-                  </td>
-                </tr>
-              </table>
-            </div>
-          </div>
-
-        </div>
-        <!-- end tiers-section -->
+          </td>
+        </tr>
+      </table>
+    </td>
+  </tr>
+  <tr>
+    <td style="padding:8px 6px 0; font-family:Arial,Helvetica,sans-serif; font-size:11px; color:#9aa8a0;">
+      Estimated payments shown. Final amount and terms are based on your business's monthly revenue — no credit check to see what you qualify for.
+    </td>
+  </tr>
+</table>
 
         <!-- Primary CTA Block -->
         <div class="cta-block">
