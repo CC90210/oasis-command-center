@@ -25,6 +25,49 @@ import type { LenderProfile, ApplicationProfile, LenderWarning } from "./match-f
 import { scoreLenderMatch } from "./match-fitness";
 import { buildLenderNarrative } from "./match-narrative";
 import { findAgentByEmail } from "@/lib/config/agents";
+import { updateRecord } from "@/lib/manifest/data";
+
+// Stages at or past "shopping" — a (re-)shop-out must never downgrade these.
+const SHOPPING_OR_LATER = new Set([
+  "shopping", "approved", "requested_docs", "docs_out", "login",
+  "funded", "follow_ups", "declined", "dead_file",
+]);
+
+/**
+ * After a REAL shop-out (>=1 lender actually sent), auto-advance the application
+ * to the "shopping" stage so the operator never drags it across the board by
+ * hand (Ezra 2026-06-24). Routes through updateRecord, so it fires
+ * BRAVO_RECORD_STATUS_CHANGED and the pipeline/board update live. Shared by BOTH
+ * shop-out paths — the legacy /shop-out route and the Gmail-direct /shop-out/run
+ * engine. Best-effort + self-contained: reads the current status, skips if it's
+ * already at/past shopping, and never throws into the caller (sends already happened).
+ */
+export async function autoAdvanceToShopping(
+  tenantId: string,
+  applicationId: string,
+): Promise<void> {
+  try {
+    const db = getServiceSupabase();
+    const row = await db
+      .from("tenant_records")
+      .select("data")
+      .eq("tenant_id", tenantId)
+      .eq("entity_type", "application")
+      .eq("id", applicationId)
+      .maybeSingle();
+    const data = (row.data as { data?: Record<string, unknown> } | null)?.data || {};
+    const cur = typeof data.status === "string" ? data.status : "";
+    if (SHOPPING_OR_LATER.has(cur)) return;
+    await updateRecord({
+      tenant_id: tenantId,
+      entity: "application",
+      id: applicationId,
+      patch: { status: "shopping" },
+    });
+  } catch (err) {
+    console.error("[shop-out] auto-advance to shopping stage failed:", err);
+  }
+}
 
 export type ShopOutAttachment = {
   /** Display filename — e.g. "bank-statements-mar-may.pdf". */

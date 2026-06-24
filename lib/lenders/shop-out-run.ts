@@ -31,7 +31,7 @@
 
 import "server-only";
 import { getServiceSupabase } from "@/lib/supabase-server";
-import { buildShopOutPlan, type ShopOutAttachment } from "@/lib/lenders/shop-out";
+import { buildShopOutPlan, autoAdvanceToShopping, type ShopOutAttachment } from "@/lib/lenders/shop-out";
 import type { ApplicationProfile } from "@/lib/lenders/match-fitness";
 import {
   jordanSubject,
@@ -350,6 +350,12 @@ export async function executeShopOutRun(
     ok: finalStatus === "completed",
     summary: `Shop-out run ${runId}: ${sentCount} sent, ${failedCount} failed`,
   });
+
+  // Ezra 2026-06-24: a real send (>=1 lender) auto-advances the deal to
+  // "shopping" — same shared helper the legacy /shop-out route uses.
+  if (sentCount > 0) {
+    await autoAdvanceToShopping(args.tenantId, args.applicationId);
+  }
 
   return {
     ok: true,
