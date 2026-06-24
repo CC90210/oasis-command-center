@@ -27,6 +27,29 @@ export type LenderReplyClass = {
 
 const CATS: LenderReplyCategory[] = ["approved", "counter_offer", "declined", "info_needed", "submitted", "unknown"];
 
+/**
+ * Isolate the lender's NEW message — strip the quoted original (our "New Deal"
+ * submission) + forwarded headers that otherwise dilute/confuse classification.
+ * Falls back to the head of the raw body if stripping leaves nothing useful.
+ */
+function topOfReply(body: string): string {
+  const raw = String(body || "");
+  const markers = [
+    /\r?\nOn .+ wrote:/i,
+    /\r?\n-{2,}\s*Original Message\s*-{2,}/i,
+    /\r?\n_{5,}/,
+    /\r?\nFrom:\s.+\r?\n\s*(Sent|Date|To):/i,
+    /\r?\n>.*/,
+  ];
+  let cut = raw.length;
+  for (const m of markers) {
+    const idx = raw.search(m);
+    if (idx >= 0 && idx < cut) cut = idx;
+  }
+  const top = raw.slice(0, cut).trim();
+  return top.length >= 8 ? top : raw.slice(0, 1500);
+}
+
 const SYSTEM = `You classify a LENDER's email reply to an MCA (merchant cash advance) deal submission, and extract any offered terms.
 
 Return ONLY a JSON object, no prose:
@@ -51,7 +74,7 @@ export async function classifyLenderReply(subject: string, body: string): Promis
   const apiKey = (process.env.BRAVO_ANTHROPIC_API_KEY || process.env.ANTHROPIC_API_KEY || "").trim();
   if (!apiKey) return fallback;
 
-  const content = `Subject: ${String(subject || "").slice(0, 300)}\n\n<<<UNTRUSTED_LENDER_EMAIL>>>\n${String(body || "").slice(0, 3500)}\n<<<END_UNTRUSTED>>>`;
+  const content = `Subject: ${String(subject || "").slice(0, 300)}\n\n<<<UNTRUSTED_LENDER_EMAIL>>>\n${topOfReply(body).slice(0, 3500)}\n<<<END_UNTRUSTED>>>`;
   try {
     const res = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
