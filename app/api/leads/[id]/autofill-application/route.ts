@@ -78,5 +78,14 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
     ok: true,
     application_id: applied.applicationId,
     applied_keys: applied.appliedKeys,
+    // Best-effort crop hint for the signature-extraction UI: where Claude saw the
+    // applicant's signature on the dropped doc. The client renders the document
+    // and lets the operator confirm/adjust the crop before it lands on the legal
+    // PDF (applyExtractedApplication whitelists fields, so _signature is never
+    // written as an application field — it's purely a UI hint).
+    signature_hint:
+      ext.fields._signature && typeof ext.fields._signature === "object"
+        ? (ext.fields._signature as Record<string, unknown>)
+        : null,
   });
 }
