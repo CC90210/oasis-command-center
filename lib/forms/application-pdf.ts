@@ -81,6 +81,29 @@ function titleCaseSlug(v: unknown): string {
 }
 
 /**
+ * Compose a COMPLETE one-line address. The "address" autocomplete field usually
+ * stores "street, city, ZIP" with NO state — the state lives in the separate
+ * business_state dropdown (for lender matching), so the lender-facing PDF was
+ * showing an address line missing the state. Merge the state back in so the
+ * line reads "street, city, ST ZIP". Idempotent: if the address already carries
+ * the 2-letter state (adjacent to a ZIP or trailing), it's left untouched.
+ */
+function composeAddress(addr: unknown, state: unknown): string {
+  const a = str(addr);
+  const st = str(state).toUpperCase();
+  if (!a) return "";
+  if (!/^[A-Z]{2}$/.test(st)) return a; // no usable 2-letter state → leave as-is
+  const up = a.toUpperCase();
+  // Already in state position (before a ZIP, or trailing ", ST")? Leave it.
+  if (new RegExp(`\\b${st}\\b\\s*\\d{5}`).test(up) || new RegExp(`,\\s*${st}\\s*$`).test(up)) return a;
+  // Insert before a trailing ZIP: "..., Miami, 33101" -> "..., Miami, FL 33101".
+  const zip = a.match(/^(.*?)[,\s]*(\d{5}(?:-\d{4})?)\s*$/);
+  if (zip) return `${zip[1].replace(/[,\s]+$/, "")}, ${st} ${zip[2]}`;
+  // No ZIP — append the state.
+  return `${a.replace(/[,\s]+$/, "")}, ${st}`;
+}
+
+/**
  * Map the merged form payload + lead record onto the application's four
  * sections. Uncollected fields (the form doesn't ask for them) render blank so
  * the layout matches the example while staying truthful about what was
@@ -100,7 +123,7 @@ export function mapApplicationFields(
       rows: [
         { label: "Legal Business Name", value: str(merged.business_legal_name) || str(merged.business_name) || str(lead.business_name) },
         { label: "DBA", value: str(merged.dba) },
-        { label: "Business Address", value: str(merged.business_address) },
+        { label: "Business Address", value: composeAddress(merged.business_address, merged.business_state ?? merged.state) },
         { label: "Phone", value: "" },
         { label: "Fax", value: "" },
         { label: "Federal Tax ID / EIN", value: str(merged.tax_id_ein) },
