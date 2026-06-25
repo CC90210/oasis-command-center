@@ -109,6 +109,12 @@ export const OPPORTUNITY_PIPELINE_STAGES: StageMeta[] = [
   { key: "follow_ups",      label: "Follow Ups",      bg: "#C0842F", fg: "#FFFFFF" },
   { key: "declined",        label: "Declined",        bg: "#9B3D45", fg: "#FFFFFF" },
   { key: "dead_file",       label: "Dead",            bg: "#6F2D34", fg: "#FFFFFF" },
+  // Default (Ezra, 2026-06-24): a FUNDED deal where the merchant stopped
+  // paying / defaulted on the advance. A distinct terminal-negative column
+  // from Declined (funder said no) and Dead (dead file) — operators move a
+  // soured funded deal here. Slate grey matches the lead pipeline's `default`
+  // stage so the same lifecycle state reads identically across both boards.
+  { key: "default",         label: "Default",         bg: "#62666F", fg: "#FFFFFF" },
 ];
 
 // Adon's canonical 7-stage deal model — 2026-05-28 (Adon handoff,

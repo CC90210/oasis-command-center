@@ -94,6 +94,13 @@ const APPLICATION_STAGE_ALIASES = new Map<string, string>([
   ["no offers available", "declined"],
   ["no offer", "declined"],
   ["no offers", "declined"],
+  // Default (Ezra, 2026-06-24): a funded deal where the merchant stopped
+  // paying. New terminal opportunity stage — alias the common phrasings so
+  // imports / inbound payloads resolve to it.
+  ["default", "default"],
+  ["defaulted", "default"],
+  ["in default", "default"],
+  ["merchant default", "default"],
 ]);
 
 const APPLICATION_RECORD_TYPES = new Set(["application", "opportunity", "deal"]);
