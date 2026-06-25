@@ -20,7 +20,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 // useRef intentionally imported for the file-input ref in DocumentsTab.
 import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
-import { X, FileText, ImageIcon, Phone, Mail, ShoppingBag, Loader2, Trash2, CheckCircle2, AlertCircle, UploadCloud, RefreshCw, ArrowRightLeft } from "lucide-react";
+import { X, FileText, ImageIcon, Phone, Mail, ShoppingBag, Loader2, Trash2, CheckCircle2, AlertCircle, UploadCloud, RefreshCw, ArrowRightLeft, ChevronLeft } from "lucide-react";
 import { LeadTimelinePanel } from "./LeadTimelinePanel";
 import { AssignmentControl } from "./AssignmentControl";
 import { CollaboratorsControl } from "./CollaboratorsControl";
@@ -1884,39 +1884,46 @@ function DrawerFooter({
   const [mode, setMode] = useState<ComposerMode>(null);
   return (
     <div className="border-t border-bg-border bg-bg-elev/40">
-      {mode === null ? (
-        <div className="flex items-stretch gap-2 p-3">
-          <button
-            type="button"
-            onClick={() => setMode("email")}
-            className="flex-1 text-[12px] font-semibold px-3 py-2 rounded-md bg-bg-elev border border-bg-border text-fg hover:bg-bg-elev/80"
-          >
-            Send Email
-          </button>
-          <button
-            type="button"
-            onClick={() => setMode("sms")}
-            className="flex-1 text-[12px] font-semibold px-3 py-2 rounded-md bg-bg-elev border border-bg-border text-fg hover:bg-bg-elev/80"
-          >
-            Send SMS
-          </button>
-          {/* Kixie alley-oop click-to-call (Phase 3 of TT + Kixie
-              embedding, 2026-06-01). POSTs to /api/leads/[id]/call
-              which resolves the acting employee's Kixie agent email
-              (per-user override → user_profiles.email → tenant default),
-              rings their Kixie line first, then bridges to the lead.
-              Replaces the prior tel:-based handler. Disabled when
-              there's no phone on the record. */}
-          <CallButton recordId={recordId} phone={str(recordData.phone)} />
-          <button
-            type="button"
-            onClick={() => setMode("torrent")}
-            className="flex-1 text-[12px] font-semibold px-3 py-2 rounded-md bg-accent/15 border border-accent/40 text-accent hover:bg-accent/25"
-          >
-            Text Torrent
-          </button>
-        </div>
-      ) : mode === "email" ? (
+      {/* Persistent action bar — buttons wrap onto a second row instead of
+          smushing when the drawer is narrow (mobile / half-screen). Opening a
+          composer renders it as an overlay (below) that covers this bar; the
+          bar returns when the composer closes. */}
+      <div className="flex flex-wrap items-stretch gap-2 p-3">
+        <button
+          type="button"
+          onClick={() => setMode("email")}
+          className="flex-1 min-w-[120px] text-[12px] font-semibold px-3 py-2 rounded-md bg-bg-elev border border-bg-border text-fg hover:bg-bg-elev/80"
+        >
+          Send Email
+        </button>
+        <button
+          type="button"
+          onClick={() => setMode("sms")}
+          className="flex-1 min-w-[120px] text-[12px] font-semibold px-3 py-2 rounded-md bg-bg-elev border border-bg-border text-fg hover:bg-bg-elev/80"
+        >
+          Send SMS
+        </button>
+        {/* Kixie alley-oop click-to-call (Phase 3 of TT + Kixie
+            embedding, 2026-06-01). POSTs to /api/leads/[id]/call
+            which resolves the acting employee's Kixie agent email
+            (per-user override → user_profiles.email → tenant default),
+            rings their Kixie line first, then bridges to the lead.
+            Replaces the prior tel:-based handler. Disabled when
+            there's no phone on the record. */}
+        <CallButton recordId={recordId} phone={str(recordData.phone)} />
+        <button
+          type="button"
+          onClick={() => setMode("torrent")}
+          className="flex-1 min-w-[120px] text-[12px] font-semibold px-3 py-2 rounded-md bg-accent/15 border border-accent/40 text-accent hover:bg-accent/25"
+        >
+          Text Torrent
+        </button>
+      </div>
+
+      {/* Composers — full-height overlay panels (ComposerShell is absolute
+          inset-0 within the drawer's relative <aside>), so they cover the
+          drawer without compacting the merchant info / tabs above. */}
+      {mode === "email" && (
         <EmailComposer
           recordId={recordId}
           entity={entity}
@@ -1934,14 +1941,16 @@ function DrawerFooter({
           onClose={() => setMode(null)}
           onChange={onChange}
         />
-      ) : mode === "sms" ? (
+      )}
+      {mode === "sms" && (
         <SmsComposer
           recordId={recordId}
           toPhone={str(recordData.phone)}
           onClose={() => setMode(null)}
           onChange={onChange}
         />
-      ) : (
+      )}
+      {mode === "torrent" && (
         <TextTorrentPicker
           leadId={entity === "lead" ? recordId : null}
           onClose={() => setMode(null)}
@@ -2028,9 +2037,8 @@ function EmailComposer({
         value={body}
         onChange={(e) => setBody(e.target.value)}
         placeholder="Message"
-        rows={5}
         maxLength={32000}
-        className="w-full text-xs px-2 py-1.5 rounded-md bg-bg-deep border border-bg-border text-fg resize-none"
+        className="w-full flex-1 min-h-[160px] text-xs px-2 py-1.5 rounded-md bg-bg-deep border border-bg-border text-fg resize-none"
       />
       <div className="flex items-center justify-between">
         <div className="text-[11px] text-fg-dim">
@@ -2112,9 +2120,8 @@ function SmsComposer({
         value={body}
         onChange={(e) => setBody(e.target.value)}
         placeholder="Message"
-        rows={3}
         maxLength={1600}
-        className="w-full text-xs px-2 py-1.5 rounded-md bg-bg-deep border border-bg-border text-fg resize-none"
+        className="w-full flex-1 min-h-[120px] text-xs px-2 py-1.5 rounded-md bg-bg-deep border border-bg-border text-fg resize-none"
       />
       <div className="flex items-center justify-between">
         <div className="text-[11px] text-fg-dim">
@@ -2298,6 +2305,22 @@ function TextTorrentPicker({
   );
 }
 
+/**
+ * ComposerShell — full-height OVERLAY panel for the email/SMS/Text-Torrent
+ * composers (2026-06-25 responsive pass, CC ask).
+ *
+ * Previously the composers rendered inline in the drawer footer, so opening
+ * one stole vertical space from the flex column and compacted the merchant
+ * info + tabs above (badly on a half-screen / short window). Now the composer
+ * is `absolute inset-0` inside the drawer's `relative` <aside>, so it covers
+ * the whole drawer as a focused panel WITHOUT compacting anything — identical
+ * behavior on desktop, MacBook half-screen, and mobile.
+ *
+ * Layout: sticky header (← back / title / Cancel) · flex body that scrolls.
+ * The body is `flex flex-col` so a composer can give its textarea `flex-1` to
+ * fill the panel, keeping the Send button pinned at the natural bottom; on a
+ * short window the body scrolls (min-h-0) instead of overlapping.
+ */
 function ComposerShell({
   title,
   children,
@@ -2308,18 +2331,34 @@ function ComposerShell({
   onClose: () => void;
 }) {
   return (
-    <div className="p-3 space-y-2">
-      <div className="flex items-center justify-between">
-        <div className="text-[11px] uppercase tracking-wider text-fg-muted">{title}</div>
+    <div
+      className="absolute inset-0 z-30 flex flex-col bg-bg-elev"
+      role="dialog"
+      aria-label={title}
+    >
+      <header className="flex items-center gap-2 px-4 py-3 border-b border-bg-border shrink-0">
         <button
           type="button"
           onClick={onClose}
-          className="text-[11px] text-fg-dim hover:text-fg"
+          aria-label="Back"
+          className="p-1 -ml-1 rounded-md text-fg-muted hover:text-fg hover:bg-bg-deep transition-colors"
+        >
+          <ChevronLeft className="w-4 h-4" />
+        </button>
+        <div className="flex-1 min-w-0 text-[11px] uppercase tracking-wider text-fg-muted truncate">
+          {title}
+        </div>
+        <button
+          type="button"
+          onClick={onClose}
+          className="text-[11px] text-fg-dim hover:text-fg px-1"
         >
           Cancel
         </button>
+      </header>
+      <div className="flex-1 min-h-0 flex flex-col gap-3 px-4 py-4 overflow-y-auto">
+        {children}
       </div>
-      {children}
     </div>
   );
 }
@@ -2345,7 +2384,9 @@ function StatTiles({
   const bestOffer = application?.data?.best_offer ?? null;
 
   return (
-    <div className="grid grid-cols-4 gap-2">
+    // 2x2 on mobile / half-screen, 4x1 on a wide drawer — keeps money values
+    // from crushing/overlapping when the window isn't full screen (CC 2026-06-25).
+    <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
       <StatTile
         label="Request"
         primary={requested != null ? fmtMoney(requested) : "—"}
