@@ -74,6 +74,27 @@ check(val("BUSINESS INFORMATION", "Email") === "owner@example.com", "email from 
 check(val("BUSINESS INFORMATION", "Phone") === "", "merchant phone suppressed on the app PDF (Ezra 2026-06-24, lender-facing)");
 check(val("BUSINESS INFORMATION", "Product / Service") === "Residential construction", "product/service mapped");
 
+// Address completeness (2026-06-25): the "address" autocomplete usually stores
+// "street, city, ZIP" with NO state (the state lives in the separate
+// business_state dropdown). The lender-facing Business Address line must MERGE
+// the state in so it isn't missing the state.
+check(val("BUSINESS INFORMATION", "Business Address") === "100 Sample Ave, Testville TX 75001",
+  "Business Address unchanged when the state is already present (idempotent)");
+{
+  const noState = mapApplicationFields(
+    { ...merged, business_address: "123 Biscayne Blvd, Miami, 33101", business_state: "fl" },
+    lead,
+  );
+  const ba = noState.sections[0].rows.find((r) => r.label === "Business Address")?.value;
+  check(ba === "123 Biscayne Blvd, Miami, FL 33101", "Business Address merges the state before the ZIP");
+  const noZip = mapApplicationFields(
+    { ...merged, business_address: "123 Biscayne Blvd, Miami", business_state: "fl" },
+    lead,
+  );
+  const ba2 = noZip.sections[0].rows.find((r) => r.label === "Business Address")?.value;
+  check(ba2 === "123 Biscayne Blvd, Miami, FL", "Business Address appends the state when there's no ZIP");
+}
+
 // Uncollected fields render blank (CC: keep form as-is).
 check(val("BUSINESS INFORMATION", "Fax") === "", "fax blank (uncollected)");
 check(val("BUSINESS INFORMATION", "Website") === "", "website blank (uncollected)");
