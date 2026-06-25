@@ -164,7 +164,7 @@ export async function listRecordsForViewer(input: {
   const db = getServiceSupabase();
 
   // Owned — reuse listRecords so the transferred_at exclusion + sort apply.
-  const owned = await listRecords({
+  const ownedPromise = listRecords({
     tenant_id: input.tenant_id,
     entity: input.entity,
     where: { assigned_to: id },
@@ -181,7 +181,12 @@ export async function listRecordsForViewer(input: {
     .contains("data->collaborators", JSON.stringify([id]))
     .limit(MAX_RECORD_LIST_LIMIT);
   if (input.entity === "lead") sq = sq.is("data->>transferred_at", null);
-  const sharedRes = await sq;
+
+  // Owned + shared are independent reads (merged by id below, order-independent)
+  // — run them as ONE parallel DB wave instead of two serial round-trips. This
+  // resolver backs every scoped board/pipeline/KPI read for non-admin reps, so
+  // the saved round-trip multiplies across entities (perf, 2026-06-25).
+  const [owned, sharedRes] = await Promise.all([ownedPromise, sq]);
   if (sharedRes.error) throw new RecordsError("db", sharedRes.error.message);
   const shared = (sharedRes.data || []) as TenantRecord[];
 

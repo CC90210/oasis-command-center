@@ -91,12 +91,17 @@ export async function GET(
         }).catch(() => ({ rows: [] }))
       : Promise.resolve({ rows: [{ id: record.id, data: record.data }] });
 
-  const [docsRes, apps] = await Promise.all([docsPromise, appPromise]);
-
   // Resolve assigned_to (auth_user_id) → assigned_to_name so the drawer's
   // "Assigned to" field shows the operator's name instead of the raw UUID.
   // One member-map fetch covers both the record and its linked application.
-  const nameMap = await buildMemberNameMap(tenantId);
+  // buildMemberNameMap only needs tenantId (no dependency on docs/app), so it
+  // rides the SAME Promise.all — the drawer-open path is one DB wave, not two
+  // (perf, 2026-06-25).
+  const [docsRes, apps, nameMap] = await Promise.all([
+    docsPromise,
+    appPromise,
+    buildMemberNameMap(tenantId),
+  ]);
   const recordData = withAssignedName(
     record.data as Record<string, unknown>,
     nameMap,

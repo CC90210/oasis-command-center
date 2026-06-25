@@ -182,6 +182,16 @@ export async function GET(
   //    so the drawer's "Partial: …" message names the real cause
   //    instead of silently swallowing the lead_interactions error and
   //    only surfacing the "interactions doesn't exist" fallback.
+  // Feeds 1-5 are independent reads keyed by (tenant_id, lead_id); each has its
+  // own try/catch and pushes into the shared events/errors/opens collectors,
+  // which are merged + sorted by `at` afterward (order-independent). Run them as
+  // ONE parallel wave instead of five serial round-trips — this is the
+  // lead-drawer Timeline tab, one of the hottest operator reads (perf 2026-06-25).
+  const feeds: Array<Promise<void>> = [];
+
+  // Feed 1 — interactions (the lead_interactions → interactions fallback MUST
+  // stay sequential inside this closure).
+  feeds.push((async () => {
   let interactionLoaded = false;
   for (const table of ["lead_interactions", "interactions"]) {
     if (interactionLoaded) break;
@@ -279,8 +289,10 @@ export async function GET(
       errors.push({ feed: table, message: errMessage(e) });
     }
   }
+  })());
 
   // 2. email_open_events
+  feeds.push((async () => {
   try {
     const { data, error } = await db
       .from("email_open_events")
@@ -304,8 +316,10 @@ export async function GET(
   } catch (e: unknown) {
     errors.push({ feed: "email_open_events", message: errMessage(e) });
   }
+  })());
 
   // 3. lead_documents
+  feeds.push((async () => {
   try {
     const { data, error } = await db
       .from("lead_documents")
@@ -334,12 +348,14 @@ export async function GET(
   } catch (e: unknown) {
     errors.push({ feed: "lead_documents", message: errMessage(e) });
   }
+  })());
 
   // 4. agent_events — stage transitions and lifecycle events. Note
   //    that agent_events has NO tenant_id column (migration 006) —
   //    tenant scope is carried by correlation_id (text). Filtering by
   //    `.eq("tenant_id", …)` was the bug that surfaced as the
   //    persistent "Partial: couldn't read agent_events" in the drawer.
+  feeds.push((async () => {
   try {
     const { data, error } = await db
       .from("agent_events")
@@ -376,8 +392,10 @@ export async function GET(
   } catch (e: unknown) {
     errors.push({ feed: "agent_events", message: errMessage(e) });
   }
+  })());
 
   // 5. agent_alerts — missing_info + future operator-side notifications.
+  feeds.push((async () => {
   try {
     const { data, error } = await db
       .from("agent_alerts")
@@ -405,6 +423,11 @@ export async function GET(
   } catch (e: unknown) {
     errors.push({ feed: "agent_alerts", message: errMessage(e) });
   }
+  })());
+
+  // Barrier: all five feeds resolve before we collapse opens + sort. Each feed
+  // already swallows its own errors into errors[], so no feed can reject here.
+  await Promise.all(feeds);
 
   // Emit one collapsed "Email opened" per message that had ≥1 genuine open.
   // Messages with only proxy prefetches contribute nothing here (count stays 0),
