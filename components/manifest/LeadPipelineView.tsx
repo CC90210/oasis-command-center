@@ -8,12 +8,14 @@ import {
   ChevronDown,
   ChevronRight,
   Loader2,
+  Mail,
   Plus,
   Square,
   UserPlus,
   X,
 } from "lucide-react";
 import type { StageMeta } from "@/lib/sunbiz-stage-meta";
+import { SUNBIZ_EMAIL_TEMPLATES } from "@/lib/sunbiz-templates-library";
 import { PageSearchBar } from "@/components/manifest/PageSearchBar";
 import { AutofillDropzone } from "@/components/leads/AutofillDropzone";
 import { pipelineRowHref } from "@/lib/pipeline-display";
@@ -507,6 +509,7 @@ export function LeadPipelineView({
           busy={bulkBusy}
           onAssign={(uid) => runBulk({ op: "assign", assigned_to: uid }, "assigned")}
           onStage={(stageKey) => runBulk({ op: "stage", stage: stageKey, entity: entityName }, "moved")}
+          onEmail={(templateId) => runBulk({ op: "email", template_id: templateId, entity: entityName }, "queued")}
           onClear={() => setSelected(new Set())}
         />
       )}
@@ -530,6 +533,7 @@ function BulkActionBar({
   busy,
   onAssign,
   onStage,
+  onEmail,
   onClear,
 }: {
   count: number;
@@ -541,6 +545,7 @@ function BulkActionBar({
   busy: boolean;
   onAssign: (assignedTo: string | null) => void;
   onStage: (stageKey: string) => void;
+  onEmail: (templateId: string) => void;
   onClear: () => void;
 }) {
   return (
@@ -600,6 +605,32 @@ function BulkActionBar({
           {stages.map((s) => (
             <option key={s.key} value={s.key}>
               {s.label}
+            </option>
+          ))}
+        </select>
+      </label>
+
+      {/* Bulk email — queue a personalized SunBiz template to every selected
+          record. send_gateway drains the queue with CASL/cooldown, so this is
+          the compliant path for a batch of commercial emails. Records with no
+          email on file are skipped server-side. */}
+      <label className="flex items-center gap-1.5 text-[11px] text-fg-muted">
+        <Mail className="h-3.5 w-3.5 text-fg-dim" />
+        <select
+          defaultValue=""
+          disabled={busy}
+          onChange={(e) => {
+            const v = e.target.value;
+            e.currentTarget.selectedIndex = 0;
+            if (v) onEmail(v);
+          }}
+          className="rounded-md border border-bg-border bg-bg-deep px-2 py-1 text-[12px] text-fg focus:border-accent focus:outline-none disabled:opacity-60"
+          title="Queue this email template (personalized per record) to every selected lead."
+        >
+          <option value="">Email…</option>
+          {SUNBIZ_EMAIL_TEMPLATES.map((t) => (
+            <option key={t.id} value={t.id}>
+              {t.label}
             </option>
           ))}
         </select>
