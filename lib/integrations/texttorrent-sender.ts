@@ -31,12 +31,38 @@ import { getUserIntegrationValue } from "@/lib/user-integration-store";
 import { getTenantIntegrationBundle } from "@/lib/tenant-integration-store";
 import {
   TEXTTORRENT_FROM_NUMBER_FIELD,
+  TEXTTORRENT_ACT_AS_EMAIL_FIELD,
   pickTextTorrentSenderId,
 } from "@/lib/integrations/texttorrent-sender-core";
 
 // Re-export the pure helpers so existing server-side import sites
 // (the personal route, etc.) can keep importing from this module.
-export { TEXTTORRENT_FROM_NUMBER_FIELD, pickTextTorrentSenderId };
+export { TEXTTORRENT_FROM_NUMBER_FIELD, TEXTTORRENT_ACT_AS_EMAIL_FIELD, pickTextTorrentSenderId };
+
+/**
+ * Resolve the per-rep TextTorrent act-as email (X-ACT-AS-USER) for a human send.
+ * Returns the rep's own sub-account email when set, else undefined (the caller
+ * then sends on the tenant master key with no act-as). Soft-fails to undefined
+ * so a transient store error never blocks a send. Mirrors resolveKixieAgentEmail.
+ */
+export async function resolveTextTorrentActAsEmail(args: {
+  tenantId: string;
+  userId?: string | null;
+}): Promise<string | undefined> {
+  const { tenantId, userId } = args;
+  if (!userId) return undefined;
+  try {
+    const email = await getUserIntegrationValue(
+      tenantId,
+      userId,
+      "texttorrent",
+      TEXTTORRENT_ACT_AS_EMAIL_FIELD,
+    );
+    return email ? email.trim() : undefined;
+  } catch {
+    return undefined;
+  }
+}
 
 export async function resolveTextTorrentSenderId(args: {
   tenantId: string;

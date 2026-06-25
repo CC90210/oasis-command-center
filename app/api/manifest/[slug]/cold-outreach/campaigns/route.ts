@@ -43,6 +43,11 @@ import { NextRequest, NextResponse } from "next/server";
 import { getSessionUser, getServiceSupabase } from "@/lib/supabase-server";
 import { resolveDataTenant } from "@/lib/manifest/tenant-scope";
 import { manifestExists } from "@/lib/manifest/loader";
+import { normalizePhoneE164 } from "@/lib/lead-interactions-queries";
+import {
+  resolveTextTorrentSenderId,
+  resolveTextTorrentActAsEmail,
+} from "@/lib/integrations/texttorrent-sender";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -51,13 +56,19 @@ const SLUG_RE = /^[a-z0-9][a-z0-9_-]{1,62}$/;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const ALLOWED_CHANNELS = ["sms_twilio", "sms_texttorrent", "email"] as const;
 type Channel = typeof ALLOWED_CHANNELS[number];
+const ALLOWED_SOURCES = ["cold_list", "assigned_leads", "uploaded"] as const;
+type RecipientSource = typeof ALLOWED_SOURCES[number];
 const DAILY_CAP_MAX = 5_000;
 const DAILY_CAP_DEFAULT = 500;
+const UPLOAD_MAX = 5_000;
 
 type RecipientFilter = {
   stage?: string;
   max_attempts?: number;
 };
+
+// A resolved recipient ready to become a cold_outreach_recipients row.
+type ResolvedRecipient = { cold_lead_id: string | null; contact_address: string };
 
 async function resolveContext(
   userId: string,
@@ -117,7 +128,8 @@ export async function GET(
     .select(
       "id, name, channel, status, cold_list_id, message_body, subject, recipient_filter, " +
       "total_recipients, sent_count, failed_count, daily_cap, scheduled_for, " +
-      "started_at, completed_at, created_at",
+      "started_at, completed_at, created_at, " +
+      "created_by_user_id, sender_user_id, sender_from_number",
     )
     .eq("tenant_id", context.tenantId)
     .order("created_at", { ascending: false })
@@ -164,17 +176,14 @@ export async function POST(
     daily_cap?: unknown;
     name?: unknown;
     scheduled_for?: unknown;
+    recipient_source?: unknown;
+    uploaded?: unknown;
+    as_user_id?: unknown;
   };
   try {
     body = await req.json();
   } catch {
     return NextResponse.json({ ok: false, error: "invalid_json" }, { status: 400 });
-  }
-
-  // Validate required fields.
-  const coldListId = typeof body.cold_list_id === "string" ? body.cold_list_id.trim() : "";
-  if (!coldListId || !UUID_RE.test(coldListId)) {
-    return NextResponse.json({ ok: false, error: "cold_list_id_required" }, { status: 400 });
   }
 
   const channel = typeof body.channel === "string" ? body.channel : "";
@@ -205,54 +214,160 @@ export async function POST(
       ? body.scheduled_for.trim()
       : null;
 
-  // Parse recipient_filter safely.
-  const rawFilter = body.recipient_filter;
-  const recipientFilter: RecipientFilter =
-    rawFilter && typeof rawFilter === "object" && !Array.isArray(rawFilter)
-      ? (rawFilter as RecipientFilter)
-      : {};
+  const recipientSource: RecipientSource =
+    (ALLOWED_SOURCES as readonly string[]).includes(body.recipient_source as string)
+      ? (body.recipient_source as RecipientSource)
+      : "cold_list";
 
   const db = getServiceSupabase();
 
-  // Confirm the list belongs to this tenant.
-  const { data: listRow, error: listErr } = await db
-    .from("cold_lead_lists")
-    .select("id, name")
-    .eq("id", coldListId)
-    .eq("tenant_id", context.tenantId)
-    .is("archived_at", null)
-    .maybeSingle();
-
-  if (listErr || !listRow) {
-    return NextResponse.json({ ok: false, error: "list_not_found" }, { status: 404 });
+  // ── Sender resolution (per-rep identity) ────────────────────────────────
+  // Default sender = the creator. An owner/admin may blast on behalf of another
+  // rep by passing as_user_id; a member can only blast as themselves.
+  const asUserId =
+    typeof body.as_user_id === "string" && UUID_RE.test(body.as_user_id) ? body.as_user_id : null;
+  let senderUserId = user.id;
+  if (asUserId && asUserId !== user.id) {
+    const me = await db
+      .from("user_profiles")
+      .select("team_role, is_owner")
+      .eq("auth_user_id", user.id)
+      .maybeSingle();
+    const role = (me.data as { team_role?: string | null } | null)?.team_role ?? null;
+    const isOwner = (me.data as { is_owner?: boolean | null } | null)?.is_owner === true;
+    if (!(isOwner || role === "owner" || role === "admin")) {
+      return NextResponse.json(
+        { ok: false, error: "forbidden_as_user", message: "Only an admin can launch a blast for another rep." },
+        { status: 403 },
+      );
+    }
+    senderUserId = asUserId;
   }
 
-  // Build the matching-leads query for this filter to get the recipient set.
-  let leadsQuery = db
-    .from("cold_leads")
-    .select("id, phone, email")
-    .eq("tenant_id", context.tenantId)
-    .eq("list_id", coldListId);
-
-  if (recipientFilter.stage) {
-    leadsQuery = leadsQuery.eq("stage", recipientFilter.stage);
+  // For TextTorrent, the rep MUST have set their own number + account email so
+  // the blast goes out AS them. Fail-closed with a clear, actionable error.
+  let senderFromNumber: string | null = null;
+  let senderActAsEmail: string | null = null;
+  if (channel === "sms_texttorrent") {
+    senderFromNumber = (await resolveTextTorrentSenderId({ tenantId: context.tenantId, userId: senderUserId })) ?? null;
+    senderActAsEmail = (await resolveTextTorrentActAsEmail({ tenantId: context.tenantId, userId: senderUserId })) ?? null;
+    if (!senderFromNumber || !senderActAsEmail) {
+      return NextResponse.json(
+        {
+          ok: false,
+          error: "sender_not_configured",
+          message:
+            "This rep hasn't set their Text Torrent number AND account email in Settings → Personal Integrations. Both are required to blast as them.",
+        },
+        { status: 400 },
+      );
+    }
   }
-  if (typeof recipientFilter.max_attempts === "number") {
-    leadsQuery = leadsQuery.lte("attempt_count", recipientFilter.max_attempts);
+
+  // ── Recipient resolution (3 sources) ────────────────────────────────────
+  let recipients: ResolvedRecipient[] = [];
+  let coldListId: string | null = null;
+  let recipientFilter: RecipientFilter = {};
+  let sourceLabel = "";
+
+  if (recipientSource === "cold_list") {
+    coldListId = typeof body.cold_list_id === "string" ? body.cold_list_id.trim() : "";
+    if (!coldListId || !UUID_RE.test(coldListId)) {
+      return NextResponse.json({ ok: false, error: "cold_list_id_required" }, { status: 400 });
+    }
+    const rawFilter = body.recipient_filter;
+    recipientFilter =
+      rawFilter && typeof rawFilter === "object" && !Array.isArray(rawFilter)
+        ? (rawFilter as RecipientFilter)
+        : {};
+
+    const { data: listRow, error: listErr } = await db
+      .from("cold_lead_lists")
+      .select("id, name")
+      .eq("id", coldListId)
+      .eq("tenant_id", context.tenantId)
+      .is("archived_at", null)
+      .maybeSingle();
+    if (listErr || !listRow) {
+      return NextResponse.json({ ok: false, error: "list_not_found" }, { status: 404 });
+    }
+    sourceLabel = (listRow as { name: string }).name;
+
+    let leadsQuery = db
+      .from("cold_leads")
+      .select("id, phone, email")
+      .eq("tenant_id", context.tenantId)
+      .eq("list_id", coldListId);
+    if (recipientFilter.stage) leadsQuery = leadsQuery.eq("stage", recipientFilter.stage);
+    if (typeof recipientFilter.max_attempts === "number") {
+      leadsQuery = leadsQuery.lte("attempt_count", recipientFilter.max_attempts);
+    }
+    const { data: matchingLeads, error: leadsErr } = await leadsQuery;
+    if (leadsErr) {
+      return NextResponse.json({ ok: false, error: "db_error", detail: leadsErr.message }, { status: 500 });
+    }
+    type LeadRow = { id: string; phone: string | null; email: string | null };
+    recipients = (matchingLeads as LeadRow[] | null ?? []).map((l) => ({
+      cold_lead_id: l.id,
+      contact_address: channel === "email" ? (l.email ?? "") : (l.phone ?? ""),
+    }));
+  } else if (recipientSource === "assigned_leads") {
+    // The sender's own pipeline book: tenant_records (entity_type='lead') whose
+    // data.assigned_to === the sender's auth_user_id.
+    const { data: rows, error: lerr } = await db
+      .from("tenant_records")
+      .select("id, data")
+      .eq("tenant_id", context.tenantId)
+      .eq("entity_type", "lead")
+      .eq("data->>assigned_to", senderUserId);
+    if (lerr) {
+      return NextResponse.json({ ok: false, error: "db_error", detail: lerr.message }, { status: 500 });
+    }
+    type LeadRecord = { id: string; data: Record<string, unknown> | null };
+    recipients = ((rows as LeadRecord[] | null) ?? []).map((r) => {
+      const d = r.data ?? {};
+      const addr = channel === "email" ? String(d.email ?? "") : String(d.phone ?? "");
+      return { cold_lead_id: null, contact_address: addr };
+    });
+    sourceLabel = "My assigned leads";
+  } else {
+    // uploaded: a posted array of { phone, email? }.
+    const up = Array.isArray(body.uploaded) ? (body.uploaded as unknown[]) : [];
+    if (up.length === 0) {
+      return NextResponse.json({ ok: false, error: "uploaded_empty" }, { status: 400 });
+    }
+    if (up.length > UPLOAD_MAX) {
+      return NextResponse.json({ ok: false, error: "uploaded_too_large", max: UPLOAD_MAX }, { status: 400 });
+    }
+    recipients = (up as Array<{ phone?: unknown; email?: unknown }>).map((u) => ({
+      cold_lead_id: null,
+      contact_address: channel === "email" ? String(u?.email ?? "") : String(u?.phone ?? ""),
+    }));
+    sourceLabel = "Uploaded list";
   }
 
-  const { data: matchingLeads, error: leadsErr } = await leadsQuery;
-  if (leadsErr) {
+  // Normalize + validate + dedupe recipient addresses (SMS channels only get a
+  // strict E.164 normalize; email is left as-is).
+  const seen = new Set<string>();
+  const cleaned = recipients
+    .map((r) => {
+      if (channel === "email") {
+        const e = r.contact_address.trim().toLowerCase();
+        return e ? { ...r, contact_address: e } : null;
+      }
+      const n = normalizePhoneE164(r.contact_address);
+      return n && /^\+[1-9]\d{7,14}$/.test(n) ? { ...r, contact_address: n } : null;
+    })
+    .filter((r): r is ResolvedRecipient => {
+      if (!r) return false;
+      if (seen.has(r.contact_address)) return false;
+      seen.add(r.contact_address);
+      return true;
+    });
+
+  if (cleaned.length === 0) {
     return NextResponse.json(
-      { ok: false, error: "db_error", detail: leadsErr.message },
-      { status: 500 },
-    );
-  }
-
-  const leads = matchingLeads ?? [];
-  if (leads.length === 0) {
-    return NextResponse.json(
-      { ok: false, error: "no_recipients", hint: "No cold leads match the given filter." },
+      { ok: false, error: "no_recipients", hint: "No valid recipients for this source/filter." },
       { status: 400 },
     );
   }
@@ -260,9 +375,10 @@ export async function POST(
   const campaignName =
     typeof body.name === "string" && body.name.trim()
       ? body.name.trim()
-      : `${(listRow as { name: string }).name} — ${new Date().toLocaleDateString("en-CA")}`;
+      : `${sourceLabel} — ${new Date().toLocaleDateString("en-CA")}`;
 
-  // INSERT the campaign at status='queued'.
+  // INSERT the campaign at status='queued', stamping the per-rep sender identity
+  // the blaster worker acts-as.
   const { data: campaignData, error: campaignErr } = await db
     .from("cold_outreach_campaigns")
     .insert({
@@ -280,6 +396,9 @@ export async function POST(
       sent_count: 0,
       failed_count: 0,
       created_by_user_id: user.id,
+      sender_user_id: senderUserId,
+      sender_from_number: senderFromNumber,
+      sender_act_as_email: senderActAsEmail,
     })
     .select("id")
     .single();
@@ -292,15 +411,11 @@ export async function POST(
   }
   const campaignId = (campaignData as { id: string }).id;
 
-  // INSERT one cold_outreach_recipients row per matching lead.
-  type LeadRow = { id: string; phone: string | null; email: string | null };
-  const recipientRows = (leads as LeadRow[]).map((lead) => ({
+  const recipientRows = cleaned.map((r) => ({
     tenant_id: context.tenantId,
     campaign_id: campaignId,
-    cold_lead_id: lead.id,
-    // contact_address resolves to phone for SMS channels, email for email.
-    contact_address:
-      channel === "email" ? (lead.email ?? "") : (lead.phone ?? ""),
+    cold_lead_id: r.cold_lead_id,
+    contact_address: r.contact_address,
     status: "pending",
   }));
 
@@ -309,19 +424,21 @@ export async function POST(
   let totalInserted = 0;
   for (let i = 0; i < recipientRows.length; i += CHUNK) {
     const chunk = recipientRows.slice(i, i + CHUNK);
-    const { error: rErr } = await db
-      .from("cold_outreach_recipients")
-      .insert(chunk);
-    // Partial failures are tolerated — daemon retries pending rows on next tick.
+    const { error: rErr } = await db.from("cold_outreach_recipients").insert(chunk);
+    // Partial failures are tolerated — the worker only ever sends pending rows.
     if (!rErr) totalInserted += chunk.length;
   }
 
-  // UPDATE campaign.total_recipients to the actual count that landed.
   await db
     .from("cold_outreach_campaigns")
     .update({ total_recipients: totalInserted })
     .eq("id", campaignId)
     .eq("tenant_id", context.tenantId);
 
-  return NextResponse.json({ ok: true, campaign_id: campaignId, total_recipients: totalInserted });
+  return NextResponse.json({
+    ok: true,
+    campaign_id: campaignId,
+    total_recipients: totalInserted,
+    sender_user_id: senderUserId,
+  });
 }

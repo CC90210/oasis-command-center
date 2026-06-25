@@ -31,7 +31,7 @@ const BASE_URL = "https://api.texttorrent.com/api/v1";
 export type TextTorrentCredentials = {
   apiSid: string;
   publicKey: string;
-  /** Optional sub-account email to act-as (sent as X-ACT-AS-USER Base64). */
+  /** Optional sub-account email to act-as (sent as X-ACT-AS-USER, PLAIN email). */
   actAsEmail?: string;
 };
 
@@ -142,7 +142,11 @@ async function ttFetch<T>(
     Accept: "application/json",
   };
   if (creds.actAsEmail) {
-    headers["X-ACT-AS-USER"] = Buffer.from(creds.actAsEmail).toString("base64");
+    // PLAIN email — LIVE-VERIFIED 2026-06-24 (TEXTTORRENT_API_VERIFIED.md). The
+    // previous base64 encoding was a dormant bug: the live API expects the raw
+    // email in X-ACT-AS-USER. (Dormant because no call site passed actAsEmail
+    // until per-rep sub-accounts shipped.)
+    headers["X-ACT-AS-USER"] = creds.actAsEmail;
   }
   if (opts.body) headers["Content-Type"] = "application/json";
 

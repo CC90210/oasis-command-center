@@ -461,6 +461,31 @@ export function ColdOutreachClient({
   const [dailyCap, setDailyCap] = useState(500);
   const [recipientFilter, setRecipientFilter] = useState<RecipientFilter>({});
 
+  // ── Per-rep Text Torrent identity (2026-06-25) ────────────────────────────
+  // A TextTorrent blast goes out AS the creating rep — their own sub-account +
+  // number. Load the rep's identity so we can confirm "sends as you" or warn
+  // them to set it before they can blast. Mirrors the backend's fail-closed
+  // sender_not_configured guard in the campaigns route.
+  const [ttIdentity, setTtIdentity] = useState<{ from: string | null; email: string | null } | null>(null);
+  useEffect(() => {
+    let live = true;
+    void (async () => {
+      try {
+        const r = await fetch("/api/integrations/personal/texttorrent", { cache: "no-store" });
+        const j = (await r.json().catch(() => ({}))) as {
+          ok?: boolean;
+          texttorrent_from_number?: string | null;
+          texttorrent_act_as_email?: string | null;
+        };
+        if (live && j.ok) setTtIdentity({ from: j.texttorrent_from_number || null, email: j.texttorrent_act_as_email || null });
+      } catch {
+        /* soft-fail — the banner just won't render */
+      }
+    })();
+    return () => { live = false; };
+  }, []);
+  const ttReady = !!(ttIdentity?.from && ttIdentity?.email);
+
   // ── HTML template picker (email channel) ─────────────────────────────────
   // The SunBiz marketing template library (SunBiz-Agent/docs/*.html),
   // served by /api/manifest/[slug]/cold-outreach/templates. Picking one
@@ -739,7 +764,9 @@ export function ColdOutreachClient({
         setPreviewOpen(false);
         await loadCampaigns();
       } else {
-        setSendResult({ ok: false, message: json.error ?? "Campaign creation failed." });
+        // Prefer the route's human-readable message (e.g. the per-rep
+        // sender_not_configured guidance) over the raw error code.
+        setSendResult({ ok: false, message: json.message ?? json.error ?? "Campaign creation failed." });
       }
     } catch (err) {
       setSendResult({ ok: false, message: String((err as Error).message || err) });
@@ -928,6 +955,23 @@ export function ColdOutreachClient({
           </div>
 
           <ChannelPicker value={channel} onChange={(c) => { setChannel(c); setPreviewOpen(false); }} />
+
+          {/* Per-rep sender banner: a Text Torrent blast sends AS you. Confirm
+              the rep's identity is set, or point them to Settings. */}
+          {channel === "sms_texttorrent" && (
+            ttReady ? (
+              <div className="rounded-md border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-[11.5px] text-emerald-200">
+                Sends from <span className="font-semibold">{ttIdentity?.from}</span> on your own Text Torrent account
+                (<span className="font-semibold">{ttIdentity?.email}</span>). Replies thread back to you.
+              </div>
+            ) : (
+              <div className="rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-[11.5px] text-amber-200">
+                Before you can blast on Text Torrent, set <span className="font-semibold">your number</span> and
+                {" "}<span className="font-semibold">your account email</span> in Settings → Personal Integrations.
+                Otherwise the blast can&apos;t go out as you.
+              </div>
+            )
+          )}
 
           {channel === "email" && (
             <div className="flex items-center gap-2">

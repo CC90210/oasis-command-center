@@ -59,6 +59,17 @@ type Thread = {
 
 type ViewMode = "accordion" | "kanban";
 
+// Team member shape from /api/team/members — used to label the per-agent
+// offer filter with real names.
+type TenantMember = {
+  auth_user_id: string;
+  full_name: string | null;
+  display_name: string | null;
+};
+
+// Sentinel agent-filter value for deals with no assigned rep.
+const UNASSIGNED = "__unassigned__";
+
 // Per-application enriched bundle used for rendering.
 type DealBundle = {
   app: AppRow;
@@ -167,6 +178,27 @@ export function OffersByDealClient({
   // Which accordion rows are expanded
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
 
+  // ── Per-agent offer filter (2026-06-25) ─────────────────────────────────
+  // Each deal belongs to the rep it's assigned to (app.data.assigned_to). The
+  // filter lets you view one agent's offers, "Unassigned", or All — the same
+  // agent-slice the lead board offers. Names come from /api/team/members.
+  const [members, setMembers] = useState<TenantMember[]>([]);
+  // null = All; UNASSIGNED = no rep; otherwise an auth_user_id.
+  const [agentFilter, setAgentFilter] = useState<string | null>(null);
+  useEffect(() => {
+    let live = true;
+    void (async () => {
+      try {
+        const r = await fetch("/api/team/members", { cache: "no-store" });
+        const j = (await r.json().catch(() => ({}))) as { ok?: boolean; members?: TenantMember[] };
+        if (live && j.ok && Array.isArray(j.members)) setMembers(j.members);
+      } catch {
+        /* soft-fail — chips fall back to id slugs */
+      }
+    })();
+    return () => { live = false; };
+  }, []);
+
   // ── Load apps + offer records on mount ──────────────────────────────────
   useEffect(() => {
     if (!tenantId) {
@@ -223,7 +255,7 @@ export function OffersByDealClient({
   }, [apps]);
 
   // ── Build deal bundles (only apps with at least one thread or offer) ─────
-  const deals = useMemo<DealBundle[]>(() => {
+  const allDeals = useMemo<DealBundle[]>(() => {
     if (!apps) return [];
 
     // Index offer records by their application_id (stored in data field).
@@ -263,6 +295,39 @@ export function OffersByDealClient({
         return bTime - aTime;
       });
   }, [apps, threadMap, offerRecords]);
+
+  // Resolve an assigned_to id → display name (members first, then the name
+  // denormalized on the record, then a short id).
+  const agentName = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const m of members) {
+      map.set(m.auth_user_id, m.display_name || m.full_name || m.auth_user_id.slice(0, 8));
+    }
+    for (const d of allDeals) {
+      const id = String(d.app.data.assigned_to || "");
+      if (id && !map.has(id)) {
+        const nm = String(d.app.data.assigned_to_name || "");
+        if (nm) map.set(id, nm);
+      }
+    }
+    return map;
+  }, [members, allDeals]);
+
+  // Per-agent buckets (id → deal count) for the chip row, busiest first.
+  const agentBuckets = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const d of allDeals) {
+      const id = String(d.app.data.assigned_to || "") || UNASSIGNED;
+      counts.set(id, (counts.get(id) || 0) + 1);
+    }
+    return [...counts.entries()].sort((a, b) => b[1] - a[1]);
+  }, [allDeals]);
+
+  // The visible deals after applying the agent filter.
+  const deals = useMemo(() => {
+    if (agentFilter === null) return allDeals;
+    return allDeals.filter((d) => (String(d.app.data.assigned_to || "") || UNASSIGNED) === agentFilter);
+  }, [allDeals, agentFilter]);
 
   // Preview-mode bail removed 2026-05-25 — operator viewing a tenant
   // they don't own should see the same scaffold (8 kanban columns,
@@ -308,10 +373,53 @@ export function OffersByDealClient({
         {/* Deal count */}
         {!isLoading && (
           <span className="ml-auto text-[11px] text-fg-dim font-mono">
-            {deals.length} deal{deals.length === 1 ? "" : "s"}
+            {agentFilter !== null
+              ? `${deals.length} of ${allDeals.length} deals`
+              : `${deals.length} deal${deals.length === 1 ? "" : "s"}`}
           </span>
         )}
       </div>
+
+      {/* Per-agent filter chips — only when more than one agent has offers.
+          "All" + one chip per rep (busiest first) + Unassigned. */}
+      {!isLoading && agentBuckets.length > 1 && (
+        <div className="flex items-center gap-1.5 flex-wrap">
+          <span className="text-[10.5px] uppercase tracking-wider text-fg-dim font-semibold mr-0.5">
+            Agent
+          </span>
+          <button
+            type="button"
+            onClick={() => setAgentFilter(null)}
+            className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[11.5px] font-semibold border transition-colors ${
+              agentFilter === null
+                ? "bg-accent/15 border-accent/40 text-accent"
+                : "bg-bg-elev border-bg-border text-fg-muted hover:text-fg"
+            }`}
+          >
+            All
+            <span className="font-mono text-[10px] opacity-70">{allDeals.length}</span>
+          </button>
+          {agentBuckets.map(([id, count]) => {
+            const label = id === UNASSIGNED ? "Unassigned" : agentName.get(id) || id.slice(0, 8);
+            const active = agentFilter === id;
+            return (
+              <button
+                key={id}
+                type="button"
+                onClick={() => setAgentFilter(active ? null : id)}
+                className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[11.5px] font-semibold border transition-colors ${
+                  active
+                    ? "bg-accent/15 border-accent/40 text-accent"
+                    : "bg-bg-elev border-bg-border text-fg-muted hover:text-fg"
+                }`}
+              >
+                {label}
+                <span className="font-mono text-[10px] opacity-70">{count}</span>
+              </button>
+            );
+          })}
+        </div>
+      )}
 
       {isLoading ? (
         <div className="text-xs text-fg-dim italic py-8 text-center">

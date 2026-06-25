@@ -69,6 +69,12 @@ export function PersonalIntegrationsPanel({
   // to the tenant default ("Default Business Number") server-side when unset.
   const [ttFromNumber, setTtFromNumber] = useState<string | null>(null);
   const [ttFromDraft, setTtFromDraft] = useState("");
+  // Per-rep "send under my own Text Torrent account" (2026-06-25): the rep's TT
+  // sub-account email (X-ACT-AS-USER). When set, blasts + sends go out on THEIR
+  // account (their daily limit, their inbox), not the tenant owner's. Required
+  // for a rep to run their own blasts.
+  const [ttActAsEmail, setTtActAsEmail] = useState<string | null>(null);
+  const [ttActAsDraft, setTtActAsDraft] = useState("");
   const [ttFlash, setTtFlash] = useState<string | null>(null);
   const [ttSyncing, setTtSyncing] = useState(false);
   const searchParams = useSearchParams();
@@ -118,10 +124,13 @@ export function PersonalIntegrationsPanel({
       const tbody = (await t.json().catch(() => ({}))) as {
         ok?: boolean;
         texttorrent_from_number?: string | null;
+        texttorrent_act_as_email?: string | null;
       };
       if (tbody.ok) {
         setTtFromNumber(tbody.texttorrent_from_number || null);
         setTtFromDraft(tbody.texttorrent_from_number || "");
+        setTtActAsEmail(tbody.texttorrent_act_as_email || null);
+        setTtActAsDraft(tbody.texttorrent_act_as_email || "");
       }
     } catch {
       // Soft-fail — independent of the rest of the panel.
@@ -269,6 +278,54 @@ export function PersonalIntegrationsPanel({
       }
       setTtFromNumber(null);
       setTtFromDraft("");
+      setTtFlash("Cleared.");
+    } finally {
+      setBusyService(null);
+    }
+  }
+
+  async function saveTtActAsEmail() {
+    setBusyService("texttorrent");
+    setError(null);
+    setTtFlash(null);
+    try {
+      const r = await fetch("/api/integrations/personal/texttorrent", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ texttorrent_act_as_email: ttActAsDraft.trim() }),
+      });
+      const body = (await r.json().catch(() => ({}))) as {
+        ok?: boolean;
+        texttorrent_act_as_email?: string;
+        error?: string;
+        message?: string;
+      };
+      if (!r.ok || !body.ok) {
+        setError(body.message || body.error || `save_failed:${r.status}`);
+        return;
+      }
+      setTtActAsEmail(body.texttorrent_act_as_email || null);
+      if (body.texttorrent_act_as_email) setTtActAsDraft(body.texttorrent_act_as_email);
+      setTtFlash("Saved — your blasts will send on your own Text Torrent account.");
+    } finally {
+      setBusyService(null);
+    }
+  }
+
+  async function clearTtActAsEmail() {
+    if (!confirm("Clear your Text Torrent account email? Your sends will go out on the workspace owner's account instead of your own.")) return;
+    setBusyService("texttorrent");
+    setError(null);
+    setTtFlash(null);
+    try {
+      const r = await fetch("/api/integrations/personal/texttorrent?field=texttorrent_act_as_email", { method: "DELETE" });
+      if (!r.ok) {
+        const body = (await r.json().catch(() => ({}))) as { message?: string };
+        setError(body.message || `clear_failed:${r.status}`);
+        return;
+      }
+      setTtActAsEmail(null);
+      setTtActAsDraft("");
       setTtFlash("Cleared.");
     } finally {
       setBusyService(null);
@@ -631,6 +688,59 @@ export function PersonalIntegrationsPanel({
                     Clear
                   </button>
                 )}
+              </div>
+              {/* Per-rep act-as account email — the other half of "send as me".
+                  The from-number is which DID; this is which TT ACCOUNT. Both
+                  must be set for a rep to run their own blasts on their own
+                  daily limit + inbox. */}
+              <div className="mt-1 border-t border-bg-border/60 pt-3 flex flex-col gap-2">
+                <div className="flex items-center gap-2">
+                  <span className="font-semibold text-sm text-fg">My Text Torrent account email</span>
+                  {ttActAsEmail ? (
+                    <span className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-bold bg-emerald-500/15 text-emerald-300 border border-emerald-500/30">
+                      <Check className="w-3 h-3" />
+                      {ttActAsEmail}
+                    </span>
+                  ) : (
+                    <span className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-medium bg-amber-500/15 text-amber-300 border border-amber-500/30">
+                      Required to run your own blasts
+                    </span>
+                  )}
+                </div>
+                <div className="text-[11.5px] text-fg-muted leading-relaxed">
+                  Your Text Torrent sub-account login email. When set, blasts and
+                  sends go out UNDER YOUR account — your own daily send limit and
+                  your own inbox — instead of the workspace owner&apos;s. e.g.
+                  alex@sunbizfunding.com.
+                </div>
+                <div className="flex items-center gap-2 flex-wrap">
+                  <input
+                    type="email"
+                    value={ttActAsDraft}
+                    onChange={(e) => setTtActAsDraft(e.target.value)}
+                    placeholder="alex@sunbizfunding.com"
+                    className="flex-1 min-w-[200px] rounded-md border border-bg-border bg-bg-elev px-3 py-1.5 text-[12.5px] text-fg placeholder:text-fg-dim focus:outline-none focus:border-accent"
+                  />
+                  <button
+                    type="button"
+                    onClick={saveTtActAsEmail}
+                    disabled={busyService === "texttorrent" || !ttActAsDraft.trim()}
+                    className="inline-flex items-center gap-1.5 rounded-md bg-accent text-bg-deep px-3 py-1.5 text-[12.5px] font-bold hover:bg-accent/90 disabled:opacity-60 transition-colors"
+                  >
+                    {busyService === "texttorrent" ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : null}
+                    Save
+                  </button>
+                  {ttActAsEmail && (
+                    <button
+                      type="button"
+                      onClick={clearTtActAsEmail}
+                      disabled={busyService === "texttorrent"}
+                      className="inline-flex items-center gap-1.5 rounded-md border border-bg-border bg-bg-elev px-3 py-1.5 text-[12.5px] font-bold text-fg-muted hover:text-red-300 hover:border-red-500/40 disabled:opacity-50 transition-colors"
+                    >
+                      Clear
+                    </button>
+                  )}
+                </div>
               </div>
               {/* Pull existing TT threads into the Conversations inbox. The
                   inbound webhook only captures NEW texts; this backfills history. */}
