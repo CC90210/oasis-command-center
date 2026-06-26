@@ -150,7 +150,8 @@ export async function POST(req: NextRequest) {
   }
 
   // DRY-RUN: short-circuit before any network call. Still log the attempt.
-  if (isDryRun()) {
+  // Per-channel: TextTorrent / Kixie can be live independently.
+  if (isDryRun(provider)) {
     await logInteraction({ tenantId, leadId, toPhone, message, userId, provider, dryRun: true });
     return NextResponse.json({
       ok: true,

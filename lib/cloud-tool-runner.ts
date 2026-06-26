@@ -81,7 +81,7 @@ import {
   getTextTorrentCredentials,
   sendSms as ttSendSms,
   replyToThread as ttReplyToThread,
-  createCampaign as ttCreateCampaign,
+  createBulkCampaign as ttCreateBulkCampaign,
   createList as ttCreateList,
   addContact as ttAddContact,
   blockContact as ttBlockContact,
@@ -1739,17 +1739,29 @@ async function toolTextTorrentBlast(input: Record<string, unknown>, ctx: ToolCon
   if (!listId) throw new Error("list_id_required");
   if (!message) throw new Error("message_required");
 
-  if (isDryRun()) {
+  if (isDryRun("texttorrent")) {
     return { ok: true, dry_run: true, would_create: { list_id: listId, message, scheduled_time: scheduledTime } };
   }
   const creds = await getTextTorrentCredentials(ctx.tenantId);
-  // NOTE (per-agent SMS, 2026-06-24): TextTorrent's /campaign/create API takes
-  // no per-send sender number, so a bulk blast sends from the TextTorrent
-  // ACCOUNT default line (the owner's account) — not a resolveTextTorrentSenderId
-  // value. This is the intended invariant for automated/Helios bulk sends; the
-  // per-rep sender_id only applies to 1:1 sends (conversations/reply + the
-  // chat-tool TT send/reply). The dashboard /api/campaigns path is the same.
-  const r = await ttCreateCampaign(creds, { list_id: listId, message, scheduled_time: scheduledTime });
+  // Native bulk send via /campaigning/bulk (the anti-block engine). Automated
+  // Helios blasts go from the account default line (number-pool/round-robin off);
+  // per-rep sender_id only applies to 1:1 sends.
+  const senderId = await resolveTextTorrentSenderId({ tenantId: ctx.tenantId, userId: ctx.userId });
+  if (!senderId) throw new Error("no_sender_number");
+  const selDate = scheduledTime ? scheduledTime.slice(0, 10) : undefined;
+  const selTime = scheduledTime && scheduledTime.length >= 16 ? scheduledTime.slice(11, 16) : undefined;
+  const r = await ttCreateBulkCampaign(creds, {
+    campaign_name: `Helios ${new Date().toISOString().slice(0, 10)}`,
+    contact_list_id: listId,
+    sms_body: message,
+    numbers: [senderId],
+    number_pool: false,
+    round_robin_campaign: false,
+    batch_process: true,
+    opt_out_link: true,
+    selected_date: selDate,
+    selected_time: selTime,
+  });
   return { ok: true, dry_run: false, campaign: r.data };
 }
 

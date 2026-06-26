@@ -219,16 +219,46 @@ export type TtContact = {
 };
 
 export type TtCampaign = {
-  id: string;
+  id: string | number;
   name?: string;
+  campaign_name?: string;
+  status?: string;
   list_id?: string;
+  contact_list_id?: string | number;
+  contact_list_name?: string;
   message?: string;
   scheduled_time?: string | null;
+  created_at?: string;
   sent?: number;
   delivered?: number;
   clicked?: number;
   failed?: number;
   opted_out?: number;
+};
+
+/** Native bulk-campaign create args — TT's carrier-safe anti-block engine. */
+export type BulkCampaignArgs = {
+  campaign_name: string;
+  contact_list_id: string | number;
+  sms_body: string;
+  /** Sender-number pool the campaign rotates across (E.164). */
+  numbers: string[];
+  sms_type?: "sms" | "mms";
+  /** Anti-blocking: spread the send across the number pool. */
+  number_pool?: boolean;
+  /** Anti-blocking: even round-robin across the numbers. */
+  round_robin_campaign?: boolean;
+  /** Anti-blocking: drip in batches over time. */
+  batch_process?: boolean;
+  batch_size?: number;
+  /** Minutes between batches. */
+  batch_frequency?: number;
+  /** Append a compliant opt-out link. */
+  opt_out_link?: boolean;
+  appended_message?: string;
+  /** Schedule (YYYY-MM-DD + HH:MM); omit to send now. */
+  selected_date?: string;
+  selected_time?: string;
 };
 
 export type TtInboxMessage = {
@@ -404,18 +434,49 @@ export function replyToThread(
 
 // --- Bulk campaigns --------------------------------------------------------
 
-export function createCampaign(
+/**
+ * Launch a native bulk campaign — TT's anti-block mass-send engine, the only
+ * way to reach thousands without carrier blocking. LIVE-VERIFIED contract
+ * (422 validation probe): POST /campaigning/bulk requires campaign_name,
+ * contact_list_id, sms_type, sms_body, numbers[]. The old /campaign/create 404s.
+ */
+export async function createBulkCampaign(
   creds: TextTorrentCredentials,
-  args: { list_id: string; message: string; scheduled_time?: string },
-): Promise<{ data: TtCampaign }> {
-  return ttFetch(creds, "/campaign/create", { body: args });
+  args: BulkCampaignArgs,
+): Promise<{ data: { campaign_id?: number; total_contacts?: number; total_segments?: number; total_credit?: number } }> {
+  const body: Record<string, unknown> = {
+    campaign_name: args.campaign_name,
+    contact_list_id: args.contact_list_id,
+    sms_type: args.sms_type || "sms",
+    sms_body: args.sms_body,
+    numbers: args.numbers,
+  };
+  if (args.number_pool !== undefined) body.number_pool = args.number_pool;
+  if (args.round_robin_campaign !== undefined) body.round_robin_campaign = args.round_robin_campaign;
+  if (args.batch_process !== undefined) body.batch_process = args.batch_process;
+  if (args.batch_size !== undefined) body.batch_size = args.batch_size;
+  if (args.batch_frequency !== undefined) body.batch_frequency = args.batch_frequency;
+  if (args.opt_out_link !== undefined) body.opt_out_link = args.opt_out_link;
+  if (args.appended_message) body.appended_message = args.appended_message;
+  if (args.selected_date) body.selected_date = args.selected_date;
+  if (args.selected_time) body.selected_time = args.selected_time;
+  return ttFetch(creds, "/campaigning/bulk", { body });
 }
 
-export function listCampaigns(
+/**
+ * List campaigns + status. LIVE-VERIFIED path: GET /campaigning/analytic
+ * (returns a paginated { data: { data: [...] } } envelope). The old /campaign 404s.
+ */
+export async function listCampaigns(
   creds: TextTorrentCredentials,
-  opts: { limit?: number; page?: number } = {},
+  opts: { limit?: number; page?: number; status?: string; search?: string } = {},
 ): Promise<{ data: TtCampaign[] }> {
-  return ttFetch(creds, "/campaign", { query: opts });
+  const r = await ttFetch<{ data?: { data?: TtCampaign[] } | TtCampaign[] }>(creds, "/campaigning/analytic", {
+    query: { limit: opts.limit, page: opts.page, status: opts.status, search: opts.search },
+  });
+  const payload = r?.data;
+  const flat = Array.isArray(payload) ? payload : (payload as { data?: TtCampaign[] })?.data || [];
+  return { data: flat };
 }
 
 export function campaignMessages(

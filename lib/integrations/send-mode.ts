@@ -34,13 +34,37 @@ export type SendResult = {
 };
 
 /**
+ * Per-channel env override for live sends. Lets each point of contact go live
+ * independently (e.g. TextTorrent live while Kixie/Twilio stay dry-run) instead
+ * of one global flip. `LIVE_SEND_<CHANNEL>=1` → that channel is live; `=0` →
+ * forced dry-run for that channel; unset → fall back to the global flag.
+ */
+const CHANNEL_LIVE_ENV: Record<string, string> = {
+  texttorrent: "LIVE_SEND_TEXTTORRENT",
+  kixie: "LIVE_SEND_KIXIE",
+  twilio: "LIVE_SEND_TWILIO",
+  gws: "LIVE_SEND_EMAIL",
+  email: "LIVE_SEND_EMAIL",
+};
+
+/**
  * True when the dashboard must NOT issue a live outbound request.
  *
- * Fail-safe default: dry-run UNLESS the operator has explicitly opted into
- * live sends via DASHBOARD_LIVE_SEND=1. BRAVO_FORCE_DRY_RUN=1 is a hard
- * override that re-clamps to dry-run even when live is enabled.
+ * Precedence (fail-safe → dry-run by default):
+ *   1. BRAVO_FORCE_DRY_RUN=1 — hard kill-switch, always clamps to dry-run.
+ *   2. Per-channel LIVE_SEND_<CHANNEL> — "1" = live, "0" = dry, for that channel.
+ *   3. Global DASHBOARD_LIVE_SEND=1 — live for any channel without its own flag.
+ *   4. Otherwise dry-run.
+ *
+ * `channel` is optional so legacy callers (no channel) keep the global behavior.
  */
-export function isDryRun(): boolean {
+export function isDryRun(channel?: string): boolean {
   if ((process.env.BRAVO_FORCE_DRY_RUN || "").trim() === "1") return true;
+  if (channel) {
+    const envKey = CHANNEL_LIVE_ENV[channel.toLowerCase()];
+    const v = envKey ? (process.env[envKey] || "").trim() : "";
+    if (v === "1") return false; // channel explicitly live
+    if (v === "0") return true; // channel explicitly clamped to dry-run
+  }
   return (process.env.DASHBOARD_LIVE_SEND || "").trim() !== "1";
 }

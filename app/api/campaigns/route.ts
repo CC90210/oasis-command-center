@@ -1,16 +1,15 @@
 /**
- * /api/campaigns — TextTorrent bulk-campaign analytics + create.
+ * /api/campaigns — TextTorrent native bulk campaigns (anti-block engine).
  *
- * Phase 3c of the TT + Kixie full embedding plan (2026-06-02).
+ * GET  → list campaigns + status from /campaigning/analytic, plus the contact
+ *        lists that power the create form.
  *
- * GET  → list campaigns with per-campaign analytics (sent / delivered /
- *        clicked / failed / opted_out). Uses the inline counts when TT
- *        returns them on /campaign; otherwise fans out to
- *        /campaign/{id}/messages/counts, bounded + limiter-aware.
+ * POST → launch a native bulk campaign via /campaigning/bulk — TT's carrier-safe
+ *        mass-send engine (number-pool rotation, round-robin, batch drip,
+ *        opt-out link). Owner/admin only. DRY-RUN unless the texttorrent channel
+ *        is live (see lib/integrations/send-mode.ts).
  *
- * POST → create a bulk campaign { list_id, message, scheduled_time? }.
- *        Owner/admin only (a blast hits many recipients). DRY-RUN by
- *        default — see lib/integrations/send-mode.ts.
+ * The earlier /campaign/* paths 404 — the live namespace is /campaigning/*.
  */
 
 import { NextResponse, type NextRequest } from "next/server";
@@ -19,15 +18,11 @@ import { getServiceSupabase } from "@/lib/supabase-server";
 import { isDryRun } from "@/lib/integrations/send-mode";
 import { sanitizeBlastMessage } from "@/lib/integrations/blast-safety";
 import { resolveTextTorrentSenderId } from "@/lib/integrations/texttorrent-sender";
-import { isPhoneOptedOut } from "@/lib/lead-interactions-queries";
 import {
   getTextTorrentCredentials,
   listCampaigns,
-  campaignCounts,
-  listContacts,
-  sendSms,
+  createBulkCampaign,
   listLists,
-  listTemplates,
   TextTorrentError,
   type TtCampaign,
   type TtList,
@@ -35,22 +30,17 @@ import {
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
-// A 1:1 blast fan-out can run for a couple of minutes (throttled, rate-limited).
-export const maxDuration = 300;
-
-// Native TT campaigns are NOT API-accessible (/campaign/create + /campaign 404/401),
-// so a "campaign" is a bounded 1:1 fan-out over the list's contacts via the proven
-// inbox path. Cap the synchronous batch so it stays inside the function timeout +
-// the 60/min TT limit; larger lists are run in repeated passes (or the blaster queue).
-const BLAST_SYNC_CAP = 60;
-const BLAST_THROTTLE_MS = 350;
-
-// Cap the per-campaign counts fan-out so a long campaign history can't blow
-// the TT 60/min limiter on a single page load.
-const COUNTS_FANOUT_CAP = 20;
 
 function ttStatus(err: TextTorrentError): number {
   return err.status === 429 ? 429 : err.code === "missing_credentials" ? 400 : 502;
+}
+
+/** Coerce a body value to a boolean with a default (TT anti-block flags). */
+function boolOr(v: unknown, dflt: boolean): boolean {
+  if (typeof v === "boolean") return v;
+  if (v === "1" || v === "true") return true;
+  if (v === "0" || v === "false") return false;
+  return dflt;
 }
 
 export async function GET() {
@@ -60,55 +50,22 @@ export async function GET() {
   }
   try {
     const creds = await getTextTorrentCredentials(tenantId);
-    // Native TT campaign listing is not API-accessible (404/401). Degrade to an
-    // empty history so the page + create form still load; only re-throw on 429.
     let campaigns: TtCampaign[] = [];
     try {
       campaigns = (await listCampaigns(creds, { limit: 50 })).data || [];
     } catch (e) {
+      // Don't let an analytics hiccup break the create form; only surface 429.
       if (e instanceof TextTorrentError && e.status === 429) throw e;
     }
-    const enriched: TtCampaign[] = [];
-    let fanout = 0;
-    let rateLimited = false;
-    for (const c of campaigns) {
-      // Use inline metrics when present; otherwise fetch counts (bounded).
-      if (typeof c.sent === "number" || fanout >= COUNTS_FANOUT_CAP || rateLimited) {
-        enriched.push(c);
-        continue;
-      }
-      fanout += 1;
-      try {
-        const counts = await campaignCounts(creds, c.id);
-        enriched.push({ ...c, ...counts.data });
-      } catch (e) {
-        if (e instanceof TextTorrentError && e.status === 429) rateLimited = true;
-        enriched.push(c);
-      }
-    }
-    // Lists + templates power the create-campaign form. Guarded so a
-    // failure here never breaks the analytics table.
+    // Contact lists power the create-form audience picker.
     let lists: TtList[] = [];
-    let templates: Array<{ id: string; name: string; content: string }> = [];
     try {
       lists = (await listLists(creds)).data || [];
     } catch {
       /* form list-picker degrades to empty */
     }
-    try {
-      templates = (await listTemplates(creds, { limit: 50 })).data || [];
-    } catch {
-      /* form template-picker degrades to empty */
-    }
 
-    return NextResponse.json({
-      ok: true,
-      campaigns: enriched,
-      lists,
-      templates,
-      rate_limited: rateLimited,
-      counts_truncated: campaigns.length > COUNTS_FANOUT_CAP,
-    });
+    return NextResponse.json({ ok: true, campaigns, lists, templates: [] });
   } catch (err) {
     if (err instanceof TextTorrentError) {
       return NextResponse.json({ ok: false, error: err.code, message: err.message }, { status: ttStatus(err) });
@@ -136,6 +93,22 @@ async function callerIsAdmin(authUserId: string): Promise<boolean> {
   }
 }
 
+type CampaignBody = {
+  list_id?: unknown;
+  message?: unknown;
+  campaign_name?: unknown;
+  numbers?: unknown;
+  sms_type?: unknown;
+  number_pool?: unknown;
+  round_robin?: unknown;
+  batch_process?: unknown;
+  batch_size?: unknown;
+  batch_frequency?: unknown;
+  opt_out_link?: unknown;
+  scheduled_date?: unknown;
+  scheduled_time?: unknown;
+};
+
 export async function POST(req: NextRequest) {
   const session = await resolveSessionContext();
   if (!session.ok) {
@@ -151,18 +124,14 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  let body: { list_id?: unknown; message?: unknown; scheduled_time?: unknown };
+  let body: CampaignBody;
   try {
-    body = (await req.json().catch(() => ({}))) as typeof body;
+    body = (await req.json().catch(() => ({}))) as CampaignBody;
   } catch {
     body = {};
   }
-  const listId = typeof body.list_id === "string" ? body.list_id.trim() : "";
+  const listId = typeof body.list_id === "string" ? body.list_id.trim() : String(body.list_id ?? "").trim();
   const message = typeof body.message === "string" ? body.message.trim() : "";
-  const scheduledTime =
-    typeof body.scheduled_time === "string" && body.scheduled_time.trim()
-      ? body.scheduled_time.trim()
-      : undefined;
   if (!listId) {
     return NextResponse.json({ ok: false, error: "list_id_required" }, { status: 400 });
   }
@@ -183,57 +152,74 @@ export async function POST(req: NextRequest) {
 
   try {
     const creds = await getTextTorrentCredentials(session.tenantId);
-    const senderId = await resolveTextTorrentSenderId({
-      tenantId: session.tenantId,
-      userId: session.userId,
-    });
 
-    // Pull the list's recipients (bounded). Native bulk-campaign send is dead,
-    // so we fan out 1:1 over the contacts via the proven inbox path.
-    const contacts = (await listContacts(creds, listId, { limit: BLAST_SYNC_CAP })).data || [];
-    const recipients = contacts.map((c) => c.number).filter((n): n is string => !!n);
+    // Sender-number pool. Explicit list wins; otherwise the rep's resolved
+    // sending number (tenant default). TT requires at least one.
+    let numbers: string[] = Array.isArray(body.numbers)
+      ? body.numbers.map((n) => String(n).trim()).filter(Boolean)
+      : [];
+    if (!numbers.length) {
+      const senderId = await resolveTextTorrentSenderId({
+        tenantId: session.tenantId,
+        userId: session.userId,
+      });
+      if (senderId) numbers = [senderId];
+    }
+    if (!numbers.length) {
+      return NextResponse.json(
+        { ok: false, error: "no_sender_number", message: "No sender number — set a Default Business Number in Settings → Integrations or pick numbers to blast from." },
+        { status: 400 },
+      );
+    }
 
-    if (isDryRun()) {
+    const campaignName =
+      typeof body.campaign_name === "string" && body.campaign_name.trim()
+        ? body.campaign_name.trim().slice(0, 255)
+        : `Campaign ${new Date().toISOString().slice(0, 10)}`;
+    const scheduledDate = typeof body.scheduled_date === "string" && body.scheduled_date.trim() ? body.scheduled_date.trim() : undefined;
+    const scheduledTime = typeof body.scheduled_time === "string" && body.scheduled_time.trim() ? body.scheduled_time.trim() : undefined;
+
+    // Anti-block defaults ON — the whole point of native campaigns.
+    const args = {
+      campaign_name: campaignName,
+      contact_list_id: listId,
+      sms_body: cleanMessage,
+      numbers,
+      sms_type: "sms" as const,
+      number_pool: boolOr(body.number_pool, numbers.length > 1),
+      round_robin_campaign: boolOr(body.round_robin, numbers.length > 1),
+      batch_process: boolOr(body.batch_process, true),
+      batch_size: typeof body.batch_size === "number" ? body.batch_size : undefined,
+      batch_frequency: typeof body.batch_frequency === "number" ? body.batch_frequency : undefined,
+      opt_out_link: boolOr(body.opt_out_link, true),
+      selected_date: scheduledDate,
+      selected_time: scheduledTime,
+    };
+
+    if (isDryRun("texttorrent")) {
       return NextResponse.json({
         ok: true,
         dry_run: true,
         provider: "texttorrent",
-        total: recipients.length,
-        would_send: { list_id: listId, message: cleanMessage, recipients: recipients.length },
+        would_send: {
+          campaign_name: campaignName,
+          list_id: listId,
+          numbers,
+          anti_block: { number_pool: args.number_pool, round_robin: args.round_robin_campaign, batch: args.batch_process, opt_out_link: args.opt_out_link },
+          scheduled: scheduledDate ? `${scheduledDate} ${scheduledTime || ""}`.trim() : "now",
+        },
       });
     }
 
-    let sent = 0;
-    let skipped = 0;
-    let failed = 0;
-    const errors: string[] = [];
-    for (const number of recipients) {
-      try {
-        if (await isPhoneOptedOut(session.tenantId, number)) {
-          skipped += 1;
-          continue;
-        }
-        await sendSms(creds, { number, message: cleanMessage, sender_id: senderId });
-        sent += 1;
-        await new Promise((r) => setTimeout(r, BLAST_THROTTLE_MS)); // anti-burn throttle
-      } catch (e) {
-        failed += 1;
-        if (errors.length < 5) {
-          errors.push(`…${number.slice(-4)}: ${e instanceof Error ? e.message : "failed"}`);
-        }
-      }
-    }
-
+    const r = await createBulkCampaign(creds, args);
     return NextResponse.json({
       ok: true,
       dry_run: false,
       provider: "texttorrent",
-      sent,
-      skipped,
-      failed,
-      total: recipients.length,
-      capped: contacts.length >= BLAST_SYNC_CAP,
-      errors,
+      campaign_id: r.data?.campaign_id,
+      total_contacts: r.data?.total_contacts,
+      total_segments: r.data?.total_segments,
+      total_credit: r.data?.total_credit,
     });
   } catch (err) {
     if (err instanceof TextTorrentError) {

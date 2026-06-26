@@ -1,16 +1,12 @@
 "use client";
 
 /**
- * CampaignsClient — Phase 3c of the TT + Kixie full embedding plan
- * (2026-06-02). TextTorrent bulk-campaign analytics + a create form.
+ * CampaignsClient — TextTorrent NATIVE bulk campaigns (the anti-block engine).
  *
- * Fetches GET /api/campaigns (campaigns + per-campaign counts + lists +
- * templates) on mount. Create form POSTs /api/campaigns — owner/admin only,
- * DRY-RUN by default server-side.
- *
- * Degrades gracefully: a missing-TT-credentials response shows the Settings
- * CTA instead of an error wall; a 429 mid-fan-out shows a soft refreshing
- * hint rather than failing the table.
+ * Fetches GET /api/campaigns (campaigns from /campaigning/analytic + contact
+ * lists) on mount. The create form POSTs /api/campaigns → /campaigning/bulk
+ * with the carrier-safe options (number-pool rotation, round-robin, batch drip,
+ * opt-out link). Owner/admin only; dry-run unless the texttorrent channel is live.
  */
 
 import { useCallback, useEffect, useState } from "react";
@@ -18,29 +14,30 @@ import { Card, EmptyState } from "@/components/Card";
 import { Megaphone, Plus, Send } from "lucide-react";
 
 type Campaign = {
-  id: string;
+  id: string | number;
   name?: string;
-  list_id?: string;
+  campaign_name?: string;
+  status?: string;
+  contact_list_name?: string;
   message?: string;
-  scheduled_time?: string | null;
-  sent?: number;
-  delivered?: number;
-  clicked?: number;
-  failed?: number;
-  opted_out?: number;
+  created_at?: string;
 };
 type TtList = { id: string; name: string; count?: number };
-type TtTemplate = { id: string; name: string; content: string };
 
-function pct(num?: number, denom?: number): string {
-  if (!denom || !num) return "—";
-  return `${Math.round((num / denom) * 100)}%`;
+function fmtDate(s?: string | null): string {
+  if (!s) return "—";
+  const d = new Date(s.replace(" ", "T"));
+  return Number.isFinite(d.getTime())
+    ? d.toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })
+    : s;
 }
 
-function fmtSchedule(iso?: string | null): string {
-  if (!iso) return "Immediate";
-  const d = new Date(iso);
-  return Number.isFinite(d.getTime()) ? d.toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }) : iso;
+function statusTone(status?: string): string {
+  const s = (status || "").toLowerCase();
+  if (s === "completed") return "text-status-good";
+  if (s === "processing" || s === "scheduled") return "text-status-warm";
+  if (s === "failed" || s === "paused") return "text-status-hot";
+  return "text-fg-muted";
 }
 
 export function CampaignsClient({
@@ -54,15 +51,21 @@ export function CampaignsClient({
   const [error, setError] = useState<{ missingCreds: boolean; message: string } | null>(null);
   const [campaigns, setCampaigns] = useState<Campaign[]>([]);
   const [lists, setLists] = useState<TtList[]>([]);
-  const [templates, setTemplates] = useState<TtTemplate[]>([]);
-  const [rateLimited, setRateLimited] = useState(false);
 
   // Create form state
   const [showForm, setShowForm] = useState(false);
   const [listId, setListId] = useState("");
-  const [templateId, setTemplateId] = useState("");
+  const [campaignName, setCampaignName] = useState("");
   const [message, setMessage] = useState("");
-  const [scheduledTime, setScheduledTime] = useState("");
+  const [numbers, setNumbers] = useState(""); // comma-separated, optional
+  const [schedule, setSchedule] = useState(""); // datetime-local; empty = now
+  // Anti-block options (default ON — the whole point of native campaigns).
+  const [numberPool, setNumberPool] = useState(true);
+  const [roundRobin, setRoundRobin] = useState(true);
+  const [batchProcess, setBatchProcess] = useState(true);
+  const [batchSize, setBatchSize] = useState("");
+  const [batchFrequency, setBatchFrequency] = useState("");
+  const [optOutLink, setOptOutLink] = useState(true);
   const [creating, setCreating] = useState(false);
   const [createNotice, setCreateNotice] = useState<string | null>(null);
 
@@ -81,8 +84,6 @@ export function CampaignsClient({
       }
       setCampaigns(data.campaigns || []);
       setLists(data.lists || []);
-      setTemplates(data.templates || []);
-      setRateLimited(!!data.rate_limited);
     } catch {
       setError({ missingCreds: false, message: "Network error loading campaigns." });
     } finally {
@@ -95,52 +96,54 @@ export function CampaignsClient({
     else setLoading(false);
   }, [tenantId, load]);
 
-  function onTemplateChange(id: string) {
-    setTemplateId(id);
-    const t = templates.find((x) => x.id === id);
-    if (t) setMessage(t.content);
-  }
-
   async function handleCreate() {
     if (!listId || !message.trim() || creating) return;
     setCreating(true);
     setCreateNotice(null);
     try {
+      const numberList = numbers
+        .split(",")
+        .map((n) => n.trim())
+        .filter(Boolean);
+      const scheduledDate = schedule ? schedule.slice(0, 10) : undefined;
+      const scheduledTime = schedule && schedule.length >= 16 ? schedule.slice(11, 16) : undefined;
       const res = await fetch("/api/campaigns", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           list_id: listId,
+          campaign_name: campaignName.trim() || undefined,
           message: message.trim(),
-          scheduled_time: scheduledTime || undefined,
+          numbers: numberList.length ? numberList : undefined,
+          number_pool: numberPool,
+          round_robin: roundRobin,
+          batch_process: batchProcess,
+          batch_size: batchSize ? Number(batchSize) : undefined,
+          batch_frequency: batchFrequency ? Number(batchFrequency) : undefined,
+          opt_out_link: optOutLink,
+          scheduled_date: scheduledDate,
+          scheduled_time: scheduledTime,
         }),
       });
       const data = await res.json();
       if (!res.ok || !data.ok) {
-        setCreateNotice(data?.message || data?.error || "Create failed.");
+        setCreateNotice(data?.message || data?.error || "Launch failed.");
         return;
       }
       if (data.dry_run) {
-        setCreateNotice(`Dry-run — nothing sent (dashboard is in dry-run mode). Would text ${data.total ?? 0} contact(s).`);
+        setCreateNotice("Dry-run — TextTorrent is in dry-run mode, nothing sent. Inputs validated. Flip the TextTorrent channel live to send.");
       } else {
-        const n = data.sent ?? 0;
-        const t = data.total ?? 0;
-        const sk = data.skipped ?? 0;
-        const f = data.failed ?? 0;
-        setCreateNotice(
-          `Sent to ${n}/${t}` +
-            (sk ? `, ${sk} skipped (opted out)` : "") +
-            (f ? `, ${f} failed` : "") +
-            (data.capped ? ` — capped at ${t}; run again for the rest` : "") +
-            ".",
-        );
+        const id = data.campaign_id ? ` (#${data.campaign_id})` : "";
+        const tc = typeof data.total_contacts === "number" ? ` — ${data.total_contacts} contacts` : "";
+        const seg = typeof data.total_segments === "number" ? `, ${data.total_segments} segments` : "";
+        setCreateNotice(`Campaign launched${id}${tc}${seg}.`);
         setMessage("");
-        setScheduledTime("");
-        setTemplateId("");
+        setCampaignName("");
+        setSchedule("");
         void load();
       }
     } catch {
-      setCreateNotice("Network error — campaign not created.");
+      setCreateNotice("Network error — campaign not launched.");
     } finally {
       setCreating(false);
     }
@@ -172,7 +175,6 @@ export function CampaignsClient({
     <div className="space-y-4">
       <div className="flex items-center justify-between gap-3">
         <div className="text-xs text-fg-dim">
-          {rateLimited && "TT rate limit hit mid-load — some counts may be missing. "}
           {!loading && `${campaigns.length} campaign${campaigns.length === 1 ? "" : "s"}`}
         </div>
         <button
@@ -185,7 +187,7 @@ export function CampaignsClient({
       </div>
 
       {showForm && (
-        <Card title="New campaign" subtitle="Owner/admin only · dry-run by default">
+        <Card title="New campaign" subtitle="Native anti-block bulk · owner/admin · dry-run unless live">
           <div className="space-y-3">
             {createNotice && <div className="text-[11px] text-status-warm">{createNotice}</div>}
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
@@ -206,19 +208,13 @@ export function CampaignsClient({
                 </select>
               </label>
               <label className="block">
-                <span className="text-[11px] uppercase tracking-wide text-fg-dim">Template (optional)</span>
-                <select
-                  value={templateId}
-                  onChange={(e) => onTemplateChange(e.target.value)}
-                  className="mt-1 w-full bg-bg-deep/40 border border-bg-border rounded-md px-2 py-1.5 text-sm text-fg focus:outline-none focus:border-accent/50"
-                >
-                  <option value="">No template</option>
-                  {templates.map((t) => (
-                    <option key={t.id} value={t.id}>
-                      {t.name}
-                    </option>
-                  ))}
-                </select>
+                <span className="text-[11px] uppercase tracking-wide text-fg-dim">Campaign name (optional)</span>
+                <input
+                  value={campaignName}
+                  onChange={(e) => setCampaignName(e.target.value)}
+                  placeholder="Auto-dated if blank"
+                  className="mt-1 w-full bg-bg-deep/40 border border-bg-border rounded-md px-2 py-1.5 text-sm text-fg placeholder:text-fg-dim focus:outline-none focus:border-accent/50"
+                />
               </label>
             </div>
             <label className="block">
@@ -231,13 +227,69 @@ export function CampaignsClient({
                 className="mt-1 w-full bg-bg-deep/40 border border-bg-border rounded-md px-3 py-2 text-sm text-fg placeholder:text-fg-dim resize-none focus:outline-none focus:border-accent/50"
               />
             </label>
+            <label className="block">
+              <span className="text-[11px] uppercase tracking-wide text-fg-dim">Send from numbers (optional, comma-separated)</span>
+              <input
+                value={numbers}
+                onChange={(e) => setNumbers(e.target.value)}
+                placeholder="+18604527608, +13106271134 — leave blank for the default business number"
+                className="mt-1 w-full bg-bg-deep/40 border border-bg-border rounded-md px-2 py-1.5 text-sm text-fg placeholder:text-fg-dim focus:outline-none focus:border-accent/50"
+              />
+            </label>
+
+            <div className="rounded-md border border-bg-border bg-bg-deep/20 p-3">
+              <div className="text-[11px] uppercase tracking-wide text-fg-dim mb-2">Anti-block sending</div>
+              <div className="grid grid-cols-2 gap-x-4 gap-y-2 text-[12px] text-fg-muted">
+                <label className="inline-flex items-center gap-2">
+                  <input type="checkbox" checked={numberPool} onChange={(e) => setNumberPool(e.target.checked)} />
+                  Number pool
+                </label>
+                <label className="inline-flex items-center gap-2">
+                  <input type="checkbox" checked={roundRobin} onChange={(e) => setRoundRobin(e.target.checked)} />
+                  Round-robin numbers
+                </label>
+                <label className="inline-flex items-center gap-2">
+                  <input type="checkbox" checked={batchProcess} onChange={(e) => setBatchProcess(e.target.checked)} />
+                  Batch drip
+                </label>
+                <label className="inline-flex items-center gap-2">
+                  <input type="checkbox" checked={optOutLink} onChange={(e) => setOptOutLink(e.target.checked)} />
+                  Opt-out link
+                </label>
+              </div>
+              {batchProcess && (
+                <div className="mt-3 grid grid-cols-2 gap-3">
+                  <label className="block">
+                    <span className="text-[11px] text-fg-dim">Batch size</span>
+                    <input
+                      type="number"
+                      value={batchSize}
+                      onChange={(e) => setBatchSize(e.target.value)}
+                      placeholder="e.g. 200"
+                      className="mt-1 w-full bg-bg-deep/40 border border-bg-border rounded-md px-2 py-1.5 text-sm text-fg placeholder:text-fg-dim focus:outline-none focus:border-accent/50"
+                    />
+                  </label>
+                  <label className="block">
+                    <span className="text-[11px] text-fg-dim">Minutes between batches</span>
+                    <input
+                      type="number"
+                      value={batchFrequency}
+                      onChange={(e) => setBatchFrequency(e.target.value)}
+                      placeholder="e.g. 20"
+                      className="mt-1 w-full bg-bg-deep/40 border border-bg-border rounded-md px-2 py-1.5 text-sm text-fg placeholder:text-fg-dim focus:outline-none focus:border-accent/50"
+                    />
+                  </label>
+                </div>
+              )}
+            </div>
+
             <div className="flex items-end justify-between gap-3">
               <label className="block">
                 <span className="text-[11px] uppercase tracking-wide text-fg-dim">Schedule (optional)</span>
                 <input
                   type="datetime-local"
-                  value={scheduledTime}
-                  onChange={(e) => setScheduledTime(e.target.value)}
+                  value={schedule}
+                  onChange={(e) => setSchedule(e.target.value)}
                   className="mt-1 block bg-bg-deep/40 border border-bg-border rounded-md px-2 py-1.5 text-sm text-fg focus:outline-none focus:border-accent/50"
                 />
               </label>
@@ -247,7 +299,7 @@ export function CampaignsClient({
                 className="btn-secondary inline-flex items-center gap-1.5 !px-3 !py-2 text-xs disabled:opacity-50"
               >
                 <Send className="h-3.5 w-3.5" />
-                {creating ? "Creating…" : "Create campaign"}
+                {creating ? "Launching…" : "Launch campaign"}
               </button>
             </div>
           </div>
@@ -265,35 +317,24 @@ export function CampaignsClient({
               <thead>
                 <tr className="text-left text-fg-dim border-b border-bg-border">
                   <th className="px-4 py-2.5 font-medium">Campaign</th>
-                  <th className="px-3 py-2.5 font-medium">Schedule</th>
-                  <th className="px-3 py-2.5 font-medium text-right">Sent</th>
-                  <th className="px-3 py-2.5 font-medium text-right">Delivered</th>
-                  <th className="px-3 py-2.5 font-medium text-right">Clicked</th>
-                  <th className="px-3 py-2.5 font-medium text-right">Failed</th>
-                  <th className="px-3 py-2.5 font-medium text-right">Opt-out</th>
+                  <th className="px-3 py-2.5 font-medium">Status</th>
+                  <th className="px-3 py-2.5 font-medium">List</th>
+                  <th className="px-3 py-2.5 font-medium text-right">Created</th>
                 </tr>
               </thead>
               <tbody>
                 {campaigns.map((c) => (
-                  <tr key={c.id} className="border-b border-bg-border/40 last:border-b-0 hover:bg-bg-elev/30">
+                  <tr key={String(c.id)} className="border-b border-bg-border/40 last:border-b-0 hover:bg-bg-elev/30">
                     <td className="px-4 py-2.5">
                       <div className="font-medium text-fg flex items-center gap-2">
                         <Megaphone className="h-3.5 w-3.5 text-fg-dim" />
-                        {c.name || `Campaign ${c.id.slice(0, 8)}`}
+                        {c.campaign_name || c.name || `Campaign ${String(c.id).slice(0, 8)}`}
                       </div>
                       {c.message && <div className="text-xs text-fg-dim truncate max-w-[280px]">{c.message}</div>}
                     </td>
-                    <td className="px-3 py-2.5 text-fg-muted">{fmtSchedule(c.scheduled_time)}</td>
-                    <td className="px-3 py-2.5 text-right tabular-nums text-fg">{c.sent ?? "—"}</td>
-                    <td className="px-3 py-2.5 text-right tabular-nums text-fg-muted">
-                      {c.delivered ?? "—"}
-                      {typeof c.delivered === "number" && typeof c.sent === "number" && (
-                        <span className="text-fg-dim text-[11px]"> ({pct(c.delivered, c.sent)})</span>
-                      )}
-                    </td>
-                    <td className="px-3 py-2.5 text-right tabular-nums text-fg-muted">{c.clicked ?? "—"}</td>
-                    <td className="px-3 py-2.5 text-right tabular-nums text-status-hot">{c.failed ?? "—"}</td>
-                    <td className="px-3 py-2.5 text-right tabular-nums text-fg-muted">{c.opted_out ?? "—"}</td>
+                    <td className={`px-3 py-2.5 ${statusTone(c.status)}`}>{c.status || "—"}</td>
+                    <td className="px-3 py-2.5 text-fg-muted">{c.contact_list_name || "—"}</td>
+                    <td className="px-3 py-2.5 text-right text-fg-muted tabular-nums">{fmtDate(c.created_at)}</td>
                   </tr>
                 ))}
               </tbody>

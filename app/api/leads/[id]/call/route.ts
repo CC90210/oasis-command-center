@@ -157,7 +157,7 @@ export async function POST(
   // Call button can't place a live call the moment Kixie creds land. We
   // still validate everything above (phone, agent email, creds) and log
   // the attempt; we just skip the actual Kixie request.
-  const dryRun = isDryRun();
+  const dryRun = isDryRun("kixie");
   if (!dryRun) {
     try {
       await makeCall(creds, {

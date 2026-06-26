@@ -92,7 +92,7 @@ export async function POST(req: Request) {
   // Dry-run gate (2026-06-02): the dashboard defaults to dry-run so no SMS
   // route can send live before DASHBOARD_LIVE_SEND=1 is set. Short-circuit
   // after validation, before either the direct-Twilio or client-agent path.
-  if (isDryRun()) {
+  if (isDryRun("twilio")) {
     return NextResponse.json(
       { ok: true, dry_run: true, status: "dry_run", would_send: { to, body } },
       { status: 200 }
