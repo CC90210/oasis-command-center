@@ -1,17 +1,28 @@
 "use client";
 
 /**
- * AutofillDropzone — drop a merchant application (PDF or photo); Claude reads it
- * and fills the application. Two modes:
+ * AutofillDropzone — drop a merchant application (PDF or photo). It's filed +
+ * QUEUED; a VPS daemon reads it with the Claude Code CLI on CC's subscription
+ * (not the metered API) and fills the application. Two modes:
  *   - "existing": POST /api/leads/[id]/autofill-application (fills the open lead)
  *   - "new":      POST /api/leads/new-from-document (creates a new lead + app)
+ * Both return { queued, job_id }. We poll /api/extraction-jobs/[job_id] until the
+ * fields land, then (if a signature was found) show the confirm prompt — the
+ * signature only embeds on the legal PDF after the operator taps "Use it".
  */
 
 import { useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Loader2, FileUp, CheckCircle2, AlertCircle, PenLine, Check, X } from "lucide-react";
 
-type SigConfirm = { preview: string; applicationId: string };
+type SigConfirm = { preview: string; applicationId: string; leadId: string };
+
+const POLL_MS = 2500;
+const POLL_DEADLINE_MS = 180_000; // ~3 min: CLI vision + apply, generously
+
+function sleep(ms: number) {
+  return new Promise((r) => setTimeout(r, ms));
+}
 
 export function AutofillDropzone({
   mode,
@@ -29,6 +40,7 @@ export function AutofillDropzone({
   const router = useRouter();
   const inputRef = useRef<HTMLInputElement>(null);
   const [busy, setBusy] = useState(false);
+  const [reading, setReading] = useState(false); // queued → polling the daemon
   const [msg, setMsg] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
   // Signature extracted from the dropped app, pending operator confirm before it
@@ -36,51 +48,100 @@ export function AutofillDropzone({
   const [sig, setSig] = useState<SigConfirm | null>(null);
   const [sigBusy, setSigBusy] = useState(false);
 
+  async function pollJob(jobId: string): Promise<
+    | { status: "applied"; appliedKeys: number; signaturePreview: string | null; applicationId: string | null; jobLeadId: string | null }
+    | { status: "failed"; error: string | null }
+    | { status: "timeout" }
+  > {
+    const deadline = Date.now() + POLL_DEADLINE_MS;
+    while (Date.now() < deadline) {
+      await sleep(POLL_MS);
+      let j: Record<string, unknown> = {};
+      try {
+        const r = await fetch(`/api/extraction-jobs/${jobId}`, { credentials: "include" });
+        j = (await r.json().catch(() => ({}))) as Record<string, unknown>;
+        if (!r.ok || !j.ok) continue; // transient — keep polling
+      } catch {
+        continue; // network blip — keep polling
+      }
+      const status = String(j.status || "");
+      if (status === "applied") {
+        return {
+          status: "applied",
+          appliedKeys: Array.isArray(j.applied_keys) ? j.applied_keys.length : 0,
+          signaturePreview: typeof j.signature_preview === "string" ? j.signature_preview : null,
+          applicationId: typeof j.application_id === "string" ? j.application_id : null,
+          jobLeadId: typeof j.lead_id === "string" ? j.lead_id : null,
+        };
+      }
+      if (status === "failed") {
+        return { status: "failed", error: typeof j.error === "string" ? j.error : null };
+      }
+      // queued | processing | extracted → keep polling
+    }
+    return { status: "timeout" };
+  }
+
   async function send(file: File) {
     setBusy(true);
     setErr(null);
     setMsg(null);
+    setSig(null);
+    let jobId: string | null = null;
     try {
       const fd = new FormData();
       fd.append("file", file);
       const url =
-        mode === "existing"
-          ? `/api/leads/${leadId}/autofill-application`
-          : `/api/leads/new-from-document`;
+        mode === "existing" ? `/api/leads/${leadId}/autofill-application` : `/api/leads/new-from-document`;
       const r = await fetch(url, { method: "POST", credentials: "include", body: fd });
       const j = await r.json().catch(() => ({}));
-      if (!r.ok || !j.ok) {
+      if (!r.ok || !j.ok || !j.job_id) {
         setErr(j.detail || j.error || `failed_${r.status}`);
         return;
       }
-      const n = Array.isArray(j.applied_keys) ? j.applied_keys.length : 0;
-      setMsg(`Filled ${n} field${n === 1 ? "" : "s"} from the application.`);
-      if (mode === "new" && j.application_id && tenantSlug) {
-        router.push(`/t/${tenantSlug}/applications?application=${j.application_id}`);
-      } else if (
-        mode === "existing" &&
-        typeof j.signature_preview === "string" &&
-        typeof j.application_id === "string"
-      ) {
-        // A signature was extracted — hold for the operator to confirm it before
-        // reloading (it only lands on the PDF after they tap "Use it").
-        setSig({ preview: j.signature_preview, applicationId: j.application_id });
-      } else {
-        onDone?.();
-      }
+      jobId = j.job_id as string;
     } catch (e) {
       setErr(e instanceof Error ? e.message : "network_error");
+      return;
     } finally {
       setBusy(false);
       if (inputRef.current) inputRef.current.value = "";
     }
+
+    // Queued. Poll the daemon until the fields land.
+    setReading(true);
+    setMsg("Reading application on the subscription… this can take up to a minute.");
+    try {
+      const res = await pollJob(jobId);
+      if (res.status === "failed") {
+        setErr(res.error ? `Couldn't read it (${res.error}). Re-drop or fill manually.` : "Couldn't read the application. Re-drop or fill manually.");
+        return;
+      }
+      if (res.status === "timeout") {
+        setMsg("Still reading — the fields will appear shortly. Refresh the drawer in a moment.");
+        return;
+      }
+      // applied
+      setMsg(`Filled ${res.appliedKeys} field${res.appliedKeys === 1 ? "" : "s"} from the application.`);
+      const resolvedLeadId = leadId || res.jobLeadId || "";
+      if (res.signaturePreview && res.applicationId && resolvedLeadId) {
+        // A signature was found — hold for the operator to confirm before it
+        // lands on the PDF.
+        setSig({ preview: res.signaturePreview, applicationId: res.applicationId, leadId: resolvedLeadId });
+      } else if (mode === "new" && res.applicationId && tenantSlug) {
+        router.push(`/t/${tenantSlug}/applications?application=${res.applicationId}`);
+      } else {
+        onDone?.();
+      }
+    } finally {
+      setReading(false);
+    }
   }
 
   // Operator's decision on the extracted signature. "Use it" embeds it on the
-  // application PDF; "Skip" leaves the ruled signature line (re-sign via the
-  // signature pad). Either way we reload the drawer afterward.
+  // application PDF; "Skip" leaves the ruled signature line (re-sign via the pad).
   async function resolveSignature(use: boolean) {
-    if (!use || !sig || !leadId) {
+    if (!use || !sig) {
       setSig(null);
       onDone?.();
       return;
@@ -88,7 +149,7 @@ export function AutofillDropzone({
     setSigBusy(true);
     setErr(null);
     try {
-      const r = await fetch(`/api/leads/${leadId}/application-signature`, {
+      const r = await fetch(`/api/leads/${sig.leadId}/application-signature`, {
         method: "POST",
         credentials: "include",
         headers: { "Content-Type": "application/json" },
@@ -109,6 +170,7 @@ export function AutofillDropzone({
   }
 
   const text = label || (mode === "existing" ? "Autofill from application" : "New from application");
+  const working = busy || reading;
 
   return (
     <div className="min-w-0">
@@ -125,12 +187,12 @@ export function AutofillDropzone({
       <button
         type="button"
         onClick={() => inputRef.current?.click()}
-        disabled={busy}
-        title="Drop a merchant application (PDF or photo). AI reads it and fills the application fields automatically."
+        disabled={working}
+        title="Drop a merchant application (PDF or photo). The VPS reads it on the subscription and fills the application fields automatically."
         className="inline-flex items-center gap-2 rounded-md bg-accent/10 border border-accent/30 text-accent px-3 py-1.5 text-[11.5px] font-semibold hover:bg-accent/20 disabled:opacity-50"
       >
-        {busy ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <FileUp className="w-3.5 h-3.5" />}
-        {busy ? "Reading application…" : text}
+        {working ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <FileUp className="w-3.5 h-3.5" />}
+        {busy ? "Uploading…" : reading ? "Reading application…" : text}
       </button>
       {msg && (
         <div className="mt-1 inline-flex items-center gap-1 text-[11px] text-status-engaged">
