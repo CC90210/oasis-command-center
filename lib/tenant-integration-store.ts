@@ -89,6 +89,7 @@ const ENV_FALLBACKS: Record<string, Record<string, string>> = {
     api_public_key: "TEXTTORRENT_PUBLIC_KEY",
     api_key: "TEXTTORRENT_API_KEY",
     from_number: "TEXTTORRENT_FROM_NUMBER",
+    act_as_email: "TEXTTORRENT_ACT_AS_EMAIL",
   },
   smtp: {
     host: "SMTP_HOST",

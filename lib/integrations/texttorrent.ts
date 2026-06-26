@@ -31,7 +31,7 @@ const BASE_URL = "https://api.texttorrent.com/api/v1";
 export type TextTorrentCredentials = {
   apiSid: string;
   publicKey: string;
-  /** Optional sub-account email to act-as (sent as X-ACT-AS-USER Base64). */
+  /** Optional sub-account email to act-as (sent as X-ACT-AS-USER, PLAIN email). */
   actAsEmail?: string;
 };
 
@@ -45,13 +45,9 @@ export async function getTextTorrentCredentials(
   opts: { actAsEmail?: string } = {},
 ): Promise<TextTorrentCredentials> {
   const bundle = await getTenantIntegrationBundle(tenantId, "texttorrent");
-  // The schema today uses {api_key, from_number} — the docs reference
-  // X-API-SID + X-API-PUBLIC-KEY as two separate fields. Until the operator
-  // pastes both into the schema we accept api_key as either the SID or the
-  // public key; production-ready setups will paste both.
-  //
-  // Schema gets a second field (api_sid) in a future migration; for now we
-  // support both shapes so we don't block on UI work.
+  // TT authenticates with two distinct keys (X-API-SID + X-API-PUBLIC-KEY).
+  // The integration form exposes api_sid + api_public_key; api_key is kept as
+  // a legacy single-value fallback for tenants wired before the two-field form.
   const apiSid = bundle.api_sid || bundle.api_key || "";
   const publicKey = bundle.api_public_key || bundle.api_key || "";
   if (!apiSid || !publicKey) {
@@ -61,7 +57,11 @@ export async function getTextTorrentCredentials(
       0,
     );
   }
-  return { apiSid, publicKey, actAsEmail: opts.actAsEmail };
+  // Act-as the sending sub-account. An explicit opts.actAsEmail wins; otherwise
+  // the tenant default (act_as_email, e.g. jordan@sunbizfunding.com) routes every
+  // send through the SunBiz operating sub-account — matching the live agent path.
+  const actAsEmail = opts.actAsEmail || bundle.act_as_email || undefined;
+  return { apiSid, publicKey, actAsEmail };
 }
 
 // ---- Rate limiter (60 req/min rolling window) -----------------------------
@@ -142,7 +142,10 @@ async function ttFetch<T>(
     Accept: "application/json",
   };
   if (creds.actAsEmail) {
-    headers["X-ACT-AS-USER"] = Buffer.from(creds.actAsEmail).toString("base64");
+    // PLAIN email — LIVE-VERIFIED (BUSINESS_CONTEXT/TEXTTORRENT_API_VERIFIED.md).
+    // The prior base64 encoding was a dormant bug: the live API expects the raw
+    // email in X-ACT-AS-USER (dormant only because no call site passed actAsEmail).
+    headers["X-ACT-AS-USER"] = creds.actAsEmail;
   }
   if (opts.body) headers["Content-Type"] = "application/json";
 
@@ -290,19 +293,91 @@ export function addContact(
 }
 
 // --- 1:1 SMS (Inbox) -------------------------------------------------------
+//
+// LIVE-VERIFIED send path (BUSINESS_CONTEXT/TEXTTORRENT_API_VERIFIED.md) — the
+// same two-step flow the production Jordan agent uses daily:
+//   1. POST /inbox/chat/create { receiver_number (10-digit), sender_id } → chat_id
+//   2. POST /inbox/chat { chat_id, to_number, from_number, message }     → sends
+// The old POST /inbox/message/send 404s ("route could not be found"); do not
+// reintroduce it.
 
-export function sendSms(
-  creds: TextTorrentCredentials,
-  args: { number: string; message: string; sender_id?: string },
-): Promise<{ data: { message_id?: string } }> {
-  return ttFetch(creds, "/inbox/message/send", { body: args });
+/** Normalize an E.164 / formatted phone to the 10-digit US form that
+ *  /inbox/chat/create requires. */
+function toTenDigit(phone: string): string {
+  const digits = String(phone || "").replace(/\D/g, "");
+  if (digits.length === 11 && digits.startsWith("1")) return digits.slice(1);
+  if (digits.length === 10) return digits;
+  throw new TextTorrentError("validation", `Cannot normalize "${phone}" to a 10-digit US number.`, 0);
 }
 
-export function startChat(
+/** Find an existing chat id for a destination number by scanning the inbox
+ *  (used when /inbox/chat/create reports the chat already exists). */
+async function findChatIdByNumber(
   creds: TextTorrentCredentials,
-  args: { number: string; initial_message: string },
-): Promise<{ data: { chat_id: string } }> {
-  return ttFetch(creds, "/inbox/chat/start", { body: args });
+  toNumber: string,
+): Promise<string | null> {
+  const ten = toTenDigit(toNumber);
+  const inbox = await ttFetch<{ data?: { data?: Array<{ id: string | number; number: string }> } }>(
+    creds,
+    "/inbox",
+    { query: { limit: 100 } },
+  );
+  const chats = inbox?.data?.data || [];
+  for (const c of chats) {
+    try {
+      if (toTenDigit(c.number) === ten) return String(c.id);
+    } catch {
+      /* skip malformed numbers */
+    }
+  }
+  return null;
+}
+
+/**
+ * Send a 1:1 SMS. Creates-or-finds the chat, then sends on it. `sender_id` is
+ * the sending number (the rep's own line or the tenant default) and is required
+ * — TT rejects a create without it. Returns the resolved chat_id so callers can
+ * thread follow-ups.
+ */
+export async function sendSms(
+  creds: TextTorrentCredentials,
+  args: { number: string; message: string; sender_id?: string },
+): Promise<{ data: { chat_id: string; message_id?: string } }> {
+  const fromNumber = (args.sender_id || "").trim();
+  if (!fromNumber) {
+    throw new TextTorrentError(
+      "validation",
+      "TextTorrent send requires a sender number — set a Default Business Number in Settings → Integrations or your own number in Personal integrations.",
+      0,
+    );
+  }
+  const receiver = toTenDigit(args.number);
+
+  // Step 1: create or find the chat.
+  let chatId = "";
+  try {
+    const created = await ttFetch<{ data?: { id?: string | number } }>(creds, "/inbox/chat/create", {
+      body: { receiver_number: receiver, sender_id: fromNumber },
+    });
+    chatId = String(created?.data?.id || "");
+  } catch (err) {
+    // "already started a chat" → reuse the existing thread; anything else is fatal.
+    if (err instanceof TextTorrentError && /already started/i.test(err.message)) {
+      chatId = (await findChatIdByNumber(creds, args.number)) || "";
+    } else {
+      throw err;
+    }
+  }
+  if (!chatId) chatId = (await findChatIdByNumber(creds, args.number)) || "";
+  if (!chatId) {
+    throw new TextTorrentError("send_failed", `Could not open a TextTorrent chat for ${args.number}.`, 0);
+  }
+
+  // Step 2: send the message on the chat.
+  const sent = await ttFetch<{ data?: { message_id?: string } }>(creds, "/inbox/chat", {
+    body: { chat_id: chatId, to_number: args.number, from_number: fromNumber, message: args.message },
+  });
+  return { data: { chat_id: chatId, message_id: sent?.data?.message_id } };
 }
 
 export function getInbox(
@@ -322,8 +397,8 @@ export function getThread(
 export function replyToThread(
   creds: TextTorrentCredentials,
   args: { number: string; message: string; sender_id?: string },
-): Promise<{ data: { message_id?: string } }> {
-  // Reuses /inbox/message/send — TT threads by sender/number internally.
+): Promise<{ data: { chat_id: string; message_id?: string } }> {
+  // Same create-or-find-then-send path; TT threads by chat_id internally.
   return sendSms(creds, args);
 }
 
