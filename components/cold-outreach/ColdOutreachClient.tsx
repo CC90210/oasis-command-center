@@ -89,6 +89,9 @@ type Campaign = {
   failed_count: number;
   daily_cap: number;
   created_at: string;
+  created_by_user_id: string | null;
+  sender_user_id: string | null;
+  sender_from_number: string | null;
 };
 
 type RecipientFilter = {
@@ -281,9 +284,11 @@ function RecipientFilterChips({
 function CampaignRow({
   campaign,
   tenantSlug,
+  senderName,
 }: {
   campaign: Campaign;
   tenantSlug: string;
+  senderName?: string | null;
 }) {
   const [expanded, setExpanded] = useState(false);
   const [recipients, setRecipients] = useState<Recipient[]>([]);
@@ -347,6 +352,9 @@ function CampaignRow({
             >
               {campaign.status}
             </span>
+            {senderName && (
+              <span className="text-[10px] text-fg-muted">sent as <span className="font-semibold text-fg-muted">{senderName}</span></span>
+            )}
           </div>
           <div className="text-[11px] text-fg-dim mt-0.5">
             {new Date(campaign.created_at).toLocaleDateString()} ·{" "}
@@ -486,6 +494,52 @@ export function ColdOutreachClient({
   }, []);
   const ttReady = !!(ttIdentity?.from && ttIdentity?.email);
 
+  // ── Per-rep blaster controls (2026-06-26) ────────────────────────────────
+  // Recipient source (cold list / the rep's assigned leads / an uploaded paste),
+  // an admin "send as another rep" override, and the campaign-monitor rep
+  // filter. Role + roster come from /api/team/members (same endpoint the Offers
+  // tab uses): can_manage = owner/admin.
+  type TeamMember = { id: string; auth_user_id: string; display_name: string | null; full_name: string | null };
+  const [recipientSource, setRecipientSource] = useState<"cold_list" | "assigned_leads" | "uploaded">("cold_list");
+  const [uploadedText, setUploadedText] = useState("");
+  const uploadedNumbers = useMemo(
+    () => uploadedText.split(/[\s,;]+/).map((s) => s.trim()).filter(Boolean),
+    [uploadedText],
+  );
+  const [asUserId, setAsUserId] = useState<string | null>(null); // null = send as self
+  const [members, setMembers] = useState<TeamMember[]>([]);
+  const [isAdmin, setIsAdmin] = useState(false);
+  const [selfUserId, setSelfUserId] = useState<string | null>(null);
+  // Campaign-monitor filter: null = all reps; otherwise an auth_user_id.
+  const [campaignRepFilter, setCampaignRepFilter] = useState<string | null>(null);
+  useEffect(() => {
+    let live = true;
+    void (async () => {
+      try {
+        const r = await fetch("/api/team/members", { cache: "no-store" });
+        const j = (await r.json().catch(() => ({}))) as {
+          ok?: boolean; can_manage?: boolean; self_profile_id?: string; members?: TeamMember[];
+        };
+        if (!live || !j.ok) return;
+        setIsAdmin(!!j.can_manage);
+        const ms = Array.isArray(j.members) ? j.members : [];
+        setMembers(ms);
+        const self = ms.find((m) => m.id === j.self_profile_id);
+        setSelfUserId(self?.auth_user_id ?? null);
+        // Members default to their own campaigns in the monitor; admins see all.
+        setCampaignRepFilter(j.can_manage ? null : (self?.auth_user_id ?? null));
+      } catch {
+        /* soft-fail — controls degrade to self-only, cold-list-only */
+      }
+    })();
+    return () => { live = false; };
+  }, []);
+  const repName = (id: string | null) => {
+    if (!id) return "—";
+    const m = members.find((x) => x.auth_user_id === id);
+    return m ? (m.display_name || m.full_name || id.slice(0, 8)) : id.slice(0, 8);
+  };
+
   // ── HTML template picker (email channel) ─────────────────────────────────
   // The SunBiz marketing template library (SunBiz-Agent/docs/*.html),
   // served by /api/manifest/[slug]/cold-outreach/templates. Picking one
@@ -568,14 +622,35 @@ export function ColdOutreachClient({
   const charCount = messageBody.length;
 
   const canSend =
-    selectedListId !== null &&
     messageBody.trim().length > 0 &&
-    (filteredTotal === null ? (selectedList?.row_count ?? 0) > 0 : filteredTotal > 0);
+    (recipientSource === "cold_list"
+      ? selectedListId !== null &&
+        (filteredTotal === null ? (selectedList?.row_count ?? 0) > 0 : filteredTotal > 0)
+      : recipientSource === "uploaded"
+        ? uploadedNumbers.length > 0
+        : true); // assigned_leads: the server resolves the rep's book at create time
 
   const recipientCount =
-    filteredTotal !== null
-      ? filteredTotal
-      : selectedList?.row_count ?? 0;
+    recipientSource === "uploaded"
+      ? uploadedNumbers.length
+      : recipientSource === "assigned_leads"
+        ? 0 // unknown until the server resolves; label handles the wording
+        : filteredTotal !== null
+          ? filteredTotal
+          : selectedList?.row_count ?? 0;
+
+  // Human label for the send button + confirm modal across all three sources.
+  const recipientLabel =
+    recipientSource === "assigned_leads"
+      ? "your assigned leads"
+      : `${recipientCount.toLocaleString()} ${CHANNEL_LABEL[channel]}`;
+
+  // Campaign monitor: which reps have campaigns, and the filtered view.
+  const campaignSender = (c: Campaign) => c.sender_user_id || c.created_by_user_id || null;
+  const campaignReps = [...new Set(campaigns.map(campaignSender).filter(Boolean) as string[])];
+  const visibleCampaigns = campaignRepFilter
+    ? campaigns.filter((c) => campaignSender(c) === campaignRepFilter)
+    : campaigns;
 
   // ── Load lists on mount ───────────────────────────────────────────────────
   useEffect(() => {
@@ -739,13 +814,23 @@ export function ColdOutreachClient({
     setSendResult(null);
     try {
       const body: Record<string, unknown> = {
-        cold_list_id: selectedListId,
+        recipient_source: recipientSource,
         channel,
         message_body: messageBody,
-        recipient_filter: recipientFilter,
         daily_cap: dailyCap,
-        name: `${selectedList?.name ?? "List"} — ${new Date().toLocaleDateString()}`,
       };
+      if (recipientSource === "cold_list") {
+        body.cold_list_id = selectedListId;
+        body.recipient_filter = recipientFilter;
+        body.name = `${selectedList?.name ?? "List"} — ${new Date().toLocaleDateString()}`;
+      } else if (recipientSource === "uploaded") {
+        body.uploaded = uploadedNumbers.map((phone) => ({ phone }));
+        body.name = `Uploaded (${uploadedNumbers.length}) — ${new Date().toLocaleDateString()}`;
+      } else {
+        body.name = `Assigned leads — ${new Date().toLocaleDateString()}`;
+      }
+      // Admin-only: blast on behalf of another rep (stamped as the sender).
+      if (isAdmin && asUserId) body.as_user_id = asUserId;
       if (channel === "email" && subject.trim()) body.subject = subject.trim();
       const res = await fetch(`/api/manifest/${tenantSlug}/cold-outreach/campaigns`, {
         method: "POST",
@@ -762,6 +847,7 @@ export function ColdOutreachClient({
         setRecipientFilter({});
         setFilteredTotal(null);
         setPreviewOpen(false);
+        setUploadedText("");
         await loadCampaigns();
       } else {
         // Prefer the route's human-readable message (e.g. the per-rep
@@ -773,13 +859,67 @@ export function ColdOutreachClient({
     } finally {
       setSending(false);
     }
-  }, [selectedListId, selectedList, channel, messageBody, subject, recipientFilter, dailyCap, tenantSlug, loadCampaigns]);
+  }, [selectedListId, selectedList, channel, messageBody, subject, recipientFilter, dailyCap, tenantSlug, loadCampaigns, recipientSource, uploadedNumbers, asUserId, isAdmin]);
 
   // =========================================================================
   return (
     <div className="space-y-5">
 
-      {/* ── Step 1 — Pick a cold list ───────────────────────────────────── */}
+      {/* ── Recipient source + (admin) sender ───────────────────────────── */}
+      <Card>
+        <div className="space-y-3">
+          <div className="text-[11px] uppercase tracking-wider text-fg-dim font-semibold">
+            Recipients
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            {([
+              { id: "cold_list", label: "Cold list" },
+              { id: "assigned_leads", label: "My assigned leads" },
+              { id: "uploaded", label: "Uploaded" },
+            ] as const).map((opt) => (
+              <button
+                key={opt.id}
+                type="button"
+                onClick={() => setRecipientSource(opt.id)}
+                className={`px-3 py-1.5 rounded-md text-[12.5px] font-semibold border transition-colors ${
+                  recipientSource === opt.id
+                    ? "bg-accent/10 border-accent/40 text-accent"
+                    : "bg-bg-elev border-bg-border text-fg-muted hover:text-fg"
+                }`}
+              >
+                {opt.label}
+              </button>
+            ))}
+          </div>
+          {isAdmin && (
+            <div className="flex items-center gap-2 flex-wrap pt-1 border-t border-bg-border/60 mt-1">
+              <span className="text-[11.5px] text-fg-muted pt-2">Send as</span>
+              <select
+                value={asUserId ?? ""}
+                onChange={(e) => setAsUserId(e.target.value || null)}
+                className="text-[12.5px] px-2.5 py-1.5 mt-2 rounded-md bg-bg-deep border border-bg-border text-fg"
+              >
+                <option value="">Myself</option>
+                {members
+                  .filter((m) => m.auth_user_id !== selfUserId)
+                  .map((m) => (
+                    <option key={m.auth_user_id} value={m.auth_user_id}>
+                      {m.display_name || m.full_name || m.auth_user_id.slice(0, 8)}
+                    </option>
+                  ))}
+              </select>
+              {asUserId && (
+                <span className="text-[10.5px] text-amber-300 mt-2">
+                  Blast goes out on {repName(asUserId)}&apos;s account + number.
+                </span>
+              )}
+            </div>
+          )}
+        </div>
+      </Card>
+
+      {/* ── Step 1 — Pick a cold list (cold_list source only) ───────────── */}
+      {recipientSource === "cold_list" && (
       <Card>
         <div className="space-y-3">
           <div className="flex items-center justify-between">
@@ -946,6 +1086,48 @@ export function ColdOutreachClient({
           </div>
         </div>
       </Card>
+      )}
+
+      {/* ── Uploaded paste (uploaded source) ───────────────────────────── */}
+      {recipientSource === "uploaded" && (
+        <Card>
+          <div className="space-y-2">
+            <div className="text-[11px] uppercase tracking-wider text-fg-dim font-semibold">
+              1 · Paste numbers
+            </div>
+            <div className="text-[11.5px] text-fg-muted">
+              One phone per line (or comma / space separated). They&apos;re
+              validated + de-duplicated on send.
+            </div>
+            <textarea
+              value={uploadedText}
+              onChange={(e) => setUploadedText(e.target.value)}
+              placeholder={"+15615550101\n+15035552222"}
+              rows={6}
+              className="w-full text-sm px-3 py-2 rounded-md bg-bg-deep border border-bg-border text-fg resize-none placeholder:text-fg-dim font-mono"
+            />
+            <div className="text-[11px] text-fg-dim">
+              {uploadedNumbers.length} number{uploadedNumbers.length === 1 ? "" : "s"}
+            </div>
+          </div>
+        </Card>
+      )}
+
+      {/* ── Assigned leads (assigned_leads source) ─────────────────────── */}
+      {recipientSource === "assigned_leads" && (
+        <Card>
+          <div className="space-y-1">
+            <div className="text-[11px] uppercase tracking-wider text-fg-dim font-semibold">
+              1 · Assigned leads
+            </div>
+            <div className="text-[11.5px] text-fg-muted">
+              Blasts {asUserId ? `${repName(asUserId)}'s` : "your"} assigned
+              pipeline leads. The exact recipient count is resolved when the
+              campaign is queued.
+            </div>
+          </div>
+        </Card>
+      )}
 
       {/* ── Step 2 — Compose ────────────────────────────────────────────── */}
       <Card>
@@ -959,7 +1141,12 @@ export function ColdOutreachClient({
           {/* Per-rep sender banner: a Text Torrent blast sends AS you. Confirm
               the rep's identity is set, or point them to Settings. */}
           {channel === "sms_texttorrent" && (
-            ttReady ? (
+            asUserId ? (
+              <div className="rounded-md border border-sky-500/30 bg-sky-500/10 px-3 py-2 text-[11.5px] text-sky-200">
+                Sends on <span className="font-semibold">{repName(asUserId)}</span>&apos;s Text Torrent account + number.
+                If they haven&apos;t set those in Settings, the send is rejected.
+              </div>
+            ) : ttReady ? (
               <div className="rounded-md border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-[11.5px] text-emerald-200">
                 Sends from <span className="font-semibold">{ttIdentity?.from}</span> on your own Text Torrent account
                 (<span className="font-semibold">{ttIdentity?.email}</span>). Replies thread back to you.
@@ -1116,7 +1303,7 @@ export function ColdOutreachClient({
               ) : (
                 <Send className="w-3.5 h-3.5" />
               )}
-              Send to {recipientCount.toLocaleString()} {CHANNEL_LABEL[channel]}
+              Send to {recipientLabel}
             </button>
           </div>
 
@@ -1169,10 +1356,10 @@ export function ColdOutreachClient({
               <div>
                 <div className="text-[14px] font-bold text-fg">Confirm blast</div>
                 <div className="text-[12.5px] text-fg-muted mt-1 leading-relaxed">
-                  About to send{" "}
-                  <span className="font-semibold text-fg">{recipientCount.toLocaleString()}</span>{" "}
-                  <span className="font-semibold text-fg">{CHANNEL_LABEL[channel]}</span>{" "}
-                  message{recipientCount === 1 ? "" : "s"}. CASL footer auto-included. Daily cap:{" "}
+                  About to blast{" "}
+                  <span className="font-semibold text-fg">{recipientLabel}</span>
+                  {asUserId ? <> as <span className="font-semibold text-fg">{repName(asUserId)}</span></> : null}.
+                  {" "}CASL footer auto-included. Daily cap:{" "}
                   <span className="font-semibold text-fg">{dailyCap.toLocaleString()}</span>.
                 </div>
               </div>
@@ -1217,11 +1404,45 @@ export function ColdOutreachClient({
             {loadingCampaigns ? "Loading campaigns…" : "No campaigns yet. Send the first one above."}
           </div>
         ) : (
-          <div className="rounded-md border border-bg-border divide-y divide-bg-border -mx-5 -mb-5">
-            {campaigns.map((c) => (
-              <CampaignRow key={c.id} campaign={c} tenantSlug={tenantSlug} />
-            ))}
-          </div>
+          <>
+            {/* Per-rep monitor filter (shown when more than one rep has campaigns). */}
+            {campaignReps.length > 1 && (
+              <div className="flex items-center gap-1.5 flex-wrap pb-3">
+                <span className="text-[10.5px] uppercase tracking-wider text-fg-dim font-semibold mr-0.5">Rep</span>
+                <button
+                  type="button"
+                  onClick={() => setCampaignRepFilter(null)}
+                  className={`px-2.5 py-1 rounded-full text-[11.5px] font-semibold border transition-colors ${
+                    campaignRepFilter === null ? "bg-accent/15 border-accent/40 text-accent" : "bg-bg-elev border-bg-border text-fg-muted hover:text-fg"
+                  }`}
+                >
+                  All
+                </button>
+                {campaignReps.map((id) => (
+                  <button
+                    key={id}
+                    type="button"
+                    onClick={() => setCampaignRepFilter(campaignRepFilter === id ? null : id)}
+                    className={`px-2.5 py-1 rounded-full text-[11.5px] font-semibold border transition-colors ${
+                      campaignRepFilter === id ? "bg-accent/15 border-accent/40 text-accent" : "bg-bg-elev border-bg-border text-fg-muted hover:text-fg"
+                    }`}
+                  >
+                    {repName(id)}
+                  </button>
+                ))}
+              </div>
+            )}
+            <div className="rounded-md border border-bg-border divide-y divide-bg-border -mx-5 -mb-5">
+              {visibleCampaigns.map((c) => (
+                <CampaignRow
+                  key={c.id}
+                  campaign={c}
+                  tenantSlug={tenantSlug}
+                  senderName={isAdmin && campaignSender(c) ? repName(campaignSender(c)) : null}
+                />
+              ))}
+            </div>
+          </>
         )}
       </Card>
     </div>
