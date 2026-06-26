@@ -66,9 +66,11 @@ export const INTEGRATION_SCHEMAS: IntegrationSchema[] = [
     service: "texttorrent",
     label: "TextTorrent",
     description:
-      "TT API for the Text Torrent button on the lead drawer + bulk sequences. One shared API key across the team; each rep sets their own sending number under Settings → Personal integrations.",
+      "TT API for the Text Torrent button on the lead drawer + bulk sequences. Text Torrent authenticates with TWO keys — the API SID (X-API-SID) and the API Public Key (X-API-PUBLIC-KEY), both under Text Torrent → Account → API. One shared pair across the team; each rep sets their own sending number under Settings → Personal integrations.",
     fields: [
-      { key: "api_key", label: "API Key", sensitive: true },
+      { key: "api_sid", label: "API SID (X-API-SID)", sensitive: true, hint: "Text Torrent → Account → API. The X-API-SID value." },
+      { key: "api_public_key", label: "API Public Key (X-API-PUBLIC-KEY)", sensitive: true, hint: "Text Torrent → Account → API. The X-API-PUBLIC-KEY value." },
+      { key: "api_key", label: "API Key (legacy)", sensitive: true, hint: "Legacy single-key field. Leave blank when the SID + Public Key above are set." },
       { key: "from_number", label: "Default Business Number", sensitive: false, validation: "phone_e164", hint: "E.164 format, e.g. +14165551212. Used for automated (Helios) sends and when a rep hasn't set their own number." },
     ],
   },

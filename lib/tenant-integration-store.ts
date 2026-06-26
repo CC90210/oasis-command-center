@@ -85,6 +85,8 @@ const ENV_FALLBACKS: Record<string, Record<string, string>> = {
     from_number: "TWILIO_FROM_NUMBER",
   },
   texttorrent: {
+    api_sid: "TEXTTORRENT_API_SID",
+    api_public_key: "TEXTTORRENT_PUBLIC_KEY",
     api_key: "TEXTTORRENT_API_KEY",
     from_number: "TEXTTORRENT_FROM_NUMBER",
   },
