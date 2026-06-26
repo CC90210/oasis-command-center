@@ -13,20 +13,27 @@
  */
 
 const UUID_RE_DRAWER = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+// TextTorrent campaign ids are numeric/string (NOT uuids). Constrain to a safe
+// charset so the value is path/query-safe before it reaches the metrics route.
+const CAMPAIGN_RE_DRAWER = /^[A-Za-z0-9_-]{1,64}$/;
 
 export type TenantDrawerIds = {
   drawerLeadId: string | null;
   drawerAppId: string | null;
+  drawerCampaignId: string | null;
 };
 
 export function parseTenantDrawerIds(sp: {
   lead?: string;
   application?: string;
+  campaign?: string;
 }): TenantDrawerIds {
   const rawLead = typeof sp.lead === "string" ? sp.lead : null;
   const rawApp = typeof sp.application === "string" ? sp.application : null;
+  const rawCampaign = typeof sp.campaign === "string" ? sp.campaign : null;
   return {
     drawerLeadId: rawLead && UUID_RE_DRAWER.test(rawLead) ? rawLead : null,
     drawerAppId: rawApp && UUID_RE_DRAWER.test(rawApp) ? rawApp : null,
+    drawerCampaignId: rawCampaign && CAMPAIGN_RE_DRAWER.test(rawCampaign) ? rawCampaign : null,
   };
 }

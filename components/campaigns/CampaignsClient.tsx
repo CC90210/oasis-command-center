@@ -10,6 +10,7 @@
  */
 
 import { useCallback, useEffect, useState } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
 import { Card, EmptyState } from "@/components/Card";
 import { Megaphone, Plus, Send } from "lucide-react";
 
@@ -48,6 +49,13 @@ export function CampaignsClient({
   tenantSlug: string;
   tenantId: string | null;
 }) {
+  const router = useRouter();
+  const searchParams = useSearchParams();
+  const openCampaign = (id: string | number) => {
+    const next = new URLSearchParams(searchParams?.toString() || "");
+    next.set("campaign", String(id));
+    router.replace(`?${next.toString()}`, { scroll: false });
+  };
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<{ missingCreds: boolean; message: string } | null>(null);
   const [campaigns, setCampaigns] = useState<Campaign[]>([]);
@@ -358,7 +366,11 @@ export function CampaignsClient({
               </thead>
               <tbody>
                 {campaigns.map((c) => (
-                  <tr key={String(c.id)} className="border-b border-bg-border/40 last:border-b-0 hover:bg-bg-elev/30">
+                  <tr
+                    key={String(c.id)}
+                    onClick={() => openCampaign(c.id)}
+                    className="border-b border-bg-border/40 last:border-b-0 hover:bg-bg-elev/30 cursor-pointer"
+                  >
                     <td className="px-4 py-2.5">
                       <div className="font-medium text-fg flex items-center gap-2">
                         <Megaphone className="h-3.5 w-3.5 text-fg-dim" />

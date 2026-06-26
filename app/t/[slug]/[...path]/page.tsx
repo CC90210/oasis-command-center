@@ -28,6 +28,7 @@ import { PipelineSearchableTable } from "@/components/manifest/PipelineSearchabl
 import { PageSearchBar } from "@/components/manifest/PageSearchBar";
 import { LeadPipelineView } from "@/components/manifest/LeadPipelineView";
 import { TenantLeadDrawerMount } from "@/components/leads/TenantLeadDrawerMount";
+import { CampaignDrawerMount } from "@/components/campaigns/CampaignDrawerMount";
 import { BoardLiveRefresh } from "@/components/leads/BoardLiveRefresh";
 import { parseTenantDrawerIds } from "@/lib/tenant-drawer-params";
 import {
@@ -82,6 +83,7 @@ export default async function TenantCatchAllPage({
     q?: string;
     lead?: string;
     application?: string;
+    campaign?: string;
     agent?: string;
     unassigned?: string;
   }>;
@@ -99,7 +101,7 @@ export default async function TenantCatchAllPage({
   // SunBiz lead-drawer triggers. Only honored on the SunBiz slug (gate lives in
   // TenantLeadDrawerMount); shared parse keeps the UUID guard consistent with
   // the bare-root dashboard so an OASIS URL with ?lead= never pops a drawer.
-  const { drawerLeadId, drawerAppId } = parseTenantDrawerIds(sp);
+  const { drawerLeadId, drawerAppId, drawerCampaignId } = parseTenantDrawerIds(sp);
   const normalised = slug.toLowerCase();
   if (!(await manifestExists(normalised))) notFound();
 
@@ -462,6 +464,11 @@ export default async function TenantCatchAllPage({
         isPreview={isPreview}
         drawerLeadId={drawerLeadId}
         drawerAppId={drawerAppId}
+      />
+      <CampaignDrawerMount
+        slug={normalised}
+        isPreview={isPreview}
+        drawerCampaignId={drawerCampaignId}
       />
       {/* Live board refresh — reassignment / collaborator changes nudge this
           rep's pipeline to re-render within seconds (no manual reload). */}

@@ -479,23 +479,75 @@ export async function listCampaigns(
   return { data: flat };
 }
 
-export function campaignMessages(
+// --- Campaign analytics (LIVE-VERIFIED /campaigning/analytic/details/*) -----
+// The old /campaign/{id}/messages* paths 404. Verified shapes below.
+
+export type TtCampaignDetails = {
+  id: number;
+  campaign_name?: string;
+  contact_list_id?: number;
+  credits_consumed?: number;
+  total_participants?: number;
+  created_at?: string;
+  status?: string;
+};
+
+export type TtCampaignCount = {
+  total: number;
+  scheduled: number;
+  processing: number;
+  completed: number; // delivered + sent
+  paused: number;
+  failed: number; // failed + undelivered
+};
+
+/** Per-message row. `received`/`received_message` carry the native inbound reply. */
+export type TtCampaignMessage = {
+  id: number;
+  bulk_message_id: number;
+  send_from: string;
+  send_to: string;
+  contact_id?: number;
+  message?: string;
+  send_status?: string; // pending | sent | delivered | failed | undelivered
+  remarks?: string;
+  received?: number; // 1 when the recipient replied
+  received_message?: string | null;
+  type?: string;
+  execute_at?: string;
+};
+
+/** Campaign core stats + spend. GET /campaigning/analytic/details/{id} */
+export async function campaignDetails(
   creds: TextTorrentCredentials,
-  campaignId: string,
-  opts: { limit?: number; page?: number } = {},
-): Promise<{ data: TtInboxMessage[] }> {
-  return ttFetch(creds, `/campaign/${encodeURIComponent(campaignId)}/messages`, {
-    query: opts,
-  });
+  campaignId: string | number,
+): Promise<{ data: TtCampaignDetails }> {
+  return ttFetch(creds, `/campaigning/analytic/details/${encodeURIComponent(String(campaignId))}`);
 }
 
-export function campaignCounts(
+/** Message status breakdown. GET /campaigning/analytic/details/{id}/count */
+export async function campaignCount(
   creds: TextTorrentCredentials,
-  campaignId: string,
-): Promise<{
-  data: { sent: number; delivered: number; clicked: number; failed: number; opted_out: number };
-}> {
-  return ttFetch(creds, `/campaign/${encodeURIComponent(campaignId)}/messages/counts`);
+  campaignId: string | number,
+): Promise<{ data: TtCampaignCount }> {
+  return ttFetch(creds, `/campaigning/analytic/details/${encodeURIComponent(String(campaignId))}/count`);
+}
+
+/** Per-message roster (delivery + native replies). GET /campaigning/analytic/details/{id}/list */
+export async function campaignMessageList(
+  creds: TextTorrentCredentials,
+  campaignId: string | number,
+  opts: { limit?: number; page?: number; status?: string; search?: string } = {},
+): Promise<{ data: TtCampaignMessage[]; page?: number; lastPage?: number }> {
+  const r = await ttFetch<{
+    data?: { data?: TtCampaignMessage[]; current_page?: number; last_page?: number } | TtCampaignMessage[];
+  }>(creds, `/campaigning/analytic/details/${encodeURIComponent(String(campaignId))}/list`, {
+    query: { limit: opts.limit ?? 100, page: opts.page, status: opts.status, search: opts.search },
+  });
+  const payload = r?.data;
+  if (Array.isArray(payload)) return { data: payload };
+  const nested = payload as { data?: TtCampaignMessage[]; current_page?: number; last_page?: number } | undefined;
+  return { data: nested?.data || [], page: nested?.current_page, lastPage: nested?.last_page };
 }
 
 // --- Opt-out + blocklist ---------------------------------------------------
