@@ -15,6 +15,7 @@ import { isReadOnlyRole } from "@/lib/role-gates";
 import { extractApplicationFields } from "@/lib/ai-document-extractor";
 import { applyExtractedApplication } from "@/lib/applications/apply-extracted";
 import { MAX_LEAD_DOC_BYTES } from "@/lib/lead-documents";
+import { cropSignatureFromDocument, toPngDataUri } from "@/lib/forms/signature-crop";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -74,18 +75,39 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
   if (!applied.ok) {
     return NextResponse.json({ ok: false, error: "apply_failed", detail: applied.error }, { status: 500 });
   }
+  // Best-effort signature extraction (CC-approved visual reproduction): when
+  // Claude located a signature, crop it server-side so the operator can CONFIRM
+  // it before it lands on the legal PDF. Never fails the autofill — a bad crop
+  // just yields no preview, and the operator falls back to the signature pad.
+  // (_signature is a UI hint only; applyExtractedApplication whitelists fields,
+  // so it's never written as an application field.)
+  let signaturePreview: string | null = null;
+  let signatureBox: { x: number; y: number; width: number; height: number; page: number } | null = null;
+  const sig = ext.fields._signature;
+  if (sig && typeof sig === "object" && (sig as Record<string, unknown>).present === true) {
+    const s = sig as { page?: unknown; bbox?: unknown };
+    const arr = Array.isArray(s.bbox) ? s.bbox : [];
+    const bbox =
+      arr.length === 4 && arr.every((n) => typeof n === "number" && Number.isFinite(n))
+        ? { x: arr[0] as number, y: arr[1] as number, width: arr[2] as number, height: arr[3] as number }
+        : null;
+    if (bbox) {
+      const page = typeof s.page === "number" && s.page > 0 ? s.page : 1;
+      const crop = await cropSignatureFromDocument({ bytes, mimeType: mime, bbox, page });
+      if (crop.ok) {
+        signaturePreview = toPngDataUri(crop.pngBase64);
+        signatureBox = { ...bbox, page };
+      }
+    }
+  }
+
   return NextResponse.json({
     ok: true,
     application_id: applied.applicationId,
     applied_keys: applied.appliedKeys,
-    // Best-effort crop hint for the signature-extraction UI: where Claude saw the
-    // applicant's signature on the dropped doc. The client renders the document
-    // and lets the operator confirm/adjust the crop before it lands on the legal
-    // PDF (applyExtractedApplication whitelists fields, so _signature is never
-    // written as an application field — it's purely a UI hint).
-    signature_hint:
-      ext.fields._signature && typeof ext.fields._signature === "object"
-        ? (ext.fields._signature as Record<string, unknown>)
-        : null,
+    // The cropped signature (PNG data-URI) for the operator to confirm, plus the
+    // box it came from (so the UI can offer a re-crop). Null when none found.
+    signature_preview: signaturePreview,
+    signature_box: signatureBox,
   });
 }
