@@ -77,6 +77,11 @@ export function PersonalIntegrationsPanel({
   const [ttActAsDraft, setTtActAsDraft] = useState("");
   const [ttFlash, setTtFlash] = useState<string | null>(null);
   const [ttSyncing, setTtSyncing] = useState(false);
+  // Per-rep AI nurture mode (2026-06-26): off / semi (50-50, escalates to you) /
+  // full (hands-off). The AI works your inbound blast replies in your voice.
+  const [nurtureMode, setNurtureMode] = useState<"off" | "semi" | "full">("off");
+  const [nurtureNotify, setNurtureNotify] = useState<"telegram" | "email">("telegram");
+  const [nurtureFlash, setNurtureFlash] = useState<string | null>(null);
   const searchParams = useSearchParams();
 
   // OAuth callback flash messages — surfaced as a banner on first
@@ -134,6 +139,49 @@ export function PersonalIntegrationsPanel({
       }
     } catch {
       // Soft-fail — independent of the rest of the panel.
+    }
+    // Load the user's AI nurture mode (if any) in parallel.
+    try {
+      const n = await fetch("/api/integrations/personal/nurture", { cache: "no-store" });
+      const nbody = (await n.json().catch(() => ({}))) as {
+        ok?: boolean; mode?: "off" | "semi" | "full"; notify_channel?: "telegram" | "email";
+      };
+      if (nbody.ok) {
+        setNurtureMode(nbody.mode || "off");
+        setNurtureNotify(nbody.notify_channel || "telegram");
+      }
+    } catch {
+      // Soft-fail.
+    }
+  }
+
+  async function saveNurture(mode: "off" | "semi" | "full", notify: "telegram" | "email") {
+    setBusyService("nurture");
+    setError(null);
+    setNurtureFlash(null);
+    const prevMode = nurtureMode;
+    setNurtureMode(mode);
+    try {
+      const r = await fetch("/api/integrations/personal/nurture", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ mode, notify_channel: notify }),
+      });
+      const body = (await r.json().catch(() => ({}))) as { ok?: boolean; error?: string; message?: string };
+      if (!r.ok || !body.ok) {
+        setNurtureMode(prevMode); // revert optimistic change
+        setError(body.message || body.error || `save_failed:${r.status}`);
+        return;
+      }
+      setNurtureFlash(
+        mode === "off"
+          ? "AI nurture turned off."
+          : mode === "semi"
+            ? "AI nurture on — 50/50: it answers the clear stuff and escalates the rest to you."
+            : "AI nurture on — full auto.",
+      );
+    } finally {
+      setBusyService(null);
     }
   }
 
@@ -764,6 +812,66 @@ export function PersonalIntegrationsPanel({
             </div>
           </li>
           )}
+
+          {/* AI nurture mode — works your inbound blast replies in your voice */}
+          <li className="rounded-lg border border-bg-border bg-bg-deep/40 p-4">
+            <div className="flex flex-col gap-2">
+              <div className="flex items-center gap-2">
+                <span className="font-semibold text-sm text-fg">AI nurture (your inbound replies)</span>
+                <span
+                  className={`inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-bold border ${
+                    nurtureMode === "off"
+                      ? "bg-bg-elev/60 text-fg-dim border-bg-border"
+                      : "bg-emerald-500/15 text-emerald-300 border-emerald-500/30"
+                  }`}
+                >
+                  {nurtureMode === "off" ? "Off" : nurtureMode === "semi" ? "50/50" : "Full auto"}
+                </span>
+              </div>
+              <div className="text-[11.5px] text-fg-muted leading-relaxed">
+                When a merchant replies to your blast, the AI works the conversation in your voice from your number.
+                <b> 50/50</b> answers the clear stuff and escalates objections, call requests, and hot leads to you.
+                <b> Full</b> is hands-off. Requires your Text Torrent number + account email above.
+              </div>
+              <div className="flex items-center gap-2 flex-wrap">
+                {(["off", "semi", "full"] as const).map((m) => (
+                  <button
+                    key={m}
+                    type="button"
+                    onClick={() => saveNurture(m, nurtureNotify)}
+                    disabled={busyService === "nurture"}
+                    className={`px-3 py-1.5 rounded-md text-[12.5px] font-semibold border transition-colors disabled:opacity-60 ${
+                      nurtureMode === m
+                        ? "bg-accent/10 border-accent/40 text-accent"
+                        : "bg-bg-elev border-bg-border text-fg-muted hover:text-fg"
+                    }`}
+                  >
+                    {m === "off" ? "Off" : m === "semi" ? "50/50 (cautious)" : "Full auto"}
+                  </button>
+                ))}
+              </div>
+              {nurtureMode !== "off" && (
+                <div className="flex items-center gap-2 flex-wrap text-[11.5px] text-fg-muted">
+                  Notify me via
+                  <select
+                    value={nurtureNotify}
+                    onChange={(e) => {
+                      const v = e.target.value as "telegram" | "email";
+                      setNurtureNotify(v);
+                      void saveNurture(nurtureMode, v);
+                    }}
+                    disabled={busyService === "nurture"}
+                    className="text-[12px] px-2 py-1 rounded-md bg-bg-elev border border-bg-border text-fg"
+                  >
+                    <option value="telegram">Telegram</option>
+                    <option value="email">Email</option>
+                  </select>
+                  when it needs you.
+                </div>
+              )}
+              {nurtureFlash && <div className="text-[11.5px] text-emerald-300">{nurtureFlash}</div>}
+            </div>
+          </li>
         </ul>
       )}
     </div>
