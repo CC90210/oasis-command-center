@@ -23,6 +23,7 @@ type Campaign = {
   created_at?: string;
 };
 type TtList = { id: string; name: string; count?: number };
+type Sender = { id: number; number: string; friendly_name?: string };
 
 function fmtDate(s?: string | null): string {
   if (!s) return "—";
@@ -51,13 +52,15 @@ export function CampaignsClient({
   const [error, setError] = useState<{ missingCreds: boolean; message: string } | null>(null);
   const [campaigns, setCampaigns] = useState<Campaign[]>([]);
   const [lists, setLists] = useState<TtList[]>([]);
+  const [senders, setSenders] = useState<Sender[]>([]);
 
   // Create form state
   const [showForm, setShowForm] = useState(false);
   const [listId, setListId] = useState("");
   const [campaignName, setCampaignName] = useState("");
   const [message, setMessage] = useState("");
-  const [numbers, setNumbers] = useState(""); // comma-separated, optional
+  const [selectedNumbers, setSelectedNumbers] = useState<string[]>([]); // sender pool to blast from
+  const [manualNumbers, setManualNumbers] = useState(""); // fallback if the API can't list numbers
   const [schedule, setSchedule] = useState(""); // datetime-local; empty = now
   // Anti-block options (default ON — the whole point of native campaigns).
   const [numberPool, setNumberPool] = useState(true);
@@ -84,6 +87,7 @@ export function CampaignsClient({
       }
       setCampaigns(data.campaigns || []);
       setLists(data.lists || []);
+      setSenders(data.senders || []);
     } catch {
       setError({ missingCreds: false, message: "Network error loading campaigns." });
     } finally {
@@ -101,10 +105,9 @@ export function CampaignsClient({
     setCreating(true);
     setCreateNotice(null);
     try {
-      const numberList = numbers
-        .split(",")
-        .map((n) => n.trim())
-        .filter(Boolean);
+      const numberList = selectedNumbers.length
+        ? selectedNumbers
+        : manualNumbers.split(",").map((n) => n.trim()).filter(Boolean);
       const scheduledDate = schedule ? schedule.slice(0, 10) : undefined;
       const scheduledTime = schedule && schedule.length >= 16 ? schedule.slice(11, 16) : undefined;
       const res = await fetch("/api/campaigns", {
@@ -227,15 +230,46 @@ export function CampaignsClient({
                 className="mt-1 w-full bg-bg-deep/40 border border-bg-border rounded-md px-3 py-2 text-sm text-fg placeholder:text-fg-dim resize-none focus:outline-none focus:border-accent/50"
               />
             </label>
-            <label className="block">
-              <span className="text-[11px] uppercase tracking-wide text-fg-dim">Send from numbers (optional, comma-separated)</span>
-              <input
-                value={numbers}
-                onChange={(e) => setNumbers(e.target.value)}
-                placeholder="+18604527608, +13106271134 — leave blank for the default business number"
-                className="mt-1 w-full bg-bg-deep/40 border border-bg-border rounded-md px-2 py-1.5 text-sm text-fg placeholder:text-fg-dim focus:outline-none focus:border-accent/50"
-              />
-            </label>
+            <div className="block">
+              <span className="text-[11px] uppercase tracking-wide text-fg-dim">Send from (rotate across the pool)</span>
+              {senders.length > 0 ? (
+                <div className="mt-1 grid grid-cols-1 sm:grid-cols-2 gap-1.5">
+                  {senders.map((s) => {
+                    const checked = selectedNumbers.includes(s.number);
+                    return (
+                      <label
+                        key={s.id}
+                        className="inline-flex items-center gap-2 text-[12px] text-fg-muted bg-bg-deep/30 border border-bg-border rounded-md px-2 py-1.5 cursor-pointer"
+                      >
+                        <input
+                          type="checkbox"
+                          checked={checked}
+                          onChange={(e) =>
+                            setSelectedNumbers((prev) =>
+                              e.target.checked ? [...prev, s.number] : prev.filter((n) => n !== s.number),
+                            )
+                          }
+                        />
+                        <span className="text-fg">{s.friendly_name || s.number}</span>
+                        {s.friendly_name && <span className="text-fg-dim">{s.number}</span>}
+                      </label>
+                    );
+                  })}
+                  <div className="text-[10px] text-fg-dim col-span-full">
+                    {selectedNumbers.length === 0
+                      ? "None selected — sends from the default business number."
+                      : `${selectedNumbers.length} selected — the number pool rotates across them.`}
+                  </div>
+                </div>
+              ) : (
+                <input
+                  value={manualNumbers}
+                  onChange={(e) => setManualNumbers(e.target.value)}
+                  placeholder="+18604527608, +13106271134 — comma-separated; blank = default number"
+                  className="mt-1 w-full bg-bg-deep/40 border border-bg-border rounded-md px-2 py-1.5 text-sm text-fg placeholder:text-fg-dim focus:outline-none focus:border-accent/50"
+                />
+              )}
+            </div>
 
             <div className="rounded-md border border-bg-border bg-bg-deep/20 p-3">
               <div className="text-[11px] uppercase tracking-wide text-fg-dim mb-2">Anti-block sending</div>

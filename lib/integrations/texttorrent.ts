@@ -572,10 +572,31 @@ export function generateAiReply(
 
 // --- Numbers (purchase + list) --------------------------------------------
 
-export function listNumbers(
+export type TtNumber = {
+  id: number;
+  number: string;
+  friendly_name?: string;
+  status?: number;
+  region?: string;
+  country?: string;
+  capabilities?: { voice?: boolean; sms?: boolean; mms?: boolean };
+};
+
+/**
+ * The account's active sending numbers (the rotating pool). LIVE-VERIFIED path:
+ * GET /inbox/numbers/active → paginated { data: { data: TtNumber[] } }. The old
+ * /inbox/active-numbers 404s.
+ */
+export async function listNumbers(
   creds: TextTorrentCredentials,
-): Promise<{ data: Array<{ number: string; label?: string; active: boolean }> }> {
-  return ttFetch(creds, "/inbox/active-numbers");
+  opts: { limit?: number; page?: number } = {},
+): Promise<{ data: TtNumber[] }> {
+  const r = await ttFetch<{ data?: { data?: TtNumber[] } | TtNumber[] }>(creds, "/inbox/numbers/active", {
+    query: { limit: opts.limit ?? 50, page: opts.page },
+  });
+  const payload = r?.data;
+  const flat = Array.isArray(payload) ? payload : (payload as { data?: TtNumber[] })?.data || [];
+  return { data: flat };
 }
 
 // --- Sub-accounts ---------------------------------------------------------

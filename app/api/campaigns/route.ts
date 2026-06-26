@@ -23,9 +23,11 @@ import {
   listCampaigns,
   createBulkCampaign,
   listLists,
+  listNumbers,
   TextTorrentError,
   type TtCampaign,
   type TtList,
+  type TtNumber,
 } from "@/lib/integrations/texttorrent";
 
 export const runtime = "nodejs";
@@ -64,8 +66,16 @@ export async function GET() {
     } catch {
       /* form list-picker degrades to empty */
     }
+    // The account's active sending numbers — the rotating anti-block pool the
+    // operator selects which to blast from (rotated when a number gets spammy).
+    let senders: TtNumber[] = [];
+    try {
+      senders = (await listNumbers(creds)).data || [];
+    } catch {
+      /* number picker degrades to a free-text fallback in the UI */
+    }
 
-    return NextResponse.json({ ok: true, campaigns, lists, templates: [] });
+    return NextResponse.json({ ok: true, campaigns, lists, senders, templates: [] });
   } catch (err) {
     if (err instanceof TextTorrentError) {
       return NextResponse.json({ ok: false, error: err.code, message: err.message }, { status: ttStatus(err) });
