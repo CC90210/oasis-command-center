@@ -93,33 +93,66 @@ export async function POST(req: NextRequest) {
 
   const db = getServiceSupabase();
 
-  // 2) Load the job (service-role). The job carries the trusted scope
-  //    (tenant_id, lead_id, storage_path) — we DON'T take those from the body.
-  const jobRes = await db
+  // 2) ATOMIC claim (Codex 2026-06-26): a single conditional UPDATE flips the job
+  //    to `applying` and returns the row ONLY if it wasn't already applied/applying.
+  //    This is a compare-and-swap — two concurrent signed callbacks can't both
+  //    pass a check-then-act gate and double-apply. If no row comes back the job
+  //    is already applied or in-flight, so we return idempotently. The job also
+  //    carries the trusted scope (tenant_id, lead_id, storage_path) — we never
+  //    take those from the body. (A crash between claim and the final mark leaves
+  //    the row in `applying`, which the daemon's stale-recovery re-POSTs.)
+  const claim = await db
     .from("document_extraction_jobs")
+    .update({ status: "applying", updated_at: new Date().toISOString() })
+    .eq("id", jobId)
+    .not("status", "in", "(applied,applying)")
     .select(
       "id, tenant_id, lead_id, application_id, storage_path, mime_type, source, assigned_to, uploaded_by, status",
-    )
-    .eq("id", jobId)
-    .maybeSingle();
-  const job = jobRes.data as Job | null;
-  if (!job) {
-    return NextResponse.json({ ok: false, error: "job_not_found" }, { status: 404 });
+    );
+  const claimed = (claim.data || []) as Job[];
+  if (claim.error) {
+    return NextResponse.json({ ok: false, error: "claim_failed", detail: claim.error.message }, { status: 500 });
   }
-  // Idempotency: a retried callback (network blip) must not double-apply.
-  if (job.status === "applied") {
+  if (claimed.length === 0) {
+    // Either the job doesn't exist, or it's already applied / being applied by a
+    // concurrent callback. Distinguish not-found (404) from already-applied (200).
+    const exists = await db.from("document_extraction_jobs").select("id").eq("id", jobId).maybeSingle();
+    if (!exists.data) {
+      return NextResponse.json({ ok: false, error: "job_not_found" }, { status: 404 });
+    }
     return NextResponse.json({ ok: true, already_applied: true, job_id: jobId });
   }
+  const job = claimed[0];
+  const isNew = job.source === "new_from_document";
 
-  // 3) Apply the extracted fields onto the application (creates the lead for the
-  //    new_from_document path) + regenerate the branded PDF. The original doc was
-  //    already filed at queue time, so no originalFile here.
+  // Download the doc once — needed to FILE it for the new-deal path (the lead
+  // doesn't exist until apply) and/or to CROP the signature.
+  let docBytes: Buffer | null = null;
+  const dl = await db.storage.from(LEAD_DOC_BUCKET).download(job.storage_path);
+  if (!dl.error && dl.data) docBytes = Buffer.from(await dl.data.arrayBuffer());
+  if (isNew && !docBytes) {
+    // Can't create the new deal without the doc to file. Fail the job (the row
+    // is in `applying`; stale-recovery resets it to retry the download).
+    await db
+      .from("document_extraction_jobs")
+      .update({ status: "extracted", error: "doc_download_failed", updated_at: new Date().toISOString() })
+      .eq("id", jobId);
+    return NextResponse.json({ ok: false, error: "doc_download_failed" }, { status: 502 });
+  }
+
+  // 3) Apply the extracted fields. For new_from_document the lead is CREATED here
+  //    (at the terminal "dropped application in hand" stage, with identity filled)
+  //    and the original doc is filed to it via originalFile — so no lead, no drip,
+  //    no orphan ever exists before extraction succeeds. For autofill the doc was
+  //    already filed, so no originalFile.
+  const filename = job.storage_path.split("/").pop() || "dropped-application.pdf";
   const applied = await applyExtractedApplication({
     tenantId: job.tenant_id,
     leadId: job.lead_id,
     rawFields: fields,
     assignedTo: job.assigned_to,
     uploadedBy: job.uploaded_by || "extraction_daemon",
+    originalFile: isNew && docBytes ? { bytes: docBytes, filename, mimeType: job.mime_type } : null,
   });
   if (!applied.ok) {
     await db
@@ -130,34 +163,39 @@ export async function POST(req: NextRequest) {
   }
 
   // 4) Signature (CC-approved visual reproduction + MANDATORY operator confirm):
-  //    crop it server-side from the stored doc, but do NOT land it on the PDF
+  //    crop it server-side from the downloaded doc, but do NOT land it on the PDF
   //    yet. Stash the preview in the job result so the dropzone surfaces the
   //    confirm UI when the operator returns — the existing application-signature
   //    route lands it only after they tap "Use it".
   let signaturePreview: string | null = null;
   let signatureBox: { x: number; y: number; width: number; height: number; page: number } | null = null;
   const sb = body.signature_box;
-  if (sb && typeof sb === "object" && !Array.isArray(sb)) {
+  if (sb && typeof sb === "object" && !Array.isArray(sb) && docBytes) {
     const s = sb as Record<string, unknown>;
     const nums = ["x", "y", "width", "height"].map((k) => s[k]);
     if (nums.every((n) => typeof n === "number" && Number.isFinite(n))) {
       const bbox = { x: nums[0] as number, y: nums[1] as number, width: nums[2] as number, height: nums[3] as number };
       const page = typeof s.page === "number" && s.page > 0 ? s.page : 1;
-      const dl = await db.storage.from(LEAD_DOC_BUCKET).download(job.storage_path);
-      if (!dl.error && dl.data) {
-        const bytes = Buffer.from(await dl.data.arrayBuffer());
-        const crop = await cropSignatureFromDocument({ bytes, mimeType: job.mime_type, bbox, page });
-        if (crop.ok) {
-          signaturePreview = toPngDataUri(crop.pngBase64);
-          signatureBox = { ...bbox, page };
-        }
+      const crop = await cropSignatureFromDocument({ bytes: docBytes, mimeType: job.mime_type, bbox, page });
+      if (crop.ok) {
+        signaturePreview = toPngDataUri(crop.pngBase64);
+        signatureBox = { ...bbox, page };
       }
     }
   }
 
-  // 5) Mark the job applied with the result the poll route returns to the UI.
+  // 5) New-deal cleanup: the real doc is now filed to the created lead, so delete
+  //    the pending upload (best-effort — a leaked blob is harmless, not fatal).
+  if (isNew) {
+    await db.storage.from(LEAD_DOC_BUCKET).remove([job.storage_path]).catch(() => {});
+  }
+
+  // 6) Mark the job applied with the result the poll route returns to the UI.
+  //    Check the update result — if it errors the fields ARE applied but the row
+  //    stays `applying`; return 502 so the daemon's stale-recovery re-POSTs (the
+  //    apply is idempotent: createApplicationFromLead reuses, fields upsert).
   const usedFallback = body.used_fallback === true;
-  await db
+  const mark = await db
     .from("document_extraction_jobs")
     .update({
       status: "applied",
@@ -177,6 +215,12 @@ export async function POST(req: NextRequest) {
       updated_at: new Date().toISOString(),
     })
     .eq("id", jobId);
+  if (mark.error) {
+    return NextResponse.json(
+      { ok: false, error: "mark_applied_failed", detail: mark.error.message, applied: true },
+      { status: 502 },
+    );
+  }
 
   return NextResponse.json({
     ok: true,

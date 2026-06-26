@@ -1,15 +1,15 @@
 /**
  * POST /api/leads/new-from-document — "new deal from a dropped application".
- * We create a stub lead, file the original as the `application` doc, and QUEUE an
- * extraction job — we do NOT call the Anthropic vision API here. The VPS daemon
- * (extraction_consumer.py) reads the doc with the Claude Code CLI on CC's
- * subscription, POSTs the fields back to /api/internal/apply-extraction, which
- * backfills the stub lead's identity + creates the application + PDF. The dropzone
- * polls /api/extraction-jobs/[job_id].
+ * We upload the doc to a tenant-scoped PENDING storage path and QUEUE an
+ * extraction job with lead_id=null — we do NOT create a lead or call the
+ * Anthropic API here. The VPS daemon reads the doc with the Claude Code CLI on
+ * CC's subscription; the apply callback (/api/internal/apply-extraction) then
+ * CREATES the lead + application from the extracted fields and files the doc to
+ * the new lead. So a lead exists ONLY after extraction succeeds — no orphan
+ * "reading" stub, no merchant drip on a blank-identity lead (Codex 2026-06-26).
  *
- * The stub lead is created with EMPTY identity fields so applyExtractedApplication
- * backfills them (its existing-lead branch only fills gaps, never clobbers). It
- * carries data.extraction_status="reading" so the board/drawer can show progress.
+ * The dropzone polls /api/extraction-jobs/[job_id] and redirects to the created
+ * application when it lands.
  *
  * Static segment — Next resolves this before the sibling [id] dynamic route.
  * Auth: session + member+ (read-only denied); fail closed. Multipart: { file }.
@@ -18,8 +18,8 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { resolveSessionContext } from "@/lib/api-auth";
 import { isReadOnlyRole } from "@/lib/role-gates";
-import { MAX_LEAD_DOC_BYTES, uploadLeadDocument } from "@/lib/lead-documents";
-import { createRecord } from "@/lib/manifest/data";
+import { MAX_LEAD_DOC_BYTES, LEAD_DOC_BUCKET } from "@/lib/lead-documents";
+import { sanitizeStorageFilename } from "@/lib/storage-helpers";
 import { getServiceSupabase } from "@/lib/supabase-server";
 
 export const runtime = "nodejs";
@@ -55,45 +55,26 @@ export async function POST(req: NextRequest) {
   }
   const bytes = Buffer.from(await f.arrayBuffer());
 
-  // 1) Stub lead (empty identity → apply backfills it; reading flag for the UI).
-  const stub = await createRecord({
-    tenant_id: sess.tenantId,
-    entity: "lead",
-    data: {
-      source: "dropped_application",
-      stage: "signed_application",
-      assigned_to: sess.userId,
-      business_name: "",
-      extraction_status: "reading",
-    },
-  });
+  const db = getServiceSupabase();
 
-  // 2) File the original as the application doc on the stub lead.
-  const up = await uploadLeadDocument({
-    tenantId: sess.tenantId,
-    leadId: stub.id,
-    filename: f.name,
-    mimeType: mime,
-    bytes,
-    sizeBytes: bytes.length,
-    docType: "application",
-    uploadedBy: sess.email || "operator",
-    source: "dropped_application_new_deal",
-    extraMetadata: { autofill: true },
-  });
-  if (!up.ok) {
-    return NextResponse.json({ ok: false, error: "upload_failed", detail: up.error }, { status: 502 });
+  // 1) Upload to a PENDING tenant path (no lead, no lead_documents row yet). The
+  //    callback files the real doc to the created lead, then deletes this object.
+  const cleanName = sanitizeStorageFilename(f.name);
+  const pendingPath = `${sess.tenantId}/_extraction_pending/${Date.now()}_${cleanName}`;
+  const upload = await db.storage
+    .from(LEAD_DOC_BUCKET)
+    .upload(pendingPath, bytes, { contentType: mime, upsert: false });
+  if (upload.error) {
+    return NextResponse.json({ ok: false, error: "upload_failed", detail: upload.error.message }, { status: 502 });
   }
 
-  // 3) Queue the extraction job.
-  const db = getServiceSupabase();
+  // 2) Queue the extraction job (lead_id null — created on apply).
   const ins = await db
     .from("document_extraction_jobs")
     .insert({
       tenant_id: sess.tenantId,
-      lead_id: stub.id,
-      lead_document_id: up.document.id,
-      storage_path: up.document.storage_path,
+      lead_id: null,
+      storage_path: pendingPath,
       mime_type: mime,
       source: "new_from_document",
       assigned_to: sess.userId,
@@ -103,8 +84,10 @@ export async function POST(req: NextRequest) {
     .select("id")
     .single();
   if (ins.error) {
+    // Clean up the orphaned blob so a failed queue doesn't leak storage.
+    await db.storage.from(LEAD_DOC_BUCKET).remove([pendingPath]).catch(() => {});
     return NextResponse.json({ ok: false, error: "queue_failed", detail: ins.error.message }, { status: 500 });
   }
 
-  return NextResponse.json({ ok: true, queued: true, job_id: ins.data.id, lead_id: stub.id });
+  return NextResponse.json({ ok: true, queued: true, job_id: ins.data.id });
 }

@@ -47,6 +47,13 @@ export function AutofillDropzone({
   // lands on the legal PDF (CC-approved visual reproduction + mandatory confirm).
   const [sig, setSig] = useState<SigConfirm | null>(null);
   const [sigBusy, setSigBusy] = useState(false);
+  // For "new" mode: the created application to navigate to AFTER the signature is
+  // confirmed/skipped (Codex 2026-06-26 — a signature must not swallow the redirect).
+  const [pendingRedirect, setPendingRedirect] = useState<string | null>(null);
+
+  function goToNewApplication(applicationId: string) {
+    if (tenantSlug) router.push(`/t/${tenantSlug}/applications?application=${applicationId}`);
+  }
 
   async function pollJob(jobId: string): Promise<
     | { status: "applied"; appliedKeys: number; signaturePreview: string | null; applicationId: string | null; jobLeadId: string | null }
@@ -124,12 +131,14 @@ export function AutofillDropzone({
       // applied
       setMsg(`Filled ${res.appliedKeys} field${res.appliedKeys === 1 ? "" : "s"} from the application.`);
       const resolvedLeadId = leadId || res.jobLeadId || "";
+      const newRedirect = mode === "new" && res.applicationId && tenantSlug ? res.applicationId : null;
+      setPendingRedirect(newRedirect);
       if (res.signaturePreview && res.applicationId && resolvedLeadId) {
         // A signature was found — hold for the operator to confirm before it
-        // lands on the PDF.
+        // lands on the PDF. The new-mode redirect (if any) runs after confirm.
         setSig({ preview: res.signaturePreview, applicationId: res.applicationId, leadId: resolvedLeadId });
-      } else if (mode === "new" && res.applicationId && tenantSlug) {
-        router.push(`/t/${tenantSlug}/applications?application=${res.applicationId}`);
+      } else if (newRedirect) {
+        goToNewApplication(newRedirect);
       } else {
         onDone?.();
       }
@@ -143,7 +152,8 @@ export function AutofillDropzone({
   async function resolveSignature(use: boolean) {
     if (!use || !sig) {
       setSig(null);
-      onDone?.();
+      if (pendingRedirect) goToNewApplication(pendingRedirect);
+      else onDone?.();
       return;
     }
     setSigBusy(true);
@@ -165,7 +175,8 @@ export function AutofillDropzone({
     } finally {
       setSigBusy(false);
       setSig(null);
-      onDone?.();
+      if (pendingRedirect) goToNewApplication(pendingRedirect);
+      else onDone?.();
     }
   }
 
