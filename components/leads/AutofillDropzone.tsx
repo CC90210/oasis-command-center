@@ -96,6 +96,8 @@ export function AutofillDropzone({
       });
       const j = await r.json().catch(() => ({}));
       if (r.ok && j.ok) setMsg("Signature added to the application PDF.");
+      else if (j.signature_saved)
+        setErr("Signature saved, but the PDF didn't regenerate — regenerate it from the drawer.");
       else setErr(j.detail || j.error || `signature_failed_${r.status}`);
     } catch (e) {
       setErr(e instanceof Error ? e.message : "network_error");

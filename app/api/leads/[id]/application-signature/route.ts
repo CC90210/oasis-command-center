@@ -20,6 +20,7 @@ import { resolveSessionContext } from "@/lib/api-auth";
 import { getAccessibleLead } from "@/lib/lead-access";
 import { isReadOnlyRole } from "@/lib/role-gates";
 import { getServiceSupabase } from "@/lib/supabase-server";
+import { canViewLead, leadScopingEnabled } from "@/lib/lead-scope";
 import { generateApplicationDocumentFromRecord } from "@/lib/forms/application-document";
 
 export const runtime = "nodejs";
@@ -51,6 +52,13 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
     { tenantId: sess.tenantId, entity: "lead", id },
   );
   if (!lead) return NextResponse.json({ ok: false, error: "not_found" }, { status: 404 });
+  // Write gate (Codex 2026-06-25): getAccessibleLead is a VIEW gate — in filter
+  // scoping mode any member can OPEN any lead. Signing is an owner-gated WRITE, so
+  // re-check in "isolate" mode: only an admin or the owning agent may sign. Mirrors
+  // the bulk-mutation gate in /api/leads/bulk.
+  if (!canViewLead({ isAdmin: sess.isAdmin, userId: sess.userId }, lead.data, leadScopingEnabled(), "isolate")) {
+    return NextResponse.json({ ok: false, error: "forbidden" }, { status: 403 });
+  }
 
   let body: { application_id?: unknown; signature_data_uri?: unknown; signature_name?: unknown };
   try {
@@ -65,6 +73,20 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
   const dataUri = typeof body.signature_data_uri === "string" ? body.signature_data_uri.trim() : "";
   if (!dataUri || dataUri.length > MAX_DATA_URI_LEN || !PNG_DATA_URI_RE.test(dataUri)) {
     return NextResponse.json({ ok: false, error: "invalid_signature_data_uri" }, { status: 400 });
+  }
+  // Prove it's actually a PNG (Codex 2026-06-25): the regex only checks the prefix
+  // + base64 alphabet. Arbitrary base64 would store, then fail embedPng at PDF time
+  // and silently draw a blank line while the API reported success. Decode + verify
+  // the 8-byte PNG magic + a sane decoded-size bound.
+  const PNG_MAGIC = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+  let sigBytes: Buffer;
+  try {
+    sigBytes = Buffer.from(dataUri.slice("data:image/png;base64,".length), "base64");
+  } catch {
+    return NextResponse.json({ ok: false, error: "invalid_signature_png" }, { status: 400 });
+  }
+  if (sigBytes.length < 67 || sigBytes.length > 2_000_000 || !sigBytes.subarray(0, 8).equals(PNG_MAGIC)) {
+    return NextResponse.json({ ok: false, error: "invalid_signature_png" }, { status: 400 });
   }
   const signatureName =
     typeof body.signature_name === "string" ? body.signature_name.trim().slice(0, 120) : "";
@@ -87,10 +109,16 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
     return NextResponse.json({ ok: false, error: "application_not_found" }, { status: 404 });
   }
   const appData = appRow.data || {};
-  const linkedByApp = typeof appData.lead_id === "string" && appData.lead_id === id;
-  const linkedByLead =
-    typeof lead.data.application_id === "string" && lead.data.application_id === applicationId;
-  if (!linkedByApp && !linkedByLead) {
+  // Link invariant (Codex 2026-06-25): if the application carries its OWN lead_id
+  // it MUST be THIS lead — a stale/corrupt lead.application_id can't override it.
+  // Only a leadless (legacy/backfilled) application falls back to the lead-side
+  // link, so a mismatched pair can never write a signature onto the wrong deal.
+  const appLeadId =
+    typeof appData.lead_id === "string" && UUID_RE.test(appData.lead_id) ? appData.lead_id : null;
+  const linkOk = appLeadId
+    ? appLeadId === id
+    : typeof lead.data.application_id === "string" && lead.data.application_id === applicationId;
+  if (!linkOk) {
     return NextResponse.json({ ok: false, error: "application_not_linked_to_lead" }, { status: 409 });
   }
 
@@ -135,10 +163,16 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
     /* best-effort audit */
   }
 
-  return NextResponse.json({
-    ok: true,
-    application_id: applicationId,
-    pdf_regenerated: regen.ok,
-    pdf_error: regen.ok ? undefined : regen.error,
-  });
+  if (!regen.ok) {
+    // The signature WAS written, but the PDF didn't regenerate — and the generator
+    // soft-deletes the prior PDF before uploading the replacement, so reporting
+    // success here would leave the operator believing a signed PDF exists when it
+    // may be missing/unsigned. Surface it so they regenerate from the drawer.
+    // (Codex 2026-06-25.)
+    return NextResponse.json(
+      { ok: false, error: "pdf_regen_failed", signature_saved: true, detail: regen.error },
+      { status: 502 },
+    );
+  }
+  return NextResponse.json({ ok: true, application_id: applicationId, pdf_regenerated: true });
 }

@@ -24,6 +24,9 @@ export type CropResult =
 
 const PDF_RENDER_SCALE = 2; // 2x for a crisp signature crop
 const MIN_PX = 4;
+// Raster-size ceilings so a malicious/oversized PDF page can't OOM the renderer.
+const MAX_PDF_DIM = 4000; // px on the long side after scaling
+const MAX_PDF_PIXELS = 24_000_000; // ~24 MP hard ceiling on W*H
 
 function clampBox(box: NormalizedBBox, W: number, H: number) {
   // Pad the box slightly (vision boxes tend to clip) then clamp to the page.
@@ -73,9 +76,18 @@ async function cropPdf(bytes: Buffer, box: NormalizedBBox, page: number): Promis
   try {
     const pageNum = Math.min(Math.max(1, Math.round(page || 1)), doc.numPages);
     const pdfPage = await doc.getPage(pageNum);
-    const viewport = pdfPage.getViewport({ scale: PDF_RENDER_SCALE });
+    // Cap the raster size (Codex 2026-06-25): a malicious/oversized page can
+    // declare huge dimensions; rendering at scale 2 unbounded would exhaust memory
+    // or time out. Fit the long side to MAX_DIM, reject anything still over the
+    // pixel ceiling. Returns ok:false (no preview) rather than risking an OOM.
+    const base = pdfPage.getViewport({ scale: 1 });
+    const fitScale = Math.min(PDF_RENDER_SCALE, MAX_PDF_DIM / Math.max(base.width || 1, base.height || 1));
+    const viewport = pdfPage.getViewport({ scale: Math.max(0.1, fitScale) });
     const W = Math.ceil(viewport.width);
     const H = Math.ceil(viewport.height);
+    if (W < 1 || H < 1 || W * H > MAX_PDF_PIXELS) {
+      return { ok: false, error: "pdf_page_too_large" };
+    }
     const full = createCanvas(W, H);
     const fctx = full.getContext("2d");
     // pdfjs draws onto the @napi-rs/canvas 2D context (API-compatible). The
