@@ -12,6 +12,12 @@ process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ||= process.env.BRAVO_SUPABASE_ANON_KE
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   reactStrictMode: true,
+  // @napi-rs/canvas ships a platform-native .node binary (used by
+  // lib/forms/signature-crop.ts on the autofill-application route).
+  // Webpack can't parse a native binary, so it must stay an external
+  // server-side require instead of being bundled — otherwise the Vercel
+  // Linux build fails with "Module parse failed: Unexpected character".
+  serverExternalPackages: ["@napi-rs/canvas"],
   outputFileTracingRoot: path.join(__dirname),
   // lib/prompts/index.ts reads the .txt + .json prompt files at module init
   // via fs.readFileSync. Next.js's static tracer doesn't follow runtime paths,
