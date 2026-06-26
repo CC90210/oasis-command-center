@@ -121,9 +121,19 @@ export function CampaignsClient({
         return;
       }
       if (data.dry_run) {
-        setCreateNotice("Dry-run — campaign NOT created (dashboard is in dry-run mode). Validated inputs only.");
+        setCreateNotice(`Dry-run — nothing sent (dashboard is in dry-run mode). Would text ${data.total ?? 0} contact(s).`);
       } else {
-        setCreateNotice("Campaign created.");
+        const n = data.sent ?? 0;
+        const t = data.total ?? 0;
+        const sk = data.skipped ?? 0;
+        const f = data.failed ?? 0;
+        setCreateNotice(
+          `Sent to ${n}/${t}` +
+            (sk ? `, ${sk} skipped (opted out)` : "") +
+            (f ? `, ${f} failed` : "") +
+            (data.capped ? ` — capped at ${t}; run again for the rest` : "") +
+            ".",
+        );
         setMessage("");
         setScheduledTime("");
         setTemplateId("");

@@ -129,6 +129,16 @@ async function resolveTenantByInboundNumber(
       }
     }
 
+    // 3. Env fallback — a single-tenant TT setup wires creds via Vercel env
+    // (not the encrypted DB), so the DB lookups above find nothing. When the
+    // destination is the configured tenant default number, route to the
+    // configured tenant. Fail-closed: requires BOTH env vars to be set.
+    const envNumber = (process.env.TEXTTORRENT_FROM_NUMBER || "").replace(/^\+/, "").trim();
+    const envTenant = (process.env.TEXTTORRENT_TENANT_ID || "").trim();
+    if (envNumber && envTenant && envNumber === normalized) {
+      return { tenantId: envTenant, userId: null };
+    }
+
     return null;
   } catch (err) {
     console.error("[webhooks.tt.sms-inbound] tenant resolve failed", err);

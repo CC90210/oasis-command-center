@@ -18,11 +18,14 @@ import { resolveTenantId, resolveSessionContext } from "@/lib/api-auth";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { isDryRun } from "@/lib/integrations/send-mode";
 import { sanitizeBlastMessage } from "@/lib/integrations/blast-safety";
+import { resolveTextTorrentSenderId } from "@/lib/integrations/texttorrent-sender";
+import { isPhoneOptedOut } from "@/lib/lead-interactions-queries";
 import {
   getTextTorrentCredentials,
   listCampaigns,
   campaignCounts,
-  createCampaign,
+  listContacts,
+  sendSms,
   listLists,
   listTemplates,
   TextTorrentError,
@@ -32,6 +35,15 @@ import {
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+// A 1:1 blast fan-out can run for a couple of minutes (throttled, rate-limited).
+export const maxDuration = 300;
+
+// Native TT campaigns are NOT API-accessible (/campaign/create + /campaign 404/401),
+// so a "campaign" is a bounded 1:1 fan-out over the list's contacts via the proven
+// inbox path. Cap the synchronous batch so it stays inside the function timeout +
+// the 60/min TT limit; larger lists are run in repeated passes (or the blaster queue).
+const BLAST_SYNC_CAP = 60;
+const BLAST_THROTTLE_MS = 350;
 
 // Cap the per-campaign counts fan-out so a long campaign history can't blow
 // the TT 60/min limiter on a single page load.
@@ -48,8 +60,14 @@ export async function GET() {
   }
   try {
     const creds = await getTextTorrentCredentials(tenantId);
-    const list = await listCampaigns(creds, { limit: 50 });
-    const campaigns = list.data || [];
+    // Native TT campaign listing is not API-accessible (404/401). Degrade to an
+    // empty history so the page + create form still load; only re-throw on 429.
+    let campaigns: TtCampaign[] = [];
+    try {
+      campaigns = (await listCampaigns(creds, { limit: 50 })).data || [];
+    } catch (e) {
+      if (e instanceof TextTorrentError && e.status === 429) throw e;
+    }
     const enriched: TtCampaign[] = [];
     let fanout = 0;
     let rateLimited = false;
@@ -163,28 +181,66 @@ export async function POST(req: NextRequest) {
   }
   const cleanMessage = safe.cleaned;
 
-  if (isDryRun()) {
-    return NextResponse.json({
-      ok: true,
-      dry_run: true,
-      would_create: { list_id: listId, message: cleanMessage, scheduled_time: scheduledTime },
-    });
-  }
-
   try {
     const creds = await getTextTorrentCredentials(session.tenantId);
-    const r = await createCampaign(creds, {
-      list_id: listId,
-      message: cleanMessage,
-      scheduled_time: scheduledTime,
+    const senderId = await resolveTextTorrentSenderId({
+      tenantId: session.tenantId,
+      userId: session.userId,
     });
-    return NextResponse.json({ ok: true, dry_run: false, campaign: r.data });
+
+    // Pull the list's recipients (bounded). Native bulk-campaign send is dead,
+    // so we fan out 1:1 over the contacts via the proven inbox path.
+    const contacts = (await listContacts(creds, listId, { limit: BLAST_SYNC_CAP })).data || [];
+    const recipients = contacts.map((c) => c.number).filter((n): n is string => !!n);
+
+    if (isDryRun()) {
+      return NextResponse.json({
+        ok: true,
+        dry_run: true,
+        provider: "texttorrent",
+        total: recipients.length,
+        would_send: { list_id: listId, message: cleanMessage, recipients: recipients.length },
+      });
+    }
+
+    let sent = 0;
+    let skipped = 0;
+    let failed = 0;
+    const errors: string[] = [];
+    for (const number of recipients) {
+      try {
+        if (await isPhoneOptedOut(session.tenantId, number)) {
+          skipped += 1;
+          continue;
+        }
+        await sendSms(creds, { number, message: cleanMessage, sender_id: senderId });
+        sent += 1;
+        await new Promise((r) => setTimeout(r, BLAST_THROTTLE_MS)); // anti-burn throttle
+      } catch (e) {
+        failed += 1;
+        if (errors.length < 5) {
+          errors.push(`…${number.slice(-4)}: ${e instanceof Error ? e.message : "failed"}`);
+        }
+      }
+    }
+
+    return NextResponse.json({
+      ok: true,
+      dry_run: false,
+      provider: "texttorrent",
+      sent,
+      skipped,
+      failed,
+      total: recipients.length,
+      capped: contacts.length >= BLAST_SYNC_CAP,
+      errors,
+    });
   } catch (err) {
     if (err instanceof TextTorrentError) {
       return NextResponse.json({ ok: false, error: err.code, message: err.message }, { status: ttStatus(err) });
     }
     return NextResponse.json(
-      { ok: false, error: "campaign_create_failed", message: err instanceof Error ? err.message : "failed" },
+      { ok: false, error: "campaign_send_failed", message: err instanceof Error ? err.message : "failed" },
       { status: 502 },
     );
   }
