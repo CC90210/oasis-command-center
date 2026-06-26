@@ -4,6 +4,14 @@
  * result through extractAppFields() (lib/forms/application-upsert.ts) to
  * whitelist + normalize before writing anything — this module only reads.
  *
+ * STATUS (2026-06-26): the dashboard no longer calls this at runtime — extraction
+ * moved to the VPS `extraction-consumer` daemon, which reads the doc with the
+ * Claude Code CLI on CC's subscription (not the metered API). This module is
+ * RETAINED as (1) the canonical EXTRACT_SYSTEM prompt the daemon mirrors — keep
+ * the two in lockstep — and (2) a metered-API fallback the daemon replicates in
+ * Python. Don't delete without porting the prompt; see
+ * scripts/integrations/extraction_consumer.py (Business-Empire-Agent).
+ *
  * Security: the document is UNTRUSTED. The system prompt fences it as
  * data-not-instructions, and we only ever return a parsed JSON object that the
  * caller whitelists; no document text is re-injected into any prompt or executed.
