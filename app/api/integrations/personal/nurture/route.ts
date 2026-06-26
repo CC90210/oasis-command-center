@@ -52,15 +52,16 @@ export async function GET() {
   const db = getServiceSupabase();
   const r = await db
     .from("agent_nurture_settings")
-    .select("mode, notify_channel")
+    .select("mode, notify_channel, voice_seed")
     .eq("tenant_id", profile.tenant_id)
     .eq("user_id", user.id)
     .maybeSingle();
-  const row = (r.data as { mode?: string; notify_channel?: string } | null) ?? null;
+  const row = (r.data as { mode?: string; notify_channel?: string; voice_seed?: string } | null) ?? null;
   return NextResponse.json({
     ok: true,
     mode: row?.mode ?? "off",
     notify_channel: row?.notify_channel ?? "telegram",
+    voice_seed: row?.voice_seed ?? "",
   });
 }
 
@@ -71,9 +72,9 @@ export async function POST(req: NextRequest) {
   if (!profile?.tenant_id) return NextResponse.json({ ok: false, error: "no_tenant" }, { status: 400 });
   const tenantId = profile.tenant_id;
 
-  let body: { mode?: unknown; notify_channel?: unknown };
+  let body: { mode?: unknown; notify_channel?: unknown; voice_seed?: unknown };
   try {
-    body = (await req.json()) as { mode?: unknown; notify_channel?: unknown };
+    body = (await req.json()) as { mode?: unknown; notify_channel?: unknown; voice_seed?: unknown };
   } catch {
     return NextResponse.json({ ok: false, error: "invalid_json" }, { status: 400 });
   }
@@ -85,6 +86,10 @@ export async function POST(req: NextRequest) {
     typeof body.notify_channel === "string" && (NOTIFY as readonly string[]).includes(body.notify_channel)
       ? body.notify_channel
       : "telegram";
+  // The rep's own voice notes (their trusted input), injected into the persona
+  // by the worker. Capped so it can't bloat the system prompt.
+  const voiceSeed =
+    typeof body.voice_seed === "string" ? body.voice_seed.trim().slice(0, 2000) : undefined;
 
   // Resolve the rep's TT identity to stamp. Required to turn nurture on.
   const fromNumber = (await resolveTextTorrentSenderId({ tenantId, userId: user.id })) ?? null;
@@ -113,6 +118,7 @@ export async function POST(req: NextRequest) {
       rep_name: profile.display_name || profile.full_name || null,
       rep_email: actAsEmail, // the rep's SunBiz email merchants send docs to
       rep_phone: fromNumber, // the rep's number merchants call
+      ...(voiceSeed !== undefined ? { voice_seed: voiceSeed } : {}),
       updated_at: new Date().toISOString(),
     },
     { onConflict: "tenant_id,user_id" },

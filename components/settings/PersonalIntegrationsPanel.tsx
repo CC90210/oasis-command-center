@@ -82,6 +82,9 @@ export function PersonalIntegrationsPanel({
   const [nurtureMode, setNurtureMode] = useState<"off" | "semi" | "full">("off");
   const [nurtureNotify, setNurtureNotify] = useState<"telegram" | "email">("telegram");
   const [nurtureFlash, setNurtureFlash] = useState<string | null>(null);
+  // The rep's voice notes — injected into the AI's persona so replies sound
+  // like them (the "train your voice" seed; CLI training is a later add).
+  const [nurtureVoice, setNurtureVoice] = useState("");
   const searchParams = useSearchParams();
 
   // OAuth callback flash messages — surfaced as a banner on first
@@ -144,11 +147,12 @@ export function PersonalIntegrationsPanel({
     try {
       const n = await fetch("/api/integrations/personal/nurture", { cache: "no-store" });
       const nbody = (await n.json().catch(() => ({}))) as {
-        ok?: boolean; mode?: "off" | "semi" | "full"; notify_channel?: "telegram" | "email";
+        ok?: boolean; mode?: "off" | "semi" | "full"; notify_channel?: "telegram" | "email"; voice_seed?: string;
       };
       if (nbody.ok) {
         setNurtureMode(nbody.mode || "off");
         setNurtureNotify(nbody.notify_channel || "telegram");
+        setNurtureVoice(nbody.voice_seed || "");
       }
     } catch {
       // Soft-fail.
@@ -165,7 +169,7 @@ export function PersonalIntegrationsPanel({
       const r = await fetch("/api/integrations/personal/nurture", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ mode, notify_channel: notify }),
+        body: JSON.stringify({ mode, notify_channel: notify, voice_seed: nurtureVoice }),
       });
       const body = (await r.json().catch(() => ({}))) as { ok?: boolean; error?: string; message?: string };
       if (!r.ok || !body.ok) {
@@ -867,6 +871,28 @@ export function PersonalIntegrationsPanel({
                     <option value="email">Email</option>
                   </select>
                   when it needs you.
+                </div>
+              )}
+              {nurtureMode !== "off" && (
+                <div className="flex flex-col gap-1.5">
+                  <span className="text-[11.5px] text-fg-muted">Your voice (how you text — the AI matches this):</span>
+                  <textarea
+                    value={nurtureVoice}
+                    onChange={(e) => setNurtureVoice(e.target.value)}
+                    placeholder={"e.g. Keep it short and warm. Open with the first name. I say \"no worries\", not \"no problem\". Never pushy."}
+                    rows={3}
+                    className="w-full text-sm px-3 py-2 rounded-md bg-bg-deep border border-bg-border text-fg resize-none placeholder:text-fg-dim"
+                  />
+                  <div>
+                    <button
+                      type="button"
+                      onClick={() => saveNurture(nurtureMode, nurtureNotify)}
+                      disabled={busyService === "nurture"}
+                      className="inline-flex items-center gap-1.5 rounded-md bg-accent text-bg-deep px-3 py-1.5 text-[12px] font-bold hover:bg-accent/90 disabled:opacity-60"
+                    >
+                      Save my voice
+                    </button>
+                  </div>
                 </div>
               )}
               {nurtureFlash && <div className="text-[11.5px] text-emerald-300">{nurtureFlash}</div>}
