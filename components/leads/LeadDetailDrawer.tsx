@@ -30,7 +30,11 @@ import { humanLeadDocSize, leadDocTypeLabel, LEAD_DOC_TYPES } from "@/lib/lead-d
 import { SalesMetricCard } from "@/components/underwriting/SalesMetricCard";
 import { formatMoney, relTime } from "@/lib/format-helpers";
 import { lastTouchIsoFlat } from "@/lib/lead-staleness";
-import { SUNBIZ_EMAIL_TEMPLATES, renderSunbizTemplate } from "@/lib/sunbiz-templates-library";
+import {
+  SUNBIZ_EMAIL_TEMPLATES,
+  SUNBIZ_TEMPLATE_CATEGORIES,
+  renderSunbizTemplate,
+} from "@/lib/sunbiz-templates-library";
 
 type DocRow = {
   id: string;
@@ -2019,11 +2023,21 @@ function EmailComposer({
         className="w-full text-xs px-2 py-1.5 rounded-md bg-bg-deep border border-bg-border text-fg"
       >
         <option value="">Template… (or write from scratch)</option>
-        {SUNBIZ_EMAIL_TEMPLATES.map((t) => (
-          <option key={t.id} value={t.id}>
-            {t.label}
-          </option>
-        ))}
+        {SUNBIZ_TEMPLATE_CATEGORIES.map((cat) => {
+          const items = SUNBIZ_EMAIL_TEMPLATES.filter(
+            (t) => t.category === cat.category,
+          );
+          if (items.length === 0) return null;
+          return (
+            <optgroup key={cat.category} label={cat.label}>
+              {items.map((t) => (
+                <option key={t.id} value={t.id}>
+                  {t.label}
+                </option>
+              ))}
+            </optgroup>
+          );
+        })}
       </select>
       <input
         type="text"

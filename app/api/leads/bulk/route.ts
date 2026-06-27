@@ -176,6 +176,17 @@ export async function POST(req: NextRequest) {
     if (!tpl) {
       return NextResponse.json({ ok: false, error: "invalid_template" }, { status: 400 });
     }
+    // Server-side bulk-safety guard (defense in depth behind the UI filter).
+    // Stage/history-asserting templates (offers, funded, renewals, stips, etc.)
+    // are 1:1-only — blasting them to a batch would send false claims to leads
+    // they aren't true for. The bulk dropdown already hides them; reject here in
+    // case a stale or hand-crafted client POSTs one anyway.
+    if (tpl.bulkSafe === false) {
+      return NextResponse.json(
+        { ok: false, error: "template_not_bulk_safe" },
+        { status: 400 },
+      );
+    }
     const emailEntity = body.entity === "application" ? "application" : "lead";
 
     for (const id of ids) {

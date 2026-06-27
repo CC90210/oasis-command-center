@@ -15,7 +15,10 @@ import {
   X,
 } from "lucide-react";
 import type { StageMeta } from "@/lib/sunbiz-stage-meta";
-import { SUNBIZ_EMAIL_TEMPLATES } from "@/lib/sunbiz-templates-library";
+import {
+  SUNBIZ_BULK_SAFE_TEMPLATES,
+  SUNBIZ_TEMPLATE_CATEGORIES,
+} from "@/lib/sunbiz-templates-library";
 import { PageSearchBar } from "@/components/manifest/PageSearchBar";
 import { AutofillDropzone } from "@/components/leads/AutofillDropzone";
 import { pipelineRowHref } from "@/lib/pipeline-display";
@@ -625,14 +628,24 @@ function BulkActionBar({
             if (v) onEmail(v);
           }}
           className="rounded-md border border-bg-border bg-bg-deep px-2 py-1 text-[12px] text-fg focus:border-accent focus:outline-none disabled:opacity-60"
-          title="Queue this email template (personalized per record) to every selected lead."
+          title="Queue this email template (personalized per record) to every selected lead. Only outreach-safe templates appear here — stage-specific ones (offers, funded, renewals) are 1:1-only to avoid false claims in a batch."
         >
           <option value="">Email…</option>
-          {SUNBIZ_EMAIL_TEMPLATES.map((t) => (
-            <option key={t.id} value={t.id}>
-              {t.label}
-            </option>
-          ))}
+          {SUNBIZ_TEMPLATE_CATEGORIES.map((cat) => {
+            const items = SUNBIZ_BULK_SAFE_TEMPLATES.filter(
+              (t) => t.category === cat.category,
+            );
+            if (items.length === 0) return null;
+            return (
+              <optgroup key={cat.category} label={cat.label}>
+                {items.map((t) => (
+                  <option key={t.id} value={t.id}>
+                    {t.label}
+                  </option>
+                ))}
+              </optgroup>
+            );
+          })}
         </select>
       </label>
 
