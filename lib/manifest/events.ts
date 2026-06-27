@@ -107,7 +107,10 @@ export async function publishAgentEvent(input: AgentEventPublish): Promise<void>
 export async function publishStatusChange(input: StatusChangePublish): Promise<void> {
   try {
     const db = getServiceSupabase();
-    await db.from("agent_events").insert({
+    // Same as publishAgentEvent: PostgREST returns insert failures as a
+    // resolved { error }, not a throw — destructure and log it so a failed
+    // status-change emission isn't invisible. Still best-effort (no re-throw).
+    const { error } = await db.from("agent_events").insert({
       event_type: "BRAVO_RECORD_STATUS_CHANGED",
       publisher_agent: input.publisher || "manifest-data",
       severity: "info",
@@ -122,6 +125,9 @@ export async function publishStatusChange(input: StatusChangePublish): Promise<v
       },
       correlation_id: input.tenantId,
     });
+    if (error) {
+      console.error("[manifest.events.publishStatusChange] insert failed:", error);
+    }
   } catch (err) {
     // Logged but not re-thrown — record updates must not depend on
     // event emission. Phase 4's sequence runner has its own retry
