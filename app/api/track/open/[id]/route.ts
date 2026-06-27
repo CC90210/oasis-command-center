@@ -132,6 +132,66 @@ export async function GET(
     const suspicious =
       sentAtMs !== null && nowMs - sentAtMs < 60_000; // <60s = APMP-likely prefetch
 
+    // Source-level dedup (2026-06-27, CC: "email opened over and over"). The
+    // pixel is served no-store, so Gmail / Apple Mail image proxies re-fetch it
+    // many times per delivered email — live data showed ONE email producing 23
+    // open events for a single lead, flooding the timeline + bloating
+    // agent_events. Two rules tame this at the source:
+    //
+    //   1. Only GENUINE (non-prefetch) opens publish BRAVO_EMAIL_OPENED. A
+    //      prefetch (<60s after send — the proxy fetching the image, not a human
+    //      read) is recorded in email_open_events for raw telemetry but never
+    //      hits the event bus. This keeps proxy noise off the bus AND guarantees
+    //      a delivery-time prefetch can't mask the genuine open that follows it.
+    //   2. At most ONE genuine open per message PER CALENDAR DAY (UTC). The probe
+    //      looks for a genuine BRAVO_EMAIL_OPENED for this outbound_message_id
+    //      already published today; if found, this hit is a same-day re-open and
+    //      we skip the publish. Day-scoping (not all-time) collapses the same-day
+    //      proxy storm while still letting a genuine re-open on a LATER day
+    //      publish, so the timeline's distinct-day "seen N days" stays truthful.
+    //
+    // Stage advance is NOT gated on this (see below) — the engine is idempotent.
+    // Fail-open: if the probe errors we publish, so a read blip can't silently
+    // drop a real open. Not atomic: a burst of truly-simultaneous first opens can
+    // each pass the probe and publish, so a message can still get a couple of
+    // same-day rows under a proxy burst; the timeline de-noises those to one row,
+    // so the display stays correct. The durable fix is a unique idempotency index
+    // on (correlation_id, outbound_message_id, opened_day) — follow-up migration,
+    // deliberately not bundled into this no-migration hotfix.
+    const dayStart = new Date(nowMs);
+    dayStart.setUTCHours(0, 0, 0, 0);
+    const dayStartIso = dayStart.toISOString();
+    let alreadyOpenedToday = false;
+    if (!suspicious) {
+      try {
+        // Supabase returns query failures as { error } on the normal path (no
+        // throw), so check BOTH that and a thrown exception. Either way we
+        // fail-open (leave alreadyOpenedToday false → publish) so a probe blip
+        // never silently drops a real open — but LOG it, because a persistent
+        // failure here means same-day storm collapse is degraded and ops must
+        // be able to see it rather than wonder why opens are inflating again.
+        const { data: prior, error: probeError } = await sb
+          .from("agent_events")
+          .select("id")
+          .eq("event_type", "BRAVO_EMAIL_OPENED")
+          .eq("correlation_id", tenantId)
+          .contains("payload", {
+            outbound_message_id: id,
+            suspicious_prefetch: false,
+          })
+          .gte("published_at", dayStartIso)
+          .limit(1);
+        if (probeError) {
+          console.error("[track/open] dedup probe error — publishing (fail-open)", probeError);
+        } else {
+          alreadyOpenedToday = Array.isArray(prior) && prior.length > 0;
+        }
+      } catch (probeErr) {
+        console.error("[track/open] dedup probe threw — publishing (fail-open)", probeErr);
+      }
+    }
+    const shouldPublishOpen = !suspicious && !alreadyOpenedToday;
+
     // Insert with ON CONFLICT DO NOTHING semantics via upsert + the
     // partial unique index (outbound_message_id, ip_hash) added in
     // migration 050. Re-opens from the same recipient don't add new
@@ -170,7 +230,7 @@ export async function GET(
     // severity + correlation_id correctly so this insert no longer
     // silently fails (which is what was happening before — the route
     // looked fine but agent_events.insert errored every call).
-    await publishAgentEvent({
+    if (shouldPublishOpen) await publishAgentEvent({
       eventType: "BRAVO_EMAIL_OPENED",
       tenantId,
       publisher: "track_open",
@@ -193,6 +253,13 @@ export async function GET(
     // out so APMP noise doesn't promote a lead that hasn't actually
     // engaged. Engine guards the from-stage so an open against a
     // lead already past viewed_application is a no-op.
+    // Always dispatch on a genuine open — do NOT gate this on alreadyRecorded.
+    // The stage engine is idempotent (email_opened only advances
+    // sent_application → viewed_application and no-ops once past it via the
+    // from-stage guard), so running it on every genuine open is a cheap no-op
+    // after the first. Gating it on the event-bus row would strand a lead
+    // under-advanced if an early open lost a race with the send (dispatch
+    // no-ops, but the event row exists, so every later open would skip forever).
     if (!suspicious && leadId) {
       await dispatchLeadStageEvent({
         type: "email_opened",

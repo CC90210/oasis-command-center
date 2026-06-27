@@ -136,42 +136,53 @@ export async function GET(
 
   // Email opens are merged across BOTH feeds that record them — email_open_events
   // (the tracking-pixel store) AND agent_events BRAVO_EMAIL_OPENED (the event-bus
-  // mirror) — keyed by the outbound message each open belongs to. Two things made
-  // a single open render as 2-3 "Email opened" rows (the bug CC reported
-  // 2026-06-18): (a) the same open lands in BOTH tables (they're 1:1 mirrors), and
-  // (b) Apple Mail Privacy Protection + Gmail's image proxy PREFETCH the pixel from
-  // a rotating IP fleet, so one message generated multiple prefetch hits. We
-  // collapse to ONE timeline event per message and count only GENUINE
-  // (non-prefetch) opens — a prefetch is the proxy fetching the image, not the
-  // recipient reading it.
+  // mirror) — keyed by the outbound message each open belongs to.
   //
-  // The re-open count must NOT sum across feeds: a single open written to both
-  // tables would otherwise read as "(2×)". Since the feeds mirror each other we
-  // track the genuine count PER FEED and take the max — equal (= N) when both
-  // feeds have the opens, and still N when one feed is empty (e.g. the
-  // email_open_events upsert currently no-ops, so only agent_events is populated).
+  // De-noise (2026-06-27, CC: "should only say email opened once"). A single
+  // delivered email generates many pixel hits: the pixel is served no-store, so
+  // Gmail / Apple Mail image proxies re-fetch it repeatedly (live data: 23 hits
+  // for ONE email to one lead), and the same open is mirrored into both tables.
+  // We collapse to ONE timeline row per message and measure engagement as the
+  // number of DISTINCT CALENDAR DAYS with a genuine (non-prefetch) open — so a
+  // same-day storm of proxy re-fetches reads as a single "opened", while a real
+  // re-open on a later day still surfaces as "· seen N days". Tracking days in a
+  // Set also dedupes the two mirror feeds for free (same open, same day → one
+  // entry), so the old cross-feed max() bookkeeping is gone. A prefetch is the
+  // proxy fetching the image, not the recipient reading it, so it never counts.
   type OpenAgg = {
     earliestAt: string;
-    byFeed: { email_open: number; agent_event: number };
+    latestAt: string;
+    days: Set<string>;
     messageId: string | null;
   };
   const opensByMessage = new Map<string, OpenAgg>();
   const recordOpen = (
-    key: string,
     messageId: string | null,
+    fallbackKey: string,
     at: string,
     prefetch: boolean,
-    feed: "email_open" | "agent_event",
   ) => {
     if (prefetch) return; // proxy prefetch — not a real open
+    const day = at.slice(0, 10); // YYYY-MM-DD bucket
+    // Collapse key: the message id when present — this folds a proxy re-fetch
+    // storm for ONE email into a single row, which is the whole fix. When the
+    // message id is missing (legacy rows), we CANNOT know which email the open
+    // belongs to, so fall back to the source row id and keep them separate —
+    // merging unattributed opens by date would under-count legitimately
+    // distinct opens.
+    const key = messageId || fallbackKey;
     const prev = opensByMessage.get(key);
     if (!prev) {
-      const byFeed = { email_open: 0, agent_event: 0 };
-      byFeed[feed] = 1;
-      opensByMessage.set(key, { earliestAt: at, byFeed, messageId });
+      opensByMessage.set(key, {
+        earliestAt: at,
+        latestAt: at,
+        days: new Set([day]),
+        messageId,
+      });
     } else {
       if (at < prev.earliestAt) prev.earliestAt = at;
-      prev.byFeed[feed] += 1;
+      if (at > prev.latestAt) prev.latestAt = at;
+      prev.days.add(day);
       if (!prev.messageId && messageId) prev.messageId = messageId;
     }
   };
@@ -306,11 +317,10 @@ export async function GET(
       if (!row.opened_at) continue;
       // Merge (don't push) — emitted as one collapsed event per message below.
       recordOpen(
-        row.outbound_message_id || `open:${row.id}`,
         row.outbound_message_id,
+        `open:${row.id}`,
         row.opened_at,
         !!row.suspicious_prefetch,
-        "email_open",
       );
     }
   } catch (e: unknown) {
@@ -378,7 +388,7 @@ export async function GET(
           typeof p.outbound_message_id === "string" ? p.outbound_message_id : null;
         const prefetch =
           p.suspicious_prefetch === true || p.suspicious_prefetch === "true";
-        recordOpen(mid || `evt:${row.id}`, mid, at, prefetch, "agent_event");
+        recordOpen(mid, `evt:${row.id}`, at, prefetch);
         continue;
       }
       events.push({
@@ -430,20 +440,24 @@ export async function GET(
   await Promise.all(feeds);
 
   // Emit one collapsed "Email opened" per message that had ≥1 genuine open.
-  // Messages with only proxy prefetches contribute nothing here (count stays 0),
-  // so a prefetched-but-unread email never shows as "opened". The genuine count
-  // is the MAX across the two mirror feeds (not the sum) so the same open in both
-  // tables counts once; a real re-open is surfaced as a "(N×)" suffix rather than
-  // N separate rows.
+  // Messages with only proxy prefetches contribute nothing here (days stays
+  // empty), so a prefetched-but-unread email never shows as "opened". The
+  // engagement signal is the count of DISTINCT DAYS opened — same-day proxy
+  // re-fetch storms collapse to a single open; a genuine re-open on another day
+  // surfaces as "· seen N days" rather than an inflated hit count.
   for (const agg of opensByMessage.values()) {
-    const count = Math.max(agg.byFeed.email_open, agg.byFeed.agent_event);
-    if (count < 1) continue;
+    const days = agg.days.size;
+    if (days < 1) continue;
     events.push({
       source: "email_open",
       type: "open",
       at: agg.earliestAt,
-      title: count > 1 ? `👁 Email opened (${count}×)` : "👁 Email opened",
-      meta: { outbound_message_id: agg.messageId, open_count: count },
+      title: days > 1 ? `👁 Email opened · seen ${days} days` : "👁 Email opened",
+      meta: {
+        outbound_message_id: agg.messageId,
+        open_days: days,
+        last_open_at: agg.latestAt,
+      },
     });
   }
 

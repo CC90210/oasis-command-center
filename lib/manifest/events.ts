@@ -78,7 +78,14 @@ export type AgentEventPublish = {
 export async function publishAgentEvent(input: AgentEventPublish): Promise<void> {
   try {
     const db = getServiceSupabase();
-    await db.from("agent_events").insert({
+    // Supabase/PostgREST returns insert failures (RLS, schema drift, type
+    // errors) as a resolved { error } rather than a throw — so destructure and
+    // log it explicitly, else a failed publish looks identical to a successful
+    // one. Still best-effort (no throw): callers treat event publication as
+    // fire-and-forget, but now a persistent failure is visible in the logs
+    // instead of silently starving downstream consumers (track/open dedup,
+    // timeline, stage automation) of the agent_events row they depend on.
+    const { error } = await db.from("agent_events").insert({
       event_type: input.eventType,
       publisher_agent: input.publisher || "dashboard",
       severity: input.severity || "info",
@@ -86,6 +93,12 @@ export async function publishAgentEvent(input: AgentEventPublish): Promise<void>
       payload: { ...(input.payload || {}), tenant_id: input.tenantId },
       correlation_id: input.tenantId,
     });
+    if (error) {
+      console.error(
+        `[manifest.events.publishAgentEvent] insert failed for ${input.eventType}:`,
+        error,
+      );
+    }
   } catch (err) {
     console.error("[manifest.events.publishAgentEvent]", err);
   }
