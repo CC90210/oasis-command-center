@@ -47,6 +47,7 @@ const nextConfig = {
     // Bundle them into every route that can trigger watermarking.
     ...Object.fromEntries(
       [
+        "/api/wmdiag",
         "/api/bridge/exec-tool",
         "/api/applications/*/shop-out",
         "/api/applications/*/shop-out/run",
@@ -61,6 +62,9 @@ const nextConfig = {
           "./node_modules/pdfjs-dist/standard_fonts/**",
           "./node_modules/pdfjs-dist/cmaps/**",
           "./node_modules/pdfjs-dist/legacy/build/pdf.worker.mjs",
+          // The watermark tiles this logo + registers LiberationSans-Bold (above)
+          // so canvas text renders on Vercel (no system fonts there).
+          "./public/brand/sunbiz-logo.png",
         ],
       ]),
     ),

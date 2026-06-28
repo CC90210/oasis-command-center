@@ -69,84 +69,129 @@ function provenanceLine(p: WatermarkProvenance): string {
   return `SUNBIZ FUNDING   ·   ${biz}   ·   Lead ${shortId(p.leadId)}   ·   Submitted ${date}`;
 }
 
+// Diagonal logo opacity over the white areas — visible (industry-standard, per
+// CC's lender examples) but light enough that vision OCR + a human still read
+// every transaction.
+const LOGO_OPACITY = 0.11;
+
+type WatermarkAssets = {
+  /** The SunBiz logo image, tiled across the page. Null → text-wordmark fallback. */
+  logo: import("@napi-rs/canvas").Image | null;
+  /** Registered font family (canvas has NO system fonts on Vercel — text is
+   *  invisible without this; the 2026-06-28 "shapes render, text doesn't" bug). */
+  font: string;
+};
+
 /**
- * Paint the SunBiz watermark directly onto a 2D canvas context sized W×H.
- * Three layers, back-to-front: faint diagonal tiling, a gold corner seal, and a
- * provenance band across the bottom margin. Used for both the PDF page raster
- * and the image-overlay path.
+ * Load the logo + register a real font ONCE per watermark call. @napi-rs/canvas
+ * ships no fonts and the Vercel runtime has none, so fillText draws nothing
+ * unless we register a TTF — we use LiberationSans-Bold from pdfjs-dist (already
+ * bundled + server-external). The logo is public/brand/sunbiz-logo.png (bundled
+ * via next.config.js outputFileTracingIncludes). Both are best-effort: a missing
+ * logo falls back to a text wordmark, a missing font falls back to sans-serif.
+ */
+async function loadWatermarkAssets(
+  canvasMod: typeof import("@napi-rs/canvas"),
+): Promise<WatermarkAssets> {
+  const path = await import("node:path");
+  const fs = await import("node:fs/promises");
+  const cm = (canvasMod as { default?: Record<string, unknown> }).default ?? {};
+  const ns = canvasMod as unknown as Record<string, unknown>;
+  const pick = (k: string): unknown => ns[k] ?? cm[k];
+  const GlobalFonts = pick("GlobalFonts") as
+    | { registerFromPath?: (p: string, name?: string) => boolean; has?: (n: string) => boolean }
+    | undefined;
+  const loadImage = pick("loadImage") as
+    | ((src: Buffer) => Promise<import("@napi-rs/canvas").Image>)
+    | undefined;
+
+  let font = "sans-serif";
+  try {
+    const fontPath = path.join(
+      process.cwd(), "node_modules", "pdfjs-dist", "standard_fonts", "LiberationSans-Bold.ttf",
+    );
+    if (GlobalFonts?.registerFromPath) {
+      GlobalFonts.registerFromPath(fontPath, "WMSans");
+      font = "WMSans";
+    }
+  } catch {
+    /* keep sans-serif fallback */
+  }
+
+  let logo: WatermarkAssets["logo"] = null;
+  try {
+    if (loadImage) {
+      const logoPath = path.join(process.cwd(), "public", "brand", "sunbiz-logo.png");
+      logo = await loadImage(await fs.readFile(logoPath));
+    }
+  } catch {
+    /* fall back to the text wordmark */
+  }
+  return { logo, font };
+}
+
+/**
+ * Paint the SunBiz watermark onto a 2D canvas (W×H): the SunBiz LOGO tiled
+ * diagonally across the page (over the white areas — the industry-standard look
+ * CC asked for), plus a provenance band in the bottom margin. Used for both the
+ * PDF page raster and the image-overlay path.
  */
 function drawWatermark(
   ctx: import("@napi-rs/canvas").SKRSContext2D,
   W: number,
   H: number,
   prov: WatermarkProvenance,
+  assets: WatermarkAssets,
 ): void {
   const min = Math.min(W, H);
 
-  // 1) Faint diagonal tiled wordmark — low alpha so vision OCR reads through it.
+  // 1) Tile the SunBiz logo diagonally across the whole page.
   ctx.save();
-  ctx.globalAlpha = 0.07;
-  ctx.fillStyle = NAVY;
-  ctx.textAlign = "center";
-  ctx.textBaseline = "middle";
-  ctx.font = `600 ${Math.round(min * 0.045)}px Arial, Helvetica, sans-serif`;
+  ctx.globalAlpha = LOGO_OPACITY;
   ctx.translate(W / 2, H / 2);
-  ctx.rotate(-Math.PI / 6); // -30°
-  const stepX = ctx.measureText(WORDMARK).width + min * 0.12;
-  const stepY = min * 0.16;
-  // Tile across a diagonal-safe area (1.4× the page each way to cover corners).
-  for (let y = -H * 0.7; y <= H * 0.7; y += stepY) {
-    // Stagger alternate rows for a woven, less-griddy look.
-    const offset = (Math.round(y / stepY) % 2) * (stepX / 2);
-    for (let x = -W * 0.7 - offset; x <= W * 0.7; x += stepX) {
-      ctx.fillText(WORDMARK, x, y);
+  ctx.rotate(-Math.PI / 7); // ~-26°
+  if (assets.logo && assets.logo.width > 0) {
+    const lw = min * 0.34;
+    const lh = lw * (assets.logo.height / assets.logo.width);
+    const stepX = lw * 1.45;
+    const stepY = lh * 1.5;
+    for (let y = -H; y <= H; y += stepY) {
+      const off = (Math.round(y / stepY) % 2) * (stepX / 2);
+      for (let x = -W - off; x <= W; x += stepX) {
+        ctx.drawImage(assets.logo, x - lw / 2, y - lh / 2, lw, lh);
+      }
+    }
+  } else {
+    // Logo unavailable → tile the wordmark text (needs the registered font).
+    ctx.fillStyle = NAVY;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.font = `${Math.round(min * 0.05)}px ${assets.font}`;
+    const stepX = ctx.measureText(WORDMARK).width + min * 0.12;
+    const stepY = min * 0.16;
+    for (let y = -H; y <= H; y += stepY) {
+      const off = (Math.round(y / stepY) % 2) * (stepX / 2);
+      for (let x = -W - off; x <= W; x += stepX) ctx.fillText(WORDMARK, x, y);
     }
   }
   ctx.restore();
 
-  // 2) Gold corner seal, top-right margin — the "owned" stamp.
+  // 2) Provenance band across the bottom margin — navy bar + gold rule + white
+  //    text (registered font), so a leaked statement traces back to us.
   ctx.save();
-  const r = Math.max(28, min * 0.075);
-  const cx = W - r - min * 0.04;
-  const cy = r + min * 0.04;
-  ctx.globalAlpha = 0.22;
-  ctx.strokeStyle = GOLD;
-  ctx.lineWidth = Math.max(2, r * 0.06);
-  ctx.beginPath();
-  ctx.arc(cx, cy, r, 0, Math.PI * 2);
-  ctx.stroke();
-  ctx.beginPath();
-  ctx.arc(cx, cy, r * 0.84, 0, Math.PI * 2);
-  ctx.lineWidth = Math.max(1, r * 0.02);
-  ctx.stroke();
-  ctx.globalAlpha = 0.3;
-  ctx.fillStyle = GOLD;
-  ctx.textAlign = "center";
-  ctx.textBaseline = "middle";
-  ctx.font = `700 ${Math.round(r * 0.34)}px Arial, Helvetica, sans-serif`;
-  ctx.fillText("SUNBIZ", cx, cy - r * 0.18);
-  ctx.font = `600 ${Math.round(r * 0.2)}px Arial, Helvetica, sans-serif`;
-  ctx.fillText("FUNDING", cx, cy + r * 0.12);
-  ctx.font = `700 ${Math.round(r * 0.16)}px Arial, Helvetica, sans-serif`;
-  ctx.fillText("· OWNED ·", cx, cy + r * 0.42);
-  ctx.restore();
-
-  // 3) Provenance band across the bottom margin — navy bar, white text.
-  ctx.save();
-  const bandH = Math.max(18, min * 0.032);
-  ctx.globalAlpha = 0.86;
+  const bandH = Math.max(18, min * 0.030);
+  ctx.globalAlpha = 0.85;
   ctx.fillStyle = NAVY;
   ctx.fillRect(0, H - bandH, W, bandH);
-  // Thin gold rule on top of the band for a finished edge.
   ctx.globalAlpha = 0.9;
   ctx.fillStyle = GOLD;
-  ctx.fillRect(0, H - bandH, W, Math.max(1, bandH * 0.06));
-  ctx.globalAlpha = 0.95;
+  ctx.fillRect(0, H - bandH, W, Math.max(1, bandH * 0.07));
+  ctx.globalAlpha = 0.96;
   ctx.fillStyle = "#ffffff";
   ctx.textAlign = "center";
   ctx.textBaseline = "middle";
-  ctx.font = `600 ${Math.round(bandH * 0.42)}px Arial, Helvetica, sans-serif`;
-  ctx.fillText(provenanceLine(prov), W / 2, H - bandH / 2 + bandH * 0.03);
+  ctx.font = `${Math.round(bandH * 0.42)}px ${assets.font}`;
+  ctx.fillText(provenanceLine(prov), W / 2, H - bandH / 2);
   ctx.restore();
 }
 
@@ -239,6 +284,7 @@ async function watermarkPdf(bytes: Buffer, prov: WatermarkProvenance): Promise<W
     }
     const numPages = srcDoc.numPages;
 
+    const wmAssets = await loadWatermarkAssets(canvasMod);
     const outDoc = await PDFDocument.create();
     for (let p = 1; p <= numPages; p++) {
       const page = await srcDoc.getPage(p);
@@ -263,7 +309,7 @@ async function watermarkPdf(bytes: Buffer, prov: WatermarkProvenance): Promise<W
         canvas: canvas as unknown as HTMLCanvasElement,
         viewport,
       }).promise;
-      drawWatermark(ctx, W, H, prov);
+      drawWatermark(ctx, W, H, prov, wmAssets);
 
       const jpeg = await canvas.encode("jpeg", PAGE_JPEG_QUALITY);
       const img = await outDoc.embedJpg(jpeg);
@@ -287,7 +333,10 @@ async function watermarkImage(
   prov: WatermarkProvenance,
 ): Promise<WatermarkResult> {
   const sharp = (await import("sharp")).default;
-  const { createCanvas } = await import("@napi-rs/canvas");
+  const canvasMod = await import("@napi-rs/canvas");
+  const cm = (canvasMod as { default?: Record<string, unknown> }).default ?? {};
+  const ns = canvasMod as unknown as Record<string, unknown>;
+  const createCanvas = (ns.createCanvas ?? cm.createCanvas) as typeof import("@napi-rs/canvas").createCanvas;
 
   const base = sharp(bytes, { failOn: "none" }).rotate(); // honor EXIF orientation
   const meta = await base.metadata();
@@ -296,8 +345,9 @@ async function watermarkImage(
   if (!W || !H) return { ok: false, error: "image_dims_unknown" };
   if (W * H > MAX_PDF_PIXELS) return { ok: false, error: "image_too_large" };
 
+  const wmAssets = await loadWatermarkAssets(canvasMod);
   const overlay = createCanvas(W, H);
-  drawWatermark(overlay.getContext("2d"), W, H, prov);
+  drawWatermark(overlay.getContext("2d"), W, H, prov, wmAssets);
   const overlayPng = overlay.toBuffer("image/png");
 
   const composited = base.composite([{ input: overlayPng, left: 0, top: 0 }]);
