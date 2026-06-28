@@ -29,6 +29,7 @@ type MetricsPayload = {
   };
   counts?: { total: number; delivered: number; failed: number; scheduled: number; processing: number };
   replies?: { count: number; rate: number; sampled: number; truncated: boolean; items: Array<{ to: string; message: string }> };
+  conversion?: { count: number; rate: number; snapshot_at?: string } | null;
   numbers?: Array<{ send_from: string; sent: number; delivered: number; failed: number; replies: number; failure_rate: number }>;
 };
 
@@ -190,6 +191,11 @@ export function CampaignDetailDrawer({ campaignId }: { tenantSlug: string; campa
                 <StatTile label="Delivered" value={counts?.delivered ?? "—"} hint={deliveryRate != null ? pct(deliveryRate) : undefined} />
                 <StatTile label="Failed" value={counts?.failed ?? "—"} />
                 <StatTile label="Reply rate" value={replies ? pct(replies.rate) : "—"} hint={replies ? `${replies.count} replies` : undefined} />
+                <StatTile
+                  label="Conversion"
+                  value={data.conversion ? pct(data.conversion.rate) : "—"}
+                  hint={data.conversion ? `${data.conversion.count} engaged/funded` : "pending collector"}
+                />
               </div>
               {replies?.truncated && (
                 <div className="text-[11px] text-fg-dim">

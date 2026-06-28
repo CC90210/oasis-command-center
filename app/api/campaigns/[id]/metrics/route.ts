@@ -16,6 +16,7 @@
 
 import { NextResponse } from "next/server";
 import { resolveTenantId } from "@/lib/api-auth";
+import { getServiceSupabase } from "@/lib/supabase-server";
 import {
   getTextTorrentCredentials,
   campaignDetails,
@@ -98,6 +99,25 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
     const sampled = messages.length;
     const replyRate = sampled ? Math.round((replyCount / sampled) * 1000) / 10 : 0;
 
+    // Conversion comes from the collector's latest snapshot (it joins the roster
+    // to the lead funnel — engaged/funded by stage). Null until the collector runs.
+    let conversion: { count: number; rate: number; snapshot_at: string } | null = null;
+    try {
+      const snap = (
+        await getServiceSupabase()
+          .from("campaign_metric_snapshots")
+          .select("conversion_count,conversion_rate,snapshot_at")
+          .eq("tenant_id", tenantId)
+          .eq("tt_campaign_id", id)
+          .order("snapshot_at", { ascending: false })
+          .limit(1)
+          .maybeSingle()
+      ).data as { conversion_count: number; conversion_rate: number; snapshot_at: string } | null;
+      if (snap) conversion = { count: snap.conversion_count, rate: snap.conversion_rate, snapshot_at: snap.snapshot_at };
+    } catch {
+      /* snapshot optional */
+    }
+
     return NextResponse.json({
       ok: true,
       campaign: {
@@ -111,6 +131,7 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
       },
       counts: { total, delivered, failed, scheduled: counts?.scheduled ?? 0, processing: counts?.processing ?? 0 },
       replies: { count: replyCount, rate: replyRate, sampled, truncated, items: replies },
+      conversion,
       numbers,
     });
   } catch (err) {

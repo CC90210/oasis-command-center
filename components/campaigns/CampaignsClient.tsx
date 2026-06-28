@@ -13,6 +13,7 @@ import { useCallback, useEffect, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Card, EmptyState } from "@/components/Card";
 import { Megaphone, Plus, Send } from "lucide-react";
+import { CampaignListIntel } from "./CampaignListIntel";
 
 type Campaign = {
   id: string | number;
@@ -64,6 +65,7 @@ export function CampaignsClient({
 
   // Create form state
   const [showForm, setShowForm] = useState(false);
+  const [showLists, setShowLists] = useState(false);
   const [listId, setListId] = useState("");
   const [campaignName, setCampaignName] = useState("");
   const [message, setMessage] = useState("");
@@ -185,18 +187,40 @@ export function CampaignsClient({
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between gap-3">
-        <div className="text-xs text-fg-dim">
-          {!loading && `${campaigns.length} campaign${campaigns.length === 1 ? "" : "s"}`}
+        <div className="flex items-center gap-2">
+          <div className="inline-flex rounded-md border border-bg-border overflow-hidden text-[11px]">
+            <button
+              onClick={() => setShowLists(false)}
+              className={`px-2.5 py-1 ${!showLists ? "bg-bg-elev text-fg" : "text-fg-muted hover:text-fg"}`}
+            >
+              Campaigns
+            </button>
+            <button
+              onClick={() => setShowLists(true)}
+              className={`px-2.5 py-1 border-l border-bg-border ${showLists ? "bg-bg-elev text-fg" : "text-fg-muted hover:text-fg"}`}
+            >
+              List intelligence
+            </button>
+          </div>
+          <span className="text-xs text-fg-dim">
+            {!loading && !showLists && `${campaigns.length} campaign${campaigns.length === 1 ? "" : "s"}`}
+          </span>
         </div>
-        <button
-          onClick={() => setShowForm((s) => !s)}
-          className="btn-secondary inline-flex items-center gap-1.5 !px-3 !py-1.5 text-xs"
-        >
-          <Plus className="h-3.5 w-3.5" />
-          {showForm ? "Close" : "New campaign"}
-        </button>
+        {!showLists && (
+          <button
+            onClick={() => setShowForm((s) => !s)}
+            className="btn-secondary inline-flex items-center gap-1.5 !px-3 !py-1.5 text-xs"
+          >
+            <Plus className="h-3.5 w-3.5" />
+            {showForm ? "Close" : "New campaign"}
+          </button>
+        )}
       </div>
 
+      {showLists ? (
+        <CampaignListIntel />
+      ) : (
+      <>
       {showForm && (
         <Card title="New campaign" subtitle="Native anti-block bulk · owner/admin · dry-run unless live">
           <div className="space-y-3">
@@ -388,6 +412,8 @@ export function CampaignsClient({
           </div>
         )}
       </Card>
+      </>
+      )}
     </div>
   );
 }

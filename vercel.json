@@ -8,6 +8,10 @@
     {
       "path": "/api/cron/materialize-plans",
       "schedule": "0 3 * * *"
+    },
+    {
+      "path": "/api/cron/collect-outreach-intel?write=1",
+      "schedule": "0 * * * *"
     }
   ]
 }

@@ -57,13 +57,18 @@ const FUNDED_STAGES = new Set(["approved", "funded"]);
 const stageRank = (s: string) => (FUNDED_STAGES.has(s) ? 3 : ENGAGED_STAGES.has(s) ? 2 : 1);
 
 function checkAuth(req: NextRequest): boolean {
-  const secret = process.env.SCAN_TRIGGER_SECRET;
-  if (!secret) return false;
   const auth = req.headers.get("authorization") || "";
   const bearer = auth.startsWith("Bearer ") ? auth.slice(7) : "";
-  const a = Buffer.from(bearer);
-  const b = Buffer.from(secret);
-  return a.length === b.length && timingSafeEqual(a, b);
+  if (!bearer) return false;
+  // Accept the manual-trigger secret OR Vercel's cron secret (the cron sends
+  // Authorization: Bearer $CRON_SECRET automatically).
+  for (const secret of [process.env.SCAN_TRIGGER_SECRET, process.env.CRON_SECRET]) {
+    if (!secret) continue;
+    const a = Buffer.from(bearer);
+    const b = Buffer.from(secret);
+    if (a.length === b.length && timingSafeEqual(a, b)) return true;
+  }
+  return false;
 }
 
 type DB = ReturnType<typeof getServiceSupabase>;
