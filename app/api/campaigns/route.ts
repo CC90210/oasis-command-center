@@ -222,11 +222,37 @@ export async function POST(req: NextRequest) {
     }
 
     const r = await createBulkCampaign(creds, args);
+
+    // Record the launch in the outreach-intelligence ledger (the anchor the
+    // collector joins on for metrics + conversion). Best-effort — never block
+    // the send on the ledger write.
+    const campaignId = r.data?.campaign_id;
+    if (campaignId) {
+      try {
+        await getServiceSupabase().from("campaign_runs").upsert(
+          {
+            tenant_id: session.tenantId,
+            tt_campaign_id: String(campaignId),
+            campaign_name: campaignName,
+            list_id: listId,
+            list_name: null, // collector backfills from the campaign analytics
+            sender_numbers: numbers,
+            message: cleanMessage,
+            launched_by: session.userId ?? null,
+            dry_run: false,
+          },
+          { onConflict: "tenant_id,tt_campaign_id" },
+        );
+      } catch {
+        /* ledger is best-effort */
+      }
+    }
+
     return NextResponse.json({
       ok: true,
       dry_run: false,
       provider: "texttorrent",
-      campaign_id: r.data?.campaign_id,
+      campaign_id: campaignId,
       total_contacts: r.data?.total_contacts,
       total_segments: r.data?.total_segments,
       total_credit: r.data?.total_credit,
