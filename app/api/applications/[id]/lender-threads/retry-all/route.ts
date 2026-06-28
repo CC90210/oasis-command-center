@@ -20,6 +20,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { resolveSessionContext } from "@/lib/api-auth";
 import { resolveSignerForOperator } from "@/lib/config/agents";
+import { ensureApplicationThreadsWatermarked } from "@/lib/lead-documents";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -39,6 +40,25 @@ export async function POST(
   const { id: applicationId } = await ctx.params;
   const db = getServiceSupabase();
   const nowIso = new Date().toISOString();
+
+  // Watermark door guard (CC 2026-06-28): a retry re-fires shop_out_send_batch
+  // over every pending thread, so brand any un-watermarked bank statement across
+  // this application's threads BEFORE flipping/firing. Refuse (422) if a
+  // statement can't be branded — never re-send one un-watermarked. Done first so
+  // a failure leaves thread state untouched.
+  const wmGuard = await ensureApplicationThreadsWatermarked(tenantId, applicationId);
+  if (!wmGuard.ok) {
+    return NextResponse.json(
+      {
+        ok: false,
+        error: "bank_statement_watermark_failed",
+        message:
+          "Bank statements must carry the SunBiz watermark before re-sending, and branding failed for one or more. Retry, or re-upload the statement.",
+        watermark_failures: wmGuard.failures,
+      },
+      { status: 422 },
+    );
+  }
 
   // Flip every 'error' thread on this application+tenant back to 'pending'.
   const errRes = await db

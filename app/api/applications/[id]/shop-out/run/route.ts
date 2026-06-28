@@ -40,6 +40,7 @@ import { getAgents, deriveSigner, findAgentByEmail } from "@/lib/config/agents";
 import { extractSubmissionDeal } from "@/lib/lenders/extract-submission-deal";
 import { deriveAgentCcs } from "@/lib/lenders/derive-agent-ccs";
 import { type ApplicationProfile, complianceProfileInputs } from "@/lib/lenders/match-fitness";
+import { ensureBankStatementsWatermarked } from "@/lib/lead-documents";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -183,6 +184,26 @@ export async function POST(
   const initiatedByAgent = sess.email ? findAgentByEmail(sess.email) : null;
   const initiatedBy = initiatedByAgent?.name || sess.email || sess.userId;
 
+  const runAttachments = Array.isArray(body.attachments) ? body.attachments : [];
+
+  // Watermark guard (CC 2026-06-28). NOTE: today this direct-Gmail path does NOT
+  // attach statements (executeShopOutRun → sendGmail sends to/cc/subject/body
+  // only; the bytes that reach lenders go via the Python send_gateway behind the
+  // exec-tool chokepoint, which IS guarded). We still brand the operator's
+  // selected statement objects here so storage is consistent AND so this path is
+  // already fail-closed if attachments ever get plumbed into the Gmail send.
+  // Skipped on dry_run (read-only preview).
+  if (body.dry_run !== true && runAttachments.length > 0) {
+    const wmGuard = await ensureBankStatementsWatermarked(sess.tenantId, runAttachments);
+    if (!wmGuard.ok) {
+      return jsonError(422, "bank_statement_watermark_failed", {
+        message:
+          "Bank statements must carry the SunBiz watermark before shop-out, and branding failed for one or more. Retry, or re-upload the statement.",
+        watermark_failures: wmGuard.failures,
+      });
+    }
+  }
+
   // Fire the engine.
   const result = await executeShopOutRun({
     tenantId: sess.tenantId,
@@ -193,7 +214,7 @@ export async function POST(
     ccEmails: finalCcs,
     signer,
     initiatedBy,
-    attachments: Array.isArray(body.attachments) ? body.attachments : [],
+    attachments: runAttachments,
     dryRun: body.dry_run === true,
   });
 

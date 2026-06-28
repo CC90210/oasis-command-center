@@ -1,0 +1,95 @@
+/**
+ * Runtime test for lib/forms/watermark.ts — proves the PDF flatten path
+ * (pdfjs-dist + @napi-rs/canvas + pdf-lib) and the image path (sharp + canvas)
+ * produce valid, branded output. Writes a sample PDF for visual inspection.
+ *   node --conditions=react-server --import tsx scripts/test-watermark.ts
+ */
+import { writeFileSync } from "node:fs";
+import { watermarkBankStatement } from "../lib/forms/watermark";
+
+const PDF_MAGIC = Buffer.from("%PDF");
+const JPG_MAGIC = Buffer.from([0xff, 0xd8, 0xff]);
+const PNG_MAGIC = Buffer.from([0x89, 0x50, 0x4e, 0x47]);
+const isPdf = (b: Buffer) => b.subarray(0, 4).equals(PDF_MAGIC);
+const isJpg = (b: Buffer) => b.subarray(0, 3).equals(JPG_MAGIC);
+const isPng = (b: Buffer) => b.subarray(0, 4).equals(PNG_MAGIC);
+
+const SAMPLE_OUT =
+  process.env.WM_SAMPLE_OUT ||
+  "/private/tmp/claude-501/-Users-conaugh-CEO-Agent/8e524508-5854-49ef-9f72-d7df1c7b158f/scratchpad/watermarked-sample.pdf";
+
+async function main() {
+  let failures = 0;
+  const prov = {
+    businessName: "Zason Latino Mexican Grill LLC",
+    leadId: "31fafb4f-b432-4619-831d-ab12efab9d31",
+    date: "2026-06-28",
+  };
+
+  // 1) PDF path — synth a 2-page statement-ish PDF, watermark, assert valid +
+  //    reloadable + page count preserved.
+  const { PDFDocument, StandardFonts, rgb } = await import("pdf-lib");
+  const src = await PDFDocument.create();
+  const font = await src.embedFont(StandardFonts.Helvetica);
+  for (let i = 0; i < 2; i++) {
+    const p = src.addPage([612, 792]);
+    p.drawText(`FIRST NATIONAL BANK — Statement page ${i + 1}`, { x: 50, y: 740, size: 14, font, color: rgb(0, 0, 0) });
+    p.drawText("Beginning balance 4,210.55", { x: 50, y: 705, size: 10, font });
+    p.drawText("Total deposits 38,902.14   Total withdrawals 31,884.00   NSF 0", { x: 50, y: 685, size: 10, font });
+    p.drawText("Ending balance 11,228.69", { x: 50, y: 665, size: 10, font });
+  }
+  const srcPdf = Buffer.from(await src.save());
+  const wmPdf = await watermarkBankStatement({ bytes: srcPdf, mimeType: "application/pdf", provenance: prov });
+  if (wmPdf.ok && isPdf(wmPdf.bytes)) {
+    const reload = await PDFDocument.load(wmPdf.bytes);
+    const okPages = reload.getPageCount() === 2;
+    console.log(`ok PDF -> watermarked PDF ${wmPdf.bytes.length} bytes, ${reload.getPageCount()} pages${okPages ? "" : " (PAGE COUNT MISMATCH!)"}`);
+    if (!okPages) failures++;
+    try {
+      writeFileSync(SAMPLE_OUT, wmPdf.bytes);
+      console.log(`   sample written -> ${SAMPLE_OUT}`);
+    } catch (e) {
+      console.log("   (could not write sample:", e instanceof Error ? e.message : e, ")");
+    }
+  } else {
+    console.error("FAIL PDF:", wmPdf);
+    failures++;
+  }
+
+  // 2) PNG image stays PNG.
+  const sharp = (await import("sharp")).default;
+  const png = await sharp({ create: { width: 1200, height: 1600, channels: 3, background: { r: 255, g: 255, b: 255 } } }).png().toBuffer();
+  const wmPng = await watermarkBankStatement({ bytes: png, mimeType: "image/png", provenance: prov });
+  if (wmPng.ok && isPng(wmPng.bytes) && wmPng.mimeType === "image/png") {
+    console.log(`ok IMAGE(png) -> ${wmPng.bytes.length} bytes`);
+  } else {
+    console.error("FAIL IMAGE png:", wmPng);
+    failures++;
+  }
+
+  // 3) JPEG image stays JPEG.
+  const jpg = await sharp({ create: { width: 1000, height: 1400, channels: 3, background: { r: 255, g: 255, b: 255 } } }).jpeg().toBuffer();
+  const wmJpg = await watermarkBankStatement({ bytes: jpg, mimeType: "image/jpeg", provenance: prov });
+  if (wmJpg.ok && isJpg(wmJpg.bytes) && wmJpg.mimeType === "image/jpeg") {
+    console.log(`ok IMAGE(jpeg) -> ${wmJpg.bytes.length} bytes`);
+  } else {
+    console.error("FAIL IMAGE jpeg:", wmJpg);
+    failures++;
+  }
+
+  // 4) Unsupported type is rejected (never throws).
+  const bad = await watermarkBankStatement({ bytes: Buffer.from("hello"), mimeType: "text/plain", provenance: prov });
+  if (!bad.ok) console.log("ok unsupported type rejected:", bad.error);
+  else {
+    console.error("FAIL: unsupported type accepted");
+    failures++;
+  }
+
+  console.log(failures === 0 ? "\nALL WATERMARK TESTS PASSED" : `\n${failures} FAILURE(S)`);
+  process.exit(failures === 0 ? 0 : 1);
+}
+
+main().catch((e) => {
+  console.error(e);
+  process.exit(1);
+});

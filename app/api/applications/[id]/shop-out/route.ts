@@ -40,6 +40,7 @@ import { getServiceSupabase } from "@/lib/supabase-server";
 import { resolveSessionContext } from "@/lib/api-auth";
 import { canViewLead, leadScopingEnabled } from "@/lib/lead-scope";
 import { buildShopOutPlan, recordShopOutThreads, autoAdvanceToShopping } from "@/lib/lenders/shop-out";
+import { ensureBankStatementsWatermarked } from "@/lib/lead-documents";
 import { complianceProfileInputs } from "@/lib/lenders/match-fitness";
 import { deriveDealSigner, resolveSignerForOperator } from "@/lib/config/agents";
 
@@ -372,7 +373,8 @@ export async function POST(
     return NextResponse.json({ ok: false, error: planResult.error }, { status: 500 });
   }
 
-  // Dry-run path: return the plan without firing.
+  // Dry-run path: return the plan without firing. (No watermarking on dry-run —
+  // preview stays read-only; the real send below enforces branding.)
   if (body.dry_run) {
     return NextResponse.json({
       ok: true,
@@ -387,6 +389,26 @@ export async function POST(
       // failed, which silently shipped incomplete packets.
       rejected_attachments: rejectedAttachments,
     });
+  }
+
+  // Watermark door guard (CC 2026-06-28): a deal NEVER leaves to lenders with an
+  // un-watermarked bank statement. The physical send (Python shop_out_send_batch)
+  // downloads these storage_paths later, so we brand the stored objects HERE,
+  // before queuing the lender threads. Ingestion already watermarks on upload, so
+  // this is a cheap idempotent backstop in the common case; if a statement can't
+  // be branded we refuse the whole send rather than ship it unmarked.
+  const wmGuard = await ensureBankStatementsWatermarked(tenantId, attachments);
+  if (!wmGuard.ok) {
+    return NextResponse.json(
+      {
+        ok: false,
+        error: "bank_statement_watermark_failed",
+        message:
+          "Bank statements must carry the SunBiz watermark before shop-out, and branding failed for one or more. Retry, or re-upload the statement.",
+        watermark_failures: wmGuard.failures,
+      },
+      { status: 422 },
+    );
   }
 
   // ---------------------------------------------------------------------------

@@ -31,6 +31,7 @@
 import { authorizeBridgeRequest } from "@/lib/bridge-proxy";
 import { bridgeExecToolAllowedForRole } from "@/lib/role-gates";
 import { rateLimit } from "@/lib/rate-limit";
+import { ensureApplicationThreadsWatermarked } from "@/lib/lead-documents";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -114,6 +115,38 @@ export async function POST(req: Request) {
       }),
       { status: 403, headers: { "content-type": "application/json" } },
     );
+  }
+
+  // Watermark CHOKEPOINT (CC 2026-06-28). shop_out_send_batch physically sends a
+  // deal's bank statements to lenders (the Python sender reads each pending
+  // thread's persisted attachments). Every dashboard send path funnels through
+  // this proxy, and a direct same-origin POST would bypass the route-level
+  // guards — so this is the single place that GUARANTEES nothing un-watermarked
+  // reaches a lender. Brand any un-watermarked bank statement across the
+  // application's threads; refuse (422, fail-closed) if branding fails, before
+  // the call ever reaches the sender.
+  if (toolName === "shop_out_send_batch") {
+    const applicationId =
+      typeof body.application_id === "string" ? body.application_id : "";
+    if (!applicationId) {
+      return new Response(
+        JSON.stringify({ ok: false, error: "missing_application_id" }),
+        { status: 400, headers: { "content-type": "application/json" } },
+      );
+    }
+    const wmGuard = await ensureApplicationThreadsWatermarked(auth.tenantId, applicationId);
+    if (!wmGuard.ok) {
+      return new Response(
+        JSON.stringify({
+          ok: false,
+          error: "bank_statement_watermark_failed",
+          message:
+            "Bank statements must carry the SunBiz watermark before they are sent to lenders, and branding failed for one or more.",
+          watermark_failures: wmGuard.failures,
+        }),
+        { status: 422, headers: { "content-type": "application/json" } },
+      );
+    }
   }
 
   try {
