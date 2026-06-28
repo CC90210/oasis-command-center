@@ -27,12 +27,12 @@ const NAVY = "#001F54";
 const GOLD = "#D4A843";
 const WORDMARK = "SUNBIZ FUNDING";
 
-// Raster + size caps (mirror signature-crop.ts).
-const PDF_RENDER_SCALE = 2.0; // ~144 DPI from the 72 DPI PDF user space — crisp but bounded
-const MAX_PDF_DIM = 4000; // px on the long side after scaling
-const MAX_PDF_PIXELS = 24_000_000; // ~24 MP per-page hard ceiling
-const MAX_PAGES = 40; // page ceiling so a huge statement can't blow the function budget
-const PAGE_JPEG_QUALITY = 78; // raster page encode — bounds output PDF size
+// Raster + size caps.
+const PDF_RENDER_SCALE = 2.0; // ~144 DPI from the 72 DPI PDF user space — legible, bounded
+const MAX_PDF_DIM = 3500; // px on the long side after scaling
+const MAX_PDF_PIXELS = 24_000_000; // ~24 MP per-page / per-image ceiling
+const MAX_PAGES = 50; // statements above this FAIL (never truncate) — see watermarkPdf
+const PAGE_JPEG_QUALITY = 80; // raster page encode — bounds output PDF size
 const IMAGE_JPEG_QUALITY = 85;
 
 export type WatermarkProvenance = {
@@ -151,18 +151,64 @@ function drawWatermark(
 }
 
 async function watermarkPdf(bytes: Buffer, prov: WatermarkProvenance): Promise<WatermarkResult> {
+  // Rasterize each page with pdfjs, paint the watermark into the pixels, and
+  // reassemble a clean image-only PDF with pdf-lib. This is the only approach
+  // that handles REAL bank statements (verified 2026-06-28 on production files):
+  //   - pdfjs DECRYPTS permission-encrypted PDFs (bank exports almost always
+  //     are) — pdf-lib cannot, it just preserves the /Encrypt dict.
+  //   - with the image-decoder WASM wired below, pdfjs decodes JBIG2/JPX SCANNED
+  //     pages (which is what these statements are) instead of dropping them.
+  //   - the output is flattened + unencrypted → unremovable mark AND universally
+  //     openable by every lender.
+  // Two things make pdfjs work in the serverless runtime (the 2026-06-28
+  // "DOMMatrix is not defined" production failure): the DOM-global polyfill from
+  // @napi-rs/canvas, and pointing wasmUrl/standardFontDataUrl/cMapUrl at the
+  // pdfjs-dist assets (bundled into the function via next.config.js
+  // outputFileTracingIncludes).
+  const path = await import("node:path");
+  const { pathToFileURL } = await import("node:url");
   const pdfjs = await import("pdfjs-dist/legacy/build/pdf.mjs");
-  const { createCanvas } = await import("@napi-rs/canvas");
+  const canvasMod = await import("@napi-rs/canvas");
   const { PDFDocument } = await import("pdf-lib");
+  const { createCanvas } = canvasMod;
 
-  const loadingTask = pdfjs.getDocument({ data: new Uint8Array(bytes), useSystemFonts: true });
+  // pdfjs renders through DOM APIs Node lacks; @napi-rs/canvas provides them.
+  const g = globalThis as Record<string, unknown>;
+  if (!g.DOMMatrix && canvasMod.DOMMatrix) g.DOMMatrix = canvasMod.DOMMatrix;
+  if (!g.Path2D && canvasMod.Path2D) g.Path2D = canvasMod.Path2D;
+  if (!g.ImageData && canvasMod.ImageData) g.ImageData = canvasMod.ImageData;
+
+  // wasmUrl points pdfjs at its bundled image-decoder dir. The raw .wasm doesn't
+  // instantiate in this Node runtime, but pdfjs then loads the pure-JS fallback
+  // decoder (jbig2_nowasm_fallback.js) from the SAME dir — which decodes the
+  // JBIG2/JPX scans correctly (verified on real statements). standardFontDataUrl
+  // + cMapUrl cover non-embedded fonts. All three dirs are bundled into the
+  // function via next.config.js outputFileTracingIncludes.
+  const pdfjsRoot = path.join(process.cwd(), "node_modules", "pdfjs-dist");
+  const dirUrl = (sub: string) => pathToFileURL(path.join(pdfjsRoot, sub) + path.sep).href;
+
+  const loadingTask = pdfjs.getDocument({
+    data: new Uint8Array(bytes),
+    useSystemFonts: true,
+    wasmUrl: dirUrl("wasm"),
+    standardFontDataUrl: dirUrl("standard_fonts"),
+    cMapUrl: dirUrl("cmaps"),
+    cMapPacked: true,
+  });
   const srcDoc = await loadingTask.promise;
   try {
-    const numPages = Math.min(srcDoc.numPages, MAX_PAGES);
-    if (numPages < 1) return { ok: false, error: "pdf_no_pages" };
+    if (srcDoc.numPages < 1) return { ok: false, error: "pdf_no_pages" };
+    if (srcDoc.numPages > MAX_PAGES) {
+      // FAIL CLOSED — never truncate-and-overwrite. A watermark result overwrites
+      // the stored object, so silently emitting only the first MAX_PAGES would
+      // permanently lose a statement's later pages AND ship a partial statement
+      // to lenders. An oversized statement (rare) instead surfaces an explicit
+      // error at the guard for an operator to handle (e.g. split + re-upload).
+      return { ok: false, error: `pdf_too_many_pages:${srcDoc.numPages}` };
+    }
+    const numPages = srcDoc.numPages;
 
     const outDoc = await PDFDocument.create();
-
     for (let p = 1; p <= numPages; p++) {
       const page = await srcDoc.getPage(p);
       const unit = page.getViewport({ scale: 1 }); // PDF points (physical size)
@@ -178,7 +224,7 @@ async function watermarkPdf(bytes: Buffer, prov: WatermarkProvenance): Promise<W
       }
       const canvas = createCanvas(W, H);
       const ctx = canvas.getContext("2d");
-      // White base so a transparent page region rasterizes opaque (not black).
+      // White base so a transparent region rasterizes opaque (not black).
       ctx.fillStyle = "#ffffff";
       ctx.fillRect(0, 0, W, H);
       await page.render({
@@ -190,11 +236,9 @@ async function watermarkPdf(bytes: Buffer, prov: WatermarkProvenance): Promise<W
 
       const jpeg = await canvas.encode("jpeg", PAGE_JPEG_QUALITY);
       const img = await outDoc.embedJpg(jpeg);
-      // New page sized to the ORIGINAL physical page (points), raster filled in.
       const outPage = outDoc.addPage([unit.width || W, unit.height || H]);
       outPage.drawImage(img, { x: 0, y: 0, width: unit.width || W, height: unit.height || H });
     }
-
     const outBytes = await outDoc.save();
     return { ok: true, bytes: Buffer.from(outBytes), mimeType: "application/pdf", pages: numPages };
   } finally {

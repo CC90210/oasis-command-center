@@ -33,6 +33,30 @@ const nextConfig = {
     // init via fs.readFileSync, which Next.js's static tracer doesn't
     // follow. Explicit include solves it.
     "/api/leads/*/compose-checkin": ["./lib/prompts/**/*"],
+    // 2026-06-28: the bank-statement watermarker (lib/forms/watermark.ts) loads
+    // pdfjs-dist's image-decoder WASM + JS fallbacks + fonts/cmaps at RUNTIME by
+    // path (process.cwd()/node_modules/pdfjs-dist/...). Next's static tracer
+    // can't follow runtime paths, so without these includes the assets don't
+    // ship and real (scanned/encrypted) statements fail to rasterize on Vercel.
+    // Bundle them into every route that can trigger watermarking.
+    ...Object.fromEntries(
+      [
+        "/api/bridge/exec-tool",
+        "/api/applications/*/shop-out",
+        "/api/applications/*/shop-out/run",
+        "/api/applications/*/lender-threads/retry-all",
+        "/api/applications/*/lender-threads/*/retry",
+        "/api/leads/*/documents",
+        "/api/forms/submit",
+      ].map((route) => [
+        route,
+        [
+          "./node_modules/pdfjs-dist/wasm/**",
+          "./node_modules/pdfjs-dist/standard_fonts/**",
+          "./node_modules/pdfjs-dist/cmaps/**",
+        ],
+      ]),
+    ),
   },
   // Standalone output for Docker — produces .next/standalone with a
   // self-contained server.js + trimmed node_modules. No effect on Vercel

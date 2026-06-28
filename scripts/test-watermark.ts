@@ -85,6 +85,26 @@ async function main() {
     failures++;
   }
 
+  // 5) Over-cap statement FAILS CLOSED — must NOT truncate-and-succeed (the
+  //    result overwrites the stored object, so truncation would lose pages).
+  const big = await PDFDocument.create();
+  const bigFont = await big.embedFont(StandardFonts.Helvetica);
+  for (let i = 0; i < 55; i++) {
+    const p = big.addPage([612, 792]);
+    p.drawText(`page ${i + 1}`, { x: 50, y: 740, size: 12, font: bigFont });
+  }
+  const wmBig = await watermarkBankStatement({
+    bytes: Buffer.from(await big.save()),
+    mimeType: "application/pdf",
+    provenance: prov,
+  });
+  if (!wmBig.ok && wmBig.error.startsWith("pdf_too_many_pages")) {
+    console.log("ok over-cap PDF fails closed:", wmBig.error);
+  } else {
+    console.error("FAIL: over-cap PDF did not fail closed:", wmBig);
+    failures++;
+  }
+
   console.log(failures === 0 ? "\nALL WATERMARK TESTS PASSED" : `\n${failures} FAILURE(S)`);
   process.exit(failures === 0 ? 0 : 1);
 }
