@@ -19,6 +19,12 @@ import { sanitizeStorageFilename } from "./storage-helpers";
 
 export const LEAD_DOC_BUCKET = "lead-documents";
 
+// Bump when the watermark RENDERING changes so older-version stored statements
+// get re-watermarked (the shop-out guard + backfill re-do anything not on this
+// version). v2 (2026-06-28): SunBiz LOGO tiled over the white areas + a real
+// registered font (v1 drew invisible text — canvas had no fonts on Vercel).
+export const WATERMARK_VERSION = 2;
+
 export type LeadDocumentUploadResult = {
   ok: true;
   document: {
@@ -124,6 +130,7 @@ export async function uploadLeadDocument(
         storeMime = wm.mimeType;
         storeSize = wm.bytes.length;
         wmMeta.watermarked_at = new Date().toISOString();
+        wmMeta.watermark_version = WATERMARK_VERSION;
       } else {
         wmMeta.watermark_error = wm.error;
       }
@@ -352,7 +359,16 @@ export async function watermarkStoredBankStatement(
     metadata: Record<string, unknown> | null;
   };
   if (row.doc_type !== "bank_statements_3mo") return { ok: false, error: "not_a_bank_statement" };
-  if (row.metadata?.watermarked_at && !opts?.force) return { ok: true, skipped: true };
+  // Skip only if it's already watermarked AT THE CURRENT VERSION (and not
+  // force). A stale-version stored statement (e.g. the v1 invisible-text mark)
+  // falls through and gets re-watermarked with the current renderer.
+  if (
+    row.metadata?.watermarked_at &&
+    row.metadata?.watermark_version === WATERMARK_VERSION &&
+    !opts?.force
+  ) {
+    return { ok: true, skipped: true };
+  }
 
   const dl = await db.storage.from(LEAD_DOC_BUCKET).download(storagePath);
   if (dl.error || !dl.data) {
@@ -389,6 +405,7 @@ export async function watermarkStoredBankStatement(
       metadata: {
         ...(row.metadata || {}),
         watermarked_at: new Date().toISOString(),
+        watermark_version: WATERMARK_VERSION,
         watermark_error: null,
       },
     })
@@ -453,7 +470,9 @@ export async function ensureBankStatementsWatermarked(
       continue;
     }
     if (row.doc_type !== "bank_statements_3mo") continue; // non-statement (ID, void cheque) — out of scope
-    if (row.metadata?.watermarked_at) continue; // already branded
+    if (row.metadata?.watermarked_at && row.metadata?.watermark_version === WATERMARK_VERSION) {
+      continue; // already branded at the current version
+    }
     const wm = await watermarkStoredBankStatement(att.storage_path);
     if (wm.ok || wm.skipped) {
       if (wm.ok && !wm.skipped) branded += 1;

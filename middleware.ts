@@ -38,6 +38,7 @@ export const PUBLIC_PATH_PREFIXES = [
   "/api/outbound/log",     // outbound logging from local backend (HMAC auth inside)
   "/api/internal/apply-extraction", // VPS extraction daemon → applies extracted fields. HMAC (OASIS_OUTBOUND_HMAC_SECRET) gated INSIDE the route, no session — MUST be public or the daemon's callback 401s here before its signature check ever runs, and no dropped application ever applies. The companion poll route /api/extraction-jobs/[job_id] stays session-gated (operator-facing).
   "/api/wmdiag",           // TEMPORARY watermark diagnostic — token-gated INSIDE; REMOVE with the route.
+  "/api/wmbackfill",       // TEMPORARY watermark backfill — token-gated INSIDE; REMOVE with the route.
   // /api/event-feed removed from public allowlist 2026-05-18 (Codex
   // pass 4): payloads carry record IDs / lead context / command
   // summaries — not safe for unauthenticated callers. Route now

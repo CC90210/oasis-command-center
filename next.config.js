@@ -48,6 +48,7 @@ const nextConfig = {
     ...Object.fromEntries(
       [
         "/api/wmdiag",
+        "/api/wmbackfill",
         "/api/bridge/exec-tool",
         "/api/applications/*/shop-out",
         "/api/applications/*/shop-out/run",
