@@ -397,7 +397,13 @@ export async function watermarkStoredBankStatement(
     .upload(storagePath, wm.bytes, { contentType: wm.mimeType, upsert: true });
   if (up.error) return { ok: false, error: `overwrite_failed: ${up.error.message}` };
 
-  await db
+  // Stamp the row LAST, and FAIL if it doesn't persist. The version stamp is the
+  // ONLY skip signal — if the bytes are overwritten but the stamp write fails,
+  // returning ok would leave the row "stale" forever, so every future guard +
+  // backfill would re-rasterize the already-watermarked object (progressive
+  // quality loss + doubled overlays). Returning a failure instead means the
+  // guard blocks the send (safe) and the NEXT attempt re-does it once — bounded.
+  const upd = await db
     .from("lead_documents")
     .update({
       mime_type: wm.mimeType,
@@ -410,6 +416,7 @@ export async function watermarkStoredBankStatement(
       },
     })
     .eq("id", row.id);
+  if (upd.error) return { ok: false, error: `stamp_failed: ${upd.error.message}` };
 
   return { ok: true, sizeBytes: wm.bytes.length, mimeType: wm.mimeType };
 }
