@@ -217,7 +217,7 @@ async function watermarkPdf(bytes: Buffer, prov: WatermarkProvenance): Promise<W
 
   // pdfjs renders through DOM APIs Node lacks (DOMMatrix/Path2D/ImageData);
   // @napi-rs/canvas provides them. CRITICAL ORDER (the 2026-06-28 Vercel
-  // failure, proven via /api/wmdiag): pdfjs BINDS `DOMMatrix` at module-init, so
+  // failure, proven on the live Vercel runtime): pdfjs BINDS `DOMMatrix` at module-init, so
   // the globals MUST be on globalThis BEFORE pdfjs is imported — setting them
   // after the import is too late and pdfjs throws "DOMMatrix is not defined"
   // even though the global is present at render time. Resolve canvas symbols
