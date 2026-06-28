@@ -31,8 +31,10 @@ export const dynamic = "force-dynamic";
 export const maxDuration = 300;
 
 const TENANT_ID = process.env.TEXTTORRENT_TENANT_ID || "aa04fa1f-ad6a-44b0-ac4b-2ff5d1067110";
-const DEEP_FETCH_CAP = Number(process.env.INTEL_DEEP_FETCH_CAP || 12);
-const ROSTER_PAGE_CAP = Number(process.env.INTEL_ROSTER_PAGE_CAP || 12);
+// Kept small: TT's 60/min is SHARED with the live Jordan agent + the dashboard.
+// ~DEEP_FETCH_CAP * (2 + ROSTER_PAGE_CAP) TT calls per run. 3 * 7 = 21 << 60.
+const DEEP_FETCH_CAP = Number(process.env.INTEL_DEEP_FETCH_CAP || 3);
+const ROSTER_PAGE_CAP = Number(process.env.INTEL_ROSTER_PAGE_CAP || 5);
 const PAGE_SIZE = 100;
 
 // Alert thresholds (env-tunable).
@@ -143,9 +145,13 @@ export async function GET(req: NextRequest) {
       const counts = await campaignCount(creds, cid).then((r) => r.data).catch(() => null);
       const msgs = [];
       for (let page = 1; page <= ROSTER_PAGE_CAP; page++) {
-        const r = await campaignMessageList(creds, cid, { limit: PAGE_SIZE, page });
-        msgs.push(...r.data);
-        if (r.data.length < PAGE_SIZE) break;
+        try {
+          const r = await campaignMessageList(creds, cid, { limit: PAGE_SIZE, page });
+          msgs.push(...r.data);
+          if (r.data.length < PAGE_SIZE) break;
+        } catch {
+          break; // rate-limited / transient — compute from the roster we have
+        }
       }
 
       let replyCount = 0;
