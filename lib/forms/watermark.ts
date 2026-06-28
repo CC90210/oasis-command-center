@@ -206,6 +206,18 @@ async function watermarkPdf(bytes: Buffer, prov: WatermarkProvenance): Promise<W
   const pdfjsRoot = path.join(process.cwd(), "node_modules", "pdfjs-dist");
   const dirUrl = (sub: string) => pathToFileURL(path.join(pdfjsRoot, sub) + path.sep).href;
 
+  // pdfjs uses a main-thread "fake worker" in Node and tries to import its
+  // worker module. Next bundles pdf.mjs into a chunk but NOT the worker, so the
+  // default lookup hits a non-existent .next/server/chunks/pdf.worker.mjs (the
+  // 2026-06-28 Vercel "fake worker failed" error). Point workerSrc at the
+  // node_modules worker we bundle via next.config.js outputFileTracingIncludes.
+  try {
+    (pdfjs as unknown as { GlobalWorkerOptions: { workerSrc: string } }).GlobalWorkerOptions.workerSrc =
+      pathToFileURL(path.join(pdfjsRoot, "legacy", "build", "pdf.worker.mjs")).href;
+  } catch {
+    /* fall back to pdfjs default if the shape ever changes */
+  }
+
   const loadingTask = pdfjs.getDocument({
     data: new Uint8Array(bytes),
     useSystemFonts: true,
