@@ -41,6 +41,7 @@ const nextConfig = {
     // Bundle them into every route that can trigger watermarking.
     ...Object.fromEntries(
       [
+        "/api/_wmdiag",
         "/api/bridge/exec-tool",
         "/api/applications/*/shop-out",
         "/api/applications/*/shop-out/run",

@@ -170,13 +170,30 @@ async function watermarkPdf(bytes: Buffer, prov: WatermarkProvenance): Promise<W
   const pdfjs = await import("pdfjs-dist/legacy/build/pdf.mjs");
   const canvasMod = await import("@napi-rs/canvas");
   const { PDFDocument } = await import("pdf-lib");
-  const { createCanvas } = canvasMod;
 
-  // pdfjs renders through DOM APIs Node lacks; @napi-rs/canvas provides them.
+  // pdfjs renders through DOM APIs Node lacks (DOMMatrix/Path2D/ImageData);
+  // @napi-rs/canvas provides them. CRITICAL interop note (the 2026-06-28 Vercel
+  // failure): under Next's serverExternalPackages bundling, the CJS module's
+  // named exports are NOT reliably exposed as properties of the dynamic-import
+  // namespace — they live under `.default`. So resolve every symbol through BOTH
+  // the namespace AND `.default`, or the polyfill is a silent no-op on Vercel
+  // and pdfjs throws "DOMMatrix is not defined" again. We also hard-fail if a
+  // global still can't be resolved, rather than limping into the same error.
+  const cm = (canvasMod as { default?: Record<string, unknown> }).default ?? {};
+  const ns = canvasMod as unknown as Record<string, unknown>;
+  const resolve = (k: string): unknown => ns[k] ?? cm[k];
+  const createCanvas = resolve("createCanvas") as typeof import("@napi-rs/canvas").createCanvas;
+  if (typeof createCanvas !== "function") {
+    return { ok: false, error: "canvas_unavailable:createCanvas" };
+  }
   const g = globalThis as Record<string, unknown>;
-  if (!g.DOMMatrix && canvasMod.DOMMatrix) g.DOMMatrix = canvasMod.DOMMatrix;
-  if (!g.Path2D && canvasMod.Path2D) g.Path2D = canvasMod.Path2D;
-  if (!g.ImageData && canvasMod.ImageData) g.ImageData = canvasMod.ImageData;
+  for (const k of ["DOMMatrix", "Path2D", "ImageData", "DOMPoint"]) {
+    if (!g[k]) {
+      const v = resolve(k);
+      if (v) g[k] = v;
+    }
+  }
+  if (!g.DOMMatrix) return { ok: false, error: "dommatrix_unavailable" };
 
   // wasmUrl points pdfjs at its bundled image-decoder dir. The raw .wasm doesn't
   // instantiate in this Node runtime, but pdfjs then loads the pure-JS fallback
