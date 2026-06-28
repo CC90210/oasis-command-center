@@ -107,6 +107,14 @@ export async function listRecords(input: ListRecordsInput): Promise<ListRecordsR
   // still openable by id). Applications never carry transferred_at.
   if (input.entity === "lead") {
     q = q.is("data->>transferred_at", null);
+  } else if (input.entity === "application") {
+    // Mirror of the lead filter: only deals EXPLICITLY transferred from a lead
+    // (or standalone apps) belong on the Applications board. "Run underwriting"
+    // and doc-extraction create a backing application while the deal is still a
+    // lead — those carry no promoted_at and stay hidden until the operator clicks
+    // "Transfer to Application" (which stamps promoted_at). Prevents the deal
+    // showing on BOTH boards. Application DETAIL via getRecord is unaffected.
+    q = q.not("data->>promoted_at", "is", null);
   }
 
   if (input.sort) {

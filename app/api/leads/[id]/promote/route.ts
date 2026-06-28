@@ -117,6 +117,16 @@ export async function POST(_req: NextRequest, ctx: { params: Promise<{ id: strin
   //    filters on transferred_at), so surface its failure instead of swallowing
   //    it — the action is idempotent, so the UI can retry cleanly.
   try {
+    // Mark the application as promoted → it now belongs on the Applications board
+    // (the board filters on promoted_at, mirroring the leads board's transferred_at).
+    // Stamp the app FIRST: if this fails the lead isn't transferred, so the deal
+    // stays on Leads rather than vanishing from both boards.
+    await updateRecord({
+      tenant_id: sess.tenantId,
+      entity: "application",
+      id: appId,
+      patch: { promoted_at: new Date().toISOString() },
+    });
     await updateRecord({
       tenant_id: sess.tenantId,
       entity: "lead",

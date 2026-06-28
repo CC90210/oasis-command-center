@@ -280,6 +280,17 @@ export function LeadDetailDrawer({
             />
           )}
 
+          {/* Move back to Leads — the reverse of Transfer. Application drawer only.
+              Clears promoted_at/transferred_at so the deal returns to the Leads
+              board and leaves Applications — one card, no duplicate. */}
+          {data && entity === "application" && (
+            <ReturnControl
+              applicationId={recordId}
+              hasLead={typeof (data.record.data as Record<string, unknown>).lead_id === "string"}
+              onReturned={close}
+            />
+          )}
+
           {/* Drop-in autofill — drop a merchant's existing application (PDF or
               photo); Claude reads it and fills THIS lead's application fields.
               Lead drawer only; then upload statements in the Docs tab. */}
@@ -482,6 +493,61 @@ function TransferControl({
       >
         {pending ? <Loader2 className="w-4 h-4 animate-spin" /> : <ShoppingBag className="w-4 h-4" />}
         {pending ? "Transferring…" : "Transfer to Application →"}
+      </button>
+      {error && <div className="mt-1 text-[10.5px] text-red-300">{error}</div>}
+    </div>
+  );
+}
+
+/** ReturnControl — application drawer's reverse bridge back to the Leads board. */
+function ReturnControl({
+  applicationId,
+  hasLead,
+  onReturned,
+}: {
+  applicationId: string;
+  hasLead: boolean;
+  onReturned: () => void;
+}) {
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  if (!hasLead) return null; // standalone application — no originating lead to return to
+
+  async function returnToLead() {
+    if (pending) return;
+    setPending(true);
+    setError(null);
+    try {
+      const r = await fetch(`/api/applications/${applicationId}/return-to-lead`, {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: "{}",
+      });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok || !j.ok) {
+        setError(j.message || j.error || `failed_${r.status}`);
+        return;
+      }
+      onReturned();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "network_error");
+    } finally {
+      setPending(false);
+    }
+  }
+
+  return (
+    <div>
+      <button
+        type="button"
+        onClick={returnToLead}
+        disabled={pending}
+        title="Move this deal back to the Leads board. It leaves Applications and returns as a lead, keeping its data + documents."
+        className="w-full inline-flex items-center justify-center gap-2 rounded-lg border border-bg-border text-fg-muted px-4 py-2 text-[12px] font-semibold hover:text-fg hover:border-fg-dim disabled:opacity-50 transition-colors"
+      >
+        {pending ? <Loader2 className="w-4 h-4 animate-spin" /> : <ChevronLeft className="w-4 h-4" />}
+        {pending ? "Moving…" : "Move back to Leads"}
       </button>
       {error && <div className="mt-1 text-[10.5px] text-red-300">{error}</div>}
     </div>
