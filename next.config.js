@@ -17,7 +17,13 @@ const nextConfig = {
   // Webpack can't parse a native binary, so it must stay an external
   // server-side require instead of being bundled — otherwise the Vercel
   // Linux build fails with "Module parse failed: Unexpected character".
-  serverExternalPackages: ["@napi-rs/canvas"],
+  // @napi-rs/canvas ships a native .node binary webpack can't parse → external.
+  // pdfjs-dist added 2026-06-28: bundling it into a chunk broke its worker
+  // module lookup + its require("@napi-rs/canvas") (stale /vercel/path0 build
+  // path → "fake worker failed" / "Cannot find module" on Vercel). Keeping it
+  // external makes it run from node_modules with normal resolution — and copies
+  // its wasm/fonts/cmaps/worker subdirs into the function alongside it.
+  serverExternalPackages: ["@napi-rs/canvas", "pdfjs-dist"],
   outputFileTracingRoot: path.join(__dirname),
   // lib/prompts/index.ts reads the .txt + .json prompt files at module init
   // via fs.readFileSync. Next.js's static tracer doesn't follow runtime paths,
