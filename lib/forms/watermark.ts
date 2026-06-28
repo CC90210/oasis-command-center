@@ -338,19 +338,32 @@ async function watermarkImage(
   const ns = canvasMod as unknown as Record<string, unknown>;
   const createCanvas = (ns.createCanvas ?? cm.createCanvas) as typeof import("@napi-rs/canvas").createCanvas;
 
-  const base = sharp(bytes, { failOn: "none" }).rotate(); // honor EXIF orientation
-  const meta = await base.metadata();
+  // Apply EXIF rotation AND bound the size FIRST, then read the real dimensions
+  // from the resulting buffer. metadata() reports PRE-rotation dims, so reading
+  // them before .rotate() gives a swapped W/H for portrait photos → the overlay
+  // mismatches and sharp throws "Image to composite must have same dimensions"
+  // (the 2026-06-28 backfill failures). Downscaling oversized photos here (long
+  // side capped) replaces the old hard image_too_large failure — we brand the
+  // statement instead of refusing it.
+  const MAX_IMG_DIM = 3000;
+  let pre = sharp(bytes, { failOn: "none" }).rotate();
+  const m0 = await pre.metadata();
+  const long = Math.max(m0.width || 0, m0.height || 0);
+  if (long > MAX_IMG_DIM) {
+    pre = pre.resize({ width: MAX_IMG_DIM, height: MAX_IMG_DIM, fit: "inside" });
+  }
+  const rotated = await pre.toBuffer();
+  const meta = await sharp(rotated).metadata();
   const W = meta.width || 0;
   const H = meta.height || 0;
   if (!W || !H) return { ok: false, error: "image_dims_unknown" };
-  if (W * H > MAX_PDF_PIXELS) return { ok: false, error: "image_too_large" };
 
   const wmAssets = await loadWatermarkAssets(canvasMod);
   const overlay = createCanvas(W, H);
   drawWatermark(overlay.getContext("2d"), W, H, prov, wmAssets);
   const overlayPng = overlay.toBuffer("image/png");
 
-  const composited = base.composite([{ input: overlayPng, left: 0, top: 0 }]);
+  const composited = sharp(rotated).composite([{ input: overlayPng, left: 0, top: 0 }]);
   // Preserve the original raster format where sharp can write it; HEIC/HEIF and
   // anything else flatten to JPEG (sharp can't reliably encode HEIC).
   const mt = mimeType.toLowerCase();
