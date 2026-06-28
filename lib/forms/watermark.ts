@@ -167,18 +167,17 @@ async function watermarkPdf(bytes: Buffer, prov: WatermarkProvenance): Promise<W
   // outputFileTracingIncludes).
   const path = await import("node:path");
   const { pathToFileURL } = await import("node:url");
-  const pdfjs = await import("pdfjs-dist/legacy/build/pdf.mjs");
   const canvasMod = await import("@napi-rs/canvas");
   const { PDFDocument } = await import("pdf-lib");
 
   // pdfjs renders through DOM APIs Node lacks (DOMMatrix/Path2D/ImageData);
-  // @napi-rs/canvas provides them. CRITICAL interop note (the 2026-06-28 Vercel
-  // failure): under Next's serverExternalPackages bundling, the CJS module's
-  // named exports are NOT reliably exposed as properties of the dynamic-import
-  // namespace — they live under `.default`. So resolve every symbol through BOTH
-  // the namespace AND `.default`, or the polyfill is a silent no-op on Vercel
-  // and pdfjs throws "DOMMatrix is not defined" again. We also hard-fail if a
-  // global still can't be resolved, rather than limping into the same error.
+  // @napi-rs/canvas provides them. CRITICAL ORDER (the 2026-06-28 Vercel
+  // failure, proven via /api/wmdiag): pdfjs BINDS `DOMMatrix` at module-init, so
+  // the globals MUST be on globalThis BEFORE pdfjs is imported — setting them
+  // after the import is too late and pdfjs throws "DOMMatrix is not defined"
+  // even though the global is present at render time. Resolve canvas symbols
+  // through BOTH the namespace and `.default` (interop-safe), hard-fail if still
+  // missing, set the globals, and ONLY THEN import pdfjs.
   const cm = (canvasMod as { default?: Record<string, unknown> }).default ?? {};
   const ns = canvasMod as unknown as Record<string, unknown>;
   const resolve = (k: string): unknown => ns[k] ?? cm[k];
@@ -194,6 +193,9 @@ async function watermarkPdf(bytes: Buffer, prov: WatermarkProvenance): Promise<W
     }
   }
   if (!g.DOMMatrix) return { ok: false, error: "dommatrix_unavailable" };
+
+  // Import pdfjs AFTER the globals are set (see above).
+  const pdfjs = await import("pdfjs-dist/legacy/build/pdf.mjs");
 
   // wasmUrl points pdfjs at its bundled image-decoder dir. The raw .wasm doesn't
   // instantiate in this Node runtime, but pdfjs then loads the pure-JS fallback
