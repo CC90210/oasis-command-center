@@ -107,42 +107,14 @@ export async function uploadLeadDocument(
       ? classifyDocTypeByFilename(cleanName)
       : input.docType;
 
-  // Bank statements get the unremovable SunBiz watermark baked in at ingestion
-  // (CC 2026-06-28). Bytes are already in hand here, so brand them inline before
-  // the store — no re-download. Best-effort: a branding failure NEVER blocks the
-  // upload; we store the original, flag metadata.watermark_error, and the
-  // shop-out guard heals it before anything leaves to a lender.
-  let storeBytes: Buffer | Uint8Array = input.bytes;
-  let storeMime = input.mimeType;
-  let storeSize = input.sizeBytes;
-  const wmMeta: Record<string, unknown> = {};
-  if (docType === "bank_statements_3mo") {
-    try {
-      const { watermarkBankStatement } = await import("./forms/watermark");
-      const srcBuf = Buffer.isBuffer(input.bytes) ? input.bytes : Buffer.from(input.bytes);
-      const wm = await watermarkBankStatement({
-        bytes: srcBuf,
-        mimeType: input.mimeType,
-        provenance: await resolveProvenance(db, input.tenantId, input.leadId),
-      });
-      if (wm.ok) {
-        storeBytes = wm.bytes;
-        storeMime = wm.mimeType;
-        storeSize = wm.bytes.length;
-        wmMeta.watermarked_at = new Date().toISOString();
-        wmMeta.watermark_version = WATERMARK_VERSION;
-      } else {
-        wmMeta.watermark_error = wm.error;
-      }
-    } catch (e) {
-      wmMeta.watermark_error = e instanceof Error ? e.message : "watermark_threw";
-    }
-  }
-
+  // Bank statements are stored CLEAN (2026-06-29). The SunBiz watermark is applied
+  // ONLY at shop-out, to a SEPARATE derived copy (watermarkAttachmentsForShopOut),
+  // so lead storage + FundMate/paper-lender submissions stay watermark-free while
+  // lenders still receive a branded copy.
   const upload = await db.storage
     .from(LEAD_DOC_BUCKET)
-    .upload(storagePath, storeBytes, {
-      contentType: storeMime,
+    .upload(storagePath, input.bytes, {
+      contentType: input.mimeType,
       upsert: false,
     });
   if (upload.error) {
@@ -156,14 +128,13 @@ export async function uploadLeadDocument(
       lead_id: input.leadId,
       filename: cleanName,
       storage_path: storagePath,
-      mime_type: storeMime,
-      size_bytes: storeSize,
+      mime_type: input.mimeType,
+      size_bytes: input.sizeBytes,
       doc_type: docType,
       uploaded_by: input.uploadedBy,
       metadata: {
         source: input.source,
         ...(input.extraMetadata || {}),
-        ...wmMeta,
       },
     })
     .select("id, filename, mime_type, size_bytes, doc_type, uploaded_by, uploaded_at, storage_path")
@@ -268,22 +239,8 @@ export async function registerLeadDocument(input: {
     return { ok: false, error: `metadata_insert_failed: ${ins.error.message}` };
   }
   const doc = ins.data as LeadDocumentUploadResult["document"];
-  // Direct-to-storage uploads (public form) never passed bytes through the
-  // server, so brand bank statements now: download → watermark → overwrite in
-  // place (CC 2026-06-28). Best-effort and awaited so the stored object is
-  // branded by the time submit returns; a failure is non-fatal (the shop-out
-  // guard + backfill are the backstop).
-  if (docType === "bank_statements_3mo") {
-    try {
-      const wm = await watermarkStoredBankStatement(input.storagePath);
-      if (wm.ok && !wm.skipped && typeof wm.sizeBytes === "number") {
-        doc.size_bytes = wm.sizeBytes;
-        if (wm.mimeType) doc.mime_type = wm.mimeType;
-      }
-    } catch {
-      /* best-effort */
-    }
-  }
+  // Stored CLEAN (2026-06-29) — bank statements are watermarked only at shop-out
+  // (a derived copy), so direct-to-storage uploads land clean like every surface.
   return { ok: true, document: doc };
 }
 
@@ -422,87 +379,141 @@ export async function watermarkStoredBankStatement(
 }
 
 /**
- * Shop-out door guard: before a deal's documents leave to lenders, make sure
- * every bank-statement attachment carries the SunBiz watermark. Heals any that
- * ingestion missed or failed (idempotent — already-branded docs are skipped
- * cheaply, before any download). Returns the statements that could NOT be
- * branded so the caller refuses the send rather than ship one un-watermarked.
- * Non-bank attachments (void cheque, ID, etc.) pass through untouched.
+ * Get (or create) the watermarked DERIVED copy of a stored bank statement, for
+ * the lender-facing send. Downloads the CLEAN original → SunBiz-watermarks →
+ * uploads to a separate `_shopout_wm/{docId}_v{version}.pdf` path. NEVER touches
+ * the original (lead storage + FundMate keep reading it clean). Idempotent: a
+ * copy already recorded at the current version is reused.
  */
-export async function ensureBankStatementsWatermarked(
+async function getOrCreateWatermarkedCopy(
+  db: ReturnType<typeof getServiceSupabase>,
+  row: {
+    id: string;
+    tenant_id: string;
+    lead_id: string;
+    storage_path: string;
+    mime_type: string | null;
+    metadata: Record<string, unknown> | null;
+  },
+): Promise<{ ok: true; wmPath: string } | { ok: false; error: string }> {
+  const wmPath = `${row.tenant_id}/${row.lead_id}/_shopout_wm/${row.id}_v${WATERMARK_VERSION}.pdf`;
+  if (
+    row.metadata?.shopout_wm_path === wmPath &&
+    row.metadata?.shopout_wm_version === WATERMARK_VERSION
+  ) {
+    return { ok: true, wmPath }; // current copy already minted — reuse
+  }
+  const dl = await db.storage.from(LEAD_DOC_BUCKET).download(row.storage_path);
+  if (dl.error || !dl.data) {
+    return { ok: false, error: `download_failed: ${dl.error?.message || "no_data"}` };
+  }
+  const buf = Buffer.from(await dl.data.arrayBuffer());
+  const { watermarkBankStatement } = await import("./forms/watermark");
+  const wm = await watermarkBankStatement({
+    bytes: buf,
+    mimeType: row.mime_type || "application/pdf",
+    provenance: await resolveProvenance(db, row.tenant_id, row.lead_id),
+  });
+  if (!wm.ok) return { ok: false, error: wm.error };
+  const up = await db.storage
+    .from(LEAD_DOC_BUCKET)
+    .upload(wmPath, wm.bytes, { contentType: wm.mimeType, upsert: true });
+  if (up.error) return { ok: false, error: `wm_copy_upload_failed: ${up.error.message}` };
+  // Pointer on the ORIGINAL row so we reuse the copy + can re-resolve on retry.
+  await db
+    .from("lead_documents")
+    .update({
+      metadata: {
+        ...(row.metadata || {}),
+        shopout_wm_path: wmPath,
+        shopout_wm_version: WATERMARK_VERSION,
+        shopout_wm_at: new Date().toISOString(),
+      },
+    })
+    .eq("id", row.id);
+  return { ok: true, wmPath };
+}
+
+export type ShopOutAttachmentBase = {
+  filename: string;
+  storage_path: string;
+  original_path?: string;
+};
+
+type WmDocRow = {
+  id: string;
+  tenant_id: string;
+  lead_id: string;
+  storage_path: string;
+  doc_type?: string;
+  mime_type: string | null;
+  metadata: Record<string, unknown> | null;
+};
+
+/**
+ * Shop-out door guard (2026-06-29 model): for the lender-facing send, REWRITE
+ * each bank-statement attachment to point at its watermarked DERIVED copy,
+ * leaving the clean original untouched (lead storage + FundMate stay clean). The
+ * returned attachments carry storage_path = the watermarked copy + original_path
+ * = the clean source (so retries re-resolve from the original). Non-statement
+ * attachments (the app form, ID, void cheque) pass through clean. Fail-closed:
+ * any statement we can't resolve or brand is a failure → caller refuses the send.
+ */
+export async function watermarkAttachmentsForShopOut<T extends ShopOutAttachmentBase>(
   tenantId: string,
-  attachments: Array<{ filename: string; storage_path: string }>,
+  attachments: T[],
 ): Promise<{
   ok: boolean;
-  branded: number;
+  attachments: T[];
   failures: Array<{ filename: string; storage_path: string; reason: string }>;
 }> {
   const db = getServiceSupabase();
+  const out: T[] = [];
   const failures: Array<{ filename: string; storage_path: string; reason: string }> = [];
-  let branded = 0;
-  const paths = attachments.map((a) => a.storage_path).filter(Boolean);
-  if (paths.length === 0) return { ok: true, branded, failures };
+  const origOf = (a: T) =>
+    typeof a.original_path === "string" && a.original_path ? a.original_path : a.storage_path;
+  const paths = attachments.map(origOf).filter(Boolean);
+  if (paths.length === 0) return { ok: true, attachments, failures };
 
   const rows = await db
     .from("lead_documents")
-    .select("storage_path, doc_type, metadata")
+    .select("id, tenant_id, lead_id, storage_path, doc_type, mime_type, metadata")
     .eq("tenant_id", tenantId)
     .in("storage_path", paths);
-  const byPath = new Map<
-    string,
-    { doc_type?: string; metadata?: Record<string, unknown> | null }
-  >();
-  for (const r of (rows.data || []) as Array<{
-    storage_path: string;
-    doc_type?: string;
-    metadata?: Record<string, unknown> | null;
-  }>) {
-    byPath.set(r.storage_path, r);
-  }
+  const byPath = new Map<string, WmDocRow>();
+  for (const r of (rows.data || []) as WmDocRow[]) byPath.set(r.storage_path, r);
 
   for (const att of attachments) {
-    const row = byPath.get(att.storage_path);
+    const op = origOf(att);
+    const row = byPath.get(op);
     if (!row) {
       // FAIL CLOSED: an attachment we can't resolve to a tenant lead_documents
-      // row could be an un-branded bank statement we have no way to verify.
-      // Never ship what we can't identify — surface it so the caller refuses
-      // the send. (Normal flow always resolves: attachments are picked from the
-      // operator's own lead_documents list; an unresolved path means a
-      // hand-crafted request or a doc removed mid-flight.)
-      failures.push({
-        filename: att.filename,
-        storage_path: att.storage_path,
-        reason: "unresolved_attachment_no_lead_document",
-      });
+      // row could be an un-branded statement we can't verify. Never ship it.
+      failures.push({ filename: att.filename, storage_path: att.storage_path, reason: "unresolved_attachment_no_lead_document" });
       continue;
     }
-    if (row.doc_type !== "bank_statements_3mo") continue; // non-statement (ID, void cheque) — out of scope
-    if (row.metadata?.watermarked_at && row.metadata?.watermark_version === WATERMARK_VERSION) {
-      continue; // already branded at the current version
+    if (row.doc_type !== "bank_statements_3mo") {
+      out.push({ ...att, storage_path: op, original_path: op } as T); // non-statement — clean original
+      continue;
     }
-    const wm = await watermarkStoredBankStatement(att.storage_path);
-    if (wm.ok || wm.skipped) {
-      if (wm.ok && !wm.skipped) branded += 1;
-    } else {
-      failures.push({
-        filename: att.filename,
-        storage_path: att.storage_path,
-        reason: wm.error || "watermark_failed",
-      });
+    const cp = await getOrCreateWatermarkedCopy(db, row);
+    if (!cp.ok) {
+      failures.push({ filename: att.filename, storage_path: att.storage_path, reason: cp.error });
+      continue;
     }
+    out.push({ ...att, storage_path: cp.wmPath, original_path: op } as T);
   }
-  return { ok: failures.length === 0, branded, failures };
+  return { ok: failures.length === 0, attachments: out, failures };
 }
 
 /**
  * Retry-path door guard: the lender-thread retry endpoints re-fire
- * shop_out_send_batch, which sends EVERY non-terminal thread on the application
- * from its persisted attachments (application_lender_threads.attachments,
- * migration 065). Before a retry can re-send, brand any un-watermarked bank
- * statement across those threads — this is the only path that can ship a
- * PRE-FEATURE or previously-failed thread whose attachments never passed the
- * upload or shop-out guards. Same fail-closed contract as
- * ensureBankStatementsWatermarked (an unresolved path is a failure).
+ * shop_out_send_batch over each thread's persisted attachments
+ * (application_lender_threads.attachments, migration 065). Re-resolve each
+ * thread's bank-statement attachments to their CURRENT watermarked copy and
+ * write the rewritten attachments back, so a retry re-sends the branded copy
+ * (and heals a PRE-FEATURE thread whose attachment is still a clean original).
+ * Same fail-closed contract.
  */
 export async function ensureApplicationThreadsWatermarked(
   tenantId: string,
@@ -515,7 +526,7 @@ export async function ensureApplicationThreadsWatermarked(
   const db = getServiceSupabase();
   const res = await db
     .from("application_lender_threads")
-    .select("attachments")
+    .select("id, attachments")
     .eq("tenant_id", tenantId)
     .eq("application_id", applicationId)
     // Everything the batch could send once a retry flips error/sending → pending.
@@ -527,21 +538,25 @@ export async function ensureApplicationThreadsWatermarked(
       failures: [{ filename: "(threads)", storage_path: "", reason: `thread_query_failed: ${res.error.message}` }],
     };
   }
-  const seen = new Set<string>();
-  const attachments: Array<{ filename: string; storage_path: string }> = [];
-  for (const row of (res.data || []) as Array<{ attachments?: unknown }>) {
-    const arr = Array.isArray(row.attachments) ? row.attachments : [];
-    for (const a of arr as Array<Record<string, unknown>>) {
-      const sp = typeof a?.storage_path === "string" ? a.storage_path : "";
-      if (!sp || seen.has(sp)) continue;
-      seen.add(sp);
-      attachments.push({
-        filename: typeof a?.filename === "string" ? a.filename : "attachment",
-        storage_path: sp,
-      });
+  const failures: Array<{ filename: string; storage_path: string; reason: string }> = [];
+  let branded = 0;
+  for (const thread of (res.data || []) as Array<{ id: string; attachments?: unknown }>) {
+    const arr = (Array.isArray(thread.attachments) ? thread.attachments : []) as ShopOutAttachmentBase[];
+    if (arr.length === 0) continue;
+    const r = await watermarkAttachmentsForShopOut(tenantId, arr);
+    if (!r.ok) {
+      failures.push(...r.failures);
+      continue;
     }
+    const upd = await db
+      .from("application_lender_threads")
+      .update({ attachments: r.attachments })
+      .eq("id", thread.id)
+      .eq("tenant_id", tenantId);
+    if (upd.error) failures.push({ filename: "(thread)", storage_path: "", reason: `thread_update_failed: ${upd.error.message}` });
+    else branded += 1;
   }
-  return ensureBankStatementsWatermarked(tenantId, attachments);
+  return { ok: failures.length === 0, branded, failures };
 }
 
 /**

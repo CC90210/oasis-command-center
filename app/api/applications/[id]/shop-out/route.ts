@@ -40,7 +40,7 @@ import { getServiceSupabase } from "@/lib/supabase-server";
 import { resolveSessionContext } from "@/lib/api-auth";
 import { canViewLead, leadScopingEnabled } from "@/lib/lead-scope";
 import { buildShopOutPlan, recordShopOutThreads, autoAdvanceToShopping } from "@/lib/lenders/shop-out";
-import { ensureBankStatementsWatermarked } from "@/lib/lead-documents";
+import { watermarkAttachmentsForShopOut } from "@/lib/lead-documents";
 import { complianceProfileInputs } from "@/lib/lenders/match-fitness";
 import { deriveDealSigner, resolveSignerForOperator } from "@/lib/config/agents";
 
@@ -391,13 +391,13 @@ export async function POST(
     });
   }
 
-  // Watermark door guard (CC 2026-06-28): a deal NEVER leaves to lenders with an
-  // un-watermarked bank statement. The physical send (Python shop_out_send_batch)
-  // downloads these storage_paths later, so we brand the stored objects HERE,
-  // before queuing the lender threads. Ingestion already watermarks on upload, so
-  // this is a cheap idempotent backstop in the common case; if a statement can't
-  // be branded we refuse the whole send rather than ship it unmarked.
-  const wmGuard = await ensureBankStatementsWatermarked(tenantId, attachments);
+  // Watermark door guard (2026-06-29): statements are stored CLEAN and branded
+  // ONLY here, into a SEPARATE derived copy. The returned attachments point at the
+  // watermarked copies (the clean originals are untouched, so lead storage +
+  // FundMate stay watermark-free); the lender threads carry those copies so the
+  // Python sender ships the branded bytes. Fail-closed: if any statement can't be
+  // branded we refuse the whole send rather than ship it unmarked.
+  const wmGuard = await watermarkAttachmentsForShopOut(tenantId, attachments);
   if (!wmGuard.ok) {
     return NextResponse.json(
       {
@@ -410,6 +410,7 @@ export async function POST(
       { status: 422 },
     );
   }
+  const lenderAttachments = wmGuard.attachments;
 
   // ---------------------------------------------------------------------------
   // Queue pass.
@@ -470,10 +471,10 @@ export async function POST(
     application_id: applicationId,
     cc_emails: ccEmails,
     entries,
-    // Validated attachments (the foreign-tenant ones already got
-    // filtered out above into rejectedAttachments). Persisted per-
-    // thread so the sender doesn't have to re-resolve them.
-    attachments,
+    // Watermarked-copy attachments (storage_path → the derived branded copy,
+    // original_path → the clean source). Persisted per-thread so the sender ships
+    // the branded copies + retries can re-resolve from the original.
+    attachments: lenderAttachments,
     owner_phone: ownerPhone,
   });
   if (!inserted.ok) {

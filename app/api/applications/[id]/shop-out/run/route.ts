@@ -40,7 +40,7 @@ import { getAgents, deriveSigner, findAgentByEmail } from "@/lib/config/agents";
 import { extractSubmissionDeal } from "@/lib/lenders/extract-submission-deal";
 import { deriveAgentCcs } from "@/lib/lenders/derive-agent-ccs";
 import { type ApplicationProfile, complianceProfileInputs } from "@/lib/lenders/match-fitness";
-import { ensureBankStatementsWatermarked } from "@/lib/lead-documents";
+import { watermarkAttachmentsForShopOut } from "@/lib/lead-documents";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -194,7 +194,7 @@ export async function POST(
   // already fail-closed if attachments ever get plumbed into the Gmail send.
   // Skipped on dry_run (read-only preview).
   if (body.dry_run !== true && runAttachments.length > 0) {
-    const wmGuard = await ensureBankStatementsWatermarked(sess.tenantId, runAttachments);
+    const wmGuard = await watermarkAttachmentsForShopOut(sess.tenantId, runAttachments);
     if (!wmGuard.ok) {
       return jsonError(422, "bank_statement_watermark_failed", {
         message:
