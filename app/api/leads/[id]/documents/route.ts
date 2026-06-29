@@ -54,7 +54,7 @@ export async function GET(
     // (the shop-out route validates each path starts with `<tenant_id>/`
     // before forwarding to send_gateway). Tenant-scoped read is already
     // enforced by the .eq("tenant_id") + RLS combo.
-    .select("id, filename, mime_type, size_bytes, doc_type, storage_path, uploaded_by, uploaded_at")
+    .select("id, filename, mime_type, size_bytes, doc_type, storage_path, uploaded_by, uploaded_at, metadata")
     .eq("tenant_id", sess.tenantId)
     .eq("lead_id", target.queryLeadId)
     .is("metadata->>deleted_at", null) // Batch 5: exclude soft-deleted (also keeps them out of shop-out)
@@ -62,7 +62,18 @@ export async function GET(
   if (r.error) {
     return NextResponse.json({ ok: false, error: r.error.message }, { status: 500 });
   }
-  return NextResponse.json({ ok: true, documents: r.data || [] });
+  // Attach the duplicate-file variant state (2026-06-29) for the drawer toggle,
+  // keeping storage_path (shop-out attachment builder reads it).
+  const documents = ((r.data || []) as Array<Record<string, unknown>>).map((d) => {
+    const meta = (d.metadata as Record<string, unknown>) || {};
+    const legacy = !!meta.watermarked_at;
+    return {
+      ...d,
+      active_variant: legacy ? "watermarked" : meta.active_variant === "watermarked" ? "watermarked" : "clean",
+      legacy_baked: legacy,
+    };
+  });
+  return NextResponse.json({ ok: true, documents });
 }
 
 export async function POST(

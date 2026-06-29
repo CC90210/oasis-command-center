@@ -49,7 +49,7 @@ export type WatermarkProvenance = {
 };
 
 export type WatermarkResult =
-  | { ok: true; bytes: Buffer; mimeType: string; pages?: number }
+  | { ok: true; bytes: Buffer; mimeType: string; pages?: number; raster?: boolean }
   | { ok: false; error: string };
 
 const IMAGE_MIME = new Set([
@@ -235,10 +235,9 @@ function toWinAnsi(s: string): string {
  * kept separately by lib/lead-documents.ts), so reversibility comes from the
  * preserved original, not from stripping the overlay.
  *
- * ignoreEncryption: real bank PDFs are permission-encrypted (owner password, no
- * user password) — pdf-lib refuses to edit them unless told to ignore the
- * /Encrypt dict. pdf-lib never WRITES encryption, so save() emits a clean
- * unencrypted PDF (universally openable by lenders, same as the raster path).
+ * Encrypted sources are NOT handled here — stock pdf-lib can't decrypt content
+ * streams, so overlaying an encrypted PDF yields corrupt output. We detect
+ * encryption up front and bail to the raster path (pdfjs decrypts correctly).
  */
 async function watermarkPdfOverlay(bytes: Buffer, prov: WatermarkProvenance): Promise<WatermarkResult> {
   try {
@@ -246,7 +245,22 @@ async function watermarkPdfOverlay(bytes: Buffer, prov: WatermarkProvenance): Pr
     const fs = await import("node:fs/promises");
     const { PDFDocument, StandardFonts, degrees, rgb } = await import("pdf-lib");
 
-    const doc = await PDFDocument.load(new Uint8Array(bytes), { ignoreEncryption: true });
+    // ENCRYPTION GUARD (verified 2026-06-29 on real bank statements): permission-
+    // encrypted bank PDFs are ~40% of statements, and stock pdf-lib does NOT
+    // decrypt their content streams. `ignoreEncryption:true` lets load() succeed
+    // but save() then emits the still-encrypted streams WITHOUT the /Encrypt dict
+    // → a CORRUPT, mostly-blank PDF (stream-inflate proof: ~5-50% of streams
+    // decode). So we must NOT overlay an encrypted source. Load WITHOUT
+    // ignoreEncryption (throws on encrypted input) and bail to the raster path,
+    // which uses pdfjs and DOES decrypt correctly. Any other load error also
+    // bails to raster.
+    let doc: import("pdf-lib").PDFDocument;
+    try {
+      doc = await PDFDocument.load(new Uint8Array(bytes));
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      return { ok: false, error: /encrypt/i.test(msg) ? "overlay_encrypted_source" : "overlay_load_failed:" + msg };
+    }
     const pages = doc.getPages();
     if (pages.length < 1) return { ok: false, error: "pdf_no_pages" };
     // FAIL CLOSED — never truncate (mirrors the raster path).
@@ -468,7 +482,9 @@ async function watermarkPdfRaster(bytes: Buffer, prov: WatermarkProvenance): Pro
       outPage.drawImage(img, { x: 0, y: 0, width: unit.width || W, height: unit.height || H });
     }
     const outBytes = await outDoc.save();
-    return { ok: true, bytes: Buffer.from(outBytes), mimeType: "application/pdf", pages: numPages };
+    // raster:true — this copy is FLATTENED (lossy). Callers stamp it so a
+    // rasterized watermark is never silent (e.g. metadata.shopout_wm_raster).
+    return { ok: true, bytes: Buffer.from(outBytes), mimeType: "application/pdf", pages: numPages, raster: true };
   } finally {
     try {
       await loadingTask.destroy();

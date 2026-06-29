@@ -397,13 +397,13 @@ async function getOrCreateWatermarkedCopy(
     mime_type: string | null;
     metadata: Record<string, unknown> | null;
   },
-): Promise<{ ok: true; wmPath: string } | { ok: false; error: string }> {
+): Promise<{ ok: true; wmPath: string; raster: boolean } | { ok: false; error: string }> {
   const wmPath = `${row.tenant_id}/${row.lead_id}/_shopout_wm/${row.id}_v${WATERMARK_VERSION}.pdf`;
   if (
     row.metadata?.shopout_wm_path === wmPath &&
     row.metadata?.shopout_wm_version === WATERMARK_VERSION
   ) {
-    return { ok: true, wmPath }; // current copy already minted — reuse
+    return { ok: true, wmPath, raster: row.metadata?.shopout_wm_raster === true }; // reuse
   }
   const dl = await db.storage.from(LEAD_DOC_BUCKET).download(row.storage_path);
   if (dl.error || !dl.data) {
@@ -421,7 +421,15 @@ async function getOrCreateWatermarkedCopy(
     .from(LEAD_DOC_BUCKET)
     .upload(wmPath, wm.bytes, { contentType: wm.mimeType, upsert: true });
   if (up.error) return { ok: false, error: `wm_copy_upload_failed: ${up.error.message}` };
+  // Orphan cleanup: a version bump (e.g. v2→v3) writes a NEW path; best-effort
+  // delete the prior-version copy so old rasterized copies don't pile up.
+  const prior = typeof row.metadata?.shopout_wm_path === "string" ? (row.metadata.shopout_wm_path as string) : null;
+  if (prior && prior !== wmPath && prior.startsWith(`${row.tenant_id}/`)) {
+    try { await db.storage.from(LEAD_DOC_BUCKET).remove([prior]); } catch { /* best-effort */ }
+  }
   // Pointer on the ORIGINAL row so we reuse the copy + can re-resolve on retry.
+  // shopout_wm_raster flags a LOSSY (flattened) copy — set when the overlay had
+  // to fall back to raster (e.g. an encrypted source) so it's never silent.
   await db
     .from("lead_documents")
     .update({
@@ -430,10 +438,11 @@ async function getOrCreateWatermarkedCopy(
         shopout_wm_path: wmPath,
         shopout_wm_version: WATERMARK_VERSION,
         shopout_wm_at: new Date().toISOString(),
+        shopout_wm_raster: wm.raster === true,
       },
     })
     .eq("id", row.id);
-  return { ok: true, wmPath };
+  return { ok: true, wmPath, raster: wm.raster === true };
 }
 
 export type ShopOutAttachmentBase = {
@@ -561,65 +570,102 @@ export async function ensureApplicationThreadsWatermarked(
   return { ok: failures.length === 0, branded, failures };
 }
 
-export type UnwatermarkResult =
-  | { ok: true; state: "clean"; purged: boolean }
+/**
+ * Pick which physical object to serve for the OPERATOR view/download, based on
+ * the duplicate-file model (2026-06-29): every clean statement keeps both a clean
+ * original (`storage_path`) and a watermarked copy (`metadata.shopout_wm_path`).
+ * `metadata.active_variant` ("clean" | "watermarked", default clean) chooses.
+ * Safe degradation: watermarked-requested-but-no-copy → serve clean. Legacy baked
+ * rows (`watermarked_at`) have no clean original — their `storage_path` IS the
+ * watermarked file. NOTE: lenders (shop-out) + FundMate do NOT use this — they
+ * always send the watermarked copy / always read the clean original respectively.
+ */
+export function resolveActiveStoragePath(row: {
+  storage_path: string;
+  metadata: Record<string, unknown> | null;
+}): { path: string; variant: "clean" | "watermarked"; is_watermarked: boolean; raster: boolean } {
+  const meta = (row.metadata || {}) as Record<string, unknown>;
+  if (meta.watermarked_at) {
+    return { path: row.storage_path, variant: "watermarked", is_watermarked: true, raster: true };
+  }
+  const wmPath = typeof meta.shopout_wm_path === "string" ? (meta.shopout_wm_path as string) : null;
+  if (meta.active_variant === "watermarked" && wmPath) {
+    return { path: wmPath, variant: "watermarked", is_watermarked: true, raster: meta.shopout_wm_raster === true };
+  }
+  return { path: row.storage_path, variant: "clean", is_watermarked: false, raster: false };
+}
+
+export type SetVariantResult =
+  | { ok: true; active: "clean" | "watermarked"; is_watermarked: boolean; raster?: boolean }
   | { ok: true; state: "legacy_baked"; clean_available: false; message: string }
   | { ok: false; error: string };
 
 /**
- * Unwatermark a stored lead document (2026-06-29, Adon ask). Two cases:
- *
- *  1. NEW-architecture file (no `metadata.watermarked_at`): `storage_path` is
- *     ALREADY the clean original (ingest no longer watermarks since b4d9039). So
- *     "unwatermark" = guarantee clean: delete any derived `_shopout_wm` copy +
- *     clear its stamps. The View/Download already serves the clean original.
- *
- *  2. LEGACY baked file (`metadata.watermarked_at` present): the storage_path
- *     bytes were rasterized in place by the old architecture — the clean original
- *     was overwritten and flattened pixels can't be losslessly recovered. Return
- *     `legacy_baked` so the UI shows a re-upload prompt (no lossy guessing).
- *
+ * Toggle which variant of a stored statement is "active" for the operator
+ * (2026-06-29, Adon ask: "watermark it or unwatermark it … keeping duplicate
+ * files"). KEEPS BOTH copies — flipping is instant + infinitely reversible.
+ *  - target "watermarked": ensure the watermarked duplicate exists, flip active.
+ *  - target "clean": flip active to the clean original (the wm copy stays).
+ *  - LEGACY baked + target "clean": no clean original exists → return
+ *    `legacy_baked` so the UI shows a re-upload prompt (no lossy guessing).
  * Fail-closed: any storage/db error returns { ok:false }.
  */
-export async function unwatermarkLeadDocument(
+export async function setLeadDocumentVariant(
   db: ReturnType<typeof getServiceSupabase>,
   row: {
     id: string;
     tenant_id: string;
+    lead_id: string;
     storage_path: string;
+    mime_type: string | null;
     metadata: Record<string, unknown> | null;
   },
-): Promise<UnwatermarkResult> {
+  target: "clean" | "watermarked",
+  toggledBy?: string | null,
+): Promise<SetVariantResult> {
   const meta = (row.metadata || {}) as Record<string, unknown>;
 
   if (meta.watermarked_at) {
-    return {
-      ok: true,
-      state: "legacy_baked",
-      clean_available: false,
-      message:
-        "This statement was watermarked before the clean-storage fix, so the clean original is gone. Re-upload it to get a clean version.",
-    };
+    if (target === "clean") {
+      return {
+        ok: true,
+        state: "legacy_baked",
+        clean_available: false,
+        message:
+          "This statement was watermarked before the clean-storage fix, so the clean original is gone. Re-upload it to get a clean version.",
+      };
+    }
+    return { ok: true, active: "watermarked", is_watermarked: true, raster: true };
   }
 
-  let purged = false;
-  const wmPath = typeof meta.shopout_wm_path === "string" ? (meta.shopout_wm_path as string) : null;
-  // Only ever delete inside THIS tenant's folder (defense-in-depth against a
-  // tampered metadata pointer at another tenant's storage).
-  if (wmPath && wmPath.startsWith(`${row.tenant_id}/`)) {
-    const del = await db.storage.from(LEAD_DOC_BUCKET).remove([wmPath]);
-    if (del.error) return { ok: false, error: `wm_copy_delete_failed: ${del.error.message}` };
-    purged = true;
+  if (target === "watermarked") {
+    const cp = await getOrCreateWatermarkedCopy(db, {
+      id: row.id, tenant_id: row.tenant_id, lead_id: row.lead_id,
+      storage_path: row.storage_path, mime_type: row.mime_type, metadata: meta,
+    });
+    if (!cp.ok) return { ok: false, error: cp.error };
+    // Re-read metadata so we don't clobber the shopout_wm_* stamps the copy just wrote.
+    const fresh = await db.from("lead_documents").select("metadata").eq("id", row.id).maybeSingle();
+    const freshMeta = ((fresh.data as { metadata?: Record<string, unknown> } | null)?.metadata) || meta;
+    const upd = await db
+      .from("lead_documents")
+      .update({
+        metadata: { ...freshMeta, active_variant: "watermarked", variant_toggled_at: new Date().toISOString(), variant_toggled_by: toggledBy || null },
+      })
+      .eq("id", row.id);
+    if (upd.error) return { ok: false, error: `variant_set_failed: ${upd.error.message}` };
+    return { ok: true, active: "watermarked", is_watermarked: true, raster: cp.raster };
   }
-  if (wmPath || "shopout_wm_version" in meta || "shopout_wm_at" in meta) {
-    const next: Record<string, unknown> = { ...meta };
-    for (const k of ["shopout_wm_path", "shopout_wm_version", "shopout_wm_at"]) {
-      delete next[k];
-    }
-    const upd = await db.from("lead_documents").update({ metadata: next }).eq("id", row.id);
-    if (upd.error) return { ok: false, error: `stamp_clear_failed: ${upd.error.message}` };
-  }
-  return { ok: true, state: "clean", purged };
+
+  // target "clean" — keep the watermarked copy, just flip the active pointer.
+  const upd = await db
+    .from("lead_documents")
+    .update({
+      metadata: { ...meta, active_variant: "clean", variant_toggled_at: new Date().toISOString(), variant_toggled_by: toggledBy || null },
+    })
+    .eq("id", row.id);
+  if (upd.error) return { ok: false, error: `variant_set_failed: ${upd.error.message}` };
+  return { ok: true, active: "clean", is_watermarked: false };
 }
 
 /**

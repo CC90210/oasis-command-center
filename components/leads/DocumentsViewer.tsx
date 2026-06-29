@@ -20,6 +20,8 @@ export type ViewerDoc = {
   filename: string;
   mime_type: string | null;
   doc_type: string;
+  active_variant?: "clean" | "watermarked";
+  legacy_baked?: boolean;
 };
 
 type Entry = { status: "loading" } | { status: "ready"; url: string } | { status: "error" };
@@ -61,6 +63,35 @@ export function DocumentsViewer({
       }
     },
     [setEntry],
+  );
+
+  // Per-doc active variant (seeded from props, updated on toggle).
+  const [variants, setVariants] = useState<Record<string, "clean" | "watermarked">>({});
+  const [toggling, setToggling] = useState<null | "clean" | "watermarked">(null);
+  const variantOf = (d?: ViewerDoc) =>
+    d ? variants[d.id] || (d.active_variant === "watermarked" ? "watermarked" : "clean") : "clean";
+  const setVariant = useCallback(
+    async (d: ViewerDoc, target: "clean" | "watermarked") => {
+      if (toggling || variantOf(d) === target) return;
+      setToggling(target);
+      try {
+        const r = await fetch(`/api/lead-documents/${d.id}/watermark-variant`, {
+          method: "POST",
+          credentials: "include",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ target }),
+        });
+        const j = await r.json().catch(() => ({}));
+        if (j.ok && j.active) {
+          setVariants((p) => ({ ...p, [d.id]: j.active }));
+          delete cacheRef.current[d.id]; // invalidate the signed URL → re-fetch the new variant
+          await load(d);
+        }
+      } finally {
+        setToggling(null);
+      }
+    },
+    [toggling, load, variants],
   );
 
   // Load the current doc + prefetch its neighbours for snappy navigation.
@@ -117,6 +148,33 @@ export function DocumentsViewer({
         <div className="text-[11px] text-fg-dim tabular-nums shrink-0">
           {docs.length ? index + 1 : 0} / {docs.length}
         </div>
+        {doc && doc.doc_type === "bank_statements_3mo" && doc.legacy_baked && (
+          <span className="shrink-0 text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-300 font-semibold" title="Watermarked before the clean-storage fix — no clean original. Re-upload from the lead to get a clean copy.">
+            WM · no clean
+          </span>
+        )}
+        {doc && doc.doc_type === "bank_statements_3mo" && !doc.legacy_baked && (
+          <div className="inline-flex items-center rounded-md border border-bg-border overflow-hidden shrink-0" title="Toggle clean / watermarked">
+            {(["clean", "watermarked"] as const).map((t, i) => {
+              const active = variantOf(doc) === t;
+              return (
+                <span key={t} className="contents">
+                  {i === 1 && <span className="w-px self-stretch bg-bg-border" />}
+                  <button
+                    type="button"
+                    disabled={!!toggling}
+                    onClick={() => setVariant(doc, t)}
+                    className={`px-2 py-1 text-[10px] uppercase tracking-wider font-semibold disabled:opacity-60 ${
+                      active ? "bg-accent/20 text-fg" : "text-fg-dim hover:text-fg hover:bg-bg-deep"
+                    }`}
+                  >
+                    {toggling === t ? "…" : t === "clean" ? "Clean" : "WM"}
+                  </button>
+                </span>
+              );
+            })}
+          </div>
+        )}
         {doc && entry?.status === "ready" && (
           <a
             href={entry.url}

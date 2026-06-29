@@ -74,7 +74,7 @@ export async function GET(
   const docsPromise = docLeadId
     ? db
         .from("lead_documents")
-        .select("id, filename, mime_type, size_bytes, doc_type, uploaded_by, uploaded_at")
+        .select("id, filename, mime_type, size_bytes, doc_type, uploaded_by, uploaded_at, metadata")
         .eq("tenant_id", tenantId)
         .eq("lead_id", docLeadId)
         .is("metadata->>deleted_at", null) // Batch 5: exclude soft-deleted
@@ -136,7 +136,34 @@ export async function GET(
       created_at: record.created_at,
       updated_at: record.updated_at,
     },
-    documents: docsRes.data || [],
+    documents: mapDocVariants(docsRes.data),
     application: linkedApplication,
+  });
+}
+
+/**
+ * Attach the duplicate-file variant state to each doc (2026-06-29) without
+ * leaking raw metadata: `active_variant` (which copy the operator sees) +
+ * `legacy_baked` (watermarked in place before the clean-storage fix → no clean
+ * original). Bank statements are the only watermarked type.
+ */
+function mapDocVariants(rows: unknown): Array<Record<string, unknown>> {
+  const arr = (Array.isArray(rows) ? rows : []) as Array<{
+    id: string; filename: string; mime_type: string | null; size_bytes: number | null;
+    doc_type: string; uploaded_at: string; metadata?: Record<string, unknown> | null;
+  }>;
+  return arr.map((d) => {
+    const meta = d.metadata || {};
+    const legacy = !!meta.watermarked_at;
+    return {
+      id: d.id,
+      filename: d.filename,
+      mime_type: d.mime_type,
+      size_bytes: d.size_bytes,
+      doc_type: d.doc_type,
+      uploaded_at: d.uploaded_at,
+      active_variant: legacy ? "watermarked" : meta.active_variant === "watermarked" ? "watermarked" : "clean",
+      legacy_baked: legacy,
+    };
   });
 }

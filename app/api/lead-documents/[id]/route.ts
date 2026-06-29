@@ -12,6 +12,7 @@ import { NextResponse, type NextRequest } from "next/server";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { resolveSessionContext } from "@/lib/api-auth";
 import { canViewLead, leadScopingEnabled } from "@/lib/lead-scope";
+import { resolveActiveStoragePath } from "@/lib/lead-documents";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -35,7 +36,7 @@ export async function GET(
 
   const docRow = await db
     .from("lead_documents")
-    .select("id, tenant_id, lead_id, filename, storage_path, mime_type")
+    .select("id, tenant_id, lead_id, filename, storage_path, mime_type, metadata")
     .eq("id", id)
     .eq("tenant_id", tenantId)
     .is("metadata->>deleted_at", null) // Batch 5: a soft-deleted doc isn't downloadable
@@ -48,6 +49,7 @@ export async function GET(
         filename: string;
         storage_path: string;
         mime_type: string | null;
+        metadata: Record<string, unknown> | null;
       }
     | null;
   if (!doc) {
@@ -103,9 +105,18 @@ export async function GET(
     );
   }
 
+  // Duplicate-file model (2026-06-29): serve the ACTIVE variant — clean original
+  // or the watermarked duplicate — per metadata.active_variant. The resolved path
+  // is re-checked against the tenant prefix (it could be the _shopout_wm copy).
+  const active = resolveActiveStoragePath({ storage_path: doc.storage_path, metadata: doc.metadata });
+  if (!active.path.startsWith(expectedPrefix)) {
+    return NextResponse.json({ ok: false, error: "storage_path_mismatch" }, { status: 403 });
+  }
+  const cleanAvailable = !(doc.metadata || {}).watermarked_at; // legacy baked → no clean
+
   const signed = await db.storage
     .from("lead-documents")
-    .createSignedUrl(doc.storage_path, SIGN_TTL_SECONDS);
+    .createSignedUrl(active.path, SIGN_TTL_SECONDS);
   if (signed.error || !signed.data?.signedUrl) {
     return NextResponse.json(
       { ok: false, error: signed.error?.message || "sign_failed" },
@@ -118,5 +129,9 @@ export async function GET(
     url: signed.data.signedUrl,
     filename: doc.filename,
     mime_type: doc.mime_type,
+    active_variant: active.variant,
+    is_watermarked: active.is_watermarked,
+    clean_available: cleanAvailable,
+    raster: active.raster,
   });
 }

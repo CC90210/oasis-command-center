@@ -18,9 +18,9 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 // useRef intentionally imported for the file-input ref in DocumentsTab.
-import { useRouter, useSearchParams } from "next/navigation";
+import { useRouter, useSearchParams, usePathname } from "next/navigation";
 import Link from "next/link";
-import { X, FileText, ImageIcon, Phone, Mail, ShoppingBag, Loader2, Trash2, CheckCircle2, AlertCircle, UploadCloud, RefreshCw, ArrowRightLeft, ChevronLeft, Eye, Eraser } from "lucide-react";
+import { X, FileText, ImageIcon, Phone, Mail, ShoppingBag, Loader2, Trash2, CheckCircle2, AlertCircle, UploadCloud, RefreshCw, ArrowRightLeft, ChevronLeft, Eye } from "lucide-react";
 import { LeadTimelinePanel } from "./LeadTimelinePanel";
 import { DocumentsViewer } from "./DocumentsViewer";
 import { AssignmentControl } from "./AssignmentControl";
@@ -44,6 +44,10 @@ type DocRow = {
   size_bytes: number | null;
   doc_type: string;
   uploaded_at: string;
+  // Duplicate-file model (2026-06-29): which copy the operator sees + whether
+  // this is a legacy baked-in-place statement with no clean original.
+  active_variant?: "clean" | "watermarked";
+  legacy_baked?: boolean;
 };
 
 type DetailPayload = {
@@ -1375,7 +1379,8 @@ function DocumentsTab({
   const [generating, setGenerating] = useState(false);
   const [generatingFundmate, setGeneratingFundmate] = useState(false);
   const [showViewer, setShowViewer] = useState(false);
-  // Set when Unwatermark hits a legacy baked file (no clean original) — surfaces
+  const [showWorklist, setShowWorklist] = useState(false);
+  // Set when a toggle hits a legacy baked file (no clean original) — surfaces
   // a re-upload prompt by the upload box.
   const [legacyNotice, setLegacyNotice] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -1705,18 +1710,30 @@ function DocumentsTab({
       <DocsSummary docs={docs} />
 
       {docs.length > 0 && (
-        <div className="flex items-center justify-between">
+        <div className="flex items-center justify-between gap-2">
           <div className="text-[11px] uppercase tracking-wider text-fg-muted">
             Documents ({docs.length})
           </div>
-          <button
-            type="button"
-            onClick={() => setShowViewer(true)}
-            title="Open all documents in a viewer and swipe through them"
-            className="inline-flex items-center gap-1.5 text-[11px] font-semibold px-2.5 py-1 rounded-md border border-bg-border bg-bg-elev text-fg-muted hover:text-fg"
-          >
-            <Eye className="w-3 h-3" /> View all
-          </button>
+          <div className="flex items-center gap-2">
+            {docs.some((d) => d.legacy_baked) && (
+              <button
+                type="button"
+                onClick={() => setShowWorklist(true)}
+                title="List every statement that needs a clean re-upload"
+                className="inline-flex items-center gap-1.5 text-[11px] font-semibold px-2.5 py-1 rounded-md border border-amber-500/40 bg-amber-500/10 text-amber-200 hover:bg-amber-500/20"
+              >
+                <AlertCircle className="w-3 h-3" /> Needs clean re-upload
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={() => setShowViewer(true)}
+              title="Open all documents in a viewer and swipe through them"
+              className="inline-flex items-center gap-1.5 text-[11px] font-semibold px-2.5 py-1 rounded-md border border-bg-border bg-bg-elev text-fg-muted hover:text-fg"
+            >
+              <Eye className="w-3 h-3" /> View all
+            </button>
+          </div>
         </div>
       )}
 
@@ -1743,16 +1760,25 @@ function DocumentsTab({
                 <span className="text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-300 font-semibold">
                   verified
                 </span>
-                {d.doc_type === "bank_statements_3mo" && (
-                  <UnwatermarkButton
-                    id={d.id}
-                    onClean={refresh}
-                    onLegacy={(msg) => {
-                      setLegacyNotice(msg);
-                      setDocType("bank_statements_3mo");
-                    }}
-                  />
-                )}
+                {d.doc_type === "bank_statements_3mo" &&
+                  (d.legacy_baked ? (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setDocType("bank_statements_3mo");
+                        setLegacyNotice(
+                          "Legacy watermarked statement — the clean original is gone. Upload a clean copy below to replace it.",
+                        );
+                        fileInputRef.current?.click();
+                      }}
+                      title="Watermarked before the clean-storage fix — no clean original. Re-upload a clean copy."
+                      className="inline-flex items-center gap-1 text-[10px] uppercase tracking-wider px-2 py-1 rounded-md border border-amber-500/40 bg-amber-500/10 text-amber-200 hover:bg-amber-500/20"
+                    >
+                      <UploadCloud className="w-3 h-3" /> Re-upload clean
+                    </button>
+                  ) : (
+                    <VariantToggle id={d.id} variant={d.active_variant === "watermarked" ? "watermarked" : "clean"} onChanged={refresh} onLegacy={setLegacyNotice} />
+                  ))}
                 <DocDownloadButton id={d.id} filename={d.filename} />
                 <button
                   type="button"
@@ -1777,6 +1803,98 @@ function DocumentsTab({
       {showViewer && (
         <DocumentsViewer docs={docs} onClose={() => setShowViewer(false)} />
       )}
+      {showWorklist && <LegacyWorklist onClose={() => setShowWorklist(false)} />}
+    </div>
+  );
+}
+
+/**
+ * LegacyWorklist — tenant-wide list of statements watermarked in place before the
+ * clean-storage fix (no clean original). Each row deep-links into its lead's
+ * drawer so the operator can re-upload a clean copy and clear it.
+ */
+function LegacyWorklist({ onClose }: { onClose: () => void }) {
+  const router = useRouter();
+  const pathname = usePathname();
+  const [state, setState] = useState<
+    | { status: "loading" }
+    | { status: "error" }
+    | { status: "ready"; items: Array<{ lead_id: string | null; entity: string; lead_name: string; doc_id: string; filename: string }> }
+  >({ status: "loading" });
+
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      try {
+        const r = await fetch(`/api/lead-documents/legacy-baked`, { credentials: "include" });
+        const j = await r.json().catch(() => ({}));
+        if (!alive) return;
+        if (j.ok) setState({ status: "ready", items: j.items || [] });
+        else setState({ status: "error" });
+      } catch {
+        if (alive) setState({ status: "error" });
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  const openLead = (leadId: string | null, entity: string) => {
+    if (!leadId) return;
+    const key = entity === "application" ? "application" : "lead";
+    router.push(`${pathname}?${key}=${leadId}`);
+    onClose();
+  };
+
+  return (
+    <div className="fixed inset-0 z-[60] flex flex-col bg-bg-elev" role="dialog" aria-label="Statements needing clean re-upload">
+      <header className="flex items-center gap-2 px-4 py-3 border-b border-bg-border shrink-0">
+        <button type="button" onClick={onClose} aria-label="Back" className="p-1 -ml-1 rounded-md text-fg-muted hover:text-fg hover:bg-bg-deep">
+          <ChevronLeft className="w-4 h-4" />
+        </button>
+        <div className="flex-1 min-w-0 text-[12px] text-fg truncate">Statements needing a clean re-upload</div>
+        <button type="button" onClick={onClose} className="text-[11px] text-fg-dim hover:text-fg px-1 shrink-0">
+          Close
+        </button>
+      </header>
+      <div className="flex-1 min-h-0 overflow-y-auto p-4">
+        {state.status === "loading" ? (
+          <div className="h-40 flex items-center justify-center text-fg-dim">
+            <Loader2 className="w-5 h-5 animate-spin" />
+          </div>
+        ) : state.status === "error" ? (
+          <div className="text-[12px] text-red-300">Couldn&apos;t load the worklist.</div>
+        ) : state.items.length === 0 ? (
+          <div className="text-[12px] text-emerald-300 flex items-center gap-2">
+            <CheckCircle2 className="w-4 h-4" /> No statements need a clean re-upload. You&apos;re all caught up.
+          </div>
+        ) : (
+          <>
+            <div className="text-[11px] text-fg-dim mb-2">
+              {state.items.length} statement{state.items.length === 1 ? "" : "s"} were watermarked before the clean-storage fix. Open each lead and re-upload a clean copy to make it toggleable.
+            </div>
+            <ul className="divide-y divide-bg-border">
+              {state.items.map((it) => (
+                <li key={it.doc_id} className="flex items-center gap-3 py-2.5">
+                  <FileText className="w-4 h-4 shrink-0 text-amber-300" />
+                  <div className="min-w-0 flex-1">
+                    <div className="text-[13px] text-fg truncate">{it.lead_name}</div>
+                    <div className="text-[11px] text-fg-dim truncate">{it.filename}</div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => openLead(it.lead_id, it.entity)}
+                    className="shrink-0 text-[11px] font-semibold px-2.5 py-1 rounded-md border border-bg-border bg-bg-elev text-fg-muted hover:text-fg"
+                  >
+                    Open lead
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </>
+        )}
+      </div>
     </div>
   );
 }
@@ -1867,61 +1985,65 @@ function DocDownloadButton({ id, filename }: { id: string; filename: string }) {
 }
 
 /**
- * UnwatermarkButton — get the CLEAN version of a stored bank statement
- * (2026-06-29). New-architecture files are already stored clean, so this purges
- * any derived shop-out watermark copy + confirms clean. Legacy baked files (no
- * clean original) bubble a re-upload prompt up to the tab via onLegacy.
+ * VariantToggle — segmented Clean | WM switch for a bank statement (2026-06-29).
+ * Both copies are kept, so flipping is instant + reversible. Clicking the
+ * inactive segment POSTs /watermark-variant with that target; the clean original
+ * and the watermarked duplicate are both always available.
  */
-function UnwatermarkButton({
+function VariantToggle({
   id,
-  onClean,
+  variant,
+  onChanged,
   onLegacy,
 }: {
   id: string;
-  onClean: () => void | Promise<void>;
+  variant: "clean" | "watermarked";
+  onChanged: () => void | Promise<void>;
   onLegacy: (message: string) => void;
 }) {
-  const [pending, setPending] = useState(false);
-  const [done, setDone] = useState(false);
+  const [pending, setPending] = useState<null | "clean" | "watermarked">(null);
+  const set = async (target: "clean" | "watermarked") => {
+    if (target === variant || pending) return;
+    setPending(target);
+    try {
+      const r = await fetch(`/api/lead-documents/${id}/watermark-variant`, {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ target }),
+      });
+      const j = await r.json().catch(() => ({}));
+      if (j.ok && j.state === "legacy_baked") onLegacy(j.message || "Re-upload to get a clean version.");
+      else if (j.ok) await onChanged();
+      else onLegacy(j.error ? `Switch failed: ${j.error}` : "Switch failed.");
+    } catch (e) {
+      onLegacy(`Switch failed: ${String((e as Error).message || e)}`);
+    } finally {
+      setPending(null);
+    }
+  };
+  const seg = (target: "clean" | "watermarked", label: string) => {
+    const active = variant === target;
+    return (
+      <button
+        type="button"
+        disabled={!!pending}
+        onClick={() => set(target)}
+        title={target === "clean" ? "Show the clean original" : "Show the SunBiz-watermarked copy"}
+        className={`px-2 py-1 text-[10px] uppercase tracking-wider font-semibold disabled:opacity-60 ${
+          active ? "bg-accent/20 text-fg" : "text-fg-dim hover:text-fg hover:bg-bg-elev"
+        }`}
+      >
+        {pending === target ? "…" : label}
+      </button>
+    );
+  };
   return (
-    <button
-      type="button"
-      disabled={pending}
-      title="Get the clean (un-watermarked) version of this statement"
-      onClick={async () => {
-        setPending(true);
-        try {
-          const r = await fetch(`/api/lead-documents/${id}/unwatermark`, {
-            method: "POST",
-            credentials: "include",
-          });
-          const j = await r.json().catch(() => ({}));
-          if (j.ok && j.state === "clean") {
-            setDone(true);
-            await onClean();
-            setTimeout(() => setDone(false), 2500);
-          } else if (j.ok && j.state === "legacy_baked") {
-            onLegacy(j.message || "Re-upload this statement to get a clean version.");
-          } else {
-            onLegacy(j.error ? `Unwatermark failed: ${j.error}` : "Unwatermark failed.");
-          }
-        } catch (e) {
-          onLegacy(`Unwatermark failed: ${String((e as Error).message || e)}`);
-        } finally {
-          setPending(false);
-        }
-      }}
-      className="inline-flex items-center gap-1 text-[11px] uppercase tracking-wider px-2 py-1 rounded-md border border-bg-border text-fg-muted hover:text-fg disabled:opacity-50"
-    >
-      {pending ? (
-        <Loader2 className="w-3 h-3 animate-spin" />
-      ) : done ? (
-        <CheckCircle2 className="w-3 h-3 text-emerald-300" />
-      ) : (
-        <Eraser className="w-3 h-3" />
-      )}
-      {pending ? "…" : done ? "Clean" : "Unwatermark"}
-    </button>
+    <div className="inline-flex items-center rounded-md border border-bg-border overflow-hidden shrink-0" title="Toggle clean / watermarked">
+      {seg("clean", "Clean")}
+      <span className="w-px self-stretch bg-bg-border" />
+      {seg("watermarked", "WM")}
+    </div>
   );
 }
 
