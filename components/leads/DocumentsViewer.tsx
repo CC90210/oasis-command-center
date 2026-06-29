@@ -1,0 +1,252 @@
+"use client";
+
+/**
+ * DocumentsViewer — full-screen lightbox to swipe through ALL of a lead's
+ * documents at once (2026-06-29, Adon ask: "click View all and swift through
+ * them all"). Mounts over the LeadDetailDrawer; mints a signed URL per doc on
+ * demand (reusing GET /api/lead-documents/[id]) and caches it for the session.
+ *
+ * PDFs render inline via <iframe> (Supabase signed URLs serve inline by default),
+ * images via <img>; anything else falls back to a download link. Navigate with
+ * the on-screen arrows, ←/→ keys, the thumbnail strip, or a touch swipe.
+ */
+
+import { useCallback, useEffect, useRef, useState } from "react";
+import { ChevronLeft, ChevronRight, FileText, ImageIcon, Loader2, Download } from "lucide-react";
+import { leadDocTypeLabel } from "@/lib/lead-doc-display";
+
+export type ViewerDoc = {
+  id: string;
+  filename: string;
+  mime_type: string | null;
+  doc_type: string;
+};
+
+type Entry = { status: "loading" } | { status: "ready"; url: string } | { status: "error" };
+
+export function DocumentsViewer({
+  docs,
+  onClose,
+  startIndex = 0,
+}: {
+  docs: ViewerDoc[];
+  onClose: () => void;
+  startIndex?: number;
+}) {
+  const [index, setIndex] = useState(
+    Math.min(Math.max(0, startIndex), Math.max(0, docs.length - 1)),
+  );
+  // Cache signed URLs in a ref (avoids stale-closure refetches); a tick state
+  // forces re-render when an entry changes.
+  const cacheRef = useRef<Record<string, Entry>>({});
+  const [, setTick] = useState(0);
+  const setEntry = useCallback((id: string, e: Entry) => {
+    cacheRef.current[id] = e;
+    setTick((t) => t + 1);
+  }, []);
+
+  const load = useCallback(
+    async (doc?: ViewerDoc) => {
+      if (!doc) return;
+      const cur = cacheRef.current[doc.id];
+      if (cur && (cur.status === "ready" || cur.status === "loading")) return;
+      setEntry(doc.id, { status: "loading" });
+      try {
+        const r = await fetch(`/api/lead-documents/${doc.id}`, { credentials: "include" });
+        const j = await r.json().catch(() => ({}));
+        if (j.ok && j.url) setEntry(doc.id, { status: "ready", url: j.url });
+        else setEntry(doc.id, { status: "error" });
+      } catch {
+        setEntry(doc.id, { status: "error" });
+      }
+    },
+    [setEntry],
+  );
+
+  // Load the current doc + prefetch its neighbours for snappy navigation.
+  useEffect(() => {
+    load(docs[index]);
+    load(docs[index + 1]);
+    load(docs[index - 1]);
+  }, [index, docs, load]);
+
+  const go = useCallback(
+    (delta: number) => setIndex((i) => Math.min(docs.length - 1, Math.max(0, i + delta))),
+    [docs.length],
+  );
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "ArrowRight") go(1);
+      else if (e.key === "ArrowLeft") go(-1);
+      else if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [go, onClose]);
+
+  const touchX = useRef<number | null>(null);
+
+  const doc = docs[index];
+  const entry = doc ? cacheRef.current[doc.id] : undefined;
+  const mime = (doc?.mime_type || "").toLowerCase();
+  const isPdf = mime === "application/pdf";
+  const isImage = mime.startsWith("image/");
+
+  return (
+    <div
+      className="fixed inset-0 z-[60] flex flex-col bg-bg-elev"
+      role="dialog"
+      aria-label="All documents"
+    >
+      <header className="flex items-center gap-2 px-4 py-3 border-b border-bg-border shrink-0">
+        <button
+          type="button"
+          onClick={onClose}
+          aria-label="Back"
+          className="p-1 -ml-1 rounded-md text-fg-muted hover:text-fg hover:bg-bg-deep transition-colors"
+        >
+          <ChevronLeft className="w-4 h-4" />
+        </button>
+        <div className="flex-1 min-w-0">
+          <div className="text-[12px] text-fg truncate">{doc?.filename || "Documents"}</div>
+          <div className="text-[10px] uppercase tracking-wider text-fg-dim truncate">
+            {doc ? leadDocTypeLabel(doc.doc_type) : ""}
+          </div>
+        </div>
+        <div className="text-[11px] text-fg-dim tabular-nums shrink-0">
+          {docs.length ? index + 1 : 0} / {docs.length}
+        </div>
+        {doc && entry?.status === "ready" && (
+          <a
+            href={entry.url}
+            download={doc.filename}
+            target="_blank"
+            rel="noopener"
+            title="Download this document"
+            className="shrink-0 p-1 rounded-md text-fg-muted hover:text-fg hover:bg-bg-deep"
+          >
+            <Download className="w-4 h-4" />
+          </a>
+        )}
+        <button
+          type="button"
+          onClick={onClose}
+          className="text-[11px] text-fg-dim hover:text-fg px-1 shrink-0"
+        >
+          Close
+        </button>
+      </header>
+
+      <div
+        className="relative flex-1 min-h-0 bg-bg-deep"
+        onTouchStart={(e) => {
+          touchX.current = e.touches[0]?.clientX ?? null;
+        }}
+        onTouchEnd={(e) => {
+          if (touchX.current == null) return;
+          const dx = (e.changedTouches[0]?.clientX ?? touchX.current) - touchX.current;
+          if (dx < -50) go(1);
+          else if (dx > 50) go(-1);
+          touchX.current = null;
+        }}
+      >
+        {!doc ? (
+          <div className="h-full flex items-center justify-center text-fg-dim text-sm">
+            No documents.
+          </div>
+        ) : !entry || entry.status === "loading" ? (
+          <div className="h-full flex items-center justify-center text-fg-dim">
+            <Loader2 className="w-5 h-5 animate-spin" />
+          </div>
+        ) : entry.status === "error" ? (
+          <div className="h-full flex flex-col items-center justify-center gap-3 text-fg-dim text-sm">
+            <span>Couldn&apos;t load this document.</span>
+            <button
+              type="button"
+              onClick={() => load(doc)}
+              className="text-[11px] font-semibold px-3 py-1.5 rounded-md border border-bg-border text-fg-muted hover:text-fg"
+            >
+              Retry
+            </button>
+          </div>
+        ) : isPdf ? (
+          <iframe
+            src={entry.url}
+            title={doc.filename}
+            className="w-full h-full border-0 bg-white"
+          />
+        ) : isImage ? (
+          <div className="h-full w-full overflow-auto flex items-center justify-center p-3">
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img
+              src={entry.url}
+              alt={doc.filename}
+              className="max-w-full max-h-full object-contain"
+            />
+          </div>
+        ) : (
+          <div className="h-full flex flex-col items-center justify-center gap-3 text-fg-dim text-sm">
+            <FileText className="w-6 h-6" />
+            <span>Preview not supported for this file type.</span>
+            <a
+              href={entry.url}
+              download={doc.filename}
+              target="_blank"
+              rel="noopener"
+              className="text-[11px] font-semibold px-3 py-1.5 rounded-md border border-bg-border text-fg-muted hover:text-fg"
+            >
+              Download
+            </a>
+          </div>
+        )}
+
+        {index > 0 && (
+          <button
+            type="button"
+            onClick={() => go(-1)}
+            aria-label="Previous document"
+            className="absolute left-2 top-1/2 -translate-y-1/2 p-2 rounded-full bg-bg-elev/80 border border-bg-border text-fg-muted hover:text-fg hover:bg-bg-elev"
+          >
+            <ChevronLeft className="w-5 h-5" />
+          </button>
+        )}
+        {index < docs.length - 1 && (
+          <button
+            type="button"
+            onClick={() => go(1)}
+            aria-label="Next document"
+            className="absolute right-2 top-1/2 -translate-y-1/2 p-2 rounded-full bg-bg-elev/80 border border-bg-border text-fg-muted hover:text-fg hover:bg-bg-elev"
+          >
+            <ChevronRight className="w-5 h-5" />
+          </button>
+        )}
+      </div>
+
+      {docs.length > 1 && (
+        <div className="shrink-0 flex items-center gap-1.5 overflow-x-auto px-3 py-2 border-t border-bg-border">
+          {docs.map((dd, i) => (
+            <button
+              key={dd.id}
+              type="button"
+              onClick={() => setIndex(i)}
+              title={dd.filename}
+              className={`shrink-0 inline-flex items-center gap-1 px-2 py-1 rounded text-[10px] border ${
+                i === index
+                  ? "border-accent/50 bg-accent/15 text-fg"
+                  : "border-transparent text-fg-dim hover:text-fg hover:bg-bg-elev"
+              }`}
+            >
+              {(dd.mime_type || "").startsWith("image/") ? (
+                <ImageIcon className="w-3 h-3" />
+              ) : (
+                <FileText className="w-3 h-3" />
+              )}
+              <span className="max-w-[90px] truncate">{dd.filename}</span>
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}

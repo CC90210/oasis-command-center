@@ -1,23 +1,29 @@
 /**
- * watermark.ts — flatten + brand a bank statement with the SunBiz watermark,
- * server-side. "Owning the lead": every bank statement that lands in our store
- * (and therefore every copy a lender ever receives via shop-out) carries an
- * elegant, unremovable SunBiz mark (CC 2026-06-28).
+ * watermark.ts — brand a bank statement with the SunBiz watermark, server-side.
+ * Applied ONLY to the lender-facing DERIVED copy at shop-out (lib/lead-documents
+ * keeps the clean original untouched); the lead drawer + FundMate read the clean
+ * original.
  *
- * Unremovable = the source is FLATTENED. For PDFs we rasterize each page, paint
- * the watermark into the pixels, and reassemble an image-only PDF — there's no
- * text/vector layer left to select or delete. For images we composite the mark
- * into the bitmap. Either way the watermark is part of the picture, not an
- * overlay anyone can strip in a PDF editor.
+ * NON-DESTRUCTIVE by default (2026-06-29, Adon ask: "don't alter the file"). For
+ * PDFs we draw the mark as a LAYER on top of the original page content with
+ * pdf-lib (watermarkPdfOverlay) — the text/vector/scan layer is preserved at
+ * full quality, the source is never rasterized, and the mark is a separable set
+ * of draw operators ("the image in the background"), not baked pixels. Only if
+ * pdf-lib can't open/edit a source do we fall back to the legacy FLATTEN path
+ * (watermarkPdfRaster: rasterize each page with pdfjs, paint the mark into the
+ * pixels, reassemble an image-only PDF). Images have no layer, so they composite
+ * — but reversibility is irrelevant there because the clean original is kept.
  *
- * OCR-friendly by design: our OWN underwriting (statement_parser.py, Anthropic
- * vision) reads the watermarked file (CC chose one-stored-file). So the diagonal
- * tiling sits at low opacity and the seal/provenance band live in the margins —
- * faint enough that vision still reads every transaction, strong enough to own.
+ * Reversibility note: we never "un-watermark" a branded copy by stripping the
+ * overlay — the clean original is preserved separately, so unwatermark = serve
+ * the original. The overlay model just keeps the lender copy high-quality.
  *
- * Reuses the signature pipeline's stack (lib/forms/signature-crop.ts):
- * pdfjs-dist (legacy build) → @napi-rs/canvas → pdf-lib, with the same
- * raster-size safety caps.
+ * OCR-friendly by design: the diagonal tiling sits at low opacity and the
+ * provenance band lives in the bottom margin — faint enough that vision still
+ * reads every transaction, strong enough to own.
+ *
+ * Stack: pdf-lib (overlay + assembly); pdfjs-dist (legacy build) + @napi-rs/canvas
+ * for the raster fallback (shared with lib/forms/signature-crop.ts).
  */
 
 import "server-only";
@@ -195,7 +201,152 @@ function drawWatermark(
   ctx.restore();
 }
 
+// #001F54 / #D4A843 → pdf-lib rgb() components (0..1).
+function hexToRgb(hex: string): { r: number; g: number; b: number } {
+  const h = hex.replace("#", "");
+  return {
+    r: parseInt(h.slice(0, 2), 16) / 255,
+    g: parseInt(h.slice(2, 4), 16) / 255,
+    b: parseInt(h.slice(4, 6), 16) / 255,
+  };
+}
+
+// Helvetica (WinAnsi) can't encode arbitrary Unicode (business names, smart
+// punctuation, emoji) and pdf-lib's drawText/widthOfTextAtSize THROW on an
+// unencodable char. Map to the WinAnsi-safe subset we use: printable ASCII +
+// the Latin-1 supplement (which includes the "·" separator); everything else
+// (smart quotes, CJK, emoji) becomes "?". Never throws.
+function toWinAnsi(s: string): string {
+  let out = "";
+  for (const ch of s) {
+    const c = ch.codePointAt(0) || 0;
+    if ((c >= 0x20 && c <= 0x7e) || (c >= 0xa0 && c <= 0xff)) out += ch;
+    else out += "?";
+  }
+  return out;
+}
+
+/**
+ * NON-DESTRUCTIVE PDF watermark (2026-06-29). Draw the SunBiz mark as a LAYER on
+ * top of the original page content using pdf-lib — the page's text/vector/scan
+ * layer is preserved at full quality and the source is never rasterized. This is
+ * "the image in the background" model: the watermark is a separable set of draw
+ * operators, not baked pixels. We never reverse this copy (the clean original is
+ * kept separately by lib/lead-documents.ts), so reversibility comes from the
+ * preserved original, not from stripping the overlay.
+ *
+ * ignoreEncryption: real bank PDFs are permission-encrypted (owner password, no
+ * user password) — pdf-lib refuses to edit them unless told to ignore the
+ * /Encrypt dict. pdf-lib never WRITES encryption, so save() emits a clean
+ * unencrypted PDF (universally openable by lenders, same as the raster path).
+ */
+async function watermarkPdfOverlay(bytes: Buffer, prov: WatermarkProvenance): Promise<WatermarkResult> {
+  try {
+    const path = await import("node:path");
+    const fs = await import("node:fs/promises");
+    const { PDFDocument, StandardFonts, degrees, rgb } = await import("pdf-lib");
+
+    const doc = await PDFDocument.load(new Uint8Array(bytes), { ignoreEncryption: true });
+    const pages = doc.getPages();
+    if (pages.length < 1) return { ok: false, error: "pdf_no_pages" };
+    // FAIL CLOSED — never truncate (mirrors the raster path).
+    if (pages.length > MAX_PAGES) return { ok: false, error: `pdf_too_many_pages:${pages.length}` };
+
+    const font = await doc.embedFont(StandardFonts.HelveticaBold);
+
+    // Embed the SunBiz logo once; fall back to the tiled wordmark if it isn't a
+    // readable PNG (best-effort, same contract as the raster path).
+    let logo: Awaited<ReturnType<typeof doc.embedPng>> | null = null;
+    try {
+      const logoBytes = await fs.readFile(
+        path.join(process.cwd(), "public", "brand", "sunbiz-logo.png"),
+      );
+      logo = await doc.embedPng(logoBytes);
+    } catch {
+      logo = null;
+    }
+
+    const navy = hexToRgb(NAVY);
+    const gold = hexToRgb(GOLD);
+    const line = toWinAnsi(provenanceLine(prov));
+    const ROT = -26; // degrees, matches the raster tiling angle
+
+    for (const page of pages) {
+      const { width: W, height: H } = page.getSize();
+      if (W < 1 || H < 1) continue;
+      const min = Math.min(W, H);
+
+      // 1) Tile the mark diagonally across the page, on TOP of the content.
+      const d = (ROT * Math.PI) / 180;
+      const cos = Math.cos(d);
+      const sin = Math.sin(d);
+      if (logo && logo.width > 0) {
+        const lw = min * 0.34;
+        const lh = lw * (logo.height / logo.width);
+        const stepX = lw * 1.45;
+        const stepY = lh * 1.6;
+        for (let cy = -lh; cy <= H + lh; cy += stepY) {
+          const off = (Math.round(cy / stepY) % 2) * (stepX / 2);
+          for (let cx = -lw + off; cx <= W + lw; cx += stepX) {
+            // Place the logo CENTER at (cx, cy): pdf-lib rotates about the draw
+            // origin (lower-left), so back out the rotated half-extents.
+            const x = cx - (lw / 2) * cos + (lh / 2) * sin;
+            const y = cy - (lw / 2) * sin - (lh / 2) * cos;
+            page.drawImage(logo, { x, y, width: lw, height: lh, rotate: degrees(ROT), opacity: LOGO_OPACITY });
+          }
+        }
+      } else {
+        const size = Math.max(8, Math.round(min * 0.05));
+        const tw = font.widthOfTextAtSize(WORDMARK, size);
+        const stepX = tw + min * 0.12;
+        const stepY = min * 0.16;
+        for (let cy = 0; cy <= H + stepY; cy += stepY) {
+          const off = (Math.round(cy / stepY) % 2) * (stepX / 2);
+          for (let cx = -tw + off; cx <= W + stepX; cx += stepX) {
+            page.drawText(WORDMARK, {
+              x: cx, y: cy, size, font,
+              color: rgb(navy.r, navy.g, navy.b),
+              opacity: LOGO_OPACITY, rotate: degrees(ROT),
+            });
+          }
+        }
+      }
+
+      // 2) Provenance band across the bottom margin (PDF origin = bottom-left).
+      const bandH = Math.max(18, min * 0.03);
+      const ruleH = Math.max(1, bandH * 0.07);
+      page.drawRectangle({ x: 0, y: 0, width: W, height: bandH, color: rgb(navy.r, navy.g, navy.b), opacity: 0.85 });
+      page.drawRectangle({ x: 0, y: bandH - ruleH, width: W, height: ruleH, color: rgb(gold.r, gold.g, gold.b), opacity: 0.9 });
+      const fsize = Math.max(6, Math.round(bandH * 0.42));
+      const tw = font.widthOfTextAtSize(line, fsize);
+      page.drawText(line, {
+        x: Math.max(2, (W - tw) / 2),
+        y: bandH / 2 - fsize * 0.36, // vertically center cap-height in the band
+        size: fsize, font, color: rgb(1, 1, 1), opacity: 0.96,
+      });
+    }
+
+    const out = await doc.save();
+    return { ok: true, bytes: Buffer.from(out), mimeType: "application/pdf", pages: pages.length };
+  } catch (e) {
+    return { ok: false, error: "overlay_error:" + (e instanceof Error ? e.message : "error") };
+  }
+}
+
 async function watermarkPdf(bytes: Buffer, prov: WatermarkProvenance): Promise<WatermarkResult> {
+  // Prefer the NON-DESTRUCTIVE overlay: it preserves the original page content
+  // (selectable text, full resolution) and is the model Adon asked for. Fall
+  // back to the legacy rasterize-and-flatten path ONLY when pdf-lib can't
+  // open/edit the source (corrupt structure). Fail-closed: both failing →
+  // { ok:false } so the caller refuses the send.
+  const overlay = await watermarkPdfOverlay(bytes, prov);
+  if (overlay.ok) return overlay;
+  const raster = await watermarkPdfRaster(bytes, prov);
+  if (raster.ok) return raster;
+  return { ok: false, error: `overlay_failed[${overlay.error}]|raster_failed[${raster.error}]` };
+}
+
+async function watermarkPdfRaster(bytes: Buffer, prov: WatermarkProvenance): Promise<WatermarkResult> {
   // Rasterize each page with pdfjs, paint the watermark into the pixels, and
   // reassemble a clean image-only PDF with pdf-lib. This is the only approach
   // that handles REAL bank statements (verified 2026-06-28 on production files):

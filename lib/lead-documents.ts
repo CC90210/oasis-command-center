@@ -23,7 +23,9 @@ export const LEAD_DOC_BUCKET = "lead-documents";
 // get re-watermarked (the shop-out guard + backfill re-do anything not on this
 // version). v2 (2026-06-28): SunBiz LOGO tiled over the white areas + a real
 // registered font (v1 drew invisible text — canvas had no fonts on Vercel).
-export const WATERMARK_VERSION = 2;
+// v3 (2026-06-29): NON-DESTRUCTIVE pdf-lib overlay (no longer rasterized) — bump
+// regenerates any v2 raster `_shopout_wm` copies as the high-quality overlay.
+export const WATERMARK_VERSION = 3;
 
 export type LeadDocumentUploadResult = {
   ok: true;
@@ -557,6 +559,67 @@ export async function ensureApplicationThreadsWatermarked(
     else branded += 1;
   }
   return { ok: failures.length === 0, branded, failures };
+}
+
+export type UnwatermarkResult =
+  | { ok: true; state: "clean"; purged: boolean }
+  | { ok: true; state: "legacy_baked"; clean_available: false; message: string }
+  | { ok: false; error: string };
+
+/**
+ * Unwatermark a stored lead document (2026-06-29, Adon ask). Two cases:
+ *
+ *  1. NEW-architecture file (no `metadata.watermarked_at`): `storage_path` is
+ *     ALREADY the clean original (ingest no longer watermarks since b4d9039). So
+ *     "unwatermark" = guarantee clean: delete any derived `_shopout_wm` copy +
+ *     clear its stamps. The View/Download already serves the clean original.
+ *
+ *  2. LEGACY baked file (`metadata.watermarked_at` present): the storage_path
+ *     bytes were rasterized in place by the old architecture — the clean original
+ *     was overwritten and flattened pixels can't be losslessly recovered. Return
+ *     `legacy_baked` so the UI shows a re-upload prompt (no lossy guessing).
+ *
+ * Fail-closed: any storage/db error returns { ok:false }.
+ */
+export async function unwatermarkLeadDocument(
+  db: ReturnType<typeof getServiceSupabase>,
+  row: {
+    id: string;
+    tenant_id: string;
+    storage_path: string;
+    metadata: Record<string, unknown> | null;
+  },
+): Promise<UnwatermarkResult> {
+  const meta = (row.metadata || {}) as Record<string, unknown>;
+
+  if (meta.watermarked_at) {
+    return {
+      ok: true,
+      state: "legacy_baked",
+      clean_available: false,
+      message:
+        "This statement was watermarked before the clean-storage fix, so the clean original is gone. Re-upload it to get a clean version.",
+    };
+  }
+
+  let purged = false;
+  const wmPath = typeof meta.shopout_wm_path === "string" ? (meta.shopout_wm_path as string) : null;
+  // Only ever delete inside THIS tenant's folder (defense-in-depth against a
+  // tampered metadata pointer at another tenant's storage).
+  if (wmPath && wmPath.startsWith(`${row.tenant_id}/`)) {
+    const del = await db.storage.from(LEAD_DOC_BUCKET).remove([wmPath]);
+    if (del.error) return { ok: false, error: `wm_copy_delete_failed: ${del.error.message}` };
+    purged = true;
+  }
+  if (wmPath || "shopout_wm_version" in meta || "shopout_wm_at" in meta) {
+    const next: Record<string, unknown> = { ...meta };
+    for (const k of ["shopout_wm_path", "shopout_wm_version", "shopout_wm_at"]) {
+      delete next[k];
+    }
+    const upd = await db.from("lead_documents").update({ metadata: next }).eq("id", row.id);
+    if (upd.error) return { ok: false, error: `stamp_clear_failed: ${upd.error.message}` };
+  }
+  return { ok: true, state: "clean", purged };
 }
 
 /**

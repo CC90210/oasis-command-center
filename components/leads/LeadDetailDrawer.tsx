@@ -20,8 +20,9 @@ import { useCallback, useEffect, useRef, useState } from "react";
 // useRef intentionally imported for the file-input ref in DocumentsTab.
 import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
-import { X, FileText, ImageIcon, Phone, Mail, ShoppingBag, Loader2, Trash2, CheckCircle2, AlertCircle, UploadCloud, RefreshCw, ArrowRightLeft, ChevronLeft } from "lucide-react";
+import { X, FileText, ImageIcon, Phone, Mail, ShoppingBag, Loader2, Trash2, CheckCircle2, AlertCircle, UploadCloud, RefreshCw, ArrowRightLeft, ChevronLeft, Eye, Eraser } from "lucide-react";
 import { LeadTimelinePanel } from "./LeadTimelinePanel";
+import { DocumentsViewer } from "./DocumentsViewer";
 import { AssignmentControl } from "./AssignmentControl";
 import { CollaboratorsControl } from "./CollaboratorsControl";
 import { StagePicker } from "./StagePicker";
@@ -1373,6 +1374,10 @@ function DocumentsTab({
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [generating, setGenerating] = useState(false);
   const [generatingFundmate, setGeneratingFundmate] = useState(false);
+  const [showViewer, setShowViewer] = useState(false);
+  // Set when Unwatermark hits a legacy baked file (no clean original) — surfaces
+  // a re-upload prompt by the upload box.
+  const [legacyNotice, setLegacyNotice] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const appInputRef = useRef<HTMLInputElement>(null);
 
@@ -1680,9 +1685,40 @@ function DocumentsTab({
         {stageNotice && (
           <div className="text-[11px] text-emerald-300">{stageNotice}</div>
         )}
+        {legacyNotice && (
+          <div className="flex items-start gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 p-2 text-[11px] text-amber-200">
+            <AlertCircle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+            <div className="min-w-0">
+              {legacyNotice}
+              <button
+                type="button"
+                onClick={() => setLegacyNotice(null)}
+                className="ml-2 underline hover:no-underline text-amber-300/80"
+              >
+                dismiss
+              </button>
+            </div>
+          </div>
+        )}
       </div>
 
       <DocsSummary docs={docs} />
+
+      {docs.length > 0 && (
+        <div className="flex items-center justify-between">
+          <div className="text-[11px] uppercase tracking-wider text-fg-muted">
+            Documents ({docs.length})
+          </div>
+          <button
+            type="button"
+            onClick={() => setShowViewer(true)}
+            title="Open all documents in a viewer and swipe through them"
+            className="inline-flex items-center gap-1.5 text-[11px] font-semibold px-2.5 py-1 rounded-md border border-bg-border bg-bg-elev text-fg-muted hover:text-fg"
+          >
+            <Eye className="w-3 h-3" /> View all
+          </button>
+        </div>
+      )}
 
       {docs.length === 0 ? (
         <div className="text-xs text-fg-dim italic py-4 text-center">
@@ -1707,6 +1743,16 @@ function DocumentsTab({
                 <span className="text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-300 font-semibold">
                   verified
                 </span>
+                {d.doc_type === "bank_statements_3mo" && (
+                  <UnwatermarkButton
+                    id={d.id}
+                    onClean={refresh}
+                    onLegacy={(msg) => {
+                      setLegacyNotice(msg);
+                      setDocType("bank_statements_3mo");
+                    }}
+                  />
+                )}
                 <DocDownloadButton id={d.id} filename={d.filename} />
                 <button
                   type="button"
@@ -1726,6 +1772,10 @@ function DocumentsTab({
             );
           })}
         </ul>
+      )}
+
+      {showViewer && (
+        <DocumentsViewer docs={docs} onClose={() => setShowViewer(false)} />
       )}
     </div>
   );
@@ -1812,6 +1862,65 @@ function DocDownloadButton({ id, filename }: { id: string; filename: string }) {
       className="text-[11px] uppercase tracking-wider px-2 py-1 rounded-md border border-bg-border text-fg-muted hover:text-fg disabled:opacity-50"
     >
       {pending ? "…" : "View"}
+    </button>
+  );
+}
+
+/**
+ * UnwatermarkButton — get the CLEAN version of a stored bank statement
+ * (2026-06-29). New-architecture files are already stored clean, so this purges
+ * any derived shop-out watermark copy + confirms clean. Legacy baked files (no
+ * clean original) bubble a re-upload prompt up to the tab via onLegacy.
+ */
+function UnwatermarkButton({
+  id,
+  onClean,
+  onLegacy,
+}: {
+  id: string;
+  onClean: () => void | Promise<void>;
+  onLegacy: (message: string) => void;
+}) {
+  const [pending, setPending] = useState(false);
+  const [done, setDone] = useState(false);
+  return (
+    <button
+      type="button"
+      disabled={pending}
+      title="Get the clean (un-watermarked) version of this statement"
+      onClick={async () => {
+        setPending(true);
+        try {
+          const r = await fetch(`/api/lead-documents/${id}/unwatermark`, {
+            method: "POST",
+            credentials: "include",
+          });
+          const j = await r.json().catch(() => ({}));
+          if (j.ok && j.state === "clean") {
+            setDone(true);
+            await onClean();
+            setTimeout(() => setDone(false), 2500);
+          } else if (j.ok && j.state === "legacy_baked") {
+            onLegacy(j.message || "Re-upload this statement to get a clean version.");
+          } else {
+            onLegacy(j.error ? `Unwatermark failed: ${j.error}` : "Unwatermark failed.");
+          }
+        } catch (e) {
+          onLegacy(`Unwatermark failed: ${String((e as Error).message || e)}`);
+        } finally {
+          setPending(false);
+        }
+      }}
+      className="inline-flex items-center gap-1 text-[11px] uppercase tracking-wider px-2 py-1 rounded-md border border-bg-border text-fg-muted hover:text-fg disabled:opacity-50"
+    >
+      {pending ? (
+        <Loader2 className="w-3 h-3 animate-spin" />
+      ) : done ? (
+        <CheckCircle2 className="w-3 h-3 text-emerald-300" />
+      ) : (
+        <Eraser className="w-3 h-3" />
+      )}
+      {pending ? "…" : done ? "Clean" : "Unwatermark"}
     </button>
   );
 }
