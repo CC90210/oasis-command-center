@@ -14,8 +14,9 @@
  * The form-submit route used to queue a `lead_interactions` row
  * (agent_source='form_intake_resume', type='email_queued') and rely on a
  * daemon to send it. But the dashboard-email-consumer daemon ONLY drains
- * agent_source='dashboard_drawer' AND is Windows-gated in ecosystem.config.js,
- * so on the SunBiz VPS those rows sat at status='queued' forever — never sent.
+ * agent_source='dashboard_drawer' rows — so even now that it runs on the VPS
+ * (moved off Windows-only 2026-06-29), form_intake_resume rows aren't its job
+ * and would sit at status='queued' forever — never sent.
  * (Verified 2026-06-17: 5/5 form_intake_resume rows stuck queued, 0 sent.)
  *
  * The proven path is the SAME one the lead-drawer email uses (27/27 sent):

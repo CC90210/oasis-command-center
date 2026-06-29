@@ -35,17 +35,18 @@ export const dynamic = "force-dynamic";
 export const maxDuration = 60;
 
 /**
- * Auto-fire the email via the bridge `send_email` tool. Parallel to the
- * shop-out auto-trigger (commit 4957702): on the SunBiz VPS the
- * dashboard-email-consumer daemon is IS_WIN-gated in ecosystem.config.js,
- * so queued lead-emails sit at metadata.status='queued' forever for
- * Matt/Jordan/Alex unless an owner/admin triggers them. This auto-trigger
- * closes that gap for owner/admin roles (members fall back to the queue —
- * /api/bridge/exec-tool's role gate rejects write tools for non-admin).
+ * Auto-fire the email via the bridge `send_email` tool — INSTANT send for
+ * owner/admin (parallel to the shop-out auto-trigger, commit 4957702). Members
+ * fall back to the queue (/api/bridge/exec-tool's role gate rejects write tools
+ * for non-admin); that queue is drained by the dashboard-email-consumer daemon,
+ * which now runs on the always-on VPS (moved from Windows-only → IS_LINUX in
+ * ecosystem.config.js, 2026-06-29 — Windows-only meant queued lead-emails never
+ * sent whenever CC's PC was off; 21 rows had piled up undelivered). So: admins
+ * send instantly here; members + any bridge hiccup are covered by the VPS daemon.
  *
  * Failure modes (best-effort): timeout / bridge offline / role denied →
- * row stays at status='queued', operator can retry or wait for the
- * daemon. Never blocks the queue confirmation.
+ * row stays at status='queued' and the VPS consumer drains it on its next poll.
+ * Never blocks the queue confirmation.
  */
 async function triggerImmediateSend(
   req: NextRequest,
