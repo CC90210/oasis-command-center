@@ -61,12 +61,13 @@ export const LEAD_PIPELINE_STAGES: StageMeta[] = [
   { key: "intent_inquiry_submitted", label: "Intent Inquiry", bg: "#0E9AA7", fg: "#FFFFFF" },
   { key: "hot_lead",           label: "Hot Lead",           bg: "#C0842F", fg: "#FFFFFF" },
   { key: "missing_info",       label: "Missing Info",       bg: "#3978BE", fg: "#FFFFFF" },
-  // UW Sheet (CC, 2026-06-30): entry stage for deals the "Sift" MCA Lead
-  // Scrubber pulls off Breeze/SunBiz Google-Drive sheets, scores, and — after
-  // Ezra's approval — injects here. Sits ABOVE follow_up: a lead landing here
+  // Live Subs (CC, 2026-06-30): entry stage for deals the Breeze UW Entry Sheet
+  // scrubber pulls off Breeze's Google Drive, scores, and — after Ezra's
+  // Telegram approval — injects here. Sits ABOVE follow_up: a lead landing here
   // kicks off the autonomous follow-up lifecycle (drip + stale-lead nudges).
+  // Internal key stays `uw_sheet` (all wiring keyed on it); LABEL is "Live Subs".
   // See ~/SunBiz-Agent/scripts/mca_lead_scrubber.py.
-  { key: "uw_sheet",           label: "UW Sheet",           bg: "#5A4A8A", fg: "#FFFFFF" },
+  { key: "uw_sheet",           label: "Live Subs",          bg: "#5A4A8A", fg: "#FFFFFF" },
   { key: "follow_up",          label: "Follow Up",          bg: "#8A6A3B", fg: "#FFFFFF" },
   { key: "sent_application",   label: "Sent Application",   bg: "#7057A7", fg: "#FFFFFF" },
   { key: "viewed_application", label: "Viewed", bg: "#2E8392", fg: "#FFFFFF" },

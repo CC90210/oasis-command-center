@@ -47,6 +47,9 @@ const LEAD_STAGE_ALIASES = new Map<string, string>([
   ["uw sheet", "uw_sheet"],
   ["underwriting", "uw_sheet"],
   ["underwriting sheet", "uw_sheet"],
+  // "Live Subs" is the operator-facing label for the uw_sheet stage (CC 2026-06-30).
+  ["live subs", "uw_sheet"],
+  ["live submissions", "uw_sheet"],
   // 2026-06-18 (CC): lead `declined`/`submitted` stages removed — route legacy
   // inbound aliases to their replacements (declined→ghost, approved→signed).
   ["decline", "ghost"],

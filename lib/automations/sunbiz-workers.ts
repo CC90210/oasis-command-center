@@ -45,7 +45,14 @@ export const SUNBIZ_WORKERS: BgWorkerDef[] = [
     // mca-lead-scrubber PM2 entry in SunBiz-Agent/ecosystem.config.js.
     service: "pm2.mca-lead-scrubber",
     label: "Breeze UW Entry Sheet",
-    purpose: "Solara watches the shared Breeze/SunBiz Google Drive for new MCA lead sheets, scrubs each deal against the underwriting criteria, and queues the good ones for Ezra to approve into the UW Sheet stage.",
+    purpose: "Solara watches Breeze's Google Drive for new per-deal UW Sheets, scores each against the underwriting criteria (revenue ≥$80k, leverage <40%, 2-4 active funders, industry/ISO/data-merge gates, previously-submitted), and sends the qualifiers to Ezra's Telegram for approval into the Live Subs stage.",
+  },
+  {
+    // Ezra's Telegram approve/deny poller. Mirrors the ezra-telegram-bridge
+    // PM2 entry in SunBiz-Agent/ecosystem.config.js.
+    service: "pm2.ezra-telegram-bridge",
+    label: "Ezra Telegram Approvals",
+    purpose: "Watches Ezra's Telegram for Approve/Deny taps on scrubbed deals. Approve injects the lead into the Live Subs pipeline stage (firing follow-up); Deny stops it. Ezra is the gate before any deal enters the Command Centre.",
   },
   {
     service: "pm2.claude-bridge",
