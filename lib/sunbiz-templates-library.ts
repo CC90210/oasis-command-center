@@ -38,13 +38,21 @@ export type SunbizTemplateCategory =
   | "welcome"
   | "educational"
   | "nurture"
+  | "industry"
+  | "use_case"
+  | "speed"
+  | "consolidation"
+  | "seasonal"
+  | "amount"
   | "follow_up"
+  | "reengagement"
   | "application"
   | "document_request"
   | "offer"
   | "objection"
   | "onboarding"
   | "retention"
+  | "renewal"
   | "breakup";
 
 export type SunbizEmailTemplate = {
@@ -79,13 +87,21 @@ export const SUNBIZ_TEMPLATE_CATEGORIES: {
   { category: "welcome", label: "First touch" },
   { category: "educational", label: "Educate / build trust" },
   { category: "nurture", label: "Nurture — not ready yet" },
+  { category: "industry", label: "Industry-specific" },
+  { category: "use_case", label: "By use case (payroll, inventory, equipment...)" },
+  { category: "speed", label: "Fast funding / urgency" },
+  { category: "consolidation", label: "Consolidate / refinance" },
+  { category: "seasonal", label: "Seasonal & timely" },
+  { category: "amount", label: "By funding amount" },
   { category: "follow_up", label: "Follow-up — no reply" },
+  { category: "reengagement", label: "Re-engage cold leads" },
   { category: "application", label: "Application" },
   { category: "document_request", label: "Documents" },
   { category: "offer", label: "Offers & closing" },
   { category: "objection", label: "Handle an objection" },
   { category: "onboarding", label: "After funding" },
   { category: "retention", label: "Retention & referrals" },
+  { category: "renewal", label: "Renewal / more capital" },
   { category: "breakup", label: "Close the thread" },
 ];
 
@@ -189,6 +205,184 @@ If {{business_name}} has a move like that on the horizon, it's worth knowing wha
 Tell me what you're weighing and I'll tell you straight whether funding makes sense for it.`,
   },
 
+  // ---- Industry-specific ---------------------------------------------------
+  {
+    id: "industry_restaurant",
+    category: "industry",
+    label: "Industry — restaurant / food service",
+    subject: "Funding built for restaurants like {{business_name}}",
+    body: `Hi {{first_name}},
+
+Restaurants run on tight cash flow — payroll lands every two weeks, food and supply costs move with the season, and a slow stretch can squeeze you fast. A lot of the owners I work with use funding to smooth exactly that: cover a slow month, stock up before a busy run, or fix the equipment that can't wait.
+
+Because your card and deposit volume shows up clearly in your bank statements, food-service files tend to move quickly on our end. Send me three months of statements for {{business_name}} and I'll show you what's realistic.`,
+  },
+  {
+    id: "industry_construction",
+    category: "industry",
+    label: "Industry — construction / contractors",
+    subject: "Capital that keeps {{business_name}}'s jobs moving",
+    body: `Hi {{first_name}},
+
+Construction has a cash-flow problem baked in: you front materials and labor, then wait 30, 60, sometimes 90 days to get paid. A lot of contractors I work with use funding to bridge that gap — take the next job without waiting on the last invoice to clear.
+
+One application and three months of statements, and I can show {{business_name}} what's available to cover materials, make payroll, or pick up equipment between draws. Reply and I'll get you started.`,
+  },
+  {
+    id: "industry_trucking",
+    category: "industry",
+    label: "Industry — trucking / transportation",
+    subject: "Funding for {{business_name}} between settlements",
+    body: `Hi {{first_name}},
+
+Trucking lives and dies on cash flow — fuel, repairs, and insurance hit now, but settlement checks come later. The owner-operators and fleets I work with use funding to keep trucks rolling: cover a major repair, fuel up for a long haul, or bridge the wait on a load that's already delivered.
+
+Send me three months of business bank statements for {{business_name}} and I'll show you what you'd qualify for. Most files like this move quickly.`,
+  },
+
+  // ---- By use case ---------------------------------------------------------
+  {
+    id: "use_case_payroll",
+    category: "use_case",
+    label: "Use case — make payroll",
+    subject: "Covering payroll for {{business_name}}",
+    body: `Hi {{first_name}},
+
+Payroll is the one bill that can't slip — your people show up, they get paid. When revenue is lumpy or a big client pays late, a lot of owners use short-term capital to keep payroll steady without touching the reserves they need for everything else.
+
+If that's the gap for {{business_name}}, one application and three months of statements gets you real offers in a day or two. Reply and I'll send the application.`,
+  },
+  {
+    id: "use_case_inventory",
+    category: "use_case",
+    label: "Use case — buy inventory ahead",
+    subject: "Stocking up ahead of demand for {{business_name}}",
+    body: `Hi {{first_name}},
+
+The classic squeeze: you need to buy inventory now to sell it later, but the cash to buy it is tied up in what you haven't sold yet. Funding closes that gap — buy ahead of a busy stretch, take a bulk discount, or keep shelves full without draining your account.
+
+If {{business_name}} has a buy coming up, send me three months of statements and I'll show you what's available so you can move on it. Real offers back in a day or two.`,
+  },
+  {
+    id: "use_case_equipment",
+    category: "use_case",
+    label: "Use case — equipment / repairs",
+    subject: "Funding equipment for {{business_name}}",
+    body: `Hi {{first_name}},
+
+When a piece of equipment goes down or you need to add capacity, waiting isn't really an option — every day it's out costs you work. Funding lets you fix or buy now and pay it back as the equipment earns, instead of draining cash you need elsewhere.
+
+If that's the situation at {{business_name}}, one application and three months of statements puts real offers in front of you in a day or two. Reply and I'll get it moving.`,
+  },
+
+  // ---- Fast funding / urgency ----------------------------------------------
+  {
+    id: "speed_fast_turnaround",
+    category: "speed",
+    label: "Speed — funds in days, not weeks",
+    subject: "How fast {{business_name}} can have funds",
+    body: `Hi {{first_name}},
+
+If timing is the thing on your mind: this isn't a bank process. With a completed application and three months of business bank statements, I can have real offers back for {{business_name}} in a day or two — and most deals fund within a few days of you picking one.
+
+The statements are the gate, so the faster I have those, the faster everything moves. Send them over and I'll start the same day.`,
+  },
+  {
+    id: "speed_deadline",
+    category: "speed",
+    label: "Speed — working against a deadline",
+    bulkSafe: false,
+    subject: "Working against a deadline for {{business_name}}?",
+    body: `Hi {{first_name}},
+
+You mentioned timing is tight, so let's move accordingly. If you can get me a completed application and three months of business bank statements today, I'll push your file to lenders right away and have offers for {{business_name}} back fast.
+
+The one thing that slows these down is waiting on statements — everything else I can run on my end. Send those over and I'll keep this on the fast track.`,
+  },
+
+  // ---- Consolidate / refinance ---------------------------------------------
+  {
+    id: "consolidation_simplify",
+    category: "consolidation",
+    label: "Consolidate — one cleaner payment",
+    subject: "Turning several payments into one for {{business_name}}",
+    body: `Hi {{first_name}},
+
+If {{business_name}} is juggling more than one advance or loan, it's worth a look at consolidating. A lot of the deals I place roll several balances into one cleaner payment — which can free up daily cash flow and make the whole thing easier to manage.
+
+Send me three months of statements and I'll show you whether consolidating makes sense for your numbers, or whether you're better off leaving things as they are. Straight answer either way.`,
+  },
+  {
+    id: "consolidation_refi",
+    category: "consolidation",
+    label: "Refinance — better terms as you pay down",
+    subject: "A look at refinancing for {{business_name}}",
+    body: `Hi {{first_name}},
+
+As you pay down existing financing, you build a track record — and that track record can open better terms than what you started with. For a lot of owners, refinancing into a stronger position lowers the daily strain and frees up room to grow.
+
+If you've got a balance out, send me three months of statements and I'll show you honestly whether {{business_name}} can do better than where it sits today. No guessing.`,
+  },
+
+  // ---- Seasonal & timely ---------------------------------------------------
+  {
+    id: "seasonal_busy_prep",
+    category: "seasonal",
+    label: "Seasonal — gear up before your busy season",
+    subject: "Getting {{business_name}} ready for the busy stretch",
+    body: `Hi {{first_name}},
+
+Most businesses have a season that makes the year — and the smart move is lining up capital before it hits, not scrambling in the middle of it. Stock up, staff up, or get the marketing out ahead of demand while approvals are easy and your numbers look steady.
+
+If {{business_name}} has a busy stretch coming, send me three months of statements now and I'll show you what's available so you're ready when it lands.`,
+  },
+  {
+    id: "seasonal_slow_bridge",
+    category: "seasonal",
+    label: "Seasonal — bridge a slow stretch",
+    subject: "Bridging the slow season for {{business_name}}",
+    body: `Hi {{first_name}},
+
+Every business has a slow stretch — the trick is getting through it without falling behind on the bills that don't slow down with revenue. Short-term capital can carry {{business_name}} across the gap, then get paid back as things pick up again.
+
+If that's where you're headed, it's easier to set up now than in the thick of it. Send me three months of statements and I'll show you what you'd qualify for.`,
+  },
+
+  // ---- By funding amount ---------------------------------------------------
+  {
+    id: "amount_up_to_500k",
+    category: "amount",
+    label: "Amount — up to $500K, apply to get quoted",
+    subject: "How much {{business_name}} could qualify for",
+    body: `Hi {{first_name}},
+
+The honest answer to "how much can I get" is that it depends on your revenue and how your bank statements look — but the program funds up to $500,000, and the way to find your real number is to apply and get quoted.
+
+There's no cost to see where {{business_name}} lands and no obligation to take anything. Send me a completed application and three months of statements and I'll bring back the actual offers.`,
+  },
+  {
+    id: "amount_smaller_start",
+    category: "amount",
+    label: "Amount — start smaller, grow the line",
+    subject: "Starting right-sized for {{business_name}}",
+    body: `Hi {{first_name}},
+
+You don't have to take the biggest number on the table. A lot of owners start with a right-sized amount, pay it down cleanly, and use that track record to come back for more — larger and on better terms the second time around.
+
+The program funds up to $500,000, but the right starting point is whatever {{business_name}} can put to work and pay back comfortably. Send me three months of statements and I'll help you find that number.`,
+  },
+  {
+    id: "amount_larger_deal",
+    category: "amount",
+    label: "Amount — larger capital need",
+    subject: "Funding a larger move for {{business_name}}",
+    body: `Hi {{first_name}},
+
+If you're planning something bigger — a major expansion, a large inventory buy, a new location — the program funds up to $500,000, and the way to find your real ceiling is to apply and get quoted on your actual numbers.
+
+Send me a completed application and three months of business bank statements, and I'll bring back what {{business_name}} qualifies for so you can plan around a real figure, not a guess.`,
+  },
+
   // ---- Follow-up — no reply ------------------------------------------------
   {
     id: "follow_up",
@@ -238,6 +432,48 @@ Send those two things over whenever you can and I'll get moving the same day.`,
 I'll stop here unless I hear from you — I don't want to keep landing in your inbox if the timing's wrong.
 
 If capital for {{business_name}} is still worth a look, reply and I'll pick it right back up, same day. If not, no harm done and the door stays open whenever things change.`,
+  },
+
+  // ---- Re-engage cold leads ------------------------------------------------
+  {
+    id: "reengage_still_open",
+    category: "reengagement",
+    // History-dependent ("since we talked", "still right here") — not safe for a
+    // mixed bulk blast that may include leads with no prior interaction (Codex P2).
+    bulkSafe: false,
+    label: "Re-engage — your file is still open",
+    subject: "{{business_name}} — still on file whenever you need it",
+    body: `Hi {{first_name}},
+
+It's been a stretch since we talked about funding for {{business_name}}, and your file is still right here on my end — nothing to redo.
+
+If working capital is back on your radar — a project, a slow month, inventory, payroll — reply and I'll pull current numbers so you can see exactly what's available now. Things change quarter to quarter, so the figure may look different than last time.`,
+  },
+  {
+    id: "reengage_whats_changed",
+    category: "reengagement",
+    // "Last time the timing wasn't right" assumes prior contact — not bulk-safe.
+    bulkSafe: false,
+    label: "Re-engage — what's changed on your end?",
+    subject: "Has anything changed for {{business_name}}?",
+    body: `Hi {{first_name}},
+
+A lot can shift in a few months — revenue, a new opportunity, a gap that wasn't there before. Last time the timing wasn't right for {{business_name}}, and I get that.
+
+If the picture's changed at all, it takes three months of statements for me to show you where you'd stand today. No cost to look, and if it's still not the moment, just tell me when and I'll hold off.`,
+  },
+  {
+    id: "reengage_new_options",
+    category: "reengagement",
+    // "last time we spoke" assumes prior contact — not bulk-safe.
+    bulkSafe: false,
+    label: "Re-engage — fresh program options",
+    subject: "New options worth a look for {{business_name}}",
+    body: `Hi {{first_name}},
+
+Reaching back out because the lender programs we work with have shifted, and there may be a better fit for {{business_name}} now than there was last time we spoke.
+
+If working capital is worth another look, send me three months of statements and I'll show you what's on the table today — real offers, no cost to see them. If the timing's still off, point me to a better month and I'll check back then.`,
   },
 
   // ---- Application ---------------------------------------------------------
@@ -429,6 +665,44 @@ Same deal for them — one application, real offers in a day or two, no cost to 
 It's been a while since we funded {{business_name}}, and your file is still here on my end, so there's nothing to redo.
 
 If you're thinking about another round — inventory, payroll, a project, or just getting ahead of a slow stretch — I can have updated offers in front of you in a day or two. Reply and I'll pull fresh numbers.`,
+  },
+
+  // ---- Renewal / more capital ----------------------------------------------
+  {
+    id: "renewal_halfway",
+    category: "renewal",
+    label: "Renewal — you're paid partway down",
+    bulkSafe: false,
+    subject: "{{business_name}} is in range for a renewal",
+    body: `Hi {{first_name}},
+
+You're far enough into your current balance that {{business_name}} is in range for a renewal — and renewals usually come back larger and on better terms, since you've now got a clean track record with the lender.
+
+If there's a use for the capital, reply and I'll pull current numbers so you can see exactly what's available. No obligation to take it — just worth knowing where you stand.`,
+  },
+  {
+    id: "renewal_more_capital",
+    category: "renewal",
+    label: "Renewal — need more before you're paid off",
+    bulkSafe: false,
+    subject: "More capital for {{business_name}} sooner than you'd think",
+    body: `Hi {{first_name}},
+
+You don't always have to wait until you're fully paid off to get more. Depending on how {{business_name}} has performed since we funded you, there may be room to add capital now — either on top of your current balance or by rolling it into one cleaner payment.
+
+Send me your three most recent statements and I'll show you which path actually makes sense for your numbers. Straight answer either way.`,
+  },
+  {
+    id: "renewal_better_terms",
+    category: "renewal",
+    label: "Renewal — better terms this round",
+    bulkSafe: false,
+    subject: "Better terms waiting for {{business_name}}",
+    body: `Hi {{first_name}},
+
+Here's the upside of a clean payment history: the second round is almost always better than the first. Since we funded {{business_name}}, you've built the track record lenders price on — which usually means more capital, lower cost, or both.
+
+If you've got a use for it, reply and I'll pull fresh numbers so you can compare them against where you are now. No pressure to move — just the real picture.`,
   },
 
   // ---- Close the thread ----------------------------------------------------
