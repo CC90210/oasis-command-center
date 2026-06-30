@@ -75,7 +75,7 @@ export const FORM_THEMES: FormTheme[] = [
       primary_color: "#111827",
       accent_color: "#0ea5e9",
       headline: "Apply for funding",
-      subheadline: "Three minutes. No credit pull.",
+      subheadline: "Three minutes. No obligation.",
       thanks_message: "We've got it. Watch your inbox.",
     },
   },
