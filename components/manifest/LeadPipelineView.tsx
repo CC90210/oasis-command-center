@@ -551,6 +551,9 @@ function BulkActionBar({
   onEmail: (templateId: string) => void;
   onClear: () => void;
 }) {
+  // Two-step confirm before a template blast — picking from the dropdown stages
+  // the send; the operator must then confirm the exact count.
+  const [pendingEmail, setPendingEmail] = useState<{ id: string; label: string } | null>(null);
   return (
     <div className="sticky bottom-3 z-20 mx-auto flex w-fit max-w-full flex-wrap items-center gap-3 rounded-xl border border-accent/40 bg-bg-elev/95 px-4 py-2.5 shadow-lg backdrop-blur">
       <span className="inline-flex items-center gap-1.5 text-[12px] font-semibold text-fg">
@@ -625,7 +628,10 @@ function BulkActionBar({
           onChange={(e) => {
             const v = e.target.value;
             e.currentTarget.selectedIndex = 0;
-            if (v) onEmail(v);
+            if (v) {
+              const t = SUNBIZ_BULK_SAFE_TEMPLATES.find((x) => x.id === v);
+              setPendingEmail({ id: v, label: t?.label || v });
+            }
           }}
           className="rounded-md border border-bg-border bg-bg-deep px-2 py-1 text-[12px] text-fg focus:border-accent focus:outline-none disabled:opacity-60"
           title="Queue this email template (personalized per record) to every selected lead. Only outreach-safe templates appear here — stage-specific ones (offers, funded, renewals) are 1:1-only to avoid false claims in a batch."
@@ -648,6 +654,30 @@ function BulkActionBar({
           })}
         </select>
       </label>
+
+      {pendingEmail && (
+        <div className="flex items-center gap-2 rounded-md border border-accent/40 bg-accent/10 px-2.5 py-1.5 text-[11px] text-fg">
+          <span>
+            Send <span className="font-semibold">&ldquo;{pendingEmail.label}&rdquo;</span> to {count}{" "}
+            {entityName === "application" ? "app" : "lead"}
+            {count === 1 ? "" : "s"}?
+          </span>
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() => {
+              onEmail(pendingEmail.id);
+              setPendingEmail(null);
+            }}
+            className="rounded-md border border-accent/50 bg-accent/20 px-2 py-0.5 text-[11px] font-semibold text-fg hover:bg-accent/30 disabled:opacity-60"
+          >
+            {busy ? "Sending…" : "Confirm send"}
+          </button>
+          <button type="button" onClick={() => setPendingEmail(null)} className="text-[11px] text-fg-dim hover:text-fg">
+            Cancel
+          </button>
+        </div>
+      )}
 
       <button
         type="button"

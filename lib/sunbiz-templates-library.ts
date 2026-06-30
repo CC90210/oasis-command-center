@@ -40,6 +40,8 @@ export type SunbizTemplateCategory =
   | "nurture"
   | "follow_up"
   | "application"
+  | "viewed_application"
+  | "signed_application"
   | "document_request"
   | "offer"
   | "objection"
@@ -81,6 +83,8 @@ export const SUNBIZ_TEMPLATE_CATEGORIES: {
   { category: "nurture", label: "Nurture — not ready yet" },
   { category: "follow_up", label: "Follow-up — no reply" },
   { category: "application", label: "Application" },
+  { category: "viewed_application", label: "App viewed — finish it" },
+  { category: "signed_application", label: "App signed — send statements" },
   { category: "document_request", label: "Documents" },
   { category: "offer", label: "Offers & closing" },
   { category: "objection", label: "Handle an objection" },
@@ -263,6 +267,78 @@ I'll send the application link in my next note. If you'd rather I walk you throu
 Your application came through — thanks for that. Before I can send {{business_name}} to lenders, there are still one or two items outstanding. I'll list exactly what's missing right below this line so we can close it out fast:
 
 Once those are in, your file is complete and I can submit it the same day.`,
+  },
+
+  // ---- App viewed — finish it ---------------------------------------------
+  {
+    id: "viewed_nudge",
+    category: "viewed_application",
+    label: "App viewed — gentle nudge to finish",
+    subject: "Finishing the application for {{business_name}}",
+    body: `Hi {{first_name}},
+
+If you started the application for {{business_name}} and didn't get all the way through, no problem at all. Tell me where it got stuck and I'll handle the rest with you in a couple of minutes.
+
+The day it's complete with your last 3 months of business bank statements, I take your file to our lenders and come back with the offers that actually fit, usually 3 to 5 inside 24 to 48 hours.`,
+  },
+  {
+    id: "viewed_value",
+    category: "viewed_application",
+    label: "App viewed — two minutes to real offers",
+    subject: "Two minutes between you and real offers",
+    body: `Hi {{first_name}},
+
+The application is the only thing standing between {{business_name}} and seeing real numbers. It takes about two minutes, there's no hard credit pull to fill it out, and no obligation on anything that comes back.
+
+Want me to send a fresh link, or would it be easier to do it together on a quick call?`,
+  },
+  {
+    id: "viewed_seen",
+    category: "viewed_application",
+    label: "App viewed — saw it open (1:1)",
+    bulkSafe: false,
+    subject: "Saw the application come up on your end",
+    body: `Hi {{first_name}},
+
+I saw the application for {{business_name}} open up but not come back completed. If something on it wasn't clear, tell me which part and I'll walk you through it.
+
+Once it's in with your last 3 months of bank statements, your file is ready to go to lenders the same day.`,
+  },
+
+  // ---- App signed — send statements ---------------------------------------
+  {
+    id: "signed_statements",
+    category: "signed_application",
+    label: "App signed — statements are the last step",
+    subject: "Last step for {{business_name}}: bank statements",
+    body: `Hi {{first_name}},
+
+Your application is in, thank you. The last thing I need to take {{business_name}} to lenders is your most recent 3 months of business bank statements. Those are the gate, they carry the most weight in what you qualify for.
+
+Send them over and I'll have your file in front of lenders the same day, with offers usually back in 24 to 48 hours.`,
+  },
+  {
+    id: "signed_upload",
+    category: "signed_application",
+    label: "App signed — secure upload link",
+    subject: "Where to send your statements, {{first_name}}",
+    body: `Hi {{first_name}},
+
+We're at the final step for {{business_name}}. I'll send you a secure upload link for your last 3 months of business bank statements, or you can reply with them attached, whichever is easier.
+
+The moment they're in, your file goes to our lender network.`,
+  },
+  {
+    id: "signed_privacy",
+    category: "signed_application",
+    label: "App signed — statements + privacy reassurance (1:1)",
+    bulkSafe: false,
+    subject: "Your file's ready, just need statements",
+    body: `Hi {{first_name}},
+
+Thanks for getting the application signed. The only thing left for {{business_name}} is your last 3 months of business bank statements. They stay with us, they're only used to match you to the right lenders, and they never get shopped around without your say.
+
+Send them when you can and I'll move your file the same day.`,
   },
 
   // ---- Documents -----------------------------------------------------------
