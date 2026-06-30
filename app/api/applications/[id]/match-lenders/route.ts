@@ -29,7 +29,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getSessionUser, getServiceSupabase } from "@/lib/supabase-server";
 import { scoreLenderMatch, complianceProfileInputs } from "@/lib/lenders/match-fitness";
-import { applyLenderFeedbackBias } from "@/lib/lenders/feedback-bias";
+import { applyLenderIntelligenceBias } from "@/lib/lenders/lender-intelligence";
 import { buildLenderNarrative } from "@/lib/lenders/match-narrative";
 import type { LenderProfile, ApplicationProfile } from "@/lib/lenders/match-fitness";
 
@@ -403,8 +403,9 @@ export async function POST(
     return { matchScore: scoreLenderMatch(lenderProfile, applicationProfile), lenderProfile };
   });
 
-  // Apply historical feedback bias (falls back to unmodified scores on DB error).
-  const biasedMatchScores = await applyLenderFeedbackBias(
+  // Bias by LEARNED lender behavior on similar paper (lender_reply_outcomes +
+  // deal_paper_snapshot). Falls back to unmodified scores on empty history / DB error.
+  const biasedMatchScores = await applyLenderIntelligenceBias(
     topMatchPairs.map((t) => t.matchScore),
     applicationProfile,
     tenantId,
