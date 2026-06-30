@@ -26,6 +26,7 @@ import { resolveSessionContext } from "@/lib/api-auth";
 import { publishAgentEvent } from "@/lib/manifest/events";
 import { dispatchLeadStageEvent } from "@/lib/lead-stage-dispatcher";
 import { resolveSignerForOperator } from "@/lib/config/agents";
+import { operatorHasGmailOAuth, sendGmailAsOperator } from "@/lib/integrations/gmail-oauth-send";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -243,23 +244,41 @@ export async function POST(
   // and lender-threads retry).
   const signer = resolveSignerForOperator(sess.email);
 
-  // Auto-fire the send via the bridge. Best-effort: on failure the row
-  // stays at metadata.status='queued' and the daemon (when running) or
-  // the operator can retry.
-  const sendResult = await triggerImmediateSend(req, {
-    to: toEmail,
-    subject: truncatedSubject,
-    body: truncatedBody,
-    leadId,
-    brand,
-    signer,
-  });
+  // Send. Preference order:
+  //   1. The operator's OWN connected Gmail (immediate, from THEIR address) —
+  //      the personal-send path the Phase-4 comment above anticipated.
+  //   2. Fall back to the submissions@ queue (bridge → send_gateway) when the
+  //      operator hasn't connected Gmail, or their token is dead/send fails.
+  type SendOutcome =
+    | { status: "sent"; agent_source?: string; via?: string; from_address?: string }
+    | { status: "queued"; reason: string };
+  let sendResult: SendOutcome;
+  let gmailFrom: string | null = null;
+  let gmailMsgId: string | null = null;
 
-  // If the send actually fired, flip the queued row to 'auto_sent' so
-  // the timeline reflects reality and the daemon doesn't double-send.
-  // Failure to update is non-fatal — the row content is still accurate
-  // (just the status flag drifts; daemon's idempotency key prevents
-  // double-send).
+  if (await operatorHasGmailOAuth(sess.tenantId, sess.userId)) {
+    const g = await sendGmailAsOperator({
+      tenantId: sess.tenantId,
+      userId: sess.userId,
+      to: toEmail,
+      subject: truncatedSubject,
+      body: truncatedBody,
+    });
+    if (g.ok) {
+      sendResult = { status: "sent", agent_source: "gmail_oauth", via: "gmail_oauth", from_address: g.from_address };
+      gmailFrom = g.from_address;
+      gmailMsgId = g.gmail_message_id;
+    } else {
+      // not_connected / refresh_failed / send_failed → fall back to the queue so
+      // the email still goes out via submissions@.
+      sendResult = await triggerImmediateSend(req, { to: toEmail, subject: truncatedSubject, body: truncatedBody, leadId, brand, signer });
+    }
+  } else {
+    sendResult = await triggerImmediateSend(req, { to: toEmail, subject: truncatedSubject, body: truncatedBody, leadId, brand, signer });
+  }
+
+  // If the send actually fired, flip the queued row to sent so the timeline
+  // reflects reality and the daemon doesn't double-send. Non-fatal on failure.
   if (sendResult.status === "sent") {
     await db
       .from("lead_interactions")
@@ -268,9 +287,11 @@ export async function POST(
           requested_by_profile_id: sess.profileId,
           requested_by_email: sess.email,
           acted_by_user_id: sess.userId,
-          status: "auto_sent",
-          auto_sent_via: sendResult.agent_source,
-          auto_sent_at: new Date().toISOString(),
+          status: gmailFrom ? "sent" : "auto_sent",
+          sent_via: sendResult.agent_source,
+          ...(gmailFrom ? { from_address: gmailFrom } : {}),
+          ...(gmailMsgId ? { gmail_message_id: gmailMsgId } : {}),
+          sent_at: new Date().toISOString(),
         },
       })
       .eq("id", ins.data.id)

@@ -36,6 +36,7 @@ import {
   SUNBIZ_TEMPLATE_CATEGORIES,
   renderSunbizTemplate,
 } from "@/lib/sunbiz-templates-library";
+import { isLeadChannelEnabled } from "@/lib/leads/channel-registry";
 
 type DocRow = {
   id: string;
@@ -2051,7 +2052,7 @@ function VariantToggle({
 /* Footer composers                                                            */
 /* -------------------------------------------------------------------------- */
 
-type ComposerMode = "email" | "sms" | "torrent" | null;
+type ComposerMode = "email" | "sms" | "torrent" | "torrent_enroll" | "twilio" | null;
 
 /**
  * CallButton — click-to-call action (2026-05-25, CC ask).
@@ -2219,6 +2220,17 @@ function DrawerFooter({
         >
           Text Torrent
         </button>
+        {/* Twilio per-lead SMS — gated by lib/leads/channel-registry (enabled:false).
+            Flipping that flag surfaces this button; no drawer change needed. */}
+        {isLeadChannelEnabled("twilio") && str(recordData.phone) && (
+          <button
+            type="button"
+            onClick={() => setMode("twilio")}
+            className="flex-1 min-w-[120px] text-[12px] font-semibold px-3 py-2 rounded-md bg-bg-elev border border-bg-border text-fg hover:bg-bg-elev/80"
+          >
+            Twilio SMS
+          </button>
+        )}
       </div>
 
       {/* Composers — full-height overlay panels (ComposerShell is absolute
@@ -2252,9 +2264,26 @@ function DrawerFooter({
         />
       )}
       {mode === "torrent" && (
+        <TextTorrentSendComposer
+          recordId={recordId}
+          toPhone={str(recordData.phone)}
+          onClose={() => setMode(null)}
+          onChange={onChange}
+          onEnroll={() => setMode("torrent_enroll")}
+        />
+      )}
+      {mode === "torrent_enroll" && (
         <TextTorrentPicker
           leadId={entity === "lead" ? recordId : null}
           onClose={() => setMode(null)}
+        />
+      )}
+      {mode === "twilio" && (
+        <TwilioSmsComposer
+          recordId={recordId}
+          toPhone={str(recordData.phone)}
+          onClose={() => setMode(null)}
+          onChange={onChange}
         />
       )}
     </div>
@@ -2378,11 +2407,19 @@ function EmailComposer({
               });
               const j = await r.json().catch(() => ({}));
               if (r.ok && j.ok) {
-                setStatus(
-                  j.stage_bumped
-                    ? `Queued · stage → ${j.stage_bumped}`
-                    : "Queued",
-                );
+                // The route sends DIRECTLY from the operator's connected Gmail
+                // when available (send_status.via === 'gmail_oauth'), else it
+                // queues to the submissions@ daemon. Reflect the real outcome.
+                const ss = j.send_status as
+                  | { status?: string; via?: string; from_address?: string }
+                  | undefined;
+                let base = "Queued";
+                if (ss?.status === "sent" && ss?.via === "gmail_oauth" && ss?.from_address) {
+                  base = `Sent from ${ss.from_address}`;
+                } else if (ss?.status === "sent") {
+                  base = "Sent";
+                }
+                setStatus(j.stage_bumped ? `${base} · stage → ${j.stage_bumped}` : base);
                 setSubject("");
                 setBody("");
                 if (onChange) await onChange();
@@ -2397,7 +2434,7 @@ function EmailComposer({
           }}
           className="text-[12px] font-semibold px-3 py-1.5 rounded-md bg-accent text-bg-deep disabled:opacity-50"
         >
-          {pending ? "Queueing…" : "Queue send"}
+          {pending ? "Sending…" : "Send"}
         </button>
       </div>
     </ComposerShell>
@@ -2493,6 +2530,160 @@ function SmsComposer({
           className="text-[12px] font-semibold px-3 py-1.5 rounded-md bg-accent text-bg-deep disabled:opacity-50"
         >
           {pending ? "Sending…" : "Send"}
+        </button>
+      </div>
+    </ComposerShell>
+  );
+}
+
+// Direct 1:1 Text Torrent send — "text this lead now" via /api/leads/[id]/texttorrent
+// (sendSms / inbox-chat), distinct from enrolling them into a drip sequence.
+function TextTorrentSendComposer({
+  recordId,
+  toPhone,
+  onClose,
+  onChange,
+  onEnroll,
+}: {
+  recordId: string;
+  toPhone: string | null;
+  onClose: () => void;
+  onChange?: () => void | Promise<void>;
+  onEnroll: () => void;
+}) {
+  const [body, setBody] = useState("");
+  const [status, setStatus] = useState<string | null>(null);
+  const [pending, setPending] = useState(false);
+  if (!toPhone) {
+    return (
+      <ComposerShell title="Text Torrent" onClose={onClose}>
+        <div className="text-xs text-fg-dim italic">No phone on this record.</div>
+      </ComposerShell>
+    );
+  }
+  return (
+    <ComposerShell title={`Text Torrent · ${toPhone}`} onClose={onClose}>
+      <textarea
+        value={body}
+        onChange={(e) => setBody(e.target.value)}
+        placeholder="Message"
+        maxLength={1600}
+        className="w-full flex-1 min-h-[120px] text-xs px-2 py-1.5 rounded-md bg-bg-deep border border-bg-border text-fg resize-none"
+      />
+      <div className="flex items-center justify-between">
+        <div className="text-[11px] text-fg-dim">{status || `${body.length}/1600`}</div>
+        <div className="flex items-center gap-3">
+          <button type="button" onClick={onEnroll} className="text-[11px] text-fg-dim hover:text-fg underline">
+            Enroll in a sequence
+          </button>
+          <button
+            type="button"
+            disabled={pending || !body.trim()}
+            onClick={async () => {
+              setPending(true);
+              setStatus(null);
+              try {
+                const r = await fetch(`/api/leads/${recordId}/texttorrent`, {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  credentials: "include",
+                  body: JSON.stringify({ to_number: toPhone, message: body }),
+                });
+                const j = await r.json().catch(() => ({}));
+                if (r.ok && j.ok) {
+                  setStatus(
+                    j.dry_run
+                      ? "Queued (dry-run — not sent live)"
+                      : j.stage_bumped
+                        ? `Sent · stage → ${j.stage_bumped}`
+                        : "Sent",
+                  );
+                  setBody("");
+                  if (onChange) await onChange();
+                } else {
+                  setStatus(j.message || j.error || `Failed (${r.status})`);
+                }
+              } catch (e) {
+                setStatus(String((e as Error).message || e));
+              } finally {
+                setPending(false);
+              }
+            }}
+            className="text-[12px] font-semibold px-3 py-1.5 rounded-md bg-accent text-bg-deep disabled:opacity-50"
+          >
+            {pending ? "Sending…" : "Send text"}
+          </button>
+        </div>
+      </div>
+    </ComposerShell>
+  );
+}
+
+// Twilio per-lead SMS — gated OFF in lib/leads/channel-registry (Twilio enabled:false),
+// so this only renders once the flag is flipped. The send route
+// (/api/leads/[id]/twilio, sendSmsDirectTwilio) is the one piece added at enable time.
+function TwilioSmsComposer({
+  recordId,
+  toPhone,
+  onClose,
+  onChange,
+}: {
+  recordId: string;
+  toPhone: string | null;
+  onClose: () => void;
+  onChange?: () => void | Promise<void>;
+}) {
+  const [body, setBody] = useState("");
+  const [status, setStatus] = useState<string | null>(null);
+  const [pending, setPending] = useState(false);
+  if (!toPhone) {
+    return (
+      <ComposerShell title="Twilio SMS" onClose={onClose}>
+        <div className="text-xs text-fg-dim italic">No phone on this record.</div>
+      </ComposerShell>
+    );
+  }
+  return (
+    <ComposerShell title={`Twilio SMS · ${toPhone}`} onClose={onClose}>
+      <textarea
+        value={body}
+        onChange={(e) => setBody(e.target.value)}
+        placeholder="Message"
+        maxLength={1600}
+        className="w-full flex-1 min-h-[120px] text-xs px-2 py-1.5 rounded-md bg-bg-deep border border-bg-border text-fg resize-none"
+      />
+      <div className="flex items-center justify-between">
+        <div className="text-[11px] text-fg-dim">{status || `${body.length}/1600`}</div>
+        <button
+          type="button"
+          disabled={pending || !body.trim()}
+          onClick={async () => {
+            setPending(true);
+            setStatus(null);
+            try {
+              const r = await fetch(`/api/leads/${recordId}/twilio`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                credentials: "include",
+                body: JSON.stringify({ to_number: toPhone, message: body }),
+              });
+              const j = await r.json().catch(() => ({}));
+              if (r.ok && j.ok) {
+                setStatus(j.dry_run ? "Queued (dry-run)" : "Sent");
+                setBody("");
+                if (onChange) await onChange();
+              } else {
+                setStatus(j.message || j.error || `Failed (${r.status})`);
+              }
+            } catch (e) {
+              setStatus(String((e as Error).message || e));
+            } finally {
+              setPending(false);
+            }
+          }}
+          className="text-[12px] font-semibold px-3 py-1.5 rounded-md bg-accent text-bg-deep disabled:opacity-50"
+        >
+          {pending ? "Sending…" : "Send text"}
         </button>
       </div>
     </ComposerShell>
