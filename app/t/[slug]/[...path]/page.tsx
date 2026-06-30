@@ -15,7 +15,7 @@ import { OffersByDealClient } from "@/components/offers/OffersByDealClient";
 import { LendersDirectoryClient } from "@/components/lenders/LendersDirectoryClient";
 import { RenewalsV2 } from "@/components/renewals/RenewalsV2";
 import { ConversationsClient } from "@/components/conversations/ConversationsClient";
-import { CampaignsClient } from "@/components/campaigns/CampaignsClient";
+import { CampaignsShell } from "@/components/campaigns/CampaignsShell";
 import { listThreadsForTenant } from "@/lib/lead-interactions-queries";
 import { TenantSettings } from "@/components/settings/TenantSettings";
 import { TenantAutomations } from "@/components/automations/TenantAutomations";
@@ -495,7 +495,7 @@ function renderSubtitle(brand: string, page: ManifestPageDef): string {
     case "settings": return "Tenant-scoped — owner sees full settings, preview shows scaffold only.";
     case "automations": return "Tenant-scoped automations — cron jobs, bridge status, AI-described drafts.";
     case "conversations": return "Unified inbox — SMS, calls, and email replies threaded by contact.";
-    case "campaigns": return "Bulk SMS campaigns — analytics and create.";
+    case "campaigns": return "Multi-channel outreach — Text Torrent, Twilio, Gmail.";
     default: return brand;
   }
 }
@@ -608,10 +608,11 @@ async function PageBody({
         />
       );
     case "campaigns":
-      // Phase 3c. TextTorrent bulk-campaign analytics + create. The client
-      // does its own fetches (per-campaign counts fan-out is better lazy
-      // client-side than blocking SSR against TT's 60/min limiter).
-      return <CampaignsClient tenantSlug={slug} tenantId={tenantId} />;
+      // Multi-channel campaigns command center: Text Torrent / Twilio / Gmail
+      // sub-tabs. Each surface does its own client-side fetches (per-list count
+      // + credit fan-out is better lazy client-side than blocking SSR against
+      // TT's 60/min limiter).
+      return <CampaignsShell tenantSlug={slug} tenantId={tenantId} />;
     case "pipeline": {
       // Stacked superview — Lead Pipeline above Opportunity Pipeline.
       // Each section has its own chevron bar + filtered table. Filter

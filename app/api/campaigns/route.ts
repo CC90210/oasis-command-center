@@ -23,8 +23,10 @@ import {
   listCampaigns,
   createBulkCampaign,
   listLists,
+  listContacts,
   listNumbers,
   TextTorrentError,
+  type TextTorrentCredentials,
   type TtCampaign,
   type TtList,
   type TtNumber,
@@ -35,6 +37,55 @@ export const dynamic = "force-dynamic";
 
 function ttStatus(err: TextTorrentError): number {
   return err.status === 429 ? 429 : err.code === "missing_credentials" ? 400 : 502;
+}
+
+// Per-tenant 60s cache of TT list contact-counts so repeated Campaigns-tab loads
+// don't re-hammer TT's 60/min limiter. Counts feed the inline "(N leads)" the
+// operator sees on every list before picking one — a hard requirement.
+type CountCache = { at: number; counts: Map<string, number> };
+const LIST_COUNT_CACHE = new Map<string, CountCache>();
+const COUNT_TTL_MS = 60_000;
+const MAX_ENRICH_PER_REQUEST = 25;
+
+/**
+ * Fill in `count` for any list TT's /contact/list returned without one, via a
+ * cheap listContacts(limit:1).total probe. Rate-guarded (cap per request) and
+ * cached so a tenant with many lists fills in progressively instead of blowing
+ * the TT budget. Never throws — a list just stays count-less if the probe fails.
+ */
+async function enrichListCounts(
+  tenantId: string,
+  creds: TextTorrentCredentials,
+  lists: TtList[],
+): Promise<TtList[]> {
+  const now = Date.now();
+  const cached = LIST_COUNT_CACHE.get(tenantId);
+  const counts =
+    cached && now - cached.at < COUNT_TTL_MS ? cached.counts : new Map<string, number>();
+
+  const missing = lists.filter(
+    (l) => typeof l.count !== "number" && !counts.has(String(l.id)),
+  );
+  const toFetch = missing.slice(0, MAX_ENRICH_PER_REQUEST);
+  if (toFetch.length) {
+    const results = await Promise.allSettled(
+      toFetch.map((l) => listContacts(creds, String(l.id), { limit: 1 })),
+    );
+    results.forEach((r, i) => {
+      if (r.status === "fulfilled" && typeof r.value.total === "number") {
+        counts.set(String(toFetch[i].id), r.value.total);
+      }
+    });
+  }
+  LIST_COUNT_CACHE.set(tenantId, { at: now, counts });
+
+  return lists.map((l) =>
+    typeof l.count === "number"
+      ? l
+      : counts.has(String(l.id))
+        ? { ...l, count: counts.get(String(l.id)) }
+        : l,
+  );
 }
 
 /** Coerce a body value to a boolean with a default (TT anti-block flags). */
@@ -59,10 +110,12 @@ export async function GET() {
       // Don't let an analytics hiccup break the create form; only surface 429.
       if (e instanceof TextTorrentError && e.status === 429) throw e;
     }
-    // Contact lists power the create-form audience picker.
+    // Contact lists power the create-form audience picker. Enrich each with its
+    // lead count so the UI can show "(N)" inline on every list automatically.
     let lists: TtList[] = [];
     try {
       lists = (await listLists(creds)).data || [];
+      lists = await enrichListCounts(tenantId, creds, lists);
     } catch {
       /* form list-picker degrades to empty */
     }

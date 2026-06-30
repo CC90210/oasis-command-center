@@ -9,11 +9,17 @@
  * opt-out link). Owner/admin only; dry-run unless the texttorrent channel is live.
  */
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Card, EmptyState } from "@/components/Card";
-import { Megaphone, Plus, Send } from "lucide-react";
+import { Megaphone, Plus, Send, Coins, Users } from "lucide-react";
 import { CampaignListIntel } from "./CampaignListIntel";
+import { countSegments } from "@/lib/sms-segments";
+import {
+  estimateCredits,
+  CREDITS_PER_SEGMENT_PER_RECIPIENT,
+  LOW_BALANCE_THRESHOLD,
+} from "@/lib/integrations/texttorrent-credits";
 
 type Campaign = {
   id: string | number;
@@ -62,6 +68,11 @@ export function CampaignsClient({
   const [campaigns, setCampaigns] = useState<Campaign[]>([]);
   const [lists, setLists] = useState<TtList[]>([]);
   const [senders, setSenders] = useState<Sender[]>([]);
+  const [credits, setCredits] = useState<{ loaded: boolean; value: number | null; plan: string | null }>({
+    loaded: false,
+    value: null,
+    plan: null,
+  });
 
   // Create form state
   const [showForm, setShowForm] = useState(false);
@@ -105,10 +116,28 @@ export function CampaignsClient({
     }
   }, []);
 
+  const loadCredits = useCallback(async () => {
+    try {
+      const res = await fetch("/api/campaigns/credits");
+      const data = await res.json();
+      if (res.ok && data.ok) {
+        setCredits({ loaded: true, value: typeof data.credits === "number" ? data.credits : null, plan: data.plan_name || null });
+      } else {
+        setCredits({ loaded: true, value: null, plan: null });
+      }
+    } catch {
+      setCredits({ loaded: true, value: null, plan: null });
+    }
+  }, []);
+
   useEffect(() => {
-    if (tenantId) void load();
-    else setLoading(false);
-  }, [tenantId, load]);
+    if (tenantId) {
+      void load();
+      void loadCredits();
+    } else {
+      setLoading(false);
+    }
+  }, [tenantId, load, loadCredits]);
 
   async function handleCreate() {
     if (!listId || !message.trim() || creating) return;
@@ -149,11 +178,13 @@ export function CampaignsClient({
         const id = data.campaign_id ? ` (#${data.campaign_id})` : "";
         const tc = typeof data.total_contacts === "number" ? ` — ${data.total_contacts} contacts` : "";
         const seg = typeof data.total_segments === "number" ? `, ${data.total_segments} segments` : "";
-        setCreateNotice(`Campaign launched${id}${tc}${seg}.`);
+        const cr = typeof data.total_credit === "number" ? `, ${data.total_credit.toLocaleString()} credits charged` : "";
+        setCreateNotice(`Campaign launched${id}${tc}${seg}${cr}.`);
         setMessage("");
         setCampaignName("");
         setSchedule("");
         void load();
+        void loadCredits();
       }
     } catch {
       setCreateNotice("Network error — campaign not launched.");
@@ -161,6 +192,14 @@ export function CampaignsClient({
       setCreating(false);
     }
   }
+
+  // Live pre-send audience + credit estimate (TT has no pre-send quote endpoint).
+  const selectedList = useMemo(() => lists.find((l) => String(l.id) === listId), [lists, listId]);
+  const segments = useMemo(() => Math.max(1, countSegments(message.trim())), [message]);
+  const hasCount = typeof selectedList?.count === "number";
+  const recipients = selectedList?.count ?? 0;
+  const estimate = useMemo(() => estimateCredits({ recipients, segments }), [recipients, segments]);
+  const insufficient = credits.loaded && credits.value != null && hasCount && estimate > credits.value;
 
   if (!tenantId) {
     return (
@@ -206,15 +245,32 @@ export function CampaignsClient({
             {!loading && !showLists && `${campaigns.length} campaign${campaigns.length === 1 ? "" : "s"}`}
           </span>
         </div>
-        {!showLists && (
-          <button
-            onClick={() => setShowForm((s) => !s)}
-            className="btn-secondary inline-flex items-center gap-1.5 !px-3 !py-1.5 text-xs"
-          >
-            <Plus className="h-3.5 w-3.5" />
-            {showForm ? "Close" : "New campaign"}
-          </button>
-        )}
+        <div className="flex items-center gap-2">
+          {credits.loaded && (
+            <span
+              className="inline-flex items-center gap-1.5 rounded-md border border-bg-border bg-bg-deep/30 px-2 py-1 text-[11px]"
+              title="Text Torrent credit balance"
+            >
+              <Coins className="h-3.5 w-3.5 text-fg-dim" />
+              <span
+                className={`tabular-nums ${credits.value != null && credits.value < LOW_BALANCE_THRESHOLD ? "text-status-warm" : "text-fg"}`}
+              >
+                {credits.value != null ? credits.value.toLocaleString() : "—"}
+              </span>
+              <span className="text-fg-dim">credits</span>
+              {credits.plan && <span className="text-fg-dim">· {credits.plan}</span>}
+            </span>
+          )}
+          {!showLists && (
+            <button
+              onClick={() => setShowForm((s) => !s)}
+              className="btn-secondary inline-flex items-center gap-1.5 !px-3 !py-1.5 text-xs"
+            >
+              <Plus className="h-3.5 w-3.5" />
+              {showForm ? "Close" : "New campaign"}
+            </button>
+          )}
+        </div>
       </div>
 
       {showLists ? (
@@ -262,6 +318,44 @@ export function CampaignsClient({
                 className="mt-1 w-full bg-bg-deep/40 border border-bg-border rounded-md px-3 py-2 text-sm text-fg placeholder:text-fg-dim resize-none focus:outline-none focus:border-accent/50"
               />
             </label>
+            {selectedList && (
+              <div
+                className={`rounded-md border px-3 py-2 ${insufficient ? "border-status-hot/40 bg-status-hot/5" : "border-bg-border bg-bg-deep/20"}`}
+              >
+                <div className="flex items-center justify-between gap-3 text-[12px]">
+                  <span className="inline-flex items-center gap-1.5 text-fg">
+                    <Users className="h-3.5 w-3.5 text-fg-dim" />
+                    {selectedList.name}
+                    <span className="text-fg-dim">
+                      {hasCount ? `(${recipients.toLocaleString()} leads)` : "(count pending…)"}
+                    </span>
+                  </span>
+                  <span className="inline-flex items-center gap-1.5">
+                    <Coins className="h-3.5 w-3.5 text-fg-dim" />
+                    {hasCount ? (
+                      <span className={`tabular-nums font-medium ${insufficient ? "text-status-hot" : "text-fg"}`}>
+                        ~{estimate.toLocaleString()} credits
+                      </span>
+                    ) : (
+                      <span className="text-fg-dim">estimate unavailable</span>
+                    )}
+                  </span>
+                </div>
+                {hasCount && (
+                  <div className="mt-1 text-[11px] text-fg-dim">
+                    {recipients.toLocaleString()} leads × {CREDITS_PER_SEGMENT_PER_RECIPIENT} credits × {segments} segment{segments === 1 ? "" : "s"}
+                    {credits.loaded && credits.value != null && (
+                      <>
+                        {" "}· balance {credits.value.toLocaleString()}
+                        {insufficient
+                          ? " — not enough credits for this blast"
+                          : ` → ${(credits.value - estimate).toLocaleString()} left after`}
+                      </>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
             <div className="block">
               <span className="text-[11px] uppercase tracking-wide text-fg-dim">Send from (rotate across the pool)</span>
               {senders.length > 0 ? (
@@ -361,11 +455,12 @@ export function CampaignsClient({
               </label>
               <button
                 onClick={handleCreate}
-                disabled={creating || !listId || !message.trim()}
+                disabled={creating || !listId || !message.trim() || insufficient}
                 className="btn-secondary inline-flex items-center gap-1.5 !px-3 !py-2 text-xs disabled:opacity-50"
+                title={insufficient ? "Not enough Text Torrent credits for this blast" : undefined}
               >
                 <Send className="h-3.5 w-3.5" />
-                {creating ? "Launching…" : "Launch campaign"}
+                {creating ? "Launching…" : insufficient ? "Not enough credits" : "Launch campaign"}
               </button>
             </div>
           </div>
