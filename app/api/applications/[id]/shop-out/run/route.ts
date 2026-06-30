@@ -225,5 +225,46 @@ export async function POST(
     });
   }
 
+  // Snapshot the paper profile the lenders actually saw, frozen to this shop run,
+  // so the lender-intelligence recommender can later score lenders on SIMILAR
+  // paper. Best-effort — a snapshot failure must NEVER fail a completed shop.
+  const runId = (result as { run_id?: string }).run_id;
+  if (body.dry_run !== true && runId) {
+    try {
+      const uw = (appData.underwriting_jsonb || appData.underwriting || {}) as Record<string, unknown>;
+      const n = (...vals: unknown[]): number | null => {
+        for (const v of vals) if (typeof v === "number" && Number.isFinite(v)) return v;
+        return null;
+      };
+      const s = (...vals: unknown[]): string | null => {
+        for (const v of vals) if (typeof v === "string" && v.trim()) return v.trim();
+        return null;
+      };
+      await db.from("deal_paper_snapshot").upsert(
+        {
+          tenant_id: sess.tenantId,
+          application_id: applicationId,
+          shop_run_id: runId,
+          paper_grade: s(appData.paper_grade, uw.paper_grade),
+          position_count: n(appData.position_count, uw.position_count, uw.active_positions),
+          total_mca_balance: n(appData.total_mca_balance, uw.total_mca_balance),
+          leverage_ratio: n(appData.leverage_ratio, uw.leverage_ratio),
+          monthly_revenue: n(appData.monthly_revenue, uw.monthly_revenue, uw.avg_monthly_deposits),
+          nsf_count: n(appData.nsf_count_avg, uw.nsf_count_avg, uw.nsf_count),
+          avg_daily_balance: n(appData.avg_daily_balance, uw.avg_daily_balance),
+          months_covered: n(appData.months_covered, uw.months_covered),
+          applicant_fico: n(appData.applicant_fico, appData.fico, uw.fico),
+          time_in_business_months: n(appData.time_in_business_months, uw.time_in_business_months),
+          industry: s(appData.industry, uw.industry),
+          merchant_state: s(appData.merchant_state, uw.merchant_state),
+          requested_amount: n(appData.requested_amount, appData.amount, uw.requested_amount),
+        },
+        { onConflict: "tenant_id,shop_run_id" },
+      );
+    } catch {
+      /* best-effort snapshot */
+    }
+  }
+
   return NextResponse.json(result);
 }
