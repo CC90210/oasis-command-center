@@ -18,6 +18,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 // useRef intentionally imported for the file-input ref in DocumentsTab.
+import { BackgroundCheckTab } from "./BackgroundCheckTab";
 import { useRouter, useSearchParams, usePathname } from "next/navigation";
 import Link from "next/link";
 import { X, FileText, ImageIcon, Phone, Mail, ShoppingBag, Loader2, Trash2, CheckCircle2, AlertCircle, UploadCloud, RefreshCw, ArrowRightLeft, ChevronLeft, Eye } from "lucide-react";
@@ -60,13 +61,14 @@ type DetailPayload = {
   application: { id: string; data: Record<string, unknown> } | null;
 };
 
-type TabKey = "activity" | "owner" | "lenders" | "bank" | "documents" | "notes";
+type TabKey = "activity" | "owner" | "lenders" | "bank" | "bgc" | "documents" | "notes";
 
 const TABS: { key: TabKey; label: string }[] = [
   { key: "activity", label: "Activity" },
   { key: "owner", label: "Owner" },
   { key: "lenders", label: "Lenders" },
   { key: "bank", label: "Bank" },
+  { key: "bgc", label: "BGC" },
   { key: "documents", label: "Docs" },
   { key: "notes", label: "Notes" },
 ];
@@ -381,6 +383,7 @@ export function LeadDetailDrawer({
           {data && activeTab === "bank" && (
             <BankTab record={data.record.data} application={data.application} tenantSlug={tenantSlug} leadId={recordId} />
           )}
+          {data && activeTab === "bgc" && <BackgroundCheckTab leadId={recordId} record={data.record.data} />}
           {data && activeTab === "notes" && <NotesTab leadId={recordId} entity={entity} />}
           {data && activeTab === "documents" && (
             <DocumentsTab

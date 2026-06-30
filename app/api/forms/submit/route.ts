@@ -32,6 +32,7 @@
 
 import { NextRequest, NextResponse, after } from "next/server";
 import { getServiceSupabase } from "@/lib/supabase-server";
+import { enqueueBackgroundCheck } from "@/lib/background-check/enqueue";
 import { getClientIp } from "@/lib/api-helpers";
 import { verifyFormLink, signFormLink, type FormLinkPayload } from "@/lib/form-links";
 import {
@@ -798,6 +799,24 @@ export async function POST(req: NextRequest) {
         stageWarning = { reason, target_stage: targetStage };
       }
     }
+  }
+
+  // Auto-enqueue a background check the moment the FULL application is signed.
+  // Deferred (after the response flushes) + best-effort so it never adds latency
+  // to or fails the submission; the JARVIS bg-check-worker polls the queue.
+  // Idempotent (one open check per lead).
+  if (appliedStage === "signed_application") {
+    after(async () => {
+      try {
+        const enq = await enqueueBackgroundCheck({ db, tenantId: form.tenant_id, leadId: link.lead_id });
+        if (!enq.ok) console.error("[forms.submit.bgc_enqueue]", { lead_id: link.lead_id, error: enq.reason });
+      } catch (e) {
+        console.error("[forms.submit.bgc_enqueue.threw]", {
+          lead_id: link.lead_id,
+          error: e instanceof Error ? e.message : String(e),
+        });
+      }
+    });
   }
 
   // Bridge form payload → application record. Adon MCA SOP §4 match-fitness
