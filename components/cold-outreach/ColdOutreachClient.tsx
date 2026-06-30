@@ -438,9 +438,13 @@ function CampaignRow({
 export function ColdOutreachClient({
   tenantSlug,
   tenantId,
+  lockedChannel,
 }: {
   tenantSlug: string;
   tenantId: string | null;
+  /** When set, this surface is locked to one channel and the channel picker is
+   *  hidden — used by the Campaigns tab's Twilio (sms_twilio) and Gmail (email) sub-tabs. */
+  lockedChannel?: Channel;
 }) {
   // ── List state ────────────────────────────────────────────────────────────
   const [lists, setLists] = useState<ColdList[] | null>(null);
@@ -455,7 +459,7 @@ export function ColdOutreachClient({
   const [uploading, setUploading] = useState(false);
 
   // ── Compose state ─────────────────────────────────────────────────────────
-  const [channel, setChannel] = useState<Channel>("sms_twilio");
+  const [channel, setChannel] = useState<Channel>(lockedChannel ?? "sms_twilio");
   const [messageBody, setMessageBody] = useState("");
   const [subject, setSubject] = useState("");
   const [dailyCap, setDailyCap] = useState(500);
@@ -927,7 +931,9 @@ export function ColdOutreachClient({
             2 · Compose
           </div>
 
-          <ChannelPicker value={channel} onChange={(c) => { setChannel(c); setPreviewOpen(false); }} />
+          {!lockedChannel && (
+            <ChannelPicker value={channel} onChange={(c) => { setChannel(c); setPreviewOpen(false); }} />
+          )}
 
           {channel === "email" && (
             <div className="flex items-center gap-2">
