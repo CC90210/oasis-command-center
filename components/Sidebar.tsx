@@ -205,7 +205,7 @@ export function Sidebar({
       } ${isDesktopCollapsed ? "md:-translate-x-full" : "md:translate-x-0"}`}
     >
       {/* Brand block */}
-      <div className="px-5 py-5 border-b border-bg-border relative">
+      <div className="px-5 py-5 border-b border-bg-border relative shrink-0">
         {/* Mobile-only close button. Sits over the brand block so the
             operator can dismiss the drawer without reaching for the
             outer backdrop. md+ never renders this. autoFocus is
@@ -251,8 +251,12 @@ export function Sidebar({
         <div className="absolute bottom-0 left-0 right-0 top-glow" />
       </div>
 
-      {/* Nav */}
-      <nav className="flex-1 px-3 py-4 overflow-y-auto">
+      {/* Nav — min-h-0 is REQUIRED: a flex child won't scroll (overflow-y-auto
+          is inert) unless it can shrink below its content height, so without it
+          the full nav (OPERATIONS→SYSTEM) overflowed and the operator footer
+          rendered on top of the lower groups on mobile (the 2026-06-30 "items
+          folding on top of each other" report). */}
+      <nav className="flex-1 min-h-0 px-3 py-4 overflow-y-auto overscroll-contain">
         {groups.map((g) => (
           <NavGroup key={g.label} label={g.label}>
             {g.items.map((item) => (
@@ -269,8 +273,9 @@ export function Sidebar({
         ))}
       </nav>
 
-      {/* Operator */}
-      <div className="border-t border-bg-border px-4 py-3 space-y-2">
+      {/* Operator — shrink-0 so the footer keeps its full height and pins to the
+          bottom while the nav above scrolls (never compressed by a tall nav). */}
+      <div className="border-t border-bg-border px-4 py-3 space-y-2 shrink-0">
         {demoMode && (
           <div className="rounded-lg border border-accent/30 bg-accent-soft px-3 py-2 text-[10px] text-accent">
             <div className="font-bold uppercase tracking-[0.14em]">{demoLabel}</div>
