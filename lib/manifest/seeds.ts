@@ -426,7 +426,12 @@ export const SUN_SEED: TenantManifest = {
         // 2026-06-22 (Adon): re-added `submitted_application` directly after
         // `signed_application` (submitted to underwriting; the entry stage for
         // the signed-application email drip). Matches LEAD_PIPELINE_STAGES.
-        { name: "stage", type: "enum", enum_values: ["intent_inquiry_submitted", "hot_lead", "missing_info", "follow_up", "sent_application", "viewed_application", "signed_application", "submitted_application", "declined", "dead_file", "ghost", "default"], required: true },
+        // 2026-06-30 (CC): added `uw_sheet` (label "Live Subs") directly after
+        // intent_inquiry_submitted — Ezra-approved Breeze UW-Sheet deals. Matches
+        // LEAD_PIPELINE_STAGES. Keeps the manifest enum consistent so agent-driven
+        // creates of a Live Subs lead validate (createRecord inserts raw JSONB, but
+        // agent-actions validates input against this enum).
+        { name: "stage", type: "enum", enum_values: ["intent_inquiry_submitted", "uw_sheet", "hot_lead", "missing_info", "follow_up", "sent_application", "viewed_application", "signed_application", "submitted_application", "declined", "dead_file", "ghost", "default"], required: true },
         // missing_info — Phase 20 (2026-05-17) classifier output. Array
         // of canonical doc-type strings the lead still owes us before
         // an application can advance. Populated by

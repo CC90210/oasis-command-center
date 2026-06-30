@@ -713,6 +713,11 @@ const STAGE_WEIGHT: Record<string, number> = {
   // Today's Focus so the team works it (or confirms Helios's auto-email landed)
   // before it cools, just under an already-engaged hot_lead.
   intent_inquiry_submitted: 98,
+  // Live Subs (uw_sheet) — Ezra-approved Breeze deal: pre-qualified and
+  // time-sensitive. Rank just under hot_lead/intent so it surfaces near the
+  // top of Today's Focus (without this it falls to the `?? 30` default and
+  // ranks below follow_up/missing_info — defeating the funnel intent).
+  uw_sheet: 95,
   signed_application: 90,
   viewed_application: 80,
   sent_application: 70,
