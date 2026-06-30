@@ -19,6 +19,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 // useRef intentionally imported for the file-input ref in DocumentsTab.
 import { BackgroundCheckTab } from "./BackgroundCheckTab";
+import { DefaultsCheckControl } from "./DefaultsCheckControl";
 import { useRouter, useSearchParams, usePathname } from "next/navigation";
 import Link from "next/link";
 import { X, FileText, ImageIcon, Phone, Mail, ShoppingBag, Loader2, Trash2, CheckCircle2, AlertCircle, UploadCloud, RefreshCw, ArrowRightLeft, ChevronLeft, Eye } from "lucide-react";
@@ -1542,6 +1543,7 @@ function DocumentsTab({
 
   return (
     <div className="space-y-3">
+      <DefaultsCheckControl leadId={recordId} />
       {/* Batch 3 — Application slot. Red when missing (reuses the missing-doc
           red styling); satisfied (green) by the auto-PDF or a manual add. */}
       <div
