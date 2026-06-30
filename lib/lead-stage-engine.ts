@@ -140,6 +140,10 @@ const RULES: Record<LeadStageEvent["type"], Rule> = {
     from: new Set<string>([
       "hot_lead",
       "missing_info",
+      // uw_sheet (CC, 2026-06-30): a scrubbed deal in the UW-Sheet nurture
+      // stage that replies "not interested" must exit to ghost — otherwise the
+      // uw_sheet drip keeps nudging an opted-out merchant (compliance risk).
+      "uw_sheet",
       "follow_up",
       "sent_application",
       "viewed_application",
@@ -152,7 +156,10 @@ const RULES: Record<LeadStageEvent["type"], Rule> = {
   // without a reply. 2026-06-18 (CC): drops to `ghost` (was `declined`,
   // now removed); operator can still resurrect manually.
   sequence_exhausted: {
-    from: new Set<string>(["follow_up", "sent_application", "missing_info"]),
+    // uw_sheet included (2026-06-30): a scrubbed deal whose UW-Sheet first-touch
+    // drip exhausts with no reply drops to ghost (re-engageable) like the other
+    // nurture stages — otherwise no-response uw_sheet leads accumulate stuck.
+    from: new Set<string>(["uw_sheet", "follow_up", "sent_application", "missing_info"]),
     to: "ghost",
     reasonCode: "sequence_exhausted_no_response",
   },

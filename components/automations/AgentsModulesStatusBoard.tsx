@@ -30,6 +30,7 @@ import {
   ArrowRight,
   BadgeDollarSign,
   Clock,
+  FileSpreadsheet,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import type { ReactNode } from "react";
@@ -114,6 +115,19 @@ const SUNBIZ_MODULES: Module[] = [
     status: "live",
     icon: ArrowRight,
     connected: "lib/lead-stage-engine.ts + lib/lead-stage-dispatcher.ts.",
+  },
+  {
+    key: "breeze_uw_entry_sheet",
+    name: "Breeze UW Entry Sheet",
+    description:
+      "Solara watches the shared Breeze/SunBiz Google Drive for new MCA web-form lead sheets, scrubs each deal against the underwriting criteria, and queues the qualified ones for Ezra to approve into the UW Sheet pipeline stage. The first-to-the-deal scrubber.",
+    // Pipeline + queue + approval are wired; scoring thresholds are
+    // placeholders pending the underwriting SOP and the daemon isn't on
+    // the VPS yet — honestly "partial" until deployed + SOP-tuned.
+    status: "partial",
+    icon: FileSpreadsheet,
+    connected:
+      "SunBiz-Agent/scripts/mca_lead_scrubber.py (Drive poll → scrubber/scoring.py → scrub_candidates) → Ezra approval queue → bridge create lead @uw_sheet. Runs on the VPS as the mca-lead-scrubber daemon (Background Workers). Scoring config: scrubber/scoring_config.yaml (SOP-tunable).",
   },
   // Underwriting pipeline + renewal reminder — both LIVE as of 2026-06-17
   // (verified against the live crons + daemon code). Updated from the prior

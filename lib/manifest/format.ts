@@ -153,6 +153,7 @@ export const ENTITY_STAGE_TONES: Record<string, Record<string, StageTone>> = {
     not_interested: "warm",
     hot_lead: "hot",
     missing_info: "info",
+    uw_sheet: "info",
     declined: "warm",
     follow_up: "info",
     sent_application: "info",

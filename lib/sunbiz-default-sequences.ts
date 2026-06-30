@@ -78,6 +78,47 @@ export const SUNBIZ_DEFAULT_SEQUENCES: DefaultSequence[] = [
   },
 
   // ─────────────────────────────────────────────────────────────────
+  // 1b. UW Sheet -> qualified-deal first touch : 3-touch
+  // Fires when Solara's "Breeze UW Entry Sheet" scrubber lands a qualified
+  // MCA deal in uw_sheet (after Ezra approves it off the scrub queue). These
+  // are scrubbed-from-sheet merchants, so it's a first-touch cadence: book a
+  // call + request the application + 3 months of bank statements so the deal
+  // can advance. send_gateway enforces CASL / opt-out / TCPA windows.
+  // ─────────────────────────────────────────────────────────────────
+  {
+    name: "UW Sheet — qualified-deal first touch",
+    description:
+      "Fires when a scrubbed MCA deal lands in uw_sheet (post-Ezra approval). 3-touch SMS+email first-contact cadence to book a call and collect bank statements.",
+    trigger_event: "BRAVO_RECORD_STATUS_CHANGED",
+    trigger_filter: { entity: "lead", field: "stage", to: "uw_sheet" },
+    one_per_lead: true,
+    steps: [
+      {
+        channel: "sms",
+        delay_minutes: 10,
+        from_label: "Solara",
+        body:
+          "Hi {{lead.contact_name}} — Solara at SunBiz Funding. {{lead.business_name}} looks like a strong fit for working capital. We can line up 3-5 lender offers in 24-48h. Reply YES and I'll send the quick application + the docs we need.",
+      },
+      {
+        channel: "email",
+        delay_minutes: 60 * 24, // 24h
+        from_label: "Solara",
+        subject: "Funding options for {{lead.business_name}}",
+        body:
+          "Hi {{lead.contact_name}},\n\nFollowing up — {{lead.business_name}} looks well-positioned for an advance. To get you real offers I just need a 2-minute application and your last 3 months of business bank statements (PDF exports from online banking). Once those are in, our lender network usually returns 3-5 offers within 48h, no obligation to take any.\n\nReply here and I'll send the link.\n\n— Solara, SunBiz Funding",
+      },
+      {
+        channel: "sms",
+        delay_minutes: 60 * 24 * 3, // +3 days
+        from_label: "Solara",
+        body:
+          "{{lead.contact_name}} — still happy to get {{lead.business_name}} in front of our lenders. Send a 1-line reply (yes / not now) and I'll match the pace. Otherwise I'll close the thread on my end.",
+      },
+    ],
+  },
+
+  // ─────────────────────────────────────────────────────────────────
   // 2. Viewed application -> nudge : 2-touch
   // ─────────────────────────────────────────────────────────────────
   {

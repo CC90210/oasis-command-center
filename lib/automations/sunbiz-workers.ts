@@ -41,6 +41,13 @@ export const SUNBIZ_WORKERS: BgWorkerDef[] = [
     purpose: "Watches conversations for frustration / STOP signals and pauses sequences before they annoy a lead.",
   },
   {
+    // "Breeze UW Entry Sheet" — Solara's backend scrubber. Mirrors the
+    // mca-lead-scrubber PM2 entry in SunBiz-Agent/ecosystem.config.js.
+    service: "pm2.mca-lead-scrubber",
+    label: "Breeze UW Entry Sheet",
+    purpose: "Solara watches the shared Breeze/SunBiz Google Drive for new MCA lead sheets, scrubs each deal against the underwriting criteria, and queues the good ones for Ezra to approve into the UW Sheet stage.",
+  },
+  {
     service: "pm2.claude-bridge",
     label: "Chat bridge",
     purpose: "The VPS chat bridge — powers the Agents chat and the agent tool proxy.",

@@ -83,6 +83,7 @@ const SUNBIZ_STAGES: LeadsTableStage[] = [
   { value: "intent_inquiry_submitted", label: "Intent inquiry",     tone: "text-status-info" },
   { value: "hot_lead",           label: "Hot lead",           tone: "text-accent" },
   { value: "missing_info",       label: "Missing info",       tone: "text-status-info" },
+  { value: "uw_sheet",           label: "UW Sheet",           tone: "text-status-info" },
   { value: "follow_up",          label: "Follow up",          tone: "text-status-info" },
   { value: "sent_application",   label: "App sent",           tone: "text-status-info" },
   { value: "viewed_application", label: "App viewed",         tone: "text-accent" },

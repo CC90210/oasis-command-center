@@ -288,6 +288,7 @@ const STAGES_NEEDING_APPLY_URL = new Set([
   "hot_lead",
   "new_contact",
   "missing_info",
+  "uw_sheet", // scrubbed deal in nurture — drip CTA needs a live apply link
   "follow_up",
   "sent_application",
   "viewed_application",

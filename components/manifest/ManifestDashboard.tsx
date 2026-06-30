@@ -717,6 +717,7 @@ const STAGE_WEIGHT: Record<string, number> = {
   viewed_application: 80,
   sent_application: 70,
   missing_info: 65,
+  uw_sheet: 60,
   follow_up: 50,
   submitted: 40,
   declined: 0,

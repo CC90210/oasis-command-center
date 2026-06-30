@@ -39,6 +39,14 @@ const LEAD_STAGE_ALIASES = new Map<string, string>([
   ["follow up", "follow_up"],
   ["hot", "hot_lead"],
   ["missing", "missing_info"],
+  // UW Sheet (CC, 2026-06-30): the Sift scrubber's entry stage. Alias the
+  // common textual forms so an imported/inbound "UW Sheet" / "Underwriting
+  // Sheet" / "UW" resolves to the canonical key (the label map already maps
+  // "uw sheet" → uw_sheet; these cover the shorthand variants).
+  ["uw", "uw_sheet"],
+  ["uw sheet", "uw_sheet"],
+  ["underwriting", "uw_sheet"],
+  ["underwriting sheet", "uw_sheet"],
   // 2026-06-18 (CC): lead `declined`/`submitted` stages removed — route legacy
   // inbound aliases to their replacements (declined→ghost, approved→signed).
   ["decline", "ghost"],

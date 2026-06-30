@@ -22,6 +22,9 @@ export const STAGE_SLA_DAYS: Record<string, number> = {
   intent_inquiry_submitted: 1,
   hot_lead: 1,
   missing_info: 3,
+  // UW Sheet (CC, 2026-06-30): Ezra-approved scrubbed deal just injected —
+  // work it fast (book call / request bank statements). 2d target.
+  uw_sheet: 2,
   follow_up: 2,
   sent_application: 5,
   viewed_application: 2,
@@ -61,6 +64,7 @@ export const ACTIVE_STAGES = new Set<string>([
   "intent_inquiry_submitted",
   "hot_lead",
   "missing_info",
+  "uw_sheet",
   "follow_up",
   "sent_application",
   "viewed_application",
@@ -86,6 +90,7 @@ export const VISIBLE_TARGET_STAGES = new Set<string>([
   "intent_inquiry_submitted",
   "hot_lead",
   "missing_info",
+  "uw_sheet",
   "follow_up",
   "sent_application",
   "viewed_application",

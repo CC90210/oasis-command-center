@@ -157,6 +157,8 @@ export const SUN_NAV: NavItem[] = [
   // record itself carries contact_name + phone + email so a separate
   // Contacts surface is dead weight until Adon asks for it.
   { group: "Pipeline", href: "/leads", label: "Leads", icon: "Users" },
+  // UW Sheet — Ezra's approval queue for Solara's Breeze UW Entry Sheet scrubber.
+  { group: "Pipeline", href: "/uw-sheet", label: "UW Sheet", icon: "ClipboardCheck" },
   { group: "Pipeline", href: "/applications", label: "Applications", icon: "FileText", badgeKey: "applications" },
   { group: "Pipeline", href: "/import", label: "Import", icon: "Upload" },
   { group: "Pipeline", href: "/forms", label: "Forms", icon: "FileCode2" },
