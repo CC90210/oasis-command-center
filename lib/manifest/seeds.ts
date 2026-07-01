@@ -342,6 +342,9 @@ export const SUN_SEED: TenantManifest = {
     // /playbook resolves profile slug "sun" -> SunBizPlaybookIndex (cards link to
     // content/playbooks/sun-*.md guides).
     { href: "/playbook", label: "Playbook", icon: "BookOpen", group: "Operations" },
+    // Templates — SunBiz ad + email creative library (global /templates page),
+    // subcategorized by niche × campaign-type. Global href like Playbook above.
+    { href: "/templates", label: "Templates", icon: "FileCode2", group: "Operations" },
     // Pipeline — top-of-funnel through funding shop. Shopping Out is the
     // new (Phase 4) multi-lender outreach surface; sits between Leads and
     // Applications to mirror the operator's real workflow order.
