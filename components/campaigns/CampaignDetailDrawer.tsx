@@ -175,7 +175,7 @@ export function CampaignDetailDrawer({ campaignId }: { tenantSlug: string; campa
           })}
         </nav>
 
-        <div className="flex-1 overflow-y-auto px-5 py-4 text-sm">
+        <div className="flex-1 min-h-0 overflow-y-auto px-5 py-4 text-sm">
           {error ? (
             <div className="rounded-md border border-red-500/30 bg-red-500/10 px-3 py-2 text-[13px] text-red-300">
               Couldn&apos;t load metrics: {error}

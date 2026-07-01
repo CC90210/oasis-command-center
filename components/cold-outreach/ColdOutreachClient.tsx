@@ -34,6 +34,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { createPortal } from "react-dom";
 import { Card } from "@/components/Card";
 import {
   MessageSquare,
@@ -1123,7 +1124,7 @@ export function ColdOutreachClient({
       </Card>
 
       {/* ── Confirmation dialog ──────────────────────────────────────────── */}
-      {showConfirm && (
+      {showConfirm && typeof document !== "undefined" && createPortal(
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
           <div className="rounded-xl border border-bg-border bg-bg-panel p-6 shadow-card w-full max-w-md space-y-4 mx-4">
             <div className="flex items-start gap-3">
@@ -1156,7 +1157,8 @@ export function ColdOutreachClient({
               </button>
             </div>
           </div>
-        </div>
+        </div>,
+        document.body,
       )}
 
       {/* ── Campaign tracker ─────────────────────────────────────────────── */}

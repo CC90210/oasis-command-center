@@ -24,6 +24,7 @@
  */
 
 import { useState } from "react";
+import { createPortal } from "react-dom";
 import { Loader2, Check, Copy, X, Clock, AlertCircle, Apple, Monitor, Terminal } from "lucide-react";
 import { useBridgePairing, type OS } from "@/hooks/useBridgePairing";
 
@@ -45,7 +46,8 @@ export function InstallBridgeModal({ onClose }: { onClose: () => void }) {
   const mm = Math.floor(secondsLeft / 60).toString().padStart(2, "0");
   const ss = (secondsLeft % 60).toString().padStart(2, "0");
 
-  return (
+  if (typeof document === "undefined") return null;
+  return createPortal(
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-bg-deep/80 backdrop-blur-sm p-4"
       onClick={onClose}
@@ -233,6 +235,7 @@ export function InstallBridgeModal({ onClose }: { onClose: () => void }) {
           )}
         </div>
       </div>
-    </div>
+    </div>,
+    document.body
   );
 }

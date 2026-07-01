@@ -8,6 +8,7 @@ import {
   useState,
   type MouseEvent,
 } from "react";
+import { createPortal } from "react-dom";
 import { Card, PageHeader, Tag } from "@/components/Card";
 import {
   COLD_OUTREACH_TEMPLATES,
@@ -396,7 +397,11 @@ function PreviewModal({
     window.setTimeout(() => setCopied(false), 1800);
   }, [template.html]);
 
-  return (
+  if (typeof document === "undefined") return null;
+  // Portal to <body> so this fixed overlay escapes the command-center shell's
+  // stacking context and reliably covers the sidebar (which otherwise renders on
+  // top of the modal at half-screen widths, clipping the left of the preview).
+  return createPortal(
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-bg-deep/95 p-3 sm:p-5"
       role="dialog"
@@ -498,7 +503,8 @@ function PreviewModal({
           </span>
         </footer>
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }
 

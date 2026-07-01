@@ -183,7 +183,7 @@ export function LeadDetailDrawer({
         {/* Header — 2026-06-08 refinement: softer divider, slightly wider
             inner spacing on the label row, stage chip is now rounded-full +
             uppercase letter-spacing to feel less rectangular. */}
-        <header className="px-5 py-4 border-b border-bg-border/60 space-y-4">
+        <header className="shrink-0 px-5 py-4 border-b border-bg-border/60 space-y-4">
           {/* Row 1: MERCHANT label + stage chip + close */}
           <div className="flex items-start gap-3">
             <div className="min-w-0 flex-1">
@@ -340,7 +340,7 @@ export function LeadDetailDrawer({
         {/* Tab nav — softened 2026-06-08: subtle hover bg, tighter padding,
             border-bg-border/50 so the divider doesn't compete with the
             header underline above */}
-        <nav className="flex gap-0.5 px-5 pt-3 border-b border-bg-border/50 overflow-x-auto">
+        <nav className="shrink-0 flex gap-0.5 px-5 pt-3 border-b border-bg-border/50 overflow-x-auto">
           {TABS.map((t) => {
             const isDocs = t.key === "documents";
             const missingCount = isDocs && data
@@ -369,7 +369,11 @@ export function LeadDetailDrawer({
           })}
         </nav>
 
-        <div className="flex-1 overflow-y-auto px-5 py-4 text-sm">
+        {/* min-h-0 is REQUIRED: without it this flex-1 scroll region can't shrink
+            below its content height, so on mobile (header + tabs + footer eat the
+            viewport) it collapsed to a tiny scroll strip. overscroll-contain stops
+            the page behind the drawer from scrolling too. (2026-06-30 mobile pass) */}
+        <div className="flex-1 min-h-0 overflow-y-auto overscroll-contain px-5 py-4 text-sm">
           {error && (
             <div className="rounded-md border border-red-500/40 bg-red-500/10 p-3 text-xs text-red-200">
               Failed to load: {error}
@@ -2189,7 +2193,7 @@ function DrawerFooter({
 }) {
   const [mode, setMode] = useState<ComposerMode>(null);
   return (
-    <div className="border-t border-bg-border bg-bg-elev/40">
+    <div className="shrink-0 border-t border-bg-border bg-bg-elev/40">
       {/* Persistent action bar — buttons wrap onto a second row instead of
           smushing when the drawer is narrow (mobile / half-screen). Opening a
           composer renders it as an overlay (below) that covers this bar; the

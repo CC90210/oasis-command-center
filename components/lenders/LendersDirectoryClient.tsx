@@ -715,7 +715,7 @@ function LenderDrawer({
         </header>
 
         {/* Body */}
-        <div className="flex-1 overflow-y-auto px-5 py-4 space-y-6 text-[12.5px]">
+        <div className="flex-1 min-h-0 overflow-y-auto px-5 py-4 space-y-6 text-[12.5px]">
           {error && (
             <div className="rounded-md border border-red-500/40 bg-red-500/10 p-2.5 text-[12px] text-red-200">
               {error}
