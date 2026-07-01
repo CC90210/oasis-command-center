@@ -424,6 +424,43 @@ function PreviewModal({
     URL.revokeObjectURL(url);
   }, [personalizedHtml, fields, template.key]);
 
+  // Send: owner/admin only + dry-run by default (both enforced server-side in
+  // /api/templates/send). The confirm step is the last gate before it leaves.
+  const [recipient, setRecipient] = useState("");
+  const [sendPhase, setSendPhase] = useState<"idle" | "confirm" | "sending" | "done">("idle");
+  const [sendResult, setSendResult] = useState<
+    { ok?: boolean; status?: string; message?: string; reason?: string; error?: string } | null
+  >(null);
+  const recipientValid = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(recipient.trim());
+  // Guard: don't let a template addressed to the sample business go out. The
+  // server enforces this too; this just disables the button + explains why.
+  const needsBusiness = template.tokens.includes("business_name");
+  const businessReal =
+    (fields.business_name || "").trim().length > 0 &&
+    (fields.business_name || "").trim() !== (SAMPLE_VALUES.business_name ?? "");
+  const canSend = recipientValid && (!needsBusiness || businessReal);
+
+  const handleSend = useCallback(async () => {
+    setSendPhase("sending");
+    try {
+      // Send field VALUES only — the server renders from the canonical template
+      // (no client-supplied HTML, real unsubscribe, sample values rejected).
+      const res = await fetch("/api/templates/send", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          to_email: recipient.trim(),
+          template_key: template.key,
+          fields,
+        }),
+      });
+      setSendResult(await res.json().catch(() => ({ ok: false, error: "bad_response" })));
+    } catch (e) {
+      setSendResult({ ok: false, error: e instanceof Error ? e.message : "network error" });
+    }
+    setSendPhase("done");
+  }, [recipient, template.key, fields]);
+
   if (typeof document === "undefined") return null;
   // Portal to <body> so this fixed overlay escapes the command-center shell's
   // stacking context and reliably covers the sidebar (which otherwise renders on
@@ -545,6 +582,95 @@ function PreviewModal({
                   />
                 </label>
               ))}
+            </div>
+
+            {/* Send — owner/admin only + dry-run by default (both server-enforced
+                in /api/templates/send). Confirm step is the last gate. */}
+            <div className="mt-3 border-t border-bg-border/60 pt-3">
+              {sendPhase === "idle" && (
+                <div className="flex flex-wrap items-end gap-2">
+                  <label className="flex min-w-[200px] flex-1 flex-col gap-1">
+                    <span className="text-[10px] font-semibold uppercase tracking-wider text-fg-dim">
+                      Send to — merchant email
+                    </span>
+                    <input
+                      type="email"
+                      value={recipient}
+                      onChange={(event) => setRecipient(event.target.value)}
+                      placeholder="owner@theirbusiness.com"
+                      className="rounded-md border border-bg-border bg-bg-deep px-2 py-1.5 text-xs text-fg outline-none transition-colors placeholder:text-fg-dim focus:border-accent/50"
+                    />
+                  </label>
+                  <button
+                    type="button"
+                    disabled={!canSend}
+                    onClick={() => setSendPhase("confirm")}
+                    className="inline-flex items-center gap-1.5 rounded-md border border-status-engaged/40 bg-status-engaged/15 px-3 py-2 text-[11px] font-bold text-status-engaged transition-colors hover:bg-status-engaged/25 disabled:cursor-not-allowed disabled:opacity-40"
+                  >
+                    <Send className="h-3.5 w-3.5" />
+                    Send this template
+                  </button>
+                  {recipientValid && needsBusiness && !businessReal && (
+                    <p className="w-full text-[10px] text-amber-300/80">
+                      Replace the sample Business Name with the merchant&apos;s real name to enable Send.
+                    </p>
+                  )}
+                </div>
+              )}
+              {sendPhase === "confirm" && (
+                <div className="flex flex-wrap items-center gap-3 rounded-md border border-amber-400/40 bg-amber-400/10 px-3 py-2 text-xs text-amber-100">
+                  <span>
+                    Send <span className="font-bold">{template.name}</span> to{" "}
+                    <span className="font-mono font-bold">{recipient.trim()}</span>?
+                  </span>
+                  <div className="ml-auto flex gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setSendPhase("idle")}
+                      className="rounded-md border border-bg-border bg-bg-elev px-3 py-1.5 text-[11px] font-bold text-fg-muted hover:text-fg"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleSend}
+                      className="rounded-md border border-status-engaged/50 bg-status-engaged/20 px-3 py-1.5 text-[11px] font-bold text-status-engaged hover:bg-status-engaged/30"
+                    >
+                      Confirm send
+                    </button>
+                  </div>
+                </div>
+              )}
+              {sendPhase === "sending" && <div className="text-xs text-fg-muted">Sending…</div>}
+              {sendPhase === "done" && sendResult && (
+                <div
+                  className={`flex flex-wrap items-center gap-3 rounded-md border px-3 py-2 text-xs ${
+                    sendResult.status === "sent"
+                      ? "border-status-engaged/40 bg-status-engaged/10 text-status-engaged"
+                      : sendResult.status === "dry_run"
+                        ? "border-accent/40 bg-accent/10 text-accent"
+                        : "border-red-500/40 bg-red-500/10 text-red-200"
+                  }`}
+                >
+                  <span>
+                    {sendResult.status === "sent"
+                      ? `Sent to ${recipient.trim()}.`
+                      : sendResult.status === "dry_run"
+                        ? sendResult.message || "Dry-run: nothing was sent."
+                        : `Not sent: ${sendResult.error || sendResult.reason || sendResult.status || "unknown"}`}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setSendPhase("idle");
+                      setSendResult(null);
+                    }}
+                    className="ml-auto rounded-md border border-bg-border bg-bg-elev px-3 py-1.5 text-[11px] font-bold text-fg-muted hover:text-fg"
+                  >
+                    Done
+                  </button>
+                </div>
+              )}
             </div>
           </div>
         )}
