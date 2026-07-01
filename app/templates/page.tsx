@@ -20,6 +20,7 @@ import {
   Braces,
   Check,
   Copy,
+  Download,
   Eye,
   FileCode2,
   Mail,
@@ -204,12 +205,6 @@ function extractTokens(html: string): string[] {
   return [...tokens].sort((a, b) => a.localeCompare(b));
 }
 
-function renderPreviewHtml(template: TemplateMeta): string {
-  return template.html.replace(/\{\{\s*([a-zA-Z0-9_.-]+)\s*\}\}/g, (_match, token) => {
-    return SAMPLE_VALUES[token] ?? `[${token}]`;
-  });
-}
-
 async function copyToClipboard(text: string): Promise<boolean> {
   try {
     await navigator.clipboard.writeText(text);
@@ -376,7 +371,22 @@ function PreviewModal({
 }) {
   const [copied, setCopied] = useState(false);
   const [viewMode, setViewMode] = useState<"preview" | "html">("preview");
-  const previewHtml = useMemo(() => renderPreviewHtml(template), [template]);
+  // Personalize: editable merge-field values, seeded from the sample values so the
+  // live preview + one-click Download work immediately. The operator overwrites
+  // business_name / first_name etc. and downloads the finished HTML — no code edits.
+  const [showFields, setShowFields] = useState(template.tokens.length > 0);
+  const [fields, setFields] = useState<Record<string, string>>(() =>
+    Object.fromEntries(template.tokens.map((t) => [t, SAMPLE_VALUES[t] ?? ""])),
+  );
+  const personalizedHtml = useMemo(
+    () =>
+      template.html.replace(/\{\{\s*([a-zA-Z0-9_.-]+)\s*\}\}/g, (_m, token) =>
+        fields[token] != null && fields[token] !== ""
+          ? fields[token]
+          : SAMPLE_VALUES[token] ?? `[${token}]`,
+      ),
+    [template.html, fields],
+  );
 
   useEffect(() => {
     const priorOverflow = document.body.style.overflow;
@@ -392,10 +402,27 @@ function PreviewModal({
   }, [onClose]);
 
   const handleCopy = useCallback(async () => {
-    await copyToClipboard(template.html);
+    await copyToClipboard(personalizedHtml);
     setCopied(true);
     window.setTimeout(() => setCopied(false), 1800);
-  }, [template.html]);
+  }, [personalizedHtml]);
+
+  const handleDownload = useCallback(() => {
+    const blob = new Blob([personalizedHtml], { type: "text/html;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const slug =
+      (fields.business_name || fields.first_name || "merchant")
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, "-")
+        .replace(/(^-|-$)/g, "") || "merchant";
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${template.key}-${slug}.html`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  }, [personalizedHtml, fields, template.key]);
 
   if (typeof document === "undefined") return null;
   // Portal to <body> so this fixed overlay escapes the command-center shell's
@@ -447,13 +474,35 @@ function PreviewModal({
                 HTML
               </button>
             </div>
+            {template.tokens.length > 0 && (
+              <button
+                type="button"
+                onClick={() => setShowFields((v) => !v)}
+                className={`inline-flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-[11px] font-bold transition-colors ${
+                  showFields
+                    ? "border-accent/50 bg-accent/15 text-accent"
+                    : "border-bg-border bg-bg-elev text-fg-muted hover:text-fg"
+                }`}
+              >
+                <WandSparkles className="h-3.5 w-3.5" />
+                Personalize
+              </button>
+            )}
             <button
               type="button"
               onClick={handleCopy}
-              className="inline-flex items-center gap-1.5 rounded-md border border-accent/30 bg-accent/10 px-3 py-1.5 text-[11px] font-bold text-accent transition-colors hover:bg-accent/20"
+              className="inline-flex items-center gap-1.5 rounded-md border border-bg-border bg-bg-elev px-3 py-1.5 text-[11px] font-bold text-fg-muted transition-colors hover:text-fg"
             >
               {copied ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
-              {copied ? "Copied" : "Copy HTML"}
+              {copied ? "Copied" : "Copy"}
+            </button>
+            <button
+              type="button"
+              onClick={handleDownload}
+              className="inline-flex items-center gap-1.5 rounded-md border border-accent/40 bg-accent/15 px-3 py-1.5 text-[11px] font-bold text-accent transition-colors hover:bg-accent/25"
+            >
+              <Download className="h-3.5 w-3.5" />
+              Download
             </button>
             <Link
               href={agentHref("helios", buildUseWithAgentPrompt(template))}
@@ -473,12 +522,39 @@ function PreviewModal({
           </div>
         </header>
 
+        {showFields && template.tokens.length > 0 && (
+          <div className="shrink-0 max-h-[38vh] overflow-y-auto border-b border-bg-border bg-bg-deep/40 px-4 py-3">
+            <div className="mb-2 flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wider text-fg-dim">
+              <WandSparkles className="h-3 w-3 text-accent" />
+              Personalize — fill in this merchant&apos;s details, then Download or Copy
+            </div>
+            <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-4">
+              {template.tokens.map((token) => (
+                <label key={token} className="flex flex-col gap-1">
+                  <span className="text-[10px] font-semibold capitalize text-fg-muted">
+                    {token.replace(/_/g, " ")}
+                  </span>
+                  <input
+                    type="text"
+                    value={fields[token] ?? ""}
+                    onChange={(event) =>
+                      setFields((prev) => ({ ...prev, [token]: event.target.value }))
+                    }
+                    placeholder={SAMPLE_VALUES[token] ?? token}
+                    className="rounded-md border border-bg-border bg-bg-deep px-2 py-1.5 text-xs text-fg outline-none transition-colors placeholder:text-fg-dim focus:border-accent/50"
+                  />
+                </label>
+              ))}
+            </div>
+          </div>
+        )}
+
         <div className="min-h-0 flex-1 overflow-auto">
           {viewMode === "preview" ? (
             <div className="h-full min-h-[620px] bg-[#071226]">
               <iframe
                 title={`Preview: ${template.name}`}
-                srcDoc={previewHtml}
+                srcDoc={personalizedHtml}
                 sandbox=""
                 className="h-full w-full border-0 bg-[#071226]"
               />
