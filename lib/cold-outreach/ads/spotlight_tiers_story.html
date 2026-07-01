@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>SunBiz — Spotlight Tier List (story)</title>
+<style>
+  /* SunBiz ad creative — 1080x1920 story. Spotlight tier-list layout,
+     SunBiz-branded (navy/gold), honest 1.25-factor weekly figures.
+     Original SunBiz execution — no competitor artwork, no stock photos. */
+  * { margin:0; padding:0; box-sizing:border-box; }
+  html,body { width:1080px; height:1920px; }
+  .ad {
+    width:1080px; height:1920px; position:relative; overflow:hidden;
+    background:radial-gradient(120% 90% at 50% 0%, #10224e 0%, #0a1735 45%, #050c1e 100%);
+    font-family:'Arial Black','Helvetica Neue',Arial,sans-serif; color:#fff;
+    display:flex; flex-direction:column; align-items:center;
+    padding:78px 64px 56px;
+  }
+
+  /* soft off-center geometric accents (SunBiz-original, no imagery) */
+  .glowA { position:absolute; width:640px; height:640px; border-radius:50%;
+    top:-260px; right:-220px; background:radial-gradient(circle, rgba(212,168,67,.16), transparent 68%); }
+  .glowB { position:absolute; width:520px; height:520px; border-radius:50%;
+    bottom:-200px; left:-180px; background:radial-gradient(circle, rgba(16,185,129,.10), transparent 70%); }
+
+  .brandbar { width:100%; display:flex; align-items:center; gap:20px; margin-bottom:56px; z-index:2; }
+  .sun { width:60px; height:60px; border-radius:50%; background:radial-gradient(circle at 50% 45%, #F4CE6E 0%, #D4A843 55%, #a9812f 100%); box-shadow:0 0 24px rgba(212,168,67,.5); position:relative; }
+  .sun::after { content:""; position:absolute; inset:13px; border-radius:50%; border:3px solid #0a1735; }
+  .handle { font-family:'Helvetica Neue',Arial,sans-serif; font-weight:700; font-size:28px; letter-spacing:.5px; color:#e7ecf6; }
+
+  .headline { text-align:center; line-height:.9; letter-spacing:-2px; margin-bottom:20px; z-index:2; }
+  .headline .l1 { display:block; font-size:120px; color:#ffffff; text-shadow:0 6px 24px rgba(0,0,0,.35); }
+  .headline .l2 { display:block; font-size:120px; color:#D4A843; text-shadow:0 6px 24px rgba(0,0,0,.35); }
+  .kick { font-family:'Helvetica Neue',Arial,sans-serif; font-weight:800; font-size:30px; letter-spacing:8px; color:#9fb0d4; text-transform:uppercase; margin-bottom:44px; z-index:2; }
+
+  /* elevated spotlight panel */
+  .spot { width:100%; border-radius:40px; padding:20px 44px 30px;
+    background:linear-gradient(180deg,#0e2050 0%,#0a1a40 100%);
+    border:2px solid rgba(212,168,67,.55);
+    box-shadow:0 0 70px rgba(212,168,67,.22), inset 0 1px 0 rgba(255,255,255,.06);
+    z-index:2; }
+
+  .tier { padding:40px 6px 34px; text-align:center; }
+  .tier + .tier { border-top:2px solid transparent;
+    border-image:linear-gradient(90deg,transparent,#D4A843,transparent) 1; }
+  .tier .borrow { font-family:'Helvetica Neue',Arial,sans-serif; font-weight:800; font-size:30px; letter-spacing:5px; color:#cdd8ef; text-transform:uppercase; }
+  .tier .amt { font-size:104px; color:#ffffff; line-height:1; margin:6px 0 20px; letter-spacing:-2px; }
+  .tier .pay { font-size:78px; color:#D4A843; line-height:1; letter-spacing:-1px; }
+  .tier .pay .u { font-size:38px; color:#9fb0d4; }
+  .tier .pk { font-family:'Helvetica Neue',Arial,sans-serif; font-weight:800; font-size:26px; letter-spacing:4px; color:#8b9ac0; text-transform:uppercase; margin-bottom:8px; }
+  .tier .tot { font-family:'Helvetica Neue',Arial,sans-serif; font-weight:600; font-size:26px; color:#8b9ac0; margin-top:14px; letter-spacing:.3px; }
+
+  /* middle tier gets the spotlight emphasis */
+  .tier.star .amt { color:#F4CE6E; }
+  .tier.star .pay { font-size:88px; }
+
+  .foot { margin-top:auto; width:100%; display:flex; flex-direction:column; align-items:center; gap:30px; z-index:2; }
+  .cta { background:#D4A843; color:#06122e; font-family:'Helvetica Neue',Arial,sans-serif; font-weight:900; font-size:42px; letter-spacing:1px; padding:28px 100px; border-radius:60px; box-shadow:0 10px 34px rgba(212,168,67,.34); }
+  .wordmark { font-size:52px; letter-spacing:6px; text-align:center; }
+  .wordmark .g { color:#D4A843; }
+  .wordmark .thin { font-family:'Helvetica Neue',Arial,sans-serif; font-weight:600; letter-spacing:10px; font-size:28px; color:#cdd8ef; display:block; margin-top:6px; }
+  .disc { font-family:'Helvetica Neue',Arial,sans-serif; font-weight:500; font-size:21px; color:#6f7ea4; text-align:center; max-width:800px; line-height:1.4; }
+</style>
+</head>
+<body>
+  <div class="ad">
+    <div class="glowA"></div>
+    <div class="glowB"></div>
+
+    <div class="brandbar">
+      <div class="sun"></div>
+      <div class="handle">sunbizfunding</div>
+    </div>
+
+    <div class="headline">
+      <span class="l1">REAL CAPITAL.</span>
+      <span class="l2">FAST.</span>
+    </div>
+    <div class="kick">Pick your tier · funded in days</div>
+
+    <div class="spot">
+      <div class="tier">
+        <div class="borrow">You Borrow</div>
+        <div class="amt">$100,000</div>
+        <div class="pk">Pay Only</div>
+        <div class="pay">$1,603<span class="u">/wk</span></div>
+        <div class="tot">$125,000 total &bull; 18-month term</div>
+      </div>
+      <div class="tier star">
+        <div class="borrow">You Borrow</div>
+        <div class="amt">$250,000</div>
+        <div class="pk">Pay Only</div>
+        <div class="pay">$4,006<span class="u">/wk</span></div>
+        <div class="tot">$312,500 total &bull; 18-month term</div>
+      </div>
+      <div class="tier">
+        <div class="borrow">You Borrow</div>
+        <div class="amt">$500,000</div>
+        <div class="pk">Pay Only</div>
+        <div class="pay">$8,013<span class="u">/wk</span></div>
+        <div class="tot">$625,000 total &bull; 18-month term</div>
+      </div>
+    </div>
+
+    <div class="foot">
+      <div class="cta">Apply now ›</div>
+      <div class="wordmark">SUN<span class="g">BIZ</span> FUNDING<span class="thin">WORKING CAPITAL</span></div>
+      <div class="disc">Illustrative estimates at a 1.25 factor rate. Your amount, term &amp; payment are confirmed at quote and subject to underwriting. Up to $500,000 available.</div>
+    </div>
+  </div>
+</body>
+</html>

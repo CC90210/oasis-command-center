@@ -13,6 +13,7 @@ import {
   COLD_OUTREACH_TEMPLATES,
   type ColdOutreachTemplate,
 } from "@/lib/cold-outreach/templates.generated";
+import { AD_CREATIVES } from "@/lib/cold-outreach/ad-creatives.generated";
 import {
   ArrowLeft,
   Braces,
@@ -30,6 +31,7 @@ import {
 
 type Category =
   | "all"
+  | "ad"
   | "first-touch"
   | "sequence"
   | "follow-up"
@@ -37,8 +39,59 @@ type Category =
   | "vertical"
   | "seasonal";
 
+// Second axis: the business niche a template targets. Kept in lockstep with the
+// SunBiz allowed-industry list — restricted verticals (real estate, legal,
+// trucking/transport, cannabis, solar, education, non-profits) are never a niche.
+type Industry =
+  | "all"
+  | "general"
+  | "restaurant"
+  | "construction"
+  | "retail"
+  | "auto"
+  | "medical"
+  | "salon";
+
+const INDUSTRY_ORDER: Industry[] = [
+  "all",
+  "general",
+  "restaurant",
+  "construction",
+  "retail",
+  "auto",
+  "medical",
+  "salon",
+];
+
+const INDUSTRY_META: Record<Industry, { label: string }> = {
+  all: { label: "All niches" },
+  general: { label: "General Growth" },
+  restaurant: { label: "Restaurant / Hospitality" },
+  construction: { label: "Construction / Trades" },
+  retail: { label: "Retail / E-commerce" },
+  auto: { label: "Auto Repair" },
+  medical: { label: "Medical / Dental" },
+  salon: { label: "Salon / Beauty" },
+};
+
+function inferIndustry(key: string): Exclude<Industry, "all"> {
+  const k = key.toLowerCase();
+  if (k.includes("restaurant") || k.includes("hospitality")) return "restaurant";
+  if (k.includes("construction") || k.includes("trades")) return "construction";
+  if (k.includes("retail") || k.includes("ecommerce") || k.includes("e_commerce"))
+    return "retail";
+  if (k.includes("auto")) return "auto";
+  if (k.includes("medical") || k.includes("dental")) return "medical";
+  if (k.includes("salon") || k.includes("beauty")) return "salon";
+  return "general";
+}
+
 type TemplateMeta = ColdOutreachTemplate & {
   category: Exclude<Category, "all">;
+  industry: Exclude<Industry, "all">;
+  assetType: "email" | "ad";
+  format?: string;
+  canvas?: string;
   sizeKb: number;
   tokens: string[];
   sourcePath: string;
@@ -48,6 +101,7 @@ type AgentKey = "helios" | "solara";
 
 const CATEGORY_ORDER: Category[] = [
   "all",
+  "ad",
   "first-touch",
   "sequence",
   "follow-up",
@@ -59,7 +113,11 @@ const CATEGORY_ORDER: Category[] = [
 const CATEGORY_META: Record<Category, { label: string; description: string }> = {
   all: {
     label: "All",
-    description: "Every SunBiz HTML email template.",
+    description: "Every SunBiz ad + email asset.",
+  },
+  ad: {
+    label: "Ad Creative",
+    description: "Social-media ad creatives — story (1080×1920) + feed (1080×1080).",
   },
   "first-touch": {
     label: "First Touch",
@@ -232,6 +290,10 @@ function TemplateCard({
             <Mail className="h-4 w-4" />
           </div>
           <Tag tone="accent">{category.label}</Tag>
+          <Tag tone="engaged">{INDUSTRY_META[template.industry].label}</Tag>
+          {template.assetType === "ad" && template.canvas && (
+            <Tag tone="warm">{template.canvas}</Tag>
+          )}
         </div>
 
         <div className="min-w-0 flex-1">
@@ -443,41 +505,76 @@ function PreviewModal({
 export default function TemplatesPage() {
   const [selectedTemplate, setSelectedTemplate] = useState<TemplateMeta | null>(null);
   const [activeCategory, setActiveCategory] = useState<Category>("all");
+  const [activeIndustry, setActiveIndustry] = useState<Industry>("all");
   const [searchQuery, setSearchQuery] = useState("");
 
-  const templates = useMemo<TemplateMeta[]>(
-    () =>
-      COLD_OUTREACH_TEMPLATES.map((template) => ({
-        ...template,
-        category: inferCategory(template.key),
-        sizeKb: Math.max(1, Math.round(template.html.length / 1024)),
-        tokens: extractTokens(template.html),
-        sourcePath: `lib/cold-outreach/templates/${template.key}.html`,
-      })),
-    [],
-  );
+  const templates = useMemo<TemplateMeta[]>(() => {
+    const emails: TemplateMeta[] = COLD_OUTREACH_TEMPLATES.map((template) => ({
+      ...template,
+      category: inferCategory(template.key),
+      industry: inferIndustry(template.key),
+      assetType: "email" as const,
+      sizeKb: Math.max(1, Math.round(template.html.length / 1024)),
+      tokens: extractTokens(template.html),
+      sourcePath: `lib/cold-outreach/templates/${template.key}.html`,
+    }));
+    // Ad creatives are gallery-only (never in the email send path). They surface
+    // here so operators can browse ads + emails together, filtered by niche.
+    const ads: TemplateMeta[] = AD_CREATIVES.map((ad) => ({
+      key: ad.key,
+      name: ad.name,
+      subject: `Social ad · ${ad.format} · ${ad.canvas}`,
+      html: ad.html,
+      category: "ad" as Exclude<Category, "all">,
+      industry: inferIndustry(ad.key),
+      assetType: "ad" as const,
+      format: ad.format,
+      canvas: ad.canvas,
+      sizeKb: Math.max(1, Math.round(ad.html.length / 1024)),
+      tokens: [],
+      sourcePath: `lib/cold-outreach/ads/${ad.key}.html`,
+    }));
+    return [...ads, ...emails];
+  }, []);
 
   const allTokens = useMemo(
     () => [...new Set(templates.flatMap((template) => template.tokens))].sort(),
     [templates],
   );
 
+  // Counts respect the OTHER active axis so the chips read as "what's available
+  // in the current niche/type," not the whole library.
   const categoryCounts = useMemo(() => {
     const counts = Object.fromEntries(CATEGORY_ORDER.map((category) => [category, 0])) as Record<
       Category,
       number
     >;
     for (const template of templates) {
+      if (activeIndustry !== "all" && template.industry !== activeIndustry) continue;
       counts.all += 1;
       counts[template.category] += 1;
     }
     return counts;
-  }, [templates]);
+  }, [templates, activeIndustry]);
+
+  const industryCounts = useMemo(() => {
+    const counts = Object.fromEntries(INDUSTRY_ORDER.map((industry) => [industry, 0])) as Record<
+      Industry,
+      number
+    >;
+    for (const template of templates) {
+      if (activeCategory !== "all" && template.category !== activeCategory) continue;
+      counts.all += 1;
+      counts[template.industry] += 1;
+    }
+    return counts;
+  }, [templates, activeCategory]);
 
   const filteredTemplates = useMemo(() => {
     const query = searchQuery.trim().toLowerCase();
     return templates.filter((template) => {
       if (activeCategory !== "all" && template.category !== activeCategory) return false;
+      if (activeIndustry !== "all" && template.industry !== activeIndustry) return false;
       if (!query) return true;
       return (
         template.name.toLowerCase().includes(query) ||
@@ -486,7 +583,7 @@ export default function TemplatesPage() {
         template.tokens.some((token) => token.toLowerCase().includes(query))
       );
     });
-  }, [activeCategory, searchQuery, templates]);
+  }, [activeCategory, activeIndustry, searchQuery, templates]);
 
   return (
     <div className="space-y-6 animate-fade-in">
@@ -529,25 +626,52 @@ export default function TemplatesPage() {
                 className="w-full rounded-lg border border-bg-border bg-bg-deep py-2 pl-9 pr-3 text-sm text-fg outline-none transition-colors placeholder:text-fg-dim focus:border-accent/50"
               />
             </div>
-            <div className="flex flex-wrap gap-1.5">
-              {CATEGORY_ORDER.filter((category) => categoryCounts[category] > 0).map((category) => {
-                const active = category === activeCategory;
-                return (
-                  <button
-                    key={category}
-                    type="button"
-                    onClick={() => setActiveCategory(category)}
-                    title={CATEGORY_META[category].description}
-                    className={`rounded-full border px-3 py-1.5 text-[11px] font-bold transition-colors ${
-                      active
-                        ? "border-accent/50 bg-accent/15 text-accent"
-                        : "border-bg-border bg-bg-elev text-fg-muted hover:border-accent/30 hover:text-fg"
-                    }`}
-                  >
-                    {CATEGORY_META[category].label} ({categoryCounts[category]})
-                  </button>
-                );
-              })}
+            {/* Axis 1 — niche/industry (restricted verticals never appear). */}
+            <div className="space-y-1.5">
+              <div className="text-[10px] font-bold uppercase tracking-wider text-fg-dim">Niche</div>
+              <div className="flex flex-wrap gap-1.5">
+                {INDUSTRY_ORDER.filter((industry) => industryCounts[industry] > 0).map((industry) => {
+                  const active = industry === activeIndustry;
+                  return (
+                    <button
+                      key={industry}
+                      type="button"
+                      onClick={() => setActiveIndustry(industry)}
+                      className={`rounded-full border px-3 py-1.5 text-[11px] font-bold transition-colors ${
+                        active
+                          ? "border-accent/50 bg-accent/15 text-accent"
+                          : "border-bg-border bg-bg-elev text-fg-muted hover:border-accent/30 hover:text-fg"
+                      }`}
+                    >
+                      {INDUSTRY_META[industry].label} ({industryCounts[industry]})
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+            {/* Axis 2 — campaign type / format (Ad Creative + email families). */}
+            <div className="space-y-1.5">
+              <div className="text-[10px] font-bold uppercase tracking-wider text-fg-dim">Type</div>
+              <div className="flex flex-wrap gap-1.5">
+                {CATEGORY_ORDER.filter((category) => categoryCounts[category] > 0).map((category) => {
+                  const active = category === activeCategory;
+                  return (
+                    <button
+                      key={category}
+                      type="button"
+                      onClick={() => setActiveCategory(category)}
+                      title={CATEGORY_META[category].description}
+                      className={`rounded-full border px-3 py-1.5 text-[11px] font-bold transition-colors ${
+                        active
+                          ? "border-accent/50 bg-accent/15 text-accent"
+                          : "border-bg-border bg-bg-elev text-fg-muted hover:border-accent/30 hover:text-fg"
+                      }`}
+                    >
+                      {CATEGORY_META[category].label} ({categoryCounts[category]})
+                    </button>
+                  );
+                })}
+              </div>
             </div>
           </div>
 

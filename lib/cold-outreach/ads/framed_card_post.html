@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>SunBiz — Framed Premium Card (square feed post)</title>
+<style>
+  /* SunBiz ad creative — 1080x1080 square feed post. Generic premium framed-card
+     funding-ad layout, SunBiz-original execution (navy/gold), honest 1.25-factor figures. */
+  * { margin:0; padding:0; box-sizing:border-box; }
+  html,body { width:1080px; height:1080px; }
+  .ad {
+    width:1080px; height:1080px; position:relative; overflow:hidden;
+    background:radial-gradient(120% 90% at 50% 0%, #10224e 0%, #0a1735 45%, #050c1e 100%);
+    font-family:'Arial Black','Helvetica Neue',Arial,sans-serif; color:#001F54;
+    display:flex; align-items:center; justify-content:center;
+  }
+
+  /* The premium framed card */
+  .card {
+    position:relative;
+    width:936px; height:936px;
+    background:#faf8f2; border-radius:30px;
+    box-shadow:0 40px 90px rgba(0,0,0,.45);
+    display:flex; flex-direction:column; align-items:center;
+    padding:60px 66px 54px;
+  }
+  /* Thin gold inner border */
+  .card::before {
+    content:""; position:absolute; inset:22px;
+    border:2px solid #D4A843; border-radius:16px; pointer-events:none;
+  }
+  /* Small gold geometric corner brackets */
+  .corner { position:absolute; width:56px; height:56px; pointer-events:none; }
+  .corner::before, .corner::after { content:""; position:absolute; background:#D4A843; }
+  .corner::before { width:56px; height:5px; }
+  .corner::after  { width:5px; height:56px; }
+  .corner.tl { top:34px; left:34px; }
+  .corner.tl::before { top:0; left:0; } .corner.tl::after { top:0; left:0; }
+  .corner.tr { top:34px; right:34px; }
+  .corner.tr::before { top:0; right:0; } .corner.tr::after { top:0; right:0; }
+  .corner.bl { bottom:34px; left:34px; }
+  .corner.bl::before { bottom:0; left:0; } .corner.bl::after { bottom:0; left:0; }
+  .corner.br { bottom:34px; right:34px; }
+  .corner.br::before { bottom:0; right:0; } .corner.br::after { bottom:0; right:0; }
+
+  /* Wordmark */
+  .brand { display:flex; align-items:center; gap:18px; margin-bottom:26px; }
+  .sun { width:52px; height:52px; border-radius:50%; background:radial-gradient(circle at 50% 45%, #F4CE6E 0%, #D4A843 55%, #a9812f 100%); box-shadow:0 0 18px rgba(212,168,67,.45); position:relative; }
+  .sun::after { content:""; position:absolute; inset:12px; border-radius:50%; border:3px solid #faf8f2; }
+  .wordmark { font-size:44px; letter-spacing:3px; color:#001F54; line-height:1; }
+  .wordmark .g { color:#D4A843; }
+  .wordmark .thin { font-family:'Helvetica Neue',Arial,sans-serif; font-weight:700; letter-spacing:7px; font-size:18px; color:#6b6250; display:block; margin-top:6px; }
+
+  /* Headline */
+  .headline { text-align:center; line-height:.92; letter-spacing:-1px; margin-bottom:30px; }
+  .headline .l1 { display:block; font-size:64px; color:#001F54; }
+  .headline .l2 { display:block; font-size:64px; color:#D4A843; }
+
+  /* Amount boxes */
+  .boxes { width:100%; display:flex; flex-direction:column; gap:20px; }
+  .box {
+    border:2px solid #D4A843; border-radius:16px; background:#ffffff;
+    padding:20px 34px; display:flex; align-items:center; justify-content:space-between;
+    box-shadow:0 6px 18px rgba(0,31,84,.06);
+  }
+  .box .left { text-align:left; }
+  .box .amt { font-size:58px; color:#001F54; line-height:1; letter-spacing:-1px; }
+  .box .tot { font-family:'Helvetica Neue',Arial,sans-serif; font-weight:600; font-size:19px; color:#8a8172; margin-top:8px; letter-spacing:.3px; }
+  .box .pay { font-size:40px; color:#D4A843; line-height:1; text-align:right; letter-spacing:-.5px; }
+  .box .pay .u { font-family:'Helvetica Neue',Arial,sans-serif; font-weight:700; font-size:22px; color:#a9812f; }
+
+  /* Footer */
+  .foot { margin-top:auto; width:100%; display:flex; flex-direction:column; align-items:center; gap:16px; }
+  .foottag { font-family:'Helvetica Neue',Arial,sans-serif; font-weight:900; font-size:26px; letter-spacing:5px; color:#001F54; text-align:center; }
+  .disc { font-family:'Helvetica Neue',Arial,sans-serif; font-weight:500; font-size:15px; color:#9a917f; text-align:center; max-width:720px; line-height:1.45; }
+</style>
+</head>
+<body>
+  <div class="ad">
+    <div class="card">
+      <span class="corner tl"></span>
+      <span class="corner tr"></span>
+      <span class="corner bl"></span>
+      <span class="corner br"></span>
+
+      <div class="brand">
+        <div class="sun"></div>
+        <div class="wordmark">SUN<span class="g">BIZ</span> FUNDING<span class="thin">WORKING CAPITAL</span></div>
+      </div>
+
+      <div class="headline">
+        <span class="l1">CAPITAL FOR YOUR</span>
+        <span class="l2">NEXT MOVE</span>
+      </div>
+
+      <div class="boxes">
+        <div class="box">
+          <div class="left">
+            <div class="amt">$75,000</div>
+            <div class="tot">$93,750 total &bull; 15mo</div>
+          </div>
+          <div class="pay">Pay Only $1,442<span class="u">/wk</span></div>
+        </div>
+        <div class="box">
+          <div class="left">
+            <div class="amt">$150,000</div>
+            <div class="tot">$187,500 total &bull; 18mo</div>
+          </div>
+          <div class="pay">$2,404<span class="u">/wk</span></div>
+        </div>
+        <div class="box">
+          <div class="left">
+            <div class="amt">$250,000</div>
+            <div class="tot">$312,500 total &bull; 18mo</div>
+          </div>
+          <div class="pay">$4,006<span class="u">/wk</span></div>
+        </div>
+      </div>
+
+      <div class="foot">
+        <div class="foottag">BUSINESS TERM LOANS &nbsp;&middot;&nbsp; APPLY TODAY</div>
+        <div class="disc">Illustrative estimates at a 1.25 factor rate. Your amount, term &amp; payment are confirmed at quote and subject to underwriting. Up to $500,000 available.</div>
+      </div>
+    </div>
+  </div>
+</body>
+</html>
