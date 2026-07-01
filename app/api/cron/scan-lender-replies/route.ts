@@ -112,7 +112,7 @@ export async function GET(req: NextRequest) {
   try {
     creds = await getSubmissionsCreds(SUNBIZ_TENANT_ID);
   } catch (e) {
-    return NextResponse.json({ ok: false, error: "creds_" + (e instanceof Error ? e.message : "unknown") }, { status: 500 });
+    return NextResponse.json({ ok: false, error: "creds_" + (e instanceof Error ? e.message : "unknown"), error_class: "creds" }, { status: 500 });
   }
 
   const [threadsR, appsR, lendersR] = await Promise.all([
@@ -151,7 +151,7 @@ export async function GET(req: NextRequest) {
   try {
     await client.connect();
   } catch (e) {
-    return NextResponse.json({ ok: false, error: "imap_connect_" + (e instanceof Error ? e.message : "unknown") }, { status: 502 });
+    return NextResponse.json({ ok: false, error: "imap_connect_" + (e instanceof Error ? e.message : "unknown"), error_class: "imap" }, { status: 502 });
   }
 
   const lock = await client.getMailboxLock("INBOX");
@@ -214,6 +214,12 @@ export async function GET(req: NextRequest) {
   const classes = await mapPool(toClassify, CLASSIFY_CONCURRENCY, (c) => classifyLenderReply(c.subject, c.body));
   const classBy = new Map<Candidate, LenderReplyClass>();
   toClassify.forEach((c, i) => classBy.set(c, classes[i]));
+
+  // Dead-inference-key signature: a non-trivial batch where EVERYTHING came back
+  // "unknown" almost always means the classifier key is dead/rate-limited (every
+  // reply silently falls back to "unknown" and nothing gets written). Surface it.
+  const unknownCount = classes.filter((c) => c.category === "unknown").length;
+  const deadKeySuspected = toClassify.length >= 5 && unknownCount === toClassify.length;
 
   // ── Phase 3: writes (gated) ─────────────────────────────────────────────────
   let applied = 0;
@@ -282,7 +288,7 @@ export async function GET(req: NextRequest) {
     results.push(row);
   }
 
-  return NextResponse.json({ ok: true, mode: write ? "write" : "dry", inbox: creds.fromAddress, scanned: results.length, classified: toClassify.length, applied, results });
+  return NextResponse.json({ ok: true, mode: write ? "write" : "dry", inbox: creds.fromAddress, scanned: results.length, classified: toClassify.length, unknown: unknownCount, dead_key_suspected: deadKeySuspected, applied, results });
 }
 
 export async function POST(req: NextRequest) {

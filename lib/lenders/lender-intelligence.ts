@@ -90,7 +90,11 @@ async function loadOutcomesWithPaper(
     .eq("tenant_id", tenantId)
     .in("lender_id", lenderIds)
     .gte("reply_at", cutoff);
-  if (oR.error || !oR.data) return { outcomes: [], snapByApp: new Map() };
+  // A query ERROR (tables missing / RLS / outage) is NOT the same as "no history
+  // yet" — log the error so a broken learning loop is visible, not silently
+  // mistaken for a brand-new lender with no data.
+  if (oR.error) { console.error("[lender-intelligence] outcomes query failed (reverting to rules):", oR.error.message || oR.error); return { outcomes: [], snapByApp: new Map() }; }
+  if (!oR.data) return { outcomes: [], snapByApp: new Map() };
   const outcomes = oR.data as OutcomeRow[];
   const appIds = [...new Set(outcomes.map((o) => o.application_id))];
   const snapByApp = new Map<string, SnapshotRow>();
@@ -169,8 +173,11 @@ export async function applyLenderIntelligenceBias(
       const blockers = warnings.filter((w) => w.severity === "high_risk").map((w) => w.detail);
       return { ...score, score: newScore, reasons, warnings, blockers };
     });
-  } catch {
-    return scores; // fail open — never break the recommender
+  } catch (e) {
+    // Fail open — never break the recommender — but make the failure VISIBLE so a
+    // silently-degraded ranker (back to dumb rules) doesn't go unnoticed.
+    console.error("[lender-intelligence] bias failed, reverting to rules:", e instanceof Error ? e.message : e);
+    return scores;
   }
 }
 
@@ -244,7 +251,8 @@ export async function getLenderIntelligence(tenantId: string, lenderId: string):
       avg_factor: factors.length ? Math.round((factors.reduce((a, b) => a + b, 0) / factors.length) * 1000) / 1000 : null,
       recent: rows.slice(0, 20).map((r) => ({ application_id: r.application_id, outcome: r.outcome, decline_reason_code: r.decline_reason_code, reply_at: r.reply_at })),
     };
-  } catch {
+  } catch (e) {
+    console.error("[lender-intelligence] getLenderIntelligence failed:", e instanceof Error ? e.message : e);
     return empty;
   }
 }

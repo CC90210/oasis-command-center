@@ -261,8 +261,10 @@ export async function POST(
         },
         { onConflict: "tenant_id,shop_run_id" },
       );
-    } catch {
-      /* best-effort snapshot */
+    } catch (e) {
+      // Best-effort — never fail a completed shop — but log so a persistently
+      // failing snapshot write (which silently starves lender-intelligence) is visible.
+      console.error("[shop-out] deal_paper_snapshot write failed:", e instanceof Error ? e.message : e);
     }
   }
 
