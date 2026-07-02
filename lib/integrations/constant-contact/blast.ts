@@ -99,6 +99,16 @@ export function renderTemplate(source: "sunbiz" | "cold", id: string): { subject
   return { subject: tpl.subject, html };
 }
 
+/** First confirmed sender email on the connected CC account (for the bulk action, which has no sender picker). */
+export async function getDefaultSender(tenantId: string): Promise<string | null> {
+  const client = await getConstantContactClient(tenantId);
+  if (!client) return null;
+  const em = await client.getSenderEmails().catch(() => null);
+  const list = (Array.isArray(em) ? em : ((em as { account_emails?: unknown[] } | null)?.account_emails || [])) as { email_address?: string; confirm_status?: string }[];
+  const pick = list.find((e) => String(e.confirm_status || "").toUpperCase() === "CONFIRMED") || list[0];
+  return pick?.email_address || null;
+}
+
 export type RunBlastInput = {
   tenantId: string;
   userId?: string | null;

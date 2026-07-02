@@ -149,6 +149,10 @@ export class ConstantContactClient {
   tracking(activityId: string, kind: "sends" | "opens" | "unique_opens" | "clicks" | "bounces" | "optouts" | "didnotopens" | "forwards") {
     return this.req("GET", `/reports/email_reports/${activityId}/tracking/${kind}`);
   }
+  /** Aggregate per-activity counts (sends/opens/clicks/bounces/optouts) — one call, no pagination. */
+  getCampaignStats(activityId: string) {
+    return this.req("GET", `/reports/stats/email_campaign_activities?campaign_activity_ids=${encodeURIComponent(activityId)}`);
+  }
 
   /**
    * High-level: create → set recipients → optional test → schedule. Returns ids.

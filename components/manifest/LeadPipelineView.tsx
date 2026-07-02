@@ -516,6 +516,7 @@ export function LeadPipelineView({
           onAssign={(uid) => runBulk({ op: "assign", assigned_to: uid }, "assigned")}
           onStage={(stageKey) => runBulk({ op: "stage", stage: stageKey, entity: entityName }, "moved")}
           onEmail={(templateId) => runBulk({ op: "email", template_id: templateId, entity: entityName }, "queued")}
+          onCcBlast={(templateId) => runBulk({ op: "cc_blast", template_id: templateId }, "sent")}
           onClear={() => setSelected(new Set())}
         />
       )}
@@ -540,6 +541,7 @@ function BulkActionBar({
   onAssign,
   onStage,
   onEmail,
+  onCcBlast,
   onClear,
 }: {
   count: number;
@@ -552,11 +554,13 @@ function BulkActionBar({
   onAssign: (assignedTo: string | null) => void;
   onStage: (stageKey: string) => void;
   onEmail: (templateId: string) => void;
+  onCcBlast: (templateId: string) => void;
   onClear: () => void;
 }) {
   // Two-step confirm before a template blast — picking from the dropdown stages
   // the send; the operator must then confirm the exact count.
   const [pendingEmail, setPendingEmail] = useState<{ id: string; label: string } | null>(null);
+  const [pendingCc, setPendingCc] = useState<{ id: string; label: string } | null>(null);
   return (
     <div className="sticky bottom-3 z-20 mx-auto flex w-fit max-w-full flex-wrap items-center gap-3 rounded-xl border border-accent/40 bg-bg-elev/95 px-4 py-2.5 shadow-lg backdrop-blur">
       <span className="inline-flex items-center gap-1.5 text-[12px] font-semibold text-fg">
@@ -677,6 +681,63 @@ function BulkActionBar({
             {busy ? "Sending…" : "Confirm send"}
           </button>
           <button type="button" onClick={() => setPendingEmail(null)} className="text-[11px] text-fg-dim hover:text-fg">
+            Cancel
+          </button>
+        </div>
+      )}
+
+      {/* Constant Contact bulk blast — leads only, admin-only (enforced server-side). */}
+      {entityName === "lead" && (
+        <label className="flex items-center gap-1.5 text-[11px] text-fg-muted">
+          <Mail className="h-3.5 w-3.5 text-fg-dim" />
+          <select
+            defaultValue=""
+            disabled={busy}
+            onChange={(e) => {
+              const v = e.target.value;
+              e.currentTarget.selectedIndex = 0;
+              if (v) {
+                const t = SUNBIZ_BULK_SAFE_TEMPLATES.find((x) => x.id === v);
+                setPendingCc({ id: v, label: t?.label || v });
+              }
+            }}
+            className="rounded-md border border-bg-border bg-bg-deep px-2 py-1 text-[12px] text-fg focus:border-accent focus:outline-none disabled:opacity-60"
+            title="Blast this template to every selected lead via Constant Contact (admin only). Only outreach-safe templates appear here."
+          >
+            <option value="">CC blast…</option>
+            {SUNBIZ_TEMPLATE_CATEGORIES.map((cat) => {
+              const items = SUNBIZ_BULK_SAFE_TEMPLATES.filter((t) => t.category === cat.category);
+              if (items.length === 0) return null;
+              return (
+                <optgroup key={cat.category} label={cat.label}>
+                  {items.map((t) => (
+                    <option key={t.id} value={t.id}>{t.label}</option>
+                  ))}
+                </optgroup>
+              );
+            })}
+          </select>
+        </label>
+      )}
+
+      {pendingCc && (
+        <div className="flex items-center gap-2 rounded-md border border-accent/40 bg-accent/10 px-2.5 py-1.5 text-[11px] text-fg">
+          <span>
+            Blast <span className="font-semibold">&ldquo;{pendingCc.label}&rdquo;</span> to {count} lead
+            {count === 1 ? "" : "s"} via Constant Contact?
+          </span>
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() => {
+              onCcBlast(pendingCc.id);
+              setPendingCc(null);
+            }}
+            className="rounded-md border border-accent/50 bg-accent/20 px-2 py-0.5 text-[11px] font-semibold text-fg hover:bg-accent/30 disabled:opacity-60"
+          >
+            {busy ? "Sending…" : "Confirm CC blast"}
+          </button>
+          <button type="button" onClick={() => setPendingCc(null)} className="text-[11px] text-fg-dim hover:text-fg">
             Cancel
           </button>
         </div>

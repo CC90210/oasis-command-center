@@ -12,6 +12,10 @@
     {
       "path": "/api/cron/collect-outreach-intel?write=1",
       "schedule": "0 * * * *"
+    },
+    {
+      "path": "/api/cron/collect-cc-metrics?write=1",
+      "schedule": "15 * * * *"
     }
   ]
 }
