@@ -90,7 +90,7 @@ export async function readMailboxImap(
     if (recent.length) {
       for await (const msg of client.fetch(
         recent,
-        { uid: true, envelope: true, source: true, threadId: true, emailId: true },
+        { uid: true, envelope: true, source: true, threadId: true },
         { uid: true },
       )) {
         try {
@@ -102,7 +102,9 @@ export async function readMailboxImap(
           } catch {
             body = "";
           }
-          const id = msg.emailId || env?.messageId || String(msg.uid);
+          // imapflow 1.4.2 has no emailId (X-GM-MSGID); the RFC Message-ID is a
+          // stable global id for dedupe, with UID as a per-mailbox fallback.
+          const id = env?.messageId || `uid_${msg.uid}`;
           out.push({
             id,
             threadId: msg.threadId || id,
