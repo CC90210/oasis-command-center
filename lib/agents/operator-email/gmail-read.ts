@@ -122,7 +122,10 @@ export async function readMailbox(
       `${GMAIL_API}/messages?q=${encodeURIComponent(query)}&maxResults=${max}`,
       { headers: H, signal: AbortSignal.timeout(20_000) },
     );
-    if (!listRes.ok) return { messages: [], diag: `list_http_${listRes.status}` };
+    if (!listRes.ok) {
+      const body = await listRes.text().catch(() => "");
+      return { messages: [], diag: `list_http_${listRes.status}:${body.replace(/\s+/g, " ").slice(0, 160)}` };
+    }
     const list = (await listRes.json()) as { messages?: { id: string }[] };
     const ids = (list.messages || []).map((m) => m.id);
     const out: MonitoredMessage[] = [];
