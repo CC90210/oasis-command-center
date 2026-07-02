@@ -52,8 +52,13 @@ export async function GET(req: NextRequest) {
     return backTo(req, { constant_contact: "error", reason: "state_expired" });
   }
 
+  // Authenticate this leg via the SIGNED STATE (HMAC + 15-min window, verified
+  // above) + the PKCE verifier cookie (below) — NOT a live session. The provider's
+  // cross-site redirect may not carry the app session cookie, so requiring a live
+  // session here 401s the whole connect. If a session IS present, assert it matches
+  // the state (defense in depth); if absent, trust the signed state.
   const user = await getSessionUser();
-  if (!user || user.id !== stateUserId) return backTo(req, { constant_contact: "error", reason: "session_mismatch" });
+  if (user && user.id !== stateUserId) return backTo(req, { constant_contact: "error", reason: "session_mismatch" });
 
   const codeVerifier = req.cookies.get("cc_oauth_pkce")?.value || "";
   if (!codeVerifier) return backTo(req, { constant_contact: "error", reason: "pkce_verifier_missing" });
