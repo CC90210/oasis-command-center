@@ -41,21 +41,47 @@ export function ConstantContactBlast() {
     else if (cc === "error") setBanner({ kind: "err", text: `Connection error: ${p.get("reason") || "unknown"}` });
   }, [load]);
 
-  async function connect() {
+  // Connect runs in a POPUP so this window (and its Supabase session) never
+  // navigates. The popup does the OAuth dance and postMessages the result back.
+  function connect() {
     setConnecting(true);
-    try {
-      const r = await fetch("/api/integrations/constant-contact/authorize", { cache: "no-store" });
-      const j = await r.json();
-      if (j.ok && j.url) {
-        window.location.href = j.url;
-        return;
-      }
-      setBanner({ kind: "err", text: j.message || j.error || "Could not start the connect flow." });
-    } catch {
-      setBanner({ kind: "err", text: "Could not start the connect flow." });
-    } finally {
-      setConnecting(false);
+    setBanner(null);
+    const url = "/api/integrations/constant-contact/authorize";
+    const popup = window.open(url, "cc_oauth", "popup,width=620,height=780");
+    if (!popup) {
+      // Popup blocked — fall back to a full-window redirect (still safe: this flow
+      // sets no cookies and reads no session).
+      window.location.href = url;
+      return;
     }
+    let poll: ReturnType<typeof setInterval>;
+    const onMsg = (e: MessageEvent) => {
+      if (e.origin !== window.location.origin) return;
+      const d = e.data as { source?: string; status?: string; reason?: string } | null;
+      if (!d || d.source !== "cc_oauth") return;
+      window.removeEventListener("message", onMsg);
+      clearInterval(poll);
+      setConnecting(false);
+      if (d.status === "connected") {
+        setBanner({ kind: "ok", text: "Constant Contact connected." });
+        load();
+      } else if (d.status === "denied") {
+        setBanner({ kind: "err", text: "Connection cancelled." });
+      } else {
+        setBanner({ kind: "err", text: `Connection error: ${d.reason || "unknown"}` });
+      }
+      try { popup.close(); } catch { /* already closed */ }
+    };
+    window.addEventListener("message", onMsg);
+    // If the operator closes the popup manually, stop the spinner + re-check status.
+    poll = setInterval(() => {
+      if (popup.closed) {
+        clearInterval(poll);
+        window.removeEventListener("message", onMsg);
+        setConnecting(false);
+        load();
+      }
+    }, 800);
   }
 
   return (
