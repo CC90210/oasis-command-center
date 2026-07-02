@@ -62,6 +62,7 @@ export const PUBLIC_PATH_PREFIXES = [
   "/f/",                   // Public prospect-facing form pages. Two shapes: /f/<tenant>/<form>/<lead_token> (personalized, HMAC-signed via Solara mint) and /f/<tenant>/<form> (anonymous share — server creates a fresh lead on submit). Both must be reachable without a session cookie or every inbound form return 401 — verified failure mode 2026-05-18 (CC opened a copied link in incognito and landed on /login).
 
   "/api/cron",
+  "/api/agents/operator-email/connect-imap", // operator mailbox connect (app-password). Self-authenticates INSIDE the route: Bearer SCAN_TRIGGER_SECRET (admin seed) OR the operator's own session. MUST be public or the admin-seed bearer path 401s here before its own auth runs (verified 2026-07: returned {ok:false,error:unauthorized}). Session self-serve still works either way. Runs IMAP+SMTP verify before storing; password never returned.
   "/api/webhook",          // public webhooks for clients (HMAC/Bearer gated inside)
   "/api/webhooks/",        // inbound provider webhooks — Kixie / TextTorrent / Twilio (and future). Each route self-authenticates via a timing-safe HMAC signature check INSIDE the route, so the prefix is public. Trailing slash → matchesPathPrefix covers every /api/webhooks/* sub-path. MUST be public or registered Kixie/TT/Twilio callbacks 401 before their signature verification runs — the singular "/api/webhook" entry can't cover the plural "/api/webhooks/" (matchesPathPrefix needs prefix+"/").
   "/_next",
