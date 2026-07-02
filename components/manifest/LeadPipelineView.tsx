@@ -344,7 +344,10 @@ export function LeadPipelineView({
           </div>
         </div>
         <div className="flex items-center gap-2">
-          {canManage && (
+          {/* Multi-select is available to every employee. The bulk API
+              (/api/leads/bulk) skips any lead a non-admin doesn't own, so a
+              member can only bulk-act on their own book — safe to always show. */}
+          {true && (
             <button
               type="button"
               onClick={() => (selectMode ? exitSelectMode() : setSelectMode(true))}

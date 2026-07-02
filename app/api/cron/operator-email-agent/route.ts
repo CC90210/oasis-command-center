@@ -13,7 +13,7 @@
 
 import { NextResponse, type NextRequest } from "next/server";
 import { timingSafeEqual } from "crypto";
-import { listActiveAgents, markProcessed, mailboxReady, type AgentEmailSettings } from "@/lib/agents/operator-email/settings";
+import { listActiveAgents, markProcessed, type AgentEmailSettings } from "@/lib/agents/operator-email/settings";
 import { readMailbox } from "@/lib/agents/operator-email/gmail-read";
 import { ingestMessages, type IngestResult } from "@/lib/agents/operator-email/ingest";
 import { writeSnapshot } from "@/lib/agents/operator-email/snapshots";
@@ -37,29 +37,35 @@ function checkTrigger(req: NextRequest): NextResponse | null {
 
 async function runAgent(agent: AgentEmailSettings, write: boolean) {
   const dryRun = !write; // writes are held off the schedule until verified
-  const results: Record<string, IngestResult> = {};
+  const results: Record<string, IngestResult & { diag: string }> = {};
   const mailboxes: ("work" | "personal")[] = [];
   if (agent.workEnabled) mailboxes.push("work");
   if (agent.personalEnabled) mailboxes.push("personal");
 
+  // Rolling window shared by both mailboxes; message-id dedupe makes overlap safe.
+  const since = agent.lastProcessedAt
+    ? `after:${Math.floor(Date.parse(agent.lastProcessedAt) / 1000)}`
+    : "newer_than:2d";
+
   for (const mailbox of mailboxes) {
-    const ready = await mailboxReady(agent.tenantId, agent.userId, mailbox);
-    if (!ready.ready) { results[mailbox] = { scanned: 0, matched: 0, ingested: 0, dropped: 0, skipped: 0 }; continue; }
-    // Poll a rolling window; the message-id dedupe makes overlap safe.
-    const since = agent.lastProcessedAt
-      ? `after:${Math.floor(Date.parse(agent.lastProcessedAt) / 1000)}`
-      : "newer_than:2d";
-    const messages = await readMailbox(agent.tenantId, agent.userId, mailbox, {
+    // readMailbox self-checks bundle + readonly scope and reports why via `diag`
+    // (scope_missing_readonly / token_refresh_failed / list_http_* / ok_N).
+    const read = await readMailbox(agent.tenantId, agent.userId, mailbox, {
       query: `${since} -in:chats`,
       max: 40,
     });
-    results[mailbox] = await ingestMessages(
+    const ing = await ingestMessages(
       { tenantId: agent.tenantId, userId: agent.userId, mailbox, dryRun },
-      messages,
+      read.messages,
     );
+    results[mailbox] = { ...ing, diag: read.diag };
   }
-  await markProcessed(agent.tenantId, agent.userId);
-  if (write) await writeSnapshot(agent.tenantId, agent.userId); // metrics for the dashboard cards
+  // Only advance the cursor on a real (write) run — a DRY tick must not consume
+  // the window, or it silently skips messages the live run should have ingested.
+  if (write) {
+    await markProcessed(agent.tenantId, agent.userId);
+    await writeSnapshot(agent.tenantId, agent.userId); // metrics for the dashboard cards
+  }
   return results;
 }
 

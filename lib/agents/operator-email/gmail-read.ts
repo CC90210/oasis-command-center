@@ -99,17 +99,19 @@ export async function readMailbox(
   userId: string,
   mailbox: "work" | "personal",
   opts: { query?: string; max?: number } = {},
-): Promise<MonitoredMessage[]> {
+): Promise<{ messages: MonitoredMessage[]; diag: string }> {
   const service: Service = mailbox === "personal" ? "gmail_oauth_personal" : "gmail_oauth";
   let bundle: Record<string, string>;
   try {
     bundle = await getUserIntegrationBundle(tenantId, userId, service);
   } catch {
-    return [];
+    return { messages: [], diag: "no_bundle" };
   }
-  if (!(bundle.scope || "").includes("gmail.readonly")) return []; // not monitor-consented
+  if (!(bundle.scope || "").includes("gmail.readonly")) {
+    return { messages: [], diag: "scope_missing_readonly" }; // connected with send-only scope
+  }
   const token = await ensureAccessToken(tenantId, userId, service, bundle);
-  if (!token) return [];
+  if (!token) return { messages: [], diag: "token_refresh_failed" };
   const mailboxAddress = bundle.gmail_address || "";
   const query = opts.query || "newer_than:2d -in:chats";
   const max = Math.min(opts.max || 25, 50);
@@ -120,7 +122,7 @@ export async function readMailbox(
       `${GMAIL_API}/messages?q=${encodeURIComponent(query)}&maxResults=${max}`,
       { headers: H, signal: AbortSignal.timeout(20_000) },
     );
-    if (!listRes.ok) return [];
+    if (!listRes.ok) return { messages: [], diag: `list_http_${listRes.status}` };
     const list = (await listRes.json()) as { messages?: { id: string }[] };
     const ids = (list.messages || []).map((m) => m.id);
     const out: MonitoredMessage[] = [];
@@ -147,8 +149,8 @@ export async function readMailbox(
         // skip a single unreadable message; keep the tick alive
       }
     }
-    return out;
+    return { messages: out, diag: `ok_${out.length}` };
   } catch {
-    return [];
+    return { messages: [], diag: "exception" };
   }
 }
