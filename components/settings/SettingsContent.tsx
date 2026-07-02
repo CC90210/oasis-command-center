@@ -44,6 +44,7 @@ import { PlanTemplateEditor } from "@/components/settings/PlanTemplateEditor";
 import { AgentConfigEditor } from "@/components/settings/AgentConfigEditor";
 import { IntegrationKeysPanel } from "@/components/settings/IntegrationKeysPanel";
 import { PersonalIntegrationsPanel } from "@/components/settings/PersonalIntegrationsPanel";
+import { TelegramConnectCard } from "@/components/settings/TelegramConnectCard";
 import { SafeBoundary } from "@/components/SafeBoundary";
 import { MyAgentsCard } from "@/components/settings/MyAgentsCard";
 import { AgentMarketplaceCard } from "@/components/settings/AgentMarketplaceCard";
@@ -260,6 +261,10 @@ export async function SettingsContent({
               // aura) was showing the row even though it doesn't use Kixie.
               showKixie={enabledAgents.includes("helios")}
             />
+          </SafeBoundary>
+
+          <SafeBoundary label="Telegram bot">
+            <TelegramConnectCard />
           </SafeBoundary>
 
           {canManageTenant && (
@@ -557,6 +562,9 @@ async function PreviewSettings({ tenantSlug, hideHeader }: { tenantSlug: string;
           <SafeBoundary label="Personal integrations">
             {/* Your own Gmail / personal API keys — always yours to manage. */}
             <PersonalIntegrationsPanel showGmail showKixie={false} />
+          </SafeBoundary>
+          <SafeBoundary label="Telegram bot">
+            <TelegramConnectCard />
           </SafeBoundary>
         </>
       )}
