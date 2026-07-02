@@ -27,6 +27,7 @@ import { publishAgentEvent } from "@/lib/manifest/events";
 import { dispatchLeadStageEvent } from "@/lib/lead-stage-dispatcher";
 import { resolveSignerForOperator } from "@/lib/config/agents";
 import { operatorHasGmailOAuth, sendGmailAsOperator } from "@/lib/integrations/gmail-oauth-send";
+import { operatorHasAppPassword, sendGmailAppPasswordAsOperator } from "@/lib/integrations/gmail-apppassword-send";
 import { checkEmailSuppressed } from "@/lib/lead-interactions-queries";
 
 export const runtime = "nodejs";
@@ -275,7 +276,30 @@ export async function POST(
   let gmailFrom: string | null = null;
   let gmailMsgId: string | null = null;
 
-  if (await operatorHasGmailOAuth(sess.tenantId, sess.userId)) {
+  // Send preference: operator app-password (our OAuth-free working path — sends
+  // FROM the operator's own address) → operator OAuth → submissions@ queue. Each
+  // path falls through to the next on any failure so the email still goes out.
+  const queueFallback = () =>
+    triggerImmediateSend(req, { to: toEmail, subject: truncatedSubject, body: truncatedBody, leadId, brand, signer });
+
+  if (await operatorHasAppPassword(sess.tenantId, sess.userId)) {
+    const g = await sendGmailAppPasswordAsOperator({
+      tenantId: sess.tenantId,
+      userId: sess.userId,
+      to: toEmail,
+      subject: truncatedSubject,
+      body: truncatedBody,
+    });
+    if (g.ok) {
+      sendResult = { status: "sent", agent_source: "gmail_apppassword", via: "gmail_apppassword", from_address: g.from_address };
+      gmailFrom = g.from_address;
+      gmailMsgId = g.gmail_message_id;
+    } else {
+      // not_connected / send_failed → fall back to the queue (the daemon re-checks
+      // suppression, so a suppressed recipient still won't actually go out).
+      sendResult = await queueFallback();
+    }
+  } else if (await operatorHasGmailOAuth(sess.tenantId, sess.userId)) {
     const g = await sendGmailAsOperator({
       tenantId: sess.tenantId,
       userId: sess.userId,
@@ -290,10 +314,10 @@ export async function POST(
     } else {
       // not_connected / refresh_failed / send_failed → fall back to the queue so
       // the email still goes out via submissions@.
-      sendResult = await triggerImmediateSend(req, { to: toEmail, subject: truncatedSubject, body: truncatedBody, leadId, brand, signer });
+      sendResult = await queueFallback();
     }
   } else {
-    sendResult = await triggerImmediateSend(req, { to: toEmail, subject: truncatedSubject, body: truncatedBody, leadId, brand, signer });
+    sendResult = await queueFallback();
   }
 
   // If the send actually fired, flip the queued row to sent so the timeline
