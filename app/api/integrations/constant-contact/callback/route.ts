@@ -16,8 +16,11 @@ export const dynamic = "force-dynamic";
 
 const RETURN_PATH = "/email-blast";
 
-function backTo(req: NextRequest, params: Record<string, string>): NextResponse {
-  const base = process.env.PUBLIC_APP_URL?.replace(/\/$/, "") || new URL(req.url).origin;
+function backTo(params: Record<string, string>): NextResponse {
+  // Land back on the SAME canonical domain the OAuth happened on (oasisai.work,
+  // where the operator is logged in) — NOT PUBLIC_APP_URL, which resolves to the
+  // raw agent-dashboard-*.vercel.app host where the session cookie isn't present.
+  const base = new URL(CC_REDIRECT_URI).origin;
   const dest = new URL(`${base}${RETURN_PATH}`);
   for (const [k, v] of Object.entries(params)) dest.searchParams.set(k, v);
   const res = NextResponse.redirect(dest.toString());
@@ -29,14 +32,14 @@ export async function GET(req: NextRequest) {
   const code = req.nextUrl.searchParams.get("code") || "";
   const state = req.nextUrl.searchParams.get("state") || "";
   const error = req.nextUrl.searchParams.get("error") || "";
-  if (error) return backTo(req, { constant_contact: "denied", reason: error });
-  if (!code || !state) return backTo(req, { constant_contact: "denied", reason: "missing_code_or_state" });
+  if (error) return backTo({ constant_contact: "denied", reason: error });
+  if (!code || !state) return backTo({ constant_contact: "denied", reason: "missing_code_or_state" });
 
   const stateSecret = process.env.CONSTANT_CONTACT_OAUTH_STATE_SECRET || process.env.BRAVO_FIELD_ENCRYPTION_KEY || "";
-  if (!stateSecret) return backTo(req, { constant_contact: "error", reason: "state_secret_missing" });
+  if (!stateSecret) return backTo({ constant_contact: "error", reason: "state_secret_missing" });
 
   const parts = state.split("|");
-  if (parts.length !== 5) return backTo(req, { constant_contact: "error", reason: "malformed_state" });
+  if (parts.length !== 5) return backTo({ constant_contact: "error", reason: "malformed_state" });
   const [tenantId, stateUserId, nonce, issuedAtRaw, providedSig] = parts;
   const expectedSig = createHmac("sha256", stateSecret).update(`${tenantId}|${stateUserId}|${nonce}|${issuedAtRaw}`).digest("base64url");
   let sigMatch = false;
@@ -45,11 +48,11 @@ export async function GET(req: NextRequest) {
   } catch {
     sigMatch = false;
   }
-  if (!sigMatch) return backTo(req, { constant_contact: "error", reason: "state_signature_invalid" });
+  if (!sigMatch) return backTo({ constant_contact: "error", reason: "state_signature_invalid" });
 
   const issuedAtMs = parseInt(issuedAtRaw, 36);
   if (!Number.isFinite(issuedAtMs) || Date.now() - issuedAtMs > 15 * 60 * 1000) {
-    return backTo(req, { constant_contact: "error", reason: "state_expired" });
+    return backTo({ constant_contact: "error", reason: "state_expired" });
   }
 
   // Authenticate this leg via the SIGNED STATE (HMAC + 15-min window, verified
@@ -58,13 +61,13 @@ export async function GET(req: NextRequest) {
   // session here 401s the whole connect. If a session IS present, assert it matches
   // the state (defense in depth); if absent, trust the signed state.
   const user = await getSessionUser();
-  if (user && user.id !== stateUserId) return backTo(req, { constant_contact: "error", reason: "session_mismatch" });
+  if (user && user.id !== stateUserId) return backTo({ constant_contact: "error", reason: "session_mismatch" });
 
   const codeVerifier = req.cookies.get("cc_oauth_pkce")?.value || "";
-  if (!codeVerifier) return backTo(req, { constant_contact: "error", reason: "pkce_verifier_missing" });
+  if (!codeVerifier) return backTo({ constant_contact: "error", reason: "pkce_verifier_missing" });
 
   const creds = await ccCredentials(tenantId);
-  if (!creds) return backTo(req, { constant_contact: "error", reason: "not_configured" });
+  if (!creds) return backTo({ constant_contact: "error", reason: "not_configured" });
 
   let tokens;
   try {
@@ -77,15 +80,15 @@ export async function GET(req: NextRequest) {
     });
   } catch (e) {
     console.error("[constant-contact.callback] token exchange failed", (e as Error).message);
-    return backTo(req, { constant_contact: "error", reason: "token_exchange_failed" });
+    return backTo({ constant_contact: "error", reason: "token_exchange_failed" });
   }
 
   try {
     await ccTokenStore(tenantId).save(tokens);
   } catch (e) {
     console.error("[constant-contact.callback] token store failed", (e as Error).message);
-    return backTo(req, { constant_contact: "error", reason: "store_failed" });
+    return backTo({ constant_contact: "error", reason: "store_failed" });
   }
 
-  return backTo(req, { constant_contact: "connected" });
+  return backTo({ constant_contact: "connected" });
 }
