@@ -14,6 +14,8 @@
 import "server-only";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { findExistingLead } from "@/lib/forms/agent-routing";
+import { classifyDealEmail } from "./classify";
+import { classifyLenderReply } from "@/lib/lenders/classify-reply";
 import type { MonitoredMessage } from "./gmail-read";
 
 export interface IngestResult {
@@ -79,8 +81,31 @@ export async function ingestMessages(
       continue;
     }
 
+    // Intelligence (Fable 5) — matched email only, so no personal/unmatched mail
+    // ever reaches the model. Lender replies additionally get terms/decline
+    // extracted (the learning signal). Both classifiers fence + fail closed.
+    const cls = await classifyDealEmail(msg.subject, msg.body);
+    let lenderEnrichment: Record<string, unknown> = {};
+    if (cls.type === "lender_reply") {
+      try {
+        const lr = await classifyLenderReply(msg.subject, msg.body);
+        lenderEnrichment = {
+          lender_category: lr.category,
+          lender_amount: lr.amount,
+          lender_term_months: lr.term_months,
+          lender_factor: lr.factor_rate,
+        };
+      } catch { /* fail closed — no terms */ }
+    }
+    const enrichment = {
+      email_type: cls.type,
+      needs_attention: cls.needs_attention,
+      summary: cls.summary,
+      ...lenderEnrichment,
+    };
+
     if (args.dryRun) {
-      console.log(`[operator-email] DRY would ingest ${outbound ? "out" : "in"} msg=${msg.id} lead=${lead.id} "${msg.subject.slice(0, 60)}"`);
+      console.log(`[operator-email] DRY ${outbound ? "out" : "in"} msg=${msg.id} lead=${lead.id} type=${cls.type}${lenderEnrichment.lender_category ? "/" + lenderEnrichment.lender_category : ""} "${msg.subject.slice(0, 50)}"`);
       res.ingested += 1;
       continue;
     }
@@ -104,6 +129,7 @@ export async function ingestMessages(
         from_address: fromEmail,
         monitored_mailbox: args.mailbox,
         routed_to_user_id: args.userId,
+        ...enrichment,
       },
     };
     try {

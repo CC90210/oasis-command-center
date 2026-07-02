@@ -16,6 +16,7 @@ import { timingSafeEqual } from "crypto";
 import { listActiveAgents, markProcessed, mailboxReady, type AgentEmailSettings } from "@/lib/agents/operator-email/settings";
 import { readMailbox } from "@/lib/agents/operator-email/gmail-read";
 import { ingestMessages, type IngestResult } from "@/lib/agents/operator-email/ingest";
+import { writeSnapshot } from "@/lib/agents/operator-email/snapshots";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -58,6 +59,7 @@ async function runAgent(agent: AgentEmailSettings, write: boolean) {
     );
   }
   await markProcessed(agent.tenantId, agent.userId);
+  if (write) await writeSnapshot(agent.tenantId, agent.userId); // metrics for the dashboard cards
   return results;
 }
 
