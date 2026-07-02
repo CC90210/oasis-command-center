@@ -305,11 +305,11 @@ export function PersonalIntegrationsPanel({
     }
   }
 
-  async function connectGmail() {
+  async function connectGmail(mailbox: "work" | "personal" = "work") {
     setBusyService("gmail_oauth");
     setError(null);
     try {
-      const r = await fetch("/api/auth/google-oauth/start");
+      const r = await fetch(`/api/auth/google-oauth/start?mailbox=${mailbox}`);
       const body = (await r.json().catch(() => ({}))) as {
         ok?: boolean;
         url?: string;
@@ -424,11 +424,11 @@ export function PersonalIntegrationsPanel({
                 </div>
                 <div className="text-[11.5px] text-fg-muted mt-1 leading-relaxed">
                   {gmailConnected
-                    ? `Connected as ${gmailStatus?.gmail_address || "(address unknown)"}. Scope: gmail.send only — we cannot read your inbox.`
-                    : "Connect your personal Gmail so outbound sends come from your address. Scope: gmail.send only — we cannot read your inbox."}
+                    ? `Connected as ${gmailStatus?.gmail_address || "(address unknown)"}. Outbound sends come from your address; the email agent monitors this inbox (read-only).`
+                    : "Connect your Gmail so sends come from your address and the email agent can monitor deal email (read-only). Connect a personal inbox too if you want it monitored."}
                 </div>
               </div>
-              <div className="shrink-0">
+              <div className="shrink-0 flex flex-col gap-1.5">
                 {gmailConnected ? (
                   <button
                     type="button"
@@ -442,14 +442,22 @@ export function PersonalIntegrationsPanel({
                 ) : (
                   <button
                     type="button"
-                    onClick={connectGmail}
+                    onClick={() => connectGmail("work")}
                     disabled={busyService === "gmail_oauth"}
                     className="inline-flex items-center gap-1.5 rounded-md bg-accent text-bg-deep px-3 py-1.5 text-[12.5px] font-bold hover:bg-accent/90 disabled:opacity-60 transition-colors"
                   >
                     {busyService === "gmail_oauth" ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : null}
-                    Connect my Gmail
+                    Connect work Gmail
                   </button>
                 )}
+                <button
+                  type="button"
+                  onClick={() => connectGmail("personal")}
+                  disabled={busyService === "gmail_oauth"}
+                  className="inline-flex items-center gap-1.5 rounded-md border border-bg-border bg-bg-elev px-3 py-1.5 text-[11.5px] font-semibold text-fg-muted hover:text-fg hover:border-accent/40 disabled:opacity-50 transition-colors"
+                >
+                  Connect personal Gmail (monitor)
+                </button>
               </div>
             </div>
           </li>
