@@ -104,6 +104,7 @@ export class ConstantContactClient {
 
   // ── Account / sender ───────────────────────────────────────────────────────
   getSenderEmails() { return this.req("GET", "/account/emails"); }
+  getAccountSummary() { return this.req("GET", "/account/summary"); }
 
   // ── Audience ───────────────────────────────────────────────────────────────
   getContactLists() { return this.req("GET", "/contact_lists?limit=100"); }

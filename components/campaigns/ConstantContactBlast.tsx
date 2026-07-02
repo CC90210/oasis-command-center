@@ -12,7 +12,14 @@
 import { useCallback, useEffect, useState } from "react";
 import { Mail, Loader2, CheckCircle2, AlertCircle, Plug } from "lucide-react";
 
-type Status = { ok: boolean; connected?: boolean; configured?: boolean; can_connect?: boolean };
+type Status = {
+  ok: boolean;
+  connected?: boolean;
+  configured?: boolean;
+  can_connect?: boolean;
+  token_ok?: boolean;
+  account?: { org: string | null; emails: { email: string; status: string }[] } | null;
+};
 
 export function ConstantContactBlast() {
   const [status, setStatus] = useState<Status | null>(null);
@@ -108,10 +115,41 @@ export function ConstantContactBlast() {
           <div className="inline-flex items-center gap-1.5 rounded-md border border-emerald-500/30 bg-emerald-500/5 px-3 py-1.5 text-[12px] text-emerald-300">
             <CheckCircle2 className="h-3.5 w-3.5" /> Connected to Constant Contact
           </div>
-          <div className="rounded-md border border-bg-border bg-bg-deep/30 px-3 py-3 text-[12px] text-fg-dim">
-            The blast composer (template picker, recipient list, test-send, and launch) is coming in the next phase.
-            The account is connected and ready.
-          </div>
+
+          {/* Account confirmation — which CC account is actually linked. */}
+          {status.account ? (
+            <div className="rounded-md border border-bg-border bg-bg-deep/30 px-3 py-3 text-[12px] space-y-1.5">
+              <div className="text-fg">
+                Account: <span className="font-medium">{status.account.org || "(no organization name)"}</span>
+              </div>
+              {status.account.emails.length > 0 ? (
+                <div className="space-y-0.5">
+                  <div className="text-fg-dim">Sender emails on this account:</div>
+                  <ul className="text-fg-dim">
+                    {status.account.emails.map((e) => (
+                      <li key={e.email}>
+                        • {e.email}{" "}
+                        <span className="text-[10px] uppercase tracking-wide">
+                          {e.status === "CONFIRMED" ? "(confirmed)" : `(${e.status.toLowerCase() || "unconfirmed"})`}
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              ) : (
+                <div className="text-status-warm">No confirmed sender email on this account yet — you&apos;ll need one before sending a blast.</div>
+              )}
+              <div className="pt-1 text-[11px] text-fg-dim">
+                Wrong account?{" "}
+                <button type="button" onClick={connect} className="underline">Reconnect</button>.
+              </div>
+            </div>
+          ) : (
+            <div className="rounded-md border border-status-warm/40 bg-status-warm/5 px-3 py-3 text-[12px] text-status-warm">
+              Connected, but couldn&apos;t read the account details just now. Reload the page; if it keeps happening,{" "}
+              <button type="button" onClick={connect} className="underline">reconnect</button>.
+            </div>
+          )}
         </div>
       ) : (
         <div className="space-y-3">
