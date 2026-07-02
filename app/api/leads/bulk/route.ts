@@ -27,6 +27,7 @@ import { updateRecord, RecordsError } from "@/lib/manifest/data";
 import { canViewLead, leadScopingEnabled } from "@/lib/lead-scope";
 import { LEAD_PIPELINE_STAGES, OPPORTUNITY_PIPELINE_STAGES } from "@/lib/sunbiz-stage-meta";
 import { SUNBIZ_EMAIL_TEMPLATES, renderSunbizTemplate } from "@/lib/sunbiz-templates-library";
+import { runBlast, resolveLeadsAudience, renderTemplate, getDefaultSender } from "@/lib/integrations/constant-contact/blast";
 import { publishAgentEvent } from "@/lib/manifest/events";
 
 export const runtime = "nodejs";
@@ -62,7 +63,7 @@ export async function POST(req: NextRequest) {
   }
 
   const op =
-    body.op === "assign" || body.op === "stage" || body.op === "email" ? body.op : null;
+    body.op === "assign" || body.op === "stage" || body.op === "email" || body.op === "cc_blast" ? body.op : null;
   if (!op) {
     return NextResponse.json({ ok: false, error: "invalid_op" }, { status: 400 });
   }
@@ -162,6 +163,26 @@ export async function POST(req: NextRequest) {
       }
     }
     return NextResponse.json({ ok: true, op, ...out });
+  }
+
+  if (op === "cc_blast") {
+    // Bulk "Send via Constant Contact" — one blast to the selected leads through
+    // the shared blast core (suppression + blast-safety + dry-run). Admin-only
+    // (org-wide send). Bulk-safe templates only.
+    if (!sess.isAdmin) return NextResponse.json({ ok: false, error: "admin_only" }, { status: 403 });
+    const templateId = str(body.template_id);
+    const tpl = SUNBIZ_EMAIL_TEMPLATES.find((t) => t.id === templateId);
+    if (!tpl) return NextResponse.json({ ok: false, error: "invalid_template" }, { status: 400 });
+    if (tpl.bulkSafe === false) return NextResponse.json({ ok: false, error: "template_not_bulk_safe" }, { status: 400 });
+    const rendered = renderTemplate("sunbiz", templateId);
+    if (!rendered) return NextResponse.json({ ok: false, error: "template_render_failed" }, { status: 400 });
+    const fromEmail = await getDefaultSender(tenantId);
+    if (!fromEmail) return NextResponse.json({ ok: false, error: "no_confirmed_sender", message: "Connect Constant Contact and confirm a sender email first." }, { status: 400 });
+    const aud = await resolveLeadsAudience(tenantId, ids);
+    if (!aud.ok) return NextResponse.json({ ok: false, error: aud.error }, { status: 500 });
+    if (aud.recipients.length === 0) return NextResponse.json({ ok: false, error: "no_recipients" }, { status: 400 });
+    const result = await runBlast({ tenantId, userId: sess.userId, recipients: aud.recipients, subject: rendered.subject, html: rendered.html, fromEmail, listNameHint: "bulk" });
+    return NextResponse.json(result, { status: result.ok ? 200 : result.status || 400 });
   }
 
   if (op === "email") {
