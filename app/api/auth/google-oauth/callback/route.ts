@@ -32,7 +32,13 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 const GMAIL_SEND_SCOPE = "https://www.googleapis.com/auth/gmail.send";
+const GMAIL_READONLY_SCOPE = "https://www.googleapis.com/auth/gmail.readonly";
 const SETTINGS_RETURN_PATH = "/settings#integrations";
+// Must mirror start/route.ts. work → send+monitor; personal → monitor only.
+const MAILBOX_SERVICE: Record<string, string> = {
+  work: "gmail_oauth",
+  personal: "gmail_oauth_personal",
+};
 
 function settingsRedirect(req: NextRequest, params: Record<string, string>): NextResponse {
   const baseUrl =
@@ -66,12 +72,16 @@ export async function GET(req: NextRequest) {
     return settingsRedirect(req, { gmail_oauth: "error", reason: "state_secret_missing" });
   }
   const parts = state.split("|");
-  if (parts.length !== 5) {
+  if (parts.length !== 6) {
     return settingsRedirect(req, { gmail_oauth: "error", reason: "malformed_state" });
   }
-  const [tenantId, stateUserId, nonce, issuedAtRaw, providedSig] = parts;
+  const [tenantId, stateUserId, nonce, issuedAtRaw, mailboxRaw, providedSig] = parts;
+  const service = MAILBOX_SERVICE[mailboxRaw];
+  if (!service) {
+    return settingsRedirect(req, { gmail_oauth: "error", reason: "unknown_mailbox" });
+  }
   const expectedSig = createHmac("sha256", stateSecret)
-    .update(`${tenantId}|${stateUserId}|${nonce}|${issuedAtRaw}`)
+    .update(`${tenantId}|${stateUserId}|${nonce}|${issuedAtRaw}|${mailboxRaw}`)
     .digest("base64url");
   let sigMatch = false;
   try {
@@ -147,15 +157,16 @@ export async function GET(req: NextRequest) {
     });
   }
 
-  // Verify the granted scope includes gmail.send. Google can grant a
-  // SUBSET of what we requested in edge cases (rare for explicit-scope
-  // flows but worth checking).
+  // Verify the granted scope covers what this mailbox needs. Google can
+  // grant a SUBSET of what we requested in edge cases. work needs send
+  // (load-bearing) + readonly (monitor); personal needs readonly (monitor).
   const grantedScopes = (tokenResp.scope || "").split(" ");
-  if (!grantedScopes.includes(GMAIL_SEND_SCOPE)) {
-    return settingsRedirect(req, {
-      gmail_oauth: "error",
-      reason: "gmail_send_scope_not_granted",
-    });
+  const needSend = service === "gmail_oauth";
+  if (needSend && !grantedScopes.includes(GMAIL_SEND_SCOPE)) {
+    return settingsRedirect(req, { gmail_oauth: "error", reason: "gmail_send_scope_not_granted" });
+  }
+  if (!grantedScopes.includes(GMAIL_READONLY_SCOPE)) {
+    return settingsRedirect(req, { gmail_oauth: "error", reason: "gmail_readonly_scope_not_granted" });
   }
 
   // Look up the operator's Gmail address. We requested `openid email`
@@ -189,14 +200,14 @@ export async function GET(req: NextRequest) {
     refresh_token: tokenResp.refresh_token,
     access_token: tokenResp.access_token,
     expires_at: expiresAt,
-    scope: tokenResp.scope || GMAIL_SEND_SCOPE,
+    scope: tokenResp.scope || GMAIL_READONLY_SCOPE,
     gmail_address: gmailAddress,
   };
 
   const setResult = await setUserIntegrationBundle(
     tenantId,
     user.id,
-    "gmail_oauth",
+    service,
     bundle,
   );
   if (!setResult.ok) {
@@ -209,5 +220,6 @@ export async function GET(req: NextRequest) {
   return settingsRedirect(req, {
     gmail_oauth: "connected",
     gmail: gmailAddress,
+    mailbox: mailboxRaw,
   });
 }

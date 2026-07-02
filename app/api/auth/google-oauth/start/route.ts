@@ -30,23 +30,36 @@ import { getSessionUser, getServiceSupabase } from "@/lib/supabase-server";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-// gmail.send is the load-bearing scope — that's what authorizes the
-// actual send. openid + email come along so the callback can reliably
-// resolve the user's Gmail address from the ID token (without these,
-// userinfo can return blank because the OAuth grant doesn't include
-// any identity scope per Google's OIDC contract). Inbox read is still
-// out of scope.
+// gmail.send authorizes the send; gmail.readonly authorizes the Operator
+// Email Agent's inbox MONITOR (read-only — it never modifies/deletes mail).
+// openid + email let the callback resolve the connected Gmail address.
+// (2026-07: expanded from send-only to enable the monitor. Reading the inbox
+// is now in-scope by explicit operator consent; the agent still cannot modify.)
 const OAUTH_SCOPES = [
   "openid",
   "email",
   "https://www.googleapis.com/auth/gmail.send",
+  "https://www.googleapis.com/auth/gmail.readonly",
 ].join(" ");
 
-export async function GET() {
+// Which mailbox this connect is for. 'work' → the existing gmail_oauth bundle
+// (send + monitor). 'personal' → a separate gmail_oauth_personal bundle
+// (monitor only, opt-in). Both store under user_integration_credentials keyed
+// by service, so an operator can connect two Google accounts.
+const MAILBOX_SERVICE: Record<string, string> = {
+  work: "gmail_oauth",
+  personal: "gmail_oauth_personal",
+};
+
+export async function GET(req: Request) {
   const user = await getSessionUser();
   if (!user) {
     return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
   }
+
+  // Which mailbox to connect (default work). Unknown values fail closed to work.
+  const mailboxParam = new URL(req.url).searchParams.get("mailbox") || "work";
+  const mailbox = mailboxParam in MAILBOX_SERVICE ? mailboxParam : "work";
 
   const clientId = process.env.GOOGLE_CLIENT_ID;
   if (!clientId) {
@@ -106,7 +119,8 @@ export async function GET() {
   // reject stale states (replay window <= 15 min). The HMAC covers the
   // timestamp so an attacker can't lengthen the window.
   const issuedAt = Date.now().toString(36);
-  const statePayload = `${tenantId}|${user.id}|${nonce}|${issuedAt}`;
+  // mailbox is the 5th segment; the HMAC covers it so it can't be swapped.
+  const statePayload = `${tenantId}|${user.id}|${nonce}|${issuedAt}|${mailbox}`;
   const signature = createHmac("sha256", stateSecret).update(statePayload).digest("base64url");
   const state = `${statePayload}|${signature}`;
 
