@@ -7,7 +7,6 @@
  */
 import { NextRequest, NextResponse } from "next/server";
 import { createHmac, timingSafeEqual } from "node:crypto";
-import { getSessionUser } from "@/lib/supabase-server";
 import { exchangeCode } from "@/lib/integrations/constant-contact/client";
 import { ccCredentials, ccTokenStore, CC_REDIRECT_URI } from "@/lib/integrations/constant-contact/store";
 
@@ -56,12 +55,12 @@ export async function GET(req: NextRequest) {
   }
 
   // Authenticate this leg via the SIGNED STATE (HMAC + 15-min window, verified
-  // above) + the PKCE verifier cookie (below) — NOT a live session. The provider's
-  // cross-site redirect may not carry the app session cookie, so requiring a live
-  // session here 401s the whole connect. If a session IS present, assert it matches
-  // the state (defense in depth); if absent, trust the signed state.
-  const user = await getSessionUser();
-  if (user && user.id !== stateUserId) return backTo({ constant_contact: "error", reason: "session_mismatch" });
+  // above) + the PKCE verifier cookie (below). CRITICAL: do NOT read the app
+  // session here. This is a public route, so getAuthedSupabase's cookie writes are
+  // a no-op; calling getUser() would refresh + ROTATE the Supabase refresh token
+  // WITHOUT persisting the rotated value, invalidating the operator's session and
+  // logging them out on the next page load (the "Connect logs me out" bug). The
+  // signed state — which carries the tenant + user id — is the trust anchor.
 
   const codeVerifier = req.cookies.get("cc_oauth_pkce")?.value || "";
   if (!codeVerifier) return backTo({ constant_contact: "error", reason: "pkce_verifier_missing" });
