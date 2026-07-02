@@ -25,24 +25,26 @@ export interface TokenStore {
   save(t: CCTokens): Promise<void>;
 }
 
-// ── OAuth (Authorization Code + PKCE) ────────────────────────────────────────
+// ── OAuth (Authorization Code — confidential client) ─────────────────────────
+// No PKCE: this app is a confidential client (has a client_secret), so the secret
+// provides code-exchange security. Dropping PKCE removes the verifier cookie, so
+// /authorize sets NO cookies and can never interfere with the Supabase session.
 export function buildAuthorizeUrl(o: {
-  clientId: string; redirectUri: string; scopes: string[]; state: string; codeChallenge: string;
+  clientId: string; redirectUri: string; scopes: string[]; state: string;
 }): string {
   const q = new URLSearchParams({
     response_type: "code", client_id: o.clientId, redirect_uri: o.redirectUri,
     scope: [...o.scopes, "offline_access"].join(" "), state: o.state,
-    code_challenge: o.codeChallenge, code_challenge_method: "S256",
   });
   return `${AUTHZ}/authorize?${q}`;
 }
 
 export async function exchangeCode(o: {
-  clientId: string; clientSecret: string; code: string; redirectUri: string; codeVerifier: string;
+  clientId: string; clientSecret: string; code: string; redirectUri: string;
 }): Promise<CCTokens> {
   return tokenRequest(o.clientId, o.clientSecret, {
     grant_type: "authorization_code", code: o.code,
-    redirect_uri: o.redirectUri, code_verifier: o.codeVerifier,
+    redirect_uri: o.redirectUri,
   });
 }
 
