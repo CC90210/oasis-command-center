@@ -14,7 +14,7 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { timingSafeEqual } from "crypto";
 import { listActiveAgents, markProcessed, type AgentEmailSettings } from "@/lib/agents/operator-email/settings";
-import { readMailbox } from "@/lib/agents/operator-email/gmail-read";
+import { readMailbox } from "@/lib/agents/operator-email/read-dispatch";
 import { ingestMessages, type IngestResult } from "@/lib/agents/operator-email/ingest";
 import { writeSnapshot } from "@/lib/agents/operator-email/snapshots";
 
