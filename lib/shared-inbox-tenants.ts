@@ -14,7 +14,15 @@
  * languages stops being the right shape.
  */
 
-export const SHARED_INBOX_SLUGS: ReadonlySet<string> = new Set(["submissions"]);
+// 2026-07: emptied. SunBiz ("submissions") was here so the dashboard hid the
+// per-user Connect Gmail panel (per-user OAuth had no effect while every send
+// went through the shared submissions@ identity). That's no longer true: the
+// operator-Gmail send path (lib/integrations/gmail-oauth-send.sendGmailAsOperator)
+// sends DIRECTLY from each operator's connected Gmail, and the Operator Email
+// Agent monitors each operator's inbox. So every employee must be able to
+// connect + manage their own Gmail. Backward-compatible: an operator who does
+// NOT connect still falls back to the shared submissions@ sender.
+export const SHARED_INBOX_SLUGS: ReadonlySet<string> = new Set<string>([]);
 
 export function isSharedInboxTenant(slug: string | null | undefined): boolean {
   return !!slug && SHARED_INBOX_SLUGS.has(slug);

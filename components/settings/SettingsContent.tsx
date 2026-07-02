@@ -530,15 +530,35 @@ const PREVIEW_SECTIONS: { id?: string; title: string; subtitle: string; empty: s
   },
 ];
 
-function PreviewSettings({ tenantSlug, hideHeader }: { tenantSlug: string; hideHeader: boolean }) {
+async function PreviewSettings({ tenantSlug, hideHeader }: { tenantSlug: string; hideHeader: boolean }) {
+  // Tenant-scoped panels stay hidden in preview (no cross-tenant data). BUT the
+  // signed-in user's OWN profile + personal integrations are THEIR data — every
+  // employee must be able to manage their own settings + personal API keys
+  // (e.g. Connect Gmail) even when the tenant surface resolves to preview mode.
+  // getActiveProfile() is the signed-in user's own record, so rendering it here
+  // is never a cross-tenant leak. (2026-07 — unblock employee self-service.)
+  const profile = await safe("settings.preview.profile", getActiveProfile(), null);
   return (
     <div className="space-y-6 animate-fade-in">
       {!hideHeader && (
         <PageHeader
           title="Settings"
-          subtitle={`Tenant-scoped settings for ${tenantSlug}. Sign in as the tenant operator to manage these.`}
-          action={<Tag tone="warm">Preview · not signed in as tenant</Tag>}
+          subtitle={`Your profile + personal integrations. Tenant-wide settings for ${tenantSlug} are managed by an owner/admin.`}
+          action={<Tag tone="warm">Personal settings</Tag>}
         />
+      )}
+      {profile && (
+        <>
+          <Card title="Profile" subtitle={`Signed in as ${profile.email}`}>
+            <SafeBoundary label="Profile editor">
+              <ProfileEditor profile={profile} tenantAgents={[]} />
+            </SafeBoundary>
+          </Card>
+          <SafeBoundary label="Personal integrations">
+            {/* Your own Gmail / personal API keys — always yours to manage. */}
+            <PersonalIntegrationsPanel showGmail showKixie={false} />
+          </SafeBoundary>
+        </>
       )}
       {PREVIEW_SECTIONS.map((s) => (
         <Card key={s.title} id={s.id} title={s.title} subtitle={s.subtitle}>
