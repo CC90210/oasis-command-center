@@ -11,6 +11,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { Mail, Loader2, CheckCircle2, AlertCircle, Plug } from "lucide-react";
+import { ConstantContactComposer } from "./ConstantContactComposer";
 
 type Status = {
   ok: boolean;
@@ -150,6 +151,8 @@ export function ConstantContactBlast() {
               <button type="button" onClick={connect} className="underline">reconnect</button>.
             </div>
           )}
+
+          <ConstantContactComposer />
         </div>
       ) : (
         <div className="space-y-3">
