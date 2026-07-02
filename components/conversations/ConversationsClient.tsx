@@ -266,7 +266,7 @@ export function ConversationsClient({
             />
           </div>
         </div>
-        <div className="overflow-y-auto flex-1">
+        <div className="overflow-y-auto flex-1 min-h-0">
           {filtered.length === 0 ? (
             <div className="p-4 text-xs text-fg-dim italic">
               {!search && COMING_SOON[section] ? COMING_SOON[section] : "No threads match."}
@@ -328,7 +328,7 @@ export function ConversationsClient({
               </div>
             </div>
 
-            <div className="overflow-y-auto flex-1 p-4 space-y-2.5">
+            <div className="overflow-y-auto flex-1 min-h-0 p-4 space-y-2.5">
               {selected.messages.map((m) => {
                 const outbound = m.direction === "outbound";
                 const callTitle = messageTitle(m);

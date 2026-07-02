@@ -529,7 +529,7 @@ export function UnderwritingClient({
           className="w-full text-sm px-3 py-2 rounded-md bg-bg-deep border border-bg-border text-fg placeholder:text-fg-dim"
         />
 
-        <div className="flex-1 overflow-y-auto rounded-xl border border-bg-border bg-bg-panel">
+        <div className="flex-1 min-h-0 overflow-y-auto rounded-xl border border-bg-border bg-bg-panel">
           {filteredGroups === null ? (
             <div className="flex items-center justify-center gap-2 py-10 text-xs text-fg-dim italic">
               <Loader2 className="w-3.5 h-3.5 animate-spin" />
@@ -609,7 +609,7 @@ export function UnderwritingClient({
       {/* ------------------------------------------------------------------ */}
       {/* RIGHT COLUMN — Selected application detail                          */}
       {/* ------------------------------------------------------------------ */}
-      <div className="flex-1 min-w-0 flex flex-col gap-4 overflow-y-auto">
+      <div className="flex-1 min-w-0 min-h-0 flex flex-col gap-4 overflow-y-auto">
         {!selectedId ? (
           <div className="flex-1 flex flex-col items-center justify-center gap-3 text-fg-dim rounded-xl border border-bg-border bg-bg-panel">
             <FileSearch className="w-8 h-8 opacity-30" />

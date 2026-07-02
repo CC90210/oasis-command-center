@@ -21,6 +21,7 @@
  */
 
 import { useEffect, useRef } from "react";
+import { createPortal } from "react-dom";
 
 type Props = {
   open: boolean;
@@ -75,7 +76,9 @@ export default function ConfirmModal({
   const plural = fundersCount === 1 ? "" : "s";
   const ccLabel = ccEmails.length > 0 ? ccEmails.join(", ") : "(none)";
 
-  return (
+  if (typeof document === "undefined") return null;
+
+  return createPortal(
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 px-4"
       role="presentation"
@@ -139,6 +142,7 @@ export default function ConfirmModal({
           </button>
         </div>
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }

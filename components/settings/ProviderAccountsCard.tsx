@@ -22,6 +22,7 @@
  */
 
 import { useState } from "react";
+import { createPortal } from "react-dom";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import {
@@ -353,7 +354,8 @@ function ConnectProviderDialog({
     }
   }
 
-  return (
+  if (typeof document === "undefined") return null;
+  return createPortal(
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-bg-deep/80 backdrop-blur-sm p-4"
       onClick={onClose}
@@ -543,7 +545,8 @@ function ConnectProviderDialog({
           </div>
         </div>
       </form>
-    </div>
+    </div>,
+    document.body
   );
 }
 

@@ -142,6 +142,39 @@ assert.equal(
   "Real SunBiz tenant user keeps deep link (non-operator path still works)",
 );
 
+// Cross-tenant leak regression (CC 2026-06-30): a SunBiz member deep-linked to
+// a BARE global app page — the exact case /welcome's old ?next=/agents produced
+// — must be pinned to their tenant home, NOT dropped on the OASIS /agents
+// operator surface (which showed "bridge not connected"). Operators keep the
+// global surface; OASIS members keep bare paths.
+assert.equal(
+  normalizePostLoginRedirect("/agents", {
+    tenantSlug: "submissions",
+    commandCenterProfileSlug: "sun",
+    isEmpireOperator: false,
+  }),
+  "/t/sun",
+  "SunBiz member deep-linked to a bare global page (e.g. /agents) lands on their tenant home, not the OASIS surface",
+);
+assert.equal(
+  normalizePostLoginRedirect("/agents", {
+    tenantSlug: "oasis-ai-cc",
+    commandCenterProfileSlug: "oasis-ai-cc",
+    isEmpireOperator: false,
+  }),
+  "/agents",
+  "OASIS member keeps the bare global app page (they own the global surface)",
+);
+assert.equal(
+  normalizePostLoginRedirect("/agents", {
+    tenantSlug: "submissions",
+    commandCenterProfileSlug: "sun",
+    isEmpireOperator: true,
+  }),
+  "/agents",
+  "Empire operator can deep-link into any global surface, even when profile resolves to sun",
+);
+
 // ===========================================================================
 // Orphan-recovery regression (2026-05-29)
 //

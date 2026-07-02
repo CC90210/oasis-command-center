@@ -243,7 +243,7 @@ export function ChatHistorySidebar({
           </button>
         </div>
 
-        <div className="flex-1 overflow-y-auto px-2 py-3 space-y-4">
+        <div className="flex-1 min-h-0 overflow-y-auto px-2 py-3 space-y-4">
           {loading && (
             <div className="flex items-center gap-2 text-xs text-fg-dim px-2 py-3">
               <Loader2 className="w-3.5 h-3.5 animate-spin" />

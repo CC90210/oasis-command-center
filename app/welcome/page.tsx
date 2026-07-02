@@ -53,7 +53,7 @@ export default async function WelcomePage() {
           </Link>
           <nav className="flex items-center gap-3 text-xs">
             <Link
-              href="/login?next=/agents"
+              href="/login"
               className="rounded-full border border-white/[0.12] bg-white/[0.07] px-3 py-2 font-semibold text-white/[0.76] transition-colors hover:border-white/[0.25] hover:text-white"
             >
               Sign in
@@ -93,10 +93,10 @@ export default async function WelcomePage() {
               delayClass="welcome-fade-d3"
             />
             <EntryChoice
-              href="/login?next=/agents"
+              href="/login"
               icon={<LogIn className="h-5 w-5" />}
               label="Sign in automatically"
-              summary="Already have a workspace? Sign in and land directly on the Agents surface."
+              summary="Already have a workspace? Sign in and land on your Command Centre."
               action="Sign in"
               delayClass="welcome-fade-d4"
             />

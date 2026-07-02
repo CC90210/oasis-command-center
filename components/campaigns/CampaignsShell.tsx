@@ -18,13 +18,15 @@ import { useState } from "react";
 import { Megaphone, MessageSquare, Mail, type LucideIcon } from "lucide-react";
 import { CampaignsClient } from "./CampaignsClient";
 import { ColdOutreachClient } from "@/components/cold-outreach/ColdOutreachClient";
+import { ConstantContactBlast } from "./ConstantContactBlast";
 
-type ChannelTab = "texttorrent" | "twilio" | "gmail";
+type ChannelTab = "texttorrent" | "twilio" | "gmail" | "constantcontact";
 
 const TABS: { key: ChannelTab; label: string; icon: LucideIcon }[] = [
   { key: "texttorrent", label: "Text Torrent", icon: Megaphone },
   { key: "twilio", label: "Twilio", icon: MessageSquare },
   { key: "gmail", label: "Gmail", icon: Mail },
+  { key: "constantcontact", label: "Constant Contact", icon: Mail },
 ];
 
 export function CampaignsShell({
@@ -71,6 +73,8 @@ export function CampaignsShell({
           <ColdOutreachClient tenantSlug={tenantSlug} tenantId={tenantId} lockedChannel="email" />
         </div>
       )}
+
+      {channel === "constantcontact" && <ConstantContactBlast />}
     </div>
   );
 }

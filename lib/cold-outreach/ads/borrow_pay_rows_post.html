@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>SunBiz — Borrow / Pay Rows (square post, light)</title>
+<style>
+  /* SunBiz ad creative — 1080x1080 square feed post, LIGHT theme.
+     Standard borrow/pay-rows funding-ad layout, SunBiz-branded (navy/gold on cream),
+     honest 1.25-factor weekly figures. */
+  * { margin:0; padding:0; box-sizing:border-box; }
+  html,body { width:1080px; height:1080px; }
+  .ad {
+    width:1080px; height:1080px; position:relative; overflow:hidden;
+    background:#f7f3e9;
+    font-family:'Arial Black','Helvetica Neue',Arial,sans-serif; color:#001F54;
+    display:flex; flex-direction:column;
+  }
+
+  /* Navy header band */
+  .header {
+    position:relative; width:100%; height:196px;
+    background:radial-gradient(120% 160% at 50% 0%, #10224e 0%, #0a1735 55%, #001F54 100%);
+    display:flex; align-items:center; gap:22px;
+    padding:0 64px; overflow:hidden;
+  }
+  .sun { width:66px; height:66px; border-radius:50%; flex:0 0 auto;
+    background:radial-gradient(circle at 50% 45%, #F4CE6E 0%, #D4A843 55%, #a9812f 100%);
+    box-shadow:0 0 24px rgba(212,168,67,.5); position:relative; }
+  .sun::after { content:""; position:absolute; inset:14px; border-radius:50%; border:3px solid #0a1735; }
+  .wordmark { font-size:52px; letter-spacing:5px; color:#ffffff; line-height:1; }
+  .wordmark .g { color:#D4A843; }
+  .wordmark .thin { font-family:'Helvetica Neue',Arial,sans-serif; font-weight:600;
+    letter-spacing:9px; font-size:22px; color:#9fb0d4; display:block; margin-top:8px; }
+  /* thin gold divider curve under the band */
+  .curve { position:absolute; left:0; right:0; bottom:-1px; height:36px; overflow:hidden; }
+  .curve svg { display:block; width:100%; height:100%; }
+
+  /* Headline */
+  .headline { text-align:center; padding:44px 64px 8px; }
+  .headline .l1 { display:block; font-size:74px; line-height:.96; letter-spacing:-1px; color:#001F54; }
+  .headline .l2 { display:block; font-size:74px; line-height:.96; letter-spacing:-1px; color:#D4A843; }
+  .subhead { font-family:'Helvetica Neue',Arial,sans-serif; font-weight:700;
+    font-size:26px; letter-spacing:2px; color:#5a6a8f; text-align:center; margin-top:16px; }
+
+  /* Rows */
+  .rows { display:flex; flex-direction:column; gap:26px; padding:30px 64px 12px; }
+  .row {
+    display:flex; align-items:stretch; background:#ffffff; border-radius:20px;
+    box-shadow:0 10px 26px rgba(10,23,53,.10); overflow:hidden; height:150px;
+  }
+  .cell { flex:1; display:flex; flex-direction:column; justify-content:center; padding:0 46px; }
+  .cell.right { align-items:flex-start; }
+  .divider { width:2px; align-self:center; height:96px;
+    background:linear-gradient(180deg,transparent,#D4A843 18%,#D4A843 82%,transparent); flex:0 0 auto; }
+  .label { font-family:'Helvetica Neue',Arial,sans-serif; font-weight:800;
+    font-size:24px; letter-spacing:3px; color:#5a6a8f; margin-bottom:4px; }
+  .borrow { font-size:66px; line-height:1; color:#D4A843; letter-spacing:-1px; }
+  .pay { font-size:60px; line-height:1; color:#001F54; letter-spacing:-1px; }
+  .pay .u { font-family:'Helvetica Neue',Arial,sans-serif; font-weight:700; font-size:28px; color:#5a6a8f; }
+  .meta { font-family:'Helvetica Neue',Arial,sans-serif; font-weight:600;
+    font-size:19px; color:#9aa3b8; margin-top:9px; letter-spacing:.2px; }
+
+  /* Apply bar + disclaimer */
+  .foot { margin-top:auto; width:100%; }
+  .applybar {
+    width:100%; background:#001F54; color:#ffffff;
+    font-family:'Helvetica Neue',Arial,sans-serif; font-weight:900;
+    font-size:42px; letter-spacing:1px; text-align:center; padding:34px 0;
+  }
+  .applybar .arrow { color:#D4A843; margin-left:10px; }
+  .disc { font-family:'Helvetica Neue',Arial,sans-serif; font-weight:500;
+    font-size:18px; color:#6b7594; text-align:center; line-height:1.4;
+    padding:20px 90px 24px; }
+</style>
+</head>
+<body>
+  <div class="ad">
+
+    <div class="header">
+      <div class="sun"></div>
+      <div class="wordmark">SUN<span class="g">BIZ</span> FUNDING<span class="thin">WORKING CAPITAL</span></div>
+      <div class="curve">
+        <svg viewBox="0 0 1080 36" preserveAspectRatio="none" aria-hidden="true">
+          <path d="M0,2 C360,40 720,40 1080,2" fill="none" stroke="#D4A843" stroke-width="3"/>
+        </svg>
+      </div>
+    </div>
+
+    <div class="headline">
+      <span class="l1">SMALL BUSINESS</span>
+      <span class="l2">FUNDING</span>
+      <div class="subhead">SIMPLE WEEKLY PAYMENTS &mdash; NO SURPRISES</div>
+    </div>
+
+    <div class="rows">
+      <div class="row">
+        <div class="cell left">
+          <div class="label">YOU BORROW</div>
+          <div class="borrow">$75,000</div>
+          <div class="meta">$93,750 total &middot; 15 mo</div>
+        </div>
+        <div class="divider"></div>
+        <div class="cell right">
+          <div class="label">PAY ONLY</div>
+          <div class="pay">$1,442<span class="u">/wk</span></div>
+        </div>
+      </div>
+
+      <div class="row">
+        <div class="cell left">
+          <div class="label">YOU BORROW</div>
+          <div class="borrow">$150,000</div>
+          <div class="meta">$187,500 total &middot; 18 mo</div>
+        </div>
+        <div class="divider"></div>
+        <div class="cell right">
+          <div class="label">PAY ONLY</div>
+          <div class="pay">$2,404<span class="u">/wk</span></div>
+        </div>
+      </div>
+
+      <div class="row">
+        <div class="cell left">
+          <div class="label">YOU BORROW</div>
+          <div class="borrow">$250,000</div>
+          <div class="meta">$312,500 total &middot; 18 mo</div>
+        </div>
+        <div class="divider"></div>
+        <div class="cell right">
+          <div class="label">PAY ONLY</div>
+          <div class="pay">$4,006<span class="u">/wk</span></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="foot">
+      <div class="applybar">Apply now<span class="arrow">&rsaquo;</span></div>
+      <div class="disc">Illustrative estimates at a 1.25 factor rate. Your amount, term &amp; payment are confirmed at quote and subject to underwriting. Up to $500,000 available.</div>
+    </div>
+
+  </div>
+</body>
+</html>

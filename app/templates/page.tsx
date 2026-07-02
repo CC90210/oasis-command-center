@@ -8,16 +8,19 @@ import {
   useState,
   type MouseEvent,
 } from "react";
+import { createPortal } from "react-dom";
 import { Card, PageHeader, Tag } from "@/components/Card";
 import {
   COLD_OUTREACH_TEMPLATES,
   type ColdOutreachTemplate,
 } from "@/lib/cold-outreach/templates.generated";
+import { AD_CREATIVES } from "@/lib/cold-outreach/ad-creatives.generated";
 import {
   ArrowLeft,
   Braces,
   Check,
   Copy,
+  Download,
   Eye,
   FileCode2,
   Mail,
@@ -30,6 +33,7 @@ import {
 
 type Category =
   | "all"
+  | "ad"
   | "first-touch"
   | "sequence"
   | "follow-up"
@@ -37,8 +41,59 @@ type Category =
   | "vertical"
   | "seasonal";
 
+// Second axis: the business niche a template targets. Kept in lockstep with the
+// SunBiz allowed-industry list — restricted verticals (real estate, legal,
+// trucking/transport, cannabis, solar, education, non-profits) are never a niche.
+type Industry =
+  | "all"
+  | "general"
+  | "restaurant"
+  | "construction"
+  | "retail"
+  | "auto"
+  | "medical"
+  | "salon";
+
+const INDUSTRY_ORDER: Industry[] = [
+  "all",
+  "general",
+  "restaurant",
+  "construction",
+  "retail",
+  "auto",
+  "medical",
+  "salon",
+];
+
+const INDUSTRY_META: Record<Industry, { label: string }> = {
+  all: { label: "All niches" },
+  general: { label: "General Growth" },
+  restaurant: { label: "Restaurant / Hospitality" },
+  construction: { label: "Construction / Trades" },
+  retail: { label: "Retail / E-commerce" },
+  auto: { label: "Auto Repair" },
+  medical: { label: "Medical / Dental" },
+  salon: { label: "Salon / Beauty" },
+};
+
+function inferIndustry(key: string): Exclude<Industry, "all"> {
+  const k = key.toLowerCase();
+  if (k.includes("restaurant") || k.includes("hospitality")) return "restaurant";
+  if (k.includes("construction") || k.includes("trades")) return "construction";
+  if (k.includes("retail") || k.includes("ecommerce") || k.includes("e_commerce"))
+    return "retail";
+  if (k.includes("auto")) return "auto";
+  if (k.includes("medical") || k.includes("dental")) return "medical";
+  if (k.includes("salon") || k.includes("beauty")) return "salon";
+  return "general";
+}
+
 type TemplateMeta = ColdOutreachTemplate & {
   category: Exclude<Category, "all">;
+  industry: Exclude<Industry, "all">;
+  assetType: "email" | "ad";
+  format?: string;
+  canvas?: string;
   sizeKb: number;
   tokens: string[];
   sourcePath: string;
@@ -48,6 +103,7 @@ type AgentKey = "helios" | "solara";
 
 const CATEGORY_ORDER: Category[] = [
   "all",
+  "ad",
   "first-touch",
   "sequence",
   "follow-up",
@@ -59,7 +115,11 @@ const CATEGORY_ORDER: Category[] = [
 const CATEGORY_META: Record<Category, { label: string; description: string }> = {
   all: {
     label: "All",
-    description: "Every SunBiz HTML email template.",
+    description: "Every SunBiz ad + email asset.",
+  },
+  ad: {
+    label: "Ad Creative",
+    description: "Social-media ad creatives — story (1080×1920) + feed (1080×1080).",
   },
   "first-touch": {
     label: "First Touch",
@@ -145,12 +205,6 @@ function extractTokens(html: string): string[] {
   return [...tokens].sort((a, b) => a.localeCompare(b));
 }
 
-function renderPreviewHtml(template: TemplateMeta): string {
-  return template.html.replace(/\{\{\s*([a-zA-Z0-9_.-]+)\s*\}\}/g, (_match, token) => {
-    return SAMPLE_VALUES[token] ?? `[${token}]`;
-  });
-}
-
 async function copyToClipboard(text: string): Promise<boolean> {
   try {
     await navigator.clipboard.writeText(text);
@@ -200,7 +254,7 @@ function buildCreateHtmlPrompt(reference?: TemplateMeta): string {
     "Before drafting, ask for: campaign goal, target audience or vertical, sender lane (Ezra, Ethan, or Matt), CTA, required merge fields, and whether this is cold outreach, follow-up, consolidation, seasonal, or vertical.",
     "",
     "Draft responsive email-safe HTML with SunBiz branding, the required unsubscribe link, and a concise subject line. Do not send or hand off to Helios until the operator approves the asset. If your current runtime cannot write to oasis-command-center directly, return the full HTML, a proposed filename under lib/cold-outreach/templates/, and the regeneration command for templates.generated.ts.",
-    "MANDATORY in EVERY email — regardless of campaign, audience, vertical, or season — include the standard SunBiz \"Your Funding Options\" block showing all three tiers in DESCENDING order, with these EXACT figures: $250,000 ($2,083/week, 36-month term), $100,000 ($1,302/week, 24-month term), and $50,000 ($868/week, 18-month term). These exact amounts, estimated WEEKLY payments, and terms must appear in every template — never omit, alter, round, or relabel them (payments are WEEKLY, not monthly). Mirror the canonical markup/branding from an existing tier template such as business_capital_tiers.html.",
+    "MANDATORY in EVERY funding email — regardless of campaign, audience, vertical, or season — show SunBiz funding tiers using ONLY these locked 1.25-factor figures (never invent, round, or relabel), with the WEEKLY payment and TOTAL PAYBACK shown together: $250,000 — $4,006/wk — $312,500 total — 18-month; $150,000 — $2,404/wk — $187,500 total — 18-month; $100,000 — $1,603/wk — $125,000 total — 18-month; $75,000 — $1,442/wk — $93,750 total — 15-month; $50,000 — $962/wk — $62,500 total — 15-month; $25,000 — $601/wk — $31,250 total — 12-month; $15,000 — $721/wk — $18,750 total — 6-month. Pick the tiers that fit the layout (premium → top three; small-business grids → a spread). ALWAYS include the catch-all 'Any amount up to $500,000 — apply to get quoted' and the disclaimer 'Figures are illustrative at a 1.25 factor rate; your actual amount, term, and payment are confirmed at quote and subject to underwriting approval.' COMPLIANCE: never claim 'no credit pull/check' (unconfirmed); state eligibility as '$15,000+ in monthly revenue, 6+ months in business, U.S. business checking account'. Mirror the canonical markup/branding from a tier template such as business_capital_tiers.html.",
   ].join("\n");
 }
 
@@ -232,6 +286,10 @@ function TemplateCard({
             <Mail className="h-4 w-4" />
           </div>
           <Tag tone="accent">{category.label}</Tag>
+          <Tag tone="engaged">{INDUSTRY_META[template.industry].label}</Tag>
+          {template.assetType === "ad" && template.canvas && (
+            <Tag tone="warm">{template.canvas}</Tag>
+          )}
         </div>
 
         <div className="min-w-0 flex-1">
@@ -313,7 +371,22 @@ function PreviewModal({
 }) {
   const [copied, setCopied] = useState(false);
   const [viewMode, setViewMode] = useState<"preview" | "html">("preview");
-  const previewHtml = useMemo(() => renderPreviewHtml(template), [template]);
+  // Personalize: editable merge-field values, seeded from the sample values so the
+  // live preview + one-click Download work immediately. The operator overwrites
+  // business_name / first_name etc. and downloads the finished HTML — no code edits.
+  const [showFields, setShowFields] = useState(template.tokens.length > 0);
+  const [fields, setFields] = useState<Record<string, string>>(() =>
+    Object.fromEntries(template.tokens.map((t) => [t, SAMPLE_VALUES[t] ?? ""])),
+  );
+  const personalizedHtml = useMemo(
+    () =>
+      template.html.replace(/\{\{\s*([a-zA-Z0-9_.-]+)\s*\}\}/g, (_m, token) =>
+        fields[token] != null && fields[token] !== ""
+          ? fields[token]
+          : SAMPLE_VALUES[token] ?? `[${token}]`,
+      ),
+    [template.html, fields],
+  );
 
   useEffect(() => {
     const priorOverflow = document.body.style.overflow;
@@ -329,12 +402,70 @@ function PreviewModal({
   }, [onClose]);
 
   const handleCopy = useCallback(async () => {
-    await copyToClipboard(template.html);
+    await copyToClipboard(personalizedHtml);
     setCopied(true);
     window.setTimeout(() => setCopied(false), 1800);
-  }, [template.html]);
+  }, [personalizedHtml]);
 
-  return (
+  const handleDownload = useCallback(() => {
+    const blob = new Blob([personalizedHtml], { type: "text/html;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const slug =
+      (fields.business_name || fields.first_name || "merchant")
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, "-")
+        .replace(/(^-|-$)/g, "") || "merchant";
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${template.key}-${slug}.html`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  }, [personalizedHtml, fields, template.key]);
+
+  // Send: owner/admin only + dry-run by default (both enforced server-side in
+  // /api/templates/send). The confirm step is the last gate before it leaves.
+  const [recipient, setRecipient] = useState("");
+  const [sendPhase, setSendPhase] = useState<"idle" | "confirm" | "sending" | "done">("idle");
+  const [sendResult, setSendResult] = useState<
+    { ok?: boolean; status?: string; message?: string; reason?: string; error?: string } | null
+  >(null);
+  const recipientValid = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(recipient.trim());
+  // Guard: don't let a template addressed to the sample business go out. The
+  // server enforces this too; this just disables the button + explains why.
+  const needsBusiness = template.tokens.includes("business_name");
+  const businessReal =
+    (fields.business_name || "").trim().length > 0 &&
+    (fields.business_name || "").trim() !== (SAMPLE_VALUES.business_name ?? "");
+  const canSend = recipientValid && (!needsBusiness || businessReal);
+
+  const handleSend = useCallback(async () => {
+    setSendPhase("sending");
+    try {
+      // Send field VALUES only — the server renders from the canonical template
+      // (no client-supplied HTML, real unsubscribe, sample values rejected).
+      const res = await fetch("/api/templates/send", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          to_email: recipient.trim(),
+          template_key: template.key,
+          fields,
+        }),
+      });
+      setSendResult(await res.json().catch(() => ({ ok: false, error: "bad_response" })));
+    } catch (e) {
+      setSendResult({ ok: false, error: e instanceof Error ? e.message : "network error" });
+    }
+    setSendPhase("done");
+  }, [recipient, template.key, fields]);
+
+  if (typeof document === "undefined") return null;
+  // Portal to <body> so this fixed overlay escapes the command-center shell's
+  // stacking context and reliably covers the sidebar (which otherwise renders on
+  // top of the modal at half-screen widths, clipping the left of the preview).
+  return createPortal(
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-bg-deep/95 p-3 sm:p-5"
       role="dialog"
@@ -380,13 +511,35 @@ function PreviewModal({
                 HTML
               </button>
             </div>
+            {template.tokens.length > 0 && (
+              <button
+                type="button"
+                onClick={() => setShowFields((v) => !v)}
+                className={`inline-flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-[11px] font-bold transition-colors ${
+                  showFields
+                    ? "border-accent/50 bg-accent/15 text-accent"
+                    : "border-bg-border bg-bg-elev text-fg-muted hover:text-fg"
+                }`}
+              >
+                <WandSparkles className="h-3.5 w-3.5" />
+                Personalize
+              </button>
+            )}
             <button
               type="button"
               onClick={handleCopy}
-              className="inline-flex items-center gap-1.5 rounded-md border border-accent/30 bg-accent/10 px-3 py-1.5 text-[11px] font-bold text-accent transition-colors hover:bg-accent/20"
+              className="inline-flex items-center gap-1.5 rounded-md border border-bg-border bg-bg-elev px-3 py-1.5 text-[11px] font-bold text-fg-muted transition-colors hover:text-fg"
             >
               {copied ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
-              {copied ? "Copied" : "Copy HTML"}
+              {copied ? "Copied" : "Copy"}
+            </button>
+            <button
+              type="button"
+              onClick={handleDownload}
+              className="inline-flex items-center gap-1.5 rounded-md border border-accent/40 bg-accent/15 px-3 py-1.5 text-[11px] font-bold text-accent transition-colors hover:bg-accent/25"
+            >
+              <Download className="h-3.5 w-3.5" />
+              Download
             </button>
             <Link
               href={agentHref("helios", buildUseWithAgentPrompt(template))}
@@ -406,12 +559,128 @@ function PreviewModal({
           </div>
         </header>
 
+        {showFields && template.tokens.length > 0 && (
+          <div className="shrink-0 max-h-[38vh] overflow-y-auto border-b border-bg-border bg-bg-deep/40 px-4 py-3">
+            <div className="mb-2 flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wider text-fg-dim">
+              <WandSparkles className="h-3 w-3 text-accent" />
+              Personalize — fill in this merchant&apos;s details, then Download or Copy
+            </div>
+            <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-4">
+              {template.tokens.map((token) => (
+                <label key={token} className="flex flex-col gap-1">
+                  <span className="text-[10px] font-semibold capitalize text-fg-muted">
+                    {token.replace(/_/g, " ")}
+                  </span>
+                  <input
+                    type="text"
+                    value={fields[token] ?? ""}
+                    onChange={(event) =>
+                      setFields((prev) => ({ ...prev, [token]: event.target.value }))
+                    }
+                    placeholder={SAMPLE_VALUES[token] ?? token}
+                    className="rounded-md border border-bg-border bg-bg-deep px-2 py-1.5 text-xs text-fg outline-none transition-colors placeholder:text-fg-dim focus:border-accent/50"
+                  />
+                </label>
+              ))}
+            </div>
+
+            {/* Send — owner/admin only + dry-run by default (both server-enforced
+                in /api/templates/send). Confirm step is the last gate. */}
+            <div className="mt-3 border-t border-bg-border/60 pt-3">
+              {sendPhase === "idle" && (
+                <div className="flex flex-wrap items-end gap-2">
+                  <label className="flex min-w-[200px] flex-1 flex-col gap-1">
+                    <span className="text-[10px] font-semibold uppercase tracking-wider text-fg-dim">
+                      Send to — merchant email
+                    </span>
+                    <input
+                      type="email"
+                      value={recipient}
+                      onChange={(event) => setRecipient(event.target.value)}
+                      placeholder="owner@theirbusiness.com"
+                      className="rounded-md border border-bg-border bg-bg-deep px-2 py-1.5 text-xs text-fg outline-none transition-colors placeholder:text-fg-dim focus:border-accent/50"
+                    />
+                  </label>
+                  <button
+                    type="button"
+                    disabled={!canSend}
+                    onClick={() => setSendPhase("confirm")}
+                    className="inline-flex items-center gap-1.5 rounded-md border border-status-engaged/40 bg-status-engaged/15 px-3 py-2 text-[11px] font-bold text-status-engaged transition-colors hover:bg-status-engaged/25 disabled:cursor-not-allowed disabled:opacity-40"
+                  >
+                    <Send className="h-3.5 w-3.5" />
+                    Send this template
+                  </button>
+                  {recipientValid && needsBusiness && !businessReal && (
+                    <p className="w-full text-[10px] text-amber-300/80">
+                      Replace the sample Business Name with the merchant&apos;s real name to enable Send.
+                    </p>
+                  )}
+                </div>
+              )}
+              {sendPhase === "confirm" && (
+                <div className="flex flex-wrap items-center gap-3 rounded-md border border-amber-400/40 bg-amber-400/10 px-3 py-2 text-xs text-amber-100">
+                  <span>
+                    Send <span className="font-bold">{template.name}</span> to{" "}
+                    <span className="font-mono font-bold">{recipient.trim()}</span>?
+                  </span>
+                  <div className="ml-auto flex gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setSendPhase("idle")}
+                      className="rounded-md border border-bg-border bg-bg-elev px-3 py-1.5 text-[11px] font-bold text-fg-muted hover:text-fg"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleSend}
+                      className="rounded-md border border-status-engaged/50 bg-status-engaged/20 px-3 py-1.5 text-[11px] font-bold text-status-engaged hover:bg-status-engaged/30"
+                    >
+                      Confirm send
+                    </button>
+                  </div>
+                </div>
+              )}
+              {sendPhase === "sending" && <div className="text-xs text-fg-muted">Sending…</div>}
+              {sendPhase === "done" && sendResult && (
+                <div
+                  className={`flex flex-wrap items-center gap-3 rounded-md border px-3 py-2 text-xs ${
+                    sendResult.status === "sent"
+                      ? "border-status-engaged/40 bg-status-engaged/10 text-status-engaged"
+                      : sendResult.status === "dry_run"
+                        ? "border-accent/40 bg-accent/10 text-accent"
+                        : "border-red-500/40 bg-red-500/10 text-red-200"
+                  }`}
+                >
+                  <span>
+                    {sendResult.status === "sent"
+                      ? `Sent to ${recipient.trim()}.`
+                      : sendResult.status === "dry_run"
+                        ? sendResult.message || "Dry-run: nothing was sent."
+                        : `Not sent: ${sendResult.error || sendResult.reason || sendResult.status || "unknown"}`}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setSendPhase("idle");
+                      setSendResult(null);
+                    }}
+                    className="ml-auto rounded-md border border-bg-border bg-bg-elev px-3 py-1.5 text-[11px] font-bold text-fg-muted hover:text-fg"
+                  >
+                    Done
+                  </button>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
         <div className="min-h-0 flex-1 overflow-auto">
           {viewMode === "preview" ? (
             <div className="h-full min-h-[620px] bg-[#071226]">
               <iframe
                 title={`Preview: ${template.name}`}
-                srcDoc={previewHtml}
+                srcDoc={personalizedHtml}
                 sandbox=""
                 className="h-full w-full border-0 bg-[#071226]"
               />
@@ -436,48 +705,84 @@ function PreviewModal({
           </span>
         </footer>
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }
 
 export default function TemplatesPage() {
   const [selectedTemplate, setSelectedTemplate] = useState<TemplateMeta | null>(null);
   const [activeCategory, setActiveCategory] = useState<Category>("all");
+  const [activeIndustry, setActiveIndustry] = useState<Industry>("all");
   const [searchQuery, setSearchQuery] = useState("");
 
-  const templates = useMemo<TemplateMeta[]>(
-    () =>
-      COLD_OUTREACH_TEMPLATES.map((template) => ({
-        ...template,
-        category: inferCategory(template.key),
-        sizeKb: Math.max(1, Math.round(template.html.length / 1024)),
-        tokens: extractTokens(template.html),
-        sourcePath: `lib/cold-outreach/templates/${template.key}.html`,
-      })),
-    [],
-  );
+  const templates = useMemo<TemplateMeta[]>(() => {
+    const emails: TemplateMeta[] = COLD_OUTREACH_TEMPLATES.map((template) => ({
+      ...template,
+      category: inferCategory(template.key),
+      industry: inferIndustry(template.key),
+      assetType: "email" as const,
+      sizeKb: Math.max(1, Math.round(template.html.length / 1024)),
+      tokens: extractTokens(template.html),
+      sourcePath: `lib/cold-outreach/templates/${template.key}.html`,
+    }));
+    // Ad creatives are gallery-only (never in the email send path). They surface
+    // here so operators can browse ads + emails together, filtered by niche.
+    const ads: TemplateMeta[] = AD_CREATIVES.map((ad) => ({
+      key: ad.key,
+      name: ad.name,
+      subject: `Social ad · ${ad.format} · ${ad.canvas}`,
+      html: ad.html,
+      category: "ad" as Exclude<Category, "all">,
+      industry: inferIndustry(ad.key),
+      assetType: "ad" as const,
+      format: ad.format,
+      canvas: ad.canvas,
+      sizeKb: Math.max(1, Math.round(ad.html.length / 1024)),
+      tokens: [],
+      sourcePath: `lib/cold-outreach/ads/${ad.key}.html`,
+    }));
+    return [...ads, ...emails];
+  }, []);
 
   const allTokens = useMemo(
     () => [...new Set(templates.flatMap((template) => template.tokens))].sort(),
     [templates],
   );
 
+  // Counts respect the OTHER active axis so the chips read as "what's available
+  // in the current niche/type," not the whole library.
   const categoryCounts = useMemo(() => {
     const counts = Object.fromEntries(CATEGORY_ORDER.map((category) => [category, 0])) as Record<
       Category,
       number
     >;
     for (const template of templates) {
+      if (activeIndustry !== "all" && template.industry !== activeIndustry) continue;
       counts.all += 1;
       counts[template.category] += 1;
     }
     return counts;
-  }, [templates]);
+  }, [templates, activeIndustry]);
+
+  const industryCounts = useMemo(() => {
+    const counts = Object.fromEntries(INDUSTRY_ORDER.map((industry) => [industry, 0])) as Record<
+      Industry,
+      number
+    >;
+    for (const template of templates) {
+      if (activeCategory !== "all" && template.category !== activeCategory) continue;
+      counts.all += 1;
+      counts[template.industry] += 1;
+    }
+    return counts;
+  }, [templates, activeCategory]);
 
   const filteredTemplates = useMemo(() => {
     const query = searchQuery.trim().toLowerCase();
     return templates.filter((template) => {
       if (activeCategory !== "all" && template.category !== activeCategory) return false;
+      if (activeIndustry !== "all" && template.industry !== activeIndustry) return false;
       if (!query) return true;
       return (
         template.name.toLowerCase().includes(query) ||
@@ -486,7 +791,7 @@ export default function TemplatesPage() {
         template.tokens.some((token) => token.toLowerCase().includes(query))
       );
     });
-  }, [activeCategory, searchQuery, templates]);
+  }, [activeCategory, activeIndustry, searchQuery, templates]);
 
   return (
     <div className="space-y-6 animate-fade-in">
@@ -529,25 +834,52 @@ export default function TemplatesPage() {
                 className="w-full rounded-lg border border-bg-border bg-bg-deep py-2 pl-9 pr-3 text-sm text-fg outline-none transition-colors placeholder:text-fg-dim focus:border-accent/50"
               />
             </div>
-            <div className="flex flex-wrap gap-1.5">
-              {CATEGORY_ORDER.filter((category) => categoryCounts[category] > 0).map((category) => {
-                const active = category === activeCategory;
-                return (
-                  <button
-                    key={category}
-                    type="button"
-                    onClick={() => setActiveCategory(category)}
-                    title={CATEGORY_META[category].description}
-                    className={`rounded-full border px-3 py-1.5 text-[11px] font-bold transition-colors ${
-                      active
-                        ? "border-accent/50 bg-accent/15 text-accent"
-                        : "border-bg-border bg-bg-elev text-fg-muted hover:border-accent/30 hover:text-fg"
-                    }`}
-                  >
-                    {CATEGORY_META[category].label} ({categoryCounts[category]})
-                  </button>
-                );
-              })}
+            {/* Axis 1 — niche/industry (restricted verticals never appear). */}
+            <div className="space-y-1.5">
+              <div className="text-[10px] font-bold uppercase tracking-wider text-fg-dim">Niche</div>
+              <div className="flex flex-wrap gap-1.5">
+                {INDUSTRY_ORDER.filter((industry) => industryCounts[industry] > 0).map((industry) => {
+                  const active = industry === activeIndustry;
+                  return (
+                    <button
+                      key={industry}
+                      type="button"
+                      onClick={() => setActiveIndustry(industry)}
+                      className={`rounded-full border px-3 py-1.5 text-[11px] font-bold transition-colors ${
+                        active
+                          ? "border-accent/50 bg-accent/15 text-accent"
+                          : "border-bg-border bg-bg-elev text-fg-muted hover:border-accent/30 hover:text-fg"
+                      }`}
+                    >
+                      {INDUSTRY_META[industry].label} ({industryCounts[industry]})
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+            {/* Axis 2 — campaign type / format (Ad Creative + email families). */}
+            <div className="space-y-1.5">
+              <div className="text-[10px] font-bold uppercase tracking-wider text-fg-dim">Type</div>
+              <div className="flex flex-wrap gap-1.5">
+                {CATEGORY_ORDER.filter((category) => categoryCounts[category] > 0).map((category) => {
+                  const active = category === activeCategory;
+                  return (
+                    <button
+                      key={category}
+                      type="button"
+                      onClick={() => setActiveCategory(category)}
+                      title={CATEGORY_META[category].description}
+                      className={`rounded-full border px-3 py-1.5 text-[11px] font-bold transition-colors ${
+                        active
+                          ? "border-accent/50 bg-accent/15 text-accent"
+                          : "border-bg-border bg-bg-elev text-fg-muted hover:border-accent/30 hover:text-fg"
+                      }`}
+                    >
+                      {CATEGORY_META[category].label} ({categoryCounts[category]})
+                    </button>
+                  );
+                })}
+              </div>
             </div>
           </div>
 

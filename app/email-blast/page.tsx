@@ -1,21 +1,11 @@
-import { ComingSoon } from "@/components/ComingSoon";
-import { Mail } from "lucide-react";
+import { ConstantContactBlast } from "@/components/campaigns/ConstantContactBlast";
 
 export const dynamic = "force-dynamic";
 
 export default function EmailBlastPage() {
   return (
-    <ComingSoon
-      title="Email Blast"
-      subtitle="Bulk email campaigns with approved templates"
-      icon={Mail}
-      phase2Bullets={[
-        "Pick a template, choose a recipient list, and preview each message before sending.",
-        "Sends are paced automatically so your mailbox reputation stays healthy.",
-        "Track delivery, opens, replies, and unsubscribes per recipient.",
-        "Use the approved email templates configured for your workspace.",
-      ]}
-      related={[{ href: "/templates", label: "Templates" }, { href: "/sms", label: "SMS" }]}
-    />
+    <div className="p-4 md:p-6 max-w-3xl">
+      <ConstantContactBlast />
+    </div>
   );
 }

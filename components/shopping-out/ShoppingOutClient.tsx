@@ -19,6 +19,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { createPortal } from "react-dom";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { Card, Tag } from "@/components/Card";
 import { ShoppingBag, Send, RefreshCcw, Loader2 } from "lucide-react";
@@ -1061,7 +1062,7 @@ export function ShoppingOutClient({
           warning_code) so the audit trail is granular even when the
           operator's reason is global ("Re-shopping this deal after
           revenue update; old number was stale"). */}
-      {pendingConfirmation && (
+      {pendingConfirmation && typeof document !== "undefined" && createPortal(
         <div
           className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm"
           role="dialog"
@@ -1136,7 +1137,8 @@ export function ShoppingOutClient({
               </button>
             </div>
           </div>
-        </div>
+        </div>,
+        document.body,
       )}
     </div>
   );

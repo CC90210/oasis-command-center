@@ -69,7 +69,18 @@ export function normalizePostLoginRedirect(
   // dashboard must be the landing.)
   if (safeNext === "/") return homePathForTenant(ctx);
   const requestedTenantSlug = tenantSlugFromPath(safeNext);
-  if (!requestedTenantSlug) return safeNext;
+  if (!requestedTenantSlug) {
+    // Cross-tenant confinement (CC 2026-06-30): a non-operator client-tenant
+    // member (sun/suga) requesting a BARE global app path — e.g. /agents (the
+    // OASIS operator surface that /welcome's old ?next=/agents link handed
+    // everyone), /pipeline, /reasoning — must NOT be dropped onto the
+    // OASIS-generic surface. Pin them to their own tenant home. Empire
+    // operators keep the bare path (they own the global surfaces); OASIS
+    // members are unaffected because homePathForTenant returns "/" for them.
+    const home = homePathForTenant(ctx);
+    if (!ctx.isEmpireOperator && home !== "/") return home;
+    return safeNext;
+  }
 
   // Empire operators can preview any tenant (per canPreviewTenantSlug),
   // so honor an explicit tenant deep-link even when the operator's own

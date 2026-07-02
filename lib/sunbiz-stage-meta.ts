@@ -59,6 +59,14 @@ export const LEAD_PIPELINE_STAGES: StageMeta[] = [
   // complete it. Set on form OPEN in /api/forms/view. "Viewed" = COMPLETED
   // the first app (set on form submit). The two are mutually exclusive.
   { key: "intent_inquiry_submitted", label: "Intent Inquiry", bg: "#0E9AA7", fg: "#FFFFFF" },
+  // Live Subs (2026-06-30, CC) — Ezra-approved Breeze "UW Sheet" deals. The
+  // backend daemon SunBiz-Agent/scripts/scrubber/telegram_bridge.py inject_lead
+  // creates leads with data.stage="uw_sheet" and emits BRAVO_RECORD_STATUS_CHANGED.
+  // Internal key is "uw_sheet" (DO NOT rename — the daemon writes it); the UI
+  // label is "Live Subs". Deep purple, distinct from intent_inquiry teal and
+  // hot_lead amber. Sits directly above Hot Lead — fresh, qualified deals
+  // entering the funnel from Breeze.
+  { key: "uw_sheet",           label: "Live Subs",          bg: "#5A4A8A", fg: "#FFFFFF" },
   { key: "hot_lead",           label: "Hot Lead",           bg: "#C0842F", fg: "#FFFFFF" },
   { key: "missing_info",       label: "Missing Info",       bg: "#3978BE", fg: "#FFFFFF" },
   { key: "follow_up",          label: "Follow Up",          bg: "#8A6A3B", fg: "#FFFFFF" },

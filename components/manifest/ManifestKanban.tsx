@@ -244,7 +244,7 @@ export async function ManifestKanban({
                   {items.length}
                 </span>
               </header>
-              <ul className="flex-1 overflow-y-auto p-2 space-y-2">
+              <ul className="flex-1 min-h-0 overflow-y-auto p-2 space-y-2">
                 {items.map((row) => (
                   <KanbanCard
                     key={row.id}

@@ -18,6 +18,8 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 // useRef intentionally imported for the file-input ref in DocumentsTab.
+import { BackgroundCheckTab } from "./BackgroundCheckTab";
+import { DefaultsCheckControl } from "./DefaultsCheckControl";
 import { useRouter, useSearchParams, usePathname } from "next/navigation";
 import Link from "next/link";
 import { X, FileText, ImageIcon, Phone, Mail, ShoppingBag, Loader2, Trash2, CheckCircle2, AlertCircle, UploadCloud, RefreshCw, ArrowRightLeft, ChevronLeft, Eye } from "lucide-react";
@@ -61,13 +63,14 @@ type DetailPayload = {
   application: { id: string; data: Record<string, unknown> } | null;
 };
 
-type TabKey = "activity" | "owner" | "lenders" | "bank" | "documents" | "notes";
+type TabKey = "activity" | "owner" | "lenders" | "bank" | "bgc" | "documents" | "notes";
 
 const TABS: { key: TabKey; label: string }[] = [
   { key: "activity", label: "Activity" },
   { key: "owner", label: "Owner" },
   { key: "lenders", label: "Lenders" },
   { key: "bank", label: "Bank" },
+  { key: "bgc", label: "BGC" },
   { key: "documents", label: "Docs" },
   { key: "notes", label: "Notes" },
 ];
@@ -181,7 +184,7 @@ export function LeadDetailDrawer({
         {/* Header — 2026-06-08 refinement: softer divider, slightly wider
             inner spacing on the label row, stage chip is now rounded-full +
             uppercase letter-spacing to feel less rectangular. */}
-        <header className="px-5 py-4 border-b border-bg-border/60 space-y-4">
+        <header className="shrink-0 px-5 py-4 border-b border-bg-border/60 space-y-4">
           {/* Row 1: MERCHANT label + stage chip + close */}
           <div className="flex items-start gap-3">
             <div className="min-w-0 flex-1">
@@ -338,7 +341,7 @@ export function LeadDetailDrawer({
         {/* Tab nav — softened 2026-06-08: subtle hover bg, tighter padding,
             border-bg-border/50 so the divider doesn't compete with the
             header underline above */}
-        <nav className="flex gap-0.5 px-5 pt-3 border-b border-bg-border/50 overflow-x-auto">
+        <nav className="shrink-0 flex gap-0.5 px-5 pt-3 border-b border-bg-border/50 overflow-x-auto">
           {TABS.map((t) => {
             const isDocs = t.key === "documents";
             const missingCount = isDocs && data
@@ -367,7 +370,11 @@ export function LeadDetailDrawer({
           })}
         </nav>
 
-        <div className="flex-1 overflow-y-auto px-5 py-4 text-sm">
+        {/* min-h-0 is REQUIRED: without it this flex-1 scroll region can't shrink
+            below its content height, so on mobile (header + tabs + footer eat the
+            viewport) it collapsed to a tiny scroll strip. overscroll-contain stops
+            the page behind the drawer from scrolling too. (2026-06-30 mobile pass) */}
+        <div className="flex-1 min-h-0 overflow-y-auto overscroll-contain px-5 py-4 text-sm">
           {error && (
             <div className="rounded-md border border-red-500/40 bg-red-500/10 p-3 text-xs text-red-200">
               Failed to load: {error}
@@ -382,6 +389,7 @@ export function LeadDetailDrawer({
           {data && activeTab === "bank" && (
             <BankTab record={data.record.data} application={data.application} tenantSlug={tenantSlug} leadId={recordId} />
           )}
+          {data && activeTab === "bgc" && <BackgroundCheckTab leadId={recordId} record={data.record.data} />}
           {data && activeTab === "notes" && <NotesTab leadId={recordId} entity={entity} />}
           {data && activeTab === "documents" && (
             <DocumentsTab
@@ -1540,6 +1548,7 @@ function DocumentsTab({
 
   return (
     <div className="space-y-3">
+      <DefaultsCheckControl leadId={recordId} />
       {/* Batch 3 — Application slot. Red when missing (reuses the missing-doc
           red styling); satisfied (green) by the auto-PDF or a manual add. */}
       <div
@@ -2185,7 +2194,7 @@ function DrawerFooter({
 }) {
   const [mode, setMode] = useState<ComposerMode>(null);
   return (
-    <div className="border-t border-bg-border bg-bg-elev/40">
+    <div className="shrink-0 border-t border-bg-border bg-bg-elev/40">
       {/* Persistent action bar — buttons wrap onto a second row instead of
           smushing when the drawer is narrow (mobile / half-screen). Opening a
           composer renders it as an overlay (below) that covers this bar; the

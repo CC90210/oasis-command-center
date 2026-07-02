@@ -15,6 +15,7 @@
  */
 
 import { useEffect, useState } from "react";
+import { createPortal } from "react-dom";
 import { useRouter } from "next/navigation";
 import { Check, KeyRound, Loader2, X, ExternalLink, Copy } from "lucide-react";
 import { BRIDGE_CHAT_BASE } from "@/lib/agent-roots";
@@ -100,7 +101,8 @@ export function KeyPasteModal({ open, onClose, service, serviceLabel, envKey, ap
     }
   }
 
-  return (
+  if (typeof document === "undefined") return null;
+  return createPortal(
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-bg-deep/60 backdrop-blur-sm p-4"
       onClick={onClose}
@@ -210,6 +212,7 @@ export function KeyPasteModal({ open, onClose, service, serviceLabel, envKey, ap
           </button>
         </div>
       </div>
-    </div>
+    </div>,
+    document.body
   );
 }

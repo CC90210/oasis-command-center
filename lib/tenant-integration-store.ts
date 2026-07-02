@@ -119,6 +119,13 @@ const ENV_FALLBACKS: Record<string, Record<string, string>> = {
   send_gateway: {
     hmac_secret: "OASIS_OUTBOUND_HMAC_SECRET",
   },
+  // Constant Contact: the app credentials come from env (the OAuth access +
+  // refresh tokens are DB-only, written by the connect flow). NOTE: APP_SECRET
+  // is a generic name — confirm it holds the Constant Contact app secret.
+  constant_contact: {
+    client_id: "api_key_Constant_Contact",
+    client_secret: "APP_SECRET",
+  },
 };
 
 /**

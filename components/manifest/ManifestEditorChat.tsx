@@ -194,7 +194,7 @@ export function ManifestEditorChat({ slug, initialManifest, initialVersion }: Pr
           </span>
         </div>
 
-        <div className="flex-1 overflow-y-auto px-5 py-4 space-y-4">
+        <div className="flex-1 min-h-0 overflow-y-auto px-5 py-4 space-y-4">
           {turns.length === 0 && (
             <div className="text-sm text-fg-muted leading-relaxed">
               Tell the editor what to change. Try:
@@ -264,7 +264,7 @@ export function ManifestEditorChat({ slug, initialManifest, initialVersion }: Pr
           )}
         </div>
 
-        <div className="flex-1 overflow-y-auto px-5 py-4 space-y-3">
+        <div className="flex-1 min-h-0 overflow-y-auto px-5 py-4 space-y-3">
           {flash && (
             <div className="rounded-xl border border-emerald-400/30 bg-emerald-400/10 px-4 py-2.5 text-sm text-emerald-100 inline-flex items-center gap-2">
               <CheckCircle2 className="h-4 w-4" />

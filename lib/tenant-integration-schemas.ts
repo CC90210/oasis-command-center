@@ -145,6 +145,21 @@ export const INTEGRATION_SCHEMAS: IntegrationSchema[] = [
   // fields automatically — the operator never pastes them by hand,
   // so all fields are marked sensitive=true but only refresh_token
   // is rendered as a password input in the rare manual-edit path.
+  // OAuth integration, tenant-scoped: SunBiz sends email blasts from ONE
+  // Constant Contact account (the org's), so the tokens are shared, not
+  // per-employee. The connect flow (app/api/integrations/constant-contact/*)
+  // auto-populates these — never pasted by hand.
+  {
+    service: "constant_contact",
+    label: "Constant Contact",
+    description:
+      "Email blasts (templates, lists, open/click/bounce tracking). Connect once via OAuth; the API key + app secret come from the server env.",
+    fields: [
+      { key: "access_token", label: "Access Token", sensitive: true, hint: "Auto-populated by the OAuth flow." },
+      { key: "refresh_token", label: "Refresh Token", sensitive: true, hint: "Auto-populated; rotates on each refresh." },
+      { key: "expires_at", label: "Expires At", sensitive: false, hint: "epoch ms of access_token expiry." },
+    ],
+  },
   {
     service: "gmail_oauth",
     label: "Gmail (your personal account)",

@@ -151,6 +151,11 @@ export const ENTITY_STAGE_TONES: Record<string, Record<string, StageTone>> = {
     intent_inquiry_submitted: "info",
     imported: "neutral",
     not_interested: "warm",
+    // Live Subs (uw_sheet) — Ezra-approved deal needing immediate work.
+    // "accent" = operator-attention/hot lane (NOT "engaged", which means
+    // closed-won). Generic-Kanban fallback only; the rail uses the explicit
+    // deep-purple hex from lib/sunbiz-stage-meta.ts.
+    uw_sheet: "accent",
     hot_lead: "hot",
     missing_info: "info",
     declined: "warm",
