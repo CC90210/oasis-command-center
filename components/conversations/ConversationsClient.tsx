@@ -36,10 +36,10 @@ const SECTIONS: { key: SectionKey; label: string }[] = [
   { key: "kixie", label: "Kixie" },
 ];
 
-// Platforms with live ingestion today. Email + Twilio sections render but their
-// full inbound sync is a later phase — show a "coming soon" affordance there.
+// Platforms with live ingestion today. Email is now wired via the Operator
+// Email Agent (Gmail monitor → lead_interactions channel='email'); Twilio's
+// full inbound sync is still a later phase.
 const COMING_SOON: Partial<Record<SectionKey, string>> = {
-  email: "Email conversations will thread here once inbound email sync is wired (coming soon).",
   twilio: "Twilio conversations will thread here once Twilio ingestion is wired (coming soon).",
 };
 

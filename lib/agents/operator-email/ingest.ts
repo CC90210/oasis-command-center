@@ -1,0 +1,118 @@
+/**
+ * lib/agents/operator-email/ingest.ts — turn monitored Gmail messages into
+ * lead_interactions rows so deal email threads under the Conversations "Email"
+ * section + the lead timeline.
+ *
+ * PRIVACY GATE (load-bearing): a message is only written if its counterparty
+ * matches an existing lead (findExistingLead). Unmatched / personal mail is
+ * DROPPED here — never stored, never sent to an LLM, never logged in the clear.
+ * That's how "monitor work + personal inboxes but only surface deal email" holds.
+ *
+ * Idempotent: dedupes on metadata.gmail_message_id. DRY-RUN logs only.
+ */
+
+import "server-only";
+import { getServiceSupabase } from "@/lib/supabase-server";
+import { findExistingLead } from "@/lib/forms/agent-routing";
+import type { MonitoredMessage } from "./gmail-read";
+
+export interface IngestResult {
+  scanned: number;
+  matched: number;
+  ingested: number;
+  dropped: number; // unmatched / personal — intentionally not stored
+  skipped: number; // already ingested (dedupe)
+}
+
+function emailFromHeader(h: string): string {
+  const m = String(h || "").match(/<([^>]+)>/);
+  return (m ? m[1] : String(h || "")).trim().toLowerCase();
+}
+
+function toISO(dateHeader: string): string | null {
+  const t = Date.parse(dateHeader);
+  return Number.isFinite(t) ? new Date(t).toISOString() : null;
+}
+
+/**
+ * Ingest a batch for one operator/mailbox. `dryRun` (monitor validation) logs
+ * the decision without writing. Returns counts for the tick summary.
+ */
+export async function ingestMessages(
+  args: { tenantId: string; userId: string; mailbox: "work" | "personal"; dryRun: boolean },
+  messages: MonitoredMessage[],
+): Promise<IngestResult> {
+  const db = getServiceSupabase();
+  const res: IngestResult = { scanned: messages.length, matched: 0, ingested: 0, dropped: 0, skipped: 0 };
+
+  for (const msg of messages) {
+    const fromEmail = emailFromHeader(msg.from);
+    const toEmail = emailFromHeader(msg.to);
+    const mailbox = (msg.mailboxAddress || "").trim().toLowerCase();
+    // Direction relative to Alex's own address; counterparty is the other side.
+    const outbound = !!mailbox && fromEmail === mailbox;
+    const counterparty = outbound ? toEmail : fromEmail;
+    if (!counterparty) { res.dropped += 1; continue; }
+
+    // PRIVACY GATE — only deal/merchant email (matches a lead) is kept.
+    let lead: { id: string } | null = null;
+    try {
+      lead = await findExistingLead(args.tenantId, { email: counterparty });
+    } catch {
+      lead = null;
+    }
+    if (!lead) { res.dropped += 1; continue; }
+    res.matched += 1;
+
+    // Dedupe on the Gmail message id.
+    try {
+      const dup = await db
+        .from("lead_interactions")
+        .select("id")
+        .eq("tenant_id", args.tenantId)
+        .filter("metadata->>gmail_message_id", "eq", msg.id)
+        .limit(1);
+      if (!dup.error && Array.isArray(dup.data) && dup.data.length > 0) { res.skipped += 1; continue; }
+    } catch {
+      // if the dedupe check errors, skip writing (fail-closed on duplicate risk)
+      res.skipped += 1;
+      continue;
+    }
+
+    if (args.dryRun) {
+      console.log(`[operator-email] DRY would ingest ${outbound ? "out" : "in"} msg=${msg.id} lead=${lead.id} "${msg.subject.slice(0, 60)}"`);
+      res.ingested += 1;
+      continue;
+    }
+
+    const row = {
+      tenant_id: args.tenantId,
+      lead_id: lead.id,
+      type: outbound ? "email_sent" : "email_received",
+      channel: "email",
+      direction: outbound ? "outbound" : "inbound",
+      agent_source: "gmail_monitor",
+      actor_user_id: args.userId,
+      subject: msg.subject.slice(0, 500),
+      content: msg.body,
+      content_preview: msg.body.slice(0, 1024),
+      to_email: counterparty,
+      sent_at: toISO(msg.date),
+      metadata: {
+        gmail_message_id: msg.id,
+        gmail_thread_id: msg.threadId,
+        from_address: fromEmail,
+        monitored_mailbox: args.mailbox,
+        routed_to_user_id: args.userId,
+      },
+    };
+    try {
+      const ins = await db.from("lead_interactions").insert(row);
+      if (ins.error) { res.dropped += 1; continue; }
+      res.ingested += 1;
+    } catch {
+      res.dropped += 1;
+    }
+  }
+  return res;
+}
