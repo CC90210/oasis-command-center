@@ -18,6 +18,7 @@
 
 import "server-only";
 import { getUserIntegrationBundle, setUserIntegrationValue } from "@/lib/user-integration-store";
+import { checkEmailSuppressed } from "@/lib/lead-interactions-queries";
 
 const TOKEN_URL = "https://oauth2.googleapis.com/token";
 const SEND_URL = "https://gmail.googleapis.com/gmail/v1/users/me/messages/send";
@@ -35,10 +36,15 @@ export type GmailOAuthSendResult =
   | {
       ok: false;
       provider: "gmail_oauth";
-      reason: "not_connected" | "refresh_failed" | "send_failed";
+      reason: "not_connected" | "refresh_failed" | "send_failed" | "suppressed" | "suppression_error";
       error: string;
       http_status?: number;
     };
+
+// Suppression gate for the operator-Gmail path bypasses send_gateway's own
+// suppression, so it re-checks via the canonical checkEmailSuppressed (below)
+// and FAILS CLOSED. Kept here as defense-in-depth even though the route also
+// gates before queuing. [[fail-closed-default]]
 
 /** True when this operator has a usable Gmail OAuth connection (a refresh token on file). */
 export async function operatorHasGmailOAuth(tenantId: string, userId: string): Promise<boolean> {
@@ -138,6 +144,15 @@ export async function sendGmailAsOperator(args: {
   subject: string;
   body: string;
 }): Promise<GmailOAuthSendResult> {
+  // Opt-out gate FIRST — before any token work or send. Fail closed.
+  const supp = await checkEmailSuppressed(args.tenantId, args.to);
+  if (supp.suppressed) {
+    return { ok: false, provider: "gmail_oauth", reason: "suppressed", error: "recipient in email_suppressions" };
+  }
+  if (supp.checkFailed) {
+    return { ok: false, provider: "gmail_oauth", reason: "suppression_error", error: "suppression lookup failed — send blocked" };
+  }
+
   const bundle = await getUserIntegrationBundle(args.tenantId, args.userId, "gmail_oauth");
   const refreshToken = bundle.refresh_token;
   const fromAddress = bundle.gmail_address;

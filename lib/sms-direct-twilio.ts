@@ -49,6 +49,7 @@
 
 import "server-only";
 import { getTenantIntegrationBundle } from "./tenant-integration-store";
+import { checkPhoneOptOut } from "./lead-interactions-queries";
 
 export type DirectTwilioResult =
   | {
@@ -80,6 +81,17 @@ export async function sendSmsDirectTwilio(input: {
   to: string;
   body: string;
 }): Promise<DirectTwilioResult> {
+  // Opt-out gate — this direct path bypasses send_gateway's suppression, so
+  // re-check and FAIL CLOSED before dispatch (channel is gated off today but
+  // must ship safe when enabled). CASL/TCPA. [[fail-closed-default]]
+  const optOut = await checkPhoneOptOut(input.tenantId, input.to);
+  if (optOut.optedOut) {
+    return { ok: false, provider: "twilio_direct", error: "recipient_opted_out", http_status: 409 };
+  }
+  if (optOut.checkFailed) {
+    return { ok: false, provider: "twilio_direct", error: "opt_out_check_failed", http_status: 503 };
+  }
+
   const creds = await getTenantIntegrationBundle(input.tenantId, "twilio");
   const sid = creds.account_sid;
   const token = creds.auth_token;

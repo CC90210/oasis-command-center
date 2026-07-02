@@ -14,6 +14,7 @@ import { NextResponse, type NextRequest } from "next/server";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { resolveSessionContext } from "@/lib/api-auth";
 import { isDryRun } from "@/lib/integrations/send-mode";
+import { checkPhoneOptOut } from "@/lib/lead-interactions-queries";
 import { dispatchLeadStageEvent } from "@/lib/lead-stage-dispatcher";
 import { resolveTextTorrentSenderId } from "@/lib/integrations/texttorrent-sender";
 import { getTextTorrentCredentials, sendSms, TextTorrentError } from "@/lib/integrations/texttorrent";
@@ -45,6 +46,23 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
   const message = (typeof body.message === "string" ? body.message : "").trim().slice(0, MAX_MSG);
   if (!toNumber) return NextResponse.json({ ok: false, error: "to_number_required" }, { status: 400 });
   if (!message) return NextResponse.json({ ok: false, error: "message_required" }, { status: 400 });
+
+  // Opt-out gate. This direct-send path bypasses send_gateway's suppression, so
+  // re-check here and FAIL CLOSED — a lead who replied STOP must never get texted,
+  // and a failed lookup blocks rather than sends. [[fail-closed-default]] / CASL.
+  const optOut = await checkPhoneOptOut(sess.tenantId, toNumber);
+  if (optOut.optedOut) {
+    return NextResponse.json(
+      { ok: false, error: "opted_out", message: "Recipient previously opted out (STOP) — send blocked." },
+      { status: 409 },
+    );
+  }
+  if (optOut.checkFailed) {
+    return NextResponse.json(
+      { ok: false, error: "suppression_check_failed", message: "Could not verify opt-out status — send blocked (fail-closed)." },
+      { status: 503 },
+    );
+  }
 
   // Sender number: the operator's own TT number when set, else tenant default.
   const senderId = await resolveTextTorrentSenderId({ tenantId: sess.tenantId, userId: sess.userId });

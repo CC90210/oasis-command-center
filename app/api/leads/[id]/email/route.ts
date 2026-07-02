@@ -27,6 +27,7 @@ import { publishAgentEvent } from "@/lib/manifest/events";
 import { dispatchLeadStageEvent } from "@/lib/lead-stage-dispatcher";
 import { resolveSignerForOperator } from "@/lib/config/agents";
 import { operatorHasGmailOAuth, sendGmailAsOperator } from "@/lib/integrations/gmail-oauth-send";
+import { checkEmailSuppressed } from "@/lib/lead-interactions-queries";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -153,6 +154,24 @@ export async function POST(
   }
   if (!text.trim()) {
     return NextResponse.json({ ok: false, error: "body_required" }, { status: 400 });
+  }
+
+  // Opt-out gate BEFORE we queue or send — both the direct operator-Gmail path
+  // and the submissions@ queue fallback bypass send_gateway's suppression here,
+  // so block up front and FAIL CLOSED (a lookup error blocks). Nothing is queued
+  // for a suppressed recipient. [[fail-closed-default]] (audit 2026-07-01)
+  const emailSupp = await checkEmailSuppressed(sess.tenantId, toEmail);
+  if (emailSupp.suppressed) {
+    return NextResponse.json(
+      { ok: false, error: "suppressed", message: "Recipient previously unsubscribed — send blocked." },
+      { status: 409 },
+    );
+  }
+  if (emailSupp.checkFailed) {
+    return NextResponse.json(
+      { ok: false, error: "suppression_check_failed", message: "Could not verify unsubscribe status — send blocked (fail-closed)." },
+      { status: 503 },
+    );
   }
 
   const db = getServiceSupabase();

@@ -52,10 +52,24 @@ export async function isPhoneOptedOut(
   tenantId: string,
   phone: string | null | undefined,
 ): Promise<boolean> {
+  const r = await checkPhoneOptOut(tenantId, phone);
+  return r.optedOut;
+}
+
+/**
+ * Strict variant for DIRECT SEND gates: distinguishes "checked clean" from
+ * "check failed". Send paths must FAIL CLOSED on `checkFailed` (block the
+ * send), unlike best-effort isPhoneOptedOut above whose false-on-error is
+ * relied on by non-send callers. [[fail-closed-default]] (audit 2026-07-01)
+ */
+export async function checkPhoneOptOut(
+  tenantId: string,
+  phone: string | null | undefined,
+): Promise<{ optedOut: boolean; checkFailed: boolean }> {
   const norm = normalizePhoneE164(phone ?? "");
-  if (!tenantId || !norm) return false;
+  if (!tenantId || !norm) return { optedOut: false, checkFailed: false };
   const last10 = norm.replace(/\D/g, "").slice(-10);
-  if (last10.length < 10) return false;
+  if (last10.length < 10) return { optedOut: false, checkFailed: false };
   try {
     const db = getServiceSupabase();
     const r = await db
@@ -66,10 +80,46 @@ export async function isPhoneOptedOut(
       .filter("metadata->>opt_out_detected", "eq", "true")
       .filter("from_phone", "ilike", `%${last10}%`)
       .limit(1);
-    return Array.isArray(r.data) && r.data.length > 0;
+    if (r.error) {
+      console.error("[lead-interactions-queries] opt-out check errored", r.error.message);
+      return { optedOut: false, checkFailed: true };
+    }
+    return { optedOut: Array.isArray(r.data) && r.data.length > 0, checkFailed: false };
   } catch (err) {
     console.error("[lead-interactions-queries] opt-out check failed", err);
-    return false;
+    return { optedOut: false, checkFailed: true };
+  }
+}
+
+/**
+ * Email opt-out re-check for dashboard DIRECT-SEND paths that bypass
+ * send_gateway's own suppression (operator-Gmail, transactional relays).
+ * FAIL CLOSED: send paths must block on `checkFailed`. Mirrors the inline
+ * pattern in lib/forms/next-steps-email.ts. [[fail-closed-default]]
+ */
+export async function checkEmailSuppressed(
+  tenantId: string,
+  email: string | null | undefined,
+): Promise<{ suppressed: boolean; checkFailed: boolean }> {
+  const addr = String(email ?? "").trim().toLowerCase();
+  if (!tenantId || !addr) return { suppressed: false, checkFailed: false };
+  // Escape LIKE wildcards — `_`/`%` are valid in an email local-part.
+  const pattern = addr.replace(/[%_\\]/g, "\\$&");
+  try {
+    const r = await getServiceSupabase()
+      .from("email_suppressions")
+      .select("email")
+      .eq("tenant_id", tenantId)
+      .ilike("email", pattern)
+      .limit(1);
+    if (r.error) {
+      console.error("[lead-interactions-queries] email suppression check errored", r.error.message);
+      return { suppressed: false, checkFailed: true };
+    }
+    return { suppressed: (r.data?.length ?? 0) > 0, checkFailed: false };
+  } catch (err) {
+    console.error("[lead-interactions-queries] email suppression check failed", err);
+    return { suppressed: false, checkFailed: true };
   }
 }
 
