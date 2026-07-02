@@ -54,34 +54,33 @@ export function ConstantContactBlast() {
       window.location.href = url;
       return;
     }
-    let poll: ReturnType<typeof setInterval>;
-    const onMsg = (e: MessageEvent) => {
-      if (e.origin !== window.location.origin) return;
-      const d = e.data as { source?: string; status?: string; reason?: string } | null;
-      if (!d || d.source !== "cc_oauth") return;
-      window.removeEventListener("message", onMsg);
-      clearInterval(poll);
+    // Held in an object so `finish` can reference the listener + timer without a
+    // forward `let`. finish() runs once, from the postMessage OR the closed-popup poll.
+    const h: { onMsg?: (e: MessageEvent) => void; poll?: ReturnType<typeof setInterval> } = {};
+    const finish = (status?: string, reason?: string) => {
+      if (h.onMsg) window.removeEventListener("message", h.onMsg);
+      if (h.poll) clearInterval(h.poll);
       setConnecting(false);
-      if (d.status === "connected") {
+      if (status === "connected") {
         setBanner({ kind: "ok", text: "Constant Contact connected." });
         load();
-      } else if (d.status === "denied") {
+      } else if (status === "denied") {
         setBanner({ kind: "err", text: "Connection cancelled." });
+      } else if (status) {
+        setBanner({ kind: "err", text: `Connection error: ${reason || "unknown"}` });
       } else {
-        setBanner({ kind: "err", text: `Connection error: ${d.reason || "unknown"}` });
+        load(); // popup closed with no message — re-check in case it connected
       }
       try { popup.close(); } catch { /* already closed */ }
     };
-    window.addEventListener("message", onMsg);
-    // If the operator closes the popup manually, stop the spinner + re-check status.
-    poll = setInterval(() => {
-      if (popup.closed) {
-        clearInterval(poll);
-        window.removeEventListener("message", onMsg);
-        setConnecting(false);
-        load();
-      }
-    }, 800);
+    h.onMsg = (e: MessageEvent) => {
+      if (e.origin !== window.location.origin) return;
+      const d = e.data as { source?: string; status?: string; reason?: string } | null;
+      if (!d || d.source !== "cc_oauth") return;
+      finish(d.status, d.reason);
+    };
+    window.addEventListener("message", h.onMsg);
+    h.poll = setInterval(() => { if (popup.closed) finish(); }, 800);
   }
 
   return (
