@@ -263,6 +263,7 @@ export class ConstantContactClient {
     physical_address_in_footer: Record<string, string>;
     scheduledDate?: string;
     testTo?: string[];
+    abTest?: { alternative_subject: string; test_size: number; winner_wait_duration: number };
     guard?: (fields: { subject: string; html_content: string }) => void | Promise<void>;
   }) {
     if (o.guard) await o.guard({ subject: o.subject, html_content: o.html_content });
@@ -287,6 +288,8 @@ export class ConstantContactClient {
       await this.testSend(activityId, o.testTo);
       return { campaign_id: camp.campaign_id, campaign_activity_id: activityId, scheduled: false, tested: true };
     }
+    // A/B subject test must be applied to the DRAFT activity BEFORE scheduling.
+    if (o.abTest) await this.createAbTest(activityId, o.abTest);
     await this.schedule(activityId, o.scheduledDate ?? "0");
     return { campaign_id: camp.campaign_id, campaign_activity_id: activityId, scheduled: true, tested: false };
   }

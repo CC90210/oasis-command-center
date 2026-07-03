@@ -99,6 +99,29 @@ export function renderTemplate(source: "sunbiz" | "cold", id: string): { subject
   return { subject: tpl.subject, html };
 }
 
+export type RenderedTemplate = { source: "sunbiz" | "cold" | "custom"; id: string; label: string; category: string; subject: string; preheader?: string; html: string };
+
+/** Code-library templates (rendered to HTML) + the tenant's saved custom templates. */
+export async function listRenderedTemplates(tenantId: string): Promise<{ sunbiz: RenderedTemplate[]; cold: RenderedTemplate[]; custom: RenderedTemplate[] }> {
+  const sunbiz: RenderedTemplate[] = SUNBIZ_EMAIL_TEMPLATES.map((t) => {
+    const r = renderTemplate("sunbiz", t.id);
+    return { source: "sunbiz", id: t.id, label: t.label, category: t.category, subject: r?.subject || t.subject, html: r?.html || "" };
+  });
+  const cold: RenderedTemplate[] = COLD_OUTREACH_TEMPLATES.map((t) => {
+    const r = renderTemplate("cold", t.key);
+    return { source: "cold", id: t.key, label: t.name, category: "cold", subject: r?.subject || t.subject, html: r?.html || "" };
+  });
+  let custom: RenderedTemplate[] = [];
+  try {
+    const db = getServiceSupabase();
+    const rows = await db.from("cc_email_templates").select("id, name, category, subject, preheader, html").eq("tenant_id", tenantId).order("updated_at", { ascending: false }).limit(200);
+    custom = ((rows.data || []) as { id: string; name: string; category: string | null; subject: string | null; preheader: string | null; html: string | null }[]).map((r) => ({
+      source: "custom", id: r.id, label: r.name, category: r.category || "custom", subject: r.subject || "", preheader: r.preheader || "", html: r.html || "",
+    }));
+  } catch { /* custom templates are best-effort */ }
+  return { sunbiz, cold, custom };
+}
+
 /** First confirmed sender email on the connected CC account (for the bulk action, which has no sender picker). */
 export async function getDefaultSender(tenantId: string): Promise<string | null> {
   const client = await getConstantContactClient(tenantId);
@@ -116,11 +139,13 @@ export type RunBlastInput = {
   ccListId?: string; // OR an existing CC contact list
   subject: string;
   html: string;
+  preheader?: string; // preview text
   fromEmail: string;
   fromName?: string;
   replyTo?: string;
   scheduledDate?: string; // '0' now, ISO later
   test?: string[]; // if set, test-send only (to the operator), never schedules
+  abTest?: { alternative_subject: string; test_size: number; winner_wait_duration: number };
   listNameHint?: string;
 };
 
@@ -171,10 +196,12 @@ export async function runBlast(input: RunBlastInput): Promise<RunBlastResult> {
       reply_to_email: input.replyTo || input.fromEmail,
       subject: input.subject,
       html_content: input.html,
+      preheader: input.preheader,
       contact_list_ids: [listId as string],
       physical_address_in_footer: SUNBIZ_FOOTER,
       scheduledDate: input.scheduledDate || "0",
       testTo: input.test,
+      abTest: input.abTest,
       guard: async (f) => {
         const g = await sanitizeBlastMessage(input.tenantId, `${f.subject}\n${f.html_content}`);
         if (!g.ok) throw new Error(`blast_safety_${g.reason}`);
