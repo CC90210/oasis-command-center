@@ -36,6 +36,21 @@ export const SUNBIZ_WORKERS: BgWorkerDef[] = [
     purpose: "Drains active cold-outreach campaigns and fires due steps via send_gateway (CASL + opt-out enforced).",
   },
   {
+    service: "pm2.mca-lead-scrubber",
+    label: "Breeze UW sheet scrubber",
+    purpose: "Polls the shared Breeze/SunBiz Google Drive for UW sheets, scores deals, and stages qualified ones for Ezra approval.",
+  },
+  {
+    service: "pm2.ezra-telegram-bridge",
+    label: "Ezra approval bridge",
+    purpose: "Long-polls Ezra's Telegram approval buttons and creates Live Subs leads after he approves a staged UW deal.",
+  },
+  {
+    service: "pm2.uw-lead-enricher",
+    label: "UW lead enricher",
+    purpose: "Refreshes approved UW leads from their source Google Sheet, enriches missing contact channels, and asks Ezra to verify newly sourced email or phone data.",
+  },
+  {
     service: "pm2.sunbiz-sentinel",
     label: "Conversation sentinel",
     purpose: "Watches conversations for frustration / STOP signals and pauses sequences before they annoy a lead.",
