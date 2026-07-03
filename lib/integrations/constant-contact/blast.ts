@@ -220,3 +220,74 @@ export async function runBlast(input: RunBlastInput): Promise<RunBlastResult> {
   }
   return { ok: true, campaign_id: result.campaign_id, recipients: count };
 }
+
+// ── Resend to non-openers ──────────────────────────────────────────────────────
+export type RunResendInput = {
+  tenantId: string;
+  userId?: string | null;
+  activityId: string;
+  resendSubject: string;
+  delayDays?: number; // 1-10; mutually exclusive with delayMinutes
+  delayMinutes?: number; // 720-14400
+};
+
+/**
+ * Resend a sent campaign to everyone who didn't open. The new subject is
+ * merchant-facing, so it runs the SAME blast-safety + dry-run rails as a launch
+ * (one-send-gate — no unguarded sibling path).
+ */
+export async function runResend(input: RunResendInput): Promise<RunBlastResult> {
+  const safe = await sanitizeBlastMessage(input.tenantId, input.resendSubject);
+  if (!safe.ok) return { ok: false, error: safe.reason, message: safe.message, lender_hits: safe.lenderHits, status: 400 };
+
+  const client = await getConstantContactClient(input.tenantId);
+  if (!client) return { ok: false, error: "not_connected", status: 400 };
+
+  if (isDryRun("constant_contact")) {
+    return { ok: true, dry_run: true, would_send: { resend_to: "non_openers", subject: input.resendSubject } };
+  }
+
+  const body: Record<string, unknown> = { resend_subject: input.resendSubject };
+  if (input.delayMinutes != null) body.delay_minutes = input.delayMinutes;
+  else body.delay_days = input.delayDays ?? 3;
+  try {
+    const res = (await client.createNonOpenerResend(input.activityId, body)) as { campaign_activity_id?: string };
+    return { ok: true, campaign_id: res?.campaign_activity_id };
+  } catch (e) {
+    return { ok: false, error: "cc_resend_failed", message: (e as Error).message.slice(0, 200), status: 502 };
+  }
+}
+
+// ── A/B subject test (applied to a DRAFT activity before scheduling) ────────────
+export type RunAbTestInput = {
+  tenantId: string;
+  activityId: string;
+  primarySubject: string;
+  alternativeSubject: string;
+  testSize: number; // 5-50 (%)
+  winnerWaitHours: number; // 6 | 12 | 24 | 48
+};
+
+/** Configure an A/B subject test on a draft campaign. Both subjects are guarded. */
+export async function runAbTest(input: RunAbTestInput): Promise<RunBlastResult> {
+  const safe = await sanitizeBlastMessage(input.tenantId, `${input.primarySubject}\n${input.alternativeSubject}`);
+  if (!safe.ok) return { ok: false, error: safe.reason, message: safe.message, lender_hits: safe.lenderHits, status: 400 };
+
+  const client = await getConstantContactClient(input.tenantId);
+  if (!client) return { ok: false, error: "not_connected", status: 400 };
+
+  if (isDryRun("constant_contact")) {
+    return { ok: true, dry_run: true, would_send: { abtest: { alternative_subject: input.alternativeSubject, test_size: input.testSize, winner_wait_duration: input.winnerWaitHours } } };
+  }
+
+  try {
+    await client.createAbTest(input.activityId, {
+      alternative_subject: input.alternativeSubject,
+      test_size: input.testSize,
+      winner_wait_duration: input.winnerWaitHours,
+    });
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: "cc_abtest_failed", message: (e as Error).message.slice(0, 200), status: 502 };
+  }
+}
