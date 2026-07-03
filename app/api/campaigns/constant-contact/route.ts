@@ -9,9 +9,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { resolveSessionContext } from "@/lib/api-auth";
 import { getConstantContactClient, ccIsConnected } from "@/lib/integrations/constant-contact/store";
-import { renderTemplate, resolveSunbizAudience, runBlast } from "@/lib/integrations/constant-contact/blast";
-import { SUNBIZ_EMAIL_TEMPLATES, SUNBIZ_TEMPLATE_CATEGORIES } from "@/lib/sunbiz-templates-library";
-import { COLD_OUTREACH_TEMPLATES } from "@/lib/cold-outreach/templates.generated";
+import { renderTemplate, resolveSunbizAudience, runBlast, listRenderedTemplates } from "@/lib/integrations/constant-contact/blast";
+import { SUNBIZ_TEMPLATE_CATEGORIES } from "@/lib/sunbiz-templates-library";
 import { LEAD_PIPELINE_STAGES } from "@/lib/sunbiz-stage-meta";
 
 export const runtime = "nodejs";
@@ -36,6 +35,7 @@ export async function GET() {
     ccLists = lsList.map((l) => ({ id: l.list_id || "", name: l.name || "", count: l.membership_count || 0 })).filter((l) => l.id);
   }
 
+  const tpls = await listRenderedTemplates(session.tenantId);
   return NextResponse.json({
     ok: true,
     senders,
@@ -43,8 +43,9 @@ export async function GET() {
     stages: LEAD_PIPELINE_STAGES.map((s) => ({ key: s.key, label: s.label })),
     templates: {
       categories: SUNBIZ_TEMPLATE_CATEGORIES,
-      sunbiz: SUNBIZ_EMAIL_TEMPLATES.map((t) => ({ id: t.id, category: t.category, label: t.label, subject: t.subject })),
-      cold: COLD_OUTREACH_TEMPLATES.map((t) => ({ id: t.key, label: t.name, subject: t.subject })),
+      sunbiz: tpls.sunbiz,
+      cold: tpls.cold,
+      custom: tpls.custom,
     },
   });
 }
@@ -59,20 +60,33 @@ export async function POST(req: NextRequest) {
     audience?: { type?: string; stage?: string; list_id?: string };
     template?: { source?: string; id?: string };
     subject?: string;
+    html?: string; // custom/edited HTML from the inline editor — overrides the template
+    preheader?: string;
     from_email?: string;
     from_name?: string;
     reply_to?: string;
     scheduled_date?: string;
+    ab_test?: { alternative_subject?: string; test_size?: number; winner_wait_duration?: number };
   } = {};
   try { body = (await req.json()) as typeof body; } catch { /* empty */ }
 
   const action = body.action === "launch" ? "launch" : "test";
   const source = body.template?.source === "cold" ? "cold" : "sunbiz";
   const rendered = body.template?.id ? renderTemplate(source, body.template.id) : null;
-  if (!rendered) return NextResponse.json({ ok: false, error: "template_required" }, { status: 400 });
-  const subject = (body.subject || rendered.subject || "").trim();
+  const html = (body.html && body.html.trim()) ? body.html : rendered?.html;
+  if (!html) return NextResponse.json({ ok: false, error: "template_or_html_required" }, { status: 400 });
+  const subject = (body.subject || rendered?.subject || "").trim();
   if (!subject) return NextResponse.json({ ok: false, error: "subject_required" }, { status: 400 });
   if (!body.from_email) return NextResponse.json({ ok: false, error: "from_email_required" }, { status: 400 });
+
+  // Optional A/B subject test — clamp to CC's allowed ranges (fail-closed on bad input).
+  let abTest: { alternative_subject: string; test_size: number; winner_wait_duration: number } | undefined;
+  if (action === "launch" && body.ab_test?.alternative_subject?.trim()) {
+    const size = Math.max(5, Math.min(50, Number(body.ab_test.test_size) || 20));
+    const waitOptions = [6, 12, 24, 48];
+    const wait = waitOptions.includes(Number(body.ab_test.winner_wait_duration)) ? Number(body.ab_test.winner_wait_duration) : 24;
+    abTest = { alternative_subject: body.ab_test.alternative_subject.trim(), test_size: size, winner_wait_duration: wait };
+  }
 
   // Audience: SunBiz segment (import) or an existing CC list.
   let recipients; let ccListId;
@@ -93,12 +107,14 @@ export async function POST(req: NextRequest) {
     recipients,
     ccListId,
     subject,
-    html: rendered.html,
+    html,
+    preheader: body.preheader,
     fromEmail: body.from_email,
     fromName: body.from_name,
     replyTo: body.reply_to,
     scheduledDate: body.scheduled_date && body.scheduled_date !== "now" ? body.scheduled_date : "0",
     test: action === "test" ? [session.email || body.from_email] : undefined,
+    abTest,
     listNameHint: body.audience?.stage || "list",
   });
 
