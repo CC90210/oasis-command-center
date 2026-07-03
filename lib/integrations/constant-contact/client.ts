@@ -154,6 +154,102 @@ export class ConstantContactClient {
     return this.req("GET", `/reports/stats/email_campaign_activities?campaign_activity_ids=${encodeURIComponent(activityId)}`);
   }
 
+  // ── Campaign management (list / detail / rename / delete / preview / history) ─
+  /** List campaigns. `after` is the pagination cursor from a prior `_links.next.href`. */
+  listCampaigns(o: { limit?: number; after?: string } = {}) {
+    const q = new URLSearchParams({ limit: String(o.limit ?? 50) });
+    if (o.after) q.set("after", o.after);
+    return this.req("GET", `/emails?${q}`);
+  }
+  getCampaign(campaignId: string) { return this.req("GET", `/emails/${encodeURIComponent(campaignId)}`); }
+  /** Rename a campaign (PATCH is name-only per CC). */
+  renameCampaign(campaignId: string, name: string) { return this.req("PATCH", `/emails/${encodeURIComponent(campaignId)}`, { name }); }
+  deleteCampaign(campaignId: string) { return this.req("DELETE", `/emails/${encodeURIComponent(campaignId)}`); }
+  /** Full activity incl. html_content / footer / permalink when `include` is set. */
+  getActivity(activityId: string, include?: string) {
+    const q = include ? `?include=${encodeURIComponent(include)}` : "";
+    return this.req("GET", `/emails/activities/${encodeURIComponent(activityId)}${q}`);
+  }
+  getPreview(activityId: string) { return this.req("GET", `/emails/activities/${encodeURIComponent(activityId)}/previews`); }
+  getSendHistory(activityId: string) { return this.req("GET", `/emails/activities/${encodeURIComponent(activityId)}/send_history`); }
+
+  // ── Schedule (view / cancel) — POST create lives in schedule() above ─────────
+  getSchedule(activityId: string) { return this.req("GET", `/emails/activities/${encodeURIComponent(activityId)}/schedules`); }
+  /** Unschedule a queued send (cancel). */
+  deleteSchedule(activityId: string) { return this.req("DELETE", `/emails/activities/${encodeURIComponent(activityId)}/schedules`); }
+
+  // ── Reporting (rollup + per-link) — tracking()/getCampaignStats() above ──────
+  getSummaryReports(limit = 50) { return this.req("GET", `/reports/summary_reports/email_campaign_summaries?limit=${limit}`); }
+  getLinksReport(activityId: string) { return this.req("GET", `/reports/email_reports/${encodeURIComponent(activityId)}/links`); }
+  getContactActivity(contactId: string) { return this.req("GET", `/reports/contact_reports/${encodeURIComponent(contactId)}/activity_details`); }
+  getContactOpenClickRates(contactId: string) { return this.req("GET", `/reports/contact_reports/${encodeURIComponent(contactId)}/open_and_click_rates`); }
+  getContactActivitySummary(contactId: string) { return this.req("GET", `/reports/contact_reports/${encodeURIComponent(contactId)}/activity_summary`); }
+
+  // ── Contacts (CRUD + resubscribe + counts + export) ──────────────────────────
+  /** List/search contacts. `include` pulls custom_fields,list_memberships,taggings,notes,phone_numbers,street_addresses. */
+  listContacts(o: { limit?: number; cursor?: string; email?: string; lists?: string; segment_id?: string | number; status?: string; tags?: string; include?: string } = {}) {
+    const q = new URLSearchParams({ limit: String(o.limit ?? 50) });
+    if (o.cursor) q.set("cursor", o.cursor);
+    if (o.email) q.set("email", o.email);
+    if (o.lists) q.set("lists", o.lists);
+    if (o.segment_id != null) q.set("segment_id", String(o.segment_id));
+    if (o.status) q.set("status", o.status);
+    if (o.tags) q.set("tags", o.tags);
+    if (o.include) q.set("include", o.include);
+    return this.req("GET", `/contacts?${q}`);
+  }
+  getContact(contactId: string, include = "custom_fields,list_memberships,taggings,notes,phone_numbers,street_addresses") {
+    return this.req("GET", `/contacts/${encodeURIComponent(contactId)}?include=${encodeURIComponent(include)}`);
+  }
+  createContact(body: Record<string, unknown>) { return this.req("POST", "/contacts", body); }
+  updateContact(contactId: string, body: Record<string, unknown>) { return this.req("PUT", `/contacts/${encodeURIComponent(contactId)}`, body); }
+  deleteContact(contactId: string) { return this.req("DELETE", `/contacts/${encodeURIComponent(contactId)}`); }
+  resubscribeContact(contactId: string) { return this.req("PUT", `/contacts/resubscribe/${encodeURIComponent(contactId)}`); }
+  getContactCounts() { return this.req("GET", "/contacts/counts"); }
+  startContactExport(body: Record<string, unknown>) { return this.req("POST", "/activities/contact_exports", body); }
+  getContactExport(fileExportId: string) { return this.req("GET", `/contact_exports/${encodeURIComponent(fileExportId)}`); }
+
+  // ── Custom fields (typed, ≤25/contact) ──────────────────────────────────────
+  getCustomFields() { return this.req("GET", "/contact_custom_fields?limit=100"); }
+  createCustomField(body: Record<string, unknown>) { return this.req("POST", "/contact_custom_fields", body); }
+  updateCustomField(id: string, body: Record<string, unknown>) { return this.req("PUT", `/contact_custom_fields/${encodeURIComponent(id)}`, body); }
+  deleteCustomField(id: string) { return this.req("DELETE", `/contact_custom_fields/${encodeURIComponent(id)}`); }
+
+  // ── Lists (detail / update / delete / membership) — GET all + create above ───
+  getList(listId: string) { return this.req("GET", `/contact_lists/${encodeURIComponent(listId)}`); }
+  updateList(listId: string, body: Record<string, unknown>) { return this.req("PUT", `/contact_lists/${encodeURIComponent(listId)}`, body); }
+  deleteList(listId: string) { return this.req("DELETE", `/contact_lists/${encodeURIComponent(listId)}`); }
+  addListMemberships(contactIds: string[], listIds: string[]) {
+    return this.req("POST", "/activities/add_list_memberships", { source: { contact_ids: contactIds }, list_ids: listIds });
+  }
+  removeListMemberships(contactIds: string[], listIds: string[]) {
+    return this.req("POST", "/activities/remove_list_memberships", { source: { contact_ids: contactIds }, list_ids: listIds });
+  }
+
+  // ── Tags ─────────────────────────────────────────────────────────────────────
+  getTags() { return this.req("GET", "/contact_tags?limit=100"); }
+  createTag(name: string) { return this.req("POST", "/contact_tags", { name }); }
+  updateTag(id: string, name: string) { return this.req("PUT", `/contact_tags/${encodeURIComponent(id)}`, { name }); }
+  deleteTag(id: string) { return this.req("DELETE", `/contact_tags/${encodeURIComponent(id)}`); }
+  addTags(tagId: string, contactIds: string[]) { return this.req("POST", "/activities/contacts_taggings_add", { tag_id: tagId, source: { contact_ids: contactIds } }); }
+  removeTags(tagId: string, contactIds: string[]) { return this.req("POST", "/activities/contacts_taggings_remove", { tag_id: tagId, source: { contact_ids: contactIds } }); }
+
+  // ── Segments (criteria is a JSON string per CC) ──────────────────────────────
+  getSegments() { return this.req("GET", "/segments?limit=1000"); }
+  getSegment(id: string) { return this.req("GET", `/segments/${encodeURIComponent(id)}`); }
+  createSegment(name: string, segmentCriteria: string) { return this.req("POST", "/segments", { name, segment_criteria: segmentCriteria }); }
+  updateSegment(id: string, name: string, segmentCriteria: string) { return this.req("PUT", `/segments/${encodeURIComponent(id)}`, { name, segment_criteria: segmentCriteria }); }
+  deleteSegment(id: string) { return this.req("DELETE", `/segments/${encodeURIComponent(id)}`); }
+  renameSegment(id: string, name: string) { return this.req("PATCH", `/segments/${encodeURIComponent(id)}/name`, { name }); }
+
+  // ── Power: A/B subject test + resend-to-non-openers (SEND paths — guard upstream) ─
+  getAbTest(activityId: string) { return this.req("GET", `/emails/activities/${encodeURIComponent(activityId)}/abtest`); }
+  createAbTest(activityId: string, body: Record<string, unknown>) { return this.req("POST", `/emails/activities/${encodeURIComponent(activityId)}/abtest`, body); }
+  deleteAbTest(activityId: string) { return this.req("DELETE", `/emails/activities/${encodeURIComponent(activityId)}/abtest`); }
+  getNonOpenerResend(activityId: string) { return this.req("GET", `/emails/activities/${encodeURIComponent(activityId)}/non_opener_resends`); }
+  createNonOpenerResend(activityId: string, body: Record<string, unknown>) { return this.req("POST", `/emails/activities/${encodeURIComponent(activityId)}/non_opener_resends`, body); }
+  deleteNonOpenerResend(activityId: string, resendRequestId: string) { return this.req("DELETE", `/emails/activities/${encodeURIComponent(activityId)}/non_opener_resends/${encodeURIComponent(resendRequestId)}`); }
+
   /**
    * High-level: create → set recipients → optional test → schedule. Returns ids.
    * @param guard host-app hook that MUST throw if subject/html contain a lender name

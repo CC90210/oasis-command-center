@@ -11,7 +11,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { Mail, Loader2, CheckCircle2, AlertCircle, Plug } from "lucide-react";
-import { ConstantContactComposer } from "./ConstantContactComposer";
+import { ConstantContactConsole } from "./ConstantContactConsole";
 
 type Status = {
   ok: boolean;
@@ -117,42 +117,14 @@ export function ConstantContactBlast() {
             <CheckCircle2 className="h-3.5 w-3.5" /> Connected to Constant Contact
           </div>
 
-          {/* Account confirmation — which CC account is actually linked. */}
-          {status.account ? (
-            <div className="rounded-md border border-bg-border bg-bg-deep/30 px-3 py-3 text-[12px] space-y-1.5">
-              <div className="text-fg">
-                Account: <span className="font-medium">{status.account.org || "(no organization name)"}</span>
-              </div>
-              {status.account.emails.length > 0 ? (
-                <div className="space-y-0.5">
-                  <div className="text-fg-dim">Sender emails on this account:</div>
-                  <ul className="text-fg-dim">
-                    {status.account.emails.map((e) => (
-                      <li key={e.email}>
-                        • {e.email}{" "}
-                        <span className="text-[10px] uppercase tracking-wide">
-                          {e.status === "CONFIRMED" ? "(confirmed)" : `(${e.status.toLowerCase() || "unconfirmed"})`}
-                        </span>
-                      </li>
-                    ))}
-                  </ul>
-                </div>
-              ) : (
-                <div className="text-status-warm">No confirmed sender email on this account yet — you&apos;ll need one before sending a blast.</div>
-              )}
-              <div className="pt-1 text-[11px] text-fg-dim">
-                Wrong account?{" "}
-                <button type="button" onClick={connect} className="underline">Reconnect</button>.
-              </div>
-            </div>
-          ) : (
-            <div className="rounded-md border border-status-warm/40 bg-status-warm/5 px-3 py-3 text-[12px] text-status-warm">
-              Connected, but couldn&apos;t read the account details just now. Reload the page; if it keeps happening,{" "}
+          {!status.account && (
+            <div className="rounded-md border border-status-warm/40 bg-status-warm/5 px-3 py-2 text-[11px] text-status-warm">
+              Couldn&apos;t read the linked account details just now. If sending fails,{" "}
               <button type="button" onClick={connect} className="underline">reconnect</button>.
             </div>
           )}
 
-          <ConstantContactComposer />
+          <ConstantContactConsole account={status.account ?? null} onReconnect={connect} />
         </div>
       ) : (
         <div className="space-y-3">
