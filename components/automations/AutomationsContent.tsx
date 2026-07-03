@@ -19,6 +19,7 @@
 import { PageHeader } from "@/components/Card";
 import { CronJobsManager } from "@/components/automations/CronJobsManager";
 import { BackgroundWorkersPanel } from "@/components/automations/BackgroundWorkersPanel";
+import { BreezeDealsPanel } from "@/components/automations/BreezeDealsPanel";
 import { DescribeAutomationFlow } from "@/components/automations/DescribeAutomationFlow";
 import { AgentsModulesStatusBoard } from "@/components/automations/AgentsModulesStatusBoard";
 import { getActiveProfile, getBridgeOnline, getTenant } from "@/lib/queries";
@@ -152,7 +153,7 @@ export async function AutomationsContent({
           <p>
             <span className="text-fg font-bold">Where output ends up.</span>{" "}
             {tenantSlug === "sun"
-              ? "Back in the dashboard — the Daily Plan, the deal records, and alerts. Calls and texts to merchants go out through Kixie and TextTorrent. (SunBiz has no Telegram, so nothing is sent there.)"
+              ? "Back in the dashboard — the Daily Plan, the deal records, the Breeze BD deal queue below, and alerts. Calls and texts to merchants go out through Kixie and TextTorrent. Scored Breeze deals go to Ezra's Telegram for approve/decline — approving there creates the lead."
               : "Telegram (alerts + briefs), local files (snapshots), or back into the dashboard (scoring + sync jobs)."}
           </p>
           <p>
@@ -161,13 +162,15 @@ export async function AutomationsContent({
           </p>
           {tenantSlug === "sun" && (
             <p>
-              <span className="text-fg font-bold">The three sections below.</span>{" "}
+              <span className="text-fg font-bold">The four sections below.</span>{" "}
               <span className="text-fg">Modules</span> is what the system can do — your live
               capabilities, for reference (nothing to switch).{" "}
               <span className="text-fg">Scheduled jobs</span> are the timed automations; flip one
               off to pause it (takes effect within ~60s on the VPS).{" "}
+              <span className="text-fg">Breeze BD deals</span> is the live intake queue — every UW
+              sheet the scrubber verified and scored, with its Telegram approval status.{" "}
               <span className="text-fg">Background workers</span> are the always-on processes that
-              power those jobs — Start, Stop, or Restart each one and the signal goes straight to
+              power all of it — Start, Stop, or Restart each one and the signal goes straight to
               the VPS.
             </p>
           )}
@@ -185,9 +188,14 @@ export async function AutomationsContent({
           <AgentsModulesStatusBoard tenantSlug={tenantSlug} />
           <CronJobsManager agentKeys={automationAgentKeys} />
           {(isOperator || tenantSlug === "sun") && (
-            <div className="border-t border-bg-border pt-6">
-              <BackgroundWorkersPanel />
-            </div>
+            <>
+              <div className="border-t border-bg-border pt-6">
+                <BreezeDealsPanel />
+              </div>
+              <div className="border-t border-bg-border pt-6">
+                <BackgroundWorkersPanel />
+              </div>
+            </>
           )}
         </>
       ) : (
