@@ -99,7 +99,9 @@ export function CCCampaignDrawer({ campaign, onClose, onChanged }: { campaign: C
   }
 
   const s = extractStats(metrics?.stats ?? detail?.stats);
-  const linkRows = ((metrics?.links as { tracking_activities?: unknown[]; results?: unknown[] } | undefined)?.tracking_activities
+  // CC's EmailLinks report returns the rows under `link_click_counts`.
+  const linkRows = ((metrics?.links as { link_click_counts?: unknown[]; tracking_activities?: unknown[]; results?: unknown[] } | undefined)?.link_click_counts
+    || (metrics?.links as { tracking_activities?: unknown[] } | undefined)?.tracking_activities
     || (metrics?.links as { results?: unknown[] } | undefined)?.results
     || (Array.isArray(metrics?.links) ? (metrics?.links as unknown[]) : [])) as Record<string, unknown>[];
   const permalink = detail?.activity?.permalink_url;

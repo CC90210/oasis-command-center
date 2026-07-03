@@ -154,8 +154,9 @@ export type RunBlastResult =
   | { ok: false; error: string; message?: string; lender_hits?: string[]; status?: number };
 
 export async function runBlast(input: RunBlastInput): Promise<RunBlastResult> {
-  // 1. Blast-safety guard (fail-closed) on subject + html.
-  const safe = await sanitizeBlastMessage(input.tenantId, `${input.subject}\n${input.html}`);
+  // 1. Blast-safety guard (fail-closed) on subject + html + the A/B alternate subject
+  //    (the alt subject is merchant-facing too — it must not bypass the lender/dash guard).
+  const safe = await sanitizeBlastMessage(input.tenantId, `${input.subject}\n${input.abTest?.alternative_subject || ""}\n${input.html}`);
   if (!safe.ok) return { ok: false, error: safe.reason, message: safe.message, lender_hits: safe.lenderHits, status: 400 };
 
   const client = await getConstantContactClient(input.tenantId);
@@ -176,7 +177,8 @@ export async function runBlast(input: RunBlastInput): Promise<RunBlastResult> {
     const created = (await client.createList(listName).catch(() => null)) as { list_id?: string } | null;
     listId = created?.list_id;
     if (!listId) return { ok: false, error: "list_create_failed", status: 502 };
-    const importData = input.recipients.map((r) => ({ email_address: r.email, first_name: r.first_name || undefined, company_name: r.business || undefined }));
+    // CC's JSON-import row identifies the contact by the `email` field (NOT email_address).
+    const importData = input.recipients.map((r) => ({ email: r.email, first_name: r.first_name || undefined, company_name: r.business || undefined }));
     try {
       const imp = (await client.importContacts(importData, [listId])) as { activity_id?: string };
       if (imp.activity_id) await client.waitForActivity(imp.activity_id, { tries: 25, delayMs: 2000 });

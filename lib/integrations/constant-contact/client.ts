@@ -118,7 +118,8 @@ export class ConstantContactClient {
   async waitForActivity(activityId: string, { tries = 30, delayMs = 2000 } = {}) {
     for (let i = 0; i < tries; i++) {
       const a = (await this.req("GET", `/activities/${activityId}`)) as { state?: string; status?: string };
-      if (["COMPLETE", "DONE", "ERROR", "CANCELLED"].includes(String(a.state || a.status).toUpperCase())) return a;
+      // CC terminal activity statuses are: completed, cancelled, failed (+ processing = in-flight).
+      if (["COMPLETED", "COMPLETE", "DONE", "FAILED", "ERROR", "CANCELLED"].includes(String(a.state || a.status).toUpperCase())) return a;
       await new Promise((res) => setTimeout(res, delayMs));
     }
     throw new Error(`CC activity ${activityId} did not finish in time`);
@@ -149,9 +150,10 @@ export class ConstantContactClient {
   tracking(activityId: string, kind: "sends" | "opens" | "unique_opens" | "clicks" | "bounces" | "optouts" | "didnotopens" | "forwards") {
     return this.req("GET", `/reports/email_reports/${activityId}/tracking/${kind}`);
   }
-  /** Aggregate per-activity counts (sends/opens/clicks/bounces/optouts) — one call, no pagination. */
+  /** Aggregate per-activity counts (sends/opens/clicks/bounces/optouts) — one call, no pagination.
+   *  The ids are a PATH segment per the CC spec, NOT a query param. */
   getCampaignStats(activityId: string) {
-    return this.req("GET", `/reports/stats/email_campaign_activities?campaign_activity_ids=${encodeURIComponent(activityId)}`);
+    return this.req("GET", `/reports/stats/email_campaign_activities/${encodeURIComponent(activityId)}`);
   }
 
   // ── Campaign management (list / detail / rename / delete / preview / history) ─
@@ -268,10 +270,13 @@ export class ConstantContactClient {
   }) {
     if (o.guard) await o.guard({ subject: o.subject, html_content: o.html_content });
     if (!o.contact_list_ids?.length && !o.segment_ids?.length) throw new Error("Blast needs contact_list_ids or segment_ids");
+    // format_type 5 (custom code) emails MUST include [[trackingImage]] in the body per CC, or the
+    // campaign activity is rejected. Inject it once if the caller's HTML doesn't already have it.
+    const html_content = o.html_content.includes("[[trackingImage]]") ? o.html_content : `${o.html_content}\n[[trackingImage]]`;
 
     const camp = (await this.createCampaign(o.name, {
       from_email: o.from_email, from_name: o.from_name, reply_to_email: o.reply_to_email,
-      subject: o.subject, html_content: o.html_content, preheader: o.preheader,
+      subject: o.subject, html_content, preheader: o.preheader,
     })) as { campaign_id: string; campaign_activities?: Array<{ role?: string; campaign_activity_id: string }> };
     const activity = (camp.campaign_activities || []).find((a) => a.role === "primary_email") || camp.campaign_activities?.[0];
     if (!activity) throw new Error("CC createCampaign returned no primary_email activity");
@@ -279,7 +284,7 @@ export class ConstantContactClient {
 
     await this.updateActivity(activityId, {
       from_email: o.from_email, from_name: o.from_name, reply_to_email: o.reply_to_email,
-      subject: o.subject, html_content: o.html_content, preheader: o.preheader,
+      subject: o.subject, html_content, preheader: o.preheader,
       contact_list_ids: o.contact_list_ids, segment_ids: o.segment_ids,
       physical_address_in_footer: o.physical_address_in_footer,
     });
