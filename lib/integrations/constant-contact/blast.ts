@@ -139,7 +139,7 @@ export async function runBlast(input: RunBlastInput): Promise<RunBlastResult> {
   const count = input.ccListId ? undefined : input.recipients?.length || 0;
 
   // 2. Dry-run gate — a LAUNCH does nothing in dry mode; a TEST send (operator-only) is allowed.
-  if (!input.test?.length && isDryRun("email")) {
+  if (!input.test?.length && isDryRun("constant_contact")) {
     return { ok: true, dry_run: true, recipients: count, would_send: { recipients: count ?? "cc_list", subject: input.subject, list: input.ccListId || input.listNameHint } };
   }
   if (!input.ccListId && !input.recipients?.length) return { ok: false, error: "no_recipients", status: 400 };

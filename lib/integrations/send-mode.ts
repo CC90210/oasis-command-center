@@ -45,6 +45,9 @@ const CHANNEL_LIVE_ENV: Record<string, string> = {
   twilio: "LIVE_SEND_TWILIO",
   gws: "LIVE_SEND_EMAIL",
   email: "LIVE_SEND_EMAIL",
+  // Constant Contact gets its OWN flag so going live for CC blasts doesn't also
+  // un-gate the Gmail / cold-outreach email channels.
+  constant_contact: "LIVE_SEND_CONSTANT_CONTACT",
 };
 
 /**
