@@ -15,18 +15,20 @@
  */
 
 import { useState } from "react";
-import { Megaphone, MessageSquare, Mail, type LucideIcon } from "lucide-react";
+import { Megaphone, MessageSquare, Mail, Send, type LucideIcon } from "lucide-react";
 import { CampaignsClient } from "./CampaignsClient";
 import { ColdOutreachClient } from "@/components/cold-outreach/ColdOutreachClient";
 import { ConstantContactBlast } from "./ConstantContactBlast";
+import { SmartleadConsole } from "./SmartleadConsole";
 
-type ChannelTab = "texttorrent" | "twilio" | "gmail" | "constantcontact";
+type ChannelTab = "texttorrent" | "twilio" | "gmail" | "constantcontact" | "coldemail";
 
 const TABS: { key: ChannelTab; label: string; icon: LucideIcon }[] = [
   { key: "texttorrent", label: "Text Torrent", icon: Megaphone },
   { key: "twilio", label: "Twilio", icon: MessageSquare },
   { key: "gmail", label: "Gmail", icon: Mail },
   { key: "constantcontact", label: "Constant Contact", icon: Mail },
+  { key: "coldemail", label: "Cold Email", icon: Send },
 ];
 
 export function CampaignsShell({
@@ -75,6 +77,8 @@ export function CampaignsShell({
       )}
 
       {channel === "constantcontact" && <ConstantContactBlast />}
+
+      {channel === "coldemail" && <SmartleadConsole />}
     </div>
   );
 }
