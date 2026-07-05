@@ -9,6 +9,7 @@
 import "server-only";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { getConstantContactClient } from "./store";
+import type { ConstantContactClient } from "./client";
 import { sanitizeBlastMessage } from "@/lib/integrations/blast-safety";
 import { isDryRun } from "@/lib/integrations/send-mode";
 import { checkEmailSuppressed } from "@/lib/lead-interactions-queries";
@@ -16,13 +17,21 @@ import { renderSunbizTemplate, SUNBIZ_EMAIL_TEMPLATES } from "@/lib/sunbiz-templ
 import { COLD_OUTREACH_TEMPLATES } from "@/lib/cold-outreach/templates.generated";
 
 // CAN-SPAM footer (mandatory). SunBiz Funding's registered address.
+// organization_name is REQUIRED by CC's EmailPhysicalAddress — omitting it 400s the send.
 const SUNBIZ_FOOTER: Record<string, string> = {
+  organization_name: "SunBiz Funding",
   address_line1: "1 East Broward Blvd, Suite 700",
   city: "Fort Lauderdale",
   state_code: "FL",
   postal_code: "33301",
   country_code: "US",
 };
+
+// Strip em/en dashes from merchant-facing copy (standing no-em-dash rule). The blast-safety
+// guard flags them but we send the ORIGINAL text, so scrub here before every send path.
+export function stripDashes(s: string | undefined | null): string {
+  return String(s || "").replace(/\s*[—–]\s*/g, ", ");
+}
 
 export type BlastRecipient = { email: string; first_name: string | null; business: string | null; lead_id?: string | null };
 
@@ -132,6 +141,28 @@ export async function getDefaultSender(tenantId: string): Promise<string | null>
   return pick?.email_address || null;
 }
 
+/** Fetch an existing CC list's contacts as blast recipients (paged, capped) so a cc_list send
+ *  can be suppression-filtered like every other audience — no send path skips suppression. */
+export async function resolveCcListRecipients(client: ConstantContactClient, listId: string, cap = 5000): Promise<BlastRecipient[]> {
+  const out: BlastRecipient[] = [];
+  let cursor: string | undefined;
+  for (let i = 0; i < 200 && out.length < cap; i++) {
+    const page = (await client.listContacts({ lists: listId, limit: 100, cursor })) as {
+      contacts?: { email_address?: { address?: string }; first_name?: string; company_name?: string }[];
+      _links?: { next?: { href?: string } };
+    };
+    for (const c of page.contacts || []) {
+      const email = String(c.email_address?.address || "").trim().toLowerCase();
+      if (email) out.push({ email, first_name: c.first_name || null, business: c.company_name || null });
+    }
+    const next = page._links?.next?.href;
+    const m = next?.match(/cursor=([^&]+)/);
+    if (!m) break;
+    cursor = decodeURIComponent(m[1]);
+  }
+  return out;
+}
+
 export type RunBlastInput = {
   tenantId: string;
   userId?: string | null;
@@ -154,37 +185,49 @@ export type RunBlastResult =
   | { ok: false; error: string; message?: string; lender_hits?: string[]; status?: number };
 
 export async function runBlast(input: RunBlastInput): Promise<RunBlastResult> {
-  // 1. Blast-safety guard (fail-closed) on subject + html + the A/B alternate subject
-  //    (the alt subject is merchant-facing too — it must not bypass the lender/dash guard).
-  const safe = await sanitizeBlastMessage(input.tenantId, `${input.subject}\n${input.abTest?.alternative_subject || ""}\n${input.html}`);
+  // Clean merchant-facing copy (no em/en dashes) before guard + send.
+  const subject = stripDashes(input.subject);
+  const html = stripDashes(input.html);
+  const preheader = stripDashes(input.preheader);
+  const altSubject = input.abTest ? stripDashes(input.abTest.alternative_subject) : undefined;
+
+  // 1. Blast-safety guard (fail-closed) on subject + html + the A/B alternate subject.
+  const safe = await sanitizeBlastMessage(input.tenantId, `${subject}\n${altSubject || ""}\n${html}`);
   if (!safe.ok) return { ok: false, error: safe.reason, message: safe.message, lender_hits: safe.lenderHits, status: 400 };
 
   const client = await getConstantContactClient(input.tenantId);
   if (!client) return { ok: false, error: "not_connected", status: 400 };
 
-  const count = input.ccListId ? undefined : input.recipients?.length || 0;
-
-  // 2. Dry-run gate — a LAUNCH does nothing in dry mode; a TEST send (operator-only) is allowed.
-  if (!input.test?.length && isDryRun("constant_contact")) {
-    return { ok: true, dry_run: true, recipients: count, would_send: { recipients: count ?? "cc_list", subject: input.subject, list: input.ccListId || input.listNameHint } };
+  // 2. Resolve the audience to an explicit recipient set — for BOTH SunBiz segments and existing
+  //    CC lists — then suppression-filter it (fail closed). No path skips suppression.
+  let recipients = input.recipients;
+  if (!recipients && input.ccListId) {
+    const raw = await resolveCcListRecipients(client, input.ccListId).catch(() => null);
+    if (!raw) return { ok: false, error: "cc_list_read_failed", status: 502 };
+    recipients = raw;
   }
-  if (!input.ccListId && !input.recipients?.length) return { ok: false, error: "no_recipients", status: 400 };
+  const filt = recipients ? await filterSuppressed(input.tenantId, recipients) : { ok: true as const, recipients: [] as BlastRecipient[] };
+  if (!filt.ok) return { ok: false, error: filt.error, status: 500 };
+  const finalRecipients = filt.recipients;
+  const count = finalRecipients.length;
 
-  // 3. Resolve the CC contact list (import the SunBiz audience, or use the chosen list).
-  let listId = input.ccListId;
-  if (!listId && input.recipients) {
-    const listName = `SunBiz ${input.listNameHint || "segment"} ${new Date().toISOString().slice(0, 16)}`;
-    const created = (await client.createList(listName).catch(() => null)) as { list_id?: string } | null;
-    listId = created?.list_id;
-    if (!listId) return { ok: false, error: "list_create_failed", status: 502 };
-    // CC's JSON-import row identifies the contact by the `email` field (NOT email_address).
-    const importData = input.recipients.map((r) => ({ email: r.email, first_name: r.first_name || undefined, company_name: r.business || undefined }));
-    try {
-      const imp = (await client.importContacts(importData, [listId])) as { activity_id?: string };
-      if (imp.activity_id) await client.waitForActivity(imp.activity_id, { tries: 25, delayMs: 2000 });
-    } catch (e) {
-      return { ok: false, error: "import_failed", message: (e as Error).message.slice(0, 200), status: 502 };
-    }
+  // 3. Dry-run gate — a LAUNCH does nothing in dry mode; a TEST send (operator-only) is allowed.
+  if (!input.test?.length && isDryRun("constant_contact")) {
+    return { ok: true, dry_run: true, recipients: count, would_send: { recipients: count, subject, list: input.ccListId || input.listNameHint } };
+  }
+  if (!finalRecipients.length) return { ok: false, error: "no_recipients", status: 400 };
+
+  // 4. Import the suppression-filtered audience into a fresh CC list (`email` is CC's identity field).
+  const listName = `SunBiz ${input.listNameHint || "segment"} ${new Date().toISOString().slice(0, 16)}`;
+  const created = (await client.createList(listName).catch(() => null)) as { list_id?: string } | null;
+  const listId = created?.list_id;
+  if (!listId) return { ok: false, error: "list_create_failed", status: 502 };
+  const importData = finalRecipients.map((r) => ({ email: r.email, first_name: r.first_name || undefined, company_name: r.business || undefined }));
+  try {
+    const imp = (await client.importContacts(importData, [listId])) as { activity_id?: string };
+    if (imp.activity_id) await client.waitForActivity(imp.activity_id, { tries: 25, delayMs: 2000 });
+  } catch (e) {
+    return { ok: false, error: "import_failed", message: (e as Error).message.slice(0, 200), status: 502 };
   }
 
   // 4. Create + (test|schedule) the campaign.
@@ -196,14 +239,14 @@ export async function runBlast(input: RunBlastInput): Promise<RunBlastResult> {
       from_email: input.fromEmail,
       from_name: input.fromName || "SunBiz Funding",
       reply_to_email: input.replyTo || input.fromEmail,
-      subject: input.subject,
-      html_content: input.html,
-      preheader: input.preheader,
-      contact_list_ids: [listId as string],
+      subject,
+      html_content: html,
+      preheader,
+      contact_list_ids: [listId],
       physical_address_in_footer: SUNBIZ_FOOTER,
       scheduledDate: input.scheduledDate || "0",
       testTo: input.test,
-      abTest: input.abTest,
+      abTest: input.abTest ? { ...input.abTest, alternative_subject: altSubject as string } : undefined,
       guard: async (f) => {
         const g = await sanitizeBlastMessage(input.tenantId, `${f.subject}\n${f.html_content}`);
         if (!g.ok) throw new Error(`blast_safety_${g.reason}`);
@@ -227,15 +270,15 @@ export async function runBlast(input: RunBlastInput): Promise<RunBlastResult> {
         channel: "constant_contact",
         campaign_name: name,
         list_id: listId,
-        message: input.subject,
+        message: subject,
         launched_by: input.userId ?? null,
         dry_run: false,
       },
       { onConflict: "tenant_id,tt_campaign_id" },
     )
     .then(() => {}, () => {});
-  if (input.recipients?.length) {
-    const rows = input.recipients.slice(0, 2000).map((r) => ({
+  if (finalRecipients.length) {
+    const rows = finalRecipients.slice(0, 2000).map((r) => ({
       tenant_id: input.tenantId,
       tt_campaign_id: String(result.campaign_id),
       send_to: r.email,
@@ -266,17 +309,18 @@ export type RunResendInput = {
  * (one-send-gate — no unguarded sibling path).
  */
 export async function runResend(input: RunResendInput): Promise<RunBlastResult> {
-  const safe = await sanitizeBlastMessage(input.tenantId, input.resendSubject);
+  const resendSubject = stripDashes(input.resendSubject);
+  const safe = await sanitizeBlastMessage(input.tenantId, resendSubject);
   if (!safe.ok) return { ok: false, error: safe.reason, message: safe.message, lender_hits: safe.lenderHits, status: 400 };
 
   const client = await getConstantContactClient(input.tenantId);
   if (!client) return { ok: false, error: "not_connected", status: 400 };
 
   if (isDryRun("constant_contact")) {
-    return { ok: true, dry_run: true, would_send: { resend_to: "non_openers", subject: input.resendSubject } };
+    return { ok: true, dry_run: true, would_send: { resend_to: "non_openers", subject: resendSubject } };
   }
 
-  const body: Record<string, unknown> = { resend_subject: input.resendSubject };
+  const body: Record<string, unknown> = { resend_subject: resendSubject };
   if (input.delayMinutes != null) body.delay_minutes = input.delayMinutes;
   else body.delay_days = input.delayDays ?? 3;
   try {
@@ -299,19 +343,21 @@ export type RunAbTestInput = {
 
 /** Configure an A/B subject test on a draft campaign. Both subjects are guarded. */
 export async function runAbTest(input: RunAbTestInput): Promise<RunBlastResult> {
-  const safe = await sanitizeBlastMessage(input.tenantId, `${input.primarySubject}\n${input.alternativeSubject}`);
+  const primarySubject = stripDashes(input.primarySubject);
+  const alternativeSubject = stripDashes(input.alternativeSubject);
+  const safe = await sanitizeBlastMessage(input.tenantId, `${primarySubject}\n${alternativeSubject}`);
   if (!safe.ok) return { ok: false, error: safe.reason, message: safe.message, lender_hits: safe.lenderHits, status: 400 };
 
   const client = await getConstantContactClient(input.tenantId);
   if (!client) return { ok: false, error: "not_connected", status: 400 };
 
   if (isDryRun("constant_contact")) {
-    return { ok: true, dry_run: true, would_send: { abtest: { alternative_subject: input.alternativeSubject, test_size: input.testSize, winner_wait_duration: input.winnerWaitHours } } };
+    return { ok: true, dry_run: true, would_send: { abtest: { alternative_subject: alternativeSubject, test_size: input.testSize, winner_wait_duration: input.winnerWaitHours } } };
   }
 
   try {
     await client.createAbTest(input.activityId, {
-      alternative_subject: input.alternativeSubject,
+      alternative_subject: alternativeSubject,
       test_size: input.testSize,
       winner_wait_duration: input.winnerWaitHours,
     });

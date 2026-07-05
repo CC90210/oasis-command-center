@@ -156,7 +156,7 @@ export function CCCampaignDrawer({ campaign, onClose, onChanged }: { campaign: C
                   {linkRows.map((l, i) => (
                     <tr key={i} className="border-b border-bg-border/40 last:border-b-0">
                       <td className="py-2 text-fg-muted max-w-[380px] truncate">{String(l.url || l.link_url || "—")}</td>
-                      <td className="py-2 text-right tabular-nums text-fg">{num(l, "click_count", "clicks", "unique_click_count").toLocaleString()}</td>
+                      <td className="py-2 text-right tabular-nums text-fg">{num(l, "unique_clicks", "click_count", "clicks", "unique_click_count").toLocaleString()}</td>
                     </tr>
                   ))}
                 </tbody>
