@@ -37,7 +37,9 @@ export async function GET() {
       .eq("channel", "constant_contact");
     const runById = new Map(((runs.data || []) as { tt_campaign_id: string; launched_by: string | null; launched_at: string | null }[]).map((r) => [String(r.tt_campaign_id), r]));
 
-    const rows = campaigns.map((c) => {
+    const rows = campaigns
+      .filter((c) => String(c.current_status || "").toUpperCase() !== "REMOVED")
+      .map((c) => {
       const s = sumById.get(c.campaign_id);
       const run = runById.get(String(c.campaign_id));
       const counts = s?.unique_counts || {};

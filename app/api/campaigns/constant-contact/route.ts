@@ -15,6 +15,9 @@ import { LEAD_PIPELINE_STAGES } from "@/lib/sunbiz-stage-meta";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+// A live launch does createList → importContacts → waitForActivity → createAndSendBlast, which
+// can run tens of seconds; give it headroom so it can't time out and half-complete.
+export const maxDuration = 300;
 
 type SenderEmail = { email_address?: string; confirm_status?: string };
 type CcList = { list_id?: string; name?: string; membership_count?: number };

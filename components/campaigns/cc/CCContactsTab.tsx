@@ -134,24 +134,18 @@ export function CCContactsTab() {
 
   function saveName() {
     if (!detail || !selId) return;
-    const body = {
-      email_address: detail.email_address,
-      first_name: eFirst,
-      last_name: eLast,
-      create_source: detail.create_source || "Account",
-      update_source: "Account",
-      list_memberships: detail.list_memberships,
-      taggings: detail.taggings,
-      custom_fields: detail.custom_fields,
-      phone_numbers: detail.phone_numbers,
-      street_addresses: detail.street_addresses,
-      notes: detail.notes,
-    };
+    // CC PUT is a full replace: send ONLY writable fields (drop create_source + the read-only
+    // taggings/notes/ids) and preserve present scalars, so saving a name can't 400 or wipe data.
+    const d = detail as Record<string, unknown>;
+    const body: Record<string, unknown> = { email_address: d.email_address, update_source: "Account", first_name: eFirst, last_name: eLast };
+    for (const k of ["job_title", "company_name", "birthday_month", "birthday_day", "anniversary", "phone_numbers", "street_addresses", "custom_fields", "list_memberships"]) {
+      if (d[k] != null) body[k] = d[k];
+    }
     void run("save", () => fetch(`/api/campaigns/constant-contact/contacts/${encodeURIComponent(selId)}`, { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }), "Saved.", () => void load({ cursor }));
   }
 
   const sel = rows.find((r) => r.contact_id === selId) || detail;
-  const rates = engagement?.rates as { open_rate?: number; click_rate?: number } | undefined;
+  const rates = engagement?.rates as { average_open_rate?: number; average_click_rate?: number } | undefined;
 
   return (
     <div className="space-y-3">
@@ -240,8 +234,8 @@ export function CCContactsTab() {
 
             {rates && (
               <div className="flex gap-4 text-fg-muted">
-                <span>Open rate: <span className="text-fg">{rates.open_rate != null ? `${(Number(rates.open_rate) * 100).toFixed(0)}%` : "—"}</span></span>
-                <span>Click rate: <span className="text-fg">{rates.click_rate != null ? `${(Number(rates.click_rate) * 100).toFixed(0)}%` : "—"}</span></span>
+                <span>Open rate: <span className="text-fg">{rates.average_open_rate != null ? `${(Number(rates.average_open_rate) * 100).toFixed(0)}%` : "—"}</span></span>
+                <span>Click rate: <span className="text-fg">{rates.average_click_rate != null ? `${(Number(rates.average_click_rate) * 100).toFixed(0)}%` : "—"}</span></span>
               </div>
             )}
 

@@ -71,7 +71,7 @@ export function CCReports() {
 
   const ap = data.aggregate_percents || {};
   const cc = data.contact_counts || {};
-  const contactsTotal = Number(cc.all_contacts ?? cc.subscribed ?? 0);
+  const contactsTotal = Number(cc.total ?? cc.all_contacts ?? cc.subscribed ?? 0);
 
   const th = (key: typeof sortBy, label: string) => (
     <th className={`px-4 py-2.5 font-medium text-right cursor-pointer select-none ${sortBy === key ? "text-fg" : ""}`} onClick={() => setSortBy(key)}>

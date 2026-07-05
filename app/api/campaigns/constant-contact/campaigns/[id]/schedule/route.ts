@@ -9,6 +9,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireCcAdmin, ccError, resolvePrimaryActivityId } from "@/lib/integrations/constant-contact/route-helpers";
 import { isDryRun } from "@/lib/integrations/send-mode";
+import { sanitizeBlastMessage } from "@/lib/integrations/blast-safety";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -38,13 +39,24 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
   const scheduledDate = (body.scheduled_date || "").trim();
   if (!scheduledDate) return NextResponse.json({ ok: false, error: "scheduled_date_required" }, { status: 400 });
 
+  const activityId = await resolvePrimaryActivityId(gate.ctx.client, id);
+  if (!activityId) return NextResponse.json({ ok: false, error: "no_activity" }, { status: 404 });
+
+  // A schedule IS a live-send trigger — the campaign may have been edited in CC's own web UI, so
+  // re-run blast-safety (lender names / dashes) on the CURRENT content. Fail closed. [[one-send-gate]]
+  try {
+    const act = (await gate.ctx.client.getActivity(activityId, "html_content")) as { subject?: string; html_content?: string };
+    const g = await sanitizeBlastMessage(gate.ctx.session.tenantId, `${act.subject || ""}\n${act.html_content || ""}`);
+    if (!g.ok) return NextResponse.json({ ok: false, error: g.reason, message: g.message, lender_hits: g.lenderHits }, { status: 400 });
+  } catch (e) {
+    return ccError(e);
+  }
+
   if (isDryRun("constant_contact")) {
     return NextResponse.json({ ok: true, dry_run: true, would_schedule: scheduledDate });
   }
 
   try {
-    const activityId = await resolvePrimaryActivityId(gate.ctx.client, id);
-    if (!activityId) return NextResponse.json({ ok: false, error: "no_activity" }, { status: 404 });
     await gate.ctx.client.schedule(activityId, scheduledDate);
     return NextResponse.json({ ok: true });
   } catch (e) {
