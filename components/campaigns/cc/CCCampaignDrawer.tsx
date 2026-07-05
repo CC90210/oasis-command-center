@@ -11,7 +11,9 @@
 
 import { useEffect, useState } from "react";
 import { X, Loader2 } from "lucide-react";
-import { Stat } from "@/components/Card";
+import { Sparkline } from "@/components/charts/Sparkline";
+import { Donut } from "@/components/charts/Donut";
+import { Funnel } from "@/components/charts/Funnel";
 import type { CampaignRef } from "../ConstantContactConsole";
 
 type Detail = { ok: boolean; activity_id?: string | null; activity?: { permalink_url?: string } | null; schedule?: unknown; stats?: unknown };
@@ -34,19 +36,26 @@ function extractStats(stats: unknown) {
     || (r as Record<string, unknown>)
     || {};
   const sends = num(s, "em_sends", "sends");
+  const opens = num(s, "em_opens", "opens");
+  const clicks = num(s, "em_clicks", "clicks");
   return {
     sends,
-    opens: num(s, "em_opens", "opens"),
-    unique_opens: num(s, "em_unique_opens", "unique_opens"),
-    clicks: num(s, "em_clicks", "clicks"),
+    opens,
+    opens_all: num(s, "em_opens_all", "opens_all") || opens,
+    unique_opens: num(s, "em_unique_opens", "unique_opens") || opens,
+    clicks,
+    clicks_all: num(s, "em_clicks_all", "clicks_all") || clicks,
     bounces: num(s, "em_bounces", "bounces"),
     optouts: num(s, "em_optouts", "optouts", "opt_outs"),
-    open_rate: sends ? num(s, "em_opens", "opens") / sends : 0,
-    click_rate: sends ? num(s, "em_clicks", "clicks") / sends : 0,
+    open_rate: sends ? opens / sends : 0,
+    click_rate: sends ? clicks / sends : 0,
+    device: {
+      computer: num(s, "em_opens_all_computer", "opens_all_computer", "computer"),
+      mobile: num(s, "em_opens_all_mobile", "opens_all_mobile", "mobile"),
+      tablet: num(s, "em_opens_all_tablet", "opens_all_tablet", "tablet"),
+    },
   };
 }
-const pct = (n: number) => `${(n * 100).toFixed(1)}%`;
-
 export function CCCampaignDrawer({ campaign, onClose, onChanged }: { campaign: CampaignRef; onClose: () => void; onChanged: () => void }) {
   const [tab, setTab] = useState<TabKey>("overview");
   const [detail, setDetail] = useState<Detail | null>(null);
@@ -105,6 +114,8 @@ export function CCCampaignDrawer({ campaign, onClose, onChanged }: { campaign: C
     || (metrics?.links as { results?: unknown[] } | undefined)?.results
     || (Array.isArray(metrics?.links) ? (metrics?.links as unknown[]) : [])) as Record<string, unknown>[];
   const permalink = detail?.activity?.permalink_url;
+  const trendVals = ((metrics?.trend || []) as { opens?: number }[]).map((t) => Number(t.opens || 0)).filter((n) => !isNaN(n));
+  const deviceTotal = s.device.computer + s.device.mobile + s.device.tablet;
 
   const tabCls = (k: TabKey) => `px-3 py-1.5 text-[12px] rounded-md ${tab === k ? "bg-bg-elev text-fg" : "text-fg-muted hover:text-fg"}`;
 
@@ -130,14 +141,56 @@ export function CCCampaignDrawer({ campaign, onClose, onChanged }: { campaign: C
           {error && <div className="text-[12px] text-status-warm">{error}</div>}
 
           {tab === "overview" && (
-            <div className="grid grid-cols-2 gap-3">
-              <Stat label="Sends" value={s.sends.toLocaleString()} />
-              <Stat label="Opens" value={s.opens.toLocaleString()} hint={`${s.unique_opens.toLocaleString()} unique`} />
-              <Stat label="Open rate" value={pct(s.open_rate)} accent />
-              <Stat label="Clicks" value={s.clicks.toLocaleString()} />
-              <Stat label="Click rate" value={pct(s.click_rate)} />
-              <Stat label="Bounces" value={s.bounces.toLocaleString()} />
-              <Stat label="Opt-outs" value={s.optouts.toLocaleString()} />
+            <div className="space-y-3">
+              {/* Rate rings + headline counts */}
+              <div className="flex items-center gap-4 rounded-xl border border-bg-border bg-bg-panel/40 p-4">
+                <div className="text-center">
+                  <Donut pct={s.open_rate * 100} tone="threshold" />
+                  <div className="mt-1.5 text-[10px] uppercase tracking-wide text-fg-dim">Open rate</div>
+                </div>
+                <div className="text-center">
+                  <Donut pct={s.click_rate * 100} tone="accent" />
+                  <div className="mt-1.5 text-[10px] uppercase tracking-wide text-fg-dim">Click rate</div>
+                </div>
+                <div className="flex-1 space-y-1.5 text-[12px]">
+                  <div className="flex justify-between"><span className="text-fg-dim">Sent</span><span className="tabular-nums text-fg">{s.sends.toLocaleString()}</span></div>
+                  <div className="flex justify-between"><span className="text-fg-dim">Opens</span><span className="tabular-nums text-fg">{s.opens_all.toLocaleString()} <span className="text-fg-dim">/ {s.unique_opens.toLocaleString()} uniq</span></span></div>
+                  <div className="flex justify-between"><span className="text-fg-dim">Clicks</span><span className="tabular-nums text-fg">{s.clicks.toLocaleString()}</span></div>
+                  <div className="flex justify-between"><span className="text-fg-dim">Bounces</span><span className={`tabular-nums ${s.bounces ? "text-status-warm" : "text-fg"}`}>{s.bounces.toLocaleString()}</span></div>
+                  <div className="flex justify-between"><span className="text-fg-dim">Opt-outs</span><span className={`tabular-nums ${s.optouts ? "text-status-hot" : "text-fg"}`}>{s.optouts.toLocaleString()}</span></div>
+                </div>
+              </div>
+
+              {/* Delivery funnel */}
+              <div className="rounded-xl border border-bg-border bg-bg-panel/40 p-4">
+                <div className="mb-2.5 text-[10px] uppercase tracking-wide text-fg-dim">Delivery funnel</div>
+                <Funnel steps={[{ label: "Sent", value: s.sends }, { label: "Opened", value: s.unique_opens || s.opens }, { label: "Clicked", value: s.clicks }]} />
+              </div>
+
+              {/* Opens over time */}
+              {trendVals.length >= 2 && (
+                <div className="rounded-xl border border-bg-border bg-bg-panel/40 p-4">
+                  <div className="mb-2 flex items-center justify-between">
+                    <span className="text-[10px] uppercase tracking-wide text-fg-dim">Opens over time</span>
+                    <span className="text-[11px] tabular-nums text-fg-muted">{s.opens_all.toLocaleString()} total</span>
+                  </div>
+                  <div className="text-accent"><Sparkline values={trendVals} width={480} height={48} area className="w-full" /></div>
+                </div>
+              )}
+
+              {/* Opens by device */}
+              {deviceTotal > 0 && (
+                <div className="space-y-2 rounded-xl border border-bg-border bg-bg-panel/40 p-4">
+                  <div className="text-[10px] uppercase tracking-wide text-fg-dim">Opens by device</div>
+                  {[{ k: "Mobile", v: s.device.mobile }, { k: "Desktop", v: s.device.computer }, { k: "Tablet", v: s.device.tablet }].map((d) => (
+                    <div key={d.k} className="flex items-center gap-3 text-[12px]">
+                      <span className="w-16 text-fg-dim">{d.k}</span>
+                      <div className="relative h-1.5 flex-1 overflow-hidden rounded-full bg-bg-elev"><div className="absolute inset-y-0 left-0 rounded-full bg-accent/50" style={{ width: `${(d.v / deviceTotal) * 100}%` }} /></div>
+                      <span className="w-10 text-right tabular-nums text-fg-muted">{((d.v / deviceTotal) * 100).toFixed(0)}%</span>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
           )}
 
