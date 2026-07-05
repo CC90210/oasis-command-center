@@ -42,11 +42,35 @@ function statusTone(status: string): "neutral" | "info" | "engaged" | "hot" | "w
   }
 }
 
-const pct = (r: number | null) => (r == null ? "—" : `${(r * 100).toFixed(1)}%`);
 function fmtDate(iso: string | null): string {
   if (!iso) return "—";
   const d = new Date(iso);
   return isNaN(d.getTime()) ? "—" : d.toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
+}
+
+/** A rate rendered as a hairline bar with the % on top — reads at a glance, not a naked number. */
+function RateBar({ value, tone = "accent" }: { value: number | null; tone?: "accent" | "engaged" }) {
+  const p = value == null ? 0 : Math.max(0, Math.min(100, value * 100));
+  const fill = tone === "engaged" ? "bg-status-engaged/50" : "bg-accent/50";
+  return (
+    <div className="flex items-center justify-end gap-2">
+      <div className="relative h-1.5 w-16 overflow-hidden rounded-full bg-bg-elev">
+        <div className={`absolute inset-y-0 left-0 rounded-full ${fill}`} style={{ width: `${p}%` }} />
+      </div>
+      <span className="w-12 text-right tabular-nums text-fg-muted">{value == null ? "—" : `${p.toFixed(1)}%`}</span>
+    </div>
+  );
+}
+
+const SENDING = new Set(["EXECUTING", "SENDING", "EXECUTION_STARTED", "EXECUTION_IN_PROGRESS"]);
+function StatusCell({ status }: { status: string }) {
+  const sending = SENDING.has((status || "").toUpperCase());
+  return (
+    <span className="inline-flex items-center gap-1.5">
+      {sending && <span className="h-1.5 w-1.5 rounded-full bg-accent animate-pulse-slow" aria-hidden="true" />}
+      <Tag tone={statusTone(status)}>{(status || "").toLowerCase()}</Tag>
+    </span>
+  );
 }
 
 export function CCCampaignsList({ onSelect }: { onSelect: (c: CampaignRef) => void }) {
@@ -125,12 +149,12 @@ export function CCCampaignsList({ onSelect }: { onSelect: (c: CampaignRef) => vo
           <div className="overflow-x-auto">
             <table className="w-full text-[13px]">
               <thead>
-                <tr className="text-left text-fg-dim border-b border-bg-border">
+                <tr className="text-left text-[11px] uppercase tracking-wide text-fg-dim border-b border-bg-border">
                   <th className="px-4 py-2.5 font-medium">Campaign</th>
                   <th className="px-4 py-2.5 font-medium">Status</th>
-                  <th className="px-4 py-2.5 font-medium">Sent / Updated</th>
-                  <th className="px-4 py-2.5 font-medium text-right">Open</th>
-                  <th className="px-4 py-2.5 font-medium text-right">Click</th>
+                  <th className="px-4 py-2.5 font-medium">Sent</th>
+                  <th className="px-4 py-2.5 font-medium text-right">Open rate</th>
+                  <th className="px-4 py-2.5 font-medium text-right">Click rate</th>
                 </tr>
               </thead>
               <tbody>
@@ -138,13 +162,15 @@ export function CCCampaignsList({ onSelect }: { onSelect: (c: CampaignRef) => vo
                   <tr
                     key={r.campaign_id}
                     onClick={() => onSelect({ campaign_id: r.campaign_id, name: r.name, status: r.status })}
-                    className="border-b border-bg-border/40 last:border-b-0 hover:bg-bg-elev/30 cursor-pointer"
+                    className="group border-b border-bg-border/40 last:border-b-0 hover:bg-bg-elev/40 cursor-pointer transition-colors"
                   >
-                    <td className="px-4 py-2.5 text-fg max-w-[320px] truncate">{r.name || "(untitled)"}</td>
-                    <td className="px-4 py-2.5"><Tag tone={statusTone(r.status)}>{(r.status || "").toLowerCase()}</Tag></td>
-                    <td className="px-4 py-2.5 text-fg-muted">{fmtDate(r.last_sent_date || r.updated_at)}</td>
-                    <td className="px-4 py-2.5 text-right tabular-nums text-fg-muted">{pct(r.open_rate)}</td>
-                    <td className="px-4 py-2.5 text-right tabular-nums text-fg-muted">{pct(r.click_rate)}</td>
+                    <td className="px-4 py-3 max-w-[320px]">
+                      <div className="truncate text-fg group-hover:text-accent transition-colors">{r.name || "(untitled)"}</div>
+                    </td>
+                    <td className="px-4 py-3"><StatusCell status={r.status} /></td>
+                    <td className="px-4 py-3 text-fg-muted tabular-nums">{fmtDate(r.last_sent_date || r.updated_at)}</td>
+                    <td className="px-4 py-3"><RateBar value={r.open_rate} /></td>
+                    <td className="px-4 py-3"><RateBar value={r.click_rate} tone="engaged" /></td>
                   </tr>
                 ))}
               </tbody>

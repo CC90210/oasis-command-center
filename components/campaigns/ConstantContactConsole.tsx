@@ -9,7 +9,7 @@
  */
 
 import { useState } from "react";
-import { PenSquare, Megaphone, BarChart3, Users, LayoutTemplate, type LucideIcon } from "lucide-react";
+import { PenSquare, Megaphone, BarChart3, Users, LayoutTemplate, Mail, CheckCircle2, AlertCircle, type LucideIcon } from "lucide-react";
 import { ConstantContactComposer } from "./ConstantContactComposer";
 import { CCCampaignsList } from "./cc/CCCampaignsList";
 import { CCCampaignDrawer } from "./cc/CCCampaignDrawer";
@@ -35,25 +35,43 @@ export function ConstantContactConsole({ account, onReconnect }: { account: CCAc
   // Bump to force a campaigns-list refetch after a drawer action (rename/delete/cancel).
   const [refreshKey, setRefreshKey] = useState(0);
 
+  const noConfirmedSender = !!account?.emails?.length && !account.emails.some((e) => e.status === "CONFIRMED");
+
   return (
     <div className="space-y-4">
-      {/* Account line + reconnect */}
-      <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] text-fg-dim">
-        <div>
-          Account: <span className="text-fg-muted font-medium">{account?.org || "Constant Contact"}</span>
-          {account?.emails?.length ? (
-            <span className="ml-2">
-              · sender{account.emails.length > 1 ? "s" : ""}:{" "}
-              {account.emails.map((e) => e.email).join(", ")}
-            </span>
-          ) : null}
+      {/* Connected-as identity — the real linked account + its confirmed senders. */}
+      <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-bg-border bg-bg-panel px-4 py-3">
+        <div className="flex min-w-0 items-center gap-3">
+          <span className="inline-flex h-8 w-8 items-center justify-center rounded-lg bg-accent/10 text-accent"><Mail className="h-4 w-4" /></span>
+          <div className="min-w-0">
+            <div className="text-[10px] uppercase tracking-wide text-fg-dim">Connected as</div>
+            <div className="truncate text-[13px] font-semibold text-fg">{account?.org || "Constant Contact"}</div>
+          </div>
         </div>
-        <button type="button" onClick={onReconnect} className="underline hover:text-fg-muted">Reconnect</button>
+        <div className="flex flex-wrap items-center gap-2 text-[11px]">
+          {account?.emails?.length ? (
+            account.emails.slice(0, 3).map((e) => (
+              <span key={e.email} className="inline-flex items-center gap-1 rounded-md border border-bg-border bg-bg-elev/40 px-2 py-1 text-fg-muted">
+                {e.status === "CONFIRMED" ? <CheckCircle2 className="h-3 w-3 text-status-engaged" /> : <AlertCircle className="h-3 w-3 text-status-warm" />}
+                {e.email}
+              </span>
+            ))
+          ) : (
+            <span className="inline-flex items-center gap-1 text-status-warm"><AlertCircle className="h-3 w-3" /> No sender email on this account</span>
+          )}
+          <button type="button" onClick={onReconnect} className="text-fg-dim underline hover:text-fg-muted">Reconnect</button>
+        </div>
       </div>
 
-      {/* Section sub-tabs */}
-      <div className="inline-flex flex-wrap rounded-md border border-bg-border overflow-hidden text-[12px]">
-        {TABS.map((t, i) => {
+      {noConfirmedSender && (
+        <div className="rounded-md border border-status-warm/40 bg-status-warm/5 px-3 py-2 text-[11px] text-status-warm">
+          No <span className="font-semibold">confirmed</span> sender on this account yet — Constant Contact rejects sends from unconfirmed addresses. Confirm one in Constant Contact first.
+        </div>
+      )}
+
+      {/* Section pill tabs */}
+      <div className="flex flex-wrap gap-1.5">
+        {TABS.map((t) => {
           const Icon = t.icon;
           const active = section === t.key;
           return (
@@ -61,7 +79,7 @@ export function ConstantContactConsole({ account, onReconnect }: { account: CCAc
               key={t.key}
               type="button"
               onClick={() => setSection(t.key)}
-              className={`inline-flex items-center gap-1.5 px-3 py-1.5 ${i > 0 ? "border-l border-bg-border" : ""} ${active ? "bg-bg-elev text-fg" : "text-fg-muted hover:text-fg"}`}
+              className={`inline-flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-[12px] transition-colors ${active ? "border-accent/40 bg-accent/10 text-accent" : "border-bg-border text-fg-muted hover:bg-bg-elev/40 hover:text-fg"}`}
             >
               <Icon className="h-3.5 w-3.5" />
               {t.label}
