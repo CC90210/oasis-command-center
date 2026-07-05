@@ -48,6 +48,8 @@ const CHANNEL_LIVE_ENV: Record<string, string> = {
   // Constant Contact gets its OWN flag so going live for CC blasts doesn't also
   // un-gate the Gmail / cold-outreach email channels.
   constant_contact: "LIVE_SEND_CONSTANT_CONTACT",
+  // Smartlead cold-email: activating a campaign / pushing leads is gated separately.
+  smartlead: "LIVE_SEND_SMARTLEAD",
 };
 
 /**
