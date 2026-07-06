@@ -201,7 +201,6 @@ export default async function TenantCatchAllPage({
     !!dataTenantId &&
     (pageDef.kind === "pipeline" ||
       pageDef.kind === "pipeline_entity" ||
-      pageDef.kind === "accelerated_followup" ||
       pageDef.kind === "dashboard");
   let adminRoster: Array<{ id: string; name: string }> = [];
   if (showLeadFilter && dataTenantId) {
@@ -489,7 +488,6 @@ function renderSubtitle(brand: string, page: ManifestPageDef): string {
     case "import": return "Paste a CSV or drop a file. Duplicate-check is automatic.";
     case "pipeline": return "Lead Pipeline and Opportunity Pipeline — Salesforce-parity overview.";
     case "pipeline_entity": return page.entity ? `${humanizeEntity(page.entity)} by stage` : "Pipeline";
-    case "accelerated_followup": return "Leads flagged for accelerated follow-up — scoped to your book.";
     case "shopping_out": return "Multi-lender outreach — pick lenders, attach docs, send.";
     case "offers_v2": return "Offers by deal — lender intelligence, accordion + kanban views.";
     case "lenders_v2": return "Lender directory — buy rates, restricted states, decline reasons.";
@@ -657,48 +655,6 @@ async function PageBody({
           stageFilter={stageFilter}
           query={query}
           assignedScope={assignedScope}
-          canManage={canManage}
-        />
-      );
-    }
-    case "accelerated_followup": {
-      // Accelerated Follow-up — a LIVE SEGMENT of the lead pipeline, not a
-      // separate dataset. Reuses the EXACT scoped fetch the Leads board uses
-      // (listByAssignedScope → per-agent scope; admins see all), then keeps
-      // ONLY the leads flagged data.accelerated_followup === true, applies the
-      // same ?q= search + assigned-name resolution, and renders the identical
-      // LeadPipelineView (variant "sunbiz"). One fetch, one scope boundary,
-      // one view — so this board can never drift from /leads.
-      const accelRes = tenantId
-        ? await listByAssignedScope({
-            tenant_id: tenantId,
-            entity: "lead",
-            scope: assignedScope,
-            limit: 2_000,
-          }).catch(() => ({ rows: [], total: 0 }))
-        : { rows: [], total: 0 };
-      // Flag lives on the JSONB row as a boolean; tolerate the "true" string
-      // form too in case an importer wrote it as text.
-      const accelRows = filterRowsByQuery(
-        accelRes.rows.filter((r) => {
-          const v = (r.data as Record<string, unknown>).accelerated_followup;
-          return v === true || v === "true";
-        }),
-        query,
-      );
-      const accelNamed = tenantId ? await attachAssignedNames(accelRows, tenantId) : accelRows;
-      return (
-        <LeadPipelineView
-          slug={slug}
-          entityName="lead"
-          entityLabel="Lead"
-          stages={LEAD_PIPELINE_STAGES}
-          stageField="stage"
-          rows={accelNamed}
-          stageFilter={stageFilter}
-          query={query}
-          basePath={page.path}
-          variant="sunbiz"
           canManage={canManage}
         />
       );
