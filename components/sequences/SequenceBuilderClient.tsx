@@ -100,6 +100,9 @@ export function SequenceBuilderClient({ initialSequence }: Props) {
     const tokens = new Set<string>();
     for (const step of parsed.steps) {
       for (const t of extractTokens(step.body || "")) tokens.add(t);
+      if (step.body_html) {
+        for (const t of extractTokens(step.body_html)) tokens.add(t);
+      }
       if (step.subject) {
         for (const t of extractTokens(step.subject)) tokens.add(t);
       }
