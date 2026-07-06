@@ -349,6 +349,11 @@ export const SUN_SEED: TenantManifest = {
     // new (Phase 4) multi-lender outreach surface; sits between Leads and
     // Applications to mirror the operator's real workflow order.
     { href: "/t/sun/leads", label: "Leads", icon: "Users", group: "Pipeline" },
+    // Accelerated Follow-up — a live segment of the Lead pipeline: only the
+    // leads flagged data.accelerated_followup === true (chase-fast bucket).
+    // Reuses the same scoped lead fetch + LeadPipelineView as Leads. Sits right
+    // under Leads so operators find the priority subset next to the full board.
+    { href: "/t/sun/accelerated-followup", label: "Accelerated Follow-up", icon: "Activity", group: "Pipeline" },
     { href: "/t/sun/shopping-out", label: "Shopping Out", icon: "ShoppingBag", group: "Pipeline" },
     { href: "/t/sun/applications", label: "Applications", icon: "FileText", group: "Pipeline" },
     // Phase 3b/3c (2026-06-02). Unified inbox + bulk-campaign analytics.
@@ -630,6 +635,10 @@ export const SUN_SEED: TenantManifest = {
     // verbatim Salesforce per Adon's screenshots. Replaces the prior
     // /leads Kanban (2026-05-17). Filter by ?stage=<key>.
     { path: "leads", label: "Lead Pipeline", kind: "pipeline_entity", entity: "lead", config: { stage_field: "stage" } },
+    // Accelerated Follow-up — same scoped lead fetch as /leads, filtered to
+    // data.accelerated_followup === true, rendered through LeadPipelineView.
+    // entity:"lead" so /new + record-detail routing reuse the lead form.
+    { path: "accelerated-followup", label: "Accelerated Follow-up", kind: "accelerated_followup", entity: "lead" },
     // Opportunity Pipeline — same chevron pattern keyed on
     // application.status. Verbatim Salesforce stages (submitted_to_
     // underwriting → funded → dead_file). Replaces the prior
