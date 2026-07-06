@@ -22,6 +22,29 @@ type EditorState = {
   html: string;
 };
 
+/** Ordered library sections (Adon's grouping). Each maps to one or more template
+ *  `category` keys from the SunBiz library; anything uncovered falls into "Other". */
+const CATEGORY_SECTIONS: { key: string; label: string; cats: string[] }[] = [
+  { key: "welcome", label: "Welcome", cats: ["welcome"] },
+  { key: "nurture", label: "Nurture", cats: ["nurture"] },
+  { key: "industry", label: "Industry", cats: ["industry"] },
+  { key: "use_case", label: "Use case", cats: ["use_case"] },
+  { key: "speed", label: "Speed", cats: ["speed"] },
+  { key: "consolidation", label: "Consolidation", cats: ["consolidation"] },
+  { key: "seasonal", label: "Seasonal", cats: ["seasonal"] },
+  { key: "amount", label: "Amount", cats: ["amount"] },
+  { key: "follow_up", label: "Follow-up", cats: ["follow_up"] },
+  { key: "reengagement", label: "Re-engagement", cats: ["reengagement"] },
+  { key: "application", label: "Application", cats: ["application"] },
+  { key: "viewed_application", label: "View application", cats: ["viewed_application"] },
+  { key: "signed_document", label: "Sign application / document request", cats: ["signed_application", "document_request"] },
+  { key: "offer", label: "Offer", cats: ["offer"] },
+  { key: "objection", label: "Objection", cats: ["objection"] },
+  { key: "retention", label: "Retention", cats: ["retention"] },
+  { key: "renewal", label: "Renewal", cats: ["renewal"] },
+  { key: "onboarding", label: "Onboarding", cats: ["onboarding"] },
+];
+
 /** Content-shaped shimmer standing in for one TemplateCard while data loads. */
 function SkeletonCard({ delay = 0 }: { delay?: number }) {
   return (
@@ -125,6 +148,7 @@ export function CCTemplates() {
   const [editor, setEditor] = useState<EditorState | null>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [bodyView, setBodyView] = useState<"edit" | "preview">("edit");
+  const [activeSection, setActiveSection] = useState<string>("all");
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -245,6 +269,33 @@ export function CCTemplates() {
   }
   if (!data) return null;
 
+  // Group the SunBiz library by Adon's section order; uncovered categories → "Other".
+  const covered = new Set<string>();
+  CATEGORY_SECTIONS.forEach((s) => s.cats.forEach((c) => covered.add(c)));
+  const sectionTemplates = (cats: string[]) => data.sunbiz.filter((t) => cats.includes(t.category));
+  const otherSunbiz = data.sunbiz.filter((t) => !covered.has(t.category));
+  const nonEmptySections = CATEGORY_SECTIONS.filter((s) => sectionTemplates(s.cats).length > 0);
+
+  const renderSection = (label: string, items: Template[], hideHeader = false) => (
+    <div className="space-y-2">
+      {!hideHeader && (
+        <div className="flex items-center gap-2">
+          <span className="text-[11px] uppercase tracking-wide text-fg-dim">{label}</span>
+          <span className="text-[10px] tabular-nums text-fg-dim">{items.length}</span>
+        </div>
+      )}
+      {items.length === 0 ? (
+        <div className="text-[12px] text-fg-dim">None.</div>
+      ) : (
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+          {items.map((t) => (
+            <TemplateCard key={t.id} t={t} onDuplicate={() => void duplicateToSaved(t)} duplicating={busy === `dup-${t.id}`} />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+
   return (
     <div className="space-y-4">
       {notice && (
@@ -330,22 +381,44 @@ export function CCTemplates() {
         </Card>
       )}
 
-      <Card title="Library" subtitle="Read-only — duplicate to Saved templates to customize.">
-        <div className="space-y-4">
-          {(["sunbiz", "cold"] as const).map((source) => (
-            <div key={source} className="space-y-2">
-              <div className="label">{source === "sunbiz" ? "SunBiz library" : "Cold-outreach"}</div>
-              {data[source].length === 0 ? (
-                <div className="text-[12px] text-fg-dim">None.</div>
-              ) : (
-                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
-                  {data[source].map((t) => (
-                    <TemplateCard key={t.id} t={t} onDuplicate={() => void duplicateToSaved(t)} duplicating={busy === `dup-${t.id}`} />
-                  ))}
-                </div>
-              )}
-            </div>
-          ))}
+      <Card
+        title="Library"
+        subtitle="Read-only — duplicate to Saved templates to customize."
+        action={
+          <select
+            value={activeSection}
+            onChange={(e) => setActiveSection(e.target.value)}
+            className="select w-auto !py-1 text-[12px]"
+            aria-label="View templates by section"
+          >
+            <option value="all">All categories</option>
+            {nonEmptySections.map((s) => (
+              <option key={s.key} value={s.key}>{s.label} ({sectionTemplates(s.cats).length})</option>
+            ))}
+            {otherSunbiz.length > 0 && <option value="other">Other ({otherSunbiz.length})</option>}
+            {data.cold.length > 0 && <option value="cold">Cold outreach ({data.cold.length})</option>}
+          </select>
+        }
+      >
+        <div className="space-y-5">
+          {activeSection === "all" ? (
+            <>
+              {nonEmptySections.map((s) => (
+                <div key={s.key}>{renderSection(s.label, sectionTemplates(s.cats))}</div>
+              ))}
+              {otherSunbiz.length > 0 && renderSection("Other", otherSunbiz)}
+              {data.cold.length > 0 && renderSection("Cold outreach", data.cold)}
+            </>
+          ) : activeSection === "cold" ? (
+            renderSection("Cold outreach", data.cold, true)
+          ) : activeSection === "other" ? (
+            renderSection("Other", otherSunbiz, true)
+          ) : (
+            (() => {
+              const sec = CATEGORY_SECTIONS.find((s) => s.key === activeSection);
+              return renderSection(sec?.label || "", sec ? sectionTemplates(sec.cats) : [], true);
+            })()
+          )}
         </div>
       </Card>
     </div>
