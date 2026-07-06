@@ -34,6 +34,13 @@ export type DripStep = {
    * vs throwing on the send path).
    */
   body: string;
+  /**
+   * Optional rich HTML body for email steps. Phase-2 seeds (Inquiry
+   * Welcomer, migrations 078/080) store body_text + body_html; the runner
+   * sends multipart/alternative when body_html is present. Carried through
+   * here so an editor save doesn't strip the HTML part.
+   */
+  body_html?: string;
   /** Optional sender label — agent name, e.g. "Solara" or "Helios". */
   from_label?: string;
 };
@@ -106,12 +113,24 @@ function parseStep(v: unknown, path: string): DripStep {
   if (typeof delayRaw !== "number" || !Number.isFinite(delayRaw)) {
     throw new DripDefinitionError(`${path}.delay_minutes`, "expected finite number");
   }
-  const body = requireString(v, "body", path);
+  // Accept both step shapes: legacy `body` and the Phase-2 `body_text`
+  // (+ optional `body_html`) used by the Inquiry Welcomer migrations
+  // (SunBiz-Agent 078/080). The Python runner reads body_text first and
+  // falls back to body — without this fallback those sequences render as
+  // "Sequence definition corrupt" in the editor despite firing fine.
+  const bodyRaw =
+    typeof v.body === "string" && v.body.trim() ? v.body : v.body_text;
+  if (typeof bodyRaw !== "string" || !bodyRaw.trim()) {
+    throw new DripDefinitionError(`${path}.body`, "expected non-empty string");
+  }
+  const body = bodyRaw;
   const step: DripStep = {
     channel: channel as DripChannel,
     delay_minutes: Math.max(0, Math.floor(delayRaw)),
     body,
   };
+  const bodyHtml = optionalString(v, "body_html");
+  if (bodyHtml) step.body_html = bodyHtml;
   if (channel === "email") {
     step.subject = requireString(v, "subject", path);
   } else if (typeof v.subject === "string" && v.subject.length > 0) {
