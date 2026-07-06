@@ -2,7 +2,15 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useEffect, useMemo, useState, type CSSProperties, type ReactNode } from "react";
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+  type MouseEvent as ReactMouseEvent,
+  type ReactNode,
+} from "react";
 import {
   CheckSquare,
   ChevronDown,
@@ -22,6 +30,8 @@ import {
 import { PageSearchBar } from "@/components/manifest/PageSearchBar";
 import { AutofillDropzone } from "@/components/leads/AutofillDropzone";
 import { pipelineRowHref } from "@/lib/pipeline-display";
+import { CopyButton } from "@/components/CopyButton";
+import { DealHoverCard } from "@/components/manifest/DealHoverCard";
 import { lastTouchIso } from "@/lib/lead-staleness";
 import {
   formatMoney,
@@ -83,7 +93,7 @@ type TenantMember = {
 
 const SUN_GRID_STYLE: CSSProperties = {
   gridTemplateColumns:
-    "minmax(150px,1.6fr) minmax(92px,.9fr) minmax(78px,.7fr) 30px 56px 38px minmax(104px,1fr) 68px 112px 34px 42px 76px 58px",
+    "minmax(150px,1.6fr) minmax(92px,.9fr) minmax(108px,.9fr) 30px 56px 38px minmax(104px,1fr) 68px 112px 34px 42px 76px 58px",
 };
 
 const OASIS_GRID_STYLE: CSSProperties = {
@@ -139,6 +149,17 @@ function stageTargetLabelVariant(cfg: VariantConfig, stage: string): string | nu
   return `${days}d target`;
 }
 
+// Doc-type chips for the Missing Info filter. Keys match lib/lead-doc-display.ts
+// and the /api/leads/missing-docs EXPECTED_DOC_TYPES.
+const MISSING_DOC_FILTERS: { key: string; label: string }[] = [
+  { key: "bank_statements_3mo", label: "Bank statements" },
+  { key: "drivers_license", label: "Driver's license" },
+  { key: "void_cheque", label: "Void cheque" },
+  { key: "proof_of_ownership", label: "Proof of ownership" },
+  { key: "business_license", label: "Business license" },
+  { key: "tax_returns", label: "Tax returns" },
+];
+
 export function LeadPipelineView({
   slug,
   entityName,
@@ -160,6 +181,9 @@ export function LeadPipelineView({
   const [membersState, setMembersState] = useState<"idle" | "loading" | "error">("idle");
   const [bulkBusy, setBulkBusy] = useState(false);
   const [bulkMsg, setBulkMsg] = useState<string | null>(null);
+  const [docFilter, setDocFilter] = useState<Set<string>>(new Set());
+  const [missingByLead, setMissingByLead] = useState<Record<string, string[]>>({});
+  const [missingLoaded, setMissingLoaded] = useState(false);
   const cfg = useMemo(() => variantConfig(variant), [variant]);
   const stageMap = useMemo(
     () => Object.fromEntries(stages.map((stage) => [stage.key, stage])) as Record<string, StageMeta>,
@@ -220,11 +244,83 @@ export function LeadPipelineView({
   const visibleStages = stageFilter
     ? stages.filter((s) => s.key === stageFilter)
     : stages;
+  const isMissingInfoView =
+    !!stageFilter && stageFilter.toLowerCase().replace(/\s+/g, "_") === "missing_info";
+  const rowMissing = (r: Row): string[] =>
+    missingByLead[entityName === "application" ? String(r.data.lead_id || "") : r.id] || [];
+  const applyDocFilter = (rowsIn: Row[]): Row[] =>
+    isMissingInfoView && docFilter.size > 0
+      ? rowsIn.filter((r) => rowMissing(r).some((t) => docFilter.has(t)))
+      : rowsIn;
   const touchFirst = pickTouchFirst(renderedRows, stageField, stages, cfg);
 
   useEffect(() => {
     setCollapsedStages({});
+    setMissingByLead({});
+    setMissingLoaded(false);
+    setDocFilter(new Set());
   }, [entityName, basePath]);
+
+  // Missing-Info doc filter: clear the chips whenever we leave that stage view.
+  useEffect(() => {
+    if (!isMissingInfoView) {
+      setDocFilter(new Set());
+      setMissingLoaded(false);
+    }
+  }, [isMissingInfoView]);
+
+  // Lazy-load which required docs each Missing-Info deal lacks (one batched call).
+  useEffect(() => {
+    if (!isMissingInfoView || missingLoaded) return;
+    const ids = [
+      ...new Set(
+        rows
+          .filter(
+            (r) => String(r.data[stageField] || "").toLowerCase().replace(/\s+/g, "_") === "missing_info",
+          )
+          .map((r) => (entityName === "application" ? String(r.data.lead_id || "") : r.id))
+          .filter(Boolean),
+      ),
+    ];
+    if (!ids.length) {
+      setMissingLoaded(true);
+      return;
+    }
+    let cancelled = false;
+    fetch("/api/leads/missing-docs", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ lead_ids: ids }),
+    })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((j) => {
+        if (cancelled) return;
+        if (j?.ok) setMissingByLead(j.missing || {});
+        setMissingLoaded(true);
+      })
+      .catch(() => {
+        if (!cancelled) setMissingLoaded(true);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [isMissingInfoView, missingLoaded, rows, stageField, entityName]);
+
+  // When doc chips are active, auto-select the matching deals for the bulk-send bar.
+  useEffect(() => {
+    if (!isMissingInfoView || docFilter.size === 0) return;
+    const match = rows
+      .filter((r) => {
+        if (String(r.data[stageField] || "").toLowerCase().replace(/\s+/g, "_") !== "missing_info")
+          return false;
+        const miss =
+          missingByLead[entityName === "application" ? String(r.data.lead_id || "") : r.id] || [];
+        return miss.some((t) => docFilter.has(t));
+      })
+      .map((r) => r.id);
+    setSelected(new Set(match));
+    setSelectMode(match.length > 0);
+  }, [docFilter, missingByLead, isMissingInfoView, rows, stageField, entityName]);
 
   // Bulk select (Batch 2.2 / 6.1) — opt-in, owner/admin only. Lazy-load the
   // member roster the first time the operator enters Select mode. On failure we
@@ -441,6 +537,48 @@ export function LeadPipelineView({
         })}
       </div>
 
+      {isMissingInfoView && (
+        <div className="flex flex-wrap items-center gap-2 rounded-md border border-bg-border bg-bg-deep/40 px-3 py-2">
+          <span className="text-[10px] font-bold uppercase tracking-wide text-fg-dim">Missing:</span>
+          {MISSING_DOC_FILTERS.map((dt) => {
+            const on = docFilter.has(dt.key);
+            const n = renderedRows.filter((r) => rowMissing(r).includes(dt.key)).length;
+            return (
+              <button
+                key={dt.key}
+                type="button"
+                onClick={() =>
+                  setDocFilter((prev) => {
+                    const nx = new Set(prev);
+                    if (nx.has(dt.key)) nx.delete(dt.key);
+                    else nx.add(dt.key);
+                    return nx;
+                  })
+                }
+                className={`rounded-full border px-2.5 py-1 text-[11px] transition-colors ${
+                  on
+                    ? "border-accent bg-accent/15 text-accent"
+                    : "border-bg-border bg-bg-elev/40 text-fg-muted hover:border-fg-dim"
+                }`}
+              >
+                {dt.label}
+                {missingLoaded ? ` (${n})` : ""}
+              </button>
+            );
+          })}
+          {docFilter.size > 0 && (
+            <button
+              type="button"
+              onClick={() => setDocFilter(new Set())}
+              className="ml-1 text-[10px] text-fg-dim hover:text-fg"
+            >
+              clear
+            </button>
+          )}
+          {!missingLoaded && <Loader2 className="h-3 w-3 animate-spin text-fg-dim" />}
+        </div>
+      )}
+
       {touchFirst && (
         <Link
           // OASIS lead detail lives at /pipeline/<id> (not a query-param
@@ -483,7 +621,9 @@ export function LeadPipelineView({
       )}
 
       {visibleStages.map((stage) => {
-        const stageRows = renderedRows.filter((r) => String(r.data[stageField] || "") === stage.key);
+        const stageRows = applyDocFilter(
+          renderedRows.filter((r) => String(r.data[stageField] || "") === stage.key),
+        );
         return (
           <StageSection
             key={stage.key}
@@ -981,6 +1121,21 @@ function DesktopRow({
   stageMap: Record<string, StageMeta>;
 }) {
   const router = useRouter();
+  const [hover, setHover] = useState(false);
+  const [anchor, setAnchor] = useState<{ left: number; top: number } | null>(null);
+  const hoverTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const openHover = (e: ReactMouseEvent<HTMLDivElement>) => {
+    const rect = e.currentTarget.getBoundingClientRect();
+    if (hoverTimer.current) clearTimeout(hoverTimer.current);
+    hoverTimer.current = setTimeout(() => {
+      setAnchor({ left: rect.left, top: rect.bottom });
+      setHover(true);
+    }, 250);
+  };
+  const closeHover = () => {
+    if (hoverTimer.current) clearTimeout(hoverTimer.current);
+    setHover(false);
+  };
   if (variant === "oasis") {
     return <OasisDesktopRow row={row} stage={stage} cfg={cfg} basePath={basePath} />;
   }
@@ -998,6 +1153,8 @@ function DesktopRow({
           router.push(href);
         }
       }}
+      onMouseEnter={openHover}
+      onMouseLeave={closeHover}
       className="grid cursor-pointer border-b border-bg-border/40 text-[11px] transition-colors last:border-b-0 hover:bg-bg-elev/40 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/70"
       style={cfg.gridStyle}
     >
@@ -1013,11 +1170,26 @@ function DesktopRow({
             <span className="block truncate text-[10px] text-fg-dim" title={model.subtitle}>
               {model.subtitle}
             </span>
+            {model.email ? (
+              <span className="flex min-w-0 items-center gap-1">
+                <span className="truncate text-[10px] text-accent/80" title={model.email}>
+                  {model.email}
+                </span>
+                <CopyButton value={model.email} size={11} />
+              </span>
+            ) : null}
           </span>
         </div>
       </Cell>
       <Cell title={model.ownerName}>{model.ownerName}</Cell>
-      <Cell title={model.phone} mono>{model.phone}</Cell>
+      <Cell clip={false} mono>
+        <span className="flex min-w-0 items-center gap-1">
+          <span className="truncate" title={model.phone}>
+            {model.phone}
+          </span>
+          <CopyButton value={model.phone} />
+        </span>
+      </Cell>
       <Cell>{model.state}</Cell>
       <Cell>{model.submitDate}</Cell>
       <Cell>
@@ -1052,6 +1224,9 @@ function DesktopRow({
         {model.monthlyRev}
       </Cell>
       <Cell mono>{model.years}</Cell>
+      {hover && anchor ? (
+        <DealHoverCard leadId={row.id} entity={entityName} stage={stage} anchor={anchor} />
+      ) : null}
     </div>
   );
 }
@@ -1114,7 +1289,22 @@ function MobileRow({
             />
           </div>
           <div className="mt-2 grid grid-cols-2 gap-x-3 gap-y-1 text-[11px] text-fg-muted">
-            <MiniMetric label="Phone" value={model.phone} mono />
+            <div className="min-w-0">
+              <div className="text-[9px] font-bold uppercase tracking-wider text-fg-dim">Phone</div>
+              <div className="flex items-center gap-1">
+                <span className="truncate font-mono">{model.phone}</span>
+                <CopyButton value={model.phone} />
+              </div>
+            </div>
+            {model.email ? (
+              <div className="min-w-0">
+                <div className="text-[9px] font-bold uppercase tracking-wider text-fg-dim">Email</div>
+                <div className="flex items-center gap-1">
+                  <span className="truncate">{model.email}</span>
+                  <CopyButton value={model.email} size={11} />
+                </div>
+              </div>
+            ) : null}
             <MiniMetric label="Submit" value={model.submitDate} />
             <MiniMetric label="Agent" value={model.agentLabel} />
             <MiniMetric label="Last" value={model.lastTouchLabel} />
@@ -1340,6 +1530,7 @@ function rowModel(row: Row, stage: StageMeta) {
   const subtitle = legalName === businessName ? `Legal: ${businessName}` : `Legal: ${legalName}`;
   const ownerName = str(d.contact_name) || str(d.owner_name) || "-";
   const phone = formatPhone(str(d.phone) || str(d.contact_phone) || "");
+  const email = str(d.email) || str(d.contact_email) || "";
   const state = str(d.state) || str(d.business_state) || "-";
   const submitIso = str(d.submitted_at) || str(d.date_submitted) || row.created_at || null;
   const submitDate = submitIso ? formatShortDate(submitIso) : "-";
@@ -1360,6 +1551,7 @@ function rowModel(row: Row, stage: StageMeta) {
     subtitle,
     ownerName,
     phone,
+    email,
     state,
     submitDate,
     dayPill,
