@@ -14,7 +14,7 @@
 
 import { NextResponse, type NextRequest } from "next/server";
 import { resolveSessionContext } from "@/lib/api-auth";
-import { getAccessibleLead } from "@/lib/lead-access";
+import { getWritableLead } from "@/lib/lead-access";
 import { MAX_LEAD_DOC_BYTES, uploadLeadDocument } from "@/lib/lead-documents";
 import { getServiceSupabase } from "@/lib/supabase-server";
 
@@ -31,15 +31,19 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
   }
   const sess = await resolveSessionContext();
   if (!sess.ok) return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
-  // AI action — owner/admin only (CC 2026-07-07)
-  if (!sess.isAdmin) {
-    return NextResponse.json({ ok: false, error: "forbidden_role", message: "Only owners/admins can run this AI action." }, { status: 403 });
-  }
-  const lead = await getAccessibleLead(
-    { isAdmin: sess.isAdmin, userId: sess.userId },
+  // Autofill is a MEMBER CRM tool (CC 2026-07-07): any non-read_only member may
+  // autofill an application for a lead they're working (role-gated, tenant-scoped).
+  // Admin-only is reserved for automations + sequences MANAGEMENT — NOT per-lead AI.
+  const acc = await getWritableLead(
+    { teamRole: sess.teamRole },
     { tenantId: sess.tenantId, entity: "lead", id },
   );
-  if (!lead) return NextResponse.json({ ok: false, error: "not_found" }, { status: 404 });
+  if (!acc.ok) {
+    return acc.reason === "role_denied"
+      ? NextResponse.json({ ok: false, error: "forbidden_role", message: "Read-only members can't do this." }, { status: 403 })
+      : NextResponse.json({ ok: false, error: "not_found" }, { status: 404 });
+  }
+  const lead = acc.record;
 
   let form: FormData;
   try {

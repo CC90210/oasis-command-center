@@ -16,6 +16,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { resolveSessionContext } from "@/lib/api-auth";
+import { canWriteCrm } from "@/lib/role-gates";
 import { recommendNextAction, type InteractionSnapshot } from "@/lib/ai-next-action";
 
 export const runtime = "nodejs";
@@ -58,14 +59,16 @@ export async function POST(
   _req: NextRequest,
   ctx: { params: Promise<{ id: string }> },
 ) {
-  // AI action — owner/admin only (CC 2026-07-07)
+  // Per-lead AI is a MEMBER CRM tool (CC 2026-07-07): any non-read_only member may
+  // request a next-action for a lead they're working. Admin-only is reserved for
+  // automations + sequences MANAGEMENT — NOT per-lead AI.
   const sess = await resolveSessionContext();
   if (!sess.ok) {
     return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
   }
-  if (!sess.isAdmin) {
+  if (!canWriteCrm(sess.teamRole)) {
     return NextResponse.json(
-      { ok: false, error: "forbidden_role", message: "Only owners/admins can run this AI action." },
+      { ok: false, error: "forbidden_role", message: "Read-only members can't run this." },
       { status: 403 },
     );
   }
