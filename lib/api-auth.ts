@@ -75,7 +75,14 @@ export async function resolveSessionContext(): Promise<SessionContext> {
     | null;
   if (!profile) return { ok: false, reason: "no_profile" };
   if (!profile.tenant_id) return { ok: false, reason: "no_tenant" };
-  const teamRole = profile.team_role || "member";
+  // Fail-closed for authorization (Codex adversarial review round-2, 2026-07-07).
+  // A missing / null / empty team_role must NOT default to a WRITE-capable role:
+  // canWriteCrm() and the isReadOnly gates key off this, so defaulting to "member"
+  // would silently grant a corrupt / partially-provisioned / legacy profile full
+  // CRM write (assign, e-sign, promote, PDFs). Default to read_only so those
+  // callers fail closed. is_owner still grants admin below regardless of this.
+  // To grant write access, assign the user an explicit role — don't rely on a default.
+  const teamRole = profile.team_role || "read_only";
   return {
     ok: true,
     userId: user.id,

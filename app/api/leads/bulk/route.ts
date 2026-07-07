@@ -25,6 +25,7 @@ import { getServiceSupabase } from "@/lib/supabase-server";
 import { resolveSessionContext } from "@/lib/api-auth";
 import { updateRecord, RecordsError } from "@/lib/manifest/data";
 import { canViewLead, leadScopingEnabled } from "@/lib/lead-scope";
+import { canWriteCrm } from "@/lib/role-gates";
 import { LEAD_PIPELINE_STAGES, OPPORTUNITY_PIPELINE_STAGES } from "@/lib/sunbiz-stage-meta";
 import { SUNBIZ_EMAIL_TEMPLATES, renderSunbizTemplate } from "@/lib/sunbiz-templates-library";
 import { runBlast, resolveLeadsAudience, renderTemplate, getDefaultSender } from "@/lib/integrations/constant-contact/blast";
@@ -82,6 +83,16 @@ export async function POST(req: NextRequest) {
   const out: Outcome = { updated: 0, skipped: 0, failed: 0 };
 
   if (op === "assign") {
+    // CRM-write authorization (2026-07-07, CC directive). Bulk-assign is core CRM
+    // work for any non-read_only member on any tenant lead — matching single
+    // /assign. Checked ONCE, before any record work, so read_only gets a clean 403
+    // rather than an all-skipped 200 (Codex adversarial review 2026-07-07).
+    if (!canWriteCrm(sess.teamRole)) {
+      return NextResponse.json(
+        { ok: false, error: "forbidden_role", message: "Read-only members can't reassign leads." },
+        { status: 403 },
+      );
+    }
     // Validate the assignee once (null = clear). A non-UUID is a 400; a UUID that
     // isn't a member of this tenant is rejected before we touch any record.
     const raw = body.assigned_to;
@@ -114,16 +125,6 @@ export async function POST(req: NextRequest) {
         .eq("id", id)
         .maybeSingle();
       if (!existing.data) {
-        out.skipped += 1;
-        continue;
-      }
-      const data = (existing.data as { data?: Record<string, unknown> }).data || {};
-      const currentOwner =
-        typeof data.assigned_to === "string" ? (data.assigned_to as string).toLowerCase() : null;
-      // Owner-or-admin gate — identical to /assign (unconditional). Agent can only
-      // reassign a lead they own. A non-owner outcome folds into `skipped` so it's
-      // indistinguishable from a missing record (no enumeration oracle).
-      if (!sess.isAdmin && currentOwner !== (sess.userId || "").toLowerCase()) {
         out.skipped += 1;
         continue;
       }
@@ -296,6 +297,18 @@ export async function POST(req: NextRequest) {
   }
   const field = entity === "application" ? "status" : "stage";
 
+  // CRM-write authorization (2026-07-07, CC directive + Codex round-2). Bulk stage
+  // change is core CRM work for any non-read_only member on any tenant lead —
+  // matching single /set-stage. Checked ONCE before the loop, so read_only gets a
+  // clean 403. (Was a per-record canViewLead("isolate") gate, which let a read_only
+  // OWNER still mutate stages and diverged from /set-stage's role model.)
+  if (!canWriteCrm(sess.teamRole)) {
+    return NextResponse.json(
+      { ok: false, error: "forbidden_role", message: "Read-only members can't change stages." },
+      { status: 403 },
+    );
+  }
+
   for (const id of ids) {
     const existing = await db
       .from("tenant_records")
@@ -309,15 +322,8 @@ export async function POST(req: NextRequest) {
       continue;
     }
     const data = (existing.data as { data?: Record<string, unknown> }).data || {};
-    // Flag-aware owner-or-admin gate, IDENTICAL to /set-stage (Codex 2026-06-19
-    // LOW-5): scoping OFF → any tenant member; ON → owner-or-admin. A no-access
-    // outcome folds into `skipped` (no enumeration oracle).
-    // mode:"isolate" — bulk edit is an owner-gated ACTION even in filtered-view
-    // mode (viewing any lead is fine; mutating another rep's is not).
-    if (!canViewLead({ isAdmin: sess.isAdmin, userId: sess.userId }, data, leadScopingEnabled(), "isolate")) {
-      out.skipped += 1;
-      continue;
-    }
+    // Authorization happened once before the loop (canWriteCrm); tenant scope is
+    // enforced by the tenant_id-filtered fetch above.
     if (typeof data[field] === "string" && data[field] === stage) {
       out.skipped += 1; // already on this stage
       continue;

@@ -62,7 +62,12 @@ export async function enqueueBackgroundCheck(opts: {
     .eq("tenant_id", tenantId)
     .maybeSingle();
   if (rec.error) return { ok: false, reason: rec.error.message };
-  const data = (rec.data as { data?: Record<string, unknown> } | null)?.data ?? {};
+  // Fail closed on a missing / wrong-tenant lead (Codex adversarial review round-2,
+  // 2026-07-07). Previously a non-existent leadId fell through with data={} and
+  // still inserted a merchant_background_checks row — orphan automation work with
+  // an empty identity snapshot. Require the tenant-scoped lead to exist first.
+  if (!rec.data) return { ok: false, reason: "lead_not_found" };
+  const data = (rec.data as { data?: Record<string, unknown> }).data ?? {};
 
   // 2. Idempotency — reuse an open check if one exists.
   const existing = await db

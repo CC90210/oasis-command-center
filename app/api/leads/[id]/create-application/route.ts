@@ -16,7 +16,7 @@ import { NextResponse, type NextRequest, after } from "next/server";
 import { getServiceSupabase, getSessionUser } from "@/lib/supabase-server";
 import { createApplicationFromLead } from "@/lib/applications/create-from-lead";
 import { generateApplicationDocumentFromRecord } from "@/lib/forms/application-document";
-import { isReadOnlyRole } from "@/lib/role-gates";
+import { canWriteCrm } from "@/lib/role-gates";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -47,11 +47,12 @@ export async function POST(
   if (!tenantId) {
     return NextResponse.json({ ok: false, error: "no_tenant" }, { status: 400 });
   }
-  // Member+ gate (parity with /api/conversations/reply + /api/leads/[id]/call).
+  // Member+ gate: any CRM-write role may create an application; read_only and
+  // unknown roles are denied. canWriteCrm is allowlist-based (fail-closed).
   const teamRole = (profile.data as { team_role?: string | null } | null)?.team_role;
-  if (isReadOnlyRole(teamRole)) {
+  if (!canWriteCrm(teamRole)) {
     return NextResponse.json(
-      { ok: false, error: "forbidden_role", message: "Read-only members can't start underwriting." },
+      { ok: false, error: "forbidden_role", message: "Read-only members can't start an application." },
       { status: 403 },
     );
   }

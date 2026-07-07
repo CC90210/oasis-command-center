@@ -8,14 +8,13 @@
  * PDF. The dropzone polls /api/extraction-jobs/[job_id] for the result.
  * (Cost: extraction moved off the metered API onto the flat-rate subscription.)
  *
- * Auth: owner-or-admin OR the owning agent (getAccessibleLead); read-only denied;
+ * Auth: owner/admin ONLY (CC 2026-07-07 — AI action); read-only AND members denied;
  * fail closed. Multipart: { file }.
  */
 
 import { NextResponse, type NextRequest } from "next/server";
 import { resolveSessionContext } from "@/lib/api-auth";
 import { getAccessibleLead } from "@/lib/lead-access";
-import { isReadOnlyRole } from "@/lib/role-gates";
 import { MAX_LEAD_DOC_BYTES, uploadLeadDocument } from "@/lib/lead-documents";
 import { getServiceSupabase } from "@/lib/supabase-server";
 
@@ -32,8 +31,9 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
   }
   const sess = await resolveSessionContext();
   if (!sess.ok) return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
-  if (isReadOnlyRole(sess.teamRole)) {
-    return NextResponse.json({ ok: false, error: "forbidden_role" }, { status: 403 });
+  // AI action — owner/admin only (CC 2026-07-07)
+  if (!sess.isAdmin) {
+    return NextResponse.json({ ok: false, error: "forbidden_role", message: "Only owners/admins can run this AI action." }, { status: 403 });
   }
   const lead = await getAccessibleLead(
     { isAdmin: sess.isAdmin, userId: sess.userId },

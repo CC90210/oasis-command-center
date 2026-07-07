@@ -7,6 +7,7 @@
  *
  *   201 { ok: true, check_id, reused }
  *   401 { ok: false, error: 'unauthorized' }
+ *   403 { ok: false, error: 'forbidden_role' }
  *   500 { ok: false, error }
  */
 
@@ -18,6 +19,8 @@ import { enqueueBackgroundCheck } from "@/lib/background-check/enqueue";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 export async function POST(
   _req: NextRequest,
   ctx: { params: Promise<{ id: string }> },
@@ -26,7 +29,17 @@ export async function POST(
   if (!session.ok) {
     return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
   }
+  // AI action — owner/admin only (CC 2026-07-07)
+  if (!session.isAdmin) {
+    return NextResponse.json(
+      { ok: false, error: "forbidden_role", message: "Only owners/admins can run this AI action." },
+      { status: 403 },
+    );
+  }
   const { id: leadId } = await ctx.params;
+  if (!UUID_RE.test(leadId)) {
+    return NextResponse.json({ ok: false, error: "invalid_id" }, { status: 400 });
+  }
 
   const enq = await enqueueBackgroundCheck({
     db: getServiceSupabase(),
@@ -34,7 +47,9 @@ export async function POST(
     leadId,
   });
   if (!enq.ok) {
-    return NextResponse.json({ ok: false, error: enq.reason }, { status: 500 });
+    // lead_not_found → 404 (fail closed on a missing/wrong-tenant target); else 500.
+    const status = enq.reason === "lead_not_found" ? 404 : 500;
+    return NextResponse.json({ ok: false, error: enq.reason }, { status });
   }
   return NextResponse.json({ ok: true, check_id: enq.checkId, reused: enq.reused }, { status: 201 });
 }

@@ -17,7 +17,7 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { getServiceSupabase } from "@/lib/supabase-server";
-import { resolveTenantId } from "@/lib/api-auth";
+import { resolveSessionContext } from "@/lib/api-auth";
 import { scoreLead } from "@/lib/ai-lead-scoring";
 
 export const runtime = "nodejs";
@@ -27,10 +27,18 @@ export async function POST(
   _req: NextRequest,
   ctx: { params: Promise<{ id: string }> },
 ) {
-  const tenantId = await resolveTenantId();
-  if (!tenantId) {
+  const sess = await resolveSessionContext();
+  if (!sess.ok) {
     return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
   }
+  // AI action — owner/admin only (CC 2026-07-07)
+  if (!sess.isAdmin) {
+    return NextResponse.json(
+      { ok: false, error: "forbidden_role", message: "Only owners/admins can run this AI action." },
+      { status: 403 },
+    );
+  }
+  const tenantId = sess.tenantId;
   const { id: leadId } = await ctx.params;
   if (!leadId) {
     return NextResponse.json({ ok: false, error: "missing_id" }, { status: 400 });

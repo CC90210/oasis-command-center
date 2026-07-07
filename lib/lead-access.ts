@@ -1,8 +1,44 @@
 import "server-only";
 import { getRecord } from "@/lib/manifest/data";
 import { canViewLead, leadScopingEnabled, type LeadViewer } from "@/lib/lead-scope";
+import { canWriteCrm } from "@/lib/role-gates";
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+export type WritableLeadResult =
+  | { ok: true; record: { id: string; data: Record<string, unknown> } }
+  | { ok: false; reason: "role_denied" | "not_found" };
+
+/**
+ * WRITE-mode access gate for CRM data-action endpoints (2026-07-07, CC directive
+ * — the "member can't be assigned a lead" bug).
+ *
+ * Unlike getAccessibleLead (which gates on canViewLead — owner/collaborator
+ * VISIBILITY, so it silently narrows members to their own book once
+ * LEAD_SCOPING_ENABLED flips on), this gates on the CRM-WRITE ROLE tier: any
+ * non-read_only member may act on ANY lead/application in their OWN tenant.
+ * The record fetch is tenant-scoped (getRecord takes tenant_id), so tenant
+ * isolation is preserved; this only removes the owner-only restriction that
+ * blocked members from their daily CRM work.
+ *
+ * Returns a discriminated result so the caller emits the right status:
+ *   { ok:false, reason:"role_denied" } → 403 (read_only / unresolved role)
+ *   { ok:false, reason:"not_found" }   → 404 (missing / wrong tenant)
+ *
+ * Use for owner-gated CRM ACTIONS (assign, set-stage, promote, e-sign, PDFs,
+ * create-application). Do NOT use for automation / per-lead-AI endpoints — those
+ * stay owner/admin (isAdmin), unchanged.
+ */
+export async function getWritableLead(
+  actor: { teamRole: string | null | undefined },
+  input: { tenantId: string; entity?: "lead" | "application"; id: string },
+): Promise<WritableLeadResult> {
+  if (!canWriteCrm(actor.teamRole)) return { ok: false, reason: "role_denied" };
+  const entity = input.entity || "lead";
+  const rec = await getRecord({ tenant_id: input.tenantId, entity, id: input.id }).catch(() => null);
+  if (!rec) return { ok: false, reason: "not_found" };
+  return { ok: true, record: { id: rec.id, data: rec.data as Record<string, unknown> } };
+}
 
 /**
  * Single-lead access gate for the /api/leads/[id]/* routes (Adon Batch 2).

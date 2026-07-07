@@ -6,15 +6,16 @@
  * stage. Goes through `updateRecord` so the existing BRAVO_RECORD_STATUS_CHANGED
  * publisher fires (drip engine / feed pick it up) — same path the kanban uses.
  *
- * Auth: owner-or-admin (via getAccessibleLead, which honors LEAD_SCOPING_ENABLED
- * — when scoping is off it's any tenant member, matching current behavior; when
- * on, only the owning agent or an admin). Fail closed. Audited to lead_interactions.
+ * Auth: role-based CRM-write (canWriteCrm / getWritableLead — 2026-07-07 conversion
+ * from getAccessibleLead). Any non-read_only tenant member may set a stage on ANY
+ * lead/application in their tenant (LEAD_SCOPING_ENABLED no longer narrows this
+ * action). Fail closed. Audited to lead_interactions.
  */
 
 import { NextRequest, NextResponse } from "next/server";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { resolveSessionContext } from "@/lib/api-auth";
-import { getAccessibleLead } from "@/lib/lead-access";
+import { getWritableLead } from "@/lib/lead-access";
 import { updateRecord, RecordsError } from "@/lib/manifest/data";
 import { LEAD_PIPELINE_STAGES, OPPORTUNITY_PIPELINE_STAGES } from "@/lib/sunbiz-stage-meta";
 
@@ -46,14 +47,22 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
     return NextResponse.json({ ok: false, error: "invalid_stage" }, { status: 400 });
   }
 
-  // Owner-or-admin gate + fetch the current record (404 for a non-owner agent).
-  const lead = await getAccessibleLead(
-    { isAdmin: sess.isAdmin, userId: sess.userId },
+  // Role-based CRM-write gate — any non-read_only member may act on any tenant lead.
+  // Converted from getAccessibleLead (visibility/scoping gate) to getWritableLead
+  // (role gate) on 2026-07-07 so LEAD_SCOPING_ENABLED no longer narrows this action.
+  const acc = await getWritableLead(
+    { teamRole: sess.teamRole },
     { tenantId: sess.tenantId, entity, id },
   );
-  if (!lead) {
-    return NextResponse.json({ ok: false, error: "not_found" }, { status: 404 });
+  if (!acc.ok) {
+    return acc.reason === "role_denied"
+      ? NextResponse.json(
+          { ok: false, error: "forbidden_role", message: "Read-only members can't do this." },
+          { status: 403 },
+        )
+      : NextResponse.json({ ok: false, error: "not_found" }, { status: 404 });
   }
+  const lead = acc.record;
 
   const field = entity === "application" ? "status" : "stage";
   const from = typeof lead.data[field] === "string" ? (lead.data[field] as string) : null;

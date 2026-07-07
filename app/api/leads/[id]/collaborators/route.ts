@@ -26,6 +26,7 @@ import {
   MAX_COLLABORATORS,
   COLLABORATORS_KEY,
 } from "@/lib/lead-scope";
+import { canWriteCrm } from "@/lib/role-gates";
 import { nudgeBoards } from "@/lib/realtime/board-nudge";
 
 export const runtime = "nodejs";
@@ -41,6 +42,17 @@ export async function POST(
   const sess = await resolveSessionContext();
   if (!sess.ok) {
     return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
+  }
+  // CRM-write authorization (2026-07-07, CC directive). Sharing a deal with a
+  // teammate is core CRM work for ANY non-read_only member, on ANY lead in the
+  // tenant — not owner-gated. Checked FIRST (before any record lookup) so a
+  // read_only caller can't use the response to probe record existence (Codex
+  // adversarial review 2026-07-07). Tenant isolation enforced by the fetch below.
+  if (!canWriteCrm(sess.teamRole)) {
+    return NextResponse.json(
+      { ok: false, error: "forbidden_role", message: "Read-only members can't manage collaborators." },
+      { status: 403 },
+    );
   }
   const tenantId = sess.tenantId;
   const { id: recordId } = await ctx.params;
@@ -99,12 +111,9 @@ export async function POST(
   }
 
   const data = (existing.data as { data?: Record<string, unknown> }).data || {};
+  // currentOwner: used for the owner-not-collaborator check + the board nudge.
+  // Authorization already happened at the top (canWriteCrm).
   const currentOwner = typeof data.assigned_to === "string" ? data.assigned_to.toLowerCase() : null;
-
-  // Owner-or-admin gate. 404 for a non-owner agent (don't confirm existence).
-  if (!sess.isAdmin && currentOwner !== (sess.userId || "").toLowerCase()) {
-    return NextResponse.json({ ok: false, error: "not_found" }, { status: 404 });
-  }
 
   // Compute the next collaborator set.
   let next = normalizeCollaborators(data);

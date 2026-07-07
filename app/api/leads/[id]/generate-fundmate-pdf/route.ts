@@ -11,12 +11,13 @@
  *   - replace defaults TRUE (always a fresh copy; the FICO stays stable because
  *     it is persisted on the record, not re-randomized here).
  *
- * Auth: owner-or-admin via getAccessibleLead (entity-aware). Read-only denied.
+ * Auth: role-based CRM-write via getWritableLead (2026-07-07 canWriteCrm conversion).
+ * Any non-read_only member may generate this PDF for any lead in their tenant.
  */
 
 import { NextRequest, NextResponse } from "next/server";
 import { resolveSessionContext } from "@/lib/api-auth";
-import { getAccessibleLead } from "@/lib/lead-access";
+import { getWritableLead } from "@/lib/lead-access";
 import { isReadOnlyRole } from "@/lib/role-gates";
 import { listRecords } from "@/lib/manifest/data";
 import { generateFundmateDocumentFromRecord } from "@/lib/forms/fundmate-document";
@@ -49,12 +50,15 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
   const entity = body.entity === "lead" ? "lead" : "application";
   const replace = body.replace === false ? false : true;
 
-  const record = await getAccessibleLead(
-    { isAdmin: sess.isAdmin, userId: sess.userId },
+  // 2026-07-07: converted from getAccessibleLead (visibility/scoping) to getWritableLead (role-based CRM-write).
+  const acc = await getWritableLead(
+    { teamRole: sess.teamRole },
     { tenantId: sess.tenantId, entity, id },
   );
-  if (!record) {
-    return NextResponse.json({ ok: false, error: "not_found" }, { status: 404 });
+  if (!acc.ok) {
+    return acc.reason === "role_denied"
+      ? NextResponse.json({ ok: false, error: "forbidden_role", message: "Read-only members can't do this." }, { status: 403 })
+      : NextResponse.json({ ok: false, error: "not_found" }, { status: 404 });
   }
 
   let applicationId: string;

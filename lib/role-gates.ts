@@ -68,6 +68,51 @@ export function isReadOnlyRole(teamRole: string | null | undefined): boolean {
 }
 
 /**
+ * CRM data-write authorization tier (2026-07-07, CC directive).
+ *
+ * The dashboard's CRM DATA actions — assign / transfer a lead, add a
+ * collaborator, set stage, promote to application, notes, documents, e-sign,
+ * generate PDFs, create-application, import, bulk stage / assign — are the
+ * DAILY JOB of a SunBiz member (Alex, Matt, Jordan), on ANY lead in their
+ * tenant. They are NOT owner-gated: a member handing a deal to a teammate, or
+ * picking up an unassigned lead, is core CRM usage. Before this, the direct
+ * REST endpoints used a stricter owner-or-admin gate than the bridge/chat
+ * business-write tier (bridgeExecToolAllowedForRole), so a member hit
+ * "forbidden" on their own daily workflow — the bug CC reported 2026-07-07
+ * (Alex couldn't self-assign; Matt couldn't hand a lead to Alex).
+ *
+ * This is DISTINCT from — and does NOT loosen — two other tiers:
+ *   - AUTOMATION / AGENTIC actions (create automations, background workers,
+ *     drip sequences, per-lead AI: auto-score, next-action, autofill,
+ *     compose-checkin, background-check) → owner/admin only (isAdmin).
+ *   - TECHNICAL-write bridge tools (bash, write_file, run_script) → admin only
+ *     (bridgeDisallowedToolsForRole / bridgeExecToolAllowedForRole).
+ *
+ * ALLOWLIST semantics (Codex adversarial review 2026-07-07): a role must be in
+ * CRM_WRITE_ROLES to write. A new / unrecognized / null / empty role therefore
+ * defaults to DENIED (fail-closed) — add a new writable role here ON PURPOSE
+ * rather than have it silently gain write access. read_only is intentionally
+ * absent.
+ *   owner / admin / member / loan_officer / processor → CRM write ALLOWED
+ *   read_only / unknown / null / ""                   → DENIED
+ *
+ * Tenant isolation is enforced SEPARATELY (the record must belong to the
+ * caller's tenant) — this decides the ROLE dimension only. Compliance gates
+ * (CASL / TCPA in send_gateway) are unaffected.
+ */
+export const CRM_WRITE_ROLES: ReadonlySet<string> = new Set([
+  "owner",
+  "admin",
+  "member",
+  "loan_officer",
+  "processor",
+]);
+
+export function canWriteCrm(teamRole: string | null | undefined): boolean {
+  return CRM_WRITE_ROLES.has((teamRole || "").trim().toLowerCase());
+}
+
+/**
  * VPS-bridge tool gating (distinct from READ_ONLY_DENIED_TOOLS above).
  *
  * READ_ONLY_DENIED_TOOLS lists CLOUD tool / marker names (snake_case:

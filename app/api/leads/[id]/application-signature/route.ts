@@ -12,15 +12,14 @@
  *
  * Body: { application_id: uuid, signature_data_uri: "data:image/png;base64,…",
  *         signature_name?: string }
- * Auth: owner-or-admin OR the owning agent (getAccessibleLead); read-only denied.
+ * Auth: any non-read_only CRM member in the tenant (getWritableLead); read-only denied.
  */
 
 import { NextResponse, type NextRequest } from "next/server";
 import { resolveSessionContext } from "@/lib/api-auth";
-import { getAccessibleLead } from "@/lib/lead-access";
+import { getWritableLead } from "@/lib/lead-access"; // 2026-07-07: canWriteCrm/getWritableLead conversion
 import { isReadOnlyRole } from "@/lib/role-gates";
 import { getServiceSupabase } from "@/lib/supabase-server";
-import { canViewLead, leadScopingEnabled } from "@/lib/lead-scope";
 import { generateApplicationDocumentFromRecord } from "@/lib/forms/application-document";
 
 export const runtime = "nodejs";
@@ -45,20 +44,19 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
   if (isReadOnlyRole(sess.teamRole)) {
     return NextResponse.json({ ok: false, error: "forbidden_role" }, { status: 403 });
   }
-  // Owner-or-admin / owning-agent gate on the LEAD (same gate as autofill). The
+  // Role-based CRM-write gate on the LEAD: any non-read_only member may act on
+  // ANY lead in their tenant (LEAD_SCOPING_ENABLED does not narrow this). The
   // application is the lead's; gating the lead is the authorization boundary.
-  const lead = await getAccessibleLead(
-    { isAdmin: sess.isAdmin, userId: sess.userId },
+  const acc = await getWritableLead(
+    { teamRole: sess.teamRole },
     { tenantId: sess.tenantId, entity: "lead", id },
   );
-  if (!lead) return NextResponse.json({ ok: false, error: "not_found" }, { status: 404 });
-  // Write gate (Codex 2026-06-25): getAccessibleLead is a VIEW gate — in filter
-  // scoping mode any member can OPEN any lead. Signing is an owner-gated WRITE, so
-  // re-check in "isolate" mode: only an admin or the owning agent may sign. Mirrors
-  // the bulk-mutation gate in /api/leads/bulk.
-  if (!canViewLead({ isAdmin: sess.isAdmin, userId: sess.userId }, lead.data, leadScopingEnabled(), "isolate")) {
-    return NextResponse.json({ ok: false, error: "forbidden" }, { status: 403 });
+  if (!acc.ok) {
+    return acc.reason === "role_denied"
+      ? NextResponse.json({ ok: false, error: "forbidden_role", message: "Read-only members can't do this." }, { status: 403 })
+      : NextResponse.json({ ok: false, error: "not_found" }, { status: 404 });
   }
+  const lead = acc.record;
 
   let body: { application_id?: unknown; signature_data_uri?: unknown; signature_name?: unknown };
   try {

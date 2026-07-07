@@ -11,13 +11,15 @@
  *   - replace defaults to TRUE — always produce a fresh PDF from current data;
  *     the generator soft-deletes any prior generated copy first (idempotent).
  *
- * Auth: owner-or-admin via getAccessibleLead (entity-aware, honors
- * LEAD_SCOPING_ENABLED). Read-only roles denied. Fail closed.
+ * Auth: role-based CRM-write via getWritableLead (2026-07-07 — converted from
+ * getAccessibleLead/canViewLead so any non-read_only member can act on any
+ * tenant lead, not just their own book when LEAD_SCOPING_ENABLED is on).
+ * Read-only roles denied. Fail closed.
  */
 
 import { NextRequest, NextResponse } from "next/server";
 import { resolveSessionContext } from "@/lib/api-auth";
-import { getAccessibleLead } from "@/lib/lead-access";
+import { getWritableLead } from "@/lib/lead-access";
 import { isReadOnlyRole } from "@/lib/role-gates";
 import { listRecords } from "@/lib/manifest/data";
 import { generateApplicationDocumentFromRecord } from "@/lib/forms/application-document";
@@ -50,15 +52,19 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
   const entity = body.entity === "lead" ? "lead" : "application";
   const replace = body.replace === false ? false : true;
 
-  // Owner-or-admin gate + fetch the record (404 for a non-owner agent / missing).
-  const record = await getAccessibleLead(
-    { isAdmin: sess.isAdmin, userId: sess.userId },
+  // Role-based CRM-write gate: any non-read_only member may act on any tenant lead.
+  // 2026-07-07: converted from getAccessibleLead (canViewLead/VISIBILITY) to
+  // getWritableLead (canWriteCrm/ROLE) so LEAD_SCOPING_ENABLED no longer blocks members.
+  const acc = await getWritableLead(
+    { teamRole: sess.teamRole },
     { tenantId: sess.tenantId, entity, id },
   );
-  if (!record) {
-    return NextResponse.json({ ok: false, error: "not_found" }, { status: 404 });
+  if (!acc.ok) {
+    return acc.reason === "role_denied"
+      ? NextResponse.json({ ok: false, error: "forbidden_role", message: "Read-only members can't do this." }, { status: 403 })
+      : NextResponse.json({ ok: false, error: "not_found" }, { status: 404 });
   }
-
+  // acc.record is available (lead.id / lead.data) if downstream logic needs it.
   // Resolve the application to generate from.
   let applicationId: string;
   if (entity === "application") {

@@ -25,6 +25,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { resolveSessionContext } from "@/lib/api-auth";
+import { canWriteCrm } from "@/lib/role-gates";
 import { nudgeBoards } from "@/lib/realtime/board-nudge";
 
 export const runtime = "nodejs";
@@ -41,10 +42,19 @@ export async function POST(
   if (!sess.ok) {
     return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
   }
-  // Authorization is owner-or-admin (Adon Batch 2.2): an ADMIN can reassign any
-  // lead to any user; an AGENT can only reassign a lead they currently OWN (peer
-  // handoff). The owner check happens after we read the record below — an agent
-  // must not be able to pull a lead off another agent's board.
+  // CRM-write authorization (2026-07-07, CC directive). Assigning / transferring a
+  // lead is core CRM work for ANY non-read_only team member, on ANY lead in the
+  // tenant — NOT owner-gated. Checked FIRST, before any record lookup, so a
+  // read_only caller gets an identical 403 whether or not the record exists (no
+  // enumeration oracle — Codex adversarial review 2026-07-07). Tenant isolation is
+  // still enforced by the tenant-scoped fetch below. (Was: owner-or-admin, which
+  // blocked a member from self-assigning or receiving a hand-off — the reported bug.)
+  if (!canWriteCrm(sess.teamRole)) {
+    return NextResponse.json(
+      { ok: false, error: "forbidden_role", message: "Read-only members can't reassign leads." },
+      { status: 403 },
+    );
+  }
   const tenantId = sess.tenantId;
   const { id: recordId } = await ctx.params;
   if (!recordId || !UUID_RE.test(recordId)) {
@@ -116,13 +126,12 @@ export async function POST(
   // Owner-or-admin gate. Admins reassign anything; an agent may only reassign a
   // lead they currently own. 404 (not 403) for a non-owner agent so the endpoint
   // doesn't confirm a lead they can't see exists. Fail closed.
+  // Current owner — read for the board nudge below (the old owner's board also
+  // refreshes when a lead leaves it). Authorization already happened at the top.
   const currentOwner =
     typeof (existing.data as { data?: Record<string, unknown> }).data?.assigned_to === "string"
       ? ((existing.data as { data?: Record<string, unknown> }).data!.assigned_to as string).toLowerCase()
       : null;
-  if (!sess.isAdmin && currentOwner !== (sess.userId || "").toLowerCase()) {
-    return NextResponse.json({ ok: false, error: "not_found" }, { status: 404 });
-  }
 
   // 2026-06-06 (Codex audit self-review extension) — atomic merge via
   // the patch_tenant_record_data RPC. The previous read-then-spread-then-

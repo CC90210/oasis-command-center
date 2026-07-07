@@ -16,15 +16,14 @@
  *
  * Idempotent: re-transferring reuses the same application and re-stamps.
  *
- * Auth: owner-or-admin OR the owning agent (getAccessibleLead, honors
- * LEAD_SCOPING_ENABLED); read-only members denied; fail closed. Audited.
+ * Auth: any non-read_only tenant member (getWritableLead / canWriteCrm, 2026-07-07);
+ * read-only members denied; fail closed. Audited.
  */
 
 import { NextRequest, NextResponse, after } from "next/server";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { resolveSessionContext } from "@/lib/api-auth";
-import { getAccessibleLead } from "@/lib/lead-access";
-import { isReadOnlyRole } from "@/lib/role-gates";
+import { getWritableLead } from "@/lib/lead-access";
 import { createApplicationFromLead } from "@/lib/applications/create-from-lead";
 import { generateApplicationDocumentFromRecord } from "@/lib/forms/application-document";
 import { getRecord, updateRecord, RecordsError } from "@/lib/manifest/data";
@@ -62,22 +61,22 @@ export async function POST(_req: NextRequest, ctx: { params: Promise<{ id: strin
   if (!sess.ok) {
     return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
   }
-  if (isReadOnlyRole(sess.teamRole)) {
-    return NextResponse.json(
-      { ok: false, error: "forbidden_role", message: "Read-only members can't transfer a lead to Applications." },
-      { status: 403 },
-    );
-  }
-
-  // Owner-or-admin gate + confirm the lead exists for this tenant (404 either
-  // way so a non-owner agent can't probe). Returns { id, data }.
-  const lead = await getAccessibleLead(
-    { isAdmin: sess.isAdmin, userId: sess.userId },
+  // Role-based CRM-write gate (canWriteCrm / getWritableLead — 2026-07-07 conversion).
+  // Denies read_only regardless of LEAD_SCOPING_ENABLED so any full member can promote
+  // any lead in the tenant (visibility scoping must not block this CRM action).
+  const acc = await getWritableLead(
+    { teamRole: sess.teamRole },
     { tenantId: sess.tenantId, entity: "lead", id: leadId },
   );
-  if (!lead) {
-    return NextResponse.json({ ok: false, error: "not_found" }, { status: 404 });
+  if (!acc.ok) {
+    return acc.reason === "role_denied"
+      ? NextResponse.json(
+          { ok: false, error: "forbidden_role", message: "Read-only members can't do this." },
+          { status: 403 },
+        )
+      : NextResponse.json({ ok: false, error: "not_found" }, { status: 404 });
   }
+  const lead = acc.record;
 
   // 1. Create or reuse the linked application (application_in).
   const result = await createApplicationFromLead({ tenantId: sess.tenantId, leadId });
