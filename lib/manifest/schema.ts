@@ -181,6 +181,11 @@ export type ManifestPageKind =
                       // chevron arrow bar + filtered records table for one entity.
                       // Used by /leads (entity=lead) + /applications (entity=
                       // application). Reads config.stage_field (default "stage").
+  | "accelerated_followup" // Accelerated Follow-up (2026-07-06). A live SEGMENT
+                      // of the lead pipeline — the SAME scoped lead fetch as
+                      // /leads (per-agent scope; admins see all), filtered to the
+                      // leads flagged data.accelerated_followup === true, rendered
+                      // through the shared LeadPipelineView (variant "sunbiz").
   | "shopping_out"    // Phase 4 (Jordan/Oasis 2026-05-23). Multi-lender outreach
                       // UI on top of the existing shop-out engine
                       // (lib/lenders/shop-out.ts + POST /api/applications/[id]/
@@ -512,6 +517,8 @@ const PAGE_KINDS = new Set<ManifestPageKind>([
   "import",
   "pipeline",
   "pipeline_entity",
+  // Accelerated Follow-up (2026-07-06) — SunBiz lead-segment board.
+  "accelerated_followup",
   // Jordan/Oasis 2026-05-23 (migration 064) — SunBiz tenant-specific primitives
   "shopping_out",
   "offers_v2",
