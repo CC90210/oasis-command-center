@@ -620,6 +620,37 @@ export function LeadPipelineView({
         </div>
       )}
 
+      {!stageFilter && variant === "sunbiz" && entityName === "lead" && (() => {
+        const acceleratedRows = rows.filter(
+          (r) => r.data.accelerated_followup === true || r.data.accelerated_followup === "true",
+        );
+        if (!acceleratedRows.length) return null;
+        const accelStage: StageMeta = {
+          key: "accelerated_followup",
+          label: "Accelerated Follow-up",
+          bg: "#7c3aed",
+          fg: "#FFFFFF",
+        };
+        return (
+          <StageSection
+            key="accelerated_followup"
+            slug={slug}
+            entityName={entityName}
+            stage={accelStage}
+            rows={acceleratedRows}
+            collapsed={collapsedStages["accelerated_followup"] ?? true}
+            onToggle={() => toggleStage("accelerated_followup")}
+            variant={variant}
+            cfg={cfg}
+            basePath={basePath}
+            stageMap={stageMap}
+            selectMode={selectMode}
+            selected={selected}
+            onToggleSelect={toggleSelect}
+          />
+        );
+      })()}
+
       {visibleStages.map((stage) => {
         const stageRows = applyDocFilter(
           renderedRows.filter((r) => String(r.data[stageField] || "") === stage.key),
