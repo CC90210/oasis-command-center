@@ -36,6 +36,17 @@ export function ThreadPane({
   statusMap,
   onRetry,
   registryRef,
+  aiSuggestActive,
+  aiConfidence,
+  aiSanitized,
+  aiSuggestLoading,
+  onSuggest,
+  onAiAcceptSend,
+  onAiEdit,
+  onAiRegenerate,
+  onAiDiscard,
+  onToneRewrite,
+  onGhostFetch,
 }: {
   thread: ConversationThread;
   tenantSlug: string;
@@ -60,6 +71,17 @@ export function ThreadPane({
   statusMap: MessageStatusMap;
   onRetry: (m: ConversationMessage) => void;
   registryRef?: MessageRegistry;
+  aiSuggestActive?: boolean;
+  aiConfidence?: "low" | "med" | "high";
+  aiSanitized?: boolean;
+  aiSuggestLoading?: boolean;
+  onSuggest?: () => void;
+  onAiAcceptSend?: () => void;
+  onAiEdit?: () => void;
+  onAiRegenerate?: () => void;
+  onAiDiscard?: () => void;
+  onToneRewrite?: (instruction: string) => void;
+  onGhostFetch?: (signal: AbortSignal) => Promise<string | null>;
 }) {
   return (
     <div className="h-full min-h-0 flex flex-col">
@@ -89,6 +111,17 @@ export function ThreadPane({
         onAiReply={onAiReply}
         aiLoading={aiLoading}
         templateVars={templateVars}
+        aiSuggestActive={aiSuggestActive}
+        aiConfidence={aiConfidence}
+        aiSanitized={aiSanitized}
+        aiSuggestLoading={aiSuggestLoading}
+        onSuggest={onSuggest}
+        onAiAcceptSend={onAiAcceptSend}
+        onAiEdit={onAiEdit}
+        onAiRegenerate={onAiRegenerate}
+        onAiDiscard={onAiDiscard}
+        onToneRewrite={onToneRewrite}
+        onGhostFetch={onGhostFetch}
       />
     </div>
   );

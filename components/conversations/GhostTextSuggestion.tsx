@@ -1,24 +1,44 @@
 "use client";
 
 /**
- * GhostTextSuggestion — STUB for Phase 2. Plan §6.4 #2: on a focused-empty
- * composer, a debounced (800ms) `mode:'ghost'` call renders a single dim
- * inline completion sentence; Tab accepts, any keystroke dismisses,
- * in-flight requests cancel on input. Not wired in Phase 1 (no
- * `voice-suggest` route exists yet). Exported now so the Composer integration
- * point is stable for P2.
+ * GhostTextSuggestion — plan §6.4 #2. On a focused-empty composer, Composer
+ * debounces (800ms) a `mode:'ghost'` voice-suggest call and passes the
+ * result here as `text`. True inline-caret ghost text would need a
+ * contentEditable/canvas-measured overlay to stay pixel-aligned with a
+ * plain <textarea>; instead this renders a dim, dismissible pill anchored
+ * under the composer — Tab (handled by Composer's onKeyDown) accepts it,
+ * any keystroke or blur dismisses it (also handled by Composer, which owns
+ * the debounce/fetch/cancel lifecycle).
  */
+import { Sparkles, CornerDownLeft } from "lucide-react";
+
 export function GhostTextSuggestion({
   text,
   onAccept,
   onDismiss,
 }: {
-  text?: string;
+  text?: string | null;
   onAccept?: () => void;
   onDismiss?: () => void;
 }) {
-  void text;
-  void onAccept;
-  void onDismiss;
-  return null;
+  if (!text) return null;
+  return (
+    <div className="flex items-center gap-1.5 text-[11px] text-fg-dim animate-in fade-in duration-150">
+      <Sparkles className="h-3 w-3 text-violet-400/70 shrink-0" />
+      <span className="italic truncate">&ldquo;{text}&rdquo;</span>
+      <button
+        type="button"
+        onClick={onAccept}
+        className="inline-flex items-center gap-0.5 shrink-0 text-violet-300 hover:text-violet-200 font-semibold"
+      >
+        <CornerDownLeft className="h-3 w-3 rotate-180" />
+        Tab to accept
+      </button>
+      {onDismiss && (
+        <button type="button" onClick={onDismiss} className="shrink-0 text-fg-dim hover:text-fg" aria-label="Dismiss suggestion">
+          ×
+        </button>
+      )}
+    </div>
+  );
 }

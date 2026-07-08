@@ -31,6 +31,18 @@ import { ThreadPane } from "./ThreadPane";
 import { ContextPanel } from "./ContextPanel";
 import type { ComposerChannel } from "./ChannelSwitcher";
 import type { MessageStatusMap, MessageRegistry } from "./MessageList";
+import type { VoiceConfidence } from "@/lib/ai-voice-suggest";
+
+type AiSuggestion = {
+  sms: string;
+  emailSubject: string;
+  emailBody: string;
+  confidence: VoiceConfidence;
+  sanitized: boolean;
+};
+type LastAiParams =
+  | { mode: "full" }
+  | { mode: "rewrite"; channel: ComposerChannel; instruction: string; draft: string };
 
 const CONTEXT_OPEN_STORAGE_KEY = "oasis:conversations:contextPanelOpen";
 
@@ -78,6 +90,16 @@ export function InboxShell({
   const [sending, setSending] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [aiLoading, setAiLoading] = useState(false);
+
+  // Voice-suggest state (Phase 2, plan §6.4). `aiSuggestion` is the last
+  // loaded suggestion for the CURRENT thread — AIDraftBanner shows only
+  // while the active channel's text still matches it verbatim (computed in
+  // `aiDraftActive` below), so any user edit silently drops the banner
+  // without extra bookkeeping. `lastAiParamsRef` lets Regenerate re-issue
+  // whatever call (full draft or a tone-rewrite) produced the current draft.
+  const [aiSuggestion, setAiSuggestion] = useState<AiSuggestion | null>(null);
+  const [aiSuggestLoading, setAiSuggestLoading] = useState(false);
+  const lastAiParamsRef = useRef<LastAiParams | null>(null);
 
   // Optimistic-send status tracking (client-only — see MessageBubble note on
   // why historical rows never get a status ladder).
@@ -165,6 +187,17 @@ export function InboxShell({
     };
   }, [selected, dealSummaryByLead]);
 
+  // True only while the composer's active-channel text still verbatim
+  // matches the last AI suggestion — any keystroke that diverges makes this
+  // false and the banner disappears, satisfying "never overwrite user-typed
+  // text; the AI affordance disappears once edited" without a dirty flag.
+  const aiDraftActive = useMemo(() => {
+    if (!aiSuggestion) return false;
+    return channel === "sms"
+      ? draft === aiSuggestion.sms
+      : emailSubject === aiSuggestion.emailSubject && emailBody === aiSuggestion.emailBody;
+  }, [aiSuggestion, channel, draft, emailSubject, emailBody]);
+
   const selectThread = useCallback((key: string) => {
     setSelectedKey(key);
     setMobileView("thread");
@@ -173,6 +206,8 @@ export function InboxShell({
     setEmailSubject("");
     setEmailBody("");
     setChannel("sms");
+    setAiSuggestion(null);
+    lastAiParamsRef.current = null;
   }, []);
 
   const onDealSummary = useCallback(
@@ -272,6 +307,7 @@ export function InboxShell({
         setNotice(data?.message || data?.error || "Send failed.");
         return;
       }
+      setAiSuggestion(null);
       setNotice(
         data.dry_run
           ? "Dry-run — logged to the timeline but not actually sent (dashboard is in dry-run mode)."
@@ -354,6 +390,7 @@ export function InboxShell({
         setNotice(data?.message || data?.error || "Send failed.");
         return;
       }
+      setAiSuggestion(null);
       setNotice(data.status === "queued" ? "Queued — will send shortly." : null);
     } catch {
       setPendingIds((p) => {
@@ -419,6 +456,169 @@ export function InboxShell({
     }
   }
 
+  // --- Voice-suggest (Phase 2, plan §6.3/§6.4) ---------------------------
+  // Every call re-derives lead_id/thread_key from `selected` (never a
+  // client-cached transcript) and lets the route re-query messages + lead
+  // facts server-side. `runVoiceSuggest` is the single fetch primitive; the
+  // three user-facing actions (full Suggest, tone-rewrite, ghost text) and
+  // Regenerate all funnel through it so error/notice handling never drifts.
+  const runVoiceSuggest = useCallback(
+    async (params: {
+      mode: "full" | "ghost" | "rewrite";
+      channel?: ComposerChannel;
+      instruction?: string;
+      draft?: string;
+      signal?: AbortSignal;
+    }): Promise<AiSuggestion | null> => {
+      if (!selected) return null;
+      try {
+        const res = await fetch("/api/conversations/voice-suggest", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            lead_id: selected.lead_id,
+            thread_key: selected.key,
+            mode: params.mode,
+            channel: params.channel,
+            instruction: params.instruction,
+            draft: params.draft,
+          }),
+          signal: params.signal,
+        });
+        const data = await res.json().catch(() => null);
+        if (params.signal?.aborted) return null;
+        if (!res.ok || !data?.ok) {
+          if (params.mode !== "ghost") {
+            setNotice(data?.message || "Couldn't generate a suggestion.");
+          }
+          if (data?.fallback) {
+            return {
+              sms: data.fallback.sms || "",
+              emailSubject: data.fallback.email?.subject || "",
+              emailBody: data.fallback.email?.body || "",
+              confidence: "low",
+              sanitized: false,
+            };
+          }
+          return null;
+        }
+        return {
+          sms: data.sms || "",
+          emailSubject: data.email?.subject || "",
+          emailBody: data.email?.body || "",
+          confidence: (data.voice_confidence as VoiceConfidence) || "low",
+          sanitized: data.sanitized !== false,
+        };
+      } catch (err) {
+        if (params.signal?.aborted || (err instanceof DOMException && err.name === "AbortError")) return null;
+        if (params.mode !== "ghost") setNotice("Network error — suggestion unavailable.");
+        return null;
+      }
+    },
+    [selected],
+  );
+
+  async function handleSuggest() {
+    if (aiSuggestLoading) return;
+    setAiSuggestLoading(true);
+    setNotice(null);
+    lastAiParamsRef.current = { mode: "full" };
+    const result = await runVoiceSuggest({ mode: "full" });
+    setAiSuggestLoading(false);
+    if (!result) return;
+    setAiSuggestion(result);
+    // Always fill the channel the operator is actively looking at (Composer
+    // only enables Suggest when that channel's field is empty). Only
+    // opportunistically fill the OTHER channel if it's also empty — never
+    // clobber real typed text sitting in the tab the operator isn't on.
+    if (channel === "sms") {
+      setDraft(result.sms);
+      if (!emailSubject.trim() && !emailBody.trim()) {
+        setEmailSubject(result.emailSubject);
+        setEmailBody(result.emailBody);
+      }
+    } else {
+      setEmailSubject(result.emailSubject);
+      setEmailBody(result.emailBody);
+      if (!draft.trim()) setDraft(result.sms);
+    }
+  }
+
+  async function handleToneRewrite(instruction: string) {
+    if (aiSuggestLoading) return;
+    const draftText = channel === "sms" ? draft : emailBody;
+    if (!draftText.trim()) return;
+    setAiSuggestLoading(true);
+    setNotice(null);
+    lastAiParamsRef.current = { mode: "rewrite", channel, instruction, draft: draftText };
+    const result = await runVoiceSuggest({ mode: "rewrite", channel, instruction, draft: draftText });
+    setAiSuggestLoading(false);
+    if (!result) return;
+    setAiSuggestion(result);
+    if (channel === "sms") setDraft(result.sms || draftText);
+    else {
+      setEmailBody(result.emailBody || draftText);
+      if (result.emailSubject) setEmailSubject(result.emailSubject);
+    }
+  }
+
+  async function handleAiRegenerate() {
+    const p = lastAiParamsRef.current;
+    if (!p || aiSuggestLoading) return;
+    setAiSuggestLoading(true);
+    setNotice(null);
+    const result = await runVoiceSuggest(p.mode === "full" ? { mode: "full" } : { mode: "rewrite", channel: p.channel, instruction: p.instruction, draft: p.draft });
+    setAiSuggestLoading(false);
+    if (!result) return;
+    setAiSuggestion(result);
+    if (p.mode === "full") {
+      if (channel === "sms") {
+        setDraft(result.sms);
+        if (!emailSubject.trim() && !emailBody.trim()) {
+          setEmailSubject(result.emailSubject);
+          setEmailBody(result.emailBody);
+        }
+      } else {
+        setEmailSubject(result.emailSubject);
+        setEmailBody(result.emailBody);
+        if (!draft.trim()) setDraft(result.sms);
+      }
+    } else if (p.channel === "sms") {
+      setDraft(result.sms || draft);
+    } else {
+      setEmailBody(result.emailBody || emailBody);
+      if (result.emailSubject) setEmailSubject(result.emailSubject);
+    }
+  }
+
+  function handleAiEdit() {
+    // Dismiss the banner but keep the current text — the operator free-edits
+    // from here; a fresh Suggest/regenerate call is needed to bring it back.
+    setAiSuggestion(null);
+  }
+
+  function handleAiDiscard() {
+    setAiSuggestion(null);
+    if (channel === "sms") setDraft("");
+    else {
+      setEmailSubject("");
+      setEmailBody("");
+    }
+  }
+
+  async function handleAiAcceptSend() {
+    setAiSuggestion(null);
+    await handleSend();
+  }
+
+  const handleGhostFetch = useCallback(
+    async (signal: AbortSignal): Promise<string | null> => {
+      const result = await runVoiceSuggest({ mode: "ghost", signal });
+      return result?.sms?.trim() || null;
+    },
+    [runVoiceSuggest],
+  );
+
   return (
     <div
       className={`h-full min-h-0 grid grid-cols-1 lg:grid-cols-[320px_minmax(0,1fr)] overflow-hidden ${
@@ -477,6 +677,17 @@ export function InboxShell({
             statusMap={statusMap}
             onRetry={handleRetry}
             registryRef={messageRegistry}
+            aiSuggestActive={aiDraftActive}
+            aiConfidence={aiSuggestion?.confidence}
+            aiSanitized={aiSuggestion?.sanitized}
+            aiSuggestLoading={aiSuggestLoading}
+            onSuggest={handleSuggest}
+            onAiAcceptSend={handleAiAcceptSend}
+            onAiEdit={handleAiEdit}
+            onAiRegenerate={handleAiRegenerate}
+            onAiDiscard={handleAiDiscard}
+            onToneRewrite={handleToneRewrite}
+            onGhostFetch={handleGhostFetch}
           />
         ) : (
           <div className="flex-1 flex items-center justify-center text-sm text-fg-dim">Select a conversation.</div>
@@ -500,6 +711,12 @@ export function InboxShell({
               open={contextOpen}
               onClose={toggleContextOpen}
               onDealSummary={onDealSummary}
+              registryRef={messageRegistry}
+              templateVars={templateVars}
+              onComposerAction={(text) => {
+                setChannel("sms");
+                setDraft(text);
+              }}
             />
           </div>
         </>

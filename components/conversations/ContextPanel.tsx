@@ -1,13 +1,13 @@
 "use client";
 
 /**
- * ContextPanel — plan §5 (Phase 1: deal-details only). Fetches
- * /api/leads/[id]/detail on thread select, caches per lead_id, and renders:
- * AISummaryCard + KeyPointsAccordion (P2 placeholders) + DealDetailsAccordion
- * (built) + AISuggestionRail (P2 placeholder) + LeadFileBody inline (the
- * full re-hosted lead file — its own Activity/Notes/Docs tabs cover the
- * plan's "SubTabs Activity/Notes/Files" requirement, see handoff notes for
- * why LeadFileBody's full 7-tab nav was kept rather than cut down to 3).
+ * ContextPanel — plan §5/§6. Fetches /api/leads/[id]/detail on thread
+ * select (deal details, Phase 1) and /api/conversations/summarize on thread
+ * select + explicit regenerate (AI summary + key points, Phase 2), each
+ * cached client-side so switching threads back and forth doesn't re-hit the
+ * API. Renders: AISummaryCard + KeyPointsAccordion (click-to-source via the
+ * MessageList registry) + DealDetailsAccordion + AISuggestionRail
+ * (chips derived from lead state + key points) + LeadFileBody inline.
  *
  * Accordion-open state + panel-open state persist to localStorage, read in
  * a useEffect (not during render) to avoid an SSR/client hydration mismatch.
@@ -15,17 +15,22 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { X } from "lucide-react";
 import type { ConversationThread } from "@/lib/conversation-threading";
+import type { KeyPoint } from "@/lib/ai-conversation-summarize";
 import { EmptyState } from "@/components/Card";
 import { LeadFileBody, type DetailPayload } from "@/components/leads/LeadFileBody";
 import { AISummaryCard } from "./AISummaryCard";
 import { KeyPointsAccordion } from "./KeyPointsAccordion";
-import { AISuggestionRail } from "./AISuggestionRail";
-import { DealDetailsAccordion } from "./DealDetailsAccordion";
+import { AISuggestionRail, deriveSuggestionChips } from "./AISuggestionRail";
+import { DealDetailsAccordion, computeMissingStips } from "./DealDetailsAccordion";
+import { scrollToMessage, type MessageRegistry } from "./MessageList";
 
 const ACCORDION_STORAGE_KEY = "oasis:conversations:contextPanelAccordions";
 
-type AccordionState = { dealDetails: boolean };
-const DEFAULT_ACCORDIONS: AccordionState = { dealDetails: true };
+type AccordionState = { dealDetails: boolean; keyPoints: boolean };
+const DEFAULT_ACCORDIONS: AccordionState = { dealDetails: true, keyPoints: true };
+
+type SummaryState = { summary: string | null; keyPoints: KeyPoint[]; loading: boolean; error: string | null };
+const SUMMARY_IDLE: SummaryState = { summary: null, keyPoints: [], loading: false, error: null };
 
 export function ContextPanel({
   thread,
@@ -33,17 +38,26 @@ export function ContextPanel({
   open,
   onClose,
   onDealSummary,
+  registryRef,
+  templateVars,
+  onComposerAction,
 }: {
   thread: ConversationThread;
   tenantSlug: string;
   open: boolean;
   onClose: () => void;
   onDealSummary?: (leadId: string, summary: { business_name?: string; funding_amount?: string }) => void;
+  registryRef?: MessageRegistry;
+  templateVars?: Record<string, string | undefined>;
+  onComposerAction?: (text: string) => void;
 }) {
   const cacheRef = useRef<Map<string, DetailPayload | "error">>(new Map());
   const [payload, setPayload] = useState<DetailPayload | "error" | null>(null);
   const [accordions, setAccordions] = useState<AccordionState>(DEFAULT_ACCORDIONS);
   const [hydrated, setHydrated] = useState(false);
+
+  const summaryCacheRef = useRef<Map<string, SummaryState>>(new Map());
+  const [summaryState, setSummaryState] = useState<SummaryState>(SUMMARY_IDLE);
 
   // Read persisted accordion state once on mount (client-only — avoids the
   // SSR/hydration mismatch a synchronous localStorage read during render
@@ -108,7 +122,84 @@ export function ContextPanel({
     void reload();
   }, [leadId, reload]);
 
+  // AI summary + key points — cache key is thread.key + thread.last_at so a
+  // new inbound/outbound message (which bumps last_at) invalidates the
+  // cached summary automatically, and switching back to an unchanged thread
+  // is instant (plan §5: "cache keyed on thread.key + last_at + explicit
+  // regenerate").
+  const summaryCacheKey = `${thread.key}:${thread.last_at}`;
+
+  const fetchSummary = useCallback(
+    async (force: boolean) => {
+      if (!force) {
+        const cached = summaryCacheRef.current.get(summaryCacheKey);
+        if (cached) {
+          setSummaryState(cached);
+          return;
+        }
+      }
+      setSummaryState((s) => ({ ...s, loading: true, error: null }));
+      try {
+        const r = await fetch("/api/conversations/summarize", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          credentials: "include",
+          body: JSON.stringify({ thread_key: thread.key, lead_id: thread.lead_id }),
+        });
+        const j = await r.json().catch(() => null);
+        if (!r.ok || !j?.ok) {
+          const next: SummaryState = {
+            summary: j?.fallback?.summary || "Summary unavailable - try regenerating.",
+            keyPoints: j?.fallback?.key_points || [],
+            loading: false,
+            error: j?.message || "Couldn't generate a summary.",
+          };
+          summaryCacheRef.current.set(summaryCacheKey, next);
+          setSummaryState(next);
+          return;
+        }
+        const next: SummaryState = { summary: j.summary, keyPoints: j.key_points || [], loading: false, error: null };
+        summaryCacheRef.current.set(summaryCacheKey, next);
+        setSummaryState(next);
+      } catch {
+        const next: SummaryState = {
+          summary: "Summary unavailable - try regenerating.",
+          keyPoints: [],
+          loading: false,
+          error: "Network error.",
+        };
+        summaryCacheRef.current.set(summaryCacheKey, next);
+        setSummaryState(next);
+      }
+    },
+    [summaryCacheKey, thread.key, thread.lead_id],
+  );
+
+  useEffect(() => {
+    void fetchSummary(false);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [summaryCacheKey]);
+
+  const handleJumpToMessage = useCallback(
+    (messageId: string) => {
+      if (registryRef) scrollToMessage(registryRef, messageId);
+    },
+    [registryRef],
+  );
+
   if (!open) return null;
+
+  const missingStips = payload && payload !== "error" ? computeMissingStips(payload.documents) : [];
+  const suggestionChips =
+    payload && payload !== "error"
+      ? deriveSuggestionChips({
+          missingStips,
+          record: payload.record.data,
+          application: payload.application,
+          keyPoints: summaryState.keyPoints,
+          templateVars: templateVars || {},
+        })
+      : [];
 
   return (
     <div className="h-full min-h-0 flex flex-col border-l border-bg-border bg-bg-panel">
@@ -120,8 +211,19 @@ export function ContextPanel({
       </div>
 
       <div className="flex-1 min-h-0 overflow-y-auto p-3 space-y-3">
-        <AISummaryCard />
-        <KeyPointsAccordion />
+        <AISummaryCard
+          summary={summaryState.summary}
+          loading={summaryState.loading}
+          error={summaryState.error}
+          onRegenerate={() => void fetchSummary(true)}
+        />
+        <KeyPointsAccordion
+          keyPoints={summaryState.keyPoints}
+          loading={summaryState.loading}
+          open={accordions.keyPoints}
+          onToggle={() => setAccordions((a) => ({ ...a, keyPoints: !a.keyPoints }))}
+          onJump={handleJumpToMessage}
+        />
 
         {!leadId ? (
           <EmptyState message="No lead linked to this thread yet — deal details will appear once one is." />
@@ -140,7 +242,7 @@ export function ContextPanel({
               open={accordions.dealDetails}
               onToggle={() => setAccordions((a) => ({ ...a, dealDetails: !a.dealDetails }))}
             />
-            <AISuggestionRail />
+            <AISuggestionRail chips={suggestionChips} onAction={(text) => onComposerAction?.(text)} />
             <div className="rounded-lg border border-bg-border bg-bg-elev/20">
               <LeadFileBody
                 tenantSlug={tenantSlug}

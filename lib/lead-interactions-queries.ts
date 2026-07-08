@@ -200,3 +200,87 @@ export async function listThreadsForTenant(
   const labels = await resolveLeadLabels(db, tenantId, distinctLeadIds(rows));
   return groupRowsIntoThreads(rows, labels);
 }
+
+/** Parsed form of a `ConversationThread.key` (see conversation-threading.ts
+ *  groupKey — lead:<uuid> | phone:<E164> | email:<addr> | id:<uuid>). */
+export type ThreadKeyParts =
+  | { kind: "lead"; leadId: string }
+  | { kind: "phone"; phone: string }
+  | { kind: "email"; email: string }
+  | { kind: "id"; id: string };
+
+export function parseThreadKey(key: string): ThreadKeyParts | null {
+  if (!key) return null;
+  if (key.startsWith("lead:")) return { kind: "lead", leadId: key.slice(5) };
+  if (key.startsWith("phone:")) return { kind: "phone", phone: key.slice(6) };
+  if (key.startsWith("email:")) return { kind: "email", email: key.slice(6) };
+  if (key.startsWith("id:")) return { kind: "id", id: key.slice(3) };
+  return null;
+}
+
+/**
+ * Server-side, per-thread message load for the AI routes (summarize,
+ * voice-suggest). Callers MUST NOT trust a client-supplied transcript —
+ * this re-queries `lead_interactions` scoped to `tenantId` + the specific
+ * thread key, so a forged/stale client payload can never smuggle another
+ * tenant's or another thread's messages into a prompt.
+ *
+ * Mirrors groupRowsIntoThreads' groupKey exactly: phone/email keys only
+ * apply to rows with no lead_id (a lead_id always wins the "lead:" key), so
+ * those branches filter `.is("lead_id", null)` to avoid pulling in messages
+ * that actually belong to a different lead-linked thread.
+ *
+ * Returns null on no match / query failure — callers fall back to the
+ * deterministic "summary unavailable" / neutral-voice path, never throw.
+ */
+export async function loadThreadForAi(
+  tenantId: string | null,
+  threadKey: string,
+  opts: { limit?: number } = {},
+): Promise<ConversationThread | null> {
+  if (!tenantId) return null;
+  const parts = parseThreadKey(threadKey);
+  if (!parts) return null;
+  const db = getServiceSupabase();
+  const limit = Math.max(5, Math.min(opts.limit ?? 30, 100));
+
+  try {
+    let query = db
+      .from("lead_interactions")
+      .select(INTERACTION_COLUMNS)
+      .eq("tenant_id", tenantId)
+      .order("created_at", { ascending: false })
+      .limit(limit);
+
+    if (parts.kind === "lead") {
+      if (!/^[0-9a-f-]{36}$/i.test(parts.leadId)) return null;
+      query = query.eq("lead_id", parts.leadId);
+    } else if (parts.kind === "phone") {
+      const last10 = parts.phone.replace(/\D/g, "").slice(-10);
+      if (last10.length < 10) return null;
+      query = query.is("lead_id", null).or(`from_phone.ilike.%${last10}%,to_phone.ilike.%${last10}%`);
+    } else if (parts.kind === "email") {
+      const pattern = parts.email.trim().toLowerCase().replace(/[%_\\]/g, "\\$&");
+      if (!pattern) return null;
+      query = query.is("lead_id", null).ilike("to_email", pattern);
+    } else {
+      if (!/^[0-9a-f-]{36}$/i.test(parts.id)) return null;
+      query = query.eq("id", parts.id);
+    }
+
+    const { data, error } = await query;
+    if (error) throw error;
+    const rows = (data || []) as unknown as RawInteractionRow[];
+    if (rows.length === 0) return null;
+
+    const labels = await resolveLeadLabels(db, tenantId, distinctLeadIds(rows));
+    const threads = groupRowsIntoThreads(rows, labels);
+    // All rows queried above share the same group key by construction, so
+    // this yields exactly one thread (or occasionally the same key split
+    // across a lead-id vs id: fallback for orphan rows — first is correct).
+    return threads[0] ?? null;
+  } catch (err) {
+    console.error("[lead-interactions-queries] loadThreadForAi failed", err);
+    return null;
+  }
+}

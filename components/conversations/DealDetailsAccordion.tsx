@@ -23,6 +23,13 @@ const REQUIRED_DOCS: { key: string; label: string }[] = [
   { key: "void_cheque", label: "Void cheque" },
 ];
 
+/** Shared with AISuggestionRail (its "Send stip reminder" chip) so the two
+ *  surfaces never disagree about what's outstanding. */
+export function computeMissingStips(documents: { doc_type: string }[]): { key: string; label: string }[] {
+  const present = new Set(documents.map((d) => d.doc_type));
+  return REQUIRED_DOCS.filter((d) => !present.has(d.key));
+}
+
 function str(v: unknown): string | null {
   return typeof v === "string" && v.trim() ? v : null;
 }
@@ -60,8 +67,7 @@ export function DealDetailsAccordion({
   const leverage = record.leverage_ratio ?? null;
   const stage = str(record.stage) || str(record.status);
 
-  const present = new Set(documents.map((d) => d.doc_type));
-  const missing = REQUIRED_DOCS.filter((d) => !present.has(d.key));
+  const missing = computeMissingStips(documents);
 
   return (
     <div className="rounded-lg border border-bg-border bg-bg-elev/40 overflow-hidden">

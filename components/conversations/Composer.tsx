@@ -1,19 +1,20 @@
 "use client";
 
 /**
- * Composer — plan §3. ChannelSwitcher + SegmentCounter (SMS) + subject field
- * (email) + SlashCommandTemplateMenu + SendSplitButton. Owns only ephemeral
- * UI state (the slash-menu open/query); the actual draft text, channel, and
- * send-in-flight state are owned by InboxShell per the plan's state-owner
- * design, and passed down as props.
- *
- * The AI "✨ Suggest" affordance is a disabled stub — Phase 2 wires it to
- * `voice-suggest`; AIDraftBanner/GhostTextSuggestion aren't mounted here yet
- * because there's nothing for them to show.
+ * Composer — plan §3/§6.4. ChannelSwitcher + SegmentCounter (SMS) + subject
+ * field (email) + SlashCommandTemplateMenu + SendSplitButton, plus the
+ * Phase 2 AI affordances: "✨ Suggest" (full draft via voice-suggest),
+ * AIDraftBanner (Accept & Send / Edit / Regenerate / Discard once a draft is
+ * AI-authored and unedited), GhostTextSuggestion (debounced single-sentence
+ * SMS opener on a focused-empty composer, Tab to accept), and tone-rewrite
+ * buttons once a draft exists. Owns only ephemeral UI state (slash-menu,
+ * ghost-text debounce/abort lifecycle) — the actual draft text, channel,
+ * and AI-suggestion bookkeeping are owned by InboxShell per the plan's
+ * state-owner design, and passed down as props.
  */
 
-import { useRef, useState } from "react";
-import { Sparkles } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import { Sparkles, Wand2 } from "lucide-react";
 import type { ConversationThread } from "@/lib/conversation-threading";
 import { ChannelSwitcher, type ComposerChannel } from "./ChannelSwitcher";
 import { SegmentCounter } from "./SegmentCounter";
@@ -25,6 +26,14 @@ import {
   type SlashTemplate,
 } from "./SlashCommandTemplateMenu";
 import { SendSplitButton } from "./SendSplitButton";
+import { AIDraftBanner } from "./AIDraftBanner";
+import { GhostTextSuggestion } from "./GhostTextSuggestion";
+
+const TONE_TOOLS: { id: string; label: string; instruction: string }[] = [
+  { id: "formal", label: "More formal", instruction: "make the tone more formal and professional" },
+  { id: "casual", label: "More casual", instruction: "make the tone more casual and conversational" },
+  { id: "tighter", label: "Tighten", instruction: "make it noticeably shorter and more direct, same meaning" },
+];
 
 function TextareaWithSlash({
   value,
@@ -34,6 +43,9 @@ function TextareaWithSlash({
   templates,
   templateVars,
   disabled,
+  onFocus,
+  ghostText,
+  onAcceptGhost,
 }: {
   value: string;
   onChange: (v: string) => void;
@@ -42,6 +54,9 @@ function TextareaWithSlash({
   templates: SlashTemplate[];
   templateVars: Record<string, string | undefined>;
   disabled?: boolean;
+  onFocus?: () => void;
+  ghostText?: string | null;
+  onAcceptGhost?: () => void;
 }) {
   const [menuOpen, setMenuOpen] = useState(false);
   const taRef = useRef<HTMLTextAreaElement>(null);
@@ -81,11 +96,17 @@ function TextareaWithSlash({
         ref={taRef}
         value={value}
         disabled={disabled}
+        onFocus={onFocus}
         onChange={(e) => handleChange(e.target.value)}
         onKeyDown={(e) => {
           if (e.key === "Escape" && menuOpen) {
             e.preventDefault();
             setMenuOpen(false);
+            return;
+          }
+          if (e.key === "Tab" && ghostText && value.trim() === "") {
+            e.preventDefault();
+            onAcceptGhost?.();
           }
         }}
         rows={rows}
@@ -114,6 +135,17 @@ export function Composer({
   onAiReply,
   aiLoading,
   templateVars,
+  aiSuggestActive,
+  aiConfidence,
+  aiSanitized,
+  aiSuggestLoading,
+  onSuggest,
+  onAiAcceptSend,
+  onAiEdit,
+  onAiRegenerate,
+  onAiDiscard,
+  onToneRewrite,
+  onGhostFetch,
 }: {
   thread: ConversationThread;
   channel: ComposerChannel;
@@ -132,10 +164,72 @@ export function Composer({
   onAiReply?: () => void;
   aiLoading?: boolean;
   templateVars: Record<string, string | undefined>;
+  aiSuggestActive?: boolean;
+  aiConfidence?: "low" | "med" | "high";
+  aiSanitized?: boolean;
+  aiSuggestLoading?: boolean;
+  onSuggest?: () => void;
+  onAiAcceptSend?: () => void;
+  onAiEdit?: () => void;
+  onAiRegenerate?: () => void;
+  onAiDiscard?: () => void;
+  onToneRewrite?: (instruction: string) => void;
+  onGhostFetch?: (signal: AbortSignal) => Promise<string | null>;
 }) {
   const hasPhone = !!thread.contact_phone;
   const hasEmail = !!thread.contact_email;
   const canSend = channel === "sms" ? hasPhone && draft.trim().length > 0 : hasEmail && emailSubject.trim().length > 0 && emailBody.trim().length > 0;
+
+  const activeText = channel === "sms" ? draft : `${emailSubject}\n${emailBody}`;
+  const hasUserText = activeText.trim().length > 0;
+  const suggestDisabled = !onSuggest || hasUserText || !!aiSuggestLoading;
+
+  // --- Ghost text (plan §6.4 #2): focused-empty SMS composer, 800ms debounce,
+  // Tab accepts, any keystroke dismisses + cancels the in-flight request. ---
+  const [ghostText, setGhostText] = useState<string | null>(null);
+  const ghostTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const ghostAbortRef = useRef<AbortController | null>(null);
+
+  function clearGhost() {
+    if (ghostTimerRef.current) {
+      clearTimeout(ghostTimerRef.current);
+      ghostTimerRef.current = null;
+    }
+    if (ghostAbortRef.current) {
+      ghostAbortRef.current.abort();
+      ghostAbortRef.current = null;
+    }
+    setGhostText(null);
+  }
+
+  useEffect(() => clearGhost, []); // cancel any in-flight ghost fetch on unmount/thread-switch
+
+  function scheduleGhost() {
+    if (!onGhostFetch || channel !== "sms" || draft.trim().length > 0) return;
+    clearGhost();
+    ghostTimerRef.current = setTimeout(() => {
+      const controller = new AbortController();
+      ghostAbortRef.current = controller;
+      onGhostFetch(controller.signal)
+        .then((text) => {
+          if (!controller.signal.aborted) setGhostText(text);
+        })
+        .catch(() => {
+          if (!controller.signal.aborted) setGhostText(null);
+        });
+    }, 800);
+  }
+
+  function handleSmsDraftChange(v: string) {
+    clearGhost(); // any keystroke dismisses the suggestion + cancels the fetch
+    onDraftChange(v);
+  }
+
+  function acceptGhost() {
+    if (!ghostText) return;
+    onDraftChange(ghostText);
+    clearGhost();
+  }
 
   return (
     <div className="shrink-0 border-t border-bg-border bg-bg-panel p-3 space-y-2">
@@ -180,34 +274,56 @@ export function Composer({
           )}
           <button
             type="button"
-            disabled
-            title="AI voice suggestions — coming in Phase 2"
-            className="inline-flex items-center gap-1 text-[11px] font-semibold text-violet-400/60 border border-violet-500/20 bg-violet-500/5 rounded-md px-2 py-1 cursor-not-allowed"
+            onClick={onSuggest}
+            disabled={suggestDisabled}
+            title={hasUserText ? "Clear the draft to get an AI suggestion" : "Draft a reply in this rep's voice"}
+            className="inline-flex items-center gap-1 text-[11px] font-semibold text-violet-300 border border-violet-500/30 bg-violet-500/10 hover:bg-violet-500/20 rounded-md px-2 py-1 disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-violet-500/10 transition-colors"
           >
             <Sparkles className="h-3 w-3" />
-            Suggest
+            {aiSuggestLoading ? "Thinking…" : "Suggest"}
           </button>
         </div>
       </div>
 
+      {aiSuggestActive && (
+        <AIDraftBanner
+          confidence={aiConfidence}
+          sanitized={aiSanitized}
+          loading={aiSuggestLoading}
+          onAcceptSend={canSend ? onAiAcceptSend : undefined}
+          onEdit={onAiEdit}
+          onRegenerate={onAiRegenerate}
+          onDiscard={onAiDiscard}
+        />
+      )}
+
       {channel === "sms" ? (
         hasPhone ? (
-          <div className="flex items-end gap-2">
-            <TextareaWithSlash
-              value={draft}
-              onChange={onDraftChange}
-              placeholder={`Reply via ${smsProvider === "kixie" ? "Kixie" : "TextTorrent"}… (type / for templates)`}
-              rows={2}
-              templates={DEFAULT_SMS_TEMPLATES}
-              templateVars={templateVars}
-            />
-            <SendSplitButton onSend={onSend} sending={sending} disabled={!canSend} channel="sms" />
+          <div className="space-y-1.5">
+            <div className="flex items-end gap-2">
+              <TextareaWithSlash
+                value={draft}
+                onChange={handleSmsDraftChange}
+                onFocus={scheduleGhost}
+                ghostText={ghostText}
+                onAcceptGhost={acceptGhost}
+                placeholder={`Reply via ${smsProvider === "kixie" ? "Kixie" : "TextTorrent"}… (type / for templates)`}
+                rows={2}
+                templates={DEFAULT_SMS_TEMPLATES}
+                templateVars={templateVars}
+              />
+              <SendSplitButton onSend={onSend} sending={sending} disabled={!canSend} channel="sms" />
+            </div>
+            <GhostTextSuggestion text={ghostText} onAccept={acceptGhost} onDismiss={clearGhost} />
+            {hasUserText && onToneRewrite && (
+              <ToneToolsRow onPick={(instr) => onToneRewrite(instr)} disabled={!!aiSuggestLoading} />
+            )}
           </div>
         ) : (
           <div className="text-[11px] text-fg-dim italic">This thread has no SMS number on file.</div>
         )
       ) : hasEmail ? (
-        <div className="space-y-2">
+        <div className="space-y-1.5">
           <input
             value={emailSubject}
             onChange={(e) => onEmailSubjectChange(e.target.value)}
@@ -225,10 +341,34 @@ export function Composer({
             />
             <SendSplitButton onSend={onSend} sending={sending} disabled={!canSend} channel="email" />
           </div>
+          {hasUserText && onToneRewrite && (
+            <ToneToolsRow onPick={(instr) => onToneRewrite(instr)} disabled={!!aiSuggestLoading} />
+          )}
         </div>
       ) : (
         <div className="text-[11px] text-fg-dim italic">This thread has no email address on file.</div>
       )}
+    </div>
+  );
+}
+
+/** Tone-rewrite chips — plan §6.4 tail: "appear only after a draft exists".
+ *  Each calls voice-suggest with mode:'rewrite' + the current draft. */
+function ToneToolsRow({ onPick, disabled }: { onPick: (instruction: string) => void; disabled?: boolean }) {
+  return (
+    <div className="flex items-center gap-1.5">
+      <Wand2 className="h-3 w-3 text-violet-400/50 shrink-0" />
+      {TONE_TOOLS.map((t) => (
+        <button
+          key={t.id}
+          type="button"
+          onClick={() => onPick(t.instruction)}
+          disabled={disabled}
+          className="text-[10.5px] font-medium text-violet-300/80 hover:text-violet-200 disabled:opacity-40 disabled:cursor-not-allowed"
+        >
+          {t.label}
+        </button>
+      ))}
     </div>
   );
 }
