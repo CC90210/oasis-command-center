@@ -41,6 +41,7 @@ export type SendResult = {
  */
 const CHANNEL_LIVE_ENV: Record<string, string> = {
   texttorrent: "LIVE_SEND_TEXTTORRENT",
+  texttorrent_followup: "LIVE_SEND_TEXTTORRENT_FOLLOWUP",
   kixie: "LIVE_SEND_KIXIE",
   twilio: "LIVE_SEND_TWILIO",
   gws: "LIVE_SEND_EMAIL",

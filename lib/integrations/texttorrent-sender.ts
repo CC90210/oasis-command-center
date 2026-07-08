@@ -42,12 +42,17 @@ export async function resolveTextTorrentSenderId(args: {
   tenantId: string;
   /** The acting user's auth id — present for any human-in-the-loop send. */
   userId?: string | null;
+  /** Which TT account's numbers to resolve. "texttorrent" (default) or "texttorrent_followup". */
+  service?: string;
 }): Promise<string | undefined> {
-  const { tenantId, userId } = args;
+  const { tenantId, userId, service = "texttorrent" } = args;
 
-  // 1. The rep's own number (only looked up for human-in-the-loop sends).
+  // 1. The rep's own number (only looked up for human-in-the-loop sends). This is
+  //    only valid on the MAIN account — the per-rep `texttorrent_from_number` is a
+  //    number registered on the main SID. The follow-up account owns different
+  //    numbers, so for it we fall through to that account's tenant default.
   let userNumber: string | null = null;
-  if (userId) {
+  if (userId && service === "texttorrent") {
     try {
       userNumber = await getUserIntegrationValue(
         tenantId,
@@ -60,11 +65,11 @@ export async function resolveTextTorrentSenderId(args: {
     }
   }
 
-  // 2. Tenant "Default Business Number" — owner number for automated sends and
-  //    the fallback when a rep hasn't set their own.
+  // 2. Tenant "Default Business Number" for the SELECTED account — owner number for
+  //    automated sends and the fallback when a rep hasn't set their own.
   let tenantDefault: string | undefined;
   try {
-    const bundle = await getTenantIntegrationBundle(tenantId, "texttorrent");
+    const bundle = await getTenantIntegrationBundle(tenantId, service);
     tenantDefault = bundle.from_number;
   } catch (err) {
     // Soft-fail so a transient store error never blocks a send — but make the

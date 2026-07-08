@@ -36,7 +36,7 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
     return NextResponse.json({ ok: false, error: sess.reason }, { status: 401 });
   }
 
-  let body: { to_number?: unknown; message?: unknown };
+  let body: { to_number?: unknown; message?: unknown; account?: unknown };
   try {
     body = (await req.json()) as typeof body;
   } catch {
@@ -46,6 +46,12 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
   const message = (typeof body.message === "string" ? body.message : "").trim().slice(0, MAX_MSG);
   if (!toNumber) return NextResponse.json({ ok: false, error: "to_number_required" }, { status: 400 });
   if (!message) return NextResponse.json({ ok: false, error: "message_required" }, { status: 400 });
+
+  // Which TextTorrent account sends this: the main SunBiz line, or the dedicated
+  // follow-up account (its own SID/number + its own LIVE_SEND flag + rate budget).
+  const account = body.account === "followup" ? "followup" : "main";
+  const service = account === "followup" ? "texttorrent_followup" : "texttorrent";
+  const channel = service; // send-mode channel + LIVE_SEND_* key
 
   // Opt-out gate. This direct-send path bypasses send_gateway's suppression, so
   // re-check here and FAIL CLOSED — a lead who replied STOP must never get texted,
@@ -64,8 +70,9 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
     );
   }
 
-  // Sender number: the operator's own TT number when set, else tenant default.
-  const senderId = await resolveTextTorrentSenderId({ tenantId: sess.tenantId, userId: sess.userId });
+  // Sender number: the operator's own TT number when set (main account only), else the
+  // selected account's tenant default.
+  const senderId = await resolveTextTorrentSenderId({ tenantId: sess.tenantId, userId: sess.userId, service });
   if (!senderId) {
     return NextResponse.json(
       { ok: false, error: "no_sender_number", message: "No Text Torrent sender number — set one in Settings → Integrations (or your own in Personal)." },
@@ -73,19 +80,20 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
     );
   }
 
-  if (isDryRun("texttorrent")) {
+  if (isDryRun(channel)) {
     return NextResponse.json({
       ok: true,
       dry_run: true,
       provider: "texttorrent",
-      would_send: { to_number: toNumber, from: senderId, chars: message.length },
+      account,
+      would_send: { to_number: toNumber, from: senderId, chars: message.length, account },
     });
   }
 
   try {
-    // Tenant default act-as sub-account (matches the campaigns send path); the
-    // per-rep identity is the sender NUMBER resolved above, not the act-as email.
-    const creds = await getTextTorrentCredentials(sess.tenantId);
+    // Selected account's tenant-default act-as sub-account; the per-rep identity is
+    // the sender NUMBER resolved above, not the act-as email.
+    const creds = await getTextTorrentCredentials(sess.tenantId, { service });
     const res = await sendSms(creds, { number: toNumber, message, sender_id: senderId });
 
     const db = getServiceSupabase();
@@ -106,6 +114,7 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
         from_number: senderId,
         chat_id: res.data?.chat_id ?? null,
         tt_message_id: res.data?.message_id ?? null,
+        tt_account: account,
         status: "sent",
       },
     });
