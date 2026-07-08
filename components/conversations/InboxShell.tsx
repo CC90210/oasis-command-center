@@ -359,32 +359,99 @@ export function InboxShell({
   // Empty/preview early-returns live BELOW all hooks (React rules-of-hooks:
   // hooks must run unconditionally on every render). See just above the render.
 
-  // Phase 3 scheduled-send (plan §3/§7, SendSplitButton). Best-effort,
-  // client-only: an in-memory setTimeout owned by this component fires the
-  // real send at the scheduled time — durable ONLY while this browser tab
-  // stays open (a closed tab or redeploy silently drops it). A real fix
-  // needs a `scheduled_sends` table + a server-side worker; out of scope for
-  // this phase — flagged again in SendSplitButton's doc comment. Cleared on
-  // unmount so a stale timer can never fire against a torn-down component.
-  const scheduledTimersRef = useRef<Array<ReturnType<typeof setTimeout>>>([]);
-  useEffect(
-    () => () => {
-      scheduledTimersRef.current.forEach(clearTimeout);
-      scheduledTimersRef.current = [];
-    },
-    [],
-  );
+  // Durable scheduled-send (2026-07-08, replaces the prior in-tab
+  // setTimeout — see SendSplitButton's doc comment). A scheduledAt POSTs to
+  // /api/conversations/schedule, which inserts a `scheduled_sends` row
+  // (database/114_scheduled_sends.sql); the dispatch-scheduled-sends Vercel
+  // cron (every 5 min) fires it server-side, so the send survives this tab
+  // closing or a redeploy. Both channels supported.
+  async function handleScheduleSend(scheduledAtIso: string) {
+    if (!selected || sending) return;
+    const selKey = selected.key;
+    const leadId = selected.lead_id;
+    const scheduledLabel = new Date(scheduledAtIso).toLocaleString([], { dateStyle: "short", timeStyle: "short" });
+
+    if (channel === "sms") {
+      if (!selected.contact_phone || !draft.trim()) return;
+      const body = draft.trim();
+      setSending(true);
+      setNotice(null);
+      try {
+        const res = await fetch("/api/conversations/schedule", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            thread_key: selKey,
+            lead_id: leadId,
+            channel: "sms",
+            to_phone: selected.contact_phone,
+            body,
+            scheduled_for: scheduledAtIso,
+          }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok || !data.ok) {
+          setNotice(data?.message || data?.error || "Couldn't schedule the send.");
+          return;
+        }
+        setDraft("");
+        setNotice(`Scheduled for ${scheduledLabel}.`);
+      } catch {
+        setNotice("Network error — send not scheduled.");
+      } finally {
+        setSending(false);
+      }
+      return;
+    }
+
+    if (!selected.contact_email || !emailSubject.trim() || !emailBody.trim()) return;
+    const subject = emailSubject.trim();
+    const body = emailBody.trim();
+    setSending(true);
+    setNotice(null);
+    try {
+      const res = await fetch("/api/conversations/schedule", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          thread_key: selKey,
+          lead_id: leadId,
+          channel: "email",
+          to_email: selected.contact_email,
+          subject,
+          body,
+          scheduled_for: scheduledAtIso,
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.ok) {
+        setNotice(data?.message || data?.error || "Couldn't schedule the send.");
+        return;
+      }
+      setEmailSubject("");
+      setEmailBody("");
+      setNotice(`Scheduled for ${scheduledLabel}.`);
+    } catch {
+      setNotice("Network error — send not scheduled.");
+    } finally {
+      setSending(false);
+    }
+  }
 
   async function handleSend(opts?: { scheduledAt?: string }) {
     if (!selected || sending) return;
-    if (channel === "sms") return handleSendSms(opts);
+    if (opts?.scheduledAt) return handleScheduleSend(opts.scheduledAt);
+    if (channel === "sms") return handleSendSms();
     return handleSendEmail();
   }
 
-  /** Fires the actual optimistic-bubble + POST /api/conversations/reply —
-   *  shared by an immediate Send and a scheduled-send timer firing later.
-   *  Reads `threads` functionally (never a captured `selected`) so it's
-   *  correct even if the operator has since switched threads. */
+  /** Fires the actual optimistic-bubble + POST /api/conversations/reply for
+   *  an IMMEDIATE send. A scheduled send never reaches this function — it
+   *  goes straight to handleScheduleSend / POST /api/conversations/schedule
+   *  above, with no client-side optimistic bubble (the server fires it later,
+   *  possibly after this tab has closed). Reads `threads` functionally
+   *  (never a captured `selected`) so it's correct even if the operator has
+   *  since switched threads. */
   async function sendSmsNow(args: {
     selKey: string;
     leadId: string | null;
@@ -472,32 +539,13 @@ export function InboxShell({
     }
   }
 
-  async function handleSendSms(opts?: { scheduledAt?: string }) {
+  async function handleSendSms() {
     if (!selected || !selected.contact_phone || !draft.trim() || sending) return;
     const selKey = selected.key;
     const leadId = selected.lead_id;
     const phone = selected.contact_phone;
     const body = draft.trim();
     const provider = smsProvider;
-
-    if (opts?.scheduledAt) {
-      const delayMs = new Date(opts.scheduledAt).getTime() - Date.now();
-      if (delayMs > 5_000) {
-        setDraft("");
-        setNotice(
-          `Scheduled for ${new Date(opts.scheduledAt).toLocaleString([], {
-            dateStyle: "short",
-            timeStyle: "short",
-          })} — fires only if this tab stays open.`,
-        );
-        const timer = setTimeout(() => {
-          void sendSmsNow({ selKey, leadId, phone, body, provider });
-        }, delayMs);
-        scheduledTimersRef.current.push(timer);
-        return;
-      }
-      // Scheduled time is already here (or within 5s) — just send now.
-    }
 
     setDraft("");
     await sendSmsNow({ selKey, leadId, phone, body, provider });

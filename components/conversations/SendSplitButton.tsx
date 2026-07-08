@@ -2,28 +2,38 @@
 
 /**
  * SendSplitButton — plan §3/§7. Primary Send action, recolored to the
- * active channel, plus (Phase 3) a real schedule-send split menu and an
- * 8am-9pm recipient-local TCPA warning gate on the primary Send itself.
+ * active channel, plus a real schedule-send split menu (presets + custom
+ * time) and an 8am-9pm recipient-local TCPA warning gate on the primary
+ * Send itself.
  *
  * TCPA (47 U.S.C. § 227) restricts SMS contact to 8am-9pm in the
  * RECIPIENT's local time — estimated from their area code (lib/tcpa-
  * window.ts), falling back to the viewer's own timezone with an explicit
  * caveat when the area code isn't recognized. Applies to SMS only (email
- * has no calling-hours restriction) — the schedule menu and TCPA gate are
- * both no-ops for `channel="email"`.
+ * has no calling-hours restriction) — the TCPA gate on the primary Send
+ * button is a no-op for `channel="email"`, but scheduling itself works for
+ * both channels.
  *
- * Scheduling caveat: presets fire via an in-memory `setTimeout` owned by
- * the caller (InboxShell) — durable ONLY while this browser tab stays
- * open. There is no server-side scheduler in this phase; a closed tab or a
- * Vercel cold redeploy silently drops a pending scheduled send. Flagged
- * here and in InboxShell's handleScheduleSend — a real fix needs a
- * `scheduled_sends` table + a cron/worker, out of scope for this phase.
+ * Durable scheduling (2026-07-08): every preset + the custom-time picker
+ * POSTs to /api/conversations/schedule, which inserts a `scheduled_sends`
+ * row (database/114_scheduled_sends.sql). A Vercel cron
+ * (/api/cron/dispatch-scheduled-sends, every 5 min) claims + fires due rows
+ * server-side — the send survives a closed tab or a redeploy. This
+ * replaces the prior in-memory `setTimeout` (dropped scheduled sends
+ * silently on tab close).
  */
 import { useState, useRef, useEffect, useMemo } from "react";
 import { Send, ChevronDown, Clock, AlertTriangle } from "lucide-react";
 import { checkTcpaWindow, nextTcpaWindowStart, zonedWallClockTime } from "@/lib/tcpa-window";
 
 type SchedulePreset = { label: string; at: Date };
+
+/** Local YYYY-MM-DDTHH:mm string for a Date, for the `datetime-local` input's
+ *  `min` attribute (that input works in the viewer's local wall-clock, not UTC). */
+function toDatetimeLocal(d: Date): string {
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
 
 export function SendSplitButton({
   onSend,
@@ -40,6 +50,7 @@ export function SendSplitButton({
 }) {
   const [menuOpen, setMenuOpen] = useState(false);
   const [confirmOutside, setConfirmOutside] = useState(false);
+  const [customTime, setCustomTime] = useState("");
   const ref = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -49,6 +60,12 @@ export function SendSplitButton({
     };
     document.addEventListener("mousedown", onDocClick);
     return () => document.removeEventListener("mousedown", onDocClick);
+  }, [menuOpen]);
+
+  // Clear the custom-time draft whenever the menu closes so a stale value
+  // can't linger into the next open.
+  useEffect(() => {
+    if (!menuOpen) setCustomTime("");
   }, [menuOpen]);
 
   // Close the "outside window" confirm strip whenever the recipient/channel
@@ -67,19 +84,36 @@ export function SendSplitButton({
   }
 
   const presets: SchedulePreset[] = useMemo(() => {
-    if (channel !== "sms") return [];
     const now = new Date();
-    const zone = checkTcpaWindow(recipientPhone, now).timeZone;
+    // TCPA-zone estimation only makes sense for SMS (recipient area code);
+    // email presets fall back to the viewer's own timezone via a null phone.
+    const phoneForZone = channel === "sms" ? recipientPhone : null;
+    const zone = checkTcpaWindow(phoneForZone, now).timeZone;
     let evening = zonedWallClockTime(zone, 18, 0, now, 0);
     if (evening <= now) evening = zonedWallClockTime(zone, 18, 0, now, 1);
     const tomorrow9 = zonedWallClockTime(zone, 9, 0, now, 1);
-    return [
+    const zoneSuffix = channel === "sms" ? ", their time" : "";
+    const base: SchedulePreset[] = [
       { label: "In 1 hour", at: new Date(now.getTime() + 60 * 60_000) },
-      { label: "This evening (6pm, their time)", at: evening },
-      { label: "Tomorrow 9am (their time)", at: tomorrow9 },
-      { label: "Next allowed window", at: nextTcpaWindowStart(recipientPhone, now) },
+      { label: `This evening (6pm${zoneSuffix})`, at: evening },
+      { label: `Tomorrow 9am${zoneSuffix ? " (their time)" : ""}`, at: tomorrow9 },
     ];
+    if (channel === "sms") {
+      base.push({ label: "Next allowed window", at: nextTcpaWindowStart(recipientPhone, now) });
+    }
+    return base;
   }, [channel, recipientPhone]);
+
+  const minCustomTime = toDatetimeLocal(new Date(Date.now() + 60_000));
+
+  function submitCustomTime() {
+    if (!customTime) return;
+    const at = new Date(customTime);
+    if (Number.isNaN(at.getTime()) || at.getTime() <= Date.now()) return;
+    setMenuOpen(false);
+    setCustomTime("");
+    onSend({ scheduledAt: at.toISOString() });
+  }
 
   const accent = channel === "sms" ? "bg-emerald-600 hover:bg-emerald-500" : "bg-blue-600 hover:bg-blue-500";
 
@@ -141,41 +175,55 @@ export function SendSplitButton({
 
       {menuOpen && (
         <div className="absolute bottom-full right-0 mb-1.5 w-64 rounded-lg border border-bg-border bg-bg-elev shadow-elev z-20 p-1">
-          {channel !== "sms" ? (
-            <div className="flex items-center gap-2 px-2.5 py-2 text-[12px] text-fg-dim italic">
-              <Clock className="h-3.5 w-3.5 shrink-0" />
-              Scheduled send is SMS-only for now.
+          <div className="px-2.5 pt-1.5 pb-1 text-[10px] font-semibold uppercase tracking-wide text-fg-dim">
+            Schedule send
+          </div>
+          {presets.map((p) => {
+            const within = channel === "sms" ? checkTcpaWindow(recipientPhone, p.at).withinWindow : true;
+            return (
+              <button
+                key={p.label}
+                type="button"
+                onClick={() => {
+                  setMenuOpen(false);
+                  onSend({ scheduledAt: p.at.toISOString() });
+                }}
+                className="w-full flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-md text-left text-[12px] text-fg hover:bg-bg-panel transition-colors"
+              >
+                <span>{p.label}</span>
+                <span className={`text-[10px] shrink-0 ${within ? "text-fg-dim" : "text-status-warm"}`}>
+                  {p.at.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}
+                  {!within && " ⚠"}
+                </span>
+              </button>
+            );
+          })}
+          <div className="px-2.5 pt-1.5 pb-1 border-t border-bg-border mt-1">
+            <label className="block text-[10px] font-semibold uppercase tracking-wide text-fg-dim mb-1">
+              Custom time
+            </label>
+            <div className="flex items-center gap-1.5">
+              <input
+                type="datetime-local"
+                value={customTime}
+                min={minCustomTime}
+                onChange={(e) => setCustomTime(e.target.value)}
+                className="flex-1 min-w-0 bg-bg-deep/40 border border-bg-border rounded-md px-2 py-1 text-[11px] text-fg focus:outline-none focus:border-accent/50"
+              />
+              <button
+                type="button"
+                onClick={submitCustomTime}
+                disabled={!customTime}
+                className="shrink-0 rounded-md px-2 py-1 text-[11px] font-semibold text-fg bg-bg-panel border border-bg-border hover:border-accent/50 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+              >
+                Set
+              </button>
             </div>
-          ) : (
-            <>
-              <div className="px-2.5 pt-1.5 pb-1 text-[10px] font-semibold uppercase tracking-wide text-fg-dim">
-                Schedule send
-              </div>
-              {presets.map((p) => {
-                const within = checkTcpaWindow(recipientPhone, p.at).withinWindow;
-                return (
-                  <button
-                    key={p.label}
-                    type="button"
-                    onClick={() => {
-                      setMenuOpen(false);
-                      onSend({ scheduledAt: p.at.toISOString() });
-                    }}
-                    className="w-full flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-md text-left text-[12px] text-fg hover:bg-bg-panel transition-colors"
-                  >
-                    <span>{p.label}</span>
-                    <span className={`text-[10px] shrink-0 ${within ? "text-fg-dim" : "text-status-warm"}`}>
-                      {p.at.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}
-                      {!within && " ⚠"}
-                    </span>
-                  </button>
-                );
-              })}
-              <div className="px-2.5 pt-1.5 pb-1 mt-1 border-t border-bg-border text-[10px] text-fg-dim">
-                Fires from this open tab — not a durable server schedule yet.
-              </div>
-            </>
-          )}
+          </div>
+          <div className="flex items-start gap-1.5 px-2.5 pt-1.5 pb-1 mt-1 border-t border-bg-border text-[10px] text-fg-dim">
+            <Clock className="h-3 w-3 shrink-0 mt-px" />
+            Durable server-side schedule — sends even if you close this tab (checked every 5 min).
+          </div>
         </div>
       )}
     </div>
