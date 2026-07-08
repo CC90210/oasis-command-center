@@ -56,8 +56,15 @@ export type SessionContext =
       email: string | null;
       /** Team role from user_profiles. Drives per-agent lead scoping. */
       teamRole: string;
-      /** owner | admin → sees all leads; everyone else is scoped to their own. */
+      /** owner | admin | admin_access-toggled → sees all leads / has admin
+       *  CAPABILITIES; everyone else is scoped to their own. */
       isAdmin: boolean;
+      /** PERMANENT admin by base role (owner / admin team_role) — EXCLUDES the
+       *  admin_access toggle. Use for escalation-sensitive gates only. */
+      isTrueAdmin: boolean;
+      /** The admin_access toggle grant (an admin flipped this agent to full
+       *  admin). Additive on top of the base role. */
+      adminAccess: boolean;
     }
   | { ok: false; reason: "no_session" | "no_profile" | "no_tenant" };
 
@@ -67,11 +74,17 @@ export async function resolveSessionContext(): Promise<SessionContext> {
   const db = getServiceSupabase();
   const r = await db
     .from("user_profiles")
-    .select("id, tenant_id, team_role, is_owner")
+    .select("id, tenant_id, team_role, is_owner, admin_access")
     .eq("auth_user_id", user.id)
     .maybeSingle();
   const profile = r.data as
-    | { id: string | null; tenant_id: string | null; team_role: string | null; is_owner: boolean | null }
+    | {
+        id: string | null;
+        tenant_id: string | null;
+        team_role: string | null;
+        is_owner: boolean | null;
+        admin_access: boolean | null;
+      }
     | null;
   if (!profile) return { ok: false, reason: "no_profile" };
   if (!profile.tenant_id) return { ok: false, reason: "no_tenant" };
@@ -83,6 +96,10 @@ export async function resolveSessionContext(): Promise<SessionContext> {
   // callers fail closed. is_owner still grants admin below regardless of this.
   // To grant write access, assign the user an explicit role — don't rely on a default.
   const teamRole = profile.team_role || "read_only";
+  // PERMANENT admin by base role — the escalation-guard predicate.
+  const isTrueAdmin = !!profile.is_owner || teamRole === "admin" || teamRole === "owner";
+  // Additive full-admin grant: an admin toggled this agent to admin_access.
+  const adminAccess = profile.admin_access === true;
   return {
     ok: true,
     userId: user.id,
@@ -90,6 +107,11 @@ export async function resolveSessionContext(): Promise<SessionContext> {
     tenantId: profile.tenant_id,
     email: user.email ?? null,
     teamRole,
-    isAdmin: !!profile.is_owner || teamRole === "admin" || teamRole === "owner",
+    // Capability admin = true admin OR toggled admin_access. Folds the grant
+    // into every route that keys off session.isAdmin (records, leads, campaigns,
+    // shop-out, underwriting, documents, ...). Admin-toggle design 2026-07-07.
+    isAdmin: isTrueAdmin || adminAccess,
+    isTrueAdmin,
+    adminAccess,
   };
 }

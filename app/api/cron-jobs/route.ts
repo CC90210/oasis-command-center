@@ -202,7 +202,7 @@ export async function POST(req: NextRequest) {
   // webhook_post / snapshot_run). Non-admin members can view (GET) only.
   const ctx = await getSessionContext();
   if (!ctx) return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
-  if (!canManageTeam(ctx.teamRole)) {
+  if (!canManageTeam(ctx.teamRole, ctx.adminAccess)) {
     return NextResponse.json(
       { ok: false, error: "forbidden", message: "Only owners/admins can create automations." },
       { status: 403 },

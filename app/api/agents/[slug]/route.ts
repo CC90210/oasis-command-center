@@ -25,16 +25,26 @@ async function resolveProfile(authUserId: string) {
   const service = getServiceSupabase();
   const res = await service
     .from("user_profiles")
-    .select("tenant_id, team_role, is_owner")
+    .select("tenant_id, team_role, is_owner, admin_access")
     .eq("auth_user_id", authUserId)
     .maybeSingle();
   return res.data as
-    | { tenant_id: string | null; team_role: string; is_owner: boolean }
+    | { tenant_id: string | null; team_role: string; is_owner: boolean; admin_access: boolean | null }
     | null;
 }
 
-function requireAdmin(profile: { team_role: string; is_owner: boolean } | null): boolean {
-  return !!profile && (profile.is_owner || profile.team_role === "admin" || profile.team_role === "owner");
+// Creating/editing/deleting AI agents is a full-admin capability — honors the
+// admin_access toggle grant (Adon's named pain point). Admin-toggle 2026-07-07.
+function requireAdmin(
+  profile: { team_role: string; is_owner: boolean; admin_access?: boolean | null } | null,
+): boolean {
+  return (
+    !!profile &&
+    (profile.is_owner ||
+      profile.team_role === "admin" ||
+      profile.team_role === "owner" ||
+      profile.admin_access === true)
+  );
 }
 
 export async function GET(

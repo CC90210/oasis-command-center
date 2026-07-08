@@ -170,17 +170,30 @@ export async function authorizeBridgeRequest(): Promise<BridgeAuthResult> {
   try {
     const opRow = await svc
       .from("user_profiles")
-      .select("tenant_id, team_role, is_owner, email")
+      .select("tenant_id, team_role, is_owner, admin_access, email")
       .eq("auth_user_id", user.id)
       .maybeSingle();
     const op = opRow.data as
-      | { tenant_id: string | null; team_role: string | null; is_owner: boolean | null; email: string | null }
+      | {
+          tenant_id: string | null;
+          team_role: string | null;
+          is_owner: boolean | null;
+          admin_access: boolean | null;
+          email: string | null;
+        }
       | null;
     if (!op) return { ok: false, status: 403, error: "no_profile" };
     tenantId = String(op.tenant_id || "");
     teamRole = (op.team_role || "read_only").trim().toLowerCase();
     if (op.is_owner === true && teamRole !== "owner" && teamRole !== "admin") {
       teamRole = "owner";
+    }
+    // admin_access toggle → promote to admin-equivalent so every downstream
+    // role gate (bridgeExecToolAllowedForRole, bridgeDisallowedToolsForRole:
+    // bash/write/pm2) treats a toggled agent as a full admin. Mirrors the
+    // is_owner promotion above. Admin-toggle design, 2026-07-07.
+    if (op.admin_access === true && teamRole !== "owner" && teamRole !== "admin") {
+      teamRole = "admin";
     }
     if (op.email) email = op.email;
   } catch {

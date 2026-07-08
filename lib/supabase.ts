@@ -101,6 +101,11 @@ export type UserProfile = {
   preferred_language: string;
   prospect_focus: string[];
   custom_fields: Record<string, unknown>;
+  /** Admin-granted full-admin toggle (see lead-scope.isAdminProfile). An admin
+   *  flips this ON to elevate an agent to full admin; OFF to revert. */
+  admin_access?: boolean | null;
+  admin_access_granted_by?: string | null;
+  admin_access_granted_at?: string | null;
   created_at: string;
   updated_at: string;
 };

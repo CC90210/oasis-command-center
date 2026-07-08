@@ -6,6 +6,7 @@ import {
   canManageTeam,
   createInvite,
   getSessionContext,
+  isTrueAdminRole,
   listActiveInvites,
   type TeamRole,
 } from "@/lib/team";
@@ -16,7 +17,7 @@ export const dynamic = "force-dynamic";
 export async function GET() {
   const ctx = await getSessionContext();
   if (!ctx) return bad(401, "unauthorized");
-  if (!canManageTeam(ctx.teamRole)) return bad(403, "forbidden");
+  if (!canManageTeam(ctx.teamRole, ctx.adminAccess)) return bad(403, "forbidden");
   const invites = await listActiveInvites(ctx.tenantId);
   return NextResponse.json({
     ok: true,
@@ -33,7 +34,7 @@ export async function GET() {
 export async function POST(req: NextRequest) {
   const ctx = await getSessionContext();
   if (!ctx) return bad(401, "unauthorized");
-  if (!canManageTeam(ctx.teamRole)) return bad(403, "forbidden");
+  if (!canManageTeam(ctx.teamRole, ctx.adminAccess)) return bad(403, "forbidden");
 
   let body: { role?: string; email?: string | null };
   try {
@@ -45,6 +46,12 @@ export async function POST(req: NextRequest) {
   const role = (body.role ?? "member") as TeamRole;
   if (!INVITABLE_ROLES.includes(role as Exclude<TeamRole, "owner">)) {
     return bad(400, "invalid role");
+  }
+  // ESCALATION GUARD: minting a permanent ADMIN via invite is a TRUE-admin
+  // action only. A toggled agent (admin_access) can invite normal teammates but
+  // must NOT be able to grant admin — that would be a privilege-escalation loop.
+  if (role === "admin" && !isTrueAdminRole(ctx.teamRole, ctx.isOwner)) {
+    return bad(403, "forbidden");
   }
   const email = body.email?.trim() || null;
 

@@ -34,14 +34,16 @@ async function canManageTenant(tenantId: string, userId: string): Promise<boolea
   const db = getServiceSupabase();
   const r = await db
     .from("user_profiles")
-    .select("team_role, is_owner")
+    .select("team_role, is_owner, admin_access")
     .eq("auth_user_id", userId)
     .eq("tenant_id", tenantId)
     .maybeSingle();
-  const row = r.data as { team_role: TeamRole | null; is_owner: boolean | null } | null;
+  const row = r.data as
+    | { team_role: TeamRole | null; is_owner: boolean | null; admin_access: boolean | null }
+    | null;
   if (!row) return false;
   if (row.is_owner) return true;
-  return canManageTeam(row.team_role || "member");
+  return canManageTeam(row.team_role || "member", row.admin_access === true);
 }
 
 export async function GET() {

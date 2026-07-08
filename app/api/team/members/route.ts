@@ -3,6 +3,7 @@ import { bad } from "@/lib/api-helpers";
 import { getAuthedSupabase } from "@/lib/supabase-server";
 import {
   canManageTeam,
+  isTrueAdminRole,
   getSessionContext,
   getTenantMembers,
   removeMember,
@@ -25,7 +26,7 @@ export async function GET() {
   const ctx = await getSessionContext();
   if (!ctx) return bad(401, "unauthorized");
   const members = await getTenantMembers(ctx.tenantId);
-  const canManage = canManageTeam(ctx.teamRole);
+  const canManage = canManageTeam(ctx.teamRole, ctx.adminAccess);
   return NextResponse.json({
     ok: true,
     self_profile_id: ctx.profileId,
@@ -52,6 +53,10 @@ export async function GET() {
 export async function PATCH(req: NextRequest) {
   const ctx = await getSessionContext();
   if (!ctx) return bad(401, "unauthorized");
+  // ESCALATION GUARD: changing a member's role is a TRUE-admin action only —
+  // canManageTeam() WITHOUT adminAccess is strict owner/admin. A toggled agent
+  // (admin_access) must NOT be able to grant/alter roles. setMemberRole enforces
+  // the same true-admin check internally as the authoritative backstop.
   if (!canManageTeam(ctx.teamRole)) return bad(403, "forbidden");
 
   let body: { profile_id?: string; role?: string };
@@ -102,7 +107,9 @@ export async function PATCH(req: NextRequest) {
 export async function DELETE(req: NextRequest) {
   const ctx = await getSessionContext();
   if (!ctx) return bad(401, "unauthorized");
-  if (!canManageTeam(ctx.teamRole)) return bad(403, "forbidden");
+  // Member removal is high-consequence; restricted to a PERMANENT admin — the
+  // admin_access grant does NOT confer it. Owner protected in removeMember.
+  if (!isTrueAdminRole(ctx.teamRole, ctx.isOwner)) return bad(403, "forbidden");
   const url = new URL(req.url);
   const profileId = url.searchParams.get("profile_id");
   if (!profileId) return bad(400, "missing profile_id");

@@ -60,7 +60,7 @@ export async function POST(req: NextRequest) {
   // SMS/email. Non-admin members can view (GET) but not create.
   const ctx = await getSessionContext();
   if (!ctx) return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
-  if (!canManageTeam(ctx.teamRole)) {
+  if (!canManageTeam(ctx.teamRole, ctx.adminAccess)) {
     return NextResponse.json(
       { ok: false, error: "forbidden", message: "Only owners/admins can create drip sequences." },
       { status: 403 },

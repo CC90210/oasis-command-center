@@ -54,11 +54,11 @@ async function resolveContext(
   const service = getServiceSupabase();
   const profileQuery = await service
     .from("user_profiles")
-    .select("tenant_id, team_role, is_owner")
+    .select("tenant_id, team_role, is_owner, admin_access")
     .eq("auth_user_id", user.id)
     .maybeSingle();
   const profile = profileQuery.data as
-    | { tenant_id: string | null; team_role: string; is_owner: boolean }
+    | { tenant_id: string | null; team_role: string; is_owner: boolean; admin_access: boolean | null }
     | null;
   if (!profile?.tenant_id) return { ok: false, status: 403, error: "no_tenant" };
 

@@ -46,7 +46,7 @@ export async function POST(req: NextRequest) {
   if (!ctx) {
     return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
   }
-  if (!canManageTeam(ctx.teamRole)) {
+  if (!canManageTeam(ctx.teamRole, ctx.adminAccess)) {
     return NextResponse.json(
       { ok: false, error: "forbidden", message: "Only owners/admins can save automations." },
       { status: 403 },

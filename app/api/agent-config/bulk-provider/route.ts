@@ -62,7 +62,7 @@ async function resolveTenant(): Promise<{
   return {
     tenantId: data?.tenant_id || ctx.tenantId || null,
     userId: ctx.authUserId,
-    canManageTenant: ctx.isOwner || canManageTeam(ctx.teamRole),
+    canManageTenant: ctx.isOwner || canManageTeam(ctx.teamRole, ctx.adminAccess),
     profileEnabledAgents: enabled,
   };
 }

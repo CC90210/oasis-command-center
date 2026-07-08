@@ -4,10 +4,15 @@ import {
   canManageTeam,
   getSessionContext,
   getTenantMembers,
+  isTrueAdminRole,
   listActiveInvites,
 } from "@/lib/team";
 import { computeSeatWarning } from "@/lib/seat-warning";
-import { TeamInviteActions, RemoveMemberClientButton } from "./TeamInviteActions";
+import {
+  TeamInviteActions,
+  RemoveMemberClientButton,
+  AdminAccessToggle,
+} from "./TeamInviteActions";
 import { redirect } from "next/navigation";
 
 export const runtime = "nodejs";
@@ -26,12 +31,16 @@ export default async function TeamPage() {
   const ctx = await getSessionContext();
   if (!ctx) redirect("/login?next=%2Fteam");
 
+  const canManage = canManageTeam(ctx.teamRole, ctx.adminAccess);
+  // Only a TRUE admin (owner/admin base role — NOT an admin_access-toggled agent)
+  // may grant/revoke the admin-access switch. Mirrors the endpoint's escalation
+  // guard so the control never renders for someone the API would 403.
+  const canGrantAdmin = isTrueAdminRole(ctx.teamRole, ctx.isOwner);
   const [members, invites, seatWarning] = await Promise.all([
     getTenantMembers(ctx.tenantId),
-    canManageTeam(ctx.teamRole) ? listActiveInvites(ctx.tenantId) : Promise.resolve([]),
-    canManageTeam(ctx.teamRole) ? computeSeatWarning(ctx.tenantId) : Promise.resolve(null),
+    canManage ? listActiveInvites(ctx.tenantId) : Promise.resolve([]),
+    canManage ? computeSeatWarning(ctx.tenantId) : Promise.resolve(null),
   ]);
-  const canManage = canManageTeam(ctx.teamRole);
 
   return (
     <div className="space-y-6">
@@ -81,14 +90,22 @@ export default async function TeamPage() {
             {members.map((m) => (
               <li
                 key={m.id}
-                className="grid grid-cols-[1fr_8rem_5rem] gap-4 py-3 items-center"
+                className="grid grid-cols-[1fr_7rem_11rem] gap-4 py-3 items-center"
               >
                 <div>
-                  <div className="font-semibold text-fg flex items-center gap-2">
+                  <div className="font-semibold text-fg flex items-center gap-2 flex-wrap">
                     {m.display_name || m.full_name || m.email}
                     {m.is_owner && (
                       <span className="text-[10px] uppercase tracking-wider text-accent font-mono">
                         owner
+                      </span>
+                    )}
+                    {!m.is_owner && m.admin_access && (
+                      <span
+                        className="text-[10px] uppercase tracking-wider text-status-warm font-mono"
+                        title="Full admin access granted by an admin"
+                      >
+                        admin (granted)
                       </span>
                     )}
                     {m.id === ctx.profileId && (
@@ -104,11 +121,13 @@ export default async function TeamPage() {
                 <div className="text-sm text-fg-muted">
                   {ROLE_LABEL[m.team_role] ?? m.team_role}
                 </div>
-                <div className="text-xs text-fg-dim text-right">
-                  {canManage && !m.is_owner && m.id !== ctx.profileId ? (
+                <div className="flex items-center justify-end gap-2 text-xs text-fg-dim">
+                  {canGrantAdmin && !m.is_owner && (
+                    <AdminAccessToggle profileId={m.id} initialGranted={m.admin_access} />
+                  )}
+                  {/* Removal is a true-admin action (not conferred by admin_access), matching the server gate. */}
+                  {canGrantAdmin && !m.is_owner && m.id !== ctx.profileId && (
                     <RemoveMemberClientButton profileId={m.id} />
-                  ) : (
-                    ""
                   )}
                 </div>
               </li>

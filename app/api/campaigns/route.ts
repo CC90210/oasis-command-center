@@ -146,11 +146,19 @@ async function callerIsAdmin(authUserId: string): Promise<boolean> {
     const db = getServiceSupabase();
     const r = await db
       .from("user_profiles")
-      .select("is_owner, team_role")
+      .select("is_owner, team_role, admin_access")
       .eq("auth_user_id", authUserId)
       .maybeSingle();
-    const op = r.data as { is_owner: boolean | null; team_role: string | null } | null;
-    return !!op && (op.is_owner === true || op.team_role === "owner" || op.team_role === "admin");
+    const op = r.data as
+      | { is_owner: boolean | null; team_role: string | null; admin_access: boolean | null }
+      | null;
+    return (
+      !!op &&
+      (op.is_owner === true ||
+        op.team_role === "owner" ||
+        op.team_role === "admin" ||
+        op.admin_access === true)
+    );
   } catch {
     return false;
   }

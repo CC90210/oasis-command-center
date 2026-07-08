@@ -51,15 +51,37 @@ export const SCOPED_ENTITIES = new Set(["lead", "application", "funded_deal"]);
 
 export type LeadViewer = { isAdmin: boolean; userId: string | null };
 
-/** Is this user_profiles row an admin (sees all leads)? Owner (is_owner) or an
- *  explicit admin/owner team_role. SINGLE source of truth for admin detection —
- *  every scoped surface (records API, catch-all pipeline, dashboards) calls this
- *  so the security-critical check can't drift between them. */
-export function isAdminProfile(
+/**
+ * "True admin" — a PERMANENT admin by base role (owner via is_owner, or an
+ * explicit admin/owner team_role). EXCLUDES the `admin_access` toggle grant.
+ *
+ * This is the escalation-guard predicate: only a true admin may grant/alter
+ * another member's team_role (setMemberRole), mint an admin (admin-role invite),
+ * or flip the admin_access toggle. A temporarily-elevated agent (admin_access=
+ * true) is NOT a true admin, so it can never mint permanent admins — no
+ * privilege-escalation loop. Admin-toggle design, 2026-07-07.
+ */
+export function isTrueAdmin(
   profile: { is_owner?: boolean | null; team_role?: string | null } | null | undefined,
 ): boolean {
   if (!profile) return false;
   return !!profile.is_owner || profile.team_role === "admin" || profile.team_role === "owner";
+}
+
+/** Is this user_profiles row an admin (sees all leads / has admin CAPABILITIES)?
+ *  A true admin (owner / admin team_role) OR an agent an admin has toggled full
+ *  admin access ON via `admin_access`. SINGLE source of truth for admin
+ *  capability detection — every scoped surface (records API, catch-all pipeline,
+ *  dashboards) calls this so the security-critical check can't drift between
+ *  them. NOTE: capability-only — escalation-sensitive gates use isTrueAdmin. */
+export function isAdminProfile(
+  profile:
+    | { is_owner?: boolean | null; team_role?: string | null; admin_access?: boolean | null }
+    | null
+    | undefined,
+): boolean {
+  if (!profile) return false;
+  return isTrueAdmin(profile) || profile.admin_access === true;
 }
 
 export type AdminLeadFilter = { agent?: string | null; unassigned?: boolean };

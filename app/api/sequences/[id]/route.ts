@@ -56,7 +56,7 @@ export async function PATCH(
 ) {
   const session = await getSessionContext();
   if (!session) return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
-  if (!canManageTeam(session.teamRole)) {
+  if (!canManageTeam(session.teamRole, session.adminAccess)) {
     return NextResponse.json(
       { ok: false, error: "forbidden", message: "Only owners/admins can edit drip sequences." },
       { status: 403 },
@@ -137,7 +137,7 @@ export async function DELETE(
 ) {
   const session = await getSessionContext();
   if (!session) return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
-  if (!canManageTeam(session.teamRole)) {
+  if (!canManageTeam(session.teamRole, session.adminAccess)) {
     return NextResponse.json(
       { ok: false, error: "forbidden", message: "Only owners/admins can delete drip sequences." },
       { status: 403 },

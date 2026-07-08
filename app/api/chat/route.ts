@@ -399,7 +399,7 @@ export async function POST(req: NextRequest) {
   try {
     const opRow = await service
       .from("user_profiles")
-      .select("display_name, full_name, email, team_role, custom_fields, is_owner")
+      .select("display_name, full_name, email, team_role, custom_fields, is_owner, admin_access")
       .eq("auth_user_id", user.id)
       .maybeSingle();
     const op = opRow.data as
@@ -410,6 +410,7 @@ export async function POST(req: NextRequest) {
           team_role: string | null;
           custom_fields: Record<string, unknown> | null;
           is_owner: boolean | null;
+          admin_access: boolean | null;
         }
       | null;
     if (op) {
@@ -419,12 +420,14 @@ export async function POST(req: NextRequest) {
       // read_only is the right default for them too.
       operatorRole = op.team_role || "read_only";
       // Admin gate for the credential vault. Owner is always admin;
-      // otherwise canManageTeam(role) decides. Mirrors the gate used
-      // by /api/credentials/custom and Settings → Custom credentials.
+      // otherwise admin/owner team_role OR the admin_access toggle grant
+      // decides. Mirrors the gate used by /api/credentials/custom and
+      // Settings → Custom credentials. Admin-toggle design, 2026-07-07.
       callerIsAdmin =
         op.is_owner === true ||
         operatorRole === "owner" ||
-        operatorRole === "admin";
+        operatorRole === "admin" ||
+        op.admin_access === true;
       // KNOWN FACTS block — operator's evergreen personal context
       // (calendar booking link, email signature, business name,
       // preferred tone, common assets). Lives in user_profiles

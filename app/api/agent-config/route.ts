@@ -34,7 +34,7 @@ async function resolveTenant(): Promise<{
   return {
     tenantId: ctx.tenantId,
     userId: ctx.authUserId,
-    canManageTenant: ctx.isOwner || canManageTeam(ctx.teamRole),
+    canManageTenant: ctx.isOwner || canManageTeam(ctx.teamRole, ctx.adminAccess),
   };
 }
 

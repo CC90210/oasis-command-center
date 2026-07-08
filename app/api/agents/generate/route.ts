@@ -156,16 +156,22 @@ export async function POST(req: NextRequest) {
   const service = getServiceSupabase();
   const profileRes = await service
     .from("user_profiles")
-    .select("tenant_id, team_role, is_owner")
+    .select("tenant_id, team_role, is_owner, admin_access")
     .eq("auth_user_id", user.id)
     .maybeSingle();
   const profile = profileRes.data as
-    | { tenant_id: string | null; team_role: string; is_owner: boolean }
+    | { tenant_id: string | null; team_role: string; is_owner: boolean; admin_access: boolean | null }
     | null;
   if (!profile?.tenant_id) {
     return NextResponse.json({ ok: false, error: "no_tenant" }, { status: 403 });
   }
-  if (!profile.is_owner && profile.team_role !== "admin" && profile.team_role !== "owner") {
+  // Generating an agent is a full-admin capability — honors the admin_access grant.
+  if (
+    !profile.is_owner &&
+    profile.team_role !== "admin" &&
+    profile.team_role !== "owner" &&
+    profile.admin_access !== true
+  ) {
     return NextResponse.json({ ok: false, error: "forbidden" }, { status: 403 });
   }
 

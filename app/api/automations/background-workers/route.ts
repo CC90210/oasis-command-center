@@ -136,19 +136,31 @@ export async function GET() {
   const db = getServiceSupabase();
   const profile = await db
     .from("user_profiles")
-    .select("id, tenant_id, team_role, is_owner")
+    .select("id, tenant_id, team_role, is_owner, admin_access")
     .eq("auth_user_id", user.id)
     .maybeSingle();
   const profileRow = profile.data as
-    | { id: string | null; tenant_id: string | null; team_role: string | null; is_owner: boolean | null }
+    | {
+        id: string | null;
+        tenant_id: string | null;
+        team_role: string | null;
+        is_owner: boolean | null;
+        admin_access: boolean | null;
+      }
     | null;
   const profileId = profileRow?.id ?? null;
   const tenantId = profileRow?.tenant_id ?? null;
   if (!tenantId) return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
-  // Owner/admin gate (mirrors authorizeBridgeRequest's is_owner promotion). Only
-  // these roles may bounce VPS daemons, so only they get Start/Stop/Restart
-  // buttons — everyone else sees the workers read-only.
-  const role = (profileRow?.is_owner === true ? "owner" : (profileRow?.team_role || "read_only"))
+  // Owner/admin gate (mirrors authorizeBridgeRequest's is_owner + admin_access
+  // promotion). Only these roles may bounce VPS daemons, so only they get
+  // Start/Stop/Restart buttons — everyone else sees the workers read-only.
+  const role = (
+    profileRow?.is_owner === true
+      ? "owner"
+      : profileRow?.admin_access === true
+        ? "admin"
+        : profileRow?.team_role || "read_only"
+  )
     .trim()
     .toLowerCase();
 

@@ -163,15 +163,18 @@ export async function POST(req: NextRequest) {
   try {
     const profRow = await getServiceSupabase()
       .from("user_profiles")
-      .select("team_role, is_owner")
+      .select("team_role, is_owner, admin_access")
       .eq("auth_user_id", user.id)
       .maybeSingle();
-    const prof = profRow.data as { team_role: string | null; is_owner: boolean | null } | null;
+    const prof = profRow.data as
+      | { team_role: string | null; is_owner: boolean | null; admin_access: boolean | null }
+      | null;
     if (prof) {
       callerIsAdmin =
         prof.is_owner === true ||
         prof.team_role === "owner" ||
-        prof.team_role === "admin";
+        prof.team_role === "admin" ||
+        prof.admin_access === true;
     }
   } catch {
     // Fail closed.

@@ -189,6 +189,67 @@ export function TeamInviteActions({
   );
 }
 
+/**
+ * Per-member full-admin toggle. Rendered ONLY for true admins (owner/admin) on
+ * NON-owner members — the parent server page gates visibility. PATCHes
+ * /api/team/members/<id>/admin-access and reflects the current grant state.
+ * Admin-toggle design, 2026-07-07.
+ */
+export function AdminAccessToggle({
+  profileId,
+  initialGranted,
+}: {
+  profileId: string;
+  initialGranted: boolean;
+}) {
+  const router = useRouter();
+  const [granted, setGranted] = useState(initialGranted);
+  const [busy, setBusy] = useState(false);
+  const [pending, startTransition] = useTransition();
+
+  async function toggle() {
+    const next = !granted;
+    setBusy(true);
+    try {
+      const res = await fetch(
+        `/api/team/members/${encodeURIComponent(profileId)}/admin-access`,
+        {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ admin_access: next }),
+        }
+      );
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        alert(data.error || "Update failed.");
+        return;
+      }
+      setGranted(next);
+      startTransition(() => router.refresh());
+    } catch (err) {
+      alert(err instanceof Error ? err.message : "Update failed.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <button
+      type="button"
+      onClick={toggle}
+      disabled={busy || pending}
+      title={granted ? "Revoke full admin access" : "Grant full admin access"}
+      className={`text-[11px] font-mono px-2 py-1 rounded border transition-colors disabled:opacity-50 ${
+        granted
+          ? "border-accent/50 bg-accent/10 text-accent hover:bg-accent/20"
+          : "border-bg-border text-fg-muted hover:text-fg hover:border-accent/40"
+      }`}
+    >
+      {busy ? "..." : granted ? "Admin: on" : "Admin: off"}
+    </button>
+  );
+}
+
 export function RemoveMemberClientButton({ profileId }: { profileId: string }) {
   const router = useRouter();
   const [pending, startTransition] = useTransition();

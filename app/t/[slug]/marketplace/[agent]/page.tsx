@@ -26,12 +26,12 @@ export default async function MarketplaceDetailPage({
   const profileRes = user
     ? await service
         .from("user_profiles")
-        .select("tenant_id, team_role, is_owner")
+        .select("tenant_id, team_role, is_owner, admin_access")
         .eq("auth_user_id", user.id)
         .maybeSingle()
     : { data: null };
   const profile = profileRes.data as
-    | { tenant_id: string | null; team_role: string; is_owner: boolean }
+    | { tenant_id: string | null; team_role: string; is_owner: boolean; admin_access: boolean | null }
     | null;
   const tenantId = profile?.tenant_id || null;
 
@@ -43,8 +43,13 @@ export default async function MarketplaceDetailPage({
   const version = row?.version ?? 0;
 
   const binding = manifest.agents.find((a) => a.slug === agentDef.slug);
+  // Editing an agent is a full-admin capability — honors the admin_access grant.
   const isAdmin =
-    !!profile && (profile.is_owner || profile.team_role === "admin" || profile.team_role === "owner");
+    !!profile &&
+    (profile.is_owner ||
+      profile.team_role === "admin" ||
+      profile.team_role === "owner" ||
+      profile.admin_access === true);
 
   return (
     <div className="space-y-6 animate-fade-in">

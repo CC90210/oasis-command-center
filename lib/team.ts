@@ -25,6 +25,8 @@ export type MemberRow = {
   display_name: string | null;
   team_role: TeamRole;
   is_owner: boolean;
+  /** Full-admin toggle grant — an admin elevated this member to admin_access. */
+  admin_access: boolean;
   invited_by: string | null;
   joined_at: string;
 };
@@ -56,10 +58,34 @@ export type SessionContext = {
   tenantId: string;
   teamRole: TeamRole;
   isOwner: boolean;
+  /** admin_access toggle grant — an admin flipped this agent to full admin.
+   *  Additive on top of the base team_role. */
+  adminAccess: boolean;
 };
 
-export function canManageTeam(role: TeamRole): boolean {
-  return role === "owner" || role === "admin";
+/**
+ * Can this member manage the team / tenant (invites, branding, integration keys,
+ * cron jobs, automations, sequences, ...)? A base owner/admin, OR an agent an
+ * admin has toggled `admin_access` ON.
+ *
+ * `adminAccess` is a SEPARATE arg (not baked into `role`) so the base role stays
+ * intact for the escalation guard: setMemberRole / admin-role invites / the
+ * admin_access toggle itself gate on isTrueAdminRole (below), which ignores the
+ * grant, so a toggled agent can never mint a permanent admin. Admin-toggle
+ * design, 2026-07-07.
+ */
+export function canManageTeam(role: TeamRole, adminAccess = false): boolean {
+  return role === "owner" || role === "admin" || adminAccess === true;
+}
+
+/**
+ * PERMANENT admin by base role (owner via is_owner, or admin/owner team_role).
+ * EXCLUDES the admin_access grant. The escalation-guard predicate: only a true
+ * admin may alter another member's role or grant admin. Mirrors
+ * lead-scope.ts isTrueAdmin for the SessionContext shape.
+ */
+export function isTrueAdminRole(role: TeamRole, isOwner: boolean): boolean {
+  return isOwner || role === "owner" || role === "admin";
 }
 
 export function hashInviteToken(rawToken: string): string {
@@ -90,7 +116,7 @@ export async function getSessionContext(): Promise<SessionContext | null> {
   const supa = getServiceSupabase();
   const { data, error } = await supa
     .from("user_profiles")
-    .select("id, tenant_id, team_role, is_owner")
+    .select("id, tenant_id, team_role, is_owner, admin_access")
     .eq("auth_user_id", user.id)
     .maybeSingle();
   if (error || !data || !data.tenant_id) return null;
@@ -100,6 +126,7 @@ export async function getSessionContext(): Promise<SessionContext | null> {
     tenantId: data.tenant_id,
     teamRole: (data.team_role as TeamRole) ?? "member",
     isOwner: !!data.is_owner,
+    adminAccess: data.admin_access === true,
   };
 }
 
@@ -108,7 +135,7 @@ export async function getTenantMembers(tenantId: string): Promise<MemberRow[]> {
   const { data, error } = await supa
     .from("user_profiles")
     .select(
-      "id, auth_user_id, email, full_name, display_name, team_role, is_owner, invited_by, joined_at"
+      "id, auth_user_id, email, full_name, display_name, team_role, is_owner, admin_access, invited_by, joined_at"
     )
     .eq("tenant_id", tenantId)
     .order("is_owner", { ascending: false })
@@ -234,7 +261,11 @@ export async function setMemberRole(args: {
   newRole: TeamRole;
   actor: SessionContext;
 }): Promise<void> {
-  if (!canManageTeam(args.actor.teamRole)) {
+  // ESCALATION GUARD: altering another member's team_role is restricted to a
+  // PERMANENT (true) admin — NOT the admin_access grant. A toggled agent must
+  // never be able to grant/alter roles (and thereby mint an admin). Admin-toggle
+  // design, 2026-07-07.
+  if (!isTrueAdminRole(args.actor.teamRole, args.actor.isOwner)) {
     throw new Error("forbidden");
   }
   if (args.newRole === "owner") {
@@ -262,7 +293,12 @@ export async function removeMember(args: {
   targetProfileId: string;
   actor: SessionContext;
 }): Promise<void> {
-  if (!canManageTeam(args.actor.teamRole)) {
+  // Removing a member demotes + detaches them (tenant_id null, team_role
+  // member). Though not a role-GRANT, it is high-consequence — a temporarily
+  // elevated agent could strip real admins off the tenant — so it is restricted
+  // to a PERMANENT admin; the admin_access grant does NOT confer it. The owner
+  // is protected below (cannot_remove_owner).
+  if (!isTrueAdminRole(args.actor.teamRole, args.actor.isOwner)) {
     throw new Error("forbidden");
   }
   const supa = getServiceSupabase();

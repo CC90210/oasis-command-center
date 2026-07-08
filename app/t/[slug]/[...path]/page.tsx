@@ -153,12 +153,12 @@ export default async function TenantCatchAllPage({
   const profileRes = user
     ? await service
         .from("user_profiles")
-        .select("tenant_id, team_role, is_owner")
+        .select("tenant_id, team_role, is_owner, admin_access")
         .eq("auth_user_id", user.id)
         .maybeSingle()
     : { data: null };
   const profileRow = profileRes.data as
-    | { tenant_id: string | null; team_role: string | null; is_owner: boolean | null }
+    | { tenant_id: string | null; team_role: string | null; is_owner: boolean | null; admin_access: boolean | null }
     | null;
   const userTenantId = profileRow?.tenant_id ?? null;
   // Resolve which tenant_id should scope record reads. If the caller

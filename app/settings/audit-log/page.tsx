@@ -24,7 +24,7 @@ export default async function AuditLogPage({
 }) {
   const ctx = await getSessionContext();
   if (!ctx) redirect("/login?next=/settings/audit-log");
-  if (!(ctx.isOwner || canManageTeam(ctx.teamRole))) redirect("/settings");
+  if (!(ctx.isOwner || canManageTeam(ctx.teamRole, ctx.adminAccess))) redirect("/settings");
 
   const params = (await searchParams) || {};
   const actor = typeof params.actor === "string" ? params.actor.trim() : "";

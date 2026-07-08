@@ -126,10 +126,18 @@ export async function SettingsContent({
   const enabledAgents = effectiveAgentKeys.map(resolveAgentKey);
   const enabledChatAgentKeys = chatAgentKeys().filter((k) => enabledAgents.includes(k));
   const isOperator = isOperatorEmail(user?.email || undefined);
-  const teamProfile = profile as (typeof profile & { is_owner?: boolean; team_role?: string }) | null;
+  const teamProfile = profile as
+    | (typeof profile & { is_owner?: boolean; team_role?: string; admin_access?: boolean | null })
+    | null;
+  // Full-admin capability: base owner/admin OR the admin_access toggle grant.
+  // Unlocks Settings cards (branding, integration keys, plan templates, cron
+  // jobs, automations, agent config) for a toggled agent. Admin-toggle 2026-07-07.
   const canManageTenant =
     !!teamProfile &&
-    (teamProfile.is_owner || teamProfile.team_role === "owner" || teamProfile.team_role === "admin");
+    (teamProfile.is_owner ||
+      teamProfile.team_role === "owner" ||
+      teamProfile.team_role === "admin" ||
+      teamProfile.admin_access === true);
   const visibleDefs = visibleIntegrationsForTenant(enabledAgents, { isOperator });
   const visibleServices = new Set(visibleDefs.map((d) => d.service));
   const visibleIntegrations = integrations.filter((h: IntegrationHealth) => visibleServices.has(h.service));
