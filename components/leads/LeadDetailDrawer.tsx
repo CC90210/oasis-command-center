@@ -16,14 +16,7 @@
  * fetch).
  */
 
-import {
-  useCallback,
-  useEffect,
-  useRef,
-  useState,
-  type KeyboardEvent as ReactKeyboardEvent,
-  type PointerEvent as ReactPointerEvent,
-} from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 // useRef intentionally imported for the file-input ref in DocumentsTab.
 import { BackgroundCheckTab } from "./BackgroundCheckTab";
 import { DefaultsCheckControl } from "./DefaultsCheckControl";
@@ -82,54 +75,6 @@ const TABS: { key: TabKey; label: string }[] = [
   { key: "notes", label: "Notes" },
 ];
 
-type SummaryBounds = {
-  min: number;
-  max: number;
-  fallback: number;
-};
-
-const SUMMARY_HEIGHT_STORAGE_KEY = "sunbiz.lead-drawer.summary-height.v1";
-const DEFAULT_SUMMARY_BOUNDS: SummaryBounds = { min: 132, max: 460, fallback: 320 };
-
-function clampNumber(value: number, min: number, max: number): number {
-  return Math.min(max, Math.max(min, value));
-}
-
-function getSummaryBounds(): SummaryBounds {
-  if (typeof window === "undefined") return DEFAULT_SUMMARY_BOUNDS;
-  const viewportHeight = window.innerHeight || 800;
-  const min = clampNumber(Math.round(viewportHeight * 0.22), 132, 180);
-  const max = Math.max(min + 80, Math.round(viewportHeight * 0.58));
-  const fallback = clampNumber(
-    Math.round(viewportHeight * (viewportHeight < 720 ? 0.4 : viewportHeight < 900 ? 0.46 : 0.52)),
-    min,
-    max,
-  );
-  return { min, max, fallback };
-}
-
-function readStoredSummaryHeight(): number | null {
-  if (typeof window === "undefined") return null;
-  try {
-    const raw = window.localStorage.getItem(SUMMARY_HEIGHT_STORAGE_KEY);
-    if (!raw) return null;
-    const parsed = Number(raw);
-    return Number.isFinite(parsed) ? parsed : null;
-  } catch {
-    return null;
-  }
-}
-
-function storeSummaryHeight(height: number | null): void {
-  if (typeof window === "undefined") return;
-  try {
-    if (height === null) window.localStorage.removeItem(SUMMARY_HEIGHT_STORAGE_KEY);
-    else window.localStorage.setItem(SUMMARY_HEIGHT_STORAGE_KEY, String(Math.round(height)));
-  } catch {
-    /* localStorage can be unavailable in private/restricted contexts */
-  }
-}
-
 export function LeadDetailDrawer({
   tenantSlug,
   recordId,
@@ -144,15 +89,7 @@ export function LeadDetailDrawer({
   const [data, setData] = useState<DetailPayload | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<TabKey>("activity");
-  const [summaryHeight, setSummaryHeight] = useState<number | null>(null);
-  const [summaryBounds, setSummaryBounds] = useState<SummaryBounds>(DEFAULT_SUMMARY_BOUNDS);
-  const [isSummaryResizing, setIsSummaryResizing] = useState(false);
   const closeBtnRef = useRef<HTMLButtonElement>(null);
-  const summaryContentRef = useRef<HTMLDivElement>(null);
-  const latestSummaryHeightRef = useRef<number | null>(null);
-  const summaryManuallySizedRef = useRef(false);
-  const resizeStartRef = useRef<{ y: number; height: number } | null>(null);
-  const resizeMovedRef = useRef(false);
 
   const reload = useCallback(async () => {
     const url = `/api/leads/${recordId}/detail${entity === "application" ? "?entity=application" : ""}`;
@@ -217,129 +154,6 @@ export function LeadDetailDrawer({
   // Header stage is now rendered by <StagePicker/> (Batch 6.1) which derives the
   // current key from data.record.data[stage|status] directly.
 
-  const computePreferredSummaryHeight = useCallback((bounds: SummaryBounds) => {
-    const measured = summaryContentRef.current?.scrollHeight || bounds.fallback;
-    return clampNumber(Math.min(measured, bounds.fallback), bounds.min, bounds.max);
-  }, []);
-
-  const setClampedSummaryHeight = useCallback((next: number, persist = false) => {
-    const bounds = getSummaryBounds();
-    setSummaryBounds(bounds);
-    const clamped = clampNumber(next, bounds.min, bounds.max);
-    latestSummaryHeightRef.current = clamped;
-    setSummaryHeight(clamped);
-    if (persist) {
-      summaryManuallySizedRef.current = true;
-      storeSummaryHeight(clamped);
-    }
-    return clamped;
-  }, []);
-
-  useEffect(() => {
-    const bounds = getSummaryBounds();
-    setSummaryBounds(bounds);
-    const stored = readStoredSummaryHeight();
-    if (stored !== null) {
-      summaryManuallySizedRef.current = true;
-      setClampedSummaryHeight(stored);
-      return;
-    }
-
-    const frame = window.requestAnimationFrame(() => {
-      if (!summaryManuallySizedRef.current) {
-        setClampedSummaryHeight(computePreferredSummaryHeight(getSummaryBounds()));
-      }
-    });
-    return () => window.cancelAnimationFrame(frame);
-  }, [computePreferredSummaryHeight, setClampedSummaryHeight]);
-
-  useEffect(() => {
-    if (summaryManuallySizedRef.current) return;
-    const frame = window.requestAnimationFrame(() => {
-      setClampedSummaryHeight(computePreferredSummaryHeight(getSummaryBounds()));
-    });
-    return () => window.cancelAnimationFrame(frame);
-  }, [data, computePreferredSummaryHeight, setClampedSummaryHeight]);
-
-  useEffect(() => {
-    const onResize = () => {
-      const bounds = getSummaryBounds();
-      setSummaryBounds(bounds);
-      if (!summaryManuallySizedRef.current) {
-        setClampedSummaryHeight(computePreferredSummaryHeight(bounds));
-        return;
-      }
-      const current = readStoredSummaryHeight() ?? latestSummaryHeightRef.current ?? summaryHeight ?? bounds.fallback;
-      setClampedSummaryHeight(current);
-    };
-    window.addEventListener("resize", onResize);
-    return () => window.removeEventListener("resize", onResize);
-  }, [summaryHeight, computePreferredSummaryHeight, setClampedSummaryHeight]);
-
-  function startSummaryResize(e: ReactPointerEvent<HTMLDivElement>) {
-    if (e.button !== 0) return;
-    e.preventDefault();
-    const current =
-      latestSummaryHeightRef.current ||
-      summaryContentRef.current?.getBoundingClientRect().height ||
-      getSummaryBounds().fallback;
-    resizeStartRef.current = { y: e.clientY, height: current };
-    resizeMovedRef.current = false;
-    setIsSummaryResizing(true);
-    e.currentTarget.setPointerCapture(e.pointerId);
-  }
-
-  function moveSummaryResize(e: ReactPointerEvent<HTMLDivElement>) {
-    if (!resizeStartRef.current) return;
-    e.preventDefault();
-    const delta = e.clientY - resizeStartRef.current.y;
-    if (Math.abs(delta) < 2) return;
-    resizeMovedRef.current = true;
-    summaryManuallySizedRef.current = true;
-    setClampedSummaryHeight(resizeStartRef.current.height + delta);
-  }
-
-  function finishSummaryResize(e?: ReactPointerEvent<HTMLDivElement>) {
-    if (!resizeStartRef.current) return;
-    if (e?.currentTarget.hasPointerCapture(e.pointerId)) {
-      e.currentTarget.releasePointerCapture(e.pointerId);
-    }
-    resizeStartRef.current = null;
-    setIsSummaryResizing(false);
-    if (resizeMovedRef.current) {
-      storeSummaryHeight(latestSummaryHeightRef.current);
-    }
-    resizeMovedRef.current = false;
-  }
-
-  function resetSummaryHeight() {
-    summaryManuallySizedRef.current = false;
-    storeSummaryHeight(null);
-    setClampedSummaryHeight(computePreferredSummaryHeight(getSummaryBounds()));
-  }
-
-  function onSummaryResizeKeyDown(e: ReactKeyboardEvent<HTMLDivElement>) {
-    const bounds = getSummaryBounds();
-    const current = latestSummaryHeightRef.current ?? summaryHeight ?? computePreferredSummaryHeight(bounds);
-    let next: number | null = null;
-
-    if (e.key === "ArrowUp") next = current - 24;
-    else if (e.key === "ArrowDown") next = current + 24;
-    else if (e.key === "PageUp") next = current - 72;
-    else if (e.key === "PageDown") next = current + 72;
-    else if (e.key === "Home") next = bounds.min;
-    else if (e.key === "End") next = bounds.max;
-    else if (e.key === "Enter" || e.key === " ") {
-      e.preventDefault();
-      resetSummaryHeight();
-      return;
-    }
-
-    if (next === null) return;
-    e.preventDefault();
-    setClampedSummaryHeight(next, true);
-  }
-
   const shortId = recordId.slice(0, 8);
   const title = data
     ? resolveTitle(data.record.data, entity, shortId)
@@ -366,18 +180,11 @@ export function LeadDetailDrawer({
         onClick={close}
         className="flex-1 bg-black/60 backdrop-blur-sm cursor-default"
       />
-      <aside className="relative w-full sm:w-[min(580px,100vw)] lg:w-[min(640px,52vw)] h-full bg-bg-elev border-l border-bg-border shadow-[-12px_0_32px_-8px_rgba(0,0,0,0.6)] flex flex-col">
+      <aside className="relative w-full sm:w-[580px] h-full bg-bg-elev border-l border-bg-border shadow-[-12px_0_32px_-8px_rgba(0,0,0,0.6)] flex flex-col">
         {/* Header — 2026-06-08 refinement: softer divider, slightly wider
             inner spacing on the label row, stage chip is now rounded-full +
             uppercase letter-spacing to feel less rectangular. */}
-        <header
-          className="shrink-0 min-h-0 bg-bg-elev"
-          style={summaryHeight === null ? undefined : { height: `${summaryHeight}px` }}
-        >
-          <div
-            ref={summaryContentRef}
-            className="h-full min-h-0 overflow-y-auto overscroll-contain px-5 py-4 space-y-4 [scrollbar-gutter:stable]"
-          >
+        <header className="shrink-0 px-5 py-4 border-b border-bg-border/60 space-y-4">
           {/* Row 1: MERCHANT label + stage chip + close */}
           <div className="flex items-start gap-3">
             <div className="min-w-0 flex-1">
@@ -529,40 +336,12 @@ export function LeadDetailDrawer({
               Edit full record →
             </Link>
           </div>
-          </div>
         </header>
 
         {/* Tab nav — softened 2026-06-08: subtle hover bg, tighter padding,
             border-bg-border/50 so the divider doesn't compete with the
             header underline above */}
-        <div
-          role="separator"
-          aria-orientation="horizontal"
-          aria-label="Resize lead details and tab content"
-          aria-valuemin={summaryBounds.min}
-          aria-valuemax={summaryBounds.max}
-          aria-valuenow={Math.round(summaryHeight ?? summaryBounds.fallback)}
-          aria-valuetext={`${Math.round(summaryHeight ?? summaryBounds.fallback)} pixels for the lead summary`}
-          tabIndex={0}
-          title="Drag to resize the drawer sections. Double-click or press Enter to reset."
-          onPointerDown={startSummaryResize}
-          onPointerMove={moveSummaryResize}
-          onPointerUp={finishSummaryResize}
-          onPointerCancel={finishSummaryResize}
-          onDoubleClick={resetSummaryHeight}
-          onKeyDown={onSummaryResizeKeyDown}
-          className={`group shrink-0 h-4 touch-none cursor-row-resize border-y border-bg-border/50 bg-bg-elev flex items-center justify-center outline-none focus-visible:ring-2 focus-visible:ring-accent/70 focus-visible:ring-inset transition-colors ${
-            isSummaryResizing ? "bg-accent/10" : "hover:bg-accent/10"
-          }`}
-        >
-          <span
-            className={`h-px w-20 rounded-full transition-colors ${
-              isSummaryResizing ? "bg-accent" : "bg-bg-border group-hover:bg-accent/70"
-            }`}
-          />
-        </div>
-
-        <nav className="shrink-0 flex gap-0.5 px-5 pt-2 border-b border-bg-border/50 overflow-x-auto">
+        <nav className="shrink-0 flex gap-0.5 px-5 pt-3 border-b border-bg-border/50 overflow-x-auto">
           {TABS.map((t) => {
             const isDocs = t.key === "documents";
             const missingCount = isDocs && data
@@ -2784,6 +2563,7 @@ function TextTorrentSendComposer({
   const [body, setBody] = useState("");
   const [status, setStatus] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
+  const [account, setAccount] = useState<"main" | "followup">("main");
   if (!toPhone) {
     return (
       <ComposerShell title="Text Torrent" onClose={onClose}>
@@ -2803,6 +2583,18 @@ function TextTorrentSendComposer({
       <div className="flex items-center justify-between">
         <div className="text-[11px] text-fg-dim">{status || `${body.length}/1600`}</div>
         <div className="flex items-center gap-3">
+          <div className="inline-flex rounded-md border border-bg-border overflow-hidden text-[10px]" title="Which TextTorrent account to send from">
+            {(["main", "followup"] as const).map((a, i) => (
+              <button
+                key={a}
+                type="button"
+                onClick={() => setAccount(a)}
+                className={`px-2 py-0.5 ${i > 0 ? "border-l border-bg-border" : ""} ${account === a ? "bg-bg-elev text-fg" : "text-fg-dim hover:text-fg"}`}
+              >
+                {a === "main" ? "Main" : "Follow-up"}
+              </button>
+            ))}
+          </div>
           <button type="button" onClick={onEnroll} className="text-[11px] text-fg-dim hover:text-fg underline">
             Enroll in a sequence
           </button>
@@ -2817,7 +2609,7 @@ function TextTorrentSendComposer({
                   method: "POST",
                   headers: { "Content-Type": "application/json" },
                   credentials: "include",
-                  body: JSON.stringify({ to_number: toPhone, message: body }),
+                  body: JSON.stringify({ to_number: toPhone, message: body, account }),
                 });
                 const j = await r.json().catch(() => ({}));
                 if (r.ok && j.ok) {

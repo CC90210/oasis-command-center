@@ -91,6 +91,16 @@ const ENV_FALLBACKS: Record<string, Record<string, string>> = {
     from_number: "TEXTTORRENT_FROM_NUMBER",
     act_as_email: "TEXTTORRENT_ACT_AS_EMAIL",
   },
+  // Dedicated "follow-up" TextTorrent account (its own SID/public key) for the
+  // stage-triggered drip cadences — a separate account so it gets its own 60/min
+  // rate budget and never starves the live Jordan line on the shared parent key.
+  texttorrent_followup: {
+    api_sid: "TEXTTORRENT_FOLLOWUP_API_SID",
+    api_public_key: "TEXTTORRENT_FOLLOWUP_PUBLIC_KEY",
+    api_key: "TEXTTORRENT_FOLLOWUP_API_KEY",
+    from_number: "TEXTTORRENT_FOLLOWUP_FROM_NUMBER",
+    act_as_email: "TEXTTORRENT_FOLLOWUP_ACT_AS_EMAIL",
+  },
   smtp: {
     host: "SMTP_HOST",
     port: "SMTP_PORT",

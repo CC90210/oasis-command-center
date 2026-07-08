@@ -42,9 +42,12 @@ export type TextTorrentCredentials = {
  */
 export async function getTextTorrentCredentials(
   tenantId: string,
-  opts: { actAsEmail?: string } = {},
+  opts: { actAsEmail?: string; service?: string } = {},
 ): Promise<TextTorrentCredentials> {
-  const bundle = await getTenantIntegrationBundle(tenantId, "texttorrent");
+  // Which TextTorrent ACCOUNT to authenticate as: the main "texttorrent" bundle by
+  // default, or "texttorrent_followup" (a separate SID/public key) for the follow-up
+  // drip account. The rate limiter keys off the resolved SID, so each account budgets separately.
+  const bundle = await getTenantIntegrationBundle(tenantId, opts.service || "texttorrent");
   // TT authenticates with two distinct keys (X-API-SID + X-API-PUBLIC-KEY).
   // The integration form exposes api_sid + api_public_key; api_key is kept as
   // a legacy single-value fallback for tenants wired before the two-field form.
