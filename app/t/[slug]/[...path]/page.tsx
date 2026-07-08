@@ -14,7 +14,7 @@ import { ShoppingOutClient } from "@/components/shopping-out/ShoppingOutClient";
 import { OffersByDealClient } from "@/components/offers/OffersByDealClient";
 import { LendersDirectoryClient } from "@/components/lenders/LendersDirectoryClient";
 import { RenewalsV2 } from "@/components/renewals/RenewalsV2";
-import { ConversationsClient } from "@/components/conversations/ConversationsClient";
+import { InboxShell } from "@/components/conversations/InboxShell";
 import { CampaignsShell } from "@/components/campaigns/CampaignsShell";
 import { listThreadsForTenant } from "@/lib/lead-interactions-queries";
 import { TenantSettings } from "@/components/settings/TenantSettings";
@@ -416,6 +416,37 @@ export default async function TenantCatchAllPage({
     );
   }
 
+  // Conversations gets the full-bleed 3-pane inbox shell (Phase 1 of the
+  // apex/conversations-inbox-v2 rebuild): no PageHeader chrome, no
+  // space-y-6 container — those chew ~120px of vertical real estate the
+  // inbox needs for independent pane scrolling. MainShell's
+  // isFullBleedPath already strips the max-w-7xl/footer wrapper around
+  // this whole tree; this is the page-level half of that same fix.
+  if (pageDef.kind === "conversations") {
+    return (
+      <div className="h-full min-h-0 flex flex-col">
+        <PageBody
+          slug={normalised}
+          tenantId={dataTenantId}
+          page={pageDef}
+          manifest={manifest}
+          viewOverride={viewOverride}
+          stageFilter={stageFilter}
+          oppStageFilter={oppStageFilter}
+          query={query}
+          assignedScope={leadScope}
+          canManage={viewer.isAdmin}
+        />
+        <TenantLeadDrawerMount
+          slug={normalised}
+          isPreview={isPreview}
+          drawerLeadId={drawerLeadId}
+          drawerAppId={drawerAppId}
+        />
+      </div>
+    );
+  }
+
   return (
     <div className="space-y-6 animate-fade-in">
       <PageHeader
@@ -595,13 +626,16 @@ async function PageBody({
       // Tenant-scoped Automations — same Option A pattern as Settings.
       return <TenantAutomations tenantSlug={slug} tenantId={tenantId} />;
     case "conversations":
-      // Phase 3b (2026-06-02). Unified inbox over lead_interactions,
-      // threaded by contact. Server-side initial fetch (PageBody is async,
-      // same precedent as RenewalsV2); the client component handles filter
-      // chips, search, and reply / AI-reply actions. Preview mode (no owned
-      // tenant) gets an empty list — shell visible, no cross-tenant data.
+      // Full-page 3-pane inbox (apex/conversations-inbox-v2 Phase 1,
+      // 2026-07). Unified inbox over lead_interactions, threaded by
+      // contact. Server-side initial fetch (PageBody is async, same
+      // precedent as RenewalsV2); InboxShell (formerly ConversationsClient)
+      // owns filters, selection, composer, and the context panel. Preview
+      // mode (no owned tenant) gets an empty list — shell visible, no
+      // cross-tenant data. Rendered full-bleed — see the `kind ===
+      // "conversations"` early return above + MainShell's isFullBleedPath.
       return (
-        <ConversationsClient
+        <InboxShell
           tenantSlug={slug}
           tenantId={tenantId}
           initialThreads={tenantId ? await listThreadsForTenant(tenantId, {}) : []}

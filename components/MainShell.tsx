@@ -55,6 +55,18 @@ function isChatShellPath(pathname: string): boolean {
 }
 
 /**
+ * Full-bleed routes — the Conversations 3-pane inbox. Same treatment as the
+ * chat shell (no max-w-7xl, no footer, h-[100dvh] overflow-hidden) but a
+ * SEPARATE predicate from isChatShellPath: conversations never renders
+ * ChatWidget, it's just an inbox that also wants the full viewport. One
+ * boolean, mirroring the isChatShellPath pattern above (plan §2a,
+ * apex/conversations-inbox-v2 Phase 1).
+ */
+function isFullBleedPath(pathname: string): boolean {
+  return /^\/t\/[^/]+\/conversations(\/.*)?$/.test(pathname);
+}
+
+/**
  * The OPERATOR'S OWN agent chat — where the persistent ChatWidget is visible.
  * Narrower than isChatShellPath on purpose: the /t/<slug>/agent preview path
  * renders AgentChat, not ChatWidget, so the persistent instance must stay
@@ -79,7 +91,7 @@ export function MainShell({
 }) {
   const pathname = usePathname() || "";
   const onAgent = isOwnAgentChatPath(pathname);
-  const chatShell = isChatShellPath(pathname);
+  const chatShell = isChatShellPath(pathname) || isFullBleedPath(pathname);
 
   // Lazy-mount: don't pay the ChatWidget's prewarm / bridge-probe / config
   // fetches on pages where chat was never opened. Latch activation DURING
