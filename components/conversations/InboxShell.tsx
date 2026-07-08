@@ -217,25 +217,8 @@ export function InboxShell({
     [],
   );
 
-  if (!tenantId) {
-    return (
-      <div className="h-full flex items-center justify-center p-6">
-        <div className="rounded-xl border border-bg-border bg-bg-panel p-6 text-sm text-fg-muted max-w-md text-center">
-          Conversations render for the tenant that owns this workspace. You&apos;re previewing the shell.
-        </div>
-      </div>
-    );
-  }
-
-  if (threads.length === 0) {
-    return (
-      <div className="h-full flex items-center justify-center p-6">
-        <div className="rounded-xl border border-bg-border bg-bg-panel max-w-md w-full">
-          <EmptyState message="No conversations yet. Inbound SMS, calls, and email replies will thread here by contact as they arrive." />
-        </div>
-      </div>
-    );
-  }
+  // Empty/preview early-returns live BELOW all hooks (React rules-of-hooks:
+  // hooks must run unconditionally on every render). See just above the render.
 
   async function handleSend() {
     if (!selected || sending) return;
@@ -618,6 +601,26 @@ export function InboxShell({
     },
     [runVoiceSuggest],
   );
+
+  if (!tenantId) {
+    return (
+      <div className="h-full flex items-center justify-center p-6">
+        <div className="rounded-xl border border-bg-border bg-bg-panel p-6 text-sm text-fg-muted max-w-md text-center">
+          Conversations render for the tenant that owns this workspace. You&apos;re previewing the shell.
+        </div>
+      </div>
+    );
+  }
+
+  if (threads.length === 0) {
+    return (
+      <div className="h-full flex items-center justify-center p-6">
+        <div className="rounded-xl border border-bg-border bg-bg-panel max-w-md w-full">
+          <EmptyState message="No conversations yet. Inbound SMS, calls, and email replies will thread here by contact as they arrive." />
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div
