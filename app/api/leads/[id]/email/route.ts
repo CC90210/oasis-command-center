@@ -29,6 +29,7 @@ import { resolveSignerForOperator } from "@/lib/config/agents";
 import { operatorHasGmailOAuth, sendGmailAsOperator } from "@/lib/integrations/gmail-oauth-send";
 import { operatorHasAppPassword, sendGmailAppPasswordAsOperator } from "@/lib/integrations/gmail-apppassword-send";
 import { checkEmailSuppressed } from "@/lib/lead-interactions-queries";
+import { nudgeConversations } from "@/lib/realtime/conversations-nudge";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -219,6 +220,12 @@ export async function POST(
   if (ins.error) {
     return NextResponse.json({ ok: false, error: ins.error.message }, { status: 500 });
   }
+
+  // Phase 3 spine live-refresh (plan §7): the insert above just fired the
+  // conv_thread_upsert trigger (when the migration is applied), so nudge any
+  // open Conversations tab to refresh. Best-effort/fail-silent — see
+  // lib/realtime/conversations-nudge.ts.
+  await nudgeConversations(sess.tenantId);
 
   // Emit an agent_event so send_gateway's event-bus listener picks it
   // up immediately instead of waiting for its next poll cycle.

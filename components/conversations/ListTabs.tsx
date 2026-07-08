@@ -1,13 +1,14 @@
 "use client";
 
 /**
- * ListTabs — plan §3/§9 Phase 1: "renders P1; filters live P3 when
- * assigned_to exists." `conversation_threads.assigned_to` doesn't exist
- * until the Phase 3 spine migration, so this control is intentionally
- * render-only right now — it tracks its own active tab and is wired for a
- * future `onChange` that will actually filter, but doesn't hide any threads
- * yet. Left un-selected by default (no highlighted tab) so it never implies
- * a filter is active when it isn't.
+ * ListTabs — plan §3/§9. "renders P1; filters live P3 when assigned_to
+ * exists." Pre-Phase-3 (`enabled` false/undefined — the default),
+ * `conversation_threads.assigned_to` doesn't exist yet, so this control is
+ * render-only: it tracks its own active tab but InboxShell's `filtered`
+ * memo never actually applies it. Once CONVERSATIONS_SPINE=1
+ * (`enabled=true`, plan §7), the parent wires the same onChange to a real
+ * SQL/client-side filter — this component itself doesn't change behavior,
+ * only its tooltip.
  */
 export type ListTabKey = "mine" | "unassigned" | "all";
 
@@ -20,14 +21,17 @@ const TABS: { key: ListTabKey; label: string }[] = [
 export function ListTabs({
   active,
   onChange,
+  enabled,
 }: {
   active: ListTabKey | null;
   onChange: (k: ListTabKey) => void;
+  /** True once the Phase 3 spine is live — filtering is real. */
+  enabled?: boolean;
 }) {
   return (
     <div
       className="inline-flex items-center rounded-md border border-bg-border overflow-hidden"
-      title="Assignment filtering lands in Phase 3 (needs the assigned_to column)"
+      title={enabled ? "Filter by assignment" : "Assignment filtering lands in Phase 3 (needs the assigned_to column)"}
     >
       {TABS.map((t) => (
         <button

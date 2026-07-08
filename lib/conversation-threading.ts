@@ -33,6 +33,15 @@ export type ConversationChannel = "sms" | "phone" | "email";
  */
 export type ConversationSource = "texttorrent" | "twilio" | "kixie" | "email" | "other";
 
+/**
+ * Phase 3 spine — mirrors conversation_threads.status (database/112_
+ * conversations_spine.sql `conv_thread_upsert()`). Only meaningful on a
+ * thread loaded via listThreadsFromSpine(); the read-time grouping path
+ * (groupRowsIntoThreads below) leaves this undefined rather than fabricate
+ * an approximation, so the UI can gate real filtering on its presence.
+ */
+export type ThreadStatus = "open" | "needs_reply" | "waiting_on_client" | "closed" | "snoozed" | "triage";
+
 export type ConversationMessage = {
   id: string;
   channel: string; // sms | phone | email | note
@@ -65,6 +74,24 @@ export type ConversationThread = {
   inbound_count: number;
   tt_chat_id: string | null;
   messages: ConversationMessage[];
+  /**
+   * Phase 3 spine fields (database/112_conversations_spine.sql). Populated
+   * ONLY by listThreadsFromSpine() in lib/lead-interactions-queries.ts;
+   * left undefined by groupRowsIntoThreads() (the permanent read-time
+   * fallback) so callers can tell "no spine data" from "spine says zero/
+   * unset" and gate live filtering/unread/assign UI on CONVERSATIONS_SPINE.
+   */
+  status?: ThreadStatus;
+  assigned_to?: string | null;
+  owner_agent_id?: string | null;
+  unread_count?: number;
+  snoozed_until?: string | null;
+  /** True when this thread's messages haven't been lazy-loaded yet (spine
+   *  mode only — the spine list query returns thread metadata without
+   *  messages; ThreadPane fetches them on select via GET
+   *  /api/conversations/threads/[key]). Always false/absent on the
+   *  read-time-grouping path, which loads messages eagerly. */
+  messages_loaded?: boolean;
 };
 
 /** Raw lead_interactions row shape consumed by the grouper. */

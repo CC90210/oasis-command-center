@@ -22,6 +22,7 @@ import type {
   ConversationThread,
   ConversationMessage,
   ConversationSource,
+  ThreadStatus,
 } from "@/lib/lead-interactions-queries";
 import { EmptyState } from "@/components/Card";
 import { ConversationListPane, type SectionKey } from "./ConversationListPane";
@@ -46,6 +47,18 @@ type LastAiParams =
 
 const CONTEXT_OPEN_STORAGE_KEY = "oasis:conversations:contextPanelOpen";
 
+// Status-chip -> real status-enum mapping (plan §7: "Awaiting Docs ->
+// waiting_on_client"). "Open" covers open + needs_reply + triage (an
+// operator browsing "Open" wants everything not snoozed/closed/waiting);
+// "Closed / Funded" maps to the terminal `closed` status. Module-level —
+// only meaningful once CONVERSATIONS_SPINE populates ConversationThread.status.
+const STATUS_TAB_MAP: Record<string, ThreadStatus[]> = {
+  open: ["open", "needs_reply", "triage"],
+  awaiting_docs: ["waiting_on_client"],
+  snoozed: ["snoozed"],
+  closed_funded: ["closed"],
+};
+
 type FailedDraft = { channel: ComposerChannel; body: string; subject?: string };
 
 function firstName(label: string): string {
@@ -61,10 +74,20 @@ export function InboxShell({
   tenantSlug,
   tenantId,
   initialThreads,
+  spineEnabled,
+  currentUserId,
 }: {
   tenantSlug: string;
   tenantId: string | null;
   initialThreads: ConversationThread[];
+  /** Phase 3 (plan §7): true only when CONVERSATIONS_SPINE=1 AND the 112
+   *  migration has been applied — gates ListTabs/StatusFilter/unread/quick-
+   *  actions from render-only to live. `initialThreads` already came from
+   *  listThreadsFromSpine() in that case (messages lazy-load below). */
+  spineEnabled: boolean;
+  /** Signed-in auth_user_id (lowercased upstream where relevant), null in
+   *  preview mode. Drives the "Mine" ListTabs filter + "assign to me". */
+  currentUserId: string | null;
 }) {
   const [threads, setThreads] = useState<ConversationThread[]>(initialThreads);
   const [selectedKey, setSelectedKey] = useState<string | null>(initialThreads[0]?.key ?? null);
@@ -138,6 +161,57 @@ export function InboxShell({
 
   const messageRegistry: MessageRegistry = useRef(new Map());
 
+  // --- Phase 3 workflow ops (plan §7) --------------------------------------
+  // Thin PATCH wrapper for /api/conversations/threads/[key] — assign/status/
+  // snooze/markRead. Best-effort: a failed PATCH just means the optimistic
+  // local update (applied by each caller below) will be corrected on the
+  // next full page load / realtime refresh rather than surfaced as an error
+  // — these are low-stakes workflow toggles, not sends.
+  const patchThread = useCallback(async (key: string, patch: Record<string, unknown>): Promise<boolean> => {
+    try {
+      const res = await fetch(`/api/conversations/threads/${encodeURIComponent(key)}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(patch),
+      });
+      return res.ok;
+    } catch {
+      return false;
+    }
+  }, []);
+
+  const handleAssignToMe = useCallback(
+    (key: string) => {
+      if (!currentUserId) return;
+      setThreads((prev) => prev.map((t) => (t.key === key ? { ...t, assigned_to: currentUserId } : t)));
+      void patchThread(key, { assigned_to: currentUserId });
+    },
+    [currentUserId, patchThread],
+  );
+
+  const handleResolve = useCallback(
+    (key: string) => {
+      setThreads((prev) => prev.map((t) => (t.key === key ? { ...t, status: "closed" as ThreadStatus } : t)));
+      void patchThread(key, { status: "closed" });
+    },
+    [patchThread],
+  );
+
+  const handleSnooze = useCallback(
+    (key: string, hours: number) => {
+      const until = new Date(Date.now() + hours * 60 * 60_000).toISOString();
+      setThreads((prev) =>
+        prev.map((t) => (t.key === key ? { ...t, status: "snoozed" as ThreadStatus, snoozed_until: until } : t)),
+      );
+      void patchThread(key, { status: "snoozed", snoozed_until: until });
+    },
+    [patchThread],
+  );
+
+  const quickActions = spineEnabled
+    ? { onAssignToMe: handleAssignToMe, onResolve: handleResolve, onSnooze: handleSnooze }
+    : null;
+
   const counts = useMemo(() => {
     const c: Record<string, number> = { all: threads.length };
     for (const t of threads) for (const s of t.sources) c[s] = (c[s] || 0) + 1;
@@ -149,15 +223,80 @@ export function InboxShell({
     const qDigits = q.replace(/\D/g, "");
     return threads.filter((t) => {
       if (section !== "all" && !t.sources.includes(section as ConversationSource)) return false;
+      // ListTabs/StatusFilter only actually filter once the spine is live —
+      // otherwise these fields are undefined on every thread and the
+      // controls stay purely render-only (see those components' doc
+      // comments), so this block is a no-op pre-Phase-3.
+      if (spineEnabled && listTab && listTab !== "all") {
+        if (listTab === "mine" && (t.assigned_to || "").toLowerCase() !== (currentUserId || "").toLowerCase()) {
+          return false;
+        }
+        if (listTab === "unassigned" && t.assigned_to) return false;
+      }
+      if (spineEnabled && statusTab) {
+        const allowed = STATUS_TAB_MAP[statusTab] || [];
+        if (!t.status || !allowed.includes(t.status)) return false;
+      }
       if (!q) return true;
       const hay = `${t.contact_label} ${t.last_preview} ${t.contact_phone || ""} ${t.contact_email || ""}`.toLowerCase();
       if (hay.includes(q)) return true;
       if (qDigits.length >= 4 && (t.contact_phone || "").replace(/\D/g, "").includes(qDigits)) return true;
       return false;
     });
-  }, [threads, section, search]);
+  }, [threads, section, search, spineEnabled, listTab, statusTab, currentUserId]);
 
   const selected = useMemo(() => threads.find((t) => t.key === selectedKey) ?? null, [threads, selectedKey]);
+
+  // Phase 3 lazy-load (plan §7): a spine-listed thread carries no messages
+  // until selected. Fetch once per thread (guarded by `messages_loaded`);
+  // `cancelled` guards against a fast thread-switch resolving stale.
+  useEffect(() => {
+    if (!spineEnabled || !selected || selected.messages_loaded) return;
+    const key = selected.key;
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch(`/api/conversations/threads/${encodeURIComponent(key)}`, { credentials: "include" });
+        const data = await res.json().catch(() => null);
+        if (cancelled) return;
+        if (!res.ok || !data?.ok) {
+          setThreads((prev) => prev.map((t) => (t.key === key ? { ...t, messages_loaded: true } : t)));
+          return;
+        }
+        setThreads((prev) =>
+          prev.map((t) =>
+            t.key === key
+              ? {
+                  ...t,
+                  messages: (data.messages as ConversationMessage[]) || [],
+                  tt_chat_id: (data.tt_chat_id as string | null) ?? t.tt_chat_id,
+                  messages_loaded: true,
+                }
+              : t,
+          ),
+        );
+      } catch {
+        if (!cancelled) {
+          setThreads((prev) => prev.map((t) => (t.key === key ? { ...t, messages_loaded: true } : t)));
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [spineEnabled, selected?.key, selected?.messages_loaded]);
+
+  // Phase 3 markRead (plan §7: "unread dots ... cleared on open"). Fires
+  // once per thread-selection when it actually carries unread; optimistic
+  // local zero + best-effort PATCH.
+  useEffect(() => {
+    if (!spineEnabled || !selected || !selected.unread_count) return;
+    const key = selected.key;
+    setThreads((prev) => prev.map((t) => (t.key === key ? { ...t, unread_count: 0 } : t)));
+    void patchThread(key, { markRead: true });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [spineEnabled, selected?.key]);
 
   const statusMap: MessageStatusMap = useMemo(() => {
     const m: MessageStatusMap = {};
@@ -220,16 +359,41 @@ export function InboxShell({
   // Empty/preview early-returns live BELOW all hooks (React rules-of-hooks:
   // hooks must run unconditionally on every render). See just above the render.
 
-  async function handleSend() {
+  // Phase 3 scheduled-send (plan §3/§7, SendSplitButton). Best-effort,
+  // client-only: an in-memory setTimeout owned by this component fires the
+  // real send at the scheduled time — durable ONLY while this browser tab
+  // stays open (a closed tab or redeploy silently drops it). A real fix
+  // needs a `scheduled_sends` table + a server-side worker; out of scope for
+  // this phase — flagged again in SendSplitButton's doc comment. Cleared on
+  // unmount so a stale timer can never fire against a torn-down component.
+  const scheduledTimersRef = useRef<Array<ReturnType<typeof setTimeout>>>([]);
+  useEffect(
+    () => () => {
+      scheduledTimersRef.current.forEach(clearTimeout);
+      scheduledTimersRef.current = [];
+    },
+    [],
+  );
+
+  async function handleSend(opts?: { scheduledAt?: string }) {
     if (!selected || sending) return;
-    if (channel === "sms") return handleSendSms();
+    if (channel === "sms") return handleSendSms(opts);
     return handleSendEmail();
   }
 
-  async function handleSendSms() {
-    if (!selected || !selected.contact_phone || !draft.trim() || sending) return;
+  /** Fires the actual optimistic-bubble + POST /api/conversations/reply —
+   *  shared by an immediate Send and a scheduled-send timer firing later.
+   *  Reads `threads` functionally (never a captured `selected`) so it's
+   *  correct even if the operator has since switched threads. */
+  async function sendSmsNow(args: {
+    selKey: string;
+    leadId: string | null;
+    phone: string;
+    body: string;
+    provider: "texttorrent" | "kixie";
+  }) {
+    const { selKey, leadId, phone, body, provider } = args;
     const localId = `local-${Date.now()}`;
-    const body = draft.trim();
     setSending(true);
     setNotice(null);
     setPendingIds((p) => new Set(p).add(localId));
@@ -237,7 +401,7 @@ export function InboxShell({
     const optimistic: ConversationMessage = {
       id: localId,
       channel: "sms",
-      source: smsProvider,
+      source: provider,
       direction: "outbound",
       type: "sms_sent",
       subject: null,
@@ -249,7 +413,6 @@ export function InboxShell({
       call_outcome: null,
       call_duration_sec: null,
     };
-    const selKey = selected.key;
     setThreads((prev) =>
       prev.map((t) =>
         t.key === selKey
@@ -260,22 +423,21 @@ export function InboxShell({
               last_at: optimistic.at,
               last_direction: "outbound",
               channels: t.channels.includes("sms") ? t.channels : [...t.channels, "sms"],
-              sources: t.sources.includes(smsProvider) ? t.sources : [...t.sources, smsProvider],
+              sources: t.sources.includes(provider) ? t.sources : [...t.sources, provider],
             }
           : t,
       ),
     );
-    setDraft("");
 
     try {
       const res = await fetch("/api/conversations/reply", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          lead_id: selected.lead_id,
-          to_phone: selected.contact_phone,
+          lead_id: leadId,
+          to_phone: phone,
           message: body,
-          provider: smsProvider,
+          provider,
         }),
       });
       const data = await res.json();
@@ -308,6 +470,37 @@ export function InboxShell({
     } finally {
       setSending(false);
     }
+  }
+
+  async function handleSendSms(opts?: { scheduledAt?: string }) {
+    if (!selected || !selected.contact_phone || !draft.trim() || sending) return;
+    const selKey = selected.key;
+    const leadId = selected.lead_id;
+    const phone = selected.contact_phone;
+    const body = draft.trim();
+    const provider = smsProvider;
+
+    if (opts?.scheduledAt) {
+      const delayMs = new Date(opts.scheduledAt).getTime() - Date.now();
+      if (delayMs > 5_000) {
+        setDraft("");
+        setNotice(
+          `Scheduled for ${new Date(opts.scheduledAt).toLocaleString([], {
+            dateStyle: "short",
+            timeStyle: "short",
+          })} — fires only if this tab stays open.`,
+        );
+        const timer = setTimeout(() => {
+          void sendSmsNow({ selKey, leadId, phone, body, provider });
+        }, delayMs);
+        scheduledTimersRef.current.push(timer);
+        return;
+      }
+      // Scheduled time is already here (or within 5s) — just send now.
+    }
+
+    setDraft("");
+    await sendSmsNow({ selKey, leadId, phone, body, provider });
   }
 
   async function handleSendEmail() {
@@ -644,6 +837,8 @@ export function InboxShell({
           onListTabChange={setListTab}
           statusTab={statusTab}
           onStatusTabChange={setStatusTab}
+          spineEnabled={spineEnabled}
+          quickActions={quickActions}
         />
       </div>
 

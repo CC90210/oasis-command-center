@@ -62,7 +62,7 @@ export function ThreadPane({
   onEmailSubjectChange: (v: string) => void;
   emailBody: string;
   onEmailBodyChange: (v: string) => void;
-  onSend: () => void;
+  onSend: (opts?: { scheduledAt?: string }) => void;
   sending: boolean;
   notice: string | null;
   onAiReply?: () => void;

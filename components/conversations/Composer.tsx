@@ -158,7 +158,7 @@ export function Composer({
   onEmailSubjectChange: (v: string) => void;
   emailBody: string;
   onEmailBodyChange: (v: string) => void;
-  onSend: () => void;
+  onSend: (opts?: { scheduledAt?: string }) => void;
   sending: boolean;
   notice: string | null;
   onAiReply?: () => void;
@@ -312,7 +312,13 @@ export function Composer({
                 templates={DEFAULT_SMS_TEMPLATES}
                 templateVars={templateVars}
               />
-              <SendSplitButton onSend={onSend} sending={sending} disabled={!canSend} channel="sms" />
+              <SendSplitButton
+                onSend={onSend}
+                sending={sending}
+                disabled={!canSend}
+                channel="sms"
+                recipientPhone={thread.contact_phone}
+              />
             </div>
             <GhostTextSuggestion text={ghostText} onAccept={acceptGhost} onDismiss={clearGhost} />
             {hasUserText && onToneRewrite && (
@@ -339,7 +345,13 @@ export function Composer({
               templates={DEFAULT_EMAIL_TEMPLATES}
               templateVars={templateVars}
             />
-            <SendSplitButton onSend={onSend} sending={sending} disabled={!canSend} channel="email" />
+            <SendSplitButton
+              onSend={onSend}
+              sending={sending}
+              disabled={!canSend}
+              channel="email"
+              recipientPhone={thread.contact_phone}
+            />
           </div>
           {hasUserText && onToneRewrite && (
             <ToneToolsRow onPick={(instr) => onToneRewrite(instr)} disabled={!!aiSuggestLoading} />

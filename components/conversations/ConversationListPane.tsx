@@ -8,7 +8,7 @@
  */
 import { Search } from "lucide-react";
 import type { ConversationThread, ConversationSource } from "@/lib/conversation-threading";
-import { ConversationRow } from "./ConversationRow";
+import { ConversationRow, type ThreadQuickActions } from "./ConversationRow";
 import { ListTabs, type ListTabKey } from "./ListTabs";
 import { StatusFilter, type StatusKey } from "./StatusFilter";
 
@@ -39,6 +39,8 @@ export function ConversationListPane({
   onListTabChange,
   statusTab,
   onStatusTabChange,
+  spineEnabled,
+  quickActions,
 }: {
   filtered: ConversationThread[];
   selectedKey: string | null;
@@ -52,11 +54,17 @@ export function ConversationListPane({
   onListTabChange: (k: ListTabKey) => void;
   statusTab: StatusKey | null;
   onStatusTabChange: (k: StatusKey | null) => void;
+  /** Phase 3 (plan §7) — true once CONVERSATIONS_SPINE=1, switching
+   *  ListTabs/StatusFilter from render-only to live filters. */
+  spineEnabled?: boolean;
+  /** Row hover quick-actions (assign to me / snooze / resolve) — null
+   *  (hidden) until the spine is live; see InboxShell's `quickActions`. */
+  quickActions?: ThreadQuickActions | null;
 }) {
   return (
     <div className="h-full min-h-0 flex flex-col border-r border-bg-border bg-bg-panel">
       <div className="shrink-0 border-b border-bg-border p-3 space-y-2">
-        <ListTabs active={listTab} onChange={onListTabChange} />
+        <ListTabs active={listTab} onChange={onListTabChange} enabled={spineEnabled} />
 
         <div className="relative">
           <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-fg-dim" />
@@ -68,7 +76,7 @@ export function ConversationListPane({
           />
         </div>
 
-        <StatusFilter active={statusTab} onChange={onStatusTabChange} />
+        <StatusFilter active={statusTab} onChange={onStatusTabChange} enabled={spineEnabled} />
 
         <div className="flex items-center gap-1.5 flex-wrap">
           {SECTIONS.map((s) => (
@@ -98,7 +106,13 @@ export function ConversationListPane({
           </div>
         ) : (
           filtered.map((t) => (
-            <ConversationRow key={t.key} thread={t} active={selectedKey === t.key} onSelect={() => onSelect(t.key)} />
+            <ConversationRow
+              key={t.key}
+              thread={t}
+              active={selectedKey === t.key}
+              onSelect={() => onSelect(t.key)}
+              quickActions={quickActions}
+            />
           ))
         )}
       </div>

@@ -34,6 +34,7 @@ import {
   TextTorrentError,
 } from "@/lib/integrations/texttorrent";
 import { resolveTextTorrentSenderId } from "@/lib/integrations/texttorrent-sender";
+import { nudgeConversations } from "@/lib/realtime/conversations-nudge";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -153,6 +154,7 @@ export async function POST(req: NextRequest) {
   // Per-channel: TextTorrent / Kixie can be live independently.
   if (isDryRun(provider)) {
     await logInteraction({ tenantId, leadId, toPhone, message, userId, provider, dryRun: true });
+    await nudgeConversations(tenantId);
     return NextResponse.json({
       ok: true,
       dry_run: true,
@@ -238,5 +240,6 @@ export async function POST(req: NextRequest) {
   }
 
   await logInteraction({ tenantId, leadId, toPhone, message, userId, provider, dryRun: false });
+  await nudgeConversations(tenantId);
   return NextResponse.json({ ok: true, dry_run: false, provider, to_phone: toPhone });
 }

@@ -1,10 +1,12 @@
 "use client";
 
 /**
- * StatusFilter — plan §3/§9 Phase 1: "same phasing" as ListTabs. The
- * `conversation_threads.status` enum doesn't exist until Phase 3, so this
- * is render-only (tracks the active chip, never hides a thread). Wired for
- * a real `onChange` filter once the spine lands.
+ * StatusFilter — plan §3/§9: "same phasing" as ListTabs. Pre-Phase-3
+ * (`enabled` false/undefined — the default), `conversation_threads.status`
+ * doesn't exist yet, so this is render-only (tracks the active chip, never
+ * hides a thread). Once CONVERSATIONS_SPINE=1 (`enabled=true`, plan §7),
+ * InboxShell wires the same onChange to a real status-enum filter (Awaiting
+ * Docs -> waiting_on_client) — this component only changes its tooltip.
  */
 export type StatusKey = "open" | "awaiting_docs" | "snoozed" | "closed_funded";
 
@@ -18,14 +20,17 @@ const STATUSES: { key: StatusKey; label: string; tone: string }[] = [
 export function StatusFilter({
   active,
   onChange,
+  enabled,
 }: {
   active: StatusKey | null;
   onChange: (k: StatusKey | null) => void;
+  /** True once the Phase 3 spine is live — filtering is real. */
+  enabled?: boolean;
 }) {
   return (
     <div
       className="flex items-center gap-1 flex-wrap"
-      title="Status filtering lands in Phase 3 (needs the conversation_threads.status column)"
+      title={enabled ? "Filter by status" : "Status filtering lands in Phase 3 (needs the conversation_threads.status column)"}
     >
       {STATUSES.map((s) => {
         const isActive = active === s.key;

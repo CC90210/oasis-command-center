@@ -15,8 +15,13 @@ import { OffersByDealClient } from "@/components/offers/OffersByDealClient";
 import { LendersDirectoryClient } from "@/components/lenders/LendersDirectoryClient";
 import { RenewalsV2 } from "@/components/renewals/RenewalsV2";
 import { InboxShell } from "@/components/conversations/InboxShell";
+import { ConversationsLiveRefresh } from "@/components/conversations/ConversationsLiveRefresh";
 import { CampaignsShell } from "@/components/campaigns/CampaignsShell";
-import { listThreadsForTenant } from "@/lib/lead-interactions-queries";
+import {
+  listThreadsForTenant,
+  listThreadsFromSpine,
+  conversationsSpineEnabled,
+} from "@/lib/lead-interactions-queries";
 import { TenantSettings } from "@/components/settings/TenantSettings";
 import { TenantAutomations } from "@/components/automations/TenantAutomations";
 import { LeadTimelinePanel } from "@/components/leads/LeadTimelinePanel";
@@ -436,7 +441,12 @@ export default async function TenantCatchAllPage({
           query={query}
           assignedScope={leadScope}
           canManage={viewer.isAdmin}
+          viewerUserId={viewer.userId}
         />
+        {/* Realtime live-refresh (Phase 3, plan §7) — mounted unconditionally
+            (not spine-gated): a fresh send/inbound also refreshes the
+            read-time-grouped list. Fail-silent without public Supabase env. */}
+        {!isPreview && <ConversationsLiveRefresh tenantId={dataTenantId} />}
         <TenantLeadDrawerMount
           slug={normalised}
           isPreview={isPreview}
@@ -489,6 +499,7 @@ export default async function TenantCatchAllPage({
         query={query}
         assignedScope={leadScope}
         canManage={viewer.isAdmin}
+        viewerUserId={viewer.userId}
       />
       <TenantLeadDrawerMount
         slug={normalised}
@@ -547,6 +558,7 @@ async function PageBody({
   query,
   assignedScope,
   canManage,
+  viewerUserId,
 }: {
   slug: string;
   tenantId: string | null;
@@ -560,6 +572,10 @@ async function PageBody({
   assignedScope: string | null | undefined;
   /** Owner/admin — unlocks the bulk Select mode on the lead/application board. */
   canManage: boolean;
+  /** Signed-in auth_user_id (session), null in preview mode. Conversations
+   *  (Phase 3 spine) uses it for the "Mine" ListTabs filter + "assign to me"
+   *  quick-action default. */
+  viewerUserId: string | null;
 }) {
   switch (page.kind) {
     case "markdown":
@@ -625,7 +641,7 @@ async function PageBody({
     case "automations":
       // Tenant-scoped Automations — same Option A pattern as Settings.
       return <TenantAutomations tenantSlug={slug} tenantId={tenantId} />;
-    case "conversations":
+    case "conversations": {
       // Full-page 3-pane inbox (apex/conversations-inbox-v2 Phase 1,
       // 2026-07). Unified inbox over lead_interactions, threaded by
       // contact. Server-side initial fetch (PageBody is async, same
@@ -634,13 +650,29 @@ async function PageBody({
       // mode (no owned tenant) gets an empty list — shell visible, no
       // cross-tenant data. Rendered full-bleed — see the `kind ===
       // "conversations"` early return above + MainShell's isFullBleedPath.
+      //
+      // Phase 3 (plan §7): CONVERSATIONS_SPINE=1 switches the initial read
+      // from read-time grouping (listThreadsForTenant, capped ~400 rows,
+      // messages loaded eagerly) to the persistent spine
+      // (listThreadsFromSpine — SQL-side filters, real pagination, messages
+      // lazy-loaded per selected thread by InboxShell). Default OFF: exact
+      // same behavior as before this migration exists or is applied.
+      const spineEnabled = conversationsSpineEnabled();
+      const initialThreads = tenantId
+        ? spineEnabled
+          ? await listThreadsFromSpine(tenantId, {})
+          : await listThreadsForTenant(tenantId, {})
+        : [];
       return (
         <InboxShell
           tenantSlug={slug}
           tenantId={tenantId}
-          initialThreads={tenantId ? await listThreadsForTenant(tenantId, {}) : []}
+          initialThreads={initialThreads}
+          spineEnabled={spineEnabled}
+          currentUserId={viewerUserId}
         />
       );
+    }
     case "campaigns":
       // Multi-channel campaigns command center: Text Torrent / Twilio / Gmail
       // sub-tabs. Each surface does its own client-side fetches (per-list count

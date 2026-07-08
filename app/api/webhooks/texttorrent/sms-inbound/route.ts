@@ -35,6 +35,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { isStopCommand, suppressPhoneViaCasl } from "@/lib/sms-opt-out";
+import { nudgeConversations } from "@/lib/realtime/conversations-nudge";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -271,6 +272,11 @@ export async function POST(req: NextRequest) {
     console.error("[webhooks.tt.sms-inbound] interaction insert failed", error);
     return NextResponse.json({ ok: false, error: "persist_failed" }, { status: 500 });
   }
+
+  // Phase 3 spine live-refresh (plan §7): an inbound reply just landed —
+  // nudge any open Conversations tab for this tenant. Best-effort/
+  // fail-silent, never blocks the webhook's 200 back to TT.
+  await nudgeConversations(tenantId);
 
   return NextResponse.json({ ok: true, lead_id: leadId, tenant_id: tenantId });
 }
