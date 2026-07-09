@@ -12,17 +12,14 @@
  * since a from-scratch signature isn't always practical on a desktop
  * trackpad.
  *
- * The source PDF is rendered via a Blob URL (built client-side from the
- * base64 the server sent) rather than a raw `data:application/pdf;base64,…`
- * iframe src — Chrome/Firefox/Edge inline both fine, but a multi-MB data:
- * URI can hit URL-length ceilings in some WebViews and Safari is flaky
- * rendering data: PDFs inline; a Blob URL is the more reliable cross-
- * browser primitive for the same "iframe a PDF" idea the spec called for.
- * A "Open in new tab" fallback link covers any browser that still won't
- * render it inline (e.g. some in-app browsers / older mobile Safari).
+ * The source PDF is iframed from the token-gated /api/sign/[token]/pdf
+ * endpoint (a real URL with Content-Type: application/pdf) so the browser's
+ * native PDF viewer loads it directly. A client-built blob:/data: URL was
+ * unreliable (blank iframe in some browsers). An "Open in new tab" fallback
+ * link points at the same URL.
  */
 
-import { useMemo, useState } from "react";
+import { useState } from "react";
 import { CheckCircle2, AlertCircle, Loader2, PenLine, Type as TypeIcon } from "lucide-react";
 import { SignatureField } from "@/components/forms/SignaturePad";
 
@@ -38,14 +35,9 @@ type Props = {
 type Mode = "draw" | "type";
 type ViewState = "signing" | "submitting" | "signed" | "declined" | "error";
 
-function base64ToBlobUrl(base64: string): string {
-  const byteChars = atob(base64);
-  const byteNumbers = new Array(byteChars.length);
-  for (let i = 0; i < byteChars.length; i++) byteNumbers[i] = byteChars.charCodeAt(i);
-  const bytes = new Uint8Array(byteNumbers);
-  const blob = new Blob([bytes], { type: "application/pdf" });
-  return URL.createObjectURL(blob);
-}
+// The source PDF is served from the token-gated /api/sign/[token]/pdf endpoint
+// and iframed directly (a client-built blob:/data: URL rendered blank in some
+// browsers).
 
 const DISCLOSURE_TEXT =
   "By checking this box and clicking Sign, you agree to use an electronic signature and electronic records for this document, in place of a handwritten signature and paper records. You confirm you can access and view this document, and you consent to conduct this transaction electronically, consistent with the U.S. ESIGN Act and UETA. You may withdraw consent at any time before signing by closing this page.";
@@ -56,15 +48,8 @@ export function SignClient({
   message,
   signerName,
   consentDisclosureVersion,
-  sourcePdfBase64,
 }: Props) {
-  const pdfUrl = useMemo(() => {
-    try {
-      return base64ToBlobUrl(sourcePdfBase64);
-    } catch {
-      return null;
-    }
-  }, [sourcePdfBase64]);
+  const pdfUrl = `/api/sign/${encodeURIComponent(token)}/pdf`;
 
   const [mode, setMode] = useState<Mode>("draw");
   const [drawnSignature, setDrawnSignature] = useState("");
