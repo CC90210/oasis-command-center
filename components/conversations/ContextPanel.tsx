@@ -23,6 +23,7 @@ import { KeyPointsAccordion } from "./KeyPointsAccordion";
 import { AISuggestionRail, deriveSuggestionChips } from "./AISuggestionRail";
 import { DealDetailsAccordion, computeMissingStips } from "./DealDetailsAccordion";
 import { scrollToMessage, type MessageRegistry } from "./MessageList";
+import { CallSchedulerModal } from "./CallSchedulerModal";
 
 const ACCORDION_STORAGE_KEY = "oasis:conversations:contextPanelAccordions";
 
@@ -58,6 +59,7 @@ export function ContextPanel({
 
   const summaryCacheRef = useRef<Map<string, SummaryState>>(new Map());
   const [summaryState, setSummaryState] = useState<SummaryState>(SUMMARY_IDLE);
+  const [schedulerOpen, setSchedulerOpen] = useState(false);
 
   // Read persisted accordion state once on mount (client-only — avoids the
   // SSR/hydration mismatch a synchronous localStorage read during render
@@ -242,7 +244,11 @@ export function ContextPanel({
               open={accordions.dealDetails}
               onToggle={() => setAccordions((a) => ({ ...a, dealDetails: !a.dealDetails }))}
             />
-            <AISuggestionRail chips={suggestionChips} onAction={(text) => onComposerAction?.(text)} />
+            <AISuggestionRail
+              chips={suggestionChips}
+              onAction={(text) => onComposerAction?.(text)}
+              onRequestCall={() => setSchedulerOpen(true)}
+            />
             <div className="rounded-lg border border-bg-border bg-bg-elev/20">
               <LeadFileBody
                 tenantSlug={tenantSlug}
@@ -257,6 +263,17 @@ export function ContextPanel({
           </>
         )}
       </div>
+
+      {schedulerOpen ? (
+        <CallSchedulerModal
+          leadId={thread.lead_id}
+          threadKey={thread.key}
+          defaultLabel={thread.contact_label}
+          defaultPhone={thread.contact_phone}
+          company={templateVars?.merchant_company}
+          onClose={() => setSchedulerOpen(false)}
+        />
+      ) : null}
     </div>
   );
 }

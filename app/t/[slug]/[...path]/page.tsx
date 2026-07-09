@@ -16,6 +16,7 @@ import { LendersDirectoryClient } from "@/components/lenders/LendersDirectoryCli
 import { RenewalsV2 } from "@/components/renewals/RenewalsV2";
 import { InboxShell } from "@/components/conversations/InboxShell";
 import { ConversationsLiveRefresh } from "@/components/conversations/ConversationsLiveRefresh";
+import { CallsBoard } from "@/components/conversations/CallsBoard";
 import { CampaignsShell } from "@/components/campaigns/CampaignsShell";
 import { EsignConsole } from "@/components/esign/EsignConsole";
 import {
@@ -538,6 +539,7 @@ function renderSubtitle(brand: string, page: ManifestPageDef): string {
     case "settings": return "Tenant-scoped — owner sees full settings, preview shows scaffold only.";
     case "automations": return "Tenant-scoped automations — cron jobs, bridge status, AI-described drafts.";
     case "conversations": return "Unified inbox — SMS, calls, and email replies threaded by contact.";
+    case "calls": return "Scheduled and past calls — book, cancel, mark done, add to Google Calendar.";
     case "campaigns": return "Multi-channel outreach — Text Torrent, Twilio, Gmail.";
     case "esign": return "Send a contract for signature, or sign an existing document.";
     default: return brand;
@@ -675,6 +677,12 @@ async function PageBody({
         />
       );
     }
+    case "calls":
+      // Calls board (2026-07-08). Upcoming + past calls from scheduled_calls
+      // (database/115). Client-side fetch of /api/conversations/scheduled-calls
+      // (tenant-scoped server-side); book/cancel/mark-done in-house + Google
+      // Calendar deep-link. Normal page chrome (not full-bleed like the inbox).
+      return <CallsBoard />;
     case "campaigns":
       // Multi-channel campaigns command center: Text Torrent / Twilio / Gmail
       // sub-tabs. Each surface does its own client-side fetches (per-list count

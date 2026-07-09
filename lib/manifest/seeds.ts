@@ -353,6 +353,7 @@ export const SUN_SEED: TenantManifest = {
     { href: "/t/sun/applications", label: "Applications", icon: "FileText", group: "Pipeline" },
     // Phase 3b/3c (2026-06-02). Unified inbox + bulk-campaign analytics.
     { href: "/t/sun/conversations", label: "Conversations", icon: "MessageSquare", group: "Pipeline" },
+    { href: "/t/sun/calls", label: "Calls", icon: "PhoneCall", group: "Pipeline" },
     { href: "/t/sun/campaigns", label: "Campaigns", icon: "Megaphone", group: "Pipeline" },
     // Deals — post-shop lifecycle: offers in, renewals tracked, commissions
     // booked, lenders managed. Lenders moved here from the (now-deleted)
@@ -681,6 +682,7 @@ export const SUN_SEED: TenantManifest = {
     { path: "import", label: "Import leads", kind: "import" },
     // Phase 3b/3c (2026-06-02). Rendered by the catch-all dispatcher.
     { path: "conversations", label: "Conversations", kind: "conversations" },
+    { path: "calls", label: "Calls", kind: "calls" },
     { path: "campaigns", label: "Campaigns", kind: "campaigns" },
     // Settings — tenant-scoped, routed via the catch-all so
     // resolveDataTenant() can gate previewMode for non-owners. See
