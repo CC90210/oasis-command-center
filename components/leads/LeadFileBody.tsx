@@ -25,6 +25,7 @@ import { CollaboratorsControl } from "./CollaboratorsControl";
 import { StagePicker } from "./StagePicker";
 import { AutofillDropzone } from "./AutofillDropzone";
 import { SignApplicationControl } from "./SignApplicationControl";
+import { ScheduleCallControl } from "./ScheduleCallControl";
 import { humanLeadDocSize, leadDocTypeLabel, LEAD_DOC_TYPES } from "@/lib/lead-doc-display";
 import { SalesMetricCard } from "@/components/underwriting/SalesMetricCard";
 import { formatMoney, relTime } from "@/lib/format-helpers";
@@ -2146,6 +2147,15 @@ function DrawerFooter({
         >
           Text Torrent
         </button>
+        {/* Schedule call (Calls tab, 2026-07-09) — books a call_appointments
+            row against this lead; shows up on the Calls tab's call sheet
+            with this lead's notes + MCA summary ready for the rep. Distinct
+            from the Call button above (which dials right now). */}
+        <ScheduleCallControl
+          leadId={recordId}
+          entity={entity}
+          label={str(recordData.business_name) || str(recordData.contact_name) || str(recordData.name)}
+        />
         {/* Twilio per-lead SMS — gated by lib/leads/channel-registry (enabled:false).
             Flipping that flag surfaces this button; no drawer change needed. */}
         {isLeadChannelEnabled("twilio") && str(recordData.phone) && (
