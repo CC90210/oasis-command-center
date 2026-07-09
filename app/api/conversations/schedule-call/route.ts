@@ -14,7 +14,6 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { resolveSessionContext } from "@/lib/api-auth";
-import { getSessionContext } from "@/lib/team";
 import { isReadOnlyRole } from "@/lib/role-gates";
 import { normalizePhoneE164 } from "@/lib/lead-interactions-queries";
 
@@ -42,8 +41,10 @@ export async function POST(req: NextRequest) {
   const { tenantId, userId } = session;
 
   // Member+ write gate (booking a call is a workflow action, not read-only).
-  const roleCtx = await getSessionContext();
-  if (!roleCtx || isReadOnlyRole(roleCtx.teamRole)) {
+  // Gate on the fail-closed session.teamRole (a null/missing role resolves to
+  // "read_only" in resolveSessionContext) rather than getSessionContext(), whose
+  // null-role default is "member" and would fail OPEN for a partial profile.
+  if (isReadOnlyRole(session.teamRole)) {
     return NextResponse.json(
       { ok: false, error: "forbidden_role", message: "Read-only members can't schedule calls." },
       { status: 403 },
@@ -102,6 +103,12 @@ export async function DELETE(req: NextRequest) {
   const session = await resolveSessionContext();
   if (!session.ok) {
     return NextResponse.json({ ok: false, error: session.reason }, { status: session.reason === "no_session" ? 401 : 400 });
+  }
+  if (isReadOnlyRole(session.teamRole)) {
+    return NextResponse.json(
+      { ok: false, error: "forbidden_role", message: "Read-only members can't cancel calls." },
+      { status: 403 },
+    );
   }
   const id = new URL(req.url).searchParams.get("id") || "";
   if (!UUID_RE.test(id)) {

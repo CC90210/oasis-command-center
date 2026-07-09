@@ -46,6 +46,22 @@ async function handle(req: NextRequest) {
     .lt("scheduled_for", missedCutoff)
     .select("id");
 
+  // Fail LOUD: if either update errored, return 500 so the run is visibly failed
+  // (monitoring/retry) instead of a green ok:true while due calls silently never
+  // advance state. No-silent-failure doctrine.
+  if (due.error || missed.error) {
+    console.error("[dispatch-scheduled-calls] update failed:", due.error?.message || missed.error?.message);
+    return NextResponse.json(
+      {
+        ok: false,
+        error: "dispatch_failed",
+        reminded: due.data?.length ?? 0,
+        missed: missed.data?.length ?? 0,
+      },
+      { status: 500 },
+    );
+  }
+
   return NextResponse.json({
     ok: true,
     reminded: due.data?.length ?? 0,

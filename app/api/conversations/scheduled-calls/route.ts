@@ -9,6 +9,7 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { resolveSessionContext } from "@/lib/api-auth";
+import { isReadOnlyRole } from "@/lib/role-gates";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -37,6 +38,14 @@ export async function POST(req: NextRequest) {
   const session = await resolveSessionContext();
   if (!session.ok) {
     return NextResponse.json({ ok: false, error: session.reason }, { status: session.reason === "no_session" ? 401 : 400 });
+  }
+  // Resolving a call (done|missed) is a write; read-only members can't. Gate on
+  // the fail-closed session.teamRole (null -> "read_only").
+  if (isReadOnlyRole(session.teamRole)) {
+    return NextResponse.json(
+      { ok: false, error: "forbidden_role", message: "Read-only members can't update calls." },
+      { status: 403 },
+    );
   }
   const url = new URL(req.url);
   const id = url.searchParams.get("id") || "";

@@ -14,7 +14,7 @@ export const DEFAULT_SMS_TEMPLATES: SlashTemplate[] = [
   {
     id: "followup",
     label: "Following up",
-    body: "Hi {{first_name}}, just following up — do you have a few minutes to talk today?",
+    body: "Hi {{first_name}}, just following up, do you have a few minutes to talk today?",
   },
   {
     id: "docs",
@@ -24,12 +24,12 @@ export const DEFAULT_SMS_TEMPLATES: SlashTemplate[] = [
   {
     id: "offer_ready",
     label: "Offer ready",
-    body: "Hi {{first_name}}, good news — {{merchant_company}}'s offer is ready. Give me a call when you get a chance.",
+    body: "Hi {{first_name}}, good news, {{merchant_company}}'s offer is ready. Give me a call when you get a chance.",
   },
   {
     id: "missed_call",
     label: "Missed you",
-    body: "Hi {{first_name}}, I tried calling — when's a good time to connect?",
+    body: "Hi {{first_name}}, I tried calling, when's a good time to connect?",
   },
 ];
 

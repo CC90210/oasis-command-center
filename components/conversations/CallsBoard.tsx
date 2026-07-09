@@ -55,6 +55,7 @@ export function CallsBoard() {
   const [state, setState] = useState<ListState>(IDLE);
   const [schedulerOpen, setSchedulerOpen] = useState(false);
   const [busyId, setBusyId] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     setState((s) => ({ ...s, loading: true, error: null }));
@@ -78,13 +79,23 @@ export function CallsBoard() {
   const resolve = useCallback(
     async (id: string, action: "done" | "missed" | "cancel") => {
       setBusyId(id);
+      setActionError(null);
       try {
-        if (action === "cancel") {
-          await fetch(`/api/conversations/schedule-call?id=${id}`, { method: "DELETE", credentials: "include" });
-        } else {
-          await fetch(`/api/conversations/scheduled-calls?id=${id}&status=${action}`, { method: "POST", credentials: "include" });
-        }
+        const r =
+          action === "cancel"
+            ? await fetch(`/api/conversations/schedule-call?id=${id}`, { method: "DELETE", credentials: "include" })
+            : await fetch(`/api/conversations/scheduled-calls?id=${id}&status=${action}`, { method: "POST", credentials: "include" });
+        const j = await r.json().catch(() => null);
         await load();
+        if (!r.ok || !j?.ok) {
+          setActionError(
+            action === "cancel"
+              ? "Couldn't cancel that call. It may already be resolved. The list has been refreshed."
+              : "Couldn't update that call. The list has been refreshed.",
+          );
+        }
+      } catch {
+        setActionError("Network error. Please try again.");
       } finally {
         setBusyId(null);
       }
@@ -117,6 +128,9 @@ export function CallsBoard() {
 
       {state.error ? (
         <div className="rounded-lg border border-red-500/30 bg-red-500/10 px-3.5 py-3 text-[12px] text-red-200">{state.error}</div>
+      ) : null}
+      {actionError ? (
+        <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-3.5 py-3 text-[12px] text-amber-200">{actionError}</div>
       ) : null}
 
       <section className="space-y-2">
