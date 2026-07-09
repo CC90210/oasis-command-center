@@ -202,6 +202,10 @@ export type ManifestPageKind =
                       // by contact. Renders ConversationsClient. SunBiz first.
   | "campaigns"       // Phase 3c. TextTorrent bulk-campaign analytics +
                       // create form. Renders CampaignsClient.
+  | "esign"           // In-house e-signature (DocuSign-lite). Renders
+                      // EsignConsole — send a PDF for signature or sign an
+                      // existing unsigned document; signed PDF = source +
+                      // appended per-signer certificate page.
   | "automations"     // Tenant-scoped Automations (Option A, 2026-05-25).
                       // Same pattern as settings — routes through
                       // /t/<slug>/automations via catch-all so
@@ -522,6 +526,8 @@ const PAGE_KINDS = new Set<ManifestPageKind>([
   // Phase 3b/3c (TT + Kixie embedding, 2026-06-02).
   "conversations",
   "campaigns",
+  // In-house e-signature (2026-07).
+  "esign",
 ]);
 const ENTITY_FIELD_TYPES = new Set(["string", "number", "boolean", "date", "datetime", "enum", "json"]);
 const INTEGRATION_KINDS = new Set<ManifestIntegrationKind>([

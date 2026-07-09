@@ -354,6 +354,9 @@ export const SUN_SEED: TenantManifest = {
     // Phase 3b/3c (2026-06-02). Unified inbox + bulk-campaign analytics.
     { href: "/t/sun/conversations", label: "Conversations", icon: "MessageSquare", group: "Pipeline" },
     { href: "/t/sun/campaigns", label: "Campaigns", icon: "Megaphone", group: "Pipeline" },
+    // In-house e-signature (2026-07) — send a contract for signature, or
+    // sign an existing unsigned application/other PDF.
+    { href: "/t/sun/esign", label: "E-Sign", icon: "ClipboardCheck", group: "Pipeline" },
     // Deals — post-shop lifecycle: offers in, renewals tracked, commissions
     // booked, lenders managed. Lenders moved here from the (now-deleted)
     // Network group — it's a deal-context entity, not a separate domain.
@@ -682,6 +685,7 @@ export const SUN_SEED: TenantManifest = {
     // Phase 3b/3c (2026-06-02). Rendered by the catch-all dispatcher.
     { path: "conversations", label: "Conversations", kind: "conversations" },
     { path: "campaigns", label: "Campaigns", kind: "campaigns" },
+    { path: "esign", label: "E-Sign", kind: "esign" },
     // Settings — tenant-scoped, routed via the catch-all so
     // resolveDataTenant() can gate previewMode for non-owners. See
     // schema.ts ManifestPageKind / TenantSettings for the full rules.

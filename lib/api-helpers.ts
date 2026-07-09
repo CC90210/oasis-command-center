@@ -80,6 +80,13 @@ export function checkBearerSecret(req: NextRequest, envVar: string): boolean {
  * over xff" tweak lands in one place instead of six.
  */
 export function getClientIp(req: NextRequest): string {
+  // Prefer Vercel's platform-set header — a client request cannot forge it,
+  // whereas raw X-Forwarded-For's leftmost entry IS client-suppliable. This
+  // matters beyond rate-limit keys: the e-sign flow burns this value into the
+  // signer's legal Certificate of Completion + audit as non-repudiation
+  // evidence, so trust the verified header first, then fall back off-Vercel.
+  const vercel = (req.headers.get("x-vercel-forwarded-for") || "").split(",")[0]?.trim();
+  if (vercel) return vercel;
   const xff = req.headers.get("x-forwarded-for") || "";
   const first = xff.split(",")[0]?.trim();
   if (first) return first;
