@@ -24,6 +24,7 @@ import { AssignmentControl } from "./AssignmentControl";
 import { CollaboratorsControl } from "./CollaboratorsControl";
 import { StagePicker } from "./StagePicker";
 import { AutofillDropzone } from "./AutofillDropzone";
+import { SignApplicationControl } from "./SignApplicationControl";
 import { humanLeadDocSize, leadDocTypeLabel, LEAD_DOC_TYPES } from "@/lib/lead-doc-display";
 import { SalesMetricCard } from "@/components/underwriting/SalesMetricCard";
 import { formatMoney, relTime } from "@/lib/format-helpers";
@@ -217,6 +218,23 @@ export function LeadFileBody({
         {entity === "lead" && (
           <AutofillDropzone mode="existing" leadId={recordId} onDone={onReload} />
         )}
+
+        {/* Sign application — the logged-in rep's own signature onto THIS
+            deal's application, at the application's existing signature line
+            (replaces the removed standalone E-Sign nav tab, 2026-07-09).
+            Shown on both the lead and the application drawer since either can
+            carry the linked application. */}
+        <SignApplicationControl
+          leadId={recordId}
+          entity={entity}
+          currentlySigned={Boolean(application?.data?.applicant_signature)}
+          signerName={
+            typeof application?.data?.signature_name === "string"
+              ? (application.data.signature_name as string)
+              : null
+          }
+          onSigned={onReload}
+        />
 
         <div className="flex items-center justify-between gap-3">
           {/* Shop Out — Phase 4 entry point (Jordan/Oasis 2026-05-23).
