@@ -16,8 +16,9 @@
  */
 import { wrapUntrusted, INJECTION_GUARD, safeJsonExtract } from "./llm-input-boundary";
 import type { ConversationMessage } from "./conversation-threading";
+import { inferTextWithFallback } from "./bridge-infer";
+import type { BridgeTarget } from "./bridge-proxy";
 
-const ANTHROPIC_VERSION = "2023-06-01";
 const SUMMARIZE_MODEL = "claude-haiku-4-5";
 const MAX_TOKENS = 900;
 const MAX_MESSAGE_CHARS = 2000;
@@ -56,40 +57,25 @@ function buildTranscript(messages: ConversationMessage[]): string {
     .join("\n\n");
 }
 
-export async function summarizeConversation(messages: ConversationMessage[]): Promise<SummarizeResult> {
-  const apiKey = (process.env.BRAVO_ANTHROPIC_API_KEY || process.env.ANTHROPIC_API_KEY || "").trim();
-  if (!apiKey) throw new Error("anthropic_key_missing");
+export async function summarizeConversation(
+  messages: ConversationMessage[],
+  opts?: { bridgeTarget?: BridgeTarget | null },
+): Promise<SummarizeResult> {
   if (messages.length === 0) throw new Error("no_messages");
 
   const transcript = buildTranscript(messages);
   const userPrompt = `Conversation transcript (${messages.length} messages, oldest first):\n\n${transcript}\n\nOutput ONLY the JSON object.`;
 
-  const res = await fetch("https://api.anthropic.com/v1/messages", {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      "x-api-key": apiKey,
-      "anthropic-version": ANTHROPIC_VERSION,
-    },
-    body: JSON.stringify({
-      model: SUMMARIZE_MODEL,
-      max_tokens: MAX_TOKENS,
-      system: SYSTEM_PROMPT,
-      messages: [{ role: "user", content: userPrompt }],
-    }),
+  // Subscription bridge first (free); paid Anthropic API fallback. Throws
+  // anthropic_key_missing only when neither is available (→ deterministic fallback).
+  const text = await inferTextWithFallback({
+    system: SYSTEM_PROMPT,
+    prompt: userPrompt,
+    bridgeTarget: opts?.bridgeTarget ?? null,
+    bridgeModel: "fast",
+    paidModel: SUMMARIZE_MODEL,
+    maxTokens: MAX_TOKENS,
   });
-
-  if (!res.ok) {
-    const detail = await res.text().catch(() => "");
-    throw new Error(`anthropic_${res.status}: ${detail.slice(0, 300)}`);
-  }
-
-  const responseBody = (await res.json()) as { content?: Array<{ type: string; text?: string }> };
-  const text = (responseBody.content || [])
-    .filter((b) => b.type === "text")
-    .map((b) => b.text || "")
-    .join("")
-    .trim();
 
   const parsed = safeJsonExtract(text) as { summary?: unknown; key_points?: unknown } | null;
   if (!parsed) throw new Error(`summarize_parse_failed: ${text.slice(0, 300)}`);
