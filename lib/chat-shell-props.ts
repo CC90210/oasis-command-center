@@ -21,6 +21,7 @@ import "server-only";
 import { safe } from "@/lib/api-helpers";
 import { getTenant, integrationsHealth } from "@/lib/queries";
 import { isOperatorEmail } from "@/lib/operator-credentials";
+import { operatorNameOverride } from "@/lib/operator-name";
 import { resolveAgentKey } from "@/lib/agents";
 import {
   getTenantAwareEnabledAgents,
@@ -103,7 +104,11 @@ export async function resolveChatShellProps(args: {
   );
   const agentKeys = Array.from(new Set([primary, ...enabled])).filter(Boolean);
 
-  const clientName = firstNameOf(profile?.display_name || profile?.full_name);
+  // Hardwired per-account override (lib/operator-name.ts) wins over the
+  // profile name — e.g. the Matt account's greeting reads "Uri".
+  const clientName =
+    operatorNameOverride({ email: profile?.email ?? userEmail }) ||
+    firstNameOf(profile?.display_name || profile?.full_name);
   const formsHealthy =
     primary === "solara" &&
     healthRows.some((row) => row.service === "lead_forms" && row.status === "healthy");
