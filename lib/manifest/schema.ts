@@ -200,10 +200,21 @@ export type ManifestPageKind =
   | "conversations"   // Phase 3b (TT + Kixie embedding, 2026-06-02). Unified
                       // inbox — TT chats + Kixie SMS + email replies threaded
                       // by contact. Renders ConversationsClient. SunBiz first.
-  | "calls"           // Calls board (2026-07-08). Upcoming + past calls from
-                      // scheduled_calls (database/115) + lead_interactions
-                      // phone history. Book/cancel/mark-done in-house; Google
-                      // Calendar deep-link per booking. Renders CallsBoard.
+  | "calls"           // Calls tab. Superseded 2026-07-09: originally rendered
+                      // CallsBoard (a generic, thread-scoped call-reminder
+                      // board over scheduled_calls, database/115 — book/
+                      // cancel/mark-done + Google Calendar deep-link; still
+                      // reachable inline from Conversations' "Request a
+                      // call" but no longer has a nav-level board). Now
+                      // renders CallsClient: a LEAD-centric call-sheet
+                      // workflow over call_appointments (database/117) —
+                      // schedule a call against a specific lead, then the
+                      // call sheet surfaces that lead's notes + MCA/
+                      // underwriting summary for the rep, plus Call now /
+                      // Add note / Log outcome / Reschedule / Cancel. See
+                      // the CallsBoard vs CallsClient note in the PR that
+                      // introduced this — Adon should decide whether to
+                      // retire scheduled_calls or fold its scheduling UX in.
   | "campaigns"       // Phase 3c. TextTorrent bulk-campaign analytics +
                       // create form. Renders CampaignsClient.
   | "esign"           // In-house e-signature (DocuSign-lite). Renders
