@@ -16,25 +16,24 @@
  * 'sending' STALE_SENDING_MINUTES after its scheduled_for is reclaimed back
  * to 'scheduled' at the top of every run, before claiming new work.
  *
- * DRIPS_LIVE — THE master go-live gate (see the plan). With DRIPS_LIVE unset
- * (default), `shouldSend` below is FALSE for every row regardless of
- * isDryRun()'s own state, so neither sendDripSms nor sendDripEmail is ever
- * called — the row is still rendered, guarded, logged (dry_run:true), and
- * advanced to the next step, exactly as if it sent, but zero bytes reach
- * TextTorrent or Gmail. isDryRun(channel) is checked in ADDITION — both must
- * be "live" for a real network call. This double-gate means flipping
- * DRIPS_LIVE=1 in Vercel env WITHOUT ALSO setting the per-channel
- * LIVE_SEND_TEXTTORRENT_FOLLOWUP/LIVE_SEND_EMAIL flags still sends nothing —
- * matching the existing dashboard-wide dry-run-by-default posture
- * (lib/integrations/send-mode.ts) rather than carving the drip engine out of
- * it.
+ * DRIPS_LIVE — THE drip-specific master go-live gate (see dripSendEnabled()).
+ * With DRIPS_LIVE unset (default), `shouldSend` below is FALSE for every row,
+ * so neither sendDripSms nor sendDripEmail is ever called — the row is still
+ * rendered, guarded, logged (dry_run:true), and advanced to the next step,
+ * exactly as if it sent, but zero bytes reach TextTorrent or Gmail. DRIPS_LIVE
+ * is deliberately DECOUPLED from the global LIVE_SEND_TEXTTORRENT /
+ * LIVE_SEND_EMAIL / DASHBOARD_LIVE_SEND flags (mirrors Constant Contact's own
+ * LIVE_SEND_CONSTANT_CONTACT flag) so that turning drips on can't un-gate the
+ * dashboard's other SMS/email paths, and drip email can go live without
+ * un-gating cold outreach. The global hard kill BRAVO_FORCE_DRY_RUN still
+ * clamps everything. WHO enters the funnel is a separate gate — see
+ * enroller.ts DRIPS_ENROLL_STAGES + DRIPS_ENROLL_LIMIT.
  */
 
 import "server-only";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { checkPhoneOptOut, checkEmailSuppressed } from "@/lib/lead-interactions-queries";
 import { sanitizeBlastMessage } from "@/lib/integrations/blast-safety";
-import { isDryRun } from "@/lib/integrations/send-mode";
 import { checkTcpaWindow, nextTcpaWindowStart } from "@/lib/tcpa-window";
 import { renderTemplate } from "@/lib/drips/templates";
 import { parseDripSteps, type DripStep } from "@/lib/drips/types";
@@ -49,6 +48,17 @@ const STALE_SENDING_MINUTES = 15;
 // cleanly. Anything left 'sending' past this point is caught by the
 // stale-reclaim on a later run.
 const SOFT_BUDGET_MS = 50_000;
+
+/**
+ * The drip-specific master send gate. DRIPS_LIVE=1 is the deliberate go-live
+ * act for the drip engine; BRAVO_FORCE_DRY_RUN=1 is the global hard kill that
+ * always wins. Intentionally NOT coupled to the global LIVE_SEND_* /
+ * DASHBOARD_LIVE_SEND flags — see the file header.
+ */
+function dripSendEnabled(): boolean {
+  if ((process.env.BRAVO_FORCE_DRY_RUN || "").trim() === "1") return false;
+  return process.env.DRIPS_LIVE === "1";
+}
 
 type Db = ReturnType<typeof getServiceSupabase>;
 
@@ -261,8 +271,7 @@ async function processSmsStep(
 
   const service = await resolveDripTextTorrentService(row.tenant_id);
   const dripsLive = process.env.DRIPS_LIVE === "1";
-  const dry = isDryRun(service);
-  const shouldSend = dripsLive && !dry;
+  const shouldSend = dripSendEnabled();
 
   let fromIdentity = `dry:${service}`;
   if (shouldSend) {
@@ -320,11 +329,7 @@ async function processEmailStep(
   }
 
   const dripsLive = process.env.DRIPS_LIVE === "1";
-  // "gws"/"email" both resolve to LIVE_SEND_EMAIL in send-mode.ts's
-  // CHANNEL_LIVE_ENV — "gws" matches the credential-store service name
-  // submissions-gmail.ts uses (getTenantIntegrationBundle(tenantId, "gws")).
-  const dry = isDryRun("gws");
-  const shouldSend = dripsLive && !dry;
+  const shouldSend = dripSendEnabled();
 
   let fromIdentity = "dry:submissions@sunbizfunding.com";
   if (shouldSend) {
