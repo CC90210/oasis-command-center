@@ -129,3 +129,77 @@ export async function sendEnvelopeCompletedEmail(input: {
     html,
   });
 }
+
+/**
+ * On full completion, email EVERY signer a confirmation with the fully-signed
+ * PDF ATTACHED. Sends from the configured e-sign sender (ESIGN_FROM_EMAIL +
+ * ESIGN_FROM_APP_PASSWORD — e.g. adonyess@gmail.com) via Gmail SMTP so the PDF
+ * can ride as an attachment; if that sender isn't configured it degrades to
+ * the submissions@ path (HTML notice, NO attachment). Best-effort per
+ * recipient — one failed send never blocks the others. Never throws.
+ */
+export async function sendEnvelopeCompletedWithPdf(input: {
+  tenantId: string;
+  to: string[];
+  envelopeTitle: string;
+  pdfBytes: Buffer;
+}): Promise<{ ok: boolean; sent: number; error?: string }> {
+  const recipients = Array.from(
+    new Set(input.to.map((e) => (e || "").trim().toLowerCase()).filter(Boolean)),
+  );
+  if (recipients.length === 0) return { ok: false, sent: 0, error: "no_recipients" };
+
+  const safeTitle = escapeHtml(input.envelopeTitle);
+  const html = wrapHtml(`
+    <p style="margin:0 0 12px;"><strong>${safeTitle}</strong> has been signed by all parties.</p>
+    <p style="margin:0 0 12px;">The completed, fully-signed PDF is attached to this email for your records. A certificate page for each signer — signature, printed name, date, IP address, and consent — is appended to the document.</p>
+    <p style="margin:0;color:#6b7280;font-size:12px;">Please retain this copy.</p>
+  `);
+  const text = [
+    `${input.envelopeTitle} has been signed by all parties.`,
+    "",
+    "The completed, fully-signed PDF is attached for your records. A certificate page for each signer is appended to the document.",
+  ].join("\n");
+  const safeName = input.envelopeTitle.replace(/[^A-Za-z0-9._ -]/g, "").trim().slice(0, 80) || "document";
+  const filename = `${safeName} - signed.pdf`;
+
+  const user = (process.env.ESIGN_FROM_EMAIL || "").trim();
+  const pass = (process.env.ESIGN_FROM_APP_PASSWORD || "").replace(/\s+/g, "");
+  if (user && pass) {
+    const fromName = (process.env.ESIGN_FROM_NAME || "").trim() || user;
+    const nodemailer = await import("nodemailer");
+    const transport = nodemailer.createTransport({
+      host: "smtp.gmail.com",
+      port: 465,
+      secure: true,
+      auth: { user, pass },
+    });
+    let sent = 0;
+    let lastErr: string | undefined;
+    for (const to of recipients) {
+      try {
+        await transport.sendMail({
+          from: `"${fromName}" <${user}>`,
+          to,
+          subject: `Signed & completed: ${input.envelopeTitle}`,
+          text,
+          html,
+          attachments: [{ filename, content: input.pdfBytes, contentType: "application/pdf" }],
+        });
+        sent++;
+      } catch (e) {
+        lastErr = e instanceof Error ? e.message : "send_failed";
+      }
+    }
+    return { ok: sent > 0, sent, error: lastErr };
+  }
+
+  // Fallback — submissions@ path has no attachment support, so this sends an
+  // HTML notice per signer WITHOUT the PDF. Configure ESIGN_FROM_* to attach.
+  let sent = 0;
+  for (const to of recipients) {
+    const r = await sendGmail({ tenantId: input.tenantId, to, subject: `Completed: ${input.envelopeTitle}`, body: text, html });
+    if (r.ok) sent++;
+  }
+  return { ok: sent > 0, sent };
+}

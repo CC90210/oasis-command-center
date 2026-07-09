@@ -31,8 +31,7 @@ import {
 } from "@/lib/esign/db";
 import { downloadEsignPdf, uploadEsignSignedPdf } from "@/lib/esign/storage";
 import { appendSignaturePages, sha256OfBytes } from "@/lib/esign/pdf";
-import { sendEnvelopeCompletedEmail } from "@/lib/esign/email";
-import { getServiceSupabase } from "@/lib/supabase-server";
+import { sendEnvelopeCompletedWithPdf } from "@/lib/esign/email";
 import { resolveSigningSession } from "@/lib/esign/resolve-signing-session";
 import type { EsignSignerRow, EsignEnvelopeRow } from "@/lib/esign/db";
 
@@ -191,7 +190,6 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ token: str
   const source = await downloadEsignPdf(envelope.source_storage_key);
   if (!source.ok) return genericError();
 
-  const db = getServiceSupabase();
   const fieldsRes = await getSignatureFieldsForEnvelope(envelope.id);
   if (!fieldsRes.ok) return genericError();
   const certInfo = allSignersRes.signers.map((s) => {
@@ -248,16 +246,17 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ token: str
       meta: { signed_pdf_sha256: signedSha256 },
     });
 
-    // Best-effort creator notification — never blocks the signer's success
-    // response; a failed notify email is not a signing failure. created_by
-    // is the operator's auth_user_id (see database/112_esign.sql), so this
-    // resolves straight through Supabase auth admin — no user_profiles hop.
+    // Email EVERY signer a completion confirmation with the fully-signed PDF
+    // ATTACHED (from the configured e-sign sender, e.g. adonyess@gmail.com).
+    // Best-effort — never blocks the signer's success response; a failed
+    // notification is not a signing failure.
     try {
-      const { data: authUser } = await db.auth.admin.getUserById(envelope.created_by);
-      const creatorEmail = authUser?.user?.email;
-      if (creatorEmail) {
-        await sendEnvelopeCompletedEmail({ tenantId: envelope.tenant_id, to: creatorEmail, envelopeTitle: envelope.title });
-      }
+      await sendEnvelopeCompletedWithPdf({
+        tenantId: envelope.tenant_id,
+        to: allSignersRes.signers.map((s) => s.email),
+        envelopeTitle: envelope.title,
+        pdfBytes: Buffer.from(appended.bytes),
+      });
     } catch {
       /* best-effort */
     }
