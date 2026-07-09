@@ -233,15 +233,22 @@ export async function updateEnvelopeStatus(
   envelopeId: string,
   status: EnvelopeStatus,
   extra?: Record<string, unknown>,
-): Promise<{ ok: true } | { ok: false; error: string }> {
+): Promise<{ ok: true; changed: boolean } | { ok: false; error: string }> {
   const db = getServiceSupabase();
-  const upd = await db
+  let q = db
     .from("esign_envelopes")
     .update({ status, updated_at: new Date().toISOString(), ...(extra || {}) })
     .eq("tenant_id", tenantId)
     .eq("id", envelopeId);
+  // Idempotent completion: only the FIRST write that flips the envelope to
+  // 'completed' returns a row — a concurrent/duplicate completion (e.g. the
+  // last two signers racing) finds status already 'completed' → 0 rows, so
+  // the caller can guard the one-time side effects (signed-PDF assembly,
+  // creator notification) on `changed`.
+  if (status === "completed") q = q.not("status", "eq", "completed");
+  const upd = await q.select("id");
   if (upd.error) return { ok: false, error: upd.error.message };
-  return { ok: true };
+  return { ok: true, changed: (upd.data?.length ?? 0) > 0 };
 }
 
 export async function getEnvelopeById(
@@ -327,8 +334,12 @@ export async function markSignerViewed(signerId: string): Promise<{ ok: true } |
 export async function markSignerSigned(
   signerId: string,
   input: { ip: string; userAgent: string; consented: boolean },
-): Promise<{ ok: true } | { ok: false; error: string }> {
+): Promise<{ ok: true; changed: boolean } | { ok: false; error: string }> {
   const db = getServiceSupabase();
+  // CAS: only transition to 'signed' from a still-signable state. A second
+  // concurrent/replayed POST for the same token finds status already 'signed'
+  // (or 'declined') → 0 rows → `changed:false`, so the route short-circuits
+  // before duplicating the signature field, PDF assembly, or completion email.
   const upd = await db
     .from("esign_signers")
     .update({
@@ -338,9 +349,11 @@ export async function markSignerSigned(
       signed_user_agent: input.userAgent,
       consented: input.consented,
     })
-    .eq("id", signerId);
+    .eq("id", signerId)
+    .in("status", ["sent", "viewed", "pending"])
+    .select("id");
   if (upd.error) return { ok: false, error: upd.error.message };
-  return { ok: true };
+  return { ok: true, changed: (upd.data?.length ?? 0) > 0 };
 }
 
 /**

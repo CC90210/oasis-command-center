@@ -54,6 +54,24 @@ function isUsable(signer: EsignSignerRow, envelope: EsignEnvelopeRow): boolean {
   return true;
 }
 
+/** A drawn signature must decode to a REAL PNG (magic bytes), not just carry a
+ *  "data:image" prefix — otherwise a garbage payload like "data:image,x" would
+ *  mark the signer signed+consented while the certificate renders a blank
+ *  signature box, gutting the record's evidentiary value. */
+function isValidPngDataUri(uri: string): boolean {
+  if (!uri.startsWith("data:image")) return false;
+  const b64 = uri.split(",")[1] || "";
+  if (!b64) return false;
+  let buf: Buffer;
+  try {
+    buf = Buffer.from(b64, "base64");
+  } catch {
+    return false;
+  }
+  // PNG signature: 89 50 4E 47 0D 0A 1A 0A
+  return buf.length > 8 && buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47;
+}
+
 export async function GET(req: NextRequest, ctx: { params: Promise<{ token: string }> }) {
   const { token } = await ctx.params;
   const ip = getClientIp(req);
@@ -120,13 +138,18 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ token: str
   }
   const signatureDataUri = typeof body.signatureDataUri === "string" ? body.signatureDataUri : "";
   const typedName = typeof body.typedName === "string" ? body.typedName.trim().slice(0, 200) : "";
-  const hasSignatureImage = signatureDataUri.startsWith("data:image");
+  const hasSignatureImage = isValidPngDataUri(signatureDataUri);
   if (!hasSignatureImage && !typedName) {
     return genericError();
   }
 
   const signResult = await markSignerSigned(signer.id, { ip, userAgent, consented: true });
   if (!signResult.ok) return genericError();
+  if (!signResult.changed) {
+    // A concurrent/replayed POST already flipped this signer to 'signed' — the
+    // CAS returned 0 rows. Benign success, no duplicated side effects.
+    return NextResponse.json({ ok: true, status: "signed", envelope_complete: envelope.status === "completed" });
+  }
   // Persist THIS signer's captured signature (esign_fields — see
   // saveSignatureField's doc comment) so a later signer's completion can
   // build every signer's certificate page, not just their own.
@@ -213,26 +236,31 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ token: str
   });
   if (!completed.ok) return genericError();
 
-  await logEvent({
-    envelopeId: envelope.id,
-    tenantId: envelope.tenant_id,
-    event: "completed",
-    actor: "system",
-    meta: { signed_pdf_sha256: signedSha256 },
-  });
+  // Only the write that actually flipped the envelope to 'completed' fires the
+  // one-time side effects — a racing second completion (changed:false) skips
+  // the audit row + creator email so neither is duplicated.
+  if (completed.changed) {
+    await logEvent({
+      envelopeId: envelope.id,
+      tenantId: envelope.tenant_id,
+      event: "completed",
+      actor: "system",
+      meta: { signed_pdf_sha256: signedSha256 },
+    });
 
-  // Best-effort creator notification — never blocks the signer's success
-  // response; a failed notify email is not a signing failure. created_by
-  // is the operator's auth_user_id (see database/112_esign.sql), so this
-  // resolves straight through Supabase auth admin — no user_profiles hop.
-  try {
-    const { data: authUser } = await db.auth.admin.getUserById(envelope.created_by);
-    const creatorEmail = authUser?.user?.email;
-    if (creatorEmail) {
-      await sendEnvelopeCompletedEmail({ tenantId: envelope.tenant_id, to: creatorEmail, envelopeTitle: envelope.title });
+    // Best-effort creator notification — never blocks the signer's success
+    // response; a failed notify email is not a signing failure. created_by
+    // is the operator's auth_user_id (see database/112_esign.sql), so this
+    // resolves straight through Supabase auth admin — no user_profiles hop.
+    try {
+      const { data: authUser } = await db.auth.admin.getUserById(envelope.created_by);
+      const creatorEmail = authUser?.user?.email;
+      if (creatorEmail) {
+        await sendEnvelopeCompletedEmail({ tenantId: envelope.tenant_id, to: creatorEmail, envelopeTitle: envelope.title });
+      }
+    } catch {
+      /* best-effort */
     }
-  } catch {
-    /* best-effort */
   }
 
   return NextResponse.json({ ok: true, status: "signed", envelope_complete: true });
