@@ -22,12 +22,15 @@
  *
  * DRY-RUN BY DEFAULT: this function reports counts (candidates, guardrail
  * skips, would-enroll) on every call, but only WRITES anything — including
- * the timezone/rep_name backfill on the lead row — when
- * process.env.DRIPS_LIVE === '1'. With DRIPS_LIVE unset, this cron is a
- * pure read + report; it can run on a schedule indefinitely without ever
- * touching a lead or creating a drip_runs row. That's deliberate: nothing
- * downstream (dispatch-drips) can send to a merchant if enroll-drips never
- * created the row that would let it.
+ * the timezone/rep_name backfill on the lead row — when BOTH: (1)
+ * process.env.DRIPS_LIVE === '1', AND (2) the lead's stage is on the
+ * DRIPS_ENROLL_STAGES allowlist (see the staging controls below). With either
+ * unset, this cron is a pure read + report; it can run on a schedule
+ * indefinitely without ever touching a lead or creating a drip_runs row.
+ * That's deliberate: nothing downstream (dispatch-drips) can send to a
+ * merchant if enroll-drips never created the row that would let it — and the
+ * allowlist is what makes go-live STAGED (one stage at a time) instead of a
+ * whole-backlog blast the instant DRIPS_LIVE flips on.
  */
 
 import "server-only";
@@ -47,6 +50,33 @@ type Db = ReturnType<typeof getServiceSupabase>;
 const DEAD_STAGES = new Set(["dead_file"]);
 
 const SHOPPED_LOOKBACK_DAYS = 7;
+
+/**
+ * Staged go-live controls, read fresh at every enroll run:
+ *  - DRIPS_ENROLL_STAGES: comma-list of stage keys allowed to ENTER the funnel,
+ *    or "*" for all. UNSET/empty => enroll NOTHING (fail-closed). DRIPS_LIVE=1
+ *    lets already-scheduled drips SEND (executor.ts), but no NEW lead is
+ *    enrolled until its stage is explicitly listed here — so go-live is done
+ *    one stage at a time, not as a whole-backlog blast.
+ *  - DRIPS_ENROLL_LIMIT: max NEW enrollments per sequence per run (default 25;
+ *    0 = unlimited). Caps each run's blast radius while ramping.
+ */
+function parseEnrollStages(raw: string | undefined): "ALL" | Set<string> {
+  const s = (raw || "").trim();
+  if (!s) return new Set(); // fail-closed: no stage enrolls
+  if (s === "*") return "ALL";
+  return new Set(
+    s
+      .split(",")
+      .map((x) => x.trim())
+      .filter(Boolean),
+  );
+}
+function parseEnrollLimit(raw: string | undefined): number {
+  const n = parseInt((raw || "").trim(), 10);
+  if (!Number.isFinite(n) || n < 0) return 25; // default per-sequence cap
+  return n; // 0 = unlimited
+}
 
 export type SkipReason =
   | "already_enrolled"
@@ -240,6 +270,8 @@ function parseStepsSafe(steps: unknown): DripStep[] | null {
  */
 export async function runEnrollDrips(): Promise<EnrollDripsResult> {
   const live = process.env.DRIPS_LIVE === "1";
+  const enrollStages = parseEnrollStages(process.env.DRIPS_ENROLL_STAGES);
+  const enrollLimit = parseEnrollLimit(process.env.DRIPS_ENROLL_LIMIT);
   const db = getServiceSupabase();
 
   const seqRes = await db
@@ -264,6 +296,7 @@ export async function runEnrollDrips(): Promise<EnrollDripsResult> {
 
   for (const seq of sequences) {
     const stage = (seq.trigger_filter as { to: string }).to;
+    const stageAllowed = enrollStages === "ALL" || enrollStages.has(stage);
     const skipped = emptySkipCounts();
     let candidates = 0;
     let enrolled = 0;
@@ -366,7 +399,12 @@ export async function runEnrollDrips(): Promise<EnrollDripsResult> {
         continue;
       }
 
-      if (!live) continue; // report-only pass — count as a would-enroll candidate, write nothing
+      // Enrollment writes only when BOTH the global DRIPS_LIVE act holds AND
+      // this stage is on the DRIPS_ENROLL_STAGES allowlist; otherwise this is a
+      // report-only pass (candidate counted, nothing written). The per-sequence
+      // DRIPS_ENROLL_LIMIT caps how many NEW rows this run creates.
+      if (!live || !stageAllowed) continue;
+      if (enrollLimit !== 0 && enrolled >= enrollLimit) break;
 
       const scheduledFor = new Date(Date.now() + Math.max(0, firstStep[0].delay_minutes) * 60_000).toISOString();
       const ins = await db.from("drip_runs").insert({
