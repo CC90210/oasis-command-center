@@ -31,6 +31,7 @@ import {
   type Provider,
 } from "@/lib/providers";
 import { getPersona, applyAgentManifestOverlay } from "@/lib/agent-personas";
+import { operatorNameOverride } from "@/lib/operator-name";
 import { isTenantChatAgent } from "@/lib/manifest/tenant-scope";
 import { composeDashboardContextV2 } from "@/lib/agent-context";
 import { markReadDb } from "@/lib/agent-inbox-db";
@@ -414,7 +415,14 @@ export async function POST(req: NextRequest) {
         }
       | null;
     if (op) {
-      const name = op.display_name || op.full_name || op.email || "Operator";
+      // Hardwired per-account override (lib/operator-name.ts) wins over the
+      // profile row — e.g. the Matt account is addressed only as "Uri".
+      const name =
+        operatorNameOverride({ authUserId: user.id, email: op.email }) ||
+        op.display_name ||
+        op.full_name ||
+        op.email ||
+        "Operator";
       // Trust the DB row's team_role — if the column is null on a
       // valid profile, that operator was never assigned a role, so
       // read_only is the right default for them too.
