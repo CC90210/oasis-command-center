@@ -9,6 +9,12 @@
  * See that file's header for the claim/retry/quiet-hours/DRIPS_LIVE
  * contract — this route never branches on any of it, it just reports
  * whatever the executor returns.
+ *
+ * TRIGGER: Vercel Cron (vercel.json crons) is the primary driver. The Vercel
+ * scheduler only attaches to a genuine Git-integration production deployment,
+ * so this route must reach prod via a Git push/merge, not an API-only
+ * redeploy. The handler is idempotent (CAS row-claim) so an additional
+ * external pinger of this endpoint is safe as a belt-and-suspenders backup.
  */
 
 import { NextResponse, type NextRequest } from "next/server";
