@@ -35,6 +35,7 @@ import { getServiceSupabase } from "@/lib/supabase-server";
 import { resolveSessionContext } from "@/lib/api-auth";
 import { canViewLead, leadScopingEnabled } from "@/lib/lead-scope";
 import { loadThreadForAi } from "@/lib/lead-interactions-queries";
+import { resolveBridgeForTenant } from "@/lib/bridge-for-tenant";
 import {
   generateVoiceSuggestion,
   fallbackVoiceDraft,
@@ -139,17 +140,22 @@ export async function POST(req: NextRequest) {
   const emailProfile = toVoiceProfile(rows.find((r) => r.channel === "email"));
 
   try {
-    const result = await generateVoiceSuggestion({
-      mode,
-      smsProfile,
-      emailProfile,
-      messages: thread?.messages ?? [],
-      leadFacts,
-      contactLabel,
-      draft,
-      channel,
-      instruction,
-    });
+    // Subscription bridge (free) for eligible tenants; null → paid-API fallback.
+    const bridgeTarget = await resolveBridgeForTenant(sess.tenantId);
+    const result = await generateVoiceSuggestion(
+      {
+        mode,
+        smsProfile,
+        emailProfile,
+        messages: thread?.messages ?? [],
+        leadFacts,
+        contactLabel,
+        draft,
+        channel,
+        instruction,
+      },
+      { bridgeTarget },
+    );
 
     const smsSanitize = result.sms ? await sanitizeBlastMessage(sess.tenantId, result.sms) : { ok: true as const, cleaned: "" };
     const emailSanitize = result.email.body

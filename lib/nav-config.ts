@@ -34,6 +34,7 @@ export type NavIconKey =
   | "RefreshCcw"
   | "DollarSign"
   | "MessageSquare"
+  | "PhoneCall"
   | "Mail"
   | "Landmark"
   | "FileCode2"

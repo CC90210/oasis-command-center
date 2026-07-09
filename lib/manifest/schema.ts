@@ -200,6 +200,10 @@ export type ManifestPageKind =
   | "conversations"   // Phase 3b (TT + Kixie embedding, 2026-06-02). Unified
                       // inbox — TT chats + Kixie SMS + email replies threaded
                       // by contact. Renders ConversationsClient. SunBiz first.
+  | "calls"           // Calls board (2026-07-08). Upcoming + past calls from
+                      // scheduled_calls (database/115) + lead_interactions
+                      // phone history. Book/cancel/mark-done in-house; Google
+                      // Calendar deep-link per booking. Renders CallsBoard.
   | "campaigns"       // Phase 3c. TextTorrent bulk-campaign analytics +
                       // create form. Renders CampaignsClient.
   | "esign"           // In-house e-signature (DocuSign-lite). Renders
@@ -501,7 +505,7 @@ const NAV_ICON_KEYS = new Set<ManifestNavIconKey>([
   "Plug", "Settings", "Activity", "Inbox", "History", "ShieldCheck",
   "ShieldAlert", "Radio", "Users", "BookUser", "FileText", "Upload",
   "HandCoins", "BadgeDollarSign", "RefreshCcw", "DollarSign", "MessageSquare",
-  "Mail", "Landmark", "FileCode2", "UsersRound", "Code2", "Megaphone",
+  "PhoneCall", "Mail", "Landmark", "FileCode2", "UsersRound", "Code2", "Megaphone",
   "ShoppingBag", "Heart", "Sparkles", "FileSearch", "ClipboardCheck",
 ]);
 
@@ -525,6 +529,7 @@ const PAGE_KINDS = new Set<ManifestPageKind>([
   "automations",
   // Phase 3b/3c (TT + Kixie embedding, 2026-06-02).
   "conversations",
+  "calls",
   "campaigns",
   // In-house e-signature (2026-07).
   "esign",

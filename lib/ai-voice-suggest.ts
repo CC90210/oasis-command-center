@@ -16,8 +16,9 @@
  */
 import { wrapUntrusted, INJECTION_GUARD, safeJsonExtract } from "./llm-input-boundary";
 import type { ConversationMessage } from "./conversation-threading";
+import { inferTextWithFallback } from "./bridge-infer";
+import type { BridgeTarget } from "./bridge-proxy";
 
-const ANTHROPIC_VERSION = "2023-06-01";
 const SUGGEST_MODEL = "claude-haiku-4-5";
 const MAX_TOKENS = 700;
 const MAX_MESSAGE_CHARS = 1500;
@@ -125,10 +126,10 @@ ${COMMON_RULES}`;
 ${COMMON_RULES}`;
 }
 
-export async function generateVoiceSuggestion(input: VoiceSuggestInput): Promise<VoiceSuggestResult> {
-  const apiKey = (process.env.BRAVO_ANTHROPIC_API_KEY || process.env.ANTHROPIC_API_KEY || "").trim();
-  if (!apiKey) throw new Error("anthropic_key_missing");
-
+export async function generateVoiceSuggestion(
+  input: VoiceSuggestInput,
+  opts?: { bridgeTarget?: BridgeTarget | null },
+): Promise<VoiceSuggestResult> {
   const channel: ComposerChannel = input.channel === "email" ? "email" : "sms";
   const system = [
     pickVoiceSystemBlock(input.smsProfile, "sms"),
@@ -150,32 +151,16 @@ export async function generateVoiceSuggestion(input: VoiceSuggestInput): Promise
   }
   userParts.push("Output ONLY the JSON object.");
 
-  const res = await fetch("https://api.anthropic.com/v1/messages", {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      "x-api-key": apiKey,
-      "anthropic-version": ANTHROPIC_VERSION,
-    },
-    body: JSON.stringify({
-      model: SUGGEST_MODEL,
-      max_tokens: MAX_TOKENS,
-      system,
-      messages: [{ role: "user", content: userParts.join("\n\n") }],
-    }),
+  // Subscription bridge first (free); paid Anthropic API fallback. Throws
+  // anthropic_key_missing only when neither is available (→ deterministic fallback).
+  const text = await inferTextWithFallback({
+    system,
+    prompt: userParts.join("\n\n"),
+    bridgeTarget: opts?.bridgeTarget ?? null,
+    bridgeModel: "fast",
+    paidModel: SUGGEST_MODEL,
+    maxTokens: MAX_TOKENS,
   });
-
-  if (!res.ok) {
-    const detail = await res.text().catch(() => "");
-    throw new Error(`anthropic_${res.status}: ${detail.slice(0, 300)}`);
-  }
-
-  const responseBody = (await res.json()) as { content?: Array<{ type: string; text?: string }> };
-  const text = (responseBody.content || [])
-    .filter((b) => b.type === "text")
-    .map((b) => b.text || "")
-    .join("")
-    .trim();
 
   const parsed = safeJsonExtract(text) as { sms?: unknown; email?: unknown } | null;
   if (!parsed) throw new Error(`voice_suggest_parse_failed: ${text.slice(0, 300)}`);

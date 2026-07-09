@@ -23,6 +23,7 @@ import { NextResponse, type NextRequest } from "next/server";
 import { resolveSessionContext } from "@/lib/api-auth";
 import { loadThreadForAi } from "@/lib/lead-interactions-queries";
 import { summarizeConversation } from "@/lib/ai-conversation-summarize";
+import { resolveBridgeForTenant } from "@/lib/bridge-for-tenant";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -61,7 +62,9 @@ export async function POST(req: NextRequest) {
   }
 
   try {
-    const result = await summarizeConversation(thread.messages);
+    // Subscription bridge (free) for eligible tenants; null → paid-API fallback.
+    const bridgeTarget = await resolveBridgeForTenant(sess.tenantId);
+    const result = await summarizeConversation(thread.messages, { bridgeTarget });
     return NextResponse.json({
       ok: true,
       summary: result.summary,
