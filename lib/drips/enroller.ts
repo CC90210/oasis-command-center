@@ -394,17 +394,22 @@ export async function runEnrollDrips(): Promise<EnrollDripsResult> {
         skipped.no_contact_method++;
         continue;
       }
+      // Enrollment writes only when BOTH the global DRIPS_LIVE act holds AND
+      // this stage is on the DRIPS_ENROLL_STAGES allowlist; otherwise this is a
+      // report-only pass (candidate counted, nothing written). The per-sequence
+      // DRIPS_ENROLL_LIMIT caps how many NEW rows this run creates. These gates
+      // come BEFORE the wasShoppedRecently() DB call below so a report-only /
+      // non-allowlisted run never fires a per-lead query across the whole
+      // backlog (that made the endpoint exceed maxDuration on a full scan).
+      if (!live || !stageAllowed) continue;
+      if (enrollLimit !== 0 && enrolled >= enrollLimit) break;
+
+      // Expensive per-lead guard — only reached for leads we're about to
+      // actually enroll (bounded by DRIPS_ENROLL_LIMIT).
       if (await wasShoppedRecently(db, seq.tenant_id, lead.id, data)) {
         skipped.shopped_recently++;
         continue;
       }
-
-      // Enrollment writes only when BOTH the global DRIPS_LIVE act holds AND
-      // this stage is on the DRIPS_ENROLL_STAGES allowlist; otherwise this is a
-      // report-only pass (candidate counted, nothing written). The per-sequence
-      // DRIPS_ENROLL_LIMIT caps how many NEW rows this run creates.
-      if (!live || !stageAllowed) continue;
-      if (enrollLimit !== 0 && enrolled >= enrollLimit) break;
 
       const scheduledFor = new Date(Date.now() + Math.max(0, firstStep[0].delay_minutes) * 60_000).toISOString();
       const ins = await db.from("drip_runs").insert({
