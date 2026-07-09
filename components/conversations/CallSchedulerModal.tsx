@@ -9,9 +9,10 @@
  *
  * The time picker is a custom slot column (no native datetime-local): quick
  * presets on the fast path, then a 14-day pill rail + a scrolling column of
- * 30-min business-hours slots where the selected slot expands and reveals an
- * inline Confirm. A smart default (next open business-hours slot) is
- * pre-selected so a callback is one tap. When the merchant's timezone (derived
+ * 30-min slots across the full 24h day (calls can be booked at any time) where
+ * the selected slot expands and reveals an inline Confirm. A smart default (the
+ * next half-hour) is pre-selected so a callback is one tap. When the merchant's
+ * timezone (derived
  * from their phone area code) differs from the operator's, every slot shows the
  * merchant's local time too, tinted amber outside 8am-8pm.
  *
@@ -24,8 +25,6 @@ import { tzFromPhone } from "@/lib/phone-timezone";
 
 const OP_TZ =
   typeof Intl !== "undefined" ? Intl.DateTimeFormat().resolvedOptions().timeZone : "America/New_York";
-const BH_START = 9;
-const BH_END = 18;
 const MIN = 60_000;
 const DAY_MS = 86_400_000;
 
@@ -46,10 +45,6 @@ function merchantHour(d: Date, tz: string): number {
 function sameDay(a: Date, b: Date): boolean {
   return a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
 }
-function isWeekend(d: Date): boolean {
-  const g = d.getDay();
-  return g === 0 || g === 6;
-}
 function dayLabelShort(d: Date): string {
   const now = new Date();
   if (sameDay(d, now)) return "Today";
@@ -63,22 +58,20 @@ function dayFull(d: Date): string {
   return new Intl.DateTimeFormat("en-US", { weekday: "long", month: "short", day: "numeric" }).format(d);
 }
 function smartDefault(): Date {
+  // Next :00/:30 strictly after now, any hour of day (calls can be booked at
+  // any time, no business-hours restriction).
   const d = new Date();
   d.setSeconds(0, 0);
-  const m = d.getMinutes();
-  d.setMinutes(m <= 0 ? 0 : m <= 30 ? 30 : 60);
-  const roll = () => {
-    d.setDate(d.getDate() + 1);
-    d.setHours(BH_START, 0, 0, 0);
-  };
-  if (d.getHours() >= BH_END || (d.getHours() === BH_END - 1 && d.getMinutes() > 30)) roll();
-  if (d.getHours() < BH_START) d.setHours(BH_START, 0, 0, 0);
-  while (isWeekend(d)) roll();
+  if (d.getMinutes() < 30) d.setMinutes(30);
+  else {
+    d.setMinutes(0);
+    d.setHours(d.getHours() + 1);
+  }
   return d;
 }
 function slotsFor(day: Date): Date[] {
   const out: Date[] = [];
-  for (let h = BH_START; h < BH_END; h++) {
+  for (let h = 0; h < 24; h++) {
     for (const mn of [0, 30]) {
       const d = new Date(day);
       d.setHours(h, mn, 0, 0);
@@ -89,7 +82,10 @@ function slotsFor(day: Date): Date[] {
 }
 function slotSection(d: Date): string {
   const h = d.getHours();
-  return h < 12 ? "Morning" : h < 17 ? "Afternoon" : "Evening";
+  if (h < 6) return "Night";
+  if (h < 12) return "Morning";
+  if (h < 17) return "Afternoon";
+  return "Evening";
 }
 function calendarUrl(args: { at: number; label: string; company?: string; phone?: string | null; notes?: string }): string {
   const start = new Date(args.at);
@@ -246,10 +242,8 @@ export function CallSchedulerModal({
     const nd = new Date(d);
     nd.setHours(0, 0, 0, 0);
     setDay(nd);
-    let h = chosen.getHours();
-    if (h < BH_START || h >= BH_END) h = BH_START;
     const nc = new Date(nd);
-    nc.setHours(h, chosen.getMinutes() || 0, 0, 0);
+    nc.setHours(chosen.getHours(), chosen.getMinutes(), 0, 0);
     setChosen(nc);
   };
 
@@ -379,7 +373,7 @@ export function CallSchedulerModal({
                     })}
                   </div>
                   {sameDay(suggested, day) ? (
-                    <div className="-mt-1 pl-0.5 text-[10.5px] text-fg-dim">Suggested: next open slot in business hours</div>
+                    <div className="-mt-1 pl-0.5 text-[10.5px] text-fg-dim">Suggested: the next available slot</div>
                   ) : null}
 
                   {/* slot column */}
