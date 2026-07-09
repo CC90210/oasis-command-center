@@ -30,6 +30,14 @@ export type SendPayload = {
   subject: string;
   body: string;
   /**
+   * Optional HTML alternative — nodemailer sends a proper multipart/
+   * alternative when both `html` and `text` (body, below) are set, so
+   * `body` MUST stay a true plaintext rendering (not markup-stripped
+   * HTML) as the fallback for clients that can't render HTML. Omit for
+   * plaintext-only sends (every existing caller keeps working unchanged).
+   */
+  html?: string;
+  /**
    * Synthesized thread anchor — passed back from a prior send on the
    * same (application, lender) pair. NOT a Gmail API thread_id; it's
    * the FIRST RFC822 Message-Id of the chain so we can persist it as
@@ -115,6 +123,7 @@ async function sendOnce(
       cc: payload.cc && payload.cc.length > 0 ? payload.cc.join(", ") : undefined,
       subject: payload.subject,
       text: payload.body,
+      ...(payload.html ? { html: payload.html } : {}),
       headers,
     });
     return { ok: true, nodemailerMessageId: info.messageId };

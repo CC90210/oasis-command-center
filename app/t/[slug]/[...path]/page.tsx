@@ -17,6 +17,7 @@ import { RenewalsV2 } from "@/components/renewals/RenewalsV2";
 import { InboxShell } from "@/components/conversations/InboxShell";
 import { ConversationsLiveRefresh } from "@/components/conversations/ConversationsLiveRefresh";
 import { CampaignsShell } from "@/components/campaigns/CampaignsShell";
+import { EsignConsole } from "@/components/esign/EsignConsole";
 import {
   listThreadsForTenant,
   listThreadsFromSpine,
@@ -538,6 +539,7 @@ function renderSubtitle(brand: string, page: ManifestPageDef): string {
     case "automations": return "Tenant-scoped automations — cron jobs, bridge status, AI-described drafts.";
     case "conversations": return "Unified inbox — SMS, calls, and email replies threaded by contact.";
     case "campaigns": return "Multi-channel outreach — Text Torrent, Twilio, Gmail.";
+    case "esign": return "Send a contract for signature, or sign an existing document.";
     default: return brand;
   }
 }
@@ -679,6 +681,11 @@ async function PageBody({
       // + credit fan-out is better lazy client-side than blocking SSR against
       // TT's 60/min limiter).
       return <CampaignsShell tenantSlug={slug} tenantId={tenantId} />;
+    case "esign":
+      // In-house e-signature (2026-07). Console does its own client-side
+      // fetches against /api/esign/envelopes — no server-side initial read
+      // needed (same shape as CampaignsShell above).
+      return <EsignConsole tenantSlug={slug} tenantId={tenantId} />;
     case "pipeline": {
       // Stacked superview — Lead Pipeline above Opportunity Pipeline.
       // Each section has its own chevron bar + filtered table. Filter

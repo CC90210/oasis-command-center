@@ -35,6 +35,9 @@ export const LEAD_DOC_TYPES: { key: string; label: string; required: boolean }[]
   // Standalone e-signature image saved on full-application submit (Batch 7.2 —
   // the DocuSign replacement; also embedded in the application PDF).
   { key: "applicant_signature", label: "Applicant signature", required: false },
+  // In-house e-signature system (2026-07) — the completed signed PDF for a
+  // lead-linked envelope, filed via uploadLeadDocument (lib/esign/storage.ts).
+  { key: "esigned_document", label: "E-signed document", required: false },
   { key: "second_application_form", label: "Second application form", required: false },
   { key: "underwriting_docs", label: "Underwriting docs", required: false },
   { key: "portal_docs", label: "Portal docs", required: false },
