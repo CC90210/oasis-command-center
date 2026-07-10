@@ -37,6 +37,49 @@ function toISO(dateHeader: string): string | null {
 }
 
 /**
+ * Route an inbound reply's conversation thread to the rep who owns it
+ * (2026-07-10). The conv_thread_upsert trigger (migration 112) creates/bumps
+ * the thread but never sets assigned_to, so every inbound reply used to land
+ * in needs_reply UNASSIGNED and reps triaged each other's deals by hand.
+ *
+ * Assignment preference:
+ *   1. the lead's assigned rep (tenant_records data.assigned_to — the
+ *      auth_user_id the lead drawer's "Assign to" writes), else
+ *   2. the monitored-mailbox owner (this reply arrived in THEIR inbox).
+ *
+ * Only fills a NULL assigned_to — a manual assignment (threads/[key] PATCH)
+ * is never clobbered. Best-effort + fail-open, same philosophy as the
+ * trigger: thread routing must never break ingest.
+ */
+async function autoAssignThreadForInbound(
+  db: ReturnType<typeof getServiceSupabase>,
+  args: { tenantId: string; leadId: string; mailboxOwnerUserId: string },
+): Promise<void> {
+  try {
+    let assignee = "";
+    const rec = await db
+      .from("tenant_records")
+      .select("data")
+      .eq("tenant_id", args.tenantId)
+      .eq("id", args.leadId)
+      .maybeSingle();
+    const data = (rec.data as { data?: Record<string, unknown> } | null)?.data;
+    if (data && typeof data.assigned_to === "string") assignee = data.assigned_to.trim();
+    if (!assignee) assignee = (args.mailboxOwnerUserId || "").trim();
+    if (!assignee) return;
+
+    await db
+      .from("conversation_threads")
+      .update({ assigned_to: assignee, updated_at: new Date().toISOString() })
+      .eq("tenant_id", args.tenantId)
+      .eq("thread_key", `lead:${args.leadId}`)
+      .is("assigned_to", null);
+  } catch {
+    // fail open — routing is a convenience; the interaction row is the ledger
+  }
+}
+
+/**
  * Ingest a batch for one operator/mailbox. `dryRun` (monitor validation) logs
  * the decision without writing. Returns counts for the tick summary.
  */
@@ -136,6 +179,15 @@ export async function ingestMessages(
       const ins = await db.from("lead_interactions").insert(row);
       if (ins.error) { res.dropped += 1; continue; }
       res.ingested += 1;
+      // Inbound replies route their thread to the owning rep (see helper
+      // above). Outbound is skipped — sends don't change ownership.
+      if (!outbound) {
+        await autoAssignThreadForInbound(db, {
+          tenantId: args.tenantId,
+          leadId: lead.id,
+          mailboxOwnerUserId: args.userId,
+        });
+      }
     } catch {
       res.dropped += 1;
     }

@@ -19,17 +19,14 @@
 import "server-only";
 import { getUserIntegrationBundle, setUserIntegrationValue } from "@/lib/user-integration-store";
 import { checkEmailSuppressed } from "@/lib/lead-interactions-queries";
+// Per-rep sign-off + canonical legal footer (2026-07-10). Replaces the local
+// CANSPAM_FOOTER, which had NO rep signature and a stale street address —
+// direct sends now match the submissions@ queue path's identity rules.
+import { appendSignatureAndFooter, type EmailSigner } from "@/lib/config/email-signature";
 
 const TOKEN_URL = "https://oauth2.googleapis.com/token";
 const SEND_URL = "https://gmail.googleapis.com/gmail/v1/users/me/messages/send";
 const REFRESH_SKEW_MS = 60_000; // refresh if the token expires within a minute
-
-// CAN-SPAM footer for the direct (operator-Gmail) path. The submissions@ queue
-// path gets its footer from send_gateway; this path bypasses the daemon, so the
-// footer must be appended here. Ported from JARVIS salesforce-responder/templates.js.
-const CANSPAM_FOOTER =
-  "\n\n---\nSunBiz Funding LLC\n1 East Broward Blvd, Suite 700\nFort Lauderdale, FL 33301\n\n" +
-  "You received this email because you submitted a funding inquiry. To stop receiving emails, reply UNSUBSCRIBE.";
 
 export type GmailOAuthSendResult =
   | { ok: true; provider: "gmail_oauth"; gmail_message_id: string; thread_id: string; from_address: string }
@@ -135,7 +132,12 @@ async function gmailSend(
 
 /**
  * Send one email as the operator, from their connected Gmail. Appends the
- * CAN-SPAM footer. Never throws.
+ * rep's sign-off + the legal footer. Never throws.
+ *
+ * `signer`: the acting rep resolved route-side from the session (preferred —
+ * survives a rep sending from a personal, non-roster Gmail). Omitted (the
+ * scheduled-send cron has no session), it self-resolves from the connected
+ * address via the roster.
  */
 export async function sendGmailAsOperator(args: {
   tenantId: string;
@@ -143,6 +145,7 @@ export async function sendGmailAsOperator(args: {
   to: string;
   subject: string;
   body: string;
+  signer?: EmailSigner | null;
 }): Promise<GmailOAuthSendResult> {
   // Opt-out gate FIRST — before any token work or send. Fail closed.
   const supp = await checkEmailSuppressed(args.tenantId, args.to);
@@ -175,7 +178,7 @@ export async function sendGmailAsOperator(args: {
     from: fromAddress,
     to: args.to,
     subject: args.subject,
-    body: args.body.replace(/\s+$/, "") + CANSPAM_FOOTER,
+    body: appendSignatureAndFooter(args.body, { signer: args.signer, fromAddress }),
   });
 
   let res = await gmailSend(accessToken, raw);

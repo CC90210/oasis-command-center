@@ -296,6 +296,9 @@ export async function POST(
       to: toEmail,
       subject: truncatedSubject,
       body: truncatedBody,
+      // Session-resolved rep — the direct path signs "— Jordan" etc. exactly
+      // like the queue path does (parity fix 2026-07-10).
+      signer,
     });
     if (g.ok) {
       sendResult = { status: "sent", agent_source: "gmail_apppassword", via: "gmail_apppassword", from_address: g.from_address };
@@ -313,6 +316,9 @@ export async function POST(
       to: toEmail,
       subject: truncatedSubject,
       body: truncatedBody,
+      // Session-resolved rep — the direct path signs "— Jordan" etc. exactly
+      // like the queue path does (parity fix 2026-07-10).
+      signer,
     });
     if (g.ok) {
       sendResult = { status: "sent", agent_source: "gmail_oauth", via: "gmail_oauth", from_address: g.from_address };

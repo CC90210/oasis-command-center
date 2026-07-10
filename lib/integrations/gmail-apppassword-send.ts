@@ -15,12 +15,10 @@
 import "server-only";
 import { getUserIntegrationBundle } from "@/lib/user-integration-store";
 import { checkEmailSuppressed } from "@/lib/lead-interactions-queries";
-
-// Same footer as the OAuth path (gmail-oauth-send.ts). The submissions@ queue
-// gets its footer from send_gateway; a direct send must append it here.
-const CANSPAM_FOOTER =
-  "\n\n---\nSunBiz Funding LLC\n1 East Broward Blvd, Suite 700\nFort Lauderdale, FL 33301\n\n" +
-  "You received this email because you submitted a funding inquiry. To stop receiving emails, reply UNSUBSCRIBE.";
+// Per-rep sign-off + canonical legal footer (2026-07-10). Replaces the local
+// CANSPAM_FOOTER, which had NO rep signature and a stale street address —
+// direct sends now match the submissions@ queue path's identity rules.
+import { appendSignatureAndFooter, type EmailSigner } from "@/lib/config/email-signature";
 
 export type GmailAppPasswordSendResult =
   | { ok: true; provider: "gmail_apppassword"; gmail_message_id: string; from_address: string }
@@ -40,7 +38,12 @@ export async function operatorHasAppPassword(tenantId: string, userId: string): 
 
 /**
  * Send one email as the operator, from their app-password Gmail. Appends the
- * CAN-SPAM footer. Never throws.
+ * rep's sign-off + the legal footer. Never throws.
+ *
+ * `signer`: the acting rep resolved route-side from the session (preferred —
+ * survives a rep sending from a personal, non-roster Gmail). Omitted (the
+ * scheduled-send cron has no session), it self-resolves from the connected
+ * address via the roster.
  */
 export async function sendGmailAppPasswordAsOperator(args: {
   tenantId: string;
@@ -48,6 +51,7 @@ export async function sendGmailAppPasswordAsOperator(args: {
   to: string;
   subject: string;
   body: string;
+  signer?: EmailSigner | null;
 }): Promise<GmailAppPasswordSendResult> {
   // Opt-out gate FIRST — before any credential work or send. Fail closed.
   const supp = await checkEmailSuppressed(args.tenantId, args.to);
@@ -75,7 +79,7 @@ export async function sendGmailAppPasswordAsOperator(args: {
       from: fromAddress,
       to: args.to,
       subject: args.subject,
-      text: args.body.replace(/\s+$/, "") + CANSPAM_FOOTER,
+      text: appendSignatureAndFooter(args.body, { signer: args.signer, fromAddress }),
     });
     return { ok: true, provider: "gmail_apppassword", gmail_message_id: info.messageId || "", from_address: fromAddress };
   } catch (e) {
