@@ -133,10 +133,25 @@ async function logInteraction(
   }
 }
 
-/** Insert the next step's row (or leave none — caller marks 'done'). */
-async function enqueueNextStep(db: Db, row: ClaimedRow, steps: DripStep[]): Promise<boolean> {
+/** Insert the next step's row. Returns { hasNext, ok }:
+ *  - hasNext=false → this was the last step, nothing to enqueue (ok=true).
+ *  - hasNext=true, ok=true → the next row was created, OR a concurrent
+ *    invocation already created it (a duplicate-key is benign HERE because the
+ *    current row is already terminal by the time this is called — the collision
+ *    can only be another invocation, never our own still-'sending' row).
+ *  - hasNext=true, ok=false → a real (non-duplicate) insert error; the chain
+ *    could not advance (audit M8).
+ *  MUST be called only AFTER the current row has been moved out of active
+ *  status — otherwise the insert collides with our own 'sending' row on the
+ *  active-only unique index and every sequence silently stalls at step 0
+ *  (audit C1). */
+async function enqueueNextStep(
+  db: Db,
+  row: ClaimedRow,
+  steps: DripStep[],
+): Promise<{ hasNext: boolean; ok: boolean }> {
   const next = row.step_index + 1;
-  if (next >= steps.length) return false;
+  if (next >= steps.length) return { hasNext: false, ok: true };
   const nextStep = steps[next];
   const scheduledFor = new Date(Date.now() + Math.max(0, nextStep.delay_minutes) * 60_000).toISOString();
   const ins = await db.from("drip_runs").insert({
@@ -149,15 +164,67 @@ async function enqueueNextStep(db: Db, row: ClaimedRow, steps: DripStep[]): Prom
     scheduled_for: scheduledFor,
     status: "scheduled",
   });
-  if (ins.error && !/duplicate key|unique constraint/i.test(ins.error.message)) {
+  if (ins.error) {
+    if (/duplicate key|unique constraint/i.test(ins.error.message)) return { hasNext: true, ok: true };
     console.error("[dispatch-drips] enqueue next step failed", { rowId: row.id, err: ins.error.message });
+    return { hasNext: true, ok: false };
+  }
+  return { hasNext: true, ok: true };
+}
+
+/** Advance a completed/skipped row out of active status and, if more steps
+ *  follow, enqueue the next one. ORDER IS LOAD-BEARING (audit C1): mark the
+ *  current row terminal FIRST, THEN insert the next step, so the insert can't
+ *  collide with our own still-'sending' row on the active-only unique index.
+ *  The update is guarded on status='sending' so a concurrent stale-reclaim that
+ *  already moved the row can't cause a double-advance/double-send (audit H4),
+ *  and the result is checked — we enqueue the next step only when the current
+ *  row was actually ours to advance (audit M8). Returns true if we advanced it. */
+async function advanceRow(
+  db: Db,
+  row: ClaimedRow,
+  steps: DripStep[],
+  opts: { fromIdentity?: string; skippedReason?: string },
+): Promise<boolean> {
+  const isLast = row.step_index + 1 >= steps.length;
+  const patch: Record<string, unknown> = {
+    status: isLast ? "done" : "sent",
+    sent_at: new Date().toISOString(),
+  };
+  if (opts.fromIdentity) patch.from_identity = opts.fromIdentity;
+  if (opts.skippedReason) patch.last_error = `skipped: ${opts.skippedReason}`.slice(0, 500);
+  const upd = await db
+    .from("drip_runs")
+    .update(patch)
+    .eq("id", row.id)
+    .eq("status", "sending")
+    .select("id");
+  if (upd.error || !(upd.data && upd.data.length)) {
+    // Row already moved (reclaimed/advanced elsewhere) or the write failed. Do
+    // NOT enqueue the next step (would risk a duplicate) and do not re-send —
+    // the message, if any, already went out.
+    console.error("[dispatch-drips] advanceRow status update did not apply", {
+      rowId: row.id,
+      err: upd.error?.message,
+    });
+    return false;
+  }
+  if (!isLast) {
+    const { ok } = await enqueueNextStep(db, row, steps);
+    if (!ok) {
+      // Step completed but the next row couldn't be created (real insert
+      // error). Leave a marker so the watchdog surfaces the stalled chain
+      // rather than it dying silently (audit M8).
+      await db
+        .from("drip_runs")
+        .update({ last_error: "advance_failed: next step not enqueued" })
+        .eq("id", row.id);
+    }
   }
   return true;
 }
 
-/** Step completed (sent for real or logged dry-run). Marks this row 'sent'
- *  (more steps follow) or 'done' (was the last step), and — only when more
- *  steps follow — enqueues the next one. */
+/** Step completed (sent for real or logged dry-run) — advance the chain. */
 async function finishStep(
   db: Db,
   row: ClaimedRow,
@@ -165,12 +232,42 @@ async function finishStep(
   fromIdentity: string,
   wasReal: boolean,
 ): Promise<StepOutcome> {
-  const hasNext = await enqueueNextStep(db, row, steps);
-  await db
-    .from("drip_runs")
-    .update({ status: hasNext ? "sent" : "done", sent_at: new Date().toISOString(), from_identity: fromIdentity })
-    .eq("id", row.id);
+  await advanceRow(db, row, steps, { fromIdentity });
   return wasReal ? "sent" : "dry_run";
+}
+
+/** The lead can't receive THIS step's channel (no phone for an sms step / no
+ *  email for an email step). Skip it and advance — the sequence may have later
+ *  steps on the other channel. Do NOT markPermanentFail (that would drop the
+ *  lead from the whole sequence over a single unreachable step). audit H5. */
+async function skipStep(db: Db, row: ClaimedRow, steps: DripStep[], reason: string): Promise<StepOutcome> {
+  await advanceRow(db, row, steps, { skippedReason: reason });
+  return "dry_run"; // nothing sent
+}
+
+/** Defense-in-depth backstop (the safety net the go-live incident lacked): has
+ *  this exact lead already received a REAL send of THIS sequence at THIS
+ *  step_index? Checks lead_interactions — the audit trail of what actually went
+ *  out — so that even if enrollment or advance logic ever regresses, no lead is
+ *  double-sent the same step. Best-effort: on a query error it returns false
+ *  (does NOT block) — the CAS claim + the once-per-lead enroll + the reclaim fix
+ *  are the primary guards; failing this backstop closed would stall the engine
+ *  on a transient blip. */
+async function alreadySentStep(db: Db, row: ClaimedRow): Promise<boolean> {
+  try {
+    const r = await db
+      .from("lead_interactions")
+      .select("id")
+      .eq("tenant_id", row.tenant_id)
+      .eq("lead_id", row.lead_id)
+      .eq("agent_source", `sequence:${row.sequence_name}`)
+      .eq("metadata->>step_index", String(row.step_index))
+      .eq("metadata->>dry_run", "false")
+      .limit(1);
+    return !r.error && Array.isArray(r.data) && r.data.length > 0;
+  } catch {
+    return false;
+  }
 }
 
 /** Retryable failure — increments attempts, requeues to 'scheduled' (picked
@@ -211,6 +308,18 @@ async function markRescheduled(
 
 function isTruthyFlag(v: unknown): boolean {
   return v === true || v === "true" || v === 1 || v === "1";
+}
+
+/** Next 18:00 UTC — the conservative send time for a lead whose area code we
+ *  can't map to a timezone (audit H6). 18:00 UTC lands inside the 8am-9pm TCPA
+ *  window for EVERY US zone including Hawaii/Alaska and regardless of DST:
+ *  UTC-10 (HST) → 08:00 (the floor) up through UTC-4 (EDT) → 14:00. 17:00 UTC
+ *  was WRONG — it's 07:00 HST, an hour before the floor (review HIGH-2). */
+function safeFallbackSendTime(): Date {
+  const t = new Date();
+  t.setUTCHours(18, 0, 0, 0);
+  if (t.getTime() <= Date.now()) t.setUTCDate(t.getUTCDate() + 1);
+  return t;
 }
 
 /** Fail-closed-ADJACENT re-check at fire time (defense in depth on top of the
@@ -267,17 +376,26 @@ async function processSmsStep(
   steps: DripStep[],
 ): Promise<StepOutcome> {
   const phone = typeof data.phone === "string" ? data.phone.trim() : "";
-  if (!phone) return markPermanentFail(db, row, "missing_phone");
+  // No phone for an SMS step: SKIP + advance (the sequence may have email steps
+  // this lead CAN receive) rather than fail the whole chain (audit H5).
+  if (!phone) return skipStep(db, row, steps, "no_phone_for_sms_step");
 
   const supp = await checkPhoneOptOut(row.tenant_id, phone);
   if (supp.optedOut) return markPermanentFail(db, row, "opted_out (replied STOP)");
   if (supp.checkFailed) return markRetryOrFail(db, row, "suppression_check_failed");
 
   // TCPA quiet-hours: only send SMS within the recipient's local ~8am-9pm.
-  // Outside the window, RESCHEDULE (don't fail) to the next in-window
-  // instant — the drip analogue of the VPS send-window.
   const tcpa = checkTcpaWindow(phone);
+  // FAIL CLOSED on an unresolved timezone (audit H6): if the area code isn't in
+  // the NANP map, checkTcpaWindow falls back to the SERVER tz (UTC on Vercel),
+  // which would happily "pass" the window at the recipient's pre-dawn local
+  // time. We can't prove it's daytime for them, so we don't send — reschedule
+  // to a conservative all-US-timezones-safe hour instead.
+  if (tcpa.usedFallback) {
+    return markRescheduled(db, row, safeFallbackSendTime().toISOString(), "tcpa_unresolved_tz (area code unmapped)");
+  }
   if (!tcpa.withinWindow) {
+    // Outside the window, RESCHEDULE (don't fail) to the next in-window instant.
     const next = nextTcpaWindowStart(phone);
     return markRescheduled(db, row, next.toISOString(), `quiet_hours (local ${tcpa.timeLabel} ${tcpa.timeZone})`);
   }
@@ -299,6 +417,11 @@ async function processSmsStep(
 
   const dripsLive = process.env.DRIPS_LIVE === "1";
   const shouldSend = dripSendEnabled();
+
+  // Backstop: never re-send this lead the same sequence step (audit safety net).
+  if (shouldSend && (await alreadySentStep(db, row))) {
+    return finishStep(db, row, steps, `dedup:${identity.repKey}:${identity.senderId}`, false);
+  }
 
   let fromIdentity = `dry:${identity.repKey}:${identity.senderId}`;
   if (shouldSend) {
@@ -342,7 +465,9 @@ async function processEmailStep(
   steps: DripStep[],
 ): Promise<StepOutcome> {
   const email = typeof data.email === "string" ? data.email.trim() : "";
-  if (!email) return markPermanentFail(db, row, "missing_email");
+  // No email for an email step: SKIP + advance (the sequence may have SMS steps
+  // this lead CAN receive) rather than fail the whole chain (audit H5).
+  if (!email) return skipStep(db, row, steps, "no_email_for_email_step");
 
   const supp = await checkEmailSuppressed(row.tenant_id, email);
   if (supp.suppressed) return markPermanentFail(db, row, "suppressed (unsubscribed)");
@@ -360,6 +485,11 @@ async function processEmailStep(
 
   const dripsLive = process.env.DRIPS_LIVE === "1";
   const shouldSend = dripSendEnabled();
+
+  // Backstop: never re-send this lead the same sequence step (audit safety net).
+  if (shouldSend && (await alreadySentStep(db, row))) {
+    return finishStep(db, row, steps, "dedup:submissions@sunbizfunding.com", false);
+  }
 
   let fromIdentity = "dry:submissions@sunbizfunding.com";
   if (shouldSend) {
@@ -435,14 +565,19 @@ export async function runDispatchDrips(): Promise<DispatchDripsResult> {
   const nowIso = new Date().toISOString();
   const staleBeforeIso = new Date(Date.now() - STALE_SENDING_MINUTES * 60_000).toISOString();
 
-  // 1) Stale-'sending' recovery — see file header.
+  // 1) Stale-'sending' recovery — keyed on CLAIM age (claimed_at), NOT
+  // scheduled_for (audit H3). A row claimed seconds ago whose scheduled_for is
+  // >15 min old (normal when dispatch is backed up / after a quiet-hours
+  // reschedule) must NOT be reclaimed mid-send — that resurrects an in-flight
+  // send and double-texts the merchant. Only a genuine crash-mid-send (row
+  // stuck 'sending' with an aged claimed_at) is recovered.
   let reclaimed = 0;
   try {
     const reclaim = await db
       .from("drip_runs")
       .update({ status: "scheduled" })
       .eq("status", "sending")
-      .lt("scheduled_for", staleBeforeIso)
+      .lt("claimed_at", staleBeforeIso)
       .select("id");
     reclaimed = reclaim.data?.length || 0;
   } catch (err) {
@@ -466,9 +601,11 @@ export async function runDispatchDrips(): Promise<DispatchDripsResult> {
   }
 
   // 3) Claim: conditional UPDATE (status still 'scheduled' at write time).
+  // Stamp claimed_at so the stale-reclaim above can tell a fresh claim from a
+  // genuinely stuck one (audit H3).
   const claimRes = await db
     .from("drip_runs")
-    .update({ status: "sending" })
+    .update({ status: "sending", claimed_at: new Date().toISOString() })
     .in("id", dueIds)
     .eq("status", "scheduled")
     .select("id, tenant_id, lead_id, sequence_id, sequence_name, step_index, channel, attempts");

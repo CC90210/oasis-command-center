@@ -325,6 +325,7 @@ export async function runEnrollDrips(): Promise<EnrollDripsResult> {
       .eq("tenant_id", seq.tenant_id)
       .eq("entity_type", "lead")
       .filter("data->>stage", "eq", stage)
+      .order("created_at", { ascending: true }) // stable order so >500-lead stages don't starve later leads (audit L13)
       .limit(500);
     if (leadsRes.error) {
       perSequence.push({
@@ -348,23 +349,29 @@ export async function runEnrollDrips(): Promise<EnrollDripsResult> {
       continue;
     }
 
-    // Batch-check which of these leads already have an active run for THIS
-    // sequence — the pre-filter that makes the common re-run a no-op before
-    // ever touching the unique index.
+    // ONCE PER LEAD PER SEQUENCE (audit C2 — the re-enrollment loop fix).
+    // Skip any lead that already has a NON-CANCELLED run for this sequence, not
+    // just an active (scheduled|sending) one. A terminal run (sent/done/failed)
+    // MUST block re-enrollment: the executor never advances a lead's stage and
+    // the pipeline often doesn't either, so a lead that just sits at a drip
+    // stage would otherwise be re-enrolled and re-sent step 0 on every 15-min
+    // pass. 'cancelled' rows (an operator halt) intentionally do NOT block, so a
+    // clean first drip can still run after a pause. (Phase 3 upgrades this to a
+    // stage-entry edge so a genuine RE-entry into the stage re-drips.)
     const leadIds = leads.map((l) => l.id);
-    const activeRes = await db
+    const priorRes = await db
       .from("drip_runs")
       .select("lead_id")
       .eq("tenant_id", seq.tenant_id)
       .eq("sequence_id", seq.id)
       .in("lead_id", leadIds)
-      .in("status", ["scheduled", "sending"]);
-    const alreadyActive = new Set(((activeRes.data || []) as { lead_id: string }[]).map((r) => r.lead_id));
+      .neq("status", "cancelled");
+    const alreadyRan = new Set(((priorRes.data || []) as { lead_id: string }[]).map((r) => r.lead_id));
 
     for (const lead of leads) {
       const data = lead.data || {};
 
-      if (alreadyActive.has(lead.id)) {
+      if (alreadyRan.has(lead.id)) {
         skipped.already_enrolled++;
         continue;
       }
