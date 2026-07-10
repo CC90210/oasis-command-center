@@ -37,7 +37,8 @@ import { sanitizeBlastMessage } from "@/lib/integrations/blast-safety";
 import { checkTcpaWindow, nextTcpaWindowStart } from "@/lib/tcpa-window";
 import { renderTemplate } from "@/lib/drips/templates";
 import { parseDripSteps, type DripStep } from "@/lib/drips/types";
-import { sendDripSms, sendDripEmail, resolveDripTextTorrentService } from "@/lib/drips/send";
+import { sendDripSms, sendDripEmail } from "@/lib/drips/send";
+import { resolveDripSmsIdentity } from "@/lib/drips/rep-sms-identity";
 import { nudgeConversations } from "@/lib/realtime/conversations-nudge";
 
 export const BATCH_LIMIT = 50;
@@ -269,15 +270,21 @@ async function processSmsStep(
       : markRetryOrFail(db, row, "blast_safety_check_failed");
   }
 
-  const service = await resolveDripTextTorrentService(row.tenant_id);
+  // Per-rep routing: this lead's SMS goes out AS its rep's TT sub-account
+  // (Alex/Jordan) or the admin/parent account (Matt/owner/unattributed), from
+  // that rep's own number. Resolved here (before the send gate) so the dry-run
+  // log also records who WOULD have sent it.
+  const identity = await resolveDripSmsIdentity(row.tenant_id, row.lead_id, data);
+  if ("error" in identity) return markRetryOrFail(db, row, `sms_identity: ${identity.error}`);
+
   const dripsLive = process.env.DRIPS_LIVE === "1";
   const shouldSend = dripSendEnabled();
 
-  let fromIdentity = `dry:${service}`;
+  let fromIdentity = `dry:${identity.repKey}:${identity.senderId}`;
   if (shouldSend) {
-    const result = await sendDripSms(row.tenant_id, phone, clean.cleaned, service);
+    const result = await sendDripSms(row.tenant_id, phone, clean.cleaned, identity);
     if (!result.ok) return markRetryOrFail(db, row, result.error);
-    fromIdentity = result.fromNumber;
+    fromIdentity = `${identity.repKey}:${result.fromNumber}`;
   }
 
   await logInteraction(db, {
@@ -291,7 +298,10 @@ async function processSmsStep(
     body: clean.cleaned,
     metadata: {
       provider: "texttorrent",
-      service,
+      account: "main",
+      rep: identity.repKey,
+      act_as: identity.actAsEmail,
+      from_number: identity.senderId,
       sequence_id: row.sequence_id,
       step_index: row.step_index,
       drip_run_id: row.id,

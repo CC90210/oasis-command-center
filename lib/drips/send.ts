@@ -2,17 +2,18 @@
  * lib/drips/send.ts — thin, no-session adapters over the two proven Vercel
  * send paths (TextTorrent SMS + submissions@ SMTP email), built for the
  * drip dispatch cron (no cookies/session — always headless, unlike the
- * lead-drawer/Conversations send routes which resolve a per-rep identity).
+ * lead-drawer/Conversations send routes which resolve a per-rep identity from
+ * the acting user).
  *
- * SMS: prefers the dedicated "texttorrent_followup" TextTorrent account
- * (its own SID/public key + its own 60/min rate budget — see
- * lib/tenant-integration-store.ts ENV_FALLBACKS.texttorrent_followup and
- * lib/integrations/send-mode.ts's LIVE_SEND_TEXTTORRENT_FOLLOWUP channel
- * key) so drip cadences never starve the live Jordan/Inbox line on the
- * shared main SID. Falls back to the main "texttorrent" account when the
- * follow-up account has no credentials on file yet (tenant hasn't wired it) —
- * this keeps drips working while the operator provisions the dedicated
- * account, at the cost of sharing the main account's rate budget until then.
+ * SMS: sends AS the LEAD REP'S TextTorrent sub-account (act-as) from that rep's
+ * own number — the identity is resolved once per row by the executor via
+ * lib/drips/rep-sms-identity.ts and passed in here. Sub-account act-as only
+ * works on the MAIN "texttorrent" account (the parent SID that owns the
+ * sub-accounts), so this always authenticates on the main account — NOT the
+ * dedicated follow-up account (a different SID with no sub-accounts). Drip SMS
+ * therefore shares the main account's 60/min budget with the live inbox line;
+ * that's an accepted trade-off of Adon's per-rep-account requirement and is
+ * held in check by the drip enroll ramp (DRIPS_ENROLL_LIMIT).
  *
  * Email: always submissions@sunbizfunding.com via the same App-Password SMTP
  * path lender shop-out uses live today (lib/integrations/
@@ -33,11 +34,9 @@ import {
   sendSms as ttSendSms,
   TextTorrentError,
 } from "@/lib/integrations/texttorrent";
-import { resolveTextTorrentSenderId } from "@/lib/integrations/texttorrent-sender";
+import type { DripSmsIdentity } from "@/lib/drips/rep-sms-identity";
 import { sendGmail } from "@/lib/integrations/submissions-gmail-send";
 import { getSubmissionsFrom } from "@/lib/integrations/submissions-gmail";
-
-export type DripTextTorrentService = "texttorrent_followup" | "texttorrent";
 
 export type DripSmsResult =
   | {
@@ -45,7 +44,8 @@ export type DripSmsResult =
       chatId: string;
       messageId?: string;
       fromNumber: string;
-      service: DripTextTorrentService;
+      actAsEmail: string | null;
+      repKey: string;
     }
   | { ok: false; error: string };
 
@@ -53,55 +53,36 @@ export type DripEmailResult =
   | { ok: true; messageId: string; fromAddress: string }
   | { ok: false; error: string };
 
-const FOLLOWUP_SERVICE: DripTextTorrentService = "texttorrent_followup";
-const DEFAULT_SERVICE: DripTextTorrentService = "texttorrent";
-
 /**
- * Resolve which TextTorrent account (service key) a drip SMS to this tenant
- * should go out on: the dedicated follow-up account if it has credentials on
- * file, else the shared main account. Exported so the executor can resolve
- * this ONCE per row and reuse it both for the isDryRun(channel) check and for
- * the actual send — resolving twice could theoretically observe a credential
- * change mid-row and gate on a different account than it sends from.
- */
-export async function resolveDripTextTorrentService(
-  tenantId: string,
-): Promise<DripTextTorrentService> {
-  try {
-    await getTextTorrentCredentials(tenantId, { service: FOLLOWUP_SERVICE });
-    return FOLLOWUP_SERVICE;
-  } catch {
-    return DEFAULT_SERVICE;
-  }
-}
-
-/**
- * Send one drip SMS on the given (already-resolved) account. Resolves the
- * tenant's Default Business Number for that account — no userId, since a
- * drip is a headless/automated send, not a rep-attributed one (see the
- * resolution ladder documented in texttorrent-sender.ts: omitting userId
- * skips straight to the tenant default) — and fires via the LIVE-VERIFIED
- * 2-step /inbox/chat path.
+ * Send one drip SMS AS the resolved rep identity. The act-as email routes the
+ * chat into that rep's sub-account inbox (so replies thread to the right rep);
+ * the sender number is that rep's own DID. `actAsEmail: null` means the parent/
+ * admin account (Matt / owner / unattributed leads). Always on the LIVE-VERIFIED
+ * 2-step /inbox/chat path, on the MAIN account (act-as requires it).
  */
 export async function sendDripSms(
   tenantId: string,
   toPhone: string,
   body: string,
-  service: DripTextTorrentService,
+  identity: DripSmsIdentity,
 ): Promise<DripSmsResult> {
   try {
-    const creds = await getTextTorrentCredentials(tenantId, { service });
-    const senderId = await resolveTextTorrentSenderId({ tenantId, service });
-    if (!senderId) {
-      return { ok: false, error: "no_sender_number_resolved" };
-    }
-    const sent = await ttSendSms(creds, { number: toPhone, message: body, sender_id: senderId });
+    const creds = await getTextTorrentCredentials(tenantId, {
+      service: "texttorrent", // per-rep act-as only works on the parent/main account
+      actAsEmail: identity.actAsEmail, // string = sub-account, null = parent/admin
+    });
+    const sent = await ttSendSms(creds, {
+      number: toPhone,
+      message: body,
+      sender_id: identity.senderId,
+    });
     return {
       ok: true,
       chatId: sent.data.chat_id,
       messageId: sent.data.message_id,
-      fromNumber: senderId,
-      service,
+      fromNumber: identity.senderId,
+      actAsEmail: identity.actAsEmail,
+      repKey: identity.repKey,
     };
   } catch (err) {
     const reason =

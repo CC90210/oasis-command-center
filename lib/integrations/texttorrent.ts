@@ -42,7 +42,7 @@ export type TextTorrentCredentials = {
  */
 export async function getTextTorrentCredentials(
   tenantId: string,
-  opts: { actAsEmail?: string; service?: string } = {},
+  opts: { actAsEmail?: string | null; service?: string } = {},
 ): Promise<TextTorrentCredentials> {
   // Which TextTorrent ACCOUNT to authenticate as: the main "texttorrent" bundle by
   // default, or "texttorrent_followup" (a separate SID/public key) for the follow-up
@@ -60,10 +60,19 @@ export async function getTextTorrentCredentials(
       0,
     );
   }
-  // Act-as the sending sub-account. An explicit opts.actAsEmail wins; otherwise
-  // the tenant default (act_as_email, e.g. jordan@sunbizfunding.com) routes every
-  // send through the SunBiz operating sub-account — matching the live agent path.
-  const actAsEmail = opts.actAsEmail || bundle.act_as_email || undefined;
+  // Act-as the sending sub-account:
+  //   - a non-empty string → act-as THAT sub-account (X-ACT-AS-USER)
+  //   - null               → EXPLICITLY no act-as: authenticate as the parent/
+  //                          admin account itself. The drip engine uses this to
+  //                          send a Matt/owner (unattributed) lead from the admin
+  //                          account rather than the default sub-account.
+  //   - undefined (default)→ the tenant default (act_as_email, e.g.
+  //                          jordan@sunbizfunding.com) — unchanged for every
+  //                          existing call site, matching the live agent path.
+  const actAsEmail =
+    opts.actAsEmail === null
+      ? undefined
+      : opts.actAsEmail || bundle.act_as_email || undefined;
   return { apiSid, publicKey, actAsEmail };
 }
 
