@@ -8,3 +8,7 @@ running a controlled live test of all enabled sequences against throwaway test l
 Real-lead enrollment stays OFF (`DRIPS_ENROLL_STAGES=__none__`) and only the seeded test
 rows are queued, so nothing but the test leads can send. Reverted to the parked state
 (sequences disabled) immediately after.
+
+## Test 2 (2026-07-10) — new direct-lender templates + cold-outreach
+Controlled live test of the redesigned direct-lender email templates across all
+stages + a cold-outreach intro, to test leads only.
