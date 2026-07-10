@@ -12,9 +12,9 @@
  */
 import "server-only";
 import { getServiceSupabase } from "@/lib/supabase-server";
-import { stripDashes, matchLenderNames } from "./blast-safety-core";
+import { stripDashes, matchLenderNames, matchPositioningPhrases } from "./blast-safety-core";
 
-export { stripDashes, matchLenderNames } from "./blast-safety-core";
+export { stripDashes, matchLenderNames, matchPositioningPhrases } from "./blast-safety-core";
 
 /**
  * Which of the tenant's lender names appear in `text`. `checked` is false if
@@ -44,7 +44,13 @@ async function findLenderNamesInText(
 
 export type BlastSanitizeResult =
   | { ok: true; cleaned: string }
-  | { ok: false; reason: "lender_name" | "safety_check_failed"; message: string; lenderHits?: string[] };
+  | {
+      ok: false;
+      reason: "lender_name" | "positioning" | "safety_check_failed";
+      message: string;
+      lenderHits?: string[];
+      positioningHits?: string[];
+    };
 
 /**
  * Sanitize a blast message before send. Strips em/en dashes (auto), then runs
@@ -54,8 +60,27 @@ export type BlastSanitizeResult =
 export async function sanitizeBlastMessage(
   tenantId: string,
   message: string,
+  opts: { checkPositioning?: boolean } = {},
 ): Promise<BlastSanitizeResult> {
   const cleaned = stripDashes(message);
+  // Direct-lender POSITIONING guard (hardwired 2026-07-10). Static + in-process,
+  // so it's fail-closed by construction — it can never silently "pass" on a DB
+  // error the way the lender-name lookup can. SunBiz is the DIRECT funder; a
+  // broker-positioning phrase must never reach a merchant. Enforced on paths
+  // whose template copy is already direct-lender-clean (the drip engine passes
+  // checkPositioning:true); other callers opt in as their legacy copy is
+  // rewritten, so turning this on can't retro-block a live rep send mid-cleanup.
+  if (opts.checkPositioning) {
+    const positioningHits = matchPositioningPhrases(cleaned);
+    if (positioningHits.length > 0) {
+      return {
+        ok: false,
+        reason: "positioning",
+        message: `SunBiz is the DIRECT funder — remove broker-positioning phrase${positioningHits.length > 1 ? "s" : ""}: ${positioningHits.join(", ")}. We fund/underwrite/offer ourselves.`,
+        positioningHits,
+      };
+    }
+  }
   const { hits, checked } = await findLenderNamesInText(tenantId, cleaned);
   if (!checked) {
     return {

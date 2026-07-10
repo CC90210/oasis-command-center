@@ -30,3 +30,36 @@ export function matchLenderNames(text: string, names: string[]): string[] {
   }
   return hits;
 }
+
+/**
+ * DIRECT-LENDER POSITIONING guard (hardwired 2026-07-10). SunBiz positions AS a
+ * direct lender/funder to merchants — it must NEVER imply it brokers to other
+ * lenders. This blocks the generic broker-positioning phrase families (not just
+ * NAMED lenders, which matchLenderNames covers). Whitespace-flexible + anchored
+ * to keep false-positives near zero; note it deliberately does NOT block
+ * self-references like "we're a direct lender" / "your lender" (SunBiz itself).
+ * Returns the human labels of any families that hit.
+ */
+const POSITIONING_PATTERNS: { re: RegExp; label: string }[] = [
+  { re: /\bour\s+lenders?\b/i, label: "our lender(s)" },
+  { re: /\blender\s+network\b/i, label: "lender network" },
+  { re: /\bnetwork\s+of\s+lenders?\b/i, label: "network of lenders" },
+  { re: /\blenders?\s+we\s+work\s+with\b/i, label: "lenders we work with" },
+  { re: /\bwe\s+work\s+with\s+(?:the\s+|our\s+)?lenders?\b/i, label: "we work with lenders" },
+  { re: /\blender\s+programs?\b/i, label: "lender programs" },
+  { re: /\bfunding\s+partners?\b/i, label: "funding partners" },
+  { re: /\bfunders?\s+we\s+work\s+with\b/i, label: "funders we work with" },
+  { re: /\b\d\s*(?:-|–|to)\s*\d\s+lender\s+offers?\b/i, label: "N-N lender offers" },
+  { re: /\bto\s+(?:the\s+|our\s+)?lenders?\b/i, label: "to lenders" },
+  { re: /\bno\s+lenders?\s+can\b/i, label: "no lender can" },
+  { re: /\bshop\s+(?:your\s+)?(?:file|deal|it)\b/i, label: "shop your file" },
+];
+
+export function matchPositioningPhrases(text: string): string[] {
+  const hay = (text || "").replace(/\s+/g, " ");
+  const hits: string[] = [];
+  for (const { re, label } of POSITIONING_PATTERNS) {
+    if (re.test(hay) && !hits.includes(label)) hits.push(label);
+  }
+  return hits;
+}
