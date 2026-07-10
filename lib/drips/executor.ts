@@ -228,15 +228,35 @@ function isOptedOutOrDead(data: LeadData): boolean {
   );
 }
 
-/** Build the template context with a greeting fallback so a missing
- *  contact_name never renders "Hi ,": falls back to business_name, then a
- *  generic "there". */
+/** Build the template context with fallbacks so a thin lead row never renders
+ *  broken copy. Central to every sequence's quality:
+ *   - contact_name / first_name → a neutral "there" (NOT the company name — a
+ *     "Hi ACME LLC" greeting reads like a mailmerge miss); first_name is the
+ *     first token so "Hi Richard" not "Hi Richard VanderTuig".
+ *   - business_name / company → the real business, else "your business"
+ *     (company is the alias several seeded templates use for business_name).
+ *   - rep_name / assigned_agent_name → the lead's rep (the enroller backfills
+ *     rep_name from assigned_to, so this is populated for all but the rare
+ *     fully-unassigned lead), else a brand-safe "your funding specialist".
+ *     Exposed under BOTH names the seeded sequences reference. */
 function buildContext(data: LeadData): Record<string, unknown> {
-  const contactName =
-    (typeof data.contact_name === "string" && data.contact_name.trim()) ||
-    (typeof data.business_name === "string" && data.business_name.trim()) ||
-    "there";
-  return { lead: { ...data, contact_name: contactName, first_name: contactName } };
+  const str = (v: unknown) => (typeof v === "string" ? v.trim() : "");
+  const rawContact = str(data.contact_name);
+  const contactName = rawContact || "there";
+  const firstName = rawContact ? rawContact.split(/\s+/)[0] : "there";
+  const business = str(data.business_name) || str(data.company) || "your business";
+  const repName = str(data.rep_name) || str(data.assigned_agent_name) || "your funding specialist";
+  return {
+    lead: {
+      ...data,
+      contact_name: contactName,
+      first_name: firstName,
+      business_name: business,
+      company: business,
+      rep_name: repName,
+      assigned_agent_name: repName,
+    },
+  };
 }
 
 async function processSmsStep(
