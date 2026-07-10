@@ -355,6 +355,13 @@ function buildContext(data: LeadData): Record<string, unknown> {
   const firstName = rawContact ? rawContact.split(/\s+/)[0] : "there";
   const business = str(data.business_name) || str(data.company) || "your business";
   const repName = str(data.rep_name) || str(data.assigned_agent_name) || "your funding specialist";
+  // application_url: per-lead link when present (viewed/signed/declined have it),
+  // else the generic SunBiz intake form (same URL pattern the live "Incomplete
+  // Application" email uses) so a template never renders a blank link for a
+  // hot_lead/follow_up lead. Env-overridable base for domain changes.
+  const repSlug = repName.toLowerCase().split(/\s+/)[0].replace(/[^a-z]/g, "") || "team";
+  const intakeBase = process.env.DRIP_INTAKE_URL || "https://oasisai.work/f/submissions/initial-lead-capture";
+  const applyUrl = str(data.application_url) || `${intakeBase}?rep=${repSlug}`;
   return {
     lead: {
       ...data,
@@ -364,8 +371,39 @@ function buildContext(data: LeadData): Record<string, unknown> {
       company: business,
       rep_name: repName,
       assigned_agent_name: repName,
+      application_url: applyUrl,
     },
   };
+}
+
+/** Deterministic per-(lead, step) index into a variant set. STABLE across
+ *  retries/reclaims — the reclaim + alreadySentStep dedup key on step_index, so
+ *  a RANDOM pick could send a lead a *different* variation on a re-dispatch.
+ *  FNV-1a over `${leadId}:${stepIndex}`. */
+function stableIndex(seed: string, n: number): number {
+  if (n <= 1) return 0;
+  let h = 2166136261;
+  for (let i = 0; i < seed.length; i++) {
+    h ^= seed.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return (h >>> 0) % n;
+}
+
+/** Resolve the subject+body to actually send for this step. When the step
+ *  defines body_variants (the "same message in nice variations" mechanism),
+ *  pick ONE deterministically per (lead, step); otherwise use the single
+ *  body/subject. The chosen string then flows through the unchanged renderer. */
+function resolveStepCopy(step: DripStep, leadId: string, stepIndex: number): { subject: string; body: string } {
+  const variants = step.body_variants;
+  if (variants && variants.length > 0) {
+    const i = stableIndex(`${leadId}:${stepIndex}`, variants.length);
+    const subjectVariants = step.subject_variants;
+    const subject =
+      (subjectVariants && subjectVariants.length > 0 ? subjectVariants[i % subjectVariants.length] : step.subject) || "";
+    return { subject, body: variants[i] };
+  }
+  return { subject: step.subject || "", body: step.body };
 }
 
 async function processSmsStep(
@@ -400,10 +438,11 @@ async function processSmsStep(
     return markRescheduled(db, row, next.toISOString(), `quiet_hours (local ${tcpa.timeLabel} ${tcpa.timeZone})`);
   }
 
-  const rendered = renderTemplate(step.body, buildContext(data));
-  const clean = await sanitizeBlastMessage(row.tenant_id, rendered);
+  const copy = resolveStepCopy(step, row.lead_id, row.step_index);
+  const rendered = renderTemplate(copy.body, buildContext(data));
+  const clean = await sanitizeBlastMessage(row.tenant_id, rendered, { checkPositioning: true });
   if (!clean.ok) {
-    return clean.reason === "lender_name"
+    return clean.reason === "lender_name" || clean.reason === "positioning"
       ? markPermanentFail(db, row, `blast_safety: ${clean.message}`)
       : markRetryOrFail(db, row, "blast_safety_check_failed");
   }
@@ -474,11 +513,12 @@ async function processEmailStep(
   if (supp.checkFailed) return markRetryOrFail(db, row, "suppression_check_failed");
 
   const ctx = buildContext(data);
-  const subject = renderTemplate(step.subject || "", ctx) || "Following up";
-  const rendered = renderTemplate(step.body, ctx);
-  const clean = await sanitizeBlastMessage(row.tenant_id, rendered);
+  const copy = resolveStepCopy(step, row.lead_id, row.step_index);
+  const subject = renderTemplate(copy.subject, ctx) || "Following up";
+  const rendered = renderTemplate(copy.body, ctx);
+  const clean = await sanitizeBlastMessage(row.tenant_id, rendered, { checkPositioning: true });
   if (!clean.ok) {
-    return clean.reason === "lender_name"
+    return clean.reason === "lender_name" || clean.reason === "positioning"
       ? markPermanentFail(db, row, `blast_safety: ${clean.message}`)
       : markRetryOrFail(db, row, "blast_safety_check_failed");
   }

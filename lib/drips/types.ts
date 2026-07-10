@@ -43,6 +43,16 @@ export type DripStep = {
   body_html?: string;
   /** Optional sender label — agent name, e.g. "Solara" or "Helios". */
   from_label?: string;
+  /**
+   * Optional body variations (2026-07-10). When present, the executor picks ONE
+   * DETERMINISTICALLY per (lead_id, step_index) — so a given lead always gets
+   * the same variant across retries/reclaims, while different leads spread
+   * across the set. Falls back to `body` when absent/empty. `subject_variants`
+   * is the email-subject analogue (paired by index with body_variants when both
+   * are present). Lets a stage send "the same message in nice variations."
+   */
+  body_variants?: string[];
+  subject_variants?: string[];
 };
 
 export type DripTriggerFilter = {
@@ -103,6 +113,13 @@ function optionalString(obj: Record<string, unknown>, key: string): string | und
   return typeof v === "string" && v.length > 0 ? v : undefined;
 }
 
+function optionalStringArray(obj: Record<string, unknown>, key: string): string[] | undefined {
+  const v = obj[key];
+  if (!Array.isArray(v)) return undefined;
+  const arr = v.filter((x): x is string => typeof x === "string" && x.trim().length > 0);
+  return arr.length > 0 ? arr : undefined;
+}
+
 function parseStep(v: unknown, path: string): DripStep {
   if (!isStringRecord(v)) throw new DripDefinitionError(path, "expected object");
   const channel = requireString(v, "channel", path);
@@ -140,6 +157,10 @@ function parseStep(v: unknown, path: string): DripStep {
   }
   const fromLabel = optionalString(v, "from_label");
   if (fromLabel) step.from_label = fromLabel;
+  const bodyVariants = optionalStringArray(v, "body_variants");
+  if (bodyVariants) step.body_variants = bodyVariants;
+  const subjectVariants = optionalStringArray(v, "subject_variants");
+  if (subjectVariants) step.subject_variants = subjectVariants;
   return step;
 }
 
