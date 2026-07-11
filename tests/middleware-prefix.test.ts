@@ -22,5 +22,8 @@ assert.equal(isPublic("/api/forms/view"), true, "public form view tracker bypass
 assert.equal(isPublic("/api/forms/address-autocomplete"), true, "public form address autocomplete bypasses session middleware");
 assert.equal(isPublic("/api/forms"), false, "operator forms list remains session-gated");
 assert.equal(isPublic("/api/forms/abc/mint-link"), false, "operator link minting remains session-gated");
+assert.equal(isPublic("/oasis-loop/index.html"), true, "OASIS Loop diagram is public static HTML");
+assert.equal(isPublic("/oasis-loop/playbook.html"), true, "OASIS Loop playbook is public static HTML");
+assert.equal(isPublic("/oasis-looping/index.html"), false, "OASIS Loop public prefix does not over-match");
 
 console.log("middleware-prefix ok");

@@ -20,7 +20,7 @@
   --star-dust: #3A4A5C;
 }
 html {
-  background: var(--bg-deep);
+  background: var(--bg-primary);
   color: var(--off-white);
   font-family: 'Inter', sans-serif;
   font-weight: 300;
@@ -29,7 +29,7 @@ html {
   scroll-behavior: smooth;
 }
 body {
-  max-width: 820px;
+  width: min(820px, 100%);
   margin: 0 auto;
   padding: 60px 40px 100px;
 }
@@ -90,6 +90,7 @@ hr {
   margin: 24px 0;
   position: relative;
   overflow: hidden;
+  overflow-wrap: anywhere;
 }
 .phase-card::before {
   content: '';
@@ -206,6 +207,7 @@ blockquote strong { color: var(--off-white); }
   border-radius: 12px;
   padding: 24px 28px;
   margin: 16px 0;
+  overflow-wrap: anywhere;
 }
 .script-block .timestamp {
   font-family: 'Inter', sans-serif;
@@ -249,6 +251,61 @@ blockquote strong { color: var(--off-white); }
 .fade-in.visible {
   opacity: 1;
   transform: translateY(0);
+}
+
+@media (max-width: 700px) {
+  body {
+    padding: 36px 18px 64px;
+  }
+  h1 {
+    font-size: clamp(2rem, 12vw, 2.8rem);
+    line-height: 1.05;
+  }
+  .tagline {
+    font-size: 0.92rem;
+    margin-bottom: 34px;
+  }
+  h2 {
+    font-size: 1.35rem;
+    margin-top: 42px;
+  }
+  h3 {
+    font-size: 1rem;
+  }
+  .role-grid {
+    grid-template-columns: 1fr;
+  }
+  .phase-card,
+  .script-block,
+  .callout {
+    padding: 20px 18px;
+    border-radius: 10px;
+  }
+  blockquote {
+    padding: 12px 16px;
+  }
+}
+
+@media (max-width: 420px) {
+  body {
+    padding-left: 14px;
+    padding-right: 14px;
+  }
+  .phase-card .phase-heading {
+    font-size: 1.12rem;
+  }
+  .role-card {
+    padding: 18px 16px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
+  }
 }
 </style>
 </head>

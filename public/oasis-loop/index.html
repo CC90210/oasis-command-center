@@ -19,18 +19,21 @@
   --star-dust: #3A4A5C;
 }
 html, body {
-  width: 100%; height: 100%;
+  width: 100%;
+  min-height: 100%;
   background: var(--bg-primary);
   color: var(--off-white);
   font-family: 'Inter', sans-serif;
-  overflow: hidden;
+  overflow-x: hidden;
+  overflow-y: auto;
 }
 #starfield { position: fixed; inset: 0; z-index: 0; pointer-events: none; }
 
 /* ── Layout ── */
 .page {
   position: relative; z-index: 1;
-  width: 100vw; height: 100vh;
+  width: 100%;
+  min-height: 100dvh;
   display: grid;
   grid-template-rows: auto 1fr auto;
   align-items: center;
@@ -100,18 +103,21 @@ html, body {
 }
 .loop-wrapper {
   position: relative;
-  width: 420px; height: 420px;
+  --node-size: 105px;
+  --ring-size: 280px;
+  width: min(420px, calc(100vw - 40px));
+  aspect-ratio: 1;
 }
 .loop-ring {
   position: absolute; top: 50%; left: 50%;
-  width: 280px; height: 280px;
+  width: var(--ring-size); height: var(--ring-size);
   transform: translate(-50%, -50%);
   border-radius: 50%;
   border: 1.5px solid var(--star-dust);
 }
 .loop-pulse {
   position: absolute; top: 50%; left: 50%;
-  width: 280px; height: 280px;
+  width: var(--ring-size); height: var(--ring-size);
   transform: translate(-50%, -50%);
   border-radius: 50%;
   border: 2px solid transparent;
@@ -143,13 +149,14 @@ html, body {
 /* Phase nodes — positioned absolutely on the ring */
 .phase-node {
   position: absolute;
-  width: 105px; height: 105px;
+  width: var(--node-size); height: var(--node-size);
   border-radius: 50%;
   background: var(--bg-elevated);
   border: 2px solid var(--star-dust);
   display: flex; flex-direction: column;
   align-items: center; justify-content: center;
   cursor: pointer;
+  touch-action: manipulation;
   transition: all 0.4s ease;
   text-align: center; z-index: 2;
 }
@@ -201,7 +208,7 @@ html, body {
 /* ── Bottom: Detail panel ── */
 .detail-panel {
   margin: 0 auto 16px;
-  width: 660px;
+  width: min(660px, calc(100vw - 40px));
   min-height: 120px;
   background: rgba(17,32,47,0.85);
   backdrop-filter: blur(20px);
@@ -231,6 +238,68 @@ html, body {
 @keyframes fadeInDown  { from { opacity:0; transform: translateY(-20px); } to { opacity:1; transform: translateY(0); } }
 @keyframes fadeInRight { from { opacity:0; transform: translateX(20px); }  to { opacity:1; transform: translateX(0); } }
 @keyframes fadeInLeft  { from { opacity:0; transform: translateX(-20px); } to { opacity:1; transform: translateX(0); } }
+
+@media (max-width: 760px) {
+  .page {
+    grid-template-rows: auto auto auto;
+    align-items: start;
+    gap: 20px;
+    padding: 18px 0 22px;
+  }
+  .top-bar {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 16px;
+    padding: 0 20px;
+  }
+  .header-center { order: 1; }
+  .ai-badge { order: 2; justify-content: center; }
+  .golden-rule { order: 3; max-width: none; }
+  .header-center h1 { font-size: clamp(1.8rem, 9vw, 2.4rem); }
+  .header-center .subtitle { font-size: 0.68rem; line-height: 1.45; }
+  .loop-area { padding: 4px 0; }
+  .loop-wrapper {
+    --node-size: clamp(78px, 24vw, 96px);
+    --ring-size: min(62vw, 230px);
+    width: min(330px, calc(100vw - 36px));
+  }
+  #node-prime { top: 0; }
+  #node-translate { right: 0; }
+  #node-execute { bottom: 0; }
+  #node-reflect { left: 0; }
+  .phase-node .phase-num { font-size: 0.5rem; }
+  .phase-node .phase-icon { font-size: 1.05rem; }
+  .phase-node .phase-title { font-size: 0.68rem; }
+  .arrow { display: none; }
+  .detail-panel {
+    margin: 0 auto;
+    min-height: auto;
+    padding: 16px 18px;
+    border-radius: 10px;
+  }
+}
+
+@media (max-height: 700px) and (min-width: 761px) {
+  .top-bar { padding-top: 14px; }
+  .header-center h1 { font-size: 1.9rem; }
+  .loop-wrapper {
+    --node-size: 92px;
+    --ring-size: 240px;
+    width: 360px;
+  }
+  .detail-panel {
+    min-height: 96px;
+    padding: 14px 22px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
 </style>
 </head>
 <body>

@@ -209,8 +209,8 @@ If you want access to the system messages and the agent harnesses we use, check 
 
 ## Interactive Deliverables
 
-- [? Interactive OASIS Loop Diagram](/oasis-loop/index.html)
-- [? Interactive HTML Playbook](/oasis-loop/playbook.html)
+- [Open the interactive OASIS Loop diagram](/oasis-loop/index.html)
+- [Open the interactive HTML playbook](/oasis-loop/playbook.html)
 
 ---
 
