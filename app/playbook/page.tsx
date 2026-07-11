@@ -84,6 +84,13 @@ const SECTIONS: PlaybookSection[] = [
     body:
       "How tenant isolation, encryption, and bridge authentication actually work. Every tenant-scoped table is RLS-protected at the Postgres layer. Provider API keys encrypted at rest with AES-256-GCM (scrypt KDF, deploy-wide BRAVO_FIELD_ENCRYPTION_KEY). Bridge tokens are SHA-256 hashed before storage. Self-pair from the daemon uses HMAC headers verified server-side. Migration 030 enforces one live pairing per (tenant, machine_fingerprint) at the DB layer. Read brain/SECURITY_MODEL.md for the full architecture.",
   },
+  {
+    href: "/playbook/10-oasis-loop",
+    title: "10 The OASIS Loop",
+    subtitle: "Closed-loop AI interaction - 4 phases - 1 clean chat",
+    body:
+      "The definitive method for getting production-grade output from any AI system. Two AIs (Prompt Engineer + Executor) working hand-in-hand to translate your raw ideas into precision execution. Prime, Translate, Execute, Reflect.",
+  },
 ];
 
 // SunBiz playbook - working surfaces first. Each visible card must either open

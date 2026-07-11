@@ -1,0 +1,450 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>The OASIS Loop — Playbook</title>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,wght@0,300;0,400;0,600;1,300;1,400&family=Inter:wght@200;300;400;500;700&display=swap" rel="stylesheet">
+<style>
+*, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+:root {
+  --bg-deep: #050B12;
+  --bg-primary: #0A1525;
+  --bg-elevated: #11202F;
+  --bg-card: #162535;
+  --cyan: #1FE3F0;
+  --cyan-soft: #7AE8F0;
+  --off-white: #F0F4F8;
+  --body-gray: #A8B5C2;
+  --body-dim: #5A6A7A;
+  --star-dust: #3A4A5C;
+}
+html {
+  background: var(--bg-deep);
+  color: var(--off-white);
+  font-family: 'Inter', sans-serif;
+  font-weight: 300;
+  font-size: 16px;
+  line-height: 1.7;
+  scroll-behavior: smooth;
+}
+body {
+  max-width: 820px;
+  margin: 0 auto;
+  padding: 60px 40px 100px;
+}
+
+/* ── Typography ── */
+h1 {
+  font-family: 'Fraunces', serif;
+  font-weight: 300;
+  font-size: 2.8rem;
+  color: var(--off-white);
+  text-shadow: 0 0 40px rgba(31,227,240,0.15);
+  margin-bottom: 8px;
+}
+h1 em { font-style: italic; color: var(--cyan-soft); }
+.tagline {
+  font-size: 1rem;
+  color: var(--body-gray);
+  font-weight: 300;
+  letter-spacing: 0.02em;
+  margin-bottom: 48px;
+}
+h2 {
+  font-family: 'Fraunces', serif;
+  font-weight: 400;
+  font-size: 1.6rem;
+  color: var(--off-white);
+  margin-top: 56px;
+  margin-bottom: 16px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--star-dust);
+}
+h3 {
+  font-family: 'Fraunces', serif;
+  font-weight: 400;
+  font-size: 1.15rem;
+  color: var(--cyan-soft);
+  margin-top: 32px;
+  margin-bottom: 10px;
+}
+p { margin-bottom: 16px; color: var(--body-gray); }
+strong { color: var(--off-white); font-weight: 500; }
+em { color: var(--cyan-soft); }
+
+/* ── Divider ── */
+hr {
+  border: none;
+  height: 1px;
+  background: var(--star-dust);
+  margin: 48px 0;
+}
+
+/* ── Phase cards ── */
+.phase-card {
+  background: var(--bg-elevated);
+  border: 1px solid var(--star-dust);
+  border-radius: 14px;
+  padding: 28px 32px;
+  margin: 24px 0;
+  position: relative;
+  overflow: hidden;
+}
+.phase-card::before {
+  content: '';
+  position: absolute;
+  top: 0; left: 0;
+  width: 4px; height: 100%;
+  background: var(--cyan);
+  border-radius: 4px 0 0 4px;
+}
+.phase-card .phase-label {
+  font-family: 'Fraunces', serif;
+  font-size: 0.65rem;
+  color: var(--cyan);
+  text-transform: uppercase;
+  letter-spacing: 0.15em;
+  margin-bottom: 4px;
+}
+.phase-card .phase-heading {
+  font-family: 'Fraunces', serif;
+  font-weight: 400;
+  font-size: 1.3rem;
+  color: var(--off-white);
+  margin-bottom: 12px;
+}
+.phase-card p { font-size: 0.92rem; }
+.phase-card ul {
+  list-style: none;
+  padding: 0;
+  margin: 12px 0;
+}
+.phase-card ul li {
+  position: relative;
+  padding-left: 20px;
+  margin-bottom: 8px;
+  color: var(--body-gray);
+  font-size: 0.92rem;
+}
+.phase-card ul li::before {
+  content: '→';
+  position: absolute;
+  left: 0;
+  color: var(--cyan);
+}
+
+/* ── Callout box ── */
+.callout {
+  background: rgba(31,227,240,0.06);
+  border: 1px solid rgba(31,227,240,0.2);
+  border-radius: 10px;
+  padding: 20px 24px;
+  margin: 24px 0;
+}
+.callout .callout-label {
+  font-family: 'Fraunces', serif;
+  font-size: 0.65rem;
+  color: var(--cyan);
+  text-transform: uppercase;
+  letter-spacing: 0.15em;
+  margin-bottom: 6px;
+}
+.callout p { margin-bottom: 8px; }
+.callout p:last-child { margin-bottom: 0; }
+
+/* ── Quote block ── */
+blockquote {
+  border-left: 3px solid var(--cyan);
+  padding: 12px 20px;
+  margin: 16px 0;
+  background: rgba(17,32,47,0.5);
+  border-radius: 0 8px 8px 0;
+  font-style: italic;
+  color: var(--body-gray);
+}
+blockquote strong { color: var(--off-white); }
+
+/* ── Two-column table ── */
+.role-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+  margin: 20px 0;
+}
+.role-card {
+  background: var(--bg-card);
+  border: 1px solid var(--star-dust);
+  border-radius: 12px;
+  padding: 20px 24px;
+  text-align: center;
+}
+.role-card .role-icon { font-size: 2rem; margin-bottom: 8px; }
+.role-card .role-name {
+  font-family: 'Fraunces', serif;
+  font-size: 1rem;
+  color: var(--off-white);
+  margin-bottom: 4px;
+}
+.role-card .role-subtitle {
+  font-size: 0.7rem;
+  color: var(--cyan);
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  margin-bottom: 10px;
+}
+.role-card .role-desc {
+  font-size: 0.85rem;
+  color: var(--body-gray);
+  line-height: 1.55;
+}
+
+/* ── Script section ── */
+.script-block {
+  background: var(--bg-elevated);
+  border: 1px solid var(--star-dust);
+  border-radius: 12px;
+  padding: 24px 28px;
+  margin: 16px 0;
+}
+.script-block .timestamp {
+  font-family: 'Inter', sans-serif;
+  font-size: 0.7rem;
+  font-weight: 500;
+  color: var(--cyan);
+  letter-spacing: 0.08em;
+  margin-bottom: 6px;
+}
+.script-block .section-name {
+  font-family: 'Fraunces', serif;
+  font-weight: 400;
+  font-size: 1rem;
+  color: var(--off-white);
+  margin-bottom: 10px;
+}
+.script-block .narration {
+  font-size: 0.9rem;
+  color: var(--body-gray);
+  line-height: 1.65;
+  font-style: italic;
+}
+
+/* ── Footer ── */
+.footer {
+  margin-top: 64px;
+  padding-top: 24px;
+  border-top: 1px solid var(--star-dust);
+  font-size: 0.75rem;
+  color: var(--body-dim);
+  text-align: center;
+}
+.footer span { color: var(--cyan); }
+
+/* ── Smooth fade-in on scroll ── */
+.fade-in {
+  opacity: 0;
+  transform: translateY(16px);
+  transition: opacity 0.6s ease, transform 0.6s ease;
+}
+.fade-in.visible {
+  opacity: 1;
+  transform: translateY(0);
+}
+</style>
+</head>
+<body>
+
+<!-- ═══════════════════════════════════════ -->
+<!-- HEADER -->
+<!-- ═══════════════════════════════════════ -->
+<h1>The OASIS <em>Loop</em></h1>
+<p class="tagline">A closed-loop AI interaction method for getting production-grade output from any AI system with an agent harness.</p>
+
+<hr>
+
+<!-- ═══════════════════════════════════════ -->
+<!-- WHAT THIS IS -->
+<!-- ═══════════════════════════════════════ -->
+<div class="fade-in">
+<h2>What This Is</h2>
+<p>The OASIS Loop is a 4-phase methodology for interacting with AI systems — specifically large language models coupled with agent harnesses (system messages, tool access, memory). It was developed from hundreds of hours of building with multi-agent systems at OASIS AI Solutions.</p>
+<p>The core insight: <strong>two AIs working hand-in-hand outperform one AI working alone.</strong> One translates your vision into precision instructions. The other executes. And every session closes with a quality gate that the AI runs on itself.</p>
+</div>
+
+<hr>
+
+<!-- ═══════════════════════════════════════ -->
+<!-- TWO-AI ARCHITECTURE -->
+<!-- ═══════════════════════════════════════ -->
+<div class="fade-in">
+<h2>The Two-AI Architecture</h2>
+<p>Both AIs share the same <strong>agent harness</strong> — the same contextual system message, brand guidelines, and operating rules. The difference is in their dedicated role.</p>
+
+<div class="role-grid">
+  <div class="role-card">
+    <div class="role-icon">🔮</div>
+    <div class="role-name">AI #1</div>
+    <div class="role-subtitle">Prompt Engineer / Vibe Executor</div>
+    <div class="role-desc">Dedicated to reverse-engineering your raw thoughts, voice memos, and messy directives into a properly formatted, sequential system message for the executor. Pre-prompted with a specialist system message from the Agent Command Centre.</div>
+  </div>
+  <div class="role-card">
+    <div class="role-icon">⚡</div>
+    <div class="role-name">AI #2</div>
+    <div class="role-subtitle">Executor</div>
+    <div class="role-desc">The smarter model. Receives the refined system message from AI #1 and works through the entire task. This is where the actual building, writing, or creating happens.</div>
+  </div>
+</div>
+</div>
+
+<hr>
+
+<!-- ═══════════════════════════════════════ -->
+<!-- THE 4 PHASES -->
+<!-- ═══════════════════════════════════════ -->
+<div class="fade-in">
+<h2>The 4 Phases</h2>
+</div>
+
+<!-- PHASE 1 -->
+<div class="phase-card fade-in">
+  <div class="phase-label">Phase 1</div>
+  <div class="phase-heading">🔮 Prime — Pre-Load the Translator</div>
+  <p>Open AI #1 — your Prompt Engineer. Before you give it any task, load it with a dedicated system message that wires it as a specialist in converting raw human thoughts into structured, compelling prompts.</p>
+  <p>This system message lives in your <strong>Agent Command Centre</strong> on the OASIS AI portal. It's the same one available in the playbook section of the OASIS profile.</p>
+  <h3>What the Prompt Engineer system message does:</h3>
+  <ul>
+    <li>Tells the AI its sole job is translation — not execution</li>
+    <li>Gives it the formatting rules for output (sequential, structured, specific)</li>
+    <li>Wires it with the brand voice and domain context from the agent harness</li>
+    <li>Makes it ask clarifying questions before outputting a system message</li>
+  </ul>
+  <p><strong>You do this once per session.</strong> The Prompt Engineer stays primed until you close the chat.</p>
+</div>
+
+<!-- PHASE 2 -->
+<div class="phase-card fade-in">
+  <div class="phase-label">Phase 2</div>
+  <div class="phase-heading">📐 Translate — Feed Your Raw Directive</div>
+  <p>Now speak naturally to AI #1. Stream of consciousness. Bullet points. A voice memo transcript. A half-formed idea. Whatever you have.</p>
+  <p>The Prompt Engineer reverse-engineers your intent into a <strong>properly formatted, sequential system message</strong> that the execution AI can consume with zero ambiguity. This is the handoff artifact — the bridge between your vision and machine execution.</p>
+  <h3>Example input to AI #1:</h3>
+  <blockquote>"I need a landing page for PropFlow. It should feel premium, dark mode, show the three main features — auto-tenant screening, smart lease generation, and maintenance automation. CTA should book a demo. Use the brand colors from the brand system. Make it responsive."</blockquote>
+  <p><strong>What AI #1 outputs:</strong> A structured, sequential system message ready to paste into AI #2 — with clear sections for context, requirements, brand constraints, deliverables, and success criteria.</p>
+</div>
+
+<!-- PHASE 3 -->
+<div class="phase-card fade-in">
+  <div class="phase-label">Phase 3</div>
+  <div class="phase-heading">⚡ Execute — Build in a Clean Chat</div>
+  <p>Open AI #2 — the smarter model, the executor. Paste the refined system message from Phase 2 as your opening message. Then work through the <strong>entire task in a single, dedicated chat.</strong></p>
+  <h3>The rules here are non-negotiable:</h3>
+  <ul>
+    <li><strong>One task, one chat.</strong> Never start a second task in this thread.</li>
+    <li><strong>Never context-switch.</strong> If you need to do something else, open a new chat.</li>
+    <li><strong>Finish the task before moving on.</strong> Don't abandon a half-done chat.</li>
+    <li><strong>Iterate within the same chat.</strong> Refinements and tweaks are fine — switching topics is not.</li>
+  </ul>
+  <p>Every new message adds to the context window. When you mix Task A and Task B in the same thread, the AI's attention gets diluted. Its responses get generic. Clean context = clean output.</p>
+</div>
+
+<!-- PHASE 4 -->
+<div class="phase-card fade-in">
+  <div class="phase-label">Phase 4</div>
+  <div class="phase-heading">🪞 Reflect & Close — The Quality Gate</div>
+  <p>Before you close the execution chat, run one final system message. This is the <strong>reflection pass</strong> — and it's what separates amateur AI use from professional output.</p>
+  <h3>The reflection message tells the AI to:</h3>
+  <ul>
+    <li><strong>Introspect</strong> — review everything it built in this session</li>
+    <li><strong>Optimize</strong> — check for quality, performance, and best practices</li>
+    <li><strong>Future-proof</strong> — evaluate sustainability and long-term growth</li>
+    <li><strong>Audit</strong> — catch anything you might have missed</li>
+    <li><strong>Ensure production-grade quality</strong> — shippable, not "good enough"</li>
+  </ul>
+  <h3>Example reflection prompt:</h3>
+  <blockquote>"Before we close this session, I want you to reflect on everything we've built. Review the full output for quality, optimization, and best practices. Check for sustainability and long-term functionality. Identify anything that could be improved. Make sure this is production-grade. Give me your honest assessment and any final refinements."</blockquote>
+  <p><strong>Always close the loop.</strong> Never leave a chat without this pass. It's the difference between 80% output and 98% output.</p>
+</div>
+
+<hr>
+
+<!-- ═══════════════════════════════════════ -->
+<!-- GOLDEN RULE -->
+<!-- ═══════════════════════════════════════ -->
+<div class="callout fade-in">
+  <div class="callout-label">⚠ The Golden Rule</div>
+  <p><strong>Never mix tasks in the same chat.</strong></p>
+  <p>If you're working on Task A — a landing page — and you finish it, don't then say "oh also, can you write me some ad copy?" in the same thread. The AI's context is loaded with landing page decisions. Asking it to context-switch means it's carrying irrelevant weight.</p>
+  <p><strong>Finish Task A. Close the loop with the reflection pass. Open a new chat for Task B.</strong> Start fresh. Start clean.</p>
+</div>
+
+<hr>
+
+<!-- ═══════════════════════════════════════ -->
+<!-- VIDEO SCRIPT -->
+<!-- ═══════════════════════════════════════ -->
+<div class="fade-in">
+<h2>Video Script</h2>
+<p>Use this as narration/talking points. Total runtime: ~4:15.</p>
+</div>
+
+<div class="script-block fade-in">
+  <div class="timestamp">0:00 – 0:08</div>
+  <div class="section-name">Hook</div>
+  <p class="narration">"Most people are using AI wrong. They open a chat, dump a wall of text, and wonder why the output feels generic. I'm going to show you the exact method I use to get production-grade results — every single time."</p>
+</div>
+
+<div class="script-block fade-in">
+  <div class="timestamp">0:08 – 0:30</div>
+  <div class="section-name">Intro</div>
+  <p class="narration">"I call it the OASIS Loop. It's a closed-loop method for interacting with any AI system — whether that's ChatGPT, Claude, Gemini, or any model with a system message and tools. The secret is using two AIs, not one. And the way you close every session is what separates good output from great output."</p>
+</div>
+
+<div class="script-block fade-in">
+  <div class="timestamp">0:30 – 1:15</div>
+  <div class="section-name">Phase 1 — Prime</div>
+  <p class="narration">"Step one — Prime. Before you do anything, you open your first AI. This is your Prompt Engineer. You pre-load it with a dedicated system message that turns it into a specialist at one thing: taking your messy, raw, stream-of-consciousness thoughts and turning them into a perfectly structured prompt for a smarter AI.<br><br>Both AIs use the same agent harness — the same context, the same brand rules, the same operating system. But AI number one has a specific job: translation. Not execution. Translation.<br><br>We have this system message ready to go in our Agent Command Centre. You load it once, and your Prompt Engineer is primed."</p>
+</div>
+
+<div class="script-block fade-in">
+  <div class="timestamp">1:15 – 2:00</div>
+  <div class="section-name">Phase 2 — Translate</div>
+  <p class="narration">"Step two — Translate. Now you talk to AI number one naturally. Just speak. Brain dump. Voice memo. Bullet points. Whatever is in your head.<br><br>The Prompt Engineer takes that raw input and reverse-engineers it into a properly formatted, sequential system message that the execution AI can run with. It structures it. It sequences it. It removes ambiguity.<br><br>This is the step most people skip — and it's the most valuable one. Because the quality of your output is directly tied to the quality of your input."</p>
+</div>
+
+<div class="script-block fade-in">
+  <div class="timestamp">2:00 – 3:00</div>
+  <div class="section-name">Phase 3 — Execute</div>
+  <p class="narration">"Step three — Execute. Open AI number two — the smarter model, the executor. Paste the refined system message from step two, and start building.<br><br>Here's the rule that most people break: one task, one chat. Never mix topics. If you're building a landing page, build the landing page. Don't finish that and then ask it to write ad copy in the same thread. The AI's context window is loaded with landing page decisions. Asking it to switch to something unrelated dilutes the quality of everything.<br><br>Finish the task. In this chat. Iterate here. Refine here. But stay focused on one outcome."</p>
+</div>
+
+<div class="script-block fade-in">
+  <div class="timestamp">3:00 – 3:50</div>
+  <div class="section-name">Phase 4 — Reflect & Close</div>
+  <p class="narration">"Step four — the one nobody does, and the one that makes the biggest difference. Reflect.<br><br>Before you close the chat, you run one final prompt. You tell the AI to reflect on everything it built. Optimize it. Check for quality. Check for sustainability. Look for things you might have missed. Make sure the output is production-grade — not a draft, not a prototype.<br><br>This is the quality gate. The AI audits its own work. And nine times out of ten, it catches something you wouldn't have.<br><br>Always close the loop. Never leave a chat without this pass."</p>
+</div>
+
+<div class="script-block fade-in">
+  <div class="timestamp">3:50 – 4:15</div>
+  <div class="section-name">Close</div>
+  <p class="narration">"That's the OASIS Loop. Prime, Translate, Execute, Reflect. Four phases. Two AIs. One clean chat per task. And always — always — close the loop.<br><br>This is the method behind everything we build at OASIS AI. It's not about having the best model. It's about having the best method.<br><br>If you want access to the system messages and the agent harnesses we use, check the link in the description. Built for the ones who refuse to stay asleep."</p>
+</div>
+
+<hr>
+
+<!-- ═══════════════════════════════════════ -->
+<!-- FOOTER -->
+<!-- ═══════════════════════════════════════ -->
+<div class="footer">
+  <span>OASIS AI</span> · The OASIS Loop Playbook · Last updated July 11, 2026
+</div>
+
+<script>
+// Scroll-triggered fade-in
+const observer = new IntersectionObserver((entries) => {
+  entries.forEach(e => { if (e.isIntersecting) e.target.classList.add('visible'); });
+}, { threshold: 0.15 });
+document.querySelectorAll('.fade-in').forEach(el => observer.observe(el));
+</script>
+
+</body>
+</html>
