@@ -67,7 +67,15 @@ export async function promoteLeadToApplication(input: {
     const patch: Record<string, unknown> = {};
     for (const [k, v] of Object.entries(fields)) {
       const cur = appData[k];
-      if (cur === undefined || cur === null || cur === "") patch[k] = v;
+      // On a FRESHLY created application there's no operator data to protect, so
+      // the mapped + normalized values are authoritative — e.g. business_state
+      // "AZ" must win over the raw "Arizona" that createApplicationFromLead just
+      // copied off the lead (the SOP §4 restricted-states filter needs the
+      // 2-letter code). On a REUSED application, only fill gaps so an operator's
+      // edits are never clobbered.
+      if (appRes.created || cur === undefined || cur === null || cur === "") {
+        patch[k] = v;
+      }
     }
     patch.lead_id = leadId;
     if (!appData.status) patch.status = "application_in";
