@@ -50,6 +50,14 @@ export type SendPayload = {
   inReplyTo?: string;
   /** Full chain of prior Message-Ids, oldest first (for References). */
   references?: string[];
+  /**
+   * RFC 8058 List-Unsubscribe header value, e.g.
+   * `<https://…/unsubscribe?…>, <mailto:…?subject=unsubscribe>`. When set, both
+   * `List-Unsubscribe` and `List-Unsubscribe-Post: List-Unsubscribe=One-Click`
+   * are emitted (Gmail/Yahoo bulk-sender one-click opt-out). Omit for
+   * transactional/reply sends — every existing caller keeps working unchanged.
+   */
+  listUnsubscribe?: string;
   /** Per-tenant credential lookup; pass through from the route's auth context. */
   tenantId: string;
 };
@@ -115,6 +123,10 @@ async function sendOnce(
     }
     if (payload.references && payload.references.length > 0) {
       headers["References"] = payload.references.join(" ");
+    }
+    if (payload.listUnsubscribe && payload.listUnsubscribe.trim().length > 0) {
+      headers["List-Unsubscribe"] = payload.listUnsubscribe.trim();
+      headers["List-Unsubscribe-Post"] = "List-Unsubscribe=One-Click";
     }
 
     const info = await transporter.sendMail({

@@ -31,6 +31,7 @@
  */
 
 import "server-only";
+import { randomUUID } from "node:crypto";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { checkPhoneOptOut, checkEmailSuppressed } from "@/lib/lead-interactions-queries";
 import { sanitizeBlastMessage } from "@/lib/integrations/blast-safety";
@@ -38,6 +39,7 @@ import { checkTcpaWindow, nextTcpaWindowStart } from "@/lib/tcpa-window";
 import { renderTemplate } from "@/lib/drips/templates";
 import { parseDripSteps, type DripStep } from "@/lib/drips/types";
 import { sendDripSms, sendDripEmail } from "@/lib/drips/send";
+import { buildDripHtml, listUnsubscribeHeader } from "@/lib/drips/html-email";
 import { resolveDripSmsIdentity } from "@/lib/drips/rep-sms-identity";
 import { nudgeConversations } from "@/lib/realtime/conversations-nudge";
 
@@ -110,10 +112,15 @@ async function logInteraction(
     subject: string | null;
     body: string;
     metadata: Record<string, unknown>;
+    /** Pin the row id (email drips: = the send_id used in the open/click pixel
+     *  URLs, so /api/track/open|click/[id] resolves tenant+lead from this row).
+     *  Omit for SMS — the DB generates a random id. */
+    interactionId?: string;
   },
 ) {
   try {
     await db.from("lead_interactions").insert({
+      ...(args.interactionId ? { id: args.interactionId } : {}),
       tenant_id: args.tenantId,
       lead_id: args.leadId,
       type: args.channel === "sms" ? "sms_sent" : "email_sent",
@@ -184,7 +191,7 @@ async function advanceRow(
   db: Db,
   row: ClaimedRow,
   steps: DripStep[],
-  opts: { fromIdentity?: string; skippedReason?: string },
+  opts: { fromIdentity?: string; skippedReason?: string; providerMessageId?: string },
 ): Promise<boolean> {
   const isLast = row.step_index + 1 >= steps.length;
   const patch: Record<string, unknown> = {
@@ -193,6 +200,8 @@ async function advanceRow(
   };
   if (opts.fromIdentity) patch.from_identity = opts.fromIdentity;
   if (opts.skippedReason) patch.last_error = `skipped: ${opts.skippedReason}`.slice(0, 500);
+  // rfc822 Message-Id of the email send — the bounce reader's correlation key.
+  if (opts.providerMessageId) patch.provider_message_id = opts.providerMessageId.slice(0, 998);
   const upd = await db
     .from("drip_runs")
     .update(patch)
@@ -231,8 +240,9 @@ async function finishStep(
   steps: DripStep[],
   fromIdentity: string,
   wasReal: boolean,
+  providerMessageId?: string,
 ): Promise<StepOutcome> {
-  await advanceRow(db, row, steps, { fromIdentity });
+  await advanceRow(db, row, steps, { fromIdentity, providerMessageId });
   return wasReal ? "sent" : "dry_run";
 }
 
@@ -394,16 +404,20 @@ function stableIndex(seed: string, n: number): number {
  *  defines body_variants (the "same message in nice variations" mechanism),
  *  pick ONE deterministically per (lead, step); otherwise use the single
  *  body/subject. The chosen string then flows through the unchanged renderer. */
-function resolveStepCopy(step: DripStep, leadId: string, stepIndex: number): { subject: string; body: string } {
+function resolveStepCopy(
+  step: DripStep,
+  leadId: string,
+  stepIndex: number,
+): { subject: string; body: string; variantIndex: number } {
   const variants = step.body_variants;
   if (variants && variants.length > 0) {
     const i = stableIndex(`${leadId}:${stepIndex}`, variants.length);
     const subjectVariants = step.subject_variants;
     const subject =
       (subjectVariants && subjectVariants.length > 0 ? subjectVariants[i % subjectVariants.length] : step.subject) || "";
-    return { subject, body: variants[i] };
+    return { subject, body: variants[i], variantIndex: i };
   }
-  return { subject: step.subject || "", body: step.body };
+  return { subject: step.subject || "", body: step.body, variantIndex: 0 };
 }
 
 async function processSmsStep(
@@ -486,6 +500,7 @@ async function processSmsStep(
       from_number: identity.senderId,
       sequence_id: row.sequence_id,
       step_index: row.step_index,
+      variant_index: copy.variantIndex,
       drip_run_id: row.id,
       dry_run: !shouldSend,
       drips_live: dripsLive,
@@ -531,11 +546,22 @@ async function processEmailStep(
     return finishStep(db, row, steps, "dedup:submissions@sunbizfunding.com", false);
   }
 
+  // send_id pins the lead_interactions row id so /api/track/open|click/<send_id>
+  // resolves this exact send (tenant + lead) without trusting the URL. Generated
+  // up front so the open pixel + click-wrapped links in the HTML body and the
+  // logged interaction row all share the one key.
+  const sendId = randomUUID();
   let fromIdentity = "dry:submissions@sunbizfunding.com";
+  let providerMessageId: string | undefined;
   if (shouldSend) {
-    const result = await sendDripEmail(row.tenant_id, email, subject, clean.cleaned);
+    const html = buildDripHtml(clean.cleaned, { sendId, email });
+    const result = await sendDripEmail(row.tenant_id, email, subject, clean.cleaned, {
+      html,
+      listUnsubscribe: listUnsubscribeHeader(email),
+    });
     if (!result.ok) return markRetryOrFail(db, row, result.error);
     fromIdentity = result.fromAddress;
+    providerMessageId = result.messageId;
   }
 
   await logInteraction(db, {
@@ -547,16 +573,19 @@ async function processEmailStep(
     toEmail: email,
     subject,
     body: clean.cleaned,
+    interactionId: sendId,
     metadata: {
       provider: "submissions_gmail",
       sequence_id: row.sequence_id,
       step_index: row.step_index,
+      variant_index: copy.variantIndex,
       drip_run_id: row.id,
+      rfc822_message_id: providerMessageId ?? null,
       dry_run: !shouldSend,
       drips_live: dripsLive,
     },
   });
-  const outcome = await finishStep(db, row, steps, fromIdentity, shouldSend);
+  const outcome = await finishStep(db, row, steps, fromIdentity, shouldSend, providerMessageId);
   await nudgeConversations(row.tenant_id);
   return outcome;
 }

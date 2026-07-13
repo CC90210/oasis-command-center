@@ -44,6 +44,7 @@ export type LeadStageEvent =
   | { type: "outbound_email_queued"; tenantId: string; leadId: string }
   | { type: "outbound_email_sent"; tenantId: string; leadId: string }
   | { type: "email_opened"; tenantId: string; leadId: string }
+  | { type: "email_clicked"; tenantId: string; leadId: string }
   | { type: "form_signed"; tenantId: string; leadId: string }
   | { type: "lead_replied_negative"; tenantId: string; leadId: string }
   | { type: "sequence_exhausted"; tenantId: string; leadId: string };
@@ -119,6 +120,26 @@ const RULES: Record<LeadStageEvent["type"], Rule> = {
     from: new Set<string>(["sent_application"]),
     to: "viewed_application",
     reasonCode: "email_opened",
+  },
+
+  // A tracked LINK click in a drip email. Unlike an open (a pixel fetch that
+  // Apple Mail Privacy Protection prefetches, so it's gated narrowly to
+  // sent_application), a click is a deliberate human action and a strong intent
+  // signal — Adon's rule: "once they click the email they should automatically
+  // be put into viewed". So it advances from any PRE-viewed funnel stage. The
+  // from-set stops before viewed_application, so it's forward-only: a click from
+  // a lead already at viewed / signed / submitted is a no-op (never a regression).
+  email_clicked: {
+    from: new Set<string>([
+      "",
+      "intent_inquiry_submitted",
+      "hot_lead",
+      "follow_up",
+      "missing_info",
+      "sent_application",
+    ]),
+    to: "viewed_application",
+    reasonCode: "email_clicked",
   },
 
   // Public form's signature step completes. The form already

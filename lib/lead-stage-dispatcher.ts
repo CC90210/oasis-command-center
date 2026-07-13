@@ -83,8 +83,8 @@ function eventToOasis(event: LeadStageEvent): OasisLeadStageEvent | null {
     case "lead_replied_negative":
       return { type: event.type, tenantId: event.tenantId, leadId: event.leadId };
     default:
-      // doc_uploaded, email_opened, form_signed, sequence_exhausted —
-      // all SunBiz-only triggers. No OASIS equivalent yet.
+      // doc_uploaded, email_opened, email_clicked, form_signed,
+      // sequence_exhausted — all SunBiz-only triggers. No OASIS equivalent yet.
       return null;
   }
 }

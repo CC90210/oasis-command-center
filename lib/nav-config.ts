@@ -153,6 +153,10 @@ export const SUN_NAV: NavItem[] = [
   { group: "Operations", href: "/agent", label: "Agents", icon: "Bot" },
   { group: "Operations", href: "/reasoning", label: "Reasoning", icon: "Brain" },
   { group: "Operations", href: "/playbook", label: "Playbook", icon: "BookOpen" },
+  // Metrics — one aggregate hub across all deals: conversion, reach/
+  // deliverability, application-form interaction, email open/click-through, and
+  // per-drip performance. The CRM still shows per-lead detail; this is the roll-up.
+  { group: "Metrics", href: "/metrics", label: "Metrics", icon: "BarChart3" },
   // Pipeline — per-entity boards behind the unified /pipeline view.
   // Contacts dropped 2026-05-17 — was a speculative scaffold; the lead
   // record itself carries contact_name + phone + email so a separate
