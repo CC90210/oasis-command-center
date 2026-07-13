@@ -28,6 +28,7 @@ import {
   updateRecord,
 } from "@/lib/manifest/data";
 import { resolveAssignedScope, leadScopingEnabled, SCOPED_ENTITIES, isAdminProfile } from "@/lib/lead-scope";
+import { generateApplicationDocumentFromRecord } from "@/lib/forms/application-document";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -203,6 +204,19 @@ export async function PATCH(
       id,
       patch: body.patch,
     });
+    // Editing an application's fields (e.g. swapping in a phone once it's found)
+    // must regenerate the branded application PDF so the filed document always
+    // reflects the current record. Awaited + soft-fail so a slow/failed render
+    // never blocks the save, but a normal edit returns only once the fresh PDF
+    // is filed — the drawer's Docs tab then shows the updated "Final Application
+    // Form" on reload. (No-op for every other entity.)
+    if (entity.toLowerCase() === "application") {
+      await generateApplicationDocumentFromRecord({
+        tenantId: r.tenant_id,
+        applicationId: id,
+        replace: true,
+      }).catch(() => {});
+    }
     return NextResponse.json({ ok: true, record: row });
   } catch (err) {
     return handleRecordsError(err);
