@@ -23,7 +23,7 @@ import { getServiceSupabase } from "@/lib/supabase-server";
 import { encryptField, decryptField } from "@/lib/field-encryption";
 import { checkEmailSuppressed } from "@/lib/lead-interactions-queries";
 import { sanitizeBlastMessage } from "@/lib/integrations/blast-safety";
-import { buildTrackedHtml, unsubscribeUrl } from "@/lib/email/tracked-html";
+import { buildTrackedHtml, unsubscribeApiUrl } from "@/lib/email/tracked-html";
 
 export type SendClass = "cold" | "warm";
 
@@ -169,7 +169,7 @@ export async function sendColdEmail(args: {
       headers: {
         // RFC 8058 one-click (HTTPS) + a cold-domain mailto fallback (keeps
         // reputation isolation — no sunbizfunding.com reference in a cold send).
-        "List-Unsubscribe": `<${unsubscribeUrl(args.to, "SunBiz")}>, <mailto:unsubscribe@${mb.domain}?subject=unsubscribe>`,
+        "List-Unsubscribe": `<${unsubscribeApiUrl(args.to, "SunBiz")}>, <mailto:unsubscribe@${mb.domain}?subject=unsubscribe>`,
         "List-Unsubscribe-Post": "List-Unsubscribe=One-Click",
       },
     });

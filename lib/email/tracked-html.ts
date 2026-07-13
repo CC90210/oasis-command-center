@@ -94,10 +94,10 @@ export function clickUrl(sendId: string, target: string): string {
   return s ? `${base}&s=${s}` : base;
 }
 
-/** Unsubscribe URL matching /api/unsubscribe's token scheme. Email is lowercased
- *  in BOTH the token and the query param because the route lowercases before it
- *  verifies HMAC(email|brand). */
-export function unsubscribeUrl(email: string, brand: string = SUNBIZ_BRAND): string {
+/** Signed query string (email|brand|token) shared by the page + API unsub URLs.
+ *  Email is lowercased in BOTH the token and the param because the route
+ *  lowercases before it verifies HMAC(email|brand). */
+function unsubQuery(email: string, brand: string): string {
   const lower = email.trim().toLowerCase();
   const secret = process.env.OASIS_UNSUBSCRIBE_HMAC_SECRET;
   const qs = new URLSearchParams({ email: lower, brand });
@@ -105,12 +105,25 @@ export function unsubscribeUrl(email: string, brand: string = SUNBIZ_BRAND): str
     const token = createHmac("sha256", secret).update(`${lower}|${brand}`).digest("hex").slice(0, 16);
     qs.set("token", token);
   }
-  return `${appBase()}/unsubscribe?${qs.toString()}`;
+  return qs.toString();
 }
 
-/** RFC 8058 List-Unsubscribe header value (one-click URL + mailto fallback). */
+/** Human-facing unsubscribe PAGE (renders a confirmation) — used by the visible
+ *  in-body footer link on commercial mail. */
+export function unsubscribeUrl(email: string, brand: string = SUNBIZ_BRAND): string {
+  return `${appBase()}/unsubscribe?${unsubQuery(email, brand)}`;
+}
+
+/** Machine-facing unsubscribe API — the RFC 8058 one-click POST target. Points at
+ *  /api/unsubscribe (which accepts the query params on POST), NOT the page, so a
+ *  mail client's one-click actually suppresses instead of 405-ing on the page. */
+export function unsubscribeApiUrl(email: string, brand: string = SUNBIZ_BRAND): string {
+  return `${appBase()}/api/unsubscribe?${unsubQuery(email, brand)}`;
+}
+
+/** RFC 8058 List-Unsubscribe header value (one-click HTTPS URL + mailto fallback). */
 export function listUnsubscribeHeader(email: string, brand: string = SUNBIZ_BRAND): string {
-  return `<${unsubscribeUrl(email, brand)}>, <mailto:submissions@sunbizfunding.com?subject=unsubscribe>`;
+  return `<${unsubscribeApiUrl(email, brand)}>, <mailto:submissions@sunbizfunding.com?subject=unsubscribe>`;
 }
 
 export type UnsubMode = "footer" | "none";
