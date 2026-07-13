@@ -106,8 +106,16 @@ export async function sendDripEmail(
   toEmail: string,
   subject: string,
   body: string,
+  opts?: { html?: string; listUnsubscribe?: string },
 ): Promise<DripEmailResult> {
-  const result = await sendGmail({ tenantId, to: toEmail, subject, body });
+  const result = await sendGmail({
+    tenantId,
+    to: toEmail,
+    subject,
+    body,
+    html: opts?.html,
+    listUnsubscribe: opts?.listUnsubscribe,
+  });
   if (!result.ok) return { ok: false, error: result.error };
   let fromAddress = "submissions@sunbizfunding.com";
   try {
