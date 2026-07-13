@@ -12,3 +12,6 @@ rows are queued, so nothing but the test leads can send. Reverted to the parked 
 ## Test 2 (2026-07-10) — new direct-lender templates + cold-outreach
 Controlled live test of the redesigned direct-lender email templates across all
 stages + a cold-outreach intro, to test leads only.
+
+## GO LIVE (2026-07-13) — email drips from submissions@ + per-rep SMS, controlled ramp
+DRIPS_ENROLL_STAGES=* + DRIPS_ENROLL_LIMIT=5 + BRAVO_FORCE_DRY_RUN=0. Sequences enabled, watchdog live.
