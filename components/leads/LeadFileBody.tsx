@@ -259,12 +259,23 @@ export function LeadFileBody({
           ) : (
             <span />
           )}
-          <Link
-            href={editHref}
-            className="text-[10.5px] text-fg-muted hover:text-fg underline underline-offset-2"
-          >
-            Edit full record →
-          </Link>
+          {entity === "application" ? (
+            <Link
+              href={editHref}
+              title="Edit this application's fields. Saving regenerates the application PDF with your changes."
+              className="inline-flex items-center gap-1.5 text-[10.5px] font-semibold px-2.5 py-1 rounded-md border border-bg-border text-fg-muted hover:text-fg hover:border-fg-dim transition-colors"
+            >
+              <FileText className="w-3 h-3" />
+              Edit application
+            </Link>
+          ) : (
+            <Link
+              href={editHref}
+              className="text-[10.5px] text-fg-muted hover:text-fg underline underline-offset-2"
+            >
+              Edit full record →
+            </Link>
+          )}
         </div>
       </div>
 
