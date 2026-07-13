@@ -89,16 +89,27 @@ export async function POST(req: NextRequest) {
     return bad(429, "rate_limited: too many opt-out attempts; back off and retry");
   }
 
-  // ---- Shape validation ----
-  let body: { email?: unknown; brand?: unknown; token?: unknown };
-  try {
-    body = await req.json();
-  } catch {
-    return bad(400, "invalid_json");
+  // ---- Read the identity from EITHER the query string (RFC 8058 one-click:
+  // the mail client POSTs to the List-Unsubscribe URL with email/brand/token in
+  // the query and a `List-Unsubscribe=One-Click` form body) OR the JSON body
+  // (the /unsubscribe page form). Query wins; only parse a JSON body when the
+  // query has no email, so the one-click form-encoded body never trips invalid_json.
+  const qp = req.nextUrl.searchParams;
+  let src: { email?: unknown; brand?: unknown; token?: unknown } = {
+    email: qp.get("email") || undefined,
+    brand: qp.get("brand") || undefined,
+    token: qp.get("token") || undefined,
+  };
+  if (!src.email) {
+    try {
+      src = await req.json();
+    } catch {
+      return bad(400, "invalid_json");
+    }
   }
-  const rawEmail = String(body.email ?? "").trim().toLowerCase();
-  const rawBrand = String(body.brand ?? "").trim();
-  const rawToken = String(body.token ?? "").trim();
+  const rawEmail = String(src.email ?? "").trim().toLowerCase();
+  const rawBrand = String(src.brand ?? "").trim();
+  const rawToken = String(src.token ?? "").trim();
 
   if (!rawEmail || rawEmail.length > MAX_EMAIL_LEN || !EMAIL_RE.test(rawEmail)) {
     await recordPairAttempt(rateKey, "code_invalid_shape", ip);

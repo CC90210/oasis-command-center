@@ -77,7 +77,7 @@ type ClaimedRow = {
 };
 
 type LeadData = Record<string, unknown>;
-type SequenceRow = { id: string; name: string; enabled: boolean; steps: unknown };
+type SequenceRow = { id: string; name: string; enabled: boolean; steps: unknown; emailClass: string };
 
 export type DispatchDripsResult = {
   ok: true;
@@ -517,6 +517,7 @@ async function processEmailStep(
   data: LeadData,
   step: DripStep,
   steps: DripStep[],
+  emailClass: string,
 ): Promise<StepOutcome> {
   const email = typeof data.email === "string" ? data.email.trim() : "";
   // No email for an email step: SKIP + advance (the sequence may have SMS steps
@@ -554,7 +555,12 @@ async function processEmailStep(
   let fromIdentity = "dry:submissions@sunbizfunding.com";
   let providerMessageId: string | undefined;
   if (shouldSend) {
-    const html = buildDripHtml(clean.cleaned, { sendId, email });
+    // Transactional/relationship email (application nudges, statements, etc.) is
+    // CAN-SPAM opt-out-exempt → NO visible unsubscribe footer. The invisible
+    // List-Unsubscribe header stays for BOTH classes (cuts spam complaints +
+    // protects inbox placement). Commercial mail keeps the footer.
+    const unsub = emailClass === "transactional" ? "none" : "footer";
+    const html = buildDripHtml(clean.cleaned, { sendId, email, unsub });
     const result = await sendDripEmail(row.tenant_id, email, subject, clean.cleaned, {
       html,
       listUnsubscribe: listUnsubscribeHeader(email),
@@ -625,7 +631,7 @@ async function processRow(
   if (isOptedOutOrDead(data)) return markPermanentFail(db, row, "lead_opted_out_or_dead");
 
   if (step.channel === "sms") return processSmsStep(db, row, data, step, steps);
-  return processEmailStep(db, row, data, step, steps);
+  return processEmailStep(db, row, data, step, steps, seq.emailClass || "commercial");
 }
 
 export async function runDispatchDrips(): Promise<DispatchDripsResult> {
@@ -706,10 +712,10 @@ export async function runDispatchDrips(): Promise<DispatchDripsResult> {
   try {
     const seqRes = await db
       .from("drip_sequences")
-      .select("id, tenant_id, name, enabled, steps")
+      .select("id, tenant_id, name, enabled, steps, email_class")
       .in("id", sequenceIds);
-    for (const r of (seqRes.data || []) as Array<{ id: string; tenant_id: string; name: string; enabled: boolean; steps: unknown }>) {
-      seqMap.set(`${r.tenant_id}|${r.id}`, { id: r.id, name: r.name, enabled: r.enabled, steps: r.steps });
+    for (const r of (seqRes.data || []) as Array<{ id: string; tenant_id: string; name: string; enabled: boolean; steps: unknown; email_class: string | null }>) {
+      seqMap.set(`${r.tenant_id}|${r.id}`, { id: r.id, name: r.name, enabled: r.enabled, steps: r.steps, emailClass: r.email_class || "commercial" });
     }
   } catch (err) {
     console.error("[dispatch-drips] sequence prefetch failed", err);

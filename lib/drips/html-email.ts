@@ -14,6 +14,7 @@ export {
   pixelUrl,
   clickUrl,
   unsubscribeUrl,
+  unsubscribeApiUrl,
   listUnsubscribeHeader,
   buildTrackedHtml,
   buildDripHtml,
