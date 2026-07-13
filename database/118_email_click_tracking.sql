@@ -34,9 +34,25 @@ create index if not exists idx_email_click_events_tenant_lead
 create index if not exists idx_email_click_events_message
   on public.email_click_events (outbound_message_id);
 -- One row per (message, recipient-ip) — re-clicks from the same recipient
--- collapse. Anonymous clicks (ip_hash null) skip the index and always insert.
+-- collapse. MUST be a NON-partial unique index: the route upserts with
+-- ON CONFLICT (outbound_message_id, ip_hash), and PostgREST rejects a PARTIAL
+-- index as an ON CONFLICT target ("42P10: no unique or exclusion constraint
+-- matching") — the exact bug that left the sibling email_open_events dedup
+-- (a partial index) inserting ZERO rows in prod. NULLs are distinct by default,
+-- so anonymous clicks (ip_hash null) still always insert (accepted over-count).
+drop index if exists public.idx_email_click_events_dedup;
 create unique index if not exists idx_email_click_events_dedup
-  on public.email_click_events (outbound_message_id, ip_hash) where ip_hash is not null;
+  on public.email_click_events (outbound_message_id, ip_hash);
+
+-- HOTFIX (same class of bug): email_open_events' dedup index is PARTIAL
+-- (WHERE ip_hash IS NOT NULL), so /api/track/open's upsert ON CONFLICT
+-- (outbound_message_id, ip_hash) has failed on EVERY open since it shipped —
+-- prod email_open_events has 0 rows. Open-rate feeds the Metrics tab, so
+-- rebuild it as a non-partial unique index. email_open_events had 0 rows, so
+-- the drop/recreate can't collide.
+drop index if exists public.idx_email_open_events_dedup;
+create unique index if not exists idx_email_open_events_dedup
+  on public.email_open_events (outbound_message_id, ip_hash);
 
 alter table public.email_click_events enable row level security;
 alter table public.email_click_events force row level security;
