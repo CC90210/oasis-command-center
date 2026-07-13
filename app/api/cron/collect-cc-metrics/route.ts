@@ -14,7 +14,7 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
 
-type Stats = { sends: number; opens: number; unique_opens: number; clicks: number; bounces: number; optouts: number; complaints: number };
+type Stats = { sends: number; opens: number; unique_opens: number; clicks: number; unique_clicks: number; bounces: number; optouts: number; complaints: number };
 
 function extractStats(resp: unknown): Stats | null {
   const r = resp as Record<string, unknown> | null;
@@ -26,6 +26,7 @@ function extractStats(resp: unknown): Stats | null {
     opens: n("opens"),
     unique_opens: n("unique_opens") || n("opens"),
     clicks: n("clicks"),
+    unique_clicks: n("unique_clicks") || n("clicks"),
     bounces: n("bounces") || n("hard_bounces") + n("soft_bounces"),
     optouts: n("optouts") || n("opt_outs"),
     complaints: n("abuse") || n("complaints"),
@@ -71,12 +72,14 @@ export async function GET(req: NextRequest) {
           opens: s.opens,
           unique_opens: s.unique_opens,
           clicks: s.clicks,
+          unique_clicks: s.unique_clicks,
           bounces: s.bounces,
           optouts: s.optouts,
           complaints: s.complaints,
           open_rate: s.sends ? Number((s.opens / s.sends).toFixed(4)) : null,
           click_rate: s.sends ? Number((s.clicks / s.sends).toFixed(4)) : null,
           bounce_rate: s.sends ? Number((s.bounces / s.sends).toFixed(4)) : null,
+          complaint_rate: s.sends ? Number((s.complaints / s.sends).toFixed(4)) : null,
           status: "collected",
         });
 

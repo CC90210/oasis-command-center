@@ -18,10 +18,12 @@
  */
 
 import "server-only";
+import { randomUUID } from "node:crypto";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { encryptField, decryptField } from "@/lib/field-encryption";
 import { checkEmailSuppressed } from "@/lib/lead-interactions-queries";
 import { sanitizeBlastMessage } from "@/lib/integrations/blast-safety";
+import { buildTrackedHtml, unsubscribeUrl } from "@/lib/email/tracked-html";
 
 export type SendClass = "cold" | "warm";
 
@@ -118,6 +120,10 @@ export async function sendColdEmail(args: {
   to: string;
   subject: string;
   body: string;
+  /** Optional: attribute the send to a CRM lead (opens/clicks move its stage). */
+  leadId?: string | null;
+  /** Campaign label → agent_source 'cold:<campaign>' so the Metrics tab buckets it. */
+  campaign?: string;
 }): Promise<ColdSendResult> {
   const mb = await pickColdMailbox(args.tenantId);
   if (!mb) {
@@ -139,6 +145,15 @@ export async function sendColdEmail(args: {
   const appPassword = safeDecrypt(mb.app_password_enc).replace(/\s+/g, "");
   if (!appPassword) return { ok: false, reason: "send_failed", error: "mailbox credential missing or undecryptable" };
 
+  // send_id pins the lead_interactions row id so /api/track/open|click/<send_id>
+  // attribute this cold send's opens/clicks (source 'cold:*' in the Metrics tab).
+  const sendId = randomUUID();
+  const textBody = safe.cleaned.replace(/\s+$/, "") + COLD_FOOTER;
+  // COLD_FOOTER already carries the CAN-SPAM postal address + reply-based opt-out,
+  // so the tracked HTML doesn't add a second (link) footer (unsub:'none'); the
+  // one-click List-Unsubscribe header below is the link-based opt-out.
+  const html = buildTrackedHtml(textBody, { sendId, email: args.to, brand: "SunBiz", unsub: "none" });
+
   try {
     const nodemailer = await import("nodemailer");
     const transporter = nodemailer.createTransport({
@@ -149,10 +164,37 @@ export async function sendColdEmail(args: {
       from: mb.address,
       to: args.to,
       subject: args.subject,
-      text: safe.cleaned.replace(/\s+$/, "") + COLD_FOOTER,
-      headers: { "List-Unsubscribe": `<mailto:unsubscribe@${mb.domain}?subject=unsubscribe>` },
+      text: textBody,
+      html,
+      headers: {
+        // RFC 8058 one-click (HTTPS) + a cold-domain mailto fallback (keeps
+        // reputation isolation — no sunbizfunding.com reference in a cold send).
+        "List-Unsubscribe": `<${unsubscribeUrl(args.to, "SunBiz")}>, <mailto:unsubscribe@${mb.domain}?subject=unsubscribe>`,
+        "List-Unsubscribe-Post": "List-Unsubscribe=One-Click",
+      },
     });
     await bumpCap(mb);
+    // Best-effort attribution log — never fail the send on a logging error.
+    try {
+      const db = getServiceSupabase();
+      await db.from("lead_interactions").insert({
+        id: sendId,
+        tenant_id: args.tenantId,
+        lead_id: args.leadId || null,
+        type: "email_sent",
+        channel: "email",
+        direction: "outbound",
+        agent_source: `cold:${(args.campaign || "blast").slice(0, 60)}`,
+        to_email: args.to,
+        subject: args.subject,
+        content_preview: textBody.slice(0, 1024),
+        provider: "cold_apppassword",
+        provider_message_id: info.messageId || null,
+        metadata: { provider: "cold_apppassword", mailbox_id: mb.id, dry_run: false, cold: true },
+      });
+    } catch (logErr) {
+      console.error("[cold-sending] interaction log failed", logErr);
+    }
     return { ok: true, provider: "cold_apppassword", from_address: mb.address, mailbox_id: mb.id, message_id: info.messageId || "" };
   } catch (e) {
     return { ok: false, reason: "send_failed", error: e instanceof Error ? e.message.split("\n")[0].slice(0, 200) : "smtp_error" };
