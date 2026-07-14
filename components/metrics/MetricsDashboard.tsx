@@ -232,10 +232,36 @@ function SeqRows({ d }: { d: SequenceMetric }) {
 function numHealthTone(h: string): "hot" | "warm" | "engaged" {
   return h === "spammy" ? "hot" : h === "watch" ? "warm" : "engaged";
 }
+type TtLive = {
+  credits: number | null; plan: number | null; subAccounts: number | null; company: string | null;
+  campaigns: Array<{ id: string; name: string; status: string; createdAt: string; list: string }>;
+};
 function SmsPanel({ sms, windowDays }: { sms: SmsMetrics; windowDays: number }) {
   const hasCampaigns = sms.campaignSent > 0;
+  // Live account snapshot (credits + recent campaigns), fetched only when this
+  // tab mounts so we don't hit the shared TT rate limit on every page load.
+  const [live, setLive] = useState<TtLive | null>(null);
+  useEffect(() => {
+    let alive = true;
+    fetch("/api/metrics/tt-live")
+      .then((r) => r.json())
+      .then((d) => { if (alive && d?.ok) setLive(d as TtLive); })
+      .catch(() => {});
+    return () => { alive = false; };
+  }, []);
   return (
     <div className="space-y-6">
+      {/* live account line */}
+      {live && (live.credits != null || live.subAccounts != null) && (
+        <div className="flex flex-wrap items-center gap-x-6 gap-y-1 text-xs text-fg-muted">
+          {live.credits != null && (
+            <span><span className="text-fg font-bold tabular-nums text-sm">{compact(live.credits)}</span> credits</span>
+          )}
+          {live.subAccounts != null && <span className="text-fg-dim">{live.subAccounts} sub-accounts (reps)</span>}
+          {live.company && <span className="text-fg-dim">{live.company}</span>}
+          <span className="ml-auto text-fg-dim">live from Text Torrent</span>
+        </div>
+      )}
       {/* headline SMS stats */}
       <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-4">
         <VolTile label="SMS sent" value={compact(sms.totalSent)} hint={`${compact(sms.dripSent)} via drips`} />
@@ -281,6 +307,34 @@ function SmsPanel({ sms, windowDays }: { sms: SmsMetrics; windowDays: number }) 
           <div className="text-sm text-fg-dim py-2">No campaign number-health data yet — it appears once the outreach collector has a Text Torrent campaign to read.</div>
         )}
       </Card>
+
+      {/* recent campaigns (live from TT) */}
+      {live && live.campaigns.length > 0 && (
+        <Card title="Recent campaigns" subtitle="Live from Text Torrent">
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="text-[10px] uppercase tracking-wider text-fg-dim">
+                  <th className="text-left font-bold pb-1">Campaign</th>
+                  <th className="text-left font-bold pb-1 px-2">List</th>
+                  <th className="text-left font-bold pb-1 px-2">Status</th>
+                  <th className="text-right font-bold pb-1 pl-2">Date</th>
+                </tr>
+              </thead>
+              <tbody>
+                {live.campaigns.map((c) => (
+                  <tr key={c.id} className="border-t border-bg-border">
+                    <td className="py-2 pr-3 font-semibold text-fg">{c.name}</td>
+                    <td className="py-2 px-2 text-fg-muted truncate max-w-[200px]">{c.list || "—"}</td>
+                    <td className="py-2 px-2"><Tag tone={c.status === "Completed" ? "engaged" : "neutral"}>{c.status || "—"}</Tag></td>
+                    <td className="py-2 pl-2 text-right text-xs text-fg-dim tabular-nums">{c.createdAt.slice(0, 10)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </Card>
+      )}
 
       {/* per-rep drip volume */}
       {sms.perRep.length > 0 && (
