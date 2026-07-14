@@ -47,6 +47,24 @@ export type EmailMetrics = EmailCounts & {
   complaintRate: number;
 };
 
+/** One day of the trend series (for sparklines + the area chart). */
+export type TrendPoint = { date: string; sent: number; opens: number; clicks: number };
+
+/**
+ * 0-100 deliverability/engagement health score for the gauge. Starts at 100 and
+ * subtracts capped penalties for bounce / complaint / unsubscribe rate, with a
+ * soft engagement penalty for very low open rate. `sent === 0` → 0 ("no data").
+ */
+export function healthScore(m: EmailMetrics): number {
+  if (!m.sent) return 0;
+  let score = 100;
+  score -= Math.min(45, m.bounceRate * 900); // ~5% bounce → −45
+  score -= Math.min(45, m.complaintRate * 15000); // ~0.3% complaint → −45
+  score -= Math.min(20, m.unsubRate * 1000); // ~2% unsub → −20
+  if (m.delivered > 0 && m.openRate < 0.1) score -= 10; // weak engagement, soft
+  return Math.max(0, Math.min(100, Math.round(score)));
+}
+
 export function rate(numerator: number, denominator: number): number {
   if (!denominator || denominator <= 0) return 0;
   const r = numerator / denominator;
