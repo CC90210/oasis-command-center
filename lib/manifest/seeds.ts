@@ -345,6 +345,10 @@ export const SUN_SEED: TenantManifest = {
     // Templates — SunBiz ad + email creative library (global /templates page),
     // subcategorized by niche × campaign-type. Global href like Playbook above.
     { href: "/templates", label: "Templates", icon: "FileCode2", group: "Operations" },
+    // Metrics — one cross-source email + conversion analytics hub (Constant
+    // Contact parity), separate from Campaigns. Global top-level /metrics route
+    // (like /sequences / /templates above), its own sidebar section.
+    { href: "/metrics", label: "Metrics", icon: "BarChart3", group: "Metrics" },
     // Pipeline — top-of-funnel through funding shop. Shopping Out is the
     // new (Phase 4) multi-lender outreach surface; sits between Leads and
     // Applications to mirror the operator's real workflow order.
