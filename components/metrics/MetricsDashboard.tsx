@@ -38,13 +38,19 @@ function useCountUp(to: number, ms = 850): number {
   return v;
 }
 
-/* ---------------- source registry ---------------- */
-const SOURCES: Array<{ key: MetricSource | "all"; label: string }> = [
-  { key: "all", label: "All" },
-  { key: "drips", label: "Drips" },
-  { key: "cold", label: "Cold" },
-  { key: "submissions", label: "Submissions@" },
-  { key: "constant_contact", label: "Constant Contact" },
+/* ---------------- source/channel registry ---------------- */
+// Tabs are the channels we actually use. Email sources (drips/cold/constant_
+// contact) map to a data block; Text Torrent (SMS) + Kixie (calls) render their
+// own panels — Text Torrent shows drip SMS volume today (full campaign metrics
+// connect when TT collection is on); Kixie is awaiting integration.
+type TabKey = "all" | "drips" | "cold" | "texttorrent" | "constant_contact" | "kixie";
+const SOURCES: Array<{ key: TabKey; label: string; kind: "email" | "sms" | "calls" }> = [
+  { key: "all", label: "All", kind: "email" },
+  { key: "drips", label: "Drips", kind: "email" },
+  { key: "cold", label: "Cold", kind: "email" },
+  { key: "texttorrent", label: "Text Torrent", kind: "sms" },
+  { key: "constant_contact", label: "Constant Contact", kind: "email" },
+  { key: "kixie", label: "Kixie", kind: "calls" },
 ];
 
 const HEALTH_TONE: Record<MetricsHealth, "engaged" | "warm" | "hot"> = { healthy: "engaged", watch: "warm", spammy: "hot" };
@@ -143,8 +149,8 @@ function MetricsFunnel({ stages, total }: { stages: Array<{ stage: string; count
 
 /* ---------------- per-source comparison ---------------- */
 function SourceBarList({ bySource }: { bySource: Record<MetricSource, SourceBlock> }) {
-  const rows = (["drips", "cold", "submissions", "constant_contact"] as MetricSource[])
-    .map((k) => ({ key: k, label: SOURCES.find((s) => s.key === k)!.label, m: bySource[k].metrics }))
+  const rows = (["drips", "cold", "constant_contact"] as MetricSource[])
+    .map((k) => ({ key: k, label: SOURCES.find((s) => s.key === k)?.label || k, m: bySource[k].metrics }))
     .filter((r) => r.m.sent > 0)
     .sort((a, b) => b.m.openRate - a.m.openRate);
   if (!rows.length) return <div className="text-sm text-fg-dim py-2">No email sent across sources yet.</div>;
@@ -222,22 +228,57 @@ function SeqRows({ d }: { d: SequenceMetric }) {
   );
 }
 
+/* ---------------- Text Torrent (SMS) + Kixie (calls) panels ---------------- */
+function SmsPanel({ smsSent, windowDays }: { smsSent: number; windowDays: number }) {
+  return (
+    <Card title="Text Torrent · SMS" subtitle="Your text-message channel">
+      <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
+        <VolTile label="SMS sent" value={compact(smsSent)} hint={`via drips · last ${windowDays} days`} />
+      </div>
+      <p className="mt-4 text-sm text-fg-dim leading-relaxed max-w-2xl">
+        SMS goes out through Text Torrent from your drip sequences. Detailed delivery, reply, and
+        opt-out rates connect here once Text Torrent campaign collection is turned on. For now the
+        volume above is your drip SMS; per-rep sending detail lives in the Drips tab.
+      </p>
+    </Card>
+  );
+}
+
+function KixiePanel() {
+  return (
+    <Card title="Kixie" subtitle="Calling — not connected yet">
+      <div className="text-center py-10">
+        <div className="text-sm text-fg-muted font-semibold">Kixie isn&apos;t connected yet.</div>
+        <p className="mt-2 text-sm text-fg-dim max-w-md mx-auto leading-relaxed">
+          Once integrated, call metrics — dials, connects, talk time, and outcomes — will show here
+          alongside your email and SMS channels.
+        </p>
+      </div>
+    </Card>
+  );
+}
+
 /* ---------------- the shell ---------------- */
 export function MetricsDashboard({ payload }: { payload: MetricsPayload }) {
-  const [active, setActive] = useState<MetricSource | "all">("all");
-  const block: SourceBlock = active === "all" ? payload.combined : payload.bySource[active];
-  const m: EmailMetrics = block.metrics;
-  const p: EmailMetrics = block.previous;
-  const hasPrev = p.sent > 0;
+  const [active, setActive] = useState<TabKey>("all");
+  const activeMeta = SOURCES.find((s) => s.key === active)!;
+  const kind = activeMeta.kind;
   const drip = payload.drip;
+
+  // Email tabs map to a data block; SMS (Text Torrent) + calls (Kixie) render their own panels.
+  const block: SourceBlock | null =
+    kind !== "email" ? null : active === "all" ? payload.combined : payload.bySource[active as MetricSource];
+  const m: EmailMetrics | null = block ? block.metrics : null;
+  const p: EmailMetrics | null = block ? block.previous : null;
+  const hasPrev = !!p && p.sent > 0;
   const showDripExtras = active === "all" || active === "drips";
 
-  const kpis = [
+  const kpis = block && m && p ? [
     { label: "Delivery rate", rate: m.deliveryRate, prev: p.deliveryRate, spark: block.trend.map((t) => t.sent), primary: false },
     { label: "Open rate", rate: m.openRate, prev: p.openRate, spark: block.trend.map((t) => t.opens), primary: true },
     { label: "Click rate", rate: m.clickRate, prev: p.clickRate, spark: block.trend.map((t) => t.clicks), primary: false },
     { label: "Click-to-open", rate: m.ctor, prev: p.ctor, spark: block.trend.map((t) => t.clicks), primary: false },
-  ];
+  ] : [];
 
   return (
     <div className="space-y-6 animate-fade-in">
@@ -256,12 +297,16 @@ export function MetricsDashboard({ payload }: { payload: MetricsPayload }) {
             </button>
           ))}
         </div>
-        {m.isProxy && <Tag tone="warm">bounce/opt-out = proxy</Tag>}
+        {m?.isProxy && <Tag tone="warm">bounce/opt-out = proxy</Tag>}
         <div className="ml-auto text-[11px] text-fg-dim">updated {timeAgo(payload.generatedAt)}</div>
       </div>
 
-      {m.sent === 0 ? (
-        <Card title={SOURCES.find((s) => s.key === active)?.label || "Metrics"}>
+      {kind === "sms" ? (
+        <SmsPanel smsSent={drip.smsSent} windowDays={payload.windowDays} />
+      ) : kind === "calls" ? (
+        <KixiePanel />
+      ) : !m || !block || m.sent === 0 ? (
+        <Card title={activeMeta.label}>
           <div className="text-sm text-fg-dim py-6 text-center">No email sent from this source in the last {payload.windowDays} days.</div>
         </Card>
       ) : (
@@ -289,10 +334,12 @@ export function MetricsDashboard({ payload }: { payload: MetricsPayload }) {
         </>
       )}
 
-      {/* per-source comparison (always all sources) */}
-      <Card title="By source" subtitle="Open rate across every email source">
-        <SourceBarList bySource={payload.bySource} />
-      </Card>
+      {/* per-source comparison — email views only */}
+      {kind === "email" && (
+        <Card title="By source" subtitle="Open rate across every email source">
+          <SourceBarList bySource={payload.bySource} />
+        </Card>
+      )}
 
       {/* drip-only: funnel */}
       {showDripExtras && (
