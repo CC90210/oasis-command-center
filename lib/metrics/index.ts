@@ -1,27 +1,33 @@
 /**
  * lib/metrics/index.ts — the Metrics tab's aggregation. One tenant-scoped read
- * pass produces a CC-parity EmailMetrics block PER SOURCE (drips, cold,
- * submissions@, Constant Contact) + the drip-only extras (funnel, per-sequence
- * A/B, failures) + a combined "All" roll-up.
+ * pass produces, PER SOURCE (drips, cold, submissions@, Constant Contact) + a
+ * combined "All": a CC-parity EmailMetrics block for the CURRENT window, the
+ * SAME block for the PREVIOUS equal window (for period-over-period deltas), a
+ * daily TREND series (for sparklines + the area chart), and a 0-100 health
+ * score. Plus the drip-only extras (funnel, per-sequence A/B, failures).
  *
- * Attribution: opens/clicks live in email_open_events / email_click_events keyed
- * by outbound_message_id = the lead_interactions row id the sender pinned
- * (send_id). We build id→source from lead_interactions.agent_source
- * ('sequence:'→drips, 'cold:'→cold, 'submissions:'→submissions) and bucket each
- * open/click through it. Constant Contact is snapshot-based (campaign_metric_
- * snapshots), never interaction-based, so it can't double-count.
+ * Time-series with no new storage: every send/open/click already carries a
+ * timestamp, so we fetch 2× the window and bucket events into current vs
+ * previous (for deltas) and into daily buckets (for trends). Constant Contact is
+ * snapshot-based (latest snapshot only), so it has current metrics but no daily
+ * trend / previous delta.
  *
- * No new storage — everything derives from tables the send paths + track routes
- * already write. Reads go through the service-role client; the page is tenant-gated.
+ * Attribution: opens/clicks are keyed by outbound_message_id = the lead_
+ * interactions row id the sender pinned (send_id). We map id→source from
+ * agent_source and bucket each event's period/day by the event's OWN timestamp.
  */
 
 import "server-only";
 import { getServiceSupabase } from "@/lib/supabase-server";
-import { EmailCounts, EmailMetrics, MetricSource, computeRates, emptyCounts, sumMetrics } from "./types";
+import {
+  EmailCounts, EmailMetrics, MetricSource, TrendPoint,
+  computeRates, emptyCounts, sumMetrics, healthScore,
+} from "./types";
 
 type Db = ReturnType<typeof getServiceSupabase>;
+type ISource = "drips" | "cold" | "submissions"; // interaction-based sources (CC is snapshot-based)
 
-// ---- Drip funnel + per-sequence extras (ported from the Ship-1 drip metrics) ----
+// ---- Drip funnel + per-sequence extras ----
 const FUNNEL_ORDER = [
   "intent_inquiry_submitted", "hot_lead", "follow_up", "missing_info",
   "sent_application", "viewed_application", "signed_application",
@@ -62,15 +68,23 @@ export type DripExtras = {
   health: MetricsHealth;
 };
 
+/** Everything the tab renders for one source (or the combined view). */
+export type SourceBlock = {
+  metrics: EmailMetrics;
+  previous: EmailMetrics;
+  trend: TrendPoint[];
+  healthScore: number;
+};
+
 export type MetricsPayload = {
   windowDays: number;
-  bySource: Record<MetricSource, EmailMetrics>;
-  combined: EmailMetrics;
+  bySource: Record<MetricSource, SourceBlock>;
+  combined: SourceBlock;
   drip: DripExtras;
   generatedAt: string;
 };
 
-function healthFrom(bounceRate: number, complaintRate: number, failRate: number): MetricsHealth {
+function healthLabelFrom(bounceRate: number, complaintRate: number, failRate: number): MetricsHealth {
   if (complaintRate >= 0.003 || bounceRate >= 0.05 || failRate >= 0.15) return "spammy";
   if (complaintRate >= 0.001 || bounceRate >= 0.02 || failRate >= 0.08) return "watch";
   return "healthy";
@@ -91,35 +105,44 @@ function failureBucket(err: string | null): string {
   return "send error";
 }
 
-/** agent_source prefix → interaction-based MetricSource (CC is snapshot-based). */
-function sourceFromAgent(agent: string): "drips" | "cold" | "submissions" | null {
+function sourceFromAgent(agent: string): ISource | null {
   if (agent.startsWith("sequence:")) return "drips";
   if (agent.startsWith("cold:")) return "cold";
   if (agent.startsWith("submissions:")) return "submissions";
   return null;
 }
 
-/** email_suppressions row → the source to charge its bounce/unsub/complaint to.
- *  constant_contact is intentionally excluded (its numbers come from the CC
- *  snapshot, so charging suppressions too would double-count). */
-function sourceFromSuppression(sourceField: string): "drips" | "cold" | "submissions" | null {
+function sourceFromSuppression(sourceField: string): ISource | null {
   const s = (sourceField || "").toLowerCase();
   if (s.includes("constant_contact")) return null;
   if (s.includes("smartlead") || s.startsWith("web_form:cold")) return "cold";
   if (s.includes("submissions_dsn") || s.startsWith("web_form:submissions")) return "submissions";
-  if (s.startsWith("web_form")) return "drips"; // footer opt-out; drips are the primary commercial email sender
-  return "submissions"; // default: the submissions@ domain
+  if (s.startsWith("web_form")) return "drips";
+  return "submissions";
+}
+
+const ISOURCES: ISource[] = ["drips", "cold", "submissions"];
+const dayOf = (iso: string | null): string => (iso || "").slice(0, 10);
+const ms = (iso: string | null): number => (iso ? new Date(iso).getTime() : 0);
+
+function emptyBlock(): SourceBlock {
+  const m = computeRates(emptyCounts());
+  return { metrics: m, previous: m, trend: [], healthScore: 0 };
 }
 
 export async function getEmailMetrics(tenantId: string, days = 30): Promise<MetricsPayload> {
   const db: Db = getServiceSupabase();
-  const sinceIso = new Date(Date.now() - days * 86_400_000).toISOString();
+  const win = Math.min(90, Math.max(1, days));
+  const nowMs = Date.now();
+  const curStartMs = nowMs - win * 86_400_000;
+  const prevStartMs = nowMs - 2 * win * 86_400_000;
+  const curStartIso = new Date(curStartMs).toISOString();
+  const prevStartIso = new Date(prevStartMs).toISOString();
 
-  const mkEmpty = (): EmailMetrics => computeRates(emptyCounts());
   const empty: MetricsPayload = {
-    windowDays: days,
-    bySource: { drips: mkEmpty(), cold: mkEmpty(), submissions: mkEmpty(), constant_contact: mkEmpty() },
-    combined: mkEmpty(),
+    windowDays: win,
+    bySource: { drips: emptyBlock(), cold: emptyBlock(), submissions: emptyBlock(), constant_contact: emptyBlock() },
+    combined: emptyBlock(),
     drip: {
       funnel: { total: 0, stages: [], appliedPct: 0, signedPct: 0, fundedPct: 0, appliedCount: 0, signedCount: 0, fundedCount: 0 },
       smsSent: 0, formViews: 0, clickAdvances: 0, sequences: [], failureReasons: [], health: "healthy",
@@ -131,19 +154,19 @@ export async function getEmailMetrics(tenantId: string, days = 30): Promise<Metr
   try {
     const [leadsRes, runsRes, intxRes, opensRes, clicksRes, viewsRes, suppRes, ccRunsRes] = await Promise.all([
       db.from("tenant_records").select("data").eq("tenant_id", tenantId).eq("entity_type", "lead"),
-      db.from("drip_runs").select("sequence_name, status, last_error").eq("tenant_id", tenantId).gte("created_at", sinceIso),
-      // NOTE: inside .or(), like-wildcards are '*' (PostgREST URL form), not '%'.
-      db.from("lead_interactions").select("id, lead_id, channel, agent_source, metadata")
+      db.from("drip_runs").select("sequence_name, status, last_error").eq("tenant_id", tenantId).gte("created_at", curStartIso),
+      // 2× window for period-over-period. Inside .or(), like-wildcards are '*'.
+      db.from("lead_interactions").select("id, lead_id, channel, agent_source, metadata, created_at")
         .eq("tenant_id", tenantId).or("agent_source.like.sequence:*,agent_source.like.cold:*,agent_source.like.submissions:*")
-        .gte("created_at", sinceIso).limit(50000),
-      db.from("email_open_events").select("lead_id, outbound_message_id, suspicious_prefetch").eq("tenant_id", tenantId).gte("created_at", sinceIso).limit(50000),
-      db.from("email_click_events").select("lead_id, outbound_message_id").eq("tenant_id", tenantId).gte("clicked_at", sinceIso).limit(50000),
-      db.from("form_views").select("id", { count: "exact", head: true }).eq("tenant_id", tenantId).gte("created_at", sinceIso),
-      db.from("email_suppressions").select("reason, source").eq("tenant_id", tenantId).gte("added_at", sinceIso),
-      db.from("campaign_runs").select("tt_campaign_id").eq("tenant_id", tenantId).eq("channel", "constant_contact").gte("launched_at", sinceIso).limit(500),
+        .gte("created_at", prevStartIso).limit(50000),
+      db.from("email_open_events").select("lead_id, outbound_message_id, suspicious_prefetch, created_at").eq("tenant_id", tenantId).gte("created_at", prevStartIso).limit(50000),
+      db.from("email_click_events").select("lead_id, outbound_message_id, clicked_at").eq("tenant_id", tenantId).gte("clicked_at", prevStartIso).limit(50000),
+      db.from("form_views").select("id", { count: "exact", head: true }).eq("tenant_id", tenantId).gte("created_at", curStartIso),
+      db.from("email_suppressions").select("reason, source, added_at").eq("tenant_id", tenantId).gte("added_at", prevStartIso),
+      db.from("campaign_runs").select("tt_campaign_id").eq("tenant_id", tenantId).eq("channel", "constant_contact").gte("launched_at", curStartIso).limit(500),
     ]);
 
-    // ---- Drip funnel (current-stage distribution) ----
+    // ---- Drip funnel (current-stage distribution, all-time snapshot) ----
     const stageCounts: Record<string, number> = {};
     let total = 0, appliedCount = 0, signedCount = 0, fundedCount = 0;
     for (const r of (leadsRes.data || []) as Array<{ data: Record<string, unknown> | null }>) {
@@ -161,15 +184,26 @@ export async function getEmailMetrics(tenantId: string, days = 30): Promise<Metr
     }
     const funnelStages = FUNNEL_ORDER.filter((s) => stageCounts[s]).map((s) => ({ stage: s, count: stageCounts[s] }));
 
-    // ---- Interactions → per-source sent + id→source map + drip per-seq ----
-    const counts: Record<"drips" | "cold" | "submissions", EmailCounts> = {
-      drips: emptyCounts(), cold: emptyCounts(), submissions: emptyCounts(),
+    // ---- Windowed counts (cur/prev) + per-source send map + daily trend ----
+    const cur: Record<ISource, EmailCounts> = { drips: emptyCounts(), cold: emptyCounts(), submissions: emptyCounts() };
+    const prev: Record<ISource, EmailCounts> = { drips: emptyCounts(), cold: emptyCounts(), submissions: emptyCounts() };
+    const curOpen: Record<ISource, Set<string>> = { drips: new Set(), cold: new Set(), submissions: new Set() };
+    const prevOpen: Record<ISource, Set<string>> = { drips: new Set(), cold: new Set(), submissions: new Set() };
+    const curClick: Record<ISource, Set<string>> = { drips: new Set(), cold: new Set(), submissions: new Set() };
+    const prevClick: Record<ISource, Set<string>> = { drips: new Set(), cold: new Set(), submissions: new Set() };
+    const trendMap: Record<ISource, Map<string, { sent: number; opens: number; clicks: number }>> = {
+      drips: new Map(), cold: new Map(), submissions: new Map(),
     };
-    const sendSource = new Map<string, "drips" | "cold" | "submissions">();
-    const uniqOpenLeads: Record<string, Set<string>> = { drips: new Set(), cold: new Set(), submissions: new Set() };
-    const uniqClickLeads: Record<string, Set<string>> = { drips: new Set(), cold: new Set(), submissions: new Set() };
+    const bump = (src: ISource, day: string, k: "sent" | "opens" | "clicks") => {
+      let d = trendMap[src].get(day);
+      if (!d) { d = { sent: 0, opens: 0, clicks: 0 }; trendMap[src].set(day, d); }
+      d[k] += 1;
+    };
+
+    const sendSource = new Map<string, ISource>();
     const perSeq = new Map<string, SequenceMetric>();
     const seqChannels = new Map<string, Set<string>>();
+    const dripMsg = new Map<string, { seq: string; variant: number }>(); // current-window drip email sends, for A/B
     let smsSent = 0;
     const seqGet = (name: string): SequenceMetric => {
       let m = perSeq.get(name);
@@ -177,24 +211,27 @@ export async function getEmailMetrics(tenantId: string, days = 30): Promise<Metr
       return m;
     };
 
-    for (const r of (intxRes.data || []) as Array<{ id: string; lead_id: string | null; channel: string; agent_source: string; metadata: Record<string, unknown> | null }>) {
+    for (const r of (intxRes.data || []) as Array<{ id: string; lead_id: string | null; channel: string; agent_source: string; metadata: Record<string, unknown> | null; created_at: string | null }>) {
       const md = r.metadata || {};
       if (md.dry_run !== false) continue; // real sends only
       const src = sourceFromAgent(r.agent_source || "");
       if (!src) continue;
+      const t = ms(r.created_at);
+      const period = t >= curStartMs ? "cur" : t >= prevStartMs ? "prev" : null;
       if (r.channel === "email") {
-        counts[src].sent += 1;
         sendSource.set(r.id, src);
-      } else if (r.channel === "sms" && src === "drips") {
+        if (period === "cur") { cur[src].sent += 1; bump(src, dayOf(r.created_at), "sent"); }
+        else if (period === "prev") prev[src].sent += 1;
+      } else if (r.channel === "sms" && src === "drips" && period === "cur") {
         smsSent += 1;
       }
-      // drip per-sequence extras
-      if (src === "drips") {
+      // drip per-sequence extras — CURRENT window only
+      if (src === "drips" && period === "cur") {
         const seq = (r.agent_source || "sequence:").replace(/^sequence:/, "") || "(unnamed)";
         const variant = typeof md.variant_index === "number" ? md.variant_index : 0;
         const m = seqGet(seq);
         m.sent += 1;
-        if (r.channel === "email") m.emailSent += 1;
+        if (r.channel === "email") { m.emailSent += 1; dripMsg.set(r.id, { seq, variant }); }
         if (!seqChannels.has(seq)) seqChannels.set(seq, new Set());
         seqChannels.get(seq)!.add(r.channel);
         let v = m.variants.find((x) => x.index === variant);
@@ -203,55 +240,49 @@ export async function getEmailMetrics(tenantId: string, days = 30): Promise<Metr
       }
     }
 
-    // ---- Opens (genuine) bucketed by source ----
-    for (const o of (opensRes.data || []) as Array<{ lead_id: string | null; outbound_message_id: string; suspicious_prefetch: boolean | null }>) {
+    // ---- Opens (genuine) → period + day by the OPEN's own timestamp ----
+    for (const o of (opensRes.data || []) as Array<{ lead_id: string | null; outbound_message_id: string; suspicious_prefetch: boolean | null; created_at: string | null }>) {
       if (o.suspicious_prefetch) continue;
       const src = sendSource.get(o.outbound_message_id);
       if (!src) continue;
-      counts[src].opens += 1;
-      if (o.lead_id) uniqOpenLeads[src].add(o.lead_id);
-      if (src === "drips") {
-        // attribute to the sequence + variant for the A/B table
-        // (re-derive via the interaction metadata isn't available here; the
-        //  per-seq open/click below is recomputed from the drip send set)
+      const t = ms(o.created_at);
+      if (t >= curStartMs) {
+        cur[src].opens += 1;
+        if (o.lead_id) curOpen[src].add(o.lead_id);
+        bump(src, dayOf(o.created_at), "opens");
+        const info = dripMsg.get(o.outbound_message_id);
+        if (info) { const m = seqGet(info.seq); m.opened += 1; const v = m.variants.find((x) => x.index === info.variant); if (v) v.opened += 1; }
+      } else if (t >= prevStartMs) {
+        prev[src].opens += 1;
+        if (o.lead_id) prevOpen[src].add(o.lead_id);
       }
     }
-    // ---- Clicks bucketed by source ----
-    for (const c of (clicksRes.data || []) as Array<{ lead_id: string | null; outbound_message_id: string }>) {
+
+    // ---- Clicks → period + day by the CLICK's own timestamp ----
+    for (const c of (clicksRes.data || []) as Array<{ lead_id: string | null; outbound_message_id: string; clicked_at: string | null }>) {
       const src = sendSource.get(c.outbound_message_id);
       if (!src) continue;
-      counts[src].clicks += 1;
-      if (c.lead_id) uniqClickLeads[src].add(c.lead_id);
-    }
-    for (const src of ["drips", "cold", "submissions"] as const) {
-      counts[src].uniqueOpens = uniqOpenLeads[src].size;
-      counts[src].uniqueClicks = uniqClickLeads[src].size;
-    }
-
-    // ---- Per-sequence open/click (drip A/B) — recompute by joining events to drip sends ----
-    // Build message→(seq,variant) for drip email sends only.
-    const dripMsg = new Map<string, { seq: string; variant: number }>();
-    for (const r of (intxRes.data || []) as Array<{ id: string; channel: string; agent_source: string; metadata: Record<string, unknown> | null }>) {
-      const md = r.metadata || {};
-      if (md.dry_run !== false || r.channel !== "email" || !(r.agent_source || "").startsWith("sequence:")) continue;
-      const seq = r.agent_source.replace(/^sequence:/, "") || "(unnamed)";
-      dripMsg.set(r.id, { seq, variant: typeof md.variant_index === "number" ? md.variant_index : 0 });
-    }
-    for (const o of (opensRes.data || []) as Array<{ outbound_message_id: string; suspicious_prefetch: boolean | null }>) {
-      if (o.suspicious_prefetch) continue;
-      const info = dripMsg.get(o.outbound_message_id);
-      if (!info) continue;
-      const m = seqGet(info.seq); m.opened += 1;
-      const v = m.variants.find((x) => x.index === info.variant); if (v) v.opened += 1;
-    }
-    for (const c of (clicksRes.data || []) as Array<{ outbound_message_id: string }>) {
-      const info = dripMsg.get(c.outbound_message_id);
-      if (!info) continue;
-      const m = seqGet(info.seq); m.clicked += 1;
-      const v = m.variants.find((x) => x.index === info.variant); if (v) v.clicked += 1;
+      const t = ms(c.clicked_at);
+      if (t >= curStartMs) {
+        cur[src].clicks += 1;
+        if (c.lead_id) curClick[src].add(c.lead_id);
+        bump(src, dayOf(c.clicked_at), "clicks");
+        const info = dripMsg.get(c.outbound_message_id);
+        if (info) { const m = seqGet(info.seq); m.clicked += 1; const v = m.variants.find((x) => x.index === info.variant); if (v) v.clicked += 1; }
+      } else if (t >= prevStartMs) {
+        prev[src].clicks += 1;
+        if (c.lead_id) prevClick[src].add(c.lead_id);
+      }
     }
 
-    // ---- Drip run statuses → failures ----
+    for (const src of ISOURCES) {
+      cur[src].uniqueOpens = curOpen[src].size;
+      cur[src].uniqueClicks = curClick[src].size;
+      prev[src].uniqueOpens = prevOpen[src].size;
+      prev[src].uniqueClicks = prevClick[src].size;
+    }
+
+    // ---- Drip run statuses → failures (current window) ----
     const failReasonCounts = new Map<string, number>();
     let failedTotal = 0;
     for (const r of (runsRes.data || []) as Array<{ sequence_name: string; status: string; last_error: string | null }>) {
@@ -271,34 +302,35 @@ export async function getEmailMetrics(tenantId: string, days = 30): Promise<Metr
     }
     const sequences = Array.from(perSeq.values()).sort((a, b) => b.sent - a.sent);
 
-    // ---- Suppressions (30d) → bounce/unsub/complaint per interaction-based source ----
-    for (const s of (suppRes.data || []) as Array<{ reason: string | null; source: string | null }>) {
+    // ---- Suppressions → bounce/unsub/complaint per source + period ----
+    for (const s of (suppRes.data || []) as Array<{ reason: string | null; source: string | null; added_at: string | null }>) {
       const src = sourceFromSuppression(s.source || "");
-      if (!src) continue; // constant_contact handled by snapshot
-      counts[src].isProxy = true;
+      if (!src) continue; // CC handled by snapshot
+      const t = ms(s.added_at);
+      const bucket = t >= curStartMs ? cur[src] : t >= prevStartMs ? prev[src] : null;
+      if (!bucket) continue;
+      bucket.isProxy = true;
       const reason = (s.reason || "").toLowerCase();
-      if (reason.includes("bounce")) counts[src].bounces += 1;
-      else if (reason.includes("abuse") || reason.includes("complaint") || reason.includes("spam")) counts[src].complaints += 1;
-      else counts[src].unsubscribes += 1; // unsubscribe / opt_out
+      if (reason.includes("bounce")) bucket.bounces += 1;
+      else if (reason.includes("abuse") || reason.includes("complaint") || reason.includes("spam")) bucket.complaints += 1;
+      else bucket.unsubscribes += 1;
     }
 
-    // ---- Constant Contact source: latest snapshot per CC campaign ----
+    // ---- Constant Contact source: latest snapshot per CC campaign (current only) ----
     const ccCounts = emptyCounts();
     const ccIds = ((ccRunsRes.data || []) as Array<{ tt_campaign_id: string }>).map((r) => r.tt_campaign_id).filter(Boolean);
     if (ccIds.length) {
       const snapRes = await db
         .from("campaign_metric_snapshots")
         .select("tt_campaign_id, snapshot_at, delivered, opens, unique_opens, clicks, unique_clicks, bounces, optouts, complaints")
-        .eq("tenant_id", tenantId)
-        .in("tt_campaign_id", ccIds)
-        .order("snapshot_at", { ascending: false })
-        .limit(5000);
+        .eq("tenant_id", tenantId).in("tt_campaign_id", ccIds)
+        .order("snapshot_at", { ascending: false }).limit(5000);
       const seen = new Set<string>();
       for (const s of (snapRes.data || []) as Array<Record<string, number | string>>) {
         const id = String(s.tt_campaign_id);
-        if (seen.has(id)) continue; // latest snapshot only (desc order)
+        if (seen.has(id)) continue;
         seen.add(id);
-        ccCounts.sent += Number(s.delivered || 0); // collector stores CC "sends" in the delivered column
+        ccCounts.sent += Number(s.delivered || 0);
         ccCounts.bounces += Number(s.bounces || 0);
         ccCounts.opens += Number(s.opens || 0);
         ccCounts.uniqueOpens += Number(s.unique_opens || 0);
@@ -309,32 +341,57 @@ export async function getEmailMetrics(tenantId: string, days = 30): Promise<Metr
       }
     }
 
-    const bySource = {
-      drips: computeRates(counts.drips),
-      cold: computeRates(counts.cold),
-      submissions: computeRates(counts.submissions),
-      constant_contact: computeRates(ccCounts),
+    // ---- Fill daily trend (continuous days, ascending) ----
+    const trendFor = (src: ISource): TrendPoint[] => {
+      const out: TrendPoint[] = [];
+      for (let i = win - 1; i >= 0; i--) {
+        const day = new Date(nowMs - i * 86_400_000).toISOString().slice(0, 10);
+        const d = trendMap[src].get(day);
+        out.push({ date: day, sent: d?.sent || 0, opens: d?.opens || 0, clicks: d?.clicks || 0 });
+      }
+      return out;
     };
-    const combined = sumMetrics([counts.drips, counts.cold, counts.submissions, ccCounts]);
+    const combinedTrend = (): TrendPoint[] => {
+      const out: TrendPoint[] = [];
+      const dr = trendFor("drips"), co = trendFor("cold"), su = trendFor("submissions");
+      for (let i = 0; i < dr.length; i++) {
+        out.push({ date: dr[i].date, sent: dr[i].sent + co[i].sent + su[i].sent, opens: dr[i].opens + co[i].opens + su[i].opens, clicks: dr[i].clicks + co[i].clicks + su[i].clicks });
+      }
+      return out;
+    };
 
-    const failRate = combined.sent + smsSent + failedTotal ? failedTotal / (combined.sent + smsSent + failedTotal) : 0;
-    const health = healthFrom(bySource.drips.bounceRate, bySource.drips.complaintRate, failRate);
+    const blockFor = (m: EmailMetrics, p: EmailMetrics, trend: TrendPoint[]): SourceBlock => ({
+      metrics: m, previous: p, trend, healthScore: healthScore(m),
+    });
+
+    const mDrips = computeRates(cur.drips), mCold = computeRates(cur.cold), mSub = computeRates(cur.submissions), mCC = computeRates(ccCounts);
+    const bySource: Record<MetricSource, SourceBlock> = {
+      drips: blockFor(mDrips, computeRates(prev.drips), trendFor("drips")),
+      cold: blockFor(mCold, computeRates(prev.cold), trendFor("cold")),
+      submissions: blockFor(mSub, computeRates(prev.submissions), trendFor("submissions")),
+      constant_contact: blockFor(mCC, computeRates(emptyCounts()), []), // snapshot: no daily trend / prev
+    };
+    const combinedMetrics = sumMetrics([cur.drips, cur.cold, cur.submissions, ccCounts]);
+    const combinedPrev = sumMetrics([prev.drips, prev.cold, prev.submissions]);
+    const combined = blockFor(combinedMetrics, combinedPrev, combinedTrend());
+
+    const failRate = combinedMetrics.sent + smsSent + failedTotal ? failedTotal / (combinedMetrics.sent + smsSent + failedTotal) : 0;
+    const health = healthLabelFrom(mDrips.bounceRate, mDrips.complaintRate, failRate);
 
     return {
-      windowDays: days,
+      windowDays: win,
       bySource,
       combined,
       drip: {
         funnel: {
-          total, stages: funnelStages,
-          appliedCount, signedCount, fundedCount,
+          total, stages: funnelStages, appliedCount, signedCount, fundedCount,
           appliedPct: total ? appliedCount / total : 0,
           signedPct: total ? signedCount / total : 0,
           fundedPct: total ? fundedCount / total : 0,
         },
         smsSent,
         formViews: viewsRes.count || 0,
-        clickAdvances: uniqClickLeads.drips.size,
+        clickAdvances: curClick.drips.size,
         sequences,
         failureReasons: Array.from(failReasonCounts.entries()).map(([reason, count]) => ({ reason, count })).sort((a, b) => b.count - a.count),
         health,
