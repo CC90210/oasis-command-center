@@ -76,11 +76,33 @@ export type SourceBlock = {
   healthScore: number;
 };
 
+/** Text Torrent (SMS) metrics — per-number health + campaign delivery from the
+ *  outreach-intel collector's tables (real TT API data), plus our drip/1:1 SMS
+ *  volume. Delivery/failure/reply are for TT bulk campaigns (the only SMS with a
+ *  delivery status); drip SMS is send-attempt volume (no per-message DLR). */
+export type SmsNumberHealth = {
+  number: string; sent: number; delivered: number; failed: number; replies: number;
+  failureRate: number; health: "healthy" | "watch" | "spammy";
+};
+export type SmsMetrics = {
+  campaignSent: number;
+  delivered: number;
+  failed: number;
+  deliveryRate: number;
+  replies: number;
+  replyRate: number;
+  dripSent: number;
+  totalSent: number;
+  perRep: Array<{ rep: string; sent: number }>;
+  numbers: SmsNumberHealth[];
+};
+
 export type MetricsPayload = {
   windowDays: number;
   bySource: Record<MetricSource, SourceBlock>;
   combined: SourceBlock;
   drip: DripExtras;
+  sms: SmsMetrics;
   generatedAt: string;
 };
 
@@ -147,12 +169,13 @@ export async function getEmailMetrics(tenantId: string, days = 30): Promise<Metr
       funnel: { total: 0, stages: [], appliedPct: 0, signedPct: 0, fundedPct: 0, appliedCount: 0, signedCount: 0, fundedCount: 0 },
       smsSent: 0, formViews: 0, clickAdvances: 0, sequences: [], failureReasons: [], health: "healthy",
     },
+    sms: { campaignSent: 0, delivered: 0, failed: 0, deliveryRate: 0, replies: 0, replyRate: 0, dripSent: 0, totalSent: 0, perRep: [], numbers: [] },
     generatedAt: new Date().toISOString(),
   };
   if (!tenantId) return empty;
 
   try {
-    const [leadsRes, runsRes, intxRes, opensRes, clicksRes, viewsRes, suppRes, ccRunsRes] = await Promise.all([
+    const [leadsRes, runsRes, intxRes, opensRes, clicksRes, viewsRes, suppRes, ccRunsRes, numHealthRes] = await Promise.all([
       db.from("tenant_records").select("data").eq("tenant_id", tenantId).eq("entity_type", "lead"),
       db.from("drip_runs").select("sequence_name, status, last_error").eq("tenant_id", tenantId).gte("created_at", curStartIso),
       // 2× window for period-over-period. Inside .or(), like-wildcards are '*'.
@@ -164,6 +187,8 @@ export async function getEmailMetrics(tenantId: string, days = 30): Promise<Metr
       db.from("form_views").select("id", { count: "exact", head: true }).eq("tenant_id", tenantId).gte("created_at", curStartIso),
       db.from("email_suppressions").select("reason, source, added_at").eq("tenant_id", tenantId).gte("added_at", prevStartIso),
       db.from("campaign_runs").select("tt_campaign_id").eq("tenant_id", tenantId).eq("channel", "constant_contact").gte("launched_at", curStartIso).limit(500),
+      // Text Torrent (SMS) per-number health — the collector's real TT-API rollup.
+      db.from("campaign_number_health").select("send_from, sent, delivered, failed, replies, failure_rate, health").eq("tenant_id", tenantId).limit(200),
     ]);
 
     // ---- Drip funnel (current-stage distribution, all-time snapshot) ----
@@ -205,6 +230,7 @@ export async function getEmailMetrics(tenantId: string, days = 30): Promise<Metr
     const seqChannels = new Map<string, Set<string>>();
     const dripMsg = new Map<string, { seq: string; variant: number }>(); // current-window drip email sends, for A/B
     let smsSent = 0;
+    const smsPerRep = new Map<string, number>();
     const seqGet = (name: string): SequenceMetric => {
       let m = perSeq.get(name);
       if (!m) { m = { sequenceName: name, channelMix: "", sent: 0, opened: 0, clicked: 0, failed: 0, openRate: 0, clickRate: 0, emailSent: 0, variants: [] }; perSeq.set(name, m); }
@@ -224,6 +250,8 @@ export async function getEmailMetrics(tenantId: string, days = 30): Promise<Metr
         else if (period === "prev") prev[src].sent += 1;
       } else if (r.channel === "sms" && src === "drips" && period === "cur") {
         smsSent += 1;
+        const rep = typeof md.rep === "string" && md.rep ? md.rep : "other";
+        smsPerRep.set(rep, (smsPerRep.get(rep) || 0) + 1);
       }
       // drip per-sequence extras — CURRENT window only
       if (src === "drips" && period === "cur") {
@@ -378,10 +406,38 @@ export async function getEmailMetrics(tenantId: string, days = 30): Promise<Metr
     const failRate = combinedMetrics.sent + smsSent + failedTotal ? failedTotal / (combinedMetrics.sent + smsSent + failedTotal) : 0;
     const health = healthLabelFrom(mDrips.bounceRate, mDrips.complaintRate, failRate);
 
+    // ---- Text Torrent (SMS) block ----
+    const numbers: SmsNumberHealth[] = ((numHealthRes.data || []) as Array<{ send_from: string; sent: number; delivered: number; failed: number; replies: number; failure_rate: number | string; health: string }>)
+      .map((n) => ({
+        number: n.send_from || "—",
+        sent: Number(n.sent) || 0,
+        delivered: Number(n.delivered) || 0,
+        failed: Number(n.failed) || 0,
+        replies: Number(n.replies) || 0,
+        failureRate: Number(n.failure_rate) || 0,
+        health: (n.health === "spammy" || n.health === "watch" ? n.health : "healthy") as SmsNumberHealth["health"],
+      }))
+      .sort((a, b) => b.failureRate - a.failureRate);
+    let smsCampaignSent = 0, smsDelivered = 0, smsFailed = 0, smsReplies = 0;
+    for (const n of numbers) { smsCampaignSent += n.sent; smsDelivered += n.delivered; smsFailed += n.failed; smsReplies += n.replies; }
+    const sms: SmsMetrics = {
+      campaignSent: smsCampaignSent,
+      delivered: smsDelivered,
+      failed: smsFailed,
+      deliveryRate: smsCampaignSent ? smsDelivered / smsCampaignSent : 0,
+      replies: smsReplies,
+      replyRate: smsCampaignSent ? smsReplies / smsCampaignSent : 0,
+      dripSent: smsSent,
+      totalSent: smsCampaignSent + smsSent,
+      perRep: Array.from(smsPerRep.entries()).map(([rep, sent]) => ({ rep, sent })).sort((a, b) => b.sent - a.sent),
+      numbers,
+    };
+
     return {
       windowDays: win,
       bySource,
       combined,
+      sms,
       drip: {
         funnel: {
           total, stages: funnelStages, appliedCount, signedCount, fundedCount,

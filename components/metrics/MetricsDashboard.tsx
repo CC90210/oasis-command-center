@@ -5,7 +5,7 @@ import { Card, Tag } from "@/components/Card";
 import { Sparkline } from "@/components/charts/Sparkline";
 import { Donut } from "@/components/charts/Donut";
 import { TrendArea } from "@/components/metrics/TrendArea";
-import type { MetricsPayload, SourceBlock, SequenceMetric, MetricsHealth } from "@/lib/metrics";
+import type { MetricsPayload, SourceBlock, SequenceMetric, MetricsHealth, SmsMetrics } from "@/lib/metrics";
 import type { EmailMetrics, MetricSource } from "@/lib/metrics/types";
 
 /* ---------------- formatting ---------------- */
@@ -229,18 +229,85 @@ function SeqRows({ d }: { d: SequenceMetric }) {
 }
 
 /* ---------------- Text Torrent (SMS) + Kixie (calls) panels ---------------- */
-function SmsPanel({ smsSent, windowDays }: { smsSent: number; windowDays: number }) {
+function numHealthTone(h: string): "hot" | "warm" | "engaged" {
+  return h === "spammy" ? "hot" : h === "watch" ? "warm" : "engaged";
+}
+function SmsPanel({ sms, windowDays }: { sms: SmsMetrics; windowDays: number }) {
+  const hasCampaigns = sms.campaignSent > 0;
   return (
-    <Card title="Text Torrent · SMS" subtitle="Your text-message channel">
-      <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
-        <VolTile label="SMS sent" value={compact(smsSent)} hint={`via drips · last ${windowDays} days`} />
+    <div className="space-y-6">
+      {/* headline SMS stats */}
+      <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-4">
+        <VolTile label="SMS sent" value={compact(sms.totalSent)} hint={`${compact(sms.dripSent)} via drips`} />
+        <VolTile label="Delivered" value={hasCampaigns ? compact(sms.delivered) : "—"} hint={hasCampaigns ? pct(sms.deliveryRate) : "campaigns"} />
+        <VolTile label="Failed" value={hasCampaigns ? compact(sms.failed) : "—"} hint={hasCampaigns ? pct(sms.failed / sms.campaignSent) : ""} />
+        <VolTile label="Delivery rate" value={hasCampaigns ? pct(sms.deliveryRate) : "—"} />
+        <VolTile label="Replies" value={hasCampaigns ? compact(sms.replies) : "—"} />
+        <VolTile label="Reply rate" value={hasCampaigns ? pct(sms.replyRate) : "—"} />
       </div>
-      <p className="mt-4 text-sm text-fg-dim leading-relaxed max-w-2xl">
-        SMS goes out through Text Torrent from your drip sequences. Detailed delivery, reply, and
-        opt-out rates connect here once Text Torrent campaign collection is turned on. For now the
-        volume above is your drip SMS; per-rep sending detail lives in the Drips tab.
+
+      {/* per-number health — the key SMS signal */}
+      <Card title="Number health" subtitle="Delivery + failure rate per Text Torrent sending number. Rotate anything flagged spammy.">
+        {sms.numbers.length > 0 ? (
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="text-[10px] uppercase tracking-wider text-fg-dim">
+                  <th className="text-left font-bold pb-1">Number</th>
+                  <th className="text-right font-bold pb-1 px-2">Sent</th>
+                  <th className="text-right font-bold pb-1 px-2">Delivered</th>
+                  <th className="text-right font-bold pb-1 px-2">Failed</th>
+                  <th className="text-right font-bold pb-1 px-2">Failure</th>
+                  <th className="text-right font-bold pb-1 px-2">Replies</th>
+                  <th className="text-right font-bold pb-1 pl-2">Health</th>
+                </tr>
+              </thead>
+              <tbody>
+                {sms.numbers.map((n) => (
+                  <tr key={n.number} className="border-t border-bg-border">
+                    <td className="py-2.5 pr-3 font-semibold text-fg tabular-nums">{n.number}</td>
+                    <td className="py-2.5 px-2 text-right tabular-nums text-fg">{num(n.sent)}</td>
+                    <td className="py-2.5 px-2 text-right tabular-nums text-fg-muted">{num(n.delivered)}</td>
+                    <td className="py-2.5 px-2 text-right tabular-nums text-fg-muted">{num(n.failed)}</td>
+                    <td className={`py-2.5 px-2 text-right tabular-nums font-semibold ${n.failureRate >= 20 ? "text-status-hot" : n.failureRate >= 10 ? "text-status-warm" : "text-fg-muted"}`}>{n.failureRate.toFixed(1)}%</td>
+                    <td className="py-2.5 px-2 text-right tabular-nums text-fg-muted">{num(n.replies)}</td>
+                    <td className="py-2.5 pl-2 text-right"><Tag tone={numHealthTone(n.health)}>{n.health}</Tag></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        ) : (
+          <div className="text-sm text-fg-dim py-2">No campaign number-health data yet — it appears once the outreach collector has a Text Torrent campaign to read.</div>
+        )}
+      </Card>
+
+      {/* per-rep drip volume */}
+      {sms.perRep.length > 0 && (
+        <Card title="Drip SMS by rep" subtitle={`Per-rep 1:1 texts sent · last ${windowDays} days`}>
+          <ul className="space-y-2.5">
+            {sms.perRep.map((r) => {
+              const max = sms.perRep[0].sent || 1;
+              return (
+                <li key={r.rep} className="flex items-center gap-3">
+                  <div className="w-24 shrink-0 text-xs font-semibold text-fg-muted capitalize truncate">{r.rep}</div>
+                  <div className="flex-1 h-5 rounded bg-bg-elev overflow-hidden border border-bg-border">
+                    <div className="h-full bg-accent/80" style={{ width: `${Math.max(3, (r.sent / max) * 100)}%` }} />
+                  </div>
+                  <div className="w-14 shrink-0 text-right text-xs tabular-nums text-fg">{num(r.sent)}</div>
+                </li>
+              );
+            })}
+          </ul>
+        </Card>
+      )}
+
+      <p className="text-xs text-fg-dim leading-relaxed max-w-2xl">
+        Delivery, failure, and reply rates come from Text Torrent&apos;s campaign analytics (real API data). Per-rep drip texts are 1:1 sends —
+        counted as volume, since Text Torrent doesn&apos;t return a per-message delivery receipt for those. A number flagged{" "}
+        <span className="text-status-hot font-semibold">spammy</span> is burning deliverability and should be rotated out.
       </p>
-    </Card>
+    </div>
   );
 }
 
@@ -302,12 +369,23 @@ export function MetricsDashboard({ payload }: { payload: MetricsPayload }) {
       </div>
 
       {kind === "sms" ? (
-        <SmsPanel smsSent={drip.smsSent} windowDays={payload.windowDays} />
+        <SmsPanel sms={payload.sms} windowDays={payload.windowDays} />
       ) : kind === "calls" ? (
         <KixiePanel />
       ) : !m || !block || m.sent === 0 ? (
         <Card title={activeMeta.label}>
-          <div className="text-sm text-fg-dim py-6 text-center">No email sent from this source in the last {payload.windowDays} days.</div>
+          {active === "cold" ? (
+            <div className="py-8 text-center space-y-2">
+              <div className="text-sm text-fg-muted font-semibold">Cold outreach is set up and ready.</div>
+              <p className="text-sm text-fg-dim max-w-lg mx-auto leading-relaxed">
+                Cold email sends from dedicated cold mailboxes (kept separate from your primary domain to protect its reputation),
+                with open + click tracking and one-click unsubscribe already wired in. Full metrics — delivery, opens, clicks,
+                bounces, unsubscribes — appear here the moment you run a cold blast.
+              </p>
+            </div>
+          ) : (
+            <div className="text-sm text-fg-dim py-6 text-center">No email sent from this source in the last {payload.windowDays} days.</div>
+          )}
         </Card>
       ) : (
         <>
