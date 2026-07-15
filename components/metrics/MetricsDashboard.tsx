@@ -5,7 +5,7 @@ import { Card, Tag } from "@/components/Card";
 import { Sparkline } from "@/components/charts/Sparkline";
 import { Donut } from "@/components/charts/Donut";
 import { TrendArea } from "@/components/metrics/TrendArea";
-import type { MetricsPayload, SourceBlock, SequenceMetric, MetricsHealth, SmsMetrics } from "@/lib/metrics";
+import type { MetricsPayload, SourceBlock, SequenceMetric, MetricsHealth, SmsMetrics, CallMetrics } from "@/lib/metrics";
 import type { EmailMetrics, MetricSource } from "@/lib/metrics/types";
 
 /* ---------------- formatting ---------------- */
@@ -272,6 +272,14 @@ function SmsPanel({ sms, windowDays }: { sms: SmsMetrics; windowDays: number }) 
         <VolTile label="Reply rate" value={hasCampaigns ? pct(sms.replyRate) : "—"} hint={hasCampaigns ? "campaigns" : ""} />
       </div>
 
+      {sms.dripDeliveryChecked > 0 && (
+        <div className="text-xs text-fg-dim">
+          Real per-message delivery (sampled from {num(sms.dripDeliveryChecked)} texts with a carrier status):{" "}
+          <span className="text-fg font-semibold tabular-nums">{pct(1 - sms.dripDeliveryFailed / sms.dripDeliveryChecked)}</span> delivered,{" "}
+          <span className="text-status-hot font-semibold tabular-nums">{num(sms.dripDeliveryFailed)}</span> failed.
+        </div>
+      )}
+
       {/* per-number health — the key SMS signal */}
       <Card title="Number health" subtitle="Delivery + failure rate per Text Torrent sending number. Rotate anything flagged spammy.">
         {sms.numbers.length > 0 ? (
@@ -365,17 +373,85 @@ function SmsPanel({ sms, windowDays }: { sms: SmsMetrics; windowDays: number }) 
   );
 }
 
-function KixiePanel() {
+function fmtDuration(sec: number): string {
+  if (!sec) return "0s";
+  const m = Math.floor(sec / 60), s = Math.round(sec % 60);
+  return m > 0 ? `${m}m ${s}s` : `${s}s`;
+}
+function KixiePanel({ calls, windowDays }: { calls: CallMetrics; windowDays: number }) {
+  if (calls.dials === 0) {
+    return (
+      <Card title="Kixie · Calls" subtitle="Calling channel">
+        <div className="py-8 text-center space-y-2">
+          <div className="text-sm text-fg-muted font-semibold">Ready — awaiting your first calls.</div>
+          <p className="text-sm text-fg-dim max-w-lg mx-auto leading-relaxed">
+            The Kixie webhook receiver is wired. Once the API key is added and the webhooks are synced,
+            every dial, connect, voicemail, and disposition lands here — dials, connect rate, talk time,
+            and a per-agent breakdown, live from Kixie.
+          </p>
+        </div>
+      </Card>
+    );
+  }
   return (
-    <Card title="Kixie" subtitle="Calling — not connected yet">
-      <div className="text-center py-10">
-        <div className="text-sm text-fg-muted font-semibold">Kixie isn&apos;t connected yet.</div>
-        <p className="mt-2 text-sm text-fg-dim max-w-md mx-auto leading-relaxed">
-          Once integrated, call metrics — dials, connects, talk time, and outcomes — will show here
-          alongside your email and SMS channels.
-        </p>
+    <div className="space-y-6">
+      <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-4">
+        <VolTile label="Dials" value={compact(calls.dials)} hint={`last ${windowDays}d`} />
+        <VolTile label="Connects" value={compact(calls.connects)} hint={pct(calls.connectRate)} />
+        <VolTile label="Connect rate" value={pct(calls.connectRate)} />
+        <VolTile label="Talk time" value={fmtDuration(calls.talkTimeSec)} />
+        <VolTile label="Avg talk" value={fmtDuration(calls.avgTalkSec)} />
+        <VolTile label="Voicemails" value={compact(calls.voicemails)} />
       </div>
-    </Card>
+
+      {calls.perAgent.length > 0 && (
+        <Card title="By agent" subtitle="Dials + connects per rep">
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="text-[10px] uppercase tracking-wider text-fg-dim">
+                  <th className="text-left font-bold pb-1">Agent</th>
+                  <th className="text-right font-bold pb-1 px-2">Dials</th>
+                  <th className="text-right font-bold pb-1 px-2">Connects</th>
+                  <th className="text-right font-bold pb-1 px-2">Conn %</th>
+                  <th className="text-right font-bold pb-1 pl-2">Talk</th>
+                </tr>
+              </thead>
+              <tbody>
+                {calls.perAgent.map((a) => (
+                  <tr key={a.agent} className="border-t border-bg-border">
+                    <td className="py-2.5 pr-3 font-semibold text-fg capitalize">{a.agent}</td>
+                    <td className="py-2.5 px-2 text-right tabular-nums text-fg">{num(a.dials)}</td>
+                    <td className="py-2.5 px-2 text-right tabular-nums text-fg-muted">{num(a.connects)}</td>
+                    <td className="py-2.5 px-2 text-right tabular-nums text-accent">{pct(a.dials ? a.connects / a.dials : 0)}</td>
+                    <td className="py-2.5 pl-2 text-right tabular-nums text-fg-muted">{fmtDuration(a.talkTimeSec)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </Card>
+      )}
+
+      {calls.dispositions.length > 0 && (
+        <Card title="Dispositions" subtitle="Call outcomes logged by reps">
+          <ul className="space-y-2">
+            {calls.dispositions.map((d, i) => {
+              const max = calls.dispositions[0].count || 1;
+              return (
+                <li key={d.disposition} className="flex items-center gap-3">
+                  <div className="w-40 shrink-0 text-xs font-bold uppercase tracking-wider text-fg-muted truncate">{d.disposition}</div>
+                  <div className="flex-1 h-5 rounded bg-bg-elev overflow-hidden border border-bg-border">
+                    <div className={`h-full ${i === 0 ? "bg-accent" : "bg-accent/70"}`} style={{ width: `${Math.max(3, (d.count / max) * 100)}%` }} />
+                  </div>
+                  <div className="w-10 shrink-0 text-right text-xs tabular-nums text-fg-muted">{num(d.count)}</div>
+                </li>
+              );
+            })}
+          </ul>
+        </Card>
+      )}
+    </div>
   );
 }
 
@@ -459,7 +535,7 @@ export function MetricsDashboard({ payload: initialPayload }: { payload: Metrics
       {kind === "sms" ? (
         <SmsPanel sms={payload.sms} windowDays={payload.windowDays} />
       ) : kind === "calls" ? (
-        <KixiePanel />
+        <KixiePanel calls={payload.calls} windowDays={payload.windowDays} />
       ) : !m || !block || m.sent === 0 ? (
         <Card title={activeMeta.label}>
           {active === "cold" ? (

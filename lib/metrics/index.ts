@@ -23,6 +23,7 @@ import {
   EmailCounts, EmailMetrics, MetricSource, TrendPoint,
   computeRates, emptyCounts, sumMetrics, healthScore,
 } from "./types";
+import { findAgentByEmail } from "@/lib/config/agents";
 
 type Db = ReturnType<typeof getServiceSupabase>;
 type ISource = "drips" | "cold" | "submissions"; // interaction-based sources (CC is snapshot-based)
@@ -96,6 +97,23 @@ export type SmsMetrics = {
   totalSent: number;
   perRep: Array<{ rep: string; sent: number }>;
   numbers: SmsNumberHealth[];
+  /** Real per-message delivery status sampled from the inbox sync's tt_send_status
+   *  (drip/outbound SMS that have a status; not all sends are covered). */
+  dripDeliveryChecked: number;
+  dripDeliveryFailed: number;
+};
+
+/** Kixie (calls) metrics — from lead_interactions channel='phone' (the Kixie
+ *  webhook receiver, deduped by kixie_call_id). */
+export type CallMetrics = {
+  dials: number;
+  connects: number;
+  connectRate: number;
+  voicemails: number;
+  talkTimeSec: number;
+  avgTalkSec: number;
+  perAgent: Array<{ agent: string; dials: number; connects: number; talkTimeSec: number }>;
+  dispositions: Array<{ disposition: string; count: number }>;
 };
 
 export type MetricsPayload = {
@@ -104,6 +122,7 @@ export type MetricsPayload = {
   combined: SourceBlock;
   drip: DripExtras;
   sms: SmsMetrics;
+  calls: CallMetrics;
   generatedAt: string;
 };
 
@@ -170,13 +189,14 @@ export async function getEmailMetrics(tenantId: string, days = 30): Promise<Metr
       funnel: { total: 0, stages: [], appliedPct: 0, signedPct: 0, fundedPct: 0, appliedCount: 0, signedCount: 0, fundedCount: 0 },
       smsSent: 0, formViews: 0, clickAdvances: 0, sequences: [], failureReasons: [], health: "healthy",
     },
-    sms: { campaignSent: 0, delivered: 0, failed: 0, deliveryRate: 0, replies: 0, replyRate: 0, repliesReceived: 0, dripSent: 0, totalSent: 0, perRep: [], numbers: [] },
+    sms: { campaignSent: 0, delivered: 0, failed: 0, deliveryRate: 0, replies: 0, replyRate: 0, repliesReceived: 0, dripSent: 0, totalSent: 0, perRep: [], numbers: [], dripDeliveryChecked: 0, dripDeliveryFailed: 0 },
+    calls: { dials: 0, connects: 0, connectRate: 0, voicemails: 0, talkTimeSec: 0, avgTalkSec: 0, perAgent: [], dispositions: [] },
     generatedAt: new Date().toISOString(),
   };
   if (!tenantId) return empty;
 
   try {
-    const [leadsRes, runsRes, intxRes, opensRes, clicksRes, viewsRes, suppRes, ccRunsRes, numHealthRes, inboundSmsRes] = await Promise.all([
+    const [leadsRes, runsRes, intxRes, opensRes, clicksRes, viewsRes, suppRes, ccRunsRes, numHealthRes, inboundSmsRes, callsRes, smsStatusRes] = await Promise.all([
       db.from("tenant_records").select("data").eq("tenant_id", tenantId).eq("entity_type", "lead"),
       db.from("drip_runs").select("sequence_name, status, last_error").eq("tenant_id", tenantId).gte("created_at", curStartIso),
       // 2× window for period-over-period. Inside .or(), like-wildcards are '*'.
@@ -192,6 +212,10 @@ export async function getEmailMetrics(tenantId: string, days = 30): Promise<Metr
       db.from("campaign_number_health").select("send_from, sent, delivered, failed, replies, failure_rate, health").eq("tenant_id", tenantId).limit(200),
       // Inbound SMS replies in the window (from the inbox sync cron).
       db.from("lead_interactions").select("id", { count: "exact", head: true }).eq("tenant_id", tenantId).eq("channel", "sms").eq("direction", "inbound").gte("created_at", curStartIso),
+      // Kixie calls in the window (channel='phone', deduped by kixie_call_id).
+      db.from("lead_interactions").select("kixie_call_id, type, direction, call_duration_sec, disposition, call_outcome, metadata").eq("tenant_id", tenantId).eq("channel", "phone").gte("created_at", curStartIso).limit(50000),
+      // A2: outbound SMS carrying a real TT delivery status (from the inbox sync).
+      db.from("lead_interactions").select("metadata").eq("tenant_id", tenantId).eq("channel", "sms").eq("direction", "outbound").not("metadata->>tt_send_status", "is", null).gte("created_at", curStartIso).limit(50000),
     ]);
 
     // ---- Drip funnel (current-stage distribution, all-time snapshot) ----
@@ -423,6 +447,14 @@ export async function getEmailMetrics(tenantId: string, days = 30): Promise<Metr
       .sort((a, b) => b.failureRate - a.failureRate);
     let smsCampaignSent = 0, smsDelivered = 0, smsFailed = 0, smsReplies = 0;
     for (const n of numbers) { smsCampaignSent += n.sent; smsDelivered += n.delivered; smsFailed += n.failed; smsReplies += n.replies; }
+    // A2: real per-message drip delivery status, sampled from the inbox sync's tt_send_status.
+    let dripDeliveryChecked = 0, dripDeliveryFailed = 0;
+    for (const r of (smsStatusRes.data || []) as Array<{ metadata: Record<string, unknown> | null }>) {
+      const st = String(r.metadata?.tt_send_status || "").toLowerCase();
+      if (!st) continue;
+      dripDeliveryChecked += 1;
+      if (st.includes("fail")) dripDeliveryFailed += 1;
+    }
     const sms: SmsMetrics = {
       campaignSent: smsCampaignSent,
       delivered: smsDelivered,
@@ -435,6 +467,40 @@ export async function getEmailMetrics(tenantId: string, days = 30): Promise<Metr
       totalSent: smsCampaignSent + smsSent,
       perRep: Array.from(smsPerRep.entries()).map(([rep, sent]) => ({ rep, sent })).sort((a, b) => b.sent - a.sent),
       numbers,
+      dripDeliveryChecked,
+      dripDeliveryFailed,
+    };
+
+    // ---- Kixie (calls) block — from lead_interactions channel='phone' (deduped by kixie_call_id) ----
+    const callRows = (callsRes.data || []) as Array<{ kixie_call_id: string | null; type: string | null; direction: string | null; call_duration_sec: number | null; disposition: string | null; call_outcome: string | null; metadata: Record<string, unknown> | null }>;
+    const seenCall = new Set<string>();
+    let dials = 0, connects = 0, voicemails = 0, talkTimeSec = 0;
+    const agentMap = new Map<string, { dials: number; connects: number; talkTimeSec: number }>();
+    const dispMap = new Map<string, number>();
+    for (const r of callRows) {
+      const cid = r.kixie_call_id || "";
+      if (cid) { if (seenCall.has(cid)) continue; seenCall.add(cid); }
+      dials += 1;
+      const dur = Number(r.call_duration_sec) || 0;
+      const isVm = r.call_outcome === "voicemail" || r.type === "call_voicemail";
+      const isConnect = dur > 0 && !isVm;
+      if (isVm) voicemails += 1;
+      if (isConnect) { connects += 1; talkTimeSec += dur; }
+      const email = typeof r.metadata?.kixie_agent_email === "string" ? (r.metadata.kixie_agent_email as string) : "";
+      const rep = (email && findAgentByEmail(email)?.name) || (email ? email.split("@")[0] : "unassigned");
+      let a = agentMap.get(rep);
+      if (!a) { a = { dials: 0, connects: 0, talkTimeSec: 0 }; agentMap.set(rep, a); }
+      a.dials += 1;
+      if (isConnect) { a.connects += 1; a.talkTimeSec += dur; }
+      if (r.disposition) dispMap.set(r.disposition, (dispMap.get(r.disposition) || 0) + 1);
+    }
+    const calls: CallMetrics = {
+      dials, connects,
+      connectRate: dials ? connects / dials : 0,
+      voicemails, talkTimeSec,
+      avgTalkSec: connects ? Math.round(talkTimeSec / connects) : 0,
+      perAgent: Array.from(agentMap.entries()).map(([agent, v]) => ({ agent, ...v })).sort((a, b) => b.dials - a.dials),
+      dispositions: Array.from(dispMap.entries()).map(([disposition, count]) => ({ disposition, count })).sort((a, b) => b.count - a.count),
     };
 
     return {
@@ -442,6 +508,7 @@ export async function getEmailMetrics(tenantId: string, days = 30): Promise<Metr
       bySource,
       combined,
       sms,
+      calls,
       drip: {
         funnel: {
           total, stages: funnelStages, appliedCount, signedCount, fundedCount,

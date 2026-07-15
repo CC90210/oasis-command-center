@@ -115,7 +115,7 @@ export async function ingestTtInboxMessages(
         content: m.message,
         content_preview: (m.message || "").slice(0, 1024),
         sent_at: m.created_at || null,
-        metadata: { tt_chat_id: m.chat_id || null, tt_synced: true },
+        metadata: { tt_chat_id: m.chat_id || null, tt_synced: true, ...(m.sendStatus ? { tt_send_status: m.sendStatus } : {}) },
       });
     }
     if (toInsert.length) {
@@ -149,7 +149,14 @@ export async function syncTenantInbox(
 
   const inbox = await getInbox(creds, { limit: 50, page: 1 }).catch(() => ({ data: [] as TtInboxMessage[] }));
   const items = inbox.data || [];
-  const chatIds = Array.from(new Set(items.map((m) => m.chat_id).filter(Boolean))).slice(0, maxChats);
+  // Skip chats with UNREAD messages. The live JARVIS Jordan agent detects new
+  // merchant replies via unread_count, and getThread() marks a thread read on
+  // view — so ingesting an unread chat here would steal that signal and make
+  // Jordan miss the reply. Only pull already-read threads (Jordan handles them
+  // fast); a reply we skip now is ingested on the next run once it's read.
+  const chatIds = Array.from(
+    new Set(items.filter((m) => !(m.unreadCount && m.unreadCount > 0)).map((m) => m.chat_id).filter(Boolean)),
+  ).slice(0, maxChats);
 
   let chats = 0,
     scanned = 0,

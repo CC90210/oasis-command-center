@@ -68,6 +68,28 @@ export async function POST() {
     );
   }
 
+  // Activation glue: the Kixie receiver (app/api/webhooks/kixie) resolves the
+  // inbound event to a tenant via `tenants.metadata.kixie_business_id`. Nothing
+  // else writes it, so stamp it here from the saved credentials — key +
+  // business ID + this one click = fully wired. Merge (don't clobber) the rest
+  // of metadata; a failure here doesn't block registration but is surfaced.
+  let businessIdLinked = false;
+  try {
+    const t = await db.from("tenants").select("metadata").eq("id", tenantId).maybeSingle();
+    const meta = ((t.data as { metadata?: Record<string, unknown> } | null)?.metadata) || {};
+    if (meta.kixie_business_id !== creds.businessId) {
+      const { error } = await db
+        .from("tenants")
+        .update({ metadata: { ...meta, kixie_business_id: creds.businessId } })
+        .eq("id", tenantId);
+      businessIdLinked = !error;
+    } else {
+      businessIdLinked = true;
+    }
+  } catch {
+    businessIdLinked = false;
+  }
+
   // Webhook destination — uses the dashboard's public URL.
   const baseUrl =
     (process.env.PUBLIC_APP_URL || "https://agent-dashboard-cc90210.vercel.app").replace(/\/$/, "");
@@ -78,6 +100,7 @@ export async function POST() {
   return NextResponse.json({
     ok: successCount > 0,
     webhook_url: webhookUrl,
+    business_id_linked: businessIdLinked,
     registered: successCount,
     total: results.length,
     results,
