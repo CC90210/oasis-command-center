@@ -278,7 +278,7 @@ export type TtInboxMessage = {
   from: string;
   to: string;
   message: string;
-  direction: "incoming" | "outgoing";
+  direction: "inbound" | "outbound";
   created_at: string;
 };
 
@@ -422,18 +422,63 @@ export async function sendSms(
   return { data: { chat_id: chatId, message_id: sent?.data?.message_id } };
 }
 
-export function getInbox(
+const ttStr = (v: unknown): string => (v == null ? "" : String(v));
+
+/**
+ * List inbox chats. TT shape: `{ data: { data: [ {id, number, from_number,
+ * last_message, updated_at, ...} ] } }` (paginated). Normalized to
+ * TtInboxMessage[] carrying the `chat_id` (= chat `id`) the caller pulls threads
+ * by. `from` = contact number, `to` = our sending number, `message` = the chat's
+ * last message.
+ */
+export async function getInbox(
   creds: TextTorrentCredentials,
   opts: { limit?: number; page?: number } = {},
 ): Promise<{ data: TtInboxMessage[] }> {
-  return ttFetch(creds, "/inbox", { query: opts });
+  const resp = await ttFetch<{ data?: { data?: Array<Record<string, unknown>> } | Array<Record<string, unknown>> }>(creds, "/inbox", { query: opts });
+  const rowsRaw = resp?.data;
+  const rows: Array<Record<string, unknown>> = Array.isArray(rowsRaw) ? rowsRaw : rowsRaw?.data || [];
+  return {
+    data: rows.map((c) => ({
+      chat_id: ttStr(c.id ?? c.chat_id),
+      from: ttStr(c.number),
+      to: ttStr(c.from_number),
+      message: ttStr(c.last_message),
+      direction: "inbound" as const,
+      created_at: ttStr(c.updated_at),
+    })),
+  };
 }
 
-export function getThread(
+/**
+ * Pull a chat's messages. TT shape: `{ data: { chat: {number, from_number}, messages:
+ * { data: [ {direction:'inbound'|'outbound', message, chat_id, created_at} ] } } }`.
+ * from/to are derived per direction from the chat's contact + our number.
+ */
+export async function getThread(
   creds: TextTorrentCredentials,
   chatId: string,
 ): Promise<{ data: TtInboxMessage[] }> {
-  return ttFetch(creds, `/inbox/${encodeURIComponent(chatId)}`);
+  const resp = await ttFetch<{ data?: { chat?: Record<string, unknown>; messages?: { data?: Array<Record<string, unknown>> } | Array<Record<string, unknown>> } }>(creds, `/inbox/${encodeURIComponent(chatId)}`);
+  const d = resp?.data || {};
+  const chat = (d.chat || {}) as Record<string, unknown>;
+  const contact = ttStr(chat.number);
+  const our = ttStr(chat.from_number);
+  const msgsRaw = d.messages;
+  const msgs: Array<Record<string, unknown>> = Array.isArray(msgsRaw) ? msgsRaw : msgsRaw?.data || [];
+  return {
+    data: msgs.map((m) => {
+      const direction = ttStr(m.direction).toLowerCase() === "inbound" ? "inbound" : "outbound";
+      return {
+        chat_id: ttStr(m.chat_id ?? chatId),
+        from: direction === "inbound" ? contact : our,
+        to: direction === "inbound" ? our : contact,
+        message: ttStr(m.message),
+        direction: direction as "inbound" | "outbound",
+        created_at: ttStr(m.created_at),
+      };
+    }),
+  };
 }
 
 export function replyToThread(
