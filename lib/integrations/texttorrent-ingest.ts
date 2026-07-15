@@ -141,7 +141,10 @@ export async function syncTenantInbox(
   opts: { maxChats?: number } = {},
 ): Promise<{ chats: number; scanned: number; inserted: number; skipped: number }> {
   const db = getServiceSupabase();
-  const creds = await getTextTorrentCredentials(tenantId);
+  // PARENT account (actAsEmail:null) — the full account inbox across all reps.
+  // The default (act-as the tenant's sub-account, e.g. jordan@) only sees that
+  // sub-account's chats and returns empty threads here, so sync as the parent.
+  const creds = await getTextTorrentCredentials(tenantId, { actAsEmail: null });
   const maxChats = Math.max(1, Math.min(opts.maxChats ?? 40, 50));
 
   const inbox = await getInbox(creds, { limit: 50, page: 1 }).catch(() => ({ data: [] as TtInboxMessage[] }));
