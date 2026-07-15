@@ -91,6 +91,7 @@ export type SmsMetrics = {
   deliveryRate: number;
   replies: number;
   replyRate: number;
+  repliesReceived: number; // inbound SMS in the window (from the inbox sync — any number)
   dripSent: number;
   totalSent: number;
   perRep: Array<{ rep: string; sent: number }>;
@@ -169,13 +170,13 @@ export async function getEmailMetrics(tenantId: string, days = 30): Promise<Metr
       funnel: { total: 0, stages: [], appliedPct: 0, signedPct: 0, fundedPct: 0, appliedCount: 0, signedCount: 0, fundedCount: 0 },
       smsSent: 0, formViews: 0, clickAdvances: 0, sequences: [], failureReasons: [], health: "healthy",
     },
-    sms: { campaignSent: 0, delivered: 0, failed: 0, deliveryRate: 0, replies: 0, replyRate: 0, dripSent: 0, totalSent: 0, perRep: [], numbers: [] },
+    sms: { campaignSent: 0, delivered: 0, failed: 0, deliveryRate: 0, replies: 0, replyRate: 0, repliesReceived: 0, dripSent: 0, totalSent: 0, perRep: [], numbers: [] },
     generatedAt: new Date().toISOString(),
   };
   if (!tenantId) return empty;
 
   try {
-    const [leadsRes, runsRes, intxRes, opensRes, clicksRes, viewsRes, suppRes, ccRunsRes, numHealthRes] = await Promise.all([
+    const [leadsRes, runsRes, intxRes, opensRes, clicksRes, viewsRes, suppRes, ccRunsRes, numHealthRes, inboundSmsRes] = await Promise.all([
       db.from("tenant_records").select("data").eq("tenant_id", tenantId).eq("entity_type", "lead"),
       db.from("drip_runs").select("sequence_name, status, last_error").eq("tenant_id", tenantId).gte("created_at", curStartIso),
       // 2× window for period-over-period. Inside .or(), like-wildcards are '*'.
@@ -189,6 +190,8 @@ export async function getEmailMetrics(tenantId: string, days = 30): Promise<Metr
       db.from("campaign_runs").select("tt_campaign_id").eq("tenant_id", tenantId).eq("channel", "constant_contact").gte("launched_at", curStartIso).limit(500),
       // Text Torrent (SMS) per-number health — the collector's real TT-API rollup.
       db.from("campaign_number_health").select("send_from, sent, delivered, failed, replies, failure_rate, health").eq("tenant_id", tenantId).limit(200),
+      // Inbound SMS replies in the window (from the inbox sync cron).
+      db.from("lead_interactions").select("id", { count: "exact", head: true }).eq("tenant_id", tenantId).eq("channel", "sms").eq("direction", "inbound").gte("created_at", curStartIso),
     ]);
 
     // ---- Drip funnel (current-stage distribution, all-time snapshot) ----
@@ -427,6 +430,7 @@ export async function getEmailMetrics(tenantId: string, days = 30): Promise<Metr
       deliveryRate: smsCampaignSent ? smsDelivered / smsCampaignSent : 0,
       replies: smsReplies,
       replyRate: smsCampaignSent ? smsReplies / smsCampaignSent : 0,
+      repliesReceived: inboundSmsRes.count || 0,
       dripSent: smsSent,
       totalSent: smsCampaignSent + smsSent,
       perRep: Array.from(smsPerRep.entries()).map(([rep, sent]) => ({ rep, sent })).sort((a, b) => b.sent - a.sent),
