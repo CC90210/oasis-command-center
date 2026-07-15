@@ -77,11 +77,39 @@ function parseEnrollLimit(raw: string | undefined): number {
   if (!Number.isFinite(n) || n < 0) return 25; // default per-sequence cap
   return n; // 0 = unlimited
 }
+/** Global NEW-enrollments-per-rolling-24h cap ACROSS all sequences — the
+ *  "how many new leads/day" throttle from the 2026-07-14 plan. DRIPS_ENROLL_LIMIT
+ *  only caps a single sequence's single run; this bounds the whole funnel's
+ *  intake so a backlog import or many stages firing at once can't flood the one
+ *  sending mailbox. Ramp via env: 15 -> 50 over the 6-week warm-up. */
+function parseEnrollDailyCap(raw: string | undefined): number {
+  const n = parseInt((raw || "").trim(), 10);
+  if (!Number.isFinite(n) || n < 0) return 50; // default new-leads/day
+  return n; // 0 = unlimited
+}
+/** Count step-0 (NEW) enrollments created in the last 24h. Returns -1 on error
+ *  so the caller can fail SOFT (the per-sequence DRIPS_ENROLL_LIMIT + stage
+ *  allowlist still bound each run's blast radius). */
+async function countEnrolledLast24h(db: Db): Promise<number> {
+  const since = new Date(Date.now() - 24 * 3_600_000).toISOString();
+  try {
+    const r = await db
+      .from("drip_runs")
+      .select("id", { count: "exact", head: true })
+      .eq("step_index", 0)
+      .gte("created_at", since);
+    if (r.error) return -1;
+    return r.count ?? 0;
+  } catch {
+    return -1;
+  }
+}
 
 export type SkipReason =
   | "already_enrolled"
   | "dead_or_declined"
   | "opted_out"
+  | "paused"
   | "no_contact_method"
   | "shopped_recently"
   | "invalid_sequence_steps";
@@ -120,6 +148,7 @@ function emptySkipCounts(): Record<SkipReason, number> {
     already_enrolled: 0,
     dead_or_declined: 0,
     opted_out: 0,
+    paused: 0,
     no_contact_method: 0,
     shopped_recently: 0,
     invalid_sequence_steps: 0,
@@ -274,6 +303,15 @@ export async function runEnrollDrips(): Promise<EnrollDripsResult> {
   const enrollLimit = parseEnrollLimit(process.env.DRIPS_ENROLL_LIMIT);
   const db = getServiceSupabase();
 
+  // Global new-leads/day budget across ALL sequences (rolling 24h). Fail SOFT
+  // to unlimited on a count error (Infinity) — the per-sequence limit still
+  // bounds each run. Only decremented on a real enroll, so report-only passes
+  // never touch it.
+  const dailyEnrollCap = parseEnrollDailyCap(process.env.DRIPS_ENROLL_DAILY_CAP);
+  const enrolled24h = dailyEnrollCap === 0 ? 0 : await countEnrolledLast24h(db);
+  let dailyEnrollRemaining =
+    dailyEnrollCap === 0 || enrolled24h < 0 ? Infinity : Math.max(0, dailyEnrollCap - enrolled24h);
+
   const seqRes = await db
     .from("drip_sequences")
     .select("id, tenant_id, name, enabled, trigger_filter, steps")
@@ -383,6 +421,12 @@ export async function runEnrollDrips(): Promise<EnrollDripsResult> {
         skipped.opted_out++;
         continue;
       }
+      // Per-lead pause toggle — don't START a sequence for a lead an operator
+      // has paused (the dispatch executor also holds mid-sequence sends).
+      if (isTruthyFlag(data.drip_paused)) {
+        skipped.paused++;
+        continue;
+      }
       const hasPhone = typeof data.phone === "string" && data.phone.trim().length > 0;
       const hasEmail = typeof data.email === "string" && data.email.trim().length > 0;
       if (!hasPhone && !hasEmail) {
@@ -409,6 +453,7 @@ export async function runEnrollDrips(): Promise<EnrollDripsResult> {
       // non-allowlisted run never fires a per-lead query across the whole
       // backlog (that made the endpoint exceed maxDuration on a full scan).
       if (!live || !stageAllowed) continue;
+      if (dailyEnrollRemaining <= 0) break; // global new-leads/day cap reached
       if (enrollLimit !== 0 && enrolled >= enrollLimit) break;
 
       // Expensive per-lead guard — only reached for leads we're about to
@@ -438,6 +483,7 @@ export async function runEnrollDrips(): Promise<EnrollDripsResult> {
         continue;
       }
       enrolled++;
+      dailyEnrollRemaining -= 1; // spend one unit of the global new-leads/day budget
 
       const patch = await backfillLeadMetadata(db, lead);
       if (patch) {

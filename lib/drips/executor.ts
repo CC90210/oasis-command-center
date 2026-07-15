@@ -40,6 +40,16 @@ import { parseDripSteps, type DripStep } from "@/lib/drips/types";
 import { sendDripSms, sendDripEmail } from "@/lib/drips/send";
 import { resolveDripSmsIdentity } from "@/lib/drips/rep-sms-identity";
 import { nudgeConversations } from "@/lib/realtime/conversations-nudge";
+import {
+  circuitOpen,
+  isPaused,
+  loadEmailBudget,
+  emailGateReason,
+  consumeEmail,
+  holdUntilIso,
+  type EmailBudget,
+} from "@/lib/drips/governor";
+import { emailAuthDecision, skipAuthDecision, type AuthDecision } from "@/lib/drips/auth-preflight";
 
 export const BATCH_LIMIT = 50;
 const MAX_ATTEMPTS = 3;
@@ -502,6 +512,8 @@ async function processEmailStep(
   data: LeadData,
   step: DripStep,
   steps: DripStep[],
+  budget: EmailBudget,
+  auth: AuthDecision,
 ): Promise<StepOutcome> {
   const email = typeof data.email === "string" ? data.email.trim() : "";
   // No email for an email step: SKIP + advance (the sequence may have SMS steps
@@ -533,9 +545,22 @@ async function processEmailStep(
 
   let fromIdentity = "dry:submissions@sunbizfunding.com";
   if (shouldSend) {
+    // Volume governor — HOLD (reschedule, no attempt spend), never fail, when a
+    // daily/hourly/per-lead email cap is hit. The row re-tries next window so
+    // the lead still gets the touch, just later. Email is the one bottleneck
+    // (single Workspace mailbox); SMS is uncapped here.
+    const capped = emailGateReason(budget, row.lead_id);
+    if (capped) return markRescheduled(db, row, holdUntilIso(capped), `email_cap: ${capped}`);
+    // Auth pre-flight — in enforce mode, hold real email while DKIM is CONFIRMED
+    // missing so we can't send unauthenticated mail off the brand domain. Warn
+    // mode (the default) passes through; the run-level log already flagged it.
+    if (auth.block) {
+      return markRescheduled(db, row, new Date(Date.now() + 6 * 3_600_000).toISOString(), `auth_hold: ${auth.reason}`);
+    }
     const result = await sendDripEmail(row.tenant_id, email, subject, clean.cleaned);
     if (!result.ok) return markRetryOrFail(db, row, result.error);
     fromIdentity = result.fromAddress;
+    consumeEmail(budget, row.lead_id);
   }
 
   await logInteraction(db, {
@@ -554,6 +579,7 @@ async function processEmailStep(
       drip_run_id: row.id,
       dry_run: !shouldSend,
       drips_live: dripsLive,
+      auth_warn: auth.warn ? auth.reason : null,
     },
   });
   const outcome = await finishStep(db, row, steps, fromIdentity, shouldSend);
@@ -566,6 +592,8 @@ async function processRow(
   row: ClaimedRow,
   leadMap: Map<string, LeadData>,
   seqMap: Map<string, SequenceRow>,
+  budget: EmailBudget,
+  auth: AuthDecision,
 ): Promise<StepOutcome> {
   const data = leadMap.get(`${row.tenant_id}|${row.lead_id}`);
   const seq = seqMap.get(`${row.tenant_id}|${row.sequence_id}`);
@@ -595,8 +623,17 @@ async function processRow(
 
   if (isOptedOutOrDead(data)) return markPermanentFail(db, row, "lead_opted_out_or_dead");
 
+  // Per-lead pause toggle (data.drip_paused, flipped from the lead drawer) — the
+  // gap the go-live engine shipped with: the executor never checked it, so a
+  // paused lead kept getting sends. HOLD the row (reschedule, no attempt spend)
+  // rather than fail, so unpausing cleanly resumes the sequence. Applies to
+  // BOTH channels — a paused lead gets neither SMS nor email.
+  if (isPaused(data)) {
+    return markRescheduled(db, row, new Date(Date.now() + 12 * 3_600_000).toISOString(), "drip_paused");
+  }
+
   if (step.channel === "sms") return processSmsStep(db, row, data, step, steps);
-  return processEmailStep(db, row, data, step, steps);
+  return processEmailStep(db, row, data, step, steps, budget, auth);
 }
 
 export async function runDispatchDrips(): Promise<DispatchDripsResult> {
@@ -622,6 +659,16 @@ export async function runDispatchDrips(): Promise<DispatchDripsResult> {
     reclaimed = reclaim.data?.length || 0;
   } catch (err) {
     console.error("[dispatch-drips] stale reclaim failed", err);
+  }
+
+  // 1b) Circuit breaker — DRIPS_CIRCUIT_OPEN=1 holds ALL real sends this run
+  // (due rows stay 'scheduled' and wait; nothing is claimed or advanced). This
+  // is the runtime kill a human or the drip-watchdog trips on a bounce/spam
+  // spike, distinct from BRAVO_FORCE_DRY_RUN (global hard kill) and DRIPS_LIVE
+  // (go-live gate). Stale-reclaim above still ran, which is safe and desirable.
+  if (circuitOpen()) {
+    console.warn("[dispatch-drips] circuit OPEN (DRIPS_CIRCUIT_OPEN=1) — holding all sends this run");
+    return { ok: true, reclaimed, claimed: 0, processed: 0, sent: 0, dryRun: 0, rescheduled: 0, retryPending: 0, failed: 0 };
   }
 
   // 2) Find due 'scheduled' work.
@@ -686,6 +733,24 @@ export async function runDispatchDrips(): Promise<DispatchDripsResult> {
     console.error("[dispatch-drips] sequence prefetch failed", err);
   }
 
+  // 4b) Volume governor + auth pre-flight, computed ONCE for this batch so the
+  // per-row gate is O(1) (no query per send). Email-only: SMS isn't volume-
+  // capped here (per-rep Text Torrent headroom). A degraded budget (count query
+  // failed) fails SOFT to full allowance — the CAS claim + suppression checks
+  // are the primary guards; these caps are a reputation-smoothing layer.
+  const emailLeadIds = Array.from(new Set(claimed.filter((r) => r.channel === "email").map((r) => r.lead_id)));
+  const budget = await loadEmailBudget(db, emailLeadIds);
+  if (budget.degraded) {
+    console.warn("[dispatch-drips] email budget degraded (count query failed) — caps best-effort this run");
+  }
+  const authDecision = emailLeadIds.length > 0 ? await emailAuthDecision() : skipAuthDecision();
+  if (authDecision.warn || authDecision.block) {
+    console.warn(
+      `[dispatch-drips] email auth ${authDecision.block ? "BLOCK" : "WARN"}: ${authDecision.reason} ` +
+        `(dkim=${authDecision.status.dkim} spf=${authDecision.status.spf} dmarc=${authDecision.status.dmarcPolicy})`,
+    );
+  }
+
   // 5) Process serially, each fully isolated by try/catch so one bad row
   // never blocks the rest of the batch. Stop early if we're eating into the
   // platform timeout — remainder stays 'sending' and is caught by the
@@ -703,7 +768,7 @@ export async function runDispatchDrips(): Promise<DispatchDripsResult> {
     if (Date.now() - startedAt > SOFT_BUDGET_MS) break;
     let outcome: StepOutcome;
     try {
-      outcome = await processRow(db, row, leadMap, seqMap);
+      outcome = await processRow(db, row, leadMap, seqMap, budget, authDecision);
     } catch (err) {
       console.error("[dispatch-drips] unhandled row error", row.id, err);
       outcome = await markRetryOrFail(db, row, err instanceof Error ? err.message : "unhandled_error").catch(
