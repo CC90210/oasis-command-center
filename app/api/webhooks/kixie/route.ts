@@ -205,6 +205,12 @@ async function persistLeadInteraction(
     from_phone: evt.fromnumber || null,
     to_phone: evt.tonumber || evt.number || null,
     direction: isInbound ? "inbound" : "outbound",
+    // Agent attribution on EVERY event — per-rep call metrics group on
+    // metadata.kixie_agent_email. Most calls never emit a CI-summary event
+    // (which is the only branch that also sets metadata), so without this the
+    // agent would be unknown for ordinary calls. The cisummary branch below
+    // overrides metadata with a superset that still carries this field.
+    metadata: { kixie_agent_email: evt.email || null },
   };
 
   // Event-specific fields.

@@ -280,6 +280,12 @@ export type TtInboxMessage = {
   message: string;
   direction: "inbound" | "outbound";
   created_at: string;
+  /** Chat-level unread count (getInbox only) — used to skip chats the live
+   *  Jordan agent hasn't read yet (reading a thread marks it read). */
+  unreadCount?: number;
+  /** Per-message TT delivery status (getThread only) — undocumented `api_send_status`
+   *  ("Failed" / "success"), the real per-message DLR signal. */
+  sendStatus?: string;
 };
 
 /** Account info + credit balance — useful for the readiness card. */
@@ -446,6 +452,7 @@ export async function getInbox(
       message: ttStr(c.last_message),
       direction: "inbound" as const,
       created_at: ttStr(c.updated_at),
+      unreadCount: Number(c.unread_count ?? c.unread ?? 0) || 0,
     })),
   };
 }
@@ -476,6 +483,7 @@ export async function getThread(
         message: ttStr(m.message),
         direction: direction as "inbound" | "outbound",
         created_at: ttStr(m.created_at),
+        sendStatus: ttStr(m.api_send_status),
       };
     }),
   };
