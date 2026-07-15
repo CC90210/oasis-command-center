@@ -102,10 +102,29 @@ const LEAD_BACKFILL_KEYS = [
  * Returns undefined to signal "don't write this key" — caller filters
  * those out before persisting.
  */
+// Full US state name → USPS code, so a lead / underwriting-sheet that stores
+// "Texas" (not "TX") still normalizes to the 2-letter code the application PDF,
+// lender-matching, and address composition expect (2026-07-15 live-subs fix).
+const US_STATE_NAME_TO_CODE: Record<string, string> = {
+  alabama: "AL", alaska: "AK", arizona: "AZ", arkansas: "AR", california: "CA",
+  colorado: "CO", connecticut: "CT", delaware: "DE", "district of columbia": "DC",
+  florida: "FL", georgia: "GA", hawaii: "HI", idaho: "ID", illinois: "IL",
+  indiana: "IN", iowa: "IA", kansas: "KS", kentucky: "KY", louisiana: "LA",
+  maine: "ME", maryland: "MD", massachusetts: "MA", michigan: "MI", minnesota: "MN",
+  mississippi: "MS", missouri: "MO", montana: "MT", nebraska: "NE", nevada: "NV",
+  "new hampshire": "NH", "new jersey": "NJ", "new mexico": "NM", "new york": "NY",
+  "north carolina": "NC", "north dakota": "ND", ohio: "OH", oklahoma: "OK",
+  oregon: "OR", pennsylvania: "PA", "rhode island": "RI", "south carolina": "SC",
+  "south dakota": "SD", tennessee: "TN", texas: "TX", utah: "UT", vermont: "VT",
+  virginia: "VA", washington: "WA", "west virginia": "WV", wisconsin: "WI",
+  wyoming: "WY",
+};
+
 function normalize(key: string, value: unknown): unknown {
   if (key === "business_state" && typeof value === "string") {
-    const v = value.trim().toUpperCase();
-    return v.length === 2 ? v : undefined;
+    const v = value.trim();
+    if (v.length === 2) return v.toUpperCase();
+    return US_STATE_NAME_TO_CODE[v.toLowerCase()] || undefined;
   }
   if (key === "industry" && typeof value === "string") {
     return value.trim().toLowerCase() || undefined;
@@ -162,6 +181,16 @@ const FIELD_ALIASES: Record<string, string[]> = {
   owner_name: ["owner_full_name"],
   business_name: ["business_legal_name"],
   phone: ["owner_cell"],
+  // Lead / underwriting-sheet source names (2026-07-15 live-subs fix). Real
+  // lead records (import + underwriting enrichment) store these identity fields
+  // under different keys than the canonical application schema, so the
+  // lead→application migration was dropping EIN / ownership% / owner address /
+  // owner name. These are FALLBACKS only — a real form submission's canonical
+  // key always wins (readField checks the canonical key first).
+  tax_id_ein: ["ein", "tax_id"],
+  owner_ownership_pct: ["ownership_pct"],
+  owner_home_address: ["home_address"],
+  owner_full_name: ["owner_name"],
 };
 
 /** Read a whitelisted key from the payload, falling back to any aliased
