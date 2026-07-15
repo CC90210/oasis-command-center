@@ -8,13 +8,14 @@
  *   - HARD_TERMINAL (default = repayment failure, opted_out = explicit
  *     unsubscribe): NEVER auto-changed by a form submission. Resetting
  *     opted_out would be a CASL/consent violation.
- *   - REACTIVATABLE_TERMINAL (ghost, declined): a new form submission is a
- *     genuine re-engagement → resurface the lead to the form's target stage.
+ *   - REACTIVATABLE_TERMINAL: was {ghost, declined}; both left the lead board
+ *     (2026-07-15 — ghost→follow_up, declined→Applications), so the lead board
+ *     now has no reactivatable-terminal stage. Kept as an (empty) extension point.
  *   - Active funnel: never downgrade a more-advanced lead (a returning merchant
  *     re-submitting the interest form must not be knocked back to the entry).
  */
 
-export const REACTIVATABLE_TERMINAL_STAGES = new Set(["ghost", "declined"]);
+export const REACTIVATABLE_TERMINAL_STAGES = new Set<string>([]);
 export const HARD_TERMINAL_STAGES = new Set(["default", "opted_out"]);
 
 /**

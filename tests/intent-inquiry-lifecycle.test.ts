@@ -19,10 +19,13 @@ function check(cond: boolean, msg: string) {
   }
 }
 
-const ENTRY = "intent_inquiry_submitted";
+// 2026-07-15 (Adon): "imported" is the new first lead stage (intent_inquiry
+// removed). Form OPEN now writes viewed_application; this file still tests the
+// pure downgrade/reactivation guard in lib/forms/stage-transition.
+const ENTRY = "imported";
 
 // Sanity: the new entry stage exists + is first.
-check(order[0] === ENTRY, "intent_inquiry_submitted is the first lead stage");
+check(order[0] === ENTRY, "imported is the first lead stage");
 
 // New lead (no current stage) → apply (land at entry).
 check(isFormStageDowngrade(null, ENTRY, order) === false, "new lead applies entry stage");
@@ -30,14 +33,15 @@ check(isFormStageDowngrade(null, ENTRY, order) === false, "new lead applies entr
 // Active, more-advanced lead re-submitting the interest form → DOWNGRADE (skip,
 // preserve their progress). This is the Codex HIGH the guard fixed.
 check(isFormStageDowngrade("sent_application", ENTRY, order) === true, "active lead not downgraded");
-check(isFormStageDowngrade("hot_lead", ENTRY, order) === true, "hot_lead not downgraded");
-check(isFormStageDowngrade("funded", ENTRY, order) === true, "funded not downgraded");
+check(isFormStageDowngrade("follow_up", ENTRY, order) === true, "follow_up not downgraded to entry");
+check(isFormStageDowngrade("funded", ENTRY, order) === true, "funded (advanced/unknown) preserved");
 
-// Reactivatable terminal: ghost/declined re-engaging → APPLY (resurface).
-check(isFormStageDowngrade("ghost", ENTRY, order) === false, "ghost reactivates to entry");
-check(isFormStageDowngrade("declined", ENTRY, order) === false, "declined reactivates to entry");
-// ...even via a later form (full app) → apply that target, not skip.
-check(isFormStageDowngrade("ghost", "sent_application", order) === false, "ghost reactivates via full app");
+// 2026-07-15: ghost + declined left the lead board and REACTIVATABLE_TERMINAL is
+// now empty. A stage no longer in the funnel fails closed (preserve), never
+// silently resurfaces.
+check(REACTIVATABLE_TERMINAL_STAGES.size === 0, "no reactivatable-terminal lead stages");
+check(isFormStageDowngrade("ghost", ENTRY, order) === true, "removed ghost stage preserved (fail closed)");
+check(isFormStageDowngrade("declined", ENTRY, order) === true, "removed declined stage preserved (fail closed)");
 
 // Hard terminal: default/opted_out → never auto-changed (preserve).
 check(isFormStageDowngrade("default", ENTRY, order) === true, "default preserved");
@@ -45,7 +49,6 @@ check(isFormStageDowngrade("opted_out", ENTRY, order) === true, "opted_out prese
 
 // Unknown / legacy current stage (not in the funnel) → FAIL CLOSED: preserve,
 // don't overwrite a value we can't classify. (Codex audit 2026-06-18 [high].)
-check(isFormStageDowngrade("imported", ENTRY, order) === true, "unknown/legacy stage preserved");
 check(isFormStageDowngrade("some_custom_stage", "sent_application", order) === true, "unknown stage never overwritten");
 
 // Forward move on an active lead → apply.
@@ -60,7 +63,7 @@ check([...REACTIVATABLE_TERMINAL_STAGES].every((s) => !HARD_TERMINAL_STAGES.has(
 check(HARD_TERMINAL_STAGES.has("opted_out") && HARD_TERMINAL_STAGES.has("default"), "hard terminal = default+opted_out");
 
 if (failures > 0) {
-  console.error(`intent-inquiry-lifecycle: ${failures} failure(s)`);
+  console.error(`stage-transition-lifecycle: ${failures} failure(s)`);
   process.exit(1);
 }
-console.log("intent-inquiry-lifecycle ok (17 cases)");
+console.log("stage-transition-lifecycle ok");

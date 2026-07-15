@@ -721,7 +721,7 @@ export async function POST(req: NextRequest) {
     isLastStep && form.slug === "initial-lead-capture"
       ? "viewed_application"
       : isLastStep && form.slug === "bank-statement-upload"
-        ? "submitted_application"
+        ? "signed_application"
         : stepOutcomes[String(stepIndex)] ||
           (isLastStep && form.on_complete_stage) ||
           null;
@@ -1250,10 +1250,10 @@ async function initAnonymousLead(input: {
     // a phantom kanban column.
     const funding = isFundingTenant(tenantSlug);
     const defaultStage = funding
-      ? // Unchanged SunBiz behavior: intent expressed (contact + revenue),
-        // not yet applied. The form's step_outcomes/on_complete_stage resolve
-        // to the same stage; this covers the create before that runs.
-        "intent_inquiry_submitted"
+      ? // 2026-07-15 (Adon): opening/engaging the application = viewed_application
+        // (intent_inquiry removed). The form's step_outcomes/on_complete_stage
+        // resolve to the real stage; this covers the create before that runs.
+        "viewed_application"
       : form.on_complete_stage ||
         (form.step_outcomes as Record<string, string> | null | undefined)?.["0"] ||
         "new_contact";

@@ -121,10 +121,14 @@ export const SUNBIZ_DEFAULT_SEQUENCES: DefaultSequence[] = [
     // re-engagement, now serving the ghost bucket.
     name: "Ghost — 1-month check-back",
     description:
-      "Professional 1-month re-engagement for leads that went cold or replied 'not now' (stage: ghost). Doesn't burn the bridge.",
+      "Professional 1-month re-engagement for leads that went cold or replied 'not now'. Doesn't burn the bridge.",
     trigger_event: "BRAVO_RECORD_STATUS_CHANGED",
+    // 2026-07-15 (Adon): the `ghost` stage was removed — no-response leads now
+    // route to follow_up, so this trigger can no longer fire. Disabled on seed;
+    // its replacement is the Follow-up rework (Build 9).
     trigger_filter: { entity: "lead", field: "stage", to: "ghost" },
     one_per_lead: true,
+    enabled_on_seed: false,
     steps: [
       {
         channel: "email",

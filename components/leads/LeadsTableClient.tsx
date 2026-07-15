@@ -80,16 +80,15 @@ type Props = {
  *  Must stay in sync with SUN_SEED.data_model.lead.stage in
  *  lib/manifest/seeds.ts AND the colors in lib/sunbiz-stage-meta.ts. */
 const SUNBIZ_STAGES: LeadsTableStage[] = [
-  { value: "intent_inquiry_submitted", label: "Intent inquiry",     tone: "text-status-info" },
-  { value: "hot_lead",           label: "Hot lead",           tone: "text-accent" },
+  // 2026-07-15 (Adon): dropped intent_inquiry/hot_lead/submitted/ghost;
+  // declined+dead live on the Applications board. "Imported" is the intake
+  // stage. Kept in sync with LEAD_PIPELINE_STAGES.
+  { value: "imported",           label: "Imported",           tone: "text-status-info" },
   { value: "missing_info",       label: "Missing info",       tone: "text-status-info" },
   { value: "follow_up",          label: "Follow up",          tone: "text-status-info" },
   { value: "sent_application",   label: "App sent",           tone: "text-status-info" },
   { value: "viewed_application", label: "App viewed",         tone: "text-accent" },
   { value: "signed_application", label: "App signed",         tone: "text-accent" },
-  // 2026-06-18 (CC): dropped submitted/funded/declined/opted_out; ghost is the
-  // re-engagement bucket. Kept in sync with LEAD_PIPELINE_STAGES (9 stages).
-  { value: "ghost",              label: "Ghost",              tone: "text-status-warm" },
   { value: "default",            label: "Default",            tone: "text-status-warm" },
 ];
 

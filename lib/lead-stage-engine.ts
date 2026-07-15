@@ -70,14 +70,13 @@ type Rule = {
 
 const RULES: Record<LeadStageEvent["type"], Rule> = {
   // All three required SunBiz docs (bank statements + driver's
-  // license + void cheque) present → hot_lead. Partial set keeps
-  // the lead in missing_info so the operator can chase the rest.
-  // 2026-05-23: removed "imported" from from-set (stage was retired
-  // in migration 064; existing imported rows were remapped to hot_lead
-  // and the empty-stage entry covers fresh records).
+  // license + void cheque) present → signed_application (ready for
+  // underwriting). Partial set keeps the lead in missing_info so the
+  // operator can chase the rest.
+  // 2026-07-15 (Adon): retargeted from the removed hot_lead stage.
   doc_uploaded: {
     from: new Set<string>(["", "missing_info", "follow_up"]),
-    to: "hot_lead",
+    to: "signed_application",
     reasonCode: "all_required_docs_received",
     predicate: async ({ tenantId, leadId }) => {
       const db = getServiceSupabase();
@@ -95,9 +94,9 @@ const RULES: Record<LeadStageEvent["type"], Rule> = {
 
   // Operator queues an outbound email to the lead. Bumps the
   // sales motion forward — "we've made contact" maps to sent_application.
-  // 2026-05-23: removed "imported" (retired in migration 064).
+  // 2026-07-15 (Adon): from-set uses "imported" (new intake) in place of hot_lead.
   outbound_email_queued: {
-    from: new Set<string>(["hot_lead", "follow_up", "missing_info"]),
+    from: new Set<string>(["imported", "follow_up", "missing_info"]),
     to: "sent_application",
     reasonCode: "application_emailed",
   },
@@ -106,9 +105,9 @@ const RULES: Record<LeadStageEvent["type"], Rule> = {
   // /api/outbound/log. Same target stage as the queue event —
   // included so a daemon-only send (no dashboard queue intermediate)
   // still moves the lead forward.
-  // 2026-05-23: removed "imported" (retired in migration 064).
+  // 2026-07-15 (Adon): from-set uses "imported" (new intake) in place of hot_lead.
   outbound_email_sent: {
-    from: new Set<string>(["hot_lead", "follow_up", "missing_info"]),
+    from: new Set<string>(["imported", "follow_up", "missing_info"]),
     to: "sent_application",
     reasonCode: "application_emailed",
   },
@@ -132,8 +131,7 @@ const RULES: Record<LeadStageEvent["type"], Rule> = {
   email_clicked: {
     from: new Set<string>([
       "",
-      "intent_inquiry_submitted",
-      "hot_lead",
+      "imported",
       "follow_up",
       "missing_info",
       "sent_application",
@@ -153,28 +151,27 @@ const RULES: Record<LeadStageEvent["type"], Rule> = {
 
   // Inbound classifier flagged the reply as negative ("not interested,
   // remove me, etc."). Always overrides forward progression.
-  // 2026-06-18 (CC): the `declined` stage was removed → route to `ghost`
-  // (re-engageable). A genuine STOP/unsubscribe sets the data.opted_out
-  // compliance flag separately; this soft "not interested right now" case
-  // belongs in ghost so it stays revivable.
+  // 2026-07-15 (Adon): ghost removed → soft "not interested right now" replies
+  // route to follow_up (re-engageable general nurture). A genuine STOP/unsubscribe
+  // sets the data.opted_out compliance flag separately.
   lead_replied_negative: {
     from: new Set<string>([
-      "hot_lead",
+      "imported",
       "missing_info",
       "follow_up",
       "sent_application",
       "viewed_application",
     ]),
-    to: "ghost",
+    to: "follow_up",
     reasonCode: "lead_replied_negative",
   },
 
   // sequence_runner.py hits the last step of a follow-up sequence
-  // without a reply. 2026-06-18 (CC): drops to `ghost` (was `declined`,
-  // now removed); operator can still resurrect manually.
+  // without a reply. 2026-07-15 (Adon): ghost removed → routes to follow_up
+  // (general nurture; a no-op for leads already there).
   sequence_exhausted: {
     from: new Set<string>(["follow_up", "sent_application", "missing_info"]),
-    to: "ghost",
+    to: "follow_up",
     reasonCode: "sequence_exhausted_no_response",
   },
 };

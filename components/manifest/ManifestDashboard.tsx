@@ -337,7 +337,7 @@ function SunBizHeroKpis({
   applications: TenantRecord[];
   fundedDeals: TenantRecord[];
 }) {
-  const hotLeads = leads.filter((l) => l.data.stage === "hot_lead").length;
+  const importedLeads = leads.filter((l) => l.data.stage === "imported").length;
   const missingInfo = leads.filter((l) => {
     const m = l.data.missing_info;
     return Array.isArray(m) && m.length > 0;
@@ -387,12 +387,12 @@ function SunBizHeroKpis({
   return (
     <section className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
       <KpiCard
-        href={`/t/${slug}/leads?stage=hot_lead`}
-        title="Hot leads"
-        value={hotLeads}
-        accent="#FFB81C"
+        href={`/t/${slug}/leads?stage=imported`}
+        title="New leads"
+        value={importedLeads}
+        accent="#4A6FA5"
         icon={<Flame className="w-5 h-5" />}
-        sub="actively engaging"
+        sub="imported, awaiting first touch"
       />
       <KpiCard
         href={`/t/${slug}/leads?stage=missing_info`}
@@ -708,11 +708,9 @@ function PipelineGlanceCard({
 // retired from the active lead funnel. Remaining stages re-weighted so
 // the urgency scorer ranks the active funnel cleanly without zombie keys.
 const STAGE_WEIGHT: Record<string, number> = {
-  hot_lead: 100,
-  // Fresh inquiry — they just submitted the form. Rank near the very top of
-  // Today's Focus so the team works it (or confirms Helios's auto-email landed)
-  // before it cools, just under an already-engaged hot_lead.
-  intent_inquiry_submitted: 98,
+  // 2026-07-15 (Adon): "imported" is the new intake — speed-to-lead makes it
+  // the top-priority stage in Today's Focus.
+  imported: 100,
   // Live Subs (uw_sheet) — Ezra-approved Breeze deal: pre-qualified and
   // time-sensitive. Rank just under hot_lead/intent so it surfaces near the
   // top of Today's Focus (without this it falls to the `?? 30` default and
@@ -847,7 +845,7 @@ function TopUrgentLeads({ slug, leads }: { slug: string; leads: TenantRecord[] }
   // surface. 2026-06-18 (CC): `declined` was removed from the lead pipeline;
   // negative-reply / no-response leads now land in `ghost` (a 1-month
   // re-engagement bucket, not daily-attention work), so exclude ghost here.
-  const TERMINAL = new Set(["default", "ghost", "dead_file"]);
+  const TERMINAL = new Set(["default", "dead_file"]);
   // Adon (2026-06-22): rank by deal VALUE, not the urgency formula —
   // this box is "the biggest merchants worth closing first" (highest
   // reward), distinct from the Active Deals board above. Tie-break on the

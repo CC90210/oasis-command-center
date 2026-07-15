@@ -20,14 +20,14 @@ const OPP_STAGE_LABELS = new Map(
   OPPORTUNITY_PIPELINE_STAGES.map((s) => [normalizeStageText(s.label), s.key]),
 );
 
-// 2026-05-23: "inbound" alias now routes to hot_lead (imported stage
-// retired in migration 064). "not interested" / "not_interested" added
-// as aliases for declined so legacy inbound payloads still resolve.
+// 2026-07-15 (Adon): "inbound"/"imported"/"hot" route to the new "imported"
+// intake stage (hot_lead removed). "not interested" and legacy "declined"
+// imports route to follow_up (ghost removed; re-engageable general nurture).
 const LEAD_STAGE_ALIASES = new Map<string, string>([
-  ["inbound", "hot_lead"],
-  ["imported", "hot_lead"],
-  ["not interested", "ghost"],
-  ["not_interested", "ghost"],
+  ["inbound", "imported"],
+  ["imported", "imported"],
+  ["not interested", "follow_up"],
+  ["not_interested", "follow_up"],
   ["application sent", "sent_application"],
   ["sent app", "sent_application"],
   ["app sent", "sent_application"],
@@ -37,12 +37,12 @@ const LEAD_STAGE_ALIASES = new Map<string, string>([
   ["app signed", "signed_application"],
   ["followup", "follow_up"],
   ["follow up", "follow_up"],
-  ["hot", "hot_lead"],
+  ["hot", "imported"],
   ["missing", "missing_info"],
-  // 2026-06-18 (CC): lead `declined`/`submitted` stages removed — route legacy
-  // inbound aliases to their replacements (declined→ghost, approved→signed).
-  ["decline", "ghost"],
-  ["declined", "ghost"],
+  // declined/dead moved to the Applications board; a bare imported "Declined"
+  // lead is re-engageable → follow_up.
+  ["decline", "follow_up"],
+  ["declined", "follow_up"],
   ["approved", "signed_application"],
 ]);
 
@@ -121,7 +121,7 @@ export function routeSunBizImportStage(
     if (explicitApplication || hasApplicationEvidence) {
       return { stage: "application_in", entityType: "application" };
     }
-    return { stage: "hot_lead", entityType: "lead" };
+    return { stage: "imported", entityType: "lead" };
   }
 
   const directOpportunity = resolveOpportunityStage(stageText);

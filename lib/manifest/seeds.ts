@@ -438,7 +438,11 @@ export const SUN_SEED: TenantManifest = {
         // LEAD_PIPELINE_STAGES. Keeps the manifest enum consistent so agent-driven
         // creates of a Live Subs lead validate (createRecord inserts raw JSONB, but
         // agent-actions validates input against this enum).
-        { name: "stage", type: "enum", enum_values: ["intent_inquiry_submitted", "uw_sheet", "hot_lead", "missing_info", "follow_up", "sent_application", "viewed_application", "signed_application", "submitted_application", "declined", "dead_file", "ghost", "default"], required: true },
+        // 2026-07-15 (Adon): removed intent_inquiry_submitted / hot_lead /
+        // submitted_application / ghost; declined + dead_file live on the
+        // Applications (opportunity) board only; added "imported" as the intake
+        // stage. Matches LEAD_PIPELINE_STAGES in lib/sunbiz-stage-meta.ts.
+        { name: "stage", type: "enum", enum_values: ["imported", "uw_sheet", "missing_info", "follow_up", "sent_application", "viewed_application", "signed_application", "default"], required: true },
         // missing_info — Phase 20 (2026-05-17) classifier output. Array
         // of canonical doc-type strings the lead still owes us before
         // an application can advance. Populated by

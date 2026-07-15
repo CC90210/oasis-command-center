@@ -169,7 +169,7 @@ export async function POST(req: NextRequest) {
       tenant_id: form.tenant_id,
       entity: "lead",
       id: link.lead_id,
-      patch: { stage: "intent_inquiry_submitted" },
+      patch: { stage: "viewed_application" },
     });
   } catch (err) {
     const reason = err instanceof RecordsError ? err.code : "unknown";

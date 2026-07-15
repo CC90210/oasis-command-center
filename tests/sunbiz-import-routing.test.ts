@@ -47,18 +47,17 @@ assert.deepEqual(routed, [
   { stage: "dead_file", entityType: "application" },
 ]);
 
-// Migration 064 (2026-05-23): "Inbound" now routes to hot_lead
-// (imported stage was retired; inbound rows are by definition engaged).
+// 2026-07-15 (Adon): "Inbound" imports route to the new "imported" intake stage.
 assert.deepEqual(routeSunBizImportStage("Inbound"), {
-  stage: "hot_lead",
+  stage: "imported",
   entityType: "lead",
 });
-// 2026-06-18 (CC): the lead `declined` stage was removed. A bare inbound
-// "Declined" lead (no application evidence) now routes to lead/ghost
-// (re-engageable). A "Declined" row WITH an application still routes to the
-// opportunity side (declined) — see the CSV batch assertion above.
+// 2026-07-15 (Adon): a bare inbound "Declined" lead (no application evidence)
+// routes to follow_up (re-engageable general nurture; ghost removed). A
+// "Declined" row WITH an application still routes to the opportunity side
+// (declined) — see the CSV batch assertion above.
 assert.deepEqual(routeSunBizImportStage("Declined"), {
-  stage: "ghost",
+  stage: "follow_up",
   entityType: "lead",
 });
 assert.deepEqual(routeSunBizImportStage(null, { hasApplicationEvidence: true }), {

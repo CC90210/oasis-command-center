@@ -119,14 +119,14 @@ export async function POST(
   }
 
   // Create a tenant_records lead row from the cold lead's data.
-  // Stage defaults to 'hot_lead' (the first warm-pipeline stage) so the
-  // operator immediately sees it in the pipeline.
+  // Stage defaults to 'imported' (the intake stage) so the operator
+  // immediately sees the promoted cold lead at the top of the pipeline.
   const leadData: Record<string, unknown> = {
     business_name: lead.business_name ?? "",
     contact_name: lead.contact_name ?? "",
     phone: lead.phone ?? "",
     email: lead.email ?? "",
-    stage: "hot_lead",
+    stage: "imported",
     source: "cold_list_promotion",
     cold_lead_id: lead.id,
     cold_list_id: lead.list_id,

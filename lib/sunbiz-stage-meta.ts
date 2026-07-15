@@ -54,44 +54,26 @@ export type StageMeta = {
 // they were absent from the lead.stage enum). Funded leads still show under
 // `funded`; their renewal tracking lives on the Renewals page.
 export const LEAD_PIPELINE_STAGES: StageMeta[] = [
-  // Change #1 (Adon, lead status defs 2026-06-19): "Intent Inquiry" = the
-  // merchant OPENED the first application (initial-lead-capture) but did NOT
-  // complete it. Set on form OPEN in /api/forms/view. "Viewed" = COMPLETED
-  // the first app (set on form submit). The two are mutually exclusive.
-  { key: "intent_inquiry_submitted", label: "Intent Inquiry", bg: "#0E9AA7", fg: "#FFFFFF" },
-  // Live Subs (2026-06-30, CC) — Ezra-approved Breeze "UW Sheet" deals. The
-  // backend daemon SunBiz-Agent/scripts/scrubber/telegram_bridge.py inject_lead
-  // creates leads with data.stage="uw_sheet" and emits BRAVO_RECORD_STATUS_CHANGED.
-  // Internal key is "uw_sheet" (DO NOT rename — the daemon writes it); the UI
-  // label is "Live Subs". Deep purple, distinct from intent_inquiry teal and
-  // hot_lead amber. Sits directly above Hot Lead — fresh, qualified deals
-  // entering the funnel from Breeze.
+  // 2026-07-15 (Adon) — lead board simplified to the drip-driven lifecycle.
+  // REMOVED: hot_lead, intent_inquiry_submitted, submitted_application, ghost.
+  // declined + dead_file moved OFF the lead board to the Applications
+  // (opportunity) board only. Lifecycle now: form OPEN -> viewed_application,
+  // form COMPLETE -> signed_application (see /api/forms/{view,submit}).
+  //
+  // "Imported" is the entry stage for imported + cold-list-promoted leads
+  // (the add-lead button instead lands leads in sent_application). No-response
+  // / "not now" leads route to follow_up (was ghost).
+  { key: "imported",           label: "Imported",           bg: "#4A6FA5", fg: "#FFFFFF" },
+  // Live Subs — Ezra-approved Breeze "UW Sheet" deals. Backend daemon writes
+  // data.stage="uw_sheet" (DO NOT rename — the daemon depends on it); UI label
+  // is "Live Subs".
   { key: "uw_sheet",           label: "Live Subs",          bg: "#5A4A8A", fg: "#FFFFFF" },
-  { key: "hot_lead",           label: "Hot Lead",           bg: "#C0842F", fg: "#FFFFFF" },
   { key: "missing_info",       label: "Missing Info",       bg: "#3978BE", fg: "#FFFFFF" },
   { key: "follow_up",          label: "Follow Up",          bg: "#8A6A3B", fg: "#FFFFFF" },
   { key: "sent_application",   label: "Sent Application",   bg: "#7057A7", fg: "#FFFFFF" },
-  { key: "viewed_application", label: "Viewed", bg: "#2E8392", fg: "#FFFFFF" },
+  { key: "viewed_application", label: "Viewed",             bg: "#2E8392", fg: "#FFFFFF" },
   { key: "signed_application", label: "Signed Application", bg: "#32876B", fg: "#FFFFFF" },
-  // Submitted Application (Adon, 2026-06-22) — re-added directly after
-  // signed_application: the lead's application has been submitted to
-  // underwriting / funders. Leads that land here are entered into the
-  // "signed application" email drip (the drip sequence is wired separately).
-  { key: "submitted_application", label: "Submitted Application", bg: "#356B8A", fg: "#FFFFFF" },
-  // Ezra 2026-06-24: manual terminal stages on the leads board (mirror the
-  // opportunity Declined/Dead so the labels/colors match "in application").
-  // Operators can move a lead straight to declined/dead from the leads page.
-  // Import routing still aliases a bare "Declined"/"Dead" lead to ghost
-  // (re-engageable) — preserved via resolveLeadStage's alias-first order.
-  { key: "declined",           label: "Declined",           bg: "#9B3D45", fg: "#FFFFFF" },
-  { key: "dead_file",          label: "Dead",               bg: "#6F2D34", fg: "#FFFFFF" },
-  { key: "ghost",              label: "Ghost",              bg: "#6F6F75", fg: "#FFFFFF" },
   { key: "default",            label: "Default",            bg: "#62666F", fg: "#FFFFFF" },
-  // 2026-06-18 (CC): removed `submitted`, `funded`, `declined`, `opted_out`
-  // from the LEAD pipeline. Funding lives on the Renewals/funded_deal side;
-  // negative-reply / no-response leads now route to `ghost` (re-engageable);
-  // opt-out COMPLIANCE is the `data.opted_out` flag + suppression list, NOT a
-  // pipeline stage. The opportunity pipeline below keeps `funded`/`declined`.
 ];
 
 // Opportunity Pipeline order — slimmed to 10 stages 2026-05-23
