@@ -63,7 +63,7 @@ export async function ingestTtInboxMessages(
   // Group by the prospect-side (counterpart) phone.
   const groups = new Map<string, TtInboxMessage[]>();
   for (const m of messages) {
-    const counterpart = m.direction === "incoming" ? m.from : m.to;
+    const counterpart = m.direction === "inbound" ? m.from : m.to;
     const k = last10(counterpart);
     if (!k) {
       skipped++;
@@ -96,7 +96,7 @@ export async function ingestTtInboxMessages(
     const leadId = await findLeadByPhone(db, tenantId, k);
     const toInsert: Record<string, unknown>[] = [];
     for (const m of msgs) {
-      const dir = m.direction === "incoming" ? "inbound" : "outbound";
+      const dir = m.direction; // already "inbound" | "outbound"
       const s = sig(dir, m.message);
       if (seen.has(s)) {
         skipped++;
