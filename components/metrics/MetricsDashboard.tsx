@@ -268,8 +268,8 @@ function SmsPanel({ sms, windowDays }: { sms: SmsMetrics; windowDays: number }) 
         <VolTile label="Delivered" value={hasCampaigns ? compact(sms.delivered) : "—"} hint={hasCampaigns ? pct(sms.deliveryRate) : "campaigns"} />
         <VolTile label="Failed" value={hasCampaigns ? compact(sms.failed) : "—"} hint={hasCampaigns ? pct(sms.failed / sms.campaignSent) : ""} />
         <VolTile label="Delivery rate" value={hasCampaigns ? pct(sms.deliveryRate) : "—"} />
-        <VolTile label="Replies" value={hasCampaigns ? compact(sms.replies) : "—"} />
-        <VolTile label="Reply rate" value={hasCampaigns ? pct(sms.replyRate) : "—"} />
+        <VolTile label="Replies in" value={compact(sms.repliesReceived)} hint={`inbound · ${windowDays}d`} />
+        <VolTile label="Reply rate" value={hasCampaigns ? pct(sms.replyRate) : "—"} hint={hasCampaigns ? "campaigns" : ""} />
       </div>
 
       {/* per-number health — the key SMS signal */}
