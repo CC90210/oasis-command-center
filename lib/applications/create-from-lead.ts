@@ -21,28 +21,11 @@
 import "server-only";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { createRecord } from "@/lib/manifest/data";
+import { extractAppFields } from "@/lib/forms/application-upsert";
 
 export type CreateAppFromLeadResult =
   | { ok: true; applicationId: string; created: boolean }
   | { ok: false; error: string };
-
-// Lead fields worth copying onto the application so downstream scorers + the
-// Opportunity pipeline have the business identity. Same whitelist shape as
-// lib/forms/application-upsert.ts APPLICATION_FIELD_KEYS.
-const LEAD_COPY_KEYS = [
-  "business_name",
-  "business_state",
-  "industry",
-  "contact_name",
-  "email",
-  "phone",
-  "monthly_revenue",
-  "time_in_business_months",
-  "applicant_fico",
-  "requested_amount",
-  "desired_product",
-  "position_count",
-] as const;
 
 export async function createApplicationFromLead(input: {
   tenantId: string;
@@ -80,11 +63,13 @@ export async function createApplicationFromLead(input: {
   const leadData = (leadRes.data as { data?: Record<string, unknown> } | null)?.data;
   if (!leadData) return { ok: false, error: "lead_not_found" };
 
-  const copied: Record<string, unknown> = {};
-  for (const k of LEAD_COPY_KEYS) {
-    const v = leadData[k];
-    if (v !== undefined && v !== null && v !== "") copied[k] = v;
-  }
+  // Copy the FULL merchant-application identity (business legal name, DBA,
+  // address, EIN, entity type, owner name/SSN/ownership%, partners, …) using the
+  // one canonical map — the same extractor the form-submit + AI-autofill paths
+  // use (aliases + normalization included). Previously a local 12-key allowlist
+  // dropped ~20 fields, so the generated application PDF rendered blank for EIN /
+  // address / owner even though the lead/underwriting-sheet had them.
+  const copied: Record<string, unknown> = extractAppFields(leadData);
   // business_name is manifest-required on the application entity. Fall back to
   // the lead's legal_name, then a placeholder, so createRecord validation passes.
   if (!copied.business_name) {

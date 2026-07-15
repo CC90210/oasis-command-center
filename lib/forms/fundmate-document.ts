@@ -21,6 +21,7 @@ import { uploadLeadDocument } from "@/lib/lead-documents";
 import { renderFundmatePdf, mapAppDataToFundmate } from "@/lib/forms/fundmate-pdf";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { getRecord } from "@/lib/manifest/data";
+import { merchantSignerName } from "@/lib/forms/application-pdf";
 
 const FUNDMATE_DOC_TYPE = "fundmate_application_form";
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -84,7 +85,11 @@ export async function generateFundmateDocumentFromRecord(input: {
         const sig = p.applicant_signature;
         if (typeof sig === "string" && sig.startsWith("data:image")) {
           sigUri = sig;
-          sigName = typeof p.signature_name === "string" ? p.signature_name : "";
+          // Merchant name only, roster-guarded — never a rep on the signed doc.
+          sigName = merchantSignerName({
+            ...appData,
+            ...(typeof p.signature_name === "string" ? { signature_name: p.signature_name } : {}),
+          });
           sigSignedAt = row.submitted_at || "";
           break;
         }

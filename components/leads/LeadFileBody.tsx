@@ -315,7 +315,9 @@ export function LeadFileBody({
           the page behind the drawer from scrolling too. (2026-06-30 mobile pass) */}
       <div className="flex-1 min-h-0 overflow-y-auto overscroll-contain px-5 py-4 text-sm">
         {activeTab === "activity" && <LeadTimelinePanel leadId={recordId} entity={entity} />}
-        {activeTab === "owner" && <OwnerTab record={record} />}
+        {activeTab === "owner" && (
+          <OwnerTab record={record} recordId={recordId} onReload={onReload} />
+        )}
         {activeTab === "lenders" && <LendersTab application={application} />}
         {activeTab === "bank" && (
           <BankTab record={record} application={application} tenantSlug={tenantSlug} leadId={recordId} />
@@ -2968,7 +2970,15 @@ function OwnerAssignedRow({ record }: { record: Record<string, unknown> }) {
 /* Owner tab — signer + business cards                                         */
 /* -------------------------------------------------------------------------- */
 
-function OwnerTab({ record }: { record: Record<string, unknown> }) {
+function OwnerTab({
+  record,
+  recordId,
+  onReload,
+}: {
+  record: Record<string, unknown>;
+  recordId: string;
+  onReload: () => void | Promise<void>;
+}) {
   const signerName = str(record.contact_name) || str(record.owner_name) || "—";
   const signerRole = str(record.contact_role) || str(record.owner_role) || "CEO";
   const ownership =
@@ -3064,6 +3074,170 @@ function OwnerTab({ record }: { record: Record<string, unknown> }) {
           />
           <KvRow label="Time in business" value={tib} fullWidth />
         </dl>
+      </div>
+
+      <AddFieldControl record={record} recordId={recordId} onReload={onReload} />
+    </div>
+  );
+}
+
+// Curated application fields (friendly label -> canonical key the application
+// PDF / lender submission read). Writing the canonical key means a manually
+// added value lands where the document reads it and is mirrored to the linked
+// application. "__custom__" opens a free key input for anything not listed.
+const ADD_FIELD_OPTIONS: { key: string; label: string }[] = [
+  { key: "business_legal_name", label: "Legal business name" },
+  { key: "dba", label: "DBA" },
+  { key: "business_address", label: "Business address" },
+  { key: "tax_id_ein", label: "EIN / Federal Tax ID" },
+  { key: "business_start_date", label: "Business start date" },
+  { key: "entity_type", label: "Entity type" },
+  { key: "product_service_description", label: "Product / service" },
+  { key: "business_state", label: "Business state" },
+  { key: "industry", label: "Industry" },
+  { key: "owner_full_name", label: "Owner full name" },
+  { key: "owner_home_address", label: "Owner home address" },
+  { key: "owner_ownership_pct", label: "Owner ownership %" },
+  { key: "owner_ssn", label: "Owner SSN" },
+  { key: "owner_dob", label: "Owner date of birth" },
+  { key: "owner_cell", label: "Owner cell" },
+  { key: "partner_full_name", label: "Partner full name" },
+  { key: "partner_home_address", label: "Partner home address" },
+  { key: "partner_ownership_pct", label: "Partner ownership %" },
+  { key: "partner_ssn", label: "Partner SSN" },
+  { key: "partner_dob", label: "Partner date of birth" },
+  { key: "partner_cell", label: "Partner cell" },
+  { key: "requested_amount", label: "Requested amount" },
+  { key: "monthly_revenue", label: "Monthly revenue" },
+  { key: "time_in_business_months", label: "Time in business (months)" },
+  { key: "applicant_fico", label: "FICO" },
+  { key: "desired_product", label: "Desired product" },
+  { key: "contact_name", label: "Contact name" },
+  { key: "email", label: "Email" },
+  { key: "phone", label: "Phone" },
+];
+
+function AddFieldControl({
+  record,
+  recordId,
+  onReload,
+}: {
+  record: Record<string, unknown>;
+  recordId: string;
+  onReload: () => void | Promise<void>;
+}) {
+  const [open, setOpen] = useState(false);
+  const [sel, setSel] = useState<string>(ADD_FIELD_OPTIONS[0]?.key || "__custom__");
+  const [customKey, setCustomKey] = useState("");
+  const [value, setValue] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  const isCustom = sel === "__custom__";
+  const effectiveKey = isCustom ? customKey.trim().toLowerCase().replace(/\s+/g, "_") : sel;
+  const currentVal = effectiveKey ? str((record as Record<string, unknown>)[effectiveKey]) : "";
+
+  async function save() {
+    setErr(null);
+    if (!effectiveKey) {
+      setErr("Pick or name a field.");
+      return;
+    }
+    setSaving(true);
+    try {
+      const r = await fetch(`/api/leads/${recordId}/set-field`, {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ key: effectiveKey, value }),
+      });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok || !j.ok) {
+        setErr(j.message || j.error || "Save failed.");
+        return;
+      }
+      setValue("");
+      setCustomKey("");
+      setOpen(false);
+      await onReload();
+    } catch {
+      setErr("Network error.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  if (!open) {
+    return (
+      <button
+        type="button"
+        onClick={() => setOpen(true)}
+        className="w-full rounded-lg border border-dashed border-bg-border text-fg-muted hover:text-fg hover:border-accent/60 text-[12px] font-semibold py-2.5 transition-colors"
+      >
+        + Add / edit a field
+      </button>
+    );
+  }
+
+  return (
+    <div className="rounded-lg border border-bg-border bg-bg-deep/40 p-3.5 space-y-2.5">
+      <div className="text-[10px] uppercase tracking-wider text-fg-dim font-semibold">
+        Add / edit a field
+      </div>
+      <select
+        value={sel}
+        onChange={(e) => setSel(e.target.value)}
+        className="w-full rounded-md border border-bg-border bg-bg-deep px-2.5 py-2 text-[12px] text-fg"
+      >
+        {ADD_FIELD_OPTIONS.map((o) => (
+          <option key={o.key} value={o.key}>
+            {o.label}
+          </option>
+        ))}
+        <option value="__custom__">Custom field…</option>
+      </select>
+      {isCustom && (
+        <input
+          value={customKey}
+          onChange={(e) => setCustomKey(e.target.value)}
+          placeholder="field_name (lowercase, underscores)"
+          className="w-full rounded-md border border-bg-border bg-bg-deep px-2.5 py-2 text-[12px] text-fg placeholder:text-fg-dim"
+        />
+      )}
+      {!isCustom && currentVal && (
+        <div className="text-[11px] text-fg-dim">
+          Current: <span className="text-fg-muted">{currentVal}</span>
+        </div>
+      )}
+      <input
+        value={value}
+        onChange={(e) => setValue(e.target.value)}
+        placeholder="Value"
+        className="w-full rounded-md border border-bg-border bg-bg-deep px-2.5 py-2 text-[12px] text-fg placeholder:text-fg-dim"
+        onKeyDown={(e) => {
+          if (e.key === "Enter" && !saving) save();
+        }}
+      />
+      {err && <div className="text-[11px] text-red-400">{err}</div>}
+      <div className="flex items-center gap-2 pt-0.5">
+        <button
+          type="button"
+          onClick={save}
+          disabled={saving}
+          className="rounded-md bg-accent/90 hover:bg-accent text-white text-[12px] font-semibold px-3 py-1.5 disabled:opacity-50 transition-colors"
+        >
+          {saving ? "Saving…" : "Save"}
+        </button>
+        <button
+          type="button"
+          onClick={() => {
+            setOpen(false);
+            setErr(null);
+          }}
+          className="text-fg-dim hover:text-fg text-[12px] px-2 py-1.5"
+        >
+          Cancel
+        </button>
       </div>
     </div>
   );

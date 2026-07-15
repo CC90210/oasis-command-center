@@ -27,29 +27,12 @@ import { getWritableLead } from "@/lib/lead-access";
 import { createApplicationFromLead } from "@/lib/applications/create-from-lead";
 import { generateApplicationDocumentFromRecord } from "@/lib/forms/application-document";
 import { getRecord, updateRecord, RecordsError } from "@/lib/manifest/data";
+import { extractAppFields } from "@/lib/forms/application-upsert";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-
-// Business identity copied lead → application so the deal is never sparse and
-// downstream scoring/Shop-Out have the merchant context. Mirrors LEAD_COPY_KEYS
-// in lib/applications/create-from-lead.ts (kept in sync intentionally).
-const IDENTITY_KEYS = [
-  "business_name",
-  "business_state",
-  "industry",
-  "contact_name",
-  "email",
-  "phone",
-  "monthly_revenue",
-  "time_in_business_months",
-  "applicant_fico",
-  "requested_amount",
-  "desired_product",
-  "position_count",
-] as const;
 
 export async function POST(_req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
   const { id: leadId } = await ctx.params;
@@ -95,9 +78,13 @@ export async function POST(_req: NextRequest, ctx: { params: Promise<{ id: strin
     const patch: Record<string, unknown> = {};
     if (appData.lead_id !== leadId) patch.lead_id = leadId;
     if (!appData.status) patch.status = "application_in";
-    for (const k of IDENTITY_KEYS) {
+    // Backfill the FULL merchant-application identity from the lead (same
+    // canonical extractor as createApplicationFromLead — aliases + normalization).
+    // Gap-fill only: never clobber a value the form/operator already set. Repairs
+    // already-created sparse applications on the reuse path.
+    const leadFields = extractAppFields(lead.data as Record<string, unknown>);
+    for (const [k, leadVal] of Object.entries(leadFields)) {
       const cur = appData[k];
-      const leadVal = (lead.data as Record<string, unknown>)[k];
       if (
         (cur === undefined || cur === null || cur === "") &&
         leadVal !== undefined && leadVal !== null && leadVal !== ""
