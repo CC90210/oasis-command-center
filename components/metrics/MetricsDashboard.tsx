@@ -380,11 +380,25 @@ function KixiePanel() {
 }
 
 /* ---------------- the shell ---------------- */
-export function MetricsDashboard({ payload }: { payload: MetricsPayload }) {
+export function MetricsDashboard({ payload: initialPayload }: { payload: MetricsPayload }) {
+  const [payload, setPayload] = useState(initialPayload);
+  const [days, setDays] = useState(initialPayload.windowDays);
+  const [loading, setLoading] = useState(false);
   const [active, setActive] = useState<TabKey>("all");
   const activeMeta = SOURCES.find((s) => s.key === active)!;
   const kind = activeMeta.kind;
   const drip = payload.drip;
+
+  const changeRange = (d: number) => {
+    if (d === days || loading) return;
+    setDays(d);
+    setLoading(true);
+    fetch(`/api/metrics/data?days=${d}`)
+      .then((r) => r.json())
+      .then((j) => { if (j?.ok && j.payload) setPayload(j.payload as MetricsPayload); })
+      .catch(() => {})
+      .finally(() => setLoading(false));
+  };
 
   // Email tabs map to a data block; SMS (Text Torrent) + calls (Kixie) render their own panels.
   const block: SourceBlock | null =
@@ -419,7 +433,27 @@ export function MetricsDashboard({ payload }: { payload: MetricsPayload }) {
           ))}
         </div>
         {m?.isProxy && <Tag tone="warm">bounce/opt-out = proxy</Tag>}
-        <div className="ml-auto text-[11px] text-fg-dim">updated {timeAgo(payload.generatedAt)}</div>
+        <div className="ml-auto flex items-center gap-2">
+          <div className="inline-flex gap-1 rounded-lg border border-bg-border bg-bg-deep/50 p-0.5">
+            {[7, 30, 90].map((d) => (
+              <button
+                key={d}
+                onClick={() => changeRange(d)}
+                className={`px-2.5 py-1 rounded-md text-[11px] font-bold tabular-nums transition-all ${days === d ? "bg-accent text-bg" : "text-fg-muted hover:text-fg hover:bg-bg-hover"}`}
+              >
+                {d}d
+              </button>
+            ))}
+          </div>
+          <button
+            onClick={() => exportCsv(payload)}
+            title="Export CSV"
+            className="px-2.5 py-1 rounded-md text-[11px] font-bold text-fg-muted border border-bg-border hover:text-fg hover:bg-bg-hover transition-all"
+          >
+            CSV
+          </button>
+          <div className="text-[11px] text-fg-dim min-w-[68px] text-right">{loading ? "updating…" : `updated ${timeAgo(payload.generatedAt)}`}</div>
+        </div>
       </div>
 
       {kind === "sms" ? (
@@ -512,6 +546,23 @@ export function MetricsDashboard({ payload }: { payload: MetricsPayload }) {
       )}
     </div>
   );
+}
+
+function exportCsv(payload: MetricsPayload) {
+  const head = ["source", "sent", "delivered", "delivery_rate", "opens", "unique_opens", "open_rate", "clicks", "unique_clicks", "click_rate", "ctor", "bounces", "bounce_rate", "unsubscribes", "complaints"];
+  const rows: string[][] = [head];
+  const add = (label: string, m: EmailMetrics) =>
+    rows.push([label, m.sent, m.delivered, m.deliveryRate, m.opens, m.uniqueOpens, m.openRate, m.clicks, m.uniqueClicks, m.clickRate, m.ctor, m.bounces, m.bounceRate, m.unsubscribes, m.complaints].map(String));
+  add("all", payload.combined.metrics);
+  (["drips", "cold", "constant_contact"] as MetricSource[]).forEach((k) => add(k, payload.bySource[k].metrics));
+  const csv = rows.map((r) => r.map((c) => (/[",\n]/.test(c) ? `"${c.replace(/"/g, '""')}"` : c)).join(",")).join("\n");
+  const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `metrics-${payload.windowDays}d.csv`;
+  a.click();
+  URL.revokeObjectURL(url);
 }
 
 function timeAgo(iso: string): string {
