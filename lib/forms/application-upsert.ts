@@ -37,7 +37,7 @@ import { createRecord } from "@/lib/manifest/data";
  * don't carry document references or file uploads directly; lead_documents
  * + application_lender_threads.attachments handle those.
  */
-const APPLICATION_FIELD_KEYS = [
+export const APPLICATION_FIELD_KEYS = [
   // Original SOP §4 + financial set.
   "business_name",
   "business_state",

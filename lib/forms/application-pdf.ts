@@ -24,6 +24,7 @@ import { PDFDocument, StandardFonts, rgb } from "pdf-lib";
 import type { PDFFont, PDFPage } from "pdf-lib";
 import { SUNBIZ_LOGO_PNG_BASE64 } from "./sunbiz-logo";
 import type { FormField, FormStep } from "./types";
+import { getAgents } from "@/lib/config/agents";
 
 export type PdfFieldRow = { label: string; value: string };
 export type PdfSection = { heading: string; rows: PdfFieldRow[] };
@@ -45,6 +46,47 @@ const ENTITY_LABELS: Record<string, string> = {
 function str(v: unknown): string {
   if (v == null) return "";
   return (typeof v === "string" ? v : String(v)).trim();
+}
+
+/**
+ * The name printed beside the signature on the APPLICATION must be the
+ * MERCHANT's, never a rep's. We sign on the merchant's behalf, so the document
+ * shows the merchant (or nothing) — attribution to a rep ("Matt"/"Jordan")
+ * belongs only on the lender-submission email, never on the signed application.
+ *
+ * Source strictly from the merchant owner identity (not the free-form
+ * signature_name, which a sign-on-behalf flow can populate with the operator),
+ * then GUARD against the agent roster: if the resolved name is a known rep
+ * (exact full-name, or a single-token first-name match like "Matt"), print
+ * nothing — leaving just the signature image. Fail-open on a roster read error
+ * so PDF generation never crashes on it.
+ */
+export function merchantSignerName(merged: Record<string, unknown>): string {
+  const candidate =
+    str(merged.owner_full_name) ||
+    str(merged.owner_name) ||
+    str(merged.contact_name) ||
+    str(merged.signature_name);
+  if (!candidate) return "";
+  let repNames = new Set<string>();
+  let repFirsts = new Set<string>();
+  try {
+    for (const a of getAgents()) {
+      const n = a.name.trim().toLowerCase();
+      if (!n) continue;
+      repNames.add(n);
+      const first = n.split(/\s+/)[0];
+      if (first) repFirsts.add(first);
+    }
+  } catch {
+    repNames = new Set();
+    repFirsts = new Set();
+  }
+  const c = candidate.trim().toLowerCase();
+  if (repNames.has(c)) return "";
+  const tokens = c.split(/\s+/);
+  if (tokens.length === 1 && repFirsts.has(tokens[0])) return "";
+  return candidate;
 }
 
 /** Currency: payload stores these as numbers (FormRenderer currency -> Number). */
@@ -179,7 +221,7 @@ export function mapApplicationFields(
     },
   ];
 
-  return { sections, signatureName: str(merged.signature_name) };
+  return { sections, signatureName: merchantSignerName(merged) };
 }
 
 /**
@@ -298,7 +340,7 @@ export function mapApplicationFieldsFromSteps(
     if (rows.length) sections.push({ heading: step.title.toUpperCase(), rows });
   }
 
-  return { sections, signatureName: str(merged.signature_name) };
+  return { sections, signatureName: merchantSignerName(merged) };
 }
 
 // Code points pdf-lib's WinAnsi encoding maps beyond ASCII + Latin-1: the
