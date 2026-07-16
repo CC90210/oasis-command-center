@@ -439,10 +439,12 @@ export const SUN_SEED: TenantManifest = {
         // creates of a Live Subs lead validate (createRecord inserts raw JSONB, but
         // agent-actions validates input against this enum).
         // 2026-07-15 (Adon): removed intent_inquiry_submitted / hot_lead /
-        // submitted_application / ghost; declined + dead_file live on the
-        // Applications (opportunity) board only; added "imported" as the intake
-        // stage. Matches LEAD_PIPELINE_STAGES in lib/sunbiz-stage-meta.ts.
-        { name: "stage", type: "enum", enum_values: ["imported", "uw_sheet", "missing_info", "follow_up", "sent_application", "viewed_application", "signed_application", "default"], required: true },
+        // submitted_application / ghost; added "imported" as the intake stage.
+        // 2026-07-16 (Adon): "declined" added back to the lead board as a
+        // one-click terminal stage (dead_file stays Applications-only). Enum must
+        // include it so updateRecord/agent-actions validate a Declined lead.
+        // Matches LEAD_PIPELINE_STAGES in lib/sunbiz-stage-meta.ts.
+        { name: "stage", type: "enum", enum_values: ["imported", "uw_sheet", "missing_info", "follow_up", "sent_application", "viewed_application", "signed_application", "declined", "default"], required: true },
         // missing_info — Phase 20 (2026-05-17) classifier output. Array
         // of canonical doc-type strings the lead still owes us before
         // an application can advance. Populated by

@@ -73,6 +73,11 @@ export const LEAD_PIPELINE_STAGES: StageMeta[] = [
   { key: "sent_application",   label: "Sent Application",   bg: "#7057A7", fg: "#FFFFFF" },
   { key: "viewed_application", label: "Viewed",             bg: "#2E8392", fg: "#FFFFFF" },
   { key: "signed_application", label: "Signed Application", bg: "#32876B", fg: "#FFFFFF" },
+  // 2026-07-16 (Adon) — Declined back on the lead board as a one-click terminal
+  // option. Operators move any lead straight to Declined from the StagePicker
+  // (not only via the Applications board). Wine matches the opportunity board's
+  // Declined so the same lifecycle state reads identically across both boards.
+  { key: "declined",           label: "Declined",           bg: "#9B3D45", fg: "#FFFFFF" },
   { key: "default",            label: "Default",            bg: "#62666F", fg: "#FFFFFF" },
 ];
 
