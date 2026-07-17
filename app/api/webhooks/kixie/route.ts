@@ -284,14 +284,16 @@ export async function POST(req: NextRequest) {
   // Canonical Bravo event type so /feed filtering can branch cleanly.
   const eventType = `BRAVO_KIXIE_${eventname.toUpperCase().replace(/[^A-Z0-9_]/g, "_")}`;
 
-  // Tenant resolution: businessid → tenants.metadata.kixie_business_id.
+  // Tenant resolution: businessid → tenants.custom_fields.kixie_business_id.
+  // (The tenants table has no `metadata` column — its jsonb config lives in
+  // `custom_fields`, matching lib/agent-actions.ts + lib/underwriting/run.ts.)
   const db = getServiceSupabase();
   let tenantId: string | null = null;
   if (evt.businessid !== undefined && evt.businessid !== null) {
     const tenantRow = await db
       .from("tenants")
       .select("id")
-      .eq("metadata->>kixie_business_id", String(evt.businessid))
+      .eq("custom_fields->>kixie_business_id", String(evt.businessid))
       .maybeSingle();
     tenantId = (tenantRow.data as { id: string } | null)?.id ?? null;
   }

@@ -69,18 +69,19 @@ export async function POST() {
   }
 
   // Activation glue: the Kixie receiver (app/api/webhooks/kixie) resolves the
-  // inbound event to a tenant via `tenants.metadata.kixie_business_id`. Nothing
-  // else writes it, so stamp it here from the saved credentials — key +
+  // inbound event to a tenant via `tenants.custom_fields.kixie_business_id`
+  // (the tenants table's jsonb config column — there is no `metadata` column).
+  // Nothing else writes it, so stamp it here from the saved credentials — key +
   // business ID + this one click = fully wired. Merge (don't clobber) the rest
-  // of metadata; a failure here doesn't block registration but is surfaced.
+  // of custom_fields; a failure here doesn't block registration but is surfaced.
   let businessIdLinked = false;
   try {
-    const t = await db.from("tenants").select("metadata").eq("id", tenantId).maybeSingle();
-    const meta = ((t.data as { metadata?: Record<string, unknown> } | null)?.metadata) || {};
-    if (meta.kixie_business_id !== creds.businessId) {
+    const t = await db.from("tenants").select("custom_fields").eq("id", tenantId).maybeSingle();
+    const cf = ((t.data as { custom_fields?: Record<string, unknown> } | null)?.custom_fields) || {};
+    if (cf.kixie_business_id !== creds.businessId) {
       const { error } = await db
         .from("tenants")
-        .update({ metadata: { ...meta, kixie_business_id: creds.businessId } })
+        .update({ custom_fields: { ...cf, kixie_business_id: creds.businessId } })
         .eq("id", tenantId);
       businessIdLinked = !error;
     } else {

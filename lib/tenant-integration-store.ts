@@ -126,6 +126,16 @@ const ENV_FALLBACKS: Record<string, Record<string, string>> = {
   telegram: {
     bot_token: "TELEGRAM_BOT_TOKEN",
   },
+  // Kixie (SunBiz dialer): the whole team shares ONE Kixie account, so the
+  // api_key + business_id resolve tenant-wide from env — same pattern as
+  // TextTorrent/Twilio above. Per-rep identity (kixie_agent_email +
+  // kixie_from_number) stays in user_integration_credentials, set by each rep.
+  kixie: {
+    api_key: "KIXIE_API_KEY",
+    business_id: "KIXIE_BUSINESS_ID",
+    from_number: "KIXIE_FROM_NUMBER",
+    default_agent_email: "KIXIE_DEFAULT_AGENT_EMAIL",
+  },
   send_gateway: {
     hmac_secret: "OASIS_OUTBOUND_HMAC_SECRET",
   },
