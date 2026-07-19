@@ -46,7 +46,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
   // re-run blast-safety (lender names / dashes) on the CURRENT content. Fail closed. [[one-send-gate]]
   try {
     const act = (await gate.ctx.client.getActivity(activityId, "html_content")) as { subject?: string; html_content?: string };
-    const g = await sanitizeBlastMessage(gate.ctx.session.tenantId, `${act.subject || ""}\n${act.html_content || ""}`);
+    const g = await sanitizeBlastMessage(gate.ctx.session.tenantId, `${act.subject || ""}\n${act.html_content || ""}`, { checkPositioning: true });
     if (!g.ok) return NextResponse.json({ ok: false, error: g.reason, message: g.message, lender_hits: g.lenderHits }, { status: 400 });
   } catch (e) {
     return ccError(e);

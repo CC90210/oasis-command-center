@@ -194,7 +194,7 @@ export async function POST(req: NextRequest) {
 
   // Merchant-facing safety guard (fail-closed): block any lender name, strip
   // em dashes — same gate every other outbound merchant-facing surface runs.
-  const safe = await sanitizeBlastMessage(tenantId, trimmedBody);
+  const safe = await sanitizeBlastMessage(tenantId, trimmedBody, { checkPositioning: true });
   if (!safe.ok) {
     return NextResponse.json(
       { ok: false, error: safe.reason, message: safe.message, lender_hits: safe.lenderHits },

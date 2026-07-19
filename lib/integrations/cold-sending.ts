@@ -139,7 +139,7 @@ export async function sendColdEmail(args: {
   if (supp.checkFailed) return { ok: false, reason: "suppression_error", error: "suppression lookup failed — send blocked" };
 
   // Merchant-facing safety: em-dash strip + never-mention-lenders. Fail closed.
-  const safe = await sanitizeBlastMessage(args.tenantId, args.body);
+  const safe = await sanitizeBlastMessage(args.tenantId, args.body, { checkPositioning: true });
   if (!safe.ok) return { ok: false, reason: "unsafe", error: safe.message };
 
   const appPassword = safeDecrypt(mb.app_password_enc).replace(/\s+/g, "");

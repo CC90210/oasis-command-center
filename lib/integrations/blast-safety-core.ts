@@ -53,6 +53,15 @@ const POSITIONING_PATTERNS: { re: RegExp; label: string }[] = [
   { re: /\bto\s+(?:the\s+|our\s+)?lenders?\b/i, label: "to lenders" },
   { re: /\bno\s+lenders?\s+can\b/i, label: "no lender can" },
   { re: /\bshop\s+(?:your\s+)?(?:file|deal|it)\b/i, label: "shop your file" },
+  // Additions (2026-07-19, merchant-copy compliance sweep). Still anchored to
+  // broker-implying constructions so "your positions with lenders" (the
+  // merchant's OWN debt) never trips.
+  { re: /\bwhat\s+lenders?\b/i, label: "what lenders" },
+  { re: /\bpanel\s+of\s+lenders?\b/i, label: "panel of lenders" },
+  { re: /\beach\s+lenders?\b/i, label: "each lender" },
+  { re: /\bthe\s+lender\s+(?:wires?|approves?|prices?|needs?|pays?)\b/i, label: "the lender <acts>" },
+  { re: /\bget\s+shopped\b/i, label: "get shopped" },
+  { re: /\bshopped\s+(?:around|out)\b/i, label: "shopped around" },
 ];
 
 export function matchPositioningPhrases(text: string): string[] {

@@ -91,7 +91,7 @@ export async function runColdCampaign(input: RunColdCampaignInput): Promise<RunC
   const body = stripDashes(input.body);
 
   // 1. Blast-safety guard (fail-closed) — no lender names, no dashes, in subject or body.
-  const safe = await sanitizeBlastMessage(input.tenantId, `${subject}\n${body}`);
+  const safe = await sanitizeBlastMessage(input.tenantId, `${subject}\n${body}`, { checkPositioning: true });
   if (!safe.ok) return { ok: false, error: safe.reason, message: safe.message, lender_hits: safe.lenderHits, status: 400 };
 
   const client = getSmartleadClient();
