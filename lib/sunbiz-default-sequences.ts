@@ -1,5 +1,5 @@
 /**
- * sunbiz-default-sequences.ts — the 5 starter drip sequences for new
+ * sunbiz-default-sequences.ts: the starter drip sequences for new
  * SunBiz tenants (Phase 4.5 of the SunBiz CRM build).
  *
  * These match the cadence Jordan + CC locked in at the 2026-05-15
@@ -41,7 +41,7 @@ export type DefaultSequence = {
 export const SUNBIZ_DEFAULT_SEQUENCES: DefaultSequence[] = [
   // ─────────────────────────────────────────────────────────────────
   // 1. Any earlier stage -> follow_up : 3-touch follow-up cadence
-  // (post-migration-064 stages: hot_lead / missing_info — any of these
+  // (post-migration-064 stages: hot_lead / missing_info, any of these
   // landing on follow_up via operator action or stage engine.)
   // ─────────────────────────────────────────────────────────────────
   {
@@ -57,7 +57,7 @@ export const SUNBIZ_DEFAULT_SEQUENCES: DefaultSequence[] = [
         delay_minutes: 10,
         from_label: "Solara",
         body:
-          "Hi {{lead.contact_name}} — this is Solara at SunBiz Funding. Saw your business {{lead.business_name}} and wanted to see if you're looking at funding options for growth or working capital this quarter. Reply YES if you'd like options.",
+          "Hi {{lead.contact_name}}, this is Solara at SunBiz Funding. Saw {{lead.business_name}} and wanted to check if you're looking at funding for growth or working capital this quarter. Reply YES if you'd like to talk options.",
       },
       {
         channel: "email",
@@ -65,14 +65,14 @@ export const SUNBIZ_DEFAULT_SEQUENCES: DefaultSequence[] = [
         from_label: "Solara",
         subject: "Quick funding options for {{lead.business_name}}",
         body:
-          "Hi {{lead.contact_name}},\n\nFollowing up on yesterday's note — we work with operators like you to surface 3-5 lender offers in under 48h, no commitment to take any of them.\n\nWhat does your monthly revenue look like right now? If it's in the {{lead.monthly_revenue}} range we can almost certainly get you offers worth reviewing.\n\nReply with a good time today or tomorrow.\n\n— Solara, SunBiz Funding",
+          "Hi {{lead.contact_name}},\n\nFollowing up on yesterday's note. We fund businesses like yours directly, and we can usually turn a file around fast once we have the basics.\n\nWhat does your monthly revenue look like right now? If it's in the {{lead.monthly_revenue}} range, send it over and my underwriters can take a real look. What we can do depends on the file, but it's worth reviewing.\n\nReply with a good time today or tomorrow.\n\nSolara, SunBiz Funding",
       },
       {
         channel: "sms",
         delay_minutes: 60 * 24 * 3, // +3 days
         from_label: "Solara",
         body:
-          "{{lead.contact_name}} — last note from me on funding. Send a 1-line reply (yes / not now / never) and I'll match the cadence. Otherwise I'll close out the thread on my end.",
+          "{{lead.contact_name}}, last note from me on funding. Send a 1-line reply (yes / not now / never) and I'll match the pace. Otherwise I'll close out the thread on my end.",
       },
     ],
   },
@@ -86,7 +86,7 @@ export const SUNBIZ_DEFAULT_SEQUENCES: DefaultSequence[] = [
   // can advance. send_gateway enforces CASL / opt-out / TCPA windows.
   // ─────────────────────────────────────────────────────────────────
   {
-    name: "UW Sheet — qualified-deal first touch",
+    name: "UW Sheet - qualified-deal first touch",
     description:
       "Fires when a scrubbed MCA deal lands in uw_sheet (post-Ezra approval). 3-touch SMS+email first-contact cadence to book a call and collect bank statements.",
     trigger_event: "BRAVO_RECORD_STATUS_CHANGED",
@@ -98,7 +98,7 @@ export const SUNBIZ_DEFAULT_SEQUENCES: DefaultSequence[] = [
         delay_minutes: 10,
         from_label: "Solara",
         body:
-          "Hi {{lead.contact_name}} — Solara at SunBiz Funding. {{lead.business_name}} looks like a strong fit for working capital. We can line up 3-5 lender offers in 24-48h. Reply YES and I'll send the quick application + the docs we need.",
+          "Hi {{lead.contact_name}}, Solara at SunBiz Funding. {{lead.business_name}} looks like a strong fit for working capital. We fund direct and can move fast once we see your file. Reply YES and I'll send the quick application plus the docs we need.",
       },
       {
         channel: "email",
@@ -106,14 +106,14 @@ export const SUNBIZ_DEFAULT_SEQUENCES: DefaultSequence[] = [
         from_label: "Solara",
         subject: "Funding options for {{lead.business_name}}",
         body:
-          "Hi {{lead.contact_name}},\n\nFollowing up — {{lead.business_name}} looks well-positioned for an advance. To get you real offers I just need a 2-minute application and your last 3 months of business bank statements (PDF exports from online banking). Once those are in, our lender network usually returns 3-5 offers within 48h, no obligation to take any.\n\nReply here and I'll send the link.\n\n— Solara, SunBiz Funding",
+          "Hi {{lead.contact_name}},\n\nFollowing up. {{lead.business_name}} looks well-positioned for an advance. To get you a real answer I just need a 2-minute application and your last 3 months of business bank statements (PDF exports from online banking). Once those are in, my underwriters review the file and come back to you quickly. What we can offer depends on the file, and there's no obligation.\n\nReply here and I'll send the link.\n\nSolara, SunBiz Funding",
       },
       {
         channel: "sms",
         delay_minutes: 60 * 24 * 3, // +3 days
         from_label: "Solara",
         body:
-          "{{lead.contact_name}} — still happy to get {{lead.business_name}} in front of our lenders. Send a 1-line reply (yes / not now) and I'll match the pace. Otherwise I'll close the thread on my end.",
+          "{{lead.contact_name}}, still happy to get {{lead.business_name}} in front of my underwriters. Send a 1-line reply (yes / not now) and I'll match the pace. Otherwise I'll close the thread on my end.",
       },
     ],
   },
@@ -134,7 +134,7 @@ export const SUNBIZ_DEFAULT_SEQUENCES: DefaultSequence[] = [
         delay_minutes: 30,
         from_label: "Solara",
         body:
-          "Hi {{lead.contact_name}} — saw you opened the application. Anything I can clarify? It's 3 quick steps — basic info, the app itself, then 3 months of bank statements at the end.",
+          "Hi {{lead.contact_name}}, saw you opened the application. Anything I can clarify? It's 3 quick steps: basic info, the app itself, then 3 months of bank statements at the end.",
       },
       {
         channel: "email",
@@ -142,12 +142,12 @@ export const SUNBIZ_DEFAULT_SEQUENCES: DefaultSequence[] = [
         from_label: "Solara",
         subject: "Heads up on the application for {{lead.business_name}}",
         body:
-          "Hi {{lead.contact_name}},\n\nWanted to follow up — when you finish the application, the lenders we work with usually return 3-5 offers within 24-48h. The bank statements at step 3 are the gating piece; without them no underwriting can fire.\n\nIf anything's holding you up, reply here and I'll help.\n\n— Solara, SunBiz Funding",
+          "Hi {{lead.contact_name}},\n\nWanted to follow up. Once you finish the application, my underwriters can review the file and come back with what we can do. The bank statements at step 3 are the gating piece; without them nothing can go into underwriting.\n\nIf anything's holding you up, reply here and I'll help.\n\nSolara, SunBiz Funding",
       },
     ],
   },
 
-  // 2026-06-18 (CC): the "Submitted — underwriting wait" sequence was removed
+  // 2026-06-18 (CC): the "Submitted - underwriting wait" sequence was removed
   // with the `submitted` stage. Underwriting is now an operator-driven action
   // (the Bank-tab "Run underwriting" CTA), not an auto-stage, so there's no
   // merchant auto-SMS on submit. An underwriting-triggered confirmation can be
@@ -160,11 +160,11 @@ export const SUNBIZ_DEFAULT_SEQUENCES: DefaultSequence[] = [
     // 2026-06-18 (CC): retargeted from the removed `declined` stage to `ghost`
     // (where negative-reply / no-response leads now land). Same 1-month
     // re-engagement, now serving the ghost bucket.
-    name: "Ghost — 1-month check-back",
+    name: "Ghost - 1-month check-back",
     description:
       "Professional 1-month re-engagement for leads that went cold or replied 'not now'. Doesn't burn the bridge.",
     trigger_event: "BRAVO_RECORD_STATUS_CHANGED",
-    // 2026-07-15 (Adon): the `ghost` stage was removed — no-response leads now
+    // 2026-07-15 (Adon): the `ghost` stage was removed, no-response leads now
     // route to follow_up, so this trigger can no longer fire. Disabled on seed;
     // its replacement is the Follow-up rework (Build 9).
     trigger_filter: { entity: "lead", field: "stage", to: "ghost" },
@@ -177,7 +177,7 @@ export const SUNBIZ_DEFAULT_SEQUENCES: DefaultSequence[] = [
         from_label: "Solara",
         subject: "Checking in on {{lead.business_name}}",
         body:
-          "Hi {{lead.contact_name}},\n\nIt's been about a month since we last talked. Funding markets shift — what didn't fit last month sometimes does this month, especially if revenue's trending up or you've added new business.\n\nIf you're open to another look, send me an updated month of bank statements and I'll re-shop the file. No pressure — just want to keep the door open.\n\n— Solara, SunBiz Funding",
+          "Hi {{lead.contact_name}},\n\nIt's been about a month since we last talked. Things shift. What didn't fit last month sometimes does this month, especially if revenue's trending up or you've added new business.\n\nIf you're open to another look, send me an updated month of bank statements and I'll run the file again on our end. No pressure, just want to keep the door open.\n\nSolara, SunBiz Funding",
       },
     ],
   },
@@ -185,11 +185,11 @@ export const SUNBIZ_DEFAULT_SEQUENCES: DefaultSequence[] = [
   // ─────────────────────────────────────────────────────────────────
   // 5. Missing Info -> 3-touch info request (Phase 5 of Jordan/Oasis
   //    2026-05-23 restructure). Replaces the prior no_offers_available
-  //    sequence — that stage was retired in migration 064 (consolidated
+  //    sequence. That stage was retired in migration 064 (consolidated
   //    into `declined`, which already has its own 1-month check-back).
   // ─────────────────────────────────────────────────────────────────
   {
-    name: "Missing info — chase + book call",
+    name: "Missing info - chase + book call",
     description:
       "Fires when a lead lands in missing_info (manual or classifier-flagged). Two-touch cadence to request the outstanding info and book a call if they go silent.",
     trigger_event: "BRAVO_RECORD_STATUS_CHANGED",
@@ -201,7 +201,7 @@ export const SUNBIZ_DEFAULT_SEQUENCES: DefaultSequence[] = [
         delay_minutes: 30,
         from_label: "Solara",
         body:
-          "Hi {{lead.contact_name}} — your file is one step from underwriting but we're missing a couple things. Reply here and I'll list what's outstanding, or text me a good time to call.",
+          "Hi {{lead.contact_name}}, your file is one step from underwriting but we're missing a couple things. Reply here and I'll list what's outstanding, or text me a good time to call.",
       },
       {
         channel: "email",
@@ -209,7 +209,7 @@ export const SUNBIZ_DEFAULT_SEQUENCES: DefaultSequence[] = [
         from_label: "Solara",
         subject: "Quick info to unblock {{lead.business_name}}",
         body:
-          "Hi {{lead.contact_name}},\n\nFollowing up — your file is sitting in our queue waiting on a couple data points before lenders can price it. Easiest path: reply here with a good time today or tomorrow for a 5-min call and we'll knock it out together.\n\n— Solara, SunBiz Funding",
+          "Hi {{lead.contact_name}},\n\nFollowing up. Your file is sitting in our queue waiting on a couple data points before my underwriters can price it. Easiest path: reply here with a good time today or tomorrow for a 5-min call and we'll knock it out together.\n\nSolara, SunBiz Funding",
       },
     ],
   },
@@ -219,10 +219,10 @@ export const SUNBIZ_DEFAULT_SEQUENCES: DefaultSequence[] = [
   // Phase 15.1 add (2026-05-15 evening). Adon: meeting decision was
   // "every stage triggers something". A lead at sent_application
   // that hasn't viewed the link is the canonical "they got distracted"
-  // case — 24h SMS to bring them back.
+  // case, 24h SMS to bring them back.
   // ─────────────────────────────────────────────────────────────────
   {
-    name: "Sent application — 24h reminder",
+    name: "Sent application - 24h reminder",
     description:
       "Fires when an application link goes out. If the lead hasn't clicked through, send a soft 24h reminder.",
     trigger_event: "BRAVO_RECORD_STATUS_CHANGED",
@@ -234,7 +234,7 @@ export const SUNBIZ_DEFAULT_SEQUENCES: DefaultSequence[] = [
         delay_minutes: 60 * 24, // 24h
         from_label: "Solara",
         body:
-          "Hi {{lead.contact_name}} — quick reminder, your SunBiz application link is still active. Takes about 5 minutes. Reply if anything's blocking you and I'll help.",
+          "Hi {{lead.contact_name}}, quick reminder: your SunBiz application link is still active. Takes about 5 minutes. Reply if anything's blocking you and I'll help.",
       },
     ],
   },
@@ -243,11 +243,11 @@ export const SUNBIZ_DEFAULT_SEQUENCES: DefaultSequence[] = [
   // 7. Signed application -> bank-statement nag
   // The form is 3-step: basic → app → bank statements. signed means
   // they finished steps 1+2; the bank-statements upload is the last
-  // gate to underwriting. Without those statements no lender can
+  // gate to underwriting. Without those statements underwriting can't
   // price the deal. 12h SMS + 36h email.
   // ─────────────────────────────────────────────────────────────────
   {
-    name: "Signed application — bank statements nag",
+    name: "Signed application - bank statements nag",
     description:
       "Fires when a lead signs the application but hasn't uploaded bank statements yet. Without statements no underwriting can fire.",
     trigger_event: "BRAVO_RECORD_STATUS_CHANGED",
@@ -259,31 +259,31 @@ export const SUNBIZ_DEFAULT_SEQUENCES: DefaultSequence[] = [
         delay_minutes: 60 * 12, // 12h
         from_label: "Solara",
         body:
-          "Nice — your application is signed. Last step is 3 months of bank statements (PDFs from your bank's online portal). Without them no lender can price the deal. Upload at the same link.",
+          "Nice, your application is signed. Last step is 3 months of bank statements (PDFs from your bank's online portal). Without them we can't price the deal. Upload at the same link.",
       },
       {
         channel: "email",
         delay_minutes: 60 * 24 * 1.5, // ~36h
         from_label: "Solara",
-        subject: "Last step for {{lead.business_name}} — bank statements",
+        subject: "Last step for {{lead.business_name}}: bank statements",
         body:
-          "Hi {{lead.contact_name}},\n\nYour signed application is in. To unlock offers from our lender network, I need 3 months of bank statements (PDF exports from your online banking work great).\n\nUpload at the same application link. Underwriting fires automatically once they land.\n\n— Solara, SunBiz Funding",
+          "Hi {{lead.contact_name}},\n\nYour signed application is in. For my underwriters to review and price your file, I need 3 months of bank statements (PDF exports from your online banking work great).\n\nUpload at the same application link. Underwriting fires automatically once they land.\n\nSolara, SunBiz Funding",
       },
     ],
   },
 
   // ─────────────────────────────────────────────────────────────────
   // 8. Default -> 60-day soft re-engagement
-  // Phase 15.1 add. Sensitive — a defaulted lead means the borrower
+  // Phase 15.1 add. Sensitive: a defaulted lead means the borrower
   // missed payments on a previous funded deal. Compliance: NO new
   // funding pitch in the same touch as the default. Just a check-in.
   // Adon: review this copy with collections before turning the sequence
   // on. Default-state is disabled by default (see seed loop).
   // ─────────────────────────────────────────────────────────────────
   {
-    name: "Default — 60-day soft check-in (DISABLED by default)",
+    name: "Default - 60-day soft check-in (DISABLED by default)",
     description:
-      "Sensitive: fires 60 days after a lead's funded_deal defaults. Soft check-in only — no new funding pitch in this touch. Review with compliance before enabling.",
+      "Sensitive: fires 60 days after a lead's funded_deal defaults. Soft check-in only, no new funding pitch in this touch. Review with compliance before enabling.",
     trigger_event: "BRAVO_RECORD_STATUS_CHANGED",
     trigger_filter: { entity: "lead", field: "stage", to: "default" },
     one_per_lead: true,
@@ -295,7 +295,7 @@ export const SUNBIZ_DEFAULT_SEQUENCES: DefaultSequence[] = [
         from_label: "Solara",
         subject: "Checking in on {{lead.business_name}}",
         body:
-          "Hi {{lead.contact_name}},\n\nIt's been a while. I wanted to reach out and see how things are going on your end — no pitch attached, just a check-in.\n\nIf the business is back on its feet and you'd ever want to talk again, I'm here. If not, no harm done — just close out the thread and I'll respect that.\n\n— Solara, SunBiz Funding",
+          "Hi {{lead.contact_name}},\n\nIt's been a while. I wanted to reach out and see how things are going on your end, no pitch attached, just a check-in.\n\nIf the business is back on its feet and you'd ever want to talk again, I'm here. If not, no harm done. Just close out the thread and I'll respect that.\n\nSolara, SunBiz Funding",
       },
     ],
   },

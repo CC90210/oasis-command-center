@@ -192,7 +192,7 @@ export async function runBlast(input: RunBlastInput): Promise<RunBlastResult> {
   const altSubject = input.abTest ? stripDashes(input.abTest.alternative_subject) : undefined;
 
   // 1. Blast-safety guard (fail-closed) on subject + html + the A/B alternate subject.
-  const safe = await sanitizeBlastMessage(input.tenantId, `${subject}\n${altSubject || ""}\n${html}`);
+  const safe = await sanitizeBlastMessage(input.tenantId, `${subject}\n${altSubject || ""}\n${html}`, { checkPositioning: true });
   if (!safe.ok) return { ok: false, error: safe.reason, message: safe.message, lender_hits: safe.lenderHits, status: 400 };
 
   const client = await getConstantContactClient(input.tenantId);
@@ -248,7 +248,7 @@ export async function runBlast(input: RunBlastInput): Promise<RunBlastResult> {
       testTo: input.test,
       abTest: input.abTest ? { ...input.abTest, alternative_subject: altSubject as string } : undefined,
       guard: async (f) => {
-        const g = await sanitizeBlastMessage(input.tenantId, `${f.subject}\n${f.html_content}`);
+        const g = await sanitizeBlastMessage(input.tenantId, `${f.subject}\n${f.html_content}`, { checkPositioning: true });
         if (!g.ok) throw new Error(`blast_safety_${g.reason}`);
       },
     })) as { campaign_id: string; campaign_activity_id: string; scheduled?: boolean; tested?: boolean };
@@ -310,7 +310,7 @@ export type RunResendInput = {
  */
 export async function runResend(input: RunResendInput): Promise<RunBlastResult> {
   const resendSubject = stripDashes(input.resendSubject);
-  const safe = await sanitizeBlastMessage(input.tenantId, resendSubject);
+  const safe = await sanitizeBlastMessage(input.tenantId, resendSubject, { checkPositioning: true });
   if (!safe.ok) return { ok: false, error: safe.reason, message: safe.message, lender_hits: safe.lenderHits, status: 400 };
 
   const client = await getConstantContactClient(input.tenantId);
@@ -345,7 +345,7 @@ export type RunAbTestInput = {
 export async function runAbTest(input: RunAbTestInput): Promise<RunBlastResult> {
   const primarySubject = stripDashes(input.primarySubject);
   const alternativeSubject = stripDashes(input.alternativeSubject);
-  const safe = await sanitizeBlastMessage(input.tenantId, `${primarySubject}\n${alternativeSubject}`);
+  const safe = await sanitizeBlastMessage(input.tenantId, `${primarySubject}\n${alternativeSubject}`, { checkPositioning: true });
   if (!safe.ok) return { ok: false, error: safe.reason, message: safe.message, lender_hits: safe.lenderHits, status: 400 };
 
   const client = await getConstantContactClient(input.tenantId);

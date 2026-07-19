@@ -157,9 +157,9 @@ export async function POST(req: NextRequest) {
       { bridgeTarget },
     );
 
-    const smsSanitize = result.sms ? await sanitizeBlastMessage(sess.tenantId, result.sms) : { ok: true as const, cleaned: "" };
+    const smsSanitize = result.sms ? await sanitizeBlastMessage(sess.tenantId, result.sms, { checkPositioning: true }) : { ok: true as const, cleaned: "" };
     const emailSanitize = result.email.body
-      ? await sanitizeBlastMessage(sess.tenantId, result.email.body)
+      ? await sanitizeBlastMessage(sess.tenantId, result.email.body, { checkPositioning: true })
       : { ok: true as const, cleaned: "" };
 
     if (!smsSanitize.ok || !emailSanitize.ok) {

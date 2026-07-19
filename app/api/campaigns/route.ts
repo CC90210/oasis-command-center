@@ -212,7 +212,7 @@ export async function POST(req: NextRequest) {
 
   // Merchant-facing safety guard (fail-closed): block any lender name, strip
   // em dashes. A blast is the highest-volume merchant-facing surface.
-  const safe = await sanitizeBlastMessage(session.tenantId, message);
+  const safe = await sanitizeBlastMessage(session.tenantId, message, { checkPositioning: true });
   if (!safe.ok) {
     return NextResponse.json(
       { ok: false, error: safe.reason, message: safe.message, lender_hits: safe.lenderHits },
