@@ -20,9 +20,12 @@
  * are 0-fill on ISO-forwarded sheets). That's expected — the application is
  * created anyway (shoppable without a phone) and flagged phone_status by the
  * promote helper; the missing number is filled later via edit + lookup.
+ *
+ * Pure module (string/number transforms + the pinned field contract) — no
+ * secrets, no I/O — so it carries no `server-only` guard and is unit-testable
+ * directly (tests/live-sub-mapping.test.ts), matching its sibling
+ * lib/forms/application-upsert.ts. Its only importers are server-side.
  */
-
-import "server-only";
 
 function str(v: unknown): string | undefined {
   if (typeof v === "string") {
@@ -64,6 +67,19 @@ function set(out: Record<string, unknown>, key: string, value: unknown): void {
   if (value !== undefined && value !== null && value !== "") out[key] = value;
 }
 
+/** Whole months between an ISO business-start date and today (backstop for when
+ * the parser emitted business_start_date but not time_in_business_months, e.g.
+ * an older lead_data row). Returns undefined for a missing/unparseable date. */
+function monthsFromStart(iso: string | undefined): number | undefined {
+  if (!iso) return undefined;
+  const start = new Date(iso);
+  if (isNaN(start.getTime())) return undefined;
+  const now = new Date();
+  let months = (now.getFullYear() - start.getFullYear()) * 12 + (now.getMonth() - start.getMonth());
+  if (now.getDate() < start.getDate()) months -= 1;
+  return months >= 0 ? months : undefined;
+}
+
 /**
  * Map a scrubber/lead_data record to canonical application fields. The result
  * is merged over the raw lead_data and handed to extractAppFields(), so a lead
@@ -86,14 +102,29 @@ export function mapLeadDataToApplicationFields(
   set(out, "business_address", firstStr(lead, "business_address", "address"));
   set(out, "entity_type", firstStr(lead, "entity_type"));
   set(out, "tax_id_ein", firstStr(lead, "tax_id_ein", "ein", "federal_tax_id"));
-  set(out, "business_start_date", firstStr(lead, "business_start_date", "tib"));
+  set(out, "iso_broker", firstStr(lead, "iso_broker"));
+  // Time in business: `tib` is the RAW sheet cell (a start DATE like
+  // "2024-06-01", but also bare years / durations / mangled dates), NOT a date
+  // we can trust — the VPS parser already resolves it into `business_start_date`
+  // (a clean ISO date, only when the cell was a real date) and
+  // `time_in_business_months` (numeric months, incl. from duration phrases).
+  // Map those. NEVER fall back tib→business_start_date: that wrote garbage like
+  // "Over 10 years" / "2009" into the date field (the pre-fix D5 bug). If months
+  // is missing but a real start date is present, derive it here as a backstop.
+  set(out, "business_start_date", firstStr(lead, "business_start_date"));
+  set(out, "time_in_business_months", firstNum(lead, "time_in_business_months") ?? monthsFromStart(firstStr(lead, "business_start_date")));
+  set(out, "time_in_business", firstStr(lead, "time_in_business"));
   set(out, "product_service_description", firstStr(lead, "product_service_description"));
 
   // — Financials —
   set(out, "monthly_revenue", firstNum(lead, "monthly_revenue", "true_revenue_monthly", "avg_monthly_revenue"));
   set(out, "requested_amount", firstNum(lead, "requested_amount", "requested_advance"));
   set(out, "applicant_fico", firstNum(lead, "applicant_fico", "credit_score", "owner_credit_score"));
-  set(out, "position_count", firstNum(lead, "position_count", "mca_positions"));
+  set(out, "position_count", firstNum(lead, "position_count", "mca_positions", "open_mca_positions"));
+  set(out, "positions_payment", firstNum(lead, "positions_payment"));
+  set(out, "positions_payment_frequency", firstStr(lead, "positions_payment_frequency"));
+  set(out, "positions_balance", firstNum(lead, "positions_balance"));
+  set(out, "leverage_ratio", firstNum(lead, "leverage_ratio", "leverage_pct"));
 
   // — Contact / owner —
   const ownerName = firstStr(lead, "owner_name", "owner_full_name", "contact_name");
@@ -106,6 +137,74 @@ export function mapLeadDataToApplicationFields(
   set(out, "owner_dob", firstStr(lead, "owner_dob", "dob"));
   set(out, "owner_ssn", firstStr(lead, "owner_ssn", "ssn"));
   set(out, "owner_home_address", firstStr(lead, "owner_home_address", "home_address"));
+  set(out, "owner_ownership_pct", firstNum(lead, "owner_ownership_pct", "ownership_pct"));
 
   return out;
+}
+
+/**
+ * ── PARSER CONTRACT (pinned) ──────────────────────────────────────────────
+ * These are the canonical application fields a COMPLETE Breeze live sub is
+ * expected to carry after mapping + extractAppFields. Pinned against the VPS
+ * `build_lead_data` output in SunBiz-Agent scripts/mca_lead_scrubber.py — keep
+ * the two in lockstep. Split by criticality so a promote can log every empty
+ * field (silent-data-loss guard) and alert only when a load-bearing one is
+ * blank. Some listed fields are legitimately absent on the UW Sheet 2.5
+ * template (applicant_fico is usually an Experian *link*, requested_amount +
+ * positions_balance aren't on the sheet at all) — those surface in the log, not
+ * as an alert-by-default, via LIVE_SUB_CRITICAL_FIELDS.
+ */
+export const LIVE_SUB_EXPECTED_FIELDS = [
+  "business_name",
+  "business_state",
+  "industry",
+  "tax_id_ein",
+  "entity_type",
+  "business_address",
+  "monthly_revenue",
+  "time_in_business_months",
+  "time_in_business",
+  "position_count",
+  "positions_payment",
+  "positions_payment_frequency",
+  "leverage_ratio",
+  "applicant_fico",
+  "owner_name",
+  "iso_broker",
+  "business_start_date",
+] as const;
+
+/** The subset whose absence means the promoted deal is materially broken (not
+ * merely thin). Blank business_name / monthly_revenue is alarming; the others
+ * are commonly absent on Breeze sheets and only warn. */
+export const LIVE_SUB_CRITICAL_FIELDS = [
+  "business_name",
+  "monthly_revenue",
+  "position_count",
+  "applicant_fico",
+  "tax_id_ein",
+] as const;
+
+export type LiveSubReconciliation = {
+  /** Expected application fields that came back empty after mapping. */
+  emptyExpected: string[];
+  /** Critical fields (LIVE_SUB_CRITICAL_FIELDS) that came back empty. */
+  missingCritical: string[];
+  /** True when a field NO deal should lack (business_name/monthly_revenue) is empty. */
+  severe: boolean;
+};
+
+/**
+ * Reconcile the extracted application fields against the pinned contract so a
+ * promote never silently drops data. Call with the post-extractAppFields object.
+ */
+export function reconcileLiveSubFields(fields: Record<string, unknown>): LiveSubReconciliation {
+  const present = (k: string): boolean => {
+    const v = fields[k];
+    return v !== undefined && v !== null && v !== "";
+  };
+  const emptyExpected = LIVE_SUB_EXPECTED_FIELDS.filter((k) => !present(k));
+  const missingCritical = LIVE_SUB_CRITICAL_FIELDS.filter((k) => !present(k));
+  const severe = !present("business_name") || !present("monthly_revenue");
+  return { emptyExpected, missingCritical, severe };
 }

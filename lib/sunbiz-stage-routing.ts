@@ -38,6 +38,13 @@ const LEAD_STAGE_ALIASES = new Map<string, string>([
   ["followup", "follow_up"],
   ["follow up", "follow_up"],
   ["hot", "imported"],
+  // Breeze Live Subs (uw_sheet). Only the unambiguous labels — "underwriting"
+  // deliberately routes to the opportunity "shopping" stage below, not here.
+  ["uw", "uw_sheet"],
+  ["uw sheet", "uw_sheet"],
+  ["uw_sheet", "uw_sheet"],
+  ["live subs", "uw_sheet"],
+  ["live submissions", "uw_sheet"],
   ["missing", "missing_info"],
   // declined/dead moved to the Applications board; a bare imported "Declined"
   // lead is re-engageable → follow_up.

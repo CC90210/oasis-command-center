@@ -84,6 +84,7 @@ const SUNBIZ_STAGES: LeadsTableStage[] = [
   // declined+dead live on the Applications board. "Imported" is the intake
   // stage. Kept in sync with LEAD_PIPELINE_STAGES.
   { value: "imported",           label: "Imported",           tone: "text-status-info" },
+  { value: "uw_sheet",           label: "Live Subs",          tone: "text-accent" },
   { value: "missing_info",       label: "Missing info",       tone: "text-status-info" },
   { value: "follow_up",          label: "Follow up",          tone: "text-status-info" },
   { value: "sent_application",   label: "App sent",           tone: "text-status-info" },

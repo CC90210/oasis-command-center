@@ -20,6 +20,10 @@ export const STAGE_SLA_DAYS: Record<string, number> = {
   // retired). Terminal stages keep 999d so they never count as overdue.
   // Fresh inquiry — speed-to-lead is everything; contact within a day.
   imported: 1,
+  // Breeze Live Subs — a scrubbed+approved UW sheet sits here until it promotes
+  // to an application. If the promote fails or the deal has no phone it can
+  // strand, so a tight 2-day SLA surfaces it as overdue on the board.
+  uw_sheet: 2,
   missing_info: 3,
   follow_up: 2,
   sent_application: 5,
@@ -58,6 +62,7 @@ export const STAGE_SLA_DAYS: Record<string, number> = {
 export const ACTIVE_STAGES = new Set<string>([
   // Lead-side active
   "imported",
+  "uw_sheet",
   "missing_info",
   "follow_up",
   "sent_application",
@@ -82,6 +87,7 @@ export const ACTIVE_STAGES = new Set<string>([
 export const VISIBLE_TARGET_STAGES = new Set<string>([
   // Lead-side
   "imported",
+  "uw_sheet",
   "missing_info",
   "follow_up",
   "sent_application",

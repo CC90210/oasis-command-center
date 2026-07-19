@@ -26,11 +26,36 @@ import { getRecord, updateRecord } from "@/lib/manifest/data";
 import { createApplicationFromLead } from "@/lib/applications/create-from-lead";
 import { extractAppFields } from "@/lib/forms/application-upsert";
 import { generateApplicationDocumentFromRecord } from "@/lib/forms/application-document";
-import { mapLeadDataToApplicationFields } from "@/lib/applications/live-sub-mapping";
+import {
+  mapLeadDataToApplicationFields,
+  reconcileLiveSubFields,
+} from "@/lib/applications/live-sub-mapping";
+import { writeAgentAlert } from "@/lib/notify/agent-alert";
 
 export type PromoteResult =
-  | { ok: true; applicationId: string; created: boolean; phoneStatus: "on_file" | "needs_lookup"; appliedKeys: string[] }
-  | { ok: false; error: string };
+  | {
+      ok: true;
+      applicationId: string;
+      created: boolean;
+      phoneStatus: "on_file" | "needs_lookup";
+      appliedKeys: string[];
+      /** Expected application fields that came back empty (silent-loss guard). */
+      emptyFields: string[];
+      /** Critical fields still blank after promote (operator-actionable). */
+      missingCritical: string[];
+      /** True once the branded PDF regenerated; false if that step failed. */
+      pdfOk: boolean;
+    }
+  | { ok: false; error: string; stage: PromoteStage };
+
+/** Where in the promote a failure happened — carried to the operator alert so a
+ * failed promote is diagnosable, not an opaque 500. */
+export type PromoteStage =
+  | "load_lead"
+  | "create_application"
+  | "map_fields"
+  | "persist"
+  | "unexpected";
 
 export async function promoteLeadToApplication(input: {
   tenantId: string;
@@ -40,17 +65,34 @@ export async function promoteLeadToApplication(input: {
 }): Promise<PromoteResult> {
   const { tenantId, leadId } = input;
   const source = input.source || "live_sub_auto";
-  if (!tenantId || !leadId) return { ok: false, error: "missing_tenant_or_lead" };
+  if (!tenantId || !leadId) return { ok: false, error: "missing_tenant_or_lead", stage: "load_lead" };
+
+  // Surface a failure as an operator-visible, dedup'd agent_alert (System Health
+  // card + Telegram) so a promote never fails silently into an opaque 500. The
+  // lead stays at uw_sheet (not transferred) and is re-runnable from the queue.
+  const fail = async (stage: PromoteStage, error: string): Promise<PromoteResult> => {
+    await writeAgentAlert({
+      tenantId,
+      alertType: "live_sub_promote_failed",
+      severity: "urgent",
+      subjectType: "lead",
+      subjectId: leadId,
+      title: `Live Sub promote failed (${stage})`,
+      body: `Lead ${leadId} could not be promoted to an application: ${error}. It remains in the Live Subs queue — fix and retry.`,
+      payload: { stage, error, source },
+    });
+    return { ok: false, error, stage };
+  };
 
   try {
     // Load the lead (tenant-scoped — a lead outside this tenant resolves to null).
     const lead = await getRecord({ tenant_id: tenantId, entity: "lead", id: leadId }).catch(() => null);
-    if (!lead) return { ok: false, error: "lead_not_found" };
+    if (!lead) return await fail("load_lead", "lead_not_found");
     const leadData = (lead.data || {}) as Record<string, unknown>;
 
     // 1) Create (or reuse) the linked application. Idempotent.
     const appRes = await createApplicationFromLead({ tenantId, leadId });
-    if (!appRes.ok) return { ok: false, error: appRes.error };
+    if (!appRes.ok) return await fail("create_application", appRes.error);
     const applicationId = appRes.applicationId;
 
     // 2) Map the full lead_data → canonical application fields, then normalize.
@@ -93,11 +135,65 @@ export async function promoteLeadToApplication(input: {
     if (!leadData.transferred_at) leadPatch.transferred_at = new Date().toISOString();
     await updateRecord({ tenant_id: tenantId, entity: "lead", id: leadId, patch: leadPatch });
 
-    // 5) (Re)generate the branded application PDF from the now-populated record.
-    await generateApplicationDocumentFromRecord({ tenantId, applicationId, replace: true }).catch(() => {});
+    // 5) Reconcile the final application fields against the pinned parser
+    //    contract — no silent data loss. Log every expected field that came back
+    //    empty; alert (dedup'd) when a critical one is blank so the operator can
+    //    fill it before the deal is shopped.
+    const finalApp = await getRecord({ tenant_id: tenantId, entity: "application", id: applicationId }).catch(() => null);
+    const finalData = (finalApp?.data || { ...appData, ...patch }) as Record<string, unknown>;
+    const { emptyExpected, missingCritical, severe } = reconcileLiveSubFields(finalData);
+    if (emptyExpected.length) {
+      console.warn(
+        `[promote] lead=${leadId} app=${applicationId} empty expected fields: ${emptyExpected.join(", ")}`,
+      );
+    }
+    if (missingCritical.length) {
+      await writeAgentAlert({
+        tenantId,
+        alertType: "live_sub_incomplete",
+        severity: severe ? "urgent" : "warn",
+        subjectType: "lead",
+        subjectId: leadId,
+        title: `Live Sub promoted with ${missingCritical.length} blank critical field(s)`,
+        body: `Application ${applicationId} is missing: ${missingCritical.join(", ")}. All empty: ${emptyExpected.join(", ") || "none"}.`,
+        payload: { applicationId, missingCritical, emptyExpected, phoneStatus },
+      });
+    }
 
-    return { ok: true, applicationId, created: appRes.created, phoneStatus, appliedKeys: Object.keys(patch) };
+    // 6) (Re)generate the branded application PDF from the now-populated record.
+    //    A PDF failure does NOT fail the promote (the record is already correct),
+    //    but it must be VISIBLE, not swallowed — the operator needs to know the
+    //    lender-ready document is stale.
+    let pdfOk = true;
+    try {
+      await generateApplicationDocumentFromRecord({ tenantId, applicationId, replace: true });
+    } catch (pdfErr) {
+      pdfOk = false;
+      const msg = pdfErr instanceof Error ? pdfErr.message : "pdf_generation_failed";
+      console.error(`[promote] lead=${leadId} app=${applicationId} PDF regen failed: ${msg}`);
+      await writeAgentAlert({
+        tenantId,
+        alertType: "live_sub_pdf_failed",
+        severity: "warn",
+        subjectType: "application",
+        subjectId: applicationId,
+        title: "Live Sub application PDF failed to generate",
+        body: `Application ${applicationId} promoted OK but its branded PDF did not regenerate: ${msg}. Re-run from the application drawer.`,
+        payload: { leadId, error: msg },
+      });
+    }
+
+    return {
+      ok: true,
+      applicationId,
+      created: appRes.created,
+      phoneStatus,
+      appliedKeys: Object.keys(patch),
+      emptyFields: emptyExpected,
+      missingCritical,
+      pdfOk,
+    };
   } catch (err) {
-    return { ok: false, error: err instanceof Error ? err.message : "promote_failed" };
+    return await fail("unexpected", err instanceof Error ? err.message : "promote_failed");
   }
 }

@@ -77,6 +77,21 @@ export const APPLICATION_FIELD_KEYS = [
   "partner_ownership_pct",
   "partner_home_address",
   "signature_name",
+  // Breeze Live-Subs / UW-sheet underwriting fields (2026-07-17). The VPS
+  // scrubber (build_lead_data) emits these canonically; downstream readers need
+  // them but they were being DROPPED by this whitelist, so a promoted live sub
+  // showed a blank broker + $NaN position payment on the lender submission and
+  // lost its time-in-business label. iso_broker → queue/provenance;
+  // time_in_business → jordan-submission "Time in Business"; positions_payment +
+  // positions_payment_frequency + positions_balance → jordan-submission
+  // "Existing Positions | Remaining Balance | <Freq> Payment"; leverage_ratio →
+  // match-fitness / shop-out. See extract-submission-deal.ts.
+  "iso_broker",
+  "time_in_business",
+  "positions_payment",
+  "positions_payment_frequency",
+  "positions_balance",
+  "leverage_ratio",
 ] as const;
 
 /**
@@ -133,7 +148,13 @@ function normalize(key: string, value: unknown): unknown {
     const v = value.trim().toLowerCase();
     return v.includes("@") ? v : undefined;
   }
-  if (key === "monthly_revenue" || key === "requested_amount") {
+  if (
+    key === "monthly_revenue" ||
+    key === "requested_amount" ||
+    key === "positions_payment" ||
+    key === "positions_balance" ||
+    key === "leverage_ratio"
+  ) {
     if (typeof value === "number" && isFinite(value)) return value;
     if (typeof value === "string") {
       const n = parseFloat(value.replace(/[$,\s]/g, ""));
