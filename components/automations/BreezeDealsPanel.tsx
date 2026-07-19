@@ -1,22 +1,25 @@
 "use client";
 
 /**
- * BreezeDealsPanel — read-only feed of the Breeze BD deal queue
- * (scrub_candidates) on the SunBiz Automations tab.
+ * BreezeDealsPanel — the Breeze BD deal queue (scrub_candidates) on the SunBiz
+ * Automations tab, with in-dashboard review.
  *
- * Shows what the backend agents are actually producing: the mca-lead-scrubber
- * daemon pulls UW Entry Sheets off the shared Breeze Drive, verifies + scores
- * each deal, and stages the qualified ones here as pending_review. Approval
- * happens in Ezra's Telegram (ezra-telegram-bridge) — approving there creates
- * the lead + fires enrichment. This panel is the dashboard window onto that
- * flow, NOT a second approval surface (one approval path, no drift).
+ * The mca-lead-scrubber daemon pulls UW Entry Sheets off the shared Breeze
+ * Drive, verifies + scores each deal, and stages the qualified ones here as
+ * pending_review. An operator can approve / decline them RIGHT HERE (or still in
+ * Ezra's Telegram — same end state). Approving creates the lead at uw_sheet and
+ * promotes it to a shoppable application (full UW-sheet fields + branded PDF).
  *
- * Data: GET /api/automations/breeze-deals (auth-gated, tenant-scoped,
+ * Live subs arrive without contact PII, so an approved deal is flagged
+ * "Needs phone" — fill it inline (one click) to make the merchant contactable.
+ *
+ * Data: GET /api/automations/breeze-deals; actions: POST /api/scrub-candidates/[id]
+ * and POST /api/leads/[id]/set-field (both auth-gated, tenant-scoped,
  * PII-whitelisted server-side). Refreshes every 60s.
  */
 
 import { useCallback, useEffect, useState } from "react";
-import { Banknote, AlertCircle, CheckCircle2, XCircle, Hourglass, RefreshCw } from "lucide-react";
+import { Banknote, AlertCircle, CheckCircle2, XCircle, Hourglass, RefreshCw, PhoneOff, Check, X, RotateCw } from "lucide-react";
 
 type Deal = {
   id: string;
@@ -34,6 +37,7 @@ type Deal = {
   reviewed_by: string | null;
   reviewed_at: string | null;
   created_lead_id: string | null;
+  needs_lookup: boolean;
 };
 
 type ApiResponse = {
@@ -133,8 +137,10 @@ export function BreezeDealsPanel() {
 
       <div className="text-[11px] text-fg-muted leading-relaxed">
         UW Entry Sheets pulled off the shared Breeze Drive, verified and scored by the scrubber
-        daemon. Qualified deals wait here as <span className="text-fg">Pending</span> until Ezra
-        approves or declines them in Telegram — approval creates the lead and fires enrichment.
+        daemon. Qualified deals wait here as <span className="text-fg">Pending</span> —{" "}
+        <span className="text-fg">Approve</span> to create the lead and promote it to a shoppable
+        application, or <span className="text-fg">Decline</span>. Approved subs with no phone are
+        flagged <span className="text-status-warm">Needs phone</span> for a one-click fill.
       </div>
 
       {data.deals.length === 0 ? (
@@ -145,7 +151,7 @@ export function BreezeDealsPanel() {
       ) : (
         <div className="space-y-2">
           {data.deals.map((d) => (
-            <DealRow key={d.id} deal={d} />
+            <DealRow key={d.id} deal={d} onChanged={() => void refresh(filter)} />
           ))}
         </div>
       )}
@@ -153,7 +159,100 @@ export function BreezeDealsPanel() {
   );
 }
 
-function DealRow({ deal }: { deal: Deal }) {
+function DealRow({ deal, onChanged }: { deal: Deal; onChanged: () => void }) {
+  const [busy, setBusy] = useState<null | "approve" | "decline" | "retry_promote" | "phone">(null);
+  const [rowError, setRowError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [phone, setPhone] = useState("");
+
+  const act = useCallback(
+    async (action: "approve" | "decline" | "retry_promote") => {
+      setBusy(action);
+      setRowError(null);
+      setNotice(null);
+      try {
+        const res = await fetch(`/api/scrub-candidates/${deal.id}`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ action }),
+        });
+        const j = (await res.json()) as {
+          ok: boolean; error?: string; message?: string;
+          promoted?: boolean; promote_error?: string; missing_critical?: string[];
+        };
+        if (!j.ok) {
+          setRowError(j.message || j.error || `http_${res.status}`);
+          return;
+        }
+        if (action === "approve" && j.promoted === false) {
+          setNotice(`Lead created, but promote failed (${j.promote_error || "error"}). Use Retry.`);
+        } else if (j.missing_critical && j.missing_critical.length) {
+          setNotice(`Promoted — missing: ${j.missing_critical.join(", ")}.`);
+        }
+        onChanged();
+      } catch (e) {
+        setRowError(e instanceof Error ? e.message : "action_failed");
+      } finally {
+        setBusy(null);
+      }
+    },
+    [deal.id, onChanged],
+  );
+
+  const savePhone = useCallback(async () => {
+    const digits = phone.replace(/\D/g, "");
+    if (digits.length < 10) {
+      setRowError("Enter a 10-digit phone");
+      return;
+    }
+    if (!deal.created_lead_id) return;
+    setBusy("phone");
+    setRowError(null);
+    try {
+      const res = await fetch(`/api/leads/${deal.created_lead_id}/set-field`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ key: "phone", value: phone.trim() }),
+      });
+      const j = (await res.json()) as { ok: boolean; error?: string; message?: string };
+      if (!j.ok) {
+        setRowError(j.message || j.error || `http_${res.status}`);
+        return;
+      }
+      setPhone("");
+      setNotice("Phone saved — merchant is now contactable.");
+      onChanged();
+    } catch (e) {
+      setRowError(e instanceof Error ? e.message : "save_failed");
+    } finally {
+      setBusy(null);
+    }
+  }, [phone, deal.created_lead_id, onChanged]);
+
+  return <DealRowView
+    deal={deal}
+    busy={busy}
+    rowError={rowError}
+    notice={notice}
+    phone={phone}
+    setPhone={setPhone}
+    act={act}
+    savePhone={savePhone}
+  />;
+}
+
+function DealRowView({
+  deal, busy, rowError, notice, phone, setPhone, act, savePhone,
+}: {
+  deal: Deal;
+  busy: null | "approve" | "decline" | "retry_promote" | "phone";
+  rowError: string | null;
+  notice: string | null;
+  phone: string;
+  setPhone: (v: string) => void;
+  act: (a: "approve" | "decline" | "retry_promote") => void;
+  savePhone: () => void;
+}) {
   const StatusIcon =
     deal.status === "approved" ? CheckCircle2 : deal.status === "declined" ? XCircle : Hourglass;
   const statusClass =
@@ -167,7 +266,7 @@ function DealRow({ deal }: { deal: Deal }) {
       ? `Approved${deal.reviewed_by ? ` · ${deal.reviewed_by}` : ""}`
       : deal.status === "declined"
         ? `Declined${deal.reviewed_by ? ` · ${deal.reviewed_by}` : ""}`
-        : "Pending Ezra";
+        : "Pending review";
 
   // The scrubber's score reasons ("leverage 12% (+20)") in the tooltip —
   // same detail-on-hover convention as the workers panel.
@@ -203,6 +302,11 @@ function DealRow({ deal }: { deal: Deal }) {
                 Prev. submitted
               </span>
             )}
+            {deal.needs_lookup && deal.status !== "declined" && (
+              <span className="text-[10px] uppercase tracking-wider rounded-full border border-status-warm/40 text-status-warm px-1.5 py-0.5 flex items-center gap-1">
+                <PhoneOff className="w-3 h-3" /> Needs phone
+              </span>
+            )}
           </div>
           <div className="text-[11px] text-fg-muted mt-1 flex items-center gap-3 flex-wrap">
             {deal.monthly_revenue != null && (
@@ -218,6 +322,66 @@ function DealRow({ deal }: { deal: Deal }) {
               <span className="font-mono truncate max-w-[280px]">{deal.source_file}</span>
             )}
           </div>
+
+          {/* Actions */}
+          <div className="mt-2 flex items-center gap-2 flex-wrap">
+            {deal.status === "pending_review" && (
+              <>
+                <button
+                  type="button"
+                  disabled={busy !== null}
+                  onClick={() => act("approve")}
+                  className="inline-flex items-center gap-1 rounded-md border border-status-engaged/50 bg-status-engaged/10 px-2 py-1 text-[11px] font-bold text-status-engaged hover:bg-status-engaged/20 disabled:opacity-50"
+                >
+                  {busy === "approve" ? <RefreshCw className="w-3 h-3 animate-spin" /> : <Check className="w-3 h-3" />}
+                  Approve
+                </button>
+                <button
+                  type="button"
+                  disabled={busy !== null}
+                  onClick={() => act("decline")}
+                  className="inline-flex items-center gap-1 rounded-md border border-status-warm/50 bg-status-warm/10 px-2 py-1 text-[11px] font-bold text-status-warm hover:bg-status-warm/20 disabled:opacity-50"
+                >
+                  {busy === "decline" ? <RefreshCw className="w-3 h-3 animate-spin" /> : <X className="w-3 h-3" />}
+                  Decline
+                </button>
+              </>
+            )}
+            {deal.status === "approved" && deal.created_lead_id && (
+              <button
+                type="button"
+                disabled={busy !== null}
+                onClick={() => act("retry_promote")}
+                className="inline-flex items-center gap-1 rounded-md border border-bg-border bg-bg-elev/50 px-2 py-1 text-[11px] font-bold text-fg-muted hover:bg-bg-elev hover:text-fg disabled:opacity-50"
+                title="Re-run promote to (re)build the application + PDF"
+              >
+                {busy === "retry_promote" ? <RefreshCw className="w-3 h-3 animate-spin" /> : <RotateCw className="w-3 h-3" />}
+                Retry promote
+              </button>
+            )}
+            {deal.status === "approved" && deal.created_lead_id && deal.needs_lookup && (
+              <div className="inline-flex items-center gap-1">
+                <input
+                  type="tel"
+                  inputMode="tel"
+                  placeholder="Add phone…"
+                  value={phone}
+                  onChange={(e) => setPhone(e.target.value)}
+                  className="w-32 rounded-md border border-bg-border bg-bg-deep/40 px-2 py-1 text-[11px] text-fg placeholder:text-fg-dim focus:border-accent/60 focus:outline-none"
+                />
+                <button
+                  type="button"
+                  disabled={busy !== null}
+                  onClick={savePhone}
+                  className="inline-flex items-center gap-1 rounded-md border border-accent/50 bg-accent/10 px-2 py-1 text-[11px] font-bold text-accent hover:bg-accent/20 disabled:opacity-50"
+                >
+                  {busy === "phone" ? <RefreshCw className="w-3 h-3 animate-spin" /> : "Save phone"}
+                </button>
+              </div>
+            )}
+          </div>
+          {rowError && <div className="mt-1 text-[11px] text-status-warm">{rowError}</div>}
+          {notice && <div className="mt-1 text-[11px] text-fg-muted">{notice}</div>}
         </div>
       </div>
     </div>

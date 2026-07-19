@@ -287,6 +287,7 @@ const STAGES_NEEDING_APPLY_URL = new Set([
   "intent_inquiry_submitted",
   "hot_lead",
   "new_contact",
+  "uw_sheet", // Live Subs — the first-touch drip texts the application link
   "missing_info",
   "follow_up",
   "sent_application",

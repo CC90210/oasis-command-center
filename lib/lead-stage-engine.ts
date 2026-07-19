@@ -157,6 +157,7 @@ const RULES: Record<LeadStageEvent["type"], Rule> = {
   lead_replied_negative: {
     from: new Set<string>([
       "imported",
+      "uw_sheet",
       "missing_info",
       "follow_up",
       "sent_application",
@@ -170,7 +171,7 @@ const RULES: Record<LeadStageEvent["type"], Rule> = {
   // without a reply. 2026-07-15 (Adon): ghost removed → routes to follow_up
   // (general nurture; a no-op for leads already there).
   sequence_exhausted: {
-    from: new Set<string>(["follow_up", "sent_application", "missing_info"]),
+    from: new Set<string>(["follow_up", "sent_application", "missing_info", "uw_sheet"]),
     to: "follow_up",
     reasonCode: "sequence_exhausted_no_response",
   },

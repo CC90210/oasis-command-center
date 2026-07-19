@@ -58,6 +58,13 @@ function toSafeDeal(row: CandidateRow) {
     const v = ld[k];
     return typeof v === "string" && v.trim() ? v.trim() : null;
   };
+  // needs_lookup: live subs arrive 0-filled (no contact PII), so a promoted
+  // deal is uncontactable until a phone is added. Surface it as a PII-FREE
+  // boolean (presence only, never the number) so the operator queue can flag it
+  // and offer a one-click fill. A "0"/"0000000000" placeholder counts as absent.
+  const phoneRaw = typeof ld.phone === "string" ? ld.phone : ld.phone != null ? String(ld.phone) : "";
+  const digits = phoneRaw.replace(/\D/g, "");
+  const hasPhone = digits.length >= 10 && !/^0+$/.test(digits);
   return {
     id: row.id,
     status: row.status,
@@ -77,6 +84,7 @@ function toSafeDeal(row: CandidateRow) {
     reviewed_by: row.reviewed_by,
     reviewed_at: row.reviewed_at,
     created_lead_id: row.created_lead_id,
+    needs_lookup: !hasPhone,
   };
 }
 
