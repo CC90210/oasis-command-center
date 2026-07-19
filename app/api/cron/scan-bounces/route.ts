@@ -22,6 +22,14 @@
  * would poison shop-out deliverability. Soft bounces (4.x.x) are reported, never
  * suppressed. An address we cannot confidently parse is left alone (fail-safe:
  * we would rather miss a suppression than wrongly block a real merchant).
+ *
+ * WATCHDOG (silent-failure guard): fires a Telegram alert on (a) any fail-closed
+ * path — creds error, IMAP connect error, lender-list load error, suppression
+ * write error — so a bounce reader that quietly stops is never silent; and (b) a
+ * bounce SPIKE — when a run NEWLY suppresses >= BOUNCE_SPIKE_ALERT (default 5)
+ * addresses, so a degrading list / burning domain gets eyes fast. The spike gate
+ * is on NEWLY-suppressed only, so the 3-day lookback can't re-alert every tick.
+ * All alerts soft-fail (sendTelegram never throws).
  */
 
 import { NextResponse, type NextRequest } from "next/server";
@@ -29,6 +37,7 @@ import { ImapFlow } from "imapflow";
 import { checkCronAuth } from "@/lib/cron-auth";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { getSubmissionsCreds } from "@/lib/integrations/submissions-gmail";
+import { sendTelegram, escapeTelegramHtml } from "@/lib/notify/telegram";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -93,6 +102,11 @@ function originalMessageId(raw: string): string | null {
   return ids.length ? ids[ids.length - 1] : null;
 }
 
+/** Watchdog alert — soft-fail wrapper so a bad token never affects the run. */
+async function watchdogAlert(text: string): Promise<void> {
+  try { await sendTelegram(text); } catch { /* sendTelegram already soft-fails; belt-and-suspenders */ }
+}
+
 export async function GET(req: NextRequest) {
   const denied = checkCronAuth(req);
   if (denied) return denied;
@@ -107,7 +121,9 @@ export async function GET(req: NextRequest) {
   try {
     creds = await getSubmissionsCreds(SUNBIZ_TENANT_ID);
   } catch (e) {
-    return NextResponse.json({ ok: false, error: "creds_" + (e instanceof Error ? e.message : "unknown"), error_class: "creds" }, { status: 500 });
+    const msg = e instanceof Error ? e.message : "unknown";
+    await watchdogAlert(`🔴 <b>Bounce reader DOWN</b> — submissions@ credentials error: ${escapeTelegramHtml(msg)}. Bounce suppression is NOT running until fixed.`);
+    return NextResponse.json({ ok: false, error: "creds_" + msg, error_class: "creds" }, { status: 500 });
   }
 
   // Known lender contact addresses — NEVER suppress these (would break shop-out).
@@ -121,6 +137,7 @@ export async function GET(req: NextRequest) {
   } catch {
     // If we can't load lenders, fail closed on suppression: better to suppress
     // nothing this run than risk poisoning a lender contact.
+    await watchdogAlert(`🔴 <b>Bounce reader DOWN</b> — could not load the lender exclusion list (DB error). Skipped this run to avoid poisoning a lender contact.`);
     return NextResponse.json({ ok: false, error: "lender_load_failed", error_class: "db" }, { status: 500 });
   }
 
@@ -134,7 +151,9 @@ export async function GET(req: NextRequest) {
   try {
     await client.connect();
   } catch (e) {
-    return NextResponse.json({ ok: false, error: "imap_connect_" + (e instanceof Error ? e.message : "unknown"), error_class: "imap" }, { status: 502 });
+    const msg = e instanceof Error ? e.message : "unknown";
+    await watchdogAlert(`🔴 <b>Bounce reader DOWN</b> — IMAP connect to submissions@ failed: ${escapeTelegramHtml(msg)}. Bounce suppression is NOT running until fixed.`);
+    return NextResponse.json({ ok: false, error: "imap_connect_" + msg, error_class: "imap" }, { status: 502 });
   }
 
   const results: Array<Record<string, unknown>> = [];
@@ -196,8 +215,16 @@ export async function GET(req: NextRequest) {
 
   // ── Write (gated): upsert hard-bounced merchant addresses to suppression ─────
   let suppressed = 0;
+  let newlySuppressed = 0;
   if (write && toSuppress.size > 0) {
-    const rows = [...toSuppress].map((email) => ({
+    const emails = [...toSuppress];
+    // Which are already suppressed? Needed so the spike alert fires on NEW volume
+    // only — otherwise the 3-day lookback re-counts the same bounces every tick.
+    const existing = await db.from("email_suppressions").select("email").eq("tenant_id", SUNBIZ_TENANT_ID).in("email", emails);
+    const already = new Set(((existing.data || []) as { email: string }[]).map((r) => String(r.email).toLowerCase()));
+    newlySuppressed = emails.filter((e) => !already.has(e)).length;
+
+    const rows = emails.map((email) => ({
       tenant_id: SUNBIZ_TENANT_ID,
       email,
       brand: null as string | null,
@@ -206,9 +233,20 @@ export async function GET(req: NextRequest) {
     }));
     const up = await db.from("email_suppressions").upsert(rows, { onConflict: "email,tenant_id,brand" });
     if (up.error) {
+      await watchdogAlert(`🔴 <b>Bounce reader</b> — suppression write FAILED: ${escapeTelegramHtml(up.error.message)}. ${toSuppress.size} bounced addresses were NOT suppressed; the drip may keep hitting them.`);
       return NextResponse.json({ ok: false, error: "suppress_write:" + up.error.message, error_class: "db", scanned, results }, { status: 500 });
     }
     suppressed = rows.length;
+  }
+
+  // ── Watchdog: bounce-spike alert (NEW suppressions only, write mode only) ─────
+  const SPIKE = Number(process.env.BOUNCE_SPIKE_ALERT) || 5;
+  if (write && newlySuppressed >= SPIKE) {
+    const sample = [...toSuppress].slice(0, 8).map((e) => escapeTelegramHtml(e)).join(", ");
+    await watchdogAlert(
+      `⚠️ <b>Bounce spike</b> — ${newlySuppressed} NEW hard bounces suppressed from submissions@ this run ` +
+      `(threshold ${SPIKE}). Sample: ${sample}. Check drip list hygiene / sending volume before reputation drops.`,
+    );
   }
 
   const hard = results.filter((r) => r.class === "hard").length;
@@ -226,6 +264,8 @@ export async function GET(req: NextRequest) {
     lender_skipped: results.filter((r) => r.action === "skipped_lender").length,
     to_suppress: toSuppress.size,
     suppressed,
+    newly_suppressed: newlySuppressed,
+    spike_threshold: SPIKE,
     results,
   });
 }
