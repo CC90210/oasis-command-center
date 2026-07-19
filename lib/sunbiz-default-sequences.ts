@@ -53,19 +53,19 @@ export const SUNBIZ_DEFAULT_SEQUENCES: DefaultSequence[] = [
     one_per_lead: true,
     steps: [
       {
-        channel: "sms",
-        delay_minutes: 10,
-        from_label: "Solara",
-        body:
-          "Hi {{lead.contact_name}}, this is Solara at SunBiz Funding. Saw {{lead.business_name}} and wanted to check if you're looking at funding for growth or working capital this quarter. Reply YES if you'd like to talk options.",
-      },
-      {
         channel: "email",
-        delay_minutes: 60 * 24, // 24h
+        delay_minutes: 10,
         from_label: "Solara",
         subject: "Quick funding options for {{lead.business_name}}",
         body:
           "Hi {{lead.contact_name}},\n\nFollowing up on yesterday's note. We fund businesses like yours directly, and we can usually turn a file around fast once we have the basics.\n\nWhat does your monthly revenue look like right now? If it's in the {{lead.monthly_revenue}} range, send it over and my underwriters can take a real look. What we can do depends on the file, but it's worth reviewing.\n\nReply with a good time today or tomorrow.\n\nSolara, SunBiz Funding",
+      },
+      {
+        channel: "sms",
+        delay_minutes: 60 * 24, // 24h
+        from_label: "Solara",
+        body:
+          "Hi {{lead.contact_name}}, this is Solara at SunBiz Funding. Saw {{lead.business_name}} and wanted to check if you're looking at funding for growth or working capital this quarter. Reply YES if you'd like to talk options.",
       },
       {
         channel: "sms",
@@ -94,19 +94,19 @@ export const SUNBIZ_DEFAULT_SEQUENCES: DefaultSequence[] = [
     one_per_lead: true,
     steps: [
       {
-        channel: "sms",
-        delay_minutes: 10,
-        from_label: "Solara",
-        body:
-          "Hi {{lead.contact_name}}, Solara at SunBiz Funding. {{lead.business_name}} looks like a strong fit for working capital. We fund direct and can move fast once we see your file. Reply YES and I'll send the quick application plus the docs we need.",
-      },
-      {
         channel: "email",
-        delay_minutes: 60 * 24, // 24h
+        delay_minutes: 10,
         from_label: "Solara",
         subject: "Funding options for {{lead.business_name}}",
         body:
           "Hi {{lead.contact_name}},\n\nFollowing up. {{lead.business_name}} looks well-positioned for an advance. To get you a real answer I just need a 2-minute application and your last 3 months of business bank statements (PDF exports from online banking). Once those are in, my underwriters review the file and come back to you quickly. What we can offer depends on the file, and there's no obligation.\n\nReply here and I'll send the link.\n\nSolara, SunBiz Funding",
+      },
+      {
+        channel: "sms",
+        delay_minutes: 60 * 24, // 24h
+        from_label: "Solara",
+        body:
+          "Hi {{lead.contact_name}}, Solara at SunBiz Funding. {{lead.business_name}} looks like a strong fit for working capital. We fund direct and can move fast once we see your file. Reply YES and I'll send the quick application plus the docs we need.",
       },
       {
         channel: "sms",
@@ -130,19 +130,19 @@ export const SUNBIZ_DEFAULT_SEQUENCES: DefaultSequence[] = [
     one_per_lead: true,
     steps: [
       {
-        channel: "sms",
-        delay_minutes: 30,
-        from_label: "Solara",
-        body:
-          "Hi {{lead.contact_name}}, saw you opened the application. Anything I can clarify? It's 3 quick steps: basic info, the app itself, then 3 months of bank statements at the end.",
-      },
-      {
         channel: "email",
-        delay_minutes: 60 * 24, // 24h
+        delay_minutes: 30,
         from_label: "Solara",
         subject: "Heads up on the application for {{lead.business_name}}",
         body:
           "Hi {{lead.contact_name}},\n\nWanted to follow up. Once you finish the application, my underwriters can review the file and come back with what we can do. The bank statements at step 3 are the gating piece; without them nothing can go into underwriting.\n\nIf anything's holding you up, reply here and I'll help.\n\nSolara, SunBiz Funding",
+      },
+      {
+        channel: "sms",
+        delay_minutes: 60 * 24, // 24h
+        from_label: "Solara",
+        body:
+          "Hi {{lead.contact_name}}, saw you opened the application. Anything I can clarify? It's 3 quick steps: basic info, the app itself, then 3 months of bank statements at the end.",
       },
     ],
   },
@@ -197,19 +197,19 @@ export const SUNBIZ_DEFAULT_SEQUENCES: DefaultSequence[] = [
     one_per_lead: true,
     steps: [
       {
-        channel: "sms",
-        delay_minutes: 30,
-        from_label: "Solara",
-        body:
-          "Hi {{lead.contact_name}}, your file is one step from underwriting but we're missing a couple things. Reply here and I'll list what's outstanding, or text me a good time to call.",
-      },
-      {
         channel: "email",
-        delay_minutes: 60 * 24 * 2, // 48h
+        delay_minutes: 30,
         from_label: "Solara",
         subject: "Quick info to unblock {{lead.business_name}}",
         body:
           "Hi {{lead.contact_name}},\n\nFollowing up. Your file is sitting in our queue waiting on a couple data points before my underwriters can price it. Easiest path: reply here with a good time today or tomorrow for a 5-min call and we'll knock it out together.\n\nSolara, SunBiz Funding",
+      },
+      {
+        channel: "sms",
+        delay_minutes: 60 * 24 * 2, // 48h
+        from_label: "Solara",
+        body:
+          "Hi {{lead.contact_name}}, your file is one step from underwriting but we're missing a couple things. Reply here and I'll list what's outstanding, or text me a good time to call.",
       },
     ],
   },
@@ -255,19 +255,19 @@ export const SUNBIZ_DEFAULT_SEQUENCES: DefaultSequence[] = [
     one_per_lead: true,
     steps: [
       {
-        channel: "sms",
-        delay_minutes: 60 * 12, // 12h
-        from_label: "Solara",
-        body:
-          "Nice, your application is signed. Last step is 3 months of bank statements (PDFs from your bank's online portal). Without them we can't price the deal. Upload at the same link.",
-      },
-      {
         channel: "email",
-        delay_minutes: 60 * 24 * 1.5, // ~36h
+        delay_minutes: 60 * 12, // 12h
         from_label: "Solara",
         subject: "Last step for {{lead.business_name}}: bank statements",
         body:
           "Hi {{lead.contact_name}},\n\nYour signed application is in. For my underwriters to review and price your file, I need 3 months of bank statements (PDF exports from your online banking work great).\n\nUpload at the same application link. Underwriting fires automatically once they land.\n\nSolara, SunBiz Funding",
+      },
+      {
+        channel: "sms",
+        delay_minutes: 60 * 24 * 1.5, // ~36h
+        from_label: "Solara",
+        body:
+          "Nice, your application is signed. Last step is 3 months of bank statements (PDFs from your bank's online portal). Without them we can't price the deal. Upload at the same link.",
       },
     ],
   },
