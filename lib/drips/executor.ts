@@ -34,7 +34,8 @@ import "server-only";
 import { randomUUID } from "node:crypto";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { checkPhoneOptOut, checkEmailSuppressed } from "@/lib/lead-interactions-queries";
-import { sanitizeBlastMessage } from "@/lib/integrations/blast-safety";
+import { sanitizeBlastMessage, stripDashes } from "@/lib/integrations/blast-safety";
+import { writeAgentAlert } from "@/lib/notify/agent-alert";
 import { checkTcpaWindow, nextTcpaWindowStart } from "@/lib/tcpa-window";
 import { renderTemplate } from "@/lib/drips/templates";
 import { parseDripSteps, type DripStep } from "@/lib/drips/types";
@@ -340,6 +341,48 @@ async function markCancelled(db: Db, row: ClaimedRow, reason: string): Promise<S
   return "cancelled";
 }
 
+/** Handle a blast-safety guard BLOCK for a drip step (2026-07-20 hardening).
+ *  The guard must stay fail-closed (no bad copy reaches a merchant) but must NOT
+ *  silently PERMANENT-drop a lead's whole chain — that turned a template bug or a
+ *  transient DB blip into invisible lead loss.
+ *   - positioning / lender_name  → a TEMPLATE bug, not a per-lead problem. Alert
+ *     operators (deduped to ONE card per sequence) to fix the copy, and
+ *     skip-advance this step so the lead still gets later steps.
+ *   - safety_check_failed        → the lender-name lookup couldn't run (transient
+ *     DB error). RESCHEDULE (no attempt burn) so the channel recovers when the DB
+ *     does, and raise a deduped alert so a persistent stall is never silent. */
+async function handleGuardBlock(
+  db: Db,
+  row: ClaimedRow,
+  steps: DripStep[],
+  guard: { reason: string; message: string },
+  where: string,
+): Promise<StepOutcome> {
+  if (guard.reason === "lender_name" || guard.reason === "positioning") {
+    await writeAgentAlert({
+      tenantId: row.tenant_id,
+      alertType: "drip_blast_safety_block",
+      severity: "warn",
+      title: `Drip copy blocked by compliance: ${row.sequence_name}`,
+      body: `${where} step ${row.step_index}: ${guard.message} Fix the sequence template; leads are skipping this step until you do.`,
+      subjectType: "drip_sequence",
+      subjectId: row.sequence_id,
+      payload: { step_index: row.step_index, reason: guard.reason, where },
+    }).catch(() => {});
+    return skipStep(db, row, steps, `blast_safety_skipped(${where}): ${guard.message}`);
+  }
+  // safety_check_failed — fail-closed, but recoverable, never a permanent drop.
+  await writeAgentAlert({
+    tenantId: row.tenant_id,
+    alertType: "drip_safety_lookup_failed",
+    severity: "warn",
+    title: "Drip compliance check can't run — sends rescheduling",
+    body: "The lender-name safety lookup is failing; drip sends are rescheduling (fail-closed, not dropped) until it recovers.",
+  }).catch(() => {});
+  const retryAt = new Date(Date.now() + 15 * 60_000).toISOString();
+  return markRescheduled(db, row, retryAt, `blast_safety_check_failed(${where}) - retrying`);
+}
+
 /** Not a failure — the recipient's local clock is outside the TCPA SMS
  *  window. Releases the claim back to 'scheduled' at the next in-window
  *  instant, WITHOUT bumping attempts (this isn't a retry budget spend). */
@@ -495,11 +538,7 @@ async function processSmsStep(
   const copy = resolveStepCopy(step, row.lead_id, row.step_index);
   const rendered = renderTemplate(copy.body, buildContext(data));
   const clean = await sanitizeBlastMessage(row.tenant_id, rendered, { checkPositioning: true });
-  if (!clean.ok) {
-    return clean.reason === "lender_name" || clean.reason === "positioning"
-      ? markPermanentFail(db, row, `blast_safety: ${clean.message}`)
-      : markRetryOrFail(db, row, "blast_safety_check_failed");
-  }
+  if (!clean.ok) return handleGuardBlock(db, row, steps, clean, "sms");
 
   // Per-rep routing: this lead's SMS goes out AS its rep's TT sub-account
   // (Alex/Jordan) or the admin/parent account (Matt/owner/unattributed), from
@@ -572,22 +611,14 @@ async function processEmailStep(
   const copy = resolveStepCopy(step, row.lead_id, row.step_index);
   const subjectRaw = renderTemplate(copy.subject, ctx) || "Following up";
   const rendered = renderTemplate(copy.body, ctx);
-  const clean = await sanitizeBlastMessage(row.tenant_id, rendered, { checkPositioning: true });
-  if (!clean.ok) {
-    return clean.reason === "lender_name" || clean.reason === "positioning"
-      ? markPermanentFail(db, row, `blast_safety: ${clean.message}`)
-      : markRetryOrFail(db, row, "blast_safety_check_failed");
-  }
-  // Guard the SUBJECT too. Only the body was gated here; the subject (and, via
-  // resolveStepCopy, any subject_variants) reached the merchant unchecked — a
-  // positioning/lender phrase in a subject line slipped through (2026-07-20).
-  const subjectGuard = await sanitizeBlastMessage(row.tenant_id, subjectRaw, { checkPositioning: true });
-  if (!subjectGuard.ok) {
-    return subjectGuard.reason === "lender_name" || subjectGuard.reason === "positioning"
-      ? markPermanentFail(db, row, `blast_safety(subject): ${subjectGuard.message}`)
-      : markRetryOrFail(db, row, "blast_safety_check_failed");
-  }
-  const subject = subjectGuard.cleaned.slice(0, 200) || "Following up";
+  // Guard subject + body in ONE lender-lookup (was two separate calls — halves
+  // the fail-closed surface + cost). positioning/lender is validated on the
+  // COMBINED text; stripDashes is then the only per-field transform, matching
+  // what sanitizeBlastMessage itself applies to each field.
+  const guard = await sanitizeBlastMessage(row.tenant_id, `${subjectRaw}\n${rendered}`, { checkPositioning: true });
+  if (!guard.ok) return handleGuardBlock(db, row, steps, guard, "email");
+  const subject = stripDashes(subjectRaw).slice(0, 200) || "Following up";
+  const cleanBody = stripDashes(rendered);
 
   const dripsLive = process.env.DRIPS_LIVE === "1";
   const shouldSend = dripSendEnabled();
@@ -610,8 +641,8 @@ async function processEmailStep(
     // List-Unsubscribe header stays for BOTH classes (cuts spam complaints +
     // protects inbox placement). Commercial mail keeps the footer.
     const unsub = emailClass === "transactional" ? "none" : "footer";
-    const html = buildDripHtml(clean.cleaned, { sendId, email, unsub });
-    const result = await sendDripEmail(row.tenant_id, email, subject, clean.cleaned, {
+    const html = buildDripHtml(cleanBody, { sendId, email, unsub });
+    const result = await sendDripEmail(row.tenant_id, email, subject, cleanBody, {
       html,
       listUnsubscribe: listUnsubscribeHeader(email),
     });
@@ -628,7 +659,7 @@ async function processEmailStep(
     toPhone: null,
     toEmail: email,
     subject,
-    body: clean.cleaned,
+    body: cleanBody,
     interactionId: sendId,
     metadata: {
       provider: "submissions_gmail",
