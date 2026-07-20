@@ -178,43 +178,53 @@ export async function GET(req: NextRequest) {
     // same filters found the messages — so we no longer rely on them.
     const searchRes = (await client.search({ since })) || [];
     const allUids = Array.isArray(searchRes) ? searchRes : [];
-    const recent = allUids.slice(-limit);
-
-    for await (const msg of client.fetch(recent, { envelope: true, source: true })) {
+    // Pass 1: envelope-only scan of the WHOLE window (cheap) to find bounce
+    // candidates anywhere. The mailbox holds hundreds of messages (484 in 7d) and
+    // the bounces are usually older than the newest N — so we must NOT slice
+    // before finding them (that was the bug: newest-150 of 484 missed the buried
+    // bounces at seq 12227/12416). imapflow's from/subject IMAP search returns
+    // nothing in the Vercel runtime, so we filter envelopes in code instead.
+    const candidateSeqs: number[] = [];
+    for await (const msg of client.fetch(allUids, { envelope: true })) {
       fetched++;
-      const from = (msg.envelope?.from?.[0]?.address || "").toLowerCase();
-      const subject = msg.envelope?.subject || "";
-      const raw = (msg.source as Buffer)?.toString("utf8") || "";
-
-      // Bounce detection in code (no reliance on IMAP search filters).
-      const isBounce = /mailer-daemon|postmaster/i.test(from)
-        || /content-type:\s*(?:multipart\/report|message\/delivery-status)|report-type=delivery-status/i.test(raw)
-        || /^(?:final-recipient|x-failed-recipients):/im.test(raw)
-        || /delivery status notification|undeliverable|failure notice|returned mail|mail delivery (?:failed|subsystem)|delivery has failed/i.test(subject);
-      if (!isBounce) continue;
-      scanned++;
-
-      const recipient = extractFailedRecipient(raw);
-      const klass = bounceClass(raw);
-      const messageId = originalMessageId(raw);
-
-      let action: string;
-      if (!recipient) {
-        action = "unparsed";
-      } else if (lenderEmails.has(recipient)) {
-        action = "skipped_lender";
-      } else if (recipient.endsWith("@sunbizfunding.com")) {
-        action = "skipped_own_domain";
-      } else if (klass === "hard") {
-        action = "suppress";
-        toSuppress.add(recipient);
-      } else if (klass === "soft") {
-        action = "soft_noted";
-      } else {
-        action = "unknown_class";
+      const efrom = (msg.envelope?.from?.[0]?.address || "").toLowerCase();
+      const esubj = msg.envelope?.subject || "";
+      if (/mailer-daemon|postmaster/i.test(efrom)
+          || /delivery status notification|undeliverable|failure notice|returned mail|mail delivery (?:failed|subsystem)|delivery has failed|delivery incomplete/i.test(esubj)) {
+        candidateSeqs.push(msg.seq);
       }
+    }
+    // Pass 2: fetch full source only for the (few) bounce candidates, parse the DSN.
+    const candidates = candidateSeqs.slice(-limit);
+    if (candidates.length > 0) {
+      for await (const msg of client.fetch(candidates, { envelope: true, source: true })) {
+        scanned++;
+        const from = (msg.envelope?.from?.[0]?.address || "").toLowerCase();
+        const subject = msg.envelope?.subject || "";
+        const raw = (msg.source as Buffer)?.toString("utf8") || "";
 
-      results.push({ from, subject: subject.slice(0, 160), recipient, class: klass, action, original_message_id: messageId });
+        const recipient = extractFailedRecipient(raw);
+        const klass = bounceClass(raw);
+        const messageId = originalMessageId(raw);
+
+        let action: string;
+        if (!recipient) {
+          action = "unparsed";
+        } else if (lenderEmails.has(recipient)) {
+          action = "skipped_lender";
+        } else if (recipient.endsWith("@sunbizfunding.com")) {
+          action = "skipped_own_domain";
+        } else if (klass === "hard") {
+          action = "suppress";
+          toSuppress.add(recipient);
+        } else if (klass === "soft") {
+          action = "soft_noted";
+        } else {
+          action = "unknown_class";
+        }
+
+        results.push({ from, subject: subject.slice(0, 160), recipient, class: klass, action, original_message_id: messageId });
+      }
     }
   } finally {
     lock.release();
