@@ -43,6 +43,10 @@ export type MetricsHealth = "healthy" | "watch" | "spammy";
 
 export type SequenceMetric = {
   sequenceName: string;
+  /** The lead stage this sequence fires on (trigger_filter.to), e.g. "viewed_application". */
+  stage: string;
+  /** The email step's subject line (what the merchant sees), or "" for SMS-only sequences. */
+  emailSubject: string;
   channelMix: string;
   sent: number;
   opened: number;
@@ -51,6 +55,9 @@ export type SequenceMetric = {
   openRate: number;
   clickRate: number;
   emailSent: number;
+  /** Deliverability/effectiveness signal: "low" = looks spammy/ignored (open rate far below
+   *  benchmark on real volume), "watch" = soft, "ok" = healthy or not enough data. */
+  health: "ok" | "watch" | "low";
   variants: Array<{ index: number; sent: number; opened: number; clicked: number }>;
 };
 
@@ -196,7 +203,7 @@ export async function getEmailMetrics(tenantId: string, days = 30): Promise<Metr
   if (!tenantId) return empty;
 
   try {
-    const [leadsRes, runsRes, intxRes, opensRes, clicksRes, viewsRes, suppRes, ccRunsRes, numHealthRes, inboundSmsRes, callsRes, smsStatusRes] = await Promise.all([
+    const [leadsRes, runsRes, intxRes, opensRes, clicksRes, viewsRes, suppRes, ccRunsRes, numHealthRes, inboundSmsRes, callsRes, smsStatusRes, seqDefsRes] = await Promise.all([
       db.from("tenant_records").select("data").eq("tenant_id", tenantId).eq("entity_type", "lead"),
       db.from("drip_runs").select("sequence_name, status, last_error").eq("tenant_id", tenantId).gte("created_at", curStartIso),
       // 2× window for period-over-period. Inside .or(), like-wildcards are '*'.
@@ -216,6 +223,9 @@ export async function getEmailMetrics(tenantId: string, days = 30): Promise<Metr
       db.from("lead_interactions").select("kixie_call_id, type, direction, call_duration_sec, disposition, call_outcome, metadata").eq("tenant_id", tenantId).eq("channel", "phone").gte("created_at", curStartIso).limit(50000),
       // A2: outbound SMS carrying a real TT delivery status (from the inbox sync).
       db.from("lead_interactions").select("metadata").eq("tenant_id", tenantId).eq("channel", "sms").eq("direction", "outbound").not("metadata->>tt_send_status", "is", null).gte("created_at", curStartIso).limit(50000),
+      // Sequence definitions → map each per-sequence metric to its lead STAGE + the
+      // email step's SUBJECT (so the Drips tab lists every email by stage, not just name).
+      db.from("drip_sequences").select("name, enabled, trigger_filter, steps").eq("tenant_id", tenantId).limit(200),
     ]);
 
     // ---- Drip funnel (current-stage distribution, all-time snapshot) ----
@@ -260,7 +270,7 @@ export async function getEmailMetrics(tenantId: string, days = 30): Promise<Metr
     const smsPerRep = new Map<string, number>();
     const seqGet = (name: string): SequenceMetric => {
       let m = perSeq.get(name);
-      if (!m) { m = { sequenceName: name, channelMix: "", sent: 0, opened: 0, clicked: 0, failed: 0, openRate: 0, clickRate: 0, emailSent: 0, variants: [] }; perSeq.set(name, m); }
+      if (!m) { m = { sequenceName: name, stage: "", emailSubject: "", channelMix: "", sent: 0, opened: 0, clicked: 0, failed: 0, openRate: 0, clickRate: 0, emailSent: 0, health: "ok", variants: [] }; perSeq.set(name, m); }
       return m;
     };
 
@@ -348,12 +358,27 @@ export async function getEmailMetrics(tenantId: string, days = 30): Promise<Metr
         failReasonCounts.set(bucket, (failReasonCounts.get(bucket) || 0) + 1);
       }
     }
+    // Map each sequence NAME → its lead stage (trigger_filter.to) + the email step's subject.
+    const seqDef = new Map<string, { stage: string; emailSubject: string }>();
+    for (const s of (seqDefsRes.data || []) as Array<{ name: string; trigger_filter: Record<string, unknown> | null; steps: unknown }>) {
+      const stage = typeof s.trigger_filter?.to === "string" ? (s.trigger_filter.to as string) : "";
+      const steps = Array.isArray(s.steps) ? (s.steps as Array<Record<string, unknown>>) : [];
+      const emailStep = steps.find((st) => st?.channel === "email");
+      const emailSubject = typeof emailStep?.subject === "string" ? (emailStep.subject as string) : "";
+      if (s.name) seqDef.set(s.name, { stage, emailSubject });
+    }
     for (const m of perSeq.values()) {
       m.openRate = m.emailSent ? m.opened / m.emailSent : 0;
       m.clickRate = m.emailSent ? m.clicked / m.emailSent : 0;
       m.variants.sort((a, b) => a.index - b.index);
       const chans = seqChannels.get(m.sequenceName);
       m.channelMix = chans ? Array.from(chans).sort().join("+") : "";
+      const def = seqDef.get(m.sequenceName);
+      m.stage = def?.stage || "";
+      m.emailSubject = def?.emailSubject || "";
+      // Spam/effectiveness signal — only meaningful on real email volume. MCA/B2B
+      // email opens run ~20-40%; a materially lower rate reads as spam-foldered/ignored.
+      m.health = m.emailSent >= 10 && m.openRate < 0.12 ? "low" : m.emailSent >= 10 && m.openRate < 0.25 ? "watch" : "ok";
     }
     const sequences = Array.from(perSeq.values()).sort((a, b) => b.sent - a.sent);
 
