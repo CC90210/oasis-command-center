@@ -15,9 +15,24 @@ function escapeRegex(s: string): string {
 }
 
 /**
+ * A lender "name" that is a single ultra-generic industry/English word matches
+ * far too broadly: a funder literally named "Funding" or "Advance" (or a "test"
+ * junk record, or the tenant's own brand) would flag EVERY email's signature or
+ * subject and fail-closed the whole drip channel. Skip a name that IS one of
+ * these on its own — real multi-word names ("Mint Funding", "True Advance") are
+ * unaffected because they only match as the full phrase. (2026-07-20 hardening:
+ * the SunBiz lender table held generic + "TEST" junk records.)
+ */
+const GENERIC_NAME_STOPWORDS = new Set([
+  "funding", "capital", "advance", "advances", "business", "finance", "financial",
+  "lending", "loan", "loans", "merchant", "solutions", "partners", "holdings",
+  "group", "corp", "corporation", "inc", "llc", "the", "test", "sunbiz",
+]);
+
+/**
  * Which of `names` appear in `text` (case-insensitive, word-boundary so
- * "Rapid" doesn't match "rapidly"). Names under 3 chars are skipped to avoid
- * false positives.
+ * "Rapid" doesn't match "rapidly"). Names under 3 chars, or a single generic
+ * stopword, are skipped to avoid false positives that would block clean copy.
  */
 export function matchLenderNames(text: string, names: string[]): string[] {
   const hay = (text || "").toLowerCase();
@@ -25,6 +40,7 @@ export function matchLenderNames(text: string, names: string[]): string[] {
   for (const raw of names) {
     const name = (raw || "").trim();
     if (name.length < 3) continue;
+    if (GENERIC_NAME_STOPWORDS.has(name.toLowerCase())) continue;
     const re = new RegExp(`(^|[^a-z0-9])${escapeRegex(name.toLowerCase())}([^a-z0-9]|$)`, "i");
     if (re.test(hay) && !hits.includes(name)) hits.push(name);
   }
