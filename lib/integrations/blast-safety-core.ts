@@ -62,6 +62,14 @@ const POSITIONING_PATTERNS: { re: RegExp; label: string }[] = [
   { re: /\bthe\s+lender\s+(?:wires?|approves?|prices?|needs?|pays?)\b/i, label: "the lender <acts>" },
   { re: /\bget\s+shopped\b/i, label: "get shopped" },
   { re: /\bshopped\s+(?:around|out)\b/i, label: "shopped around" },
+  // Broker-as-intermediary constructions (2026-07-20 rotation review — the AI
+  // rewrite seam is the first FREE-FORM copy generator, so the deterministic
+  // guard is the real backstop). Deliberately NARROW: we do NOT block bare
+  // "broker", so legit direct-funder positioning ("we cut out the broker",
+  // "we're not a broker") still passes, matching the self-reference carve-out.
+  { re: /\bour\s+brokers?\b/i, label: "our broker(s)" },
+  { re: /\bthrough\s+(?:a\s+|the\s+|our\s+)?brokers?\b/i, label: "through a broker" },
+  { re: /\bbrokered\s+(?:out|to)\b/i, label: "brokered out/to" },
 ];
 
 export function matchPositioningPhrases(text: string): string[] {

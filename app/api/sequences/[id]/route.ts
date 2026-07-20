@@ -22,6 +22,7 @@ import {
   parseDripTriggerFilter,
   DripDefinitionError,
 } from "@/lib/drips/types";
+import { sanitizeBlastMessage, stripDashes } from "@/lib/integrations/blast-safety";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -98,8 +99,9 @@ export async function PATCH(
     }
   }
   if ("steps" in body) {
+    let steps;
     try {
-      patch.steps = parseDripSteps(body.steps);
+      steps = parseDripSteps(body.steps);
     } catch (err) {
       if (err instanceof DripDefinitionError) {
         return NextResponse.json(
@@ -109,6 +111,43 @@ export async function PATCH(
       }
       throw err;
     }
+    // Fail-closed positioning/lender guard on every email step being saved
+    // (Adon 2026-07-20: template rotation must never let broker/lender copy
+    // into a live drip). The runtime send path strips dashes at send time, but
+    // gating here means a bad AI rewrite or library paste can't PERSIST — the
+    // save is rejected with the offending phrase. SMS steps ride the send-time
+    // blast guard; email copy is what the rotation UI mutates, so we gate it
+    // on write. checkPositioning:true == the same rule the drip executor uses.
+    for (let i = 0; i < steps.length; i++) {
+      const s = steps[i];
+      if (s.channel !== "email") continue;
+      // Guard EVERY piece of email copy that can reach a merchant: base
+      // subject/body AND the A/B variant pools (subject_variants/body_variants),
+      // which the executor samples from at send time. One combined check == one
+      // lender-name lookup; a hit in ANY field blocks the whole save (a bad
+      // variant would otherwise persist unguarded and fire later — 2026-07-20).
+      const parts = [
+        s.subject || "",
+        s.body,
+        ...(s.subject_variants || []),
+        ...(s.body_variants || []),
+      ].filter(Boolean);
+      const guard = await sanitizeBlastMessage(tenantId, parts.join("\n"), { checkPositioning: true });
+      if (!guard.ok) {
+        return NextResponse.json(
+          { ok: false, error: "blocked_copy", step: i, reason: guard.reason, message: `Step ${i + 1}: ${guard.message}` },
+          { status: 400 },
+        );
+      }
+      steps[i] = {
+        ...s,
+        subject: s.subject ? stripDashes(s.subject) : s.subject,
+        body: stripDashes(s.body),
+        ...(s.subject_variants ? { subject_variants: s.subject_variants.map(stripDashes) } : {}),
+        ...(s.body_variants ? { body_variants: s.body_variants.map(stripDashes) } : {}),
+      };
+    }
+    patch.steps = steps;
   }
   if ("enabled" in body) patch.enabled = Boolean(body.enabled);
   if ("one_per_lead" in body) patch.one_per_lead = Boolean(body.one_per_lead);
