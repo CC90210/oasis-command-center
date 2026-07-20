@@ -785,8 +785,14 @@ export async function runDispatchDrips(): Promise<DispatchDripsResult> {
       .select("id, tenant_id, name, enabled, steps, email_class, trigger_filter")
       .in("id", sequenceIds);
     for (const r of (seqRes.data || []) as Array<{ id: string; tenant_id: string; name: string; enabled: boolean; steps: unknown; email_class: string | null; trigger_filter: unknown }>) {
-      const tf = r.trigger_filter as { to?: unknown } | null;
-      const triggerStage = tf && typeof tf.to === "string" && tf.to.trim() ? tf.to.trim() : null;
+      // Mirror the enroller's own "stage-triggered" definition (enroller.ts
+      // filter): entity is lead-or-absent AND field is stage-or-absent. Only
+      // then is trigger_filter.to a STAGE we can compare to data.stage. A
+      // sequence keyed on some other field (e.g. status) gets triggerStage=null
+      // so the stage-match cancel never touches it.
+      const tf = r.trigger_filter as { to?: unknown; field?: unknown; entity?: unknown } | null;
+      const isStageTrigger = !!tf && (!tf.field || tf.field === "stage") && (!tf.entity || tf.entity === "lead");
+      const triggerStage = isStageTrigger && typeof tf!.to === "string" && tf!.to.trim() ? (tf!.to as string).trim() : null;
       seqMap.set(`${r.tenant_id}|${r.id}`, { id: r.id, name: r.name, enabled: r.enabled, steps: r.steps, emailClass: r.email_class || "commercial", triggerStage });
     }
   } catch (err) {
