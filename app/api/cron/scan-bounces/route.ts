@@ -163,22 +163,29 @@ export async function GET(req: NextRequest) {
   const lock = await client.getMailboxLock("INBOX");
   try {
     const since = new Date(Date.now() - lookbackDays * 24 * 3600 * 1000);
-    // Target bounce senders/subjects precisely so real bounces aren't buried
-    // under lender replies. since AND (mailer-daemon OR postmaster OR DSN subjects).
-    const uids = (await client.search({
-      since,
-      or: [
-        { from: "mailer-daemon" },
-        { from: "postmaster" },
-        { subject: "Delivery Status Notification" },
-        { subject: "Undeliverable" },
-        { subject: "failure notice" },
-        { subject: "returned mail" },
-        { subject: "Mail delivery failed" },
-        { subject: "Delivery has failed" },
-      ],
-    })) || [];
-    const recent = (Array.isArray(uids) ? uids : []).slice(-limit);
+    // Target bounce senders/subjects. IMAP's OR is binary, and imapflow's N-term
+    // `or` proved unreliable at runtime (the deployed cron found 0 bounces while a
+    // Python imaplib test with the SAME criteria found them). So run each criterion
+    // as its own search and union the UIDs — robust + matches the verified dry-run.
+    const criteria: Array<{ from?: string; subject?: string }> = [
+      { from: "mailer-daemon" },
+      { from: "postmaster" },
+      { subject: "Delivery Status Notification" },
+      { subject: "Undeliverable" },
+      { subject: "failure notice" },
+      { subject: "returned mail" },
+      { subject: "Mail delivery failed" },
+      { subject: "Delivery has failed" },
+    ];
+    const seen = new Set<number>();
+    const uids: number[] = [];
+    for (const crit of criteria) {
+      const found = (await client.search({ since, ...crit })) || [];
+      for (const u of (Array.isArray(found) ? found : [])) {
+        if (!seen.has(u)) { seen.add(u); uids.push(u); }
+      }
+    }
+    const recent = uids.slice(-limit);
 
     for await (const msg of client.fetch(recent, { envelope: true, source: true })) {
       scanned++;
