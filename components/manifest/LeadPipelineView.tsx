@@ -686,6 +686,19 @@ export function LeadPipelineView({
           busy={bulkBusy}
           onAssign={(uid) => runBulk({ op: "assign", assigned_to: uid }, "assigned")}
           onStage={(stageKey) => runBulk({ op: "stage", stage: stageKey, entity: entityName }, "moved")}
+          onDecline={
+            entityName === "lead"
+              ? () => {
+                  if (
+                    window.confirm(
+                      `Decline ${selected.size} lead${selected.size === 1 ? "" : "s"}? They move to Applications › Declined.`,
+                    )
+                  ) {
+                    runBulk({ op: "decline", entity: entityName }, "declined");
+                  }
+                }
+              : undefined
+          }
           onEmail={(templateId) => runBulk({ op: "email", template_id: templateId, entity: entityName }, "queued")}
           onCcBlast={(templateId) => runBulk({ op: "cc_blast", template_id: templateId }, "sent")}
           onClear={() => setSelected(new Set())}
@@ -711,6 +724,7 @@ function BulkActionBar({
   busy,
   onAssign,
   onStage,
+  onDecline,
   onEmail,
   onCcBlast,
   onClear,
@@ -724,6 +738,7 @@ function BulkActionBar({
   busy: boolean;
   onAssign: (assignedTo: string | null) => void;
   onStage: (stageKey: string) => void;
+  onDecline?: () => void;
   onEmail: (templateId: string) => void;
   onCcBlast: (templateId: string) => void;
   onClear: () => void;
@@ -781,7 +796,8 @@ function BulkActionBar({
           onChange={(e) => {
             const v = e.target.value;
             e.currentTarget.selectedIndex = 0;
-            if (v) onStage(v);
+            if (v === "__decline") onDecline?.();
+            else if (v) onStage(v);
           }}
           className="rounded-md border border-bg-border bg-bg-deep px-2 py-1 text-[12px] text-fg focus:border-accent focus:outline-none disabled:opacity-60"
         >
@@ -791,6 +807,9 @@ function BulkActionBar({
               {s.label}
             </option>
           ))}
+          {entityName === "lead" && onDecline && (
+            <option value="__decline">Decline → Applications</option>
+          )}
         </select>
       </label>
 
