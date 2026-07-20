@@ -1132,6 +1132,49 @@ function SelectableRow({
   );
 }
 
+/**
+ * Per-lead Decline button (leads board only). `declined` is no longer a valid lead
+ * stage — it lives on the Applications board — so declining a lead promotes it to an
+ * application and sets status="declined" via POST /api/leads/[id]/decline, landing it
+ * in Applications › Declined. stopPropagation is required: the row navigates on click.
+ */
+function DeclineButton({ leadId, entityName }: { leadId: string; entityName: "lead" | "application" }) {
+  const router = useRouter();
+  const [busy, setBusy] = useState(false);
+  if (entityName !== "lead") return null;
+  const onDecline = async (e: ReactMouseEvent<HTMLButtonElement>) => {
+    e.stopPropagation();
+    e.preventDefault();
+    if (busy) return;
+    if (!window.confirm("Decline this lead? It moves to Applications › Declined.")) return;
+    setBusy(true);
+    try {
+      const res = await fetch(`/api/leads/${leadId}/decline`, { method: "POST" });
+      const j = await res.json().catch(() => null);
+      if (!res.ok || !j?.ok) {
+        window.alert(`Could not decline: ${j?.message || j?.error || res.status}`);
+        setBusy(false);
+        return;
+      }
+      router.refresh();
+    } catch {
+      window.alert("Could not decline (network error). Try again.");
+      setBusy(false);
+    }
+  };
+  return (
+    <button
+      type="button"
+      onClick={onDecline}
+      disabled={busy}
+      title="Decline → Applications › Declined"
+      className="shrink-0 rounded border border-red-500/40 px-1.5 py-0.5 text-[10px] font-semibold text-red-300 transition-colors hover:bg-red-500/10 disabled:opacity-50"
+    >
+      {busy ? "…" : "Decline"}
+    </button>
+  );
+}
+
 function DesktopRow({
   slug,
   entityName,
@@ -1242,12 +1285,15 @@ function DesktopRow({
       </Cell>
       <Cell className={model.cold ? "font-semibold text-red-300" : ""}>{model.lastTouchLabel}</Cell>
       <Cell clip={false}>
-        <InlineStageControl
-          recordId={row.id}
-          stage={stage.key}
-          stageMap={stageMap}
-          entity={entityName}
-        />
+        <div className="flex items-center gap-1.5">
+          <InlineStageControl
+            recordId={row.id}
+            stage={stage.key}
+            stageMap={stageMap}
+            entity={entityName}
+          />
+          <DeclineButton leadId={row.id} entityName={entityName} />
+        </div>
       </Cell>
       <Cell mono>{model.paper}</Cell>
       <Cell mono>{model.leverage}</Cell>
@@ -1311,13 +1357,16 @@ function MobileRow({
               <div className="truncate text-sm font-semibold text-fg">{model.businessName}</div>
               <div className="truncate text-[11px] text-fg-dim">{model.ownerName}</div>
             </div>
-            <InlineStageControl
-              recordId={row.id}
-              stage={stage.key}
-              stageMap={stageMap}
-              entity={entityName}
-              menuAlign="right"
-            />
+            <div className="flex items-center gap-1.5">
+              <InlineStageControl
+                recordId={row.id}
+                stage={stage.key}
+                stageMap={stageMap}
+                entity={entityName}
+                menuAlign="right"
+              />
+              <DeclineButton leadId={row.id} entityName={entityName} />
+            </div>
           </div>
           <div className="mt-2 grid grid-cols-2 gap-x-3 gap-y-1 text-[11px] text-fg-muted">
             <div className="min-w-0">
