@@ -1,28 +1,20 @@
 /**
  * POST /api/leads/[id]/decline — DECLINE a lead.
  *
- * `declined` is no longer a valid LEAD stage (moved OFF the leads board to the
- * Applications board 2026-07-15), so a lead can only be "declined" by becoming a
- * promoted application with status="declined". This route does that atomically:
- *   1. creates (or reuses) the linked application (createApplicationFromLead — the
- *      same helper /promote + "Run underwriting" use, so no duplicate is made),
- *   2. sets that application's status="declined" + backfills identity from the lead,
- *   3. stamps promoted_at (application → Applications board) then transferred_at
- *      (lead → off the leads board), so the deal lands in exactly one place:
- *      Applications › Declined.
+ * `declined` is not a valid LEAD stage (it lives on the Applications board), so a lead
+ * is declined by becoming a promoted application with status="declined" → it lands in
+ * Applications › Declined. Core logic lives in lib/applications/decline-lead.ts, shared
+ * with the bulk route's op:"decline".
  *
- * Mirrors /promote but lands at "declined" instead of "application_in".
- * Idempotent: re-declining reuses the same application. Auth: any non-read_only
- * tenant member (getWritableLead / canWriteCrm); read-only denied; fail closed. Audited.
+ * Idempotent: re-declining reuses the same application. Auth: any non-read_only tenant
+ * member (getWritableLead / canWriteCrm); read-only denied; fail closed. Audited.
  */
 
 import { NextRequest, NextResponse } from "next/server";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { resolveSessionContext } from "@/lib/api-auth";
 import { getWritableLead } from "@/lib/lead-access";
-import { createApplicationFromLead } from "@/lib/applications/create-from-lead";
-import { getRecord, updateRecord, RecordsError } from "@/lib/manifest/data";
-import { extractAppFields } from "@/lib/forms/application-upsert";
+import { declineLeadToApplication } from "@/lib/applications/decline-lead";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -39,8 +31,6 @@ export async function POST(_req: NextRequest, ctx: { params: Promise<{ id: strin
   if (!sess.ok) {
     return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
   }
-  // Role-based CRM-write gate (canWriteCrm / getWritableLead). Denies read_only
-  // regardless of LEAD_SCOPING_ENABLED so any full member can decline any lead.
   const acc = await getWritableLead(
     { teamRole: sess.teamRole },
     { tenantId: sess.tenantId, entity: "lead", id: leadId },
@@ -53,66 +43,16 @@ export async function POST(_req: NextRequest, ctx: { params: Promise<{ id: strin
         )
       : NextResponse.json({ ok: false, error: "not_found" }, { status: 404 });
   }
-  const lead = acc.record;
 
-  // 1. Create or reuse the linked application (idempotent — never duplicates).
-  const result = await createApplicationFromLead({ tenantId: sess.tenantId, leadId });
-  if (!result.ok) {
-    return NextResponse.json({ ok: false, error: result.error }, { status: 500 });
+  const dec = await declineLeadToApplication({
+    tenantId: sess.tenantId,
+    leadId,
+    leadData: acc.record.data as Record<string, unknown>,
+  });
+  if (!dec.ok) {
+    return NextResponse.json({ ok: false, error: dec.error }, { status: 500 });
   }
-  const appId = result.applicationId;
-
-  // 2. Build the application patch: guarantee the lead link, FORCE status="declined",
-  //    and gap-fill the merchant-application identity from the lead (same canonical
-  //    extractor promote uses; never clobbers a value already set).
-  const patch: Record<string, unknown> = { lead_id: leadId, status: "declined" };
-  try {
-    const app = await getRecord({ tenant_id: sess.tenantId, entity: "application", id: appId });
-    const appData = (app?.data || {}) as Record<string, unknown>;
-    const leadFields = extractAppFields(lead.data as Record<string, unknown>);
-    for (const [k, leadVal] of Object.entries(leadFields)) {
-      const cur = appData[k];
-      if (
-        (cur === undefined || cur === null || cur === "") &&
-        leadVal !== undefined && leadVal !== null && leadVal !== ""
-      ) {
-        patch[k] = leadVal;
-      }
-    }
-  } catch {
-    /* best-effort backfill — the link + status below are still guaranteed */
-  }
-
-  // 3. Land the application in Applications › Declined, then move the lead off the
-  //    Leads board. Stamp the app FIRST (status=declined + promoted_at) so a failure
-  //    on the lead update leaves the deal on Applications rather than nowhere.
-  //    Setting `status` via updateRecord fires BRAVO_RECORD_STATUS_CHANGED.
-  try {
-    await updateRecord({
-      tenant_id: sess.tenantId,
-      entity: "application",
-      id: appId,
-      patch: { ...patch, promoted_at: new Date().toISOString() },
-    });
-    await updateRecord({
-      tenant_id: sess.tenantId,
-      entity: "lead",
-      id: leadId,
-      patch: { transferred_at: new Date().toISOString(), application_id: appId },
-    });
-  } catch (err) {
-    const code = err instanceof RecordsError ? err.code : "unknown";
-    return NextResponse.json(
-      {
-        ok: false,
-        error: "decline_incomplete",
-        code,
-        application_id: appId,
-        message: "Application set to declined but the lead could not be moved. Retry.",
-      },
-      { status: 500 },
-    );
-  }
+  const appId = dec.applicationId;
 
   // Audit (best-effort, mirrors /promote + /set-stage).
   try {

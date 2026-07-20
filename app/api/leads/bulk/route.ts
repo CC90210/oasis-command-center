@@ -24,6 +24,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { resolveSessionContext } from "@/lib/api-auth";
 import { updateRecord, RecordsError } from "@/lib/manifest/data";
+import { declineLeadToApplication } from "@/lib/applications/decline-lead";
 import { canViewLead, leadScopingEnabled } from "@/lib/lead-scope";
 import { canWriteCrm } from "@/lib/role-gates";
 import { LEAD_PIPELINE_STAGES, OPPORTUNITY_PIPELINE_STAGES } from "@/lib/sunbiz-stage-meta";
@@ -64,7 +65,9 @@ export async function POST(req: NextRequest) {
   }
 
   const op =
-    body.op === "assign" || body.op === "stage" || body.op === "email" || body.op === "cc_blast" ? body.op : null;
+    body.op === "assign" || body.op === "stage" || body.op === "email" || body.op === "cc_blast" || body.op === "decline"
+      ? body.op
+      : null;
   if (!op) {
     return NextResponse.json({ ok: false, error: "invalid_op" }, { status: 400 });
   }
@@ -283,6 +286,56 @@ export async function POST(req: NextRequest) {
         out.updated += 1;
       } catch {
         out.failed += 1;
+      }
+    }
+    return NextResponse.json({ ok: true, op, ...out });
+  }
+
+  if (op === "decline") {
+    // Bulk decline: promote each selected lead to an application + set status="declined"
+    // (→ Applications › Declined) via the shared helper. Leads-only; same CRM-write gate
+    // as bulk stage-change. Read-only members get a clean 403 before any record work.
+    if (!canWriteCrm(sess.teamRole)) {
+      return NextResponse.json(
+        { ok: false, error: "forbidden_role", message: "Read-only members can't decline leads." },
+        { status: 403 },
+      );
+    }
+    for (const id of ids) {
+      const existing = await db
+        .from("tenant_records")
+        .select("id, data")
+        .eq("tenant_id", tenantId)
+        .eq("entity_type", "lead")
+        .eq("id", id)
+        .maybeSingle();
+      if (!existing.data) {
+        out.skipped += 1;
+        continue;
+      }
+      const leadData = (existing.data as { data?: Record<string, unknown> }).data || {};
+      const dec = await declineLeadToApplication({ tenantId, leadId: id, leadData });
+      if (!dec.ok) {
+        out.failed += 1;
+        continue;
+      }
+      out.updated += 1;
+      try {
+        const note = `Declined (bulk) → Applications › Declined (application ${dec.applicationId.slice(0, 8)})`;
+        await db.from("lead_interactions").insert({
+          tenant_id: tenantId,
+          lead_id: id,
+          type: "stage_changed",
+          channel: "system",
+          direction: "outbound",
+          agent_source: "dashboard_bulk_decline",
+          subject: "Declined",
+          content: note,
+          content_preview: note,
+          metadata: { application_id: dec.applicationId, declined_by: sess.userId, bulk: true },
+        });
+      } catch {
+        /* best-effort audit */
       }
     }
     return NextResponse.json({ ok: true, op, ...out });
