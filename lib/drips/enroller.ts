@@ -83,7 +83,13 @@ function parseEnrollLimit(raw: string | undefined): number {
 // same instant and detonate on the next dispatch tick (the clustering half of
 // the blast, 2026-07-20). Combined with the dispatch hourly cap this makes a
 // mass enrollment bleed out as a paced drip. Env, default 90 min; 0 disables.
-const ENROLL_SPREAD_MS = Math.max(0, Number(process.env.DRIPS_ENROLL_SPREAD_MIN ?? 90)) * 60_000;
+const ENROLL_SPREAD_MS = (() => {
+  // Blank/whitespace env → default (a blank secret → Number("")===0 would
+  // silently kill de-clustering). Non-numeric also falls back.
+  const raw = (process.env.DRIPS_ENROLL_SPREAD_MIN ?? "").trim();
+  const n = raw ? Number(raw) : 90;
+  return Math.max(0, Number.isFinite(n) ? n : 90) * 60_000;
+})();
 function enrollJitterMs(): number {
   return ENROLL_SPREAD_MS > 0 ? Math.floor(Math.random() * ENROLL_SPREAD_MS) : 0;
 }

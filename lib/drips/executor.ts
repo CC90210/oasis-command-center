@@ -44,17 +44,29 @@ import { resolveDripSmsIdentity } from "@/lib/drips/rep-sms-identity";
 import { nudgeConversations } from "@/lib/realtime/conversations-nudge";
 
 export const BATCH_LIMIT = 12;
+// Read a numeric env var, treating unset OR blank/whitespace as "use default"
+// (a blank secret materializes as "" on some platforms → Number("")===0, which
+// would SILENTLY disable the cap/jitter below — the exact silent failure to
+// avoid). Non-numeric also falls back to the default.
+function envNum(name: string, def: number): number {
+  const raw = (process.env[name] ?? "").trim();
+  if (!raw) return def;
+  const n = Number(raw);
+  return Number.isFinite(n) ? n : def;
+}
 // Global drip send ceiling per ROLLING HOUR — the hard "it's a drip, not a
 // blast" throttle (2026-07-20). Dispatch will not claim more than
 // (HOURLY_CAP - realSendsLastHour) rows, so total real output can never exceed
 // ~HOURLY_CAP/hour no matter how many rows are due — a mass-enrolled backlog
 // bleeds out as a paced drip instead of detonating. Only enforced in live mode
 // (dry runs move zero bytes, so pacing is moot). Tunable; 0 disables the cap.
-const HOURLY_CAP = Number(process.env.DRIPS_HOURLY_CAP ?? 30);
+// NOTE: this is a GLOBAL (all-tenant) ceiling — correct while SunBiz is the only
+// active drip tenant; make it per-tenant if a second tenant goes live.
+const HOURLY_CAP = envNum("DRIPS_HOURLY_CAP", 30);
 // Scheduling jitter (minutes) — spread a cohort's scheduled_for across a window
 // so a batch enrolled/advanced together doesn't all come due at the same instant
 // (the clustering half of the blast). Same env the enroller uses for step 0.
-const STEP_SPREAD_MS = Math.max(0, Number(process.env.DRIPS_ENROLL_SPREAD_MIN ?? 90)) * 60_000;
+const STEP_SPREAD_MS = Math.max(0, envNum("DRIPS_ENROLL_SPREAD_MIN", 90)) * 60_000;
 function spreadJitterMs(): number {
   return STEP_SPREAD_MS > 0 ? Math.floor(Math.random() * STEP_SPREAD_MS) : 0;
 }
@@ -722,12 +734,16 @@ export async function runDispatchDrips(): Promise<DispatchDripsResult> {
   if (dripSendEnabled() && HOURLY_CAP > 0) {
     const oneHourAgoIso = new Date(Date.now() - 3_600_000).toISOString();
     try {
-      const r = await db
-        .from("drip_runs")
-        .select("id", { count: "exact", head: true })
-        .in("status", ["sent", "done"])
-        .gte("sent_at", oneHourAgoIso);
-      const sentLastHour = r.count || 0;
+      // Count settled sends this hour PLUS any rows a concurrent run has already
+      // claimed ('sending', always recent — reclaimed after STALE_SENDING_MINUTES).
+      // Counting in-flight rows stops two overlapping ticks (the Vercel cron and
+      // the external pinger) from each budgeting a full HOURLY_CAP and stacking
+      // past it — the "pace, not blast" guarantee must hold under overlap.
+      const [settled, inflight] = await Promise.all([
+        db.from("drip_runs").select("id", { count: "exact", head: true }).in("status", ["sent", "done"]).gte("sent_at", oneHourAgoIso),
+        db.from("drip_runs").select("id", { count: "exact", head: true }).eq("status", "sending"),
+      ]);
+      const sentLastHour = (settled.count || 0) + (inflight.count || 0);
       claimBudget = Math.max(0, Math.min(BATCH_LIMIT, HOURLY_CAP - sentLastHour));
     } catch (err) {
       // Can't measure the rate → trickle a few rather than risk a burst.
