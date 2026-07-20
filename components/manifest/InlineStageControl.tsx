@@ -80,6 +80,30 @@ export function InlineStageControl({ recordId, stage, stageMap, entity, menuAlig
     }
   }
 
+  // "Decline" is offered as a stage option on the LEADS board even though it isn't a
+  // valid lead stage — declined lives on the Applications board. Selecting it promotes
+  // the lead to an application and sets status="declined" in one call
+  // (POST /api/leads/[id]/decline), so the deal moves straight to Applications › Declined.
+  async function declineLead() {
+    setOpen(false);
+    if (pending) return;
+    if (!window.confirm("Decline this lead? It moves to Applications › Declined.")) return;
+    setPending(true);
+    try {
+      const res = await fetch(`/api/leads/${recordId}/decline`, { method: "POST" });
+      const json = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string; message?: string };
+      if (!res.ok || !json.ok) {
+        alert(`Couldn't decline: ${json?.message || json?.error || res.status}`);
+      } else {
+        router.refresh();
+      }
+    } catch {
+      alert("Couldn't decline — network error.");
+    } finally {
+      setPending(false);
+    }
+  }
+
   return (
     <div ref={ref} className="relative inline-block" onClick={(e) => e.stopPropagation()}>
       <button
@@ -115,6 +139,17 @@ export function InlineStageControl({ recordId, stage, stageMap, entity, menuAlig
               {s.key === current && <span className="ml-auto text-fg-dim">✓</span>}
             </button>
           ))}
+          {entity === "lead" && (
+            <button
+              type="button"
+              onClick={declineLead}
+              className="flex w-full items-center gap-2 border-t border-bg-border/50 px-2.5 py-1.5 text-left text-[11.5px] hover:bg-bg-elev/60"
+            >
+              <span className="inline-block h-2.5 w-2.5 shrink-0 rounded-full" style={{ background: "#9B3D45" }} />
+              <span className="text-fg">Decline</span>
+              <span className="ml-auto text-[10px] text-fg-dim">&rarr; Applications</span>
+            </button>
+          )}
         </div>
       )}
     </div>
