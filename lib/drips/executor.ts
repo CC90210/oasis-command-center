@@ -43,7 +43,21 @@ import { buildDripHtml, listUnsubscribeHeader } from "@/lib/drips/html-email";
 import { resolveDripSmsIdentity } from "@/lib/drips/rep-sms-identity";
 import { nudgeConversations } from "@/lib/realtime/conversations-nudge";
 
-export const BATCH_LIMIT = 50;
+export const BATCH_LIMIT = 12;
+// Global drip send ceiling per ROLLING HOUR — the hard "it's a drip, not a
+// blast" throttle (2026-07-20). Dispatch will not claim more than
+// (HOURLY_CAP - realSendsLastHour) rows, so total real output can never exceed
+// ~HOURLY_CAP/hour no matter how many rows are due — a mass-enrolled backlog
+// bleeds out as a paced drip instead of detonating. Only enforced in live mode
+// (dry runs move zero bytes, so pacing is moot). Tunable; 0 disables the cap.
+const HOURLY_CAP = Number(process.env.DRIPS_HOURLY_CAP ?? 30);
+// Scheduling jitter (minutes) — spread a cohort's scheduled_for across a window
+// so a batch enrolled/advanced together doesn't all come due at the same instant
+// (the clustering half of the blast). Same env the enroller uses for step 0.
+const STEP_SPREAD_MS = Math.max(0, Number(process.env.DRIPS_ENROLL_SPREAD_MIN ?? 90)) * 60_000;
+function spreadJitterMs(): number {
+  return STEP_SPREAD_MS > 0 ? Math.floor(Math.random() * STEP_SPREAD_MS) : 0;
+}
 const MAX_ATTEMPTS = 3;
 const STALE_SENDING_MINUTES = 15;
 // Soft time budget — mirrors dispatch-scheduled-sends: stop claiming further
@@ -77,7 +91,7 @@ type ClaimedRow = {
 };
 
 type LeadData = Record<string, unknown>;
-type SequenceRow = { id: string; name: string; enabled: boolean; steps: unknown; emailClass: string };
+type SequenceRow = { id: string; name: string; enabled: boolean; steps: unknown; emailClass: string; triggerStage: string | null };
 
 export type DispatchDripsResult = {
   ok: true;
@@ -89,11 +103,12 @@ export type DispatchDripsResult = {
   rescheduled: number;
   retryPending: number;
   failed: number;
+  cancelled: number;
 };
 
 /** Per-row outcome, tallied in-process by the main loop (no post-hoc DB
  *  query needed — every code path below returns exactly one of these). */
-type StepOutcome = "sent" | "dry_run" | "rescheduled" | "retry_pending" | "failed";
+type StepOutcome = "sent" | "dry_run" | "rescheduled" | "retry_pending" | "failed" | "cancelled";
 
 /** Best-effort lead_interactions log — never throws; a logging failure must
  *  never fail an actual send. agent_source is 'sequence:<name>' per the
@@ -160,7 +175,9 @@ async function enqueueNextStep(
   const next = row.step_index + 1;
   if (next >= steps.length) return { hasNext: false, ok: true };
   const nextStep = steps[next];
-  const scheduledFor = new Date(Date.now() + Math.max(0, nextStep.delay_minutes) * 60_000).toISOString();
+  const scheduledFor = new Date(
+    Date.now() + Math.max(0, nextStep.delay_minutes) * 60_000 + spreadJitterMs(),
+  ).toISOString();
   const ins = await db.from("drip_runs").insert({
     tenant_id: row.tenant_id,
     lead_id: row.lead_id,
@@ -298,6 +315,17 @@ async function markPermanentFail(db: Db, row: ClaimedRow, reason: string): Promi
     .update({ status: "failed", attempts: (row.attempts || 0) + 1, last_error: reason.slice(0, 500) })
     .eq("id", row.id);
   return "failed";
+}
+
+/** The lead has moved to a DIFFERENT stage than the one this sequence targets,
+ *  so this sequence is stale for them — cancel it (don't send, don't advance).
+ *  'cancelled' (not 'failed') so it reads as an intentional stage handoff, and
+ *  because cancelled rows intentionally don't block re-enrollment the enroller
+ *  is already starting the NEW stage's sequence. This is the "cancel old, start
+ *  new" rule (2026-07-20): a lead only ever receives its current stage's drip. */
+async function markCancelled(db: Db, row: ClaimedRow, reason: string): Promise<StepOutcome> {
+  await db.from("drip_runs").update({ status: "cancelled", last_error: reason.slice(0, 500) }).eq("id", row.id);
+  return "cancelled";
 }
 
 /** Not a failure — the recipient's local clock is outside the TCPA SMS
@@ -640,6 +668,16 @@ async function processRow(
 
   if (isOptedOutOrDead(data)) return markPermanentFail(db, row, "lead_opted_out_or_dead");
 
+  // Cancel-old-start-new (2026-07-20): if the lead has moved to a different
+  // stage than the one this sequence targets, this sequence is stale for them —
+  // cancel it (no send, no advance) instead of continuing to nag about an old
+  // stage. The enroller (also stage-matched) is already starting the lead's
+  // CURRENT-stage sequence, so this is a clean handoff and stops the "stacking"
+  // where a fast-moving lead accumulates several stages' emails at once.
+  if (seq.triggerStage && String(data.stage ?? "") !== seq.triggerStage) {
+    return markCancelled(db, row, `stage_changed: lead now at ${String(data.stage ?? "unknown")}`);
+  }
+
   if (step.channel === "sms") return processSmsStep(db, row, data, step, steps);
   return processEmailStep(db, row, data, step, steps, seq.emailClass || "commercial");
 }
@@ -669,21 +707,47 @@ export async function runDispatchDrips(): Promise<DispatchDripsResult> {
     console.error("[dispatch-drips] stale reclaim failed", err);
   }
 
-  // 2) Find due 'scheduled' work.
+  const empty = (): DispatchDripsResult => ({
+    ok: true, reclaimed, claimed: 0, processed: 0, sent: 0,
+    dryRun: 0, rescheduled: 0, retryPending: 0, failed: 0, cancelled: 0,
+  });
+
+  // 2) Hourly send cap (live mode only) — the hard drip throttle. Count REAL
+  // drip sends in the rolling last hour and claim at most (HOURLY_CAP - that),
+  // so total output can never exceed ~HOURLY_CAP/hour no matter how many rows
+  // are due. (Dry runs and channel-skips also advance to 'sent'/'done', so this
+  // slightly over-counts and errs toward under-sending — the safe side of "no
+  // blast". Only enforced in live mode; dry runs move zero bytes.)
+  let claimBudget = BATCH_LIMIT;
+  if (dripSendEnabled() && HOURLY_CAP > 0) {
+    const oneHourAgoIso = new Date(Date.now() - 3_600_000).toISOString();
+    try {
+      const r = await db
+        .from("drip_runs")
+        .select("id", { count: "exact", head: true })
+        .in("status", ["sent", "done"])
+        .gte("sent_at", oneHourAgoIso);
+      const sentLastHour = r.count || 0;
+      claimBudget = Math.max(0, Math.min(BATCH_LIMIT, HOURLY_CAP - sentLastHour));
+    } catch (err) {
+      // Can't measure the rate → trickle a few rather than risk a burst.
+      console.error("[dispatch-drips] hourly-cap count failed, trickling", err);
+      claimBudget = Math.min(BATCH_LIMIT, 5);
+    }
+    if (claimBudget <= 0) return empty(); // at the hourly ceiling — wait for the next tick
+  }
+
+  // 3) Find due 'scheduled' work (bounded by the hourly cap).
   const dueRes = await db
     .from("drip_runs")
     .select("id")
     .eq("status", "scheduled")
     .lte("scheduled_for", nowIso)
     .order("scheduled_for", { ascending: true })
-    .limit(BATCH_LIMIT);
-  if (dueRes.error) {
-    return { ok: true, reclaimed, claimed: 0, processed: 0, sent: 0, dryRun: 0, rescheduled: 0, retryPending: 0, failed: 0 };
-  }
+    .limit(claimBudget);
+  if (dueRes.error) return empty();
   const dueIds = (dueRes.data || []).map((r) => (r as { id: string }).id);
-  if (dueIds.length === 0) {
-    return { ok: true, reclaimed, claimed: 0, processed: 0, sent: 0, dryRun: 0, rescheduled: 0, retryPending: 0, failed: 0 };
-  }
+  if (dueIds.length === 0) return empty();
 
   // 3) Claim: conditional UPDATE (status still 'scheduled' at write time).
   // Stamp claimed_at so the stale-reclaim above can tell a fresh claim from a
@@ -694,13 +758,9 @@ export async function runDispatchDrips(): Promise<DispatchDripsResult> {
     .in("id", dueIds)
     .eq("status", "scheduled")
     .select("id, tenant_id, lead_id, sequence_id, sequence_name, step_index, channel, attempts");
-  if (claimRes.error) {
-    return { ok: true, reclaimed, claimed: 0, processed: 0, sent: 0, dryRun: 0, rescheduled: 0, retryPending: 0, failed: 0 };
-  }
+  if (claimRes.error) return empty();
   const claimed = (claimRes.data || []) as ClaimedRow[];
-  if (claimed.length === 0) {
-    return { ok: true, reclaimed, claimed: 0, processed: 0, sent: 0, dryRun: 0, rescheduled: 0, retryPending: 0, failed: 0 };
-  }
+  if (claimed.length === 0) return empty();
 
   // 4) Batch-prefetch every distinct lead + sequence this batch touches.
   // Maps below are keyed by "tenant_id|id" so a (theoretical) cross-tenant
@@ -722,10 +782,12 @@ export async function runDispatchDrips(): Promise<DispatchDripsResult> {
   try {
     const seqRes = await db
       .from("drip_sequences")
-      .select("id, tenant_id, name, enabled, steps, email_class")
+      .select("id, tenant_id, name, enabled, steps, email_class, trigger_filter")
       .in("id", sequenceIds);
-    for (const r of (seqRes.data || []) as Array<{ id: string; tenant_id: string; name: string; enabled: boolean; steps: unknown; email_class: string | null }>) {
-      seqMap.set(`${r.tenant_id}|${r.id}`, { id: r.id, name: r.name, enabled: r.enabled, steps: r.steps, emailClass: r.email_class || "commercial" });
+    for (const r of (seqRes.data || []) as Array<{ id: string; tenant_id: string; name: string; enabled: boolean; steps: unknown; email_class: string | null; trigger_filter: unknown }>) {
+      const tf = r.trigger_filter as { to?: unknown } | null;
+      const triggerStage = tf && typeof tf.to === "string" && tf.to.trim() ? tf.to.trim() : null;
+      seqMap.set(`${r.tenant_id}|${r.id}`, { id: r.id, name: r.name, enabled: r.enabled, steps: r.steps, emailClass: r.email_class || "commercial", triggerStage });
     }
   } catch (err) {
     console.error("[dispatch-drips] sequence prefetch failed", err);
@@ -744,6 +806,7 @@ export async function runDispatchDrips(): Promise<DispatchDripsResult> {
   let rescheduled = 0;
   let retryPending = 0;
   let failed = 0;
+  let cancelled = 0;
   for (const row of claimed) {
     if (Date.now() - startedAt > SOFT_BUDGET_MS) break;
     let outcome: StepOutcome;
@@ -760,8 +823,9 @@ export async function runDispatchDrips(): Promise<DispatchDripsResult> {
     else if (outcome === "dry_run") dryRun++;
     else if (outcome === "rescheduled") rescheduled++;
     else if (outcome === "retry_pending") retryPending++;
+    else if (outcome === "cancelled") cancelled++;
     else failed++;
   }
 
-  return { ok: true, reclaimed, claimed: claimed.length, processed, sent, dryRun, rescheduled, retryPending, failed };
+  return { ok: true, reclaimed, claimed: claimed.length, processed, sent, dryRun, rescheduled, retryPending, failed, cancelled };
 }
