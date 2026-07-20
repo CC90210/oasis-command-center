@@ -22,6 +22,7 @@ import {
   parseDripTriggerFilter,
   DripDefinitionError,
 } from "@/lib/drips/types";
+import { sanitizeBlastMessage, stripDashes } from "@/lib/integrations/blast-safety";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -98,8 +99,9 @@ export async function PATCH(
     }
   }
   if ("steps" in body) {
+    let steps;
     try {
-      patch.steps = parseDripSteps(body.steps);
+      steps = parseDripSteps(body.steps);
     } catch (err) {
       if (err instanceof DripDefinitionError) {
         return NextResponse.json(
@@ -109,6 +111,34 @@ export async function PATCH(
       }
       throw err;
     }
+    // Fail-closed positioning/lender guard on every email step being saved
+    // (Adon 2026-07-20: template rotation must never let broker/lender copy
+    // into a live drip). The runtime send path strips dashes at send time, but
+    // gating here means a bad AI rewrite or library paste can't PERSIST — the
+    // save is rejected with the offending phrase. SMS steps ride the send-time
+    // blast guard; email copy is what the rotation UI mutates, so we gate it
+    // on write. checkPositioning:true == the same rule the drip executor uses.
+    for (let i = 0; i < steps.length; i++) {
+      const s = steps[i];
+      if (s.channel !== "email") continue;
+      const guard = await sanitizeBlastMessage(
+        tenantId,
+        `${s.subject || ""}\n${s.body}`,
+        { checkPositioning: true },
+      );
+      if (!guard.ok) {
+        return NextResponse.json(
+          { ok: false, error: "blocked_copy", step: i, reason: guard.reason, message: `Step ${i + 1}: ${guard.message}` },
+          { status: 400 },
+        );
+      }
+      steps[i] = {
+        ...s,
+        subject: s.subject ? stripDashes(s.subject) : s.subject,
+        body: stripDashes(s.body),
+      };
+    }
+    patch.steps = steps;
   }
   if ("enabled" in body) patch.enabled = Boolean(body.enabled);
   if ("one_per_lead" in body) patch.one_per_lead = Boolean(body.one_per_lead);

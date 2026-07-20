@@ -20,7 +20,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
-import { AlertCircle, CheckCircle2, Loader2, Save, Trash2, Plus, X, MessageSquare, Mail } from "lucide-react";
+import { AlertCircle, CheckCircle2, Loader2, Save, Trash2, Plus, X, MessageSquare, Mail, Sparkles, BookOpen } from "lucide-react";
 import {
   parseDripSteps,
   parseDripTriggerFilter,
@@ -29,6 +29,10 @@ import {
   type DripTriggerFilter,
 } from "@/lib/drips/types";
 import { extractTokens } from "@/lib/drips/templates";
+import {
+  SUNBIZ_EMAIL_TEMPLATES,
+  SUNBIZ_TEMPLATE_CATEGORIES,
+} from "@/lib/sunbiz-templates-library";
 
 type SequenceRecord = {
   id: string;
@@ -304,6 +308,7 @@ export function SequenceBuilderClient({ initialSequence }: Props) {
             Steps
           </h3>
           <StepsEditor
+            sequenceId={initialSequence.id}
             steps={parsed.steps || []}
             onChange={(next) => setStepsJson(JSON.stringify(next, null, 2))}
           />
@@ -447,9 +452,11 @@ export function SequenceBuilderClient({ initialSequence }: Props) {
  * identical to the raw textarea path.
  */
 function StepsEditor({
+  sequenceId,
   steps,
   onChange,
 }: {
+  sequenceId: string;
   steps: DripStep[];
   onChange: (steps: DripStep[]) => void;
 }) {
@@ -598,6 +605,15 @@ function StepsEditor({
               className="w-full rounded-md border border-bg-border bg-bg-elev px-2 py-1.5 text-xs text-fg font-mono"
             />
           </label>
+          {step.channel === "email" && (
+            <EmailStepRotation
+              sequenceId={sequenceId}
+              stepIndex={idx}
+              currentSubject={step.subject || ""}
+              currentBody={step.body}
+              onApply={(patch) => update(idx, patch)}
+            />
+          )}
           <label className="block">
             <span className="text-[10px] uppercase tracking-wider text-fg-dim block mb-0.5">
               From label (optional)
@@ -628,6 +644,222 @@ function StepsEditor({
           <Plus className="h-3 w-3" /> Email step
         </button>
       </div>
+    </div>
+  );
+}
+
+/**
+ * Translate a saved-library template into the DRIP token dialect. The manual
+ * library (lib/sunbiz-templates-library.ts) uses {{first_name}} /
+ * {{business_name}} — the two fields the lead-drawer composer supplies. The
+ * drip executor resolves {{lead.first_name}} / {{lead.business_name}} instead
+ * (lib/drips/templates.ts). Rewrite the tokens so a pasted template still
+ * personalizes when it fires. Copy that uses neither token is unchanged.
+ */
+function toDripDialect(s: string): string {
+  return s
+    .replace(/\{\{\s*first_name\s*\}\}/g, "{{lead.first_name}}")
+    .replace(/\{\{\s*business_name\s*\}\}/g, "{{lead.business_name}}");
+}
+
+/**
+ * EmailStepRotation — the "rotate this template" control on an email step
+ * (Adon 2026-07-20). Three sources, all landing in the same subject+body:
+ *   • AI suggest — POST /rotate-suggest returns a fresh compliant variation.
+ *   • From saved — pick from the SunBiz template library (token-translated).
+ *   • Type it in — the existing subject/body fields (nothing to add here).
+ * Apply only fills the editor; the operator still Saves, which re-runs the
+ * fail-closed positioning/lender guard on the PATCH path.
+ */
+function EmailStepRotation({
+  sequenceId,
+  stepIndex,
+  currentSubject,
+  currentBody,
+  onApply,
+}: {
+  sequenceId: string;
+  stepIndex: number;
+  currentSubject: string;
+  currentBody: string;
+  onApply: (patch: { subject: string; body: string }) => void;
+}) {
+  const [open, setOpen] = useState<null | "ai" | "library">(null);
+  const [instruction, setInstruction] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const [suggestion, setSuggestion] = useState<{ subject: string; body: string } | null>(null);
+  const [note, setNote] = useState<string | null>(null);
+
+  async function runAi() {
+    setLoading(true);
+    setErr(null);
+    setSuggestion(null);
+    try {
+      const res = await fetch(`/api/sequences/${sequenceId}/rotate-suggest`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          step_index: stepIndex,
+          instruction: instruction.trim() || undefined,
+          current_subject: currentSubject,
+          current_body: currentBody,
+        }),
+      });
+      const data = (await res.json()) as {
+        ok: boolean;
+        subject?: string;
+        body?: string;
+        message?: string;
+        error?: string;
+      };
+      if (!data.ok || !data.subject || !data.body) {
+        setErr(data.message || data.error || "Couldn't generate a suggestion.");
+        return;
+      }
+      setSuggestion({ subject: data.subject, body: data.body });
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : "network error");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  function applyTemplate(id: string) {
+    const tpl = SUNBIZ_EMAIL_TEMPLATES.find((t) => t.id === id);
+    if (!tpl) return;
+    onApply({ subject: toDripDialect(tpl.subject), body: toDripDialect(tpl.body) });
+    setNote(`Loaded "${tpl.label}". Edit the copy, then Save.`);
+    setOpen(null);
+  }
+
+  return (
+    <div className="rounded-md border border-bg-border/70 bg-bg-elev/30 p-2 space-y-2">
+      <div className="flex items-center gap-2">
+        <span className="text-[10px] uppercase tracking-wider text-fg-dim">Rotate this email</span>
+        <div className="flex items-center gap-1.5 ml-auto">
+          <button
+            type="button"
+            onClick={() => {
+              setNote(null);
+              setOpen(open === "ai" ? null : "ai");
+            }}
+            className={`inline-flex items-center gap-1 text-[11px] rounded border px-2 py-1 ${
+              open === "ai" ? "border-accent text-accent" : "border-bg-border text-fg-muted hover:text-fg"
+            }`}
+          >
+            <Sparkles className="h-3 w-3" /> AI suggest
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              setNote(null);
+              setOpen(open === "library" ? null : "library");
+            }}
+            className={`inline-flex items-center gap-1 text-[11px] rounded border px-2 py-1 ${
+              open === "library" ? "border-accent text-accent" : "border-bg-border text-fg-muted hover:text-fg"
+            }`}
+          >
+            <BookOpen className="h-3 w-3" /> From saved
+          </button>
+        </div>
+      </div>
+
+      {note && <div className="text-[11px] text-status-engaged">{note}</div>}
+
+      {open === "ai" && (
+        <div className="space-y-2">
+          <input
+            value={instruction}
+            onChange={(e) => setInstruction(e.target.value)}
+            placeholder="Optional steer: shorter, warmer, lead with the bank statements…"
+            className="w-full rounded border border-bg-border bg-bg-elev px-2 py-1 text-[11px] text-fg"
+          />
+          <button
+            type="button"
+            onClick={runAi}
+            disabled={loading}
+            className="inline-flex items-center gap-1.5 text-[11px] rounded bg-accent text-bg-deep px-2.5 py-1 font-bold hover:bg-accent-bright disabled:opacity-50"
+          >
+            {loading ? <Loader2 className="h-3 w-3 animate-spin" /> : <Sparkles className="h-3 w-3" />}
+            {loading ? "Writing a fresh version…" : "Suggest a fresh version"}
+          </button>
+          {err && (
+            <div className="flex items-start gap-1.5 text-[11px] text-rose-400">
+              <AlertCircle className="h-3 w-3 mt-0.5 shrink-0" />
+              <span>{err}</span>
+            </div>
+          )}
+          {suggestion && (
+            <div className="rounded border border-accent/40 bg-accent/5 p-2 space-y-1.5">
+              <div className="text-[10px] uppercase tracking-wider text-fg-dim">Suggested</div>
+              <div className="text-[11px] font-bold text-fg">{suggestion.subject}</div>
+              <div className="text-[11px] text-fg-muted whitespace-pre-wrap leading-relaxed max-h-40 overflow-y-auto">
+                {suggestion.body}
+              </div>
+              <div className="flex items-center gap-2 pt-0.5">
+                <button
+                  type="button"
+                  onClick={() => {
+                    onApply(suggestion);
+                    setSuggestion(null);
+                    setOpen(null);
+                    setNote("Applied the AI version. Edit if you like, then Save.");
+                  }}
+                  className="text-[11px] rounded bg-accent text-bg-deep px-2.5 py-1 font-bold hover:bg-accent-bright"
+                >
+                  Apply
+                </button>
+                <button
+                  type="button"
+                  onClick={runAi}
+                  disabled={loading}
+                  className="text-[11px] rounded border border-bg-border px-2.5 py-1 text-fg-muted hover:text-fg disabled:opacity-50"
+                >
+                  Regenerate
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setSuggestion(null)}
+                  className="text-[11px] text-fg-dim hover:text-fg ml-auto"
+                >
+                  Dismiss
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {open === "library" && (
+        <div className="space-y-1">
+          <select
+            value=""
+            onChange={(e) => {
+              if (e.target.value) applyTemplate(e.target.value);
+            }}
+            className="w-full rounded border border-bg-border bg-bg-elev px-2 py-1 text-[11px] text-fg"
+          >
+            <option value="">Pick a saved template…</option>
+            {SUNBIZ_TEMPLATE_CATEGORIES.map((cat) => {
+              const items = SUNBIZ_EMAIL_TEMPLATES.filter((t) => t.category === cat.category);
+              if (items.length === 0) return null;
+              return (
+                <optgroup key={cat.category} label={cat.label}>
+                  {items.map((t) => (
+                    <option key={t.id} value={t.id}>
+                      {t.label}
+                    </option>
+                  ))}
+                </optgroup>
+              );
+            })}
+          </select>
+          <p className="text-[10px] text-fg-dim">
+            Pastes the saved copy (with drip tokens) into the subject + body above. Edit, then Save.
+          </p>
+        </div>
+      )}
     </div>
   );
 }
