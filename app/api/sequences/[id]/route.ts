@@ -121,11 +121,18 @@ export async function PATCH(
     for (let i = 0; i < steps.length; i++) {
       const s = steps[i];
       if (s.channel !== "email") continue;
-      const guard = await sanitizeBlastMessage(
-        tenantId,
-        `${s.subject || ""}\n${s.body}`,
-        { checkPositioning: true },
-      );
+      // Guard EVERY piece of email copy that can reach a merchant: base
+      // subject/body AND the A/B variant pools (subject_variants/body_variants),
+      // which the executor samples from at send time. One combined check == one
+      // lender-name lookup; a hit in ANY field blocks the whole save (a bad
+      // variant would otherwise persist unguarded and fire later — 2026-07-20).
+      const parts = [
+        s.subject || "",
+        s.body,
+        ...(s.subject_variants || []),
+        ...(s.body_variants || []),
+      ].filter(Boolean);
+      const guard = await sanitizeBlastMessage(tenantId, parts.join("\n"), { checkPositioning: true });
       if (!guard.ok) {
         return NextResponse.json(
           { ok: false, error: "blocked_copy", step: i, reason: guard.reason, message: `Step ${i + 1}: ${guard.message}` },
@@ -136,6 +143,8 @@ export async function PATCH(
         ...s,
         subject: s.subject ? stripDashes(s.subject) : s.subject,
         body: stripDashes(s.body),
+        ...(s.subject_variants ? { subject_variants: s.subject_variants.map(stripDashes) } : {}),
+        ...(s.body_variants ? { body_variants: s.body_variants.map(stripDashes) } : {}),
       };
     }
     patch.steps = steps;

@@ -530,7 +530,7 @@ async function processEmailStep(
 
   const ctx = buildContext(data);
   const copy = resolveStepCopy(step, row.lead_id, row.step_index);
-  const subject = renderTemplate(copy.subject, ctx) || "Following up";
+  const subjectRaw = renderTemplate(copy.subject, ctx) || "Following up";
   const rendered = renderTemplate(copy.body, ctx);
   const clean = await sanitizeBlastMessage(row.tenant_id, rendered, { checkPositioning: true });
   if (!clean.ok) {
@@ -538,6 +538,16 @@ async function processEmailStep(
       ? markPermanentFail(db, row, `blast_safety: ${clean.message}`)
       : markRetryOrFail(db, row, "blast_safety_check_failed");
   }
+  // Guard the SUBJECT too. Only the body was gated here; the subject (and, via
+  // resolveStepCopy, any subject_variants) reached the merchant unchecked — a
+  // positioning/lender phrase in a subject line slipped through (2026-07-20).
+  const subjectGuard = await sanitizeBlastMessage(row.tenant_id, subjectRaw, { checkPositioning: true });
+  if (!subjectGuard.ok) {
+    return subjectGuard.reason === "lender_name" || subjectGuard.reason === "positioning"
+      ? markPermanentFail(db, row, `blast_safety(subject): ${subjectGuard.message}`)
+      : markRetryOrFail(db, row, "blast_safety_check_failed");
+  }
+  const subject = subjectGuard.cleaned.slice(0, 200) || "Following up";
 
   const dripsLive = process.env.DRIPS_LIVE === "1";
   const shouldSend = dripSendEnabled();
