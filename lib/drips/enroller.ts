@@ -78,6 +78,22 @@ function parseEnrollLimit(raw: string | undefined): number {
   return n; // 0 = unlimited
 }
 
+// Enroll-time jitter (minutes) — spread a cohort's step-0 scheduled_for across a
+// window so a batch enrolled in the SAME pass doesn't all come due at the exact
+// same instant and detonate on the next dispatch tick (the clustering half of
+// the blast, 2026-07-20). Combined with the dispatch hourly cap this makes a
+// mass enrollment bleed out as a paced drip. Env, default 90 min; 0 disables.
+const ENROLL_SPREAD_MS = (() => {
+  // Blank/whitespace env → default (a blank secret → Number("")===0 would
+  // silently kill de-clustering). Non-numeric also falls back.
+  const raw = (process.env.DRIPS_ENROLL_SPREAD_MIN ?? "").trim();
+  const n = raw ? Number(raw) : 90;
+  return Math.max(0, Number.isFinite(n) ? n : 90) * 60_000;
+})();
+function enrollJitterMs(): number {
+  return ENROLL_SPREAD_MS > 0 ? Math.floor(Math.random() * ENROLL_SPREAD_MS) : 0;
+}
+
 export type SkipReason =
   | "already_enrolled"
   | "dead_or_declined"
@@ -418,7 +434,9 @@ export async function runEnrollDrips(): Promise<EnrollDripsResult> {
         continue;
       }
 
-      const scheduledFor = new Date(Date.now() + Math.max(0, firstStep[0].delay_minutes) * 60_000).toISOString();
+      const scheduledFor = new Date(
+        Date.now() + Math.max(0, firstStep[0].delay_minutes) * 60_000 + enrollJitterMs(),
+      ).toISOString();
       const ins = await db.from("drip_runs").insert({
         tenant_id: seq.tenant_id,
         lead_id: lead.id,
