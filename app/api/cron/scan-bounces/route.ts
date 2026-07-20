@@ -108,13 +108,21 @@ async function watchdogAlert(text: string): Promise<void> {
 }
 
 export async function GET(req: NextRequest) {
-  const denied = checkCronAuth(req);
-  if (denied) return denied;
+  // Vercel cron (checkCronAuth) OR a manual SCAN_TRIGGER_SECRET bearer (the same
+  // trusted secret scan-lender-replies uses) so this cron can be triggered and
+  // inspected on demand.
+  const authHeader = req.headers.get("authorization") || "";
+  const trigSecret = process.env.SCAN_TRIGGER_SECRET;
+  const manualOk = !!trigSecret && authHeader === `Bearer ${trigSecret}`;
+  if (!manualOk) {
+    const denied = checkCronAuth(req);
+    if (denied) return denied;
+  }
 
   const url = new URL(req.url);
   const write = url.searchParams.get("write") === "1";
   const lookbackDays = Math.min(30, Math.max(1, Number(url.searchParams.get("days")) || 3));
-  const limit = Math.min(60, Math.max(1, Number(url.searchParams.get("limit")) || 40));
+  const limit = Math.min(150, Math.max(1, Number(url.searchParams.get("limit")) || 80));
   const db = getServiceSupabase();
 
   let creds: { fromAddress: string; appPassword: string };
@@ -159,39 +167,32 @@ export async function GET(req: NextRequest) {
   const results: Array<Record<string, unknown>> = [];
   const toSuppress = new Set<string>();
   let scanned = 0;
+  let fetched = 0;
 
   const lock = await client.getMailboxLock("INBOX");
   try {
     const since = new Date(Date.now() - lookbackDays * 24 * 3600 * 1000);
-    // Target bounce senders/subjects. IMAP's OR is binary, and imapflow's N-term
-    // `or` proved unreliable at runtime (the deployed cron found 0 bounces while a
-    // Python imaplib test with the SAME criteria found them). So run each criterion
-    // as its own search and union the UIDs — robust + matches the verified dry-run.
-    const criteria: Array<{ from?: string; subject?: string }> = [
-      { from: "mailer-daemon" },
-      { from: "postmaster" },
-      { subject: "Delivery Status Notification" },
-      { subject: "Undeliverable" },
-      { subject: "failure notice" },
-      { subject: "returned mail" },
-      { subject: "Mail delivery failed" },
-      { subject: "Delivery has failed" },
-    ];
-    const seen = new Set<number>();
-    const uids: number[] = [];
-    for (const crit of criteria) {
-      const found = (await client.search({ since, ...crit })) || [];
-      for (const u of (Array.isArray(found) ? found : [])) {
-        if (!seen.has(u)) { seen.add(u); uids.push(u); }
-      }
-    }
-    const recent = uids.slice(-limit);
+    // Plain {since} search + detect bounces in CODE. imapflow's from/subject/or
+    // IMAP search filters returned nothing in the Vercel runtime (scan-lender-
+    // replies, which uses {since}, works), even though an imaplib test with the
+    // same filters found the messages — so we no longer rely on them.
+    const searchRes = (await client.search({ since })) || [];
+    const allUids = Array.isArray(searchRes) ? searchRes : [];
+    const recent = allUids.slice(-limit);
 
     for await (const msg of client.fetch(recent, { envelope: true, source: true })) {
-      scanned++;
+      fetched++;
       const from = (msg.envelope?.from?.[0]?.address || "").toLowerCase();
       const subject = msg.envelope?.subject || "";
       const raw = (msg.source as Buffer)?.toString("utf8") || "";
+
+      // Bounce detection in code (no reliance on IMAP search filters).
+      const isBounce = /mailer-daemon|postmaster/i.test(from)
+        || /content-type:\s*(?:multipart\/report|message\/delivery-status)|report-type=delivery-status/i.test(raw)
+        || /^(?:final-recipient|x-failed-recipients):/im.test(raw)
+        || /delivery status notification|undeliverable|failure notice|returned mail|mail delivery (?:failed|subsystem)|delivery has failed/i.test(subject);
+      if (!isBounce) continue;
+      scanned++;
 
       const recipient = extractFailedRecipient(raw);
       const klass = bounceClass(raw);
@@ -264,6 +265,7 @@ export async function GET(req: NextRequest) {
     ok: true,
     mode: write ? "write" : "dry",
     inbox: creds.fromAddress,
+    fetched,
     scanned,
     hard,
     soft,
