@@ -171,7 +171,12 @@ function SourceBarList({ bySource }: { bySource: Record<MetricSource, SourceBloc
   );
 }
 
-/* ---------------- per-drip A/B table ---------------- */
+/* ---------------- per-drip table: every email by STAGE + effectiveness ---------------- */
+function HealthDot({ h }: { h: "ok" | "watch" | "low" }) {
+  const c = h === "low" ? "bg-status-hot" : h === "watch" ? "bg-status-warm" : "bg-status-engaged";
+  const label = h === "low" ? "Low open rate — may be spam-foldered, consider rotating" : h === "watch" ? "Opens below benchmark" : "Healthy";
+  return <span title={label} className={`inline-block w-1.5 h-1.5 rounded-full ${c} align-middle ml-1`} />;
+}
 function DripTable({ sequences }: { sequences: SequenceMetric[] }) {
   if (!sequences.length) return <div className="text-sm text-fg-dim py-2">No drip sends in this window yet.</div>;
   return (
@@ -179,7 +184,8 @@ function DripTable({ sequences }: { sequences: SequenceMetric[] }) {
       <table className="w-full text-sm">
         <thead>
           <tr className="text-[10px] uppercase tracking-wider text-fg-dim">
-            <th className="text-left font-bold pb-1">Sequence</th>
+            <th className="text-left font-bold pb-1">Stage</th>
+            <th className="text-left font-bold pb-1 px-2">Email</th>
             <th className="text-left font-bold pb-1 px-2">Ch</th>
             <th className="text-right font-bold pb-1 px-2">Sent</th>
             <th className="text-right font-bold pb-1 px-2">Opens</th>
@@ -199,22 +205,34 @@ function DripTable({ sequences }: { sequences: SequenceMetric[] }) {
   );
 }
 function SeqRows({ d }: { d: SequenceMetric }) {
+  const openTone = d.health === "low" ? "text-status-hot" : d.health === "watch" ? "text-status-warm" : "text-accent";
   return (
     <>
-      <tr className="border-t border-bg-border">
-        <td className="py-2.5 pr-3 text-sm font-semibold text-fg">{d.sequenceName}</td>
+      <tr className="border-t border-bg-border align-top">
+        <td className="py-2.5 pr-2">
+          <span className="text-[11px] font-bold uppercase tracking-wide text-fg-muted">{d.stage ? d.stage.replace(/_/g, " ") : "—"}</span>
+        </td>
+        <td className="py-2.5 px-2 max-w-[300px]">
+          <div className="text-[13px] font-medium text-fg truncate" title={d.emailSubject || undefined}>
+            {d.emailSubject || <span className="text-fg-dim italic">no email step (SMS only)</span>}
+          </div>
+          <div className="text-[10.5px] text-fg-dim truncate">{d.sequenceName}</div>
+        </td>
         <td className="py-2.5 px-2 text-xs text-fg-muted uppercase tracking-wide">{d.channelMix || "—"}</td>
         <td className="py-2.5 px-2 text-right tabular-nums text-fg">{num(d.sent)}</td>
         <td className="py-2.5 px-2 text-right tabular-nums text-fg-muted">{d.emailSent ? num(d.opened) : "—"}</td>
         <td className="py-2.5 px-2 text-right tabular-nums text-fg-muted">{d.emailSent ? num(d.clicked) : "—"}</td>
-        <td className="py-2.5 px-2 text-right tabular-nums text-accent">{d.emailSent ? pct(d.openRate) : "—"}</td>
+        <td className="py-2.5 px-2 text-right tabular-nums whitespace-nowrap">
+          {d.emailSent ? <span className={openTone}>{pct(d.openRate)}<HealthDot h={d.health} /></span> : "—"}
+        </td>
         <td className="py-2.5 px-2 text-right tabular-nums text-accent">{d.emailSent ? pct(d.clickRate) : "—"}</td>
         <td className="py-2.5 pl-2 text-right tabular-nums">{d.failed > 0 ? <span className="text-status-hot">{num(d.failed)}</span> : <span className="text-fg-dim">0</span>}</td>
       </tr>
       {d.variants.length > 1 &&
         d.variants.map((v) => (
           <tr key={`${d.sequenceName}-v${v.index}`} className="text-xs text-fg-dim">
-            <td className="py-1 pr-3 pl-4">variation {String.fromCharCode(65 + v.index)}</td>
+            <td />
+            <td className="py-1 px-2 pl-4">variation {String.fromCharCode(65 + v.index)}</td>
             <td className="py-1 px-2" />
             <td className="py-1 px-2 text-right tabular-nums">{num(v.sent)}</td>
             <td className="py-1 px-2 text-right tabular-nums">{num(v.opened)}</td>
