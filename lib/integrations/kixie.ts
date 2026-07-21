@@ -29,7 +29,11 @@ import "server-only";
 import { getTenantIntegrationBundle } from "@/lib/tenant-integration-store";
 
 const EVENT_ENDPOINT = "https://apig.kixie.com/app/event";
-const WEBHOOK_REGISTER_ENDPOINT = "https://apig.kixie.com/app/v1/api/postwebhook";
+// NOTE (2026-07-21, verified live): the path is postWebhook with a CAPITAL W —
+// Kixie's own docs say "postwebhook", which returns {"success":false,
+// "error":"function does not exist"}. The gateway also dispatches on a
+// `call` discriminator in the body (see registerWebhook).
+const WEBHOOK_REGISTER_ENDPOINT = "https://apig.kixie.com/app/v1/api/postWebhook";
 const WEBHOOK_DELETE_ENDPOINT = "https://apig.kixie.com/app/v1/api/deleteWebhooks";
 
 // ---- Credential resolution ------------------------------------------------
@@ -230,44 +234,83 @@ export function addToPowerlist(
 // ---- Webhook management ---------------------------------------------------
 
 /**
- * Every webhook Kixie can fire. Used by the auto-registration route to
- * loop through and register all of them on first config.
+ * Every webhook Kixie can fire — Kixie's REAL enum, verified live 2026-07-21
+ * against getWebhooks. Kixie's docs (and this file's original list) were
+ * wrong: the disposition event is "disposition" (not "dispositioncall"),
+ * SMS is capital "SMS", and "dialattempt" does not exist.
  */
 export const KIXIE_WEBHOOK_EVENTS = [
+  "endcall",        // Call terminates (duration + recording)
   "startcall",      // Call begins (ring)
   "answeredcall",   // Call connected
-  "endcall",        // Call terminates
-  "dispositioncall", // Agent set call outcome
+  "SMS",            // Every SMS (inbound + outbound)
+  "disposition",    // Agent set call outcome
   "voicemail",      // Voicemail dropped
-  "dialattempt",    // Outbound dial fires
   "scheduledactivity", // Calendar event
-  "sms",            // Every SMS (inbound + outbound)
   "cisummary",      // Conversation Intelligence finished
 ] as const;
 
 export type KixieWebhookEvent = typeof KIXIE_WEBHOOK_EVENTS[number];
 
-export function registerWebhook(
-  creds: KixieCredentials,
-  args: { eventName: KixieWebhookEvent; location: string },
-): Promise<unknown> {
-  return kixiePost(WEBHOOK_REGISTER_ENDPOINT, {
-    apikey: creds.apiKey,
-    businessid: creds.businessId,
-    eventname: args.eventName,
-    location: args.location,
-  });
+/** Kixie replies HTTP 200 with {success:false,error} on failures — surface it. */
+function assertKixieSuccess(parsed: unknown, context: string): unknown {
+  if (
+    typeof parsed === "object" &&
+    parsed !== null &&
+    (parsed as { success?: boolean }).success === false
+  ) {
+    const err = (parsed as { error?: string }).error || "unknown kixie error";
+    throw new KixieError("kixie_rejected", `${context}: ${err}`, 200, parsed);
+  }
+  return parsed;
 }
 
-export function deleteWebhooks(
+export async function registerWebhook(
   creds: KixieCredentials,
-  args: { eventName: KixieWebhookEvent },
+  args: {
+    eventName: KixieWebhookEvent;
+    location: string;
+    /**
+     * Static headers Kixie attaches to every delivery, JSON-encoded STRING
+     * per their API: '[{"name":"X-Kixie-Token","value":"..."}]'. This is the
+     * webhook auth mechanism — Kixie does not HMAC-sign.
+     */
+    headersJson?: string;
+  },
 ): Promise<unknown> {
-  return kixiePost(WEBHOOK_DELETE_ENDPOINT, {
+  const parsed = await kixiePost(WEBHOOK_REGISTER_ENDPOINT, {
     apikey: creds.apiKey,
     businessid: creds.businessId,
+    call: "postWebhook", // gateway dispatches on this, not just the URL path
+    callresult: "all",
+    direction: "all",
+    disposition: "all",
     eventname: args.eventName,
+    headers: args.headersJson ?? false,
+    location: args.location,
+    name: `oasis-dashboard-${args.eventName.toLowerCase()}`,
+    runtime: "realtime",
   });
+  return assertKixieSuccess(parsed, `register ${args.eventName}`);
+}
+
+/**
+ * Delete a webhook by id. NOTE: the docs say call:"removeWebhook", but every
+ * variant probed live on 2026-07-21 returned "function does not exist" — the
+ * real function name is unverified. Kept per-docs; expect it may fail until
+ * Kixie support confirms the name.
+ */
+export async function deleteWebhooks(
+  creds: KixieCredentials,
+  args: { webhookId: number },
+): Promise<unknown> {
+  const parsed = await kixiePost(WEBHOOK_DELETE_ENDPOINT, {
+    apikey: creds.apiKey,
+    businessid: creds.businessId,
+    call: "removeWebhook",
+    webhookid: args.webhookId,
+  });
+  return assertKixieSuccess(parsed, `delete webhook ${args.webhookId}`);
 }
 
 /**
@@ -278,11 +321,16 @@ export function deleteWebhooks(
 export async function registerAllWebhooks(
   creds: KixieCredentials,
   location: string,
+  opts?: { headersJson?: string },
 ): Promise<Array<{ event: KixieWebhookEvent; ok: boolean; error?: string }>> {
   const results: Array<{ event: KixieWebhookEvent; ok: boolean; error?: string }> = [];
   for (const event of KIXIE_WEBHOOK_EVENTS) {
     try {
-      await registerWebhook(creds, { eventName: event, location });
+      await registerWebhook(creds, {
+        eventName: event,
+        location,
+        headersJson: opts?.headersJson,
+      });
       results.push({ event, ok: true });
     } catch (err) {
       results.push({
