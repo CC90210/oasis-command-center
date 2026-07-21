@@ -71,6 +71,11 @@ export async function POST(req: NextRequest) {
 
   const email = normEmail(body.email);
   const phone = normPhone(body.phone);
+  // A lead with no way to reach it is useless (can't dedup, can't follow up, can't
+  // drip). Require at least one contact — the modal enforces this too.
+  if (!email && !phone) {
+    return NextResponse.json({ ok: false, error: "contact_required", message: "Add a phone or email." }, { status: 400 });
+  }
   const tenantId = sess.tenantId;
 
   let leadId: string;
@@ -78,8 +83,12 @@ export async function POST(req: NextRequest) {
   let advanced = false;
   let fromStage: string | null = null;
   try {
-    // Create-or-advance: never spawn a duplicate for a returning merchant.
-    const found = await findExistingLead(tenantId, { email, phone, business: businessName });
+    // Create-or-advance, deduped on STRONG identity only (email/phone). We
+    // deliberately DON'T match on business name here: two different merchants can
+    // share a name, and merging them would advance the wrong file + lose the new
+    // one's contact. A missed returning-merchant just yields a dup (harmless) vs a
+    // false merge (data loss).
+    const found = await findExistingLead(tenantId, { email, phone });
     if (found) {
       existing = true;
       leadId = found.id;
