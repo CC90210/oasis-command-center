@@ -36,6 +36,7 @@ import { getServiceSupabase } from "@/lib/supabase-server";
 import { checkPhoneOptOut, checkEmailSuppressed } from "@/lib/lead-interactions-queries";
 import { sanitizeBlastMessage, stripDashes } from "@/lib/integrations/blast-safety";
 import { writeAgentAlert } from "@/lib/notify/agent-alert";
+import { maybeMintApplicationUrl, updateRecord } from "@/lib/manifest/data";
 import { checkTcpaWindow, nextTcpaWindowStart } from "@/lib/tcpa-window";
 import { renderTemplate } from "@/lib/drips/templates";
 import { parseDripSteps, type DripStep } from "@/lib/drips/types";
@@ -664,8 +665,59 @@ async function processEmailStep(
     return markRescheduled(db, row, emailWait.toISOString(), `email_window (outside ${EMAIL_WIN_START}:00-${EMAIL_WIN_END}:00 ${EMAIL_WIN_TZ})`);
   }
 
-  const ctx = buildContext(data);
+  // Resolve the copy first so the app-link pre-flight can inspect it.
   const copy = resolveStepCopy(step, row.lead_id, row.step_index);
+
+  // ── Dynamic application-link pre-flight (2026-07-21) ────────────────────────
+  // If this email injects the merchant's resumable application link
+  // ({{lead.application_url}}) but the lead has none on file, MINT a fresh
+  // per-lead link on the fly (HMAC-signed, carries lead_id → one URL both starts
+  // a new app and resumes an in-progress one). If a real per-lead link can't be
+  // produced (no enabled intake form / HMAC key missing), HALT this email rather
+  // than fall back to the generic no-lead link — never send a merchant a broken
+  // or generic application link.
+  const usesLink = /\{\{\s*lead\.application_url\s*\}\}/.test(`${copy.subject || ""}\n${copy.body}`);
+  if (usesLink) {
+    const existing = typeof data.application_url === "string" && data.application_url.trim() ? data.application_url.trim() : "";
+    if (!existing) {
+      const minted = await maybeMintApplicationUrl(db, row.tenant_id, "lead", row.lead_id, data);
+      if (minted) {
+        data.application_url = minted; // buildContext below renders the REAL per-lead link
+        // Persist so later steps don't re-mint + the board/other sends see it.
+        await updateRecord({ tenant_id: row.tenant_id, entity: "lead", id: row.lead_id, patch: { application_url: minted } }).catch(() => {});
+      } else {
+        // Couldn't mint a real per-lead link. Retry a few times (a form/HMAC-key
+        // config issue may get fixed), alerting on the FIRST hold and at give-up
+        // only (never every tick), then SKIP this email and advance the sequence
+        // rather than rescheduling forever — a stage/template mismatch won't
+        // self-heal the way a TCPA/quiet-hours reschedule does.
+        const attempts = (row.attempts || 0) + 1;
+        const CAP = 4;
+        if (attempts === 1 || attempts >= CAP) {
+          await writeAgentAlert({
+            tenantId: row.tenant_id,
+            alertType: "drip_missing_app_link",
+            severity: attempts >= CAP ? "urgent" : "warn",
+            title: `Drip email ${attempts >= CAP ? "skipped" : "held"}: no application link (${row.sequence_name})`,
+            body: `Lead ${row.lead_id} has no application link and one couldn't be minted (no enabled intake form or HMAC key). ${attempts >= CAP ? "Skipped this email after retries so the sequence keeps moving." : "Holding this email so no generic link reaches the merchant."}`,
+            subjectType: "drip_sequence",
+            subjectId: row.sequence_id,
+            payload: { step_index: row.step_index, lead_id: row.lead_id, attempts },
+          }).catch(() => {});
+        }
+        if (attempts >= CAP) {
+          return skipStep(db, row, steps, "missing_application_link: skipped after retries (no form/HMAC key)");
+        }
+        await db
+          .from("drip_runs")
+          .update({ status: "scheduled", attempts, scheduled_for: new Date(Date.now() + 6 * 3_600_000).toISOString(), last_error: "missing_application_link (no form/HMAC key)" })
+          .eq("id", row.id);
+        return "rescheduled";
+      }
+    }
+  }
+
+  const ctx = buildContext(data);
   const subjectRaw = renderTemplate(copy.subject, ctx) || "Following up";
   const rendered = renderTemplate(copy.body, ctx);
   // Guard subject + body in ONE lender-lookup (was two separate calls — halves

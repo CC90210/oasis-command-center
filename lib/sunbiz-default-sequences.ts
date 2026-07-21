@@ -249,8 +249,13 @@ export const SUNBIZ_DEFAULT_SEQUENCES: DefaultSequence[] = [
         delay_minutes: 5, // paired email, right after the SMS
         from_label: "Solara",
         subject: "Finishing your application for {{lead.business_name}}",
+        // Injects the merchant's per-lead resumable application link. The dispatch
+        // service mints one on the fly if the lead lacks it, or HALTS the email
+        // rather than send a generic link (see processEmailStep pre-flight). Every
+        // email step across the live sequences carries this token; the live
+        // drip_sequences rows are the source of truth (installed via scripts).
         body:
-          "Hi {{lead.contact_name}},\n\nYour SunBiz application is started but not finished yet. Once it's in with your last 3 months of business bank statements, your file goes straight into our underwriting and I come back with the options that actually fit, usually within 24 to 48 hours.\n\nIf anything on the application is unclear, reply here and I'll walk you through it.\n\nSolara, SunBiz Funding",
+          "Hi {{lead.contact_name}},\n\nYour SunBiz application is started but not finished yet. Once it's in with your last 3 months of business bank statements, your file goes straight into our underwriting and I come back with the options that actually fit, usually within 24 to 48 hours.\n\nIf anything on the application is unclear, reply here and I'll walk you through it.\n\nStart or pick up your application here:\n{{lead.application_url}}\n\nSolara, SunBiz Funding",
       },
     ],
   },
