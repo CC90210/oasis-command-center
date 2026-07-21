@@ -222,19 +222,35 @@ export const SUNBIZ_DEFAULT_SEQUENCES: DefaultSequence[] = [
   // case, 24h SMS to bring them back.
   // ─────────────────────────────────────────────────────────────────
   {
-    name: "Sent application - 24h reminder",
+    // Sent-application COMPLETION drip (2026-07-21). The FULL production cadence
+    // is escalating and ~46 steps (SMS+email at +6h, then daily for a week, then
+    // every 2 days for a month), and a lead still here after ~37 days is
+    // auto-moved to dead_file by /api/cron/sweep-stale-sent-app. That full
+    // cadence is DB-managed and installed via scripts/install-sent-app-cadence
+    // (the drip_sequences row is the source of truth — the seed only bootstraps a
+    // brand-new tenant, which is then re-run through the install script). This
+    // seed carries a representative STARTER pair so a fresh tenant isn't empty.
+    name: "Sent application - completion drip",
     description:
-      "Fires when an application link goes out. If the lead hasn't clicked through, send a soft 24h reminder.",
+      "Nudges the merchant to finish their application. Escalates from +6h through ~37 days (SMS+email), then auto-retires to Dead. Stops the moment the app is completed (stage leaves sent_application).",
     trigger_event: "BRAVO_RECORD_STATUS_CHANGED",
     trigger_filter: { entity: "lead", field: "stage", to: "sent_application" },
     one_per_lead: true,
     steps: [
       {
         channel: "sms",
-        delay_minutes: 60 * 24, // 24h
+        delay_minutes: 60 * 6, // +6h — first nudge
         from_label: "Solara",
         body:
-          "Hi {{lead.contact_name}}, quick reminder: your SunBiz application link is still active. Takes about 5 minutes. Reply if anything's blocking you and I'll help.",
+          "Hi {{lead.contact_name}}, your SunBiz application link is still open. Whenever you finish it and send your last 3 months of business bank statements, I get your file straight into underwriting. Anything blocking you?",
+      },
+      {
+        channel: "email",
+        delay_minutes: 5, // paired email, right after the SMS
+        from_label: "Solara",
+        subject: "Finishing your application for {{lead.business_name}}",
+        body:
+          "Hi {{lead.contact_name}},\n\nYour SunBiz application is started but not finished yet. Once it's in with your last 3 months of business bank statements, your file goes straight into our underwriting and I come back with the options that actually fit, usually within 24 to 48 hours.\n\nIf anything on the application is unclear, reply here and I'll walk you through it.\n\nSolara, SunBiz Funding",
       },
     ],
   },

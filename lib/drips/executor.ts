@@ -71,6 +71,46 @@ const STEP_SPREAD_MS = Math.max(0, envNum("DRIPS_ENROLL_SPREAD_MIN", 90)) * 60_0
 function spreadJitterMs(): number {
   return STEP_SPREAD_MS > 0 ? Math.floor(Math.random() * STEP_SPREAD_MS) : 0;
 }
+
+// Email business-hours window (2026-07-21). Unlike SMS, email has no TCPA gate,
+// so a step due at 3am would send at 3am. This reschedules an off-hours email
+// step to the next window-start, so drip email lands in daytime ("every
+// morning") for every lead + sequence. Fixed business TZ (email has no per-lead
+// tz). Set START<=0 & END>=24 (or END<=START) to disable.
+const EMAIL_WIN_START = envNum("DRIP_EMAIL_WINDOW_START", 8);
+const EMAIL_WIN_END = envNum("DRIP_EMAIL_WINDOW_END", 20);
+const EMAIL_WIN_TZ = (process.env.DRIP_EMAIL_WINDOW_TZ || "America/New_York").trim() || "America/New_York";
+
+/** ms the wall-clock in `tz` is ahead of UTC at `date` (negative for US zones). */
+function tzOffsetMs(tz: string, date: Date): number {
+  const p = new Intl.DateTimeFormat("en-US", {
+    timeZone: tz, hourCycle: "h23",
+    year: "numeric", month: "2-digit", day: "2-digit",
+    hour: "2-digit", minute: "2-digit", second: "2-digit",
+  }).formatToParts(date).reduce<Record<string, string>>((a, x) => { a[x.type] = x.value; return a; }, {});
+  const asUTC = Date.UTC(+p.year, +p.month - 1, +p.day, +p.hour, +p.minute, +p.second);
+  return asUTC - date.getTime();
+}
+
+/** If `now` is OUTSIDE the email window, the next window-start Date; else null. */
+function emailWindowNextStart(now: Date = new Date()): Date | null {
+  if (!(EMAIL_WIN_END > EMAIL_WIN_START) || (EMAIL_WIN_START <= 0 && EMAIL_WIN_END >= 24)) return null; // disabled
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: EMAIL_WIN_TZ, hourCycle: "h23",
+    year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit",
+  }).formatToParts(now).reduce<Record<string, string>>((a, x) => { a[x.type] = x.value; return a; }, {});
+  const hour = +parts.hour;
+  if (hour >= EMAIL_WIN_START && hour < EMAIL_WIN_END) return null; // inside window
+  let y = +parts.year, m = +parts.month, d = +parts.day;
+  if (hour >= EMAIL_WIN_END) {
+    // after close → advance to tomorrow's open (rolls month/year correctly).
+    const t = new Date(Date.UTC(y, m - 1, d) + 86_400_000);
+    y = t.getUTCFullYear(); m = t.getUTCMonth() + 1; d = t.getUTCDate();
+  } // else (before open) → today's open
+  const localOpenAsUTC = Date.UTC(y, m - 1, d, EMAIL_WIN_START, 0, 0);
+  return new Date(localOpenAsUTC - tzOffsetMs(EMAIL_WIN_TZ, now));
+}
+
 const MAX_ATTEMPTS = 3;
 const STALE_SENDING_MINUTES = 15;
 // Soft time budget — mirrors dispatch-scheduled-sends: stop claiming further
@@ -606,6 +646,14 @@ async function processEmailStep(
   const supp = await checkEmailSuppressed(row.tenant_id, email);
   if (supp.suppressed) return markPermanentFail(db, row, "suppressed (unsubscribed)");
   if (supp.checkFailed) return markRetryOrFail(db, row, "suppression_check_failed");
+
+  // Email business-hours gate ("every morning"): reschedule an off-hours email
+  // step to the next window-start (no attempt burn) — mirrors the SMS TCPA
+  // reschedule above. Keeps drip email out of the middle of the night.
+  const emailWait = emailWindowNextStart();
+  if (emailWait) {
+    return markRescheduled(db, row, emailWait.toISOString(), `email_window (outside ${EMAIL_WIN_START}:00-${EMAIL_WIN_END}:00 ${EMAIL_WIN_TZ})`);
+  }
 
   const ctx = buildContext(data);
   const copy = resolveStepCopy(step, row.lead_id, row.step_index);
