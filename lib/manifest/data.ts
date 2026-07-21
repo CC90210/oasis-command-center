@@ -292,6 +292,8 @@ const STAGES_NEEDING_APPLY_URL = new Set([
   "follow_up",
   "sent_application",
   "viewed_application",
+  "signed_application", // the bank-statements nag drip links back to their form to finish uploading
+  "declined", // a declined-stage re-engagement drip still needs a working link
   "ghost", // re-engagement merchants still need a working link
 ]);
 
@@ -359,7 +361,7 @@ async function resolveIntakeForm(
  * supabase blip) returns null silently so the parent create/update
  * never crashes on a side-effect.
  */
-async function maybeMintApplicationUrl(
+export async function maybeMintApplicationUrl(
   db: ReturnType<typeof getServiceSupabase>,
   tenantId: string,
   entity: string,
