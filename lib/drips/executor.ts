@@ -686,17 +686,33 @@ async function processEmailStep(
         // Persist so later steps don't re-mint + the board/other sends see it.
         await updateRecord({ tenant_id: row.tenant_id, entity: "lead", id: row.lead_id, patch: { application_url: minted } }).catch(() => {});
       } else {
-        await writeAgentAlert({
-          tenantId: row.tenant_id,
-          alertType: "drip_missing_app_link",
-          severity: "warn",
-          title: `Drip email held: no application link (${row.sequence_name})`,
-          body: `Lead ${row.lead_id} has no application link and one couldn't be minted (no enabled intake form or HMAC key). Holding this email so no generic link reaches the merchant.`,
-          subjectType: "drip_sequence",
-          subjectId: row.sequence_id,
-          payload: { step_index: row.step_index, lead_id: row.lead_id },
-        }).catch(() => {});
-        return markRescheduled(db, row, new Date(Date.now() + 6 * 3_600_000).toISOString(), "missing_application_link (no form/HMAC key)");
+        // Couldn't mint a real per-lead link. Retry a few times (a form/HMAC-key
+        // config issue may get fixed), alerting on the FIRST hold and at give-up
+        // only (never every tick), then SKIP this email and advance the sequence
+        // rather than rescheduling forever — a stage/template mismatch won't
+        // self-heal the way a TCPA/quiet-hours reschedule does.
+        const attempts = (row.attempts || 0) + 1;
+        const CAP = 4;
+        if (attempts === 1 || attempts >= CAP) {
+          await writeAgentAlert({
+            tenantId: row.tenant_id,
+            alertType: "drip_missing_app_link",
+            severity: attempts >= CAP ? "urgent" : "warn",
+            title: `Drip email ${attempts >= CAP ? "skipped" : "held"}: no application link (${row.sequence_name})`,
+            body: `Lead ${row.lead_id} has no application link and one couldn't be minted (no enabled intake form or HMAC key). ${attempts >= CAP ? "Skipped this email after retries so the sequence keeps moving." : "Holding this email so no generic link reaches the merchant."}`,
+            subjectType: "drip_sequence",
+            subjectId: row.sequence_id,
+            payload: { step_index: row.step_index, lead_id: row.lead_id, attempts },
+          }).catch(() => {});
+        }
+        if (attempts >= CAP) {
+          return skipStep(db, row, steps, "missing_application_link: skipped after retries (no form/HMAC key)");
+        }
+        await db
+          .from("drip_runs")
+          .update({ status: "scheduled", attempts, scheduled_for: new Date(Date.now() + 6 * 3_600_000).toISOString(), last_error: "missing_application_link (no form/HMAC key)" })
+          .eq("id", row.id);
+        return "rescheduled";
       }
     }
   }

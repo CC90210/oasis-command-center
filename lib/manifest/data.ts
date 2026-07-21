@@ -293,7 +293,8 @@ const STAGES_NEEDING_APPLY_URL = new Set([
   "sent_application",
   "viewed_application",
   "signed_application", // the bank-statements nag drip links back to their form to finish uploading
-  "declined", // a declined-stage re-engagement drip still needs a working link
+  // (note: "declined" is intentionally NOT here — a lead's data.stage is never
+  //  "declined"; decline lives on the APPLICATION status, so it can't mint here.)
   "ghost", // re-engagement merchants still need a working link
 ]);
 
