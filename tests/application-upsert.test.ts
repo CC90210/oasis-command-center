@@ -38,6 +38,7 @@ function run() {
     business_start_date: "2019-06-01",
     entity_type: "llc",
     product_service_description: "Retail goods",
+    website: " https://acme.example/products ",
     business_state: "fl",
     industry: "Retail",
   });
@@ -49,6 +50,7 @@ function run() {
   assert.equal(biz.dba, "Acme", "dba persisted");
   assert.equal(biz.business_address, "500 Market St", "business_address persisted");
   assert.equal(biz.product_service_description, "Retail goods", "product_service_description persisted");
+  assert.equal(biz.website, "https://acme.example/products", "website persisted and trimmed");
   assert.equal(biz.business_state, "FL", "business_state upper-cased");
   assert.equal(biz.industry, "retail", "industry lower-cased");
 
