@@ -14,9 +14,11 @@
  *   POST   https://apig.kixie.com/app/v1/api/postwebhook    — register webhook
  *   DELETE https://apig.kixie.com/app/v1/api/deleteWebhooks — remove webhook
  *
- * Auth: `apikey` + `businessid` in the JSON body. No header signing on
- * outbound. INBOUND webhooks (from Kixie -> us) carry X-Kixie-Signature
- * HMAC-SHA256 — see app/api/webhooks/kixie/route.ts for verification.
+ * Auth: the /app/event action endpoint authenticates via the QUERY-STRING
+ * `apikey` (body-only = 403 "apiKey is invalid" — verified live 2026-07-21);
+ * `apikey` + `businessid` ride in the JSON body too. The v1 webhook-mgmt
+ * endpoints take them in the body. INBOUND webhooks (Kixie -> us) carry a
+ * static X-Kixie-Token header — see app/api/webhooks/kixie/route.ts.
  *
  * Outbound calls are TWO-STAGE: Kixie rings the agent's phone first, then
  * upon pickup, bridges to the target number. The acting employee's email
@@ -125,6 +127,25 @@ async function kixiePost<T>(
   return parsed as T;
 }
 
+/**
+ * POST to the action endpoint (/app/event). The gateway authenticates via
+ * the QUERY-STRING apikey — verified live 2026-07-21: body-only requests get
+ * HTTP 403 "Your apiKey is invalid" even with a valid key. The body carries
+ * the key too, matching the docs' examples. Failures come back HTTP 200 with
+ * {success:false, msg} — surface them so callers never treat them as sent.
+ */
+async function eventPost(
+  creds: KixieCredentials,
+  body: Record<string, unknown>,
+  context: string,
+): Promise<unknown> {
+  const parsed = await kixiePost(
+    `${EVENT_ENDPOINT}?apikey=${encodeURIComponent(creds.apiKey)}`,
+    body,
+  );
+  return assertKixieSuccess(parsed, context);
+}
+
 // ---- Action API (POST /app/event) -----------------------------------------
 
 export type MakeCallArgs = {
@@ -152,7 +173,7 @@ export function makeCall(
   creds: KixieCredentials,
   args: MakeCallArgs,
 ): Promise<unknown> {
-  return kixiePost(EVENT_ENDPOINT, {
+  return eventPost(creds, {
     apikey: creds.apiKey,
     businessid: creds.businessId,
     eventname: "call",
@@ -160,7 +181,7 @@ export function makeCall(
     target: args.target,
     displayname: args.displayName || "Outbound call",
     ...(args.leadId ? { customField1: args.leadId } : {}),
-  });
+  }, "make call");
 }
 
 export type SendSmsArgs = {
@@ -179,7 +200,7 @@ export function sendSms(
   creds: KixieCredentials,
   args: SendSmsArgs,
 ): Promise<unknown> {
-  return kixiePost(EVENT_ENDPOINT, {
+  return eventPost(creds, {
     apikey: creds.apiKey,
     businessid: creds.businessId,
     eventname: "sms",
@@ -188,7 +209,7 @@ export function sendSms(
     message: args.message,
     from: args.from || creds.defaultFromNumber,
     ...(args.leadId ? { customField1: args.leadId } : {}),
-  });
+  }, "send sms");
 }
 
 /** Send a contact to the agent's call queue (power dialer flow). */
@@ -196,14 +217,14 @@ export function sendToQueue(
   creds: KixieCredentials,
   args: { target: string; agentEmail: string; leadId?: string },
 ): Promise<unknown> {
-  return kixiePost(EVENT_ENDPOINT, {
+  return eventPost(creds, {
     apikey: creds.apiKey,
     businessid: creds.businessId,
     eventname: "sendToQueue",
     email: args.agentEmail || creds.defaultAgentEmail,
     target: args.target,
     ...(args.leadId ? { customField1: args.leadId } : {}),
-  });
+  }, "send to queue");
 }
 
 /** Add a contact to a Kixie Powerlist (power-dial campaign queue). */
@@ -218,7 +239,7 @@ export function addToPowerlist(
     leadId?: string;
   },
 ): Promise<unknown> {
-  return kixiePost(EVENT_ENDPOINT, {
+  return eventPost(creds, {
     apikey: creds.apiKey,
     businessid: creds.businessId,
     eventname: "addToPowerlist",
@@ -228,7 +249,7 @@ export function addToPowerlist(
     lname: args.lastName,
     email: args.email,
     ...(args.leadId ? { customField1: args.leadId } : {}),
-  });
+  }, "add to powerlist");
 }
 
 // ---- Webhook management ---------------------------------------------------
@@ -252,14 +273,15 @@ export const KIXIE_WEBHOOK_EVENTS = [
 
 export type KixieWebhookEvent = typeof KIXIE_WEBHOOK_EVENTS[number];
 
-/** Kixie replies HTTP 200 with {success:false,error} on failures — surface it. */
+/** Kixie replies HTTP 200 with {success:false, error|msg} on failures — surface it. */
 function assertKixieSuccess(parsed: unknown, context: string): unknown {
   if (
     typeof parsed === "object" &&
     parsed !== null &&
     (parsed as { success?: boolean }).success === false
   ) {
-    const err = (parsed as { error?: string }).error || "unknown kixie error";
+    const p = parsed as { error?: string; msg?: string; message?: string };
+    const err = p.error || p.msg || p.message || "unknown kixie error";
     throw new KixieError("kixie_rejected", `${context}: ${err}`, 200, parsed);
   }
   return parsed;
