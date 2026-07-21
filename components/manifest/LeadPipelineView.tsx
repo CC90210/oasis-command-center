@@ -54,6 +54,7 @@ import {
   OASIS_VISIBLE_TARGET_STAGES,
 } from "@/lib/oasis-sla";
 import { InlineStageControl } from "@/components/manifest/InlineStageControl";
+import { QuickAddLeadModal } from "@/components/manifest/QuickAddLeadModal";
 
 type Row = { id: string; data: Record<string, unknown>; updated_at?: string; created_at?: string };
 
@@ -176,6 +177,9 @@ export function LeadPipelineView({
   const router = useRouter();
   const [collapsedStages, setCollapsedStages] = useState<Record<string, boolean>>({});
   const [selectMode, setSelectMode] = useState(false);
+  // Quick-add modal (manual "add lead to Sent Application" — reps logging apps
+  // they sent via TextTorrent/email; 2026-07-20).
+  const [addLeadOpen, setAddLeadOpen] = useState(false);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [members, setMembers] = useState<TenantMember[] | null>(null);
   const [membersState, setMembersState] = useState<"idle" | "loading" | "error">("idle");
@@ -417,6 +421,7 @@ export function LeadPipelineView({
 
   return (
     <div className="space-y-4">
+      <QuickAddLeadModal open={addLeadOpen} onClose={() => setAddLeadOpen(false)} />
       <div className="flex flex-wrap items-start justify-between gap-4">
         <div>
           <h1 className="inline-flex items-center gap-2.5 text-2xl font-bold text-fg">
@@ -671,6 +676,7 @@ export function LeadPipelineView({
             selectMode={selectMode}
             selected={selected}
             onToggleSelect={toggleSelect}
+            onAddLead={() => setAddLeadOpen(true)}
           />
         );
       })}
@@ -959,6 +965,7 @@ function StageSection({
   selectMode = false,
   selected,
   onToggleSelect,
+  onAddLead,
 }: {
   slug: string;
   entityName: "lead" | "application";
@@ -973,6 +980,9 @@ function StageSection({
   selectMode?: boolean;
   selected?: Set<string>;
   onToggleSelect?: (id: string) => void;
+  /** When set (only the sent_application section passes it), renders a "+ Add
+   *  lead" button in the section header that opens the manual quick-add modal. */
+  onAddLead?: () => void;
 }) {
   const targetLabel = stageTargetLabelVariant(cfg, stage.key);
   return (
@@ -980,29 +990,40 @@ function StageSection({
       className="overflow-visible rounded-lg border border-bg-border bg-bg-deep/30"
       style={{ borderLeftWidth: 4, borderLeftColor: stage.bg }}
     >
-      <button
-        type="button"
-        onClick={onToggle}
-        className="flex w-full items-center justify-between gap-3 px-4 py-2.5 text-left"
-        style={{ background: `${stage.bg}1A` }}
-      >
-        <div className="flex min-w-0 items-center gap-2.5">
-          {collapsed ? (
-            <ChevronRight className="h-3.5 w-3.5 shrink-0 text-fg-dim" />
-          ) : (
-            <ChevronDown className="h-3.5 w-3.5 shrink-0 text-fg-dim" />
+      <div className="flex w-full items-center" style={{ background: `${stage.bg}1A` }}>
+        <button
+          type="button"
+          onClick={onToggle}
+          className="flex min-w-0 flex-1 items-center justify-between gap-3 px-4 py-2.5 text-left"
+        >
+          <div className="flex min-w-0 items-center gap-2.5">
+            {collapsed ? (
+              <ChevronRight className="h-3.5 w-3.5 shrink-0 text-fg-dim" />
+            ) : (
+              <ChevronDown className="h-3.5 w-3.5 shrink-0 text-fg-dim" />
+            )}
+            <span className="truncate text-[11px] font-bold uppercase tracking-wider" style={{ color: stage.bg }}>
+              {stage.label}
+            </span>
+            <span className="font-mono text-[11px] text-fg-dim">{rows.length}</span>
+          </div>
+          {targetLabel && (
+            <span className="shrink-0 rounded bg-bg-deep/60 px-1.5 py-0.5 text-[9.5px] font-bold uppercase tracking-wider text-fg-dim">
+              {targetLabel}
+            </span>
           )}
-          <span className="truncate text-[11px] font-bold uppercase tracking-wider" style={{ color: stage.bg }}>
-            {stage.label}
-          </span>
-          <span className="font-mono text-[11px] text-fg-dim">{rows.length}</span>
-        </div>
-        {targetLabel && (
-          <span className="shrink-0 rounded bg-bg-deep/60 px-1.5 py-0.5 text-[9.5px] font-bold uppercase tracking-wider text-fg-dim">
-            {targetLabel}
-          </span>
+        </button>
+        {onAddLead && stage.key === "sent_application" && (
+          <button
+            type="button"
+            onClick={onAddLead}
+            title="Manually add a lead to this status"
+            className="mr-3 inline-flex shrink-0 items-center gap-1 rounded-md bg-accent px-2.5 py-1 text-[10px] font-semibold uppercase tracking-wider text-bg-deep hover:bg-accent/90"
+          >
+            <Plus className="h-3 w-3" /> Add lead
+          </button>
         )}
-      </button>
+      </div>
 
       {!collapsed && rows.length === 0 && (
         <div className="px-4 py-5 text-center text-xs text-fg-dim">No records</div>
