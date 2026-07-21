@@ -53,7 +53,7 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  let body: { business_name?: unknown; phone?: unknown; email?: unknown; stage?: unknown };
+  let body: { business_name?: unknown; contact_name?: unknown; phone?: unknown; email?: unknown; stage?: unknown };
   try {
     body = (await req.json()) as typeof body;
   } catch {
@@ -64,6 +64,7 @@ export async function POST(req: NextRequest) {
   if (!businessName) {
     return NextResponse.json({ ok: false, error: "business_name_required" }, { status: 400 });
   }
+  const contactName = typeof body.contact_name === "string" ? body.contact_name.trim().slice(0, 200) : "";
   const stage = typeof body.stage === "string" && body.stage.trim() ? body.stage.trim() : DEFAULT_STAGE;
   if (!LEAD_PIPELINE_STAGES.some((s) => s.key === stage)) {
     return NextResponse.json({ ok: false, error: "invalid_stage" }, { status: 400 });
@@ -93,9 +94,16 @@ export async function POST(req: NextRequest) {
       existing = true;
       leadId = found.id;
       fromStage = typeof found.data.stage === "string" ? found.data.stage : null;
+      const patch: Record<string, unknown> = {};
       if (fromStage !== stage) {
-        await updateRecord({ tenant_id: tenantId, entity: "lead", id: leadId, patch: { stage } });
+        patch.stage = stage;
         advanced = true;
+      }
+      // Fill in a MISSING contact name; never overwrite an existing one (their
+      // file may already hold a better value than what the rep typed here).
+      if (contactName && !found.data.contact_name) patch.contact_name = contactName;
+      if (Object.keys(patch).length > 0) {
+        await updateRecord({ tenant_id: tenantId, entity: "lead", id: leadId, patch });
       }
     } else {
       const created = await createRecord({
@@ -103,6 +111,7 @@ export async function POST(req: NextRequest) {
         entity: "lead",
         data: {
           business_name: businessName,
+          ...(contactName ? { contact_name: contactName } : {}),
           ...(phone ? { phone } : {}),
           ...(email ? { email } : {}),
           stage,
