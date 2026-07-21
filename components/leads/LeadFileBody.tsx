@@ -17,7 +17,7 @@ import { BackgroundCheckTab } from "./BackgroundCheckTab";
 import { DefaultsCheckControl } from "./DefaultsCheckControl";
 import { useRouter, usePathname } from "next/navigation";
 import Link from "next/link";
-import { X, FileText, ImageIcon, Phone, Mail, ShoppingBag, Loader2, Trash2, CheckCircle2, AlertCircle, UploadCloud, RefreshCw, ArrowRightLeft, ChevronLeft, Eye } from "lucide-react";
+import { X, FileText, ImageIcon, Phone, Mail, ShoppingBag, Loader2, Trash2, CheckCircle2, AlertCircle, UploadCloud, RefreshCw, ArrowRightLeft, ChevronLeft, Eye, GripHorizontal, ChevronUp, ChevronDown } from "lucide-react";
 import { LeadTimelinePanel } from "./LeadTimelinePanel";
 import { DocumentsViewer } from "./DocumentsViewer";
 import { AssignmentControl } from "./AssignmentControl";
@@ -93,6 +93,27 @@ export function LeadFileBody({
 }) {
   const recordId = leadId;
   const [activeTab, setActiveTab] = useState<TabKey>("activity");
+  const [summaryHeight, setSummaryHeight] = useState<number | null>(null);
+  const [summaryCollapsed, setSummaryCollapsed] = useState(false);
+  const summaryRef = useRef<HTMLDivElement>(null);
+
+  const beginSummaryResize = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    const startY = event.clientY;
+    const startHeight = summaryRef.current?.getBoundingClientRect().height ?? 420;
+    setSummaryCollapsed(false);
+
+    const move = (moveEvent: PointerEvent) => {
+      const viewportMax = Math.max(180, window.innerHeight * 0.75);
+      setSummaryHeight(Math.min(viewportMax, Math.max(96, startHeight + moveEvent.clientY - startY)));
+    };
+    const stop = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", stop);
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", stop);
+  }, []);
 
   const shortId = recordId.slice(0, 8);
   const title = resolveTitle(record, entity, shortId);
@@ -114,7 +135,11 @@ export function LeadFileBody({
       {/* Header — 2026-06-08 refinement: softer divider, slightly wider
           inner spacing on the label row, stage chip is now rounded-full +
           uppercase letter-spacing to feel less rectangular. */}
-      <div className="shrink-0 px-5 py-4 border-b border-bg-border/60 space-y-4">
+      <div
+        ref={summaryRef}
+        className="shrink-0 px-5 py-4 border-b border-bg-border/60 space-y-4 overflow-y-auto overscroll-contain"
+        style={{ height: summaryCollapsed ? 96 : summaryHeight ?? undefined }}
+      >
         {/* Row 1: MERCHANT label + stage chip + close */}
         <div className="flex items-start gap-3">
           <div className="min-w-0 flex-1">
@@ -277,6 +302,28 @@ export function LeadFileBody({
             </Link>
           )}
         </div>
+      </div>
+
+      <div className="relative shrink-0 h-5 border-b border-bg-border/50 bg-bg-elev">
+        <div
+          role="separator"
+          aria-label="Resize merchant summary"
+          aria-orientation="horizontal"
+          onPointerDown={beginSummaryResize}
+          className="absolute inset-0 flex cursor-row-resize touch-none items-center justify-center text-fg-dim hover:text-accent"
+          title="Drag to resize the merchant summary"
+        >
+          <GripHorizontal className="h-4 w-4" />
+        </div>
+        <button
+          type="button"
+          aria-label={summaryCollapsed ? "Expand merchant summary" : "Collapse merchant summary"}
+          onClick={() => setSummaryCollapsed((value) => !value)}
+          className="absolute right-4 top-1/2 -translate-y-1/2 rounded p-0.5 text-fg-muted hover:bg-bg-deep hover:text-fg"
+          title={summaryCollapsed ? "Expand summary" : "Collapse summary"}
+        >
+          {summaryCollapsed ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronUp className="h-3.5 w-3.5" />}
+        </button>
       </div>
 
       {/* Tab nav — softened 2026-06-08: subtle hover bg, tighter padding,

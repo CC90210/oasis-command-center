@@ -30,6 +30,13 @@ function run() {
   assert.deepEqual(uploadField.accept, ["application/pdf", "image/*"], "bank_statements accepts PDFs and images");
   assert.equal(uploadField.max_files, 50, "bank_statements keeps the high file cap for multi-account merchants");
 
+  const business = steps.find((step) => step.key === "business");
+  assert.ok(business, "business step exists");
+  const websiteField = business.fields.find((field) => field.name === "website");
+  assert.ok(websiteField, "full application collects the merchant website");
+  assert.equal(websiteField.type, "url", "website uses URL validation");
+  assert.equal(websiteField.required, false, "website remains optional for merchants without a site");
+
   const financial = steps.find((step) => step.key === "financial");
   assert.ok(financial, "financial step exists");
   const ficoField = financial.fields.find((field) => field.name === "applicant_fico");

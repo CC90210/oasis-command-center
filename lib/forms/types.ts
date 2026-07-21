@@ -25,6 +25,7 @@ export type FormFieldType =
   | "text"
   | "textarea"
   | "email"
+  | "url"
   | "phone"
   | "number"
   | "currency"
@@ -180,6 +181,7 @@ const VALID_FIELD_TYPES: ReadonlySet<FormFieldType> = new Set([
   "text",
   "textarea",
   "email",
+  "url",
   "phone",
   "number",
   "currency",

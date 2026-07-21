@@ -97,7 +97,7 @@ check(val("BUSINESS INFORMATION", "Business Address") === "100 Sample Ave, Testv
 
 // Uncollected fields render blank (CC: keep form as-is).
 check(val("BUSINESS INFORMATION", "Fax") === "", "fax blank (uncollected)");
-check(val("BUSINESS INFORMATION", "Website") === "", "website blank (uncollected)");
+check(val("BUSINESS INFORMATION", "Website") === "", "website blank when not supplied");
 check(val("BUSINESS INFORMATION", "Business Type") === "", "business type blank (uncollected)");
 check(val("BUSINESS INFORMATION", "Length of Ownership") === "", "length of ownership blank");
 

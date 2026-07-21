@@ -63,6 +63,7 @@ export const APPLICATION_FIELD_KEYS = [
   "business_start_date",
   "entity_type",
   "product_service_description",
+  "website",
   "owner_full_name",
   "owner_name", // canonical alias of owner_full_name (drawer "Owner / Signer" reads owner_name/contact_name)
   "owner_ssn",

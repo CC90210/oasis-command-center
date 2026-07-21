@@ -190,11 +190,12 @@ function renderInput(
   switch (field.type) {
     case "text":
     case "email":
+    case "url":
     case "phone":
       return (
         <input
           id={inputId}
-          type={field.type === "email" ? "email" : field.type === "phone" ? "tel" : "text"}
+          type={field.type === "email" ? "email" : field.type === "url" ? "url" : field.type === "phone" ? "tel" : "text"}
           value={typeof value === "string" ? value : ""}
           onChange={(e) => onChange(e.target.value)}
           placeholder={field.placeholder}

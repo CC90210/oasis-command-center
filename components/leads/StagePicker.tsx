@@ -9,8 +9,12 @@
  */
 
 import { useEffect, useRef, useState } from "react";
+import { useRouter } from "next/navigation";
 import { Loader2, ChevronDown } from "lucide-react";
 import { LEAD_PIPELINE_STAGES, OPPORTUNITY_PIPELINE_STAGES } from "@/lib/sunbiz-stage-meta";
+import { stageChangeRequest } from "@/lib/leads/stage-change-request";
+
+const DECLINED_STAGE = OPPORTUNITY_PIPELINE_STAGES.find((candidate) => candidate.key === "declined")!;
 
 export function StagePicker({
   recordId,
@@ -23,7 +27,12 @@ export function StagePicker({
   currentStage: string | null;
   onChanged?: (stage: string) => void | Promise<void>;
 }) {
-  const stages = entity === "application" ? OPPORTUNITY_PIPELINE_STAGES : LEAD_PIPELINE_STAGES;
+  const router = useRouter();
+  // Declined is an application status, not a lead-board lane. Surface it only
+  // inside the lead drawer as a cross-board action, immediately after Default.
+  const stages = entity === "application"
+    ? OPPORTUNITY_PIPELINE_STAGES
+    : [...LEAD_PIPELINE_STAGES, DECLINED_STAGE];
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [stage, setStage] = useState(currentStage || "");
@@ -41,18 +50,22 @@ export function StagePicker({
   async function pick(next: string) {
     setOpen(false);
     if (next === stage) return;
+    if (entity === "lead" && next === "declined" && !window.confirm("Decline this lead? It moves to Applications › Declined.")) return;
     setBusy(true);
     try {
-      const r = await fetch(`/api/leads/${recordId}/set-stage`, {
+      const request = stageChangeRequest(entity, next);
+      const endpoint = request.endpoint;
+      const r = await fetch(`/api/leads/${recordId}/${endpoint}`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         credentials: "include",
-        body: JSON.stringify({ stage: next, entity }),
+        body: JSON.stringify(request.body),
       });
       const j = await r.json().catch(() => ({}));
       if (r.ok && j.ok) {
         setStage(next);
         if (onChanged) await onChanged(next);
+        router.refresh();
       }
     } finally {
       setBusy(false);

@@ -190,6 +190,14 @@ export const SUNBIZ_FORM_TEMPLATES: Record<SunBizStep, SunBizFormTemplate> = {
             required: true,
             placeholder: "Brief description of your product or service",
           },
+          {
+            name: "website",
+            label: "Business website",
+            type: "url",
+            required: false,
+            placeholder: "https://yourbusiness.com",
+            help: "Include your website if you have one.",
+          },
           // SOP §4 compliance inputs — discrete, machine-matchable fields on
           // top of the free-text business_address. Without these the lender
           // restricted-states / restricted-industries hard-gates stay dormant.
