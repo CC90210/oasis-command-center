@@ -30,6 +30,7 @@ export function QuickAddLeadModal({
 }: Props) {
   const router = useRouter();
   const [businessName, setBusinessName] = useState("");
+  const [contactName, setContactName] = useState("");
   const [phone, setPhone] = useState("");
   const [email, setEmail] = useState("");
   const [pending, setPending] = useState(false);
@@ -39,6 +40,7 @@ export function QuickAddLeadModal({
 
   function reset() {
     setBusinessName("");
+    setContactName("");
     setPhone("");
     setEmail("");
     setError(null);
@@ -66,7 +68,13 @@ export function QuickAddLeadModal({
       const res = await fetch("/api/leads/quick-add", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ business_name: name, phone: phone.trim(), email: email.trim(), stage }),
+        body: JSON.stringify({
+          business_name: name,
+          contact_name: contactName.trim(),
+          phone: phone.trim(),
+          email: email.trim(),
+          stage,
+        }),
       });
       const json = (await res.json().catch(() => ({}))) as {
         ok?: boolean;
@@ -126,6 +134,17 @@ export function QuickAddLeadModal({
               value={businessName}
               onChange={(e) => setBusinessName(e.target.value)}
               placeholder="ACME Trucking LLC"
+              className="w-full rounded-md border border-bg-border bg-bg-elev px-3 py-2 text-sm text-fg"
+            />
+          </label>
+          <label className="block">
+            <span className="mb-1 block text-[10px] font-bold uppercase tracking-wider text-fg-dim">
+              Contact name
+            </span>
+            <input
+              value={contactName}
+              onChange={(e) => setContactName(e.target.value)}
+              placeholder="Merchant / owner name"
               className="w-full rounded-md border border-bg-border bg-bg-elev px-3 py-2 text-sm text-fg"
             />
           </label>
