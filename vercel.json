@@ -40,6 +40,10 @@
     {
       "path": "/api/cron/scan-bounces?write=1",
       "schedule": "*/30 * * * *"
+    },
+    {
+      "path": "/api/cron/sweep-stale-sent-app",
+      "schedule": "0 13 * * *"
     }
   ]
 }
