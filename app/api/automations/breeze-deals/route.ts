@@ -85,6 +85,14 @@ function toSafeDeal(row: CandidateRow) {
     reviewed_at: row.reviewed_at,
     created_lead_id: row.created_lead_id,
     needs_lookup: !hasPhone,
+    // What the automated trace concluded, so the queue can say WHY a deal still
+    // has no number instead of just flagging it. Both are PII-free by
+    // construction — a status slug and a sentence about how many same-name
+    // people were found. The candidate NUMBERS deliberately stay out of this
+    // route (see the whitelist note above); they render only in the
+    // authenticated lead drawer via MCAProfilePanel.
+    phone_lookup_status: pick("phone_lookup_status"),
+    phone_lookup_reason: pick("phone_lookup_reason"),
   };
 }
 
