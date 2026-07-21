@@ -21,6 +21,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { Phone, Loader2, CalendarClock, Ban, Check, XCircle, ExternalLink } from "lucide-react";
 import { MCAProfilePanel } from "@/components/leads/MCAProfilePanel";
+import { ClairReportPanel } from "@/components/leads/ClairReportPanel";
 import type { DetailPayload } from "@/components/leads/LeadFileBody";
 
 export type AppointmentRow = {
@@ -186,6 +187,7 @@ export function CallSheet({
         ) : null}
 
         {record ? <MCAProfilePanel data={record.data} /> : null}
+        {record ? <ClairReportPanel leadId={record.id} leadData={record.data} /> : null}
 
         <NotesSection leadId={appointment.lead_id} entityQ={entityQ} notes={notes} onAdded={loadNotes} />
       </div>

@@ -31,6 +31,7 @@ import { LeadDocumentsPanel } from "@/components/leads/LeadDocumentsPanel";
 import { LeadLifecycleActions } from "./LeadLifecycleActions";
 import { CollapsibleSection } from "@/components/leads/CollapsibleSection";
 import { MCAProfilePanel } from "@/components/leads/MCAProfilePanel";
+import { ClairReportPanel } from "@/components/leads/ClairReportPanel";
 import { LeadActionToolbar } from "@/components/leads/LeadActionToolbar";
 
 export const dynamic = "force-dynamic";
@@ -143,6 +144,7 @@ export default async function PipelineLeadDetailPage({
       />
       <LeadLifecycleActions leadId={id} currentStage={metrics.stageKey} />
       <MCAProfilePanel data={record.data} />
+      <ClairReportPanel leadId={id} leadData={record.data} />
       <LeadTimelinePanel leadId={id} />
       <CollapsibleSection
         title="Edit lead fields"
