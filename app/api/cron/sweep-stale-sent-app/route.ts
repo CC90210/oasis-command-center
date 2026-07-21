@@ -50,16 +50,24 @@ async function handle(req: NextRequest): Promise<NextResponse> {
     if (seqs.length === 0) return NextResponse.json({ ok: true, moved: 0, note: "no sent_application sequence" });
     const seqIds = seqs.map((s) => s.id);
 
-    // 2. drip_runs for those sequences older than the cutoff → distinct leads
-    // whose sent_application clock started > DEAD_DAYS ago (step-0 is the oldest).
-    const drRes = await db
-      .from("drip_runs")
-      .select("lead_id, tenant_id")
-      .in("sequence_id", seqIds)
-      .lte("created_at", cutoff)
-      .limit(5000);
+    // 2. Anchor to the lead's CURRENT stint, not "any run ever". A lead qualifies
+    // only if its MOST RECENT sent_application run is older than the cutoff — i.e.
+    // it has a run <= cutoff AND no run > cutoff. This prevents killing a lead
+    // that bounced OUT of the stage and RE-ENTERED recently: re-entry mints a
+    // fresh run (the old one is cancelled but its row lingers), which lands in the
+    // `recent` set and resets the clock. (Bounded at 20k rows/side — ample for
+    // SunBiz volume; ordered oldest-first so the cap degrades gracefully.)
+    const [oldRes, recentRes] = await Promise.all([
+      db.from("drip_runs").select("lead_id, tenant_id").in("sequence_id", seqIds).lte("created_at", cutoff).order("created_at", { ascending: true }).limit(20000),
+      db.from("drip_runs").select("lead_id, tenant_id").in("sequence_id", seqIds).gt("created_at", cutoff).limit(20000),
+    ]);
+    const recent = new Set<string>();
+    for (const r of (recentRes.data || []) as Array<{ lead_id: string; tenant_id: string }>) {
+      recent.add(`${r.tenant_id}|${r.lead_id}`);
+    }
     const byTenant = new Map<string, Set<string>>();
-    for (const r of (drRes.data || []) as Array<{ lead_id: string; tenant_id: string }>) {
+    for (const r of (oldRes.data || []) as Array<{ lead_id: string; tenant_id: string }>) {
+      if (recent.has(`${r.tenant_id}|${r.lead_id}`)) continue; // re-entered since — clock reset
       const set = byTenant.get(r.tenant_id) || new Set<string>();
       set.add(r.lead_id);
       byTenant.set(r.tenant_id, set);

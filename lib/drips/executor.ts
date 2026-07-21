@@ -92,23 +92,32 @@ function tzOffsetMs(tz: string, date: Date): number {
   return asUTC - date.getTime();
 }
 
-/** If `now` is OUTSIDE the email window, the next window-start Date; else null. */
+/** If `now` is OUTSIDE the email window, the next window-start Date; else null.
+ *  Fails OPEN on a bad TZ / Intl error (returns null = no gate) — this is a
+ *  cosmetic daytime nudge, not a legal window like TCPA, so a misconfig must not
+ *  brick the email send path. */
 function emailWindowNextStart(now: Date = new Date()): Date | null {
-  if (!(EMAIL_WIN_END > EMAIL_WIN_START) || (EMAIL_WIN_START <= 0 && EMAIL_WIN_END >= 24)) return null; // disabled
-  const parts = new Intl.DateTimeFormat("en-US", {
-    timeZone: EMAIL_WIN_TZ, hourCycle: "h23",
-    year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit",
-  }).formatToParts(now).reduce<Record<string, string>>((a, x) => { a[x.type] = x.value; return a; }, {});
-  const hour = +parts.hour;
-  if (hour >= EMAIL_WIN_START && hour < EMAIL_WIN_END) return null; // inside window
-  let y = +parts.year, m = +parts.month, d = +parts.day;
-  if (hour >= EMAIL_WIN_END) {
-    // after close → advance to tomorrow's open (rolls month/year correctly).
-    const t = new Date(Date.UTC(y, m - 1, d) + 86_400_000);
-    y = t.getUTCFullYear(); m = t.getUTCMonth() + 1; d = t.getUTCDate();
-  } // else (before open) → today's open
-  const localOpenAsUTC = Date.UTC(y, m - 1, d, EMAIL_WIN_START, 0, 0);
-  return new Date(localOpenAsUTC - tzOffsetMs(EMAIL_WIN_TZ, now));
+  try {
+    if (!(EMAIL_WIN_END > EMAIL_WIN_START) || (EMAIL_WIN_START <= 0 && EMAIL_WIN_END >= 24)) return null; // disabled
+    const parts = new Intl.DateTimeFormat("en-US", {
+      timeZone: EMAIL_WIN_TZ, hourCycle: "h23",
+      year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit",
+    }).formatToParts(now).reduce<Record<string, string>>((a, x) => { a[x.type] = x.value; return a; }, {});
+    const hour = +parts.hour;
+    if (hour >= EMAIL_WIN_START && hour < EMAIL_WIN_END) return null; // inside window
+    let y = +parts.year, m = +parts.month, d = +parts.day;
+    if (hour >= EMAIL_WIN_END) {
+      // after close → advance to tomorrow's open (rolls month/year correctly).
+      const t = new Date(Date.UTC(y, m - 1, d) + 86_400_000);
+      y = t.getUTCFullYear(); m = t.getUTCMonth() + 1; d = t.getUTCDate();
+    } // else (before open) → today's open
+    const localOpenAsUTC = Date.UTC(y, m - 1, d, EMAIL_WIN_START, 0, 0);
+    // Offset at the TARGET (not `now`), so a DST change between now and the
+    // target open can't shift the result by an hour.
+    return new Date(localOpenAsUTC - tzOffsetMs(EMAIL_WIN_TZ, new Date(localOpenAsUTC)));
+  } catch {
+    return null;
+  }
 }
 
 const MAX_ATTEMPTS = 3;
