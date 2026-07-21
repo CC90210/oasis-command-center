@@ -22,6 +22,7 @@ import "server-only";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { createRecord } from "@/lib/manifest/data";
 import { extractAppFields } from "@/lib/forms/application-upsert";
+import { GENERATED_APPLICATION_OWNERSHIP_PCT } from "@/lib/applications/live-sub-mapping";
 
 export type CreateAppFromLeadResult =
   | { ok: true; applicationId: string; created: boolean }
@@ -70,6 +71,10 @@ export async function createApplicationFromLead(input: {
   // dropped ~20 fields, so the generated application PDF rendered blank for EIN /
   // address / owner even though the lead/underwriting-sheet had them.
   const copied: Record<string, unknown> = extractAppFields(leadData);
+  // Ownership % is stamped, not inherited, on every application GENERATED from a
+  // lead — see GENERATED_APPLICATION_OWNERSHIP_PCT. (Merchant-filled web-form
+  // applications don't come through here and keep whatever they typed.)
+  copied.owner_ownership_pct = GENERATED_APPLICATION_OWNERSHIP_PCT;
   // business_name is manifest-required on the application entity. Fall back to
   // the lead's legal_name, then a placeholder, so createRecord validation passes.
   if (!copied.business_name) {

@@ -98,6 +98,49 @@ function run() {
   assert.ok(rec3.missingCritical.includes("business_name"), "case 3: business_name flagged");
   assert.ok(rec3.missingCritical.includes("monthly_revenue"), "case 3: monthly_revenue flagged");
 
+  // ── Case 4: business address is composed whole (2026-07-21) ──────────────
+  // The application entity has ONE free-text address field, so the street line
+  // alone silently dropped the city + ZIP off every generated application/PDF.
+  const d = toAppFields({
+    business_name: "Shoal Creek Tavern LLC",
+    monthly_revenue: 228423,
+    business_address_line1: "1701 SHOAL CREEK DR STE 100",
+    business_address: "1701 SHOAL CREEK DR STE 100",
+    business_city: "HIGHLAND VILLAGE",
+    business_zip: "75077",
+    business_address_state: "TX",
+    state: "Texas",
+  });
+  assert.equal(
+    d.business_address,
+    "1701 SHOAL CREEK DR STE 100, HIGHLAND VILLAGE 75077",
+    "case 4: street + city + zip composed onto the single address field",
+  );
+  // State is NOT in the line — application-pdf.composeAddress splices it in at
+  // render time, so including it here would print it twice.
+  assert.ok(!String(d.business_address).includes("TX"), "case 4: state excluded from the address line");
+  assert.equal(d.business_state, "TX", "case 4: business_address_state wins over the full name");
+
+  // Re-running the mapper over an ALREADY-composed address must be idempotent.
+  const dAgain = toAppFields({
+    business_name: "Shoal Creek Tavern LLC",
+    business_address: "1701 SHOAL CREEK DR STE 100, HIGHLAND VILLAGE 75077",
+    business_city: "HIGHLAND VILLAGE",
+    business_zip: "75077",
+  });
+  assert.equal(
+    dAgain.business_address,
+    "1701 SHOAL CREEK DR STE 100, HIGHLAND VILLAGE 75077",
+    "case 4: composing an already-complete address does not duplicate parts",
+  );
+
+  // ── Case 5: ownership % is stamped 100, never inherited (2026-07-21) ─────
+  assert.equal(d.owner_ownership_pct, 100, "case 5: ownership defaults to 100 when absent");
+  const e = toAppFields({ business_name: "X", monthly_revenue: 1, owner_ownership_pct: 51 });
+  assert.equal(e.owner_ownership_pct, 100, "case 5: a lead-side ownership value is overridden to 100");
+  const f = toAppFields({ business_name: "X", monthly_revenue: 1, ownership_pct: 33 });
+  assert.equal(f.owner_ownership_pct, 100, "case 5: the ownership_pct alias is overridden too");
+
   console.log("live-sub-mapping.test.ts — all assertions passed ✓");
 }
 

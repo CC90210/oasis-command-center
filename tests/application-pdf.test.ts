@@ -193,13 +193,29 @@ check(fval("BUSINESS INFORMATION", "Business start date") === "12/20/2020", "for
 check(fval("BUSINESS INFORMATION", "Industry") === "Residential Construction", "form-driven: industry option label");
 check(fval("FINANCIAL DETAILS", "Average monthly revenue") === "$175,000", "form-driven: currency formatted");
 check(fval("FINANCIAL DETAILS", "Requested advance amount") === "$60,000", "form-driven: requested advance currency");
-check(fval("SIGN AND SUBMIT", "Type your full legal name") === "Jordan Tester", "form-driven: name field listed");
-check(fval("SIGN AND SUBMIT", "Authorization") === "I agree", "form-driven: agree value → 'I agree'");
 check(fd.signatureName === "Jordan Tester", "form-driven: signatureName captured");
 check(!fd.sections.some((s) => s.heading === "UPLOAD YOUR DOCUMENTS"), "form-driven: file-only step omitted");
+// Operator directive 2026-07-21: the signature step renders NO document section
+// — the PDF's own AUTHORIZATION & SIGNATURE block is the single signing
+// component. signatureName must still be captured from it (asserted above), so
+// the printed name keeps flowing into that block.
 check(
-  !fd.sections.find((s) => s.heading === "SIGN AND SUBMIT")?.rows.some((r) => r.label === "Sign here"),
-  "form-driven: signature field omitted from rows (renders in the signature block)",
+  !fd.sections.some((s) => s.heading === "SIGN AND SUBMIT"),
+  "form-driven: signature step emits no section (authorized-signature block is authoritative)",
+);
+check(
+  fd.sections.every((s) => !s.rows.some((r) => r.label === "Sign here")),
+  "form-driven: signature field never rendered as a row",
+);
+// The drop is keyed on step.key, so retitling the step can't resurrect the section.
+const retitled = mapApplicationFieldsFromSteps(
+  steps.map((s) => (s.key === "signature" ? { ...s, title: "Final authorization" } : s)),
+  { ...merged, agree: "agreed" },
+  lead,
+);
+check(
+  !retitled.sections.some((s) => s.heading === "FINAL AUTHORIZATION"),
+  "form-driven: signature step dropped by key, not by title",
 );
 
 // Record-alias fallback (from-record path): an application RECORD stores the
