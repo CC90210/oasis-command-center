@@ -81,6 +81,46 @@ function monthsFromStart(iso: string | undefined): number | undefined {
 }
 
 /**
+ * Build a complete single-line business address from whatever discrete parts
+ * the lead carries: "<street>, <city> <zip>".
+ *
+ * The state is deliberately EXCLUDED — application-pdf.composeAddress() splices
+ * `business_state` in ahead of the ZIP when it renders, so including it here
+ * would print the state twice.
+ *
+ * Returns undefined when there is no street line, or when the street already
+ * looks complete (already carries the city or the ZIP), so re-running a promote
+ * over an address that was composed on a previous pass can't duplicate parts.
+ */
+function composeBusinessAddress(lead: Record<string, unknown>): string | undefined {
+  const street = firstStr(lead, "business_address_line1", "business_address", "address");
+  if (!street) return undefined;
+  const city = firstStr(lead, "business_city", "city");
+  const zip = firstStr(lead, "business_zip", "zip");
+  if (!city && !zip) return undefined;
+
+  const seen = street.toLowerCase();
+  const parts = [street];
+  if (city && !seen.includes(city.toLowerCase())) parts.push(city);
+  const line = parts.join(", ");
+  if (zip && !seen.includes(zip.toLowerCase())) return `${line} ${zip}`;
+  return line;
+}
+
+/** Ownership percentage stamped on every AUTO-GENERATED application.
+ *
+ * Breeze UW sheets carry no ownership field, and every deal that reaches this
+ * path is a single-owner submission signed by that owner, so the value was
+ * always blank on the generated application and the lender-facing PDF printed
+ * an empty "Ownership %" cell. Operator directive (2026-07-21): it is 100 for
+ * all generated applications, not inferred.
+ *
+ * This applies ONLY to applications generated from a lead. Applications the
+ * merchant fills in themselves on the web form keep the percentage they type
+ * (that form has a partner/co-owner step where a split is real). */
+export const GENERATED_APPLICATION_OWNERSHIP_PCT = 100;
+
+/**
  * Map a scrubber/lead_data record to canonical application fields. The result
  * is merged over the raw lead_data and handed to extractAppFields(), so a lead
  * that already uses a canonical key (e.g. business_name) still flows through.
@@ -97,9 +137,22 @@ export function mapLeadDataToApplicationFields(
   // Prefer the 2-letter code: extractAppFields normalizes business_state to a
   // 2-char uppercase value and DROPS anything else, so a full state name
   // ("Arizona") would be silently lost — state_code carries "AZ".
-  set(out, "business_state", firstStr(lead, "state_code", "business_state", "state"));
+  // `business_address_state` is the scrubber's reconciliation of the business
+  // premises state (the UW sheet's business-address block has no State row of
+  // its own); prefer it, then the left-block state code.
+  set(out, "business_state", firstStr(lead, "business_address_state", "state_code", "business_state", "state"));
   set(out, "industry", firstStr(lead, "industry"));
-  set(out, "business_address", firstStr(lead, "business_address", "address"));
+  // The application entity has ONE free-text address field — no discrete
+  // city/zip columns — so the street line alone would drop the city and ZIP
+  // entirely. The scrubber now composes "street, city zip" into
+  // business_address; compose it here too as a backstop for older lead_data
+  // rows (and for leads that arrived by any other route) that still carry only
+  // the street in business_address with the parts alongside it.
+  set(
+    out,
+    "business_address",
+    composeBusinessAddress(lead) ?? firstStr(lead, "business_address", "address"),
+  );
   set(out, "entity_type", firstStr(lead, "entity_type"));
   set(out, "tax_id_ein", firstStr(lead, "tax_id_ein", "ein", "federal_tax_id"));
   set(out, "iso_broker", firstStr(lead, "iso_broker"));
@@ -137,7 +190,8 @@ export function mapLeadDataToApplicationFields(
   set(out, "owner_dob", firstStr(lead, "owner_dob", "dob"));
   set(out, "owner_ssn", firstStr(lead, "owner_ssn", "ssn"));
   set(out, "owner_home_address", firstStr(lead, "owner_home_address", "home_address"));
-  set(out, "owner_ownership_pct", firstNum(lead, "owner_ownership_pct", "ownership_pct"));
+  // Hardcoded, not read from the lead — see GENERATED_APPLICATION_OWNERSHIP_PCT.
+  set(out, "owner_ownership_pct", GENERATED_APPLICATION_OWNERSHIP_PCT);
 
   return out;
 }
@@ -172,6 +226,13 @@ export const LIVE_SUB_EXPECTED_FIELDS = [
   "owner_name",
   "iso_broker",
   "business_start_date",
+  // 2026-07-21: these three were being dropped silently — the address line lost
+  // its city/ZIP, the SSN never left the VPS, and ownership was never set. Now
+  // that all three are guaranteed by the mapper, pin them so a regression shows
+  // up in the reconciliation log instead of on a lender's desk.
+  "owner_ssn",
+  "owner_ownership_pct",
+  "owner_home_address",
 ] as const;
 
 /** The subset whose absence means the promoted deal is materially broken (not

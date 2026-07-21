@@ -306,6 +306,11 @@ function resolveAnswer(merged: Record<string, unknown>, name: string): unknown {
  * cells blank AND silently dropped any question whose key wasn't in its map.
  * This drives off the live `forms.steps`, so it can't drift from the form.
  */
+/** Form-step keys whose content is represented by the PDF's own
+ * AUTHORIZATION & SIGNATURE block and must not be emitted as a section.
+ * `signature` is the canonical key on the sunbiz `full-application` template. */
+const SIGNATURE_STEP_KEYS = new Set(["signature", "sign_and_submit"]);
+
 export function mapApplicationFieldsFromSteps(
   steps: FormStep[],
   merged: Record<string, unknown>,
@@ -318,6 +323,17 @@ export function mapApplicationFieldsFromSteps(
   // the form's Business Information step, so the leading block was redundant.
 
   for (const step of steps) {
+    // Operator directive 2026-07-21: the "Sign and submit" step must not render
+    // as a document section. It duplicated the AUTHORIZATION & SIGNATURE block
+    // that generateApplicationPdf() already draws (the authoritative signature
+    // component — signature image, printed name, signed-at timestamp), so the
+    // PDF asked for the same attestation twice. The step stays in the WEB FORM
+    // (it's how the merchant actually signs, and it feeds signature_name +
+    // applicant_signature into that block); it is dropped only from the printed
+    // document. Matched on step key, not the display title, so retitling the
+    // step in the form builder can't silently resurrect the section.
+    if (SIGNATURE_STEP_KEYS.has(step.key)) continue;
+
     const rows: PdfFieldRow[] = [];
     for (const f of step.fields) {
       if (

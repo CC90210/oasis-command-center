@@ -31,6 +31,45 @@ import {
   reconcileLiveSubFields,
 } from "@/lib/applications/live-sub-mapping";
 import { writeAgentAlert } from "@/lib/notify/agent-alert";
+import { decryptField } from "@/lib/field-encryption";
+
+/**
+ * Hydrate the full SSN from the scrubber's encrypted-at-rest blobs.
+ *
+ * The lender application requires the full SSN, but the VPS scrubber must not
+ * park one in plaintext in `tenant_records.data`, so build_lead_data writes
+ * `owner_ssn_enc` / `second_owner_ssn_enc` — AES-256-GCM under
+ * BRAVO_FIELD_ENCRYPTION_KEY, byte-compatible with lib/field-encryption.ts.
+ * Decrypt here, at the server-side promote boundary, so the plaintext exists
+ * only on the application record the PDF is generated from.
+ *
+ * A decrypt failure (rotated/absent key, corrupt blob) is swallowed: the
+ * application is still worth creating with `ssn_last4`, and a thrown error here
+ * would fail the whole promote. It surfaces instead as an empty `owner_ssn` in
+ * the reconciliation log, which is pinned in LIVE_SUB_EXPECTED_FIELDS.
+ */
+function hydrateEncryptedSsn(leadData: Record<string, unknown>): Record<string, unknown> {
+  const out = { ...leadData };
+  const pairs: Array<[string, string]> = [
+    ["owner_ssn_enc", "owner_ssn"],
+    ["second_owner_ssn_enc", "partner_ssn"],
+  ];
+  for (const [encKey, plainKey] of pairs) {
+    const packed = out[encKey];
+    if (typeof packed !== "string" || !packed) continue;
+    // Never overwrite a value already present (an operator edit, or a form-filled app).
+    const existing = out[plainKey];
+    if (typeof existing === "string" && existing.trim()) continue;
+    try {
+      out[plainKey] = decryptField(packed);
+    } catch {
+      // leave unset — see docblock
+    }
+    // Drop the ciphertext so it can't ride along into the application record.
+    delete out[encKey];
+  }
+  return out;
+}
 
 export type PromoteResult =
   | {
@@ -88,7 +127,7 @@ export async function promoteLeadToApplication(input: {
     // Load the lead (tenant-scoped — a lead outside this tenant resolves to null).
     const lead = await getRecord({ tenant_id: tenantId, entity: "lead", id: leadId }).catch(() => null);
     if (!lead) return await fail("load_lead", "lead_not_found");
-    const leadData = (lead.data || {}) as Record<string, unknown>;
+    const leadData = hydrateEncryptedSsn((lead.data || {}) as Record<string, unknown>);
 
     // 1) Create (or reuse) the linked application. Idempotent.
     const appRes = await createApplicationFromLead({ tenantId, leadId });
