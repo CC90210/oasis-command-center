@@ -122,17 +122,28 @@ const LOOKUP_PRESENTATION: Record<string, { label: string; tone: string }> = {
   found: { label: "Number found", tone: "text-status-good border-status-good/40" },
   manual_review: { label: "Needs manual lookup", tone: "text-status-warm border-status-warm/40" },
   not_found: { label: "No match found", tone: "text-fg-muted border-bg-border" },
+  /** Synthetic: a number is on file, so whatever the trace concluded is moot. */
+  resolved: { label: "Number on file", tone: "text-status-good border-status-good/40" },
 };
 
 function PhoneLookupBlock({ d }: { d: MCALeadData }) {
-  const status = d.phone_lookup_status;
-  if (!status) return null; // legacy leads look exactly as before
+  const rawStatus = d.phone_lookup_status;
+  if (!rawStatus) return null; // legacy leads look exactly as before
+
+  // A number on file settles it, whatever the last trace concluded. The daemon
+  // writes lookup state fill-only (it never clobbers operator edits), so a lead
+  // an operator resolved by hand still carries the old `manual_review` verdict —
+  // without this it would keep nagging for work that is already done.
+  const hasPhone = Boolean(String(d.phone ?? "").replace(/\D/g, "").match(/^(?!0+$)\d{10,}$/));
+  const status = hasPhone && rawStatus !== "found" ? "resolved" : rawStatus;
 
   const presentation = LOOKUP_PRESENTATION[status] ?? {
     label: status,
     tone: "text-fg-muted border-bg-border",
   };
-  const candidates = d.phone_lookup_candidates ?? [];
+  /** Work is still outstanding: no number on file and the trace didn't settle it. */
+  const stillOutstanding = status === "manual_review" || status === "not_found";
+  const candidates = stillOutstanding ? d.phone_lookup_candidates ?? [] : [];
   const checked = d.phone_lookup_checked_at
     ? new Date(d.phone_lookup_checked_at).toLocaleString("en-US", {
         month: "short", day: "numeric", hour: "numeric", minute: "2-digit",
@@ -162,8 +173,9 @@ function PhoneLookupBlock({ d }: { d: MCALeadData }) {
       )}
 
       {/* The search terms, so an operator can run it in CLEAR without
-          reassembling name/address/DOB from the rest of the record. */}
-      {status !== "found" && d.phone_lookup_query && (
+          reassembling name/address/DOB from the rest of the record. Shown only
+          while the lookup is still outstanding. */}
+      {stillOutstanding && d.phone_lookup_query && (
         <div className="mt-2">
           <div className="text-[9.5px] uppercase tracking-wider text-fg-dim mb-1">
             Search terms (CLEAR / manual)
