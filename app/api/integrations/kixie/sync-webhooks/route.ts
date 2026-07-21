@@ -6,9 +6,10 @@
  * the manual "paste each URL into Kixie's dashboard" step with a single
  * one-click sync from Settings → Integrations.
  *
- * The 9 events registered (lib/integrations/kixie.ts KIXIE_WEBHOOK_EVENTS):
- *   startcall, answeredcall, endcall, dispositioncall, voicemail,
- *   dialattempt, scheduledactivity, sms, cisummary
+ * The 8 events registered (lib/integrations/kixie.ts KIXIE_WEBHOOK_EVENTS —
+ * Kixie's REAL enum, verified live 2026-07-21):
+ *   endcall, startcall, answeredcall, SMS, disposition, voicemail,
+ *   scheduledactivity, cisummary
  *
  * All point at the same destination — the dashboard's
  * /api/webhooks/kixie route does the dispatch on `eventname`.
@@ -96,7 +97,24 @@ export async function POST() {
     (process.env.PUBLIC_APP_URL || "https://agent-dashboard-cc90210.vercel.app").replace(/\/$/, "");
   const webhookUrl = `${baseUrl}/api/webhooks/kixie`;
 
-  const results = await registerAllWebhooks(creds, webhookUrl);
+  // Attach the static auth header Kixie sends back on every delivery — this
+  // IS the receiver's auth (Kixie cannot HMAC-sign; see the receiver route).
+  // Registering without it would create hooks the receiver 401s, so refuse.
+  const secret = (process.env.KIXIE_WEBHOOK_SECRET || "").trim();
+  if (!secret) {
+    return NextResponse.json(
+      {
+        ok: false,
+        error: "missing_webhook_secret",
+        message:
+          "KIXIE_WEBHOOK_SECRET env is not set — set it (Vercel project env) before registering webhooks.",
+      },
+      { status: 500 },
+    );
+  }
+  const headersJson = JSON.stringify([{ name: "X-Kixie-Token", value: secret }]);
+
+  const results = await registerAllWebhooks(creds, webhookUrl, { headersJson });
   const successCount = results.filter((r) => r.ok).length;
   return NextResponse.json({
     ok: successCount > 0,

@@ -18,9 +18,12 @@
  *   sms                — every SMS (inbound + outbound, via direction field)
  *   cisummary          — Conversation Intelligence post-call summary
  *
- * Auth: signed via X-Kixie-Signature header (HMAC-SHA256 of the raw body
- * with KIXIE_WEBHOOK_SECRET). We verify before processing; unsigned
- * requests get a 401.
+ * Auth (2026-07-21): Kixie does NOT compute HMAC signatures — its webhook
+ * registration API only supports STATIC custom headers. Each registered
+ * webhook carries `X-Kixie-Token: <KIXIE_WEBHOOK_SECRET>`; we verify it
+ * with a constant-time compare. The original X-Kixie-Signature HMAC path
+ * is kept as an alternative (harmless, and correct if Kixie ever adds
+ * signing). No valid header → 401. Secret unset → 401 (fail closed).
  *
  * Side effects per event:
  *   1. agent_events row (BRAVO_KIXIE_<event>) so /feed surfaces it live.
@@ -85,22 +88,44 @@ type KixieEvent = {
   [k: string]: unknown;
 };
 
-function verifySignature(rawBody: string, headerSig: string | null): boolean {
-  if (!headerSig) return false;
+function verifyAuth(
+  rawBody: string,
+  headerSig: string | null,
+  headerToken: string | null,
+): boolean {
   const secret = (process.env[WEBHOOK_SECRET_ENV] || "").trim();
   if (!secret) {
     // Refuse webhooks when the secret isn't configured. Otherwise an
     // attacker can spam fake call events to pollute /feed.
     return false;
   }
-  const expected = createHmac("sha256", secret).update(rawBody, "utf8").digest("hex");
-  const provided = headerSig.trim();
-  if (provided.length !== expected.length) return false;
-  try {
-    return timingSafeEqual(Buffer.from(provided, "hex"), Buffer.from(expected, "hex"));
-  } catch {
-    return false;
+
+  // Path A — static token header, what Kixie actually sends (registered
+  // per-webhook via the postWebhook `headers` param).
+  if (headerToken) {
+    const provided = Buffer.from(headerToken.trim(), "utf8");
+    const expected = Buffer.from(secret, "utf8");
+    if (provided.length === expected.length) {
+      try {
+        if (timingSafeEqual(provided, expected)) return true;
+      } catch {
+        /* fall through to signature path */
+      }
+    }
   }
+
+  // Path B — HMAC signature (kept for forward-compat; Kixie doesn't sign today).
+  if (headerSig) {
+    const expected = createHmac("sha256", secret).update(rawBody, "utf8").digest("hex");
+    const provided = headerSig.trim();
+    if (provided.length !== expected.length) return false;
+    try {
+      return timingSafeEqual(Buffer.from(provided, "hex"), Buffer.from(expected, "hex"));
+    } catch {
+      return false;
+    }
+  }
+  return false;
 }
 
 /**
@@ -260,8 +285,9 @@ async function persistLeadInteraction(
 export async function POST(req: NextRequest) {
   const rawBody = await req.text();
   const sig = req.headers.get("x-kixie-signature");
+  const token = req.headers.get("x-kixie-token");
 
-  if (!verifySignature(rawBody, sig)) {
+  if (!verifyAuth(rawBody, sig, token)) {
     return NextResponse.json(
       { ok: false, error: "invalid_signature" },
       { status: 401 },
@@ -276,10 +302,14 @@ export async function POST(req: NextRequest) {
   }
 
   const evt = flattenEvent(raw);
-  const eventname = String(evt.eventname || evt.hookevent || "").toLowerCase();
+  let eventname = String(evt.eventname || evt.hookevent || "").toLowerCase();
   if (!eventname) {
     return NextResponse.json({ ok: false, error: "missing_eventname" }, { status: 400 });
   }
+  // Kixie's real event enum says "disposition" (not "dispositioncall", which
+  // this handler was originally written against — the docs were wrong).
+  // Canonicalize so the branch logic + /feed event types stay stable.
+  if (eventname === "disposition") eventname = "dispositioncall";
 
   // Canonical Bravo event type so /feed filtering can branch cleanly.
   const eventType = `BRAVO_KIXIE_${eventname.toUpperCase().replace(/[^A-Z0-9_]/g, "_")}`;
@@ -295,6 +325,16 @@ export async function POST(req: NextRequest) {
       .select("id")
       .eq("custom_fields->>kixie_business_id", String(evt.businessid))
       .maybeSingle();
+    // Fail CLOSED on a lookup error: a transient DB failure must return
+    // non-2xx so Kixie retries, not coerce into no_tenant_mapping (which
+    // returns 200 and drops the event forever).
+    if (tenantRow.error) {
+      console.error("[webhooks.kixie] tenant lookup failed", tenantRow.error);
+      return NextResponse.json(
+        { ok: false, error: "tenant_lookup_failed" },
+        { status: 503 },
+      );
+    }
     tenantId = (tenantRow.data as { id: string } | null)?.id ?? null;
   }
 
