@@ -38,6 +38,10 @@ type Deal = {
   reviewed_at: string | null;
   created_lead_id: string | null;
   needs_lookup: boolean;
+  /** What the automated phone trace concluded. PII-free by construction — the
+   * candidate numbers live only on the lead drawer. */
+  phone_lookup_status: string | null;
+  phone_lookup_reason: string | null;
 };
 
 type ApiResponse = {
@@ -60,6 +64,10 @@ export function BreezeDealsPanel() {
   const [error, setError] = useState<string | null>(null);
   const [filter, setFilter] = useState<(typeof FILTERS)[number]["key"]>("pending_review");
   const [refreshing, setRefreshing] = useState(false);
+  // Client-side, and deliberately separate from FILTERS: "needs a phone"
+  // crosses status boundaries (a deal can be pending OR approved and still
+  // be uncontactable), so it layers on top of the server status filter.
+  const [needsPhoneOnly, setNeedsPhoneOnly] = useState(false);
 
   const refresh = useCallback(async (status: string) => {
     try {
@@ -101,6 +109,12 @@ export function BreezeDealsPanel() {
     );
   }
 
+  // A declined deal needing a phone is not work — nobody is going to trace a
+  // number for a deal we turned down.
+  const needsPhone = (d: Deal) => d.needs_lookup && d.status !== "declined";
+  const needsPhoneCount = data.deals.filter(needsPhone).length;
+  const visibleDeals = needsPhoneOnly ? data.deals.filter(needsPhone) : data.deals;
+
   return (
     <div className="space-y-3">
       <div className="flex items-center justify-between flex-wrap gap-2">
@@ -132,6 +146,19 @@ export function BreezeDealsPanel() {
               )}
             </button>
           ))}
+          <button
+            type="button"
+            onClick={() => setNeedsPhoneOnly((v) => !v)}
+            title="Only deals with no usable phone number"
+            className={`rounded-md border px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider transition-colors inline-flex items-center gap-1 ${
+              needsPhoneOnly
+                ? "border-status-warm/60 bg-status-warm/10 text-status-warm"
+                : "border-bg-border bg-bg-elev/50 text-fg-muted hover:bg-bg-elev hover:text-fg"
+            }`}
+          >
+            <PhoneOff className="w-3 h-3" /> Needs phone
+            <span className="ml-0.5 text-fg-dim font-mono">{needsPhoneCount}</span>
+          </button>
         </div>
       </div>
 
@@ -143,14 +170,14 @@ export function BreezeDealsPanel() {
         flagged <span className="text-status-warm">Needs phone</span> for a one-click fill.
       </div>
 
-      {data.deals.length === 0 ? (
+      {visibleDeals.length === 0 ? (
         <div className="rounded-xl border border-bg-border bg-bg-elev/30 p-6 text-center text-xs text-fg-muted">
           No {filter === "all" ? "" : `${FILTERS.find((f) => f.key === filter)?.label.toLowerCase()} `}
           deals yet. New UW sheets land here within ~2 minutes of the scrubber&apos;s next pass.
         </div>
       ) : (
         <div className="space-y-2">
-          {data.deals.map((d) => (
+          {visibleDeals.map((d) => (
             <DealRow key={d.id} deal={d} onChanged={() => void refresh(filter)} />
           ))}
         </div>
@@ -303,8 +330,12 @@ function DealRowView({
               </span>
             )}
             {deal.needs_lookup && deal.status !== "declined" && (
-              <span className="text-[10px] uppercase tracking-wider rounded-full border border-status-warm/40 text-status-warm px-1.5 py-0.5 flex items-center gap-1">
-                <PhoneOff className="w-3 h-3" /> Needs phone
+              <span
+                className="text-[10px] uppercase tracking-wider rounded-full border border-status-warm/40 text-status-warm px-1.5 py-0.5 flex items-center gap-1"
+                title={deal.phone_lookup_reason ?? undefined}
+              >
+                <PhoneOff className="w-3 h-3" />
+                {deal.phone_lookup_status === "manual_review" ? "Manual lookup" : "Needs phone"}
               </span>
             )}
           </div>
@@ -315,6 +346,14 @@ function DealRowView({
             {deal.leverage_pct != null && <span>{Number(deal.leverage_pct)}% leverage</span>}
             {deal.iso_broker && <span className="truncate">ISO: {deal.iso_broker}</span>}
           </div>
+          {/* Why the trace couldn't produce a number — the operator's cue to run
+              it by hand in CLEAR. Numbers themselves are never sent to this
+              screen; open the lead to see candidates. */}
+          {deal.phone_lookup_reason && deal.needs_lookup && deal.status !== "declined" && (
+            <div className="text-[11px] text-status-warm/90 mt-1">
+              Phone lookup: {deal.phone_lookup_reason}
+            </div>
+          )}
           <div className="text-[11px] text-fg-dim mt-1 flex items-center gap-3 flex-wrap">
             <span className={statusClass}>{statusLabel}</span>
             <span>{relativeTime(deal.created_at)}</span>
