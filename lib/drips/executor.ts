@@ -41,6 +41,7 @@ import { checkTcpaWindow, nextTcpaWindowStart } from "@/lib/tcpa-window";
 import { renderTemplate } from "@/lib/drips/templates";
 import { parseDripSteps, type DripStep } from "@/lib/drips/types";
 import { sendDripSms, sendDripEmail } from "@/lib/drips/send";
+import { wasShoppedRecently } from "@/lib/drips/enroller";
 import { buildDripHtml, listUnsubscribeHeader } from "@/lib/drips/html-email";
 import { resolveDripSmsIdentity, type DripSmsIdentity } from "@/lib/drips/rep-sms-identity";
 import { nudgeConversations } from "@/lib/realtime/conversations-nudge";
@@ -882,6 +883,15 @@ async function processRow(
   // tick instead of waiting for the hourly enroll pass.
   if (seq.triggerFlag && !isTruthyFlag(data[seq.triggerFlag])) {
     return markCancelled(db, row, `flag_cleared: ${seq.triggerFlag}`);
+  }
+
+  // Shopped-out recheck (2026-07-22 stage-buffer fix): the enroller refuses to
+  // ENROLL a recently-shopped lead, but a lead shopped AFTER enrollment sailed
+  // through — shop-out advances the APPLICATION's status while the lead's
+  // stage stays put, so the stage-recheck above can't see it. Same guard,
+  // applied at dispatch time.
+  if (await wasShoppedRecently(db, row.tenant_id, row.lead_id, data)) {
+    return markCancelled(db, row, "shopped_recently");
   }
 
   if (step.channel === "sms") return processSmsStep(db, row, data, step, steps);

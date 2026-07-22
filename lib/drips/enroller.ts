@@ -37,6 +37,7 @@ import "server-only";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { checkTcpaWindow } from "@/lib/tcpa-window";
 import type { DripStep } from "./types";
+import { computeStep0DelayMinutes, stageBufferMinutes } from "./stage-buffer";
 
 type Db = ReturnType<typeof getServiceSupabase>;
 
@@ -93,6 +94,7 @@ const ENROLL_SPREAD_MS = (() => {
 function enrollJitterMs(): number {
   return ENROLL_SPREAD_MS > 0 ? Math.floor(Math.random() * ENROLL_SPREAD_MS) : 0;
 }
+
 
 export type SkipReason =
   | "already_enrolled"
@@ -171,7 +173,7 @@ function isOptedOut(data: Record<string, unknown>): boolean {
  * not a fail-closed compliance gate. checkPhoneOptOut/checkEmailSuppressed
  * (fail-closed) remain the load-bearing suppression checks at DISPATCH time.
  */
-async function wasShoppedRecently(
+export async function wasShoppedRecently(
   db: Db,
   tenantId: string,
   leadId: string,
@@ -434,8 +436,12 @@ export async function runEnrollDrips(): Promise<EnrollDripsResult> {
         continue;
       }
 
+      // Step-0 send time = the LATER of the sequence's own delay and the 24h
+      // stage buffer (this whole enroll path is stage-triggered), plus jitter.
       const scheduledFor = new Date(
-        Date.now() + Math.max(0, firstStep[0].delay_minutes) * 60_000 + enrollJitterMs(),
+        Date.now() +
+          computeStep0DelayMinutes(firstStep[0].delay_minutes, stageBufferMinutes()) * 60_000 +
+          enrollJitterMs(),
       ).toISOString();
       const ins = await db.from("drip_runs").insert({
         tenant_id: seq.tenant_id,
