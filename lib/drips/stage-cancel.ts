@@ -24,12 +24,17 @@ type RunRow = { id: string; sequence_id: string };
 type SequenceTriggerRow = { id: string; trigger_filter: unknown };
 
 /** The stage a sequence's trigger targets, or null when it isn't
- *  stage-triggered (flag sequences, malformed filters). */
+ *  stage-triggered (flag sequences, application-keyed filters, malformed
+ *  filters). MUST mirror the engine's canonical definition (executor.ts
+ *  seqMap load / enroller.ts poll filter): entity absent-or-"lead" AND field
+ *  absent-or-"stage" AND a nonempty string `to` (codex review P1, 2026-07-22 —
+ *  a stricter parse here left omitted-field sequences uncancellable). */
 export function triggerStageOf(triggerFilter: unknown): string | null {
   if (!triggerFilter || typeof triggerFilter !== "object") return null;
   const f = triggerFilter as Record<string, unknown>;
-  if (f.field !== "stage") return null;
-  return typeof f.to === "string" && f.to ? f.to : null;
+  const isStageTrigger = (!f.field || f.field === "stage") && (!f.entity || f.entity === "lead");
+  if (!isStageTrigger) return null;
+  return typeof f.to === "string" && f.to.trim() ? f.to.trim() : null;
 }
 
 /**

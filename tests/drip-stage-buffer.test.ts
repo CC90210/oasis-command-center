@@ -42,6 +42,13 @@ assert.equal(triggerStageOf({ field: "accelerated_followup", to: "1" }), null, "
 assert.equal(triggerStageOf(null), null, "null filter -> null");
 assert.equal(triggerStageOf({ field: "stage", to: "" }), null, "empty stage -> null");
 assert.equal(triggerStageOf("stage"), null, "non-object -> null");
+// Canonical-definition parity (codex P1): the engine treats omitted field/
+// entity as stage/lead defaults — the cancel helper must match, or those
+// sequences survive stage changes uncancelled.
+assert.equal(triggerStageOf({ to: "follow_up" }), "follow_up", "omitted field+entity -> stage-triggered");
+assert.equal(triggerStageOf({ entity: "lead", to: "signed_application" }), "signed_application", "omitted field -> stage-triggered");
+assert.equal(triggerStageOf({ entity: "application", field: "stage", to: "shopping" }), null, "application-keyed filter is NOT lead-stage");
+assert.equal(triggerStageOf({ to: "  follow_up  " }), "follow_up", "stage trimmed like the engine");
 
 // --- selectStaleRunIds: the debounce partition ---
 const SEQS = [
