@@ -18,6 +18,7 @@ import { getServiceSupabase } from "@/lib/supabase-server";
 import { resolveTenantId } from "@/lib/api-auth";
 import { getSessionContext, canManageTeam } from "@/lib/team";
 import { isMissingTableError, missingTablePayload } from "@/lib/api-helpers";
+import { guardSequenceSteps } from "@/lib/drips/edit-guard";
 import {
   parseDripSteps,
   parseDripTriggerFilter,
@@ -94,6 +95,19 @@ export async function POST(req: NextRequest) {
     }
     throw err;
   }
+
+  // Write-time compliance guard (2026-07-22): create previously skipped the
+  // copy guard entirely, so scaffolded/imported sequences could persist
+  // lender/broker copy unguarded until the first edit. Same shared guard as
+  // PATCH; no prior baseline on create (nothing to preserve yet).
+  const guarded = await guardSequenceSteps(tenantId, steps, null);
+  if (!guarded.ok) {
+    return NextResponse.json(
+      { ok: false, error: guarded.error, step: guarded.step, message: guarded.message },
+      { status: 400 },
+    );
+  }
+  steps = guarded.steps;
 
   const triggerEvent = String(body.trigger_event || "BRAVO_RECORD_STATUS_CHANGED");
 

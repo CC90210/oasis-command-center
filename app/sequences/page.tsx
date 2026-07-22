@@ -9,12 +9,14 @@ import { PageHeader } from "@/components/Card";
 import { getActiveProfile, getBridgeOnline } from "@/lib/queries";
 import { getSessionUser, getServiceSupabase } from "@/lib/supabase-server";
 import { safe, isMissingTableError } from "@/lib/api-helpers";
-import { SequencesListClient } from "@/components/sequences/SequencesListClient";
+import { SequencesTabs } from "@/components/sequences/SequencesTabs";
 import { AlertCircle, Cpu, Cloud, Download } from "lucide-react";
 import Link from "next/link";
 import { redirect } from "next/navigation";
 
 export const dynamic = "force-dynamic";
+
+import type { DripStep } from "@/lib/drips/types";
 
 type SequenceRow = {
   id: string;
@@ -22,9 +24,10 @@ type SequenceRow = {
   description: string | null;
   trigger_event: string;
   trigger_filter: Record<string, unknown>;
-  steps: Array<{ channel: string; delay_minutes: number }>;
+  steps: DripStep[];
   enabled: boolean;
   one_per_lead: boolean;
+  email_class?: string;
 };
 
 async function loadSequences(tenantId: string | null): Promise<
@@ -36,7 +39,7 @@ async function loadSequences(tenantId: string | null): Promise<
   const { data, error } = await db
     .from("drip_sequences")
     .select(
-      "id, name, description, trigger_event, trigger_filter, steps, enabled, one_per_lead",
+      "id, name, description, trigger_event, trigger_filter, steps, enabled, one_per_lead, email_class",
     )
     .eq("tenant_id", tenantId)
     .order("created_at", { ascending: false });
@@ -143,7 +146,7 @@ export default async function SequencesPage() {
         </div>
       )}
 
-      {result.ok && <SequencesListClient initialRows={result.rows} />}
+      {result.ok && <SequencesTabs rows={result.rows} />}
     </div>
   );
 }

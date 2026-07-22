@@ -43,6 +43,7 @@ type SequenceRecord = {
   steps: DripStep[];
   enabled: boolean;
   one_per_lead: boolean;
+  email_class?: string;
 };
 
 type Props = {
@@ -56,6 +57,7 @@ export function SequenceBuilderClient({ initialSequence }: Props) {
   const [description, setDescription] = useState(initialSequence.description || "");
   const [enabled, setEnabled] = useState(initialSequence.enabled);
   const [onePerLead, setOnePerLead] = useState(initialSequence.one_per_lead);
+  const [emailClass, setEmailClass] = useState(initialSequence.email_class || "commercial");
   const [triggerEvent, setTriggerEvent] = useState(initialSequence.trigger_event);
   // Serialized JSON strings remain the source of truth feeding the
   // `parsed` memo below. The structured StepsEditor + FilterEditor
@@ -154,6 +156,7 @@ export function SequenceBuilderClient({ initialSequence }: Props) {
           steps: parsed.steps,
           enabled,
           one_per_lead: onePerLead,
+          email_class: emailClass,
         }),
       });
       const data = (await res.json()) as { ok: boolean; error?: string; path?: string; reason?: string };
@@ -277,6 +280,24 @@ export function SequenceBuilderClient({ initialSequence }: Props) {
             />
             <span>One enrollment per lead (idempotent re-triggers)</span>
           </label>
+          <div>
+            <label className="block text-[11px] uppercase tracking-wider font-bold text-fg-dim mb-1">
+              Email class
+            </label>
+            <select
+              value={emailClass}
+              onChange={(e) => setEmailClass(e.target.value)}
+              className="w-full rounded-md border border-bg-border bg-bg-elev px-3 py-2 text-sm text-fg"
+            >
+              <option value="commercial">Commercial — unsubscribe footer shown (default)</option>
+              <option value="transactional">Transactional — no unsubscribe footer</option>
+            </select>
+            <p className="mt-1 text-[11px] leading-relaxed text-fg-dim">
+              Commercial is right for follow-up/marketing drips. Only mark a sequence
+              transactional when every email is about the lead&apos;s own in-flight
+              application (misclassifying marketing as transactional is a CAN-SPAM risk).
+            </p>
+          </div>
         </section>
 
         <section className="space-y-3 rounded-xl border border-bg-border bg-bg-elev/40 p-4">
@@ -435,8 +456,113 @@ export function SequenceBuilderClient({ initialSequence }: Props) {
             </ul>
           )}
         </section>
+
+        <VersionHistory
+          sequenceId={initialSequence.id}
+          onRestored={(steps) => {
+            setStepsJson(JSON.stringify(steps, null, 2));
+            setSaveMessage({ kind: "ok", text: "Version restored (already saved)." });
+          }}
+        />
       </div>
     </div>
+  );
+}
+
+/**
+ * VersionHistory — prior template snapshots for this sequence (written on
+ * every steps-changing save). Restore applies the snapshot server-side
+ * through the same guarded path as a manual edit, then syncs the editor.
+ */
+function VersionHistory({
+  sequenceId,
+  onRestored,
+}: {
+  sequenceId: string;
+  onRestored: (steps: DripStep[]) => void;
+}) {
+  type VersionRow = { id: string; name: string; steps: DripStep[]; created_at: string };
+  const [versions, setVersions] = useState<VersionRow[] | null>(null);
+  const [busyId, setBusyId] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      try {
+        const res = await fetch(`/api/sequences/${sequenceId}/versions`);
+        const data = (await res.json()) as { ok: boolean; versions?: VersionRow[] };
+        if (alive) setVersions(data.ok ? data.versions || [] : []);
+      } catch {
+        if (alive) setVersions([]);
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+  }, [sequenceId]);
+
+  async function restore(versionId: string) {
+    if (!confirm("Restore this template version? The current copy is snapshotted first, so this is reversible.")) return;
+    setBusyId(versionId);
+    setError(null);
+    try {
+      const res = await fetch(`/api/sequences/${sequenceId}/versions`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ versionId }),
+      });
+      const data = (await res.json()) as { ok: boolean; sequence?: { steps: DripStep[] }; message?: string; error?: string };
+      if (!data.ok || !data.sequence) {
+        setError(data.message || data.error || "restore failed");
+        return;
+      }
+      onRestored(data.sequence.steps);
+      const list = await fetch(`/api/sequences/${sequenceId}/versions`);
+      const listData = (await list.json()) as { ok: boolean; versions?: VersionRow[] };
+      if (listData.ok) setVersions(listData.versions || []);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "network error");
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  return (
+    <section className="rounded-xl border border-bg-border bg-bg-elev/40 p-4 space-y-3">
+      <h3 className="text-xs font-bold uppercase tracking-wider text-fg-muted">
+        Template history
+      </h3>
+      {error && <p className="text-xs text-rose-400">{error}</p>}
+      {versions === null ? (
+        <p className="text-xs text-fg-dim italic">Loading…</p>
+      ) : versions.length === 0 ? (
+        <p className="text-xs text-fg-dim italic">
+          No prior versions yet — a snapshot is kept every time the steps are saved.
+        </p>
+      ) : (
+        <ul className="space-y-1.5 text-xs">
+          {versions.slice(0, 10).map((v) => (
+            <li key={v.id} className="flex items-center gap-2">
+              <span className="font-mono text-[10px] text-fg-dim shrink-0">
+                {new Date(v.created_at).toLocaleString()}
+              </span>
+              <span className="text-fg-muted truncate">
+                {v.steps.length} step{v.steps.length === 1 ? "" : "s"}
+              </span>
+              <button
+                type="button"
+                disabled={busyId !== null}
+                onClick={() => restore(v.id)}
+                className="ml-auto shrink-0 rounded-md border border-accent/30 bg-accent/10 px-2 py-0.5 text-[10px] font-bold text-accent hover:bg-accent/20 disabled:opacity-40"
+              >
+                {busyId === v.id ? "Restoring…" : "Restore"}
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
   );
 }
 
@@ -614,6 +740,62 @@ function StepsEditor({
               onApply={(patch) => update(idx, patch)}
             />
           )}
+          {/* A/B variant pools — the executor picks ONE per lead at send time.
+              Previously invisible + un-editable here, so merchants could get
+              copy no screen showed (2026-07-22). One variant per line-block,
+              separated by a line of three dashes. */}
+          {step.channel === "email" &&
+            ((step.body_variants?.length || 0) > 0 ||
+              (step.subject_variants?.length || 0) > 0) && (
+              <div className="rounded-md border border-status-warm/25 bg-status-warm/5 p-2 space-y-2">
+                <div className="text-[10px] uppercase tracking-wider font-bold text-status-warm">
+                  A/B variant pool — one is picked per lead at send time
+                </div>
+                {(step.subject_variants?.length || 0) > 0 && (
+                  <label className="block">
+                    <span className="text-[10px] uppercase tracking-wider text-fg-dim block mb-0.5">
+                      Subject variants (one per line)
+                    </span>
+                    <textarea
+                      value={(step.subject_variants || []).join("\n")}
+                      onChange={(e) =>
+                        update(idx, {
+                          subject_variants: e.target.value
+                            .split("\n")
+                            .map((s) => s.trim())
+                            .filter(Boolean),
+                        })
+                      }
+                      rows={Math.min(6, (step.subject_variants || []).length + 1)}
+                      className="w-full rounded-md border border-bg-border bg-bg-elev px-2 py-1.5 text-xs text-fg font-mono"
+                    />
+                  </label>
+                )}
+                {(step.body_variants?.length || 0) > 0 && (
+                  <label className="block">
+                    <span className="text-[10px] uppercase tracking-wider text-fg-dim block mb-0.5">
+                      Body variants (separate variants with a line containing only ---)
+                    </span>
+                    <textarea
+                      value={(step.body_variants || []).join("\n---\n")}
+                      onChange={(e) =>
+                        update(idx, {
+                          body_variants: e.target.value
+                            .split(/\n---\n/)
+                            .map((s) => s.trim())
+                            .filter(Boolean),
+                        })
+                      }
+                      rows={8}
+                      className="w-full rounded-md border border-bg-border bg-bg-elev px-2 py-1.5 text-xs text-fg font-mono"
+                    />
+                  </label>
+                )}
+                <p className="text-[10px] text-fg-dim">
+                  Deleting all text removes the pool (the base subject/body then always sends).
+                </p>
+              </div>
+            )}
           <label className="block">
             <span className="text-[10px] uppercase tracking-wider text-fg-dim block mb-0.5">
               From label (optional)
