@@ -15,6 +15,7 @@ import {
   type ColdOutreachTemplate,
 } from "@/lib/cold-outreach/templates.generated";
 import { AD_CREATIVES } from "@/lib/cold-outreach/ad-creatives.generated";
+import GmailTemplatesSection from "@/components/templates/GmailTemplatesSection";
 import {
   ArrowLeft,
   Braces,
@@ -715,6 +716,7 @@ export default function TemplatesPage() {
   const [activeCategory, setActiveCategory] = useState<Category>("all");
   const [activeIndustry, setActiveIndustry] = useState<Industry>("all");
   const [searchQuery, setSearchQuery] = useState("");
+  const [section, setSection] = useState<"html" | "gmail">("html");
 
   const templates = useMemo<TemplateMeta[]>(() => {
     const emails: TemplateMeta[] = COLD_OUTREACH_TEMPLATES.map((template) => ({
@@ -797,10 +799,51 @@ export default function TemplatesPage() {
     <div className="space-y-6 animate-fade-in">
       <PageHeader
         title="Template Library"
-        subtitle="SunBiz HTML emails Ezra can preview, copy, send with Helios, or hand to Solara for a new variant."
-        action={<Tag tone="engaged">{templates.length} HTML assets</Tag>}
+        subtitle={
+          section === "html"
+            ? "SunBiz HTML emails Ezra can preview, copy, send with Helios, or hand to Solara for a new variant."
+            : "Plain-text Gmail templates by pipeline stage. Create, refine with Solara variants, copy into any lead outreach or cold blast."
+        }
+        action={
+          section === "html" ? (
+            <Tag tone="engaged">{templates.length} HTML assets</Tag>
+          ) : undefined
+        }
       />
 
+      {/* Top-level section switch — code-shipped HTML library vs the
+          DB-backed plain-text Gmail library. */}
+      <div className="flex w-fit overflow-hidden rounded-lg border border-bg-border">
+        <button
+          type="button"
+          onClick={() => setSection("html")}
+          className={`inline-flex items-center gap-1.5 px-4 py-2 text-xs font-bold transition-colors ${
+            section === "html"
+              ? "bg-accent/15 text-accent"
+              : "bg-bg-elev text-fg-muted hover:text-fg"
+          }`}
+        >
+          <FileCode2 className="h-3.5 w-3.5" />
+          HTML Library
+        </button>
+        <button
+          type="button"
+          onClick={() => setSection("gmail")}
+          className={`inline-flex items-center gap-1.5 border-l border-bg-border px-4 py-2 text-xs font-bold transition-colors ${
+            section === "gmail"
+              ? "bg-accent/15 text-accent"
+              : "bg-bg-elev text-fg-muted hover:text-fg"
+          }`}
+        >
+          <Mail className="h-3.5 w-3.5" />
+          Gmail Templates
+        </button>
+      </div>
+
+      {section === "gmail" ? (
+        <GmailTemplatesSection />
+      ) : (
+        <>
       <div className="flex flex-wrap items-center gap-2">
         <Link
           href="/playbook"
@@ -932,6 +975,8 @@ export default function TemplatesPage() {
           template={selectedTemplate}
           onClose={() => setSelectedTemplate(null)}
         />
+      )}
+        </>
       )}
     </div>
   );
