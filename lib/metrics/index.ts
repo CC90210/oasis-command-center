@@ -112,6 +112,33 @@ export type SmsMetrics = {
 
 /** Kixie (calls) metrics — from lead_interactions channel='phone' (the Kixie
  *  webhook receiver, deduped by kixie_call_id). */
+export type CallNumberHealth = "healthy" | "warning" | "critical" | "insufficient_data";
+export type CallNumberStats = {
+  /** The Kixie caller ID (from_phone) the outbound dial went out on. */
+  number: string;
+  dials: number;
+  /** Reached call_answered, or ran >= 30s (and wasn't a voicemail drop). */
+  connects: number;
+  /** 0-100, one decimal. */
+  connectRatePct: number;
+  /** Average duration of CONNECTED calls on this number. */
+  avgDurationSec: number;
+  /** >=15% healthy, 8-15% warning, <8% critical — only with >=20 dials in the
+   *  window; fewer dials = insufficient_data (no flag on thin volume). */
+  health: CallNumberHealth;
+};
+export type CallAgentStats = {
+  /** metadata.kixie_agent_email (lowercased), or "" when the webhook carried none. */
+  email: string;
+  /** Roster name via agents.config.json when the email matches, else the email prefix. */
+  name: string;
+  dials: number;
+  connects: number;
+  talkTimeSec: number;
+  /** ci_sentiment positive/neutral/negative → +1/0/-1, averaged over calls with a
+   *  CI summary; null when this agent has none in the window. */
+  avgSentiment: number | null;
+};
 export type CallMetrics = {
   dials: number;
   connects: number;
@@ -121,6 +148,10 @@ export type CallMetrics = {
   avgTalkSec: number;
   perAgent: Array<{ agent: string; dials: number; connects: number; talkTimeSec: number }>;
   dispositions: Array<{ disposition: string; count: number }>;
+  /** Per-number health for OUTBOUND dials, grouped by from_phone. */
+  numbers: CallNumberStats[];
+  /** Per-agent rollup keyed on metadata.kixie_agent_email, with CI sentiment. */
+  agents: CallAgentStats[];
 };
 
 export type MetricsPayload = {
@@ -197,7 +228,7 @@ export async function getEmailMetrics(tenantId: string, days = 30): Promise<Metr
       smsSent: 0, formViews: 0, clickAdvances: 0, sequences: [], failureReasons: [], health: "healthy",
     },
     sms: { campaignSent: 0, delivered: 0, failed: 0, deliveryRate: 0, replies: 0, replyRate: 0, repliesReceived: 0, dripSent: 0, totalSent: 0, perRep: [], numbers: [], dripDeliveryChecked: 0, dripDeliveryFailed: 0 },
-    calls: { dials: 0, connects: 0, connectRate: 0, voicemails: 0, talkTimeSec: 0, avgTalkSec: 0, perAgent: [], dispositions: [] },
+    calls: { dials: 0, connects: 0, connectRate: 0, voicemails: 0, talkTimeSec: 0, avgTalkSec: 0, perAgent: [], dispositions: [], numbers: [], agents: [] },
     generatedAt: new Date().toISOString(),
   };
   if (!tenantId) return empty;
@@ -220,7 +251,7 @@ export async function getEmailMetrics(tenantId: string, days = 30): Promise<Metr
       // Inbound SMS replies in the window (from the inbox sync cron).
       db.from("lead_interactions").select("id", { count: "exact", head: true }).eq("tenant_id", tenantId).eq("channel", "sms").eq("direction", "inbound").gte("created_at", curStartIso),
       // Kixie calls in the window (channel='phone', deduped by kixie_call_id).
-      db.from("lead_interactions").select("kixie_call_id, type, direction, call_duration_sec, disposition, call_outcome, metadata").eq("tenant_id", tenantId).eq("channel", "phone").gte("created_at", curStartIso).limit(50000),
+      db.from("lead_interactions").select("kixie_call_id, type, direction, from_phone, call_duration_sec, disposition, call_outcome, metadata").eq("tenant_id", tenantId).eq("channel", "phone").gte("created_at", curStartIso).limit(50000),
       // A2: outbound SMS carrying a real TT delivery status (from the inbox sync).
       db.from("lead_interactions").select("metadata").eq("tenant_id", tenantId).eq("channel", "sms").eq("direction", "outbound").not("metadata->>tt_send_status", "is", null).gte("created_at", curStartIso).limit(50000),
       // Sequence definitions → map each per-sequence metric to its lead STAGE + the
@@ -497,7 +528,7 @@ export async function getEmailMetrics(tenantId: string, days = 30): Promise<Metr
     };
 
     // ---- Kixie (calls) block — from lead_interactions channel='phone' (deduped by kixie_call_id) ----
-    const callRows = (callsRes.data || []) as Array<{ kixie_call_id: string | null; type: string | null; direction: string | null; call_duration_sec: number | null; disposition: string | null; call_outcome: string | null; metadata: Record<string, unknown> | null }>;
+    const callRows = (callsRes.data || []) as Array<{ kixie_call_id: string | null; type: string | null; direction: string | null; from_phone: string | null; call_duration_sec: number | null; disposition: string | null; call_outcome: string | null; metadata: Record<string, unknown> | null }>;
     const seenCall = new Set<string>();
     let dials = 0, connects = 0, voicemails = 0, talkTimeSec = 0;
     const agentMap = new Map<string, { dials: number; connects: number; talkTimeSec: number }>();
@@ -519,6 +550,80 @@ export async function getEmailMetrics(tenantId: string, days = 30): Promise<Metr
       if (isConnect) { a.connects += 1; a.talkTimeSec += dur; }
       if (r.disposition) dispMap.set(r.disposition, (dispMap.get(r.disposition) || 0) + 1);
     }
+
+    // Per-CALL aggregation for the number-health + per-agent rollups. The Kixie
+    // webhook writes one row per lifecycle event (initiated / answered / ended /
+    // dispositioned / CI summary), all sharing a kixie_call_id — so these stats
+    // must merge a call's rows FIRST (the first-row-wins dedupe above is fine for
+    // volume counters but would drop the answered flag / duration / CI sentiment
+    // when they land on a later row). Rows without a kixie_call_id (legacy) each
+    // count as their own call, matching the dedupe loop's behavior.
+    type CallAgg = {
+      outbound: boolean; fromPhone: string; durationSec: number;
+      answered: boolean; voicemail: boolean; agentEmail: string; sentiment: number | null;
+    };
+    const perCall = new Map<string, CallAgg>();
+    let syntheticId = 0;
+    for (const r of callRows) {
+      const key = r.kixie_call_id || `row:${syntheticId++}`;
+      let c = perCall.get(key);
+      if (!c) { c = { outbound: false, fromPhone: "", durationSec: 0, answered: false, voicemail: false, agentEmail: "", sentiment: null }; perCall.set(key, c); }
+      if (r.direction === "outbound" || r.type === "call_outgoing") c.outbound = true;
+      if (!c.fromPhone && typeof r.from_phone === "string" && r.from_phone) c.fromPhone = r.from_phone;
+      c.durationSec = Math.max(c.durationSec, Number(r.call_duration_sec) || 0);
+      if (r.type === "call_answered") c.answered = true;
+      if (r.call_outcome === "voicemail" || r.type === "call_voicemail") c.voicemail = true;
+      const email = typeof r.metadata?.kixie_agent_email === "string" ? (r.metadata.kixie_agent_email as string).trim().toLowerCase() : "";
+      if (!c.agentEmail && email) c.agentEmail = email;
+      if (c.sentiment === null) {
+        const s = typeof r.metadata?.ci_sentiment === "string" ? (r.metadata.ci_sentiment as string).toLowerCase() : "";
+        if (s === "positive") c.sentiment = 1;
+        else if (s === "neutral") c.sentiment = 0;
+        else if (s === "negative") c.sentiment = -1;
+      }
+    }
+    // A call "connects" when Kixie reported call_answered OR it ran >= 30s —
+    // voicemail drops never count even when the recording pushes past 30s.
+    const isCallConnect = (c: CallAgg): boolean => !c.voicemail && (c.answered || c.durationSec >= 30);
+
+    const numMap = new Map<string, { dials: number; connects: number; connectedDurSec: number }>();
+    const agentDetail = new Map<string, { dials: number; connects: number; talkTimeSec: number; sentimentSum: number; sentimentN: number }>();
+    for (const c of perCall.values()) {
+      const connected = isCallConnect(c);
+      if (c.outbound && c.fromPhone) {
+        let n = numMap.get(c.fromPhone);
+        if (!n) { n = { dials: 0, connects: 0, connectedDurSec: 0 }; numMap.set(c.fromPhone, n); }
+        n.dials += 1;
+        if (connected) { n.connects += 1; n.connectedDurSec += c.durationSec; }
+      }
+      let a = agentDetail.get(c.agentEmail);
+      if (!a) { a = { dials: 0, connects: 0, talkTimeSec: 0, sentimentSum: 0, sentimentN: 0 }; agentDetail.set(c.agentEmail, a); }
+      a.dials += 1;
+      if (connected) { a.connects += 1; a.talkTimeSec += c.durationSec; }
+      if (c.sentiment !== null) { a.sentimentSum += c.sentiment; a.sentimentN += 1; }
+    }
+    const callNumbers: CallNumberStats[] = Array.from(numMap.entries()).map(([number, n]) => {
+      const ratePct = n.dials ? (n.connects / n.dials) * 100 : 0;
+      const health: CallNumberHealth =
+        n.dials < 20 ? "insufficient_data" : ratePct >= 15 ? "healthy" : ratePct >= 8 ? "warning" : "critical";
+      return {
+        number,
+        dials: n.dials,
+        connects: n.connects,
+        connectRatePct: Math.round(ratePct * 10) / 10,
+        avgDurationSec: n.connects ? Math.round(n.connectedDurSec / n.connects) : 0,
+        health,
+      };
+    }).sort((a, b) => b.dials - a.dials);
+    const callAgents: CallAgentStats[] = Array.from(agentDetail.entries()).map(([email, a]) => ({
+      email,
+      name: (email && findAgentByEmail(email)?.name) || (email ? email.split("@")[0] : "unassigned"),
+      dials: a.dials,
+      connects: a.connects,
+      talkTimeSec: a.talkTimeSec,
+      avgSentiment: a.sentimentN ? Math.round((a.sentimentSum / a.sentimentN) * 100) / 100 : null,
+    })).sort((a, b) => b.dials - a.dials);
+
     const calls: CallMetrics = {
       dials, connects,
       connectRate: dials ? connects / dials : 0,
@@ -526,6 +631,8 @@ export async function getEmailMetrics(tenantId: string, days = 30): Promise<Metr
       avgTalkSec: connects ? Math.round(talkTimeSec / connects) : 0,
       perAgent: Array.from(agentMap.entries()).map(([agent, v]) => ({ agent, ...v })).sort((a, b) => b.dials - a.dials),
       dispositions: Array.from(dispMap.entries()).map(([disposition, count]) => ({ disposition, count })).sort((a, b) => b.count - a.count),
+      numbers: callNumbers,
+      agents: callAgents,
     };
 
     return {

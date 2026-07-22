@@ -212,17 +212,26 @@ export function sendSms(
   }, "send sms");
 }
 
-/** Send a contact to the agent's call queue (power dialer flow). */
+/**
+ * Send a contact to a Kixie call queue (rings the agent, then bridges the
+ * target — the warm-transfer / closer-handoff lane). Docs shape (Send to
+ * Queue API, verified in the article 2026-07-21 but not yet live-tested):
+ * eventname "queue" + the queue's numeric id from the Kixie dashboard
+ * (Manage → Inbound → Queues). Queue ids live in
+ * tenants.custom_fields.kixie_queues, same pattern as powerlists.
+ */
 export function sendToQueue(
   creds: KixieCredentials,
-  args: { target: string; agentEmail: string; leadId?: string },
+  args: { target: string; agentEmail: string; queueId: string | number; displayName?: string; leadId?: string },
 ): Promise<unknown> {
   return eventPost(creds, {
     apikey: creds.apiKey,
     businessid: creds.businessId,
-    eventname: "sendToQueue",
+    eventname: "queue",
+    id: args.queueId,
     email: args.agentEmail || creds.defaultAgentEmail,
     target: args.target,
+    displayname: args.displayName || "Queue transfer",
     ...(args.leadId ? { customField1: args.leadId } : {}),
   }, "send to queue");
 }

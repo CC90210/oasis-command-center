@@ -51,6 +51,7 @@ type InteractionRow = {
   direction: string | null;
   type: string | null;
   subject: string | null;
+  content: string | null;
   content_preview: string | null;
   created_at: string | null;
   sent_at: string | null;
@@ -210,7 +211,7 @@ export async function GET(
       const { data, error } = await db
         .from(table)
         .select(
-          "id, channel, direction, type, subject, content_preview, " +
+          "id, channel, direction, type, subject, content, content_preview, " +
             "created_at, sent_at, to_email, to_phone, metadata, " +
             "recording_url, transcript_url, disposition, call_outcome, " +
             "call_duration_sec, kixie_call_id",
@@ -284,6 +285,7 @@ export async function GET(
           meta: {
             id: row.id,
             channel,
+            direction,
             to_email: row.to_email,
             to_phone: row.to_phone,
             metadata: row.metadata,
@@ -293,6 +295,10 @@ export async function GET(
             call_outcome: row.call_outcome,
             call_duration_sec: row.call_duration_sec,
             kixie_call_id: row.kixie_call_id,
+            // Full CI narrative — ONLY on the AI-summary rows, so ordinary
+            // email/SMS bodies never ride along in meta. The drawer's
+            // expandable "AI call summary" block renders this.
+            ci_content: rowType === "call_ci_summary" ? row.content : null,
           },
         });
       }
