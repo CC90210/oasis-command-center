@@ -1004,12 +1004,15 @@ export async function runDispatchDrips(): Promise<DispatchDripsResult> {
       const isStageTrigger = !!tf && (!tf.field || tf.field === "stage") && (!tf.entity || tf.entity === "lead");
       const triggerStage = isStageTrigger && typeof tf!.to === "string" && tf!.to.trim() ? (tf!.to as string).trim() : null;
       // Flag-triggered sequence (e.g. accelerated_followup): trigger_filter.field
-      // names a boolean lead-data flag rather than "stage". Captured so the
-      // dispatcher cancels the run the instant that flag goes false (the lead
-      // was handled / unflagged) — the flag-based analogue of the stage-match
-      // cancel. Only lead-entity, non-"stage" fields with a target qualify.
+      // names a BOOLEAN lead-data flag rather than "stage", targeting `to:"true"`.
+      // Captured so the dispatcher cancels the run the instant that flag goes
+      // false (the lead was handled / unflagged) — the flag-based analogue of
+      // the stage-match cancel. The `to === "true"` requirement is load-bearing
+      // (codex review P1, 2026-07-22): without it a sequence keyed on an
+      // ordinary STRING field (e.g. { field: "status", to: "approved" }) would
+      // be misread as a boolean flag and every run instantly cancelled.
       const triggerFlag =
-        !!tf && (!tf.entity || tf.entity === "lead") && typeof tf.field === "string" && tf.field.trim() && tf.field !== "stage"
+        !!tf && (!tf.entity || tf.entity === "lead") && typeof tf.field === "string" && tf.field.trim() && tf.field !== "stage" && tf.to === "true"
           ? (tf.field as string).trim()
           : null;
       seqMap.set(`${r.tenant_id}|${r.id}`, { id: r.id, name: r.name, enabled: r.enabled, steps: r.steps, emailClass: r.email_class || "commercial", triggerStage, triggerFlag });

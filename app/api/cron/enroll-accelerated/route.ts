@@ -153,10 +153,18 @@ async function handle(req: NextRequest): Promise<NextResponse> {
         continue;
       }
 
-      // Prefetch this cohort's runs for this sequence → active set (skip
-      // re-enroll) + newest run per lead (current-stint clock for auto-dead).
+      // Prefetch this cohort's runs for this sequence:
+      //  - active   → currently chasing (skip re-enroll)
+      //  - everRan  → ANY non-cancelled run, incl. terminal done/sent/failed.
+      //    Load-bearing (codex review P1, 2026-07-22): a COMPLETED chase leaves
+      //    no active run but must never re-enroll — without this the 58-step
+      //    chase restarted forever and the auto-dead clock reset each cycle.
+      //    Mirrors the stage enroller's once-per-lead rule; 'cancelled' rows
+      //    intentionally don't block (an operator halt allows a fresh chase).
+      //  - newestRun → current-stint clock for the day-45 backstop.
       const leadIds = leads.map((l) => l.id);
       const active = new Set<string>();
+      const everRan = new Set<string>();
       const newestRun = new Map<string, number>();
       for (let i = 0; i < leadIds.length; i += 300) {
         const chunk = leadIds.slice(i, i + 300);
@@ -168,6 +176,7 @@ async function handle(req: NextRequest): Promise<NextResponse> {
           .in("lead_id", chunk);
         for (const r of (runRes.data || []) as RunRow[]) {
           if (r.status === "scheduled" || r.status === "sending") active.add(r.lead_id);
+          if (r.status !== "cancelled") everRan.add(r.lead_id);
           const t = Date.parse(r.created_at);
           if (Number.isFinite(t)) newestRun.set(r.lead_id, Math.max(newestRun.get(r.lead_id) ?? 0, t));
         }
@@ -196,9 +205,20 @@ async function handle(req: NextRequest): Promise<NextResponse> {
           continue;
         }
 
-        // 3. AUTO-DEAD — current chase stint older than the window → retire.
+        // 3. AUTO-DEAD — two triggers, one outcome (dead_file + flag cleared):
+        //  (a) chase EXHAUSTED: a prior non-cancelled run exists and none is
+        //      active — the 58-step sequence ran to its end (or failed
+        //      permanently) with the lead still unengaged. Per Adon: after the
+        //      month, the lead moves to Dead. Checking this here (not just the
+        //      day-45 clock) is what prevents the completed chase from
+        //      re-enrolling (codex review P1).
+        //  (b) day-45 BACKSTOP: the current stint started >= DEAD_DAYS ago —
+        //      covers a wedged run that never reaches a terminal status.
+        const hasActive = active.has(lead.id);
+        const exhausted = everRan.has(lead.id) && !hasActive;
         const newest = newestRun.get(lead.id);
-        if (newest !== undefined && Number.isFinite(deadCutoffMs) && newest <= deadCutoffMs) {
+        const stintExpired = newest !== undefined && Number.isFinite(deadCutoffMs) && newest <= deadCutoffMs;
+        if (exhausted || stintExpired) {
           wouldDead++;
           if (LIVE) {
             try {
@@ -208,12 +228,15 @@ async function handle(req: NextRequest): Promise<NextResponse> {
               });
               autoDead++;
               try {
-                const note = `No engagement after ${DEAD_DAYS} days of accelerated chase`;
+                const reason = exhausted ? "accelerated_exhausted" : "accelerated_stint_expired";
+                const note = exhausted
+                  ? "Accelerated chase completed with no engagement"
+                  : `No engagement after ${DEAD_DAYS} days of accelerated chase`;
                 await db.from("lead_interactions").insert({
                   tenant_id: tenantId, lead_id: lead.id, type: "stage_changed", channel: "system",
                   direction: "outbound", agent_source: "cron_enroll_accelerated",
                   subject: "Auto-retired to Dead", content: note, content_preview: note,
-                  metadata: { from: stage, to: DEAD_STAGE, reason: "accelerated_exhausted", days: DEAD_DAYS },
+                  metadata: { from: stage, to: DEAD_STAGE, reason, days: DEAD_DAYS },
                 });
               } catch { /* best-effort audit */ }
             } catch (e) {
@@ -223,8 +246,10 @@ async function handle(req: NextRequest): Promise<NextResponse> {
           continue;
         }
 
-        // 1. ENROLL — new flagged lead, not yet chasing.
-        if (active.has(lead.id)) { skippedActive++; continue; }
+        // 1. ENROLL — a flagged lead that has never chased (no non-cancelled
+        // run). Leads mid-chase land in `hasActive`; completed ones were
+        // retired above.
+        if (hasActive) { skippedActive++; continue; }
         if (isOptedOut(d)) { skippedOptedOut++; continue; }
         const phone = typeof d.phone === "string" ? d.phone.trim() : "";
         if (firstChannel === "sms" && !phone) { skippedNoPhone++; continue; }
