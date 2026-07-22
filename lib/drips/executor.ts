@@ -44,6 +44,7 @@ import { sendDripSms, sendDripEmail } from "@/lib/drips/send";
 import { wasShoppedRecently } from "@/lib/drips/enroller";
 import { buildDripHtml, listUnsubscribeHeader } from "@/lib/drips/html-email";
 import { resolveDripSmsIdentity, type DripSmsIdentity } from "@/lib/drips/rep-sms-identity";
+import { ACCELERATED_FLAG, acceleratedSystemLive, hasActiveAcceleratedRun } from "@/lib/drips/accelerated";
 import { nudgeConversations } from "@/lib/realtime/conversations-nudge";
 
 export const BATCH_LIMIT = 12;
@@ -892,6 +893,23 @@ async function processRow(
   // applied at dispatch time.
   if (await wasShoppedRecently(db, row.tenant_id, row.lead_id, data)) {
     return markCancelled(db, row, "shopped_recently");
+  }
+
+  // Overlap suppression, the mirror of the flag-cancel above (Adon 2026-07-22):
+  // while a lead IS being chased, its STAGE drips stand down — one track at a
+  // time, never both texting the same merchant. The predicate is an ACTIVE
+  // chase run (not the flag alone — codex review P1: a flagged lead the chase
+  // can't enroll must keep its stage drips or it sits on no track at all).
+  // Gated on the chase master switch so the dormant system can't strip stage
+  // drips before go-live. 'cancelled' (not skip) so the enroller restarts the
+  // stage drip cleanly once the chase ends.
+  if (
+    seq.triggerStage &&
+    acceleratedSystemLive() &&
+    isTruthyFlag(data[ACCELERATED_FLAG]) &&
+    (await hasActiveAcceleratedRun(db, row.tenant_id, row.lead_id))
+  ) {
+    return markCancelled(db, row, "accelerated_chase_active: stage drip stands down");
   }
 
   if (step.channel === "sms") return processSmsStep(db, row, data, step, steps);
