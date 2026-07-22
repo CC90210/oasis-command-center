@@ -24,6 +24,9 @@
 
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { detectStatusTransitions, publishStatusChange } from "./events";
+// Standalone on purpose (no enroller/executor import): executor.ts imports
+// THIS file, so the eager drip-cancel lives in its own cycle-free module.
+import { cancelStaleDripRunsForLead } from "@/lib/drips/stage-cancel";
 import { signFormLink } from "@/lib/form-links";
 
 export class RecordsError extends Error {
@@ -524,6 +527,43 @@ export async function updateRecord(input: UpdateRecordInput): Promise<TenantReco
       to: t.to,
       data: row.data,
     });
+  }
+
+  // Debounce stale drips (2026-07-22 stage-buffer fix): the moment a lead
+  // changes stage, flush its pending prior-stage drip rows; when an
+  // application advances to shopping, flush ALL of the linked lead's stage
+  // drips (shop-out moves the application's status, not the lead's stage).
+  // cancelStaleDripRunsForLead never throws (fail-soft) — a drip hiccup must
+  // not fail the stage write, and the dispatcher's stage/shopped rechecks
+  // remain the backstop.
+  if (transitions.length > 0) {
+    if (input.entity === "lead") {
+      const stageT = transitions.find((t) => t.field === "stage" && typeof ((t as { to: unknown }).to) === "string");
+      if (stageT) {
+        await cancelStaleDripRunsForLead(
+          db,
+          input.tenant_id,
+          row.id,
+          String(stageT.to),
+          `stage_changed_eager: lead moved to ${String(stageT.to)}`,
+        );
+      }
+    } else if (input.entity === "application") {
+      const shopped = transitions.some((t) => t.field === "status" && t.to === "shopping");
+      const leadId =
+        typeof (row.data as Record<string, unknown>).lead_id === "string"
+          ? String((row.data as Record<string, unknown>).lead_id)
+          : null;
+      if (shopped && leadId) {
+        await cancelStaleDripRunsForLead(
+          db,
+          input.tenant_id,
+          leadId,
+          null,
+          "shopped_out_eager: application moved to shopping",
+        );
+      }
+    }
   }
 
   return row;
