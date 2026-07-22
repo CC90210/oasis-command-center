@@ -36,6 +36,7 @@
 import "server-only";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { checkTcpaWindow } from "@/lib/tcpa-window";
+import { ACCELERATED_FLAG, acceleratedSystemLive, hasActiveAcceleratedRun } from "@/lib/drips/accelerated";
 import type { DripStep } from "./types";
 import { computeStep0DelayMinutes, stageBufferMinutes } from "./stage-buffer";
 
@@ -102,6 +103,7 @@ export type SkipReason =
   | "opted_out"
   | "no_contact_method"
   | "shopped_recently"
+  | "accelerated_chase"
   | "invalid_sequence_steps";
 
 export type SequenceEnrollSummary = {
@@ -140,9 +142,11 @@ function emptySkipCounts(): Record<SkipReason, number> {
     opted_out: 0,
     no_contact_method: 0,
     shopped_recently: 0,
+    accelerated_chase: 0,
     invalid_sequence_steps: 0,
   };
 }
+
 
 function isTruthyFlag(v: unknown): boolean {
   return v === true || v === "true" || v === 1 || v === "1";
@@ -429,10 +433,22 @@ export async function runEnrollDrips(): Promise<EnrollDripsResult> {
       if (!live || !stageAllowed) continue;
       if (enrollLimit !== 0 && enrolled >= enrollLimit) break;
 
-      // Expensive per-lead guard — only reached for leads we're about to
+      // Expensive per-lead guards — only reached for leads we're about to
       // actually enroll (bounded by DRIPS_ENROLL_LIMIT).
       if (await wasShoppedRecently(db, seq.tenant_id, lead.id, data)) {
         skipped.shopped_recently++;
+        continue;
+      }
+      // Accelerated-chase overlap suppression (Adon 2026-07-22): a lead being
+      // ACTIVELY chased doesn't get stage drips — one track at a time. The
+      // predicate is an active chase run, not the flag alone, so a flagged
+      // lead the chase can't enroll keeps its stage follow-up (codex P1).
+      if (
+        acceleratedSystemLive() &&
+        isTruthyFlag(data[ACCELERATED_FLAG]) &&
+        (await hasActiveAcceleratedRun(db, seq.tenant_id, lead.id))
+      ) {
+        skipped.accelerated_chase++;
         continue;
       }
 
