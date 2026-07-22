@@ -67,29 +67,49 @@ const PROTECTED_KEYS = new Set<string>([
 const EDITABLE = new Set<string>(APPLICATION_FIELD_KEYS as readonly string[]);
 
 /**
- * Legacy display-alias sync. The drawer's Owner tab (LeadFileBody OwnerTab)
- * reads OLD alias keys FIRST (`ein || tax_id`, `state || business_state`,
+ * Legacy display-alias sync. Drawer readers (OwnerTab, OwnerAssignedRow)
+ * check OLD alias keys FIRST (`ein || tax_id`, `state || business_state`,
  * `legal_name || business_name`, `ownership_pct`, `owner_ssn_last4 ||
- * ssn_last4`) — records that carry stale alias copies would keep displaying
- * the pre-edit value after a canonical-key edit. When a canonical key is
- * edited, overwrite its aliases in the SAME atomic patch so every read path
- * agrees. Null propagates (clearing the canonical clears the aliases).
+ * ssn_last4`, `contact_name || owner_name`, `phone`) — records carrying
+ * stale alias copies would keep displaying the pre-edit value after a
+ * canonical-key edit. Two sync classes, applied to the SAME atomic patch:
+ *
+ * OVERWRITE — pure display copies with no editor of their own: always
+ * follow the canonical key (null propagates).
+ * FILL-mirrors — first-class reader keys the intake pipeline duplicates
+ * (FIELD_ALIASES: owner_full_name → contact_name/owner_name, owner_cell →
+ * phone, business_legal_name → business_name): follow the canonical key
+ * ONLY when the client didn't explicitly set the target in the same save —
+ * an operator who deliberately sets a different contact person wins.
  */
-const ALIAS_SYNC: Record<string, ReadonlyArray<string>> = {
+const ALIAS_OVERWRITE: Record<string, ReadonlyArray<string>> = {
   tax_id_ein: ["ein", "tax_id"],
   business_state: ["state"],
   business_legal_name: ["legal_name"],
   owner_ownership_pct: ["ownership_pct"],
 };
+const ALIAS_FILL: Record<string, ReadonlyArray<string>> = {
+  owner_full_name: ["contact_name", "owner_name"],
+  owner_cell: ["phone"],
+  business_legal_name: ["business_name"],
+};
 
 function applyAliasSync(patch: Record<string, string | number | boolean | null>): void {
-  for (const [canonical, aliases] of Object.entries(ALIAS_SYNC)) {
-    if (canonical in patch) {
+  const clientKeys = new Set(Object.keys(patch));
+  for (const [canonical, aliases] of Object.entries(ALIAS_OVERWRITE)) {
+    if (clientKeys.has(canonical)) {
       for (const alias of aliases) patch[alias] = patch[canonical];
     }
   }
+  for (const [canonical, aliases] of Object.entries(ALIAS_FILL)) {
+    if (clientKeys.has(canonical)) {
+      for (const alias of aliases) {
+        if (!clientKeys.has(alias)) patch[alias] = patch[canonical];
+      }
+    }
+  }
   // SSN aliases derive the last-4 (never store the full SSN under a last4 key).
-  if ("owner_ssn" in patch) {
+  if (clientKeys.has("owner_ssn")) {
     const v = patch.owner_ssn;
     const digits = typeof v === "string" ? v.replace(/\D+/g, "") : "";
     const last4 = digits.length >= 4 ? digits.slice(-4) : null;
