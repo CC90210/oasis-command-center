@@ -34,6 +34,32 @@ function todayStamp(): string {
   return d.toISOString().slice(0, 10);
 }
 
+/**
+ * Per-lead follow-up density from the step schedule — how many touches ONE
+ * merchant gets in the first day / week / month, plus the channel split and how
+ * long the cadence runs. delay_minutes is the wait BEFORE each step (cumulative),
+ * so a step "lands in day 1" when its cumulative delay is <= 24h.
+ */
+function cadenceStats(steps: Array<{ channel: string; delay_minutes: number }>) {
+  const s = steps || [];
+  let cum = 0;
+  const cums: number[] = [];
+  for (const st of s) {
+    cum += Math.max(0, Number(st.delay_minutes) || 0);
+    cums.push(cum);
+  }
+  const inWin = (mins: number) => cums.filter((c) => c <= mins).length;
+  return {
+    total: s.length,
+    sms: s.filter((x) => x.channel === "sms").length,
+    email: s.filter((x) => x.channel === "email").length,
+    day1: inWin(1440),
+    week1: inWin(10080),
+    month1: inWin(43200),
+    spanDays: cums.length ? Math.round(cums[cums.length - 1] / 1440) : 0,
+  };
+}
+
 const STARTER_SEQUENCE_TEMPLATE = {
   trigger_event: "BRAVO_RECORD_STATUS_CHANGED",
   trigger_filter: {
@@ -187,12 +213,15 @@ export function SequencesListClient({ initialRows }: { initialRows: SequenceRow[
               <tr className="text-left text-[10px] uppercase tracking-wider text-fg-dim">
                 <th className="px-4 py-2 font-bold">Name</th>
                 <th className="px-4 py-2 font-bold">Trigger</th>
+                <th className="px-4 py-2 font-bold">Follow-ups / lead</th>
                 <th className="px-4 py-2 font-bold">Status</th>
                 <th className="px-4 py-2 font-bold text-right">Actions</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-bg-border">
-              {rows.map((r) => (
+              {rows.map((r) => {
+                const c = cadenceStats(r.steps);
+                return (
                 <tr key={r.id} className="hover:bg-bg-elev/30">
                   <td className="px-4 py-3">
                     <Link
@@ -212,6 +241,22 @@ export function SequencesListClient({ initialRows }: { initialRows: SequenceRow[
                     <div className="font-mono text-xs text-fg-muted">{summarize(r)}</div>
                     <div className="text-[10.5px] text-fg-dim mt-0.5">
                       Fires on event — no interval
+                    </div>
+                  </td>
+                  <td className="px-4 py-3 whitespace-nowrap">
+                    <div className="text-xs text-fg">
+                      <span className="font-bold">{c.total}</span> total{" "}
+                      <span className="text-fg-dim">
+                        ({c.sms} SMS · {c.email} email)
+                      </span>
+                    </div>
+                    <div className="text-[10.5px] text-fg-muted mt-0.5">
+                      Day 1: <b className="text-fg">{c.day1}</b> · Week 1:{" "}
+                      <b className="text-fg">{c.week1}</b> · Month 1:{" "}
+                      <b className="text-fg">{c.month1}</b>
+                    </div>
+                    <div className="text-[10px] text-fg-dim mt-0.5">
+                      over {c.spanDays} day{c.spanDays === 1 ? "" : "s"}
                     </div>
                   </td>
                   <td className="px-4 py-3">
@@ -250,7 +295,8 @@ export function SequencesListClient({ initialRows }: { initialRows: SequenceRow[
                     </div>
                   </td>
                 </tr>
-              ))}
+                );
+              })}
             </tbody>
           </table>
         </div>
@@ -258,6 +304,11 @@ export function SequencesListClient({ initialRows }: { initialRows: SequenceRow[
 
       <div className="rounded-xl border border-bg-border bg-bg-elev/30 p-4 text-xs text-fg-muted leading-relaxed">
         <div className="font-bold text-fg mb-1">How sequences fire</div>
+        <span className="text-fg">Follow-ups / lead</span> = how many messages ONE
+        merchant receives from that sequence, and how many land in their first day,
+        first week, and first month. To tune it, open the sequence and add/remove
+        steps or change the delay before each. (For actual send VOLUME across all
+        leads, see the Metrics tab.){" "}
         Each sequence has a trigger (e.g. lead.stage → viewed_application) and an
         ordered list of steps (SMS or email, with a delay before each). When the
         triggering event lands on Bravo&apos;s event bus, the bridge-side{" "}
