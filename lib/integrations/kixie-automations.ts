@@ -252,6 +252,19 @@ export async function handleMissedInbound(
     if (leadId) {
       // Known lead, missed or voicemail → callback signal.
       if (!isVoicemail && !isMissedEnd) return null;
+      // Idempotency (Codex P1 2026-07-21): Kixie retries deliveries, and a
+      // single missed call can fire BOTH voicemail and endcall. The
+      // BRAVO_KIXIE_MISSED_INBOUND event row doubles as the dedupe marker —
+      // one per call_id, checked BEFORE creating an appointment. Fail closed:
+      // a dedupe-check error skips the automation rather than double-booking.
+      const dup = await db
+        .from("agent_events")
+        .select("id")
+        .eq("event_type", "BRAVO_KIXIE_MISSED_INBOUND")
+        .eq("payload->>call_id", callId)
+        .limit(1);
+      if (dup.error) return { action, ok: false, detail: "dedupe_check_failed" };
+      if ((dup.data || []).length > 0) return { action, ok: true, detail: "deduped_call_id" };
       let apptDetail = "no_rep_for_appointment";
       if (rep) {
         const ins = await db.from("call_appointments").insert({
@@ -304,6 +317,8 @@ export async function handleMissedInbound(
     const newLeadId = (ins.data as { id: string }).id;
 
     // Backfill the call row (persist skipped it — there was no lead yet).
+    // Duration rides along (Codex P2 2026-07-21) so metrics count this as a
+    // connected call; an answered talk backfills as call_ended, not incoming.
     await db.from("lead_interactions").upsert(
       {
         tenant_id: tenantId,
@@ -313,7 +328,8 @@ export async function handleMissedInbound(
         kixie_call_id: callId,
         direction: "inbound",
         from_phone: merchantPhone || null,
-        type: isVoicemail ? "call_voicemail" : "call_incoming",
+        type: isVoicemail ? "call_voicemail" : "call_ended",
+        ...(duration !== null ? { call_duration_sec: duration } : {}),
         ...(isVoicemail ? { call_outcome: "voicemail" } : {}),
         content_preview: "Inbound call from new caller (lead auto-created)",
         metadata: { kixie_agent_email: evt.email || null, auto_created_lead: true },
