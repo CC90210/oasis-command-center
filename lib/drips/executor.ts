@@ -42,7 +42,7 @@ import { renderTemplate } from "@/lib/drips/templates";
 import { parseDripSteps, type DripStep } from "@/lib/drips/types";
 import { sendDripSms, sendDripEmail } from "@/lib/drips/send";
 import { buildDripHtml, listUnsubscribeHeader } from "@/lib/drips/html-email";
-import { resolveDripSmsIdentity } from "@/lib/drips/rep-sms-identity";
+import { resolveDripSmsIdentity, type DripSmsIdentity } from "@/lib/drips/rep-sms-identity";
 import { nudgeConversations } from "@/lib/realtime/conversations-nudge";
 
 export const BATCH_LIMIT = 12;
@@ -81,6 +81,41 @@ function spreadJitterMs(): number {
 const EMAIL_WIN_START = envNum("DRIP_EMAIL_WINDOW_START", 8);
 const EMAIL_WIN_END = envNum("DRIP_EMAIL_WINDOW_END", 20);
 const EMAIL_WIN_TZ = (process.env.DRIP_EMAIL_WINDOW_TZ || "America/New_York").trim() || "America/New_York";
+
+const E164_RE = /^\+[1-9][0-9]{9,14}$/;
+
+/**
+ * Runtime override for the accelerated two-number pool (JSON array of E.164
+ * strings, e.g. '["+15614650503","+14707429516"]'). When set AND valid, it
+ * replaces whatever numbers are baked into the sequence's steps — so a
+ * carrier-burned accelerated number can be rotated WITHOUT a redeploy or a
+ * sequence re-install (mirrors DRIP_REP_SMS_IDENTITIES). A malformed/empty
+ * value falls back to the step's own from_number (fail-safe, never a throw). */
+function acceleratedNumberPool(): string[] {
+  const raw = (process.env.DRIP_ACCELERATED_NUMBERS || "").trim();
+  if (!raw) return [];
+  try {
+    const arr = JSON.parse(raw);
+    if (!Array.isArray(arr)) return [];
+    return arr.filter((x): x is string => typeof x === "string" && E164_RE.test(x.trim())).map((x) => x.trim());
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * The pinned sending number for one SMS step, or null to use the per-rep
+ * identity. A step opts in by declaring `from_number`; the env pool (if any)
+ * overrides it, alternating by step_index so consecutive sends rotate across
+ * the two numbers. Always E.164-validated before it can reach sender_id. */
+function pinnedSenderId(step: DripStep, stepIndex: number): string | null {
+  const baked = typeof step.from_number === "string" ? step.from_number.trim() : "";
+  if (!baked) return null; // step didn't opt in — normal per-rep routing
+  const pool = acceleratedNumberPool();
+  const pick = pool.length ? pool[stepIndex % pool.length] : baked;
+  if (E164_RE.test(pick)) return pick;
+  return E164_RE.test(baked) ? baked : null;
+}
 
 /** ms the wall-clock in `tz` is ahead of UTC at `date` (negative for US zones). */
 function tzOffsetMs(tz: string, date: Date): number {
@@ -154,7 +189,7 @@ type ClaimedRow = {
 };
 
 type LeadData = Record<string, unknown>;
-type SequenceRow = { id: string; name: string; enabled: boolean; steps: unknown; emailClass: string; triggerStage: string | null };
+type SequenceRow = { id: string; name: string; enabled: boolean; steps: unknown; emailClass: string; triggerStage: string | null; triggerFlag: string | null };
 
 export type DispatchDripsResult = {
   ok: true;
@@ -590,12 +625,22 @@ async function processSmsStep(
   const clean = await sanitizeBlastMessage(row.tenant_id, rendered, { checkPositioning: true });
   if (!clean.ok) return handleGuardBlock(db, row, steps, clean, "sms");
 
-  // Per-rep routing: this lead's SMS goes out AS its rep's TT sub-account
-  // (Alex/Jordan) or the admin/parent account (Matt/owner/unattributed), from
-  // that rep's own number. Resolved here (before the send gate) so the dry-run
-  // log also records who WOULD have sent it.
-  const identity = await resolveDripSmsIdentity(row.tenant_id, row.lead_id, data);
-  if ("error" in identity) return markRetryOrFail(db, row, `sms_identity: ${identity.error}`);
+  // Sender routing. Default: this lead's SMS goes out AS its rep's TT
+  // sub-account (Alex/Jordan) or the admin/parent account (Matt/owner/
+  // unattributed), from that rep's own number. Resolved here (before the send
+  // gate) so the dry-run log also records who WOULD have sent it.
+  //   Override: a step with a pinned `from_number` (the accelerated 2-number
+  //   chase) sends from THAT number on the parent/admin account (no act-as) —
+  //   bypassing per-rep resolution so the two dedicated lines alternate.
+  let identity: DripSmsIdentity;
+  const pinned = pinnedSenderId(step, row.step_index);
+  if (pinned) {
+    identity = { actAsEmail: null, senderId: pinned, repKey: "accel" };
+  } else {
+    const resolved = await resolveDripSmsIdentity(row.tenant_id, row.lead_id, data);
+    if ("error" in resolved) return markRetryOrFail(db, row, `sms_identity: ${resolved.error}`);
+    identity = resolved;
+  }
 
   const dripsLive = process.env.DRIPS_LIVE === "1";
   const shouldSend = dripSendEnabled();
@@ -830,6 +875,15 @@ async function processRow(
     return markCancelled(db, row, `stage_changed: lead now at ${String(data.stage ?? "unknown")}`);
   }
 
+  // Flag-cancel (accelerated chase): a flag-triggered sequence stops the instant
+  // its flag clears on the lead — the manage cron clears accelerated_followup
+  // when the lead advances to an in-funnel stage, gets marked dead, or a rep
+  // toggles it off, and this cancels the remaining chase within one dispatch
+  // tick instead of waiting for the hourly enroll pass.
+  if (seq.triggerFlag && !isTruthyFlag(data[seq.triggerFlag])) {
+    return markCancelled(db, row, `flag_cleared: ${seq.triggerFlag}`);
+  }
+
   if (step.channel === "sms") return processSmsStep(db, row, data, step, steps);
   return processEmailStep(db, row, data, step, steps, seq.emailClass || "commercial");
 }
@@ -949,7 +1003,16 @@ export async function runDispatchDrips(): Promise<DispatchDripsResult> {
       const tf = r.trigger_filter as { to?: unknown; field?: unknown; entity?: unknown } | null;
       const isStageTrigger = !!tf && (!tf.field || tf.field === "stage") && (!tf.entity || tf.entity === "lead");
       const triggerStage = isStageTrigger && typeof tf!.to === "string" && tf!.to.trim() ? (tf!.to as string).trim() : null;
-      seqMap.set(`${r.tenant_id}|${r.id}`, { id: r.id, name: r.name, enabled: r.enabled, steps: r.steps, emailClass: r.email_class || "commercial", triggerStage });
+      // Flag-triggered sequence (e.g. accelerated_followup): trigger_filter.field
+      // names a boolean lead-data flag rather than "stage". Captured so the
+      // dispatcher cancels the run the instant that flag goes false (the lead
+      // was handled / unflagged) — the flag-based analogue of the stage-match
+      // cancel. Only lead-entity, non-"stage" fields with a target qualify.
+      const triggerFlag =
+        !!tf && (!tf.entity || tf.entity === "lead") && typeof tf.field === "string" && tf.field.trim() && tf.field !== "stage"
+          ? (tf.field as string).trim()
+          : null;
+      seqMap.set(`${r.tenant_id}|${r.id}`, { id: r.id, name: r.name, enabled: r.enabled, steps: r.steps, emailClass: r.email_class || "commercial", triggerStage, triggerFlag });
     }
   } catch (err) {
     console.error("[dispatch-drips] sequence prefetch failed", err);

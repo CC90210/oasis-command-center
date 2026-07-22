@@ -44,6 +44,17 @@ export type DripStep = {
   /** Optional sender label — agent name, e.g. "Solara" or "Helios". */
   from_label?: string;
   /**
+   * Optional pinned sending number (E.164, e.g. "+15614650503"). SMS steps
+   * only. When set, this step's SMS goes out from THIS number on the parent/
+   * admin TextTorrent account, bypassing the per-rep sender identity — the
+   * mechanism behind the two-number accelerated-chase alternation (each step
+   * carries numberA or numberB). Ignored on email steps. Charset/E.164
+   * validated here; a malformed value is dropped so it can never reach the
+   * send body's sender_id (see [[argv-for-path-handling]]) and the step falls
+   * back to the normal per-rep identity.
+   */
+  from_number?: string;
+  /**
    * Optional body variations (2026-07-10). When present, the executor picks ONE
    * DETERMINISTICALLY per (lead_id, step_index) — so a given lead always gets
    * the same variant across retries/reclaims, while different leads spread
@@ -157,6 +168,13 @@ function parseStep(v: unknown, path: string): DripStep {
   }
   const fromLabel = optionalString(v, "from_label");
   if (fromLabel) step.from_label = fromLabel;
+  // Pinned sender number — SMS only, strict E.164 allowlist. A malformed value
+  // is silently dropped (not an error) so the step degrades to the per-rep
+  // identity rather than pushing a bad string toward the TT send body.
+  const fromNumber = optionalString(v, "from_number");
+  if (fromNumber && channel === "sms" && /^\+[1-9][0-9]{9,14}$/.test(fromNumber.trim())) {
+    step.from_number = fromNumber.trim();
+  }
   const bodyVariants = optionalStringArray(v, "body_variants");
   if (bodyVariants) step.body_variants = bodyVariants;
   const subjectVariants = optionalStringArray(v, "subject_variants");

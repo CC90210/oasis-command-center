@@ -52,6 +52,10 @@
     {
       "path": "/api/cron/kixie-compliance-scan?mode=weekly",
       "schedule": "40 13 * * 1"
+    },
+    {
+      "path": "/api/cron/enroll-accelerated",
+      "schedule": "*/15 * * * *"
     }
   ]
 }

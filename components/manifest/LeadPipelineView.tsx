@@ -21,8 +21,10 @@ import {
   Square,
   UserPlus,
   X,
+  Zap,
 } from "lucide-react";
 import type { StageMeta } from "@/lib/sunbiz-stage-meta";
+import { AcceleratedToggle } from "@/components/manifest/AcceleratedToggle";
 import {
   SUNBIZ_BULK_SAFE_TEMPLATES,
   SUNBIZ_TEMPLATE_CATEGORIES,
@@ -58,6 +60,21 @@ import { InlineStageControl } from "@/components/manifest/InlineStageControl";
 import { QuickAddLeadModal } from "@/components/manifest/QuickAddLeadModal";
 
 type Row = { id: string; data: Record<string, unknown>; updated_at?: string; created_at?: string };
+
+/** A lead on the accelerated SMS chase (data.accelerated_followup truthy). */
+function isAccelerated(r: Row): boolean {
+  const v = r.data.accelerated_followup;
+  return v === true || v === "true";
+}
+
+/** Stable sort that floats accelerated leads to the top of a stage list without
+ *  otherwise reordering (keeps the existing within-group order). */
+function sortAcceleratedFirst(rowsIn: Row[]): Row[] {
+  const accel: Row[] = [];
+  const rest: Row[] = [];
+  for (const r of rowsIn) (isAccelerated(r) ? accel : rest).push(r);
+  return accel.length ? [...accel, ...rest] : rowsIn;
+}
 
 /**
  * Pipeline variant. `sunbiz` keeps the legacy 13-column funding-funnel
@@ -626,40 +643,32 @@ export function LeadPipelineView({
         </div>
       )}
 
+      {/* Accelerated leads no longer live in a separate lumped bucket — each
+          one shows inside its REAL stage below (pinned to the top of its stage
+          with a lightning chip) so it can be worked and moved stage-by-stage in
+          place. This is just the at-a-glance count + a reminder of what the chip
+          means. (2026-07-21, Adon.) */}
       {!stageFilter && variant === "sunbiz" && entityName === "lead" && (() => {
-        const acceleratedRows = rows.filter(
-          (r) => r.data.accelerated_followup === true || r.data.accelerated_followup === "true",
-        );
-        if (!acceleratedRows.length) return null;
-        const accelStage: StageMeta = {
-          key: "accelerated_followup",
-          label: "Accelerated Follow-up",
-          bg: "#7c3aed",
-          fg: "#FFFFFF",
-        };
+        const n = rows.filter(isAccelerated).length;
+        if (!n) return null;
         return (
-          <StageSection
-            key="accelerated_followup"
-            slug={slug}
-            entityName={entityName}
-            stage={accelStage}
-            rows={acceleratedRows}
-            collapsed={collapsedStages["accelerated_followup"] ?? true}
-            onToggle={() => toggleStage("accelerated_followup")}
-            variant={variant}
-            cfg={cfg}
-            basePath={basePath}
-            stageMap={stageMap}
-            selectMode={selectMode}
-            selected={selected}
-            onToggleSelect={toggleSelect}
-          />
+          <div className="flex items-center gap-2 rounded-lg border border-amber-400/30 bg-amber-400/5 px-3 py-2 text-xs text-fg-muted">
+            <Zap className="h-3.5 w-3.5 shrink-0 text-amber-300" fill="currentColor" />
+            <span>
+              <span className="font-bold text-amber-300">{n}</span> lead{n === 1 ? "" : "s"} on the
+              accelerated SMS chase. They&apos;re pinned to the top of their stage below with the{" "}
+              <span className="font-bold text-amber-300">Accel</span> chip. Click a chip to stop the
+              chase; the lead drops off automatically once it reaches the application funnel.
+            </span>
+          </div>
         );
       })()}
 
       {visibleStages.map((stage) => {
-        const stageRows = applyDocFilter(
-          renderedRows.filter((r) => String(r.data[stageField] || "") === stage.key),
+        const stageRows = sortAcceleratedFirst(
+          applyDocFilter(
+            renderedRows.filter((r) => String(r.data[stageField] || "") === stage.key),
+          ),
         );
         return (
           <StageSection
@@ -1246,8 +1255,13 @@ function DesktopRow({
             {initialsOf(model.businessName)}
           </span>
           <span className="min-w-0">
-            <span className="block truncate font-semibold text-fg" title={model.businessName}>
-              {model.businessName}
+            <span className="flex min-w-0 items-center gap-1.5">
+              <span className="truncate font-semibold text-fg" title={model.businessName}>
+                {model.businessName}
+              </span>
+              {entityName === "lead" && (
+                <AcceleratedToggle recordId={row.id} on={isAccelerated(row)} />
+              )}
             </span>
             <span className="block truncate text-[10px] text-fg-dim" title={model.subtitle}>
               {model.subtitle}
@@ -1359,7 +1373,12 @@ function MobileRow({
         <div className="min-w-0 flex-1">
           <div className="flex items-start justify-between gap-2">
             <div className="min-w-0">
-              <div className="truncate text-sm font-semibold text-fg">{model.businessName}</div>
+              <div className="flex min-w-0 items-center gap-1.5">
+                <div className="truncate text-sm font-semibold text-fg">{model.businessName}</div>
+                {entityName === "lead" && (
+                  <AcceleratedToggle recordId={row.id} on={isAccelerated(row)} />
+                )}
+              </div>
               <div className="truncate text-[11px] text-fg-dim">{model.ownerName}</div>
             </div>
             <InlineStageControl
