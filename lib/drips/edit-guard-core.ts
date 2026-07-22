@@ -15,21 +15,52 @@ export function extractCopyTokens(text: string): Set<string> {
   return out;
 }
 
-/** All human-visible copy of one step, joined for scanning. */
+/** All copy of one step that can REACH a merchant, joined for scanning —
+ *  including `body_html`, which is what actually gets delivered when present
+ *  (codex P1 2026-07-22: HTML previously bypassed the write guard). */
 export function stepCopyJoined(s: DripStep): string {
-  return [s.subject || "", s.body, ...(s.subject_variants || []), ...(s.body_variants || [])]
+  return [
+    s.subject || "",
+    s.body,
+    s.body_html || "",
+    ...(s.subject_variants || []),
+    ...(s.body_variants || []),
+  ]
     .filter(Boolean)
     .join("\n");
 }
 
-/** Tokens present in `prior` but missing from `next` — the silent-merge-break case. */
-export function droppedTokens(prior: DripStep, next: DripStep): string[] {
-  const before = extractCopyTokens(stepCopyJoined(prior));
-  const after = extractCopyTokens(stepCopyJoined(next));
-  return [...before].filter((t) => !after.has(t));
+/** Union of merge tokens across a whole sequence's steps. */
+export function sequenceTokens(steps: DripStep[]): Set<string> {
+  const out = new Set<string>();
+  for (const s of steps || []) {
+    for (const t of extractCopyTokens(stepCopyJoined(s))) out.add(t);
+  }
+  return out;
 }
 
-/** True when an SMS edit removed a previously-present opt-out instruction. */
-export function stopLineRemoved(prior: DripStep, next: DripStep): boolean {
-  return STOP_RE.test(stepCopyJoined(prior)) && !STOP_RE.test(stepCopyJoined(next));
+/**
+ * Tokens referenced ANYWHERE in the prior sequence but NOWHERE in the next —
+ * sequence-level on purpose (codex P1 2026-07-22): index-to-index comparison
+ * false-rejected legitimate reorders/inserts/deletes. Moving a token between
+ * steps is fine; only losing it from the whole sequence flags.
+ */
+export function sequenceDroppedTokens(prior: DripStep[], next: DripStep[]): string[] {
+  const after = sequenceTokens(next);
+  return [...sequenceTokens(prior)].filter((t) => !after.has(t));
+}
+
+/**
+ * True when the prior sequence carried an SMS opt-out instruction, the next
+ * still has SMS steps, and NONE of them carries one — sequence-level for the
+ * same reorder-safety reason. A sequence that drops SMS entirely passes.
+ */
+export function smsStopRemoved(prior: DripStep[], next: DripStep[]): boolean {
+  const priorHadStop = (prior || []).some(
+    (s) => s.channel === "sms" && STOP_RE.test(stepCopyJoined(s)),
+  );
+  if (!priorHadStop) return false;
+  const nextSms = (next || []).filter((s) => s.channel === "sms");
+  if (nextSms.length === 0) return false;
+  return !nextSms.some((s) => STOP_RE.test(stepCopyJoined(s)));
 }

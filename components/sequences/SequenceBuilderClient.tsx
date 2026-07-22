@@ -133,8 +133,12 @@ export function SequenceBuilderClient({ initialSequence }: Props) {
   const [saveMessage, setSaveMessage] = useState<
     null | { kind: "ok" | "err"; text: string }
   >(null);
+  // Set when the server rejected a save for removing merge fields — renders a
+  // deliberate second-step "remove anyway" button (STOP-line removal has no
+  // such override).
+  const [tokenOverrideOffer, setTokenOverrideOffer] = useState<string[] | null>(null);
 
-  async function save() {
+  async function save(allowTokenRemoval = false) {
     if (parsed.error) {
       setSaveMessage({
         kind: "err",
@@ -144,6 +148,7 @@ export function SequenceBuilderClient({ initialSequence }: Props) {
     }
     setSaving(true);
     setSaveMessage(null);
+    setTokenOverrideOffer(null);
     try {
       const res = await fetch(`/api/sequences/${initialSequence.id}`, {
         method: "PATCH",
@@ -157,15 +162,21 @@ export function SequenceBuilderClient({ initialSequence }: Props) {
           enabled,
           one_per_lead: onePerLead,
           email_class: emailClass,
+          ...(allowTokenRemoval ? { allowTokenRemoval: true } : {}),
         }),
       });
-      const data = (await res.json()) as { ok: boolean; error?: string; path?: string; reason?: string };
+      const data = (await res.json()) as {
+        ok: boolean; error?: string; path?: string; reason?: string; message?: string; detail?: string[];
+      };
       if (!data.ok) {
+        if (data.error === "tokens_dropped") setTokenOverrideOffer(data.detail || []);
         setSaveMessage({
           kind: "err",
-          text: data.path && data.reason
-            ? `Save failed — ${data.path}: ${data.reason}`
-            : `Save failed: ${data.error || `http_${res.status}`}`,
+          text: data.message
+            ? data.message
+            : data.path && data.reason
+              ? `Save failed — ${data.path}: ${data.reason}`
+              : `Save failed: ${data.error || `http_${res.status}`}`,
         });
         return;
       }
@@ -337,13 +348,23 @@ export function SequenceBuilderClient({ initialSequence }: Props) {
 
         <div className="flex items-center gap-3">
           <button
-            onClick={save}
+            onClick={() => save()}
             disabled={saving}
             className="inline-flex items-center gap-2 rounded-lg bg-accent text-bg-deep px-4 py-2 text-sm font-bold hover:bg-accent-bright disabled:opacity-50"
           >
             {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
             Save
           </button>
+          {tokenOverrideOffer && (
+            <button
+              onClick={() => save(true)}
+              disabled={saving}
+              className="inline-flex items-center gap-2 rounded-lg border border-status-warm/40 bg-status-warm/10 px-4 py-2 text-sm font-bold text-status-warm hover:bg-status-warm/20 disabled:opacity-50"
+              title={`Confirms removing: ${tokenOverrideOffer.map((t) => `{{${t}}}`).join(", ")}`}
+            >
+              Remove merge fields anyway
+            </button>
+          )}
           <button
             onClick={destroy}
             className="inline-flex items-center gap-2 rounded-lg border border-rose-500/40 text-rose-400 px-4 py-2 text-sm font-bold hover:bg-rose-500/10"

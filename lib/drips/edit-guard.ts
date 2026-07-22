@@ -21,7 +21,7 @@
 
 import { sanitizeBlastMessage, stripDashes } from "@/lib/integrations/blast-safety";
 import type { DripStep } from "./types";
-import { droppedTokens, stepCopyJoined, stopLineRemoved } from "./edit-guard-core";
+import { sequenceDroppedTokens, smsStopRemoved, stepCopyJoined } from "./edit-guard-core";
 
 export type GuardRejection = {
   ok: false;
@@ -36,18 +36,23 @@ export type GuardResult = { ok: true; steps: DripStep[] } | GuardRejection;
  * @param steps       the incoming (already parseDripSteps-validated) steps
  * @param priorSteps  the currently-stored steps, when this is an edit; pass
  *                    null on create (token/STOP preservation has no baseline)
+ * @param opts.allowTokenRemoval  operator explicitly confirmed the removed
+ *                    merge fields are intentional (the builder's second-step
+ *                    "remove anyway" flow). STOP-line removal has NO override.
  */
 export async function guardSequenceSteps(
   tenantId: string,
   steps: DripStep[],
   priorSteps: DripStep[] | null,
+  opts: { allowTokenRemoval?: boolean } = {},
 ): Promise<GuardResult> {
   const cleaned: DripStep[] = [];
   for (let i = 0; i < steps.length; i++) {
     const s = steps[i];
     const joined = stepCopyJoined(s);
 
-    // 1. Compliance denylist — EVERY channel (SMS was write-unguarded before).
+    // 1. Compliance denylist — EVERY channel (SMS was write-unguarded before)
+    //    and every copy field incl. body_html (what actually delivers).
     const guard = await sanitizeBlastMessage(tenantId, joined, { checkPositioning: true });
     if (!guard.ok) {
       return {
@@ -58,44 +63,42 @@ export async function guardSequenceSteps(
       };
     }
 
-    const prior = priorSteps && i < priorSteps.length ? priorSteps[i] : null;
-
-    // 2. Merge-token preservation vs the prior copy of the SAME step slot.
-    if (prior) {
-      const dropped = droppedTokens(prior, s);
-      if (dropped.length) {
-        return {
-          ok: false,
-          error: "tokens_dropped",
-          step: i,
-          message:
-            `Step ${i + 1}: this edit removes merge field(s) ${dropped.map((t) => `{{${t}}}`).join(", ")} — ` +
-            `they fill from the lead at send time. Keep them, or intentionally rewrite the step without them by ` +
-            `first saving a version that renames the step copy entirely.`,
-          detail: dropped,
-        };
-      }
-    }
-
-    // 3. SMS opt-out line preservation.
-    if (s.channel === "sms" && prior && prior.channel === "sms") {
-      if (stopLineRemoved(prior, s)) {
-        return {
-          ok: false,
-          error: "stop_line_removed",
-          step: i,
-          message: `Step ${i + 1}: the SMS opt-out instruction (e.g. "Reply STOP to opt out") was removed — it must stay.`,
-        };
-      }
-    }
-
     cleaned.push({
       ...s,
       subject: s.subject ? stripDashes(s.subject) : s.subject,
       body: stripDashes(s.body),
+      ...(s.body_html ? { body_html: stripDashes(s.body_html) } : {}),
       ...(s.subject_variants ? { subject_variants: s.subject_variants.map(stripDashes) } : {}),
       ...(s.body_variants ? { body_variants: s.body_variants.map(stripDashes) } : {}),
     });
   }
+
+  // 2 + 3. Preservation checks are SEQUENCE-level (codex P1: per-index
+  // comparison false-rejected reorders/inserts/deletes — moving copy between
+  // steps is legitimate; losing it from the sequence is what flags).
+  if (priorSteps) {
+    const dropped = sequenceDroppedTokens(priorSteps, steps);
+    if (dropped.length && !opts.allowTokenRemoval) {
+      return {
+        ok: false,
+        error: "tokens_dropped",
+        step: -1,
+        message:
+          `This edit removes merge field(s) ${dropped.map((t) => `{{${t}}}`).join(", ")} from the whole sequence — ` +
+          `they fill from the lead at send time. Keep them somewhere, or confirm the removal is intentional.`,
+        detail: dropped,
+      };
+    }
+    if (smsStopRemoved(priorSteps, steps)) {
+      return {
+        ok: false,
+        error: "stop_line_removed",
+        step: -1,
+        message:
+          'The SMS opt-out instruction (e.g. "Reply STOP to opt out") no longer appears in any SMS step — at least one must keep it.',
+      };
+    }
+  }
+
   return { ok: true, steps: cleaned };
 }

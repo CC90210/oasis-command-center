@@ -138,7 +138,9 @@ export async function PATCH(
     } catch {
       priorSteps = null; // legacy malformed row — no preservation baseline
     }
-    const guarded = await guardSequenceSteps(tenantId, steps, priorSteps);
+    const guarded = await guardSequenceSteps(tenantId, steps, priorSteps, {
+      allowTokenRemoval: body.allowTokenRemoval === true,
+    });
     if (!guarded.ok) {
       return NextResponse.json(
         { ok: false, error: guarded.error, step: guarded.step, message: guarded.message, detail: guarded.detail },

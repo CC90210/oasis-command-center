@@ -4,7 +4,12 @@ import {
   formatDelayMinutes,
   sequenceSearchText,
 } from "../lib/drips/template-inventory";
-import { droppedTokens, extractCopyTokens, stopLineRemoved } from "../lib/drips/edit-guard-core";
+import {
+  extractCopyTokens,
+  sequenceDroppedTokens,
+  smsStopRemoved,
+  stepCopyJoined,
+} from "../lib/drips/edit-guard-core";
 import type { DripStep } from "../lib/drips/types";
 
 // Template inventory + edit-guard pure logic (2026-07-22 drip visibility/editor build).
@@ -56,30 +61,60 @@ assert.deepEqual(
 );
 assert.equal(extractCopyTokens("no tokens").size, 0);
 
-// --- droppedTokens: variant-pool tokens count on BOTH sides ---
-const priorStep: DripStep = {
-  channel: "email", delay_minutes: 5, subject: "Hi {{lead.first_name}}",
-  body: "For {{lead.business_name}}", body_variants: ["Alt for {{lead.application_url}}"],
-};
+// --- stepCopyJoined includes body_html (codex P1: HTML is what delivers) ---
+const htmlStep: DripStep = {
+  channel: "email", delay_minutes: 5, subject: "S", body: "plain",
+  body_html: "<p>Hi {{lead.first_name}} from our lender network</p>",
+} as DripStep;
+assert.ok(stepCopyJoined(htmlStep).includes("our lender network"), "body_html is scanned");
+assert.ok(extractCopyTokens(stepCopyJoined(htmlStep)).has("lead.first_name"), "body_html tokens count");
+
+// --- sequenceDroppedTokens: SEQUENCE-level (reorder-safe, codex P1) ---
+const priorSeq: DripStep[] = [
+  { channel: "email", delay_minutes: 5, subject: "Hi {{lead.first_name}}", body: "For {{lead.business_name}}" } as DripStep,
+  { channel: "sms", delay_minutes: 60, body: "Link: {{lead.application_url}}. Reply STOP to opt out" } as DripStep,
+];
+// Reorder + move a token between steps: NOT a drop.
 assert.deepEqual(
-  droppedTokens(priorStep, { channel: "email", delay_minutes: 5, subject: "Hi", body: "For {{lead.business_name}}" } as DripStep).sort(),
-  ["lead.application_url", "lead.first_name"],
-  "dropping subject token + a variant-only token both flagged",
-);
-assert.deepEqual(
-  droppedTokens(priorStep, { ...priorStep, body: "Now {{lead.business_name}} and {{lead.email}}" } as DripStep),
+  sequenceDroppedTokens(priorSeq, [
+    { channel: "sms", delay_minutes: 60, body: "{{lead.first_name}}: {{lead.application_url}}. Reply STOP to opt out" } as DripStep,
+    { channel: "email", delay_minutes: 5, subject: "Hi", body: "For {{lead.business_name}}" } as DripStep,
+  ]),
   [],
-  "adding a token is fine",
+  "reorder + token moved across steps passes",
+);
+// Token gone from the WHOLE sequence: flagged.
+assert.deepEqual(
+  sequenceDroppedTokens(priorSeq, [
+    { channel: "email", delay_minutes: 5, subject: "Hi {{lead.first_name}}", body: "For {{lead.business_name}}" } as DripStep,
+    { channel: "sms", delay_minutes: 60, body: "Reply STOP to opt out" } as DripStep,
+  ]),
+  ["lead.application_url"],
+  "sequence-wide token loss flagged",
 );
 
-// --- stopLineRemoved ---
-const smsPrior: DripStep = { channel: "sms", delay_minutes: 5, body: "Hey. Reply STOP to opt out" };
-assert.equal(stopLineRemoved(smsPrior, { channel: "sms", delay_minutes: 5, body: "Hey there" } as DripStep), true, "removed STOP flagged");
-assert.equal(stopLineRemoved(smsPrior, { channel: "sms", delay_minutes: 5, body: "Yo. Text STOP to end" } as DripStep), false, "alternate STOP phrasing kept");
+// --- smsStopRemoved: sequence-level ---
 assert.equal(
-  stopLineRemoved({ channel: "sms", delay_minutes: 5, body: "no stop before" } as DripStep, { channel: "sms", delay_minutes: 5, body: "still none" } as DripStep),
+  smsStopRemoved(priorSeq, [
+    { channel: "sms", delay_minutes: 60, body: "No opt out text" } as DripStep,
+  ]),
+  true,
+  "all SMS lost the STOP line -> flagged",
+);
+assert.equal(
+  smsStopRemoved(priorSeq, [
+    { channel: "sms", delay_minutes: 60, body: "hey" } as DripStep,
+    { channel: "sms", delay_minutes: 90, body: "bye. Text STOP to end" } as DripStep,
+  ]),
   false,
-  "no baseline STOP -> nothing to preserve",
+  "one SMS still carries STOP -> passes",
+);
+assert.equal(
+  smsStopRemoved(priorSeq, [
+    { channel: "email", delay_minutes: 5, subject: "s", body: "email only now" } as DripStep,
+  ]),
+  false,
+  "sequence dropped SMS entirely -> nothing to preserve",
 );
 
 console.log("drip-template-inventory: ALL PASS");
