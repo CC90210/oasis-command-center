@@ -21,8 +21,9 @@ import {
   parseDripSteps,
   parseDripTriggerFilter,
   DripDefinitionError,
+  type DripStep,
 } from "@/lib/drips/types";
-import { sanitizeBlastMessage, stripDashes } from "@/lib/integrations/blast-safety";
+import { guardSequenceSteps } from "@/lib/drips/edit-guard";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -98,6 +99,23 @@ export async function PATCH(
       throw err;
     }
   }
+  const db = getServiceSupabase();
+  // Prior row: the token/STOP-preservation baseline for the copy guard AND
+  // the snapshot that goes into version history when copy changes.
+  const priorRes = await db
+    .from("drip_sequences")
+    .select("*")
+    .eq("id", id)
+    .eq("tenant_id", tenantId)
+    .maybeSingle();
+  if (priorRes.error) {
+    return NextResponse.json({ ok: false, error: priorRes.error.message }, { status: 500 });
+  }
+  if (!priorRes.data) {
+    return NextResponse.json({ ok: false, error: "not_found" }, { status: 404 });
+  }
+  const prior = priorRes.data as { steps: unknown; name: string };
+
   if ("steps" in body) {
     let steps;
     try {
@@ -111,52 +129,40 @@ export async function PATCH(
       }
       throw err;
     }
-    // Fail-closed positioning/lender guard on every email step being saved
-    // (Adon 2026-07-20: template rotation must never let broker/lender copy
-    // into a live drip). The runtime send path strips dashes at send time, but
-    // gating here means a bad AI rewrite or library paste can't PERSIST — the
-    // save is rejected with the offending phrase. SMS steps ride the send-time
-    // blast guard; email copy is what the rotation UI mutates, so we gate it
-    // on write. checkPositioning:true == the same rule the drip executor uses.
-    for (let i = 0; i < steps.length; i++) {
-      const s = steps[i];
-      if (s.channel !== "email") continue;
-      // Guard EVERY piece of email copy that can reach a merchant: base
-      // subject/body AND the A/B variant pools (subject_variants/body_variants),
-      // which the executor samples from at send time. One combined check == one
-      // lender-name lookup; a hit in ANY field blocks the whole save (a bad
-      // variant would otherwise persist unguarded and fire later — 2026-07-20).
-      const parts = [
-        s.subject || "",
-        s.body,
-        ...(s.subject_variants || []),
-        ...(s.body_variants || []),
-      ].filter(Boolean);
-      const guard = await sanitizeBlastMessage(tenantId, parts.join("\n"), { checkPositioning: true });
-      if (!guard.ok) {
-        return NextResponse.json(
-          { ok: false, error: "blocked_copy", step: i, reason: guard.reason, message: `Step ${i + 1}: ${guard.message}` },
-          { status: 400 },
-        );
-      }
-      steps[i] = {
-        ...s,
-        subject: s.subject ? stripDashes(s.subject) : s.subject,
-        body: stripDashes(s.body),
-        ...(s.subject_variants ? { subject_variants: s.subject_variants.map(stripDashes) } : {}),
-        ...(s.body_variants ? { body_variants: s.body_variants.map(stripDashes) } : {}),
-      };
+    // Shared write-time guard (lib/drips/edit-guard): compliance denylist on
+    // EVERY channel (SMS included), merge-token preservation, SMS STOP-line
+    // preservation, dash strip. Fail-closed: nothing persists on a hit.
+    let priorSteps: DripStep[] | null = null;
+    try {
+      priorSteps = parseDripSteps(prior.steps);
+    } catch {
+      priorSteps = null; // legacy malformed row — no preservation baseline
     }
-    patch.steps = steps;
+    const guarded = await guardSequenceSteps(tenantId, steps, priorSteps, {
+      allowTokenRemoval: body.allowTokenRemoval === true,
+    });
+    if (!guarded.ok) {
+      return NextResponse.json(
+        { ok: false, error: guarded.error, step: guarded.step, message: guarded.message, detail: guarded.detail },
+        { status: 400 },
+      );
+    }
+    patch.steps = guarded.steps;
   }
   if ("enabled" in body) patch.enabled = Boolean(body.enabled);
   if ("one_per_lead" in body) patch.one_per_lead = Boolean(body.one_per_lead);
+  if ("email_class" in body) {
+    const v = String(body.email_class || "");
+    if (v !== "transactional" && v !== "commercial") {
+      return NextResponse.json({ ok: false, error: "invalid_email_class" }, { status: 400 });
+    }
+    patch.email_class = v;
+  }
 
   if (Object.keys(patch).length === 0) {
     return NextResponse.json({ ok: false, error: "no_changes" }, { status: 400 });
   }
 
-  const db = getServiceSupabase();
   const { data, error } = await db
     .from("drip_sequences")
     .update(patch)
@@ -167,7 +173,22 @@ export async function PATCH(
   if (error) {
     return NextResponse.json({ ok: false, error: error.message }, { status: 500 });
   }
-  return NextResponse.json({ ok: true, sequence: data });
+
+  // Version history: when the STEPS changed, snapshot the PRIOR copy so the
+  // edit is reversible. Best-effort — history-write failure never fails the
+  // save (the save already happened); it does surface in the response.
+  let historySaved: boolean | undefined;
+  if ("steps" in patch) {
+    const hist = await db.from("drip_sequence_versions").insert({
+      tenant_id: tenantId,
+      sequence_id: id,
+      name: prior.name,
+      steps: prior.steps,
+      edited_by: session.authUserId ?? null,
+    });
+    historySaved = !hist.error;
+  }
+  return NextResponse.json({ ok: true, sequence: data, ...(historySaved === undefined ? {} : { historySaved }) });
 }
 
 export async function DELETE(
