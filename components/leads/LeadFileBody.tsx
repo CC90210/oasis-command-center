@@ -27,6 +27,7 @@ import { AutofillDropzone } from "./AutofillDropzone";
 import { SignApplicationControl } from "./SignApplicationControl";
 import { ScheduleCallControl } from "./ScheduleCallControl";
 import { humanLeadDocSize, leadDocTypeLabel, LEAD_DOC_TYPES } from "@/lib/lead-doc-display";
+import { ApplicationEditForm } from "@/components/applications/ApplicationEditForm";
 import { SalesMetricCard } from "@/components/underwriting/SalesMetricCard";
 import { formatMoney, relTime } from "@/lib/format-helpers";
 import { lastTouchIsoFlat } from "@/lib/lead-staleness";
@@ -93,6 +94,11 @@ export function LeadFileBody({
 }) {
   const recordId = leadId;
   const [activeTab, setActiveTab] = useState<TabKey>("activity");
+  // Global "Edit application" (2026-07-22): toggles the application profile's
+  // static content area (tab bar + tab panels + footer composers) into the
+  // inline ApplicationEditForm. Application drawer only; the summary header
+  // stays visible so the operator keeps the deal context while editing.
+  const [editingApplication, setEditingApplication] = useState(false);
   const [summaryHeight, setSummaryHeight] = useState<number | null>(null);
   const [summaryCollapsed, setSummaryCollapsed] = useState(false);
   const summaryRef = useRef<HTMLDivElement>(null);
@@ -285,14 +291,23 @@ export function LeadFileBody({
             <span />
           )}
           {entity === "application" ? (
-            <Link
-              href={editHref}
+            // Global Edit Application (2026-07-22): was a <Link> to the record
+            // page; now toggles the inline editor below (same styling). Saving
+            // PATCHes /api/applications/[id]/edit which also regenerates the
+            // application PDF server-side.
+            <button
+              type="button"
+              onClick={() => setEditingApplication((v) => !v)}
               title="Edit this application's fields. Saving regenerates the application PDF with your changes."
-              className="inline-flex items-center gap-1.5 text-[10.5px] font-semibold px-2.5 py-1 rounded-md border border-bg-border text-fg-muted hover:text-fg hover:border-fg-dim transition-colors"
+              className={`inline-flex items-center gap-1.5 text-[10.5px] font-semibold px-2.5 py-1 rounded-md border transition-colors ${
+                editingApplication
+                  ? "border-accent/50 bg-accent/10 text-accent"
+                  : "border-bg-border text-fg-muted hover:text-fg hover:border-fg-dim"
+              }`}
             >
               <FileText className="w-3 h-3" />
-              Edit application
-            </Link>
+              {editingApplication ? "Close editor" : "Edit application"}
+            </button>
           ) : (
             <Link
               href={editHref}
@@ -326,68 +341,95 @@ export function LeadFileBody({
         </button>
       </div>
 
-      {/* Tab nav — softened 2026-06-08: subtle hover bg, tighter padding,
-          border-bg-border/50 so the divider doesn't compete with the
-          header underline above */}
-      <nav className="shrink-0 flex gap-0.5 px-5 pt-3 border-b border-bg-border/50 overflow-x-auto">
-        {TABS.map((t) => {
-          const isDocs = t.key === "documents";
-          const missingCount = isDocs ? computeMissingDocCount(documents) : 0;
-          const isActive = activeTab === t.key;
-          return (
-            <button
-              key={t.key}
-              type="button"
-              onClick={() => setActiveTab(t.key)}
-              className={`text-[11px] uppercase tracking-[0.08em] px-2.5 py-1.5 rounded-t-md border-b-2 inline-flex items-center gap-1.5 transition-colors ${
-                isActive
-                  ? "border-accent text-fg"
-                  : "border-transparent text-fg-muted hover:text-fg hover:bg-bg-deep/30"
-              }`}
-            >
-              <span>{t.label}</span>
-              {isDocs && missingCount > 0 && (
-                <span className="inline-flex items-center justify-center min-w-[16px] h-[16px] px-1 rounded-full bg-red-500/20 text-red-300 text-[9.5px] font-mono">
-                  {missingCount}
-                </span>
-              )}
-            </button>
-          );
-        })}
-      </nav>
+      {entity === "application" && editingApplication ? (
+        /* Inline application editor (2026-07-22): swaps the tab bar + tab
+           panels + footer composers for the edit form. Hiding the tab bar
+           while editing is the cleaner layout choice: the form has its own
+           sections/scroll, the composers can't overlay it mid-edit, and the
+           Docs tab remounts fresh (with the regenerated PDF) when editing
+           ends. onSaved → onReload refetches record + documents + application
+           in one round trip (/api/leads/[id]/detail), so the summary header
+           above live-updates and the static tabs show the new values the
+           moment the editor closes. */
+        <div className="flex-1 min-h-0 overflow-y-auto overscroll-contain px-5 py-4 text-sm">
+          <ApplicationEditForm
+            tenantSlug={tenantSlug}
+            applicationId={recordId}
+            data={record}
+            onSaved={onReload}
+            onCancel={() => setEditingApplication(false)}
+            onViewDocs={() => {
+              setEditingApplication(false);
+              setActiveTab("documents");
+            }}
+          />
+        </div>
+      ) : (
+        <>
+          {/* Tab nav — softened 2026-06-08: subtle hover bg, tighter padding,
+              border-bg-border/50 so the divider doesn't compete with the
+              header underline above */}
+          <nav className="shrink-0 flex gap-0.5 px-5 pt-3 border-b border-bg-border/50 overflow-x-auto">
+            {TABS.map((t) => {
+              const isDocs = t.key === "documents";
+              const missingCount = isDocs ? computeMissingDocCount(documents) : 0;
+              const isActive = activeTab === t.key;
+              return (
+                <button
+                  key={t.key}
+                  type="button"
+                  onClick={() => setActiveTab(t.key)}
+                  className={`text-[11px] uppercase tracking-[0.08em] px-2.5 py-1.5 rounded-t-md border-b-2 inline-flex items-center gap-1.5 transition-colors ${
+                    isActive
+                      ? "border-accent text-fg"
+                      : "border-transparent text-fg-muted hover:text-fg hover:bg-bg-deep/30"
+                  }`}
+                >
+                  <span>{t.label}</span>
+                  {isDocs && missingCount > 0 && (
+                    <span className="inline-flex items-center justify-center min-w-[16px] h-[16px] px-1 rounded-full bg-red-500/20 text-red-300 text-[9.5px] font-mono">
+                      {missingCount}
+                    </span>
+                  )}
+                </button>
+              );
+            })}
+          </nav>
 
-      {/* min-h-0 is REQUIRED: without it this flex-1 scroll region can't shrink
-          below its content height, so on mobile (header + tabs + footer eat the
-          viewport) it collapsed to a tiny scroll strip. overscroll-contain stops
-          the page behind the drawer from scrolling too. (2026-06-30 mobile pass) */}
-      <div className="flex-1 min-h-0 overflow-y-auto overscroll-contain px-5 py-4 text-sm">
-        {activeTab === "activity" && <LeadTimelinePanel leadId={recordId} entity={entity} />}
-        {activeTab === "owner" && (
-          <OwnerTab record={record} recordId={recordId} onReload={onReload} />
-        )}
-        {activeTab === "lenders" && <LendersTab application={application} />}
-        {activeTab === "bank" && (
-          <BankTab record={record} application={application} tenantSlug={tenantSlug} leadId={recordId} />
-        )}
-        {activeTab === "bgc" && <BackgroundCheckTab leadId={recordId} record={record} />}
-        {activeTab === "notes" && <NotesTab leadId={recordId} entity={entity} />}
-        {activeTab === "documents" && (
-          <DocumentsTab
+          {/* min-h-0 is REQUIRED: without it this flex-1 scroll region can't shrink
+              below its content height, so on mobile (header + tabs + footer eat the
+              viewport) it collapsed to a tiny scroll strip. overscroll-contain stops
+              the page behind the drawer from scrolling too. (2026-06-30 mobile pass) */}
+          <div className="flex-1 min-h-0 overflow-y-auto overscroll-contain px-5 py-4 text-sm">
+            {activeTab === "activity" && <LeadTimelinePanel leadId={recordId} entity={entity} />}
+            {activeTab === "owner" && (
+              <OwnerTab record={record} recordId={recordId} onReload={onReload} />
+            )}
+            {activeTab === "lenders" && <LendersTab application={application} />}
+            {activeTab === "bank" && (
+              <BankTab record={record} application={application} tenantSlug={tenantSlug} leadId={recordId} />
+            )}
+            {activeTab === "bgc" && <BackgroundCheckTab leadId={recordId} record={record} />}
+            {activeTab === "notes" && <NotesTab leadId={recordId} entity={entity} />}
+            {activeTab === "documents" && (
+              <DocumentsTab
+                recordId={recordId}
+                entity={entity}
+                initialDocs={documents}
+                canGenerateApp={entity === "application" || !!application}
+                onChange={onReload}
+              />
+            )}
+          </div>
+
+          <DrawerFooter
             recordId={recordId}
             entity={entity}
-            initialDocs={documents}
-            canGenerateApp={entity === "application" || !!application}
+            recordData={record}
             onChange={onReload}
           />
-        )}
-      </div>
-
-      <DrawerFooter
-        recordId={recordId}
-        entity={entity}
-        recordData={record}
-        onChange={onReload}
-      />
+        </>
+      )}
     </div>
   );
 }

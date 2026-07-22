@@ -454,16 +454,10 @@ export async function generateApplicationDocumentFromRecord(input: {
     if (existingRows.length && !input.replace) {
       return { ok: true, documentId: existingRows[0].id }; // already filed; idempotent
     }
-    if (existingRows.length && input.replace) {
-      // Soft-delete the prior generated copy so the new one is the live document.
-      for (const r of existingRows) {
-        await db
-          .from("lead_documents")
-          .update({ metadata: { deleted_at: new Date().toISOString(), deleted_by: "record_regenerate" } })
-          .eq("id", r.id)
-          .eq("tenant_id", input.tenantId);
-      }
-    }
+    // replace=true: the prior copy is retired AFTER the new PDF renders +
+    // uploads successfully (see below). Deleting first meant a failed render/
+    // upload left the application with NO active PDF (Codex P1, 2026-07-22);
+    // a brief two-active-docs window is strictly safer than a zero-doc one.
 
     const { sections, signatureName } = await resolveApplicationSections(
       db,
@@ -499,6 +493,18 @@ export async function generateApplicationDocumentFromRecord(input: {
       extraMetadata: { application_id: input.applicationId, generated_at: signedAt, generated_from: "record" },
     });
     if (!up.ok) return { ok: false, error: up.error };
+
+    // New PDF is filed — NOW retire the prior generated copies so the fresh
+    // one is the single live document.
+    if (existingRows.length && input.replace) {
+      for (const r of existingRows) {
+        await db
+          .from("lead_documents")
+          .update({ metadata: { deleted_at: new Date().toISOString(), deleted_by: "record_regenerate" } })
+          .eq("id", r.id)
+          .eq("tenant_id", input.tenantId);
+      }
+    }
 
     // Timeline marker — best-effort, fixed string + ids only (no PII).
     try {
