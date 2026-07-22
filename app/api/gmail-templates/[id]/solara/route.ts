@@ -19,8 +19,10 @@ import { canWriteCrm } from "@/lib/role-gates";
 import { streamChat, type ChatMessage, type Provider } from "@/lib/providers";
 import { getAgentModelForUser } from "@/lib/agent-resolver";
 import { isOperatorEmail, operatorPlatformFallback } from "@/lib/operator-credentials";
+import { redactAll } from "@/lib/secret-redaction";
 import { validateGmailTemplateFields } from "@/lib/gmail-templates-server";
 import {
+  extractGmailTokens,
   GMAIL_VARIANTS_MAX,
   gmailStageLabel,
   type GmailTemplate,
@@ -166,7 +168,9 @@ export async function POST(
     apiKey = fallback.apiKey;
   }
 
-  const userMessage = [
+  // Model boundary: redact env-secret values / keyed URL params before any
+  // template text or operator guidance leaves for a third-party provider.
+  const userMessage = redactAll([
     `BASE TEMPLATE`,
     `Name: ${template.name}`,
     `Pipeline stage: ${template.stage} (${gmailStageLabel(template.stage)})`,
@@ -176,7 +180,7 @@ export async function POST(
     ``,
     `EXISTING VARIANT LABELS (make something different): ${variants.map((v) => v.label).join("; ") || "none yet"}`,
     guidance ? `OPERATOR GUIDANCE: ${guidance}` : ``,
-  ].join("\n");
+  ].join("\n"));
 
   const messages: ChatMessage[] = [{ role: "user", content: userMessage }];
   const isOllama = provider === "ollama";
@@ -231,6 +235,24 @@ export async function POST(
     );
   }
 
+  // Merge-token preservation is enforcement, not a prompt suggestion: a variant
+  // that drops or invents {{tokens}} would merge wrong at send time.
+  const baseTokens = extractGmailTokens(`${template.subject}\n${template.body}`).join(",");
+  const variantTokens = extractGmailTokens(
+    `${validated.fields.subject ?? ""}\n${validated.fields.body ?? ""}`,
+  ).join(",");
+  if (baseTokens !== variantTokens) {
+    return NextResponse.json(
+      {
+        ok: false,
+        error: "generated_copy_rejected",
+        reason: "merge_tokens_changed",
+        message: `Variant must keep the base merge fields intact (base: ${baseTokens || "none"}; got: ${variantTokens || "none"}). Try again.`,
+      },
+      { status: 422 },
+    );
+  }
+
   const variant: GmailTemplateVariant = {
     id: crypto.randomUUID(),
     label: validated.fields.name ?? label,
@@ -240,21 +262,56 @@ export async function POST(
     created_at: new Date().toISOString(),
   };
 
-  const res = await db
-    .from("gmail_templates")
-    .update({
-      variants: [...variants, variant],
-      updated_at: new Date().toISOString(),
-    })
-    .eq("tenant_id", sess.tenantId)
-    .eq("id", id)
-    .select("*")
-    .single();
-  if (res.error) {
-    return NextResponse.json(
-      { ok: false, error: "attach_failed", message: res.error.message },
-      { status: 500 },
-    );
+  // Attach atomically: the pre-generation snapshot is stale after a long model
+  // call, so re-read fresh state and guard the write on updated_at — a
+  // concurrent generation or variant removal must never be overwritten.
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const fresh = await db
+      .from("gmail_templates")
+      .select("*")
+      .eq("tenant_id", sess.tenantId)
+      .eq("id", id)
+      .maybeSingle();
+    if (fresh.error) {
+      return NextResponse.json(
+        { ok: false, error: "attach_failed", message: fresh.error.message },
+        { status: 500 },
+      );
+    }
+    if (!fresh.data) {
+      return NextResponse.json({ ok: false, error: "not_found" }, { status: 404 });
+    }
+    const current = fresh.data as GmailTemplate;
+    const currentVariants = (current.variants ?? []) as GmailTemplateVariant[];
+    if (currentVariants.length >= GMAIL_VARIANTS_MAX) {
+      return NextResponse.json(
+        { ok: false, error: "variant_limit", message: `Max ${GMAIL_VARIANTS_MAX} variants per template — delete one first.` },
+        { status: 400 },
+      );
+    }
+    const res = await db
+      .from("gmail_templates")
+      .update({
+        variants: [...currentVariants, variant],
+        updated_at: new Date().toISOString(),
+      })
+      .eq("tenant_id", sess.tenantId)
+      .eq("id", id)
+      .eq("updated_at", current.updated_at)
+      .select("*");
+    if (res.error) {
+      return NextResponse.json(
+        { ok: false, error: "attach_failed", message: res.error.message },
+        { status: 500 },
+      );
+    }
+    if (res.data && res.data.length === 1) {
+      return NextResponse.json({ ok: true, template: res.data[0] as GmailTemplate, variant });
+    }
+    // 0 rows matched → a concurrent write moved updated_at; retry on fresh state.
   }
-  return NextResponse.json({ ok: true, template: res.data as GmailTemplate, variant });
+  return NextResponse.json(
+    { ok: false, error: "attach_conflict", message: "Concurrent edits kept winning — try again." },
+    { status: 409 },
+  );
 }
