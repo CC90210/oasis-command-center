@@ -26,6 +26,16 @@
  */
 
 import { useEffect, useState } from "react";
+import {
+  ChevronRight,
+  Phone,
+  PhoneCall,
+  PhoneIncoming,
+  PhoneOutgoing,
+  Sparkles,
+  Voicemail,
+  type LucideIcon,
+} from "lucide-react";
 import { relTime } from "@/lib/format-helpers";
 
 type TimelineEvent = {
@@ -59,6 +69,196 @@ function absTime(iso: string): string {
   } catch {
     return iso;
   }
+}
+
+/* ---------------- Kixie call events (Phase 2 webhook rows) ---------------- */
+
+/** The call fields the timeline route forwards in `meta` for phone rows. */
+type CallMeta = {
+  channel?: string;
+  direction?: string;
+  call_duration_sec?: number | null;
+  disposition?: string | null;
+  call_outcome?: string | null;
+  recording_url?: string | null;
+  transcript_url?: string | null;
+  ci_content?: string | null;
+  metadata?: Record<string, unknown> | null;
+};
+
+function isCallEvent(e: TimelineEvent): boolean {
+  return (
+    e.source === "interaction" &&
+    (e.meta as CallMeta | undefined)?.channel === "phone"
+  );
+}
+
+/** "2m 14s" / "45s" — timeline-compact call duration. */
+function fmtCallDuration(sec: number): string {
+  const m = Math.floor(sec / 60);
+  const s = Math.round(sec % 60);
+  return m > 0 ? `${m}m ${s}s` : `${s}s`;
+}
+
+/** Icon + headline per call lifecycle type (mirrors the route's labels). */
+function callVisual(type: string, direction: string): { Icon: LucideIcon; label: string } {
+  switch (type) {
+    case "call_voicemail":
+      return { Icon: Voicemail, label: "Voicemail" };
+    case "call_ci_summary":
+      return { Icon: Sparkles, label: "AI call summary" };
+    case "call_dispositioned":
+      return { Icon: PhoneCall, label: "Disposition set" };
+    case "call_answered":
+      return { Icon: PhoneCall, label: "Call answered" };
+    case "call_ended":
+      return { Icon: Phone, label: "Call ended" };
+    case "call_incoming":
+      return { Icon: PhoneIncoming, label: "Inbound call" };
+    case "call_outgoing":
+      return { Icon: PhoneOutgoing, label: "Outbound call" };
+    case "call_initiated":
+      return { Icon: PhoneOutgoing, label: "Call initiated" };
+  }
+  return direction === "inbound"
+    ? { Icon: PhoneIncoming, label: "Inbound call" }
+    : { Icon: PhoneOutgoing, label: "Outbound call" };
+}
+
+/**
+ * The route appends "▶ Recording: <url>" / "📄 Transcript: <url>" lines to the
+ * body for older consumers; this panel renders proper links off meta instead,
+ * so strip the raw-URL lines to avoid showing the same artifact twice.
+ */
+function stripArtifactLines(body?: string): string | null {
+  if (!body) return null;
+  const kept = body
+    .split("\n")
+    .filter((l) => !l.startsWith("▶ Recording:") && !l.startsWith("📄 Transcript:"));
+  const out = kept.join("\n").trim();
+  return out || null;
+}
+
+function SentimentBadge({ sentiment }: { sentiment: string | null }) {
+  const v = (sentiment || "").toLowerCase();
+  if (v !== "positive" && v !== "neutral" && v !== "negative") return null;
+  const cls =
+    v === "positive"
+      ? "text-emerald-400 border-emerald-400/30 bg-emerald-400/10"
+      : v === "negative"
+        ? "text-red-400 border-red-400/30 bg-red-400/10"
+        : "text-fg-dim border-bg-border bg-bg-elev";
+  return (
+    <span
+      className={`inline-flex items-center px-1.5 py-px rounded border text-[10px] font-semibold uppercase tracking-wide ${cls}`}
+    >
+      {v}
+    </span>
+  );
+}
+
+/** Expandable AI summary block for call_ci_summary rows. */
+function CiSummaryBlock({ content, sentiment }: { content: string; sentiment: string | null }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="mt-1.5">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        aria-expanded={open}
+        className="flex items-center gap-1.5 text-[11px] font-medium text-sky-400 hover:text-sky-300 transition-colors"
+      >
+        <ChevronRight
+          className={`w-3 h-3 shrink-0 transition-transform ${open ? "rotate-90" : ""}`}
+        />
+        AI call summary
+        <SentimentBadge sentiment={sentiment} />
+      </button>
+      {open && (
+        <div className="mt-1.5 rounded-md border border-bg-border/60 bg-bg-deep/40 px-2.5 py-2 text-[11.5px] text-fg-muted whitespace-pre-wrap break-words">
+          {content}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Rich rendering for Kixie call rows: per-type phone icon, duration,
+ * disposition chip, recording/transcript links, and the expandable AI
+ * summary (with sentiment) on call_ci_summary events. Same compact
+ * bordered-row footprint as every other timeline entry.
+ */
+function CallEventContent({ e }: { e: TimelineEvent }) {
+  const m = (e.meta || {}) as CallMeta;
+  const direction = typeof m.direction === "string" ? m.direction : "outbound";
+  const { Icon, label } = callVisual(e.type, direction);
+  const durationSec =
+    typeof m.call_duration_sec === "number" && m.call_duration_sec > 0
+      ? m.call_duration_sec
+      : null;
+  const disposition = m.disposition || m.call_outcome || null;
+  const isCi = e.type === "call_ci_summary";
+  const body = stripArtifactLines(e.body);
+  const sentiment =
+    typeof m.metadata?.ci_sentiment === "string" ? (m.metadata.ci_sentiment as string) : null;
+  const ciText = (isCi && (m.ci_content || body)) || "";
+  return (
+    <>
+      <div className="flex items-baseline justify-between gap-3">
+        <div className="min-w-0 font-medium text-fg break-words flex items-center gap-1.5 flex-wrap">
+          <Icon className="w-3.5 h-3.5 text-sky-400 shrink-0" aria-hidden />
+          <span>{label}</span>
+          {durationSec !== null && (
+            <span className="text-[11px] text-fg-muted font-mono tabular-nums">
+              {fmtCallDuration(durationSec)}
+            </span>
+          )}
+          {disposition && (
+            <span className="inline-flex items-center px-1.5 py-px rounded border border-bg-border bg-bg-elev text-[10px] font-semibold uppercase tracking-wide text-fg-muted">
+              {disposition.replace(/_/g, " ")}
+            </span>
+          )}
+        </div>
+        <time title={absTime(e.at)} className="text-[10.5px] text-fg-dim font-mono shrink-0">
+          {relTime(e.at)}
+        </time>
+      </div>
+      {isCi && ciText ? (
+        <CiSummaryBlock content={ciText} sentiment={sentiment} />
+      ) : (
+        body && (
+          <div className="mt-1 text-fg-muted whitespace-pre-wrap break-words text-[11.5px]">
+            {body}
+          </div>
+        )
+      )}
+      {(m.recording_url || m.transcript_url) && (
+        <div className="mt-1.5 flex items-center gap-3 text-[11px]">
+          {m.recording_url && (
+            <a
+              href={m.recording_url}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-sky-400 hover:text-sky-300 hover:underline font-medium"
+            >
+              ▶ Recording
+            </a>
+          )}
+          {m.transcript_url && (
+            <a
+              href={m.transcript_url}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-fg-muted hover:text-fg hover:underline"
+            >
+              Transcript
+            </a>
+          )}
+        </div>
+      )}
+    </>
+  );
 }
 
 /**
@@ -173,28 +373,34 @@ export function LeadTimelinePanel({
                     dimmed ? "opacity-50" : ""
                   }`}
                 >
-                  <div className="flex items-baseline justify-between gap-3">
-                    <div className="font-medium text-fg break-words">
-                      {e.title}
-                      {dimmed && (
-                        <span className="ml-1.5 text-[10px] text-fg-dim font-mono">
-                          (prefetch)
-                        </span>
+                  {isCallEvent(e) ? (
+                    <CallEventContent e={e} />
+                  ) : (
+                    <>
+                      <div className="flex items-baseline justify-between gap-3">
+                        <div className="font-medium text-fg break-words">
+                          {e.title}
+                          {dimmed && (
+                            <span className="ml-1.5 text-[10px] text-fg-dim font-mono">
+                              (prefetch)
+                            </span>
+                          )}
+                        </div>
+                        <time
+                          title={absTime(e.at)}
+                          className="text-[10.5px] text-fg-dim font-mono shrink-0"
+                        >
+                          {relTime(e.at)}
+                        </time>
+                      </div>
+                      {e.body && (
+                        <div className="mt-1 text-fg-muted whitespace-pre-wrap break-words text-[11.5px]">
+                          {e.body}
+                        </div>
                       )}
-                    </div>
-                    <time
-                      title={absTime(e.at)}
-                      className="text-[10.5px] text-fg-dim font-mono shrink-0"
-                    >
-                      {relTime(e.at)}
-                    </time>
-                  </div>
-                  {e.body && (
-                    <div className="mt-1 text-fg-muted whitespace-pre-wrap break-words text-[11.5px]">
-                      {e.body}
-                    </div>
+                      {e.source === "system" && renderStageMetaLine(e.meta)}
+                    </>
                   )}
-                  {e.source === "system" && renderStageMetaLine(e.meta)}
                 </div>
               </li>
             );

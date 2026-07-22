@@ -29,6 +29,7 @@ import {
 } from "@/lib/sunbiz-templates-library";
 import { PageSearchBar } from "@/components/manifest/PageSearchBar";
 import { AutofillDropzone } from "@/components/leads/AutofillDropzone";
+import { SendToDialerControl } from "@/components/leads/SendToDialerControl";
 import { pipelineRowHref } from "@/lib/pipeline-display";
 import { CopyButton } from "@/components/CopyButton";
 import { DealHoverCard } from "@/components/manifest/DealHoverCard";
@@ -684,6 +685,7 @@ export function LeadPipelineView({
       {selectMode && selected.size > 0 && (
         <BulkActionBar
           count={selected.size}
+          selectedIds={Array.from(selected)}
           entityName={entityName}
           stages={stages}
           members={members}
@@ -722,6 +724,7 @@ export function LeadPipelineView({
  */
 function BulkActionBar({
   count,
+  selectedIds,
   entityName,
   stages,
   members,
@@ -736,6 +739,8 @@ function BulkActionBar({
   onClear,
 }: {
   count: number;
+  /** The selected record ids — consumed by the Send-to-dialer control. */
+  selectedIds: string[];
   entityName: "lead" | "application";
   stages: StageMeta[];
   members: TenantMember[] | null;
@@ -937,6 +942,12 @@ function BulkActionBar({
             Cancel
           </button>
         </div>
+      )}
+
+      {/* Kixie power-dialer push — leads only. Server enforces role gate +
+          dry-run; the control fetches the tenant's PowerLists on open. */}
+      {entityName === "lead" && (
+        <SendToDialerControl selectedIds={selectedIds} disabled={busy} />
       )}
 
       <button

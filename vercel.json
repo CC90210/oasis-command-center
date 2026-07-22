@@ -44,6 +44,14 @@
     {
       "path": "/api/cron/sweep-stale-sent-app",
       "schedule": "0 13 * * *"
+    },
+    {
+      "path": "/api/cron/kixie-compliance-scan",
+      "schedule": "10 13 * * *"
+    },
+    {
+      "path": "/api/cron/kixie-compliance-scan?mode=weekly",
+      "schedule": "40 13 * * 1"
     }
   ]
 }

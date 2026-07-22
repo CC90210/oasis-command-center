@@ -5,7 +5,7 @@ import { Card, Tag } from "@/components/Card";
 import { Sparkline } from "@/components/charts/Sparkline";
 import { Donut } from "@/components/charts/Donut";
 import { TrendArea } from "@/components/metrics/TrendArea";
-import type { MetricsPayload, SourceBlock, SequenceMetric, MetricsHealth, SmsMetrics, CallMetrics } from "@/lib/metrics";
+import type { MetricsPayload, SourceBlock, SequenceMetric, MetricsHealth, SmsMetrics, CallMetrics, CallNumberHealth } from "@/lib/metrics";
 import type { EmailMetrics, MetricSource } from "@/lib/metrics/types";
 
 /* ---------------- formatting ---------------- */
@@ -396,6 +396,27 @@ function fmtDuration(sec: number): string {
   const m = Math.floor(sec / 60), s = Math.round(sec % 60);
   return m > 0 ? `${m}m ${s}s` : `${s}s`;
 }
+/** Talk-time in h/m for the per-agent table ("1h 24m", "38m", "45s"). */
+function fmtTalkHM(sec: number): string {
+  if (!sec) return "0m";
+  const h = Math.floor(sec / 3600), m = Math.round((sec % 3600) / 60);
+  if (h > 0) return `${h}h ${m}m`;
+  if (m > 0) return `${m}m`;
+  return `${Math.round(sec)}s`;
+}
+const CALL_HEALTH_META: Record<CallNumberHealth, { dot: string; label: string; text: string }> = {
+  healthy: { dot: "bg-status-engaged", label: "Healthy", text: "text-status-engaged" },
+  warning: { dot: "bg-status-warm", label: "Warning", text: "text-status-warm" },
+  critical: { dot: "bg-status-hot", label: "Critical", text: "text-status-hot" },
+  insufficient_data: { dot: "bg-fg-dim", label: "Low volume", text: "text-fg-dim" },
+};
+/** CI sentiment cell: avg of +1/0/-1 per call → ↑ / → / ↓. */
+function SentimentCell({ v }: { v: number | null }) {
+  if (v === null) return <span className="text-fg-dim">—</span>;
+  if (v > 0.2) return <span className="text-status-engaged font-semibold">↑ {v.toFixed(2)}</span>;
+  if (v < -0.2) return <span className="text-status-hot font-semibold">↓ {v.toFixed(2)}</span>;
+  return <span className="text-fg-muted">→ {v.toFixed(2)}</span>;
+}
 function KixiePanel({ calls, windowDays }: { calls: CallMetrics; windowDays: number }) {
   if (calls.dials === 0) {
     return (
@@ -422,8 +443,52 @@ function KixiePanel({ calls, windowDays }: { calls: CallMetrics; windowDays: num
         <VolTile label="Voicemails" value={compact(calls.voicemails)} />
       </div>
 
-      {calls.perAgent.length > 0 && (
-        <Card title="By agent" subtitle="Dials + connects per rep">
+      {/* per-number health — the key voice-deliverability signal */}
+      {calls.numbers.length > 0 && (
+        <Card title="Number health" subtitle="Outbound connect rate per Kixie caller ID. Rotate anything critical.">
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="text-[10px] uppercase tracking-wider text-fg-dim">
+                  <th className="text-left font-bold pb-1">Number</th>
+                  <th className="text-right font-bold pb-1 px-2">Dials</th>
+                  <th className="text-right font-bold pb-1 px-2">Connects</th>
+                  <th className="text-right font-bold pb-1 px-2">Connect %</th>
+                  <th className="text-right font-bold pb-1 px-2">Avg duration</th>
+                  <th className="text-right font-bold pb-1 pl-2">Health</th>
+                </tr>
+              </thead>
+              <tbody>
+                {calls.numbers.map((n) => {
+                  const h = CALL_HEALTH_META[n.health];
+                  return (
+                    <tr key={n.number} className="border-t border-bg-border">
+                      <td className="py-2.5 pr-3 font-semibold text-fg tabular-nums">{n.number}</td>
+                      <td className="py-2.5 px-2 text-right tabular-nums text-fg">{num(n.dials)}</td>
+                      <td className="py-2.5 px-2 text-right tabular-nums text-fg-muted">{num(n.connects)}</td>
+                      <td className={`py-2.5 px-2 text-right tabular-nums font-semibold ${n.health === "insufficient_data" ? "text-fg-muted" : h.text}`}>{n.connectRatePct.toFixed(1)}%</td>
+                      <td className="py-2.5 px-2 text-right tabular-nums text-fg-muted">{n.avgDurationSec ? fmtDuration(n.avgDurationSec) : "—"}</td>
+                      <td className="py-2.5 pl-2 text-right whitespace-nowrap">
+                        <span className={`inline-flex items-center gap-1.5 text-xs font-semibold ${h.text}`}>
+                          <span className={`inline-block w-1.5 h-1.5 rounded-full ${h.dot}`} />
+                          {h.label}
+                        </span>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+          <p className="mt-3 text-[11px] text-fg-dim leading-relaxed">
+            A connect = Kixie reported the call answered, or it ran 30s+. Numbers under 20 dials in the window show as{" "}
+            <span className="text-fg-muted font-semibold">low volume</span> — not enough data to flag either way.
+          </p>
+        </Card>
+      )}
+
+      {calls.agents.length > 0 && (
+        <Card title="Per-agent" subtitle="Dials, connects, talk time + CI sentiment per rep">
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
               <thead>
@@ -432,17 +497,19 @@ function KixiePanel({ calls, windowDays }: { calls: CallMetrics; windowDays: num
                   <th className="text-right font-bold pb-1 px-2">Dials</th>
                   <th className="text-right font-bold pb-1 px-2">Connects</th>
                   <th className="text-right font-bold pb-1 px-2">Conn %</th>
-                  <th className="text-right font-bold pb-1 pl-2">Talk</th>
+                  <th className="text-right font-bold pb-1 px-2">Talk</th>
+                  <th className="text-right font-bold pb-1 pl-2">Sentiment</th>
                 </tr>
               </thead>
               <tbody>
-                {calls.perAgent.map((a) => (
-                  <tr key={a.agent} className="border-t border-bg-border">
-                    <td className="py-2.5 pr-3 font-semibold text-fg capitalize">{a.agent}</td>
+                {calls.agents.map((a) => (
+                  <tr key={a.email || a.name} className="border-t border-bg-border">
+                    <td className="py-2.5 pr-3 font-semibold text-fg capitalize" title={a.email || undefined}>{a.name}</td>
                     <td className="py-2.5 px-2 text-right tabular-nums text-fg">{num(a.dials)}</td>
                     <td className="py-2.5 px-2 text-right tabular-nums text-fg-muted">{num(a.connects)}</td>
                     <td className="py-2.5 px-2 text-right tabular-nums text-accent">{pct(a.dials ? a.connects / a.dials : 0)}</td>
-                    <td className="py-2.5 pl-2 text-right tabular-nums text-fg-muted">{fmtDuration(a.talkTimeSec)}</td>
+                    <td className="py-2.5 px-2 text-right tabular-nums text-fg-muted">{fmtTalkHM(a.talkTimeSec)}</td>
+                    <td className="py-2.5 pl-2 text-right tabular-nums"><SentimentCell v={a.avgSentiment} /></td>
                   </tr>
                 ))}
               </tbody>

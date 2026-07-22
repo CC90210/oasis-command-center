@@ -39,6 +39,19 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createHmac, timingSafeEqual } from "crypto";
 import { getServiceSupabase } from "@/lib/supabase-server";
+import {
+  findLeadByPhone,
+  merchantNumberFor,
+  resolveRepByEmail,
+  type ResolvedRep,
+} from "@/lib/integrations/kixie-attribution";
+import {
+  getAutomationConfig,
+  handleDispositionActions,
+  handleMissedInbound,
+  handleVoicemailFollowup,
+  type AutomationResult,
+} from "@/lib/integrations/kixie-automations";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -172,9 +185,13 @@ async function persistLeadInteraction(
     tenantId: string;
     eventname: string;
     evt: KixieEvent;
+    /** Dashboard user id of the acting rep (resolved from the webhook's
+     * agent email). Only written when resolved — never null-overwrites the
+     * actor a dashboard-initiated row already carries. */
+    repUserId?: string | null;
   },
 ): Promise<void> {
-  const { tenantId, eventname, evt } = args;
+  const { tenantId, eventname, evt, repUserId } = args;
   const channel = channelForEvent(eventname);
   if (!channel) return;
   const leadId = evt.customField1?.trim();
@@ -200,6 +217,7 @@ async function persistLeadInteraction(
       to_phone: evt.tonumber || evt.to || evt.customernumber || null,
       content: evt.message || null,
       content_preview: (evt.message || "").slice(0, 1024),
+      ...(repUserId ? { actor_user_id: repUserId } : {}),
       metadata: {
         kixie_messageid: messageId,
         kixie_agent_email: evt.email || null,
@@ -230,6 +248,7 @@ async function persistLeadInteraction(
     from_phone: evt.fromnumber || null,
     to_phone: evt.tonumber || evt.number || null,
     direction: isInbound ? "inbound" : "outbound",
+    ...(repUserId ? { actor_user_id: repUserId } : {}),
     // Agent attribution on EVERY event — per-rep call metrics group on
     // metadata.kixie_agent_email. Most calls never emit a CI-summary event
     // (which is the only branch that also sets metadata), so without this the
@@ -345,6 +364,32 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ ok: true, ignored: "no_tenant_mapping" });
   }
 
+  // ── Attribution (2026-07-21) ──────────────────────────────────────────
+  // customField1 (lead UUID) only rides on dashboard-initiated actions. The
+  // team lives in the Kixie app, so match the merchant-side number to a lead
+  // and the agent email to a dashboard rep. Best-effort: a lookup failure
+  // must not drop the event (it still lands in agent_events unattributed).
+  const dirRaw = String(evt.direction || evt.calltype || "outgoing").toLowerCase();
+  const isInbound = dirRaw === "incoming" || dirRaw === "inbound";
+  const merchantPhone = merchantNumberFor(evt, isInbound);
+  let matchedLead: { id: string; data: Record<string, unknown> } | null = null;
+  if (!evt.customField1?.trim() && merchantPhone) {
+    try {
+      matchedLead = await findLeadByPhone(tenantId, merchantPhone);
+      if (matchedLead) evt.customField1 = matchedLead.id;
+    } catch (err) {
+      console.error("[webhooks.kixie] phone attribution failed", err);
+    }
+  }
+  let rep: ResolvedRep | null = null;
+  if (evt.email) {
+    try {
+      rep = await resolveRepByEmail(tenantId, evt.email);
+    } catch (err) {
+      console.error("[webhooks.kixie] rep resolution failed", err);
+    }
+  }
+
   // 1. Publish to agent_events so /feed surfaces the event live.
   const severity =
     eventname === "voicemail" || eventname.includes("missed")
@@ -381,11 +426,62 @@ export async function POST(req: NextRequest) {
   //    marking the event delivered and dropping it forever (the prior code
   //    swallowed supabase-js .error and returned 200).
   try {
-    await persistLeadInteraction(db, { tenantId, eventname, evt });
+    await persistLeadInteraction(db, { tenantId, eventname, evt, repUserId: rep?.userId ?? null });
   } catch (err) {
     console.error("[webhooks.kixie] persist failed", err);
     return NextResponse.json({ ok: false, error: "persist_failed" }, { status: 500 });
   }
 
-  return NextResponse.json({ ok: true, event_type: eventType });
+  // 3. Pipeline automations (2026-07-21) — AFTER the fail-closed persist so
+  //    an automation failure can never make Kixie re-deliver a stored event.
+  //    Handlers are best-effort and report per-action results.
+  const automations: AutomationResult[] = [];
+  try {
+    const cfg = await getAutomationConfig(db, tenantId);
+    const leadId = evt.customField1?.trim() || null;
+    const leadData = matchedLead?.data ?? null;
+    const callId = evt.callid?.trim() || "";
+
+    if (eventname === "voicemail" && callId) {
+      const r = await handleVoicemailFollowup(db, {
+        tenantId, leadId, leadData, rep, merchantPhone, isInbound, callId, cfg,
+      });
+      if (r) automations.push(r);
+    }
+    if (isInbound && (eventname === "voicemail" || eventname === "endcall") && callId) {
+      const r = await handleMissedInbound(db, {
+        tenantId,
+        eventname,
+        evt: {
+          duration: evt.duration,
+          callstatus: evt.callstatus,
+          fname: evt.fname,
+          lname: evt.lname,
+          email: evt.email,
+        },
+        leadId, leadData, rep, merchantPhone, isInbound, callId, cfg,
+      });
+      if (r) automations.push(r);
+    }
+    if (eventname === "dispositioncall") {
+      const r = await handleDispositionActions(db, {
+        tenantId, leadId, rep, disposition: evt.disposition, cfg,
+      });
+      if (r) automations.push(r);
+    }
+  } catch (err) {
+    console.error("[webhooks.kixie] automation layer failed", err);
+    automations.push({
+      action: "automation_layer",
+      ok: false,
+      detail: err instanceof Error ? err.message : "unknown",
+    });
+  }
+
+  return NextResponse.json({
+    ok: true,
+    event_type: eventType,
+    attributed: Boolean(matchedLead),
+    ...(automations.length ? { automations } : {}),
+  });
 }
