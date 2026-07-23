@@ -103,6 +103,28 @@ function run() {
   assert.equal(r.data.owner_address_state, "FL");
   assert.equal(r.data.owner_address_zip, "33101");
 
+  // bare street + unit, no state/zip anchor → stays whole in line1 (no city guess)
+  a = splitUsAddress("123 Main St, Apt 4");
+  assert.equal(a.line1, "123 Main St, Apt 4");
+  assert.equal(a.city, "");
+  assert.equal(a.state, "");
+  assert.equal(a.zip, "");
+
+  // Codex P2 regression: apartment must survive when dedicated city column present
+  r = resolveHomeAddress({ address: "123 Main St, Apt 4", city: "Miami", state: "FL", zip: "33101" });
+  assert.equal(r.data.owner_address_line1, "123 Main St, Apt 4", "apt kept in line1, not swallowed as city");
+  assert.equal(r.data.owner_address_city, "Miami");
+  assert.equal(r.data.owner_address_state, "FL");
+  assert.equal(r.data.owner_address_zip, "33101");
+  assert.equal(r.data.owner_home_address, "123 Main St, Apt 4, Miami, FL 33101");
+
+  // full address with unit AND anchors still splits correctly (apt kept in line1)
+  a = splitUsAddress("123 Main St, Apt 4, Miami, FL 33101");
+  assert.equal(a.line1, "123 Main St, Apt 4");
+  assert.equal(a.city, "Miami");
+  assert.equal(a.state, "FL");
+  assert.equal(a.zip, "33101");
+
   // resolveHomeAddress — nothing → empty data (no stray keys)
   r = resolveHomeAddress({ address: null, city: null, state: null, zip: null });
   assert.deepEqual(r.data, {});

@@ -77,8 +77,12 @@ export function splitUsAddress(raw: string | null | undefined): SplitAddress {
     }
   }
 
-  // remaining: "line1, city" | "line1" | "city"
-  if (s.includes(",")) {
+  // remaining: "line1, city" | "line1" | "city". Only trust a comma as the
+  // street/city boundary when a state or zip anchored this as a real full
+  // address. Without that anchor a comma is more likely a unit suffix
+  // ("123 Main St, Apt 4") — keep it whole in line1 so nothing is dropped.
+  const hasAnchor = Boolean(out.state || out.zip);
+  if (s.includes(",") && hasAnchor) {
     const parts = s.split(",").map((p) => p.trim()).filter(Boolean);
     if (parts.length >= 2) {
       out.city = parts[parts.length - 1];
@@ -87,11 +91,11 @@ export function splitUsAddress(raw: string | null | undefined): SplitAddress {
       out.line1 = parts[0];
     }
   } else if (s) {
-    // No comma to separate street from city. If the token starts with a house
-    // number it's a street → line1; otherwise, only if we already found a
-    // state or zip, treat the leftover as the city (e.g. "Miami FL 33101").
+    // No comma boundary to use. If the token starts with a house number it's a
+    // street → line1; otherwise, only when a state/zip anchored the string,
+    // treat the leftover as the city (e.g. "Miami FL 33101").
     const startsWithNumber = /^\d/.test(s);
-    if (startsWithNumber || (!out.state && !out.zip)) {
+    if (startsWithNumber || !hasAnchor) {
       out.line1 = s;
     } else {
       out.city = s;
