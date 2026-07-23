@@ -84,9 +84,13 @@ function fmtWhen(iso: string | null): string {
 export function ClairReportPanel({
   leadId,
   leadData,
+  onChanged,
 }: {
   leadId: string;
   leadData: Record<string, unknown>;
+  // Fired after a report is pulled, so a host (the Enrichment tab's pinned
+  // summary) can refresh its phone-availability view.
+  onChanged?: () => void;
 }) {
   const [reports, setReports] = useState<ClairReport[] | null>(null);
   const [open, setOpen] = useState(false);
@@ -122,12 +126,13 @@ export function ClairReportPanel({
         setOpen(true);
       }
       await load();
+      onChanged?.();
     } catch (e) {
       setError(e instanceof Error ? e.message : "CLAIR lookup failed");
     } finally {
       setPulling(false);
     }
-  }, [leadId, load]);
+  }, [leadId, load, onChanged]);
 
   const latest = reports?.[0] ?? null;
   const hasHistory = Boolean(reports && reports.length > 0);

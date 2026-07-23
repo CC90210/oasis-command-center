@@ -57,7 +57,16 @@ function statusLabel(s: Check["status"]): string {
   }[s];
 }
 
-export function BackgroundCheckTab({ leadId }: { leadId: string; record?: Record<string, unknown> }) {
+export function BackgroundCheckTab({
+  leadId,
+  onChanged,
+}: {
+  leadId: string;
+  record?: Record<string, unknown>;
+  // Fired when this panel starts a run or saves a manual result, so a host
+  // (the Enrichment tab's pinned summary) can refresh its critical-flags view.
+  onChanged?: () => void;
+}) {
   const [check, setCheck] = useState<Check | null>(null);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
@@ -100,6 +109,7 @@ export function BackgroundCheckTab({ leadId }: { leadId: string; record?: Record
       const r = await fetch(`/api/leads/${leadId}/background-check/run`, { method: "POST" });
       if (!r.ok) { const j = await r.json().catch(() => ({})); throw new Error(j.error || "run_failed"); }
       await load();
+      onChanged?.();
     } catch (e) {
       setErr(e instanceof Error ? e.message : "Could not start the check.");
     } finally {
@@ -121,6 +131,7 @@ export function BackgroundCheckTab({ leadId }: { leadId: string; record?: Record
       setShowManual(false);
       setManualText("");
       await load();
+      onChanged?.();
     } catch (e) {
       setErr(e instanceof Error ? e.message : "Could not save results.");
     } finally {

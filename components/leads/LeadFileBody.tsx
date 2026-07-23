@@ -13,7 +13,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 // useRef intentionally imported for the file-input ref in DocumentsTab.
-import { BackgroundCheckTab } from "./BackgroundCheckTab";
+import { EnrichmentTab } from "./EnrichmentTab";
 import { DefaultsCheckControl } from "./DefaultsCheckControl";
 import { useRouter, usePathname } from "next/navigation";
 import Link from "next/link";
@@ -68,7 +68,9 @@ const TABS: { key: TabKey; label: string }[] = [
   { key: "owner", label: "Owner" },
   { key: "lenders", label: "Lenders" },
   { key: "bank", label: "Bank" },
-  { key: "bgc", label: "BGC" },
+  // key stays "bgc" for deep-link stability; the tab now houses both the
+  // background check and the CLAIR phone/address enrichment (2026-07-23).
+  { key: "bgc", label: "Enrichment" },
   { key: "documents", label: "Docs" },
   { key: "notes", label: "Notes" },
 ];
@@ -409,7 +411,7 @@ export function LeadFileBody({
             {activeTab === "bank" && (
               <BankTab record={record} application={application} tenantSlug={tenantSlug} leadId={recordId} />
             )}
-            {activeTab === "bgc" && <BackgroundCheckTab leadId={recordId} record={record} />}
+            {activeTab === "bgc" && <EnrichmentTab leadId={recordId} record={record} />}
             {activeTab === "notes" && <NotesTab leadId={recordId} entity={entity} />}
             {activeTab === "documents" && (
               <DocumentsTab
