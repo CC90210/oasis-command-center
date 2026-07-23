@@ -84,6 +84,16 @@ create index if not exists phone_lookup_jobs_pending_idx
   on public.phone_lookup_jobs (status, created_at)
   where status = 'pending';
 
+-- AT MOST ONE UNFINISHED JOB PER LEAD, enforced by the database rather than by
+-- the API route's read-then-insert. Two concurrent POSTs (two operators, or one
+-- double-click) can both pass a SELECT-based dedupe check before either INSERT
+-- commits, and would then both enqueue — spending two scrapes out of a daily
+-- budget whose whole purpose is to protect the workstation's IP reputation.
+-- The second insert now fails with 23505 and the route returns the existing job.
+create unique index if not exists phone_lookup_jobs_one_in_flight_idx
+  on public.phone_lookup_jobs (lead_id)
+  where status in ('pending', 'running');
+
 -- The UI's path: this lead's history, newest first. Also backs the 30-day
 -- per-lead dedupe check the API route runs before enqueueing.
 create index if not exists phone_lookup_jobs_lead_idx

@@ -282,14 +282,26 @@ function EnrichmentSummary({
 export function EnrichmentTab({
   leadId,
   record,
+  onReload,
 }: {
   leadId: string;
   // In the lead drawer, `record` IS the flattened lead data object (the same
   // value ClairReportPanel expects as `leadData` and clairEligibility reads).
   record: Record<string, unknown>;
+  /** Refetch the lead record from the drawer. */
+  onReload?: () => void | Promise<void>;
 }) {
   const [refreshKey, setRefreshKey] = useState(0);
-  const bump = useCallback(() => setRefreshKey((k) => k + 1), []);
+  // A finished lookup writes to the LEAD (phone, phone_lookup_status), not just
+  // to its own table, and `record` is a prop owned by the drawer. Bumping only
+  // the local key would refresh the summary's own fetches while leaving every
+  // consumer of `record` — including clairEligibility, which decides whether the
+  // billable fallback is even offered — reading pre-lookup data until someone
+  // manually reopened the drawer.
+  const bump = useCallback(() => {
+    setRefreshKey((k) => k + 1);
+    void onReload?.();
+  }, [onReload]);
 
   return (
     <div className="space-y-5">

@@ -411,7 +411,14 @@ export function LeadFileBody({
             {activeTab === "bank" && (
               <BankTab record={record} application={application} tenantSlug={tenantSlug} leadId={recordId} />
             )}
-            {activeTab === "bgc" && <EnrichmentTab leadId={recordId} record={record} />}
+            {activeTab === "bgc" && (
+              // onReload is required, not optional: a finished phone lookup
+              // writes phone_lookup_status + phone onto the RECORD, and both the
+              // summary chip and the CLAIR eligibility gate read that record.
+              // Without a refetch the tab would keep rendering the pre-lookup
+              // state and CLAIR would stay hidden after a no-match.
+              <EnrichmentTab leadId={recordId} record={record} onReload={onReload} />
+            )}
             {activeTab === "notes" && <NotesTab leadId={recordId} entity={entity} />}
             {activeTab === "documents" && (
               <DocumentsTab

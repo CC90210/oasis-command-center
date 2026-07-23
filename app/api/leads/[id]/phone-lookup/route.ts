@@ -212,6 +212,22 @@ export async function POST(_req: Request, ctx: { params: Promise<{ id: string }>
     .single();
 
   if (insErr) {
+    // 23505 = the partial unique index in database/121, which is what actually
+    // guarantees one unfinished job per lead. The dedupe SELECT above is a
+    // read-then-insert and two concurrent POSTs can both clear it, so losing
+    // this race is expected rather than exceptional: return the job that won.
+    if (insErr.code === "23505") {
+      const { data: winner } = await svc
+        .from("phone_lookup_jobs")
+        .select(SELECT_COLS)
+        .eq("tenant_id", sess.tenantId)
+        .eq("lead_id", leadId)
+        .in("status", IN_FLIGHT)
+        .order("created_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+      if (winner) return NextResponse.json({ ok: true, job: winner, deduped: "in_flight" });
+    }
     return NextResponse.json(
       { ok: false, error: "enqueue_failed", message: insErr.message },
       { status: 500 },
