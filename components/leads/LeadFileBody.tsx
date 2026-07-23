@@ -3102,7 +3102,21 @@ function OwnerTab({
   const state = str(record.state) || str(record.business_state);
   const industry = str(record.industry);
   const subIndustry = str(record.sub_industry);
-  const tib = str(record.time_in_business);
+  // Time in business: canonical is time_in_business_months (what the intake
+  // pipeline + Edit Application write); the legacy free-text field is a
+  // fallback for old records. Canonical first, else an edited months value
+  // would never change this line (Edit Application follow-up, 2026-07-22).
+  const tibMonthsRaw = record.time_in_business_months;
+  const tibMonths =
+    typeof tibMonthsRaw === "number" && Number.isFinite(tibMonthsRaw) && tibMonthsRaw >= 0
+      ? Math.round(tibMonthsRaw)
+      : null;
+  const tib =
+    tibMonths != null
+      ? tibMonths >= 12
+        ? `${Math.floor(tibMonths / 12)}y${tibMonths % 12 ? ` ${tibMonths % 12}m` : ""}`
+        : `${tibMonths}m`
+      : str(record.time_in_business);
 
   return (
     <div className="space-y-4">
