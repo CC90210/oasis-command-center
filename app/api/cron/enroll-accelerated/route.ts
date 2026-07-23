@@ -165,6 +165,7 @@ async function handle(req: NextRequest): Promise<NextResponse> {
       const leadIds = leads.map((l) => l.id);
       const active = new Set<string>();
       const everRan = new Set<string>();
+      const completed = new Set<string>();
       const newestRun = new Map<string, number>();
       for (let i = 0; i < leadIds.length; i += 300) {
         const chunk = leadIds.slice(i, i + 300);
@@ -177,6 +178,13 @@ async function handle(req: NextRequest): Promise<NextResponse> {
         for (const r of (runRes.data || []) as RunRow[]) {
           if (r.status === "scheduled" || r.status === "sending") active.add(r.lead_id);
           if (r.status !== "cancelled") everRan.add(r.lead_id);
+          // 'done' is minted ONLY when the FINAL step advances (advanceRow:
+          // isLast). Rows are one-per-step, so 'sent' rows are mid-chase
+          // progress and 'failed' rows are outages — NEITHER means the chase
+          // ran its course. Treating any inactive non-cancelled run as
+          // "exhausted" auto-retired 64 mid-outage leads on go-live night
+          // (2026-07-22 incident); only a 'done' row qualifies now.
+          if (r.status === "done") completed.add(r.lead_id);
           const t = Date.parse(r.created_at);
           if (Number.isFinite(t)) newestRun.set(r.lead_id, Math.max(newestRun.get(r.lead_id) ?? 0, t));
         }
@@ -206,16 +214,16 @@ async function handle(req: NextRequest): Promise<NextResponse> {
         }
 
         // 3. AUTO-DEAD — two triggers, one outcome (dead_file + flag cleared):
-        //  (a) chase EXHAUSTED: a prior non-cancelled run exists and none is
-        //      active — the 58-step sequence ran to its end (or failed
-        //      permanently) with the lead still unengaged. Per Adon: after the
-        //      month, the lead moves to Dead. Checking this here (not just the
-        //      day-45 clock) is what prevents the completed chase from
-        //      re-enrolling (codex review P1).
-        //  (b) day-45 BACKSTOP: the current stint started >= DEAD_DAYS ago —
-        //      covers a wedged run that never reaches a terminal status.
+        //  (a) chase EXHAUSTED: the FINAL step completed (a 'done' row) and
+        //      nothing is active — the 58-step sequence genuinely ran its
+        //      course with the lead still unengaged. Per Adon: after the
+        //      month, the lead moves to Dead. (NOT any inactive run — a failed
+        //      run is an outage, not exhaustion; see the 2026-07-22 incident.)
+        //  (b) day-45 BACKSTOP: the newest run row is >= DEAD_DAYS old — the
+        //      chase stalled entirely (rows mint per step, so an actively
+        //      chasing lead always has a recent row).
         const hasActive = active.has(lead.id);
-        const exhausted = everRan.has(lead.id) && !hasActive;
+        const exhausted = completed.has(lead.id) && !hasActive;
         const newest = newestRun.get(lead.id);
         const stintExpired = newest !== undefined && Number.isFinite(deadCutoffMs) && newest <= deadCutoffMs;
         if (exhausted || stintExpired) {
@@ -248,8 +256,10 @@ async function handle(req: NextRequest): Promise<NextResponse> {
 
         // 1. ENROLL — a flagged lead that has never chased (no non-cancelled
         // run). Leads mid-chase land in `hasActive`; completed ones were
-        // retired above.
-        if (hasActive) { skippedActive++; continue; }
+        // retired above; leads with only FAILED rows are skipped too (an
+        // outage must not become a fail -> re-enroll -> fail loop — ops
+        // revives their rows, as in the 2026-07-22 recovery).
+        if (hasActive || everRan.has(lead.id)) { skippedActive++; continue; }
         if (isOptedOut(d)) { skippedOptedOut++; continue; }
         const phone = typeof d.phone === "string" ? d.phone.trim() : "";
         if (firstChannel === "sms" && !phone) { skippedNoPhone++; continue; }

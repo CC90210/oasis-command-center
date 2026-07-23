@@ -39,8 +39,15 @@ export async function writeAgentAlert(input: {
   payload?: Record<string, unknown>;
   /** Override Telegram push (default: on for warn/urgent, off for info). */
   telegram?: boolean;
+  /** Page Telegram only when this call CREATES the open card — a refresh of an
+   *  already-open card stays silent. For high-frequency callers (e.g. every
+   *  claimed drip row during a TT credit outage) where re-paging per call is a
+   *  notification storm (codex review 2026-07-23). Default false = legacy
+   *  behavior (page on every call). */
+  telegramOncePerOpen?: boolean;
 }): Promise<void> {
   const nowIso = new Date().toISOString();
+  let refreshedExisting = false;
   try {
     const db = getServiceSupabase();
 
@@ -69,18 +76,25 @@ export async function writeAgentAlert(input: {
 
     if (existingId) {
       // Refresh the open card (bump created_at so it re-sorts to the top).
-      await db
+      // Flag only on a VERIFIED refresh — a failed update errs toward loud
+      // (codex review 2026-07-23).
+      const upd = await db
         .from("agent_alerts")
         .update({ ...row, created_at: nowIso })
         .eq("id", existingId);
+      if (!upd.error) refreshedExisting = true;
     } else {
       await db.from("agent_alerts").insert({ ...row, created_at: nowIso });
     }
   } catch (err) {
+    // Write failed → we can't know if a card was open; err toward LOUD
+    // (refreshedExisting stays false so Telegram still fires).
     console.error("[agent-alert] write failed:", err instanceof Error ? err.message : err);
   }
 
-  const wantTelegram = input.telegram ?? input.severity !== "info";
+  const wantTelegram =
+    (input.telegram ?? input.severity !== "info") &&
+    !(input.telegramOncePerOpen && refreshedExisting);
   if (wantTelegram) {
     const tag = input.severity === "urgent" ? "🚨" : "⚠️";
     const text = `${tag} ${input.title}${input.body ? `\n${input.body}` : ""}`;
