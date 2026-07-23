@@ -315,7 +315,7 @@ export function LendersDirectoryClient({
               network === value ? "bg-accent text-bg-deep" : "text-fg-muted hover:text-fg"
             }`}
           >
-            {value === "sunbiz" ? "SunBiz Lenders" : "Funmate Lenders"}
+            {value === "sunbiz" ? "SunBiz Lenders" : "FundMate Lenders"}
           </button>
         ))}
       </div>
@@ -750,7 +750,7 @@ function LenderDrawer({
                 className="w-full px-2 py-1.5 rounded-md bg-bg-deep border border-bg-border text-fg text-[12.5px]"
               >
                 <option value="sunbiz">SunBiz Lenders — submissions@</option>
-                <option value="funmate">Funmate Lenders — Funmate mailbox</option>
+                <option value="funmate">FundMate Lenders — FundMate mailbox</option>
               </select>
             </Field>
             <Field label="Lender name *">

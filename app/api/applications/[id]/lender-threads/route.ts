@@ -29,7 +29,7 @@ export async function GET(
   const r = await db
     .from("application_lender_threads")
     .select(
-      "id, lender_id, status, subject, sent_at, last_response_at, last_response_summary, last_error, gmail_thread_id, created_at",
+      "id, lender_id, status, subject, sent_at, last_response_at, last_response_summary, last_error, gmail_thread_id, email_identity, created_at",
     )
     .eq("tenant_id", tenantId)
     .eq("application_id", applicationId)

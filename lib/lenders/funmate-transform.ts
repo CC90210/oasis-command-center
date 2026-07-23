@@ -71,9 +71,9 @@ const money = (value: number | null) =>
 
 export function renderFunmateSubmission(app: FunmateApplication, notes = "") {
   return {
-    subject: `Funmate Submission | ${app.business.legalName}`,
+    subject: `FundMate Submission | ${app.business.legalName}`,
     text: [
-      "New SunBiz application routed to the Funmate lender network.",
+      "New application routed through the FundMate lender network.",
       "",
       `Business: ${app.business.legalName}`,
       `DBA: ${app.business.dba || "Not provided"}`,

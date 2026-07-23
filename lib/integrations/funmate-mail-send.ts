@@ -45,7 +45,7 @@ export async function sendFunmateMail(input: {
     const senderDomain = creds.email.split("@")[1] || "localhost";
     const rfc822 = `<${randomUUID()}@${senderDomain}>`;
     const result = await transport.sendMail({
-      from: `Funmate Deal Desk <${creds.email}>`,
+      from: `FundMate Deal Desk <${creds.email}>`,
       to: input.to,
       cc: input.cc?.length ? input.cc.join(", ") : undefined,
       subject: input.subject,

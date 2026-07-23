@@ -40,6 +40,11 @@ export async function POST(
   const { id: applicationId } = await ctx.params;
   const db = getServiceSupabase();
   const nowIso = new Date().toISOString();
+  const requestBody = await req.json().catch(() => ({}));
+  const emailIdentity =
+    (requestBody as { email_identity?: unknown }).email_identity === "funmate"
+      ? "funmate"
+      : "sunbiz";
 
   // Watermark door guard (CC 2026-06-28): a retry re-fires shop_out_send_batch
   // over every pending thread, so brand any un-watermarked bank statement across
@@ -58,6 +63,89 @@ export async function POST(
       },
       { status: 422 },
     );
+  }
+
+  if (emailIdentity === "funmate") {
+    const staleCutoff = new Date(Date.now() - STALE_SENDING_MS).toISOString();
+    const [errors, stale] = await Promise.all([
+      db
+        .from("application_lender_threads")
+        .select("id")
+        .eq("tenant_id", tenantId)
+        .eq("application_id", applicationId)
+        .eq("email_identity", "funmate")
+        .eq("status", "error"),
+      db
+        .from("application_lender_threads")
+        .select("id")
+        .eq("tenant_id", tenantId)
+        .eq("application_id", applicationId)
+        .eq("email_identity", "funmate")
+        .eq("status", "sending")
+        .lt("updated_at", staleCutoff),
+    ]);
+    if (errors.error || stale.error) {
+      return NextResponse.json(
+        { ok: false, error: "funmate_retry_lookup_failed" },
+        { status: 500 },
+      );
+    }
+    const threadIds = [
+      ...(errors.data || []).map((row) => String(row.id)),
+      ...(stale.data || []).map((row) => String(row.id)),
+    ].slice(0, 12);
+    if (!threadIds.length) {
+      return NextResponse.json({
+        ok: true,
+        identity: "funmate",
+        recovered: 0,
+        physical_send: { status: "skipped" },
+      });
+    }
+
+    const cookie = req.headers.get("cookie") || "";
+    const results: Array<{ thread_id: string; ok: boolean; error?: string }> = [];
+    for (const threadId of threadIds) {
+      try {
+        const retryUrl = new URL(
+          `/api/applications/${applicationId}/lender-threads/${threadId}/retry`,
+          req.url,
+        );
+        const retryResponse = await fetch(retryUrl, {
+          method: "POST",
+          headers: { cookie },
+          signal: AbortSignal.timeout(30_000),
+        });
+        const retryData = await retryResponse.json().catch(() => ({}));
+        results.push({
+          thread_id: threadId,
+          ok: retryResponse.ok && retryData?.ok === true,
+          error:
+            retryResponse.ok && retryData?.ok === true
+              ? undefined
+              : String(retryData?.error || `retry_http_${retryResponse.status}`).slice(0, 160),
+        });
+      } catch (error) {
+        results.push({
+          thread_id: threadId,
+          ok: false,
+          error: error instanceof Error ? error.message.slice(0, 160) : "retry_failed",
+        });
+      }
+    }
+    const sentCount = results.filter((result) => result.ok).length;
+    return NextResponse.json({
+      ok: sentCount === results.length,
+      identity: "funmate",
+      recovered: sentCount,
+      physical_send: {
+        status:
+          sentCount === results.length ? "sent" : sentCount > 0 ? "partial" : "error",
+        sent_count: sentCount,
+        failed_count: results.length - sentCount,
+      },
+      results,
+    });
   }
 
   // Flip every 'error' thread on this application+tenant back to 'pending'.
