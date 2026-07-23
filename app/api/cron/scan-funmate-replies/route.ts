@@ -11,11 +11,17 @@ export const dynamic = "force-dynamic";
 export const maxDuration = 60;
 
 function authorized(req: NextRequest) {
-  const expected = process.env.SCAN_TRIGGER_SECRET || "";
   const supplied = (req.headers.get("authorization") || "").replace(/^Bearer\s+/i, "");
-  const a = Buffer.from(expected);
-  const b = Buffer.from(supplied);
-  return Boolean(expected) && a.length === b.length && timingSafeEqual(a, b);
+  const suppliedBuffer = Buffer.from(supplied);
+  return [process.env.CRON_SECRET, process.env.SCAN_TRIGGER_SECRET]
+    .filter((value): value is string => Boolean(value))
+    .some((expected) => {
+      const expectedBuffer = Buffer.from(expected);
+      return (
+        expectedBuffer.length === suppliedBuffer.length &&
+        timingSafeEqual(expectedBuffer, suppliedBuffer)
+      );
+    });
 }
 
 export async function GET(req: NextRequest) {
@@ -30,12 +36,42 @@ export async function GET(req: NextRequest) {
   const db = getServiceSupabase();
   const threadsResult = await db
     .from("application_lender_threads")
-    .select("id,subject,last_response_at")
+    .select("id,lender_id,subject,last_response_at")
     .eq("email_identity", "funmate")
     .order("created_at", { ascending: false })
     .limit(500);
   if (threadsResult.error) return NextResponse.json({ ok: false, error: "funmate_thread_lookup_failed" }, { status: 500 });
-  const threads = (threadsResult.data || []) as Array<{ id: string; subject: string | null; last_response_at: string | null }>;
+  const threads = (threadsResult.data || []) as Array<{
+    id: string;
+    lender_id: string;
+    subject: string | null;
+    last_response_at: string | null;
+  }>;
+  const lenderIds = [...new Set(threads.map((thread) => thread.lender_id).filter(Boolean))];
+  const lendersResult = lenderIds.length
+    ? await db
+        .from("tenant_records")
+        .select("id,data")
+        .eq("entity_type", "lender")
+        .in("id", lenderIds)
+    : { data: [], error: null };
+  if (lendersResult.error) {
+    return NextResponse.json(
+      { ok: false, error: "funmate_lender_lookup_failed" },
+      { status: 500 },
+    );
+  }
+  const addressesByLender = new Map<string, Set<string>>();
+  for (const row of lendersResult.data || []) {
+    const data = (row as { id: string; data?: Record<string, unknown> }).data || {};
+    const addresses = [
+      ...(Array.isArray(data.submission_emails) ? data.submission_emails : []),
+      data.contact,
+    ]
+      .filter((value): value is string => typeof value === "string" && value.includes("@"))
+      .map((value) => value.trim().toLowerCase());
+    addressesByLender.set(String(row.id), new Set(addresses));
+  }
 
   const client = new ImapFlow({
     host: creds.imapHost,
@@ -54,8 +90,18 @@ export async function GET(req: NextRequest) {
       const uids = await client.search({ since: new Date(Date.now() - 7 * 86400_000) });
       for await (const message of client.fetch((uids || []).slice(-20), { envelope: true, source: true })) {
         const subject = message.envelope?.subject || "";
-        const thread = threads.find((candidate) =>
-          candidate.subject && subject.toLowerCase().includes(candidate.subject.toLowerCase()));
+        const senders = (message.envelope?.from || [])
+          .map((address) => address.address?.trim().toLowerCase())
+          .filter((address): address is string => Boolean(address));
+        const subjectMatches = threads.filter(
+          (candidate) =>
+            candidate.subject &&
+            subject.toLowerCase().includes(candidate.subject.toLowerCase()),
+        );
+        const thread =
+          subjectMatches.find((candidate) =>
+            senders.some((sender) => addressesByLender.get(candidate.lender_id)?.has(sender)),
+          ) || (subjectMatches.length === 1 ? subjectMatches[0] : undefined);
         if (!thread) continue;
         const date = message.envelope?.date instanceof Date ? message.envelope.date : new Date();
         if (thread.last_response_at && date.getTime() <= Date.parse(thread.last_response_at)) continue;

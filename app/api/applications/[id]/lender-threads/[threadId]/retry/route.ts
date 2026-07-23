@@ -28,6 +28,9 @@ import { getServiceSupabase } from "@/lib/supabase-server";
 import { resolveSessionContext } from "@/lib/api-auth";
 import { resolveSignerForOperator } from "@/lib/config/agents";
 import { ensureApplicationThreadsWatermarked } from "@/lib/lead-documents";
+import { sendFunmateMail } from "@/lib/integrations/funmate-mail-send";
+import { verifyFunmateSmtp } from "@/lib/integrations/funmate-mail";
+import type { ShopOutAttachment } from "@/lib/lenders/shop-out";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -59,7 +62,9 @@ export async function POST(
   // would otherwise affect the right tenant's threads under a wrong URL).
   const threadRes = await db
     .from("application_lender_threads")
-    .select("id, tenant_id, application_id, status, last_error, updated_at, email_identity")
+    .select(
+      "id, tenant_id, application_id, lender_id, status, last_error, updated_at, email_identity, subject, body_template, attachments, cc_emails",
+    )
     .eq("id", threadId)
     .eq("tenant_id", tenantId)
     .eq("application_id", applicationId)
@@ -68,15 +73,6 @@ export async function POST(
     return NextResponse.json(
       { ok: false, error: "thread_lookup_failed" },
       { status: 500 },
-    );
-  }
-  if (
-    threadRes.data &&
-    String((threadRes.data as { email_identity?: unknown }).email_identity || "sunbiz") === "funmate"
-  ) {
-    return NextResponse.json(
-      { ok: false, error: "funmate_retry_requires_funmate_route" },
-      { status: 409 },
     );
   }
   if (!threadRes.data) {
@@ -90,6 +86,12 @@ export async function POST(
     status: string;
     last_error: string | null;
     updated_at: string | null;
+    lender_id: string;
+    email_identity?: string | null;
+    subject?: string | null;
+    body_template?: string | null;
+    attachments?: unknown;
+    cc_emails?: unknown;
   };
 
   // Retryable = an 'error' row OR a 'sending' row that's been stuck long
@@ -110,6 +112,112 @@ export async function POST(
       previous_status: thread.status,
       new_status: thread.status,
       noop: true,
+    });
+  }
+
+  if (String(thread.email_identity || "sunbiz") === "funmate") {
+    const lenderRes = await db
+      .from("tenant_records")
+      .select("data")
+      .eq("tenant_id", tenantId)
+      .eq("entity_type", "lender")
+      .eq("id", thread.lender_id)
+      .maybeSingle();
+    const lenderData =
+      (lenderRes.data as { data?: Record<string, unknown> } | null)?.data || {};
+    const submissionEmails = Array.isArray(lenderData.submission_emails)
+      ? lenderData.submission_emails.filter(
+          (value): value is string => typeof value === "string" && value.includes("@"),
+        )
+      : [];
+    const contact =
+      typeof lenderData.contact === "string" && lenderData.contact.includes("@")
+        ? lenderData.contact
+        : null;
+    const recipient =
+      submissionEmails.find((email) => /submission|submit/i.test(email)) ||
+      contact ||
+      submissionEmails[0] ||
+      null;
+    if (!recipient) {
+      return NextResponse.json(
+        { ok: false, error: "funmate_retry_missing_recipient" },
+        { status: 422 },
+      );
+    }
+
+    const connection = await verifyFunmateSmtp();
+    if (!connection.ok) {
+      return NextResponse.json(
+        { ok: false, error: "funmate_mail_unreachable", detail: connection.error },
+        { status: 503 },
+      );
+    }
+
+    const claim = await db
+      .from("application_lender_threads")
+      .update({ status: "sending", last_error: null, updated_at: new Date().toISOString() })
+      .eq("id", thread.id)
+      .eq("tenant_id", tenantId)
+      .eq("status", thread.status)
+      .select("id");
+    if (claim.error || !claim.data?.length) {
+      return NextResponse.json({
+        ok: true,
+        thread_id: thread.id,
+        previous_status: thread.status,
+        new_status: thread.status,
+        noop: true,
+      });
+    }
+
+    const attachments = Array.isArray(thread.attachments)
+      ? (thread.attachments as ShopOutAttachment[])
+      : [];
+    const cc = Array.isArray(thread.cc_emails)
+      ? thread.cc_emails.filter(
+          (value): value is string => typeof value === "string" && value.includes("@"),
+        )
+      : [];
+    const sent = await sendFunmateMail({
+      to: recipient,
+      cc,
+      subject: thread.subject || "FundMate Submission",
+      text: thread.body_template || "",
+      tenantId,
+      attachments,
+    });
+    const now = new Date().toISOString();
+    await db
+      .from("application_lender_threads")
+      .update(
+        sent.ok
+          ? {
+              status: "sent",
+              sent_at: now,
+              gmail_thread_id: sent.rfc822MessageId,
+              last_message_id: sent.rfc822MessageId,
+              message_id_history: [sent.rfc822MessageId],
+              last_error: null,
+              updated_at: now,
+            }
+          : { status: "error", last_error: sent.error, updated_at: now },
+      )
+      .eq("id", thread.id)
+      .eq("tenant_id", tenantId)
+      .eq("email_identity", "funmate");
+
+    return NextResponse.json({
+      ok: sent.ok,
+      thread_id: thread.id,
+      previous_status: thread.status,
+      new_status: sent.ok ? "sent" : "error",
+      physical_send: {
+        status: sent.ok ? "sent" : "error",
+        sent_count: sent.ok ? 1 : 0,
+        failed_count: sent.ok ? 0 : 1,
+        message: sent.ok ? undefined : sent.error,
+      },
     });
   }
 

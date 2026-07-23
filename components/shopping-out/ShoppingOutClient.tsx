@@ -46,6 +46,7 @@ type Thread = {
   last_response_at: string | null;
   last_response_summary: string | null;
   last_error: string | null;
+  email_identity?: "sunbiz" | "funmate";
   created_at: string;
 };
 
@@ -490,6 +491,8 @@ export function ShoppingOutClient({
     try {
       await fetch(`/api/applications/${selectedAppId}/lender-threads/retry-all`, {
         method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email_identity: lenderNetwork }),
       }).then((r) => r.json().catch(() => ({})));
       await refreshThreads();
     } catch {
@@ -497,13 +500,21 @@ export function ShoppingOutClient({
     } finally {
       setRetryingAll(false);
     }
-  }, [selectedAppId, refreshThreads]);
+  }, [selectedAppId, lenderNetwork, refreshThreads]);
+
+  const visibleThreads = useMemo(
+    () =>
+      threads.filter(
+        (thread) => (thread.email_identity === "funmate" ? "funmate" : "sunbiz") === lenderNetwork,
+      ),
+    [threads, lenderNetwork],
+  );
 
   // Threads in a needs-retry state (error or stuck sending). Drives the
   // "Retry all failed" button visibility + count.
   const failedThreadCount = useMemo(
-    () => threads.filter((t) => t.status === "error" || t.status === "sending").length,
-    [threads],
+    () => visibleThreads.filter((t) => t.status === "error" || t.status === "sending").length,
+    [visibleThreads],
   );
 
   const toggleLender = (id: string) => {
@@ -590,7 +601,7 @@ export function ShoppingOutClient({
         if (lenderNetwork === "funmate") {
           setSendResult({
             ok: true,
-            message: `Funmate sent ${json.sent || 0} lender package${json.sent === 1 ? "" : "s"}${json.failed ? ` · ${json.failed} failed` : ""}.`,
+            message: `FundMate sent ${json.sent || 0} lender package${json.sent === 1 ? "" : "s"}${json.failed ? ` · ${json.failed} failed` : ""}.`,
           });
           await refreshPlanAndThreads();
           return;
@@ -719,14 +730,14 @@ export function ShoppingOutClient({
                     lenderNetwork === value ? "bg-accent text-bg-deep" : "text-fg-muted hover:text-fg"
                   }`}
                 >
-                  {value === "sunbiz" ? "SunBiz Lenders" : "Funmate Lenders"}
+                  {value === "sunbiz" ? "SunBiz Lenders" : "FundMate Lenders"}
                 </button>
               ))}
             </div>
             <div className="flex items-center justify-between">
               <div>
                 <div className="text-[11px] uppercase tracking-wider text-fg-dim font-semibold">
-                  2 · {lenderNetwork === "sunbiz" ? "SunBiz Lenders" : "Funmate Lenders"}
+                  2 · {lenderNetwork === "sunbiz" ? "SunBiz Lenders" : "FundMate Lenders"}
                 </div>
                 <div className="text-[11.5px] text-fg-muted mt-0.5">
                   {typeof selectedApp?.data.business_name === "string" && (
@@ -833,7 +844,7 @@ export function ShoppingOutClient({
               </div>
             ) : (
               <div className="text-xs text-fg-dim italic py-4 text-center">
-                No {lenderNetwork === "sunbiz" ? "SunBiz" : "Funmate"} lenders in this directory. Add one on the Lenders page first.
+                No {lenderNetwork === "sunbiz" ? "SunBiz" : "FundMate"} lenders in this directory. Add one on the Lenders page first.
               </div>
             )}
           </div>
@@ -1012,17 +1023,17 @@ export function ShoppingOutClient({
                 )}
                 <Tag tone="info">
                   <ShoppingBag className="w-3 h-3 mr-1 inline" />
-                  {threads.length}
+                  {visibleThreads.length}
                 </Tag>
               </div>
             </div>
-            {threads.length === 0 ? (
+            {visibleThreads.length === 0 ? (
               <div className="text-xs text-fg-dim italic py-3 text-center">
                 No threads yet. The first send creates one row per lender.
               </div>
             ) : (
               <div className="rounded-md border border-bg-border divide-y divide-bg-border">
-                {threads.map((t) => {
+                {visibleThreads.map((t) => {
                   const tone =
                     STATUS_TONE[t.status] || "bg-slate-500/15 text-slate-300 border-slate-500/30";
                   // For needs-attention states, show a plain-English message

@@ -22,7 +22,7 @@ assert.equal(transformed.funding.requestedAmount, 75000);
 assert.equal(transformed.source, "sunbiz");
 
 const rendered = renderFunmateSubmission(transformed, "Priority review requested.");
-assert.match(rendered.subject, /^Funmate Submission \| Example Holdings LLC$/);
+assert.match(rendered.subject, /^FundMate Submission \| Example Holdings LLC$/);
 assert.match(rendered.text, /Priority review requested/);
 assert.match(rendered.text, /SunBiz reference: app-123/);
 
@@ -42,6 +42,10 @@ const retryRoute = readFileSync(
   "app/api/applications/[id]/lender-threads/[threadId]/retry/route.ts",
   "utf8",
 );
-assert.match(retryRoute, /funmate_retry_requires_funmate_route/);
+assert.match(retryRoute, /sendFunmateMail/);
+assert.match(retryRoute, /funmate_retry_missing_recipient/);
+const replyScanner = readFileSync("app/api/cron/scan-funmate-replies/route.ts", "utf8");
+assert.match(replyScanner, /process\.env\.CRON_SECRET/);
+assert.match(replyScanner, /addressesByLender/);
 
 console.log("funmate-integration: all assertions passed");
