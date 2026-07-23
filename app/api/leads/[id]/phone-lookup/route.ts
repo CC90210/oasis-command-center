@@ -42,12 +42,6 @@ const IN_FLIGHT = ["pending", "running"];
  * Re-running the same lead inside this window returns the existing row instead. */
 const DEDUPE_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
 
-/** The subset of the job row this route reasons about. `phone_lookup_jobs` was
- * added in database/121 and is not in the generated Database types, so the
- * client infers an error shape for a string select; the narrow local type is
- * what the dedupe logic below is actually checked against. */
-type JobRow = { id: string; status: string; created_at: string };
-
 const SELECT_COLS =
   "id,status,error_message,phones,emails,matched_name,matched_age,matched_city," +
   "matched_state,confidence,source,query_first_name,query_last_name,query_city," +
@@ -158,30 +152,48 @@ export async function POST(_req: Request, ctx: { params: Promise<{ id: string }>
     );
   }
 
-  // One in-flight job per lead: a double-click must not spend two scrapes.
-  const { data: existing, error: existErr } = await svc
+  // Both dedupe checks below filter in the DATABASE rather than slicing recent
+  // history in memory. Fetching the last N rows and scanning them looks
+  // equivalent but is not: a run of retryable failures pushes the qualifying
+  // job out of the sample, and the window silently stops applying.
+
+  // 1. One in-flight job per lead — a double-click must not spend two scrapes.
+  //    (The partial unique index in database/121 is the real guarantee; this is
+  //    the friendly path that returns the running job instead of a conflict.)
+  const { data: inFlight, error: inFlightErr } = await svc
     .from("phone_lookup_jobs")
     .select(SELECT_COLS)
     .eq("tenant_id", sess.tenantId)
     .eq("lead_id", leadId)
+    .in("status", IN_FLIGHT)
     .order("created_at", { ascending: false })
-    .limit(5);
-  if (existErr) {
+    .limit(1)
+    .maybeSingle();
+  if (inFlightErr) {
     // Fail closed: unable to prove there is no in-flight job ⇒ do not add one.
     return NextResponse.json({ ok: false, error: "dedupe_check_failed" }, { status: 503 });
   }
-  const priorJobs = (existing ?? []) as unknown as JobRow[];
-  const inFlight = priorJobs.find((j) => IN_FLIGHT.includes(String(j.status)));
   if (inFlight) {
     return NextResponse.json({ ok: true, job: inFlight, deduped: "in_flight" });
   }
-  const recent = priorJobs.find(
-    (j) =>
-      Date.now() - new Date(String(j.created_at)).getTime() < DEDUPE_WINDOW_MS &&
-      // A previous BLOCK or ERROR is not an answer about this merchant, so it
-      // must not suppress a retry. Only a completed lookup does.
-      ["completed", "no_results"].includes(String(j.status)),
-  );
+
+  // 2. A conclusive lookup inside the dedupe window suppresses a new one. Only
+  //    'completed' and 'no_results' qualify: a previous block or error is not an
+  //    answer about this merchant and must never suppress a retry.
+  const cutoff = new Date(Date.now() - DEDUPE_WINDOW_MS).toISOString();
+  const { data: recent, error: recentErr } = await svc
+    .from("phone_lookup_jobs")
+    .select(SELECT_COLS)
+    .eq("tenant_id", sess.tenantId)
+    .eq("lead_id", leadId)
+    .in("status", ["completed", "no_results"])
+    .gte("created_at", cutoff)
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (recentErr) {
+    return NextResponse.json({ ok: false, error: "dedupe_check_failed" }, { status: 503 });
+  }
   if (recent) {
     return NextResponse.json({ ok: true, job: recent, deduped: "recent" });
   }
