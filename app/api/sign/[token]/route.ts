@@ -33,6 +33,7 @@ import { downloadEsignPdf, uploadEsignSignedPdf } from "@/lib/esign/storage";
 import { appendSignaturePages, sha256OfBytes } from "@/lib/esign/pdf";
 import { sendEnvelopeCompletedWithPdf } from "@/lib/esign/email";
 import { resolveSigningSession } from "@/lib/esign/resolve-signing-session";
+import { logTenantAudit } from "@/lib/audit/activity-feed";
 import type { EsignSignerRow, EsignEnvelopeRow } from "@/lib/esign/db";
 
 export const runtime = "nodejs";
@@ -226,11 +227,22 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ token: str
   });
   if (!upload.ok) return genericError();
 
+  // B2 (2026-07-23): a completed envelope with NEITHER lead_id NOR
+  // application_id used to leave both silently null — indistinguishable from
+  // a linking bug that dropped the association. Stamp WHY it's unlinked
+  // instead (migration 124_esign_unlinked_reason.sql). Only set once — a
+  // racing second completion (changed:false below) never re-derives this.
+  const unlinkedReason =
+    !envelope.lead_id && !envelope.application_id
+      ? "standalone_document_no_lead_or_application"
+      : null;
+
   const completed = await updateEnvelopeStatus(envelope.tenant_id, envelope.id, "completed", {
     signed_storage_key: upload.storagePath,
     signed_document_id: upload.documentId,
     signed_pdf_sha256: signedSha256,
     completed_at: new Date().toISOString(),
+    ...(unlinkedReason ? { unlinked_reason: unlinkedReason } : {}),
   });
   if (!completed.ok) return genericError();
 
@@ -245,6 +257,33 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ token: str
       actor: "system",
       meta: { signed_pdf_sha256: signedSha256 },
     });
+
+    // B2 (2026-07-23): tenant-wide audit trail entry (separate from the
+    // envelope-scoped esign_events row above) — surfaces envelope completion
+    // on the Settings/Operations audit feed alongside team/invite changes,
+    // and records signed_document_id being null (a real completion state for
+    // lead-less envelopes, not a silent gap) plus the unlinked_reason if any.
+    // Best-effort — never blocks the signer's success response.
+    const auditWrite = await logTenantAudit({
+      tenantId: envelope.tenant_id,
+      actionType: "esign_envelope_completed",
+      targetTable: "esign_envelopes",
+      targetId: envelope.id,
+      after: {
+        status: "completed",
+        signed_document_id: upload.documentId,
+        signed_pdf_sha256: signedSha256,
+        lead_id: envelope.lead_id,
+        application_id: envelope.application_id,
+        unlinked_reason: unlinkedReason,
+      },
+    });
+    if (!auditWrite.ok) {
+      // Reported (not silent) but non-fatal — same posture as the completion
+      // email below. The esign_events row above is still the legally
+      // authoritative audit trail for this envelope even if this write fails.
+      console.error("[sign.route] tenant_audit_log write failed", auditWrite.error);
+    }
 
     // Email EVERY signer a completion confirmation with the fully-signed PDF
     // ATTACHED (from the configured e-sign sender, e.g. adonyess@gmail.com).

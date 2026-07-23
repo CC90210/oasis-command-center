@@ -14,11 +14,27 @@
  * + BRIDGE_BEARER_TOKEN (already configured in the dashboard env — the chat
  * proves it). This route then:
  *   - allowlists action ∈ {start,stop,restart} and the daemon name (the SunBiz
- *     pm2 services — SUNBIZ_WORKER_NAMES in @/lib/automations/sunbiz-workers),
+ *     pm2 services — SUNBIZ_WORKERS in @/lib/automations/sunbiz-workers; a
+ *     name that doesn't match any entry there is rejected as unknown_worker),
  *   - gates to owner/admin only — bouncing a production daemon is a shell-tier
  *     privilege, identical to "can this role run bash on the VPS"
  *     (bridgeExecToolAllowedForRole(role, "bash")), so members / read_only /
  *     loan_officer / processor are rejected,
+ *   - B4 (2026-07-23; hardened 2026-07-23 per CodeRabbit PR #81 review):
+ *     WORKER-OWNER SEGREGATION. sunbiz-workers.ts tags each daemon "cc"
+ *     (SunBiz core infra) / "adon" (Breeze/MCA underwriting) / "shared".
+ *     This table has no per-user identity column, so the actor's side is
+ *     resolved from authorizeBridgeRequest()'s isOperator flag: the empire
+ *     operator (CC) bypassing the tenant gate = "cc"; any other authenticated
+ *     SunBiz tenant member (owner/admin-tier, per the role gate above) =
+ *     "adon" side. A caller may act on a worker whose owner matches their
+ *     side, or "shared". Cross-owner is DENIED for everyone else — the ONLY
+ *     override is the empire operator (isOperator), NOT a SunBiz tenant
+ *     is_owner role. teamRole promotes to "owner" for the tenant's OWN
+ *     is_owner flag (Adon, on the 'submissions' tenant) — using that as the
+ *     escape hatch would let Adon's side bounce CC's core-infra daemons,
+ *     which is exactly the hole this gate exists to close. Every attempt
+ *     (allowed or denied) is logged with the actor via tenant_audit_log.
  *   - then, and only then, forwards `pm2 <action> <name>` to the bridge with
  *     the server-held bearer. The tunnel can only ever receive that exact,
  *     constrained command from us — never operator-supplied bash.
@@ -27,7 +43,8 @@
 import { NextResponse } from "next/server";
 import { authorizeBridgeRequest, callBridgeExecTool } from "@/lib/bridge-proxy";
 import { bridgeExecToolAllowedForRole } from "@/lib/role-gates";
-import { SUNBIZ_WORKER_NAMES } from "@/lib/automations/sunbiz-workers";
+import { SUNBIZ_WORKERS } from "@/lib/automations/sunbiz-workers";
+import { logTenantAudit } from "@/lib/audit/activity-feed";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -64,8 +81,47 @@ export async function POST(req: Request) {
   if (!ALLOWED_ACTIONS.has(action)) {
     return NextResponse.json({ ok: false, error: "invalid_action" }, { status: 400 });
   }
-  if (!SUNBIZ_WORKER_NAMES.has(name)) {
+  const worker = SUNBIZ_WORKERS.find((w) => w.service.replace(/^pm2\./, "") === name);
+  if (!worker) {
     return NextResponse.json({ ok: false, error: "unknown_worker" }, { status: 400 });
+  }
+
+  // B4 (2026-07-23) — worker-owner segregation gate. See the file-header
+  // doc comment above for the full rationale. Every cross-owner touch
+  // (denied OR allowed-via-override) gets a DURABLE row in tenant_audit_log
+  // — reusing B2's logTenantAudit() rather than a console line, so "who
+  // bounced Adon's Breeze daemon" survives past Vercel's ephemeral function
+  // logs and is queryable on the same Settings/Operations audit surface as
+  // everything else. Best-effort: a failed audit write never blocks the
+  // gate decision itself.
+  const actorSide: "cc" | "adon" = auth.isOperator ? "cc" : "adon";
+  const ownerMatches = worker.owner === "shared" || worker.owner === actorSide;
+  // ONLY the empire operator (CC) may cross the owner boundary. A SunBiz
+  // tenant is_owner (Adon, teamRole==="owner") is NOT a valid override here —
+  // that would let Adon's side bounce CC's core-infra daemons, defeating the
+  // whole point of this gate. (CodeRabbit PR #81 [Major]: the prior
+  // `auth.teamRole === "owner" || auth.isOperator` left exactly that hole.)
+  const operatorOverride = auth.isOperator;
+  if (!ownerMatches) {
+    await logTenantAudit({
+      tenantId: auth.tenantId,
+      actorUserId: auth.userId,
+      actionType: "background_worker_cross_owner_control",
+      targetTable: "sunbiz_workers",
+      targetId: name,
+      after: {
+        actor_side: actorSide,
+        action,
+        worker_owner: worker.owner,
+        outcome: operatorOverride ? "operator_override_allowed" : "denied",
+      },
+    });
+  }
+  if (!ownerMatches && !operatorOverride) {
+    return NextResponse.json(
+      { ok: false, error: "cross_owner_worker_denied", worker_owner: worker.owner },
+      { status: 403 },
+    );
   }
 
   const result = await callBridgeExecTool(auth.target, {

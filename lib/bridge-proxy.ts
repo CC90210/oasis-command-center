@@ -151,6 +151,12 @@ export type BridgeAuthResult =
       tenantSlug: string;
       userId: string;
       teamRole: string;
+      /** True for the empire operator (CC) bypassing the tenant gate — as
+       *  opposed to an authenticated SunBiz tenant member. B4 (2026-07-23):
+       *  the worker-owner control gate (background-workers/control/route.ts)
+       *  uses this to resolve "cc" vs "adon" actor side when neither party
+       *  has a per-user identity column on this table. */
+      isOperator: boolean;
     }
   | { ok: false; status: number; error: string };
 
@@ -227,5 +233,6 @@ export async function authorizeBridgeRequest(): Promise<BridgeAuthResult> {
     tenantSlug: tenantRow.slug,
     userId: user.id,
     teamRole,
+    isOperator,
   };
 }
