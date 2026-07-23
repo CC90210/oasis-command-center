@@ -195,6 +195,7 @@ export function ShoppingOutClient({
   const [plan, setPlan] = useState<PlanRow[] | null>(null);
   const [planLoading, setPlanLoading] = useState(false);
   const [selectedLenderIds, setSelectedLenderIds] = useState<Set<string>>(new Set());
+  const [lenderNetwork, setLenderNetwork] = useState<"sunbiz" | "funmate">("sunbiz");
   const [notes, setNotes] = useState("");
   // Per-deal CC: agent preset checkboxes (Jordan / Alex) + free-text
   // custom email. The shop-out POST forwards the resolved cc_emails to
@@ -300,10 +301,18 @@ export function ShoppingOutClient({
       // is the authoritative on/off switch. Inactive lenders should
       // never appear in the shop-out plan (Codex review 2026-05-24).
       const allLenderIds = lenders
-        .filter((l) => l.data.active !== false)
+        .filter(
+          (l) =>
+            l.data.active !== false &&
+            (l.data.lender_network === "funmate" ? "funmate" : "sunbiz") === lenderNetwork,
+        )
         .map((l) => l.id);
+      const planEndpoint =
+        lenderNetwork === "funmate"
+          ? `/api/applications/${selectedAppId}/shop-out/funmate`
+          : `/api/applications/${selectedAppId}/shop-out`;
       const [planRes, threadsRes, docsRes] = await Promise.all([
-        fetch(`/api/applications/${selectedAppId}/shop-out`, {
+        fetch(planEndpoint, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           credentials: "include",
@@ -396,7 +405,7 @@ export function ShoppingOutClient({
     } finally {
       setPlanLoading(false);
     }
-  }, [selectedAppId, lenders]);
+  }, [selectedAppId, lenders, lenderNetwork]);
 
   useEffect(() => {
     if (selectedAppId && lenders) refreshPlanAndThreads();
@@ -551,7 +560,11 @@ export function ShoppingOutClient({
         warning_codes: p.warnings.filter((w) => w.severity === "high_risk").map((w) => w.code),
         override_note: overrideNote.trim(),
       }));
-      const res = await fetch(`/api/applications/${selectedAppId}/shop-out`, {
+      const sendEndpoint =
+        lenderNetwork === "funmate"
+          ? `/api/applications/${selectedAppId}/shop-out/funmate`
+          : `/api/applications/${selectedAppId}/shop-out`;
+      const res = await fetch(sendEndpoint, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         credentials: "include",
@@ -566,12 +579,22 @@ export function ShoppingOutClient({
             ccCustom.trim() && ccCustom.includes("@") ? ccCustom.trim() : null,
           ].filter((e): e is string => Boolean(e)),
           attachments,
-          body_template: notes.trim() || undefined,
+          ...(lenderNetwork === "funmate"
+            ? { notes: notes.trim() || undefined }
+            : { body_template: notes.trim() || undefined }),
           acknowledged_warnings: acknowledged.length > 0 ? acknowledged : undefined,
         }),
       });
       const json = await res.json();
       if (json.ok) {
+        if (lenderNetwork === "funmate") {
+          setSendResult({
+            ok: true,
+            message: `Funmate sent ${json.sent || 0} lender package${json.sent === 1 ? "" : "s"}${json.failed ? ` · ${json.failed} failed` : ""}.`,
+          });
+          await refreshPlanAndThreads();
+          return;
+        }
         // Reflect the actual physical-send outcome the route auto-triggers,
         // not a generic "fires later" line. Falls back gracefully when the
         // bridge result is absent (queued-only).
@@ -682,10 +705,28 @@ export function ShoppingOutClient({
       {selectedAppId && (
         <Card>
           <div className="space-y-3">
+            <div className="inline-flex rounded-lg border border-bg-border bg-bg-deep p-1">
+              {(["sunbiz", "funmate"] as const).map((value) => (
+                <button
+                  key={value}
+                  type="button"
+                  onClick={() => {
+                    setLenderNetwork(value);
+                    setSelectedLenderIds(new Set());
+                    setSendResult(null);
+                  }}
+                  className={`rounded-md px-4 py-2 text-[12px] font-semibold transition-colors ${
+                    lenderNetwork === value ? "bg-accent text-bg-deep" : "text-fg-muted hover:text-fg"
+                  }`}
+                >
+                  {value === "sunbiz" ? "SunBiz Lenders" : "Funmate Lenders"}
+                </button>
+              ))}
+            </div>
             <div className="flex items-center justify-between">
               <div>
                 <div className="text-[11px] uppercase tracking-wider text-fg-dim font-semibold">
-                  2 · Lenders
+                  2 · {lenderNetwork === "sunbiz" ? "SunBiz Lenders" : "Funmate Lenders"}
                 </div>
                 <div className="text-[11.5px] text-fg-muted mt-0.5">
                   {typeof selectedApp?.data.business_name === "string" && (
@@ -792,7 +833,7 @@ export function ShoppingOutClient({
               </div>
             ) : (
               <div className="text-xs text-fg-dim italic py-4 text-center">
-                No lenders in directory. Add some on the Lenders page first.
+                No {lenderNetwork === "sunbiz" ? "SunBiz" : "Funmate"} lenders in this directory. Add one on the Lenders page first.
               </div>
             )}
           </div>

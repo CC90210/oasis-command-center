@@ -269,6 +269,25 @@ export async function POST(
   // lead's monthly_revenue / time_in_business / FICO / requested_amount
   // fields denormalized at form-submission time.
   const db = getServiceSupabase();
+  const selectedLenders = await db
+    .from("tenant_records")
+    .select("id, data")
+    .eq("tenant_id", tenantId)
+    .eq("entity_type", "lender")
+    .in("id", lenderIds);
+  if (selectedLenders.error) {
+    return NextResponse.json({ ok: false, error: "lender_lookup_failed" }, { status: 500 });
+  }
+  const funmateSelected = (selectedLenders.data || []).filter((row) => {
+    const data = (row as { data: Record<string, unknown> }).data || {};
+    return String(data.lender_network || "sunbiz") === "funmate";
+  });
+  if (funmateSelected.length > 0) {
+    return NextResponse.json(
+      { ok: false, error: "funmate_lenders_require_funmate_route" },
+      { status: 409 },
+    );
+  }
   const appRow = await db
     .from("tenant_records")
     .select("id, data")

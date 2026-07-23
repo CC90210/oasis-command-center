@@ -59,7 +59,7 @@ export async function POST(
   // would otherwise affect the right tenant's threads under a wrong URL).
   const threadRes = await db
     .from("application_lender_threads")
-    .select("id, tenant_id, application_id, status, last_error, updated_at")
+    .select("id, tenant_id, application_id, status, last_error, updated_at, email_identity")
     .eq("id", threadId)
     .eq("tenant_id", tenantId)
     .eq("application_id", applicationId)
@@ -68,6 +68,15 @@ export async function POST(
     return NextResponse.json(
       { ok: false, error: "thread_lookup_failed" },
       { status: 500 },
+    );
+  }
+  if (
+    threadRes.data &&
+    String((threadRes.data as { email_identity?: unknown }).email_identity || "sunbiz") === "funmate"
+  ) {
+    return NextResponse.json(
+      { ok: false, error: "funmate_retry_requires_funmate_route" },
+      { status: 409 },
     );
   }
   if (!threadRes.data) {
