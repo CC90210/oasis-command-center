@@ -26,8 +26,11 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ShieldAlert, ShieldCheck, ShieldQuestion, Phone, PhoneOff } from "lucide-react";
 
+import { hasUsablePhone } from "@/lib/clair/eligibility";
+
 import { BackgroundCheckTab } from "./BackgroundCheckTab";
 import { ClairReportPanel } from "./ClairReportPanel";
+import { PhoneLookupPanel } from "./PhoneLookupPanel";
 
 type RiskFlag =
   | "none"
@@ -121,7 +124,15 @@ function Chip({
  * whether a phone number is on file, and when each was last determined. The
  * detail lives in the panels below.
  */
-function EnrichmentSummary({ leadId, refreshKey }: { leadId: string; refreshKey: number }) {
+function EnrichmentSummary({
+  leadId,
+  refreshKey,
+  leadData,
+}: {
+  leadId: string;
+  refreshKey: number;
+  leadData: Record<string, unknown>;
+}) {
   const [bg, setBg] = useState<BgCheck>(null);
   const [clair, setClair] = useState<ClairReport>(null);
   const [loaded, setLoaded] = useState(false);
@@ -180,12 +191,34 @@ function EnrichmentSummary({ leadId, refreshKey }: { leadId: string; refreshKey:
     bgChip = <Chip color={riskColor(bg.risk_flag)}>{RISK_LABEL[bg.risk_flag]}</Chip>;
   }
 
-  // Phone chip — CLAIR is the only enrichment source that yields numbers today.
+  // Phone chip. Two sources can produce a number now: the automated
+  // TruePeopleSearch lookup (free, first) and CLAIR (billable, fallback). The
+  // automated one is checked first because it is the one that normally answers,
+  // and because its status is what governs whether CLAIR is even offered.
+  const lookupStatus = String(leadData.phone_lookup_status ?? "");
   let phoneChip: React.ReactNode;
-  if (phoneCount > 0) {
+  if (hasUsablePhone(leadData) && lookupStatus === "found") {
+    phoneChip = (
+      <Chip color="#1f7a4d">
+        <Phone className="h-3 w-3" /> Phone found — automated lookup
+      </Chip>
+    );
+  } else if (lookupStatus === "manual_review") {
+    phoneChip = (
+      <Chip color={riskColor("unknown")}>
+        <PhoneOff className="h-3 w-3" /> Lookup failed — needs CLAIR
+      </Chip>
+    );
+  } else if (phoneCount > 0) {
     phoneChip = (
       <Chip color="#1f7a4d">
         <Phone className="h-3 w-3" /> {phoneCount} phone{phoneCount === 1 ? "" : "s"} on file
+      </Chip>
+    );
+  } else if (lookupStatus === "not_found" && clair?.status !== "no_results") {
+    phoneChip = (
+      <Chip muted>
+        <PhoneOff className="h-3 w-3" /> Automated lookup: no match
       </Chip>
     );
   } else if (clair?.status === "no_results") {
@@ -260,8 +293,13 @@ export function EnrichmentTab({
 
   return (
     <div className="space-y-5">
-      <EnrichmentSummary leadId={leadId} refreshKey={refreshKey} />
+      <EnrichmentSummary leadId={leadId} refreshKey={refreshKey} leadData={record} />
       <BackgroundCheckTab leadId={leadId} record={record} onChanged={bump} />
+      {/* Order is the policy, not a layout preference: the free automated lookup
+          is offered first, and CLAIR renders below it precisely because
+          clairEligibility() keeps the billable button hidden until this one has
+          run and come up empty. */}
+      <PhoneLookupPanel leadId={leadId} leadData={record} onChanged={bump} />
       <ClairReportPanel leadId={leadId} leadData={record} onChanged={bump} />
     </div>
   );
