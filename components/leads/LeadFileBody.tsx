@@ -15,6 +15,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 // useRef intentionally imported for the file-input ref in DocumentsTab.
 import { BackgroundCheckTab } from "./BackgroundCheckTab";
 import { DefaultsCheckControl } from "./DefaultsCheckControl";
+import { splitUsAddress } from "@/lib/address/split-us-address";
 import { useRouter, usePathname } from "next/navigation";
 import Link from "next/link";
 import { X, FileText, ImageIcon, Phone, Mail, ShoppingBag, Loader2, Trash2, CheckCircle2, AlertCircle, UploadCloud, RefreshCw, ArrowRightLeft, ChevronLeft, Eye, GripHorizontal, ChevronUp, ChevronDown } from "lucide-react";
@@ -3052,6 +3053,21 @@ function OwnerTab({
     .filter(Boolean)
     .join(", ");
   if (cityStateZip) addressLines.push(cityStateZip);
+  // Fallback: legacy / PDF-extracted rows that only stored the whole
+  // `owner_home_address` (never split). Parse it so city/state/zip still show
+  // instead of the structured line rendering blank.
+  if (addressLines.length === 0) {
+    const whole = str(record.owner_home_address);
+    if (whole) {
+      const p = splitUsAddress(whole);
+      if (p.line1) addressLines.push(p.line1);
+      const csz = [p.city, [p.state, p.zip].filter(Boolean).join(" ")]
+        .filter(Boolean)
+        .join(", ");
+      if (csz) addressLines.push(csz);
+      if (addressLines.length === 0) addressLines.push(whole);
+    }
+  }
   const hasAddress = addressLines.length > 0;
 
   const legalName = str(record.legal_name) || str(record.business_name);
