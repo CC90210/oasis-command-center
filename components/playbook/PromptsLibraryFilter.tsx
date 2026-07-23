@@ -15,7 +15,7 @@
 
 import { useMemo, useState } from "react";
 import Link from "next/link";
-import { ArrowRight, Search, ShieldAlert, User as UserIcon, Users, X } from "lucide-react";
+import { ArrowRight, Check, Copy, Search, ShieldAlert, User as UserIcon, Users, X } from "lucide-react";
 import { Card } from "@/components/Card";
 import type {
   PromptCategory,
@@ -38,6 +38,7 @@ export function PromptsLibraryFilter({
   categoryDefs,
 }: Props) {
   const [query, setQuery] = useState("");
+  const [copiedId, setCopiedId] = useState<string | null>(null);
   const q = query.trim().toLowerCase();
 
   // Match against the fields the operator's most likely to remember:
@@ -61,12 +62,31 @@ export function PromptsLibraryFilter({
     });
   }, [prompts, q, categoryDefs]);
 
-  const operatorPrompts = filtered.filter(
-    (p) => p.audience === "operator" || p.audience === "shared",
-  );
-  const clientPrompts = filtered.filter(
-    (p) => p.audience === "client" || p.audience === "shared",
-  );
+  const operatorPrompts = filtered.filter((p) => p.audience === "operator");
+  const clientPrompts = filtered.filter((p) => p.audience === "client");
+  const sharedPrompts = filtered.filter((p) => p.audience === "shared");
+
+  async function copyPrompt(prompt: PromptEntry) {
+    // Mirrors components/CopyButton.tsx: clipboard API is unavailable on
+    // insecure origins / older browsers and can reject on permission denial —
+    // fall back to window.prompt so the copy path never silently no-ops.
+    const text = prompt.prompt;
+    try {
+      if (typeof navigator !== "undefined" && navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(text);
+      } else if (typeof window !== "undefined") {
+        window.prompt("Copy:", text);
+      }
+      setCopiedId(prompt.id);
+      window.setTimeout(() => setCopiedId((id) => (id === prompt.id ? null : id)), 1600);
+    } catch {
+      try {
+        window.prompt("Copy:", text);
+      } catch {
+        /* ignore */
+      }
+    }
+  }
 
   const hasResults = filtered.length > 0;
 
@@ -134,7 +154,7 @@ export function PromptsLibraryFilter({
                     <Card key={cat} title={def.label} subtitle={def.description}>
                       <div className="grid sm:grid-cols-2 gap-2.5">
                         {list.map((p) => (
-                          <PromptCard key={p.id} p={p} />
+                          <PromptCard key={p.id} p={p} copied={copiedId === p.id} onCopy={copyPrompt} />
                         ))}
                       </div>
                     </Card>
@@ -163,7 +183,7 @@ export function PromptsLibraryFilter({
                     <Card key={cat} title={def.label} subtitle={def.description}>
                       <div className="grid sm:grid-cols-2 gap-2.5">
                         {list.map((p) => (
-                          <PromptCard key={p.id} p={p} />
+                          <PromptCard key={p.id} p={p} copied={copiedId === p.id} onCopy={copyPrompt} />
                         ))}
                       </div>
                     </Card>
@@ -172,20 +192,34 @@ export function PromptsLibraryFilter({
               </div>
             </div>
           )}
+
+          {sharedPrompts.length > 0 && (
+            <div>
+              <div className="flex items-baseline gap-2 mb-3">
+                <Users className="w-4 h-4 text-status-engaged" />
+                <h2 className="text-lg font-bold text-fg">Universal prompts</h2>
+                <span className="text-xs text-fg-muted">shared once across operator and client work</span>
+              </div>
+              <Card title="Agent tooling + shared routines" subtitle="Use these in any OASIS workspace.">
+                <div className="grid sm:grid-cols-2 gap-2.5">
+                  {sharedPrompts.map((p) => (
+                    <PromptCard key={p.id} p={p} copied={copiedId === p.id} onCopy={copyPrompt} />
+                  ))}
+                </div>
+              </Card>
+            </div>
+          )}
         </>
       )}
     </div>
   );
 }
 
-function PromptCard({ p }: { p: PromptEntry }) {
+function PromptCard({ p, copied, onCopy }: { p: PromptEntry; copied: boolean; onCopy: (prompt: PromptEntry) => void }) {
   const href = `/agents?agent=${encodeURIComponent(p.agent)}&prompt=${encodeURIComponent(p.prompt)}`;
   const isOverride = p.category === "system_override";
   return (
-    <Link
-      href={href}
-      className="group rounded-lg border border-bg-border bg-bg-elev/40 hover:border-accent/50 hover:bg-accent/5 transition-all p-3.5 flex items-start gap-3"
-    >
+    <div className="group rounded-lg border border-bg-border bg-bg-elev/40 hover:border-accent/50 hover:bg-accent/5 transition-all p-3.5 flex items-start gap-3">
       <div className="flex-1 min-w-0">
         <div className="flex items-center gap-1.5 flex-wrap">
           <span className="text-sm font-bold text-fg">{p.title}</span>
@@ -197,7 +231,6 @@ function PromptCard({ p }: { p: PromptEntry }) {
           <span className="text-[10px] uppercase tracking-wider font-bold text-fg-dim">
             → {p.agent}
           </span>
-          <ArrowRight className="hover-reveal-cue w-3.5 h-3.5 text-fg-dim transition-opacity ml-auto" />
         </div>
         <div className="text-xs text-fg-muted mt-1.5 leading-snug">{p.description}</div>
         {isOverride && (
@@ -205,7 +238,16 @@ function PromptCard({ p }: { p: PromptEntry }) {
             <ShieldAlert className="w-3 h-3" /> [OVERRIDE] prompt
           </div>
         )}
+        <div className="flex gap-2 mt-3">
+          <Link href={href} className="inline-flex items-center gap-1.5 rounded border border-bg-border px-2.5 py-1.5 text-[11px] font-semibold text-fg-muted hover:text-accent hover:border-accent/50 transition-colors">
+            Open in chat <ArrowRight className="w-3 h-3" />
+          </Link>
+          <button type="button" onClick={() => onCopy(p)} className="inline-flex items-center gap-1.5 rounded border border-bg-border px-2.5 py-1.5 text-[11px] font-semibold text-fg-muted hover:text-fg hover:border-fg-dim transition-colors" aria-label={`Copy ${p.title} prompt`}>
+            {copied ? <Check className="w-3 h-3 text-status-engaged" /> : <Copy className="w-3 h-3" />}
+            {copied ? "Copied" : "Copy prompt"}
+          </button>
+        </div>
       </div>
-    </Link>
+    </div>
   );
 }

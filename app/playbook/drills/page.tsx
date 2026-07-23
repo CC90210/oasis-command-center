@@ -140,19 +140,19 @@ const DRILLS: Drill[] = [
   // ── ADVANCED (alternate days, week 3+) ─────────────────────────
   {
     num: "06",
-    name: "Objection volley — speed mode",
+    name: "Client workflow recall — speed mode",
     timing: "10 min · alternate days · 12:15 PM",
     category: "sales",
     intensity: "advanced",
     body:
-      "Open Cold Call Script + Objections. Bravo reads each trigger; you respond aloud, no pause. Track the 2-3 you stumble on. Drill ONLY those for 5 minutes. Speed builds neural pathways — the third pass should be faster than your conscious thought.",
-    output: "Day 30 → respond inside 1.2 sec on every objection. No internal panic.",
+      "Pick one active client. State their current workflows, owner, next milestone, risk, and promised outcome without opening five documents. Then verify against the canonical runbook and correct only the gaps.",
+    output: "Day 30 → client context is crisp, current, and recoverable from one source.",
     chat: {
       agent: "bravo",
       prompt:
-        "Run me through the 10 objections from /playbook/script in random order. For each, paste the trigger and wait. After I respond, score me 1-5 on tightness + tone, then give me a tighter version. Only call out the 2-3 weakest at the end.",
+        "Choose one active client and quiz me on their current workflows, accountable owners, next milestone, delivery risk, and promised outcome. After each answer, verify against live project truth. End with only the gaps that need a source-of-truth update.",
     },
-    link: { href: "/playbook/script", label: "Script + objections" },
+    link: { href: "/playbook/client-deploy", label: "Deployment runbook" },
     icon: "sword",
   },
   {
@@ -189,17 +189,17 @@ const DRILLS: Drill[] = [
   },
   {
     num: "09",
-    name: "Outreach surgery — the 3 you didn't book",
+    name: "Relationship review — the 3 next moves",
     timing: "10 min · Wed + Fri · 9:30 AM",
     category: "sales",
     intensity: "advanced",
     body:
-      "Pull the 3 most recent leads who DIDN'T book. For each, the script asks: was it the opener, the discovery question, or the close? Pick one and rewrite the moment. Don't just write a 'better' version — explain WHY the original didn't land. Patterns surface fast.",
-    output: "Day 60 → conversion rate climbs because you stop repeating the same miss.",
+      "Review the three warm opportunities or active clients with the most important next move. Separate delivery follow-through from commercial nurture, then choose one honest action for each.",
+    output: "Day 60 → relationships move because the next action stays specific and timely.",
     chat: {
       agent: "bravo",
       prompt:
-        "Show me the last 3 qualified leads who didn't book. For each: the touchpoint that lost them (cold open / discovery / close), why that specific moment failed, and the rewrite. Look for patterns across all three.",
+        "Review the current active clients and warm pipeline only. Give me the three highest-leverage next relationship moves. For each: context, why now, exact action, desired outcome, and the date to revisit. Draft only; do not send.",
     },
     icon: "messageSquare",
   },
@@ -280,8 +280,8 @@ export default function DrillsPage() {
 
       <PageHeader
         title="Daily Drills"
-        subtitle="Sales is a physical skill. The pianist runs scales daily; the boxer shadowboxes daily. You'll drill voice, NEPQ, pipeline, content, and capital — every day, against your real OASIS pipeline. Not theory. Reps wired into your dashboard."
-        action={<Tag tone="accent">5 core · 5 advanced · 90-day path to $5K MRR</Tag>}
+        subtitle="Operations improve through deliberate reps. Drill client context, relationship pipeline, voice, content, and decisions against live OASIS work — not theory."
+        action={<Tag tone="accent">5 core · 5 advanced · 90-day operating rhythm</Tag>}
       />
 
       {/* 90-day phases */}

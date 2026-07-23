@@ -143,7 +143,7 @@ const PHASES: Phase[] = [
       {
         title: "Set their north-star goal",
         detail:
-          "Capture the client's primary metric + deadline + path-to. Writes to brain/USER.md so every agent reasons against it. Without this, content drafts will reference CC's $5K MRR target.",
+          "Capture the client's primary metric, baseline, deadline, and path-to. Store it once in the client profile so every agent reasons against current client truth instead of inherited operator defaults.",
         promptId: "client-set-north-star",
       },
       {
@@ -204,7 +204,7 @@ const PHASES: Phase[] = [
       {
         title: "Tighten the cron schedule",
         detail:
-          "CC's outreach engine fires every 4 hours because he ships 5-10 cold emails/day. A client doing 1-2/week needs a leaner schedule. Audit + recommend.",
+          "Audit every scheduled job against the client's real operating rhythm. Default to the minimum useful cadence, keep outbound opt-in and approval-gated, and remove inherited schedules that do not serve the deployment.",
         promptId: "client-tighten-cron-schedule",
       },
       {

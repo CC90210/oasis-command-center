@@ -72,7 +72,7 @@ export const PROMPT_CATEGORIES: Record<PromptCategory, { label: string; descript
   },
   ops_daily: {
     label: "Daily ops",
-    description: "What to fire every morning / before sales blocks / before content blocks.",
+    description: "Brief, prioritize, deliver for clients, nurture warm relationships, and create.",
   },
   ops_review: {
     label: "Review + retro",
@@ -460,7 +460,7 @@ Acknowledge this directive by saying: "Vibe-to-Execution Translator online. Drop
       "Detect when files have drifted from canonical state. Score the system, name the drift, propose fixes.",
     tags: ["health", "audit"],
     prompt:
-      "Run scripts/self_audit.py and walk me through its output. Score the current state, name the top 3 drift issues, and for each propose the fix as either: auto-fixable (do it now), needs my judgment (ask me), or out of scope (skip).",
+      "Run scripts/core/self_audit.py and walk me through its output. Score the current state, name the top 3 drift issues, and for each propose the fix as either: auto-fixable (do it now), needs my judgment (ask me), or out of scope (skip).",
   },
   {
     id: "health-bridge-status",
@@ -601,12 +601,12 @@ Personal context: I'm CC. My main work machine is Windows; my travel machine is 
     category: "ops_daily",
     audience: "operator",
     agent: "bravo",
-    title: "Pre-sales-block",
+    title: "Relationship pipeline focus",
     description:
-      "Before your outreach block: who to call, what they care about, NEPQ openers per lead.",
-    tags: ["daily", "sales"],
+      "Choose the highest-leverage next touch across active clients and warm community opportunities.",
+    tags: ["daily", "pipeline", "relationships"],
     prompt:
-      "I'm about to start a 90-min outreach block. Pull every qualified lead I haven't touched in 3+ days, rank by score, give me a custom NEPQ opener for each based on their last interaction. Format: lead name + company + opener + 1-line context.",
+      "Review the current OASIS pipeline and active clients. Ignore cold lists. Rank the three highest-leverage relationship moves for today using recency, trust, delivery urgency, and commercial upside. For each: person/company, current context, the next honest action, and the outcome we want. Draft-only unless I explicitly approve a send.",
   },
   {
     id: "ops-pre-content-block",
@@ -630,7 +630,7 @@ Personal context: I'm CC. My main work machine is Windows; my travel machine is 
       "Before any commitment over $500 or 10 hrs: Atlas runs the financial + opportunity-cost math.",
     tags: ["daily", "money"],
     prompt:
-      "I'm about to commit to <decision>. Run the financial math: cost (real + opportunity), expected return, payback period, and how it shifts my $5K MRR trajectory. Tell me yes/no/wait with one reason.",
+      "I'm about to commit to <decision>. Run the financial math: real cost, opportunity cost, expected return, payback period, cash-flow risk, and strategic fit. Tell me yes / no / wait with one decisive reason. Use live financial truth; do not rely on a hard-coded revenue target.",
   },
   {
     id: "ops-inbox-triage",
@@ -667,10 +667,10 @@ Personal context: I'm CC. My main work machine is Windows; my travel machine is 
     agent: "bravo",
     title: "Weekly retro",
     description:
-      "Did we actually move toward $5K MRR this week? What worked, what didn't, what changes next week.",
+      "Did delivery, relationships, and pipeline move this week? What changes next week.",
     tags: ["review", "weekly"],
     prompt:
-      "Weekly retrospective. Trajectory toward $5K MRR — are we accelerating or stalling? What worked this week (specific actions, not categories). What didn't. One process change for next week. Save the retro to memory/RETROS.md.",
+      "Weekly retrospective. Use live client delivery, relationship pipeline, content, operations, and financial signals. What moved, what stalled, and why? Name one process change and one priority for next week. Save only durable lessons; do not duplicate raw activity into memory.",
   },
   {
     id: "ops-quarterly-review",

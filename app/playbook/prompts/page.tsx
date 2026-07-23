@@ -16,33 +16,22 @@ const OPERATOR_CATEGORIES: PromptCategory[] = [
   "system_override",
   "system_health",
   "system_integration",
-  // agent_tooling = meta-prompts that drop agents into specialized
-  // roles (prompt engineering, translation layers, persona overlays).
-  // Placed last in the operator block because it's a power-user
-  // surface, not a daily ritual.
-  "agent_tooling",
 ];
 
 const CLIENT_CATEGORIES: PromptCategory[] = [
   "client_setup",
   "client_optimization",
   "client_handoff",
-  // Shared-audience agent_tooling entries surface here too — clients
-  // running their own deployment can fire the same meta-prompts.
-  "agent_tooling",
 ];
 
 export default function PromptsLibraryPage() {
   // Operator section: prompts tagged "operator" + the "shared" ones that
   // are universally useful (override syntax, health checks, end-of-day).
-  const operatorPrompts = PROMPTS_LIBRARY.filter(
-    (p) => p.audience === "operator" || p.audience === "shared"
-  );
+  const operatorPrompts = PROMPTS_LIBRARY.filter((p) => p.audience === "operator");
   // Client deployment section: prompts tagged "client" + the shared ones
   // (operator runs them when SSH'd into a client's machine).
-  const clientPrompts = PROMPTS_LIBRARY.filter(
-    (p) => p.audience === "client" || p.audience === "shared"
-  );
+  const clientPrompts = PROMPTS_LIBRARY.filter((p) => p.audience === "client");
+  const sharedPrompts = PROMPTS_LIBRARY.filter((p) => p.audience === "shared");
 
   // Total count for the header tag — the filter component computes
   // filtered counts client-side, but the page header shows the full
@@ -64,10 +53,10 @@ export default function PromptsLibraryPage() {
 
       <PageHeader
         title="Prompts Library"
-        subtitle="Saved prompts that move the system. Two audiences: yours (daily operator moves) and the client toolkit (what to fire when setting up someone else's machine)."
+        subtitle="Current, reusable system messages. Open one in chat or copy it unchanged for your IDE."
         action={
           <Tag tone="accent">
-            {totalPrompts} prompts · {operatorPrompts.length} operator · {clientPrompts.length} client
+            {totalPrompts} prompts · {operatorPrompts.length} operator · {clientPrompts.length} client · {sharedPrompts.length} universal
           </Tag>
         }
       />
