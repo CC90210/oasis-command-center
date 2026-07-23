@@ -409,11 +409,16 @@ export async function runEnrollDrips(): Promise<EnrollDripsResult> {
       }
       // Docs-on-file suppression (2026-07-23): a deal received COMPLETE via the
       // document-extraction parser (dropped application + bank statements
-      // already in hand) is never enrolled into a collection/first-touch drip
-      // that would re-ask the merchant for the application or statements we
-      // already hold. Set ONLY by apply-extracted's new-deal path; scrubber-fed
-      // uw_sheet leads (which DO need the first-touch cadence) never carry it.
-      if (data.docs_on_file === true) {
+      // already in hand) must not be re-asked for the app/statements we already
+      // hold. SCOPED to the uw_sheet first-touch collection cadence only: the
+      // flag is never cleared, so we gate on the CURRENT trigger `stage` (the
+      // sequence's trigger_filter.to). That way a docs-complete deal later
+      // re-triaged to another stage (e.g. a negative-reply reclass to
+      // follow_up) still gets its generic re-engagement nurture — we only ever
+      // block the uw_sheet doc-collection drip, not all future sends. Set ONLY
+      // by apply-extracted's new-deal path; scrubber-fed uw_sheet leads never
+      // carry it, so their first-touch cadence is unchanged.
+      if (data.docs_on_file === true && stage === "uw_sheet") {
         skipped.docs_on_file++;
         continue;
       }
