@@ -14,7 +14,8 @@
  * + BRIDGE_BEARER_TOKEN (already configured in the dashboard env — the chat
  * proves it). This route then:
  *   - allowlists action ∈ {start,stop,restart} and the daemon name (the SunBiz
- *     pm2 services — SUNBIZ_WORKER_NAMES in @/lib/automations/sunbiz-workers),
+ *     pm2 services — SUNBIZ_WORKERS in @/lib/automations/sunbiz-workers; a
+ *     name that doesn't match any entry there is rejected as unknown_worker),
  *   - gates to owner/admin only — bouncing a production daemon is a shell-tier
  *     privilege, identical to "can this role run bash on the VPS"
  *     (bridgeExecToolAllowedForRole(role, "bash")), so members / read_only /
@@ -38,6 +39,7 @@ import { NextResponse } from "next/server";
 import { authorizeBridgeRequest, callBridgeExecTool } from "@/lib/bridge-proxy";
 import { bridgeExecToolAllowedForRole } from "@/lib/role-gates";
 import { SUNBIZ_WORKERS } from "@/lib/automations/sunbiz-workers";
+import { logTenantAudit } from "@/lib/audit/activity-feed";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -80,22 +82,35 @@ export async function POST(req: Request) {
   }
 
   // B4 (2026-07-23) — worker-owner segregation gate. See the file-header
-  // doc comment above for the full rationale.
+  // doc comment above for the full rationale. Every cross-owner touch
+  // (denied OR allowed-via-override) gets a DURABLE row in tenant_audit_log
+  // — reusing B2's logTenantAudit() rather than a console line, so "who
+  // bounced Adon's Breeze daemon" survives past Vercel's ephemeral function
+  // logs and is queryable on the same Settings/Operations audit surface as
+  // everything else. Best-effort: a failed audit write never blocks the
+  // gate decision itself.
   const actorSide: "cc" | "adon" = auth.isOperator ? "cc" : "adon";
   const ownerMatches = worker.owner === "shared" || worker.owner === actorSide;
   const tenantOwnerOverride = auth.teamRole === "owner";
+  if (!ownerMatches) {
+    await logTenantAudit({
+      tenantId: auth.tenantId,
+      actorUserId: auth.userId,
+      actionType: "background_worker_cross_owner_control",
+      targetTable: "sunbiz_workers",
+      targetId: name,
+      after: {
+        actor_side: actorSide,
+        action,
+        worker_owner: worker.owner,
+        outcome: tenantOwnerOverride ? "owner_override_allowed" : "denied",
+      },
+    });
+  }
   if (!ownerMatches && !tenantOwnerOverride) {
-    console.warn(
-      `[background-workers.control] DENIED cross-owner action: actor_side=${actorSide} user=${auth.userId} action=${action} worker=${name} worker_owner=${worker.owner}`,
-    );
     return NextResponse.json(
       { ok: false, error: "cross_owner_worker_denied", worker_owner: worker.owner },
       { status: 403 },
-    );
-  }
-  if (!ownerMatches && tenantOwnerOverride) {
-    console.warn(
-      `[background-workers.control] tenant-owner override: actor_side=${actorSide} user=${auth.userId} action=${action} worker=${name} worker_owner=${worker.owner}`,
     );
   }
 

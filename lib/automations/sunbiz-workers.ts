@@ -110,12 +110,3 @@ export const UNTRACKED_MANUAL_RUNTIMES = [
     owner: "cc" as const,
   },
 ] as const;
-
-/**
- * pm2 process names (service string minus the "pm2." prefix) the control proxy
- * is allowed to act on. Derived from SUNBIZ_WORKERS so the allowlist can never
- * drift from the displayed worker set.
- */
-export const SUNBIZ_WORKER_NAMES: ReadonlySet<string> = new Set(
-  SUNBIZ_WORKERS.map((w) => w.service.replace(/^pm2\./, "")),
-);
