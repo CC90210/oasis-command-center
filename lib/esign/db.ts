@@ -41,6 +41,10 @@ export type EsignEnvelopeRow = {
   signed_pdf_sha256: string | null;
   lead_id: string | null;
   application_id: string | null;
+  // B2 (2026-07-23, migration 124): non-null only when lead_id AND
+  // application_id are both null — records WHY the envelope has no SunBiz
+  // link instead of leaving the gap silent/ambiguous.
+  unlinked_reason: string | null;
   consent_disclosure_version: string;
   message: string | null;
   expires_at: string | null;
@@ -83,7 +87,7 @@ export type EsignEventRow = {
 };
 
 const ENVELOPE_COLS =
-  "id, tenant_id, created_by, title, status, source_storage_key, source_document_id, source_pdf_sha256, signed_storage_key, signed_document_id, signed_pdf_sha256, lead_id, application_id, consent_disclosure_version, message, expires_at, completed_at, void_reason, created_at, updated_at";
+  "id, tenant_id, created_by, title, status, source_storage_key, source_document_id, source_pdf_sha256, signed_storage_key, signed_document_id, signed_pdf_sha256, lead_id, application_id, unlinked_reason, consent_disclosure_version, message, expires_at, completed_at, void_reason, created_at, updated_at";
 const SIGNER_COLS =
   "id, envelope_id, tenant_id, email, name, sign_order, status, token_sha256, expires_at, viewed_at, signed_at, signed_ip, signed_user_agent, consented, decline_reason, created_at";
 const EVENT_COLS = "id, envelope_id, signer_id, tenant_id, event, actor, at, ip, user_agent, meta";

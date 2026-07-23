@@ -188,14 +188,33 @@ export async function AutomationsContent({
           <AgentsModulesStatusBoard tenantSlug={tenantSlug} />
           <CronJobsManager agentKeys={automationAgentKeys} />
           {(isOperator || tenantSlug === "sun") && (
-            <>
-              <div className="border-t border-bg-border pt-6">
-                <BreezeDealsPanel />
+            // B3 (2026-07-23): BreezeDealsPanel (MCA deal intake queue) and
+            // BackgroundWorkersPanel (mixed cc/adon daemons, owner-grouped
+            // internally per B4) previously flowed directly under the
+            // primary SunBiz automations (cron jobs, modules board) with
+            // only a plain border-top — no heading distinguished "your
+            // SunBiz automations" from "the Breeze/MCA underwriting surface
+            // Adon operates." Presentation-only separation — no query
+            // changes; breeze-deals stays tenant-scoped as-is.
+            <section
+              aria-labelledby="underwriting-breeze-heading"
+              className="border-t-2 border-bg-border pt-6 space-y-6"
+            >
+              <div>
+                <h2
+                  id="underwriting-breeze-heading"
+                  className="text-xs font-bold uppercase tracking-wider text-fg-muted"
+                >
+                  Underwriting / Breeze
+                </h2>
+                <p className="text-[11px] text-fg-dim mt-0.5">
+                  The MCA/underwriting surface — deal intake queue + the background daemons that
+                  power it. Separate from the SunBiz automations above.
+                </p>
               </div>
-              <div className="border-t border-bg-border pt-6">
-                <BackgroundWorkersPanel />
-              </div>
-            </>
+              <BreezeDealsPanel />
+              <BackgroundWorkersPanel />
+            </section>
           )}
         </>
       ) : (

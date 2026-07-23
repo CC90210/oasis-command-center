@@ -702,16 +702,28 @@ export async function agentStates(agentNames: string[] = []): Promise<AgentState
 /**
  * Activity-tape rows for /agents and /operations.
  *
- * SCOPING (cross-tenant data-leak fix, 2026-05-14):
+ * SCOPING (cross-tenant data-leak fix, 2026-05-14; hardened 2026-07-23):
  *   agent_events does NOT carry a tenant_id column today (same schema debt
  *   as agent_decisions + agent_state_snapshot). Until the column lands,
  *   the read path filters by publisher_agent ∈ agentNames so a client
  *   tenant only sees events fired by agents they have enabled.
  *
- *   Operators (CC) get the full feed by passing isOperator: true — the
- *   activity tape is one of the operator's primary debugging surfaces and
- *   we want them to see everything including system events with no
- *   publisher_agent.
+ *   2026-07-23 (B1): publisher_agent ∈ agentNames alone is NOT tenant-safe
+ *   — two different tenants who both enable the same agent (e.g. both have
+ *   Kixie on) match the SAME publisher_agent filter and would see each
+ *   other's call events (recording URLs, dispositions, lead IDs). Every
+ *   producer stamps correlation_id with the originating tenant_id (see
+ *   app/api/webhooks/kixie/route.ts, lib/manifest/events.ts) — this is the
+ *   sibling convention already used correctly by app/api/event-feed/route.ts.
+ *   opts.tenantId is now enforced via `.eq("correlation_id", tenantId)`
+ *   whenever the caller supplies one, on BOTH the non-operator path and the
+ *   operator path (an operator who explicitly passes a tenantId — e.g. to
+ *   investigate one client's tape — gets that client's events only).
+ *
+ *   Operators (CC) get the full feed by passing isOperator: true WITHOUT a
+ *   tenantId — the activity tape is one of the operator's primary debugging
+ *   surfaces and we want them to see everything including system events
+ *   with no publisher_agent, unless they explicitly scope down.
  *
  *   Empty agentNames + non-operator: return [] (safer than leaking).
  *
@@ -719,6 +731,12 @@ export async function agentStates(agentNames: string[] = []): Promise<AgentState
  *   sinceDays:0 to show "most recent N regardless of age" — they were
  *   rendering empty when the event bus was quiet for a week even though
  *   the table had history.
+ *
+ *   `opts.db` (test-only injection point, added alongside the B1 fix,
+ *   mirrors the `db` param on lib/auth-routing.ts::resolvePostLoginRedirect):
+ *   production callers never pass this — it defaults to the real service-role
+ *   client — but it lets tests/agent-events-tenant-scope.test.ts assert the
+ *   exact filters this function applies without hitting live Supabase.
  */
 export async function recentEvents(
   limit = 25,
@@ -727,20 +745,29 @@ export async function recentEvents(
     tenantId?: string | null;
     agentNames?: string[];
     isOperator?: boolean;
+    db?: ReturnType<typeof getServiceSupabase>;
   }
 ): Promise<AgentEvent[]> {
   const agentNames = opts?.agentNames ?? [];
   const isOperator = opts?.isOperator === true;
+  const tenantId = opts?.tenantId || null;
 
   // Non-operator with no enabled agents → no leakage. Operator with no
   // agentNames → full feed (this is the dashboard-debug expectation).
   if (!isOperator && agentNames.length === 0) return [];
 
-  const db = getServiceSupabase();
+  const db = opts?.db ?? getServiceSupabase();
   let q = db.from("agent_events").select("*");
 
   if (!isOperator) {
     q = q.in("publisher_agent", agentNames);
+    // B1: publisher_agent scoping is agent-level, not tenant-level — a
+    // shared agent (Kixie) leaks across tenants without this.
+    if (tenantId) q = q.eq("correlation_id", tenantId);
+  } else if (tenantId) {
+    // Operator explicitly scoped to one tenant — respect it. Operator +
+    // no tenantId keeps the existing full empire-wide view.
+    q = q.eq("correlation_id", tenantId);
   }
 
   const sinceDays = opts?.sinceDays ?? 7;

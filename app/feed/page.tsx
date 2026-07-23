@@ -28,7 +28,11 @@ export const revalidate = 0;
 type EventRow = {
   id: string;
   event_type: string;
-  source_agent: string | null;
+  // B1 (2026-07-23): renamed from source_agent — every producer in this repo
+  // writes publisher_agent (migration 006); source_agent is a later column
+  // that defaults to 'unknown' and none of these producers set it, so
+  // filtering/reading it made every locally-produced event invisible.
+  publisher_agent: string | null;
   target_agent: string | null;
   severity: string | null;
   payload: Record<string, unknown> | null;
@@ -79,21 +83,21 @@ async function fetchInitial(args: {
     let q = db
       .from("agent_events")
       .select(
-        "id, event_type, source_agent, target_agent, severity, payload, " +
+        "id, event_type, publisher_agent, target_agent, severity, payload, " +
           "published_at, created_at, status",
       )
       .gte("created_at", cutoff)
       .order("created_at", { ascending: false })
       .limit(100);
     // Cross-tenant scoping. agent_events has no tenant_id column —
-    // proxy-filter by source_agent against the caller's tenant-enabled
+    // proxy-filter by publisher_agent against the caller's tenant-enabled
     // agents so a SunBiz user can't see CC's Bravo/Atlas/Maven events
     // (and vice versa). Operators bypass via the empire-wide view.
     if (!args.isOperator) {
       if (args.agentNames.length === 0) {
         return { rows: [] };
       }
-      q = q.in("source_agent", args.agentNames);
+      q = q.in("publisher_agent", args.agentNames);
     }
     const r = await q;
     if (r.error) return { rows: [], error: r.error.message };
@@ -116,7 +120,7 @@ export default async function FeedPage() {
   });
   const { rows, error } = await fetchInitial({ agentNames, isOperator });
 
-  const sources = Array.from(new Set(rows.map((r) => r.source_agent || "unknown"))).sort();
+  const sources = Array.from(new Set(rows.map((r) => r.publisher_agent || "unknown"))).sort();
 
   return (
     <div className="space-y-6 animate-fade-in">
@@ -189,8 +193,8 @@ export default async function FeedPage() {
                     {formatEventType(row.event_type)}
                   </span>
                   <Tag tone={severityTone(row.severity)}>{row.severity || "info"}</Tag>
-                  <span className="text-xs text-fg-dim" title={row.source_agent || ""}>
-                    {row.source_agent ? formatPublisher(row.source_agent) : "Unknown"}
+                  <span className="text-xs text-fg-dim" title={row.publisher_agent || ""}>
+                    {row.publisher_agent ? formatPublisher(row.publisher_agent) : "Unknown"}
                   </span>
                   <ArrowUpRight size={12} className="text-fg-faint" />
                   <span className="text-xs text-fg-dim" title={row.target_agent || ""}>

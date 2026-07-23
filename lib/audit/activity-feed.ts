@@ -15,6 +15,12 @@
  *   - lead_interactions   email / SMS / call (human operator OR AI automation)
  *   - agent_events        AI stage-changes, automation/cron runs (agent)
  *   - chat_sessions       chats (human ↔ agent)
+ *
+ * WRITE SIDE (added 2026-07-23, B2): logTenantAudit() below is the write
+ * counterpart to the tenant_audit_log read above. Best-effort, same
+ * convention as lib/esign/db.ts::logEvent() — a failed audit write is
+ * reported to the caller but must never block the primary action it's
+ * logging (e.g. an e-sign envelope completing).
  */
 
 import "server-only";
@@ -137,6 +143,40 @@ function safeDetail(value: unknown, max = 160): string {
     return scrubbed.length > max ? `${scrubbed.slice(0, max)}…` : scrubbed;
   } catch {
     return "";
+  }
+}
+
+/**
+ * Write one row to tenant_audit_log. Only the columns already consumed by
+ * getActivityFeed() (above) and components/settings/OperationsTrackerPanel.tsx
+ * are written — id/created_at are DB-defaulted. Best-effort: a failed write
+ * is returned as { ok: false } for the caller to log, never thrown, so a
+ * blip in the audit table can't fail the action being audited.
+ */
+export async function logTenantAudit(input: {
+  tenantId: string;
+  actorEmail?: string | null;
+  actorUserId?: string | null;
+  actionType: string;
+  targetTable: string;
+  targetId?: string | null;
+  after?: Record<string, unknown> | null;
+}): Promise<{ ok: true } | { ok: false; error: string }> {
+  try {
+    const db = getServiceSupabase();
+    const ins = await db.from("tenant_audit_log").insert({
+      tenant_id: input.tenantId,
+      actor_email: input.actorEmail ?? null,
+      actor_user_id: input.actorUserId ?? null,
+      action_type: input.actionType,
+      target_table: input.targetTable,
+      target_id: input.targetId ?? null,
+      after: input.after ?? {},
+    });
+    if (ins.error) return { ok: false, error: ins.error.message };
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : "insert_failed" };
   }
 }
 

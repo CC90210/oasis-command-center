@@ -23,6 +23,7 @@
  *       purpose: string,             // 1-line "what this daemon does"
  *       archived_on?: string,        // ISO date if status === "archived"
  *       archived_reason?: string,    // short why-archived if status === "archived"
+ *       owner: "cc" | "adon" | "shared", // B4 (2026-07-23) — who this worker belongs to
  *     }>,
  *   }
  *
@@ -261,6 +262,10 @@ export async function GET() {
       // (sunbizControl); their actions route through the server proxy, not the
       // operator's localhost.
       manageable_via_pm2: isSun ? sunbizControl : w.manageable_via_pm2 !== false,
+      // B4 (2026-07-23): EXPECTED_WORKERS (CC's own local empire daemons)
+      // predates the owner field and has no Breeze/adon entries — default
+      // "cc". SUNBIZ_WORKERS always carries an explicit owner.
+      owner: "owner" in w ? w.owner : "cc",
       ...(archived && {
         archived_on: w.archived_on,
         archived_reason: w.archived_reason,

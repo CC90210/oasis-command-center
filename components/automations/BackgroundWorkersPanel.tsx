@@ -51,7 +51,19 @@ type Worker = {
   manageable_via_pm2?: boolean;
   archived_on?: string;
   archived_reason?: string;
+  /** B4 (2026-07-23): who this daemon belongs to. The API always sends this
+   * now (defaults "cc" server-side for the pre-existing CC-only worker list)
+   * — optional here only as a defensive fallback against a stale API. */
+  owner?: "cc" | "adon" | "shared";
 };
+
+const OWNER_GROUP_LABEL: Record<"cc" | "adon" | "shared", string> = {
+  cc: "CC",
+  adon: "Adon — Breeze / MCA underwriting",
+  shared: "Shared",
+};
+// Fixed display order so the grouping doesn't reshuffle between refreshes.
+const OWNER_GROUP_ORDER: Array<"cc" | "adon" | "shared"> = ["cc", "adon", "shared"];
 
 type ApiResponse = {
   ok: boolean;
@@ -147,17 +159,62 @@ export function BackgroundWorkersPanel() {
         </div>
       )}
 
-      <div className="grid sm:grid-cols-2 gap-2">
-        {data.workers.map((w) => (
-          <WorkerRow
-            key={w.service}
-            worker={w}
-            bridgeOnline={data.bridge_online}
-            remoteControl={data.remote_control || false}
-            onChange={refresh}
-          />
-        ))}
-      </div>
+      {(() => {
+        // B4 (2026-07-23): group by owner (cc / adon / shared) so a mixed
+        // worker list (SunBiz core + Breeze/MCA underwriting daemons) reads
+        // as two clearly-attributed sets instead of one undifferentiated
+        // grid. Skip the group headers entirely when everything belongs to
+        // one owner (e.g. CC's own OASIS worker list has no adon entries) —
+        // no reason to add label noise to the common single-owner case.
+        const byOwner = new Map<"cc" | "adon" | "shared", Worker[]>();
+        for (const w of data.workers) {
+          const owner = w.owner ?? "cc";
+          const list = byOwner.get(owner) ?? [];
+          list.push(w);
+          byOwner.set(owner, list);
+        }
+        const groupsPresent = OWNER_GROUP_ORDER.filter((o) => (byOwner.get(o)?.length ?? 0) > 0);
+        const showGroupHeaders = groupsPresent.length > 1;
+
+        if (!showGroupHeaders) {
+          return (
+            <div className="grid sm:grid-cols-2 gap-2">
+              {data.workers.map((w) => (
+                <WorkerRow
+                  key={w.service}
+                  worker={w}
+                  bridgeOnline={data.bridge_online}
+                  remoteControl={data.remote_control || false}
+                  onChange={refresh}
+                />
+              ))}
+            </div>
+          );
+        }
+
+        return (
+          <div className="space-y-4">
+            {groupsPresent.map((owner) => (
+              <div key={owner} className="space-y-2">
+                <div className="text-[10px] font-bold uppercase tracking-wider text-fg-dim">
+                  {OWNER_GROUP_LABEL[owner]}
+                </div>
+                <div className="grid sm:grid-cols-2 gap-2">
+                  {(byOwner.get(owner) ?? []).map((w) => (
+                    <WorkerRow
+                      key={w.service}
+                      worker={w}
+                      bridgeOnline={data.bridge_online}
+                      remoteControl={data.remote_control || false}
+                      onChange={refresh}
+                    />
+                  ))}
+                </div>
+              </div>
+            ))}
+          </div>
+        );
+      })()}
     </div>
   );
 }

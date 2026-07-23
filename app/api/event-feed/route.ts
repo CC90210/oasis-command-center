@@ -9,8 +9,16 @@
  * Query params:
  *   since_minutes — default 60, max 1440 (24h)
  *   limit         — default 100, max 500
- *   source        — optional filter on source_agent
+ *   source        — optional filter on publisher_agent
  *   event_type    — optional exact-match filter
+ *
+ * COLUMN NOTE (B1, 2026-07-23): every producer in this repo (Kixie webhook,
+ * lib/manifest/events.ts, action-log.ts, kixie-compliance-scan, etc.) writes
+ * `publisher_agent` — none set `source_agent` (a later migration-015 column
+ * that defaults to 'unknown' and is only backfilled from publisher_agent for
+ * rows that existed at migration time). Reading/filtering on source_agent
+ * here previously meant every locally-produced event was invisible to this
+ * filter. Read publisher_agent to match the write path.
  */
 
 import { NextRequest, NextResponse } from "next/server";
@@ -51,7 +59,7 @@ export async function GET(req: NextRequest) {
     let q = db
       .from("agent_events")
       .select(
-        "id, event_type, source_agent, target_agent, severity, payload, " +
+        "id, event_type, publisher_agent, target_agent, severity, payload, " +
           "published_at, created_at, status",
       )
       .gte("created_at", cutoff)
@@ -63,7 +71,7 @@ export async function GET(req: NextRequest) {
     // every producer (kixie webhook, state_manager, bridge events) sets
     // it to the originating tenant_id.
     if (tenantId) q = q.eq("correlation_id", tenantId);
-    if (source) q = q.eq("source_agent", source);
+    if (source) q = q.eq("publisher_agent", source);
     if (eventType) q = q.eq("event_type", eventType);
 
     const { data, error } = await q;

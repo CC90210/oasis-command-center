@@ -19,6 +19,16 @@
  *     privilege, identical to "can this role run bash on the VPS"
  *     (bridgeExecToolAllowedForRole(role, "bash")), so members / read_only /
  *     loan_officer / processor are rejected,
+ *   - B4 (2026-07-23): WORKER-OWNER SEGREGATION. sunbiz-workers.ts tags each
+ *     daemon "cc" (SunBiz core infra) / "adon" (Breeze/MCA underwriting) /
+ *     "shared". This table has no per-user identity column, so the actor's
+ *     side is resolved from authorizeBridgeRequest()'s isOperator flag: the
+ *     empire operator (CC) bypassing the tenant gate = "cc"; any other
+ *     authenticated SunBiz tenant member (owner/admin-tier, per the role gate
+ *     above) = "adon" side. A caller may act on a worker whose owner matches
+ *     their side, or "shared". Cross-owner is DENIED unless the caller's role
+ *     promoted to "owner" (tenant is_owner) — the one documented escape hatch
+ *     — and every attempt (allowed or denied) is logged with the actor.
  *   - then, and only then, forwards `pm2 <action> <name>` to the bridge with
  *     the server-held bearer. The tunnel can only ever receive that exact,
  *     constrained command from us — never operator-supplied bash.
@@ -27,7 +37,7 @@
 import { NextResponse } from "next/server";
 import { authorizeBridgeRequest, callBridgeExecTool } from "@/lib/bridge-proxy";
 import { bridgeExecToolAllowedForRole } from "@/lib/role-gates";
-import { SUNBIZ_WORKER_NAMES } from "@/lib/automations/sunbiz-workers";
+import { SUNBIZ_WORKERS } from "@/lib/automations/sunbiz-workers";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -64,8 +74,29 @@ export async function POST(req: Request) {
   if (!ALLOWED_ACTIONS.has(action)) {
     return NextResponse.json({ ok: false, error: "invalid_action" }, { status: 400 });
   }
-  if (!SUNBIZ_WORKER_NAMES.has(name)) {
+  const worker = SUNBIZ_WORKERS.find((w) => w.service.replace(/^pm2\./, "") === name);
+  if (!worker) {
     return NextResponse.json({ ok: false, error: "unknown_worker" }, { status: 400 });
+  }
+
+  // B4 (2026-07-23) — worker-owner segregation gate. See the file-header
+  // doc comment above for the full rationale.
+  const actorSide: "cc" | "adon" = auth.isOperator ? "cc" : "adon";
+  const ownerMatches = worker.owner === "shared" || worker.owner === actorSide;
+  const tenantOwnerOverride = auth.teamRole === "owner";
+  if (!ownerMatches && !tenantOwnerOverride) {
+    console.warn(
+      `[background-workers.control] DENIED cross-owner action: actor_side=${actorSide} user=${auth.userId} action=${action} worker=${name} worker_owner=${worker.owner}`,
+    );
+    return NextResponse.json(
+      { ok: false, error: "cross_owner_worker_denied", worker_owner: worker.owner },
+      { status: 403 },
+    );
+  }
+  if (!ownerMatches && tenantOwnerOverride) {
+    console.warn(
+      `[background-workers.control] tenant-owner override: actor_side=${actorSide} user=${auth.userId} action=${action} worker=${name} worker_owner=${worker.owner}`,
+    );
   }
 
   const result = await callBridgeExecTool(auth.target, {
