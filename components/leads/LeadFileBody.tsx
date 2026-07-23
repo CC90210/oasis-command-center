@@ -13,7 +13,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 // useRef intentionally imported for the file-input ref in DocumentsTab.
-import { BackgroundCheckTab } from "./BackgroundCheckTab";
+import { EnrichmentTab } from "./EnrichmentTab";
 import { DefaultsCheckControl } from "./DefaultsCheckControl";
 import { useRouter, usePathname } from "next/navigation";
 import Link from "next/link";
@@ -68,7 +68,9 @@ const TABS: { key: TabKey; label: string }[] = [
   { key: "owner", label: "Owner" },
   { key: "lenders", label: "Lenders" },
   { key: "bank", label: "Bank" },
-  { key: "bgc", label: "BGC" },
+  // key stays "bgc" for deep-link stability; the tab now houses both the
+  // background check and the CLAIR phone/address enrichment (2026-07-23).
+  { key: "bgc", label: "Enrichment" },
   { key: "documents", label: "Docs" },
   { key: "notes", label: "Notes" },
 ];
@@ -409,7 +411,7 @@ export function LeadFileBody({
             {activeTab === "bank" && (
               <BankTab record={record} application={application} tenantSlug={tenantSlug} leadId={recordId} />
             )}
-            {activeTab === "bgc" && <BackgroundCheckTab leadId={recordId} record={record} />}
+            {activeTab === "bgc" && <EnrichmentTab leadId={recordId} record={record} />}
             {activeTab === "notes" && <NotesTab leadId={recordId} entity={entity} />}
             {activeTab === "documents" && (
               <DocumentsTab
@@ -2920,6 +2922,25 @@ function ComposerShell({
 /* Header sub-components: stat tiles + owner/assigned-to                       */
 /* -------------------------------------------------------------------------- */
 
+type StatTone = "default" | "accent" | "good" | "warn" | "risk";
+
+type StatTileData = {
+  label: string;
+  primary: string | null;
+  secondary?: string | null;
+  tone?: StatTone;
+};
+
+// Paper/leverage grade → a coarse tone. A/B read as healthy, C as caution,
+// anything lower (D+) as risk. Only the first letter matters (e.g. "B+", "C-").
+function gradeTone(grade: string | null): StatTone {
+  const g = (grade || "").trim().toUpperCase()[0];
+  if (g === "A" || g === "B") return "good";
+  if (g === "C") return "warn";
+  if (g) return "risk";
+  return "default";
+}
+
 function StatTiles({
   record,
   application,
@@ -2936,67 +2957,89 @@ function StatTiles({
     record.open_mca_positions ?? application?.data?.open_mca_positions ?? null;
   const bestOffer = application?.data?.best_offer ?? null;
 
+  // Data-driven so density is easy to extend and empty tiles can be visually
+  // de-emphasized in one place. Paper grade is now its own tinted tile rather
+  // than a grey subtitle on Request, and NSF/open-positions each stand alone.
+  const tiles: StatTileData[] = [
+    { label: "Request", primary: requested != null ? fmtMoney(requested) : null },
+    { label: "Rev / mo", primary: monthly != null ? fmtMoney(monthly) : null },
+    {
+      label: "Best offer",
+      primary: bestOffer != null ? fmtMoney(bestOffer) : null,
+      tone: "accent",
+    },
+    { label: "Open pos", primary: openPositions != null ? `${openPositions}` : null },
+    { label: "NSF", primary: nsf != null ? `${nsf}` : null },
+    {
+      label: "Paper",
+      primary: paperGrade ? paperGrade.toUpperCase() : null,
+      tone: gradeTone(paperGrade),
+    },
+  ];
+
   return (
-    // 2x2 on mobile / half-screen, 4x1 on a wide drawer — keeps money values
-    // from crushing/overlapping when the window isn't full screen (CC 2026-06-25).
-    <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-      <StatTile
-        label="Request"
-        primary={requested != null ? fmtMoney(requested) : "—"}
-        secondary={paperGrade ? `paper ${paperGrade}` : null}
-      />
-      <StatTile
-        label="Rev / mo"
-        primary={monthly != null ? fmtMoney(monthly) : "—"}
-        secondary={nsf != null ? `NSF ${nsf}` : null}
-      />
-      <StatTile
-        label="Leverage"
-        primary={openPositions != null ? `${openPositions}` : "—"}
-        secondary={openPositions != null ? `${openPositions} open pos` : null}
-      />
-      <StatTile
-        label="Best offer"
-        primary={bestOffer != null ? fmtMoney(bestOffer) : "—"}
-        secondary={null}
-      />
+    // A horizontally-snapping metric strip ("carousel"). On a wide drawer the
+    // populated tiles grow to fill one dense row; when the drawer is narrow
+    // they scroll-snap instead of wrapping into ragged half-empty rows. Scroll
+    // affordance is intentionally chromeless (hidden scrollbar) so it reads as
+    // a clean strip. Replaces the old fixed 2×2/4×1 grid whose ungraded cells
+    // rendered as full-height em-dashes — the "dead white space" this pass
+    // removes (CC 2026-07-23).
+    <div
+      className="-mx-1 flex snap-x snap-mandatory gap-2 overflow-x-auto px-1 pb-1
+                 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+    >
+      {tiles.map((t) => (
+        <StatTile key={t.label} {...t} />
+      ))}
     </div>
   );
 }
 
-function StatTile({
-  label,
-  primary,
-  secondary,
-}: {
-  label: string;
-  primary: string;
-  secondary: string | null;
-}) {
-  // Empty tiles (primary === "—") get a softer treatment so the stark
-  // em-dash doesn't read as broken UI when a lead hasn't been graded yet.
-  // 2026-06-08: refined per CC's "less blocky" pass — softer border,
-  // rounded-lg, faded primary on empty, tighter label letter-spacing.
-  const isEmpty = primary === "—";
+function StatTile({ label, primary, secondary, tone = "default" }: StatTileData) {
+  // An ungraded metric shrinks to a slim, muted placeholder instead of a
+  // stark full-height em-dash. Populated tiles carry a colored accent rail on
+  // the left so the eye lands on real numbers and risk tones (grade/NSF) pop.
+  const isEmpty = primary == null;
+  const rail = isEmpty
+    ? "before:bg-transparent"
+    : tone === "good"
+      ? "before:bg-emerald-400/70"
+      : tone === "warn"
+        ? "before:bg-amber-400/70"
+        : tone === "risk"
+          ? "before:bg-red-400/70"
+          : tone === "accent"
+            ? "before:bg-accent/70"
+            : "before:bg-bg-border";
+  const valueColor = isEmpty
+    ? "text-fg-dim/50"
+    : tone === "good"
+      ? "text-emerald-300"
+      : tone === "warn"
+        ? "text-amber-300"
+        : tone === "risk"
+          ? "text-red-300"
+          : tone === "accent"
+            ? "text-accent"
+            : "text-fg";
+
   return (
     <div
-      className={`rounded-lg border px-2.5 py-2 transition-colors ${
-        isEmpty
-          ? "border-bg-border/40 bg-bg-deep/20"
-          : "border-bg-border/70 bg-bg-deep/40"
-      }`}
+      className={`relative snap-start shrink-0 overflow-hidden rounded-lg border py-2 pl-3 pr-2.5 transition-colors
+        before:absolute before:inset-y-1.5 before:left-1 before:w-[3px] before:rounded-full before:content-[''] ${rail} ${
+          isEmpty
+            ? "basis-[68px] grow-0 border-bg-border/40 bg-bg-deep/20"
+            : "basis-[116px] grow border-bg-border/70 bg-bg-deep/40"
+        }`}
     >
-      <div className="text-[9.5px] uppercase tracking-[0.08em] text-fg-dim/80 leading-tight">
+      <div className="text-[9.5px] uppercase tracking-[0.08em] text-fg-dim/80 leading-tight truncate">
         {label}
       </div>
-      <div
-        className={`text-[14px] font-bold leading-tight mt-1 ${
-          isEmpty ? "text-fg-dim/60" : "text-fg"
-        }`}
-      >
-        {primary}
+      <div className={`text-[14px] font-bold leading-tight mt-1 ${valueColor}`}>
+        {primary ?? "—"}
       </div>
-      {secondary && (
+      {secondary && !isEmpty && (
         <div className="text-[9.5px] text-fg-dim mt-0.5 truncate">{secondary}</div>
       )}
     </div>
