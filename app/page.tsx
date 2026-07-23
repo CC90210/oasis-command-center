@@ -449,14 +449,14 @@ export default async function TodayPage() {
                 className="text-xs text-fg-muted hover:text-accent transition-colors"
               >
                 {inbound.length === 0 || (inbound[0] && Date.now() - new Date(inbound[0].created_at).getTime() > 7 * 24 * 60 * 60 * 1000)
-                  ? "Check n8n →"
+                  ? "Check sweep →"
                   : null}
               </Link>
             }
           >
             {inbound.length === 0 ? (
               <EmptyState
-                message="No inbound rows yet. If you've received emails recently, the n8n 'OASIS Inbound Qualifier' workflow on Hostinger may be down. Run scripts/n8n_inbound_doctor.py to diagnose."
+                message="No inbound rows yet. If you've received emails recently, the 'Inbound Email Sweep' cron (every 5 min, bravo-scheduler) may be stopped. Check it under Automations, or run: python scripts/integrations/email_engine.py --json check-inbox"
               />
             ) : (
               <ul className="divide-y divide-bg-border">

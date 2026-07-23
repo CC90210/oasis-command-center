@@ -395,10 +395,16 @@ export const KNOWN_INTEGRATIONS: IntegrationDef[] = [
 
   // ── Data / automation ──────────────────────────────────────────
   {
+    // NOTE: the `service` key stays "n8n_inbound" for continuity — it's what
+    // integration_health rows are keyed on and renaming it would orphan the
+    // existing history. The pipeline behind it was migrated 2026-07-23 from the
+    // n8n "OASIS Inbound Qualifier" workflow to the native Bravo email brain
+    // (scripts/email_brain.py, driven by the "Inbound Email Sweep" cron every
+    // 5 min). Label/description reflect the real owner; the key is legacy.
     service: "n8n_inbound",
-    label: "n8n Inbound",
+    label: "Inbound Email Brain",
     category: "data",
-    description: "Email classifier pipeline (self-hosted on Hostinger)",
+    description: "Native inbound email classifier — 4-brain router (support / opportunity / financial / archive) on the subscription Claude CLI",
     connection_kind: "api_key",
     signup_url: "https://n8n.io/cloud/",
     api_key_url: "https://docs.n8n.io/api/authentication/",
