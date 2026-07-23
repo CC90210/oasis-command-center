@@ -104,6 +104,7 @@ export type SkipReason =
   | "no_contact_method"
   | "shopped_recently"
   | "accelerated_chase"
+  | "docs_on_file"
   | "invalid_sequence_steps";
 
 export type SequenceEnrollSummary = {
@@ -143,6 +144,7 @@ function emptySkipCounts(): Record<SkipReason, number> {
     no_contact_method: 0,
     shopped_recently: 0,
     accelerated_chase: 0,
+    docs_on_file: 0,
     invalid_sequence_steps: 0,
   };
 }
@@ -403,6 +405,21 @@ export async function runEnrollDrips(): Promise<EnrollDripsResult> {
       }
       if (isOptedOut(data)) {
         skipped.opted_out++;
+        continue;
+      }
+      // Docs-on-file suppression (2026-07-23): a deal received COMPLETE via the
+      // document-extraction parser (dropped application + bank statements
+      // already in hand) must not be re-asked for the app/statements we already
+      // hold. SCOPED to the uw_sheet first-touch collection cadence only: the
+      // flag is never cleared, so we gate on the CURRENT trigger `stage` (the
+      // sequence's trigger_filter.to). That way a docs-complete deal later
+      // re-triaged to another stage (e.g. a negative-reply reclass to
+      // follow_up) still gets its generic re-engagement nurture — we only ever
+      // block the uw_sheet doc-collection drip, not all future sends. Set ONLY
+      // by apply-extracted's new-deal path; scrubber-fed uw_sheet leads never
+      // carry it, so their first-touch cadence is unchanged.
+      if (data.docs_on_file === true && stage === "uw_sheet") {
+        skipped.docs_on_file++;
         continue;
       }
       const hasPhone = typeof data.phone === "string" && data.phone.trim().length > 0;

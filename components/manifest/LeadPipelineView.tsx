@@ -251,7 +251,8 @@ export function LeadPipelineView({
       if (cfg.readyToAdvance.has(s)) ready++;
 
       const lastTouch = lastTouchIso(r);
-      if (typeof lastTouch === "string" && isGoingColdVariant(cfg, s, lastTouch)) cold++;
+      // docs_on_file deals (received complete) are never "going cold" — they're ready to shop, not stranded.
+      if (typeof lastTouch === "string" && r.data.docs_on_file !== true && isGoingColdVariant(cfg, s, lastTouch)) cold++;
 
       const t = r.updated_at ? new Date(r.updated_at).getTime() : 0;
       if (t > mostRecentUpdate) mostRecentUpdate = t;
@@ -1444,7 +1445,7 @@ function oasisRowModel(row: Row, cfg: VariantConfig, stage: StageMeta) {
   const scoreRaw = typeof d.score === "number" ? d.score : null;
   const scoreNum = aiScoreRaw ?? scoreRaw;
   const touchIso = lastTouchIso(row);
-  const cold = isGoingColdVariant(cfg, stage.key, touchIso);
+  const cold = d.docs_on_file !== true && isGoingColdVariant(cfg, stage.key, touchIso);
   const lastTouchLabel = touchIso ? relTime(touchIso) : "-";
   const createdIso = row.created_at || null;
   const createdLabel = createdIso ? formatShortDate(createdIso) : "-";
@@ -1639,7 +1640,7 @@ function rowModel(row: Row, stage: StageMeta) {
   const agentFull = str(d.assigned_to_name) || str(d.assigned_to) || "-";
   const agentLabel = compactAgent(agentFull);
   const touchIso = lastTouchIso(row);
-  const cold = isGoingColdSun(stage.key, touchIso);
+  const cold = d.docs_on_file !== true && isGoingColdSun(stage.key, touchIso);
   const lastTouchLabel = touchIso ? relTime(touchIso) : "-";
   const paper = str(d.paper_grade) || str(d.leverage_grade) || "-";
   const leverage = d.leverage != null ? String(d.leverage) : str(d.leverage_ratio) || "-";
@@ -1710,7 +1711,7 @@ function pickTouchFirst(
     const stageKey = String(r.data[stageField] || "");
     if (!cfg.active.has(stageKey)) continue;
     const lastTouch = lastTouchIso(r);
-    if (!isGoingColdVariant(cfg, stageKey, lastTouch)) continue;
+    if (r.data.docs_on_file === true || !isGoingColdVariant(cfg, stageKey, lastTouch)) continue;
     const days = daysSince(lastTouch) - (cfg.slaDays[stageKey] ?? 7);
     const potential = leadPotentialUsd(r);
     // Ranking tuple — highest wins, evaluated left to right:
