@@ -66,6 +66,7 @@ export async function POST(
     .update({ status: "pending", last_error: null, updated_at: nowIso })
     .eq("tenant_id", tenantId)
     .eq("application_id", applicationId)
+    .eq("email_identity", "sunbiz")
     .eq("status", "error")
     .select("id");
   if (errRes.error) {
@@ -79,6 +80,7 @@ export async function POST(
     .update({ status: "pending", last_error: null, updated_at: nowIso })
     .eq("tenant_id", tenantId)
     .eq("application_id", applicationId)
+    .eq("email_identity", "sunbiz")
     .eq("status", "sending")
     .lt("updated_at", staleCutoff)
     .select("id");

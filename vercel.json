@@ -42,6 +42,10 @@
       "schedule": "*/30 * * * *"
     },
     {
+      "path": "/api/cron/scan-funmate-replies?write=1",
+      "schedule": "*/30 * * * *"
+    },
+    {
       "path": "/api/cron/sweep-stale-sent-app",
       "schedule": "0 13 * * *"
     },

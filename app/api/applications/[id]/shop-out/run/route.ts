@@ -102,6 +102,24 @@ export async function POST(
   }
 
   const db = getServiceSupabase();
+  const { data: selectedLenders, error: selectedLendersError } = await db
+    .from("tenant_records")
+    .select("id, data")
+    .eq("tenant_id", sess.tenantId)
+    .eq("entity_type", "lender")
+    .in("id", lenderIds);
+
+  if (selectedLendersError) {
+    return jsonError(500, selectedLendersError.message);
+  }
+
+  const includesFunmateLender = (selectedLenders || []).some(
+    (lender) =>
+      String((lender as { data?: Record<string, unknown> }).data?.lender_network || "sunbiz") === "funmate",
+  );
+  if (includesFunmateLender) {
+    return jsonError(409, "funmate_lenders_require_funmate_route");
+  }
 
   // Tenant gate — SunBiz only, OR operator (CC).
   const tenantRow = await db

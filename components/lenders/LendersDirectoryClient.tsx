@@ -30,6 +30,7 @@ type LenderRecord = {
 
 /** Typed view of the lender JSONB data block. */
 type LenderData = {
+  lender_network: "sunbiz" | "funmate";
   name: string;
   contact: string;
   product_type: string;
@@ -136,6 +137,7 @@ function bool(v: unknown): boolean {
 
 function toLenderData(raw: Record<string, unknown>): LenderData {
   return {
+    lender_network: raw.lender_network === "funmate" ? "funmate" : "sunbiz",
     name: str(raw.name),
     contact: str(raw.contact),
     product_type: str(raw.product_type),
@@ -170,6 +172,7 @@ function toLenderData(raw: Record<string, unknown>): LenderData {
 }
 
 const BLANK_DATA: LenderData = {
+  lender_network: "sunbiz",
   name: "",
   contact: "",
   product_type: "",
@@ -217,6 +220,7 @@ export function LendersDirectoryClient({
   const [search, setSearch] = useState("");
   const [activeOnly, setActiveOnly] = useState(true);
   const [productFilter, setProductFilter] = useState<string[]>([]);
+  const [network, setNetwork] = useState<"sunbiz" | "funmate">("sunbiz");
 
   // Drawer state: null = closed, "new" = create, record id = edit.
   const [drawerTarget, setDrawerTarget] = useState<string | "new" | null>(null);
@@ -274,6 +278,7 @@ export function LendersDirectoryClient({
     if (!records) return [];
     const needle = search.trim().toLowerCase();
     return records.filter((r) => {
+      if ((r.data.lender_network === "funmate" ? "funmate" : "sunbiz") !== network) return false;
       if (activeOnly && !bool(r.data.active)) return false;
       if (productFilter.length > 0 && !productFilter.includes(str(r.data.product_type))) {
         return false;
@@ -289,7 +294,7 @@ export function LendersDirectoryClient({
         .toLowerCase();
       return haystack.includes(needle);
     });
-  }, [records, search, activeOnly, productFilter]);
+  }, [records, search, activeOnly, productFilter, network]);
 
   const openRecord = records?.find((r) => r.id === drawerTarget) ?? null;
 
@@ -300,6 +305,20 @@ export function LendersDirectoryClient({
 
   return (
     <div className="space-y-5">
+      <div className="inline-flex rounded-lg border border-bg-border bg-bg-deep p-1">
+        {(["sunbiz", "funmate"] as const).map((value) => (
+          <button
+            key={value}
+            type="button"
+            onClick={() => setNetwork(value)}
+            className={`rounded-md px-4 py-2 text-[12px] font-semibold transition-colors ${
+              network === value ? "bg-accent text-bg-deep" : "text-fg-muted hover:text-fg"
+            }`}
+          >
+            {value === "sunbiz" ? "SunBiz Lenders" : "Funmate Lenders"}
+          </button>
+        ))}
+      </div>
       {/* Catch-all dispatcher renders the page title + subtitle. No
           inner PageHeader here — was duplicating 2026-05-24. */}
 
@@ -724,6 +743,16 @@ function LenderDrawer({
 
           {/* Section 1: Identity */}
           <Section label="Identity">
+            <Field label="Lender network">
+              <select
+                value={form.lender_network}
+                onChange={(e) => set("lender_network", e.target.value === "funmate" ? "funmate" : "sunbiz")}
+                className="w-full px-2 py-1.5 rounded-md bg-bg-deep border border-bg-border text-fg text-[12.5px]"
+              >
+                <option value="sunbiz">SunBiz Lenders — submissions@</option>
+                <option value="funmate">Funmate Lenders — Funmate mailbox</option>
+              </select>
+            </Field>
             <Field label="Lender name *">
               <TextInput
                 value={form.name}

@@ -571,6 +571,7 @@ export const SUN_SEED: TenantManifest = {
       fields: [
         { name: "name", type: "string", required: true },
         { name: "contact", type: "string" },
+        { name: "lender_network", type: "enum", enum_values: ["sunbiz", "funmate"], default: "sunbiz" },
         // Phase 6.1 — match-fitness fields per Jordan's 2026-05-15
         // meeting. Operator UI on /lenders/[id]/edit lets the operator
         // populate these; the shop-out flow pre-ranks lenders against
