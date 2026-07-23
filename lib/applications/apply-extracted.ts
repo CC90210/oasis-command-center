@@ -62,9 +62,16 @@ export async function applyExtractedApplication(input: {
         if (fields[k] !== undefined) leadData[k] = fields[k];
       }
       if (!leadData.business_name) leadData.business_name = "Untitled application";
-      // A dropped application is a completed app in hand — land it at the
-      // terminal positive lead stage so it reads as ready.
-      leadData.stage = "signed_application";
+      // A dropped application is a completed deal received externally (via the
+      // job-form link) with bank statements already in hand — it's a Live Sub,
+      // not a fresh signee. Land it at `uw_sheet` ("Live Subs") so it surfaces
+      // on the Live Subs board (matching the Breeze UW-sheet daemon's pattern)
+      // and does NOT fire the signed_application bank-statement nag drip
+      // (BRAVO_RECORD_STATUS_CHANGED -> to:signed_application), which would chase
+      // a merchant whose statements we already hold. The application entity
+      // still gets the valid `application_in` opportunity status below, so the
+      // Bank/underwriting pipeline is unaffected and nothing is orphaned.
+      leadData.stage = "uw_sheet";
       if (input.assignedTo) leadData.assigned_to = input.assignedTo;
       const created = await createRecord({ tenant_id: input.tenantId, entity: "lead", data: leadData });
       leadId = created.id;
