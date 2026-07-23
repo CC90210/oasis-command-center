@@ -204,11 +204,23 @@ export type DispatchDripsResult = {
   retryPending: number;
   failed: number;
   cancelled: number;
+  /** True when the run stopped early because TextTorrent credits ran out. */
+  creditHalted: boolean;
 };
 
 /** Per-row outcome, tallied in-process by the main loop (no post-hoc DB
  *  query needed — every code path below returns exactly one of these). */
 type StepOutcome = "sent" | "dry_run" | "rescheduled" | "retry_pending" | "failed" | "cancelled";
+
+/** Mutable per-run state. `creditExhausted` latches the moment TextTorrent
+ *  reports an account-wide credit outage. This matters because Step 1
+ *  (`/inbox/chat/create`) is FREE and returns 201 even at a zero balance, while
+ *  only the Step 2 send is billable — so continuing the batch mints one empty
+ *  chat per remaining row while every send 422s. Parking rows individually (the
+ *  existing +6h behaviour) fixes the retry burn but NOT the chat litter; the main
+ *  loop must also stop claiming further work. 2026-07-23 incident: 1,232 chats,
+ *  0 messages delivered. */
+type RunState = { creditExhausted: boolean };
 
 /** Best-effort lead_interactions log — never throws; a logging failure must
  *  never fail an actual send. agent_source is 'sequence:<name>' per the
@@ -596,6 +608,7 @@ async function processSmsStep(
   data: LeadData,
   step: DripStep,
   steps: DripStep[],
+  run: RunState,
 ): Promise<StepOutcome> {
   const phone = typeof data.phone === "string" ? data.phone.trim() : "";
   // No phone for an SMS step: SKIP + advance (the sequence may have email steps
@@ -660,7 +673,12 @@ async function processSmsStep(
       // per-lead retry budgets mass-fails the fleet (2026-07-22 incident: 49
       // runs failed in one evening and cascaded into wrongful auto-deads).
       // Park the row (+6h, no attempt spent) + ONE deduped urgent alert.
-      if (/enough credits/i.test(result.error)) {
+      if (result.code === "insufficient_credits" || /enough credits/i.test(result.error)) {
+        // Latch so the main loop stops claiming further rows. Without this the
+        // batch keeps running and every remaining row still executes the FREE
+        // Step 1, leaving an empty chat in the rep's inbox for a send that can
+        // never go out.
+        run.creditExhausted = true;
         await writeAgentAlert({
           tenantId: row.tenant_id,
           alertType: "tt_credits_exhausted",
@@ -860,6 +878,7 @@ async function processRow(
   row: ClaimedRow,
   leadMap: Map<string, LeadData>,
   seqMap: Map<string, SequenceRow>,
+  run: RunState,
 ): Promise<StepOutcome> {
   const data = leadMap.get(`${row.tenant_id}|${row.lead_id}`);
   const seq = seqMap.get(`${row.tenant_id}|${row.sequence_id}`);
@@ -934,7 +953,7 @@ async function processRow(
     return markCancelled(db, row, "accelerated_chase_active: stage drip stands down");
   }
 
-  if (step.channel === "sms") return processSmsStep(db, row, data, step, steps);
+  if (step.channel === "sms") return processSmsStep(db, row, data, step, steps, run);
   return processEmailStep(db, row, data, step, steps, seq.emailClass || "commercial");
 }
 
@@ -966,6 +985,7 @@ export async function runDispatchDrips(): Promise<DispatchDripsResult> {
   const empty = (): DispatchDripsResult => ({
     ok: true, reclaimed, claimed: 0, processed: 0, sent: 0,
     dryRun: 0, rescheduled: 0, retryPending: 0, failed: 0, cancelled: 0,
+    creditHalted: false,
   });
 
   // 2) Hourly send cap (live mode only) — the hard drip throttle. Count REAL
@@ -1085,11 +1105,12 @@ export async function runDispatchDrips(): Promise<DispatchDripsResult> {
   let retryPending = 0;
   let failed = 0;
   let cancelled = 0;
+  const run: RunState = { creditExhausted: false };
   for (const row of claimed) {
     if (Date.now() - startedAt > SOFT_BUDGET_MS) break;
     let outcome: StepOutcome;
     try {
-      outcome = await processRow(db, row, leadMap, seqMap);
+      outcome = await processRow(db, row, leadMap, seqMap, run);
     } catch (err) {
       console.error("[dispatch-drips] unhandled row error", row.id, err);
       outcome = await markRetryOrFail(db, row, err instanceof Error ? err.message : "unhandled_error").catch(
@@ -1103,7 +1124,23 @@ export async function runDispatchDrips(): Promise<DispatchDripsResult> {
     else if (outcome === "retry_pending") retryPending++;
     else if (outcome === "cancelled") cancelled++;
     else failed++;
+
+    // Account-wide credit outage: every remaining row would 422 on the billable
+    // Step 2 while its FREE Step 1 still left an empty chat in a rep's inbox.
+    // Stop the batch here. Rows already claimed but unprocessed stay 'sending'
+    // and are returned to 'scheduled' by the stale-reclaim on a later run —
+    // exactly how the SOFT_BUDGET_MS break above already behaves.
+    if (run.creditExhausted) {
+      console.error("[dispatch-drips] HALTING run — TextTorrent credits exhausted", {
+        processedBeforeHalt: processed,
+        claimedButUnprocessed: claimed.length - processed,
+      });
+      break;
+    }
   }
 
-  return { ok: true, reclaimed, claimed: claimed.length, processed, sent, dryRun, rescheduled, retryPending, failed, cancelled };
+  return {
+    ok: true, reclaimed, claimed: claimed.length, processed, sent, dryRun,
+    rescheduled, retryPending, failed, cancelled, creditHalted: run.creditExhausted,
+  };
 }

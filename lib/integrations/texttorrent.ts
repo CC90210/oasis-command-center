@@ -193,12 +193,15 @@ async function ttFetch<T>(
       (body as { message?: string; error?: string })?.message ||
       (body as { error?: string })?.error ||
       `TT ${resp.status}`;
-    throw new TextTorrentError(
-      `http_${resp.status}`,
-      msg,
-      resp.status,
-      body,
-    );
+    // TT bills per message SEND. `/inbox/chat/create` is FREE and still returns
+    // 201 at a zero balance, so a drained account keeps minting chats while every
+    // send 422s — the 2026-07-23 incident (1,232 chats, 0 messages). Give credit
+    // exhaustion a stable code so callers can halt on it instead of string-
+    // matching a vendor message or burning a retry budget on it.
+    const code = /enough credit|insufficient credit/i.test(msg)
+      ? "insufficient_credits"
+      : `http_${resp.status}`;
+    throw new TextTorrentError(code, msg, resp.status, body);
   }
   return body as T;
 }
@@ -399,6 +402,17 @@ export async function sendSms(
       0,
     );
   }
+  // Refuse a blank body BEFORE Step 1. Step 1 is free but creates a real chat, so
+  // sending an empty message would leave an empty thread in the rep's inbox and
+  // still attempt a billable send. Fail closed instead.
+  const outbound = String(args.message ?? "").trim();
+  if (!outbound) {
+    throw new TextTorrentError(
+      "validation",
+      "Refusing to send an empty TextTorrent message — no chat is created and no credit is spent.",
+      0,
+    );
+  }
   const receiver = toTenDigit(args.number);
 
   // Step 1: create or find the chat.
@@ -421,11 +435,25 @@ export async function sendSms(
     throw new TextTorrentError("send_failed", `Could not open a TextTorrent chat for ${args.number}.`, 0);
   }
 
-  // Step 2: send the message on the chat.
+  // Step 2: send the message on the chat. THIS is the billable call; Step 1 above
+  // is free, so any failure here leaves an empty chat behind.
   const sent = await ttFetch<{ data?: { message_id?: string } }>(creds, "/inbox/chat", {
-    body: { chat_id: chatId, to_number: args.number, from_number: fromNumber, message: args.message },
+    body: { chat_id: chatId, to_number: args.number, from_number: fromNumber, message: outbound },
   });
-  return { data: { chat_id: chatId, message_id: sent?.data?.message_id } };
+  const messageId = sent?.data?.message_id;
+  if (messageId == null || String(messageId).trim() === "") {
+    // Observability only — deliberately NOT a throw. We have never captured a
+    // confirmed-successful Step 2 response (the incident probe only ever got 422
+    // insufficient_credits), so we cannot yet prove TT always returns message_id
+    // on success; failing closed here could break every send. Promote this to a
+    // hard fail once one real success is observed to carry a message_id.
+    console.warn("[texttorrent] send returned no message_id — delivery unconfirmed", {
+      chatId,
+      to: args.number,
+      from: fromNumber,
+    });
+  }
+  return { data: { chat_id: chatId, message_id: messageId } };
 }
 
 const ttStr = (v: unknown): string => (v == null ? "" : String(v));

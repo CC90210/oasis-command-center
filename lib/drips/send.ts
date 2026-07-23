@@ -47,7 +47,10 @@ export type DripSmsResult =
       actAsEmail: string | null;
       repKey: string;
     }
-  | { ok: false; error: string };
+  /** `code` is the TextTorrentError code when the failure came from TT — the
+   *  executor branches on "insufficient_credits" to halt the run instead of
+   *  burning each lead's retry budget on an account-wide outage. */
+  | { ok: false; error: string; code?: string };
 
 export type DripEmailResult =
   | { ok: true; messageId: string; fromAddress: string }
@@ -91,7 +94,11 @@ export async function sendDripSms(
         : err instanceof Error
           ? err.message
           : "send_failed";
-    return { ok: false, error: reason };
+    return {
+      ok: false,
+      error: reason,
+      code: err instanceof TextTorrentError ? err.code : undefined,
+    };
   }
 }
 
