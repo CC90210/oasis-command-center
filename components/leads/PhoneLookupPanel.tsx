@@ -124,6 +124,13 @@ export function PhoneLookupPanel({
   const [jobs, setJobs] = useState<Job[] | null>(null);
   const [starting, setStarting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  /** The history GET failed. Tracked separately from `error` (which reports a
+   * failed START) because the panel must still render: swallowing this would
+   * hide the whole feature — including an already-queued job — behind a
+   * transient network blip, with no way for the operator to tell. */
+  const [loadFailed, setLoadFailed] = useState(false);
+  /** Set when POST returned an existing job instead of starting a new one. */
+  const [deduped, setDeduped] = useState<null | "recent" | "in_flight">(null);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
   /** Set once a poll observes a terminal status, so the parent refreshes the
    * lead record exactly once rather than on every poll tick. */
@@ -133,10 +140,20 @@ export function PhoneLookupPanel({
     try {
       const r = await fetch(`/api/leads/${leadId}/phone-lookup`, { cache: "no-store" });
       const j = await r.json();
-      if (j?.ok) setJobs(j.jobs as Job[]);
+      if (j?.ok) {
+        setJobs(j.jobs as Job[]);
+        setLoadFailed(false);
+        return;
+      }
+      setLoadFailed(true);
     } catch {
-      /* transient fetch failure — the next poll retries; never blank the panel */
+      // Non-JSON, network error, 5xx — all the same to the operator: we do not
+      // know the state. Say so instead of rendering a confident empty panel.
+      setLoadFailed(true);
     }
+    // Never leave `jobs` at null after a failure: null is the "still loading"
+    // sentinel that hides the panel entirely.
+    setJobs((prev) => prev ?? []);
   }, [leadId]);
 
   useEffect(() => {
@@ -165,24 +182,35 @@ export function PhoneLookupPanel({
     };
   }, [inFlight, latest, load, onChanged]);
 
-  const start = useCallback(async () => {
-    setStarting(true);
-    setError(null);
-    try {
-      const r = await fetch(`/api/leads/${leadId}/phone-lookup`, { method: "POST" });
-      const j = await r.json();
-      if (!j?.ok) {
-        setError(j?.message || j?.error || "Could not start the lookup.");
-      } else {
-        settled.current = false;
-        await load();
+  const start = useCallback(
+    async (force = false) => {
+      setStarting(true);
+      setError(null);
+      setDeduped(null);
+      try {
+        const r = await fetch(
+          `/api/leads/${leadId}/phone-lookup${force ? "?force=1" : ""}`,
+          { method: "POST" },
+        );
+        const j = await r.json();
+        if (!j?.ok) {
+          setError(j?.message || j?.error || "Could not start the lookup.");
+        } else {
+          // The route returns an EXISTING job rather than starting one when the
+          // lead was already searched. Without surfacing that, the button looks
+          // broken: it appears to run and nothing changes.
+          if (j.deduped) setDeduped(j.deduped as "recent" | "in_flight");
+          settled.current = false;
+          await load();
+        }
+      } catch {
+        setError("Could not reach the server.");
+      } finally {
+        setStarting(false);
       }
-    } catch {
-      setError("Could not reach the server.");
-    } finally {
-      setStarting(false);
-    }
-  }, [leadId, load]);
+    },
+    [leadId, load],
+  );
 
   const alreadyHasPhone = hasUsablePhone(leadData);
   const hasHistory = Boolean(jobs && jobs.length);
@@ -220,7 +248,7 @@ export function PhoneLookupPanel({
         <div className="mt-2.5 flex flex-wrap items-center gap-2">
           <button
             type="button"
-            onClick={() => void start()}
+            onClick={() => void start(false)}
             disabled={starting || inFlight}
             className="inline-flex items-center gap-1.5 rounded-md border border-accent/50 bg-accent/10 px-2.5 py-1 text-[11px] font-bold text-accent hover:bg-accent/20 disabled:opacity-50"
           >
@@ -242,6 +270,42 @@ export function PhoneLookupPanel({
       {error && (
         <div className="mt-3 rounded-lg border border-status-warm/40 bg-status-warm/5 p-3 text-[12px] text-status-warm">
           {error}
+        </div>
+      )}
+
+      {loadFailed && (
+        <div className="mt-3 flex flex-wrap items-center gap-2 rounded-lg border border-status-warm/40 bg-status-warm/5 p-3 text-[12px] text-status-warm">
+          <span>Could not load the lookup history, so what you see here may be incomplete.</span>
+          <button
+            type="button"
+            onClick={() => void load()}
+            className="inline-flex items-center gap-1 rounded-md border border-status-warm/50 px-2 py-0.5 text-[11px] font-bold hover:bg-status-warm/10"
+          >
+            <RefreshCw className="h-3 w-3" /> Retry
+          </button>
+        </div>
+      )}
+
+      {/* The lookup was NOT re-run. Saying so is the whole point: the operator
+          pressed a button and the result they are looking at is the old one. */}
+      {deduped === "recent" && (
+        <div className="mt-3 rounded-lg border border-bg-border bg-bg-elev/30 p-3 text-[12px] text-fg-muted">
+          <p>
+            This lead was already searched on {fmtWhen(latest?.created_at ?? null)}, so the previous
+            result is shown below rather than spending another search.
+          </p>
+          <button
+            type="button"
+            onClick={() => void start(true)}
+            disabled={starting}
+            className="mt-2 inline-flex items-center gap-1.5 rounded-md border border-bg-border bg-bg-elev/50 px-2.5 py-1 text-[11px] font-bold text-fg-muted hover:bg-bg-elev hover:text-fg disabled:opacity-50"
+          >
+            <Search className="h-3 w-3" /> Search again anyway
+          </button>
+          <p className="mt-1.5 text-[11px] text-fg-dim">
+            Worth doing if you have just corrected the owner&apos;s name or state — the earlier
+            search used whatever was on the lead at the time.
+          </p>
         </div>
       )}
 

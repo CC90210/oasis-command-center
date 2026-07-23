@@ -93,7 +93,7 @@ function splitName(full: string): { first: string; last: string } {
   return { first: parts[0], last: parts[parts.length - 1] };
 }
 
-export async function POST(_req: Request, ctx: { params: Promise<{ id: string }> }) {
+export async function POST(req: Request, ctx: { params: Promise<{ id: string }> }) {
   const sess = await resolveSessionContext();
   if (!sess.ok) {
     return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
@@ -180,22 +180,32 @@ export async function POST(_req: Request, ctx: { params: Promise<{ id: string }>
   // 2. A conclusive lookup inside the dedupe window suppresses a new one. Only
   //    'completed' and 'no_results' qualify: a previous block or error is not an
   //    answer about this merchant and must never suppress a retry.
-  const cutoff = new Date(Date.now() - DEDUPE_WINDOW_MS).toISOString();
-  const { data: recent, error: recentErr } = await svc
-    .from("phone_lookup_jobs")
-    .select(SELECT_COLS)
-    .eq("tenant_id", sess.tenantId)
-    .eq("lead_id", leadId)
-    .in("status", ["completed", "no_results"])
-    .gte("created_at", cutoff)
-    .order("created_at", { ascending: false })
-    .limit(1)
-    .maybeSingle();
-  if (recentErr) {
-    return NextResponse.json({ ok: false, error: "dedupe_check_failed" }, { status: 503 });
-  }
-  if (recent) {
-    return NextResponse.json({ ok: true, job: recent, deduped: "recent" });
+  //
+  //    `?force=1` overrides this ONE check, because the most common reason an
+  //    operator re-runs a lookup is that they just fixed the owner's name or
+  //    state — and the stored query was snapshotted from the old, wrong data.
+  //    Refusing that retry would make the window protect a result we already
+  //    know was asked wrongly. It does NOT override the in-flight check above,
+  //    and the worker's daily cap still applies.
+  const force = new URL(req.url).searchParams.get("force") === "1";
+  if (!force) {
+    const cutoff = new Date(Date.now() - DEDUPE_WINDOW_MS).toISOString();
+    const { data: recent, error: recentErr } = await svc
+      .from("phone_lookup_jobs")
+      .select(SELECT_COLS)
+      .eq("tenant_id", sess.tenantId)
+      .eq("lead_id", leadId)
+      .in("status", ["completed", "no_results"])
+      .gte("created_at", cutoff)
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    if (recentErr) {
+      return NextResponse.json({ ok: false, error: "dedupe_check_failed" }, { status: 503 });
+    }
+    if (recent) {
+      return NextResponse.json({ ok: true, job: recent, deduped: "recent" });
+    }
   }
 
   // Home city/state beats the business address for a people-search match, so
