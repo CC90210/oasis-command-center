@@ -175,6 +175,27 @@ async function main() {
   );
 
   await test(
+    "non-operator + NO tenantId (but a shared agent name) → fail-closed, no leak (CodeRabbit PR #81)",
+    async () => {
+      const db = makeFakeAgentEventsClient(SEED_ROWS);
+      const rows = await recentEvents(25, {
+        agentNames: ["kixie"],
+        isOperator: false,
+        sinceDays: 0,
+        // No tenantId supplied — this used to fall through to a
+        // publisher_agent-only filter and return every tenant's kixie rows.
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any -- fake client only implements the subset recentEvents() calls
+        db: db as any,
+      });
+      assert.equal(rows.length, 0, "a non-operator caller that forgets tenantId must get nothing, never every tenant's rows");
+      assert.ok(
+        !rows.some((r) => (r as unknown as Row).id === "evt-tenant-a-1" || (r as unknown as Row).id === "evt-tenant-b-1"),
+        "neither tenant's shared-agent rows may leak when tenantId is omitted",
+      );
+    },
+  );
+
+  await test(
     "operator + no tenantId → full empire-wide view unchanged (regression guard)",
     async () => {
       const db = makeFakeAgentEventsClient(SEED_ROWS);

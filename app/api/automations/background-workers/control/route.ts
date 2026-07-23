@@ -20,16 +20,21 @@
  *     privilege, identical to "can this role run bash on the VPS"
  *     (bridgeExecToolAllowedForRole(role, "bash")), so members / read_only /
  *     loan_officer / processor are rejected,
- *   - B4 (2026-07-23): WORKER-OWNER SEGREGATION. sunbiz-workers.ts tags each
- *     daemon "cc" (SunBiz core infra) / "adon" (Breeze/MCA underwriting) /
- *     "shared". This table has no per-user identity column, so the actor's
- *     side is resolved from authorizeBridgeRequest()'s isOperator flag: the
- *     empire operator (CC) bypassing the tenant gate = "cc"; any other
- *     authenticated SunBiz tenant member (owner/admin-tier, per the role gate
- *     above) = "adon" side. A caller may act on a worker whose owner matches
- *     their side, or "shared". Cross-owner is DENIED unless the caller's role
- *     promoted to "owner" (tenant is_owner) — the one documented escape hatch
- *     — and every attempt (allowed or denied) is logged with the actor.
+ *   - B4 (2026-07-23; hardened 2026-07-23 per CodeRabbit PR #81 review):
+ *     WORKER-OWNER SEGREGATION. sunbiz-workers.ts tags each daemon "cc"
+ *     (SunBiz core infra) / "adon" (Breeze/MCA underwriting) / "shared".
+ *     This table has no per-user identity column, so the actor's side is
+ *     resolved from authorizeBridgeRequest()'s isOperator flag: the empire
+ *     operator (CC) bypassing the tenant gate = "cc"; any other authenticated
+ *     SunBiz tenant member (owner/admin-tier, per the role gate above) =
+ *     "adon" side. A caller may act on a worker whose owner matches their
+ *     side, or "shared". Cross-owner is DENIED for everyone else — the ONLY
+ *     override is the empire operator (isOperator), NOT a SunBiz tenant
+ *     is_owner role. teamRole promotes to "owner" for the tenant's OWN
+ *     is_owner flag (Adon, on the 'submissions' tenant) — using that as the
+ *     escape hatch would let Adon's side bounce CC's core-infra daemons,
+ *     which is exactly the hole this gate exists to close. Every attempt
+ *     (allowed or denied) is logged with the actor via tenant_audit_log.
  *   - then, and only then, forwards `pm2 <action> <name>` to the bridge with
  *     the server-held bearer. The tunnel can only ever receive that exact,
  *     constrained command from us — never operator-supplied bash.
@@ -91,12 +96,12 @@ export async function POST(req: Request) {
   // gate decision itself.
   const actorSide: "cc" | "adon" = auth.isOperator ? "cc" : "adon";
   const ownerMatches = worker.owner === "shared" || worker.owner === actorSide;
-  // The empire operator (CC) can always override — full control is not
-  // contingent on carrying an is_owner profile row on the SunBiz tenant (the
-  // operator reaches this route via the isOperator tenant-gate bypass, so their
-  // teamRole may resolve below "owner"). A non-operator still needs a real
-  // tenant-owner role to touch another owner's daemon.
-  const tenantOwnerOverride = auth.teamRole === "owner" || auth.isOperator;
+  // ONLY the empire operator (CC) may cross the owner boundary. A SunBiz
+  // tenant is_owner (Adon, teamRole==="owner") is NOT a valid override here —
+  // that would let Adon's side bounce CC's core-infra daemons, defeating the
+  // whole point of this gate. (CodeRabbit PR #81 [Major]: the prior
+  // `auth.teamRole === "owner" || auth.isOperator` left exactly that hole.)
+  const operatorOverride = auth.isOperator;
   if (!ownerMatches) {
     await logTenantAudit({
       tenantId: auth.tenantId,
@@ -108,11 +113,11 @@ export async function POST(req: Request) {
         actor_side: actorSide,
         action,
         worker_owner: worker.owner,
-        outcome: tenantOwnerOverride ? "owner_override_allowed" : "denied",
+        outcome: operatorOverride ? "operator_override_allowed" : "denied",
       },
     });
   }
-  if (!ownerMatches && !tenantOwnerOverride) {
+  if (!ownerMatches && !operatorOverride) {
     return NextResponse.json(
       { ok: false, error: "cross_owner_worker_denied", worker_owner: worker.owner },
       { status: 403 },

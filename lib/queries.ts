@@ -727,6 +727,13 @@ export async function agentStates(agentNames: string[] = []): Promise<AgentState
  *
  *   Empty agentNames + non-operator: return [] (safer than leaking).
  *
+ *   2026-07-23 (CodeRabbit PR #81 [Major]): a non-operator caller that omits
+ *   tenantId (but supplies agentNames) previously fell through to the
+ *   publisher_agent-only filter with NO tenant scoping — recreating the
+ *   exact cross-tenant leak this function exists to close, for any future
+ *   caller that forgets to pass tenantId. Now fail-closed: non-operator +
+ *   no tenantId → [] regardless of agentNames.
+ *
  *   Default sinceDays: 7. The /operations + /agents pages explicitly pass
  *   sinceDays:0 to show "most recent N regardless of age" — they were
  *   rendering empty when the event bus was quiet for a week even though
@@ -755,6 +762,9 @@ export async function recentEvents(
   // Non-operator with no enabled agents → no leakage. Operator with no
   // agentNames → full feed (this is the dashboard-debug expectation).
   if (!isOperator && agentNames.length === 0) return [];
+  // Fail-closed (CodeRabbit PR #81): a non-operator MUST supply a tenantId —
+  // publisher_agent alone is agent-level, not tenant-level, scoping.
+  if (!isOperator && !tenantId) return [];
 
   const db = opts?.db ?? getServiceSupabase();
   let q = db.from("agent_events").select("*");

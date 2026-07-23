@@ -85,10 +85,18 @@ where id = 'b2717cbf-1030-440c-ac33-879d580fa7df';
 -- PART 3 — safe, idempotent. Stamps unlinked_reason if (and only if) this
 -- envelope truly has no lead/application link and the column is still null.
 -- Requires migration 124_esign_unlinked_reason.sql to already be applied.
+--
+-- status = 'completed' guard (CodeRabbit PR #81 [Minor]): without it, running
+-- this early against a still-open envelope (sent/viewed/partially_signed)
+-- would stamp unlinked_reason before completion — the app's own forward-fix
+-- only ever sets this column AT completion time, so a pre-emptive stamp here
+-- would violate that invariant and could read as "this finished unlinked"
+-- for an envelope that hasn't finished yet.
 -- ============================================================
 update public.esign_envelopes
 set unlinked_reason = 'standalone_document_no_lead_or_application'
 where id = 'b2717cbf-1030-440c-ac33-879d580fa7df'
+  and status = 'completed'
   and lead_id is null
   and application_id is null
   and unlinked_reason is null;

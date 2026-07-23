@@ -22,4 +22,4 @@ alter table public.esign_envelopes
   add column if not exists unlinked_reason text;
 
 comment on column public.esign_envelopes.unlinked_reason is
-  'Set (non-null) whenever lead_id AND application_id are both null at completion time — records WHY the envelope has no SunBiz link (e.g. "standalone_document_no_lead_or_application") instead of leaving the gap silent/ambiguous. NULL means the envelope IS linked to a lead or application, or has not completed yet.';
+  'Set (non-null) by app/api/sign/[token]/route.ts whenever lead_id AND application_id are both null at completion time — records WHY the envelope has no SunBiz link (e.g. "standalone_document_no_lead_or_application") instead of leaving the gap silent/ambiguous. NULL means no reason was recorded — it is NOT proof the envelope is linked or incomplete: this migration deliberately does not backfill existing rows (see database/backfill_b2717cbf.sql), so a completed, genuinely-unlinked envelope from before this fix shipped can still read NULL here.';
