@@ -655,7 +655,29 @@ async function processSmsStep(
   let fromIdentity = `dry:${identity.repKey}:${identity.senderId}`;
   if (shouldSend) {
     const result = await sendDripSms(row.tenant_id, phone, clean.cleaned, identity);
-    if (!result.ok) return markRetryOrFail(db, row, result.error);
+    if (!result.ok) {
+      // GLOBAL transient: TT credit exhaustion hits EVERY send at once. Burning
+      // per-lead retry budgets mass-fails the fleet (2026-07-22 incident: 49
+      // runs failed in one evening and cascaded into wrongful auto-deads).
+      // Park the row (+6h, no attempt spent) + ONE deduped urgent alert.
+      if (/enough credits/i.test(result.error)) {
+        await writeAgentAlert({
+          tenantId: row.tenant_id,
+          alertType: "tt_credits_exhausted",
+          severity: "urgent",
+          title: "TextTorrent credits exhausted — SMS drips parked",
+          body: "Drip SMS sends are failing with 'not enough credits'. Every affected row reschedules +6h (no retry burn, no auto-dead) until credits are topped up.",
+          telegramOncePerOpen: true, // one page per outage, not one per row
+        }).catch(() => {});
+        return markRescheduled(db, row, new Date(Date.now() + 6 * 3_600_000).toISOString(), "tt_credits_exhausted - parked 6h");
+      }
+      // Per-lead permanent: TT says the contact is blacklisted — retrying is
+      // pointless and burns three dispatch slots per lead.
+      if (/blacklisted/i.test(result.error)) {
+        return markPermanentFail(db, row, result.error);
+      }
+      return markRetryOrFail(db, row, result.error);
+    }
     fromIdentity = `${identity.repKey}:${result.fromNumber}`;
   }
 
