@@ -17,6 +17,7 @@ import { useMemo, useState } from "react";
 import Link from "next/link";
 import { ArrowRight, Check, Copy, Search, ShieldAlert, User as UserIcon, Users, X } from "lucide-react";
 import { Card } from "@/components/Card";
+import { copyText } from "@/lib/clipboard";
 import type {
   PromptCategory,
   PromptEntry,
@@ -67,24 +68,9 @@ export function PromptsLibraryFilter({
   const sharedPrompts = filtered.filter((p) => p.audience === "shared");
 
   async function copyPrompt(prompt: PromptEntry) {
-    // Mirrors components/CopyButton.tsx: clipboard API is unavailable on
-    // insecure origins / older browsers and can reject on permission denial —
-    // fall back to window.prompt so the copy path never silently no-ops.
-    const text = prompt.prompt;
-    try {
-      if (typeof navigator !== "undefined" && navigator.clipboard?.writeText) {
-        await navigator.clipboard.writeText(text);
-      } else if (typeof window !== "undefined") {
-        window.prompt("Copy:", text);
-      }
+    if (await copyText(prompt.prompt)) {
       setCopiedId(prompt.id);
       window.setTimeout(() => setCopiedId((id) => (id === prompt.id ? null : id)), 1600);
-    } catch {
-      try {
-        window.prompt("Copy:", text);
-      } catch {
-        /* ignore */
-      }
     }
   }
 

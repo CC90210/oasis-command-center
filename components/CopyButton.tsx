@@ -2,6 +2,7 @@
 
 import { useCallback, useState } from "react";
 import { Check, Copy } from "lucide-react";
+import { copyText } from "@/lib/clipboard";
 
 /**
  * Small copy-to-clipboard control for dense rows (phone/email). Stops event
@@ -28,20 +29,9 @@ export function CopyButton({
       e.preventDefault();
       const v = String(value ?? "").trim();
       if (!v) return;
-      try {
-        if (typeof navigator !== "undefined" && navigator.clipboard?.writeText) {
-          await navigator.clipboard.writeText(v);
-        } else if (typeof window !== "undefined") {
-          window.prompt("Copy:", v);
-        }
+      if (await copyText(v)) {
         setCopied(true);
         setTimeout(() => setCopied(false), 1500);
-      } catch {
-        try {
-          window.prompt("Copy:", v);
-        } catch {
-          /* ignore */
-        }
       }
     },
     [value],
