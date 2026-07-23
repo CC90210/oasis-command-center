@@ -104,6 +104,7 @@ export type SkipReason =
   | "no_contact_method"
   | "shopped_recently"
   | "accelerated_chase"
+  | "docs_on_file"
   | "invalid_sequence_steps";
 
 export type SequenceEnrollSummary = {
@@ -143,6 +144,7 @@ function emptySkipCounts(): Record<SkipReason, number> {
     no_contact_method: 0,
     shopped_recently: 0,
     accelerated_chase: 0,
+    docs_on_file: 0,
     invalid_sequence_steps: 0,
   };
 }
@@ -403,6 +405,16 @@ export async function runEnrollDrips(): Promise<EnrollDripsResult> {
       }
       if (isOptedOut(data)) {
         skipped.opted_out++;
+        continue;
+      }
+      // Docs-on-file suppression (2026-07-23): a deal received COMPLETE via the
+      // document-extraction parser (dropped application + bank statements
+      // already in hand) is never enrolled into a collection/first-touch drip
+      // that would re-ask the merchant for the application or statements we
+      // already hold. Set ONLY by apply-extracted's new-deal path; scrubber-fed
+      // uw_sheet leads (which DO need the first-touch cadence) never carry it.
+      if (data.docs_on_file === true) {
+        skipped.docs_on_file++;
         continue;
       }
       const hasPhone = typeof data.phone === "string" && data.phone.trim().length > 0;

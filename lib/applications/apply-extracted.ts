@@ -72,6 +72,13 @@ export async function applyExtractedApplication(input: {
       // still gets the valid `application_in` opportunity status below, so the
       // Bank/underwriting pipeline is unaffected and nothing is orphaned.
       leadData.stage = "uw_sheet";
+      // Mark the deal as arriving COMPLETE (application + statements on file).
+      // The drip enroller skips this flag (never re-ask a merchant for docs we
+      // already hold) and the Live Subs board treats it as "ready", not "going
+      // cold" — both keyed off data.docs_on_file, which is set ONLY here.
+      // Scrubber-fed uw_sheet leads (which still need the first-touch cadence)
+      // never carry it, so their drip + SLA behaviour is unchanged.
+      leadData.docs_on_file = true;
       if (input.assignedTo) leadData.assigned_to = input.assignedTo;
       const created = await createRecord({ tenant_id: input.tenantId, entity: "lead", data: leadData });
       leadId = created.id;
