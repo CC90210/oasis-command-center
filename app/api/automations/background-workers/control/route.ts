@@ -91,7 +91,12 @@ export async function POST(req: Request) {
   // gate decision itself.
   const actorSide: "cc" | "adon" = auth.isOperator ? "cc" : "adon";
   const ownerMatches = worker.owner === "shared" || worker.owner === actorSide;
-  const tenantOwnerOverride = auth.teamRole === "owner";
+  // The empire operator (CC) can always override — full control is not
+  // contingent on carrying an is_owner profile row on the SunBiz tenant (the
+  // operator reaches this route via the isOperator tenant-gate bypass, so their
+  // teamRole may resolve below "owner"). A non-operator still needs a real
+  // tenant-owner role to touch another owner's daemon.
+  const tenantOwnerOverride = auth.teamRole === "owner" || auth.isOperator;
   if (!ownerMatches) {
     await logTenantAudit({
       tenantId: auth.tenantId,
