@@ -629,16 +629,16 @@ function resolveStepCopy(
   step: DripStep,
   leadId: string,
   stepIndex: number,
-): { subject: string; body: string; variantIndex: number } {
+): { subject: string; body: string; bodyHtml?: string; variantIndex: number } {
   const variants = step.body_variants;
   if (variants && variants.length > 0) {
     const i = stableIndex(`${leadId}:${stepIndex}`, variants.length);
     const subjectVariants = step.subject_variants;
     const subject =
       (subjectVariants && subjectVariants.length > 0 ? subjectVariants[i % subjectVariants.length] : step.subject) || "";
-    return { subject, body: variants[i], variantIndex: i };
+    return { subject, body: variants[i], bodyHtml: step.body_html, variantIndex: i };
   }
-  return { subject: step.subject || "", body: step.body, variantIndex: 0 };
+  return { subject: step.subject || "", body: step.body, bodyHtml: step.body_html, variantIndex: 0 };
 }
 
 async function processSmsStep(
@@ -806,7 +806,9 @@ async function processEmailStep(
   // produced (no enabled intake form / HMAC key missing), HALT this email rather
   // than fall back to the generic no-lead link — never send a merchant a broken
   // or generic application link.
-  const usesLink = /\{\{\s*lead\.application_url\s*\}\}/.test(`${copy.subject || ""}\n${copy.body}`);
+  const usesLink = /\{\{\s*lead\.application_url\s*\}\}/.test(
+    `${copy.subject || ""}\n${copy.body}\n${copy.bodyHtml || ""}`,
+  );
   if (usesLink) {
     const existing = typeof data.application_url === "string" && data.application_url.trim() ? data.application_url.trim() : "";
     if (!existing) {
@@ -850,11 +852,17 @@ async function processEmailStep(
   const ctx = buildContext(data);
   const subjectRaw = renderTemplate(copy.subject, ctx) || "Following up";
   const rendered = renderTemplate(copy.body, ctx);
+  const renderedCustomHtml = copy.bodyHtml ? renderTemplate(copy.bodyHtml, ctx) : "";
   // Guard subject + body in ONE lender-lookup (was two separate calls — halves
   // the fail-closed surface + cost). positioning/lender is validated on the
   // COMBINED text; stripDashes is then the only per-field transform, matching
   // what sanitizeBlastMessage itself applies to each field.
-  const guard = await sanitizeBlastMessage(row.tenant_id, `${subjectRaw}\n${rendered}`, { checkPositioning: true });
+  const htmlAsText = renderedCustomHtml.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim();
+  const guard = await sanitizeBlastMessage(
+    row.tenant_id,
+    `${subjectRaw}\n${rendered}\n${htmlAsText}`,
+    { checkPositioning: true },
+  );
   if (!guard.ok) return handleGuardBlock(db, row, steps, guard, "email");
   const subject = stripDashes(subjectRaw).slice(0, 200) || "Following up";
   const cleanBody = stripDashes(rendered);
@@ -881,7 +889,7 @@ async function processEmailStep(
     // List-Unsubscribe header stays for BOTH classes (cuts spam complaints +
     // protects inbox placement). Commercial mail keeps the footer.
     const unsub = emailClass === "transactional" ? "none" : "footer";
-    const html = buildDripHtml(cleanBody, { sendId, email, unsub });
+    const html = renderedCustomHtml || buildDripHtml(cleanBody, { sendId, email, unsub });
     htmlPayload = html;
     const result = await sendDripEmail(row.tenant_id, email, subject, cleanBody, {
       html,

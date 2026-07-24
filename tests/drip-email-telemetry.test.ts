@@ -64,6 +64,23 @@ assert.match(defaults, /Sent application - access link/);
 assert.match(defaults, /delay_minutes:\s*0/);
 assert.match(defaults, /\{\{lead\.application_url\}\}/);
 assert.match(executor, /sms_delivery_failed_after_retries/);
+assert.match(executor, /renderedCustomHtml/);
+assert.match(executor, /copy\.bodyHtml/);
+
+const sequenceBuilder = readFileSync("components/sequences/SequenceBuilderClient.tsx", "utf8");
+assert.match(sequenceBuilder, /Save to Templates/);
+assert.match(sequenceBuilder, /Your Drip Templates/);
+assert.match(sequenceBuilder, /Optional custom HTML/);
+assert.match(sequenceBuilder, /body_html/);
+
+const templatesPage = readFileSync("app/templates/page.tsx", "utf8");
+assert.match(templatesPage, /DripEmailTemplatesSection/);
+assert.match(templatesPage, /Drip Templates/);
+
+const dripLibrary = readFileSync("components/templates/DripEmailTemplatesSection.tsx", "utf8");
+assert.match(dripLibrary, /Jordan direct/);
+assert.match(dripLibrary, /Create with Solara/);
+assert.match(dripLibrary, /application_url/);
 
 const manifestData = readFileSync("lib/manifest/data.ts", "utf8");
 assert.match(manifestData, /s === "full-application"/);
