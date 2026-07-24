@@ -36,4 +36,8 @@ assert.match(ui, /sandbox=""/);
 assert.match(ui, /payload_html/);
 assert.match(ui, /payload_text/);
 
+const metricsUi = readFileSync("components/metrics/MetricsDashboard.tsx", "utf8");
+assert.match(metricsUi, /import \{ DripTrackerClient \}/);
+assert.match(metricsUi, /active === "drips" && <DripTrackerClient \/>/);
+
 console.log("drip-email-telemetry: all assertions passed");
