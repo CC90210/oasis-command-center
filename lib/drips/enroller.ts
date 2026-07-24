@@ -38,7 +38,7 @@ import { getServiceSupabase } from "@/lib/supabase-server";
 import { checkTcpaWindow } from "@/lib/tcpa-window";
 import { ACCELERATED_FLAG, acceleratedSystemLive, hasActiveAcceleratedRun } from "@/lib/drips/accelerated";
 import type { DripStep } from "./types";
-import { computeStep0DelayMinutes, stageBufferMinutes } from "./stage-buffer";
+import { computeStep0DelayMinutes, enrollmentBufferForStage } from "./stage-buffer";
 
 type Db = ReturnType<typeof getServiceSupabase>;
 
@@ -473,7 +473,7 @@ export async function runEnrollDrips(): Promise<EnrollDripsResult> {
       // stage buffer (this whole enroll path is stage-triggered), plus jitter.
       const scheduledFor = new Date(
         Date.now() +
-          computeStep0DelayMinutes(firstStep[0].delay_minutes, stageBufferMinutes()) * 60_000 +
+          computeStep0DelayMinutes(firstStep[0].delay_minutes, enrollmentBufferForStage(stage)) * 60_000 +
           enrollJitterMs(),
       ).toISOString();
       const ins = await db.from("drip_runs").insert({

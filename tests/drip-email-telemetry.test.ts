@@ -59,4 +59,15 @@ const metricsUi = readFileSync("components/metrics/MetricsDashboard.tsx", "utf8"
 assert.match(metricsUi, /import \{ DripTrackerClient \}/);
 assert.match(metricsUi, /active === "drips" && <DripTrackerClient compact \/>/);
 
+const defaults = readFileSync("lib/sunbiz-default-sequences.ts", "utf8");
+assert.match(defaults, /Sent application - access link/);
+assert.match(defaults, /delay_minutes:\s*0/);
+assert.match(defaults, /\{\{lead\.application_url\}\}/);
+assert.match(executor, /sms_delivery_failed_after_retries/);
+
+const manifestData = readFileSync("lib/manifest/data.ts", "utf8");
+assert.match(manifestData, /s === "full-application"/);
+assert.doesNotMatch(manifestData, /const chosen = intakeMatch/);
+assert.match(manifestData, /fail closed: never substitute the lead-capture form/);
+
 console.log("drip-email-telemetry: all assertions passed");
