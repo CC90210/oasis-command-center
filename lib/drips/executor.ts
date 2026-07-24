@@ -42,7 +42,7 @@ import { renderTemplate } from "@/lib/drips/templates";
 import { parseDripSteps, type DripStep } from "@/lib/drips/types";
 import { sendDripSms, sendDripEmail } from "@/lib/drips/send";
 import { wasShoppedRecently } from "@/lib/drips/enroller";
-import { buildDripHtml, listUnsubscribeHeader } from "@/lib/drips/html-email";
+import { buildDripHtml, listUnsubscribeHeader, pixelUrl, unsubscribeUrl } from "@/lib/drips/html-email";
 import { resolveDripSmsIdentity, type DripSmsIdentity } from "@/lib/drips/rep-sms-identity";
 import { ACCELERATED_FLAG, acceleratedSystemLive, hasActiveAcceleratedRun } from "@/lib/drips/accelerated";
 import { nudgeConversations } from "@/lib/realtime/conversations-nudge";
@@ -889,7 +889,16 @@ async function processEmailStep(
     // List-Unsubscribe header stays for BOTH classes (cuts spam complaints +
     // protects inbox placement). Commercial mail keeps the footer.
     const unsub = emailClass === "transactional" ? "none" : "footer";
-    const html = renderedCustomHtml || buildDripHtml(cleanBody, { sendId, email, unsub });
+    const customFooter =
+      emailClass === "transactional"
+        ? ""
+        : `<div style="margin:24px 0 0;color:#8a94a6;font:12px/1.5 Arial,sans-serif">` +
+          `Prefer not to receive these? <a href="${unsubscribeUrl(email)}" style="color:#8a94a6">Unsubscribe here</a>.</div>`;
+    const customTracking = `<img src="${pixelUrl(sendId)}" width="1" height="1" alt="" style="display:none;max-height:0;overflow:hidden" />`;
+    const instrumentedCustomHtml = renderedCustomHtml
+      ? renderedCustomHtml.replace(/<\/body>/i, `${customFooter}${customTracking}</body>`)
+      : "";
+    const html = instrumentedCustomHtml || buildDripHtml(cleanBody, { sendId, email, unsub });
     htmlPayload = html;
     const result = await sendDripEmail(row.tenant_id, email, subject, cleanBody, {
       html,

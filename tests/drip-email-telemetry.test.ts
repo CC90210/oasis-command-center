@@ -88,6 +88,13 @@ assert.match(dripTemplatesApi, /\.eq\("tenant_id", session\.tenantId\)/);
 assert.match(dripTemplatesApi, /\.like\("category", "drip:%"\)/);
 assert.doesNotMatch(dripTemplatesApi, /admin_only/);
 
+const dripSeeds = readFileSync("scripts/seed-drip-template-library.ts", "utf8");
+assert.match(dripSeeds, /Follow Up - Jordan Direct/);
+assert.match(dripSeeds, /Sent Application - Direct Link/);
+assert.match(dripSeeds, /Signed Application - Bank Statements/);
+assert.match(dripSeeds, /Declined - Revisit the File/);
+assert.match(dripSeeds, /templates: seeds\.length/);
+
 const manifestData = readFileSync("lib/manifest/data.ts", "utf8");
 assert.match(manifestData, /s === "full-application"/);
 assert.doesNotMatch(manifestData, /const chosen = intakeMatch/);
