@@ -115,36 +115,33 @@ export async function GET(req: NextRequest) {
     summary.skipped[r] = (summary.skipped[r] || 0) + 1;
   };
 
-  // KEYSET pagination over the ENTIRE approved set, oldest-first. No page
-  // ceiling: an offset+limit ceiling permanently starves rows past it, and the
-  // frontier-advance argument does not save them because they are never even
-  // scanned (Codex 2026-07-24). The cursor is created_at; a `seen` set absorbs
-  // the boundary overlap from `gte` so rows sharing a timestamp are never
-  // skipped. Terminates on a short page (end of table) or no-progress.
+  // KEYSET pagination over the ENTIRE approved set, keyed on the UNIQUE id. No
+  // page ceiling (a ceiling permanently starves rows past it, and the
+  // frontier-advance argument does not save them because they are never scanned).
+  // Keying on id — not created_at — because id is unique: a created_at cursor
+  // breaks when >=PAGE rows share a timestamp (a bulk import), silently skipping
+  // the rest (Codex 2026-07-24). Order is therefore arbitrary rather than
+  // oldest-first, which is fine: enrollment is order-agnostic (every row is
+  // reached over successive sweeps as enrolled ones drop out at the dedupe step),
+  // and the initial backfill already ran oldest-first.
   const PAGE = 500;
   const candidates: Candidate[] = [];
-  const seen = new Set<string>();
   let cursor: string | null = null;
   for (;;) {
     let q = db
       .from(CANDIDATE_TABLE)
-      .select("id, tenant_id, created_lead_id, lead_data, created_at")
+      .select("id, tenant_id, created_lead_id, lead_data")
       .eq("status", "approved")
       .not("created_lead_id", "is", null)
-      .order("created_at", { ascending: true })
       .order("id", { ascending: true })
       .limit(PAGE);
-    if (cursor) q = q.gte("created_at", cursor);
+    if (cursor) q = q.gt("id", cursor);
     const { data, error } = await q;
     if (error) {
       return NextResponse.json({ ok: false, error: error.message }, { status: 500 });
     }
-    const rows = (data ?? []) as (Candidate["row"] & { created_at: string })[];
-    let fresh = 0;
+    const rows = (data ?? []) as Candidate["row"][];
     for (const row of rows) {
-      if (seen.has(row.id)) continue; // gte overlap at the cursor boundary
-      seen.add(row.id);
-      fresh++;
       summary.scanned++;
       const d = (row.lead_data || {}) as Record<string, unknown>;
       if (usablePhone(d.phone)) continue;
@@ -157,8 +154,7 @@ export async function GET(req: NextRequest) {
       candidates.push({ row, d, name });
     }
     if (rows.length < PAGE) break; // reached the end of the table
-    if (fresh === 0) break; // safety: a full page of only-overlap rows — no progress
-    cursor = rows[rows.length - 1].created_at;
+    cursor = rows[rows.length - 1].id; // id is unique → strict advance, no overlap
   }
 
   if (!candidates.length) return NextResponse.json(summary);

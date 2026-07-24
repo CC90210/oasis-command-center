@@ -50,7 +50,7 @@ export async function GET(req: NextRequest) {
   const db = getServiceSupabase();
 
   // Oldest pending job + total pending count.
-  const [{ data: oldest }, { count }] = await Promise.all([
+  const [oldestRes, countRes] = await Promise.all([
     db
       .from("phone_lookup_jobs")
       .select("created_at")
@@ -61,7 +61,18 @@ export async function GET(req: NextRequest) {
     db.from("phone_lookup_jobs").select("id", { count: "exact", head: true }).eq("status", "pending"),
   ]);
 
-  const pending = count ?? 0;
+  // Fail closed: a query failure must NOT read as an empty, healthy backlog —
+  // that would suppress the alert during the exact DB/permission outage the
+  // watchdog should surface. Return an error instead of a false all-clear.
+  if (oldestRes.error || countRes.error) {
+    return NextResponse.json(
+      { ok: false, error: `query_failed:${oldestRes.error?.message || countRes.error?.message}` },
+      { status: 500 },
+    );
+  }
+
+  const oldest = oldestRes.data;
+  const pending = countRes.count ?? 0;
   if (!oldest?.created_at || pending === 0) {
     return NextResponse.json({ ok: true, pending: 0, alerted: false });
   }
