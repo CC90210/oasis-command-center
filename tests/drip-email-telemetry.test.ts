@@ -20,6 +20,21 @@ assert.match(executor, /logDripEmailEvent/);
 assert.match(executor, /payloadHtml:\s*htmlPayload/);
 assert.match(executor, /Promise\.all/);
 assert.match(executor, /shouldSend && htmlPayload/);
+assert.match(executor, /if \(error\) throw error/);
+
+const reconciliation = readFileSync("lib/drips/reconcile-email-telemetry.ts", "utf8");
+assert.match(reconciliation, /submissions_gmail/);
+assert.match(reconciliation, /buildDripHtml/);
+assert.match(reconciliation, /drip_run_id/);
+assert.match(reconciliation, /ignoreDuplicates:\s*true/);
+
+const cron = readFileSync("app/api/cron/reconcile-drip-telemetry/route.ts", "utf8");
+assert.match(cron, /checkCronAuth/);
+assert.match(cron, /reconcileDripEmailTelemetry/);
+
+const idempotency = readFileSync("database/126_drip_email_event_idempotency.sql", "utf8");
+assert.match(idempotency, /UNIQUE INDEX/);
+assert.match(idempotency, /tenant_id, drip_run_id/);
 
 const api = readFileSync("app/api/drip-tracker/route.ts", "utf8");
 assert.match(api, /resolveTenantId/);

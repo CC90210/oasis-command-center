@@ -30,6 +30,10 @@
       "schedule": "*/5 * * * *"
     },
     {
+      "path": "/api/cron/reconcile-drip-telemetry",
+      "schedule": "17 * * * *"
+    },
+    {
       "path": "/api/cron/dispatch-scheduled-calls",
       "schedule": "*/5 * * * *"
     },
