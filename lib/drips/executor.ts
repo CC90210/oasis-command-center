@@ -246,7 +246,7 @@ async function logInteraction(
   },
 ) {
   try {
-    await db.from("lead_interactions").insert({
+    const { error } = await db.from("lead_interactions").insert({
       ...(args.interactionId ? { id: args.interactionId } : {}),
       tenant_id: args.tenantId,
       lead_id: args.leadId,
@@ -262,6 +262,7 @@ async function logInteraction(
       actor_user_id: null,
       metadata: args.metadata,
     });
+    if (error) throw error;
   } catch (err) {
     console.error("[dispatch-drips] interaction insert failed", err);
   }
@@ -286,7 +287,7 @@ async function logDripEmailEvent(
   },
 ) {
   try {
-    await db.from("drip_email_events").insert({
+    const { error } = await db.from("drip_email_events").insert({
       tenant_id: args.tenantId,
       merchant_id: args.merchantId,
       sequence_id: args.sequenceId,
@@ -299,6 +300,7 @@ async function logDripEmailEvent(
       provider_message_id: args.providerMessageId ?? null,
       sent_at: new Date().toISOString(),
     });
+    if (error) throw error;
   } catch (err) {
     console.error("[dispatch-drips] exact email telemetry insert failed", err);
   }
