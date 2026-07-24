@@ -148,13 +148,17 @@ begin
 end
 $$;
 
--- ── PRIVILEGES — RUN THESE MANUALLY IN THE SUPABASE SQL EDITOR ──────────────
--- exec_sql refuses GRANT/REVOKE ("privilege changes must be run manually"), so
--- the automated apply stops short. Belt-and-braces only: RLS is enabled AND
--- forced above and the tenant policy already constrains every visible row.
+-- ── PRIVILEGES — RUN THIS MANUALLY IN THE SUPABASE SQL EDITOR ───────────────
+-- This table is SERVICE-ROLE ONLY. Do NOT grant authenticated SELECT: the panel
+-- reads job history through /api/leads/[id]/phone-lookup (service role), which
+-- enforces per-agent lead visibility via canViewLead(). A blanket tenant_read
+-- grant would let any tenant member read every lead's lookup PII directly through
+-- Supabase, bypassing that per-agent boundary (Codex 2026-07-24). The
+-- tenant_read POLICY above is inert without a grant and is intentionally left
+-- ungranted — the API is the only read path.
 --
 --   revoke all on public.phone_lookup_jobs from anon, authenticated;
---   grant select on public.phone_lookup_jobs to authenticated;
+--   -- (do NOT run `grant select ... to authenticated`)
 
 comment on table public.phone_lookup_jobs is
   'TruePeopleSearch skip-trace queue. Enqueued by the oasis API, executed by the '

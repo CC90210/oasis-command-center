@@ -27,6 +27,7 @@ import { NextResponse } from "next/server";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { resolveSessionContext } from "@/lib/api-auth";
 import { canWriteCrm } from "@/lib/role-gates";
+import { canViewLead, leadScopingEnabled } from "@/lib/lead-scope";
 import { hasUsablePhone } from "@/lib/clair/eligibility";
 
 export const runtime = "nodejs";
@@ -58,6 +59,28 @@ export async function GET(_req: Request, ctx: { params: Promise<{ id: string }> 
   }
 
   const svc = getServiceSupabase();
+
+  // Per-agent lead visibility: when lead scoping is on, an agent must not read
+  // another agent's lead lookup PII (names/phones/emails) by hitting this
+  // endpoint with a UUID. Same boundary the detail/documents routes enforce.
+  // 404 (not 403) so the endpoint doesn't confirm the lead exists.
+  const { data: lead } = await svc
+    .from("tenant_records")
+    .select("data")
+    .eq("id", leadId)
+    .eq("tenant_id", sess.tenantId)
+    .maybeSingle();
+  if (
+    !lead ||
+    !canViewLead(
+      { isAdmin: sess.isAdmin, userId: sess.userId },
+      (lead.data ?? {}) as Record<string, unknown>,
+      leadScopingEnabled(),
+    )
+  ) {
+    return NextResponse.json({ ok: false, error: "not_found" }, { status: 404 });
+  }
+
   const { data, error } = await svc
     .from("phone_lookup_jobs")
     .select(SELECT_COLS)
@@ -129,6 +152,18 @@ export async function POST(req: Request, ctx: { params: Promise<{ id: string }> 
   }
 
   const leadData = (lead.data ?? {}) as Record<string, unknown>;
+  // Per-agent lead visibility: a write-capable member must not enqueue a lookup
+  // (which spends scrape budget and produces PII) for a lead outside their scope.
+  // 404, matching the detail/documents routes — no existence oracle.
+  if (
+    !canViewLead(
+      { isAdmin: sess.isAdmin, userId: sess.userId },
+      leadData,
+      leadScopingEnabled(),
+    )
+  ) {
+    return NextResponse.json({ ok: false, error: "not_found" }, { status: 404 });
+  }
   if (hasUsablePhone(leadData)) {
     return NextResponse.json(
       { ok: false, error: "already_has_phone", message: "This lead already has a phone number on file." },
