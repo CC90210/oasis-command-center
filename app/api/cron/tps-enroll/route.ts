@@ -89,12 +89,6 @@ function enrollDecision(jobs: PriorJob[]): { enroll: boolean; reason: string } {
   return { enroll: true, reason: "eligible" };
 }
 
-type Candidate = {
-  row: { id: string; tenant_id: string; created_lead_id: string; lead_data: Record<string, unknown> };
-  d: Record<string, unknown>;
-  name: { first: string; last: string };
-};
-
 export async function GET(req: NextRequest) {
   if (!checkAuth(req)) {
     return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
@@ -115,22 +109,23 @@ export async function GET(req: NextRequest) {
     summary.skipped[r] = (summary.skipped[r] || 0) + 1;
   };
 
-  // KEYSET pagination over the ENTIRE approved set, keyed on the UNIQUE id. No
-  // page ceiling (a ceiling permanently starves rows past it, and the
-  // frontier-advance argument does not save them because they are never scanned).
-  // Keying on id — not created_at — because id is unique: a created_at cursor
-  // breaks when >=PAGE rows share a timestamp (a bulk import), silently skipping
-  // the rest (Codex 2026-07-24). Order is therefore arbitrary rather than
-  // oldest-first, which is fine: enrollment is order-agnostic (every row is
-  // reached over successive sweeps as enrolled ones drop out at the dedupe step),
-  // and the initial backfill already ran oldest-first.
+  // INCREMENTAL enrollment. Paginate approved candidates keyed on the UNIQUE id
+  // (unique → strict advance, no timestamp ties, no starvation). Per page:
+  // batch-load job history, and for each JOB-eligible candidate consult the LIVE
+  // lead (tenant_records.data is authoritative — scrub_candidates.lead_data is
+  // only the approval-time snapshot and goes stale the moment an operator edits
+  // the lead's phone/name/address). Enqueue from the LIVE data. STOP as soon as
+  // ENROLL_BATCH jobs are queued, so a large approved history never
+  // scans-the-world-before-inserting into a Vercel timeout (Codex 2026-07-24).
+  // The frontier advances across sweeps because enrolled leads acquire in-flight
+  // jobs and drop out at the dedupe step.
   const PAGE = 500;
-  const candidates: Candidate[] = [];
   let cursor: string | null = null;
-  for (;;) {
+  let done = false;
+  while (!done) {
     let q = db
       .from(CANDIDATE_TABLE)
-      .select("id, tenant_id, created_lead_id, lead_data")
+      .select("id, tenant_id, created_lead_id")
       .eq("status", "approved")
       .not("created_lead_id", "is", null)
       .order("id", { ascending: true })
@@ -140,81 +135,84 @@ export async function GET(req: NextRequest) {
     if (error) {
       return NextResponse.json({ ok: false, error: error.message }, { status: 500 });
     }
-    const rows = (data ?? []) as Candidate["row"][];
+    const rows = (data ?? []) as { id: string; tenant_id: string; created_lead_id: string }[];
+    if (!rows.length) break;
+
+    // Batch job history for this page.
+    const jobsByLead = new Map<string, PriorJob[]>();
+    const leadIds = rows.map((r) => r.created_lead_id);
+    for (let i = 0; i < leadIds.length; i += 200) {
+      const chunk = leadIds.slice(i, i + 200);
+      const { data: jd, error: je } = await db
+        .from(JOBS_TABLE)
+        .select("lead_id, status, trigger_source, created_at")
+        .in("lead_id", chunk);
+      if (je) {
+        return NextResponse.json({ ok: false, error: `jobs_scan_failed:${je.message}` }, { status: 500 });
+      }
+      for (const j of (jd ?? []) as (PriorJob & { lead_id: string })[]) {
+        if (!jobsByLead.has(j.lead_id)) jobsByLead.set(j.lead_id, []);
+        jobsByLead.get(j.lead_id)!.push(j);
+      }
+    }
+
     for (const row of rows) {
       summary.scanned++;
-      const d = (row.lead_data || {}) as Record<string, unknown>;
-      if (usablePhone(d.phone)) continue;
+      const decision = enrollDecision(jobsByLead.get(row.created_lead_id) || []);
+      if (!decision.enroll) {
+        bump(decision.reason);
+        continue;
+      }
+      // Job-eligible → the LIVE lead is authoritative for phone + identity.
+      const { data: lead } = await db
+        .from("tenant_records")
+        .select("data")
+        .eq("id", row.created_lead_id)
+        .eq("tenant_id", row.tenant_id)
+        .maybeSingle();
+      const ld = (lead?.data ?? {}) as Record<string, unknown>;
+      if (usablePhone(ld.phone)) {
+        bump("already_has_phone");
+        continue;
+      }
       summary.needPhone++;
-      const name = splitName(pickName(d));
+      const name = splitName(pickName(ld));
       if (!name) {
         bump("no_name");
         continue;
       }
-      candidates.push({ row, d, name });
-    }
-    if (rows.length < PAGE) break; // reached the end of the table
-    cursor = rows[rows.length - 1].id; // id is unique → strict advance, no overlap
-  }
+      const state = String(
+        ld.owner_home_state || ld.owner_state || ld.business_state || ld.state || "",
+      );
+      if (summary.samples.length < 10) {
+        summary.samples.push(`${name.first} ${name.last} (${state || "?"})`);
+      }
+      if (write) {
+        const { error: ie } = await db.from(JOBS_TABLE).insert({
+          tenant_id: row.tenant_id,
+          lead_id: row.created_lead_id,
+          query_first_name: name.first,
+          query_last_name: name.last,
+          query_city: String(ld.owner_home_city || ld.owner_city || ld.city || "") || null,
+          query_state: state || null,
+          trigger_source: "live_sub_auto",
+          requested_by_email: "auto:live_subs:cron",
+        });
+        if (!ie) summary.enrolled++;
+        else if (ie.code === "23505" || /duplicate/i.test(ie.message)) bump("already_queued");
+        else bump(`insert_failed:${ie.code || ie.message}`);
+      } else {
+        summary.enrolled++;
+      }
 
-  if (!candidates.length) return NextResponse.json(summary);
+      if (summary.enrolled >= ENROLL_BATCH) {
+        done = true;
+        break;
+      }
+    }
 
-  // Job history for every candidate, grouped in memory (chunked IN()).
-  const jobsByLead = new Map<string, PriorJob[]>();
-  const ids = candidates.map((c) => c.row.created_lead_id);
-  for (let i = 0; i < ids.length; i += 200) {
-    const chunk = ids.slice(i, i + 200);
-    const { data, error } = await db
-      .from(JOBS_TABLE)
-      .select("lead_id, status, trigger_source, created_at")
-      .in("lead_id", chunk);
-    if (error) {
-      return NextResponse.json({ ok: false, error: `jobs_scan_failed:${error.message}` }, { status: 500 });
-    }
-    for (const j of (data ?? []) as (PriorJob & { lead_id: string })[]) {
-      if (!jobsByLead.has(j.lead_id)) jobsByLead.set(j.lead_id, []);
-      jobsByLead.get(j.lead_id)!.push(j);
-    }
-  }
-
-  for (const c of candidates) {
-    if (summary.enrolled >= ENROLL_BATCH) {
-      bump("batch_cap");
-      continue;
-    }
-    const decision = enrollDecision(jobsByLead.get(c.row.created_lead_id) || []);
-    if (!decision.enroll) {
-      bump(decision.reason);
-      continue;
-    }
-    const state = String(
-      c.d.owner_home_state || c.d.owner_state || c.d.business_state || c.d.state || "",
-    );
-    if (summary.samples.length < 10) {
-      summary.samples.push(`${c.name.first} ${c.name.last} (${state || "?"})`);
-    }
-    if (!write) {
-      summary.enrolled++;
-      continue;
-    }
-    const { error } = await db.from(JOBS_TABLE).insert({
-      tenant_id: c.row.tenant_id,
-      lead_id: c.row.created_lead_id,
-      query_first_name: c.name.first,
-      query_last_name: c.name.last,
-      query_city: String(c.d.owner_home_city || c.d.owner_city || c.d.city || "") || null,
-      query_state: state || null,
-      trigger_source: "live_sub_auto",
-      requested_by_email: "auto:live_subs:cron",
-    });
-    if (!error) {
-      summary.enrolled++;
-    } else if (error.code === "23505" || /duplicate/i.test(error.message)) {
-      // Partial-unique in-flight index won a race — already queued.
-      bump("already_queued");
-    } else {
-      bump(`insert_failed:${error.code || error.message}`);
-    }
+    if (rows.length < PAGE) break;
+    cursor = rows[rows.length - 1].id;
   }
 
   return NextResponse.json(summary);
