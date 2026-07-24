@@ -302,11 +302,13 @@ const STAGES_NEEDING_APPLY_URL = new Set([
 ]);
 
 /**
- * Look up the tenant's primary lead-intake form. Returns null if the
+ * Look up the tenant's full application form. Returns null if the
  * tenant has no enabled form (cleanly skips URL stamping — sequence
  * templates handle the empty variable as plain text). Picks the form
- * whose slug looks intake-shaped, falling back to the oldest enabled
- * form if no slug match.
+ * whose slug explicitly identifies the full application. Only then fall back
+ * to another application-shaped form. The previous selector preferred
+ * `initial-lead-capture`, which sent merchants at Sent Application back to the
+ * short lead form instead of their actual application.
  *
  * Uses Supabase's foreign-table embed (`tenant:tenants!inner(slug)`)
  * to fetch tenant.slug in ONE query — matches the pattern used by
@@ -334,17 +336,18 @@ async function resolveIntakeForm(
     };
     const forms = (formsRes.data || []) as FormRow[];
     if (forms.length === 0) return null;
-    const intakeMatch = forms.find((f) => {
+    const fullApplication = forms.find((f) => {
+      const s = (f.slug || "").toLowerCase();
+      return s === "full-application" || s === "full_application";
+    });
+    const applicationMatch = forms.find((f) => {
       const s = (f.slug || "").toLowerCase();
       return (
-        s === "initial-lead-capture" ||
-        s === "intake" ||
-        s.includes("apply") ||
-        s.includes("intake") ||
-        s.includes("lead-capture")
+        s.includes("full") && (s.includes("application") || s.includes("apply"))
       );
     });
-    const chosen = intakeMatch || forms[0];
+    const chosen = fullApplication || applicationMatch;
+    if (!chosen) return null; // fail closed: never substitute the lead-capture form
     // Supabase REST may flatten or array-wrap the embed depending on
     // FK shape — handle both.
     const tenantSlug = Array.isArray(chosen.tenant)

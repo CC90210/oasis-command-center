@@ -731,7 +731,11 @@ async function processSmsStep(
       // Per-lead permanent: TT says the contact is blacklisted — retrying is
       // pointless and burns three dispatch slots per lead.
       if (/blacklisted/i.test(result.error)) {
-        return markPermanentFail(db, row, result.error);
+        return skipStep(db, row, steps, `sms_delivery_failed: ${result.error}`);
+      }
+      const attempts = (row.attempts || 0) + 1;
+      if (attempts >= MAX_ATTEMPTS) {
+        return skipStep(db, row, steps, `sms_delivery_failed_after_retries: ${result.error}`);
       }
       return markRetryOrFail(db, row, result.error);
     }

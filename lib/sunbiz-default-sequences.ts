@@ -32,6 +32,7 @@ export type DefaultSequence = {
   trigger_filter: DripTriggerFilter;
   steps: DripStep[];
   one_per_lead: boolean;
+  email_class?: "transactional" | "commercial";
   /** Whether the sequence is enabled on seed. Defaults to true. Set to
    *  false for sensitive drips (compliance-flagged, collections, etc.)
    *  that operators must approve before they fire on real leads. */
@@ -215,7 +216,30 @@ export const SUNBIZ_DEFAULT_SEQUENCES: DefaultSequence[] = [
   },
 
   // ─────────────────────────────────────────────────────────────────
-  // 6. Sent application -> 24h reminder
+  // 6. Sent application -> immediate access email. This is intentionally its
+  // own email-only sequence: a TextTorrent outage on the longer cadence must
+  // never prevent the merchant from receiving their private application link.
+  {
+    name: "Sent application - access link",
+    description:
+      "Immediately gives each merchant their private, resumable application link when the lead reaches Sent Application.",
+    trigger_event: "BRAVO_RECORD_STATUS_CHANGED",
+    trigger_filter: { entity: "lead", field: "stage", to: "sent_application" },
+    one_per_lead: true,
+    email_class: "transactional",
+    steps: [
+      {
+        channel: "email",
+        delay_minutes: 0,
+        from_label: "Solara",
+        subject: "Your application for {{lead.business_name}}",
+        body:
+          "Hi {{lead.contact_name}},\n\nHere is your secure SunBiz application link for {{lead.business_name}}. It is tied to your record, so you can start now or return later and continue where you left off.\n\nOpen your application:\n{{lead.application_url}}\n\nOnce the application and your last 3 months of business bank statements are submitted, your file moves into underwriting.\n\nIf you have any trouble opening it, reply to this email and I'll help.\n\nSolara, SunBiz Funding",
+      },
+    ],
+  },
+
+  // 7. Sent application -> completion reminder cadence
   // Phase 15.1 add (2026-05-15 evening). Adon: meeting decision was
   // "every stage triggers something". A lead at sent_application
   // that hasn't viewed the link is the canonical "they got distracted"
@@ -338,6 +362,7 @@ export function buildSunbizSequenceRows(
   steps: DripStep[];
   enabled: boolean;
   one_per_lead: boolean;
+  email_class: "transactional" | "commercial";
   created_by: string | null;
 }> {
   return SUNBIZ_DEFAULT_SEQUENCES.map((s) => ({
@@ -353,6 +378,7 @@ export function buildSunbizSequenceRows(
     // they fire on real leads.
     enabled: s.enabled_on_seed !== false,
     one_per_lead: s.one_per_lead,
+    email_class: s.email_class || "commercial",
     created_by: createdBy,
   }));
 }

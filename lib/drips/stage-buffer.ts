@@ -22,3 +22,9 @@ export function stageBufferMinutes(): number {
 export function computeStep0DelayMinutes(delayMinutes: number, bufferMinutes: number): number {
   return Math.max(0, delayMinutes, bufferMinutes);
 }
+
+/** Sending the private application URL is itself the stage-entry action, so it
+ * must not inherit the generic 24-hour holding period. */
+export function enrollmentBufferForStage(stage: string): number {
+  return stage === "sent_application" ? 0 : stageBufferMinutes();
+}
