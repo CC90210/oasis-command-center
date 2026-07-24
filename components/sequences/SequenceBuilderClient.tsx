@@ -920,14 +920,12 @@ function EmailStepRotation({
 
   useEffect(() => {
     let alive = true;
-    fetch("/api/campaigns/constant-contact/templates", { cache: "no-store" })
+    fetch("/api/drip-templates", { cache: "no-store" })
       .then((res) => res.json())
       .then((data) => {
         if (alive) {
           setSaved(
-            (data.custom || []).filter((item: { category?: string }) =>
-              String(item.category || "").startsWith("drip:"),
-            ),
+            data.templates || [],
           );
         }
       })
@@ -994,7 +992,7 @@ function EmailStepRotation({
     setSavingTemplate(true);
     setErr(null);
     try {
-      const res = await fetch("/api/campaigns/constant-contact/templates", {
+      const res = await fetch("/api/drip-templates", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({

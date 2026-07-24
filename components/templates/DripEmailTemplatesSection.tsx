@@ -37,11 +37,9 @@ export default function DripEmailTemplatesSection() {
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const res = await fetch("/api/campaigns/constant-contact/templates", { cache: "no-store" });
+      const res = await fetch("/api/drip-templates", { cache: "no-store" });
       const json = await res.json();
-      setItems(
-        (json.custom || []).filter((item: DripTemplate) => String(item.category).startsWith("drip:")),
-      );
+      setItems(json.templates || []);
     } finally {
       setLoading(false);
     }
@@ -71,7 +69,7 @@ export default function DripEmailTemplatesSection() {
     setSaving(true);
     setNotice("");
     try {
-      const res = await fetch("/api/campaigns/constant-contact/templates", {
+      const res = await fetch("/api/drip-templates", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({

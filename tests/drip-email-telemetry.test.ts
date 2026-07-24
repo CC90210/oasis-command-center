@@ -82,6 +82,12 @@ assert.match(dripLibrary, /Jordan direct/);
 assert.match(dripLibrary, /Create with Solara/);
 assert.match(dripLibrary, /application_url/);
 
+const dripTemplatesApi = readFileSync("app/api/drip-templates/route.ts", "utf8");
+assert.match(dripTemplatesApi, /resolveSessionContext/);
+assert.match(dripTemplatesApi, /\.eq\("tenant_id", session\.tenantId\)/);
+assert.match(dripTemplatesApi, /\.like\("category", "drip:%"\)/);
+assert.doesNotMatch(dripTemplatesApi, /admin_only/);
+
 const manifestData = readFileSync("lib/manifest/data.ts", "utf8");
 assert.match(manifestData, /s === "full-application"/);
 assert.doesNotMatch(manifestData, /const chosen = intakeMatch/);
