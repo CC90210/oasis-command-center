@@ -9,9 +9,13 @@
  * The alert is also the trigger signal for whether the Phase-2 VPS + residential
  * proxy fallback is actually needed.
  *
- * De-dupe WITHOUT a marker table: alert only in the cron-interval-wide window
- * right after the oldest job first crosses the threshold. On later runs the same
- * backlog's oldest job is already past the window, so it does not re-fire.
+ * It alerts whenever the oldest pending job is past the threshold, and simply
+ * runs on a coarse cadence (every 6h) so a sustained outage re-reminds without
+ * spamming. This deliberately has NO "just crossed the threshold" window: a
+ * window silently misses a backlog that was already stale at deploy time or when
+ * a run is skipped — which is exactly the sustained outage the watchdog exists to
+ * report (Codex 2026-07-24). A periodic re-alert during a real outage is useful,
+ * not noise.
  *
  * Auth: Bearer SCAN_TRIGGER_SECRET | CRON_SECRET.
  */
@@ -25,9 +29,6 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 const THRESHOLD_H = Number(process.env.TPS_BACKLOG_HOURS || 2);
-/** The cron cadence in hours — the de-dupe window width. Keep in sync with the
- * schedule in vercel.json. */
-const INTERVAL_H = Number(process.env.TPS_BACKLOG_INTERVAL_H || 2);
 
 function checkAuth(req: NextRequest): boolean {
   const auth = req.headers.get("authorization") || "";
@@ -66,9 +67,7 @@ export async function GET(req: NextRequest) {
   }
 
   const ageH = (Date.now() - new Date(oldest.created_at).getTime()) / 3_600_000;
-  const justCrossed = ageH >= THRESHOLD_H && ageH < THRESHOLD_H + INTERVAL_H;
-
-  if (!justCrossed) {
+  if (ageH < THRESHOLD_H) {
     return NextResponse.json({ ok: true, pending, ageHours: Number(ageH.toFixed(1)), alerted: false });
   }
 

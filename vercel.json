@@ -67,7 +67,7 @@
     },
     {
       "path": "/api/cron/tps-backlog-watch",
-      "schedule": "0 */2 * * *"
+      "schedule": "0 */6 * * *"
     }
   ]
 }
