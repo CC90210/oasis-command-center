@@ -49,42 +49,49 @@ export async function GET(req: NextRequest) {
   }
   const db = getServiceSupabase();
 
-  // Oldest pending job + total pending count.
-  const [oldestRes, countRes] = await Promise.all([
-    db
-      .from("phone_lookup_jobs")
-      .select("created_at")
-      .eq("status", "pending")
-      .order("created_at", { ascending: true })
-      .limit(1)
-      .maybeSingle(),
+  // A backlog is BOTH pending jobs (worker offline, not claiming) AND stale
+  // running jobs (worker crashed mid-scrape, leaving a row claimed forever). The
+  // second is a real outage the pending-only check would miss — the job never
+  // completes, the UI polls forever, and it is never retried. Age pending by
+  // created_at, stale-running by claimed_at.
+  const [oldestPendRes, pendCountRes, oldestRunRes, runCountRes] = await Promise.all([
+    db.from("phone_lookup_jobs").select("created_at").eq("status", "pending")
+      .order("created_at", { ascending: true }).limit(1).maybeSingle(),
     db.from("phone_lookup_jobs").select("id", { count: "exact", head: true }).eq("status", "pending"),
+    db.from("phone_lookup_jobs").select("claimed_at").eq("status", "running")
+      .order("claimed_at", { ascending: true }).limit(1).maybeSingle(),
+    db.from("phone_lookup_jobs").select("id", { count: "exact", head: true }).eq("status", "running"),
   ]);
 
   // Fail closed: a query failure must NOT read as an empty, healthy backlog —
   // that would suppress the alert during the exact DB/permission outage the
   // watchdog should surface. Return an error instead of a false all-clear.
-  if (oldestRes.error || countRes.error) {
-    return NextResponse.json(
-      { ok: false, error: `query_failed:${oldestRes.error?.message || countRes.error?.message}` },
-      { status: 500 },
-    );
+  const anyErr = oldestPendRes.error || pendCountRes.error || oldestRunRes.error || runCountRes.error;
+  if (anyErr) {
+    return NextResponse.json({ ok: false, error: `query_failed:${anyErr.message}` }, { status: 500 });
   }
 
-  const oldest = oldestRes.data;
-  const pending = countRes.count ?? 0;
-  if (!oldest?.created_at || pending === 0) {
-    return NextResponse.json({ ok: true, pending: 0, alerted: false });
+  const pending = pendCountRes.count ?? 0;
+  const running = runCountRes.count ?? 0;
+  const stuck = pending + running;
+  if (stuck === 0) {
+    return NextResponse.json({ ok: true, pending: 0, running: 0, alerted: false });
   }
 
-  const ageH = (Date.now() - new Date(oldest.created_at).getTime()) / 3_600_000;
+  // The most-aged waiting job, whether pending (created_at) or running (claimed_at).
+  const pendAgeH = oldestPendRes.data?.created_at
+    ? (Date.now() - new Date(oldestPendRes.data.created_at).getTime()) / 3_600_000 : 0;
+  const runAgeH = oldestRunRes.data?.claimed_at
+    ? (Date.now() - new Date(oldestRunRes.data.claimed_at).getTime()) / 3_600_000 : 0;
+  const ageH = Math.max(pendAgeH, runAgeH);
   if (ageH < THRESHOLD_H) {
-    return NextResponse.json({ ok: true, pending, ageHours: Number(ageH.toFixed(1)), alerted: false });
+    return NextResponse.json({ ok: true, pending, running, ageHours: Number(ageH.toFixed(1)), alerted: false });
   }
 
+  const stuckNote = running > 0 ? ` (${running} stuck mid-lookup — worker may have crashed)` : "";
   const msg =
     `⏳ <b>TPS enrichment backlog</b>\n` +
-    `${pending} Live Sub${pending === 1 ? "" : "s"} waiting for a phone lookup ` +
+    `${stuck} Live Sub${stuck === 1 ? "" : "s"} waiting for a phone lookup${stuckNote} ` +
     `(oldest ~${ageH.toFixed(1)}h). The local scrape worker may be offline — ` +
     `check that the workstation is on and the APEX-TPS-Enricher task is running.`;
 
@@ -93,9 +100,9 @@ export async function GET(req: NextRequest) {
   const sent = await sendTelegram(msg);
   if (!sent.ok) {
     return NextResponse.json(
-      { ok: false, pending, ageHours: Number(ageH.toFixed(1)), error: `telegram_failed:${sent.reason}` },
+      { ok: false, pending, running, ageHours: Number(ageH.toFixed(1)), error: `telegram_failed:${sent.reason}` },
       { status: 502 },
     );
   }
-  return NextResponse.json({ ok: true, pending, ageHours: Number(ageH.toFixed(1)), alerted: true });
+  return NextResponse.json({ ok: true, pending, running, ageHours: Number(ageH.toFixed(1)), alerted: true });
 }

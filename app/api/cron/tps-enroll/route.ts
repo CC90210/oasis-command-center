@@ -99,6 +99,7 @@ export async function GET(req: NextRequest) {
   const summary = {
     ok: true,
     write,
+    reclaimed: 0,
     scanned: 0,
     needPhone: 0,
     enrolled: 0,
@@ -108,6 +109,23 @@ export async function GET(req: NextRequest) {
   const bump = (r: string) => {
     summary.skipped[r] = (summary.skipped[r] || 0) + 1;
   };
+
+  // Reclaim stale claims. If the local worker crashes mid-scrape, its row is
+  // stuck `running` forever — the UI polls it, the dedupe treats it as in-flight,
+  // and nothing ever retries it. Reset `running` rows claimed longer ago than any
+  // scrape could take back to `pending` so they are picked up again. Runs here
+  // (every 10 min, in the cloud) so it works even while the workstation is down.
+  const STALE_RUNNING_MS = Number(process.env.TPS_STALE_RUNNING_MIN || 15) * 60_000;
+  if (write) {
+    const staleCutoff = new Date(Date.now() - STALE_RUNNING_MS).toISOString();
+    const { data: reclaimed } = await db
+      .from(JOBS_TABLE)
+      .update({ status: "pending", claimed_at: null })
+      .eq("status", "running")
+      .lt("claimed_at", staleCutoff)
+      .select("id");
+    summary.reclaimed = reclaimed?.length ?? 0;
+  }
 
   // INCREMENTAL enrollment. Paginate approved candidates keyed on the UNIQUE id
   // (unique → strict advance, no timestamp ties, no starvation). Per page:
@@ -119,6 +137,16 @@ export async function GET(req: NextRequest) {
   // scans-the-world-before-inserting into a Vercel timeout (Codex 2026-07-24).
   // The frontier advances across sweeps because enrolled leads acquire in-flight
   // jobs and drop out at the dedupe step.
+  //
+  // KNOWN LIMITATION (acceptable at this scale): the cursor resets each run, so
+  // when the approved population grows into the thousands AND most are terminally
+  // ineligible (already have a phone), a run rescans them before reaching newer
+  // eligible ones and could hit the Vercel timeout, starving the newer ones. Not
+  // fixed here because the safe fix (a persisted cross-run cursor) needs new state
+  // infra, and a phone_lookup_status query-filter is unsafe while the VPS enricher
+  // still writes false statuses (see docs/TPS_VPS_DECOMMISSION.md). Live Subs is a
+  // hand-approved BD queue (tens–low-hundreds); revisit with a persisted cursor if
+  // it ever approaches that size.
   const PAGE = 500;
   let cursor: string | null = null;
   let done = false;
