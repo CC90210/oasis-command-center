@@ -267,6 +267,43 @@ async function logInteraction(
   }
 }
 
+/** Exact payload telemetry for successfully dispatched email steps. Runs in
+ * parallel with the existing interaction audit after SMTP accepts the message,
+ * so it adds no latency to the delivery itself. */
+async function logDripEmailEvent(
+  db: Db,
+  args: {
+    tenantId: string;
+    merchantId: string;
+    sequenceId: string;
+    dripRunId: string;
+    stepIndex: number;
+    recipientEmail: string;
+    subject: string;
+    payloadText: string;
+    payloadHtml: string;
+    providerMessageId?: string;
+  },
+) {
+  try {
+    await db.from("drip_email_events").insert({
+      tenant_id: args.tenantId,
+      merchant_id: args.merchantId,
+      sequence_id: args.sequenceId,
+      drip_run_id: args.dripRunId,
+      step_index: args.stepIndex,
+      recipient_email: args.recipientEmail,
+      subject_line: args.subject,
+      payload_text: args.payloadText,
+      payload_html: args.payloadHtml,
+      provider_message_id: args.providerMessageId ?? null,
+      sent_at: new Date().toISOString(),
+    });
+  } catch (err) {
+    console.error("[dispatch-drips] exact email telemetry insert failed", err);
+  }
+}
+
 /** Insert the next step's row. Returns { hasNext, ok }:
  *  - hasNext=false → this was the last step, nothing to enqueue (ok=true).
  *  - hasNext=true, ok=true → the next row was created, OR a concurrent
@@ -831,6 +868,7 @@ async function processEmailStep(
   const sendId = randomUUID();
   let fromIdentity = "dry:submissions@sunbizfunding.com";
   let providerMessageId: string | undefined;
+  let htmlPayload: string | null = null;
   if (shouldSend) {
     // Transactional/relationship email (application nudges, statements, etc.) is
     // CAN-SPAM opt-out-exempt → NO visible unsubscribe footer. The invisible
@@ -838,6 +876,7 @@ async function processEmailStep(
     // protects inbox placement). Commercial mail keeps the footer.
     const unsub = emailClass === "transactional" ? "none" : "footer";
     const html = buildDripHtml(cleanBody, { sendId, email, unsub });
+    htmlPayload = html;
     const result = await sendDripEmail(row.tenant_id, email, subject, cleanBody, {
       html,
       listUnsubscribe: listUnsubscribeHeader(email),
@@ -847,7 +886,7 @@ async function processEmailStep(
     providerMessageId = result.messageId;
   }
 
-  await logInteraction(db, {
+  const interactionLog = logInteraction(db, {
     tenantId: row.tenant_id,
     leadId: row.lead_id,
     sequenceName: row.sequence_name,
@@ -868,6 +907,25 @@ async function processEmailStep(
       drips_live: dripsLive,
     },
   });
+  await Promise.all([
+    interactionLog,
+    ...(shouldSend && htmlPayload
+      ? [
+          logDripEmailEvent(db, {
+            tenantId: row.tenant_id,
+            merchantId: row.lead_id,
+            sequenceId: row.sequence_id,
+            dripRunId: row.id,
+            stepIndex: row.step_index,
+            recipientEmail: email,
+            subject,
+            payloadText: cleanBody,
+            payloadHtml: htmlPayload,
+            providerMessageId,
+          }),
+        ]
+      : []),
+  ]);
   const outcome = await finishStep(db, row, steps, fromIdentity, shouldSend, providerMessageId);
   await nudgeConversations(row.tenant_id);
   return outcome;
