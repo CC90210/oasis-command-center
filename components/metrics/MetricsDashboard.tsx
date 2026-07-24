@@ -618,7 +618,7 @@ export function MetricsDashboard({ payload: initialPayload }: { payload: Metrics
         </div>
       </div>
 
-      {active === "drips" && <DripTrackerClient />}
+      {active === "drips" && <DripTrackerClient compact />}
 
       {kind === "sms" ? (
         <SmsPanel sms={payload.sms} windowDays={payload.windowDays} />

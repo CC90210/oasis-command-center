@@ -1,8 +1,9 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import Link from "next/link";
 import { Card, Stat } from "@/components/Card";
-import { Eye, RefreshCcw, X } from "lucide-react";
+import { ChevronDown, ChevronUp, Eye, Maximize2, RefreshCcw, X } from "lucide-react";
 
 type DripEvent = {
   id: string;
@@ -26,7 +27,7 @@ type Metrics = {
   visible_events: number;
 };
 
-export function DripTrackerClient() {
+export function DripTrackerClient({ compact = false }: { compact?: boolean }) {
   const [events, setEvents] = useState<DripEvent[]>([]);
   const [metrics, setMetrics] = useState<Metrics>({
     total_sent_today: 0,
@@ -40,13 +41,14 @@ export function DripTrackerClient() {
     "sent_at",
   );
   const [order, setOrder] = useState<"asc" | "desc">("desc");
+  const [collapsed, setCollapsed] = useState(false);
 
   const load = useCallback(async () => {
     try {
-      const response = await fetch(`/api/drip-tracker?sort=${sort}&order=${order}&limit=200`, {
-        credentials: "include",
-        cache: "no-store",
-      });
+      const response = await fetch(
+        `/api/drip-tracker?sort=${sort}&order=${order}&limit=${compact ? 50 : 200}`,
+        { credentials: "include", cache: "no-store" },
+      );
       const json = await response.json();
       if (!response.ok || !json.ok) throw new Error(json.error || "tracker_load_failed");
       setEvents(Array.isArray(json.events) ? json.events : []);
@@ -57,7 +59,7 @@ export function DripTrackerClient() {
     } finally {
       setLoading(false);
     }
-  }, [order, sort]);
+  }, [compact, order, sort]);
 
   useEffect(() => {
     void load();
@@ -93,20 +95,42 @@ export function DripTrackerClient() {
         subtitle={`Live exact-payload telemetry · sorted by ${sortedLabel}`}
         noPadding
         action={
-          <button
-            type="button"
-            onClick={() => void load()}
-            className="inline-flex items-center gap-1.5 rounded-md border border-bg-border px-2.5 py-1.5 text-xs text-fg-muted hover:text-fg"
-          >
-            <RefreshCcw className="h-3.5 w-3.5" />
-            Refresh
-          </button>
+          <div className="flex items-center gap-2">
+            {compact && (
+              <>
+                <button
+                  type="button"
+                  onClick={() => setCollapsed((value) => !value)}
+                  className="inline-flex items-center gap-1.5 rounded-md border border-bg-border px-2.5 py-1.5 text-xs text-fg-muted hover:text-fg"
+                >
+                  {collapsed ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronUp className="h-3.5 w-3.5" />}
+                  {collapsed ? "Show" : "Collapse"}
+                </button>
+                <Link
+                  href="/drip-tracker"
+                  className="inline-flex items-center gap-1.5 rounded-md bg-accent px-2.5 py-1.5 text-xs font-semibold text-bg hover:opacity-90"
+                >
+                  <Maximize2 className="h-3.5 w-3.5" />
+                  View all
+                </Link>
+              </>
+            )}
+            <button
+              type="button"
+              onClick={() => void load()}
+              aria-label="Refresh drip activity"
+              className="inline-flex items-center gap-1.5 rounded-md border border-bg-border px-2.5 py-1.5 text-xs text-fg-muted hover:text-fg"
+            >
+              <RefreshCcw className="h-3.5 w-3.5" />
+              {!compact && "Refresh"}
+            </button>
+          </div>
         }
       >
-        {error && <div className="border-b border-rose-500/30 bg-rose-500/10 px-4 py-3 text-xs text-rose-300">{error}</div>}
-        <div className="overflow-x-auto">
+        {!collapsed && error && <div className="border-b border-rose-500/30 bg-rose-500/10 px-4 py-3 text-xs text-rose-300">{error}</div>}
+        {!collapsed && <div className={compact ? "max-h-[246px] overflow-auto" : "overflow-x-auto"}>
           <table className="w-full text-left text-xs">
-            <thead className="border-b border-bg-border bg-bg-deep/60 text-[10px] uppercase tracking-wider text-fg-dim">
+            <thead className={`border-b border-bg-border bg-bg-deep text-[10px] uppercase tracking-wider text-fg-dim ${compact ? "sticky top-0 z-10" : ""}`}>
               <tr>
                 <th className="px-4 py-3"><button onClick={() => changeSort("sent_at")}>Sent</button></th>
                 <th className="px-4 py-3">Merchant</th>
@@ -139,7 +163,7 @@ export function DripTrackerClient() {
             <div className="px-4 py-14 text-center text-sm text-fg-muted">No loop emails have been dispatched yet.</div>
           )}
           {loading && <div className="px-4 py-14 text-center text-sm text-fg-muted">Loading telemetry…</div>}
-        </div>
+        </div>}
       </Card>
 
       {selected && (

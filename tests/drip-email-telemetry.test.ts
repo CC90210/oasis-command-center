@@ -50,9 +50,13 @@ assert.match(ui, /5_000/);
 assert.match(ui, /sandbox=""/);
 assert.match(ui, /payload_html/);
 assert.match(ui, /payload_text/);
+assert.match(ui, /compact = false/);
+assert.match(ui, /max-h-\[246px\]/);
+assert.match(ui, /href="\/drip-tracker"/);
+assert.match(ui, /Collapse/);
 
 const metricsUi = readFileSync("components/metrics/MetricsDashboard.tsx", "utf8");
 assert.match(metricsUi, /import \{ DripTrackerClient \}/);
-assert.match(metricsUi, /active === "drips" && <DripTrackerClient \/>/);
+assert.match(metricsUi, /active === "drips" && <DripTrackerClient compact \/>/);
 
 console.log("drip-email-telemetry: all assertions passed");
