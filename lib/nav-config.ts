@@ -172,7 +172,6 @@ export const SUN_NAV: NavItem[] = [
   { group: "Deals", href: "/commissions", label: "Commissions", icon: "DollarSign" },
   // Outreach — drip + blast cadence surfaces.
   { group: "Outreach", href: "/sequences", label: "Sequences", icon: "Sparkles" },
-  { group: "Outreach", href: "/drip-tracker", label: "Drip Tracker", icon: "Activity" },
   { group: "Outreach", href: "/sms", label: "SMS", icon: "MessageSquare", expandable: true },
   { group: "Outreach", href: "/email-blast", label: "Email Blast", icon: "Mail" },
   // Network — lender book + templates.
