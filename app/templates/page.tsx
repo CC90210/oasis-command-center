@@ -16,8 +16,10 @@ import {
 } from "@/lib/cold-outreach/templates.generated";
 import { AD_CREATIVES } from "@/lib/cold-outreach/ad-creatives.generated";
 import GmailTemplatesSection from "@/components/templates/GmailTemplatesSection";
+import DripEmailTemplatesSection from "@/components/templates/DripEmailTemplatesSection";
 import {
   ArrowLeft,
+  BookOpen,
   Braces,
   Check,
   Copy,
@@ -716,7 +718,7 @@ export default function TemplatesPage() {
   const [activeCategory, setActiveCategory] = useState<Category>("all");
   const [activeIndustry, setActiveIndustry] = useState<Industry>("all");
   const [searchQuery, setSearchQuery] = useState("");
-  const [section, setSection] = useState<"html" | "gmail">("html");
+  const [section, setSection] = useState<"html" | "gmail" | "drips">("html");
 
   const templates = useMemo<TemplateMeta[]>(() => {
     const emails: TemplateMeta[] = COLD_OUTREACH_TEMPLATES.map((template) => ({
@@ -802,7 +804,9 @@ export default function TemplatesPage() {
         subtitle={
           section === "html"
             ? "SunBiz HTML emails Ezra can preview, copy, send with Helios, or hand to Solara for a new variant."
-            : "Plain-text Gmail templates by pipeline stage. Create, refine with Solara variants, copy into any lead outreach or cold blast."
+            : section === "drips"
+              ? "Jordan-style sequence emails: generate, store, preview, and load them directly into any drip step."
+              : "Plain-text Gmail templates by pipeline stage. Create, refine with Solara variants, copy into any lead outreach or cold blast."
         }
         action={
           section === "html" ? (
@@ -838,9 +842,21 @@ export default function TemplatesPage() {
           <Mail className="h-3.5 w-3.5" />
           Gmail Templates
         </button>
+        <button
+          type="button"
+          onClick={() => setSection("drips")}
+          className={`inline-flex items-center gap-1.5 border-l border-bg-border px-4 py-2 text-xs font-bold transition-colors ${
+            section === "drips" ? "bg-accent/15 text-accent" : "bg-bg-elev text-fg-muted hover:text-fg"
+          }`}
+        >
+          <BookOpen className="h-3.5 w-3.5" />
+          Drip Templates
+        </button>
       </div>
 
-      {section === "gmail" ? (
+      {section === "drips" ? (
+        <DripEmailTemplatesSection />
+      ) : section === "gmail" ? (
         <GmailTemplatesSection />
       ) : (
         <>
