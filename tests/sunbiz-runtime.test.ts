@@ -60,9 +60,15 @@ assert.match(migration, /insert into scheduled_sends[\s\S]*update sunbiz_reply_d
 
 const suppression = readFileSync("lib/lead-interactions-queries.ts", "utf8");
 assert.match(suppression, /from\("sunbiz_phone_suppressions"\)[\s\S]*eq\("tenant_id", tenantId\)/);
-assert.match(dispatcher, /consume_texttorrent_rate_token/);
-assert.match(dispatcher, /p_bucket: `\$\{row\.tenant_id\}:parent-sid`/);
+assert.match(dispatcher, /rate_priority: 80/);
 assert.match(dispatcher, /daily_cap_check_failed/);
+const ttClient = readFileSync("lib/integrations/texttorrent.ts", "utf8");
+assert.match(ttClient, /consume_texttorrent_rate_token/);
+assert.match(ttClient, /p_bucket: `\$\{creds\.tenantId\}:parent-sid`/);
+assert.match(ttClient, /p_priority: opts\.priority \?\? 50/);
+assert.match(migration, /inference_jobs add column if not exists next_attempt_at/);
+assert.match(webhook, /approved: true[\s\S]*instructions: profile\.data\.compiled_prompt/);
+assert.match(ingest, /work reconciliation failed/);
 for (const column of ["account_id", "inbound_message", "conversation", "merchant_context",
   "voice_profile", "lease_owner", "next_attempt_at", "decision"])
   assert.match(migration, new RegExp(`\\b${column}\\b`));

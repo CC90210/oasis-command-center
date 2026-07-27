@@ -87,6 +87,12 @@ create table if not exists public.texttorrent_dead_letters (
   created_at timestamptz not null default now(), resolved_at timestamptz
 );
 alter table public.inference_jobs add column if not exists metadata jsonb not null default '{}'::jsonb;
+alter table public.inference_jobs add column if not exists next_attempt_at timestamptz;
+update public.inference_jobs set next_attempt_at=now() where next_attempt_at is null;
+alter table public.inference_jobs alter column next_attempt_at set default now();
+alter table public.inference_jobs alter column next_attempt_at set not null;
+create index if not exists idx_inference_jobs_retry_due
+  on public.inference_jobs(status,next_attempt_at,created_at);
 alter table public.agent_voice_profiles add column if not exists approved boolean not null default false;
 alter table public.agent_voice_profiles add column if not exists approved_at timestamptz;
 alter table public.agent_voice_profiles add column if not exists approved_by uuid;

@@ -36,6 +36,7 @@ import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { isStopCommand, suppressPhoneViaCasl } from "@/lib/sms-opt-out";
 import { nudgeConversations } from "@/lib/realtime/conversations-nudge";
+import { loadSunbizInboundContext } from "@/lib/sunbiz-inbound-context";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -208,18 +209,33 @@ async function enqueueInboundWork(
       .select("id,style_descriptors,compiled_prompt,example_snippets,confidence,model_used,refreshed_at")
       .eq("id", account.voice_profile_id).eq("tenant_id", tenantId).eq("approved", true).maybeSingle();
     if (profile.error || !profile.data) return false;
-    voiceProfile = profile.data;
+    voiceProfile = {
+      approved: true,
+      instructions: profile.data.compiled_prompt || "",
+      style_descriptors: profile.data.style_descriptors,
+      example_snippets: profile.data.example_snippets,
+      confidence: profile.data.confidence,
+      model_used: profile.data.model_used,
+      refreshed_at: profile.data.refreshed_at,
+    };
+  }
+  let scoped;
+  try {
+    scoped = await loadSunbizInboundContext(db, tenantId, leadId, contactPhone);
+  } catch {
+    return false;
   }
   const queued = await db.from("texttorrent_inbound_work").upsert({
     tenant_id: tenantId, account_id: account.id,
     provider_message_id: providerMessageId, provider_conversation_id: providerConversationId,
     source_interaction_id: interactionId, inbound_message: inboundMessage,
     conversation: {
+      ...scoped.conversation,
       thread_key: leadId ? `lead:${leadId}` : `phone:+${contactPhone.replace(/\D/g, "")}`,
       to_phone: contactPhone,
       lead_id: leadId,
     },
-    merchant_context: leadId ? { lead_id: leadId } : {},
+    merchant_context: { ...scoped.merchantContext, ...(leadId ? { lead_id: leadId } : {}) },
     voice_profile: voiceProfile,
     status: "pending",
   }, { onConflict: "tenant_id,provider_message_id", ignoreDuplicates: true });

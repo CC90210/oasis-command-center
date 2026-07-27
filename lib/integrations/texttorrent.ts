@@ -23,12 +23,14 @@
 import "server-only";
 
 import { getTenantIntegrationBundle } from "@/lib/tenant-integration-store";
+import { getServiceSupabase } from "@/lib/supabase-server";
 
 const BASE_URL = "https://api.texttorrent.com/api/v1";
 
 // ---- Credential resolution ------------------------------------------------
 
 export type TextTorrentCredentials = {
+  tenantId: string;
   apiSid: string;
   publicKey: string;
   /** Optional sub-account email to act-as (sent as X-ACT-AS-USER, PLAIN email). */
@@ -73,7 +75,7 @@ export async function getTextTorrentCredentials(
     opts.actAsEmail === null
       ? undefined
       : opts.actAsEmail || bundle.act_as_email || undefined;
-  return { apiSid, publicKey, actAsEmail };
+  return { tenantId, apiSid, publicKey, actAsEmail };
 }
 
 // ---- Rate limiter (60 req/min rolling window) -----------------------------
@@ -120,6 +122,7 @@ type RequestOpts = {
   body?: Record<string, unknown> | unknown[];
   /** When the rate limit is hit, wait up to this many ms before erroring. */
   maxWaitMs?: number;
+  priority?: number;
 };
 
 async function ttFetch<T>(
@@ -127,6 +130,16 @@ async function ttFetch<T>(
   path: string,
   opts: RequestOpts = {},
 ): Promise<T> {
+  const gate = await getServiceSupabase().rpc("consume_texttorrent_rate_token", {
+    p_bucket: `${creds.tenantId}:parent-sid`,
+    p_worker_id: "oasis-texttorrent-client",
+    p_priority: opts.priority ?? 50,
+    p_limit: 60,
+    p_window_seconds: 60,
+  });
+  if (gate.error || gate.data !== true) {
+    throw new TextTorrentError("rate_limited", "Shared TextTorrent parent-SID rate limit deferred.", 429);
+  }
   const wait = rateLimitRetryAfterMs(creds.apiSid);
   if (wait > 0) {
     const cap = opts.maxWaitMs ?? 2000;
@@ -392,7 +405,7 @@ async function findChatIdByNumber(
  */
 export async function sendSms(
   creds: TextTorrentCredentials,
-  args: { number: string; message: string; sender_id?: string },
+  args: { number: string; message: string; sender_id?: string; rate_priority?: number },
 ): Promise<{ data: { chat_id: string; message_id?: string } }> {
   const fromNumber = (args.sender_id || "").trim();
   if (!fromNumber) {
@@ -420,6 +433,7 @@ export async function sendSms(
   try {
     const created = await ttFetch<{ data?: { id?: string | number } }>(creds, "/inbox/chat/create", {
       body: { receiver_number: receiver, sender_id: fromNumber },
+      priority: args.rate_priority,
     });
     chatId = String(created?.data?.id || "");
   } catch (err) {
@@ -439,6 +453,7 @@ export async function sendSms(
   // is free, so any failure here leaves an empty chat behind.
   const sent = await ttFetch<{ data?: { message_id?: string } }>(creds, "/inbox/chat", {
     body: { chat_id: chatId, to_number: args.number, from_number: fromNumber, message: outbound },
+    priority: args.rate_priority,
   });
   const messageId = sent?.data?.message_id;
   if (messageId == null || String(messageId).trim() === "") {

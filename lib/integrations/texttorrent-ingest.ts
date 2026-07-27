@@ -22,6 +22,7 @@ import {
   TextTorrentError,
   type TtInboxMessage,
 } from "@/lib/integrations/texttorrent";
+import { loadSunbizInboundContext } from "@/lib/sunbiz-inbound-context";
 
 type Db = ReturnType<typeof getServiceSupabase>;
 
@@ -127,15 +128,30 @@ export async function ingestTtInboxMessages(
         metadata: { tt_chat_id: m.chat_id || null, tt_synced: true, ...(m.sendStatus ? { tt_send_status: m.sendStatus } : {}) },
       });
     }
-    if (toInsert.length) {
-      const saved = await db.from("lead_interactions").insert(toInsert)
-        .select("id,provider_message_id,to_phone,from_phone,direction,content,lead_id,metadata");
+    {
+      const saved = toInsert.length
+        ? await db.from("lead_interactions").insert(toInsert)
+          .select("id,provider_message_id,to_phone,from_phone,direction,content,lead_id,metadata")
+        : { data: [], error: null };
       const { error } = saved;
       if (error) {
         console.error("[tt-ingest] insert failed", error.message);
         skipped += toInsert.length;
       } else {
         inserted += toInsert.length;
+        // Re-read every inbound identity in this provider thread, including
+        // rows inserted by an earlier run whose work enqueue failed. This
+        // makes queue repair deterministic on every poll.
+        const identities = msgs.filter((m) => m.direction === "inbound").map(textTorrentMessageFingerprint);
+        const reconciled = identities.length ? await db.from("lead_interactions")
+          .select("id,provider_message_id,to_phone,from_phone,direction,content,lead_id,metadata")
+          .eq("tenant_id", tenantId).eq("provider", "texttorrent")
+          .in("provider_message_id", identities) : { data: [], error: null };
+        if (reconciled.error) {
+          console.error("[tt-ingest] work reconciliation failed", reconciled.error.message);
+          skipped += identities.length;
+          continue;
+        }
         const accounts = await db.from("sunbiz_agent_accounts").select("id,from_number,voice_profile_id")
           .eq("tenant_id", tenantId).eq("provider", "texttorrent").eq("enabled", true);
         if (!accounts.error) {
@@ -152,33 +168,50 @@ export async function ingestTtInboxMessages(
           const profileById = new Map(((profiles.data || []) as Array<Record<string, unknown> & { id: string }>)
             .map((p) => [p.id, p]));
           const unmapped: Array<{ provider_message_id: string; to_phone: string }> = [];
-          const work = ((saved.data || []) as Array<{
+          const inboundRows = ((reconciled.data || []) as Array<{
             id: string; provider_message_id: string; to_phone: string; from_phone: string;
             direction: string; content: string; lead_id: string | null;
             metadata: { tt_chat_id?: string | null } | null;
-          }>).filter((row) => row.direction === "inbound").flatMap((row) => {
+          }>).filter((row) => row.direction === "inbound");
+          const work: Record<string, unknown>[] = [];
+          for (const row of inboundRows) {
             const did = last10(row.to_phone);
             const account = accountRows
               .find((a) => last10(a.from_number) === did);
             if (!account) {
               unmapped.push({ provider_message_id: row.provider_message_id, to_phone: row.to_phone });
-              return [];
+              continue;
             }
-            if (account?.voice_profile_id && !profileById.has(account.voice_profile_id)) return [];
-            return account ? [{
+            if (account.voice_profile_id && !profileById.has(account.voice_profile_id)) continue;
+            let scoped;
+            try {
+              scoped = await loadSunbizInboundContext(db, tenantId, row.lead_id, row.from_phone);
+            } catch {
+              skipped++;
+              continue;
+            }
+            const rawProfile = account.voice_profile_id ? profileById.get(account.voice_profile_id) : null;
+            work.push({
               tenant_id: tenantId, account_id: account.id,
               provider_message_id: row.provider_message_id,
               provider_conversation_id: row.metadata?.tt_chat_id || null,
               source_interaction_id: row.id, inbound_message: row.content,
               conversation: {
+                ...scoped.conversation,
                 thread_key: row.lead_id ? `lead:${row.lead_id}` : `phone:+${row.from_phone.replace(/\D/g, "")}`,
                 to_phone: row.from_phone, lead_id: row.lead_id,
               },
-              merchant_context: row.lead_id ? { lead_id: row.lead_id } : {},
-              voice_profile: account.voice_profile_id ? profileById.get(account.voice_profile_id) : {},
+              merchant_context: { ...scoped.merchantContext, ...(row.lead_id ? { lead_id: row.lead_id } : {}) },
+              voice_profile: rawProfile ? {
+                approved: true, instructions: rawProfile.compiled_prompt || "",
+                style_descriptors: rawProfile.style_descriptors,
+                example_snippets: rawProfile.example_snippets,
+                confidence: rawProfile.confidence, model_used: rawProfile.model_used,
+                refreshed_at: rawProfile.refreshed_at,
+              } : {},
               status: "pending",
-            }] : [];
-          });
+            });
+          }
           if (work.length) {
             const queued = await db.from("texttorrent_inbound_work").upsert(work, {
               onConflict: "tenant_id,provider_message_id", ignoreDuplicates: true,

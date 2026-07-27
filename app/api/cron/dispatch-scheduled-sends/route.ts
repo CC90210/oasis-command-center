@@ -187,20 +187,12 @@ async function processSms(db: Db, row: ClaimedRow): Promise<void> {
         .gte("created_at", new Date(new Date().setHours(0, 0, 0, 0)).toISOString());
       if (sentToday.error) return markRetryOrFail(db, row, "daily_cap_check_failed");
       if ((sentToday.count || 0) > identity.data.daily_cap) return markRetryOrFail(db, row, "daily_cap_reached");
-      const rate = await db.rpc("consume_texttorrent_rate_token", {
-        p_bucket: `${row.tenant_id}:parent-sid`,
-        p_worker_id: "oasis-scheduled-dispatcher",
-        p_priority: 80,
-        p_limit: 60,
-        p_window_seconds: 60,
-      });
-      if (rate.error || rate.data !== true) {
-        return markRetryOrFail(db, row, "texttorrent_rate_deferred");
-      }
       const creds = await getTextTorrentCredentials(row.tenant_id, {
         actAsEmail: identity.data.act_as_email,
       });
-      await ttSendSms(creds, { number: row.to_phone, message: row.body, sender_id: row.from_identity });
+      await ttSendSms(creds, {
+        number: row.to_phone, message: row.body, sender_id: row.from_identity, rate_priority: 80,
+      });
     } catch (err) {
       const reason =
         err instanceof TextTorrentError ? `${err.code}: ${err.message}` : err instanceof Error ? err.message : "send_failed";
