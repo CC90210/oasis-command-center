@@ -66,6 +66,8 @@ const ttClient = readFileSync("lib/integrations/texttorrent.ts", "utf8");
 assert.match(ttClient, /consume_texttorrent_rate_token/);
 assert.match(ttClient, /p_bucket: `\$\{creds\.tenantId\}:parent-sid`/);
 assert.match(ttClient, /p_priority: opts\.priority \?\? 50/);
+assert.match(migration, /effective_limit := greatest[\s\S]*when p_priority >= 90[\s\S]*p_limit - 20/);
+assert.match(migration, /request_count < effective_limit/);
 assert.match(migration, /inference_jobs add column if not exists next_attempt_at/);
 assert.match(webhook, /approved: true[\s\S]*instructions: profile\.data\.compiled_prompt/);
 assert.match(ingest, /work reconciliation failed/);
