@@ -184,6 +184,9 @@ async function enqueueInboundWork(
   providerMessageId: string,
   interactionId: string,
   providerConversationId: string | null,
+  inboundMessage: string,
+  leadId: string | null,
+  contactPhone: string,
 ): Promise<boolean> {
   const normalized = toNumber.replace(/\D/g, "").slice(-10);
   const accounts = await db.from("sunbiz_agent_accounts").select("id,from_number")
@@ -193,9 +196,17 @@ async function enqueueInboundWork(
     .find((row) => row.from_number.replace(/\D/g, "").slice(-10) === normalized);
   if (!account) return false;
   const queued = await db.from("texttorrent_inbound_work").upsert({
-    tenant_id: tenantId, agent_account_id: account.id,
+    tenant_id: tenantId, account_id: account.id,
     provider_message_id: providerMessageId, provider_conversation_id: providerConversationId,
-    source_interaction_id: interactionId, status: "pending",
+    source_interaction_id: interactionId, inbound_message: inboundMessage,
+    conversation: {
+      thread_key: leadId ? `lead:${leadId}` : `phone:+${contactPhone.replace(/\D/g, "")}`,
+      to_phone: contactPhone,
+      lead_id: leadId,
+    },
+    merchant_context: leadId ? { lead_id: leadId } : {},
+    voice_profile: {},
+    status: "pending",
   }, { onConflict: "tenant_id,provider_message_id", ignoreDuplicates: true });
   return !queued.error;
 }
@@ -264,7 +275,8 @@ export async function POST(req: NextRequest) {
         .maybeSingle();
       if ((existing.data as { id?: string } | null)?.id) {
         const queued = await enqueueInboundWork(db, tenantId, to, providerMessageId,
-          (existing.data as { id: string }).id, typeof payload.chat_id === "string" ? payload.chat_id : null);
+          (existing.data as { id: string }).id, typeof payload.chat_id === "string" ? payload.chat_id : null,
+          messageText, leadId, from);
         if (!queued) return NextResponse.json({ ok: false, error: "enqueue_failed" }, { status: 503 });
         return NextResponse.json({ ok: true, deduped: true });
       }
@@ -306,7 +318,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ ok: false, error: "persist_failed" }, { status: 500 });
   }
   const queued = await enqueueInboundWork(db, tenantId, to, providerMessageId, persisted.data.id,
-    typeof payload.chat_id === "string" ? payload.chat_id : null);
+    typeof payload.chat_id === "string" ? payload.chat_id : null, messageText, leadId, from);
   if (!queued) return NextResponse.json({ ok: false, error: "enqueue_failed" }, { status: 503 });
 
   // Phase 3 spine live-refresh (plan §7): an inbound reply just landed —

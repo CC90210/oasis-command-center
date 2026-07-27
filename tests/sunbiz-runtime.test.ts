@@ -27,6 +27,13 @@ assert.match(webhook, /from\("texttorrent_inbound_work"\)/);
 const route = readFileSync("app/api/conversations/drafts/[id]/route.ts", "utf8");
 assert.match(route, /eq\("status", "pending"\).*select\("id"\)/s);
 assert.match(route, /checkPhoneOptOut/);
+const collection = readFileSync("app/api/conversations/drafts/route.ts", "utf8");
+assert.match(collection, /eq\("tenant_id", session\.tenantId\)/);
+assert.match(collection, /eq\("thread_key", threadKey\)\.eq\("status", "pending"\)/);
+assert.match(collection, /account\.data\.user_id !== session\.userId/);
+const card = readFileSync("components/conversations/SunbizDraftCard.tsx", "utf8");
+for (const action of ["approve", "edit_send", "reject", "pause", "resume"])
+  assert.match(card, new RegExp(`\"${action}\"`));
 const migration = readFileSync("database/127_sunbiz_agent_runtime.sql", "utf8");
 for (const table of ["sunbiz_agent_accounts", "sunbiz_conversation_state", "sunbiz_reply_drafts",
   "sunbiz_processing_leases", "sunbiz_provider_rate_state", "texttorrent_inbound_work",
@@ -36,7 +43,13 @@ for (const table of ["sunbiz_agent_accounts", "sunbiz_conversation_state", "sunb
 }
 for (const rpc of ["claim_texttorrent_partition", "heartbeat_texttorrent_partition",
   "release_texttorrent_partition", "claim_texttorrent_inbound",
-  "consume_texttorrent_rate_token", "texttorrent_runtime_health"]) {
+  "consume_texttorrent_rate_token", "suppress_texttorrent_inbound",
+  "finalize_texttorrent_inbound", "texttorrent_runtime_health"]) {
   assert.match(migration, new RegExp(`function public\\.${rpc}`));
 }
+for (const column of ["account_id", "inbound_message", "conversation", "merchant_context",
+  "voice_profile", "lease_owner", "next_attempt_at", "decision"])
+  assert.match(migration, new RegExp(`\\b${column}\\b`));
+for (const status of ["pending", "running", "drafted", "escalated", "suppressed", "dead_letter"])
+  assert.match(migration, new RegExp(`'${status}'`));
 console.log("sunbiz-runtime.test.ts: OK");

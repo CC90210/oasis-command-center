@@ -34,6 +34,12 @@ export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: strin
   if (found.error) return NextResponse.json({ ok: false, error: "draft_lookup_failed" }, { status: 503 });
   const draft = found.data as DraftRow | null;
   if (!draft) return NextResponse.json({ ok: false, error: "not_found" }, { status: 404 });
+  const accessAccount = await db.from("sunbiz_agent_accounts").select("user_id")
+    .eq("id", draft.agent_account_id).eq("tenant_id", session.tenantId).maybeSingle();
+  if (accessAccount.error || !accessAccount.data) return NextResponse.json({ ok: false, error: "account_lookup_failed" }, { status: 503 });
+  if (!session.isAdmin && accessAccount.data.user_id !== session.userId) {
+    return NextResponse.json({ ok: false, error: "not_assigned" }, { status: 403 });
+  }
 
   if (body.action === "pause" || body.action === "resume") {
     const paused = body.action === "pause";
@@ -79,9 +85,6 @@ export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: strin
     .eq("id", draft.agent_account_id).eq("tenant_id", session.tenantId).eq("provider", "texttorrent").maybeSingle();
   if (account.error || !account.data || !account.data.enabled || account.data.mode !== "semi") {
     return NextResponse.json({ ok: false, error: "account_not_sendable" }, { status: 409 });
-  }
-  if (!session.isAdmin && account.data.user_id !== session.userId) {
-    return NextResponse.json({ ok: false, error: "not_assigned" }, { status: 403 });
   }
   if (!isWithinSmsHours(account.data.timezone)) {
     return NextResponse.json({ ok: false, error: "quiet_hours" }, { status: 409 });

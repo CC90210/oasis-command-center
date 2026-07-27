@@ -55,12 +55,17 @@ create table if not exists public.sunbiz_provider_rate_state (
 create table if not exists public.texttorrent_inbound_work (
   id uuid primary key default gen_random_uuid(),
   tenant_id uuid not null references public.tenants(id) on delete cascade,
-  agent_account_id uuid references public.sunbiz_agent_accounts(id) on delete set null,
+  account_id uuid not null references public.sunbiz_agent_accounts(id) on delete cascade,
   provider_message_id text not null, provider_conversation_id text,
-  source_interaction_id uuid, priority integer not null default 100,
-  status text not null default 'pending' check (status in ('pending','running','complete','dead')),
-  attempts integer not null default 0, available_at timestamptz not null default now(),
-  claimed_by text, claimed_at timestamptz, lease_expires_at timestamptz,
+  source_interaction_id uuid, inbound_message text not null,
+  conversation jsonb not null default '{}'::jsonb,
+  merchant_context jsonb not null default '{}'::jsonb,
+  voice_profile jsonb not null default '{}'::jsonb,
+  decision jsonb, priority integer not null default 100,
+  status text not null default 'pending'
+    check (status in ('pending','running','drafted','escalated','suppressed','dead_letter')),
+  attempts integer not null default 0, next_attempt_at timestamptz not null default now(),
+  lease_owner text, claimed_at timestamptz, lease_expires_at timestamptz,
   last_error text, created_at timestamptz not null default now(), completed_at timestamptz,
   unique (tenant_id,provider_message_id)
 );
@@ -68,15 +73,16 @@ create table if not exists public.texttorrent_dead_letters (
   id uuid primary key default gen_random_uuid(),
   tenant_id uuid not null references public.tenants(id) on delete cascade,
   inbound_work_id uuid references public.texttorrent_inbound_work(id) on delete set null,
-  provider_message_id text not null, failure_code text not null, failure_detail text,
-  attempts integer not null, payload_metadata jsonb not null default '{}'::jsonb,
+  account_id uuid not null references public.sunbiz_agent_accounts(id) on delete cascade,
+  failure_code text not null, attempts integer not null,
+  sanitized_metadata jsonb not null default '{}'::jsonb,
   created_at timestamptz not null default now(), resolved_at timestamptz
 );
 alter table public.inference_jobs add column if not exists metadata jsonb not null default '{}'::jsonb;
 create index if not exists idx_sunbiz_drafts_queue on public.sunbiz_reply_drafts(tenant_id,status,created_at);
 create index if not exists idx_sunbiz_state_agent on public.sunbiz_conversation_state(tenant_id,agent_account_id,updated_at desc);
 create index if not exists idx_sunbiz_leases_expiry on public.sunbiz_processing_leases(expires_at);
-create index if not exists idx_tt_inbound_due on public.texttorrent_inbound_work(status,priority,available_at);
+create index if not exists idx_tt_inbound_due on public.texttorrent_inbound_work(status,priority,next_attempt_at);
 alter table public.sunbiz_agent_accounts enable row level security;
 alter table public.sunbiz_agent_accounts force row level security;
 alter table public.sunbiz_conversation_state enable row level security;
@@ -109,82 +115,155 @@ create policy sunbiz_rate_service_role on public.sunbiz_provider_rate_state for 
 create policy tt_inbound_work_service_role on public.texttorrent_inbound_work for all to service_role using(true) with check(true);
 create policy tt_dead_letters_service_role on public.texttorrent_dead_letters for all to service_role using(true) with check(true);
 
-create or replace function public.claim_texttorrent_partition(partition_key text, worker_id text, lease_seconds integer default 60)
+create or replace function public.claim_texttorrent_partition(p_partition_key text, p_worker_id text, p_lease_seconds integer default 60)
 returns boolean language plpgsql security definer set search_path=public as $$
 declare changed integer;
 begin
   insert into sunbiz_processing_leases(tenant_id,partition_key,owner_id,expires_at)
-  select a.tenant_id, claim_texttorrent_partition.partition_key, worker_id, now()+make_interval(secs=>lease_seconds)
-  from sunbiz_agent_accounts a where a.id::text=split_part(partition_key,':',1)
+  select a.tenant_id, p_partition_key, p_worker_id, now()+make_interval(secs=>p_lease_seconds)
+  from sunbiz_agent_accounts a where a.id::text=split_part(p_partition_key,':',1)
   on conflict (tenant_id,partition_key) do update set owner_id=excluded.owner_id,
     acquired_at=now(), heartbeat_at=now(), expires_at=excluded.expires_at
-  where sunbiz_processing_leases.expires_at < now() or sunbiz_processing_leases.owner_id=worker_id;
+  where sunbiz_processing_leases.expires_at < now() or sunbiz_processing_leases.owner_id=p_worker_id;
   get diagnostics changed = row_count;
   return changed > 0;
 end $$;
 
-create or replace function public.heartbeat_texttorrent_partition(partition_key text, worker_id text, lease_seconds integer default 60)
+create or replace function public.heartbeat_texttorrent_partition(p_partition_key text, p_worker_id text, p_lease_seconds integer default 60)
 returns boolean language plpgsql security definer set search_path=public as $$
 declare changed integer;
 begin
-  update sunbiz_processing_leases set heartbeat_at=now(), expires_at=now()+make_interval(secs=>lease_seconds)
-  where sunbiz_processing_leases.partition_key=heartbeat_texttorrent_partition.partition_key
-    and owner_id=worker_id and expires_at>now();
+  update sunbiz_processing_leases set heartbeat_at=now(), expires_at=now()+make_interval(secs=>p_lease_seconds)
+  where sunbiz_processing_leases.partition_key=p_partition_key
+    and owner_id=p_worker_id and expires_at>now();
   get diagnostics changed = row_count; return changed > 0;
 end $$;
 
-create or replace function public.release_texttorrent_partition(partition_key text, worker_id text)
+create or replace function public.release_texttorrent_partition(p_partition_key text, p_worker_id text)
 returns boolean language plpgsql security definer set search_path=public as $$
 declare changed integer;
 begin
-  delete from sunbiz_processing_leases where sunbiz_processing_leases.partition_key=release_texttorrent_partition.partition_key
-    and owner_id=worker_id;
+  delete from sunbiz_processing_leases where sunbiz_processing_leases.partition_key=p_partition_key
+    and owner_id=p_worker_id;
   get diagnostics changed = row_count; return changed > 0;
 end $$;
 
-create or replace function public.claim_texttorrent_inbound(account_id uuid, worker_id text, lease_seconds integer default 60)
+create or replace function public.claim_texttorrent_inbound(p_account_id uuid, p_worker_id text, p_lease_seconds integer default 60)
 returns setof public.texttorrent_inbound_work language sql security definer set search_path=public as $$
-  update texttorrent_inbound_work w set status='running', claimed_by=worker_id, claimed_at=now(),
-    lease_expires_at=now()+make_interval(secs=>lease_seconds), attempts=attempts+1
-  where w.id=(select id from texttorrent_inbound_work where agent_account_id=account_id
-    and (status='pending' or (status='running' and lease_expires_at<now())) and available_at<=now()
+  update texttorrent_inbound_work w set status='running', lease_owner=p_worker_id, claimed_at=now(),
+    lease_expires_at=now()+make_interval(secs=>p_lease_seconds)
+  where w.id=(select id from texttorrent_inbound_work where account_id=p_account_id
+    and (status='pending' or (status='running' and lease_expires_at<now())) and next_attempt_at<=now()
     order by priority asc, created_at asc for update skip locked limit 1)
   returning w.*;
 $$;
 
-create or replace function public.consume_texttorrent_rate_token(bucket text, worker_id text, priority integer,
-  "limit" integer default 60, window_seconds integer default 60)
+create or replace function public.consume_texttorrent_rate_token(p_bucket text, p_worker_id text, p_priority integer,
+  p_limit integer default 60, p_window_seconds integer default 60)
 returns boolean language plpgsql security definer set search_path=public as $$
 declare tid uuid; changed integer;
 begin
-  tid := split_part(bucket,':',1)::uuid;
+  tid := split_part(p_bucket,':',1)::uuid;
   insert into sunbiz_provider_rate_state(tenant_id,provider,window_started_at,request_count)
   values(tid,'texttorrent',now(),1)
   on conflict(tenant_id,provider) do update set
-    window_started_at=case when sunbiz_provider_rate_state.window_started_at < now()-make_interval(secs=>window_seconds)
+    window_started_at=case when sunbiz_provider_rate_state.window_started_at < now()-make_interval(secs=>p_window_seconds)
       then now() else sunbiz_provider_rate_state.window_started_at end,
-    request_count=case when sunbiz_provider_rate_state.window_started_at < now()-make_interval(secs=>window_seconds)
+    request_count=case when sunbiz_provider_rate_state.window_started_at < now()-make_interval(secs=>p_window_seconds)
       then 1 else sunbiz_provider_rate_state.request_count+1 end, updated_at=now()
-  where sunbiz_provider_rate_state.window_started_at < now()-make_interval(secs=>window_seconds)
-    or sunbiz_provider_rate_state.request_count < "limit";
+  where sunbiz_provider_rate_state.window_started_at < now()-make_interval(secs=>p_window_seconds)
+    or sunbiz_provider_rate_state.request_count < p_limit;
   get diagnostics changed = row_count; return changed > 0;
 end $$;
 
-create or replace function public.texttorrent_runtime_health(worker_id text)
+create or replace function public.suppress_texttorrent_inbound(
+  p_inbound_work_id uuid, p_tenant_id uuid, p_account_id uuid, p_reason text, p_worker_id text)
+returns boolean language plpgsql security definer set search_path=public as $$
+declare w texttorrent_inbound_work; state_id uuid;
+begin
+  select * into w from texttorrent_inbound_work where id=p_inbound_work_id
+    and tenant_id=p_tenant_id and account_id=p_account_id and status='running'
+    and lease_owner=p_worker_id for update;
+  if not found then return false; end if;
+  insert into sunbiz_conversation_state(tenant_id,provider,provider_conversation_id,lead_id,
+    agent_account_id,qualification_state,last_intent,last_action,automation_paused,knowledge_version)
+  select w.tenant_id,'texttorrent',coalesce(w.provider_conversation_id,w.provider_message_id),
+    nullif(w.conversation->>'lead_id','')::uuid,w.account_id,'{}',p_reason,'suppressed',true,a.knowledge_version
+  from sunbiz_agent_accounts a where a.id=w.account_id
+  on conflict(tenant_id,provider,provider_conversation_id) do update set
+    last_intent=excluded.last_intent,last_action='suppressed',automation_paused=true,updated_at=now()
+  returning id into state_id;
+  update scheduled_sends set status='cancelled'
+    where tenant_id=w.tenant_id and channel='sms' and status='pending'
+      and (thread_key=w.conversation->>'thread_key' or to_phone=w.conversation->>'to_phone');
+  update texttorrent_inbound_work set status='suppressed',
+    decision=jsonb_build_object('intent',p_reason,'shouldSuppress',true),
+    lease_owner=null,lease_expires_at=null,completed_at=now(),last_error=null where id=w.id;
+  return true;
+end $$;
+
+create or replace function public.finalize_texttorrent_inbound(
+  p_work_id uuid, p_worker_id text, p_status text, p_decision jsonb)
+returns boolean language plpgsql security definer set search_path=public as $$
+declare w texttorrent_inbound_work; a sunbiz_agent_accounts; state_id uuid; response text;
+begin
+  if p_status not in ('drafted','escalated') then return false; end if;
+  select * into w from texttorrent_inbound_work where id=p_work_id and status='running'
+    and lease_owner=p_worker_id for update;
+  if not found then return false; end if;
+  select * into a from sunbiz_agent_accounts where id=w.account_id and tenant_id=w.tenant_id;
+  if not found then return false; end if;
+  insert into sunbiz_conversation_state(tenant_id,provider,provider_conversation_id,lead_id,
+    agent_account_id,qualification_state,last_intent,last_action,automation_paused,
+    human_owner_id,knowledge_version,updated_at)
+  values(w.tenant_id,'texttorrent',coalesce(w.provider_conversation_id,w.provider_message_id),
+    nullif(w.conversation->>'lead_id','')::uuid,w.account_id,
+    coalesce(p_decision->'qualification_updates','{}'::jsonb),p_decision->>'intent',p_status,
+    false,case when p_status='escalated' then a.handoff_user_id else null end,a.knowledge_version,now())
+  on conflict(tenant_id,provider,provider_conversation_id) do update set
+    qualification_state=excluded.qualification_state,last_intent=excluded.last_intent,
+    last_action=excluded.last_action,human_owner_id=coalesce(excluded.human_owner_id,sunbiz_conversation_state.human_owner_id),
+    knowledge_version=excluded.knowledge_version,updated_at=now()
+  returning id into state_id;
+  response := nullif(btrim(p_decision->>'response'),'');
+  if p_status='drafted' and response is not null then
+    insert into sunbiz_reply_drafts(tenant_id,conversation_state_id,agent_account_id,lead_id,
+      thread_key,to_phone,original_text,intent,confidence,model_id,model_version,
+      knowledge_version,source_interaction_id,provider_message_id)
+    values(w.tenant_id,state_id,w.account_id,nullif(w.conversation->>'lead_id','')::uuid,
+      w.conversation->>'thread_key',w.conversation->>'to_phone',left(response,1600),
+      coalesce(p_decision->>'intent','UNCERTAIN'),nullif(p_decision->>'confidence','')::numeric,
+      p_decision->>'model_id',p_decision->>'model_version',a.knowledge_version,
+      w.source_interaction_id,w.provider_message_id)
+    on conflict(tenant_id,source_interaction_id) do nothing;
+  elsif p_status='drafted' then
+    return false;
+  end if;
+  update texttorrent_inbound_work set status=p_status,decision=p_decision,lease_owner=null,
+    lease_expires_at=null,completed_at=now(),last_error=null where id=w.id;
+  return true;
+end $$;
+
+create or replace function public.texttorrent_runtime_health(p_worker_id text)
 returns jsonb language sql security definer set search_path=public as $$
-  select jsonb_build_object('worker_id',worker_id,'now',now(),
-    'active_leases',(select count(*) from sunbiz_processing_leases where owner_id=worker_id and expires_at>now()),
+  select jsonb_build_object('worker_id',p_worker_id,'now',now(),
+    'active_leases',(select count(*) from sunbiz_processing_leases where owner_id=p_worker_id and expires_at>now()),
     'pending',(select count(*) from texttorrent_inbound_work where status='pending'),
     'running',(select count(*) from texttorrent_inbound_work where status='running'),
-    'dead',(select count(*) from texttorrent_dead_letters where resolved_at is null));
+    'dead',(select count(*) from texttorrent_dead_letters where resolved_at is null),
+    'oldest_pending_at',(select min(created_at) from texttorrent_inbound_work where status='pending'));
 $$;
 revoke all on function public.claim_texttorrent_partition(text,text,integer),
  public.heartbeat_texttorrent_partition(text,text,integer), public.release_texttorrent_partition(text,text),
  public.claim_texttorrent_inbound(uuid,text,integer),
  public.consume_texttorrent_rate_token(text,text,integer,integer,integer),
+ public.suppress_texttorrent_inbound(uuid,uuid,uuid,text,text),
+ public.finalize_texttorrent_inbound(uuid,text,text,jsonb),
  public.texttorrent_runtime_health(text) from public;
 grant execute on function public.claim_texttorrent_partition(text,text,integer),
  public.heartbeat_texttorrent_partition(text,text,integer), public.release_texttorrent_partition(text,text),
  public.claim_texttorrent_inbound(uuid,text,integer),
  public.consume_texttorrent_rate_token(text,text,integer,integer,integer),
+ public.suppress_texttorrent_inbound(uuid,uuid,uuid,text,text),
+ public.finalize_texttorrent_inbound(uuid,text,text,jsonb),
  public.texttorrent_runtime_health(text) to service_role;

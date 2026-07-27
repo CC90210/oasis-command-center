@@ -129,7 +129,7 @@ export async function ingestTtInboxMessages(
     }
     if (toInsert.length) {
       const saved = await db.from("lead_interactions").insert(toInsert)
-        .select("id,provider_message_id,to_phone,direction");
+        .select("id,provider_message_id,to_phone,from_phone,direction,content,lead_id,metadata");
       const { error } = saved;
       if (error) {
         console.error("[tt-ingest] insert failed", error.message);
@@ -140,14 +140,24 @@ export async function ingestTtInboxMessages(
           .eq("tenant_id", tenantId).eq("provider", "texttorrent").eq("enabled", true);
         if (!accounts.error) {
           const work = ((saved.data || []) as Array<{
-            id: string; provider_message_id: string; to_phone: string; direction: string;
+            id: string; provider_message_id: string; to_phone: string; from_phone: string;
+            direction: string; content: string; lead_id: string | null;
+            metadata: { tt_chat_id?: string | null } | null;
           }>).filter((row) => row.direction === "inbound").flatMap((row) => {
             const did = last10(row.to_phone);
             const account = ((accounts.data || []) as Array<{ id: string; from_number: string }>)
               .find((a) => last10(a.from_number) === did);
             return account ? [{
-              tenant_id: tenantId, agent_account_id: account.id,
-              provider_message_id: row.provider_message_id, source_interaction_id: row.id, status: "pending",
+              tenant_id: tenantId, account_id: account.id,
+              provider_message_id: row.provider_message_id,
+              provider_conversation_id: row.metadata?.tt_chat_id || null,
+              source_interaction_id: row.id, inbound_message: row.content,
+              conversation: {
+                thread_key: row.lead_id ? `lead:${row.lead_id}` : `phone:+${row.from_phone.replace(/\D/g, "")}`,
+                to_phone: row.from_phone, lead_id: row.lead_id,
+              },
+              merchant_context: row.lead_id ? { lead_id: row.lead_id } : {},
+              voice_profile: {}, status: "pending",
             }] : [];
           });
           if (work.length) {
