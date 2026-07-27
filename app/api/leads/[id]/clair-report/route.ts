@@ -19,12 +19,18 @@
  * There is no service-to-service caller, no cron, and no retry-on-failure: a
  * failed CLEAR call returns the error and stops. If you are adding an automated
  * caller, you are breaking a compliance boundary, not a code style rule.
+ *
+ * NOT A FALLBACK ANY MORE (Adon, 2026-07-27). CLEAR used to 409 when the
+ * automated TruePeopleSearch path had not run, or had already produced a
+ * number. That coupling is gone: the two enrichments are independent and an
+ * operator may run CLEAR on a lead TruePeopleSearch already enriched. Cost and
+ * redundancy are now an operator judgement (the UI states both), not a lock.
+ * The manual/attributed/role/tenant constraints above are untouched.
  */
 
 import { NextResponse } from "next/server";
 import { authorizeBridgeRequest, callBridgeExecTool } from "@/lib/bridge-proxy";
 import { getServiceSupabase, getSessionUser } from "@/lib/supabase-server";
-import { clairEligibility } from "@/lib/clair/eligibility";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -81,28 +87,18 @@ export async function POST(_req: Request, ctx: Ctx) {
 
   const svc = getServiceSupabase();
 
-  // Guard 1 — the lead must exist in THIS tenant. Without this, a valid session
-  // could pull a regulated report against another tenant's merchant by id.
+  // Tenant guard — the lead must exist in THIS tenant. Without this, a valid
+  // session could pull a regulated report against another tenant's merchant by
+  // id. This is the only precondition on a pull; there is deliberately no
+  // second guard tying CLEAR to the state of the automated lookup.
   const { data: lead } = await svc
     .from("tenant_records")
-    .select("id,data")
+    .select("id")
     .eq("id", leadId)
     .eq("tenant_id", auth.tenantId)
     .maybeSingle();
   if (!lead) {
     return NextResponse.json({ ok: false, error: "lead_not_found" }, { status: 404 });
-  }
-
-  // Guard 2 — CLAIR is the FALLBACK. Refuse when the automated path has not run
-  // or already produced a number. The UI hides the button in those cases; this
-  // is the same rule enforced where it cannot be bypassed.
-  const leadData = (lead.data ?? {}) as Record<string, unknown>;
-  const gate = clairEligibility(leadData);
-  if (!gate.eligible) {
-    return NextResponse.json(
-      { ok: false, error: "clair_not_applicable", message: gate.reason },
-      { status: 409 },
-    );
   }
 
   // Who asked. Recorded on the report row because a permissible-use assertion
