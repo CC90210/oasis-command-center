@@ -44,9 +44,11 @@ for (const table of ["sunbiz_agent_accounts", "sunbiz_conversation_state", "sunb
 for (const rpc of ["claim_texttorrent_partition", "heartbeat_texttorrent_partition",
   "release_texttorrent_partition", "claim_texttorrent_inbound",
   "consume_texttorrent_rate_token", "suppress_texttorrent_inbound",
-  "finalize_texttorrent_inbound", "texttorrent_runtime_health"]) {
+  "finalize_texttorrent_inbound", "fail_texttorrent_inbound", "texttorrent_runtime_health"]) {
   assert.match(migration, new RegExp(`function public\\.${rpc}`));
 }
+assert.match(migration, /next_attempts := w\.attempts \+ 1/);
+assert.match(migration, /insert into texttorrent_dead_letters[\s\S]*update texttorrent_inbound_work/);
 for (const column of ["account_id", "inbound_message", "conversation", "merchant_context",
   "voice_profile", "lease_owner", "next_attempt_at", "decision"])
   assert.match(migration, new RegExp(`\\b${column}\\b`));

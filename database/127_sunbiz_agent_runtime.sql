@@ -72,7 +72,7 @@ create table if not exists public.texttorrent_inbound_work (
 create table if not exists public.texttorrent_dead_letters (
   id uuid primary key default gen_random_uuid(),
   tenant_id uuid not null references public.tenants(id) on delete cascade,
-  inbound_work_id uuid references public.texttorrent_inbound_work(id) on delete set null,
+  inbound_work_id uuid unique references public.texttorrent_inbound_work(id) on delete set null,
   account_id uuid not null references public.sunbiz_agent_accounts(id) on delete cascade,
   failure_code text not null, attempts integer not null,
   sanitized_metadata jsonb not null default '{}'::jsonb,
@@ -244,6 +244,32 @@ begin
   return true;
 end $$;
 
+create or replace function public.fail_texttorrent_inbound(
+  p_work_id uuid, p_worker_id text, p_error_code text, p_max_attempts integer,
+  p_next_attempt_at timestamptz)
+returns text language plpgsql security definer set search_path=public as $$
+declare w texttorrent_inbound_work; next_attempts integer; next_status text;
+begin
+  if p_max_attempts < 1 or p_error_code is null or p_error_code = '' then return null; end if;
+  select * into w from texttorrent_inbound_work where id=p_work_id and status='running'
+    and lease_owner=p_worker_id for update;
+  if not found then return null; end if;
+  next_attempts := w.attempts + 1;
+  next_status := case when next_attempts >= p_max_attempts then 'dead_letter' else 'pending' end;
+  if next_status='dead_letter' then
+    insert into texttorrent_dead_letters(inbound_work_id,tenant_id,account_id,failure_code,attempts,sanitized_metadata)
+    values(w.id,w.tenant_id,w.account_id,left(p_error_code,120),next_attempts,
+      jsonb_build_object('provider_message_id',w.provider_message_id))
+    on conflict do nothing;
+  end if;
+  update texttorrent_inbound_work set status=next_status,attempts=next_attempts,
+    next_attempt_at=case when next_status='pending' then coalesce(p_next_attempt_at,now()) else next_attempt_at end,
+    lease_owner=null,lease_expires_at=null,last_error=left(p_error_code,120),
+    completed_at=case when next_status='dead_letter' then now() else null end
+  where id=w.id;
+  return next_status;
+end $$;
+
 create or replace function public.texttorrent_runtime_health(p_worker_id text)
 returns jsonb language sql security definer set search_path=public as $$
   select jsonb_build_object('worker_id',p_worker_id,'now',now(),
@@ -259,6 +285,7 @@ revoke all on function public.claim_texttorrent_partition(text,text,integer),
  public.consume_texttorrent_rate_token(text,text,integer,integer,integer),
  public.suppress_texttorrent_inbound(uuid,uuid,uuid,text,text),
  public.finalize_texttorrent_inbound(uuid,text,text,jsonb),
+ public.fail_texttorrent_inbound(uuid,text,text,integer,timestamptz),
  public.texttorrent_runtime_health(text) from public;
 grant execute on function public.claim_texttorrent_partition(text,text,integer),
  public.heartbeat_texttorrent_partition(text,text,integer), public.release_texttorrent_partition(text,text),
@@ -266,4 +293,5 @@ grant execute on function public.claim_texttorrent_partition(text,text,integer),
  public.consume_texttorrent_rate_token(text,text,integer,integer,integer),
  public.suppress_texttorrent_inbound(uuid,uuid,uuid,text,text),
  public.finalize_texttorrent_inbound(uuid,text,text,jsonb),
+ public.fail_texttorrent_inbound(uuid,text,text,integer,timestamptz),
  public.texttorrent_runtime_health(text) to service_role;
