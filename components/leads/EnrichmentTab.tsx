@@ -197,12 +197,33 @@ function EnrichmentSummary({
   // one slot. Collapsing them into a single chip is what used to make a CLEAR
   // pull look like it did nothing on a lead the automated lookup had already
   // answered.
+  //
+  // A chip may only claim what the data actually supports. "found" is the
+  // lookup's own record of its outcome and can outlive the number (a field
+  // edit, a bad write); a number with no lookup status is a manual or legacy
+  // entry. Neither is evidence of the other, so the three cases are separate:
+  // attributed, unattributed, and status-without-number.
   const lookupStatus = String(leadData.phone_lookup_status ?? "");
+  const phoneOnLead = hasUsablePhone(leadData);
   let tpsChip: React.ReactNode;
-  if (lookupStatus === "found" || (hasUsablePhone(leadData) && !lookupStatus)) {
+  if (lookupStatus === "found" && phoneOnLead) {
     tpsChip = (
       <Chip color="#1f7a4d">
         <Phone className="h-3 w-3" /> Phone on file — automated lookup
+      </Chip>
+    );
+  } else if (lookupStatus === "found") {
+    // The lookup says it matched, but nothing usable is on the lead. Say
+    // exactly that rather than implying a number the operator cannot dial.
+    tpsChip = (
+      <Chip color={riskColor("unknown")}>
+        <PhoneOff className="h-3 w-3" /> Automated lookup matched — no number on lead
+      </Chip>
+    );
+  } else if (!lookupStatus && phoneOnLead) {
+    tpsChip = (
+      <Chip color="#1f7a4d">
+        <Phone className="h-3 w-3" /> Phone on file
       </Chip>
     );
   } else if (lookupStatus === "pending" || lookupStatus === "running" || lookupStatus === "queued") {
