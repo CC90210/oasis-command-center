@@ -32,7 +32,7 @@
  */
 
 import { NextRequest, NextResponse } from "next/server";
-import { createHmac, timingSafeEqual } from "node:crypto";
+import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { isStopCommand, suppressPhoneViaCasl } from "@/lib/sms-opt-out";
 import { nudgeConversations } from "@/lib/realtime/conversations-nudge";
@@ -177,6 +177,29 @@ async function findLeadByPhone(
   }
 }
 
+async function enqueueInboundWork(
+  db: ReturnType<typeof getServiceSupabase>,
+  tenantId: string,
+  toNumber: string,
+  providerMessageId: string,
+  interactionId: string,
+  providerConversationId: string | null,
+): Promise<boolean> {
+  const normalized = toNumber.replace(/\D/g, "").slice(-10);
+  const accounts = await db.from("sunbiz_agent_accounts").select("id,from_number")
+    .eq("tenant_id", tenantId).eq("provider", "texttorrent").eq("enabled", true);
+  if (accounts.error) return false;
+  const account = ((accounts.data || []) as Array<{ id: string; from_number: string }>)
+    .find((row) => row.from_number.replace(/\D/g, "").slice(-10) === normalized);
+  if (!account) return false;
+  const queued = await db.from("texttorrent_inbound_work").upsert({
+    tenant_id: tenantId, agent_account_id: account.id,
+    provider_message_id: providerMessageId, provider_conversation_id: providerConversationId,
+    source_interaction_id: interactionId, status: "pending",
+  }, { onConflict: "tenant_id,provider_message_id", ignoreDuplicates: true });
+  return !queued.error;
+}
+
 export async function POST(req: NextRequest) {
   const rawBody = await req.text();
 
@@ -208,6 +231,7 @@ export async function POST(req: NextRequest) {
     const result = await suppressPhoneViaCasl(from, "texttorrent_inbound");
     if (!result.ok) {
       console.error("[webhooks.texttorrent.sms-inbound] suppress-phone failed", result.error);
+      return NextResponse.json({ ok: false, error: "suppression_failed" }, { status: 503 });
     }
   }
 
@@ -217,24 +241,31 @@ export async function POST(req: NextRequest) {
   if (!resolved) {
     // Unknown destination number — still 200 so TT doesn't retry, but
     // don't write an orphan interaction row.
-    return NextResponse.json({ ok: true, ignored: "no_tenant_mapping" });
+    return NextResponse.json({ ok: false, error: "no_tenant_mapping" }, { status: 503 });
   }
   const { tenantId, userId: routedToUserId } = resolved;
 
   const leadId = await findLeadByPhone(db, tenantId, from);
+  const providerMessageId = messageId || `tt-fp:${createHash("sha256")
+    .update([to, from, String(payload.received_at || ""), messageText].join("\n"))
+    .digest("hex")}`;
 
   // Idempotency: when messageId is provided, check for an existing row
   // via metadata->>tt_message_id. We could promote this to a column +
   // unique index later if duplicate webhook deliveries become common.
-  if (messageId) {
+  if (providerMessageId) {
     try {
       const existing = await db
         .from("lead_interactions")
         .select("id")
         .eq("tenant_id", tenantId)
-        .filter("metadata->>tt_message_id", "eq", messageId)
+        .eq("provider", "texttorrent")
+        .eq("provider_message_id", providerMessageId)
         .maybeSingle();
       if ((existing.data as { id?: string } | null)?.id) {
+        const queued = await enqueueInboundWork(db, tenantId, to, providerMessageId,
+          (existing.data as { id: string }).id, typeof payload.chat_id === "string" ? payload.chat_id : null);
+        if (!queued) return NextResponse.json({ ok: false, error: "enqueue_failed" }, { status: 503 });
         return NextResponse.json({ ok: true, deduped: true });
       }
     } catch {
@@ -245,13 +276,15 @@ export async function POST(req: NextRequest) {
   // supabase-js does NOT throw on DB errors — check .error and fail-CLOSED so
   // TT retries instead of us silently dropping an inbound reply (the prior code
   // swallowed the error and returned 200, losing the message permanently).
-  const { error } = await db.from("lead_interactions").insert({
+  const persisted = await db.from("lead_interactions").insert({
     tenant_id: tenantId,
     lead_id: leadId, // null when we couldn't resolve — still useful in the conversations view
     type: "sms_received",
     channel: "sms",
     direction: "inbound",
     agent_source: "texttorrent",
+    provider: "texttorrent",
+    provider_message_id: providerMessageId,
     from_phone: from,
     to_phone: to,
     content: messageText,
@@ -267,11 +300,14 @@ export async function POST(req: NextRequest) {
       // debugging of per-agent number routing.
       routed_to_user_id: routedToUserId,
     },
-  });
-  if (error) {
-    console.error("[webhooks.tt.sms-inbound] interaction insert failed", error);
+  }).select("id").single();
+  if (persisted.error || !persisted.data) {
+    console.error("[webhooks.tt.sms-inbound] interaction insert failed", persisted.error);
     return NextResponse.json({ ok: false, error: "persist_failed" }, { status: 500 });
   }
+  const queued = await enqueueInboundWork(db, tenantId, to, providerMessageId, persisted.data.id,
+    typeof payload.chat_id === "string" ? payload.chat_id : null);
+  if (!queued) return NextResponse.json({ ok: false, error: "enqueue_failed" }, { status: 503 });
 
   // Phase 3 spine live-refresh (plan §7): an inbound reply just landed —
   // nudge any open Conversations tab for this tenant. Best-effort/

@@ -13,6 +13,7 @@
  * pulls up to `maxChats` threads, stopping early on a 429.
  */
 import "server-only";
+import { createHash } from "node:crypto";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import {
   getTextTorrentCredentials,
@@ -29,6 +30,12 @@ const last10 = (p: string | null | undefined): string => (p || "").replace(/\D/g
 /** Dedup signature within a contact's thread: direction + normalized content. */
 function sig(direction: string, content: string | null | undefined): string {
   return `${direction}|${(content || "").trim().toLowerCase().slice(0, 300)}`;
+}
+
+export function textTorrentMessageFingerprint(m: TtInboxMessage): string {
+  const material = [m.to || "", m.from || "", (m.created_at || "").trim(),
+    (m.message || "").trim()].join("\n");
+  return `tt-fp:${createHash("sha256").update(material).digest("hex")}`;
 }
 
 /** Best-effort lead match by the inbound `from` phone (mirrors the webhook). */
@@ -110,6 +117,8 @@ export async function ingestTtInboxMessages(
         channel: "sms",
         direction: dir,
         agent_source: "texttorrent",
+        provider: "texttorrent",
+        provider_message_id: textTorrentMessageFingerprint(m),
         from_phone: m.from,
         to_phone: m.to,
         content: m.message,
@@ -119,12 +128,34 @@ export async function ingestTtInboxMessages(
       });
     }
     if (toInsert.length) {
-      const { error } = await db.from("lead_interactions").insert(toInsert);
+      const saved = await db.from("lead_interactions").insert(toInsert)
+        .select("id,provider_message_id,to_phone,direction");
+      const { error } = saved;
       if (error) {
         console.error("[tt-ingest] insert failed", error.message);
         skipped += toInsert.length;
       } else {
         inserted += toInsert.length;
+        const accounts = await db.from("sunbiz_agent_accounts").select("id,from_number")
+          .eq("tenant_id", tenantId).eq("provider", "texttorrent").eq("enabled", true);
+        if (!accounts.error) {
+          const work = ((saved.data || []) as Array<{
+            id: string; provider_message_id: string; to_phone: string; direction: string;
+          }>).filter((row) => row.direction === "inbound").flatMap((row) => {
+            const did = last10(row.to_phone);
+            const account = ((accounts.data || []) as Array<{ id: string; from_number: string }>)
+              .find((a) => last10(a.from_number) === did);
+            return account ? [{
+              tenant_id: tenantId, agent_account_id: account.id,
+              provider_message_id: row.provider_message_id, source_interaction_id: row.id, status: "pending",
+            }] : [];
+          });
+          if (work.length) {
+            await db.from("texttorrent_inbound_work").upsert(work, {
+              onConflict: "tenant_id,provider_message_id", ignoreDuplicates: true,
+            });
+          }
+        }
       }
     }
   }
@@ -166,7 +197,7 @@ export async function syncTenantInbox(
   // Jordan miss the reply. Only pull already-read threads (Jordan handles them
   // fast); a reply we skip now is ingested on the next run once it's read.
   const chatIds = Array.from(
-    new Set(items.filter((m) => !(m.unreadCount && m.unreadCount > 0)).map((m) => m.chat_id).filter(Boolean)),
+    new Set(items.map((m) => m.chat_id).filter(Boolean)),
   ).slice(0, maxChats);
 
   let chats = 0,
