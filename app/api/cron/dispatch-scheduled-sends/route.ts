@@ -171,7 +171,7 @@ async function processSms(db: Db, row: ClaimedRow): Promise<void> {
       // still match, otherwise the tenant default act-as account could send an
       // employee's approved reply from the wrong TextTorrent sub-account.
       const identity = await db.from("sunbiz_agent_accounts")
-        .select("act_as_email")
+        .select("act_as_email,daily_cap,user_id")
         .eq("tenant_id", row.tenant_id)
         .eq("user_id", row.actor_user_id)
         .eq("provider", "texttorrent")
@@ -180,6 +180,22 @@ async function processSms(db: Db, row: ClaimedRow): Promise<void> {
         .maybeSingle();
       if (identity.error || !identity.data?.act_as_email) {
         return markRetryOrFail(db, row, "sunbiz_agent_identity_unavailable");
+      }
+      const sentToday = await db.from("scheduled_sends").select("id", { count: "exact", head: true })
+        .eq("tenant_id", row.tenant_id).eq("actor_user_id", identity.data.user_id)
+        .eq("channel", "sms").in("status", ["sending", "sent"])
+        .gte("created_at", new Date(new Date().setHours(0, 0, 0, 0)).toISOString());
+      if (sentToday.error) return markRetryOrFail(db, row, "daily_cap_check_failed");
+      if ((sentToday.count || 0) > identity.data.daily_cap) return markRetryOrFail(db, row, "daily_cap_reached");
+      const rate = await db.rpc("consume_texttorrent_rate_token", {
+        p_bucket: `${row.tenant_id}:parent-sid`,
+        p_worker_id: "oasis-scheduled-dispatcher",
+        p_priority: 80,
+        p_limit: 60,
+        p_window_seconds: 60,
+      });
+      if (rate.error || rate.data !== true) {
+        return markRetryOrFail(db, row, "texttorrent_rate_deferred");
       }
       const creds = await getTextTorrentCredentials(row.tenant_id, {
         actAsEmail: identity.data.act_as_email,

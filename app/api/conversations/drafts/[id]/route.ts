@@ -100,24 +100,10 @@ export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: strin
   const safe = await sanitizeBlastMessage(session.tenantId, message, { checkPositioning: true });
   if (!safe.ok) return NextResponse.json({ ok: false, error: safe.reason, message: safe.message }, { status: 400 });
 
-  // Conditional transition is the single-use claim. Only its winner may enqueue.
-  const claimed = await db.from("sunbiz_reply_drafts").update({
-    status: "approved", final_text: safe.cleaned, approved_by: session.userId,
-    approved_at: new Date().toISOString(), updated_at: new Date().toISOString(),
-  }).eq("id", id).eq("tenant_id", session.tenantId).eq("status", "pending").select("id").maybeSingle();
-  if (claimed.error || !claimed.data) return NextResponse.json({ ok: false, error: "draft_not_pending" }, { status: 409 });
-
-  const queued = await db.from("scheduled_sends").insert({
-    tenant_id: session.tenantId, lead_id: draft.lead_id, thread_key: draft.thread_key,
-    channel: "sms", to_phone: phone, body: safe.cleaned, actor_user_id: session.userId,
-    from_identity: account.data.from_number, scheduled_for: new Date().toISOString(), status: "pending",
-  }).select("id").single();
-  if (queued.error || !queued.data) {
-    await db.from("sunbiz_reply_drafts").update({ status: "failed", updated_at: new Date().toISOString() })
-      .eq("id", id).eq("tenant_id", session.tenantId).eq("status", "approved");
-    return NextResponse.json({ ok: false, error: "enqueue_failed" }, { status: 503 });
-  }
-  await db.from("sunbiz_reply_drafts").update({ scheduled_send_id: queued.data.id, updated_at: new Date().toISOString() })
-    .eq("id", id).eq("tenant_id", session.tenantId).eq("status", "approved");
-  return NextResponse.json({ ok: true, status: "approved", scheduled_send_id: queued.data.id });
+  const approved = await db.rpc("approve_sunbiz_draft", {
+    p_draft_id: id, p_tenant_id: session.tenantId, p_user_id: session.userId, p_final_text: safe.cleaned,
+  });
+  if (approved.error) return NextResponse.json({ ok: false, error: "approval_failed" }, { status: 503 });
+  if (!approved.data) return NextResponse.json({ ok: false, error: "draft_not_approvable" }, { status: 409 });
+  return NextResponse.json({ ok: true, status: "approved", scheduled_send_id: approved.data });
 }

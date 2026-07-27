@@ -189,12 +189,27 @@ async function enqueueInboundWork(
   contactPhone: string,
 ): Promise<boolean> {
   const normalized = toNumber.replace(/\D/g, "").slice(-10);
-  const accounts = await db.from("sunbiz_agent_accounts").select("id,from_number")
+  const accounts = await db.from("sunbiz_agent_accounts").select("id,from_number,voice_profile_id")
     .eq("tenant_id", tenantId).eq("provider", "texttorrent").eq("enabled", true);
   if (accounts.error) return false;
-  const account = ((accounts.data || []) as Array<{ id: string; from_number: string }>)
+  const account = ((accounts.data || []) as Array<{ id: string; from_number: string; voice_profile_id: string | null }>)
     .find((row) => row.from_number.replace(/\D/g, "").slice(-10) === normalized);
-  if (!account) return false;
+  if (!account) {
+    await db.from("agent_events").insert({
+      event_type: "TEXTTORRENT_UNMAPPED_DID", publisher_agent: "texttorrent",
+      severity: "warn", correlation_id: tenantId,
+      payload: { tenant_id: tenantId, destination_last4: normalized.slice(-4), provider_message_id: providerMessageId },
+    });
+    return false;
+  }
+  let voiceProfile: Record<string, unknown> = {};
+  if (account.voice_profile_id) {
+    const profile = await db.from("agent_voice_profiles")
+      .select("id,style_descriptors,compiled_prompt,example_snippets,confidence,model_used,refreshed_at")
+      .eq("id", account.voice_profile_id).eq("tenant_id", tenantId).eq("approved", true).maybeSingle();
+    if (profile.error || !profile.data) return false;
+    voiceProfile = profile.data;
+  }
   const queued = await db.from("texttorrent_inbound_work").upsert({
     tenant_id: tenantId, account_id: account.id,
     provider_message_id: providerMessageId, provider_conversation_id: providerConversationId,
@@ -205,7 +220,7 @@ async function enqueueInboundWork(
       lead_id: leadId,
     },
     merchant_context: leadId ? { lead_id: leadId } : {},
-    voice_profile: {},
+    voice_profile: voiceProfile,
     status: "pending",
   }, { onConflict: "tenant_id,provider_message_id", ignoreDuplicates: true });
   return !queued.error;
@@ -237,15 +252,6 @@ export async function POST(req: NextRequest) {
     (typeof payload.messageid === "string" && payload.messageid) ||
     "";
 
-  // Opt-out keyword auto-suppression — runs regardless of tenant resolution.
-  if (from && isStopCommand(messageText)) {
-    const result = await suppressPhoneViaCasl(from, "texttorrent_inbound");
-    if (!result.ok) {
-      console.error("[webhooks.texttorrent.sms-inbound] suppress-phone failed", result.error);
-      return NextResponse.json({ ok: false, error: "suppression_failed" }, { status: 503 });
-    }
-  }
-
   // Persist inbound to lead_interactions when we can resolve a tenant.
   const db = getServiceSupabase();
   const resolved = await resolveTenantByInboundNumber(db, to);
@@ -255,6 +261,18 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ ok: false, error: "no_tenant_mapping" }, { status: 503 });
   }
   const { tenantId, userId: routedToUserId } = resolved;
+  if (from && isStopCommand(messageText)) {
+    const digits = from.replace(/\D/g, "").slice(-10);
+    if (digits.length !== 10) return NextResponse.json({ ok: false, error: "invalid_stop_phone" }, { status: 400 });
+    const durable = await db.from("sunbiz_phone_suppressions").upsert({
+      tenant_id: tenantId, phone_last10: digits, reason: "OPT_OUT",
+      source: "texttorrent_webhook", updated_at: new Date().toISOString(),
+    }, { onConflict: "tenant_id,phone_last10" });
+    if (durable.error) return NextResponse.json({ ok: false, error: "suppression_failed" }, { status: 503 });
+    void suppressPhoneViaCasl(from, "texttorrent_inbound").then((result) => {
+      if (!result.ok) console.error("[webhooks.texttorrent.sms-inbound] CASL propagation failed", result.error);
+    });
+  }
 
   const leadId = await findLeadByPhone(db, tenantId, from);
   const providerMessageId = messageId || `tt-fp:${createHash("sha256")

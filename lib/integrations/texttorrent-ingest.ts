@@ -136,17 +136,35 @@ export async function ingestTtInboxMessages(
         skipped += toInsert.length;
       } else {
         inserted += toInsert.length;
-        const accounts = await db.from("sunbiz_agent_accounts").select("id,from_number")
+        const accounts = await db.from("sunbiz_agent_accounts").select("id,from_number,voice_profile_id")
           .eq("tenant_id", tenantId).eq("provider", "texttorrent").eq("enabled", true);
         if (!accounts.error) {
+          const accountRows = (accounts.data || []) as Array<{ id: string; from_number: string; voice_profile_id: string | null }>;
+          const profileIds = accountRows.flatMap((a) => a.voice_profile_id ? [a.voice_profile_id] : []);
+          const profiles = profileIds.length ? await db.from("agent_voice_profiles")
+            .select("id,style_descriptors,compiled_prompt,example_snippets,confidence,model_used,refreshed_at")
+            .eq("tenant_id", tenantId).eq("approved", true).in("id", profileIds) : { data: [], error: null };
+          if (profiles.error) {
+            console.error("[tt-ingest] approved voice profile lookup failed", profiles.error.message);
+            skipped += toInsert.length;
+            continue;
+          }
+          const profileById = new Map(((profiles.data || []) as Array<Record<string, unknown> & { id: string }>)
+            .map((p) => [p.id, p]));
+          const unmapped: Array<{ provider_message_id: string; to_phone: string }> = [];
           const work = ((saved.data || []) as Array<{
             id: string; provider_message_id: string; to_phone: string; from_phone: string;
             direction: string; content: string; lead_id: string | null;
             metadata: { tt_chat_id?: string | null } | null;
           }>).filter((row) => row.direction === "inbound").flatMap((row) => {
             const did = last10(row.to_phone);
-            const account = ((accounts.data || []) as Array<{ id: string; from_number: string }>)
+            const account = accountRows
               .find((a) => last10(a.from_number) === did);
+            if (!account) {
+              unmapped.push({ provider_message_id: row.provider_message_id, to_phone: row.to_phone });
+              return [];
+            }
+            if (account?.voice_profile_id && !profileById.has(account.voice_profile_id)) return [];
             return account ? [{
               tenant_id: tenantId, account_id: account.id,
               provider_message_id: row.provider_message_id,
@@ -157,13 +175,28 @@ export async function ingestTtInboxMessages(
                 to_phone: row.from_phone, lead_id: row.lead_id,
               },
               merchant_context: row.lead_id ? { lead_id: row.lead_id } : {},
-              voice_profile: {}, status: "pending",
+              voice_profile: account.voice_profile_id ? profileById.get(account.voice_profile_id) : {},
+              status: "pending",
             }] : [];
           });
           if (work.length) {
-            await db.from("texttorrent_inbound_work").upsert(work, {
+            const queued = await db.from("texttorrent_inbound_work").upsert(work, {
               onConflict: "tenant_id,provider_message_id", ignoreDuplicates: true,
             });
+            if (queued.error) {
+              console.error("[tt-ingest] work enqueue failed", queued.error.message);
+              skipped += work.length;
+            }
+          }
+          if (unmapped.length) {
+            await db.from("agent_events").insert(unmapped.map((row) => ({
+              event_type: "TEXTTORRENT_UNMAPPED_DID", publisher_agent: "texttorrent",
+              severity: "warn", correlation_id: tenantId,
+              payload: {
+                tenant_id: tenantId, destination_last4: last10(row.to_phone).slice(-4),
+                provider_message_id: row.provider_message_id,
+              },
+            })));
           }
         }
       }
