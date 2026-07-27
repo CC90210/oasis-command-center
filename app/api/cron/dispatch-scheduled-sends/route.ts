@@ -166,7 +166,24 @@ async function processSms(db: Db, row: ClaimedRow): Promise<void> {
   const dryRun = isDryRun("texttorrent");
   if (!dryRun) {
     try {
-      const creds = await getTextTorrentCredentials(row.tenant_id);
+      // Semi-mode drafts are approved for a specific employee identity. Resolve
+      // that identity again at fire time and require the frozen sender DID to
+      // still match, otherwise the tenant default act-as account could send an
+      // employee's approved reply from the wrong TextTorrent sub-account.
+      const identity = await db.from("sunbiz_agent_accounts")
+        .select("act_as_email")
+        .eq("tenant_id", row.tenant_id)
+        .eq("user_id", row.actor_user_id)
+        .eq("provider", "texttorrent")
+        .eq("from_number", row.from_identity)
+        .eq("enabled", true)
+        .maybeSingle();
+      if (identity.error || !identity.data?.act_as_email) {
+        return markRetryOrFail(db, row, "sunbiz_agent_identity_unavailable");
+      }
+      const creds = await getTextTorrentCredentials(row.tenant_id, {
+        actAsEmail: identity.data.act_as_email,
+      });
       await ttSendSms(creds, { number: row.to_phone, message: row.body, sender_id: row.from_identity });
     } catch (err) {
       const reason =
