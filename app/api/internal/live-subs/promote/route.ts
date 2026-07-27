@@ -6,8 +6,9 @@
  * Ezra approves in Telegram, then POSTs { lead_id } here. This route resolves
  * the SunBiz ("submissions") tenant and runs promoteLeadToApplication — which
  * maps the full UW-sheet field set onto the application, stamps phone_status,
- * moves the lead off the Leads board, and regenerates the branded PDF. The same
- * endpoint backs the one-time backfill of already-approved leads.
+ * and regenerates the branded PDF. The lead REMAINS on the Live Subs board —
+ * an accepted Bridge deal is worked there, not routed to "Application In". The
+ * same endpoint backs the one-time backfill of already-approved leads.
  *
  * Trust boundary: NO Supabase session. Auth is HMAC-SHA256 over the raw body
  * with OASIS_OUTBOUND_HMAC_SECRET — the same shared secret the VPS send_gateway

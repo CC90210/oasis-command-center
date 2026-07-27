@@ -14,6 +14,10 @@
  * mapLeadDataToApplicationFields (canonical keys) + extractAppFields (normalize),
  * then gap-fill onto the application so operator edits are never clobbered.
  *
+ * The lead STAYS on the Live Subs board (it is never stamped `transferred_at`).
+ * An accepted Bridge deal is pre-qualified work-in-hand, not a fresh intake, so
+ * it belongs in Live Subs rather than the "Application In" stage — see step 4.
+ *
  * Live subs arrive without a phone (ISO sheets carry no contact PII). That does
  * NOT block creation — the application is shoppable without it — so we stamp
  * phone_status:"needs_lookup" as a visible flag the operator (and, later, the
@@ -163,15 +167,62 @@ export async function promoteLeadToApplication(input: {
     // Provenance: mark a freshly created app as the live-sub auto path; leave a
     // reused app's existing created_via (e.g. form_submission) intact.
     if (appRes.created) patch.created_via = source;
-    if (!appData.promoted_at) patch.promoted_at = new Date().toISOString();
+    // NOTE: `promoted_at` is deliberately NOT stamped — see step 4. It is the
+    // flag the Applications board filters ON (lib/manifest/data.ts), the exact
+    // mirror of the lead board's `transferred_at`. Stamping one without the
+    // other puts the same deal on BOTH boards. An already-promoted application
+    // (a re-run of a deal an operator has since transferred) keeps its own
+    // stamp — this only stops the promote from setting one.
     if (!appData.phone_status) patch.phone_status = phoneStatus;
 
     await updateRecord({ tenant_id: tenantId, entity: "application", id: applicationId, patch });
 
-    // 4) Move the lead off the Leads board (the board filters on transferred_at),
-    //    linking it to the application. Only stamp if not already transferred.
+    // 4) Link the lead to its application, but LEAVE IT ON THE LIVE SUBS BOARD.
+    //
+    //    2026-07-27 (Adon) — this step used to stamp `transferred_at`, which is
+    //    the flag the Leads board filters on (lib/manifest/data.ts). Stamping it
+    //    made an Ezra-approved Bridge deal vanish from the Live Subs tab the
+    //    instant it was accepted and reappear only as an "Application In" card.
+    //    That is the wrong destination for this path: a live sub arrives
+    //    pre-qualified with the UW sheet and statements already in hand, so it is
+    //    ready to be WORKED in Live Subs, not parked in the application-intake
+    //    stage the merchant has already completed.
+    //
+    //    ONE DEAL, ONE BOARD. The two markers are a matched pair: a lead is
+    //    hidden from the Leads board by `transferred_at`, and an application is
+    //    SHOWN on the Applications board by `promoted_at` (lib/manifest/data.ts).
+    //    Dropping one without the other would put the deal on both boards, so
+    //    neither is stamped here. The application record is still created and
+    //    still carries status="application_in", so underwriting and the branded
+    //    PDF are unaffected — it simply stays off the Applications board until an
+    //    operator explicitly transfers it, which is also when it becomes
+    //    selectable in Shopping Out (that picker reads the same filtered list).
+    //    Work the deal in Live Subs, then Transfer to Application to shop it.
+    //
+    //    This mirrors the dropped-application path exactly
+    //    (lib/applications/apply-extracted.ts), which lands its lead at uw_sheet
+    //    and creates its backing application with neither marker.
+    //
+    //    Nothing here stamps transferred_at, so a lead that was ALREADY
+    //    transferred (a re-run / retry_promote of a deal an operator had since
+    //    moved on manually) keeps whatever it had — this only stops the promote
+    //    from setting it, it never clears one.
+    //    STAGE IS FORCED HERE, not just at creation. The dashboard approve path
+    //    de-duplicates against an existing merchant lead
+    //    (app/api/scrub-candidates/[id] findExistingLead), and that lead can sit
+    //    in ANY stage — follow_up, ghost, declined. Only the create branch runs
+    //    sanitizeLeadData, which is what pins stage="uw_sheet"; the dedup branch
+    //    promotes the existing record untouched. That used to be invisible
+    //    because the transfer marker pulled the lead off the board entirely, so
+    //    now that it stays visible it has to be visible in the RIGHT place, or
+    //    an approved Bridge deal would sit in Live Subs' neighbour stage forever.
+    //    Matching the create branch also means the dedup'd deal fires the same
+    //    uw_sheet first-touch cadence, which is what a scrubber-fed live sub is
+    //    supposed to get (it carries no docs_on_file — see lib/drips/enroller).
     const leadPatch: Record<string, unknown> = { application_id: applicationId };
-    if (!leadData.transferred_at) leadPatch.transferred_at = new Date().toISOString();
+    if (!leadData.transferred_at && leadData.stage !== "uw_sheet") {
+      leadPatch.stage = "uw_sheet";
+    }
     await updateRecord({ tenant_id: tenantId, entity: "lead", id: leadId, patch: leadPatch });
 
     // 5) Reconcile the final application fields against the pinned parser
