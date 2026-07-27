@@ -14,7 +14,7 @@ export async function GET(req: NextRequest) {
   if (!threadKey || threadKey.length > 500) return NextResponse.json({ ok: false, error: "invalid_thread_key" }, { status: 400 });
 
   const db = getServiceSupabase();
-  let query = db.from("sunbiz_reply_drafts")
+  const query = db.from("sunbiz_reply_drafts")
     .select("id,conversation_state_id,agent_account_id,lead_id,thread_key,to_phone,original_text,status,intent,confidence,model_id,model_version,knowledge_version,created_at")
     .eq("tenant_id", session.tenantId).eq("thread_key", threadKey).eq("status", "pending")
     .order("created_at", { ascending: false }).limit(1);
