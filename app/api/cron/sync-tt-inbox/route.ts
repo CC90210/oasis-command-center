@@ -16,7 +16,7 @@ import { syncTenantInbox } from "@/lib/integrations/texttorrent-ingest";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
-export const maxDuration = 60;
+export const maxDuration = 120;
 
 const SUNBIZ_TENANT_ID = process.env.TEXTTORRENT_TENANT_ID || "aa04fa1f-ad6a-44b0-ac4b-2ff5d1067110";
 
@@ -36,8 +36,15 @@ function checkAuth(req: NextRequest): boolean {
 export async function GET(req: NextRequest) {
   if (!checkAuth(req)) return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
   try {
-    const r = await syncTenantInbox(SUNBIZ_TENANT_ID, { maxChats: 15 });
-    return NextResponse.json({ ok: true, ...r });
+    // Env-tunable without a redeploy. Defaults bumped 15 -> 40 for fuller
+    // ongoing coverage of the recent inbox. For a deeper one-time HISTORY
+    // backfill, raise TT_SYNC_MAX_CHATS (cap 200) and TT_SYNC_PAGES (cap 10,
+    // each page = 50 older chats), let it run a few cycles, then revert — the
+    // sync is idempotent and 429-safe on the shared 60/min TT budget.
+    const maxChats = Number(process.env.TT_SYNC_MAX_CHATS) || 40;
+    const pages = Number(process.env.TT_SYNC_PAGES) || 1;
+    const r = await syncTenantInbox(SUNBIZ_TENANT_ID, { maxChats, pages });
+    return NextResponse.json({ ok: true, maxChats, pages, ...r });
   } catch (e) {
     return NextResponse.json({ ok: false, error: e instanceof Error ? e.message.slice(0, 200) : "sync_failed" }, { status: 500 });
   }

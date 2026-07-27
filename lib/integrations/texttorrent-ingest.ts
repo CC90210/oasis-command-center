@@ -138,17 +138,28 @@ export async function ingestTtInboxMessages(
  */
 export async function syncTenantInbox(
   tenantId: string,
-  opts: { maxChats?: number } = {},
+  opts: { maxChats?: number; pages?: number } = {},
 ): Promise<{ chats: number; scanned: number; inserted: number; skipped: number }> {
   const db = getServiceSupabase();
   // PARENT account (actAsEmail:null) — the full account inbox across all reps.
   // The default (act-as the tenant's sub-account, e.g. jordan@) only sees that
   // sub-account's chats and returns empty threads here, so sync as the parent.
   const creds = await getTextTorrentCredentials(tenantId, { actAsEmail: null });
-  const maxChats = Math.max(1, Math.min(opts.maxChats ?? 40, 50));
+  const maxChats = Math.max(1, Math.min(opts.maxChats ?? 40, 200));
+  const pages = Math.max(1, Math.min(opts.pages ?? 1, 10));
 
-  const inbox = await getInbox(creds, { limit: 50, page: 1 }).catch(() => ({ data: [] as TtInboxMessage[] }));
-  const items = inbox.data || [];
+  // Gather candidate chats across `pages` pages of the inbox (each page = 50).
+  // page 1 alone is the recent inbox (ongoing sync); more pages reach further
+  // back for a history backfill. Stop early on a short/empty page (the last one)
+  // or when getInbox fails soft to [] (rate limit); the 429 break in the thread
+  // loop below is the real guard on the shared 60/min parent budget.
+  const items: TtInboxMessage[] = [];
+  for (let p = 1; p <= pages; p++) {
+    const page = await getInbox(creds, { limit: 50, page: p }).catch(() => ({ data: [] as TtInboxMessage[] }));
+    const pageItems = page.data || [];
+    items.push(...pageItems);
+    if (pageItems.length < 50) break;
+  }
   // Skip chats with UNREAD messages. The live JARVIS Jordan agent detects new
   // merchant replies via unread_count, and getThread() marks a thread read on
   // view — so ingesting an unread chat here would steal that signal and make
