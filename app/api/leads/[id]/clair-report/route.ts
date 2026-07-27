@@ -101,9 +101,30 @@ export async function POST(_req: Request, ctx: Ctx) {
     return NextResponse.json({ ok: false, error: "lead_not_found" }, { status: 404 });
   }
 
-  // Who asked. Recorded on the report row because a permissible-use assertion
-  // is made on a person's behalf, so the row must name that person.
+  // MANUAL GUARD — who asked, and a refusal if the answer is "nobody".
+  //
+  // A CLEAR query asserts a DPPA/GLB permissible use on a named person's
+  // behalf, so an unattributed pull is not a logging gap, it is an
+  // impermissible query. These fields used to fall back to null, which meant a
+  // caller that reached this line without a human behind it would still spend
+  // the query and write an anonymous report row — exactly the shape an
+  // automated caller produces. Both identifiers are now required and the route
+  // fails CLOSED without them, so "automated" cannot happen by accident: it
+  // would have to be a deliberate act of forging an operator identity.
   const sessionUser = await getSessionUser();
+  const requestedBy = auth.userId?.trim() ?? "";
+  const requestedByEmail = sessionUser?.email?.trim() ?? "";
+  if (!requestedBy || !requestedByEmail) {
+    return NextResponse.json(
+      {
+        ok: false,
+        error: "manual_operator_required",
+        message:
+          "A CLEAR report must be pulled by a signed-in operator. No permissible-use query runs without one.",
+      },
+      { status: 403 },
+    );
+  }
 
   const result = await callBridgeExecTool(
     auth.target,
@@ -111,8 +132,8 @@ export async function POST(_req: Request, ctx: Ctx) {
       tool_name: "clair_report",
       tenant_id: auth.tenantId,
       lead_id: leadId,
-      requested_by: auth.userId ?? null,
-      requested_by_email: sessionUser?.email ?? null,
+      requested_by: requestedBy,
+      requested_by_email: requestedByEmail,
     },
     { timeoutMs: BRIDGE_TIMEOUT_MS },
   );
