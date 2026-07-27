@@ -97,7 +97,12 @@ export function ClairReportPanel({
   const [pulling, setPulling] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // Same predicate the API route enforces — imported, not re-implemented.
+  // Same predicate the API route enforces — imported, not re-implemented, so the
+  // button and the 409 can never disagree. As of 2026-07-27 this is
+  // unconditionally true: CLAIR is offered at every point in the lead lifecycle,
+  // with or without a phone already on file, because the automated number is
+  // often the wrong one. The seam is kept (rather than inlining `true`) so any
+  // future rule lands in lib/clair/eligibility.ts once and both sides inherit it.
   const applies = clairEligibility(leadData).eligible;
 
   const load = useCallback(async () => {
@@ -159,7 +164,7 @@ export function ClairReportPanel({
 
       <p className="mt-1.5 text-[12px] text-fg-muted leading-relaxed">
         {applies
-          ? "The automated lookup could not produce a number for this merchant. A CLAIR report is a billable, permissible-use query — run it only when you intend to use the result."
+          ? "A CLAIR report is a billable, permissible-use query — run it only when you intend to use the result. Available whether or not a number is already on file: the automated lookup is frequently wrong, and this is how you correct it."
           : "Reports previously pulled for this lead."}
       </p>
 

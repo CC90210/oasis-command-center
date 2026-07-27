@@ -93,9 +93,15 @@ export async function POST(_req: Request, ctx: Ctx) {
     return NextResponse.json({ ok: false, error: "lead_not_found" }, { status: 404 });
   }
 
-  // Guard 2 — CLAIR is the FALLBACK. Refuse when the automated path has not run
-  // or already produced a number. The UI hides the button in those cases; this
-  // is the same rule enforced where it cannot be bypassed.
+  // Guard 2 — the shared availability rule, enforced where it cannot be bypassed
+  // (the UI imports the same predicate, so the button and this 409 agree).
+  //
+  // 2026-07-27: this no longer refuses a lead that already has a phone or whose
+  // automated lookup reported "found". Those preconditions were removed on
+  // purpose — see lib/clair/eligibility.ts. The compliance boundary is Guard 0
+  // (authenticated operator) + the role gate + the tenant check + the
+  // requested_by attribution below, NOT this call. Keep the seam so a future
+  // rule has one home; do NOT reinstate a phone-presence precondition here.
   const leadData = (lead.data ?? {}) as Record<string, unknown>;
   const gate = clairEligibility(leadData);
   if (!gate.eligible) {

@@ -295,9 +295,8 @@ export function EnrichmentTab({
   // A finished lookup writes to the LEAD (phone, phone_lookup_status), not just
   // to its own table, and `record` is a prop owned by the drawer. Bumping only
   // the local key would refresh the summary's own fetches while leaving every
-  // consumer of `record` — including clairEligibility, which decides whether the
-  // billable fallback is even offered — reading pre-lookup data until someone
-  // manually reopened the drawer.
+  // consumer of `record` — the phone chip, the CLAIR panel's history view —
+  // reading pre-lookup data until someone manually reopened the drawer.
   const bump = useCallback(() => {
     setRefreshKey((k) => k + 1);
     void onReload?.();
@@ -307,10 +306,11 @@ export function EnrichmentTab({
     <div className="space-y-5">
       <EnrichmentSummary leadId={leadId} refreshKey={refreshKey} leadData={record} />
       <BackgroundCheckTab leadId={leadId} record={record} onChanged={bump} />
-      {/* Order is the policy, not a layout preference: the free automated lookup
-          is offered first, and CLAIR renders below it precisely because
-          clairEligibility() keeps the billable button hidden until this one has
-          run and come up empty. */}
+      {/* Order is the recommendation, not a gate: the free automated lookup sits
+          first because it is the one to try first, and the billable CLAIR pull
+          renders below it. Since 2026-07-27 CLAIR is NOT hidden while the
+          automated lookup is unrun or reports "found" — the automated number is
+          often wrong, and correcting it is precisely what CLAIR is for. */}
       <PhoneLookupPanel leadId={leadId} leadData={record} onChanged={bump} />
       <ClairReportPanel leadId={leadId} leadData={record} onChanged={bump} />
     </div>
