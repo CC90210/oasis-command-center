@@ -146,18 +146,26 @@ assert.ok(
 // is `server-only` and cannot be loaded here.
 const proxy = read(join(ROOT, "lib", "bridge-proxy.ts"));
 assert.ok(
-  proxy.includes("clairCapabilityError(body)"),
+  proxy.includes("clairCapabilityError(body, session)"),
   "callBridgeExecTool must run the CLEAR capability gate — without it, any server-side " +
     "caller with a resolved bridge target can spend a regulated query",
 );
 assert.ok(
-  proxy.indexOf("clairCapabilityError(body)") < proxy.indexOf("await fetch("),
+  proxy.indexOf("clairCapabilityError(body, session)") < proxy.indexOf("await fetch("),
   "the CLEAR capability gate must run BEFORE the network call, so a refused pull costs nothing",
 );
+// The identity must be resolved from the session inside the transport. If this
+// ever reads out of `body` instead, the gate becomes caller-supplied again.
+assert.ok(
+  proxy.includes("getSessionUser()") && proxy.indexOf("getSessionUser()") < proxy.indexOf("clairCapabilityError(body, session)"),
+  "the transport must resolve the operator from the request session BEFORE gating, " +
+    "never trust attribution supplied in the call body",
+);
 
+const SESSION = { userId: "user-uuid", email: "op@example.com" };
 const OPERATOR = { requested_by: "user-uuid", requested_by_email: "op@example.com" };
-// Every shape an automated caller actually produces: no attribution at all,
-// half of it, blank strings, or a non-string.
+
+// ---- 7a. Missing/blank/non-string attribution is refused even WITH a session.
 for (const body of [
   { tool_name: CLAIR_TOOL_NAME },
   { tool_name: CLAIR_TOOL_NAME, requested_by: "user-uuid" },
@@ -168,23 +176,62 @@ for (const body of [
   { tool_name: CLAIR_TOOL_NAME, requested_by: 42, requested_by_email: "op@example.com" },
 ]) {
   assert.equal(
-    clairCapabilityError(body as Record<string, unknown>),
+    clairCapabilityError(body as Record<string, unknown>, SESSION),
     "clair_requires_operator_attribution",
     `unattributed CLEAR pull must be refused: ${JSON.stringify(body)}`,
   );
 }
 
-// A real operator-attributed pull proceeds, and non-CLEAR tools are untouched.
-assert.equal(clairCapabilityError({ tool_name: CLAIR_TOOL_NAME, ...OPERATOR }), null);
-assert.equal(clairCapabilityError({ tool_name: "bash", command: "ls" }), null);
-assert.equal(clairCapabilityError({ tool_name: "send_email" }), null);
+// ---- 7b. THE ONE THAT MATTERS (Codex [P1]). A caller that invents its own
+// attribution is refused, because the identity comes from the session, not the
+// body. These are the exact shapes a cron would produce.
+for (const [session, label] of [
+  [null, "no session at all (cron / worker / queue)"],
+  [{ userId: null, email: null }, "session object with no user"],
+  [{ userId: "   ", email: "op@example.com" }, "blank user id"],
+] as const) {
+  assert.equal(
+    clairCapabilityError({ tool_name: CLAIR_TOOL_NAME, requested_by: "system", requested_by_email: "cron@internal" }, session),
+    "clair_requires_authenticated_operator",
+    `self-asserted attribution must not authorize a pull — ${label}`,
+  );
+  // …and it stays refused even when the invented attribution is well-formed
+  // and looks exactly like a real operator's.
+  assert.equal(
+    clairCapabilityError({ tool_name: CLAIR_TOOL_NAME, ...OPERATOR }, session),
+    "clair_requires_authenticated_operator",
+    `a cron copying a real operator's attribution must still be refused — ${label}`,
+  );
+}
+
+// ---- 7c. Attribution must name the ACTUAL session user, not a different one.
+assert.equal(
+  clairCapabilityError({ tool_name: CLAIR_TOOL_NAME, requested_by: "someone-else", requested_by_email: "op@example.com" }, SESSION),
+  "clair_attribution_mismatch",
+  "a pull may not be spent in another operator's name",
+);
+assert.equal(
+  clairCapabilityError({ tool_name: CLAIR_TOOL_NAME, requested_by: "user-uuid", requested_by_email: "other@example.com" }, SESSION),
+  "clair_attribution_mismatch",
+  "the attributed email must match the authenticated session",
+);
+
+// ---- 7d. The real path works, and nothing else is affected.
+assert.equal(clairCapabilityError({ tool_name: CLAIR_TOOL_NAME, ...OPERATOR }, SESSION), null);
+assert.equal(
+  clairCapabilityError({ tool_name: CLAIR_TOOL_NAME, requested_by: "user-uuid", requested_by_email: "OP@Example.com " }, SESSION),
+  null,
+  "email comparison is case/whitespace insensitive — a real operator must not be locked out",
+);
+assert.equal(clairCapabilityError({ tool_name: "bash", command: "ls" }, null), null);
+assert.equal(clairCapabilityError({ tool_name: "send_email" }, null), null);
 
 // The spelling-independence claim, stated as a test: a caller that builds the
 // name by concatenation — the exact case the source scan cannot see — is still
 // refused, because this gate reads the resolved value.
 assert.equal(
-  clairCapabilityError({ tool_name: "clair" + "_report" }),
-  "clair_requires_operator_attribution",
+  clairCapabilityError({ tool_name: "clair" + "_report", requested_by: "system", requested_by_email: "cron@internal" }, null),
+  "clair_requires_authenticated_operator",
   "the capability gate must not depend on how the tool name was spelled in source",
 );
 
