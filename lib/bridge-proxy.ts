@@ -27,6 +27,7 @@ import {
   type BridgeTarget as _BridgeTarget,
 } from "./bridge-target-resolver";
 import { bridgeExecToolAllowedForRole } from "./role-gates";
+import { clairCapabilityError } from "./clair/capability";
 
 export type BridgeTarget = _BridgeTarget;
 export const resolveBridgeTarget = _resolveBridgeTarget;
@@ -98,6 +99,19 @@ export async function callBridgeExecTool(
   body: Record<string, unknown>,
   opts?: { timeoutMs?: number },
 ): Promise<BridgeExecResult> {
+  // CLEAR CAPABILITY GATE — fails closed BEFORE the network call, so a
+  // regulated, billable query cannot be spent by a caller with no operator
+  // behind it. This is deliberately here, in the one transport every bridge
+  // caller shares, rather than only in the clair-report route: the session-less
+  // resolveBridgeTarget() + callBridgeExecTool() shape is already used by
+  // lib/underwriting/run.ts and lib/forms/next-steps-email.ts, and a future cron
+  // copying it is exactly how CLEAR would become automatic by accident. It
+  // matches on the resolved tool_name, so it holds regardless of how the caller
+  // spelled it (Codex review 2026-07-27 [P2]). Non-CLEAR tools are unaffected.
+  const clairError = clairCapabilityError(body);
+  if (clairError) {
+    return { ok: false, isError: true, output: "", error: clairError, httpStatus: 0 };
+  }
   try {
     const res = await fetch(`${target.baseUrl}/exec-tool`, {
       method: "POST",

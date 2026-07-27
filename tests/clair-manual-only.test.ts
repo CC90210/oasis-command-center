@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join, relative, sep } from "node:path";
 
+import { CLAIR_TOOL_NAME, clairCapabilityError } from "../lib/clair/capability";
+
 /**
  * CLEAR (CLAIR) MUST STAY MANUAL. This test is the enforcement, not a comment.
  *
@@ -32,6 +34,8 @@ const ROOT = join(__dirname, "..");
 
 /** The one file permitted to invoke the CLEAR bridge tool. */
 const THE_ONE_ROUTE = ["app", "api", "leads", "[id]", "clair-report", "route.ts"].join(sep);
+/** The capability module that names the tool so the transport can gate on it. */
+const THE_CAPABILITY = ["lib", "clair", "capability.ts"].join(sep);
 
 const SOURCE_DIRS = ["app", "lib", "components", "scripts"];
 const SOURCE_EXT = /\.(ts|tsx|js|mjs)$/;
@@ -59,17 +63,29 @@ assert.ok(files.length > 100, "source walk found suspiciously few files — the 
 const read = (f: string) => readFileSync(f, "utf8");
 const rel = (f: string) => relative(ROOT, f);
 
-// ---- 1. The CLEAR bridge tool is invoked from EXACTLY ONE file.
+// ---- 1. The CLEAR bridge tool name appears in EXACTLY TWO files.
 // `clair_report` is the tool_name the VPS bridge dispatches on. Anything that
 // sends it is capable of spending a billable permissible-use query.
-const invokers = files.filter((f) => read(f).includes('"clair_report"') || read(f).includes("'clair_report'"));
+//
+// Codex review 2026-07-27 [P2]: this originally matched only '"clair_report"'
+// and "'clair_report'", so a backtick literal, a concatenation or a shared
+// constant would have slipped past a guard whose whole purpose was to catch
+// them. It now matches the bare substring — and, more importantly, is no longer
+// the only line of defence: clairCapabilityError() below runs on the RESOLVED
+// tool name inside the shared transport, where spelling cannot help you.
+//
+// Word-bounded: `clair_reports` is the TABLE and is read all over the UI, which
+// is fine and unregulated. `clair_report` is the TOOL — the thing that spends.
+const TOOL_NAME_RE = /\bclair_report\b/;
+const NAMED = new Set([THE_ONE_ROUTE, THE_CAPABILITY]);
+const mentions = files.filter((f) => TOOL_NAME_RE.test(read(f)));
 assert.deepEqual(
-  invokers.map(rel).sort(),
-  [THE_ONE_ROUTE],
-  "the CLEAR bridge tool must be invoked from exactly one session-gated route.\n" +
-    "A new invoker means CLEAR can now be pulled from somewhere that has not been\n" +
+  mentions.map(rel).sort(),
+  [...NAMED].sort(),
+  "the CLEAR bridge tool may only be named in the session-gated route and the capability module.\n" +
+    "A new mention means CLEAR may now be pulled from somewhere that has not been\n" +
     "proven to have a signed-in human behind it. Found: " +
-    invokers.map(rel).join(", "),
+    mentions.map(rel).join(", "),
 );
 
 // ---- 2. That one route keeps every manual-only control.
@@ -123,6 +139,56 @@ assert.ok(
   "vercel.json must not schedule anything against the CLEAR route — a cron has no operator identity",
 );
 
+// ---- 7. The transport itself refuses an unattributed CLEAR pull.
+// This is the layer that does not depend on how anyone spelled anything: it
+// runs on the resolved tool_name inside callBridgeExecTool, which every bridge
+// caller must go through. Imported from the pure module because bridge-proxy.ts
+// is `server-only` and cannot be loaded here.
+const proxy = read(join(ROOT, "lib", "bridge-proxy.ts"));
+assert.ok(
+  proxy.includes("clairCapabilityError(body)"),
+  "callBridgeExecTool must run the CLEAR capability gate — without it, any server-side " +
+    "caller with a resolved bridge target can spend a regulated query",
+);
+assert.ok(
+  proxy.indexOf("clairCapabilityError(body)") < proxy.indexOf("await fetch("),
+  "the CLEAR capability gate must run BEFORE the network call, so a refused pull costs nothing",
+);
+
+const OPERATOR = { requested_by: "user-uuid", requested_by_email: "op@example.com" };
+// Every shape an automated caller actually produces: no attribution at all,
+// half of it, blank strings, or a non-string.
+for (const body of [
+  { tool_name: CLAIR_TOOL_NAME },
+  { tool_name: CLAIR_TOOL_NAME, requested_by: "user-uuid" },
+  { tool_name: CLAIR_TOOL_NAME, requested_by_email: "op@example.com" },
+  { tool_name: CLAIR_TOOL_NAME, requested_by: "   ", requested_by_email: "op@example.com" },
+  { tool_name: CLAIR_TOOL_NAME, requested_by: "user-uuid", requested_by_email: "" },
+  { tool_name: CLAIR_TOOL_NAME, requested_by: null, requested_by_email: null },
+  { tool_name: CLAIR_TOOL_NAME, requested_by: 42, requested_by_email: "op@example.com" },
+]) {
+  assert.equal(
+    clairCapabilityError(body as Record<string, unknown>),
+    "clair_requires_operator_attribution",
+    `unattributed CLEAR pull must be refused: ${JSON.stringify(body)}`,
+  );
+}
+
+// A real operator-attributed pull proceeds, and non-CLEAR tools are untouched.
+assert.equal(clairCapabilityError({ tool_name: CLAIR_TOOL_NAME, ...OPERATOR }), null);
+assert.equal(clairCapabilityError({ tool_name: "bash", command: "ls" }), null);
+assert.equal(clairCapabilityError({ tool_name: "send_email" }), null);
+
+// The spelling-independence claim, stated as a test: a caller that builds the
+// name by concatenation — the exact case the source scan cannot see — is still
+// refused, because this gate reads the resolved value.
+assert.equal(
+  clairCapabilityError({ tool_name: "clair" + "_report" }),
+  "clair_requires_operator_attribution",
+  "the capability gate must not depend on how the tool name was spelled in source",
+);
+
 console.log(
-  `clair-manual-only: OK — CLEAR invoked from 1 route only, ${scheduled.length} scheduled surfaces clean, ${files.length} files scanned`,
+  `clair-manual-only: OK — CLEAR named in 2 files only, transport gate enforced, ` +
+    `${scheduled.length} scheduled surfaces clean, ${files.length} files scanned`,
 );
