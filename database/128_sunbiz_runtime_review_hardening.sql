@@ -112,6 +112,16 @@ begin
 end $$;
 
 revoke all on function public.heartbeat_texttorrent_partition(uuid,text,text,integer),
-  public.release_texttorrent_partition(uuid,text,text) from public;
+  public.heartbeat_texttorrent_partition(text,text,integer),
+  public.release_texttorrent_partition(uuid,text,text),
+  public.release_texttorrent_partition(text,text),
+  public.suppress_texttorrent_inbound(uuid,uuid,uuid,text,text),
+  public.approve_sunbiz_draft(uuid,uuid,uuid,text)
+  from public, anon, authenticated;
 grant execute on function public.heartbeat_texttorrent_partition(uuid,text,text,integer),
-  public.release_texttorrent_partition(uuid,text,text) to service_role;
+  public.heartbeat_texttorrent_partition(text,text,integer),
+  public.release_texttorrent_partition(uuid,text,text),
+  public.release_texttorrent_partition(text,text),
+  public.suppress_texttorrent_inbound(uuid,uuid,uuid,text,text),
+  public.approve_sunbiz_draft(uuid,uuid,uuid,text)
+  to service_role;
