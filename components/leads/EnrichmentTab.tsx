@@ -11,7 +11,7 @@
  *   1. Background check (merchant_background_checks) — court cases, UCC filings,
  *      liens, bankruptcies, MCA defaults. The actionable run / re-run / manual
  *      entry UI is the existing <BackgroundCheckTab/>, unchanged.
- *   2. CLAIR · Thomson Reuters CLEAR (clair_reports) — the manual, billable,
+ *   2. CLEAR · Thomson Reuters CLEAR (clair_reports) — the manual, billable,
  *      permissible-use phone/address enrichment. The existing <ClairReportPanel/>
  *      (which keeps CLEAR data separate from the application record) is now
  *      surfaced here in the drawer, not only on the pipeline page. It is
@@ -255,27 +255,27 @@ function EnrichmentSummary({
     clairChip =
       phoneCount > 0 ? (
         <Chip color="#1f7a4d">
-          <Phone className="h-3 w-3" /> CLAIR: {phoneCount} phone{phoneCount === 1 ? "" : "s"}
+          <Phone className="h-3 w-3" /> CLEAR: {phoneCount} phone{phoneCount === 1 ? "" : "s"}
         </Chip>
       ) : (
         <Chip muted>
-          <PhoneOff className="h-3 w-3" /> CLAIR: no numbers
+          <PhoneOff className="h-3 w-3" /> CLEAR: no numbers
         </Chip>
       );
   } else if (clair?.status === "no_results") {
     clairChip = (
       <Chip muted>
-        <PhoneOff className="h-3 w-3" /> CLAIR: no match
+        <PhoneOff className="h-3 w-3" /> CLEAR: no match
       </Chip>
     );
   } else if (clair?.status === "error") {
     clairChip = (
       <Chip color={riskColor("mca_default")}>
-        <PhoneOff className="h-3 w-3" /> CLAIR: error
+        <PhoneOff className="h-3 w-3" /> CLEAR: error
       </Chip>
     );
   } else if (clair?.status === "pending") {
-    clairChip = <Chip muted>CLAIR report pending…</Chip>;
+    clairChip = <Chip muted>CLEAR report pending…</Chip>;
   }
 
   const HeadIcon = isCritical ? ShieldAlert : bg?.risk_flag === "none" ? ShieldCheck : ShieldQuestion;
@@ -346,7 +346,7 @@ export function EnrichmentTab({
       <EnrichmentSummary leadId={leadId} refreshKey={refreshKey} leadData={record} />
       <BackgroundCheckTab leadId={leadId} record={record} onChanged={bump} />
       {/* Order is a recommendation, not a lock: the free automated lookup reads
-          first because it is the cheaper thing to try. CLAIR sits below it and
+          first because it is the cheaper thing to try. CLEAR sits below it and
           is independently runnable at any time — including on a lead this panel
           has already enriched. */}
       <PhoneLookupPanel leadId={leadId} leadData={record} onChanged={bump} />

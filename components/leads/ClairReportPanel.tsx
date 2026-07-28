@@ -1,9 +1,21 @@
 "use client";
 
 /**
- * ClairReportPanel — the CLAIR (Thomson Reuters CLEAR) enrichment, on a lead.
+ * ClairReportPanel — the Thomson Reuters CLEAR enrichment, on a lead.
  *
- * INDEPENDENT OF THE AUTOMATED LOOKUP (Adon, 2026-07-27). The "Pull CLAIR
+ * NAMING: the vendor product is spelled CLEAR. Everything an operator can read
+ * says CLEAR. The "Clair"/"clair" spelling survives ONLY in identifiers that are
+ * expensive or unsafe to rename — the `clair_reports` table, the VPS bridge tool
+ * name it dispatches on, the `/api/leads/[id]/clair-report` route, and the
+ * symbols in this file. Renaming those needs a migration and a coordinated VPS
+ * deploy; renaming the copy did not. Do not "fix" one half of that split
+ * without the other.
+ *
+ * (Deliberately not spelling the bridge tool name here: tests/clair-manual-only
+ * asserts it appears in exactly two files, and that scan matches the bare
+ * substring on purpose — a mention in a comment is still a mention.)
+ *
+ * INDEPENDENT OF THE AUTOMATED LOOKUP (Adon, 2026-07-27). The "Pull CLEAR
  * Report" button is always available to a permitted operator. It used to render
  * only after TruePeopleSearch had run and failed; that coupling is gone, in the
  * UI and in the route alike, because an automated match is often stale or wrong
@@ -124,14 +136,14 @@ export function ClairReportPanel({
       const res = await fetch(`/api/leads/${leadId}/clair-report`, { method: "POST" });
       const json = await res.json();
       if (!json.ok) {
-        setError(json.message || json.error || "CLAIR lookup failed");
+        setError(json.message || json.error || "CLEAR lookup failed");
       } else {
         setOpen(true);
       }
       await load();
       onChanged?.();
     } catch (e) {
-      setError(e instanceof Error ? e.message : "CLAIR lookup failed");
+      setError(e instanceof Error ? e.message : "CLEAR lookup failed");
     } finally {
       setPulling(false);
     }
@@ -144,7 +156,7 @@ export function ClairReportPanel({
     <div className="mt-5 border-t border-bg-border pt-4">
       <div className="flex items-center gap-2 flex-wrap">
         <h4 className="text-[11px] font-bold uppercase tracking-[0.14em] text-fg-dim">
-          CLAIR
+          CLEAR
         </h4>
         <span className="text-[10px] uppercase tracking-wider rounded-full border border-bg-border text-fg-dim px-1.5 py-0.5">
           Manual · billable
@@ -158,7 +170,7 @@ export function ClairReportPanel({
 
       <p className="mt-1.5 text-[12px] text-fg-muted leading-relaxed">
         {advisory ||
-          "A CLAIR report is a billable, permissible-use query against Thomson Reuters CLEAR. It runs independently of the automated lookup — run it when you intend to use the result."}
+          "A CLEAR report is a billable, permissible-use query against Thomson Reuters. It runs independently of the automated lookup — run it when you intend to use the result."}
       </p>
 
       <div className="mt-2.5 flex items-center gap-2 flex-wrap">
@@ -170,12 +182,12 @@ export function ClairReportPanel({
         >
           {pulling ? (
             <>
-              <RefreshCw className="w-3 h-3 animate-spin" /> Pulling CLAIR report…
+              <RefreshCw className="w-3 h-3 animate-spin" /> Pulling CLEAR report…
             </>
           ) : (
             <>
               <FileSearch className="w-3 h-3" />
-              {hasHistory ? "Pull new CLAIR Report" : "Pull CLAIR Report"}
+              {hasHistory ? "Pull new CLEAR Report" : "Pull CLEAR Report"}
             </>
           )}
         </button>
@@ -248,17 +260,17 @@ function ClairDrawer({
   if (!report) return null;
 
   return (
-    <div className="fixed inset-0 z-50 flex justify-end" role="dialog" aria-modal="true" aria-label="CLAIR report">
+    <div className="fixed inset-0 z-50 flex justify-end" role="dialog" aria-modal="true" aria-label="CLEAR report">
       <button
         type="button"
-        aria-label="Close CLAIR report"
+        aria-label="Close CLEAR report"
         onClick={onClose}
         className="absolute inset-0 bg-black/50 backdrop-blur-[1px]"
       />
       <div className="relative h-full w-full max-w-xl overflow-y-auto border-l border-bg-border bg-bg-deep shadow-2xl">
         <div className="sticky top-0 z-10 flex items-center gap-2 border-b border-bg-border bg-bg-deep/95 px-4 py-3 backdrop-blur">
           <FileSearch className="w-4 h-4 text-accent" />
-          <div className="text-sm font-bold text-fg">CLAIR Report</div>
+          <div className="text-sm font-bold text-fg">CLEAR Report</div>
           <span className="text-[10px] uppercase tracking-wider rounded-full border border-bg-border text-fg-dim px-1.5 py-0.5">
             reference only
           </span>
@@ -353,7 +365,7 @@ function ClairDrawer({
               </ul>
               <p className="mt-1.5 text-[11px] text-fg-dim leading-relaxed">
                 Copy a number into the lead&apos;s Phone field to use it. It is not applied
-                automatically — CLAIR data stays separate from the application record.
+                automatically — CLEAR data stays separate from the application record.
               </p>
             </section>
           )}
