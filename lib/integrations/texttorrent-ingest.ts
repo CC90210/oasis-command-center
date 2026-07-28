@@ -154,7 +154,10 @@ export async function ingestTtInboxMessages(
         }
         const accounts = await db.from("sunbiz_agent_accounts").select("id,from_number,voice_profile_id")
           .eq("tenant_id", tenantId).eq("provider", "texttorrent").eq("enabled", true);
-        if (!accounts.error) {
+        if (accounts.error) {
+          console.error("[tt-ingest] account lookup failed", accounts.error.message);
+          skipped += identities.length;
+        } else {
           const accountRows = (accounts.data || []) as Array<{ id: string; from_number: string; voice_profile_id: string | null }>;
           const profileIds = accountRows.flatMap((a) => a.voice_profile_id ? [a.voice_profile_id] : []);
           const profiles = profileIds.length ? await db.from("agent_voice_profiles")
@@ -173,8 +176,21 @@ export async function ingestTtInboxMessages(
             direction: string; content: string; lead_id: string | null;
             metadata: { tt_chat_id?: string | null } | null;
           }>).filter((row) => row.direction === "inbound");
+          const existingWork = inboundRows.length ? await db.from("texttorrent_inbound_work")
+            .select("provider_message_id").eq("tenant_id", tenantId)
+            .in("provider_message_id", inboundRows.map((row) => row.provider_message_id))
+            : { data: [], error: null };
+          if (existingWork.error) {
+            console.error("[tt-ingest] existing work lookup failed", existingWork.error.message);
+            skipped += inboundRows.length;
+            continue;
+          }
+          const alreadyQueued = new Set(
+            ((existingWork.data || []) as Array<{ provider_message_id: string }>).map((row) => row.provider_message_id),
+          );
           const work: Record<string, unknown>[] = [];
           for (const row of inboundRows) {
+            if (alreadyQueued.has(row.provider_message_id)) continue;
             const did = last10(row.to_phone);
             const account = accountRows
               .find((a) => last10(a.from_number) === did);
@@ -182,7 +198,11 @@ export async function ingestTtInboxMessages(
               unmapped.push({ provider_message_id: row.provider_message_id, to_phone: row.to_phone });
               continue;
             }
-            if (account.voice_profile_id && !profileById.has(account.voice_profile_id)) continue;
+            if (account.voice_profile_id && !profileById.has(account.voice_profile_id)) {
+              console.error("[tt-ingest] configured voice profile is not approved", account.voice_profile_id);
+              skipped++;
+              continue;
+            }
             let scoped;
             try {
               scoped = await loadSunbizInboundContext(db, tenantId, row.lead_id, row.from_phone);
@@ -267,11 +287,10 @@ export async function syncTenantInbox(
     items.push(...pageItems);
     if (pageItems.length < 50) break;
   }
-  // Skip chats with UNREAD messages. The live JARVIS Jordan agent detects new
-  // merchant replies via unread_count, and getThread() marks a thread read on
-  // view — so ingesting an unread chat here would steal that signal and make
-  // Jordan miss the reply. Only pull already-read threads (Jordan handles them
-  // fast); a reply we skip now is ingested on the next run once it's read.
+  // OASIS owns unread ingestion now that the local Jordan worker is retired.
+  // getThread may mark the provider thread read; OASIS is the signal owner,
+  // so reading it cannot hide work from a separate local consumer.
+  // Reconciliation persists and queues every provider message ID exactly once.
   const chatIds = Array.from(
     new Set(items.map((m) => m.chat_id).filter(Boolean)),
   ).slice(0, maxChats);

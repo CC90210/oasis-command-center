@@ -7,6 +7,9 @@ export async function loadSunbizInboundContext(
   db: DbLike, tenantId: string, leadId: string | null, contactPhone: string,
 ): Promise<{ conversation: Record<string, unknown>; merchantContext: Record<string, unknown> }> {
   const phone10 = contactPhone.replace(/\D/g, "").slice(-10);
+  if (!leadId && phone10.length !== 10) {
+    throw new Error("invalid_contact_phone");
+  }
   let interactions = db.from("lead_interactions")
     .select("direction,content,content_preview,sent_at,created_at")
     .eq("tenant_id", tenantId).eq("channel", "sms")

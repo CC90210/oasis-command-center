@@ -272,8 +272,7 @@ export async function POST(req: NextRequest) {
   const db = getServiceSupabase();
   const resolved = await resolveTenantByInboundNumber(db, to);
   if (!resolved) {
-    // Unknown destination number — still 200 so TT doesn't retry, but
-    // don't write an orphan interaction row.
+    // Unknown destination is retryable: 503 prevents silent acknowledgement.
     return NextResponse.json({ ok: false, error: "no_tenant_mapping" }, { status: 503 });
   }
   const { tenantId, userId: routedToUserId } = resolved;
@@ -295,28 +294,21 @@ export async function POST(req: NextRequest) {
     .update([to, from, String(payload.received_at || ""), messageText].join("\n"))
     .digest("hex")}`;
 
-  // Idempotency: when messageId is provided, check for an existing row
-  // via metadata->>tt_message_id. We could promote this to a column +
-  // unique index later if duplicate webhook deliveries become common.
-  if (providerMessageId) {
-    try {
-      const existing = await db
-        .from("lead_interactions")
-        .select("id")
-        .eq("tenant_id", tenantId)
-        .eq("provider", "texttorrent")
-        .eq("provider_message_id", providerMessageId)
-        .maybeSingle();
-      if ((existing.data as { id?: string } | null)?.id) {
-        const queued = await enqueueInboundWork(db, tenantId, to, providerMessageId,
-          (existing.data as { id: string }).id, typeof payload.chat_id === "string" ? payload.chat_id : null,
-          messageText, leadId, from);
-        if (!queued) return NextResponse.json({ ok: false, error: "enqueue_failed" }, { status: 503 });
-        return NextResponse.json({ ok: true, deduped: true });
-      }
-    } catch {
-      // Best-effort idempotency check — if it fails, proceed with insert.
-    }
+  // Canonical provider identity covers TT IDs and fallback hashes.
+  const existing = await db
+    .from("lead_interactions")
+    .select("id")
+    .eq("tenant_id", tenantId)
+    .eq("provider", "texttorrent")
+    .eq("provider_message_id", providerMessageId)
+    .maybeSingle();
+  if (existing.error) return NextResponse.json({ ok: false, error: "dedup_lookup_failed" }, { status: 503 });
+  if ((existing.data as { id?: string } | null)?.id) {
+    const queued = await enqueueInboundWork(db, tenantId, to, providerMessageId,
+      (existing.data as { id: string }).id, typeof payload.chat_id === "string" ? payload.chat_id : null,
+      messageText, leadId, from);
+    if (!queued) return NextResponse.json({ ok: false, error: "enqueue_failed" }, { status: 503 });
+    return NextResponse.json({ ok: true, deduped: true });
   }
 
   // supabase-js does NOT throw on DB errors — check .error and fail-CLOSED so

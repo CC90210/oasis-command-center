@@ -130,14 +130,34 @@ async function ttFetch<T>(
   path: string,
   opts: RequestOpts = {},
 ): Promise<T> {
-  const gate = await getServiceSupabase().rpc("consume_texttorrent_rate_token", {
-    p_bucket: `${creds.tenantId}:parent-sid`,
-    p_worker_id: "oasis-texttorrent-client",
-    p_priority: opts.priority ?? 50,
-    p_limit: 60,
-    p_window_seconds: 60,
-  });
-  if (gate.error || gate.data !== true) {
+  const controller = new AbortController();
+  const gateTimeout = setTimeout(() => controller.abort(), 3000);
+  let gate: { data: unknown; error: { message?: string } | null };
+  try {
+    gate = await getServiceSupabase().rpc("consume_texttorrent_rate_token", {
+      p_bucket: `${creds.tenantId}:parent-sid`,
+      p_worker_id: "oasis-texttorrent-client",
+      p_priority: opts.priority ?? 50,
+      p_limit: 60,
+      p_window_seconds: 60,
+    }).abortSignal(controller.signal);
+  } catch (error) {
+    throw new TextTorrentError(
+      "rate_limiter_unavailable",
+      error instanceof Error ? error.message : "Shared TextTorrent rate limiter unavailable.",
+      503,
+    );
+  } finally {
+    clearTimeout(gateTimeout);
+  }
+  if (gate.error) {
+    throw new TextTorrentError(
+      "rate_limiter_unavailable",
+      gate.error.message || "Shared TextTorrent rate limiter unavailable.",
+      503,
+    );
+  }
+  if (gate.data !== true) {
     throw new TextTorrentError("rate_limited", "Shared TextTorrent parent-SID rate limit deferred.", 429);
   }
   const wait = rateLimitRetryAfterMs(creds.apiSid);

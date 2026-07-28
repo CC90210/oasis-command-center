@@ -1,10 +1,11 @@
-export type SunbizDraftAction = "approve" | "edit_send" | "reject" | "pause" | "resume" | "handoff";
+const DRAFT_ACTIONS = ["approve", "edit_send", "reject", "pause", "resume", "handoff"] as const;
+export type SunbizDraftAction = (typeof DRAFT_ACTIONS)[number];
 const WRITE_ROLES = new Set(["owner", "admin", "member", "loan_officer", "processor"]);
 export function canManageSunbizDraft(role: string | null | undefined): boolean {
   return WRITE_ROLES.has((role || "").trim().toLowerCase());
 }
 export function isSunbizDraftAction(value: unknown): value is SunbizDraftAction {
-  return ["approve", "edit_send", "reject", "pause", "resume", "handoff"].includes(String(value));
+  return (DRAFT_ACTIONS as readonly string[]).includes(String(value));
 }
 export function normalizeDraftText(value: unknown): string | null {
   if (typeof value !== "string") return null;

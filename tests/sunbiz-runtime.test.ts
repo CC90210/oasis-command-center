@@ -29,7 +29,8 @@ assert.match(route, /eq\("status", "pending"\).*select\("id"\)/s);
 assert.match(route, /checkPhoneOptOut/);
 const dispatcher = readFileSync("app/api/cron/dispatch-scheduled-sends/route.ts", "utf8");
 assert.match(dispatcher, /from\("sunbiz_agent_accounts"\)[\s\S]*eq\("user_id", row\.actor_user_id\)/);
-assert.match(dispatcher, /actAsEmail: identity\.data\.act_as_email/);
+assert.match(dispatcher, /actAsEmail: identity\.act_as_email/);
+assert.match(dispatcher, /from_number\.replace\(\/\\D\/g, ""\)\.slice\(-10\)/);
 const collection = readFileSync("app/api/conversations/drafts/route.ts", "utf8");
 assert.match(collection, /eq\("tenant_id", session\.tenantId\)/);
 assert.match(collection, /eq\("thread_key", threadKey\)\.eq\("status", "pending"\)/);
@@ -38,6 +39,7 @@ const card = readFileSync("components/conversations/SunbizDraftCard.tsx", "utf8"
 for (const action of ["approve", "edit_send", "reject", "pause", "resume"])
   assert.match(card, new RegExp(`\"${action}\"`));
 const migration = readFileSync("database/127_sunbiz_agent_runtime.sql", "utf8");
+const hardening = readFileSync("database/128_sunbiz_runtime_review_hardening.sql", "utf8");
 for (const table of ["sunbiz_agent_accounts", "sunbiz_conversation_state", "sunbiz_reply_drafts",
   "sunbiz_processing_leases", "sunbiz_provider_rate_state", "texttorrent_inbound_work",
   "texttorrent_dead_letters"]) {
@@ -66,6 +68,13 @@ const ttClient = readFileSync("lib/integrations/texttorrent.ts", "utf8");
 assert.match(ttClient, /consume_texttorrent_rate_token/);
 assert.match(ttClient, /p_bucket: `\$\{creds\.tenantId\}:parent-sid`/);
 assert.match(ttClient, /p_priority: opts\.priority \?\? 50/);
+assert.match(ttClient, /AbortController/);
+assert.match(ttClient, /rate_limiter_unavailable/);
+assert.match(hardening, /idx_tt_inbound_account_due[\s\S]*account_id,status,next_attempt_at,priority,created_at/);
+assert.match(hardening, /heartbeat_texttorrent_partition\(\s*p_tenant_id uuid/);
+assert.match(hardening, /release_texttorrent_partition\(\s*p_tenant_id uuid/);
+assert.match(hardening, /p_final_text is null/);
+assert.match(hardening, /right\(regexp_replace\(coalesce\(to_phone,''\)/);
 assert.match(migration, /effective_limit := greatest[\s\S]*when p_priority >= 90[\s\S]*p_limit - 20/);
 assert.match(migration, /request_count < effective_limit/);
 assert.match(migration, /inference_jobs add column if not exists next_attempt_at/);
