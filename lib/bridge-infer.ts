@@ -102,11 +102,19 @@ export async function queueInfer(
 
   if (key) {
     const since = new Date(Date.now() - (args.dedupeWindowMs ?? 30 * 60_000)).toISOString();
-    const prior = await db
+    // TENANT-SCOPED. This runs as service role, so RLS is not a backstop here.
+    // The key is a content hash, and boilerplate content collides readily
+    // across tenants (a generic "we received your submission" auto-reply hashes
+    // the same everywhere) — without this filter one tenant could adopt or read
+    // another tenant's job. A caller with no tenant may only reuse untenanted
+    // jobs, never a tenant's. [[rls-required-default]]
+    let q = db
       .from("inference_jobs")
       .select("id, status, result_text")
       .eq("source", source)
-      .gte("created_at", since)
+      .gte("created_at", since);
+    q = args.tenantId ? q.eq("tenant_id", args.tenantId) : q.is("tenant_id", null);
+    const prior = await q
       .order("created_at", { ascending: false })
       .limit(1);
     const p = prior.data?.[0] as

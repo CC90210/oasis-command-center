@@ -240,6 +240,10 @@ export async function GET(req: NextRequest) {
       // genuinely broken and someone needs paging.
       if (cls.retryable) pendingCount++;
       else unavailableCount++;
+      // THIS candidate is uncommitted too and will be retried, so it is
+      // deferred like the rest. It is already in classBy, so the loop below
+      // would skip it and undercount by one while leaving its row unmarked.
+      deferredSet.add(c);
       for (const rest of toClassify) if (!classBy.has(rest)) deferredSet.add(rest);
       break;
     }
