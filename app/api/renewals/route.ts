@@ -87,6 +87,26 @@ function optionalNum(v: unknown): { provided: boolean; value: number | null } {
   return { provided: true, value: num(v) };
 }
 
+/**
+ * One shape for "this looks like a deal you already recorded", whether it came
+ * from the friendly pre-check or from the unique index winning a race. The
+ * client keys off `error` to arm its next submit.
+ */
+function duplicateResponse(existing: { id: string | null; lender_name: string | null }) {
+  return NextResponse.json(
+    {
+      ok: false,
+      error: "possible_duplicate",
+      message:
+        "A funded deal for this merchant on this date is already recorded" +
+        `${existing.lender_name ? ` (${existing.lender_name})` : ""}. ` +
+        "Submit again to record it anyway.",
+      existing,
+    },
+    { status: 409 },
+  );
+}
+
 export async function POST(req: NextRequest) {
   const sess = await resolveSessionContext();
   if (!sess.ok) {
@@ -169,16 +189,26 @@ export async function POST(req: NextRequest) {
   // ── duplicate guard ────────────────────────────────────────────────────────
   //
   // A double-click or a retry after a timeout would otherwise create a second
-  // funded deal, which does not just clutter the list — it double-counts the
-  // commission in the Renewals summary tiles and puts two renewal rows on the
-  // same deal.
+  // funded deal, which does not merely clutter the list — it double-counts the
+  // commission in the Renewals summary tiles and puts two renewal rows on one
+  // deal.
   //
-  // Deliberately a CONFIRMABLE 409 rather than a unique index. One merchant
-  // genuinely can be funded twice on the same day by two different funders, and
-  // a hard constraint would block that real entry with a database error. This
-  // catches the accident, states what it found, and lets the operator say "yes,
-  // really" via confirm_duplicate.
-  if (body.confirm_duplicate !== true) {
+  // The DATABASE is what actually prevents it, via the partial unique index on
+  // (tenant_id, dedupe_key) in migration 131. A route-level select-then-insert
+  // cannot: two concurrent submissions both finish their lookup before either
+  // insert, and both rows land. The lookup below is kept only to produce a
+  // helpful message ("already recorded, funded by X") — the index is the
+  // guarantee, and the 23505 handler after the insert is what closes the race.
+  //
+  // confirm_duplicate writes a NULL dedupe_key. NULLs never conflict in a unique
+  // index, so a genuine second funding on the same day by a different funder is
+  // still recordable — no hard constraint on real data, no race on accidents.
+  const confirmed = body.confirm_duplicate === true;
+  const dedupe_key = confirmed
+    ? null
+    : `${merchant_name!.toLowerCase()}|${funded_at}|${funded_amount_usd}`;
+
+  if (!confirmed) {
     const dupe = await db
       .from("funded_deals")
       .select("id, merchant_name, funded_at, funded_amount_usd, lender_name")
@@ -187,23 +217,9 @@ export async function POST(req: NextRequest) {
       .eq("funded_at", funded_at as string)
       .limit(1);
     const existing = dupe.data?.[0] as { id: string; lender_name: string | null } | undefined;
-    if (!dupe.error && existing) {
-      return NextResponse.json(
-        {
-          ok: false,
-          error: "possible_duplicate",
-          message:
-            `A funded deal for ${merchant_name} on ${funded_at} is already recorded` +
-            `${existing.lender_name ? ` (${existing.lender_name})` : ""}. ` +
-            `Submit again to record it anyway.`,
-          existing,
-        },
-        { status: 409 },
-      );
-    }
-    // A failed dupe check is NOT a reason to block the write: this guard exists
-    // to prevent an accident, and refusing real work because a convenience
-    // lookup blipped would be the worse failure.
+    if (!dupe.error && existing) return duplicateResponse(existing);
+    // A failed lookup is NOT a reason to block the write — it only costs a
+    // friendlier message, and the unique index still holds the line.
   }
 
   const ins = await db
@@ -223,11 +239,19 @@ export async function POST(req: NextRequest) {
       notes: text(body.notes, 2000),
       source: "manual_entry",
       created_by: sess.userId ?? null,
+      dedupe_key,
     })
     .select("id, merchant_name, funded_at, next_renewal_date, est_commission_usd")
     .single();
 
   if (ins.error || !ins.data) {
+    // 23505 = unique violation on uq_funded_deals_dedupe. This is the branch the
+    // pre-check cannot cover: a concurrent identical submission that got there
+    // first. Same confirmable answer, so a racing double-click reads as "already
+    // recorded" rather than a 500.
+    if (ins.error?.code === "23505") {
+      return duplicateResponse({ id: null, lender_name: null });
+    }
     console.error("[renewals] insert failed:", ins.error?.message);
     return NextResponse.json(
       { ok: false, error: "insert_failed", message: ins.error?.message || "Could not save the funded deal." },

@@ -61,14 +61,29 @@ create table if not exists public.funded_deals (
 create index if not exists idx_funded_deals_tenant_renewal
   on public.funded_deals (tenant_id, next_renewal_date);
 
--- Supports the duplicate LOOKUP on manual entry (same merchant, same funded
--- date). Deliberately NOT unique: one merchant genuinely can be funded twice on
--- the same day by two different funders, and a hard constraint would block that
--- real entry with a database error. The route turns a hit into a confirmable
--- 409 instead, so an accidental double-submit is caught while a legitimate
--- second deal can still be recorded.
+-- Supports the duplicate LOOKUP on manual entry (same merchant, same funded date).
 create index if not exists idx_funded_deals_tenant_merchant
   on public.funded_deals (tenant_id, lower(merchant_name), funded_at);
+
+-- ATOMIC duplicate prevention.
+--
+-- A route-level "SELECT then INSERT" cannot actually prevent duplicates: two
+-- concurrent submissions (a rapid double-click, or a client retry racing the
+-- original) both complete their lookup before either insert, and both rows land.
+-- That is not cosmetic — it double-counts the commission in the Renewals summary
+-- tiles and puts two renewal rows on one deal. The database has to be the one
+-- saying no.
+--
+-- dedupe_key is set by the route to merchant|funded_at|amount for a normal
+-- entry, and left NULL when the operator has explicitly confirmed a genuine
+-- second funding. NULLs never conflict in a unique index, so this is atomic for
+-- accidents while leaving the legitimate same-day-different-funder case open.
+-- No hard constraint on real data, no race on the accidental kind.
+alter table public.funded_deals add column if not exists dedupe_key text;
+
+create unique index if not exists uq_funded_deals_dedupe
+  on public.funded_deals (tenant_id, dedupe_key)
+  where dedupe_key is not null;
 
 alter table public.funded_deals enable row level security;
 alter table public.funded_deals force row level security;
