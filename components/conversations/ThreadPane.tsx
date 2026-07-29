@@ -55,8 +55,8 @@ export function ThreadPane({
   onToggleContextPanel: () => void;
   channel: ComposerChannel;
   onChannelChange: (c: ComposerChannel) => void;
-  smsProvider: "texttorrent" | "kixie";
-  onSmsProviderChange: (p: "texttorrent" | "kixie") => void;
+  smsProvider: "texttorrent" | "kixie" | "twilio";
+  onSmsProviderChange: (p: "texttorrent" | "kixie" | "twilio") => void;
   draft: string;
   onDraftChange: (v: string) => void;
   emailSubject: string;
