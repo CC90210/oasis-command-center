@@ -25,8 +25,10 @@
 import "server-only";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { sendTelegram } from "@/lib/notify/telegram";
+import { isSameNews, shouldPageTelegram } from "@/lib/notify/alert-page-policy";
 
-export type AlertSeverity = "info" | "warn" | "urgent";
+export type { AlertSeverity } from "@/lib/notify/alert-page-policy";
+import type { AlertSeverity } from "@/lib/notify/alert-page-policy";
 
 export async function writeAgentAlert(input: {
   tenantId: string;
@@ -43,25 +45,51 @@ export async function writeAgentAlert(input: {
    *  already-open card stays silent. For high-frequency callers (e.g. every
    *  claimed drip row during a TT credit outage) where re-paging per call is a
    *  notification storm (codex review 2026-07-23). Default false = legacy
-   *  behavior (page on every call). */
+   *  behavior (page on every call).
+   *
+   *  Escalation still pages: suppression applies ONLY when the refreshed card is
+   *  materially the SAME signal — same severity, and same `notifySignature` when
+   *  the caller supplies one. A warn that becomes urgent, or a different set of
+   *  failing fields, breaks through (codex review 2026-07-29). Silence must mean
+   *  "you already know", never "it got worse while you weren't looking". */
   telegramOncePerOpen?: boolean;
+  /** Optional content fingerprint for `telegramOncePerOpen`. Two calls with the
+   *  same signature are the same news; a changed signature re-pages even though
+   *  the card was already open. Stored on the row (payload.__notify_sig) so the
+   *  comparison survives across processes. Omit to compare severity only. */
+  notifySignature?: string;
 }): Promise<void> {
   const nowIso = new Date().toISOString();
   let refreshedExisting = false;
+  /** True only when the card we refreshed carried the SAME news (severity +
+   *  signature). Anything else must still page. Starts false = loud. */
+  let refreshedUnchanged = false;
   try {
     const db = getServiceSupabase();
 
-    // De-dup against an existing OPEN row for the same signal + subject.
+    // De-dup against an existing OPEN row for the same signal + subject. Pull
+    // severity + payload too: the once-per-open suppression needs to know
+    // whether this call is the same news or an escalation.
     let q = db
       .from("agent_alerts")
-      .select("id")
+      .select("id, severity, payload")
       .eq("tenant_id", input.tenantId)
       .eq("alert_type", input.alertType)
       .is("resolved_at", null)
       .limit(1);
     q = input.subjectId ? q.eq("subject_id", input.subjectId) : q.is("subject_id", null);
     const existing = await q.maybeSingle();
-    const existingId = (existing.data as { id: string } | null)?.id;
+    const existingRow = existing.data as {
+      id: string;
+      severity: string | null;
+      payload: Record<string, unknown> | null;
+    } | null;
+    const existingId = existingRow?.id;
+
+    const payload =
+      input.notifySignature === undefined
+        ? (input.payload ?? null)
+        : { ...(input.payload ?? {}), __notify_sig: input.notifySignature };
 
     const row: Record<string, unknown> = {
       tenant_id: input.tenantId,
@@ -71,8 +99,15 @@ export async function writeAgentAlert(input: {
       body: input.body ?? null,
       subject_type: input.subjectType ?? null,
       subject_id: input.subjectId ?? null,
-      payload: input.payload ?? null,
+      payload,
     };
+
+    const sameNews = isSameNews({
+      existingSeverity: existingRow?.severity,
+      existingSignature: existingRow?.payload?.__notify_sig,
+      nextSeverity: input.severity,
+      nextSignature: input.notifySignature,
+    });
 
     if (existingId) {
       // Refresh the open card (bump created_at so it re-sorts to the top).
@@ -82,7 +117,10 @@ export async function writeAgentAlert(input: {
         .from("agent_alerts")
         .update({ ...row, created_at: nowIso })
         .eq("id", existingId);
-      if (!upd.error) refreshedExisting = true;
+      if (!upd.error) {
+        refreshedExisting = true;
+        refreshedUnchanged = sameNews;
+      }
     } else {
       await db.from("agent_alerts").insert({ ...row, created_at: nowIso });
     }
@@ -92,9 +130,13 @@ export async function writeAgentAlert(input: {
     console.error("[agent-alert] write failed:", err instanceof Error ? err.message : err);
   }
 
-  const wantTelegram =
-    (input.telegram ?? input.severity !== "info") &&
-    !(input.telegramOncePerOpen && refreshedExisting);
+  const wantTelegram = shouldPageTelegram({
+    severity: input.severity,
+    telegram: input.telegram,
+    telegramOncePerOpen: input.telegramOncePerOpen,
+    refreshedExisting,
+    refreshedUnchanged,
+  });
   if (wantTelegram) {
     const tag = input.severity === "urgent" ? "🚨" : "⚠️";
     const text = `${tag} ${input.title}${input.body ? `\n${input.body}` : ""}`;
