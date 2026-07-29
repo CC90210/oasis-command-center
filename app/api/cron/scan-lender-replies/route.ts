@@ -218,7 +218,17 @@ export async function GET(req: NextRequest) {
   // DEFER the rest — safe because an unclassified reply is simply not written,
   // so its thread cursor never advances and it is picked up next tick. The
   // 8-minute trigger drains any backlog over a few passes.
-  const toClassify = candidates.filter((c) => !c.already);
+  //
+  // OLDEST FIRST — this ordering is load-bearing, not cosmetic. Phase 1 fetches
+  // `uids.slice(-limit)`, i.e. only the NEWEST messages in the lookback window,
+  // so anything we defer is only retried next tick if it is still inside that
+  // newest-N slice. Deferring oldest-first would push the most at-risk replies
+  // out of the window permanently once enough new mail arrived. By classifying
+  // oldest-first, whatever gets deferred is always the NEWEST — which is
+  // exactly what is guaranteed to still be in range next tick.
+  const toClassify = candidates
+    .filter((c) => !c.already)
+    .sort((a, b) => (a.date ? a.date.getTime() : 0) - (b.date ? b.date.getTime() : 0));
   const classBy = new Map<Candidate, LenderReplyClass>();
   const deferredSet = new Set<Candidate>();
   let unavailableCount = 0;
