@@ -200,7 +200,12 @@ export async function promoteLeadToApplication(input: {
         // dashboard, plus the backfill), so without this every re-run re-paged
         // Telegram for a card that was already open. Page once per open card;
         // the dashboard row still refreshes.
+        //
+        // The signature is the missing-field set, so suppression only covers
+        // IDENTICAL news: if a retry comes back missing a different field, or
+        // escalates warn → urgent, it breaks through (codex review 2026-07-29).
         telegramOncePerOpen: true,
+        notifySignature: missingCritical.join("|"),
       });
     }
 
