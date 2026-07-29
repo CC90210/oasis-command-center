@@ -27,6 +27,7 @@
 
 import "server-only";
 import { createHmac, timingSafeEqual } from "node:crypto";
+import { resolveTrackingBase } from "./tracking-base";
 
 // The brand string MUST resolve to the SunBiz tenant in /api/unsubscribe's
 // resolveTenantId (matches tenants.name ILIKE 'SunBiz') or the recorded
@@ -34,8 +35,42 @@ import { createHmac, timingSafeEqual } from "node:crypto";
 // never honors it. Verified: tenants.name='SunBiz'.
 export const SUNBIZ_BRAND = "SunBiz";
 
-function appBase(): string {
-  return (process.env.PUBLIC_APP_URL || "https://oasisai.work").replace(/\/+$/, "");
+/**
+ * SENDING-DOMAIN ALIGNMENT (2026-07-29).
+ *
+ * Drip mail goes out From submissions@sunbizfunding.com, but every URL inside it
+ * — the open pixel, every click-wrapped link, the unsubscribe link and the
+ * List-Unsubscribe header — was built on PUBLIC_APP_URL, which is oasisai.work.
+ * A visible sender whose links all point at an unrelated domain is one of the
+ * more reliable spam signals, because it is the shape phishing takes. It also
+ * means sunbizfunding.com earns no reputation from opens or clicks while
+ * carrying all of the complaint risk: the engagement accrues to the other domain.
+ *
+ * The base is therefore resolved PER BRAND, not globally. oasisai.work is the
+ * platform domain and remains correct for everything that is not SunBiz mail, so
+ * a blanket swap would misattribute other tenants' links.
+ *
+ * Set SUNBIZ_TRACKING_BASE_URL to a host on the sending domain (for example
+ * https://go.sunbizfunding.com) that is added to this Vercel project and
+ * CNAME'd to it. Middleware is path-based rather than host-based and
+ * /api/track + /api/unsubscribe are both public, so the same routes serve
+ * unchanged from the new hostname.
+ *
+ * UNSET IS TODAY'S BEHAVIOUR, EXACTLY. This is deliberate so the code can merge
+ * before the DNS exists: nothing changes until the variable is set, and setting
+ * it is the deploy.
+ */
+function trackingBaseFor(brand: string): string | undefined {
+  if (brand === SUNBIZ_BRAND) return process.env.SUNBIZ_TRACKING_BASE_URL;
+  return undefined;
+}
+
+/** Resolve the origin every tracked URL in a message is built on. Validation and
+ *  the fail-safe fallback live in ./tracking-base so the click route's allowlist
+ *  shares exactly the same logic and cannot drift from what mints the links. */
+function appBase(brand: string = SUNBIZ_BRAND): string {
+  const fallback = process.env.PUBLIC_APP_URL || "https://oasisai.work";
+  return resolveTrackingBase(trackingBaseFor(brand), fallback);
 }
 
 export function escapeHtml(s: string): string {
@@ -83,14 +118,14 @@ export function verifyClickTarget(uEncoded: string, sig: string): boolean {
   }
 }
 
-export function pixelUrl(sendId: string): string {
-  return `${appBase()}/api/track/open/${encodeURIComponent(sendId)}`;
+export function pixelUrl(sendId: string, brand: string = SUNBIZ_BRAND): string {
+  return `${appBase(brand)}/api/track/open/${encodeURIComponent(sendId)}`;
 }
 
-export function clickUrl(sendId: string, target: string): string {
+export function clickUrl(sendId: string, target: string, brand: string = SUNBIZ_BRAND): string {
   const u = b64urlEncode(target);
   const s = signClickTarget(u);
-  const base = `${appBase()}/api/track/click/${encodeURIComponent(sendId)}?u=${u}`;
+  const base = `${appBase(brand)}/api/track/click/${encodeURIComponent(sendId)}?u=${u}`;
   return s ? `${base}&s=${s}` : base;
 }
 
@@ -111,14 +146,14 @@ function unsubQuery(email: string, brand: string): string {
 /** Human-facing unsubscribe PAGE (renders a confirmation) — used by the visible
  *  in-body footer link on commercial mail. */
 export function unsubscribeUrl(email: string, brand: string = SUNBIZ_BRAND): string {
-  return `${appBase()}/unsubscribe?${unsubQuery(email, brand)}`;
+  return `${appBase(brand)}/unsubscribe?${unsubQuery(email, brand)}`;
 }
 
 /** Machine-facing unsubscribe API — the RFC 8058 one-click POST target. Points at
  *  /api/unsubscribe (which accepts the query params on POST), NOT the page, so a
  *  mail client's one-click actually suppresses instead of 405-ing on the page. */
 export function unsubscribeApiUrl(email: string, brand: string = SUNBIZ_BRAND): string {
-  return `${appBase()}/api/unsubscribe?${unsubQuery(email, brand)}`;
+  return `${appBase(brand)}/api/unsubscribe?${unsubQuery(email, brand)}`;
 }
 
 /** RFC 8058 List-Unsubscribe header value (one-click HTTPS URL + mailto fallback). */
@@ -149,13 +184,13 @@ export function buildTrackedHtml(
     const idx = m.index ?? 0;
     out += escapeHtml(plain.slice(last, idx));
     const target = m[0];
-    out += `<a href="${escapeHtml(clickUrl(sendId, target))}" style="color:#0B1F4F;text-decoration:underline;">${escapeHtml(target)}</a>`;
+    out += `<a href="${escapeHtml(clickUrl(sendId, target, brand))}" style="color:#0B1F4F;text-decoration:underline;">${escapeHtml(target)}</a>`;
     last = idx + target.length;
   }
   out += escapeHtml(plain.slice(last));
   const bodyHtml = out.replace(/\n/g, "<br />\n");
 
-  const pixel = `<img src="${escapeHtml(pixelUrl(sendId))}" width="1" height="1" alt="" style="display:none;max-height:0;overflow:hidden;" />`;
+  const pixel = `<img src="${escapeHtml(pixelUrl(sendId, brand))}" width="1" height="1" alt="" style="display:none;max-height:0;overflow:hidden;" />`;
   const footer =
     unsub === "none"
       ? ""
