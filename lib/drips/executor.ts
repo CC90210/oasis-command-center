@@ -42,7 +42,7 @@ import { renderTemplate } from "@/lib/drips/templates";
 import { parseDripSteps, type DripStep } from "@/lib/drips/types";
 import { sendDripSms, sendDripEmail } from "@/lib/drips/send";
 import { wasShoppedRecently } from "@/lib/drips/enroller";
-import { SUNBIZ_BRAND, brandTrackingBase, platformTrackingBase, buildDripHtml, listUnsubscribeHeader, pixelUrl, unsubscribeUrl } from "@/lib/drips/html-email";
+import { SUNBIZ_BRAND, dripTrackingBase, platformTrackingBase, buildDripHtml, listUnsubscribeHeader, pixelUrl, unsubscribeUrl } from "@/lib/drips/html-email";
 import { resolveDripSmsIdentity, type DripSmsIdentity } from "@/lib/drips/rep-sms-identity";
 import { ACCELERATED_FLAG, acceleratedSystemLive, hasActiveAcceleratedRun } from "@/lib/drips/accelerated";
 import {
@@ -939,7 +939,7 @@ async function processEmailStep(
     // agrees, and so the exact origin used can be recorded on the interaction row
     // below. Cold outreach deliberately does NOT do this: it sends from isolated
     // domains and its links must stay on the platform origin.
-    const trackingBase = brandTrackingBase(SUNBIZ_BRAND);
+    const trackingBase = dripTrackingBase();
     const customFooter =
       emailClass === "transactional"
         ? ""

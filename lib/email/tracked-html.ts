@@ -91,18 +91,26 @@ export function platformTrackingBase(): string {
 }
 
 /**
- * The origin for mail genuinely SENT FROM this brand's domain, resolved now.
+ * The origin for OUTBOUND DRIP mail, resolved now.
+ *
+ * Deliberately keyed to the sending PATH, not to a brand name, because the
+ * sending brand is expected to change: SunBiz drips move to Bluerise Business
+ * Capital once that domain finishes warming. Keying this to "SunBiz" would have
+ * made that rebrand a code change; keying it to the drip path makes it one
+ * environment variable.
+ *
+ * Reputation isolation for cold outreach is achieved by WHO CALLS THIS, not by a
+ * brand check: the drip executor calls it, cold-sending does not, so cold mail
+ * stays on the platform origin and its domain reputation stays separate.
  *
  * Falls back to the platform origin when unconfigured or invalid, so the return
- * value is always the origin that will REALLY be used. That is exactly why
- * callers stamp this resolved string on the send rather than their intent: a
- * message sent while the variable was unset really did carry platform URLs, and
- * recording "aligned" would make the telemetry reconciler rebuild it wrong once
- * the variable is later set.
+ * value is always the origin that will REALLY be used. That is why callers stamp
+ * this resolved string on the send rather than their intent: a message sent while
+ * the variable was unset really did carry platform URLs, and recording an
+ * intention would make the telemetry reconciler rebuild it wrong later.
  */
-export function brandTrackingBase(brand: string = SUNBIZ_BRAND): string {
-  const configured = brand === SUNBIZ_BRAND ? process.env.SUNBIZ_TRACKING_BASE_URL : undefined;
-  return resolveTrackingBase(configured, platformFallback());
+export function dripTrackingBase(): string {
+  return resolveTrackingBase(process.env.DRIP_TRACKING_BASE_URL, platformFallback());
 }
 
 export function escapeHtml(s: string): string {

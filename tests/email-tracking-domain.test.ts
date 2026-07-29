@@ -119,16 +119,16 @@ for (const bad of ["http://go.sunbizfunding.com", "not-a-url", ""]) {
     "utf8",
   );
   assert.ok(
-    !/brandTrackingBase\s*\(/.test(cold),
-    "cold outreach must never resolve a brand sending domain — its reputation isolation depends on staying on the platform origin",
+    !/dripTrackingBase\s*\(/.test(cold),
+    "cold outreach must never resolve the drip sending domain — its reputation isolation depends on staying on the platform origin",
   );
 
   // And the drip path, which IS sent from that domain, must opt in — otherwise
   // this whole change is inert and the links stay misaligned.
   const executor = readFileSync(new URL("../lib/drips/executor.ts", import.meta.url), "utf8");
   assert.ok(
-    /brandTrackingBase\s*\(\s*SUNBIZ_BRAND\s*\)/.test(executor),
-    "the drip send path must resolve the SunBiz sending domain",
+    /dripTrackingBase\s*\(\s*\)/.test(executor),
+    "the drip send path must resolve the configured drip sending domain",
   );
   // The resolved origin, not the intent, must be what gets recorded — otherwise
   // the telemetry reconciler cannot rebuild a historical message exactly.
