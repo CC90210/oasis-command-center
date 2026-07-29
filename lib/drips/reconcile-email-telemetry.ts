@@ -86,6 +86,12 @@ export async function reconcileDripEmailTelemetry(db: Db, limit = 1000) {
           sendId: row.id,
           email: recipient,
           unsub: sequenceClasses.get(sequenceId) === "transactional" ? "none" : "footer",
+          // Must match what the executor actually sent, or this backfilled audit
+          // row records oasisai.work URLs for a message whose links were on the
+          // SunBiz sending domain. This reconciler's contract is to reconstruct
+          // the payload exactly; a plausible-looking wrong payload is worse than
+          // none (Codex review P2).
+          tracking: "aligned",
         }),
         provider_message_id:
           typeof meta.rfc822_message_id === "string" ? meta.rfc822_message_id : null,
