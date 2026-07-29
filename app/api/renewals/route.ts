@@ -83,6 +83,14 @@ export async function GET(req: NextRequest) {
         contact_name: firstText(data, ["contact_name", "owner_name", "full_name"]),
         phone: firstText(data, ["phone", "phone_number", "mobile"]),
         email: firstText(data, ["email", "email_address"]),
+        stage: firstText(data, ["stage", "status"]),
+        amount_requested:
+          typeof data.amount_requested === "number"
+            ? data.amount_requested
+            : typeof data.requested_amount === "number"
+              ? data.requested_amount
+              : null,
+        updated_at: row.updated_at as string,
       };
     })
     .filter((lead) => {
