@@ -328,7 +328,12 @@ export async function GET(req: NextRequest) {
       // 3) lender-intelligence ledger — every matched-lender outcome, with the
       // structured reason. Idempotent on (tenant, app, lender, reply_at).
       if (c.lenderId) {
-        await db.from("lender_reply_outcomes").upsert({
+        // The result is CHECKED. It previously was not, and `outcome_logged`
+        // was set to true unconditionally — so with the table absent (migration
+        // 106 had never been applied) every scan reported it had written the
+        // lender-intelligence ledger while writing nothing at all. PostgREST
+        // returns { error } rather than throwing, so nothing surfaced.
+        const led = await db.from("lender_reply_outcomes").upsert({
           tenant_id: SUNBIZ_TENANT_ID,
           application_id: c.appId,
           lender_id: c.lenderId,
@@ -342,7 +347,13 @@ export async function GET(req: NextRequest) {
           confidence: cls.confidence,
           reply_at: replyAt,
         }, { onConflict: "tenant_id,application_id,lender_id,reply_at" });
-        row.outcome_logged = true;
+        if (led.error) {
+          console.error("[offers-scan] lender_reply_outcomes write failed:", led.error.message);
+          row.outcome_logged = false;
+          row.outcome_error = led.error.message.slice(0, 200);
+        } else {
+          row.outcome_logged = true;
+        }
       }
     }
 
