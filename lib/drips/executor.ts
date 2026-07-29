@@ -42,7 +42,7 @@ import { renderTemplate } from "@/lib/drips/templates";
 import { parseDripSteps, type DripStep } from "@/lib/drips/types";
 import { sendDripSms, sendDripEmail } from "@/lib/drips/send";
 import { wasShoppedRecently } from "@/lib/drips/enroller";
-import { buildDripHtml, listUnsubscribeHeader, pixelUrl, unsubscribeUrl } from "@/lib/drips/html-email";
+import { SUNBIZ_BRAND, buildDripHtml, listUnsubscribeHeader, pixelUrl, unsubscribeUrl } from "@/lib/drips/html-email";
 import { resolveDripSmsIdentity, type DripSmsIdentity } from "@/lib/drips/rep-sms-identity";
 import { ACCELERATED_FLAG, acceleratedSystemLive, hasActiveAcceleratedRun } from "@/lib/drips/accelerated";
 import {
@@ -933,16 +933,21 @@ async function processEmailStep(
       emailClass === "transactional"
         ? ""
         : `<div style="margin:24px 0 0;color:#8a94a6;font:12px/1.5 Arial,sans-serif">` +
-          `Prefer not to receive these? <a href="${unsubscribeUrl(email)}" style="color:#8a94a6">Unsubscribe here</a>.</div>`;
-    const customTracking = `<img src="${pixelUrl(sendId)}" width="1" height="1" alt="" style="display:none;max-height:0;overflow:hidden" />`;
+          `Prefer not to receive these? <a href="${unsubscribeUrl(email, SUNBIZ_BRAND, "aligned")}" style="color:#8a94a6">Unsubscribe here</a>.</div>`;
+    const customTracking = `<img src="${pixelUrl(sendId, SUNBIZ_BRAND, "aligned")}" width="1" height="1" alt="" style="display:none;max-height:0;overflow:hidden" />`;
     const instrumentedCustomHtml = renderedCustomHtml
       ? renderedCustomHtml.replace(/<\/body>/i, `${customFooter}${customTracking}</body>`)
       : "";
-    const html = instrumentedCustomHtml || buildDripHtml(cleanBody, { sendId, email, unsub });
+    // tracking:"aligned" — drip mail is genuinely sent From
+    // submissions@sunbizfunding.com, so its links belong on the SunBiz sending
+    // domain rather than the shared platform one. This is the ONE opt-in: cold
+    // outreach deliberately stays on "platform" to keep its reputation isolated.
+    const html =
+      instrumentedCustomHtml || buildDripHtml(cleanBody, { sendId, email, unsub, tracking: "aligned" });
     htmlPayload = html;
     const result = await sendDripEmail(row.tenant_id, email, subject, cleanBody, {
       html,
-      listUnsubscribe: listUnsubscribeHeader(email),
+      listUnsubscribe: listUnsubscribeHeader(email, SUNBIZ_BRAND, "aligned"),
     });
     if (!result.ok) return markRetryOrFail(db, row, result.error);
     fromIdentity = result.fromAddress;

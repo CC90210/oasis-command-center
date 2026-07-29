@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { resolveTrackingBase, trackingHost } from "../lib/email/tracking-base";
 
 /**
@@ -97,6 +98,38 @@ for (const good of ["https://go.sunbizfunding.com", "https://links.sunbizfunding
 for (const bad of ["http://go.sunbizfunding.com", "not-a-url", ""]) {
   assert.equal(resolveTrackingBase(bad, FALLBACK), FALLBACK, `${bad} rejected by minter`);
   assert.equal(trackingHost(bad), null, `${bad} rejected by allowlist`);
+}
+
+// ── Cold outreach must NOT inherit the SunBiz sending domain ────────────────
+// Codex review P1. lib/integrations/cold-sending.ts passes brand:"SunBiz" — it
+// has to, because brand is the SUPPRESSION key and an unsubscribe from a cold
+// blast must record against the SunBiz tenant. But cold mail sends from ISOLATED
+// mailbox domains specifically so its reputation cannot touch sunbizfunding.com.
+//
+// Keying the tracking domain off brand alone would therefore have moved cold
+// pixels and unsubscribe links onto the SunBiz sending domain, defeating that
+// isolation. The context axis is what separates "who suppresses this" from
+// "where was this actually sent from", and it defaults to the isolated choice.
+//
+// This is a source-level assertion rather than a call: tracked-html.ts imports
+// "server-only" and cannot load here. It fails if anyone opts cold sending in.
+{
+  const cold = readFileSync(
+    new URL("../lib/integrations/cold-sending.ts", import.meta.url),
+    "utf8",
+  );
+  assert.ok(
+    !/tracking:\s*["']aligned["']/.test(cold),
+    "cold outreach must never request tracking:'aligned' — its reputation isolation depends on staying off the SunBiz sending domain",
+  );
+
+  // And the drip path, which IS sent from that domain, must opt in — otherwise
+  // this whole change is inert and the links stay misaligned.
+  const executor = readFileSync(new URL("../lib/drips/executor.ts", import.meta.url), "utf8");
+  assert.ok(
+    /tracking:\s*["']aligned["']/.test(executor),
+    "the drip send path must opt into aligned tracking",
+  );
 }
 
 console.log("email-tracking-domain.test.ts — all assertions passed ✓");
