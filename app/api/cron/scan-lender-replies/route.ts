@@ -33,7 +33,6 @@ export const dynamic = "force-dynamic";
 export const maxDuration = 60;
 
 const SUNBIZ_TENANT_ID = "aa04fa1f-ad6a-44b0-ac4b-2ff5d1067110";
-const CLASSIFY_CONCURRENCY = 4;
 
 function extractBusinessName(subject: string): string {
   const s = String(subject || "");
@@ -60,19 +59,14 @@ function isAutoReply(subject: string, headerLines: string): boolean {
   return /out of office|out-of-office|auto-?reply|automatic reply|on vacation|away from (the|my) office|will be out|currently away/i.test(s);
 }
 
-// Bounded-concurrency map so N classify calls run ~CLASSIFY_CONCURRENCY at a time.
-async function mapPool<T, R>(items: T[], cap: number, fn: (item: T, idx: number) => Promise<R>): Promise<R[]> {
-  const out: R[] = new Array(items.length);
-  let next = 0;
-  async function worker() {
-    while (next < items.length) {
-      const idx = next++;
-      out[idx] = await fn(items[idx], idx);
-    }
-  }
-  await Promise.all(Array.from({ length: Math.min(cap, items.length) }, worker));
-  return out;
-}
+// Classify budget. maxDuration is 60s; Phase 1 (IMAP) and Phase 3 (writes) need
+// the remainder, so classification gets a hard wall-clock slice and defers the
+// rest to the next 8-minute tick.
+const CLASSIFY_BUDGET_MS = Number(process.env.LENDER_SCAN_CLASSIFY_BUDGET_MS || 40_000);
+/** Don't start a call that cannot plausibly finish. */
+const MIN_CLASSIFY_MS = 8_000;
+/** Ceiling for any single classify, so one wedged job can't eat the whole budget. */
+const MAX_PER_CLASSIFY_MS = 22_000;
 
 function checkTrigger(req: NextRequest): NextResponse | null {
   const secret = process.env.SCAN_TRIGGER_SECRET;
@@ -92,6 +86,11 @@ type Thread = { id: string; application_id: string; lender_id: string | null; st
 export async function GET(req: NextRequest) {
   const denied = checkTrigger(req);
   if (denied) return denied;
+
+  // Wall clock for the classify budget below. Phase 1 (IMAP) spends an unknown
+  // slice of maxDuration, so the classify loop measures from here rather than
+  // assuming a fixed allowance.
+  const startedAt = Date.now();
 
   const url = new URL(req.url);
   if (url.searchParams.get("probe") === "1") {
@@ -209,17 +208,76 @@ export async function GET(req: NextRequest) {
     try { await client.logout(); } catch { /* ignore */ }
   }
 
-  // ── Phase 2: classify the NOT-already candidates in a bounded pool ───────────
-  const toClassify = candidates.filter((c) => !c.already);
-  const classes = await mapPool(toClassify, CLASSIFY_CONCURRENCY, (c) => classifyLenderReply(c.subject, c.body));
+  // ── Phase 2: classify the NOT-already candidates, bounded by WALL CLOCK ──────
+  //
+  // Inference runs through the subscription queue (inference_jobs), which the
+  // local CLI daemon drains SERIALLY on an 8s poll. A fixed-size concurrent
+  // pool is therefore the wrong shape: N concurrent pollers still wait on one
+  // serial executor, and a large batch would blow maxDuration=60 (the original
+  // 504). Instead we classify sequentially for as long as the budget allows and
+  // DEFER the rest — safe because an unclassified reply is simply not written,
+  // so its thread cursor never advances and it is picked up next tick. The
+  // 8-minute trigger drains any backlog over a few passes.
+  //
+  // OLDEST FIRST — this ordering is load-bearing, not cosmetic. Phase 1 fetches
+  // `uids.slice(-limit)`, i.e. only the NEWEST messages in the lookback window,
+  // so anything we defer is only retried next tick if it is still inside that
+  // newest-N slice. Deferring oldest-first would push the most at-risk replies
+  // out of the window permanently once enough new mail arrived. By classifying
+  // oldest-first, whatever gets deferred is always the NEWEST — which is
+  // exactly what is guaranteed to still be in range next tick.
+  const toClassify = candidates
+    .filter((c) => !c.already)
+    .sort((a, b) => (a.date ? a.date.getTime() : 0) - (b.date ? b.date.getTime() : 0));
   const classBy = new Map<Candidate, LenderReplyClass>();
-  toClassify.forEach((c, i) => classBy.set(c, classes[i]));
+  const deferredSet = new Set<Candidate>();
+  let unavailableCount = 0;
+  let pendingCount = 0;
 
-  // Dead-inference-key signature: a non-trivial batch where EVERYTHING came back
-  // "unknown" almost always means the classifier key is dead/rate-limited (every
-  // reply silently falls back to "unknown" and nothing gets written). Surface it.
-  const unknownCount = classes.filter((c) => c.category === "unknown").length;
-  const deadKeySuspected = toClassify.length >= 5 && unknownCount === toClassify.length;
+  for (const c of toClassify) {
+    const remaining = CLASSIFY_BUDGET_MS - (Date.now() - startedAt);
+    if (remaining < MIN_CLASSIFY_MS) { deferredSet.add(c); continue; }
+    const cls = await classifyLenderReply(c.subject, c.body, {
+      timeoutMs: Math.min(remaining, MAX_PER_CLASSIFY_MS),
+      tenantId: SUNBIZ_TENANT_ID,
+    });
+    classBy.set(c, cls);
+    if (cls.unavailable) {
+      // Either way we stop: another call would burn its full timeout for a
+      // near-certain miss and risk maxDuration. But WHY matters. `retryable`
+      // means the job is still queued and the next tick collects it via the
+      // dedupe key — ordinary latency, no alarm. Otherwise inference is
+      // genuinely broken and someone needs paging.
+      if (cls.retryable) pendingCount++;
+      else unavailableCount++;
+      // THIS candidate is uncommitted too and will be retried, so it is
+      // deferred like the rest. It is already in classBy, so the loop below
+      // would skip it and undercount by one while leaving its row unmarked.
+      deferredSet.add(c);
+      for (const rest of toClassify) if (!classBy.has(rest)) deferredSet.add(rest);
+      break;
+    }
+  }
+
+  // Only genuinely-classified replies count. A pending/unavailable result is an
+  // absence of classification, not an "unknown" verdict about the lender, and
+  // counting it as one would re-create the exact ambiguity this change removes.
+  const classified = [...classBy.values()].filter((c) => !c.unavailable);
+  const unknownCount = classified.filter((c) => c.category === "unknown").length;
+
+  // The classifier being DOWN is now directly observable rather than inferred:
+  // `unavailable` means inference itself failed, which no amount of lender
+  // wording can fake. This is the signal that was missing when the paid API ran
+  // dry on 2026-07-21 and a total outage looked like chatty lenders.
+  const classifierDown = unavailableCount > 0;
+
+  // Secondary signal for the other failure shape: inference RUNS but returns
+  // garbage every time. Floor lowered from 5 to 2 — the old threshold meant a
+  // steady 3-reply backlog could never trip it, which is exactly what happened.
+  const allUnknown = classified.length >= 2 && unknownCount === classified.length;
+
+  // Kept under the original key so an un-updated trigger still alerts.
+  const deadKeySuspected = classifierDown || allUnknown;
 
   // ── Phase 3: writes (gated) ─────────────────────────────────────────────────
   let applied = 0;
@@ -230,6 +288,9 @@ export async function GET(req: NextRequest) {
       application_id: c.appId, lender: c.lenderName, lender_id: c.lenderId,
       thread_id: c.thread?.id || null, date: c.date ? c.date.toISOString() : null,
       already: c.already, classification: cls || null,
+      // Ran out of classify budget (or inference was down) — NOT a property of
+      // this reply. It stays uncommitted and is retried on the next tick.
+      deferred: deferredSet.has(c) || undefined,
     };
 
     if (write && cls && !c.already && cls.category !== "unknown") {
@@ -288,7 +349,31 @@ export async function GET(req: NextRequest) {
     results.push(row);
   }
 
-  return NextResponse.json({ ok: true, mode: write ? "write" : "dry", inbox: creds.fromAddress, scanned: results.length, classified: toClassify.length, unknown: unknownCount, dead_key_suspected: deadKeySuspected, applied, results });
+  return NextResponse.json({
+    ok: true,
+    mode: write ? "write" : "dry",
+    inbox: creds.fromAddress,
+    scanned: results.length,
+    /** Candidates eligible for classification this tick. */
+    candidates: toClassify.length,
+    /** ACTUALLY classified. Previously reported the candidate count, which
+     *  overstated the work whenever anything was skipped. */
+    classified: classified.length,
+    /** Ran out of budget or inference was down — retried next tick, not lost. */
+    deferred: deferredSet.size,
+    unknown: unknownCount,
+    /** Inference genuinely failed. The authoritative outage signal. */
+    unavailable: unavailableCount,
+    /** Job still in flight past our budget — ordinary latency, collected next
+     *  tick via the dedupe key. Explicitly NOT an outage. */
+    pending: pendingCount,
+    classifier_down: classifierDown,
+    /** Legacy key — kept so an un-updated trigger still alerts. */
+    dead_key_suspected: deadKeySuspected,
+    ...(classifierDown ? { error_class: "inference" as const } : {}),
+    applied,
+    results,
+  });
 }
 
 export async function POST(req: NextRequest) {
