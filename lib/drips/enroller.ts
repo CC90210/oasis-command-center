@@ -236,7 +236,11 @@ type CandidateResult = {
  * eligible on its own without ever being permanently stuck behind them. They
  * are also per-lead DB calls, which is why they stay in the bounded path.
  */
-function staticSkipReason(data: Record<string, unknown>, stage: string): SkipReason | null {
+function staticSkipReason(
+  data: Record<string, unknown>,
+  stage: string,
+  firstChannel: "sms" | "email",
+): SkipReason | null {
   if (DEAD_STAGES.has(String(data.stage))) return "dead_or_declined";
   if (isOptedOut(data)) return "opted_out";
   if (isPaused(data)) return "paused";
@@ -248,6 +252,13 @@ function staticSkipReason(data: Record<string, unknown>, stage: string): SkipRea
   const hasPhone = typeof data.phone === "string" && data.phone.trim().length > 0;
   const hasEmail = typeof data.email === "string" && data.email.trim().length > 0;
   if (!hasPhone && !hasEmail) return "no_contact_method";
+  // The step-0 channel needs a matching contact method: an SMS-first sequence
+  // can never reach an email-only lead, and vice versa. This is as PERMANENT as
+  // the checks above for a given sequence, so it belongs in the same place —
+  // leaving it downstream let an email-only lead occupy a slot in an SMS
+  // sequence's candidate window on every pass forever (Codex review P1, round 2).
+  if (firstChannel === "sms" && !hasPhone) return "no_contact_method";
+  if (firstChannel === "email" && !hasEmail) return "no_contact_method";
   return null;
 }
 
@@ -296,6 +307,7 @@ async function collectCandidates(
   stage: string,
   enrollLimit: number,
   cooldownDays: number,
+  firstChannel: "sms" | "email",
 ): Promise<CandidateResult> {
   const out: LeadRow[] = [];
   let skippedAlreadyRan = 0;
@@ -369,7 +381,7 @@ async function collectCandidates(
       }
       // Permanent guards are applied HERE so a rejected lead does not occupy a
       // slot under `want` and block the leads behind it forever.
-      const staticSkip = staticSkipReason(lead.data || {}, stage);
+      const staticSkip = staticSkipReason(lead.data || {}, stage, firstChannel);
       if (staticSkip) {
         noteSkip(staticSkip);
         continue;
@@ -600,7 +612,7 @@ export async function runEnrollDrips(): Promise<EnrollDripsResult> {
 
     // Candidate collection — see collectCandidates() for the two bugs this
     // replaces (the >500-lead freeze and the permanent once-per-lifetime block).
-    const collected = await collectCandidates(db, seq, stage, enrollLimit, redripCooldownDays);
+    const collected = await collectCandidates(db, seq, stage, enrollLimit, redripCooldownDays, firstStep[0].channel);
     if (collected.error) {
       perSequence.push({
         sequenceId: seq.id,
@@ -634,20 +646,6 @@ export async function runEnrollDrips(): Promise<EnrollDripsResult> {
       // applied there rather than here so that a lead they reject does not
       // consume a slot under the enrollment limit and starve the leads behind
       // it — see staticSkipReason() for why that ordering is load-bearing.
-      const hasPhone = typeof data.phone === "string" && data.phone.trim().length > 0;
-      const hasEmail = typeof data.email === "string" && data.email.trim().length > 0;
-      // The first step needs a matching contact method — sms needs a phone,
-      // email needs an address. Route selection at dispatch time re-derives
-      // this from the same lead row; checked here too so we don't enroll a
-      // lead into a sequence whose step-0 channel it can never receive.
-      if (firstStep[0].channel === "sms" && !hasPhone) {
-        skipped.no_contact_method++;
-        continue;
-      }
-      if (firstStep[0].channel === "email" && !hasEmail) {
-        skipped.no_contact_method++;
-        continue;
-      }
       // Enrollment writes only when BOTH the global DRIPS_LIVE act holds AND
       // this stage is on the DRIPS_ENROLL_STAGES allowlist; otherwise this is a
       // report-only pass (candidate counted, nothing written). The per-sequence
