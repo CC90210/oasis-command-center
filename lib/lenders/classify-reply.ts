@@ -29,6 +29,7 @@
 import "server-only";
 import { createHash } from "crypto";
 import { queueInfer } from "@/lib/bridge-infer";
+import { redactAll } from "@/lib/secret-redaction";
 import {
   parseClassification,
   topOfReply,
@@ -109,12 +110,20 @@ export async function classifyLenderReply(
   body: string,
   opts?: { timeoutMs?: number; tenantId?: string | null },
 ): Promise<LenderReplyClass> {
-  const content = `Subject: ${String(subject || "").slice(0, 300)}\n\n<<<UNTRUSTED_LENDER_EMAIL>>>\n${topOfReply(body).slice(0, 3500)}\n<<<END_UNTRUSTED>>>`;
+  // Redaction is load-bearing here. Unlike the old direct-API call, the queue
+  // PERSISTS this text in inference_jobs.prompt as well as showing it to a
+  // model, so a lender reply that happens to quote a credential would be stored
+  // in the clear. The table is RLS-forced service-role-only, but that is
+  // defence in depth, not a reason to skip redaction. [[redact-pii-logs]]
+  const content = redactAll(
+    `Subject: ${String(subject || "").slice(0, 300)}\n\n<<<UNTRUSTED_LENDER_EMAIL>>>\n${topOfReply(body).slice(0, 3500)}\n<<<END_UNTRUSTED>>>`,
+  );
 
   // Stable per-reply key so a job that outlives one tick's budget is adopted (or
   // its finished result collected) next tick, instead of being orphaned while we
   // queue an identical twin every 8 minutes. Content-addressed: the same email
-  // always maps to the same job.
+  // always maps to the same job. Hashed AFTER redaction so the key matches what
+  // is actually stored and sent.
   const dedupeKey = createHash("sha256").update(content).digest("hex").slice(0, 32);
 
   let q: Awaited<ReturnType<typeof queueInfer>>;
