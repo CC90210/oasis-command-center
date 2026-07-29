@@ -35,6 +35,7 @@ import {
 } from "@/lib/integrations/texttorrent";
 import { resolveTextTorrentSenderId } from "@/lib/integrations/texttorrent-sender";
 import { nudgeConversations } from "@/lib/realtime/conversations-nudge";
+import { sendSmsDirectTwilio } from "@/lib/sms-direct-twilio";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -117,7 +118,10 @@ export async function POST(req: NextRequest) {
   if (message.length > 1600) {
     return NextResponse.json({ ok: false, error: "message_too_long" }, { status: 400 });
   }
-  const provider = body.provider === "kixie" ? "kixie" : "texttorrent";
+  const provider =
+    body.provider === "kixie" ? "kixie" :
+    body.provider === "twilio" ? "twilio" :
+    "texttorrent";
   const leadId =
     typeof body.lead_id === "string" && UUID_RE.test(body.lead_id) ? body.lead_id : null;
   const toPhone = normalizePhoneE164(typeof body.to_phone === "string" ? body.to_phone : "");
@@ -174,7 +178,15 @@ export async function POST(req: NextRequest) {
   }
 
   try {
-    if (provider === "kixie") {
+    if (provider === "twilio") {
+      const result = await sendSmsDirectTwilio({ tenantId, to: toPhone, body: message });
+      if (!result.ok) {
+        return NextResponse.json(
+          { ok: false, error: result.error, message: result.error },
+          { status: result.http_status },
+        );
+      }
+    } else if (provider === "kixie") {
       // 3-tier agent email: per-user override → session email → tenant default.
       let agentEmail = email || "";
       try {

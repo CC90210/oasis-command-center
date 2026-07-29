@@ -106,7 +106,7 @@ export function InboxShell({
   // Composer state — owned here per plan §3 ("InboxShell owns... draft,
   // channel mode"), passed down to ThreadPane/Composer.
   const [channel, setChannel] = useState<ComposerChannel>("sms");
-  const [smsProvider, setSmsProvider] = useState<"texttorrent" | "kixie">("texttorrent");
+  const [smsProvider, setSmsProvider] = useState<"texttorrent" | "kixie" | "twilio">("texttorrent");
   const [draft, setDraft] = useState("");
   const [emailSubject, setEmailSubject] = useState("");
   const [emailBody, setEmailBody] = useState("");
@@ -457,7 +457,7 @@ export function InboxShell({
     leadId: string | null;
     phone: string;
     body: string;
-    provider: "texttorrent" | "kixie";
+    provider: "texttorrent" | "kixie" | "twilio";
   }) {
     const { selKey, leadId, phone, body, provider } = args;
     const localId = `local-${Date.now()}`;

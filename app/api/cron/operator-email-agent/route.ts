@@ -23,16 +23,18 @@ export const dynamic = "force-dynamic";
 export const maxDuration = 60;
 
 function checkTrigger(req: NextRequest): NextResponse | null {
-  const secret = process.env.SCAN_TRIGGER_SECRET;
-  if (!secret) return NextResponse.json({ ok: false, error: "trigger_not_configured" }, { status: 500 });
   const auth = req.headers.get("authorization") || "";
   const bearer = auth.startsWith("Bearer ") ? auth.slice(7) : "";
-  const a = Buffer.from(bearer);
-  const b = Buffer.from(secret);
-  if (a.length !== b.length || !timingSafeEqual(a, b)) {
-    return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
+  for (const secret of [process.env.SCAN_TRIGGER_SECRET, process.env.CRON_SECRET]) {
+    if (!secret) continue;
+    const a = Buffer.from(bearer);
+    const b = Buffer.from(secret);
+    if (a.length === b.length && timingSafeEqual(a, b)) return null;
   }
-  return null;
+  if (!process.env.SCAN_TRIGGER_SECRET && !process.env.CRON_SECRET) {
+    return NextResponse.json({ ok: false, error: "trigger_not_configured" }, { status: 500 });
+  }
+  return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
 }
 
 async function runAgent(agent: AgentEmailSettings, write: boolean) {

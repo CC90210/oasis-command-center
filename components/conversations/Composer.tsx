@@ -150,8 +150,8 @@ export function Composer({
   thread: ConversationThread;
   channel: ComposerChannel;
   onChannelChange: (c: ComposerChannel) => void;
-  smsProvider: "texttorrent" | "kixie";
-  onSmsProviderChange: (p: "texttorrent" | "kixie") => void;
+  smsProvider: "texttorrent" | "kixie" | "twilio";
+  onSmsProviderChange: (p: "texttorrent" | "kixie" | "twilio") => void;
   draft: string;
   onDraftChange: (v: string) => void;
   emailSubject: string;
@@ -244,7 +244,7 @@ export function Composer({
         />
         {channel === "sms" && (
           <div className="inline-flex items-center rounded-md border border-bg-border overflow-hidden">
-            {(["texttorrent", "kixie"] as const).map((p) => (
+            {(["texttorrent", "kixie", "twilio"] as const).map((p) => (
               <button
                 key={p}
                 type="button"
@@ -253,7 +253,7 @@ export function Composer({
                   smsProvider === p ? "bg-accent/15 text-accent" : "text-fg-dim hover:text-fg hover:bg-bg-elev"
                 }`}
               >
-                {p === "texttorrent" ? "TextTorrent" : "Kixie"}
+                {p === "texttorrent" ? "TextTorrent" : p === "kixie" ? "Kixie" : "Twilio"}
               </button>
             ))}
           </div>
@@ -307,7 +307,7 @@ export function Composer({
                 onFocus={scheduleGhost}
                 ghostText={ghostText}
                 onAcceptGhost={acceptGhost}
-                placeholder={`Reply via ${smsProvider === "kixie" ? "Kixie" : "TextTorrent"}… (type / for templates)`}
+                placeholder={`Reply via ${smsProvider === "kixie" ? "Kixie" : smsProvider === "twilio" ? "Twilio" : "TextTorrent"}… (type / for templates)`}
                 rows={2}
                 templates={DEFAULT_SMS_TEMPLATES}
                 templateVars={templateVars}
