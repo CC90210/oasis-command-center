@@ -86,9 +86,16 @@ function run() {
   assert.strictEqual(b.business_state, "TX", "state normalized from state_code fallback");
   assert.strictEqual(b.iso_broker, "FUNDMATE", "iso_broker carried");
 
-  // credit_score absent here → applicant_fico is legitimately blank and flagged.
+  // credit_score absent here → applicant_fico is legitimately blank. It must be
+  // LOGGED (emptyExpected) but must NOT page anyone (2026-07-29): the UW sheet
+  // carries an Experian link rather than a number and our external application
+  // never asks for a score, so a blank FICO is the normal case, not a defect.
   const rec2 = reconcileLiveSubFields(b);
-  assert.ok(rec2.missingCritical.includes("applicant_fico"), "case 2: applicant_fico flagged missing");
+  assert.ok(rec2.emptyExpected.includes("applicant_fico"), "case 2: applicant_fico logged empty");
+  assert.ok(
+    !rec2.missingCritical.includes("applicant_fico"),
+    "case 2: applicant_fico must NOT be critical (no Telegram page for a blank FICO)",
+  );
   assert.ok(!rec2.severe, "case 2: not severe (business_name + monthly_revenue present)");
 
   // ── Case 3: severe — a broken sub missing business_name + revenue ────────
