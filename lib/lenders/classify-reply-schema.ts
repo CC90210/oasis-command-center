@@ -62,6 +62,14 @@ export type LenderReplyClass = {
    * ambiguity is what let a total outage run silently for a week.
    */
   unavailable: boolean;
+  /**
+   * Only meaningful when `unavailable`. TRUE means the classification is still
+   * in flight (the queued job outlived our budget) and is expected to resolve
+   * itself on a later tick — retry quietly. FALSE means inference genuinely
+   * failed and someone should be paged. Conflating the two would either alert
+   * on ordinary queue latency or stay silent through a real outage.
+   */
+  retryable: boolean;
 };
 
 const CATS: LenderReplyCategory[] = [
@@ -75,19 +83,26 @@ const DECLINE_CODES: LenderDeclineReasonCode[] = [
 ];
 
 /** Fresh object each call — never hand callers a shared mutable singleton. */
-function baseFallback(unavailable: boolean): LenderReplyClass {
+function baseFallback(unavailable: boolean, retryable = false): LenderReplyClass {
   return {
     category: "unknown", amount: null, term_months: null, factor_rate: null,
     confidence: 0, decline_reason_code: null, decline_reason_detail: null,
-    conditions: [], unavailable,
+    conditions: [], unavailable, retryable,
   };
 }
 
 /** The reply could not be parsed. Fail closed; the reply itself is the reason. */
 export const FALLBACK: LenderReplyClass = baseFallback(false);
 
-/** The classifier could not RUN. Fail closed, but flag it as an outage. */
-export const CLASSIFIER_UNAVAILABLE: LenderReplyClass = baseFallback(true);
+/** Inference genuinely failed. Fail closed AND page someone. */
+export const CLASSIFIER_UNAVAILABLE: LenderReplyClass = baseFallback(true, false);
+
+/**
+ * The queued job outlived our budget and is still in flight. Fail closed for
+ * write-gating, but this is ordinary latency, not an outage — the next tick
+ * collects the result via the dedupe key rather than re-queueing.
+ */
+export const CLASSIFIER_PENDING: LenderReplyClass = baseFallback(true, true);
 
 /**
  * Isolate the lender's NEW message — strip the quoted original (our "New Deal"
@@ -172,6 +187,6 @@ export function parseClassification(text: string): LenderReplyClass {
   return {
     category, amount, term_months, factor_rate, confidence,
     decline_reason_code, decline_reason_detail, conditions,
-    unavailable: false,
+    unavailable: false, retryable: false,
   };
 }

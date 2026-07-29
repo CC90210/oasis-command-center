@@ -58,7 +58,17 @@ const QUEUE_TIER_RE = /^(fast|smart|max)$/;
  *
  * A timeout leaves the job in place — the daemon may still finish it (the
  * result stays queryable in the table); we just stop waiting so the calling
- * route stays inside its function budget.
+ * route stays inside its function budget. `timedOut` says so explicitly: a
+ * caller must be able to tell "still cooking, ask again" from "this failed",
+ * because they warrant opposite reactions (retry quietly vs alert an outage).
+ *
+ * `dedupeKey` (optional) closes the loop on that timeout. Without it, a job
+ * that outlives its caller's budget is orphaned: the daemon burns real
+ * subscription inference finishing it, nobody ever reads the result, and the
+ * next tick enqueues the identical prompt again — unbounded duplicate work on
+ * anything slower than one caller's budget. With it, the job is tagged on
+ * `source` and the next call ADOPTS the in-flight job (or collects its finished
+ * result for free) instead of queueing a twin.
  */
 export async function queueInfer(
   args: {
@@ -68,30 +78,69 @@ export async function queueInfer(
     modelTier?: string;
     maxTokens?: number;
     tenantId?: string | null;
+    /** Stable per-payload key. Enables adopt/collect instead of re-queueing. */
+    dedupeKey?: string;
+    /** How far back an existing job stays reusable. Default 30 min. */
+    dedupeWindowMs?: number;
   },
   opts?: { timeoutMs?: number; pollMs?: number },
-): Promise<{ ok: true; text: string } | { ok: false; error: string }> {
+): Promise<
+  | { ok: true; text: string; reused?: boolean }
+  | { ok: false; error: string; timedOut?: boolean }
+> {
   const timeoutMs = opts?.timeoutMs ?? 30_000;
   const pollMs = opts?.pollMs ?? 2_000;
   const tier = QUEUE_TIER_RE.test(args.modelTier || "") ? (args.modelTier as string) : "fast";
   const db = getServiceSupabase();
 
-  const ins = await db
-    .from("inference_jobs")
-    .insert({
-      tenant_id: args.tenantId ?? null,
-      source: args.source.slice(0, 120),
-      system: args.system || null,
-      prompt: args.prompt,
-      model_tier: tier,
-      max_tokens: Math.min(Math.max(args.maxTokens ?? 1024, 1), 16000),
-    })
-    .select("id")
-    .single();
-  if (ins.error || !ins.data) {
-    return { ok: false, error: `queue_insert_failed: ${ins.error?.message || "unknown"}` };
+  // Tag the dedupe key onto `source` so this needs no schema change and stays
+  // compatible with the daemon's claim query (which only reads status+created_at).
+  const key = (args.dedupeKey || "").replace(/[^A-Za-z0-9_-]/g, "").slice(0, 40);
+  const source = (key ? `${args.source}#${key}` : args.source).slice(0, 120);
+
+  let jobId: string | null = null;
+
+  if (key) {
+    const since = new Date(Date.now() - (args.dedupeWindowMs ?? 30 * 60_000)).toISOString();
+    const prior = await db
+      .from("inference_jobs")
+      .select("id, status, result_text")
+      .eq("source", source)
+      .gte("created_at", since)
+      .order("created_at", { ascending: false })
+      .limit(1);
+    const p = prior.data?.[0] as
+      | { id: string; status?: string; result_text?: string | null }
+      | undefined;
+    if (!prior.error && p) {
+      // Finished while an earlier caller was not looking — collect it, free.
+      if (p.status === "complete" && (p.result_text || "").trim()) {
+        return { ok: true, text: (p.result_text as string).trim(), reused: true };
+      }
+      // Still queued or running — adopt it rather than enqueue a duplicate.
+      if (p.status === "pending" || p.status === "running") jobId = p.id;
+      // status 'error' falls through to a fresh attempt.
+    }
   }
-  const jobId = (ins.data as { id: string }).id;
+
+  if (!jobId) {
+    const ins = await db
+      .from("inference_jobs")
+      .insert({
+        tenant_id: args.tenantId ?? null,
+        source,
+        system: args.system || null,
+        prompt: args.prompt,
+        model_tier: tier,
+        max_tokens: Math.min(Math.max(args.maxTokens ?? 1024, 1), 16000),
+      })
+      .select("id")
+      .single();
+    if (ins.error || !ins.data) {
+      return { ok: false, error: `queue_insert_failed: ${ins.error?.message || "unknown"}` };
+    }
+    jobId = (ins.data as { id: string }).id;
+  }
 
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -110,7 +159,13 @@ export async function queueInfer(
       return { ok: false, error: j.error_message || "infer_job_failed" };
     }
   }
-  return { ok: false, error: `queue_timeout_${Math.round(timeoutMs / 1000)}s (job ${jobId} left for the daemon)` };
+  // Recoverable: the job is still queued and the daemon may well finish it. With
+  // a dedupeKey the next call collects that result; without one it is orphaned.
+  return {
+    ok: false,
+    error: `queue_timeout_${Math.round(timeoutMs / 1000)}s (job ${jobId} left for the daemon)`,
+    timedOut: true,
+  };
 }
 
 /**

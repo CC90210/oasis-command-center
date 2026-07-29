@@ -222,25 +222,33 @@ export async function GET(req: NextRequest) {
   const classBy = new Map<Candidate, LenderReplyClass>();
   const deferredSet = new Set<Candidate>();
   let unavailableCount = 0;
+  let pendingCount = 0;
 
   for (const c of toClassify) {
     const remaining = CLASSIFY_BUDGET_MS - (Date.now() - startedAt);
     if (remaining < MIN_CLASSIFY_MS) { deferredSet.add(c); continue; }
     const cls = await classifyLenderReply(c.subject, c.body, {
       timeoutMs: Math.min(remaining, MAX_PER_CLASSIFY_MS),
+      tenantId: SUNBIZ_TENANT_ID,
     });
     classBy.set(c, cls);
     if (cls.unavailable) {
-      // Inference is down for this whole tick, not just this reply. Every
-      // further call would burn its full timeout for another guaranteed miss,
-      // so stop and defer the rest rather than run the route out of budget.
-      unavailableCount++;
+      // Either way we stop: another call would burn its full timeout for a
+      // near-certain miss and risk maxDuration. But WHY matters. `retryable`
+      // means the job is still queued and the next tick collects it via the
+      // dedupe key — ordinary latency, no alarm. Otherwise inference is
+      // genuinely broken and someone needs paging.
+      if (cls.retryable) pendingCount++;
+      else unavailableCount++;
       for (const rest of toClassify) if (!classBy.has(rest)) deferredSet.add(rest);
       break;
     }
   }
 
-  const classified = [...classBy.values()];
+  // Only genuinely-classified replies count. A pending/unavailable result is an
+  // absence of classification, not an "unknown" verdict about the lender, and
+  // counting it as one would re-create the exact ambiguity this change removes.
+  const classified = [...classBy.values()].filter((c) => !c.unavailable);
   const unknownCount = classified.filter((c) => c.category === "unknown").length;
 
   // The classifier being DOWN is now directly observable rather than inferred:
@@ -340,8 +348,11 @@ export async function GET(req: NextRequest) {
     /** Ran out of budget or inference was down — retried next tick, not lost. */
     deferred: deferredSet.size,
     unknown: unknownCount,
-    /** Inference itself failed. The authoritative outage signal. */
+    /** Inference genuinely failed. The authoritative outage signal. */
     unavailable: unavailableCount,
+    /** Job still in flight past our budget — ordinary latency, collected next
+     *  tick via the dedupe key. Explicitly NOT an outage. */
+    pending: pendingCount,
     classifier_down: classifierDown,
     /** Legacy key — kept so an un-updated trigger still alerts. */
     dead_key_suspected: deadKeySuspected,

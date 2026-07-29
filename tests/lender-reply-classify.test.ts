@@ -20,6 +20,7 @@ import {
   parseClassification,
   topOfReply,
   CLASSIFIER_UNAVAILABLE,
+  CLASSIFIER_PENDING,
   type LenderReplyClass,
 } from "../lib/lenders/classify-reply-schema";
 
@@ -134,6 +135,38 @@ for (const junk of ["", "not json at all", "{ broken", "null", "[]"]) {
   const parsed = parseClassification("not json at all");
   assert.equal(parsed.category, u.category, "same write-gating outcome");
   assert.notEqual(parsed.unavailable, u.unavailable, "different diagnosis");
+}
+
+// ── latency is not an outage ─────────────────────────────────────────────────
+{
+  // A queued job that outlives the tick budget must NOT page anyone: the job is
+  // still in flight and the next tick collects it via the dedupe key. Alerting
+  // on this would train everyone to ignore the alert that actually matters.
+  const p: LenderReplyClass = CLASSIFIER_PENDING;
+  const u: LenderReplyClass = CLASSIFIER_UNAVAILABLE;
+
+  assert.equal(p.category, "unknown", "pending still fails closed — never written");
+  assert.equal(p.unavailable, true, "pending yields no usable classification");
+  assert.equal(p.retryable, true, "…but resolves itself; retry quietly");
+  assert.equal(u.retryable, false, "a terminal failure must page someone");
+  assert.notEqual(p.retryable, u.retryable, "the two outage shapes stay distinguishable");
+
+  // A real classification is neither.
+  const real = parseClassification(j({ category: "declined", confidence: 0.7 }));
+  assert.equal(real.unavailable, false);
+  assert.equal(real.retryable, false);
+}
+
+// ── every sentinel is a FRESH object (no shared mutable singleton) ───────────
+{
+  // The pre-2026-07-28 code returned one shared FALLBACK reference to every
+  // caller; a single downstream mutation would have silently rewritten the
+  // verdict for every other reply in the batch.
+  const a = parseClassification("garbage");
+  const b = parseClassification("garbage");
+  assert.notEqual(a, b, "distinct object identities");
+  a.conditions.push("mutated");
+  assert.equal(b.conditions.length, 0, "mutating one result cannot affect another");
 }
 
 console.log("lender-reply-classify tests passed");
