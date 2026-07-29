@@ -245,14 +245,16 @@ export async function POST(req: NextRequest) {
   // leaving no renewal date on a deal they thought they had dated.
   const term = optionalNum(body.term_months);
   const term_months = term.value;
-  if (term.provided && term_months === null) errors.term_months = "Term must be a number of months.";
+  if (!term.provided) errors.term_months = "Term is required.";
+  else if (term_months === null) errors.term_months = "Term must be a number of months.";
   else if (term_months !== null && (!Number.isInteger(term_months) || term_months < 1 || term_months > 60)) {
     errors.term_months = "Term must be a whole number of months, 1 to 60.";
   }
 
   const factor = optionalNum(body.factor_rate);
   const factor_rate = factor.value;
-  if (factor.provided && factor_rate === null) errors.factor_rate = "Factor rate must be a number.";
+  if (!factor.provided) errors.factor_rate = "Rate is required.";
+  else if (factor_rate === null) errors.factor_rate = "Factor rate must be a number.";
   else if (factor_rate !== null && (factor_rate < 1.0 || factor_rate > 2.0)) {
     errors.factor_rate = "Factor rate should be between 1.0 and 2.0 (e.g. 1.35).";
   }

@@ -147,6 +147,20 @@ export default function RecordFundedDeal() {
     return () => document.removeEventListener("mousedown", closeOnOutsideClick);
   }, []);
 
+  useEffect(() => {
+    if (!selectedLead) return;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    function closeOnEscape(event: KeyboardEvent) {
+      if (event.key === "Escape" && !saving) clearLead();
+    }
+    document.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      document.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [selectedLead, saving]);
+
   function chooseLead(lead: LeadOption) {
     setSelectedLead(lead);
     setPickerOpen(false);
@@ -221,6 +235,11 @@ export default function RecordFundedDeal() {
         <CalendarPlus size={12} className="text-accent" />
         <span>Record a funded deal</span>
       </div>
+      {saved && !selectedLead && (
+        <div className="mb-4 flex items-center gap-2 rounded-xl border border-status-warm/30 bg-status-warm/10 px-4 py-3 text-sm text-status-warm" role="status">
+          <Check size={15} /> Recorded {saved}. The renewal schedule is now active.
+        </div>
+      )}
 
       <form onSubmit={selectedLead ? submit : searchLeads} className="space-y-4">
         {!selectedLead ? (
@@ -276,6 +295,12 @@ export default function RecordFundedDeal() {
                   <button
                     key={lead.id}
                     type="button"
+                    onPointerDown={(event) => {
+                      // Commit selection before any outside-click/focus handler
+                      // can dismiss the option between pointer-down and click.
+                      event.preventDefault();
+                      chooseLead(lead);
+                    }}
                     onClick={() => chooseLead(lead)}
                     className="group flex w-full items-center gap-3 rounded-lg px-3 py-3 text-left transition-colors hover:bg-accent/8 focus:bg-accent/8 focus:outline-none"
                   >
@@ -307,6 +332,35 @@ export default function RecordFundedDeal() {
           </div>
         ) : (
           <>
+            <div className="fixed inset-0 z-[80] flex items-center justify-center p-3 sm:p-6" role="presentation">
+              <button
+                type="button"
+                className="absolute inset-0 bg-black/65 backdrop-blur-sm"
+                onClick={() => !saving && clearLead()}
+                aria-label="Close funding details"
+              />
+              <div
+                role="dialog"
+                aria-modal="true"
+                aria-labelledby="renewal-deal-title"
+                className="relative z-10 flex max-h-[94vh] w-full max-w-3xl flex-col overflow-hidden rounded-2xl border border-border bg-bg-panel shadow-2xl shadow-black/40"
+              >
+                <header className="flex items-center justify-between border-b border-border bg-bg-subtle/70 px-5 py-4">
+                  <div>
+                    <div className="text-[10px] font-bold uppercase tracking-[0.14em] text-accent">New renewal deal</div>
+                    <h2 id="renewal-deal-title" className="mt-1 text-lg font-semibold text-fg">Add funding details</h2>
+                    <p className="mt-0.5 text-xs text-fg-muted">These terms determine when renewal outreach begins.</p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => !saving && clearLead()}
+                    disabled={saving}
+                    className="rounded-lg border border-border px-3 py-2 text-xs font-medium text-fg-muted hover:bg-bg hover:text-fg disabled:opacity-50"
+                  >
+                    Cancel
+                  </button>
+                </header>
+                <div className="overflow-y-auto p-5 sm:p-6 space-y-5">
             <div className="flex items-center justify-between rounded-xl border border-accent/30 bg-accent/5 px-4 py-3">
               <div className="flex min-w-0 items-center gap-3">
                 <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-accent/10 text-sm font-bold text-accent">
@@ -353,11 +407,11 @@ export default function RecordFundedDeal() {
           </div>
 
           <div>
-            <label className={labelCls} htmlFor="fd-term">Term (months)</label>
+            <label className={labelCls} htmlFor="fd-term">Term (months) *</label>
             <input
               id="fd-term" className={inputCls} value={form.term_months}
               onChange={set("term_months")} placeholder="10" inputMode="numeric"
-              aria-invalid={!!errors.term_months}
+              aria-invalid={!!errors.term_months} required
             />
             {errors.term_months
               ? <p className="mt-1 text-xs text-status-hot">{errors.term_months}</p>
@@ -377,11 +431,11 @@ export default function RecordFundedDeal() {
           </div>
 
           <div>
-            <label className={labelCls} htmlFor="fd-factor">Factor rate</label>
+            <label className={labelCls} htmlFor="fd-factor">Factor rate *</label>
             <input
               id="fd-factor" className={inputCls} value={form.factor_rate}
               onChange={set("factor_rate")} placeholder="1.35" inputMode="decimal"
-              aria-invalid={!!errors.factor_rate}
+              aria-invalid={!!errors.factor_rate} required
             />
             {errors.factor_rate && <p className="mt-1 text-xs text-status-hot">{errors.factor_rate}</p>}
           </div>
@@ -454,6 +508,9 @@ export default function RecordFundedDeal() {
           </button>
           <span className="text-[11px] text-fg-muted">* required</span>
         </div>
+                </div>
+              </div>
+            </div>
           </>
         )}
       </form>
