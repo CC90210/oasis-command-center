@@ -13,8 +13,9 @@
  *      entry UI is the existing <BackgroundCheckTab/>, unchanged.
  *   2. CLAIR · Thomson Reuters CLEAR (clair_reports) — the manual, billable,
  *      permissible-use phone/address enrichment. The existing <ClairReportPanel/>
- *      (which self-gates and keeps CLEAR data separate from the application
- *      record) is now surfaced here in the drawer, not only on the pipeline page.
+ *      (which keeps CLEAR data separate from the application record) is now
+ *      surfaced here in the drawer, not only on the pipeline page. It is
+ *      independent of the automated lookup: both may run on the same lead.
  *
  * The pinned summary reads BOTH sources read-only; the two panels below own all
  * writes and their own polling. The summary polls only while a background check
@@ -191,54 +192,90 @@ function EnrichmentSummary({
     bgChip = <Chip color={riskColor(bg.risk_flag)}>{RISK_LABEL[bg.risk_flag]}</Chip>;
   }
 
-  // Phone chip. Two sources can produce a number now: the automated
-  // TruePeopleSearch lookup (free, first) and CLAIR (billable, fallback). The
-  // automated one is checked first because it is the one that normally answers,
-  // and because its status is what governs whether CLAIR is even offered.
+  // Phone chips. The two sources are INDEPENDENT enrichments and both may have
+  // run on the same lead, so each gets its own chip rather than competing for
+  // one slot. Collapsing them into a single chip is what used to make a CLEAR
+  // pull look like it did nothing on a lead the automated lookup had already
+  // answered.
+  //
+  // A chip may only claim what the data actually supports. "found" is the
+  // lookup's own record of its outcome and can outlive the number (a field
+  // edit, a bad write); a number with no lookup status is a manual or legacy
+  // entry. Neither is evidence of the other, so the three cases are separate:
+  // attributed, unattributed, and status-without-number.
   const lookupStatus = String(leadData.phone_lookup_status ?? "");
-  let phoneChip: React.ReactNode;
-  if (hasUsablePhone(leadData) && lookupStatus === "found") {
-    phoneChip = (
+  const phoneOnLead = hasUsablePhone(leadData);
+  let tpsChip: React.ReactNode;
+  if (lookupStatus === "found" && phoneOnLead) {
+    tpsChip = (
       <Chip color="#1f7a4d">
-        <Phone className="h-3 w-3" /> Phone found — automated lookup
+        <Phone className="h-3 w-3" /> Phone on file — automated lookup
       </Chip>
     );
-  } else if (lookupStatus === "manual_review") {
-    phoneChip = (
+  } else if (lookupStatus === "found") {
+    // The lookup says it matched, but nothing usable is on the lead. Say
+    // exactly that rather than implying a number the operator cannot dial.
+    tpsChip = (
       <Chip color={riskColor("unknown")}>
-        <PhoneOff className="h-3 w-3" /> Lookup failed — needs CLAIR
+        <PhoneOff className="h-3 w-3" /> Automated lookup matched — no number on lead
       </Chip>
     );
-  } else if (phoneCount > 0) {
-    phoneChip = (
+  } else if (!lookupStatus && phoneOnLead) {
+    tpsChip = (
       <Chip color="#1f7a4d">
-        <Phone className="h-3 w-3" /> {phoneCount} phone{phoneCount === 1 ? "" : "s"} on file
+        <Phone className="h-3 w-3" /> Phone on file
       </Chip>
     );
-  } else if (lookupStatus === "not_found" && clair?.status !== "no_results") {
-    phoneChip = (
+  } else if (lookupStatus === "pending" || lookupStatus === "running" || lookupStatus === "queued") {
+    tpsChip = <Chip muted>Automated lookup running…</Chip>;
+  } else if (lookupStatus === "manual_review") {
+    tpsChip = (
+      <Chip color={riskColor("unknown")}>
+        <PhoneOff className="h-3 w-3" /> Automated lookup failed
+      </Chip>
+    );
+  } else if (lookupStatus) {
+    tpsChip = (
       <Chip muted>
         <PhoneOff className="h-3 w-3" /> Automated lookup: no match
       </Chip>
     );
+  } else {
+    tpsChip = (
+      <Chip muted>
+        <PhoneOff className="h-3 w-3" /> Automated lookup not run
+      </Chip>
+    );
+  }
+
+  // Only rendered once a CLEAR report exists — an absent chip means "never
+  // pulled", which is different from "pulled and empty".
+  let clairChip: React.ReactNode = null;
+  if (clair?.status === "completed") {
+    clairChip =
+      phoneCount > 0 ? (
+        <Chip color="#1f7a4d">
+          <Phone className="h-3 w-3" /> CLAIR: {phoneCount} phone{phoneCount === 1 ? "" : "s"}
+        </Chip>
+      ) : (
+        <Chip muted>
+          <PhoneOff className="h-3 w-3" /> CLAIR: no numbers
+        </Chip>
+      );
   } else if (clair?.status === "no_results") {
-    phoneChip = (
+    clairChip = (
       <Chip muted>
         <PhoneOff className="h-3 w-3" /> CLAIR: no match
       </Chip>
     );
   } else if (clair?.status === "error") {
-    phoneChip = (
+    clairChip = (
       <Chip color={riskColor("mca_default")}>
         <PhoneOff className="h-3 w-3" /> CLAIR: error
       </Chip>
     );
-  } else {
-    phoneChip = (
-      <Chip muted>
-        <PhoneOff className="h-3 w-3" /> No number found
-      </Chip>
-    );
+  } else if (clair?.status === "pending") {
+    clairChip = <Chip muted>CLAIR report pending…</Chip>;
   }
 
   const HeadIcon = isCritical ? ShieldAlert : bg?.risk_flag === "none" ? ShieldCheck : ShieldQuestion;
@@ -267,7 +304,8 @@ function EnrichmentSummary({
 
       <div className="mt-2 flex flex-wrap items-center gap-1.5">
         {bgChip}
-        {phoneChip}
+        {tpsChip}
+        {clairChip}
       </div>
 
       {bg?.findings_summary && (
@@ -286,7 +324,7 @@ export function EnrichmentTab({
 }: {
   leadId: string;
   // In the lead drawer, `record` IS the flattened lead data object (the same
-  // value ClairReportPanel expects as `leadData` and clairEligibility reads).
+  // value ClairReportPanel expects as `leadData` and clairAdvisory reads).
   record: Record<string, unknown>;
   /** Refetch the lead record from the drawer. */
   onReload?: () => void | Promise<void>;
@@ -295,9 +333,9 @@ export function EnrichmentTab({
   // A finished lookup writes to the LEAD (phone, phone_lookup_status), not just
   // to its own table, and `record` is a prop owned by the drawer. Bumping only
   // the local key would refresh the summary's own fetches while leaving every
-  // consumer of `record` — including clairEligibility, which decides whether the
-  // billable fallback is even offered — reading pre-lookup data until someone
-  // manually reopened the drawer.
+  // consumer of `record` — including clairAdvisory, which tells the operator
+  // whether a billable pull would be redundant — reading pre-lookup data until
+  // someone manually reopened the drawer.
   const bump = useCallback(() => {
     setRefreshKey((k) => k + 1);
     void onReload?.();
@@ -307,10 +345,10 @@ export function EnrichmentTab({
     <div className="space-y-5">
       <EnrichmentSummary leadId={leadId} refreshKey={refreshKey} leadData={record} />
       <BackgroundCheckTab leadId={leadId} record={record} onChanged={bump} />
-      {/* Order is the policy, not a layout preference: the free automated lookup
-          is offered first, and CLAIR renders below it precisely because
-          clairEligibility() keeps the billable button hidden until this one has
-          run and come up empty. */}
+      {/* Order is a recommendation, not a lock: the free automated lookup reads
+          first because it is the cheaper thing to try. CLAIR sits below it and
+          is independently runnable at any time — including on a lead this panel
+          has already enriched. */}
       <PhoneLookupPanel leadId={leadId} leadData={record} onChanged={bump} />
       <ClairReportPanel leadId={leadId} leadData={record} onChanged={bump} />
     </div>
