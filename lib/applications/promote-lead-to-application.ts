@@ -196,6 +196,11 @@ export async function promoteLeadToApplication(input: {
         title: `Live Sub promoted with ${missingCritical.length} blank critical field(s)`,
         body: `Application ${applicationId} is missing: ${missingCritical.join(", ")}. All empty: ${emptyExpected.join(", ") || "none"}.`,
         payload: { applicationId, missingCritical, emptyExpected, phoneStatus },
+        // Promote is idempotent and retryable (retry_promote from the Live Subs
+        // dashboard, plus the backfill), so without this every re-run re-paged
+        // Telegram for a card that was already open. Page once per open card;
+        // the dashboard row still refreshes.
+        telegramOncePerOpen: true,
       });
     }
 
