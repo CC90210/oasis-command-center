@@ -131,7 +131,11 @@ export async function ingestMessages(
     let lenderEnrichment: Record<string, unknown> = {};
     if (cls.type === "lender_reply") {
       try {
-        const lr = await classifyLenderReply(msg.subject, msg.body);
+        // Tenant-scope the queued prompt: the classifier now PERSISTS this
+        // content in inference_jobs, so it must carry its owner.
+        const lr = await classifyLenderReply(msg.subject, msg.body, {
+          tenantId: args.tenantId,
+        });
         lenderEnrichment = {
           lender_category: lr.category,
           lender_amount: lr.amount,

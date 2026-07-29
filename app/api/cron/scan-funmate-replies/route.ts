@@ -107,6 +107,19 @@ export async function GET(req: NextRequest) {
         if (thread.last_response_at && date.getTime() <= Date.parse(thread.last_response_at)) continue;
         const parsed = await simpleParser(message.source as Buffer);
         const classification = await classifyLenderReply(subject, String(parsed.text || parsed.html || ""));
+        // Inference produced no verdict (queue still in flight, or down). Do NOT
+        // write: `unknown` falls through to "responded" below AND advances
+        // last_response_at, and line 107 then skips this reply forever — the
+        // queued result would be discarded and a real approval lost. Leave the
+        // cursor where it is and pick it up next tick.
+        //
+        // A genuinely unparseable reply (unavailable === false) still advances,
+        // which is right: retrying forever on an email no model can read is a
+        // loop, not a recovery. The distinction is exactly what `unavailable` is
+        // for. NOTE: this path has been silently swallowing funmate replies
+        // since the classifier died on 2026-07-21 — every one was stamped
+        // "responded" and skipped.
+        if (classification.unavailable) continue;
         const status =
           classification.category === "approved" ? "approved" :
           classification.category === "declined" ? "declined" :
