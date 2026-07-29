@@ -205,8 +205,8 @@ export function mapLeadDataToApplicationFields(
  * field (silent-data-loss guard) and alert only when a load-bearing one is
  * blank. Some listed fields are legitimately absent on the UW Sheet 2.5
  * template (applicant_fico is usually an Experian *link*, requested_amount +
- * positions_balance aren't on the sheet at all) — those surface in the log, not
- * as an alert-by-default, via LIVE_SUB_CRITICAL_FIELDS.
+ * positions_balance aren't on the sheet at all) — those surface in the log
+ * ONLY, never as an alert: keep them OUT of LIVE_SUB_CRITICAL_FIELDS.
  */
 export const LIVE_SUB_EXPECTED_FIELDS = [
   "business_name",
@@ -237,12 +237,19 @@ export const LIVE_SUB_EXPECTED_FIELDS = [
 
 /** The subset whose absence means the promoted deal is materially broken (not
  * merely thin). Blank business_name / monthly_revenue is alarming; the others
- * are commonly absent on Breeze sheets and only warn. */
+ * are commonly absent on Breeze sheets and only warn.
+ *
+ * 2026-07-29 (Adon): applicant_fico REMOVED. The contract comment above always
+ * said a blank FICO belongs in the log, not in an alert (UW Sheet 2.5 carries an
+ * Experian link, not a number, and our own external application never asks for
+ * it — the rep collects it on the phone afterwards), but it was in this list
+ * anyway. Net effect: near enough every live sub paged Adon and Ezra over a
+ * field nobody expected to arrive. It stays pinned in LIVE_SUB_EXPECTED_FIELDS,
+ * so a promote still logs it as empty. */
 export const LIVE_SUB_CRITICAL_FIELDS = [
   "business_name",
   "monthly_revenue",
   "position_count",
-  "applicant_fico",
   "tax_id_ein",
 ] as const;
 
