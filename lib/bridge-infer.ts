@@ -58,7 +58,17 @@ const QUEUE_TIER_RE = /^(fast|smart|max)$/;
  *
  * A timeout leaves the job in place — the daemon may still finish it (the
  * result stays queryable in the table); we just stop waiting so the calling
- * route stays inside its function budget.
+ * route stays inside its function budget. `timedOut` says so explicitly: a
+ * caller must be able to tell "still cooking, ask again" from "this failed",
+ * because they warrant opposite reactions (retry quietly vs alert an outage).
+ *
+ * `dedupeKey` (optional) closes the loop on that timeout. Without it, a job
+ * that outlives its caller's budget is orphaned: the daemon burns real
+ * subscription inference finishing it, nobody ever reads the result, and the
+ * next tick enqueues the identical prompt again — unbounded duplicate work on
+ * anything slower than one caller's budget. With it, the job is tagged on
+ * `source` and the next call ADOPTS the in-flight job (or collects its finished
+ * result for free) instead of queueing a twin.
  */
 export async function queueInfer(
   args: {
@@ -68,30 +78,108 @@ export async function queueInfer(
     modelTier?: string;
     maxTokens?: number;
     tenantId?: string | null;
+    /** Stable per-payload key. Enables adopt/collect instead of re-queueing. */
+    dedupeKey?: string;
+    /** How far back an existing job stays reusable. Default 30 min. */
+    dedupeWindowMs?: number;
+    /**
+     * An in-flight job older than this is not latency, it is a stalled queue —
+     * reported as a TERMINAL failure so a dead daemon raises an alarm instead
+     * of looking like a slow one forever. Requires dedupeKey (that is what
+     * lets a later call see the original job's age). Default 15 min.
+     */
+    stalledAfterMs?: number;
   },
   opts?: { timeoutMs?: number; pollMs?: number },
-): Promise<{ ok: true; text: string } | { ok: false; error: string }> {
+): Promise<
+  | { ok: true; text: string; reused?: boolean }
+  | { ok: false; error: string; timedOut?: boolean; stalledMs?: number }
+> {
   const timeoutMs = opts?.timeoutMs ?? 30_000;
   const pollMs = opts?.pollMs ?? 2_000;
   const tier = QUEUE_TIER_RE.test(args.modelTier || "") ? (args.modelTier as string) : "fast";
   const db = getServiceSupabase();
 
-  const ins = await db
-    .from("inference_jobs")
-    .insert({
-      tenant_id: args.tenantId ?? null,
-      source: args.source.slice(0, 120),
-      system: args.system || null,
-      prompt: args.prompt,
-      model_tier: tier,
-      max_tokens: Math.min(Math.max(args.maxTokens ?? 1024, 1), 16000),
-    })
-    .select("id")
-    .single();
-  if (ins.error || !ins.data) {
-    return { ok: false, error: `queue_insert_failed: ${ins.error?.message || "unknown"}` };
+  // Tag the dedupe key onto `source` so this needs no schema change and stays
+  // compatible with the daemon's claim query (which only reads status+created_at).
+  // Reserve room for the suffix BEFORE truncating: slicing the combined string
+  // would chop the key off a long source label, so two different payloads could
+  // resolve to the same stored source and adopt each other's job. Safe for the
+  // current callers, but this is a shared primitive — the next one may not be.
+  const key = (args.dedupeKey || "").replace(/[^A-Za-z0-9_-]/g, "").slice(0, 40);
+  const suffix = key ? `#${key}` : "";
+  const source = args.source.slice(0, 120 - suffix.length) + suffix;
+
+  let jobId: string | null = null;
+
+  if (key) {
+    const since = new Date(Date.now() - (args.dedupeWindowMs ?? 30 * 60_000)).toISOString();
+    // TENANT-SCOPED. This runs as service role, so RLS is not a backstop here.
+    // The key is a content hash, and boilerplate content collides readily
+    // across tenants (a generic "we received your submission" auto-reply hashes
+    // the same everywhere) — without this filter one tenant could adopt or read
+    // another tenant's job. A caller with no tenant may only reuse untenanted
+    // jobs, never a tenant's. [[rls-required-default]]
+    let q = db
+      .from("inference_jobs")
+      .select("id, status, result_text, created_at")
+      .eq("source", source)
+      .gte("created_at", since);
+    q = args.tenantId ? q.eq("tenant_id", args.tenantId) : q.is("tenant_id", null);
+    const prior = await q
+      .order("created_at", { ascending: false })
+      .limit(1);
+    const p = prior.data?.[0] as
+      | { id: string; status?: string; result_text?: string | null; created_at?: string }
+      | undefined;
+    if (!prior.error && p) {
+      // Finished while an earlier caller was not looking — collect it, free.
+      if (p.status === "complete" && (p.result_text || "").trim()) {
+        return { ok: true, text: (p.result_text as string).trim(), reused: true };
+      }
+      // Still queued or running — adopt it rather than enqueue a duplicate.
+      if (p.status === "pending" || p.status === "running") {
+        // …unless it has been sitting there far too long. A job nobody has
+        // finished after this many minutes means the consumer daemon is not
+        // draining the queue, which is an OUTAGE, not slowness. Say so
+        // immediately rather than polling for a result that is never coming:
+        // otherwise a dead daemon reports "still cooking" on every tick
+        // forever and lender replies pile up in silence — precisely the
+        // failure this whole change exists to make impossible.
+        const ageMs = p.created_at ? Date.now() - Date.parse(p.created_at) : 0;
+        const stalledAfterMs = args.stalledAfterMs ?? 15 * 60_000;
+        if (Number.isFinite(ageMs) && ageMs > stalledAfterMs) {
+          return {
+            ok: false,
+            error: `queue_stalled: job ${p.id} still ${p.status} after ${Math.round(ageMs / 60_000)}m — is the infer-consumer daemon running?`,
+            timedOut: false,
+            stalledMs: ageMs,
+          };
+        }
+        jobId = p.id;
+      }
+      // status 'error' falls through to a fresh attempt.
+    }
   }
-  const jobId = (ins.data as { id: string }).id;
+
+  if (!jobId) {
+    const ins = await db
+      .from("inference_jobs")
+      .insert({
+        tenant_id: args.tenantId ?? null,
+        source,
+        system: args.system || null,
+        prompt: args.prompt,
+        model_tier: tier,
+        max_tokens: Math.min(Math.max(args.maxTokens ?? 1024, 1), 16000),
+      })
+      .select("id")
+      .single();
+    if (ins.error || !ins.data) {
+      return { ok: false, error: `queue_insert_failed: ${ins.error?.message || "unknown"}` };
+    }
+    jobId = (ins.data as { id: string }).id;
+  }
 
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -110,7 +198,13 @@ export async function queueInfer(
       return { ok: false, error: j.error_message || "infer_job_failed" };
     }
   }
-  return { ok: false, error: `queue_timeout_${Math.round(timeoutMs / 1000)}s (job ${jobId} left for the daemon)` };
+  // Recoverable: the job is still queued and the daemon may well finish it. With
+  // a dedupeKey the next call collects that result; without one it is orphaned.
+  return {
+    ok: false,
+    error: `queue_timeout_${Math.round(timeoutMs / 1000)}s (job ${jobId} left for the daemon)`,
+    timedOut: true,
+  };
 }
 
 /**
