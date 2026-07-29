@@ -70,4 +70,36 @@ for (const bad of [null, undefined, -5, NaN]) {
   assert.equal(estCommissionUsd(amount, points), 9_350);
 }
 
+// ── the intake's date rule, mirrored ─────────────────────────────────────────
+// Kept in step with isRealYmd() in app/api/renewals/route.ts. Date.parse
+// NORMALISES ("2026-02-30" → March 2) rather than rejecting, so a shape-only
+// check lets an impossible date through, Postgres then rejects the original, and
+// the caller gets a 500 where a field-level 400 was promised.
+{
+  const YMD_RE = /^\d{4}-\d{2}-\d{2}$/;
+  const isRealYmd = (s: string): boolean => {
+    if (!YMD_RE.test(s)) return false;
+    const [y, m, d] = s.split("-").map(Number);
+    const dt = new Date(Date.UTC(y, m - 1, d));
+    return dt.getUTCFullYear() === y && dt.getUTCMonth() === m - 1 && dt.getUTCDate() === d;
+  };
+
+  for (const good of ["2026-01-01", "2026-02-28", "2024-02-29", "2026-12-31"]) {
+    assert.equal(isRealYmd(good), true, `${good} is a real date`);
+  }
+  for (const bad of ["2026-02-30", "2026-02-31", "2026-04-31", "2026-13-01", "2026-00-10", "2026-01-32"]) {
+    assert.equal(isRealYmd(bad), false, `${bad} is not a real date and must be rejected, not normalised`);
+  }
+  assert.equal(isRealYmd("2026-02-29"), false, "2026 is not a leap year");
+  assert.equal(isRealYmd("2024-02-29"), true, "2024 is");
+
+  // Guard the whole point: the naive check would have accepted these.
+  for (const bad of ["2026-02-30", "2026-04-31"]) {
+    assert.ok(
+      YMD_RE.test(bad) && !Number.isNaN(Date.parse(`${bad}T00:00:00Z`)),
+      `${bad} passes a shape+parse check — which is exactly why the round-trip exists`,
+    );
+  }
+}
+
 console.log("renewals-derive tests passed");

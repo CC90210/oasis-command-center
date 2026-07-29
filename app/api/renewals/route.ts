@@ -60,6 +60,31 @@ function num(v: unknown): number | null {
   return Number.isFinite(n) ? n : null;
 }
 
+/**
+ * A real calendar date, not merely a well-shaped one.
+ *
+ * Date.parse NORMALISES rather than rejects: "2026-02-30" becomes March 2. That
+ * would sail past a shape check, then Postgres would reject the original value
+ * and the caller would get a 500 instead of the field-level 400 this route
+ * promises. Round-tripping the components is what catches it.
+ */
+function isRealYmd(s: string): boolean {
+  if (!YMD_RE.test(s)) return false;
+  const [y, m, d] = s.split("-").map(Number);
+  const dt = new Date(Date.UTC(y, m - 1, d));
+  return dt.getUTCFullYear() === y && dt.getUTCMonth() === m - 1 && dt.getUTCDate() === d;
+}
+
+/**
+ * Read an optional numeric field, keeping "absent" and "present but unparsable"
+ * distinct so the latter can be rejected instead of silently dropped.
+ */
+function optionalNum(v: unknown): { provided: boolean; value: number | null } {
+  const absent = v === undefined || v === null || (typeof v === "string" && v.trim() === "");
+  if (absent) return { provided: false, value: null };
+  return { provided: true, value: num(v) };
+}
+
 export async function POST(req: NextRequest) {
   const sess = await resolveSessionContext();
   if (!sess.ok) {
@@ -96,29 +121,36 @@ export async function POST(req: NextRequest) {
   else if (funded_amount_usd <= 0) errors.funded_amount_usd = "Amount funded must be greater than zero.";
   else if (funded_amount_usd > 100_000_000) errors.funded_amount_usd = "Amount funded looks too large.";
 
-  const funded_at = typeof body.funded_at === "string" && YMD_RE.test(body.funded_at.trim())
+  const funded_at = typeof body.funded_at === "string" && isRealYmd(body.funded_at.trim())
     ? body.funded_at.trim()
     : null;
-  if (!funded_at) errors.funded_at = "Funded date is required (YYYY-MM-DD).";
-  else if (Number.isNaN(Date.parse(`${funded_at}T00:00:00Z`))) errors.funded_at = "Funded date is not a real date.";
+  if (!funded_at) errors.funded_at = "Funded date is required, as a real calendar date (YYYY-MM-DD).";
 
-  // Optional, but validated when present — the DB has matching CHECKs, and a
+  // Optional, but validated when PRESENT — the DB has matching CHECKs, and a
   // clear field-level message beats a raw constraint violation.
-  const term_months = body.term_months === undefined || body.term_months === null || body.term_months === ""
-    ? null : num(body.term_months);
-  if (term_months !== null && (!Number.isInteger(term_months) || term_months < 1 || term_months > 60)) {
+  //
+  // `provided` distinguishes "left blank" from "typed something unparsable".
+  // Without it, term_months: "abc" parses to null, looks identical to omitted,
+  // and the request quietly succeeds having thrown the operator's input away —
+  // leaving no renewal date on a deal they thought they had dated.
+  const term = optionalNum(body.term_months);
+  const term_months = term.value;
+  if (term.provided && term_months === null) errors.term_months = "Term must be a number of months.";
+  else if (term_months !== null && (!Number.isInteger(term_months) || term_months < 1 || term_months > 60)) {
     errors.term_months = "Term must be a whole number of months, 1 to 60.";
   }
 
-  const factor_rate = body.factor_rate === undefined || body.factor_rate === null || body.factor_rate === ""
-    ? null : num(body.factor_rate);
-  if (factor_rate !== null && (factor_rate < 1.0 || factor_rate > 2.0)) {
+  const factor = optionalNum(body.factor_rate);
+  const factor_rate = factor.value;
+  if (factor.provided && factor_rate === null) errors.factor_rate = "Factor rate must be a number.";
+  else if (factor_rate !== null && (factor_rate < 1.0 || factor_rate > 2.0)) {
     errors.factor_rate = "Factor rate should be between 1.0 and 2.0 (e.g. 1.35).";
   }
 
-  const points_pct = body.points_pct === undefined || body.points_pct === null || body.points_pct === ""
-    ? null : num(body.points_pct);
-  if (points_pct !== null && (points_pct < 0 || points_pct > 100)) {
+  const points = optionalNum(body.points_pct);
+  const points_pct = points.value;
+  if (points.provided && points_pct === null) errors.points_pct = "Points must be a number.";
+  else if (points_pct !== null && (points_pct < 0 || points_pct > 100)) {
     errors.points_pct = "Points must be between 0 and 100.";
   }
 

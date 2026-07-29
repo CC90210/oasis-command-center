@@ -16,6 +16,7 @@
 import { Card, Stat, EmptyState, Tag } from "@/components/Card";
 import { Flame, Clock, CalendarDays, TrendingUp } from "lucide-react";
 import {
+  getActiveProfile,
   getRenewalsSummary,
   getRenewalsRows,
   type FundedDealRow,
@@ -43,6 +44,12 @@ export async function RenewalsV2({ tenantId }: { tenantId: string | null }) {
         getRenewalsRows(tenantId, 100).catch(() => [] as FundedDealRow[]),
       ])
     : [EMPTY_SUMMARY, [] as FundedDealRow[]];
+
+  // Intake is offered only when the surface tenant IS the caller's own tenant —
+  // see the note at the render site. Fail closed: if the profile cannot be
+  // resolved, no form.
+  const viewer = await getActiveProfile().catch(() => null);
+  const canRecord = !!tenantId && !!viewer?.tenant_id && viewer.tenant_id === tenantId;
 
   const groups = groupRows(rows);
 
@@ -115,9 +122,15 @@ export async function RenewalsV2({ tenantId }: { tenantId: string | null }) {
 
       {/* Manual intake — kept in lock-step with the top-level /renewals page, so
           a rep working in the tenant surface can record a funded deal without
-          leaving it. The route resolves tenant + role from the session, so this
-          needs no props. */}
-      <RecordFundedDeal />
+          leaving it.
+
+          ONLY on your OWN tenant. /api/renewals takes its tenant from the
+          SESSION, never from the page, so on an operator previewing someone
+          else's tenant this form would look tenant-scoped while writing the deal
+          into the operator's own tenant — and then refresh a view that can never
+          show it. Showing it is the bug; the endpoint is right to trust only the
+          session. */}
+      {canRecord && <RecordFundedDeal />}
 
       {/* Grouped rows */}
       {rows.length === 0 ? (
