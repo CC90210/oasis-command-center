@@ -14,10 +14,19 @@
  * derivation is visible rather than magic.
  */
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Card } from "@/components/Card";
-import { CalendarPlus, Loader2, Check, Search, X } from "lucide-react";
+import {
+  ArrowLeft,
+  Building2,
+  CalendarPlus,
+  Check,
+  ChevronRight,
+  Clock3,
+  Loader2,
+  Search,
+} from "lucide-react";
 import { nextRenewalDate, estCommissionUsd } from "@/lib/renewals/derive";
 
 type FieldErrors = Record<string, string>;
@@ -41,6 +50,9 @@ type LeadOption = {
   contact_name: string | null;
   phone: string | null;
   email: string | null;
+  stage: string | null;
+  amount_requested: number | null;
+  updated_at: string;
 };
 
 const inputCls =
@@ -58,6 +70,19 @@ function toNum(v: string): number | null {
 const fmtUsd = (n: number) =>
   n.toLocaleString("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 2 });
 
+function fmtRelativeDate(value: string): string {
+  const elapsed = Date.now() - new Date(value).getTime();
+  const days = Math.max(0, Math.floor(elapsed / 86_400_000));
+  if (days === 0) return "Updated today";
+  if (days === 1) return "Updated yesterday";
+  if (days < 7) return `Updated ${days} days ago`;
+  return `Updated ${new Date(value).toLocaleDateString("en-US", { month: "short", day: "numeric" })}`;
+}
+
+function titleCase(value: string): string {
+  return value.replace(/[_-]+/g, " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+
 export default function RecordFundedDeal() {
   const router = useRouter();
   const [form, setForm] = useState({ ...EMPTY });
@@ -71,6 +96,8 @@ export default function RecordFundedDeal() {
   const [leadResults, setLeadResults] = useState<LeadOption[]>([]);
   const [selectedLead, setSelectedLead] = useState<LeadOption | null>(null);
   const [searching, setSearching] = useState(false);
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const pickerRef = useRef<HTMLDivElement>(null);
 
   const set = (k: keyof typeof EMPTY) => (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => {
     setForm((f) => ({ ...f, [k]: e.target.value }));
@@ -86,12 +113,12 @@ export default function RecordFundedDeal() {
   const previewRenewal = nextRenewalDate(form.funded_at || null, termNum);
   const previewCommission = estCommissionUsd(toNum(form.funded_amount_usd), toNum(form.points_pct));
 
-  async function searchLeads(e?: React.FormEvent) {
+  async function searchLeads(e?: React.FormEvent, query = leadQuery) {
     e?.preventDefault();
     setSearching(true);
     setFormError(null);
     try {
-      const res = await fetch(`/api/renewals?q=${encodeURIComponent(leadQuery)}`);
+      const res = await fetch(`/api/renewals?q=${encodeURIComponent(query)}`);
       const json = await res.json();
       if (!res.ok || !json?.ok) throw new Error();
       setLeadResults(json.leads || []);
@@ -102,8 +129,27 @@ export default function RecordFundedDeal() {
     }
   }
 
+  // Shopping-Out-style discovery: opening the control loads recent deals, and
+  // typing filters continuously. There is no separate "Search" action.
+  useEffect(() => {
+    if (!pickerOpen || selectedLead) return;
+    const timer = window.setTimeout(() => void searchLeads(undefined, leadQuery), leadQuery ? 180 : 0);
+    return () => window.clearTimeout(timer);
+    // searchLeads intentionally uses only the query passed above.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [leadQuery, pickerOpen, selectedLead]);
+
+  useEffect(() => {
+    function closeOnOutsideClick(event: MouseEvent) {
+      if (pickerRef.current && !pickerRef.current.contains(event.target as Node)) setPickerOpen(false);
+    }
+    document.addEventListener("mousedown", closeOnOutsideClick);
+    return () => document.removeEventListener("mousedown", closeOnOutsideClick);
+  }, []);
+
   function chooseLead(lead: LeadOption) {
     setSelectedLead(lead);
+    setPickerOpen(false);
     setLeadResults([]);
     setErrors({});
     setForm((current) => ({
@@ -116,6 +162,8 @@ export default function RecordFundedDeal() {
 
   function clearLead() {
     setSelectedLead(null);
+    setLeadQuery("");
+    setPickerOpen(true);
     setForm({ ...EMPTY });
     setSaved(null);
     setConfirmDuplicate(false);
@@ -176,65 +224,102 @@ export default function RecordFundedDeal() {
 
       <form onSubmit={selectedLead ? submit : searchLeads} className="space-y-4">
         {!selectedLead ? (
-          <div className="space-y-3">
-            <div>
-              <label className={labelCls} htmlFor="fd-lead-search">Search for a lead</label>
-              <div className="flex gap-2">
-                <div className="relative flex-1">
-                  <Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-fg-muted" />
+          <div className="rounded-xl border border-border bg-bg-subtle/40 p-4 md:p-5">
+            <div className="mb-4 flex items-start gap-3">
+              <div className="rounded-lg bg-accent/10 p-2.5 text-accent"><Building2 size={19} /></div>
+              <div>
+                <div className="text-sm font-semibold text-fg">Choose the funded deal</div>
+                <p className="mt-0.5 text-xs text-fg-muted">Start with a recent deal or type to find any lead in the CRM.</p>
+              </div>
+            </div>
+            <div ref={pickerRef} className="relative">
+              <label className={labelCls} htmlFor="fd-lead-search">Find a CRM deal</label>
+              <div className={`rounded-xl border bg-bg shadow-sm transition ${pickerOpen ? "border-accent ring-2 ring-accent/20" : "border-border hover:border-fg-muted/50"}`}>
+                <div className="relative">
+                  <Search size={17} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-fg-muted" />
                   <input
                     id="fd-lead-search"
-                    className={`${inputCls} pl-9`}
+                    type="search"
+                    autoComplete="off"
+                    className="h-12 w-full rounded-xl bg-transparent pl-10 pr-11 text-sm text-fg outline-none placeholder:text-fg-muted"
                     value={leadQuery}
-                    onChange={(e) => setLeadQuery(e.target.value)}
-                    placeholder="Business, contact, phone, or email"
+                    onFocus={() => setPickerOpen(true)}
+                    onClick={() => setPickerOpen(true)}
+                    onChange={(e) => { setLeadQuery(e.target.value); setPickerOpen(true); }}
+                  placeholder="Search business, contact, phone, or email…"
+                  role="combobox"
+                  aria-expanded={pickerOpen}
+                  aria-controls="renewal-lead-options"
                   />
+                  {searching && <Loader2 size={16} className="absolute right-3.5 top-1/2 -translate-y-1/2 animate-spin text-accent" />}
                 </div>
                 <button
                   type="button"
                   onClick={() => searchLeads()}
                   disabled={searching}
-                  className="rounded-lg border border-border px-4 py-2 text-sm font-semibold text-fg disabled:opacity-60"
+                  className="sr-only"
                 >
                   {searching ? "Searching…" : "Search"}
                 </button>
               </div>
-              <p className="mt-1.5 text-[11px] text-fg-muted">
-                Select an existing CRM lead before entering the funded deal.
-              </p>
-            </div>
+              </div>
 
-            {leadResults.length > 0 && (
-              <div className="max-h-72 overflow-y-auto rounded-lg border border-border divide-y divide-border">
+            {pickerOpen && leadResults.length > 0 && (
+              <div id="renewal-lead-options" role="listbox" className="absolute z-30 mt-2 max-h-[390px] w-full overflow-y-auto rounded-xl border border-border bg-bg p-1.5 shadow-2xl shadow-black/20">
+                <div className="sticky top-0 z-10 mb-1 flex items-center justify-between rounded-lg bg-bg-subtle px-3 py-2">
+                  <span className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-[0.13em] text-fg-muted">
+                    <Clock3 size={12} />{leadQuery ? "Matching deals" : "Most recent deals"}
+                  </span>
+                  <span className="text-[10px] tabular-nums text-fg-muted">{leadResults.length} shown</span>
+                </div>
                 {leadResults.map((lead) => (
                   <button
                     key={lead.id}
                     type="button"
                     onClick={() => chooseLead(lead)}
-                    className="w-full px-3 py-3 text-left hover:bg-bg-subtle transition-colors"
+                    className="group flex w-full items-center gap-3 rounded-lg px-3 py-3 text-left transition-colors hover:bg-accent/8 focus:bg-accent/8 focus:outline-none"
                   >
-                    <div className="text-sm font-semibold text-fg">{lead.business_name}</div>
-                    <div className="mt-0.5 text-xs text-fg-muted">
+                    <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg border border-border bg-bg-subtle text-sm font-bold text-accent">
+                      {lead.business_name.slice(0, 2).toUpperCase()}
+                    </div>
+                    <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-2 text-sm font-semibold text-fg">
+                      <span className="truncate">{lead.business_name}</span>
+                      {lead.stage && <span className="shrink-0 rounded-full bg-accent/10 px-2 py-0.5 text-[9px] uppercase tracking-wide text-accent">{titleCase(lead.stage)}</span>}
+                    </div>
+                    <div className="mt-0.5 truncate text-xs text-fg-muted">
                       {[lead.contact_name, lead.phone, lead.email].filter(Boolean).join(" · ") || "No contact details"}
                     </div>
+                    <div className="mt-1 text-[10px] text-fg-muted">{fmtRelativeDate(lead.updated_at)}</div>
+                    </div>
+                    <ChevronRight size={16} className="shrink-0 text-fg-muted transition-transform group-hover:translate-x-0.5 group-hover:text-accent" />
                   </button>
                 ))}
               </div>
             )}
-            {!searching && leadResults.length === 0 && leadQuery && (
-              <p className="text-xs text-fg-muted">Run the search to find and select a lead.</p>
+            {pickerOpen && !searching && leadResults.length === 0 && (
+              <div className="absolute z-30 mt-2 w-full rounded-xl border border-border bg-bg px-5 py-9 text-center shadow-2xl">
+                <Search size={22} className="mx-auto mb-2 text-fg-muted" />
+                <div className="text-sm font-medium text-fg">{leadQuery ? "No matching deals" : "No recent deals yet"}</div>
+                <p className="mt-1 text-xs text-fg-muted">{leadQuery ? "Try a business, contact, phone, or email." : "Start typing to search the CRM."}</p>
+              </div>
             )}
           </div>
         ) : (
           <>
-            <div className="flex items-center justify-between rounded-lg border border-accent/30 bg-accent/5 px-3 py-2.5">
-              <div>
+            <div className="flex items-center justify-between rounded-xl border border-accent/30 bg-accent/5 px-4 py-3">
+              <div className="flex min-w-0 items-center gap-3">
+                <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-accent/10 text-sm font-bold text-accent">
+                  {selectedLead.business_name.slice(0, 2).toUpperCase()}
+                </div>
+                <div className="min-w-0">
                 <div className="text-[10px] uppercase tracking-[0.12em] text-fg-muted font-bold">Selected lead</div>
-                <div className="mt-0.5 text-sm font-semibold text-fg">{selectedLead.business_name}</div>
-                {selectedLead.contact_name && <div className="text-xs text-fg-muted">{selectedLead.contact_name}</div>}
+                <div className="mt-0.5 truncate text-sm font-semibold text-fg">{selectedLead.business_name}</div>
+                {selectedLead.contact_name && <div className="truncate text-xs text-fg-muted">{selectedLead.contact_name}</div>}
+                </div>
               </div>
-              <button type="button" onClick={clearLead} className="p-2 text-fg-muted hover:text-fg" aria-label="Choose a different lead">
-                <X size={16} />
+              <button type="button" onClick={clearLead} className="flex shrink-0 items-center gap-1.5 rounded-lg px-2.5 py-2 text-xs font-medium text-fg-muted hover:bg-bg hover:text-fg" aria-label="Choose a different lead">
+                <ArrowLeft size={14} /> Change deal
               </button>
             </div>
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
