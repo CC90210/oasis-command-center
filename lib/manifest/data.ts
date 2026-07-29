@@ -477,6 +477,35 @@ export async function updateRecord(input: UpdateRecordInput): Promise<TenantReco
   const existing = await getRecord({ tenant_id: input.tenant_id, entity: input.entity, id: input.id });
   if (!existing) throw new RecordsError("not_found", "record not found");
   const merged = { ...existing.data, ...input.patch };
+
+  // STAGE-ENTRY TIMESTAMP (2026-07-29). Stamp `stage_entered_at` whenever the
+  // pipeline field actually changes value. This is the ONE chokepoint every
+  // stage change already flows through (it is where BRAVO_RECORD_STATUS_CHANGED
+  // is emitted below), so stamping here means no caller has to remember to.
+  //
+  // Why it exists: drip enrollment used to key off "is the lead currently in
+  // this stage", which cannot tell a lead that just arrived from one that has
+  // sat there for six weeks and already been dripped. That made re-entry into a
+  // stage un-drippable forever (see lib/drips/enroller.ts). With an entry
+  // timestamp, enrollment can compare stage entry against the last run and
+  // treat a genuine RE-entry as a new edge.
+  //
+  // Folded into `merged` rather than written as a second update so a stage
+  // change stays a single write, and so the value is already present on the row
+  // that publishStatusChange broadcasts.
+  const stageField = input.entity === "application" ? "status" : "stage";
+  const priorStage = existing.data?.[stageField];
+  const nextStage = merged[stageField];
+  if (
+    typeof nextStage === "string" &&
+    nextStage !== "" &&
+    String(priorStage ?? "") !== String(nextStage) &&
+    // Never let a caller's patch spoof the entry time; we own this field.
+    input.patch.stage_entered_at === undefined
+  ) {
+    merged.stage_entered_at = new Date().toISOString();
+  }
+
   const db = getServiceSupabase();
   const result = await db
     .from("tenant_records")
