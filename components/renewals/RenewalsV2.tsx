@@ -21,6 +21,7 @@ import {
   type FundedDealRow,
 } from "@/lib/queries";
 import { fmtCurrency, groupRows, RenewalRow } from "./renewals-shared";
+import RecordFundedDeal from "./RecordFundedDeal";
 
 const EMPTY_SUMMARY = {
   past_due_count: 0,
@@ -111,6 +112,12 @@ export async function RenewalsV2({ tenantId }: { tenantId: string | null }) {
           />
         </Card>
       </section>
+
+      {/* Manual intake — kept in lock-step with the top-level /renewals page, so
+          a rep working in the tenant surface can record a funded deal without
+          leaving it. The route resolves tenant + role from the session, so this
+          needs no props. */}
+      <RecordFundedDeal />
 
       {/* Grouped rows */}
       {rows.length === 0 ? (

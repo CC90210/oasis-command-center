@@ -29,6 +29,7 @@ import {
   groupRows,
   RenewalRow,
 } from "@/components/renewals/renewals-shared";
+import RecordFundedDeal from "@/components/renewals/RecordFundedDeal";
 
 export const dynamic = "force-dynamic";
 
@@ -126,6 +127,10 @@ export default async function RenewalsPage() {
           />
         </Card>
       </section>
+
+      {/* Manual intake. Hidden in demo mode, where the rows are fixtures and a
+          write would neither persist nor make sense. */}
+      {!demoMode && <RecordFundedDeal />}
 
       <div className="flex flex-wrap items-center gap-2">
         <button className="px-3 py-1.5 rounded-full bg-accent-soft text-accent text-xs font-semibold border border-accent/30">
