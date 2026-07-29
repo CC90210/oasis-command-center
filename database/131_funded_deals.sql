@@ -61,7 +61,12 @@ create table if not exists public.funded_deals (
 create index if not exists idx_funded_deals_tenant_renewal
   on public.funded_deals (tenant_id, next_renewal_date);
 
--- Supports the duplicate check on manual entry (same merchant, same funded date).
+-- Supports the duplicate LOOKUP on manual entry (same merchant, same funded
+-- date). Deliberately NOT unique: one merchant genuinely can be funded twice on
+-- the same day by two different funders, and a hard constraint would block that
+-- real entry with a database error. The route turns a hit into a confirmable
+-- 409 instead, so an accidental double-submit is caught while a legitimate
+-- second deal can still be recorded.
 create index if not exists idx_funded_deals_tenant_merchant
   on public.funded_deals (tenant_id, lower(merchant_name), funded_at);
 

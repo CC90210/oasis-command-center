@@ -56,10 +56,15 @@ export default function RecordFundedDeal() {
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState<string | null>(null);
   const [formError, setFormError] = useState<string | null>(null);
+  /** Armed when the server flags a possible duplicate; the next submit overrides. */
+  const [confirmDuplicate, setConfirmDuplicate] = useState(false);
 
   const set = (k: keyof typeof EMPTY) => (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => {
     setForm((f) => ({ ...f, [k]: e.target.value }));
     setErrors((prev) => (prev[k] ? { ...prev, [k]: "" } : prev));
+    // Editing after a duplicate warning means this may no longer be the same
+    // deal — re-arm the check rather than carrying a stale override.
+    setConfirmDuplicate(false);
   };
 
   // Live preview of the two derived fields, using the SAME functions the server
@@ -78,11 +83,17 @@ export default function RecordFundedDeal() {
       const res = await fetch("/api/renewals", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(form),
+        // Carry the operator's "yes, really" through on the second submit.
+        body: JSON.stringify({ ...form, confirm_duplicate: confirmDuplicate }),
       });
       const json = await res.json().catch(() => null);
       if (!res.ok || !json?.ok) {
         if (json?.errors) setErrors(json.errors as FieldErrors);
+        // A flagged duplicate is a question, not a rejection — arm the next
+        // submit to go through rather than making the operator find a workaround.
+        if (res.status === 409 && json?.error === "possible_duplicate") {
+          setConfirmDuplicate(true);
+        }
         setFormError(
           json?.message ||
             (res.status === 403
@@ -95,6 +106,7 @@ export default function RecordFundedDeal() {
       }
       setSaved(json.deal?.merchant_name || form.merchant_name);
       setForm({ ...EMPTY });
+      setConfirmDuplicate(false);
       // The tab is a server component reading funded_deals — refresh so the new
       // row and the recalculated summary tiles appear without a manual reload.
       router.refresh();
@@ -185,6 +197,17 @@ export default function RecordFundedDeal() {
             />
           </div>
 
+          <div>
+            {/* Internal only. The renewal row reads this to avoid showing
+                "No lender assigned"; it is never rendered on a merchant-facing
+                surface. [[feedback_never_mention_lenders]] */}
+            <label className={labelCls} htmlFor="fd-lender">Funder</label>
+            <input
+              id="fd-lender" className={inputCls} value={form.lender_name}
+              onChange={set("lender_name")} placeholder="Who funded it"
+            />
+          </div>
+
           <div className="md:col-span-2">
             <label className={labelCls} htmlFor="fd-notes">Notes</label>
             <textarea
@@ -230,7 +253,7 @@ export default function RecordFundedDeal() {
             className="inline-flex items-center gap-2 rounded-lg bg-accent px-4 py-2 text-sm font-semibold text-white disabled:opacity-60"
           >
             {saving && <Loader2 size={14} className="animate-spin" />}
-            {saving ? "Saving…" : "Record funded deal"}
+            {saving ? "Saving…" : confirmDuplicate ? "Record it anyway" : "Record funded deal"}
           </button>
           <span className="text-[11px] text-fg-muted">* required</span>
         </div>

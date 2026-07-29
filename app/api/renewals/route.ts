@@ -38,6 +38,8 @@ type Body = {
   points_pct?: unknown;
   funded_at?: unknown;
   notes?: unknown;
+  /** Set by the form's second submit to accept a flagged possible duplicate. */
+  confirm_duplicate?: unknown;
 };
 
 /** Trim + bound a free-text field, or null when empty. */
@@ -163,6 +165,47 @@ export async function POST(req: NextRequest) {
   const est_commission_usd = estCommissionUsd(funded_amount_usd, points_pct);
 
   const db = getServiceSupabase();
+
+  // ── duplicate guard ────────────────────────────────────────────────────────
+  //
+  // A double-click or a retry after a timeout would otherwise create a second
+  // funded deal, which does not just clutter the list — it double-counts the
+  // commission in the Renewals summary tiles and puts two renewal rows on the
+  // same deal.
+  //
+  // Deliberately a CONFIRMABLE 409 rather than a unique index. One merchant
+  // genuinely can be funded twice on the same day by two different funders, and
+  // a hard constraint would block that real entry with a database error. This
+  // catches the accident, states what it found, and lets the operator say "yes,
+  // really" via confirm_duplicate.
+  if (body.confirm_duplicate !== true) {
+    const dupe = await db
+      .from("funded_deals")
+      .select("id, merchant_name, funded_at, funded_amount_usd, lender_name")
+      .eq("tenant_id", tenantId)
+      .ilike("merchant_name", merchant_name as string)
+      .eq("funded_at", funded_at as string)
+      .limit(1);
+    const existing = dupe.data?.[0] as { id: string; lender_name: string | null } | undefined;
+    if (!dupe.error && existing) {
+      return NextResponse.json(
+        {
+          ok: false,
+          error: "possible_duplicate",
+          message:
+            `A funded deal for ${merchant_name} on ${funded_at} is already recorded` +
+            `${existing.lender_name ? ` (${existing.lender_name})` : ""}. ` +
+            `Submit again to record it anyway.`,
+          existing,
+        },
+        { status: 409 },
+      );
+    }
+    // A failed dupe check is NOT a reason to block the write: this guard exists
+    // to prevent an accident, and refusing real work because a convenience
+    // lookup blipped would be the worse failure.
+  }
+
   const ins = await db
     .from("funded_deals")
     .insert({
