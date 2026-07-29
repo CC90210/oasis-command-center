@@ -82,11 +82,18 @@ export async function queueInfer(
     dedupeKey?: string;
     /** How far back an existing job stays reusable. Default 30 min. */
     dedupeWindowMs?: number;
+    /**
+     * An in-flight job older than this is not latency, it is a stalled queue —
+     * reported as a TERMINAL failure so a dead daemon raises an alarm instead
+     * of looking like a slow one forever. Requires dedupeKey (that is what
+     * lets a later call see the original job's age). Default 15 min.
+     */
+    stalledAfterMs?: number;
   },
   opts?: { timeoutMs?: number; pollMs?: number },
 ): Promise<
   | { ok: true; text: string; reused?: boolean }
-  | { ok: false; error: string; timedOut?: boolean }
+  | { ok: false; error: string; timedOut?: boolean; stalledMs?: number }
 > {
   const timeoutMs = opts?.timeoutMs ?? 30_000;
   const pollMs = opts?.pollMs ?? 2_000;
@@ -110,7 +117,7 @@ export async function queueInfer(
     // jobs, never a tenant's. [[rls-required-default]]
     let q = db
       .from("inference_jobs")
-      .select("id, status, result_text")
+      .select("id, status, result_text, created_at")
       .eq("source", source)
       .gte("created_at", since);
     q = args.tenantId ? q.eq("tenant_id", args.tenantId) : q.is("tenant_id", null);
@@ -118,7 +125,7 @@ export async function queueInfer(
       .order("created_at", { ascending: false })
       .limit(1);
     const p = prior.data?.[0] as
-      | { id: string; status?: string; result_text?: string | null }
+      | { id: string; status?: string; result_text?: string | null; created_at?: string }
       | undefined;
     if (!prior.error && p) {
       // Finished while an earlier caller was not looking — collect it, free.
@@ -126,7 +133,26 @@ export async function queueInfer(
         return { ok: true, text: (p.result_text as string).trim(), reused: true };
       }
       // Still queued or running — adopt it rather than enqueue a duplicate.
-      if (p.status === "pending" || p.status === "running") jobId = p.id;
+      if (p.status === "pending" || p.status === "running") {
+        // …unless it has been sitting there far too long. A job nobody has
+        // finished after this many minutes means the consumer daemon is not
+        // draining the queue, which is an OUTAGE, not slowness. Say so
+        // immediately rather than polling for a result that is never coming:
+        // otherwise a dead daemon reports "still cooking" on every tick
+        // forever and lender replies pile up in silence — precisely the
+        // failure this whole change exists to make impossible.
+        const ageMs = p.created_at ? Date.now() - Date.parse(p.created_at) : 0;
+        const stalledAfterMs = args.stalledAfterMs ?? 15 * 60_000;
+        if (Number.isFinite(ageMs) && ageMs > stalledAfterMs) {
+          return {
+            ok: false,
+            error: `queue_stalled: job ${p.id} still ${p.status} after ${Math.round(ageMs / 60_000)}m — is the infer-consumer daemon running?`,
+            timedOut: false,
+            stalledMs: ageMs,
+          };
+        }
+        jobId = p.id;
+      }
       // status 'error' falls through to a fresh attempt.
     }
   }

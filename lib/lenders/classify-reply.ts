@@ -142,7 +142,9 @@ export async function classifyLenderReply(
 
   if (!q.ok) {
     // A timeout is ordinary latency: the job is still queued and the next tick
-    // collects it via the dedupe key. Only a terminal failure is an outage.
+    // collects it via the dedupe key. But queueInfer reports a STALLED queue as
+    // a terminal failure (timedOut false), so a dead daemon escalates to a real
+    // outage instead of claiming to be slow forever.
     if (q.timedOut) {
       console.warn("[classify-reply] still in flight, deferring:", q.error);
       return { ...CLASSIFIER_PENDING };
