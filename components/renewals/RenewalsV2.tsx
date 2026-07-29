@@ -16,11 +16,12 @@
 import { Card, Stat, EmptyState, Tag } from "@/components/Card";
 import { Flame, Clock, CalendarDays, TrendingUp } from "lucide-react";
 import {
-  getActiveProfile,
   getRenewalsSummary,
   getRenewalsRows,
   type FundedDealRow,
 } from "@/lib/queries";
+import { resolveSessionContext } from "@/lib/api-auth";
+import { canWriteCrm } from "@/lib/role-gates";
 import { fmtCurrency, groupRows, RenewalRow } from "./renewals-shared";
 import RecordFundedDeal from "./RecordFundedDeal";
 
@@ -45,11 +46,15 @@ export async function RenewalsV2({ tenantId }: { tenantId: string | null }) {
       ])
     : [EMPTY_SUMMARY, [] as FundedDealRow[]];
 
-  // Intake is offered only when the surface tenant IS the caller's own tenant —
-  // see the note at the render site. Fail closed: if the profile cannot be
-  // resolved, no form.
-  const viewer = await getActiveProfile().catch(() => null);
-  const canRecord = !!tenantId && !!viewer?.tenant_id && viewer.tenant_id === tenantId;
+  // Intake is offered only when BOTH hold: the surface tenant is the caller's
+  // own, and the caller may actually write CRM data. Resolved with the exact
+  // helper /api/renewals authorizes with, so the button someone sees and the
+  // permission they have cannot drift apart — a read_only member was otherwise
+  // shown a full form that could only ever answer 403. Fail closed on any
+  // unresolved session.
+  const sess = await resolveSessionContext().catch(() => null);
+  const canRecord =
+    !!tenantId && !!sess?.ok && sess.tenantId === tenantId && canWriteCrm(sess.teamRole);
 
   const groups = groupRows(rows);
 
