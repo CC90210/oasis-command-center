@@ -29,6 +29,7 @@ export const dynamic = "force-dynamic";
 const YMD_RE = /^\d{4}-\d{2}-\d{2}$/;
 
 type Body = {
+  lead_id?: unknown;
   merchant_name?: unknown;
   contact_name?: unknown;
   lender_name?: unknown;
@@ -41,6 +42,59 @@ type Body = {
   /** Set by the form's second submit to accept a flagged possible duplicate. */
   confirm_duplicate?: unknown;
 };
+
+type LeadData = Record<string, unknown>;
+
+function firstText(data: LeadData, keys: string[]): string | null {
+  for (const key of keys) {
+    const value = data[key];
+    if (typeof value === "string" && value.trim()) return value.trim();
+  }
+  return null;
+}
+
+/** Searchable lead directory for the intake picker. Tenant is session-derived. */
+export async function GET(req: NextRequest) {
+  const sess = await resolveSessionContext();
+  if (!sess.ok) return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
+  if (!sess.tenantId) return NextResponse.json({ ok: false, error: "no_tenant" }, { status: 400 });
+
+  const query = (req.nextUrl.searchParams.get("q") || "").trim().toLowerCase().slice(0, 100);
+  const db = getServiceSupabase();
+  const result = await db
+    .from("tenant_records")
+    .select("id, data, updated_at")
+    .eq("tenant_id", sess.tenantId)
+    .eq("entity_type", "lead")
+    .order("updated_at", { ascending: false })
+    .limit(250);
+
+  if (result.error) {
+    console.error("[renewals] lead search failed:", result.error.message);
+    return NextResponse.json({ ok: false, error: "search_failed" }, { status: 500 });
+  }
+
+  const leads = (result.data || [])
+    .map((row) => {
+      const data = (row.data || {}) as LeadData;
+      return {
+        id: row.id as string,
+        business_name: firstText(data, ["business_name", "legal_name", "company_name", "name"]) || "Unnamed lead",
+        contact_name: firstText(data, ["contact_name", "owner_name", "full_name"]),
+        phone: firstText(data, ["phone", "phone_number", "mobile"]),
+        email: firstText(data, ["email", "email_address"]),
+      };
+    })
+    .filter((lead) => {
+      if (!query) return true;
+      return [lead.business_name, lead.contact_name, lead.phone, lead.email]
+        .filter(Boolean)
+        .some((value) => value!.toLowerCase().includes(query));
+    })
+    .slice(0, 25);
+
+  return NextResponse.json({ ok: true, leads });
+}
 
 /** Trim + bound a free-text field, or null when empty. */
 function text(v: unknown, max: number): string | null {
@@ -132,10 +186,36 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ ok: false, error: "invalid_json" }, { status: 400 });
   }
 
+  const lead_id = typeof body.lead_id === "string" ? body.lead_id.trim() : "";
+  if (!lead_id) {
+    return NextResponse.json(
+      { ok: false, error: "validation_failed", errors: { lead_id: "Select a lead first." } },
+      { status: 400 },
+    );
+  }
+
+  const db = getServiceSupabase();
+  const leadResult = await db
+    .from("tenant_records")
+    .select("id, data")
+    .eq("tenant_id", tenantId)
+    .eq("entity_type", "lead")
+    .eq("id", lead_id)
+    .maybeSingle();
+  if (leadResult.error || !leadResult.data) {
+    return NextResponse.json(
+      { ok: false, error: "invalid_lead", errors: { lead_id: "That lead was not found in this workspace." } },
+      { status: 400 },
+    );
+  }
+  const leadData = (leadResult.data.data || {}) as LeadData;
+
   // ── validate ───────────────────────────────────────────────────────────────
   const errors: Record<string, string> = {};
 
-  const merchant_name = text(body.merchant_name, 200);
+  const merchant_name =
+    text(body.merchant_name, 200) ||
+    firstText(leadData, ["business_name", "legal_name", "company_name", "name"]);
   if (!merchant_name) errors.merchant_name = "Merchant or deal name is required.";
 
   const funded_amount_usd = num(body.funded_amount_usd);
@@ -184,8 +264,6 @@ export async function POST(req: NextRequest) {
   const next_renewal_date = nextRenewalDate(funded_at, term_months);
   const est_commission_usd = estCommissionUsd(funded_amount_usd, points_pct);
 
-  const db = getServiceSupabase();
-
   // ── duplicate guard ────────────────────────────────────────────────────────
   //
   // A double-click or a retry after a timeout would otherwise create a second
@@ -226,6 +304,7 @@ export async function POST(req: NextRequest) {
     .from("funded_deals")
     .insert({
       tenant_id: tenantId,
+      lead_id,
       merchant_name,
       contact_name: text(body.contact_name, 200),
       lender_name: text(body.lender_name, 200),

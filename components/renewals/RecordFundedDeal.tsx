@@ -17,12 +17,13 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { Card } from "@/components/Card";
-import { CalendarPlus, Loader2, Check } from "lucide-react";
+import { CalendarPlus, Loader2, Check, Search, X } from "lucide-react";
 import { nextRenewalDate, estCommissionUsd } from "@/lib/renewals/derive";
 
 type FieldErrors = Record<string, string>;
 
 const EMPTY = {
+  lead_id: "",
   merchant_name: "",
   contact_name: "",
   lender_name: "",
@@ -32,6 +33,14 @@ const EMPTY = {
   points_pct: "",
   funded_at: "",
   notes: "",
+};
+
+type LeadOption = {
+  id: string;
+  business_name: string;
+  contact_name: string | null;
+  phone: string | null;
+  email: string | null;
 };
 
 const inputCls =
@@ -58,6 +67,10 @@ export default function RecordFundedDeal() {
   const [formError, setFormError] = useState<string | null>(null);
   /** Armed when the server flags a possible duplicate; the next submit overrides. */
   const [confirmDuplicate, setConfirmDuplicate] = useState(false);
+  const [leadQuery, setLeadQuery] = useState("");
+  const [leadResults, setLeadResults] = useState<LeadOption[]>([]);
+  const [selectedLead, setSelectedLead] = useState<LeadOption | null>(null);
+  const [searching, setSearching] = useState(false);
 
   const set = (k: keyof typeof EMPTY) => (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => {
     setForm((f) => ({ ...f, [k]: e.target.value }));
@@ -72,6 +85,41 @@ export default function RecordFundedDeal() {
   const termNum = toNum(form.term_months);
   const previewRenewal = nextRenewalDate(form.funded_at || null, termNum);
   const previewCommission = estCommissionUsd(toNum(form.funded_amount_usd), toNum(form.points_pct));
+
+  async function searchLeads(e?: React.FormEvent) {
+    e?.preventDefault();
+    setSearching(true);
+    setFormError(null);
+    try {
+      const res = await fetch(`/api/renewals?q=${encodeURIComponent(leadQuery)}`);
+      const json = await res.json();
+      if (!res.ok || !json?.ok) throw new Error();
+      setLeadResults(json.leads || []);
+    } catch {
+      setFormError("Could not search leads. Please try again.");
+    } finally {
+      setSearching(false);
+    }
+  }
+
+  function chooseLead(lead: LeadOption) {
+    setSelectedLead(lead);
+    setLeadResults([]);
+    setErrors({});
+    setForm((current) => ({
+      ...current,
+      lead_id: lead.id,
+      merchant_name: lead.business_name,
+      contact_name: lead.contact_name || "",
+    }));
+  }
+
+  function clearLead() {
+    setSelectedLead(null);
+    setForm({ ...EMPTY });
+    setSaved(null);
+    setConfirmDuplicate(false);
+  }
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
@@ -106,6 +154,8 @@ export default function RecordFundedDeal() {
       }
       setSaved(json.deal?.merchant_name || form.merchant_name);
       setForm({ ...EMPTY });
+      setSelectedLead(null);
+      setLeadQuery("");
       setConfirmDuplicate(false);
       // The tab is a server component reading funded_deals — refresh so the new
       // row and the recalculated summary tiles appear without a manual reload.
@@ -124,7 +174,69 @@ export default function RecordFundedDeal() {
         <span>Record a funded deal</span>
       </div>
 
-      <form onSubmit={submit} className="space-y-4">
+      <form onSubmit={selectedLead ? submit : searchLeads} className="space-y-4">
+        {!selectedLead ? (
+          <div className="space-y-3">
+            <div>
+              <label className={labelCls} htmlFor="fd-lead-search">Search for a lead</label>
+              <div className="flex gap-2">
+                <div className="relative flex-1">
+                  <Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-fg-muted" />
+                  <input
+                    id="fd-lead-search"
+                    className={`${inputCls} pl-9`}
+                    value={leadQuery}
+                    onChange={(e) => setLeadQuery(e.target.value)}
+                    placeholder="Business, contact, phone, or email"
+                  />
+                </div>
+                <button
+                  type="button"
+                  onClick={() => searchLeads()}
+                  disabled={searching}
+                  className="rounded-lg border border-border px-4 py-2 text-sm font-semibold text-fg disabled:opacity-60"
+                >
+                  {searching ? "Searching…" : "Search"}
+                </button>
+              </div>
+              <p className="mt-1.5 text-[11px] text-fg-muted">
+                Select an existing CRM lead before entering the funded deal.
+              </p>
+            </div>
+
+            {leadResults.length > 0 && (
+              <div className="max-h-72 overflow-y-auto rounded-lg border border-border divide-y divide-border">
+                {leadResults.map((lead) => (
+                  <button
+                    key={lead.id}
+                    type="button"
+                    onClick={() => chooseLead(lead)}
+                    className="w-full px-3 py-3 text-left hover:bg-bg-subtle transition-colors"
+                  >
+                    <div className="text-sm font-semibold text-fg">{lead.business_name}</div>
+                    <div className="mt-0.5 text-xs text-fg-muted">
+                      {[lead.contact_name, lead.phone, lead.email].filter(Boolean).join(" · ") || "No contact details"}
+                    </div>
+                  </button>
+                ))}
+              </div>
+            )}
+            {!searching && leadResults.length === 0 && leadQuery && (
+              <p className="text-xs text-fg-muted">Run the search to find and select a lead.</p>
+            )}
+          </div>
+        ) : (
+          <>
+            <div className="flex items-center justify-between rounded-lg border border-accent/30 bg-accent/5 px-3 py-2.5">
+              <div>
+                <div className="text-[10px] uppercase tracking-[0.12em] text-fg-muted font-bold">Selected lead</div>
+                <div className="mt-0.5 text-sm font-semibold text-fg">{selectedLead.business_name}</div>
+                {selectedLead.contact_name && <div className="text-xs text-fg-muted">{selectedLead.contact_name}</div>}
+              </div>
+              <button type="button" onClick={clearLead} className="p-2 text-fg-muted hover:text-fg" aria-label="Choose a different lead">
+                <X size={16} />
+              </button>
+            </div>
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
           <div className="md:col-span-2">
             <label className={labelCls} htmlFor="fd-merchant">Deal / merchant name *</label>
@@ -257,6 +369,8 @@ export default function RecordFundedDeal() {
           </button>
           <span className="text-[11px] text-fg-muted">* required</span>
         </div>
+          </>
+        )}
       </form>
     </Card>
   );
