@@ -19,7 +19,14 @@ export async function readMailbox(
   opts: { query?: string; max?: number } = {},
 ): Promise<{ messages: MonitoredMessage[]; diag: string }> {
   if (await hasImapMailbox(tenantId, userId, mailbox)) {
-    return readMailboxImap(tenantId, userId, mailbox, opts);
+    const imap = await readMailboxImap(tenantId, userId, mailbox, opts);
+    if (!imap.diag.startsWith("imap_")) return imap;
+    // A stale app password must not hide a valid Gmail OAuth connection.
+    // OAuth remains read-only and returns its own diagnostic on failure.
+    const oauth = await readOAuth(tenantId, userId, mailbox, opts);
+    return oauth.messages.length > 0 || oauth.diag.startsWith("ok_")
+      ? oauth
+      : { messages: [], diag: `${imap.diag}; oauth=${oauth.diag}` };
   }
   return readOAuth(tenantId, userId, mailbox, opts);
 }
