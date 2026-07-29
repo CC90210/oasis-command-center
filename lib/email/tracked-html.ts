@@ -72,30 +72,37 @@ export const SUNBIZ_BRAND = "SunBiz";
  * keying the tracking domain off brand would have moved their pixels and
  * unsubscribe links onto it (Codex review P1).
  *
- *  - "platform"  the shared platform origin (PUBLIC_APP_URL). THE DEFAULT, and
- *                today's behaviour for every caller. Correct for cold outreach,
- *                whose whole point is reputation isolation.
- *  - "aligned"   the sending domain for this brand. Opt in ONLY where the
- *                message is genuinely sent From that domain.
+ * Callers therefore pass an explicit ORIGIN, not a flag, and everything defaults
+ * to the shared platform origin. A future caller that does not think about this
+ * gets reputation isolation rather than silently borrowing a sending domain.
  *
- * Defaulting to "platform" is deliberate: a future caller that forgets to think
- * about this gets the safe, isolated behaviour rather than silently borrowing
- * the SunBiz sending domain.
+ * Passing the RESOLVED origin is also what makes a send auditable: the executor
+ * stamps the exact string it used onto the interaction row, so the telemetry
+ * reconciler can rebuild that message months later byte-identically even if the
+ * configuration has changed since, or was unset at the time and fell back.
  */
-export type TrackingContext = "platform" | "aligned";
-
-function trackingBaseFor(brand: string, ctx: TrackingContext): string | undefined {
-  if (ctx !== "aligned") return undefined;
-  if (brand === SUNBIZ_BRAND) return process.env.SUNBIZ_TRACKING_BASE_URL;
-  return undefined;
+function platformFallback(): string {
+  return process.env.PUBLIC_APP_URL || "https://oasisai.work";
 }
 
-/** Resolve the origin every tracked URL in a message is built on. Validation and
- *  the fail-safe fallback live in ./tracking-base so the click route's allowlist
- *  shares exactly the same logic and cannot drift from what mints the links. */
-function appBase(brand: string = SUNBIZ_BRAND, ctx: TrackingContext = "platform"): string {
-  const fallback = process.env.PUBLIC_APP_URL || "https://oasisai.work";
-  return resolveTrackingBase(trackingBaseFor(brand, ctx), fallback);
+/** The shared platform origin. The default for every tracked URL. */
+export function platformTrackingBase(): string {
+  return resolveTrackingBase(undefined, platformFallback());
+}
+
+/**
+ * The origin for mail genuinely SENT FROM this brand's domain, resolved now.
+ *
+ * Falls back to the platform origin when unconfigured or invalid, so the return
+ * value is always the origin that will REALLY be used. That is exactly why
+ * callers stamp this resolved string on the send rather than their intent: a
+ * message sent while the variable was unset really did carry platform URLs, and
+ * recording "aligned" would make the telemetry reconciler rebuild it wrong once
+ * the variable is later set.
+ */
+export function brandTrackingBase(brand: string = SUNBIZ_BRAND): string {
+  const configured = brand === SUNBIZ_BRAND ? process.env.SUNBIZ_TRACKING_BASE_URL : undefined;
+  return resolveTrackingBase(configured, platformFallback());
 }
 
 export function escapeHtml(s: string): string {
@@ -143,15 +150,19 @@ export function verifyClickTarget(uEncoded: string, sig: string): boolean {
   }
 }
 
-export function pixelUrl(sendId: string, brand: string = SUNBIZ_BRAND, ctx: TrackingContext = "platform"): string {
-  return `${appBase(brand, ctx)}/api/track/open/${encodeURIComponent(sendId)}`;
+export function pixelUrl(sendId: string, base: string = platformTrackingBase()): string {
+  return `${base}/api/track/open/${encodeURIComponent(sendId)}`;
 }
 
-export function clickUrl(sendId: string, target: string, brand: string = SUNBIZ_BRAND, ctx: TrackingContext = "platform"): string {
+export function clickUrl(
+  sendId: string,
+  target: string,
+  base: string = platformTrackingBase(),
+): string {
   const u = b64urlEncode(target);
   const s = signClickTarget(u);
-  const base = `${appBase(brand, ctx)}/api/track/click/${encodeURIComponent(sendId)}?u=${u}`;
-  return s ? `${base}&s=${s}` : base;
+  const clickBase = `${base}/api/track/click/${encodeURIComponent(sendId)}?u=${u}`;
+  return s ? `${clickBase}&s=${s}` : clickBase;
 }
 
 /** Signed query string (email|brand|token) shared by the page + API unsub URLs.
@@ -170,20 +181,32 @@ function unsubQuery(email: string, brand: string): string {
 
 /** Human-facing unsubscribe PAGE (renders a confirmation) — used by the visible
  *  in-body footer link on commercial mail. */
-export function unsubscribeUrl(email: string, brand: string = SUNBIZ_BRAND, ctx: TrackingContext = "platform"): string {
-  return `${appBase(brand, ctx)}/unsubscribe?${unsubQuery(email, brand)}`;
+export function unsubscribeUrl(
+  email: string,
+  brand: string = SUNBIZ_BRAND,
+  base: string = platformTrackingBase(),
+): string {
+  return `${base}/unsubscribe?${unsubQuery(email, brand)}`;
 }
 
 /** Machine-facing unsubscribe API — the RFC 8058 one-click POST target. Points at
  *  /api/unsubscribe (which accepts the query params on POST), NOT the page, so a
  *  mail client's one-click actually suppresses instead of 405-ing on the page. */
-export function unsubscribeApiUrl(email: string, brand: string = SUNBIZ_BRAND, ctx: TrackingContext = "platform"): string {
-  return `${appBase(brand, ctx)}/api/unsubscribe?${unsubQuery(email, brand)}`;
+export function unsubscribeApiUrl(
+  email: string,
+  brand: string = SUNBIZ_BRAND,
+  base: string = platformTrackingBase(),
+): string {
+  return `${base}/api/unsubscribe?${unsubQuery(email, brand)}`;
 }
 
 /** RFC 8058 List-Unsubscribe header value (one-click HTTPS URL + mailto fallback). */
-export function listUnsubscribeHeader(email: string, brand: string = SUNBIZ_BRAND, ctx: TrackingContext = "platform"): string {
-  return `<${unsubscribeApiUrl(email, brand, ctx)}>, <mailto:submissions@sunbizfunding.com?subject=unsubscribe>`;
+export function listUnsubscribeHeader(
+  email: string,
+  brand: string = SUNBIZ_BRAND,
+  base: string = platformTrackingBase(),
+): string {
+  return `<${unsubscribeApiUrl(email, brand, base)}>, <mailto:submissions@sunbizfunding.com?subject=unsubscribe>`;
 }
 
 export type UnsubMode = "footer" | "none";
@@ -196,12 +219,12 @@ export type UnsubMode = "footer" | "none";
  */
 export function buildTrackedHtml(
   plain: string,
-  opts: { sendId: string; email: string; brand?: string; unsub?: UnsubMode; tracking?: TrackingContext },
+  opts: { sendId: string; email: string; brand?: string; unsub?: UnsubMode; trackingBase?: string },
 ): string {
   const { sendId, email } = opts;
   const brand = opts.brand || SUNBIZ_BRAND;
   const unsub: UnsubMode = opts.unsub || "footer";
-  const tracking: TrackingContext = opts.tracking || "platform";
+  const trackingBase = opts.trackingBase || platformTrackingBase();
 
   const urlRe = /(https?:\/\/[^\s<>"')]+)/g;
   let out = "";
@@ -210,19 +233,19 @@ export function buildTrackedHtml(
     const idx = m.index ?? 0;
     out += escapeHtml(plain.slice(last, idx));
     const target = m[0];
-    out += `<a href="${escapeHtml(clickUrl(sendId, target, brand, tracking))}" style="color:#0B1F4F;text-decoration:underline;">${escapeHtml(target)}</a>`;
+    out += `<a href="${escapeHtml(clickUrl(sendId, target, trackingBase))}" style="color:#0B1F4F;text-decoration:underline;">${escapeHtml(target)}</a>`;
     last = idx + target.length;
   }
   out += escapeHtml(plain.slice(last));
   const bodyHtml = out.replace(/\n/g, "<br />\n");
 
-  const pixel = `<img src="${escapeHtml(pixelUrl(sendId, brand, tracking))}" width="1" height="1" alt="" style="display:none;max-height:0;overflow:hidden;" />`;
+  const pixel = `<img src="${escapeHtml(pixelUrl(sendId, trackingBase))}" width="1" height="1" alt="" style="display:none;max-height:0;overflow:hidden;" />`;
   const footer =
     unsub === "none"
       ? ""
       : `<div style="margin-top:24px;color:#8a94a6;font-size:12px;line-height:1.5;">` +
         `If you would prefer not to receive these, you can ` +
-        `<a href="${escapeHtml(unsubscribeUrl(email, brand, tracking))}" style="color:#8a94a6;">unsubscribe here</a>.` +
+        `<a href="${escapeHtml(unsubscribeUrl(email, brand, trackingBase))}" style="color:#8a94a6;">unsubscribe here</a>.` +
         `</div>`;
 
   return (
@@ -233,6 +256,6 @@ export function buildTrackedHtml(
 }
 
 /** Back-compat alias for the drip executor's original call shape. */
-export function buildDripHtml(plain: string, opts: { sendId: string; email: string; brand?: string; unsub?: UnsubMode; tracking?: TrackingContext }): string {
+export function buildDripHtml(plain: string, opts: { sendId: string; email: string; brand?: string; unsub?: UnsubMode; trackingBase?: string }): string {
   return buildTrackedHtml(plain, opts);
 }

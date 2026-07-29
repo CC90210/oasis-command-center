@@ -119,16 +119,32 @@ for (const bad of ["http://go.sunbizfunding.com", "not-a-url", ""]) {
     "utf8",
   );
   assert.ok(
-    !/tracking:\s*["']aligned["']/.test(cold),
-    "cold outreach must never request tracking:'aligned' — its reputation isolation depends on staying off the SunBiz sending domain",
+    !/brandTrackingBase\s*\(/.test(cold),
+    "cold outreach must never resolve a brand sending domain — its reputation isolation depends on staying on the platform origin",
   );
 
   // And the drip path, which IS sent from that domain, must opt in — otherwise
   // this whole change is inert and the links stay misaligned.
   const executor = readFileSync(new URL("../lib/drips/executor.ts", import.meta.url), "utf8");
   assert.ok(
-    /tracking:\s*["']aligned["']/.test(executor),
-    "the drip send path must opt into aligned tracking",
+    /brandTrackingBase\s*\(\s*SUNBIZ_BRAND\s*\)/.test(executor),
+    "the drip send path must resolve the SunBiz sending domain",
+  );
+  // The resolved origin, not the intent, must be what gets recorded — otherwise
+  // the telemetry reconciler cannot rebuild a historical message exactly.
+  assert.ok(
+    /tracking_base:\s*sentTrackingBase/.test(executor),
+    "the drip send must stamp the RESOLVED tracking origin on the interaction row",
+  );
+
+  // And the reconciler must read that recorded value rather than resolving now.
+  const reconciler = readFileSync(
+    new URL("../lib/drips/reconcile-email-telemetry.ts", import.meta.url),
+    "utf8",
+  );
+  assert.ok(
+    /meta\.tracking_base/.test(reconciler),
+    "the telemetry reconciler must rebuild on the origin the send recorded, not today's config",
   );
 }
 

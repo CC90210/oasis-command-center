@@ -42,7 +42,7 @@ import { renderTemplate } from "@/lib/drips/templates";
 import { parseDripSteps, type DripStep } from "@/lib/drips/types";
 import { sendDripSms, sendDripEmail } from "@/lib/drips/send";
 import { wasShoppedRecently } from "@/lib/drips/enroller";
-import { SUNBIZ_BRAND, buildDripHtml, listUnsubscribeHeader, pixelUrl, unsubscribeUrl } from "@/lib/drips/html-email";
+import { SUNBIZ_BRAND, brandTrackingBase, platformTrackingBase, buildDripHtml, listUnsubscribeHeader, pixelUrl, unsubscribeUrl } from "@/lib/drips/html-email";
 import { resolveDripSmsIdentity, type DripSmsIdentity } from "@/lib/drips/rep-sms-identity";
 import { ACCELERATED_FLAG, acceleratedSystemLive, hasActiveAcceleratedRun } from "@/lib/drips/accelerated";
 import {
@@ -923,31 +923,39 @@ async function processEmailStep(
   let fromIdentity = "dry:submissions@sunbizfunding.com";
   let providerMessageId: string | undefined;
   let htmlPayload: string | null = null;
+  // The origin the HTML was actually built on, recorded on the interaction row.
+  // Defaults to the platform origin so a dry run (which builds no HTML) records
+  // the truthful "nothing aligned happened here".
+  let sentTrackingBase: string = platformTrackingBase();
   if (shouldSend) {
     // Transactional/relationship email (application nudges, statements, etc.) is
     // CAN-SPAM opt-out-exempt → NO visible unsubscribe footer. The invisible
     // List-Unsubscribe header stays for BOTH classes (cuts spam complaints +
     // protects inbox placement). Commercial mail keeps the footer.
     const unsub = emailClass === "transactional" ? "none" : "footer";
+    // Drip mail is genuinely sent From submissions@sunbizfunding.com, so its
+    // links belong on the SunBiz sending domain rather than the shared platform
+    // one. Resolved ONCE here and passed everywhere, so every URL in this message
+    // agrees, and so the exact origin used can be recorded on the interaction row
+    // below. Cold outreach deliberately does NOT do this: it sends from isolated
+    // domains and its links must stay on the platform origin.
+    const trackingBase = brandTrackingBase(SUNBIZ_BRAND);
     const customFooter =
       emailClass === "transactional"
         ? ""
         : `<div style="margin:24px 0 0;color:#8a94a6;font:12px/1.5 Arial,sans-serif">` +
-          `Prefer not to receive these? <a href="${unsubscribeUrl(email, SUNBIZ_BRAND, "aligned")}" style="color:#8a94a6">Unsubscribe here</a>.</div>`;
-    const customTracking = `<img src="${pixelUrl(sendId, SUNBIZ_BRAND, "aligned")}" width="1" height="1" alt="" style="display:none;max-height:0;overflow:hidden" />`;
+          `Prefer not to receive these? <a href="${unsubscribeUrl(email, SUNBIZ_BRAND, trackingBase)}" style="color:#8a94a6">Unsubscribe here</a>.</div>`;
+    const customTracking = `<img src="${pixelUrl(sendId, trackingBase)}" width="1" height="1" alt="" style="display:none;max-height:0;overflow:hidden" />`;
     const instrumentedCustomHtml = renderedCustomHtml
       ? renderedCustomHtml.replace(/<\/body>/i, `${customFooter}${customTracking}</body>`)
       : "";
-    // tracking:"aligned" — drip mail is genuinely sent From
-    // submissions@sunbizfunding.com, so its links belong on the SunBiz sending
-    // domain rather than the shared platform one. This is the ONE opt-in: cold
-    // outreach deliberately stays on "platform" to keep its reputation isolated.
     const html =
-      instrumentedCustomHtml || buildDripHtml(cleanBody, { sendId, email, unsub, tracking: "aligned" });
+      instrumentedCustomHtml || buildDripHtml(cleanBody, { sendId, email, unsub, trackingBase });
     htmlPayload = html;
+    sentTrackingBase = trackingBase;
     const result = await sendDripEmail(row.tenant_id, email, subject, cleanBody, {
       html,
-      listUnsubscribe: listUnsubscribeHeader(email, SUNBIZ_BRAND, "aligned"),
+      listUnsubscribe: listUnsubscribeHeader(email, SUNBIZ_BRAND, trackingBase),
     });
     if (!result.ok) return markRetryOrFail(db, row, result.error);
     fromIdentity = result.fromAddress;
@@ -977,13 +985,14 @@ async function processEmailStep(
       rfc822_message_id: providerMessageId ?? null,
       dry_run: !shouldSend,
       drips_live: dripsLive,
-      // Which domain this message's tracked URLs were actually built on. Stamped
-      // at SEND time because it is the only reliable record: the telemetry
-      // reconciler rebuilds payload_html from this row long afterwards, and
-      // inferring the domain from today's config would misreconstruct every
-      // message sent before the aligned-domain rollout. Absence means platform,
-      // which is exactly right for historical rows (Codex review P2).
-      tracking_context: "aligned",
+      // The RESOLVED origin this message's tracked URLs were actually built on,
+      // not the intent. Stamped at SEND time because it is the only reliable
+      // record: the telemetry reconciler rebuilds payload_html from this row long
+      // afterwards, and inferring the domain from today's config would
+      // misreconstruct any message sent before the rollout, or sent while the
+      // variable was unset and silently fell back. Absence means the platform
+      // origin, which is exactly right for historical rows (Codex review P2).
+      tracking_base: sentTrackingBase,
     },
   });
   await Promise.all([
