@@ -27,6 +27,7 @@ import {
   type BridgeTarget as _BridgeTarget,
 } from "./bridge-target-resolver";
 import { bridgeExecToolAllowedForRole } from "./role-gates";
+import { CLAIR_TOOL_NAME, clairCapabilityError, type ClairSession } from "./clair/capability";
 
 export type BridgeTarget = _BridgeTarget;
 export const resolveBridgeTarget = _resolveBridgeTarget;
@@ -98,6 +99,35 @@ export async function callBridgeExecTool(
   body: Record<string, unknown>,
   opts?: { timeoutMs?: number },
 ): Promise<BridgeExecResult> {
+  // CLEAR CAPABILITY GATE — fails closed BEFORE the network call, so a
+  // regulated, billable query cannot be spent by a caller with no operator
+  // behind it. This is deliberately here, in the one transport every bridge
+  // caller shares, rather than only in the clair-report route: the session-less
+  // resolveBridgeTarget() + callBridgeExecTool() shape is already used by
+  // lib/underwriting/run.ts and lib/forms/next-steps-email.ts, and a future cron
+  // copying it is exactly how CLEAR would become automatic by accident. It
+  // matches on the resolved tool_name, so it holds regardless of how the caller
+  // spelled it (Codex review 2026-07-27 [P2]).
+  //
+  // The identity is resolved HERE, from the request cookies — never read out of
+  // `body`. Attribution a caller writes about itself is not authorization
+  // (Codex review 2026-07-27 [P1]); a cron passing requested_by:"system" must
+  // not be able to satisfy this. Anything that throws (no request scope, no
+  // cookie store, a broken auth call) is treated as "no operator" and denied.
+  if (body?.tool_name === CLAIR_TOOL_NAME) {
+    let session: ClairSession = null;
+    try {
+      const { getSessionUser } = await import("@/lib/supabase-server");
+      const user = await getSessionUser();
+      session = user ? { userId: user.id, email: user.email ?? null } : null;
+    } catch {
+      session = null; // fail closed
+    }
+    const clairError = clairCapabilityError(body, session);
+    if (clairError) {
+      return { ok: false, isError: true, output: "", error: clairError, httpStatus: 0 };
+    }
+  }
   try {
     const res = await fetch(`${target.baseUrl}/exec-tool`, {
       method: "POST",

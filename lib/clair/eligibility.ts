@@ -1,22 +1,26 @@
 /**
- * The CLAIR strict-fallback rule, in exactly one place.
+ * CLAIR applicability — the shared, non-blocking rule, in exactly one place.
  *
- * CLAIR (Thomson Reuters CLEAR) is the MANUAL, SECONDARY fallback for merchant
- * contact enrichment. TruePeopleSearch is the automated primary. A CLEAR query
- * is billable and asserts a DPPA/GLB permissible use on the account, so it is
- * only ever appropriate once the automated path has RUN and come up empty.
+ * CLAIR (Thomson Reuters CLEAR) and TruePeopleSearch are INDEPENDENT contact
+ * enrichments on the same lead. TruePeopleSearch is the automated, free one;
+ * CLAIR is the manual, billable, permissible-use one. Neither excludes the
+ * other: an operator may pull a CLEAR report whether or not the automated
+ * lookup has run, and whether or not it already returned a number. Automated
+ * matches are routinely stale, partial, or wrong, and a CLEAR pull is how an
+ * operator verifies or expands one.
  *
- * Both the API route (which enforces it, returning 409) and the lead UI (which
- * hides the button) import this. It is a pure module — no server-only guard, no
- * I/O — precisely so the client component can share the rule rather than
- * re-implement it and drift out of sync with the server.
+ * This module therefore no longer gates anything — it only produces the
+ * advisory copy the UI shows next to the button when a pull would be redundant.
+ *
+ * WHAT IS NOT RELAXED, and must not be: every CLEAR pull stays MANUAL and
+ * operator-attributed (no cron, no service caller, no retry-on-failure),
+ * role-gated, tenant-scoped, and its payload stays in `clair_reports` — never
+ * merged into the application record. Those constraints live in
+ * app/api/leads/[id]/clair-report/route.ts and ClairReportPanel.tsx.
+ *
+ * Pure module — no server-only guard, no I/O — so the client component and the
+ * route can share it without drifting.
  */
-
-export type ClairEligibility = {
-  eligible: boolean;
-  /** Why not, in words an operator can act on. Empty when eligible. */
-  reason: string;
-};
 
 /** True when `phone` holds a real, usable number. Live subs arrive 0-filled, so
  * a run of zeros (or anything under 10 digits) is an absence, not a number. */
@@ -25,19 +29,16 @@ export function hasUsablePhone(leadData: Record<string, unknown>): boolean {
   return digits.length >= 10 && !/^0+$/.test(digits);
 }
 
-export function clairEligibility(leadData: Record<string, unknown>): ClairEligibility {
+/**
+ * Context for the operator about to spend a billable query — never a gate.
+ * Returns "" when there is nothing worth saying.
+ */
+export function clairAdvisory(leadData: Record<string, unknown>): string {
   if (hasUsablePhone(leadData)) {
-    return { eligible: false, reason: "this lead already has a phone number on file" };
+    return "This lead already has a number on file. A CLEAR pull is billable — run it to verify that number or find additional ones, not to duplicate it.";
   }
-  const status = String(leadData.phone_lookup_status ?? "");
-  if (!status) {
-    return {
-      eligible: false,
-      reason: "the automated lookup has not run yet — CLAIR is the fallback, not the first step",
-    };
+  if (String(leadData.phone_lookup_status ?? "") === "found") {
+    return "The automated lookup already returned a match. A CLEAR pull is billable — run it to verify or expand that result.";
   }
-  if (status === "found") {
-    return { eligible: false, reason: "the automated lookup already found a number" };
-  }
-  return { eligible: true, reason: "" };
+  return "";
 }

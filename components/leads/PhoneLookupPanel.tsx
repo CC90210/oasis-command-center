@@ -2,8 +2,9 @@
 
 /**
  * PhoneLookupPanel — the AUTOMATED (TruePeopleSearch) phone lookup, which is
- * step one of merchant contact enrichment and sits directly above the CLAIR
- * panel that is its paid fallback.
+ * the cheaper of the two contact enrichments and sits directly above the CLAIR
+ * panel — its paid counterpart, which runs independently and is not gated on
+ * anything that happens here.
  *
  * WHY THE RESULT ARRIVES ASYNCHRONOUSLY:
  * The lookup cannot run in the Vercel function this button calls. The source
@@ -241,7 +242,7 @@ export function PhoneLookupPanel({
       <p className="mt-1.5 text-[12px] leading-relaxed text-fg-muted">
         {alreadyHasPhone
           ? "This lead has a number on file. The history below shows where it came from."
-          : "Searches public people-search records for this owner's phone number. Free, and always run before a billable CLAIR report."}
+          : "Searches public people-search records for this owner's phone number. Free, and the cheaper of the two enrichments to try first — CLAIR below can be run independently at any time."}
       </p>
 
       {!alreadyHasPhone && (
