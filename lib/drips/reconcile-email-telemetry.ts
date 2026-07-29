@@ -86,12 +86,15 @@ export async function reconcileDripEmailTelemetry(db: Db, limit = 1000) {
           sendId: row.id,
           email: recipient,
           unsub: sequenceClasses.get(sequenceId) === "transactional" ? "none" : "footer",
-          // Must match what the executor actually sent, or this backfilled audit
-          // row records oasisai.work URLs for a message whose links were on the
-          // SunBiz sending domain. This reconciler's contract is to reconstruct
-          // the payload exactly; a plausible-looking wrong payload is worse than
-          // none (Codex review P2).
-          tracking: "aligned",
+          // Read the context the SEND recorded, never today's config. This
+          // reconciler scans historical interactions, so assuming the current
+          // domain would rebuild aligned URLs for every message sent before the
+          // rollout — messages whose links really were on the platform domain.
+          // Absence means platform, which is correct for exactly those rows.
+          // Its contract is to reconstruct the payload exactly; a
+          // plausible-looking wrong payload is worse than none, because nothing
+          // downstream can tell it is wrong (Codex review P2).
+          tracking: meta.tracking_context === "aligned" ? "aligned" : "platform",
         }),
         provider_message_id:
           typeof meta.rfc822_message_id === "string" ? meta.rfc822_message_id : null,

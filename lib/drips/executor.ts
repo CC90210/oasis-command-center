@@ -977,6 +977,13 @@ async function processEmailStep(
       rfc822_message_id: providerMessageId ?? null,
       dry_run: !shouldSend,
       drips_live: dripsLive,
+      // Which domain this message's tracked URLs were actually built on. Stamped
+      // at SEND time because it is the only reliable record: the telemetry
+      // reconciler rebuilds payload_html from this row long afterwards, and
+      // inferring the domain from today's config would misreconstruct every
+      // message sent before the aligned-domain rollout. Absence means platform,
+      // which is exactly right for historical rows (Codex review P2).
+      tracking_context: "aligned",
     },
   });
   await Promise.all([
