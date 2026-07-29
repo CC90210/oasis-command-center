@@ -208,10 +208,48 @@ type CandidateResult = {
   leads: LeadRow[];
   /** Leads examined and rejected because they have already had their run. */
   skippedAlreadyRan: number;
+  /** Permanent-guard rejections, counted during collection so they do not
+   *  consume the enrollment limit. */
+  staticSkips: Partial<Record<SkipReason, number>>;
   /** Set when the stage held more leads than we were willing to walk. */
   truncated: boolean;
   error?: string;
 };
+
+/**
+ * The guards whose answer does NOT change between one cron pass and the next:
+ * a dead file stays dead, an opt-out stays opted out, a lead with no phone and
+ * no email stays uncontactable.
+ *
+ * These are evaluated during candidate COLLECTION rather than after it, and the
+ * reason is subtle enough to be worth stating. The enrollment limit bounds how
+ * many leads we take per pass. If the limit were filled with leads that a
+ * permanent guard then rejects, every pass would select and reject that same
+ * set, and leads behind them would never be reached — the exact starvation this
+ * change exists to fix, just relocated one step downstream (Codex review P1).
+ * Counting a lead against the limit only once it has passed every permanent
+ * guard is what makes the limit mean "leads we will actually try to enroll".
+ *
+ * The two remaining guards in the enrollment loop, wasShoppedRecently and the
+ * accelerated-chase overlap, are deliberately NOT here: both are TRANSIENT (a
+ * 7-day shopping window, a chase that clears), so a lead they reject becomes
+ * eligible on its own without ever being permanently stuck behind them. They
+ * are also per-lead DB calls, which is why they stay in the bounded path.
+ */
+function staticSkipReason(data: Record<string, unknown>, stage: string): SkipReason | null {
+  if (DEAD_STAGES.has(String(data.stage))) return "dead_or_declined";
+  if (isOptedOut(data)) return "opted_out";
+  if (isPaused(data)) return "paused";
+  // Docs-on-file suppression is scoped to the uw_sheet first-touch cadence only
+  // (see the enrollment loop's original note): the flag is never cleared, so it
+  // gates on the CURRENT trigger stage, letting a docs-complete deal re-triaged
+  // elsewhere still receive its generic nurture.
+  if (data.docs_on_file === true && stage === "uw_sheet") return "docs_on_file";
+  const hasPhone = typeof data.phone === "string" && data.phone.trim().length > 0;
+  const hasEmail = typeof data.email === "string" && data.email.trim().length > 0;
+  if (!hasPhone && !hasEmail) return "no_contact_method";
+  return null;
+}
 
 /**
  * Find leads in `stage` that are eligible to ENTER this sequence.
@@ -261,6 +299,10 @@ async function collectCandidates(
 ): Promise<CandidateResult> {
   const out: LeadRow[] = [];
   let skippedAlreadyRan = 0;
+  const staticSkips: Partial<Record<SkipReason, number>> = {};
+  const noteSkip = (r: SkipReason) => {
+    staticSkips[r] = (staticSkips[r] || 0) + 1;
+  };
   // Unlimited (enrollLimit === 0) still needs a bound on how many candidates we
   // hand downstream in one pass; the per-run ceiling is the page size.
   const want = enrollLimit > 0 ? enrollLimit : CANDIDATE_PAGE_SIZE;
@@ -278,11 +320,11 @@ async function collectCandidates(
       .order("created_at", { ascending: true })
       .range(from, from + CANDIDATE_PAGE_SIZE - 1);
     if (leadsRes.error) {
-      return { leads: out, skippedAlreadyRan, truncated: false, error: leadsRes.error.message };
+      return { leads: out, skippedAlreadyRan, staticSkips, truncated: false, error: leadsRes.error.message };
     }
     const pageLeads = (leadsRes.data || []) as LeadRow[];
     if (pageLeads.length === 0) {
-      return { leads: out, skippedAlreadyRan, truncated: false };
+      return { leads: out, skippedAlreadyRan, staticSkips, truncated: false };
     }
 
     // Most recent run per lead for THIS sequence. 'cancelled' rows do not block
@@ -301,7 +343,7 @@ async function collectCandidates(
       // Fail CLOSED on this page: without the prior-run history we cannot tell a
       // first-time lead from one we already dripped, and guessing wrong means
       // re-sending step 0 to people who already got it.
-      return { leads: out, skippedAlreadyRan, truncated: false, error: priorRes.error.message };
+      return { leads: out, skippedAlreadyRan, staticSkips, truncated: false, error: priorRes.error.message };
     }
     const lastRunAt = new Map<string, number>();
     for (const r of (priorRes.data || []) as Array<{ lead_id: string; created_at: string }>) {
@@ -313,33 +355,39 @@ async function collectCandidates(
 
     for (const lead of pageLeads) {
       const prior = lastRunAt.get(lead.id);
-      if (prior === undefined) {
-        out.push(lead); // never run this sequence
-      } else if (
+      const eligibleByRunHistory =
+        prior === undefined ||
         isReEntryEligible({
           lastRunAtMs: prior,
           stageEnteredAt: (lead.data || {}).stage_entered_at,
           nowMs: now,
           cooldownMs,
-        })
-      ) {
-        out.push(lead);
-      } else {
+        });
+      if (!eligibleByRunHistory) {
         skippedAlreadyRan++;
+        continue;
       }
+      // Permanent guards are applied HERE so a rejected lead does not occupy a
+      // slot under `want` and block the leads behind it forever.
+      const staticSkip = staticSkipReason(lead.data || {}, stage);
+      if (staticSkip) {
+        noteSkip(staticSkip);
+        continue;
+      }
+      out.push(lead);
       if (out.length >= want) {
-        return { leads: out, skippedAlreadyRan, truncated: true };
+        return { leads: out, skippedAlreadyRan, staticSkips, truncated: true };
       }
     }
 
     // A short page means we reached the end of the stage.
     if (pageLeads.length < CANDIDATE_PAGE_SIZE) {
-      return { leads: out, skippedAlreadyRan, truncated: false };
+      return { leads: out, skippedAlreadyRan, staticSkips, truncated: false };
     }
   }
   // Walked the page budget without exhausting the stage. Not silent: the caller
   // surfaces `candidates`, and this flag records that more leads exist behind it.
-  return { leads: out, skippedAlreadyRan, truncated: true };
+  return { leads: out, skippedAlreadyRan, staticSkips, truncated: true };
 }
 
 
@@ -568,6 +616,9 @@ export async function runEnrollDrips(): Promise<EnrollDripsResult> {
     }
     const leads = collected.leads;
     skipped.already_enrolled += collected.skippedAlreadyRan;
+    for (const [reason, n] of Object.entries(collected.staticSkips)) {
+      skipped[reason as SkipReason] += n ?? 0;
+    }
     candidates = leads.length;
     totalCandidates += candidates;
 
@@ -578,44 +629,13 @@ export async function runEnrollDrips(): Promise<EnrollDripsResult> {
 
     for (const lead of leads) {
       const data = lead.data || {};
-      if (DEAD_STAGES.has(String(data.stage))) {
-        skipped.dead_or_declined++;
-        continue;
-      }
-      if (isOptedOut(data)) {
-        skipped.opted_out++;
-        continue;
-      }
-      // Per-lead pause (2026-07-29). /api/leads/[id]/drip-toggle has written
-      // this flag since it shipped and NOTHING read it, so pausing a lead did
-      // nothing at all and the drip carried on. Honored here at enrollment and
-      // again in the executor at send time, because a lead can be paused after
-      // it is already enrolled.
-      if (isPaused(data)) {
-        skipped.paused++;
-        continue;
-      }
-      // Docs-on-file suppression (2026-07-23): a deal received COMPLETE via the
-      // document-extraction parser (dropped application + bank statements
-      // already in hand) must not be re-asked for the app/statements we already
-      // hold. SCOPED to the uw_sheet first-touch collection cadence only: the
-      // flag is never cleared, so we gate on the CURRENT trigger `stage` (the
-      // sequence's trigger_filter.to). That way a docs-complete deal later
-      // re-triaged to another stage (e.g. a negative-reply reclass to
-      // follow_up) still gets its generic re-engagement nurture — we only ever
-      // block the uw_sheet doc-collection drip, not all future sends. Set ONLY
-      // by apply-extracted's new-deal path; scrubber-fed uw_sheet leads never
-      // carry it, so their first-touch cadence is unchanged.
-      if (data.docs_on_file === true && stage === "uw_sheet") {
-        skipped.docs_on_file++;
-        continue;
-      }
+      // NOTE: the permanent guards (dead file, opted out, paused, docs-on-file,
+      // no contact method) already ran inside collectCandidates. They are
+      // applied there rather than here so that a lead they reject does not
+      // consume a slot under the enrollment limit and starve the leads behind
+      // it — see staticSkipReason() for why that ordering is load-bearing.
       const hasPhone = typeof data.phone === "string" && data.phone.trim().length > 0;
       const hasEmail = typeof data.email === "string" && data.email.trim().length > 0;
-      if (!hasPhone && !hasEmail) {
-        skipped.no_contact_method++;
-        continue;
-      }
       // The first step needs a matching contact method — sms needs a phone,
       // email needs an address. Route selection at dispatch time re-derives
       // this from the same lead row; checked here too so we don't enroll a
