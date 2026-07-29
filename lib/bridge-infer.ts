@@ -102,8 +102,13 @@ export async function queueInfer(
 
   // Tag the dedupe key onto `source` so this needs no schema change and stays
   // compatible with the daemon's claim query (which only reads status+created_at).
+  // Reserve room for the suffix BEFORE truncating: slicing the combined string
+  // would chop the key off a long source label, so two different payloads could
+  // resolve to the same stored source and adopt each other's job. Safe for the
+  // current callers, but this is a shared primitive — the next one may not be.
   const key = (args.dedupeKey || "").replace(/[^A-Za-z0-9_-]/g, "").slice(0, 40);
-  const source = (key ? `${args.source}#${key}` : args.source).slice(0, 120);
+  const suffix = key ? `#${key}` : "";
+  const source = args.source.slice(0, 120 - suffix.length) + suffix;
 
   let jobId: string | null = null;
 
