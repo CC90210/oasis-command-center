@@ -18,6 +18,7 @@ import { NextResponse, type NextRequest } from "next/server";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { resolveSessionContext } from "@/lib/api-auth";
 import { getAccessibleLeadTarget } from "@/lib/lead-access";
+import { canWriteCrm } from "@/lib/role-gates";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -27,6 +28,7 @@ const MAX_NOTE_LENGTH = 4000;
 
 type NoteRow = {
   id: string;
+  content: string | null;
   content_preview: string | null;
   agent_source: string | null;
   created_at: string;
@@ -58,7 +60,7 @@ export async function GET(
   const db = getServiceSupabase();
   const r = await db
     .from("lead_interactions")
-    .select("id, content_preview, agent_source, created_at, metadata")
+    .select("id, content, content_preview, agent_source, created_at, metadata")
     .eq("tenant_id", sess.tenantId)
     .eq("lead_id", target.queryLeadId)
     .eq("channel", "note")
@@ -81,6 +83,9 @@ export async function POST(
   const sess = await resolveSessionContext();
   if (!sess.ok) {
     return NextResponse.json({ ok: false, error: sess.reason }, { status: 401 });
+  }
+  if (!canWriteCrm(sess.teamRole)) {
+    return NextResponse.json({ ok: false, error: "role_denied" }, { status: 403 });
   }
   const target = await getAccessibleLeadTarget(
     { isAdmin: sess.isAdmin, userId: sess.userId },
@@ -127,7 +132,7 @@ export async function POST(
         author_profile_id: sess.profileId,
       },
     })
-    .select("id, content_preview, agent_source, created_at, metadata")
+    .select("id, content, content_preview, agent_source, created_at, metadata")
     .single();
   if (ins.error) {
     return NextResponse.json({ ok: false, error: ins.error.message }, { status: 500 });
