@@ -54,6 +54,9 @@ export default async function RootLayout({
     "/welcome",
     "/download",
     "/configure",
+    "/privacy",   // public legal pages render their own chrome (components/legal/LegalPage)
+    "/terms",
+    "/dmca",
     "/login",
     "/signup",
     "/forgot-password",

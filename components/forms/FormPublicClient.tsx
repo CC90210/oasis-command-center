@@ -487,6 +487,19 @@ export function FormPublicClient({
           Your information is kept private — only used to follow up on your request.
         </p>
 
+        {/* FTC AI disclosure. Deliberately BRAND-NEUTRAL and unlinked: this
+            renders on every tenant's public form, so naming OASIS (or linking
+            to OASIS's own /terms) would re-introduce exactly the cross-tenant
+            attribution leak removed on 2026-05-25 below. A SunBiz applicant
+            must not be shown OASIS's legal terms as if they were SunBiz's.
+            The disclosure itself is still required, because uploaded documents
+            ARE sent to a third-party model provider for field extraction —
+            see lib/legal/constants.ts DATA_MATRIX. */}
+        <p className="text-center text-[11px] leading-relaxed text-fg-dim">
+          Submissions and uploaded documents are processed using automated
+          systems and AI, which may include third-party AI providers.
+        </p>
+
         {/* Hardcoded "Powered by OASIS AI" footer removed 2026-05-25
             (CC cross-tenant audit). A Sun Biz lead filling out a Sun
             Biz application form shouldn't see OASIS AI attribution

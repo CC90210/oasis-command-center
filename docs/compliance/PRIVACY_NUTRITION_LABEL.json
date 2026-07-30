@@ -1,0 +1,130 @@
+{
+  "$comment": "App-store-style privacy manifest for the OASIS Agent Command Center. Generated from the product's real behaviour on 2026-07-27 and kept in sync with lib/legal/constants.ts (DATA_MATRIX + SUBPROCESSORS), which is what /privacy renders. If you change either, change both in the same commit.",
+  "schemaVersion": "1.0",
+  "app": {
+    "name": "OASIS Agent Command Center",
+    "publisher": "OASIS AI Solutions",
+    "jurisdiction": "Quebec, Canada",
+    "productionUrl": "https://oasisai.work",
+    "privacyPolicyUrl": "https://oasisai.work/privacy",
+    "termsUrl": "https://oasisai.work/terms",
+    "dmcaUrl": "https://oasisai.work/dmca",
+    "privacyContact": "privacy@oasisai.work"
+  },
+  "lastVerified": "2026-07-27",
+  "verificationMethod": "Static scan of app/ and lib/ for collected form fields, outbound provider hosts, storage buckets, and analytics SDKs.",
+
+  "tracking": {
+    "usedForTracking": false,
+    "thirdPartyAnalyticsSdks": [],
+    "advertisingPixels": [],
+    "note": "No Google Analytics, Meta Pixel, PostHog, Mixpanel, or @vercel/analytics is present in this application as of the lastVerified date. Cookies are limited to authentication and session state."
+  },
+
+  "dataCollected": [
+    {
+      "category": "Contact Info",
+      "fields": ["first_name", "last_name", "email", "phone"],
+      "purposes": ["App Functionality", "Customer Support"],
+      "linkedToUser": true,
+      "usedForTracking": false,
+      "sensitive": false,
+      "sharedWith": ["Supabase", "Anthropic"],
+      "retention": "Life of account, then 24 months"
+    },
+    {
+      "category": "Business & Financial Info",
+      "fields": ["company", "address", "city", "state", "zip", "revenue"],
+      "purposes": ["App Functionality"],
+      "linkedToUser": true,
+      "usedForTracking": false,
+      "sensitive": false,
+      "sharedWith": ["Supabase", "Submitting tenant"],
+      "retention": "Life of account, then 24 months"
+    },
+    {
+      "category": "Sensitive Info — Government Identifiers",
+      "fields": ["ssn", "dob", "ein", "tax_id"],
+      "purposes": ["App Functionality"],
+      "linkedToUser": true,
+      "usedForTracking": false,
+      "sensitive": true,
+      "sharedWith": ["Supabase", "Anthropic (when present in an uploaded document)"],
+      "retention": "Duration of the active application; deleted on request",
+      "regulatoryNote": "Sensitive personal information under Quebec Law 25 and the CPRA. Collection requires express consent and, under Law 25 s.3.3, a privacy impact assessment before use in an automated process."
+    },
+    {
+      "category": "User Content — Uploaded Documents",
+      "fields": ["bank statements", "signed applications", "supporting files"],
+      "purposes": ["App Functionality"],
+      "linkedToUser": true,
+      "usedForTracking": false,
+      "sensitive": true,
+      "sharedWith": ["Supabase Storage", "Anthropic (field extraction)"],
+      "retention": "Stored with the application; deleted on request"
+    },
+    {
+      "category": "Diagnostics & Usage Data",
+      "fields": ["ip_address", "request_path", "timestamp", "user_agent", "error_logs"],
+      "purposes": ["Analytics (first-party only)", "App Functionality", "Security"],
+      "linkedToUser": false,
+      "usedForTracking": false,
+      "sensitive": false,
+      "sharedWith": ["Vercel", "Supabase"],
+      "retention": "30 days"
+    }
+  ],
+
+  "subprocessors": [
+    {
+      "name": "Supabase, Inc.",
+      "role": "Database, authentication, file storage",
+      "region": "United States",
+      "dpaInPlace": true
+    },
+    {
+      "name": "Vercel, Inc.",
+      "role": "Hosting and edge delivery",
+      "region": "United States / global edge",
+      "dpaInPlace": true
+    },
+    {
+      "name": "Anthropic PBC",
+      "role": "LLM inference (Claude); chat, agent tasks, and document field extraction",
+      "region": "United States",
+      "dpaInPlace": false,
+      "openIssue": "Document extraction runs via the Claude CLI on an individual subscription, not a commercial API account. Consumer subscription terms differ materially from Anthropic's Commercial Terms and DPA. Sensitive identifiers (SSN, DOB, EIN) traverse this path."
+    },
+    {
+      "name": "OpenAI, L.L.C.",
+      "role": "LLM inference (GPT) for delegated code and review tasks",
+      "region": "United States",
+      "dpaInPlace": false
+    },
+    {
+      "name": "Google LLC",
+      "role": "LLM inference (Gemini) fallback provider",
+      "region": "United States",
+      "dpaInPlace": false
+    }
+  ],
+
+  "userRights": {
+    "access": true,
+    "correction": true,
+    "deletion": true,
+    "portability": true,
+    "withdrawConsent": true,
+    "optOutOfSale": "Not applicable — no sale or sharing as defined by the CPRA",
+    "requestChannel": "privacy@oasisai.work",
+    "responseTargetDays": 30
+  },
+
+  "openGaps": [
+    "No signed DPA covering the LLM providers for the document-extraction path.",
+    "Law 25 privacy impact assessment not yet completed for cross-border transfer of sensitive identifiers.",
+    "No French-language version of the privacy policy or terms (Charter of the French Language, art. 55, for consumer contracts of adhesion in Quebec).",
+    "DMCA Designated Agent not yet registered with the U.S. Copyright Office.",
+    "Legal copy has not been reviewed by counsel."
+  ]
+}
