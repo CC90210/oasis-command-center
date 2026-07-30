@@ -39,18 +39,29 @@ import { checkTcpaWindow } from "@/lib/tcpa-window";
 import { ACCELERATED_FLAG, acceleratedSystemLive, hasActiveAcceleratedRun } from "@/lib/drips/accelerated";
 import type { DripStep } from "./types";
 import { computeStep0DelayMinutes, enrollmentBufferForStage } from "./stage-buffer";
-import { isPaused, isReEntryEligible } from "./drip-rules-core";
+/**
+ * The guards whose answer does NOT change between one cron pass and the next:
+ * a dead file stays dead, an opt-out stays opted out, a lead with no phone and
+ * no email stays uncontactable.
+ *
+ * These are evaluated during candidate COLLECTION rather than after it, and the
+ * reason is subtle enough to be worth stating. The enrollment limit bounds how
+ * many leads we take per pass. If the limit were filled with leads that a
+ * permanent guard then rejects, every pass would select and reject that same
+ * set, and leads behind them would never be reached — the exact starvation this
+ * change exists to fix, just relocated one step downstream (Codex review P1).
+ * Counting a lead against the limit only once it has passed every permanent
+ * guard is what makes the limit mean "leads we will actually try to enroll".
+ *
+ * The two remaining guards in the enrollment loop, wasShoppedRecently and the
+ * accelerated-chase overlap, are deliberately NOT here: both are TRANSIENT (a
+ * 7-day shopping window, a chase that clears), so a lead they reject becomes
+ * eligible on its own without ever being permanently stuck behind them. They
+ * are also per-lead DB calls, which is why they stay in the bounded path.
+ */
+import { isReEntryEligible, isTruthyFlag, staticSkipReason } from "./drip-rules-core";
 
 type Db = ReturnType<typeof getServiceSupabase>;
-
-// Terminal-negative lead stages that must never receive a drip touch, even
-// if some future sequence is misconfigured to target one of them directly
-// (today none of the seeded SUNBIZ_DEFAULT_SEQUENCES do — see
-// lib/sunbiz-stage-meta.ts LEAD_PIPELINE_STAGES). Kept as an explicit
-// allow-nothing list rather than relying solely on "current stage matches
-// trigger_filter.to" so a future sequence edit can't accidentally start
-// drip-touching a dead file.
-const DEAD_STAGES = new Set(["dead_file"]);
 
 const SHOPPED_LOOKBACK_DAYS = 7;
 
@@ -217,52 +228,6 @@ type CandidateResult = {
 };
 
 /**
- * The guards whose answer does NOT change between one cron pass and the next:
- * a dead file stays dead, an opt-out stays opted out, a lead with no phone and
- * no email stays uncontactable.
- *
- * These are evaluated during candidate COLLECTION rather than after it, and the
- * reason is subtle enough to be worth stating. The enrollment limit bounds how
- * many leads we take per pass. If the limit were filled with leads that a
- * permanent guard then rejects, every pass would select and reject that same
- * set, and leads behind them would never be reached — the exact starvation this
- * change exists to fix, just relocated one step downstream (Codex review P1).
- * Counting a lead against the limit only once it has passed every permanent
- * guard is what makes the limit mean "leads we will actually try to enroll".
- *
- * The two remaining guards in the enrollment loop, wasShoppedRecently and the
- * accelerated-chase overlap, are deliberately NOT here: both are TRANSIENT (a
- * 7-day shopping window, a chase that clears), so a lead they reject becomes
- * eligible on its own without ever being permanently stuck behind them. They
- * are also per-lead DB calls, which is why they stay in the bounded path.
- */
-function staticSkipReason(
-  data: Record<string, unknown>,
-  stage: string,
-  firstChannel: "sms" | "email",
-): SkipReason | null {
-  if (DEAD_STAGES.has(String(data.stage))) return "dead_or_declined";
-  if (isOptedOut(data)) return "opted_out";
-  if (isPaused(data)) return "paused";
-  // Docs-on-file suppression is scoped to the uw_sheet first-touch cadence only
-  // (see the enrollment loop's original note): the flag is never cleared, so it
-  // gates on the CURRENT trigger stage, letting a docs-complete deal re-triaged
-  // elsewhere still receive its generic nurture.
-  if (data.docs_on_file === true && stage === "uw_sheet") return "docs_on_file";
-  const hasPhone = typeof data.phone === "string" && data.phone.trim().length > 0;
-  const hasEmail = typeof data.email === "string" && data.email.trim().length > 0;
-  if (!hasPhone && !hasEmail) return "no_contact_method";
-  // The step-0 channel needs a matching contact method: an SMS-first sequence
-  // can never reach an email-only lead, and vice versa. This is as PERMANENT as
-  // the checks above for a given sequence, so it belongs in the same place —
-  // leaving it downstream let an email-only lead occupy a slot in an SMS
-  // sequence's candidate window on every pass forever (Codex review P1, round 2).
-  if (firstChannel === "sms" && !hasPhone) return "no_contact_method";
-  if (firstChannel === "email" && !hasEmail) return "no_contact_method";
-  return null;
-}
-
-/**
  * Find leads in `stage` that are eligible to ENTER this sequence.
  *
  * This replaces two bugs that between them were suppressing most enrollment
@@ -402,19 +367,6 @@ async function collectCandidates(
   return { leads: out, skippedAlreadyRan, staticSkips, truncated: true };
 }
 
-
-function isTruthyFlag(v: unknown): boolean {
-  return v === true || v === "true" || v === 1 || v === "1";
-}
-
-function isOptedOut(data: Record<string, unknown>): boolean {
-  return (
-    isTruthyFlag(data.opted_out) ||
-    isTruthyFlag(data.sms_opt_out) ||
-    isTruthyFlag(data.email_opt_out) ||
-    data.stage === "opted_out"
-  );
-}
 
 /**
  * Best-effort "shopped to funders in the last 7 days" check — the standing

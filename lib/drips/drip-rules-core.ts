@@ -128,3 +128,72 @@ export function isReEntryEligible(args: {
   if (!(entered > args.lastRunAtMs)) return false;
   return args.nowMs - args.lastRunAtMs >= args.cooldownMs;
 }
+
+// ── Permanent per-lead guards ────────────────────────────────────────────────
+
+/** Terminal-negative lead stages that must never receive a drip touch. Kept as
+ *  an explicit list rather than relying solely on "current stage matches
+ *  trigger_filter.to" so a future sequence edit can't start touching a dead file. */
+export const DEAD_STAGES = new Set(["dead_file"]);
+
+export function isTruthyFlag(v: unknown): boolean {
+  return v === true || v === "true" || v === 1 || v === "1";
+}
+
+export function isOptedOut(data: Record<string, unknown>): boolean {
+  return (
+    isTruthyFlag(data.opted_out) ||
+    isTruthyFlag(data.sms_opt_out) ||
+    isTruthyFlag(data.email_opt_out) ||
+    data.stage === "opted_out"
+  );
+}
+
+export type GuardSkipReason =
+  | "dead_or_declined" | "opted_out" | "paused" | "docs_on_file" | "no_contact_method";
+
+/**
+ * PERMANENT per-lead guards, shared by the batch enroller and the instant
+ * "Send Application" path (moved here from enroller.ts 2026-07-30 so BOTH call
+ * one implementation and so it is unit-testable — enroller.ts imports
+ * "server-only" and cannot be loaded by a test).
+ *
+ * Transient guards (wasShoppedRecently, the accelerated-chase overlap) stay in
+ * the enroller: they need DB calls, and a lead they reject becomes eligible on
+ * its own without being permanently stuck.
+ */
+export function staticSkipReason(
+  data: Record<string, unknown>,
+  stage: string,
+  firstChannel: "sms" | "email",
+): GuardSkipReason | null {
+  if (DEAD_STAGES.has(String(data.stage))) return "dead_or_declined";
+  if (isOptedOut(data)) return "opted_out";
+  if (isPaused(data)) return "paused";
+  // Docs-on-file suppression is scoped to the uw_sheet first-touch cadence only:
+  // the flag is never cleared, so it gates on the CURRENT trigger stage, letting
+  // a docs-complete deal re-triaged elsewhere still receive its generic nurture.
+  if (data.docs_on_file === true && stage === "uw_sheet") return "docs_on_file";
+  const hasPhone = typeof data.phone === "string" && data.phone.trim().length > 0;
+  const hasEmail = typeof data.email === "string" && data.email.trim().length > 0;
+  if (!hasPhone && !hasEmail) return "no_contact_method";
+  // The step-0 channel needs a matching contact method: an SMS-first sequence
+  // can never reach an email-only lead, and vice versa.
+  if (firstChannel === "sms" && !hasPhone) return "no_contact_method";
+  if (firstChannel === "email" && !hasEmail) return "no_contact_method";
+  return null;
+}
+
+/**
+ * Is the 08:00-20:00 ET email window (and the governor's volume caps) in force
+ * for this send?
+ *
+ * DOUBLE-KEYED on purpose (spec 4.3). `immediate` alone would satisfy the
+ * requirement, but then a future caller pointing the instant path at a
+ * commercial sequence would silently start sending marketing email at 3am. The
+ * class check makes that impossible. Commercial drips are unaffected in every
+ * case, and so is every cron dispatch.
+ */
+export function shouldApplyEmailWindow(a: { immediate: boolean; emailClass: string }): boolean {
+  return !(a.immediate && a.emailClass === "transactional");
+}
