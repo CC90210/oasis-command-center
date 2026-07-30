@@ -151,13 +151,54 @@ if (!TRACKING) {
       // A catch-all HTML page cannot fake that.
       const ct = (probe.headers.get("content-type") || "").toLowerCase();
       const isGif = probe.status === 200 && ct.includes("image/gif");
-      const detail = `status ${probe.status}, content-type ${ct || "(none)"}`;
-      if (isGif) {
-        ok("Tracking host serves the app", `open pixel answered ${detail}`);
-      } else {
+      const pixelDetail = `status ${probe.status}, content-type ${ct || "(none)"}`;
+
+      // The pixel proves TRACKING works from this host. It does NOT prove
+      // /api/unsubscribe is there — an older deployment or a path-based proxy
+      // could serve one and not the other, and this preflight explicitly
+      // certifies unsubscribe availability (Codex review P2). So probe both.
+      //
+      // POST is the unsubscribe route's only method. An empty JSON body is
+      // deliberately safe: with no email it returns 400 {ok:false,
+      // error:"invalid_email"} and writes NOTHING. That shape is also a strong
+      // app fingerprint a marketing site cannot produce.
+      //
+      // Note: that route rate-limits by IP, so this probe is cheap but not free.
+      // Running the preflight in a tight loop can trip the limiter (429 — which
+      // still proves the route is the app, and is accepted below).
+      let unsubOk = false;
+      let unsubDetail = "not attempted";
+      try {
+        const u = await fetch(`${TRACKING.replace(/\/+$/, "")}/api/unsubscribe`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: "{}",
+          redirect: "manual",
+        });
+        const uct = (u.headers.get("content-type") || "").toLowerCase();
+        unsubDetail = `status ${u.status}, content-type ${uct || "(none)"}`;
+        if (uct.includes("application/json")) {
+          const body = await u.json().catch(() => null);
+          // Any JSON carrying `ok` is this app's handler. A 429 counts: being
+          // rate-limited still proves the route exists and is ours.
+          unsubOk = Boolean(body && typeof body === "object" && "ok" in body);
+          if (unsubOk) unsubDetail += `, ok=${JSON.stringify(body.ok)}`;
+        }
+      } catch (e) {
+        unsubDetail = `unreachable: ${e instanceof Error ? e.message : "unknown"}`;
+      }
+
+      if (isGif && unsubOk) {
+        ok("Tracking host serves the app", `open pixel (${pixelDetail}); unsubscribe (${unsubDetail})`);
+      } else if (!isGif) {
         bad(
           "Tracking host serves the app",
-          `${host}/api/track/open/... did not answer like this app (${detail}). The host resolves but is serving something else, most likely the marketing site, so tracking and unsubscribe links will be dead.`,
+          `${host}/api/track/open/... did not answer like this app (${pixelDetail}). The host resolves but is serving something else, most likely the marketing site, so tracking links will be dead.`,
+        );
+      } else {
+        bad(
+          "Unsubscribe reachable on tracking host",
+          `${host} serves the tracking pixel but /api/unsubscribe did not answer like this app (${unsubDetail}). Every unsubscribe link in that mail would be dead, which is a compliance failure, not a cosmetic one.`,
         );
       }
     } catch (e) {
