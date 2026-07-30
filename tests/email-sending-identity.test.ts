@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import {
   domainOfAddress,
+  fromDisplayName,
   clickAllowedHosts,
   fromAddress,
   fromDomain,
@@ -22,6 +23,7 @@ import {
  */
 
 const ENV_KEYS = [
+  "DRIP_FROM_NAME",
   "DRIP_FROM_ADDRESS",
   "DRIP_TRACKING_BASE_URL",
   "DRIP_INTAKE_URL",
@@ -196,5 +198,39 @@ assert.equal(domainOfAddress("  a@b.co  "), "b.co", "surrounding whitespace is t
 assert.equal(domainOfAddress("MiXeD@CaSe.COM"), "case.com", "domain is lowercased");
 assert.equal(domainOfAddress("no-at-sign"), "", "unparseable yields empty, never a partial");
 assert.equal(domainOfAddress(""), "", "empty yields empty");
+
+// ── Drip-only display name ──────────────────────────────────────────────────
+// getSubmissionsFrom() hardcodes "SunBiz Submissions" and is SHARED with lender
+// shop-out mail. DRIP_FROM_NAME rebrands only the drips, so the Bluerise cutover
+// does not have to wait on the decision about whether lender mail rebrands too.
+
+withEnv({}, () => {
+  assert.equal(
+    fromDisplayName(),
+    undefined,
+    "unset means leave the shared default alone — lender mail is untouched",
+  );
+});
+
+withEnv({ DRIP_FROM_NAME: "Bluerise Business Capital" }, () => {
+  assert.equal(fromDisplayName(), "Bluerise Business Capital", "set value is used verbatim");
+});
+
+// Header injection defence. This value lands in a From header, and a newline in a
+// header value splits it. Operator-set rather than user-set, so this is defence
+// in depth, but a header builder should never trust its input.
+withEnv({ DRIP_FROM_NAME: "Evil\r\nBcc: attacker@example.com" }, () => {
+  const n = fromDisplayName() || "";
+  assert.ok(!/[\r\n]/.test(n), "CR/LF stripped — a display name cannot inject a header");
+  assert.ok(!n.includes("<") && !n.includes(">"), "angle brackets stripped so the mailbox cannot be forged");
+});
+
+withEnv({ DRIP_FROM_NAME: '   Bluerise "Quoted" Name   ' }, () => {
+  assert.equal(fromDisplayName(), "Bluerise Quoted Name", "quotes stripped and whitespace collapsed");
+});
+
+withEnv({ DRIP_FROM_NAME: "   " }, () => {
+  assert.equal(fromDisplayName(), undefined, "whitespace-only is treated as unset, not an empty name");
+});
 
 console.log("email-sending-identity.test.ts — all assertions passed ✓");

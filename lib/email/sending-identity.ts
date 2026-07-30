@@ -58,6 +58,28 @@ export function domainOfAddress(addr: string): string {
     .toLowerCase();
 }
 
+/**
+ * The human-readable name shown in front of the From address, for the DRIP path
+ * only. Undefined means "leave it alone", which is today's behaviour.
+ *
+ * Exists because getSubmissionsFrom() hardcodes "SunBiz Submissions", and that
+ * function is SHARED with lender shop-out mail. A global rename would rebrand
+ * lender correspondence at the same moment as the merchant drips, which may not
+ * be intended. Setting DRIP_FROM_NAME moves only the drips and leaves everything
+ * else on the shared default, so the Bluerise cutover no longer waits on that
+ * decision — it works either way.
+ *
+ * Sanitized: CR/LF and quotes are stripped. This value ends up in a mail header,
+ * and a newline in a header value is header injection. It is operator-set rather
+ * than user-set, so this is defence in depth, not the primary control.
+ */
+export function fromDisplayName(): string | undefined {
+  const raw = env("DRIP_FROM_NAME");
+  if (!raw) return undefined;
+  const clean = raw.replace(/[\r\n"<>]/g, " ").replace(/\s+/g, " ").trim();
+  return clean || undefined;
+}
+
 /** The domain part of the CONFIGURED From address. Drives the unsubscribe mailto
  *  so it can never disagree with the visible sender.
  *

@@ -59,6 +59,13 @@ export type SendPayload = {
    * transactional/reply sends — every existing caller keeps working unchanged.
    */
   listUnsubscribe?: string;
+  /**
+   * Optional display name for the From header, e.g. "Bluerise Business Capital".
+   * Omit to keep the shared default from getSubmissionsFrom(). Exists so ONE
+   * caller can rebrand without dragging lender shop-out mail along with it; the
+   * sending address is unchanged either way.
+   */
+  fromName?: string;
   /** Per-tenant credential lookup; pass through from the route's auth context. */
   tenantId: string;
 };
@@ -118,7 +125,14 @@ async function sendOnce(
   try {
     const nodemailer = await import("nodemailer");
     const creds = await getSubmissionsCreds(payload.tenantId);
-    const from = await getSubmissionsFrom(payload.tenantId);
+    // The display name in front of the address. getSubmissionsFrom() supplies a
+    // shared default ("SunBiz Submissions") used by lender shop-out mail as well,
+    // so a caller that needs to rebrand ONLY its own mail passes `fromName` and
+    // leaves every other caller untouched. The ADDRESS is always the tenant's
+    // real authenticated mailbox either way — only the label changes.
+    const from = payload.fromName
+      ? `${payload.fromName} <${creds.fromAddress}>`
+      : await getSubmissionsFrom(payload.tenantId);
 
     const transporter = nodemailer.createTransport({
       host: "smtp.gmail.com",

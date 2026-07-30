@@ -37,7 +37,10 @@ import {
 import type { DripSmsIdentity } from "@/lib/drips/rep-sms-identity";
 import { sendGmail } from "@/lib/integrations/submissions-gmail-send";
 import { getSubmissionsFrom } from "@/lib/integrations/submissions-gmail";
-import { fromAddress as configuredFromAddress } from "@/lib/email/sending-identity";
+import {
+  fromAddress as configuredFromAddress,
+  fromDisplayName,
+} from "@/lib/email/sending-identity";
 
 export type DripSmsResult =
   | {
@@ -123,6 +126,9 @@ export async function sendDripEmail(
     body,
     html: opts?.html,
     listUnsubscribe: opts?.listUnsubscribe,
+    // Drip-only display name. Undefined unless DRIP_FROM_NAME is set, so lender
+    // shop-out mail through the same mailbox keeps the shared default.
+    fromName: fromDisplayName(),
   });
   if (!result.ok) return { ok: false, error: result.error };
   // Label only — the send already happened. Falls back to the configured sending

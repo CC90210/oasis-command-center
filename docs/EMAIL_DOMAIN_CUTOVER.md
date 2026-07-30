@@ -146,7 +146,7 @@ is blocking the cutover on the DNS side.
 
 ---
 
-## Open decision: the From display name
+## The From display name (resolved 2026-07-30, no longer blocking)
 
 `lib/integrations/submissions-gmail.ts getSubmissionsFrom()` returns a hardcoded
 display name:
@@ -155,18 +155,22 @@ display name:
 SunBiz Submissions <submissions@sunbizfunding.com>
 ```
 
-Left alone deliberately, because that function is shared: **lender shop-out mail
-uses it too**, not just drips. Making it environment-driven would rebrand lender
-correspondence at the same time, which may not be what you want.
+That function is **shared with lender shop-out mail**, so making it globally
+environment-driven would rebrand lender correspondence at the same moment as the
+merchant drips, which may not be intended.
 
-Decide before cutover:
+**`DRIP_FROM_NAME` now sets the display name for drip mail only**, so this works
+either way and does not gate the cutover:
 
-- **Drips rebrand, lender mail stays SunBiz** → the display name needs to become
-  per-send rather than global. Small change, but it is a change; say the word.
-- **Everything rebrands together** → one env var is enough and I will wire it.
+- **Drips rebrand, lender mail stays SunBiz** → set `DRIP_FROM_NAME`. Done.
+- **Everything rebrands together** → set `DRIP_FROM_NAME` and change the shared
+  default in `getSubmissionsFrom()` in the same change.
 
-Whichever way, the *address* and its derived headers already move with
-`DRIP_FROM_ADDRESS`. This is only the human-readable name in front of it.
+Unset means unchanged, so nothing moves until you choose. The *address* and every
+header derived from it already follow `DRIP_FROM_ADDRESS`; this is only the
+human-readable label in front of it. The value is stripped of CR/LF, quotes and
+angle brackets before it reaches the header, because a newline in a header value
+is header injection.
 
 ---
 
