@@ -103,15 +103,17 @@ export function QuickAddLeadModal({
         return;
       }
       // Surface the real application-email outcome instead of closing silently.
-      const status = json.email?.status || "queued";
-      const note = EMAIL_STATUS_COPY[status] || "Lead saved.";
+      // `status` is undefined whenever the server omitted `email` (no instant
+      // send ran for this stage) — show no email note at all in that case,
+      // rather than falling back to a fake "queued".
+      const status = json.email?.status;
+      const note = status ? EMAIL_STATUS_COPY[status] || "Lead saved." : "";
       if (json.existing) {
-        alert(
-          `${json.advanced
-            ? `That merchant already had a lead, moved it to ${stageLabel}.`
-            : `That merchant is already at ${stageLabel}.`}\n\n${note}`,
-        );
-      } else if (status !== "sent") {
+        const merge = json.advanced
+          ? `That merchant already had a lead, moved it to ${stageLabel}.`
+          : `That merchant is already at ${stageLabel}.`;
+        alert(note ? `${merge}\n\n${note}` : merge);
+      } else if (status && status !== "sent") {
         alert(note);
       }
       reset();

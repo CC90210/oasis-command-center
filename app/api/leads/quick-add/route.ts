@@ -110,6 +110,12 @@ export async function POST(req: NextRequest) {
       // Fill in a MISSING contact name; never overwrite an existing one (their
       // file may already hold a better value than what the rep typed here).
       if (contactName && !found.data.contact_name) patch.contact_name = contactName;
+      // Same policy for the contact channels, and load-bearing since the instant
+      // application send: findExistingLead matches on email OR phone, so a lead
+      // matched by phone may have no email on file. Without this the address the
+      // operator just typed is discarded and the send skips as no_email.
+      if (email && !found.data.email) patch.email = email;
+      if (phone && !found.data.phone) patch.phone = phone;
       if (Object.keys(patch).length > 0) {
         await updateRecord({ tenant_id: tenantId, entity: "lead", id: leadId, patch });
       }
@@ -171,7 +177,7 @@ export async function POST(req: NextRequest) {
   // rep is told exactly what happened.
   // Named `emailOutcome` locally (not `email`) — that identifier is already the
   // merchant's normalized email address above; the response field is still `email`.
-  let emailOutcome: InstantEmailOutcome = { status: "queued" };
+  let emailOutcome: InstantEmailOutcome | undefined;
   if (stage === "sent_application") {
     try {
       emailOutcome = await sendApplicationNow({ tenantId, leadId, stage });
@@ -181,5 +187,14 @@ export async function POST(req: NextRequest) {
     }
   }
 
-  return NextResponse.json({ ok: true, id: leadId, stage, existing, advanced, email: emailOutcome });
+  return NextResponse.json({
+    ok: true,
+    id: leadId,
+    stage,
+    existing,
+    advanced,
+    // Omitted entirely for stages that have no instant send, so the UI cannot
+    // report a queued application email that was never enrolled.
+    ...(emailOutcome ? { email: emailOutcome } : {}),
+  });
 }
