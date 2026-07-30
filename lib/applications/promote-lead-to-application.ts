@@ -14,6 +14,10 @@
  * mapLeadDataToApplicationFields (canonical keys) + extractAppFields (normalize),
  * then gap-fill onto the application so operator edits are never clobbered.
  *
+ * The lead STAYS on the Live Subs board (it is never stamped `transferred_at`).
+ * An accepted Bridge deal is pre-qualified work-in-hand, not a fresh intake, so
+ * it belongs in Live Subs rather than the "Application In" stage — see step 4.
+ *
  * Live subs arrive without a phone (ISO sheets carry no contact PII). That does
  * NOT block creation — the application is shoppable without it — so we stamp
  * phone_status:"needs_lookup" as a visible flag the operator (and, later, the
@@ -27,7 +31,9 @@ import { createApplicationFromLead } from "@/lib/applications/create-from-lead";
 import { extractAppFields } from "@/lib/forms/application-upsert";
 import { generateApplicationDocumentFromRecord } from "@/lib/forms/application-document";
 import {
+  liveSubLifecyclePatches,
   mapLeadDataToApplicationFields,
+  matchesLegacyLiveSubIncident,
   reconcileLiveSubFields,
 } from "@/lib/applications/live-sub-mapping";
 import { writeAgentAlert } from "@/lib/notify/agent-alert";
@@ -84,6 +90,8 @@ export type PromoteResult =
       missingCritical: string[];
       /** True once the branded PDF regenerated; false if that step failed. */
       pdfOk: boolean;
+      /** True when this approval is intentionally visible in Leads → Live Subs. */
+      retainedInLiveSubs: boolean;
     }
   | { ok: false; error: string; stage: PromoteStage };
 
@@ -101,6 +109,8 @@ export async function promoteLeadToApplication(input: {
   leadId: string;
   /** Provenance stamped on a NEWLY created application (default live_sub_auto). */
   source?: string;
+  /** Signed one-shot repair for the known legacy auto-transfer incident. */
+  restoreLiveSubs?: boolean;
 }): Promise<PromoteResult> {
   const { tenantId, leadId } = input;
   const source = input.source || "live_sub_auto";
@@ -145,6 +155,21 @@ export async function promoteLeadToApplication(input: {
     //    prior form submission) already set on a reused application.
     const app = await getRecord({ tenant_id: tenantId, entity: "application", id: applicationId }).catch(() => null);
     const appData = (app?.data || {}) as Record<string, unknown>;
+    const legacyIncidentMatch = matchesLegacyLiveSubIncident({
+      leadSource: leadData.source,
+      applicationCreatedVia: appData.created_via,
+      leadCreatedAt:
+        (lead as { created_at?: unknown }).created_at ?? leadData.created_at,
+      leadTransferredAt: leadData.transferred_at,
+    });
+    const lifecycle = liveSubLifecyclePatches({
+      applicationId,
+      applicationCreated: appRes.created,
+      leadTransferredAt: leadData.transferred_at,
+      applicationPromotedAt: appData.promoted_at,
+      restoreLiveSubs: input.restoreLiveSubs,
+      legacyIncidentMatch,
+    });
     const patch: Record<string, unknown> = {};
     for (const [k, v] of Object.entries(fields)) {
       const cur = appData[k];
@@ -163,16 +188,73 @@ export async function promoteLeadToApplication(input: {
     // Provenance: mark a freshly created app as the live-sub auto path; leave a
     // reused app's existing created_via (e.g. form_submission) intact.
     if (appRes.created) patch.created_via = source;
-    if (!appData.promoted_at) patch.promoted_at = new Date().toISOString();
+    Object.assign(patch, lifecycle.applicationPatch);
     if (!appData.phone_status) patch.phone_status = phoneStatus;
+
+    // When retaining/restoring Live Subs, expose the lead first. If the second
+    // write fails, the deal may briefly appear on both boards but can never
+    // disappear from both. The ordinary advanced/retry path keeps its existing
+    // application-first order because it does not clear lifecycle markers.
+    if (lifecycle.retainInLiveSubs) {
+      await updateRecord({
+        tenant_id: tenantId,
+        entity: "lead",
+        id: leadId,
+        patch: lifecycle.leadPatch,
+      });
+    }
 
     await updateRecord({ tenant_id: tenantId, entity: "application", id: applicationId, patch });
 
-    // 4) Move the lead off the Leads board (the board filters on transferred_at),
-    //    linking it to the application. Only stamp if not already transferred.
-    const leadPatch: Record<string, unknown> = { application_id: applicationId };
-    if (!leadData.transferred_at) leadPatch.transferred_at = new Date().toISOString();
-    await updateRecord({ tenant_id: tenantId, entity: "lead", id: leadId, patch: leadPatch });
+    // 4) Link the lead to its application, but LEAVE IT ON THE LIVE SUBS BOARD.
+    //
+    //    2026-07-27 (Adon) — this step used to stamp `transferred_at`, which is
+    //    the flag the Leads board filters on (lib/manifest/data.ts). Stamping it
+    //    made an Ezra-approved Bridge deal vanish from the Live Subs tab the
+    //    instant it was accepted and reappear only as an "Application In" card.
+    //    That is the wrong destination for this path: a live sub arrives
+    //    pre-qualified with the UW sheet and statements already in hand, so it is
+    //    ready to be WORKED in Live Subs, not parked in the application-intake
+    //    stage the merchant has already completed.
+    //
+    //    ONE DEAL, ONE BOARD. The two markers are a matched pair: a lead is
+    //    hidden from the Leads board by `transferred_at`, and an application is
+    //    SHOWN on the Applications board by `promoted_at` (lib/manifest/data.ts).
+    //    Dropping one without the other would put the deal on both boards, so
+    //    neither is stamped here. The application record is still created and
+    //    still carries status="application_in", so underwriting and the branded
+    //    PDF are unaffected — it simply stays off the Applications board until an
+    //    operator explicitly transfers it, which is also when it becomes
+    //    selectable in Shopping Out (that picker reads the same filtered list).
+    //    Work the deal in Live Subs, then Transfer to Application to shop it.
+    //
+    //    This mirrors the dropped-application path exactly
+    //    (lib/applications/apply-extracted.ts), which lands its lead at uw_sheet
+    //    and creates its backing application with neither marker.
+    //
+    //    The signed one-shot repair may explicitly clear both markers for rows
+    //    matching the known legacy incident fingerprint. Ordinary retries never
+    //    pull an operator-advanced application backwards.
+    //    STAGE IS FORCED HERE, not just at creation. The dashboard approve path
+    //    de-duplicates against an existing merchant lead
+    //    (app/api/scrub-candidates/[id] findExistingLead), and that lead can sit
+    //    in ANY stage — follow_up, ghost, declined. Only the create branch runs
+    //    sanitizeLeadData, which is what pins stage="uw_sheet"; the dedup branch
+    //    promotes the existing record untouched. That used to be invisible
+    //    because the transfer marker pulled the lead off the board entirely, so
+    //    now that it stays visible it has to be visible in the RIGHT place, or
+    //    an approved Bridge deal would sit in Live Subs' neighbour stage forever.
+    //    Matching the create branch also means the dedup'd deal fires the same
+    //    uw_sheet first-touch cadence, which is what a scrubber-fed live sub is
+    //    supposed to get (it carries no docs_on_file — see lib/drips/enroller).
+    if (!lifecycle.retainInLiveSubs) {
+      await updateRecord({
+        tenant_id: tenantId,
+        entity: "lead",
+        id: leadId,
+        patch: lifecycle.leadPatch,
+      });
+    }
 
     // 5) Reconcile the final application fields against the pinned parser
     //    contract — no silent data loss. Log every expected field that came back
@@ -231,6 +313,7 @@ export async function promoteLeadToApplication(input: {
       emptyFields: emptyExpected,
       missingCritical,
       pdfOk,
+      retainedInLiveSubs: lifecycle.retainInLiveSubs,
     };
   } catch (err) {
     return await fail("unexpected", err instanceof Error ? err.message : "promote_failed");

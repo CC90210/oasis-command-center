@@ -15,7 +15,9 @@
  */
 import assert from "node:assert";
 import {
+  liveSubLifecyclePatches,
   mapLeadDataToApplicationFields,
+  matchesLegacyLiveSubIncident,
   reconcileLiveSubFields,
 } from "../lib/applications/live-sub-mapping";
 import { extractAppFields } from "../lib/forms/application-upsert";
@@ -140,6 +142,82 @@ function run() {
   assert.equal(e.owner_ownership_pct, 100, "case 5: a lead-side ownership value is overridden to 100");
   const f = toAppFields({ business_name: "X", monthly_revenue: 1, ownership_pct: 33 });
   assert.equal(f.owner_ownership_pct, 100, "case 5: the ownership_pct alias is overridden too");
+
+  // ── Case 6: Dolphin approvals remain visible in Leads → Live Subs ──
+  const freshLifecycle = liveSubLifecyclePatches({
+    applicationId: "app-1",
+    applicationCreated: true,
+  });
+  assert.equal(freshLifecycle.retainInLiveSubs, true);
+  assert.deepStrictEqual(freshLifecycle.applicationPatch, { promoted_at: null });
+  assert.deepStrictEqual(freshLifecycle.leadPatch, {
+    application_id: "app-1",
+    stage: "uw_sheet",
+    transferred_at: null,
+  });
+
+  // The signed incident-repair request can explicitly restore a legacy row.
+  const legacyLifecycle = liveSubLifecyclePatches({
+    applicationId: "app-2",
+    applicationCreated: false,
+    restoreLiveSubs: true,
+    legacyIncidentMatch: true,
+  });
+  assert.equal(legacyLifecycle.retainInLiveSubs, true);
+  assert.deepStrictEqual(legacyLifecycle.applicationPatch, { promoted_at: null });
+
+  // A deduplicated application with neither lifecycle marker has never been
+  // transferred and must still be placed in Live Subs.
+  const reusedUnadvanced = liveSubLifecyclePatches({
+    applicationId: "app-3",
+    applicationCreated: false,
+  });
+  assert.equal(reusedUnadvanced.retainInLiveSubs, true);
+  assert.deepStrictEqual(reusedUnadvanced.leadPatch, {
+    application_id: "app-3",
+    stage: "uw_sheet",
+    transferred_at: null,
+  });
+
+  // Once an operator advances the application, retry must not move it back.
+  const progressedLifecycle = liveSubLifecyclePatches({
+    applicationId: "app-4",
+    applicationCreated: false,
+    leadTransferredAt: "2026-07-30T15:00:00.000Z",
+    applicationPromotedAt: "2026-07-30T15:00:00.000Z",
+  });
+  assert.equal(progressedLifecycle.retainInLiveSubs, false);
+  assert.deepStrictEqual(progressedLifecycle.applicationPatch, {});
+  assert.deepStrictEqual(progressedLifecycle.leadPatch, { application_id: "app-4" });
+
+  const rejectedRestore = liveSubLifecyclePatches({
+    applicationId: "app-5",
+    applicationCreated: false,
+    leadTransferredAt: "2026-07-30T15:00:00.000Z",
+    applicationPromotedAt: "2026-07-30T15:00:00.000Z",
+    restoreLiveSubs: true,
+    legacyIncidentMatch: false,
+  });
+  assert.equal(rejectedRestore.retainInLiveSubs, false);
+
+  assert.equal(
+    matchesLegacyLiveSubIncident({
+      leadSource: "breeze_uw_sheet",
+      applicationCreatedVia: "live_sub_auto",
+      leadCreatedAt: "2026-07-29T21:46:42.200Z",
+      leadTransferredAt: "2026-07-29T21:46:44.000Z",
+    }),
+    true,
+  );
+  assert.equal(
+    matchesLegacyLiveSubIncident({
+      leadSource: "breeze_uw_sheet",
+      applicationCreatedVia: "live_sub_auto",
+      leadCreatedAt: "2026-07-29T21:46:42.200Z",
+      leadTransferredAt: "2026-07-29T22:40:00.000Z",
+    }),
+    false,
+  );
 
   console.log("live-sub-mapping.test.ts — all assertions passed ✓");
 }

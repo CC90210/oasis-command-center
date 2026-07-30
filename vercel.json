@@ -76,6 +76,10 @@
     {
       "path": "/api/cron/tps-backlog-watch",
       "schedule": "0 */6 * * *"
+    },
+    {
+      "path": "/api/cron/renewal-thresholds",
+      "schedule": "15 13 * * *"
     }
   ]
 }

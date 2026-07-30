@@ -256,6 +256,72 @@ export type LiveSubReconciliation = {
 };
 
 /**
+ * Keep a newly approved Dolphin/Bridge deal on the Leads → Live Subs board
+ * while retaining its linked application record for underwriting/PDF work.
+ *
+ * The two board markers are a pair:
+ * - lead.transferred_at hides the lead from Leads;
+ * - application.promoted_at shows the application on Applications.
+ *
+ * Clear both for a fresh live-sub application. A legacy row is restored only
+ * when the signed internal request explicitly identifies the known incident;
+ * ordinary retries never pull an advanced deal backwards.
+ */
+export function liveSubLifecyclePatches(input: {
+  applicationId: string;
+  applicationCreated: boolean;
+  leadTransferredAt?: unknown;
+  applicationPromotedAt?: unknown;
+  restoreLiveSubs?: boolean;
+  legacyIncidentMatch?: boolean;
+}): {
+  retainInLiveSubs: boolean;
+  applicationPatch: Record<string, unknown>;
+  leadPatch: Record<string, unknown>;
+} {
+  const alreadyAdvanced =
+    Boolean(input.leadTransferredAt) || Boolean(input.applicationPromotedAt);
+  const allowLegacyRestore =
+    input.restoreLiveSubs === true && input.legacyIncidentMatch === true;
+  const retainInLiveSubs =
+    input.applicationCreated || allowLegacyRestore || !alreadyAdvanced;
+
+  return {
+    retainInLiveSubs,
+    applicationPatch: retainInLiveSubs ? { promoted_at: null } : {},
+    leadPatch: retainInLiveSubs
+      ? {
+          application_id: input.applicationId,
+          stage: "uw_sheet",
+          transferred_at: null,
+        }
+      : { application_id: input.applicationId },
+  };
+}
+
+/** Match only the 2026-07 Dolphin bug: the auto path transferred the lead
+ * immediately as it created the linked application. Later operator transfers
+ * are deliberately excluded even if a caller requests restoration. */
+export function matchesLegacyLiveSubIncident(input: {
+  leadSource: unknown;
+  applicationCreatedVia: unknown;
+  leadCreatedAt: unknown;
+  leadTransferredAt: unknown;
+}): boolean {
+  if (
+    input.leadSource !== "breeze_uw_sheet" ||
+    input.applicationCreatedVia !== "live_sub_auto"
+  ) {
+    return false;
+  }
+  const createdMs = Date.parse(String(input.leadCreatedAt || ""));
+  const transferredMs = Date.parse(String(input.leadTransferredAt || ""));
+  if (!Number.isFinite(createdMs) || !Number.isFinite(transferredMs)) return false;
+  const elapsedMs = transferredMs - createdMs;
+  return elapsedMs >= 0 && elapsedMs <= 10_000;
+}
+
+/**
  * Reconcile the extracted application fields against the pinned contract so a
  * promote never silently drops data. Call with the post-extractAppFields object.
  */
