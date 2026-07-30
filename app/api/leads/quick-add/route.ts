@@ -15,6 +15,12 @@
  *
  * Auth: any non-read-only tenant member (canWriteCrm) — the same role gate the
  * one-click set-stage action uses. Fail closed. Audited to lead_interactions.
+ *
+ * INSTANT SEND (2026-07-30): when the stage is `sent_application` this route
+ * enrolls + dispatches the transactional application email INLINE, so Save
+ * emails the merchant in seconds at any hour instead of waiting on the enroll
+ * cron + jitter + the 08:00-20:00 window. The `email` field in the response
+ * carries the real outcome; it is never optimistic.
  */
 
 import { NextRequest, NextResponse } from "next/server";
@@ -24,6 +30,8 @@ import { canWriteCrm } from "@/lib/role-gates";
 import { createRecord, updateRecord, RecordsError } from "@/lib/manifest/data";
 import { findExistingLead } from "@/lib/forms/agent-routing";
 import { LEAD_PIPELINE_STAGES } from "@/lib/sunbiz-stage-meta";
+import { sendApplicationNow } from "@/lib/drips/immediate";
+import type { InstantEmailOutcome } from "@/lib/drips/immediate-core";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -157,5 +165,21 @@ export async function POST(req: NextRequest) {
     /* best-effort audit */
   }
 
-  return NextResponse.json({ ok: true, id: leadId, stage, existing, advanced });
+  // Instant application email (2026-07-30). The lead write above is the
+  // operator's real intent; this is the message it implies. A failure here
+  // NEVER fails the request — the lead is saved, the drip row survives, and the
+  // rep is told exactly what happened.
+  // Named `emailOutcome` locally (not `email`) — that identifier is already the
+  // merchant's normalized email address above; the response field is still `email`.
+  let emailOutcome: InstantEmailOutcome = { status: "queued" };
+  if (stage === "sent_application") {
+    try {
+      emailOutcome = await sendApplicationNow({ tenantId, leadId, stage });
+    } catch (err) {
+      console.error("[quick-add] instant send threw", err);
+      emailOutcome = { status: "failed", reason: "unhandled" };
+    }
+  }
+
+  return NextResponse.json({ ok: true, id: leadId, stage, existing, advanced, email: emailOutcome });
 }
