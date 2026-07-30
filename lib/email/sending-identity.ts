@@ -34,10 +34,28 @@ export function fromAddress(): string {
   return env("DRIP_FROM_ADDRESS") || LEGACY_FROM;
 }
 
-/** The domain part of an arbitrary address, lowercased. Empty when unparseable. */
+/**
+ * The domain of an address, lowercased. Empty when unparseable.
+ *
+ * MUST handle the RFC 5322 display-name form, not just a bare mailbox:
+ * getSubmissionsFrom() returns `SunBiz Submissions <submissions@sunbizfunding.com>`,
+ * and naively taking everything after the last "@" yields `sunbizfunding.com>`
+ * with the bracket attached. That produced a malformed Message-Id
+ * (`<uuid@sunbizfunding.com>>`) on every send, which receivers may rewrite or
+ * reject and which breaks the persisted threading identifiers (Codex review P1).
+ */
 export function domainOfAddress(addr: string): string {
-  const at = (addr || "").lastIndexOf("@");
-  return at >= 0 ? addr.slice(at + 1).trim().toLowerCase() : "";
+  const raw = (addr || "").trim();
+  // Prefer the bracketed mailbox when the string is a display-name form.
+  const angled = /<([^<>]+)>\s*$/.exec(raw);
+  const mailbox = (angled ? angled[1] : raw).trim();
+  const at = mailbox.lastIndexOf("@");
+  if (at < 0) return "";
+  return mailbox
+    .slice(at + 1)
+    .trim()
+    .replace(/[>\s]+$/, "")
+    .toLowerCase();
 }
 
 /** The domain part of the CONFIGURED From address. Drives the unsubscribe mailto

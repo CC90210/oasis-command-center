@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import {
+  domainOfAddress,
   clickAllowedHosts,
   fromAddress,
   fromDomain,
@@ -168,5 +169,32 @@ withEnv({ DRIP_INTAKE_URL: "not-a-url" }, () => {
   const hosts = clickAllowedHosts();
   assert.ok(hosts.has("oasisai.work"), "a malformed intake URL leaves the allowlist usable");
 });
+
+// ── domainOfAddress must handle the display-name form ───────────────────────
+// getSubmissionsFrom() returns `SunBiz Submissions <submissions@sunbizfunding.com>`.
+// Naively slicing after the last "@" yields "sunbizfunding.com>" with the bracket
+// attached, which produced a malformed Message-Id (`<uuid@domain>>`) on EVERY
+// send. Receivers may rewrite or reject that, and it breaks the persisted
+// threading ids we rely on to chain lender replies.
+
+assert.equal(
+  domainOfAddress("SunBiz Submissions <submissions@sunbizfunding.com>"),
+  "sunbizfunding.com",
+  "THE BUG: a display-name From must not leak the closing bracket into the domain",
+);
+assert.equal(
+  domainOfAddress("submissions@sunbizfunding.com"),
+  "sunbizfunding.com",
+  "a bare mailbox still works",
+);
+assert.equal(
+  domainOfAddress("Bluerise Business Capital <funding@bluerisebusinesscapital.com>"),
+  "bluerisebusinesscapital.com",
+  "display names containing spaces and words are fine",
+);
+assert.equal(domainOfAddress("  a@b.co  "), "b.co", "surrounding whitespace is trimmed");
+assert.equal(domainOfAddress("MiXeD@CaSe.COM"), "case.com", "domain is lowercased");
+assert.equal(domainOfAddress("no-at-sign"), "", "unparseable yields empty, never a partial");
+assert.equal(domainOfAddress(""), "", "empty yields empty");
 
 console.log("email-sending-identity.test.ts — all assertions passed ✓");

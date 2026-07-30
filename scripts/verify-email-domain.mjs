@@ -129,38 +129,35 @@ if (!TRACKING) {
 
     // Does that host actually reach the app? A tracking host that does not serve
     // the app means a dead unsubscribe link.
+    // Probe the OPEN PIXEL, not /api/unsubscribe: that route exports POST only,
+    // so a GET gets Next's framework method-not-allowed page and this check would
+    // fail against the genuine app (Codex review P1). The pixel route is GET,
+    // always answers with a 1x1 image/gif regardless of whether the id resolves,
+    // and is harmless to hit — and it is the endpoint that actually has to work
+    // from the tracking host.
     try {
-      const probe = await fetch(`${TRACKING.replace(/\/+$/, "")}/api/unsubscribe`, {
-        method: "GET",
-        redirect: "manual",
-      });
+      const probe = await fetch(
+        `${TRACKING.replace(/\/+$/, "")}/api/track/open/preflight-probe-no-such-send`,
+        { method: "GET", redirect: "manual" },
+      );
       // Any real HTTP answer proves the host is attached to the app. A 404 means
       // it resolves but is serving something else (the marketing site).
       // Assert an APP-SPECIFIC response, not merely "not a 404". A marketing site
       // with a catch-all route happily returns 200 for unknown paths, and a
-      // generic error page or a redirect would also sail past a not-404 check —
-      // reporting PASS while unsubscribe links are dead (Codex review P2).
+      // generic error page or a redirect would sail past a not-404 check while
+      // tracking and unsubscribe links were dead (Codex review P2).
       //
-      // The real endpoint answers JSON with an `ok` field. Anything that is not
-      // JSON carrying that field is not this app.
-      const ct = probe.headers.get("content-type") || "";
-      let appShaped = false;
-      let detail = `status ${probe.status}, content-type ${ct || "(none)"}`;
-      if (ct.includes("application/json")) {
-        try {
-          const body = await probe.json();
-          appShaped = body && typeof body === "object" && "ok" in body;
-          if (appShaped) detail = `status ${probe.status}, JSON with ok=${JSON.stringify(body.ok)}`;
-        } catch {
-          detail += " (body was not parseable JSON)";
-        }
-      }
-      if (appShaped) {
-        ok("Tracking host serves the app", detail);
+      // The pixel route answers 200 with content-type image/gif and a tiny body.
+      // A catch-all HTML page cannot fake that.
+      const ct = (probe.headers.get("content-type") || "").toLowerCase();
+      const isGif = probe.status === 200 && ct.includes("image/gif");
+      const detail = `status ${probe.status}, content-type ${ct || "(none)"}`;
+      if (isGif) {
+        ok("Tracking host serves the app", `open pixel answered ${detail}`);
       } else {
         bad(
           "Tracking host serves the app",
-          `${host}/api/unsubscribe did not answer like this app (${detail}). The host resolves but is serving something else, most likely the marketing site, so unsubscribe links will be dead.`,
+          `${host}/api/track/open/... did not answer like this app (${detail}). The host resolves but is serving something else, most likely the marketing site, so tracking and unsubscribe links will be dead.`,
         );
       }
     } catch (e) {

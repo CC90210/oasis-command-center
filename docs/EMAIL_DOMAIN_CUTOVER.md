@@ -101,6 +101,30 @@ is blocking the cutover on the DNS side.
 
 ---
 
+## Open decision: the From display name
+
+`lib/integrations/submissions-gmail.ts getSubmissionsFrom()` returns a hardcoded
+display name:
+
+```
+SunBiz Submissions <submissions@sunbizfunding.com>
+```
+
+Left alone deliberately, because that function is shared: **lender shop-out mail
+uses it too**, not just drips. Making it environment-driven would rebrand lender
+correspondence at the same time, which may not be what you want.
+
+Decide before cutover:
+
+- **Drips rebrand, lender mail stays SunBiz** → the display name needs to become
+  per-send rather than global. Small change, but it is a change; say the word.
+- **Everything rebrands together** → one env var is enough and I will wire it.
+
+Whichever way, the *address* and its derived headers already move with
+`DRIP_FROM_ADDRESS`. This is only the human-readable name in front of it.
+
+---
+
 ## The one genuinely dangerous setting
 
 `DRIP_SUPPRESSION_BRAND` (default `SunBiz`).
