@@ -1001,6 +1001,11 @@ async function processEmailStep(
       rfc822_message_id: providerMessageId ?? null,
       dry_run: !shouldSend,
       drips_live: dripsLive,
+      // Separates an operator-initiated instant send from the scheduled cadence
+      // in later reporting. Without it the two are indistinguishable after the
+      // fact, because both write the same row shape. Task 6's bypass ceiling
+      // counts these, so this marker is load-bearing, not just reporting.
+      sent_via: immediate ? "instant" : "drip",
       // The RESOLVED origin this message's tracked URLs were actually built on,
       // not the intent. Stamped at SEND time because it is the only reliable
       // record: the telemetry reconciler rebuilds payload_html from this row long
