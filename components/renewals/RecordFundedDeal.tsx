@@ -1,35 +1,41 @@
 "use client";
 
-/**
- * RecordFundedDeal — manual funded-deal entry, the intake behind the Renewals tab.
- *
- * Phase 1 of activating renewals. The tab itself has been built and wired for a
- * while; it had nothing to show because nothing ever wrote a funded deal. This
- * is that write path.
- *
- * Deliberately five fields plus two optional ones. The operator does NOT enter a
- * renewal date or a commission figure — both are derived server-side from the
- * term and the points, so they cannot drift and nobody has to remember to
- * update them. The preview below the form shows what will be computed, so the
- * derivation is visible rather than magic.
- */
-
 import { useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { useRouter } from "next/navigation";
-import { Card } from "@/components/Card";
 import {
   ArrowLeft,
-  Building2,
-  CalendarPlus,
+  ArrowRight,
+  CalendarDays,
   Check,
   ChevronRight,
+  CircleDollarSign,
   Clock3,
+  Command,
   Loader2,
+  Mail,
+  Phone,
+  Plus,
+  RotateCcw,
   Search,
+  Sparkles,
+  UserRound,
+  X,
 } from "lucide-react";
 import { nextRenewalDate, estCommissionUsd } from "@/lib/renewals/derive";
 
 type FieldErrors = Record<string, string>;
+
+type LeadOption = {
+  id: string;
+  business_name: string;
+  contact_name: string | null;
+  phone: string | null;
+  email: string | null;
+  stage: string | null;
+  amount_requested: number | null;
+  updated_at: string;
+};
 
 const EMPTY = {
   lead_id: "",
@@ -44,476 +50,618 @@ const EMPTY = {
   notes: "",
 };
 
-type LeadOption = {
-  id: string;
-  business_name: string;
-  contact_name: string | null;
-  phone: string | null;
-  email: string | null;
-  stage: string | null;
-  amount_requested: number | null;
-  updated_at: string;
-};
-
 const inputCls =
-  "w-full rounded-lg border border-border bg-bg px-3 py-2 text-sm text-fg " +
-  "placeholder:text-fg-muted focus:outline-none focus:ring-2 focus:ring-accent/40 focus:border-accent";
-const labelCls = "block text-[11px] uppercase tracking-[0.12em] text-fg-muted font-bold mb-1.5";
+  "w-full rounded-xl border border-border bg-bg px-3.5 py-2.5 text-sm text-fg " +
+  "placeholder:text-fg-muted outline-none transition focus:border-accent focus:ring-2 focus:ring-accent/20";
+const labelCls = "mb-1.5 block text-[10px] font-bold uppercase tracking-[0.14em] text-fg-muted";
 
-function toNum(v: string): number | null {
-  const cleaned = v.replace(/[$,\s]/g, "");
+function toNum(value: string): number | null {
+  const cleaned = value.replace(/[$,\s]/g, "");
   if (!cleaned) return null;
-  const n = Number(cleaned);
-  return Number.isFinite(n) ? n : null;
+  const number = Number(cleaned);
+  return Number.isFinite(number) ? number : null;
 }
 
-const fmtUsd = (n: number) =>
-  n.toLocaleString("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 2 });
+function fmtUsd(value: number): string {
+  return value.toLocaleString("en-US", {
+    style: "currency",
+    currency: "USD",
+    maximumFractionDigits: 0,
+  });
+}
 
-function fmtRelativeDate(value: string): string {
+function relativeDate(value: string): string {
   const elapsed = Date.now() - new Date(value).getTime();
   const days = Math.max(0, Math.floor(elapsed / 86_400_000));
-  if (days === 0) return "Updated today";
-  if (days === 1) return "Updated yesterday";
-  if (days < 7) return `Updated ${days} days ago`;
-  return `Updated ${new Date(value).toLocaleDateString("en-US", { month: "short", day: "numeric" })}`;
+  if (days === 0) return "Today";
+  if (days === 1) return "Yesterday";
+  if (days < 7) return `${days}d ago`;
+  return new Date(value).toLocaleDateString("en-US", { month: "short", day: "numeric" });
 }
 
 function titleCase(value: string): string {
   return value.replace(/[_-]+/g, " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
 }
 
+function initials(value: string): string {
+  return value
+    .split(/\s+/)
+    .filter(Boolean)
+    .slice(0, 2)
+    .map((part) => part[0])
+    .join("")
+    .toUpperCase();
+}
+
 export default function RecordFundedDeal() {
   const router = useRouter();
-  const [form, setForm] = useState({ ...EMPTY });
-  const [errors, setErrors] = useState<FieldErrors>({});
-  const [saving, setSaving] = useState(false);
-  const [saved, setSaved] = useState<string | null>(null);
-  const [formError, setFormError] = useState<string | null>(null);
-  /** Armed when the server flags a possible duplicate; the next submit overrides. */
-  const [confirmDuplicate, setConfirmDuplicate] = useState(false);
+  const launchRef = useRef<HTMLButtonElement>(null);
+  const searchRef = useRef<HTMLInputElement>(null);
+  const pickerDialogRef = useRef<HTMLElement>(null);
+  const drawerRef = useRef<HTMLDivElement>(null);
+  const requestRef = useRef(0);
+
+  const [mounted, setMounted] = useState(false);
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const [selectedLead, setSelectedLead] = useState<LeadOption | null>(null);
   const [leadQuery, setLeadQuery] = useState("");
   const [leadResults, setLeadResults] = useState<LeadOption[]>([]);
-  const [selectedLead, setSelectedLead] = useState<LeadOption | null>(null);
+  const [activeIndex, setActiveIndex] = useState(0);
   const [searching, setSearching] = useState(false);
-  const [pickerOpen, setPickerOpen] = useState(false);
-  const pickerRef = useRef<HTMLDivElement>(null);
+  const [searchError, setSearchError] = useState<string | null>(null);
+  const [searchNonce, setSearchNonce] = useState(0);
 
-  const set = (k: keyof typeof EMPTY) => (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => {
-    setForm((f) => ({ ...f, [k]: e.target.value }));
-    setErrors((prev) => (prev[k] ? { ...prev, [k]: "" } : prev));
-    // Editing after a duplicate warning means this may no longer be the same
-    // deal — re-arm the check rather than carrying a stale override.
-    setConfirmDuplicate(false);
-  };
+  const [form, setForm] = useState({ ...EMPTY });
+  const [errors, setErrors] = useState<FieldErrors>({});
+  const [formError, setFormError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [confirmDuplicate, setConfirmDuplicate] = useState(false);
+  const [saved, setSaved] = useState<string | null>(null);
 
-  // Live preview of the two derived fields, using the SAME functions the server
-  // uses — so what the operator sees here is what gets stored, not an estimate.
-  const termNum = toNum(form.term_months);
-  const previewRenewal = nextRenewalDate(form.funded_at || null, termNum);
-  const previewCommission = estCommissionUsd(toNum(form.funded_amount_usd), toNum(form.points_pct));
+  const renewalDate = nextRenewalDate(form.funded_at || null, toNum(form.term_months));
+  const commission = estCommissionUsd(toNum(form.funded_amount_usd), toNum(form.points_pct));
 
-  async function searchLeads(e?: React.FormEvent, query = leadQuery) {
-    e?.preventDefault();
-    setSearching(true);
-    setFormError(null);
-    try {
-      const res = await fetch(`/api/renewals?q=${encodeURIComponent(query)}`);
-      const json = await res.json();
-      if (!res.ok || !json?.ok) throw new Error();
-      setLeadResults(json.leads || []);
-    } catch {
-      setFormError("Could not search leads. Please try again.");
-    } finally {
-      setSearching(false);
-    }
-  }
-
-  // Shopping-Out-style discovery: opening the control loads recent deals, and
-  // typing filters continuously. There is no separate "Search" action.
-  useEffect(() => {
-    if (!pickerOpen || selectedLead) return;
-    const timer = window.setTimeout(() => void searchLeads(undefined, leadQuery), leadQuery ? 180 : 0);
-    return () => window.clearTimeout(timer);
-    // searchLeads intentionally uses only the query passed above.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [leadQuery, pickerOpen, selectedLead]);
+  useEffect(() => setMounted(true), []);
 
   useEffect(() => {
-    function closeOnOutsideClick(event: MouseEvent) {
-      if (pickerRef.current && !pickerRef.current.contains(event.target as Node)) setPickerOpen(false);
-    }
-    document.addEventListener("mousedown", closeOnOutsideClick);
-    return () => document.removeEventListener("mousedown", closeOnOutsideClick);
-  }, []);
+    if (!pickerOpen) return;
+    const requestId = ++requestRef.current;
+    const controller = new AbortController();
+    const timer = window.setTimeout(async () => {
+      setSearching(true);
+      setSearchError(null);
+      try {
+        const response = await fetch(`/api/renewals?q=${encodeURIComponent(leadQuery.trim())}`, {
+          signal: controller.signal,
+        });
+        const json = await response.json();
+        if (!response.ok || !json?.ok) throw new Error("search_failed");
+        if (requestId !== requestRef.current) return;
+        setLeadResults(json.leads || []);
+        setActiveIndex(0);
+      } catch (error) {
+        if (controller.signal.aborted || requestId !== requestRef.current) return;
+        setLeadResults([]);
+        setSearchError(error instanceof Error ? "We couldn't load CRM deals." : "Search failed.");
+      } finally {
+        if (requestId === requestRef.current) setSearching(false);
+      }
+    }, leadQuery ? 200 : 0);
+    return () => {
+      window.clearTimeout(timer);
+      controller.abort();
+    };
+  }, [leadQuery, pickerOpen, searchNonce]);
+
+  useEffect(() => {
+    if (!pickerOpen && !selectedLead) return;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      document.body.style.overflow = previousOverflow;
+    };
+  }, [pickerOpen, selectedLead]);
+
+  useEffect(() => {
+    if (pickerOpen) window.setTimeout(() => searchRef.current?.focus(), 0);
+  }, [pickerOpen]);
 
   useEffect(() => {
     if (!selectedLead) return;
-    const previousOverflow = document.body.style.overflow;
-    document.body.style.overflow = "hidden";
-    function closeOnEscape(event: KeyboardEvent) {
-      if (event.key === "Escape" && !saving) clearLead();
-    }
-    document.addEventListener("keydown", closeOnEscape);
-    return () => {
-      document.body.style.overflow = previousOverflow;
-      document.removeEventListener("keydown", closeOnEscape);
-    };
-  }, [selectedLead, saving]);
+    window.setTimeout(() => document.getElementById("fd-amount")?.focus(), 0);
+  }, [selectedLead]);
 
-  function chooseLead(lead: LeadOption) {
-    setSelectedLead(lead);
+  function openPicker() {
+    setSaved(null);
+    setLeadQuery("");
+    setSearchError(null);
+    setPickerOpen(true);
+  }
+
+  function closePicker() {
     setPickerOpen(false);
-    setLeadResults([]);
+    window.setTimeout(() => launchRef.current?.focus(), 0);
+  }
+
+  function selectLead(lead: LeadOption) {
+    setPickerOpen(false);
+    setSelectedLead(lead);
     setErrors({});
-    setForm((current) => ({
-      ...current,
+    setFormError(null);
+    setConfirmDuplicate(false);
+    setForm({
+      ...EMPTY,
       lead_id: lead.id,
       merchant_name: lead.business_name,
       contact_name: lead.contact_name || "",
-    }));
+    });
   }
 
-  function clearLead() {
+  function closeDrawer(restoreFocus = true) {
+    if (saving) return;
     setSelectedLead(null);
-    setLeadQuery("");
-    setPickerOpen(true);
     setForm({ ...EMPTY });
-    setSaved(null);
+    setErrors({});
+    setFormError(null);
     setConfirmDuplicate(false);
+    if (restoreFocus) window.setTimeout(() => launchRef.current?.focus(), 0);
   }
 
-  async function submit(e: React.FormEvent) {
-    e.preventDefault();
+  function changeDeal() {
+    closeDrawer(false);
+    setPickerOpen(true);
+  }
+
+  function handlePickerKeys(event: React.KeyboardEvent<HTMLInputElement>) {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      closePicker();
+      return;
+    }
+    if (!leadResults.length) return;
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      setActiveIndex((index) => (index + 1) % leadResults.length);
+    } else if (event.key === "ArrowUp") {
+      event.preventDefault();
+      setActiveIndex((index) => (index - 1 + leadResults.length) % leadResults.length);
+    } else if (event.key === "Enter") {
+      event.preventDefault();
+      selectLead(leadResults[activeIndex]);
+    }
+  }
+
+  function handleDrawerKeys(event: React.KeyboardEvent<HTMLDivElement>) {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      closeDrawer();
+      return;
+    }
+    if (event.key !== "Tab" || !drawerRef.current) return;
+    const focusable = Array.from(
+      drawerRef.current.querySelectorAll<HTMLElement>(
+        'button:not([disabled]), input:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+      ),
+    );
+    if (!focusable.length) return;
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  }
+
+  function handlePickerDialogKeys(event: React.KeyboardEvent<HTMLElement>) {
+    if (event.defaultPrevented) return;
+    if (event.key === "Escape") {
+      event.preventDefault();
+      closePicker();
+      return;
+    }
+    if (event.key !== "Tab" || !pickerDialogRef.current) return;
+    const focusable = Array.from(
+      pickerDialogRef.current.querySelectorAll<HTMLElement>(
+        'button:not([disabled]), input:not([disabled]), [tabindex]:not([tabindex="-1"])',
+      ),
+    );
+    if (!focusable.length) return;
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  }
+
+  const setField =
+    (key: keyof typeof EMPTY) =>
+    (event: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => {
+      setForm((current) => ({ ...current, [key]: event.target.value }));
+      setErrors((current) => (current[key] ? { ...current, [key]: "" } : current));
+      setConfirmDuplicate(false);
+    };
+
+  function focusFirstError(nextErrors: FieldErrors) {
+    const order = ["funded_amount_usd", "factor_rate", "term_months", "funded_at"];
+    const first = order.find((key) => nextErrors[key]) || Object.keys(nextErrors)[0];
+    if (!first) return;
+    window.setTimeout(() => document.getElementById(`fd-${first.replaceAll("_", "-")}`)?.focus(), 0);
+  }
+
+  async function submit(event: React.FormEvent) {
+    event.preventDefault();
+    if (!selectedLead || saving) return;
     setSaving(true);
     setErrors({});
     setFormError(null);
-    setSaved(null);
     try {
-      const res = await fetch("/api/renewals", {
+      const response = await fetch("/api/renewals", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        // Carry the operator's "yes, really" through on the second submit.
         body: JSON.stringify({ ...form, confirm_duplicate: confirmDuplicate }),
       });
-      const json = await res.json().catch(() => null);
-      if (!res.ok || !json?.ok) {
-        if (json?.errors) setErrors(json.errors as FieldErrors);
-        // A flagged duplicate is a question, not a rejection — arm the next
-        // submit to go through rather than making the operator find a workaround.
-        if (res.status === 409 && json?.error === "possible_duplicate") {
+      const json = await response.json().catch(() => null);
+      if (!response.ok || !json?.ok) {
+        const nextErrors = (json?.errors || {}) as FieldErrors;
+        setErrors(nextErrors);
+        if (response.status === 409 && json?.error === "possible_duplicate") {
           setConfirmDuplicate(true);
         }
         setFormError(
           json?.message ||
-            (res.status === 403
-              ? "You don't have permission to record funded deals."
-              : json?.errors
-                ? "Please fix the highlighted fields."
-                : "Could not save the funded deal."),
+            (Object.keys(nextErrors).length
+              ? "Check the highlighted funding details."
+              : "The renewal could not be saved. Your entries are still here."),
         );
+        focusFirstError(nextErrors);
         return;
       }
-      setSaved(json.deal?.merchant_name || form.merchant_name);
-      setForm({ ...EMPTY });
+      const merchant = json.deal?.merchant_name || selectedLead.business_name;
+      setSaved(merchant);
       setSelectedLead(null);
-      setLeadQuery("");
+      setForm({ ...EMPTY });
+      setErrors({});
+      setFormError(null);
       setConfirmDuplicate(false);
-      // The tab is a server component reading funded_deals — refresh so the new
-      // row and the recalculated summary tiles appear without a manual reload.
       router.refresh();
+      window.setTimeout(() => launchRef.current?.focus(), 0);
     } catch {
-      setFormError("Network error — the deal was not saved.");
+      setFormError("Network error. Your entries are still here—try saving again.");
     } finally {
       setSaving(false);
     }
   }
 
   return (
-    <Card>
-      <div className="flex items-center gap-2 text-[10px] uppercase tracking-[0.14em] text-fg-muted font-bold mb-4">
-        <CalendarPlus size={12} className="text-accent" />
-        <span>Record a funded deal</span>
-      </div>
-      {saved && !selectedLead && (
-        <div className="mb-4 flex items-center gap-2 rounded-xl border border-status-warm/30 bg-status-warm/10 px-4 py-3 text-sm text-status-warm" role="status">
-          <Check size={15} /> Recorded {saved}. The renewal schedule is now active.
-        </div>
-      )}
-
-      <form onSubmit={selectedLead ? submit : searchLeads} className="space-y-4">
-        {!selectedLead ? (
-          <div className="rounded-xl border border-border bg-bg-subtle/40 p-4 md:p-5">
-            <div className="mb-4 flex items-start gap-3">
-              <div className="rounded-lg bg-accent/10 p-2.5 text-accent"><Building2 size={19} /></div>
-              <div>
-                <div className="text-sm font-semibold text-fg">Choose the funded deal</div>
-                <p className="mt-0.5 text-xs text-fg-muted">Start with a recent deal or type to find any lead in the CRM.</p>
-              </div>
+    <>
+      <section className="relative overflow-hidden rounded-2xl border border-accent/20 bg-bg-panel shadow-card">
+        <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_15%_0%,rgba(59,130,246,0.14),transparent_38%),radial-gradient(circle_at_90%_100%,rgba(0,212,255,0.08),transparent_34%)]" />
+        <div className="relative flex flex-col gap-4 p-5 sm:flex-row sm:items-center sm:justify-between">
+          <div className="flex items-start gap-3.5">
+            <div className="rounded-xl border border-accent/30 bg-accent/10 p-3 text-accent shadow-[0_0_24px_-8px_rgba(59,130,246,0.8)]">
+              <Sparkles size={20} />
             </div>
-            <div ref={pickerRef} className="relative">
-              <label className={labelCls} htmlFor="fd-lead-search">Find a CRM deal</label>
-              <div className={`rounded-xl border bg-bg shadow-sm transition ${pickerOpen ? "border-accent ring-2 ring-accent/20" : "border-border hover:border-fg-muted/50"}`}>
-                <div className="relative">
-                  <Search size={17} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-fg-muted" />
-                  <input
-                    id="fd-lead-search"
-                    type="search"
-                    autoComplete="off"
-                    className="h-12 w-full rounded-xl bg-transparent pl-10 pr-11 text-sm text-fg outline-none placeholder:text-fg-muted"
-                    value={leadQuery}
-                    onFocus={() => setPickerOpen(true)}
-                    onClick={() => setPickerOpen(true)}
-                    onChange={(e) => { setLeadQuery(e.target.value); setPickerOpen(true); }}
-                  placeholder="Search business, contact, phone, or email…"
-                  role="combobox"
-                  aria-expanded={pickerOpen}
-                  aria-controls="renewal-lead-options"
-                  />
-                  {searching && <Loader2 size={16} className="absolute right-3.5 top-1/2 -translate-y-1/2 animate-spin text-accent" />}
-                </div>
-                <button
-                  type="button"
-                  onClick={() => searchLeads()}
-                  disabled={searching}
-                  className="sr-only"
-                >
-                  {searching ? "Searching…" : "Search"}
-                </button>
+            <div>
+              <div className="flex items-center gap-2">
+                <span className="text-[10px] font-bold uppercase tracking-[0.16em] text-accent">Renewal command</span>
+                <span className="h-1 w-1 rounded-full bg-cyan-300 shadow-[0_0_8px_rgba(103,232,249,1)]" />
               </div>
-              </div>
-
-            {pickerOpen && leadResults.length > 0 && (
-              <div id="renewal-lead-options" role="listbox" className="absolute z-30 mt-2 max-h-[390px] w-full overflow-y-auto rounded-xl border border-border bg-bg p-1.5 shadow-2xl shadow-black/20">
-                <div className="sticky top-0 z-10 mb-1 flex items-center justify-between rounded-lg bg-bg-subtle px-3 py-2">
-                  <span className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-[0.13em] text-fg-muted">
-                    <Clock3 size={12} />{leadQuery ? "Matching deals" : "Most recent deals"}
-                  </span>
-                  <span className="text-[10px] tabular-nums text-fg-muted">{leadResults.length} shown</span>
-                </div>
-                {leadResults.map((lead) => (
-                  <button
-                    key={lead.id}
-                    type="button"
-                    onPointerDown={(event) => {
-                      // Commit selection before any outside-click/focus handler
-                      // can dismiss the option between pointer-down and click.
-                      event.preventDefault();
-                      chooseLead(lead);
-                    }}
-                    onClick={() => chooseLead(lead)}
-                    className="group flex w-full items-center gap-3 rounded-lg px-3 py-3 text-left transition-colors hover:bg-accent/8 focus:bg-accent/8 focus:outline-none"
-                  >
-                    <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg border border-border bg-bg-subtle text-sm font-bold text-accent">
-                      {lead.business_name.slice(0, 2).toUpperCase()}
-                    </div>
-                    <div className="min-w-0 flex-1">
-                    <div className="flex items-center gap-2 text-sm font-semibold text-fg">
-                      <span className="truncate">{lead.business_name}</span>
-                      {lead.stage && <span className="shrink-0 rounded-full bg-accent/10 px-2 py-0.5 text-[9px] uppercase tracking-wide text-accent">{titleCase(lead.stage)}</span>}
-                    </div>
-                    <div className="mt-0.5 truncate text-xs text-fg-muted">
-                      {[lead.contact_name, lead.phone, lead.email].filter(Boolean).join(" · ") || "No contact details"}
-                    </div>
-                    <div className="mt-1 text-[10px] text-fg-muted">{fmtRelativeDate(lead.updated_at)}</div>
-                    </div>
-                    <ChevronRight size={16} className="shrink-0 text-fg-muted transition-transform group-hover:translate-x-0.5 group-hover:text-accent" />
-                  </button>
-                ))}
-              </div>
-            )}
-            {pickerOpen && !searching && leadResults.length === 0 && (
-              <div className="absolute z-30 mt-2 w-full rounded-xl border border-border bg-bg px-5 py-9 text-center shadow-2xl">
-                <Search size={22} className="mx-auto mb-2 text-fg-muted" />
-                <div className="text-sm font-medium text-fg">{leadQuery ? "No matching deals" : "No recent deals yet"}</div>
-                <p className="mt-1 text-xs text-fg-muted">{leadQuery ? "Try a business, contact, phone, or email." : "Start typing to search the CRM."}</p>
-              </div>
-            )}
-          </div>
-        ) : (
-          <>
-            <div className="fixed inset-0 z-[80] flex items-center justify-center p-3 sm:p-6" role="presentation">
-              <button
-                type="button"
-                className="absolute inset-0 bg-black/65 backdrop-blur-sm"
-                onClick={() => !saving && clearLead()}
-                aria-label="Close funding details"
-              />
-              <div
-                role="dialog"
-                aria-modal="true"
-                aria-labelledby="renewal-deal-title"
-                className="relative z-10 flex max-h-[94vh] w-full max-w-3xl flex-col overflow-hidden rounded-2xl border border-border bg-bg-panel shadow-2xl shadow-black/40"
-              >
-                <header className="flex items-center justify-between border-b border-border bg-bg-subtle/70 px-5 py-4">
-                  <div>
-                    <div className="text-[10px] font-bold uppercase tracking-[0.14em] text-accent">New renewal deal</div>
-                    <h2 id="renewal-deal-title" className="mt-1 text-lg font-semibold text-fg">Add funding details</h2>
-                    <p className="mt-0.5 text-xs text-fg-muted">These terms determine when renewal outreach begins.</p>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => !saving && clearLead()}
-                    disabled={saving}
-                    className="rounded-lg border border-border px-3 py-2 text-xs font-medium text-fg-muted hover:bg-bg hover:text-fg disabled:opacity-50"
-                  >
-                    Cancel
-                  </button>
-                </header>
-                <div className="overflow-y-auto p-5 sm:p-6 space-y-5">
-            <div className="flex items-center justify-between rounded-xl border border-accent/30 bg-accent/5 px-4 py-3">
-              <div className="flex min-w-0 items-center gap-3">
-                <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-accent/10 text-sm font-bold text-accent">
-                  {selectedLead.business_name.slice(0, 2).toUpperCase()}
-                </div>
-                <div className="min-w-0">
-                <div className="text-[10px] uppercase tracking-[0.12em] text-fg-muted font-bold">Selected lead</div>
-                <div className="mt-0.5 truncate text-sm font-semibold text-fg">{selectedLead.business_name}</div>
-                {selectedLead.contact_name && <div className="truncate text-xs text-fg-muted">{selectedLead.contact_name}</div>}
-                </div>
-              </div>
-              <button type="button" onClick={clearLead} className="flex shrink-0 items-center gap-1.5 rounded-lg px-2.5 py-2 text-xs font-medium text-fg-muted hover:bg-bg hover:text-fg" aria-label="Choose a different lead">
-                <ArrowLeft size={14} /> Change deal
-              </button>
-            </div>
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          <div className="md:col-span-2">
-            <label className={labelCls} htmlFor="fd-merchant">Deal / merchant name *</label>
-            <input
-              id="fd-merchant" className={inputCls} value={form.merchant_name}
-              onChange={set("merchant_name")} placeholder="Remington Builders LLC"
-              aria-invalid={!!errors.merchant_name} required
-            />
-            {errors.merchant_name && <p className="mt-1 text-xs text-status-hot">{errors.merchant_name}</p>}
-          </div>
-
-          <div>
-            <label className={labelCls} htmlFor="fd-amount">Amount funded *</label>
-            <input
-              id="fd-amount" className={inputCls} value={form.funded_amount_usd}
-              onChange={set("funded_amount_usd")} placeholder="85,000" inputMode="decimal"
-              aria-invalid={!!errors.funded_amount_usd} required
-            />
-            {errors.funded_amount_usd && <p className="mt-1 text-xs text-status-hot">{errors.funded_amount_usd}</p>}
-          </div>
-
-          <div>
-            <label className={labelCls} htmlFor="fd-funded-at">Funded date *</label>
-            <input
-              id="fd-funded-at" type="date" className={inputCls} value={form.funded_at}
-              onChange={set("funded_at")} aria-invalid={!!errors.funded_at} required
-            />
-            {errors.funded_at && <p className="mt-1 text-xs text-status-hot">{errors.funded_at}</p>}
-          </div>
-
-          <div>
-            <label className={labelCls} htmlFor="fd-term">Term (months) *</label>
-            <input
-              id="fd-term" className={inputCls} value={form.term_months}
-              onChange={set("term_months")} placeholder="10" inputMode="numeric"
-              aria-invalid={!!errors.term_months} required
-            />
-            {errors.term_months
-              ? <p className="mt-1 text-xs text-status-hot">{errors.term_months}</p>
-              : <p className="mt-1 text-[11px] text-fg-muted">Sets the renewal date.</p>}
-          </div>
-
-          <div>
-            <label className={labelCls} htmlFor="fd-points">Points (%)</label>
-            <input
-              id="fd-points" className={inputCls} value={form.points_pct}
-              onChange={set("points_pct")} placeholder="11" inputMode="decimal"
-              aria-invalid={!!errors.points_pct}
-            />
-            {errors.points_pct
-              ? <p className="mt-1 text-xs text-status-hot">{errors.points_pct}</p>
-              : <p className="mt-1 text-[11px] text-fg-muted">Sets the estimated commission.</p>}
-          </div>
-
-          <div>
-            <label className={labelCls} htmlFor="fd-factor">Factor rate *</label>
-            <input
-              id="fd-factor" className={inputCls} value={form.factor_rate}
-              onChange={set("factor_rate")} placeholder="1.35" inputMode="decimal"
-              aria-invalid={!!errors.factor_rate} required
-            />
-            {errors.factor_rate && <p className="mt-1 text-xs text-status-hot">{errors.factor_rate}</p>}
-          </div>
-
-          <div>
-            <label className={labelCls} htmlFor="fd-contact">Contact name</label>
-            <input
-              id="fd-contact" className={inputCls} value={form.contact_name}
-              onChange={set("contact_name")} placeholder="Ray Remington"
-            />
-          </div>
-
-          <div>
-            {/* Internal only. The renewal row reads this to avoid showing
-                "No lender assigned"; it is never rendered on a merchant-facing
-                surface. [[feedback_never_mention_lenders]] */}
-            <label className={labelCls} htmlFor="fd-lender">Funder</label>
-            <input
-              id="fd-lender" className={inputCls} value={form.lender_name}
-              onChange={set("lender_name")} placeholder="Who funded it"
-            />
-          </div>
-
-          <div className="md:col-span-2">
-            <label className={labelCls} htmlFor="fd-notes">Notes</label>
-            <textarea
-              id="fd-notes" className={inputCls} rows={2} value={form.notes}
-              onChange={set("notes")} placeholder="Anything worth remembering at renewal time"
-            />
-          </div>
-        </div>
-
-        {/* The derived fields, shown before saving so they are visible rather
-            than magic. Computed with the same functions the server uses. */}
-        {(previewRenewal || previewCommission !== null) && (
-          <div className="rounded-lg border border-border bg-bg-subtle px-3 py-2.5 text-xs text-fg-muted">
-            <span className="font-bold uppercase tracking-[0.12em] text-[10px]">Will be calculated</span>
-            <div className="mt-1.5 flex flex-wrap gap-x-6 gap-y-1">
-              <span>
-                Renewal date:{" "}
-                <span className="text-fg font-medium">{previewRenewal ?? "needs a funded date + term"}</span>
-                {previewRenewal && <span className="ml-1">(halfway through the term)</span>}
-              </span>
-              <span>
-                Est. commission:{" "}
-                <span className="text-fg font-medium">
-                  {previewCommission === null ? "needs an amount + points" : fmtUsd(previewCommission)}
-                </span>
-              </span>
+              <h2 className="mt-1 text-base font-semibold text-fg">Track a newly funded deal</h2>
+              <p className="mt-1 max-w-xl text-xs leading-relaxed text-fg-muted">
+                Find a CRM deal, enter its funding terms, and activate outreach at the halfway point.
+              </p>
             </div>
           </div>
-        )}
-
-        {formError && (
-          <p className="text-sm text-status-hot" role="alert">{formError}</p>
-        )}
-        {saved && (
-          <p className="flex items-center gap-1.5 text-sm text-status-warm" role="status">
-            <Check size={14} /> Recorded {saved}. It will appear in the list below.
-          </p>
-        )}
-
-        <div className="flex items-center gap-3">
           <button
-            type="submit" disabled={saving}
-            className="inline-flex items-center gap-2 rounded-lg bg-accent px-4 py-2 text-sm font-semibold text-white disabled:opacity-60"
+            ref={launchRef}
+            type="button"
+            onClick={openPicker}
+            className="btn-primary inline-flex min-h-11 shrink-0 items-center justify-center gap-2 rounded-xl px-5"
           >
-            {saving && <Loader2 size={14} className="animate-spin" />}
-            {saving ? "Saving…" : confirmDuplicate ? "Record it anyway" : "Record funded deal"}
+            <Plus size={16} /> Add Renewal
           </button>
-          <span className="text-[11px] text-fg-muted">* required</span>
         </div>
+        {saved && (
+          <div className="relative flex items-center gap-2 border-t border-status-engaged/20 bg-status-engaged/5 px-5 py-3 text-sm text-status-engaged" role="status">
+            <Check size={15} /> {saved} is now tracked for renewal outreach.
+          </div>
+        )}
+      </section>
+
+      {mounted && pickerOpen &&
+        createPortal(
+          <div className="fixed inset-0 z-[100] flex items-start justify-center p-3 pt-[8vh] sm:p-6 sm:pt-[12vh]">
+            <button type="button" className="absolute inset-0 bg-black/75 backdrop-blur-md" onClick={closePicker} aria-label="Close deal picker" />
+            <section ref={pickerDialogRef} onKeyDown={handlePickerDialogKeys} role="dialog" aria-modal="true" aria-labelledby="renewal-picker-title" className="relative z-10 w-full max-w-3xl overflow-hidden rounded-2xl border border-accent/25 bg-[#080c14] shadow-[0_28px_90px_-24px_rgba(0,0,0,0.95),0_0_50px_-28px_rgba(59,130,246,0.9)]">
+              <div className="h-px bg-gradient-to-r from-transparent via-cyan-400 to-transparent opacity-80" />
+              <header className="flex items-start justify-between border-b border-border px-5 py-4">
+                <div>
+                  <div className="flex items-center gap-2 text-[10px] font-bold uppercase tracking-[0.16em] text-accent">
+                    <Command size={12} /> Deal finder
+                  </div>
+                  <h2 id="renewal-picker-title" className="mt-1 text-lg font-semibold text-fg">Select a funded deal</h2>
+                </div>
+                <button type="button" onClick={closePicker} className="rounded-lg border border-border p-2 text-fg-muted hover:border-accent/40 hover:bg-accent/10 hover:text-fg" aria-label="Close">
+                  <X size={16} />
+                </button>
+              </header>
+
+              <div className="p-4 sm:p-5">
+                <div className="relative">
+                  <Search size={18} className="absolute left-4 top-1/2 -translate-y-1/2 text-accent" />
+                  <input
+                    ref={searchRef}
+                    type="search"
+                    role="combobox"
+                    aria-expanded="true"
+                    aria-controls="renewal-picker-results"
+                    aria-activedescendant={leadResults[activeIndex] ? `renewal-option-${leadResults[activeIndex].id}` : undefined}
+                    value={leadQuery}
+                    onChange={(event) => setLeadQuery(event.target.value)}
+                    onKeyDown={handlePickerKeys}
+                    placeholder="Search business, owner, phone, or email…"
+                    className="h-14 w-full rounded-xl border border-accent/30 bg-[#0d131f] pl-11 pr-12 text-sm text-fg outline-none transition placeholder:text-fg-muted focus:border-accent focus:ring-2 focus:ring-accent/20"
+                  />
+                  {searching ? (
+                    <Loader2 size={17} className="absolute right-4 top-1/2 -translate-y-1/2 animate-spin text-accent" />
+                  ) : leadQuery ? (
+                    <button type="button" onClick={() => setLeadQuery("")} className="absolute right-3 top-1/2 -translate-y-1/2 rounded-md p-1.5 text-fg-muted hover:bg-bg-elev hover:text-fg" aria-label="Clear search">
+                      <X size={15} />
+                    </button>
+                  ) : null}
+                </div>
+
+                <div className="mt-3 flex items-center justify-between px-1">
+                  <div className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-[0.14em] text-fg-muted">
+                    <Clock3 size={12} /> {leadQuery ? "Matching CRM deals" : "25 most recent deals"}
+                  </div>
+                  <div className="hidden items-center gap-2 text-[10px] text-fg-muted sm:flex">
+                    <kbd className="rounded border border-border bg-bg-elev px-1.5 py-0.5">↑↓</kbd> navigate
+                    <kbd className="rounded border border-border bg-bg-elev px-1.5 py-0.5">↵</kbd> select
+                    <kbd className="rounded border border-border bg-bg-elev px-1.5 py-0.5">esc</kbd> close
+                  </div>
+                </div>
+
+                <div id="renewal-picker-results" role="listbox" className="mt-2 max-h-[52vh] min-h-52 overflow-y-auto rounded-xl border border-border bg-[#060910] p-1.5">
+                  {searching && leadResults.length === 0 ? (
+                    <PickerSkeleton />
+                  ) : searchError ? (
+                    <div className="flex min-h-52 flex-col items-center justify-center px-5 text-center">
+                      <RotateCcw size={22} className="text-status-warm" />
+                      <p className="mt-3 text-sm font-medium text-fg">{searchError}</p>
+                      <button type="button" onClick={() => setSearchNonce((value) => value + 1)} className="btn-secondary mt-3 inline-flex items-center gap-2">
+                        <RotateCcw size={13} /> Retry
+                      </button>
+                    </div>
+                  ) : leadResults.length === 0 ? (
+                    <div className="flex min-h-52 flex-col items-center justify-center px-5 text-center">
+                      <Search size={24} className="text-fg-muted" />
+                      <p className="mt-3 text-sm font-medium text-fg">{leadQuery ? "No matching deals" : "No recent deals yet"}</p>
+                      <p className="mt-1 text-xs text-fg-muted">Try a business name, owner, phone, or email.</p>
+                    </div>
+                  ) : (
+                    leadResults.map((lead, index) => (
+                      <button
+                        id={`renewal-option-${lead.id}`}
+                        key={lead.id}
+                        type="button"
+                        role="option"
+                        aria-selected={index === activeIndex}
+                        onMouseEnter={() => setActiveIndex(index)}
+                        onPointerDown={(event) => {
+                          event.preventDefault();
+                          selectLead(lead);
+                        }}
+                        onClick={() => selectLead(lead)}
+                        className={`group grid w-full grid-cols-[auto_1fr_auto] items-center gap-3 rounded-xl border px-3 py-3 text-left transition ${
+                          index === activeIndex
+                            ? "border-accent/35 bg-accent/10 shadow-[inset_3px_0_0_rgba(59,130,246,0.9)]"
+                            : "border-transparent hover:border-border hover:bg-bg-elev/70"
+                        }`}
+                      >
+                        <div className="flex h-11 w-11 items-center justify-center rounded-xl border border-accent/25 bg-gradient-to-br from-accent/20 to-cyan-400/5 font-mono text-sm font-bold text-cyan-200">
+                          {initials(lead.business_name)}
+                        </div>
+                        <div className="min-w-0">
+                          <div className="flex min-w-0 items-center gap-2">
+                            <span className="truncate text-sm font-semibold text-fg">{lead.business_name}</span>
+                            {lead.stage && <span className="shrink-0 rounded-full border border-accent/20 bg-accent/10 px-2 py-0.5 text-[9px] font-bold uppercase tracking-wide text-accent">{titleCase(lead.stage)}</span>}
+                          </div>
+                          <div className="mt-1 flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-fg-muted">
+                            {lead.contact_name && <span className="flex items-center gap-1"><UserRound size={11} />{lead.contact_name}</span>}
+                            {lead.phone && <span className="flex items-center gap-1"><Phone size={11} />{lead.phone}</span>}
+                            {lead.email && <span className="flex min-w-0 items-center gap-1"><Mail size={11} /><span className="max-w-52 truncate">{lead.email}</span></span>}
+                          </div>
+                          <div className="mt-1.5 flex items-center gap-3 text-[10px] text-fg-dim">
+                            <span>{relativeDate(lead.updated_at)}</span>
+                            {lead.amount_requested !== null && <span className="font-mono text-cyan-200/80">{fmtUsd(lead.amount_requested)} requested</span>}
+                          </div>
+                        </div>
+                        <ChevronRight size={17} className="text-fg-muted transition group-hover:translate-x-0.5 group-hover:text-accent" />
+                      </button>
+                    ))
+                  )}
                 </div>
               </div>
-            </div>
-          </>
+            </section>
+          </div>,
+          document.body,
         )}
-      </form>
-    </Card>
+
+      {mounted && selectedLead &&
+        createPortal(
+          <div className="fixed inset-0 z-[110]" onKeyDown={handleDrawerKeys}>
+            <button type="button" className="absolute inset-0 bg-black/70 backdrop-blur-sm" onClick={() => closeDrawer()} aria-label="Close funding drawer" />
+            <aside
+              ref={drawerRef}
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="renewal-drawer-title"
+              className="absolute inset-x-0 bottom-0 flex max-h-[94vh] flex-col overflow-hidden rounded-t-2xl border border-border bg-[#080c14] shadow-2xl sm:inset-y-0 sm:left-auto sm:right-0 sm:max-h-none sm:w-[min(620px,94vw)] sm:rounded-none sm:rounded-l-2xl"
+            >
+              <div className="h-px bg-gradient-to-r from-transparent via-cyan-400 to-accent" />
+              <header className="flex items-start justify-between border-b border-border px-5 py-4 sm:px-6">
+                <div>
+                  <div className="flex items-center gap-2 text-[10px] font-bold uppercase tracking-[0.16em] text-accent">
+                    <CircleDollarSign size={12} /> Funding profile
+                  </div>
+                  <h2 id="renewal-drawer-title" className="mt-1 text-xl font-semibold text-fg">Activate renewal tracking</h2>
+                  <p className="mt-1 text-xs text-fg-muted">Add the current deal terms. Outreach starts halfway through the term.</p>
+                </div>
+                <button type="button" onClick={() => closeDrawer()} disabled={saving} className="rounded-lg border border-border p-2 text-fg-muted hover:border-accent/40 hover:bg-accent/10 hover:text-fg disabled:opacity-50" aria-label="Close">
+                  <X size={17} />
+                </button>
+              </header>
+
+              <form onSubmit={submit} className="flex min-h-0 flex-1 flex-col">
+                <div className="min-h-0 flex-1 space-y-5 overflow-y-auto p-5 sm:p-6">
+                  <div className="flex items-center justify-between gap-3 rounded-xl border border-accent/25 bg-[linear-gradient(135deg,rgba(59,130,246,0.12),rgba(0,212,255,0.04))] p-4">
+                    <div className="flex min-w-0 items-center gap-3">
+                      <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl border border-accent/25 bg-accent/10 font-mono text-sm font-bold text-cyan-200">
+                        {initials(selectedLead.business_name)}
+                      </div>
+                      <div className="min-w-0">
+                        <div className="truncate text-sm font-semibold text-fg">{selectedLead.business_name}</div>
+                        <div className="mt-1 flex flex-wrap gap-x-2 text-[11px] text-fg-muted">
+                          {selectedLead.contact_name && <span>{selectedLead.contact_name}</span>}
+                          {selectedLead.stage && <span>• {titleCase(selectedLead.stage)}</span>}
+                        </div>
+                      </div>
+                    </div>
+                    <button type="button" onClick={changeDeal} disabled={saving} className="inline-flex shrink-0 items-center gap-1.5 rounded-lg border border-border bg-bg/60 px-2.5 py-2 text-xs font-medium text-fg-muted hover:border-accent/40 hover:text-fg disabled:opacity-50">
+                      <ArrowLeft size={13} /> Change
+                    </button>
+                  </div>
+
+                  <section>
+                    <div className="mb-3 flex items-center gap-2">
+                      <span className="flex h-5 w-5 items-center justify-center rounded-full bg-accent/15 font-mono text-[10px] font-bold text-accent">01</span>
+                      <h3 className="text-[10px] font-bold uppercase tracking-[0.15em] text-fg-muted">Required deal terms</h3>
+                    </div>
+                    <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                      <Field label="Funding amount" htmlFor="fd-funded-amount-usd" error={errors.funded_amount_usd} required>
+                        <input id="fd-funded-amount-usd" className={inputCls} value={form.funded_amount_usd} onChange={setField("funded_amount_usd")} placeholder="$85,000" inputMode="decimal" required aria-invalid={!!errors.funded_amount_usd} />
+                      </Field>
+                      <Field label="Factor rate" htmlFor="fd-factor-rate" error={errors.factor_rate} required>
+                        <input id="fd-factor-rate" className={inputCls} value={form.factor_rate} onChange={setField("factor_rate")} placeholder="1.35" inputMode="decimal" required aria-invalid={!!errors.factor_rate} />
+                      </Field>
+                      <Field label="Term" htmlFor="fd-term-months" error={errors.term_months} hint="Months" required>
+                        <input id="fd-term-months" className={inputCls} value={form.term_months} onChange={setField("term_months")} placeholder="10" inputMode="numeric" required aria-invalid={!!errors.term_months} />
+                      </Field>
+                      <Field label="Funded date" htmlFor="fd-funded-at" error={errors.funded_at} required>
+                        <input id="fd-funded-at" type="date" className={inputCls} value={form.funded_at} onChange={setField("funded_at")} required aria-invalid={!!errors.funded_at} />
+                      </Field>
+                    </div>
+                  </section>
+
+                  <section>
+                    <div className="mb-3 flex items-center gap-2">
+                      <span className="flex h-5 w-5 items-center justify-center rounded-full bg-bg-elev font-mono text-[10px] font-bold text-fg-muted">02</span>
+                      <h3 className="text-[10px] font-bold uppercase tracking-[0.15em] text-fg-muted">Optional context</h3>
+                    </div>
+                    <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                      <Field label="Funder" htmlFor="fd-lender-name" error={errors.lender_name}>
+                        <input id="fd-lender-name" className={inputCls} value={form.lender_name} onChange={setField("lender_name")} placeholder="Who funded the deal" />
+                      </Field>
+                      <Field label="Commission points" htmlFor="fd-points-pct" error={errors.points_pct} hint="%">
+                        <input id="fd-points-pct" className={inputCls} value={form.points_pct} onChange={setField("points_pct")} placeholder="11" inputMode="decimal" aria-invalid={!!errors.points_pct} />
+                      </Field>
+                      <Field label="Contact override" htmlFor="fd-contact-name" error={errors.contact_name}>
+                        <input id="fd-contact-name" className={inputCls} value={form.contact_name} onChange={setField("contact_name")} placeholder="Primary contact" />
+                      </Field>
+                      <div className="sm:col-span-2">
+                        <label className={labelCls} htmlFor="fd-notes">Renewal notes</label>
+                        <textarea id="fd-notes" className={`${inputCls} min-h-20 resize-y`} value={form.notes} onChange={setField("notes")} placeholder="Context to remember when outreach begins…" />
+                      </div>
+                    </div>
+                  </section>
+
+                  <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                    <div className="rounded-xl border border-accent/25 bg-accent/8 p-4">
+                      <div className="flex items-center gap-2 text-[10px] font-bold uppercase tracking-[0.14em] text-accent"><CalendarDays size={13} /> Outreach begins</div>
+                      <div className="mt-2 font-mono text-lg font-semibold text-fg">{renewalDate || "Awaiting term + date"}</div>
+                      <p className="mt-1 text-[11px] text-fg-muted">50% through the funding term</p>
+                    </div>
+                    <div className="rounded-xl border border-cyan-400/20 bg-cyan-400/5 p-4">
+                      <div className="flex items-center gap-2 text-[10px] font-bold uppercase tracking-[0.14em] text-cyan-300"><CircleDollarSign size={13} /> Est. commission</div>
+                      <div className="mt-2 font-mono text-lg font-semibold text-fg">{commission === null ? "Awaiting points" : fmtUsd(commission)}</div>
+                      <p className="mt-1 text-[11px] text-fg-muted">Calculated from amount × points</p>
+                    </div>
+                  </div>
+
+                  {formError && (
+                    <div className={`rounded-xl border px-4 py-3 text-sm ${confirmDuplicate ? "border-status-warm/35 bg-status-warm/10 text-status-warm" : "border-status-hot/35 bg-status-hot/10 text-status-hot"}`} role="alert">
+                      {formError}
+                    </div>
+                  )}
+                </div>
+
+                <footer className="flex items-center justify-between gap-3 border-t border-border bg-bg-panel/95 px-5 py-4 sm:px-6">
+                  <span className="hidden text-[10px] uppercase tracking-[0.13em] text-fg-muted sm:block">Four required fields • server verified</span>
+                  <div className="ml-auto flex items-center gap-2">
+                    <button type="button" onClick={() => closeDrawer()} disabled={saving} className="btn-secondary">Cancel</button>
+                    <button type="submit" disabled={saving} className="btn-primary inline-flex min-w-40 items-center justify-center gap-2">
+                      {saving ? <Loader2 size={14} className="animate-spin" /> : confirmDuplicate ? <RotateCcw size={14} /> : <ArrowRight size={14} />}
+                      {saving ? "Saving…" : confirmDuplicate ? "Record anyway" : "Activate renewal"}
+                    </button>
+                  </div>
+                </footer>
+              </form>
+            </aside>
+          </div>,
+          document.body,
+        )}
+    </>
+  );
+}
+
+function Field({
+  label,
+  htmlFor,
+  error,
+  hint,
+  required = false,
+  children,
+}: {
+  label: string;
+  htmlFor: string;
+  error?: string;
+  hint?: string;
+  required?: boolean;
+  children: React.ReactNode;
+}) {
+  return (
+    <div>
+      <div className="mb-1.5 flex items-center justify-between">
+        <label htmlFor={htmlFor} className="text-[10px] font-bold uppercase tracking-[0.14em] text-fg-muted">{label}{required ? " *" : ""}</label>
+        {hint && <span className="text-[10px] text-fg-dim">{hint}</span>}
+      </div>
+      {children}
+      {error && <p className="mt-1.5 text-xs text-status-hot">{error}</p>}
+    </div>
+  );
+}
+
+function PickerSkeleton() {
+  return (
+    <div className="space-y-1.5 p-1" aria-label="Loading recent deals">
+      {[0, 1, 2, 3].map((index) => (
+        <div key={index} className="flex animate-pulse items-center gap-3 rounded-xl border border-transparent px-3 py-3 motion-reduce:animate-none">
+          <div className="h-11 w-11 rounded-xl bg-bg-elev" />
+          <div className="flex-1">
+            <div className="h-3 w-2/5 rounded bg-bg-elev" />
+            <div className="mt-2 h-2.5 w-3/5 rounded bg-bg-elev/70" />
+            <div className="mt-2 h-2 w-1/4 rounded bg-bg-elev/50" />
+          </div>
+        </div>
+      ))}
+    </div>
   );
 }
