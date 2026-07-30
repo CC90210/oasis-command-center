@@ -13,9 +13,11 @@
  *   3. Does the tracking host resolve, and does it serve the app? A tracking
  *      host that does not reach the app means a dead unsubscribe link, which is
  *      a compliance failure rather than a cosmetic one.
- *   4. Is the suppression brand still pointed at a real tenant? This is the
- *      sharpest edge: get it wrong and new opt-outs record against a null tenant
- *      and are never honored, silently.
+ *   4. Is the suppression brand safe? This script has NO database access by
+ *      design (no dependencies, no secrets), so it does not claim to resolve the
+ *      tenant. It fails closed on any value it cannot vouch for and requires
+ *      --suppression-verified to accept a changed one. Get this wrong and new
+ *      opt-outs record against a null tenant and are silently never honored.
  *
  * Read-only. No writes, no sends, no secrets printed. Safe to run any time.
  *
@@ -134,13 +136,32 @@ if (!TRACKING) {
       });
       // Any real HTTP answer proves the host is attached to the app. A 404 means
       // it resolves but is serving something else (the marketing site).
-      if (probe.status === 404) {
+      // Assert an APP-SPECIFIC response, not merely "not a 404". A marketing site
+      // with a catch-all route happily returns 200 for unknown paths, and a
+      // generic error page or a redirect would also sail past a not-404 check —
+      // reporting PASS while unsubscribe links are dead (Codex review P2).
+      //
+      // The real endpoint answers JSON with an `ok` field. Anything that is not
+      // JSON carrying that field is not this app.
+      const ct = probe.headers.get("content-type") || "";
+      let appShaped = false;
+      let detail = `status ${probe.status}, content-type ${ct || "(none)"}`;
+      if (ct.includes("application/json")) {
+        try {
+          const body = await probe.json();
+          appShaped = body && typeof body === "object" && "ok" in body;
+          if (appShaped) detail = `status ${probe.status}, JSON with ok=${JSON.stringify(body.ok)}`;
+        } catch {
+          detail += " (body was not parseable JSON)";
+        }
+      }
+      if (appShaped) {
+        ok("Tracking host serves the app", detail);
+      } else {
         bad(
           "Tracking host serves the app",
-          `${host}/api/unsubscribe returned 404 — the host resolves but is NOT attached to this Vercel project, so unsubscribe links will be dead`,
+          `${host}/api/unsubscribe did not answer like this app (${detail}). The host resolves but is serving something else, most likely the marketing site, so unsubscribe links will be dead.`,
         );
-      } else {
-        ok("Tracking host serves the app", `/api/unsubscribe answered ${probe.status}`);
       }
     } catch (e) {
       bad(
@@ -169,10 +190,31 @@ if (!INTAKE) {
 // This one cannot be checked from DNS. It is stated loudly instead, because it
 // is the failure that is both silent and legally serious.
 
-warn(
-  "Suppression brand",
-  `set to "${BRAND}". This MUST match a row in tenants.name (ILIKE) or new unsubscribes record with tenant_id=NULL and are never honored. Verify against the database before go-live. Previously recorded suppressions are unaffected — enforcement keys on (tenant_id, email), not brand.`,
-);
+// This script has no database access by design (no deps, no secrets). So it does
+// not CLAIM to resolve the tenant — it fails closed on any value it cannot vouch
+// for, and requires a human to assert the lookup was done.
+//
+// "SunBiz" is the known-good value currently in production, so it passes. Any
+// other value is treated as unproven and FAILS until --suppression-verified is
+// passed, because the failure it guards is silent and legally serious: a brand
+// matching no tenant records opt-outs with tenant_id=NULL, and
+// checkEmailSuppressed filters on tenant_id, so those unsubscribes are never
+// honored (Codex review P1 — this used to warn and still exit 0).
+const KNOWN_GOOD_BRAND = "SunBiz";
+const brandVerified = argv.includes("--suppression-verified");
+if (BRAND === KNOWN_GOOD_BRAND) {
+  ok("Suppression brand", `"${BRAND}" is the known-good production value`);
+} else if (brandVerified) {
+  ok(
+    "Suppression brand",
+    `"${BRAND}" accepted on your explicit assertion that it matches a tenants.name row`,
+  );
+} else {
+  bad(
+    "Suppression brand",
+    `"${BRAND}" is not the known-good value and cannot be verified from here. Confirm it matches a row in tenants.name (ILIKE), then re-run with --suppression-verified. If it matches nothing, every NEW unsubscribe records against tenant_id=NULL and is silently ignored. Suppressions recorded BEFORE the change keep working, since enforcement keys on (tenant_id, email).`,
+  );
+}
 
 // ── Report ──────────────────────────────────────────────────────────────────
 

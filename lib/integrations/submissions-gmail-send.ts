@@ -23,7 +23,7 @@
 import "server-only";
 import { randomUUID } from "node:crypto";
 import { getSubmissionsCreds, getSubmissionsFrom } from "./submissions-gmail";
-import { messageIdDomain } from "@/lib/email/sending-identity";
+import { domainOfAddress, messageIdDomain } from "@/lib/email/sending-identity";
 
 export type SendPayload = {
   to: string;
@@ -95,12 +95,20 @@ export type SendResult =
  * which is what makes our chain-via-References work on the recipient
  * side without needing the Gmail API.
  */
-function synthesizeMessageId(): string {
-  // Derived from the configured sending domain (2026-07-29). A Message-Id whose
-  // domain does not match the visible sender is scored against by some filters,
-  // and hardcoding it here would have quietly kept saying sunbizfunding.com after
-  // the Bluerise cutover. Defaults to the legacy domain when unconfigured.
-  return `<${randomUUID()}@${messageIdDomain()}>`;
+function synthesizeMessageId(senderDomain?: string): string {
+  // Derived from the domain of the address the recipient will actually SEE
+  // (2026-07-29). A Message-Id whose domain does not match the visible sender is
+  // scored against by some filters.
+  //
+  // `senderDomain` is the RESOLVED per-tenant sender. It matters that this is not
+  // simply the global configured domain: sendOnce resolves From per tenant via
+  // getSubmissionsFrom, so stamping a globally-configured domain here would put
+  // one tenant's domain on another tenant's mail, and would put the new brand's
+  // domain on mail still going out under the old sender during a cutover. That is
+  // the very mismatch this work exists to remove (Codex review P1).
+  //
+  // Falls back to the configured identity, then to the legacy domain.
+  return `<${randomUUID()}@${senderDomain || messageIdDomain()}>`;
 }
 
 async function sendOnce(
@@ -158,7 +166,17 @@ async function sendOnce(
  * fires through Gmail SMTP. Returns the persistable IDs.
  */
 export async function sendGmail(payload: SendPayload): Promise<SendResult> {
-  const generatedMessageId = synthesizeMessageId();
+  // Resolve the tenant's real sender FIRST so the Message-Id domain matches the
+  // From header the recipient sees. sendOnce resolves the same value for the
+  // actual send; a failure here is non-fatal because the Message-Id is only a
+  // threading aid, and sendOnce will surface a genuine credential problem.
+  let senderDomain: string | undefined;
+  try {
+    senderDomain = domainOfAddress(await getSubmissionsFrom(payload.tenantId)) || undefined;
+  } catch {
+    /* fall back to the configured identity */
+  }
+  const generatedMessageId = synthesizeMessageId(senderDomain);
 
   let attempt = await sendOnce(payload, generatedMessageId);
 

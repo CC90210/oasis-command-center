@@ -34,12 +34,21 @@ export function fromAddress(): string {
   return env("DRIP_FROM_ADDRESS") || LEGACY_FROM;
 }
 
-/** The domain part of the From address. Drives the Message-Id domain and the
- *  unsubscribe mailto so they can never disagree with the visible sender. */
+/** The domain part of an arbitrary address, lowercased. Empty when unparseable. */
+export function domainOfAddress(addr: string): string {
+  const at = (addr || "").lastIndexOf("@");
+  return at >= 0 ? addr.slice(at + 1).trim().toLowerCase() : "";
+}
+
+/** The domain part of the CONFIGURED From address. Drives the unsubscribe mailto
+ *  so it can never disagree with the visible sender.
+ *
+ *  Note for the Message-Id: prefer the RESOLVED per-tenant sender where one is
+ *  available (see submissions-gmail-send.ts). This global value is the fallback,
+ *  and using it unconditionally would stamp one tenant's domain onto another
+ *  tenant's mail. */
 export function fromDomain(): string {
-  const at = fromAddress().lastIndexOf("@");
-  const domain = at >= 0 ? fromAddress().slice(at + 1) : "";
-  return domain || "sunbizfunding.com";
+  return domainOfAddress(fromAddress()) || "sunbizfunding.com";
 }
 
 /**
