@@ -4,7 +4,6 @@ import {
   skipToStatus,
   statusFromRow,
   type EnrollNowSkip,
-  type InstantEmailStatus,
 } from "../lib/drips/immediate-core";
 import { shouldApplyEmailWindow } from "../lib/drips/drip-rules-core";
 
@@ -40,7 +39,6 @@ const ALL_SKIPS: EnrollNowSkip[] = [
 ];
 for (const s of ALL_SKIPS) {
   const got = skipToStatus(s);
-  assert.ok(typeof got === "string" && got.length > 0, `every skip maps to a status: ${s}`);
   assert.notEqual(got, "sent", `a skip must never map to 'sent': ${s}`);
 }
 
@@ -84,14 +82,9 @@ assert.equal(
   "the 6h app-link HOLD is reported specifically",
 );
 assert.equal(
-  statusFromRow({ status: "sent", last_error: "missing_application_link: skipped after retries (no form/HMAC key)" }),
-  "sent",
-  "a settled row wins over a stale last_error",
-);
-assert.equal(
-  statusFromRow({ status: "failed", last_error: "missing_application_link: skipped after retries (no form/HMAC key)" }),
+  statusFromRow({ status: "sent", last_error: "skipped: missing_application_link: skipped after retries (no form/HMAC key)" }),
   "held_no_app_link",
-  "the app-link GIVE-UP is reported specifically, not as a generic failure",
+  "the app-link GIVE-UP is reported specifically, not as a generic failure (the row shape that actually occurs: status sent, prefixed last_error)",
 );
 assert.equal(
   statusFromRow({ status: "failed", last_error: "lead_opted_out_or_dead" }),
@@ -107,6 +100,35 @@ assert.equal(
   statusFromRow({ status: "failed", last_error: "email_volume_gate (per_lead_weekly_cap)" }),
   "failed",
   "an unmatched reason stays a failure rather than being guessed at",
+);
+
+// ── skipStep rows: terminal status, but nothing was sent ────────────────────
+// advanceRow gives these the SAME 'sent'/'done' status as a real send. Reading
+// status first is how a rep gets told "emailed" for mail that never left.
+assert.equal(
+  statusFromRow({ status: "sent", last_error: "skipped: no_email_for_email_step" }),
+  "skipped_no_email",
+  "THE FABRICATED-SEND BUG: a skipped row must never report sent",
+);
+assert.equal(
+  statusFromRow({ status: "done", last_error: "skipped: missing_application_link: skipped after retries (no form/HMAC key)" }),
+  "held_no_app_link",
+  "the app-link give-up terminalizes as 'done' and must still report the halt",
+);
+assert.equal(
+  statusFromRow({ status: "sent", last_error: "skipped: blast_safety_skipped(email): lender mention" }),
+  "held_blocked_by_guard",
+  "a compliance guard block is reported as a block, not as a send",
+);
+assert.equal(
+  statusFromRow({ status: "sent", last_error: "skipped: some_future_reason_we_have_not_mapped" }),
+  "skipped_other",
+  "an unmapped skip says plainly that it was skipped rather than claiming sent",
+);
+assert.equal(
+  statusFromRow({ status: "sent", last_error: null }),
+  "sent",
+  "a genuine send (no skip prefix) still reports sent",
 );
 
 assert.equal(
@@ -131,16 +153,10 @@ for (const st of ["scheduled", "sending", "failed", "cancelled"]) {
 }
 
 // ── The forbidden status ────────────────────────────────────────────────────
-
-const REACHABLE: InstantEmailStatus[] = [
-  ...ALL_SKIPS.map(skipToStatus),
-  statusFromRow({ status: "sent", last_error: null }),
-  statusFromRow({ status: "failed", last_error: "suppressed" }),
-  statusFromRow({ status: "scheduled", last_error: null }),
-];
-for (const s of REACHABLE) {
-  assert.notEqual(s, "filtered", "'filtered' is not observable over SMTP and must never be reported");
-}
+// There is no test here: "filtered" is not a member of InstantEmailStatus, so
+// tsc already makes it unconstructible from either skipToStatus or
+// statusFromRow. Gmail spam placement is not observable over SMTP, and the
+// type system is what enforces that this policy can never claim otherwise.
 
 // ── The double-keyed window/volume gate (implemented in Task 1) ─────────────
 

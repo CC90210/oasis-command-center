@@ -10,7 +10,8 @@
 export type InstantEmailStatus =
   | "sent" | "queued" | "disabled" | "duplicate" | "failed"
   | "skipped_no_email" | "skipped_suppressed" | "skipped_paused"
-  | "held_circuit_open" | "held_no_app_link";
+  | "held_circuit_open" | "held_no_app_link"
+  | "held_blocked_by_guard" | "skipped_other";
 
 export type InstantEmailOutcome = { status: InstantEmailStatus; reason?: string; runId?: string };
 
@@ -64,22 +65,31 @@ export function skipToStatus(reason: EnrollNowSkip): InstantEmailStatus {
  * produce skipped_suppressed or held_no_app_link — they would surface as a
  * misleading `failed` or `queued`.
  *
- * Only a settled row ever reports 'sent'.
+ * Only a settled row that was NOT skipped ever reports 'sent'.
  */
+/** executor.ts advanceRow() terminalizes a SKIPPED step to the very same
+ *  'sent'/'done' status a real send gets; the ONLY difference on the row is
+ *  this prefix that skipStep writes into last_error. Checking status first
+ *  would report "sent" for an email that never left the building. */
+const SKIP_PREFIX = "skipped: ";
+
 export function statusFromRow(row: { status: string; last_error: string | null }): InstantEmailStatus {
-  const err = (row.last_error || "").toLowerCase();
-  if (row.status === "sent" || row.status === "done") return "sent";
-  if (err.includes("suppressed") || err.includes("unsubscrib") || err.includes("opted_out")) {
-    return "skipped_suppressed";
-  }
-  // Matches BOTH strings executor.ts writes for this condition: the 6h hold
-  // ("missing_application_link (no form/HMAC key)") and the give-up skip
-  // ("missing_application_link: skipped after retries (no form/HMAC key)").
-  // Matched on the underscore form because that is what the executor actually
-  // writes — an earlier draft matched "application link"/"app_link" and caught
-  // neither, silently degrading a halt into a generic "failed".
+  const raw = (row.last_error || "").toLowerCase();
+  const skipped = raw.startsWith(SKIP_PREFIX);
+  const err = skipped ? raw.slice(SKIP_PREFIX.length) : raw;
+
+  // Reason matching runs FIRST, on the un-prefixed remainder, so a skip is
+  // always explained by its cause rather than by its (misleading) row status.
+  if (err.includes("suppressed") || err.includes("unsubscrib") || err.includes("opted_out")) return "skipped_suppressed";
   if (err.includes("missing_application_link")) return "held_no_app_link";
   if (err.includes("no_email_for_email_step")) return "skipped_no_email";
+  if (err.includes("blast_safety") || err.includes("positioning")) return "held_blocked_by_guard";
+
+  // A skip we have no specific mapping for: say so plainly rather than
+  // guessing. It is NOT sent and NOT merely queued — the sequence moved past it.
+  if (skipped) return "skipped_other";
+
+  if (row.status === "sent" || row.status === "done") return "sent";
   if (row.status === "failed") return "failed";
   return "queued"; // scheduled / sending / rescheduled — the row survives
 }
