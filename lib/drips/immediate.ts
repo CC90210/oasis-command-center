@@ -176,6 +176,41 @@ export async function enrollNow(args: {
   };
 }
 
+/** How many instant sends per tenant per rolling hour may BYPASS the volume
+ *  pacing. Past this, the email is still enrolled and still goes out on the
+ *  normal dispatch cadence — only the bypass stops. Default 15: comfortably
+ *  above a human working at typing speed, well under the governor's 25/hour. */
+function instantBypassCap(): number {
+  const n = parseInt((process.env.SEND_APPLICATION_INSTANT_HOURLY_BYPASS || "").trim(), 10);
+  return Number.isFinite(n) && n >= 0 ? n : 15;
+}
+
+/**
+ * Has this tenant already spent its bypass budget this hour?
+ *
+ * Counts the `sent_via: "instant"` marker the executor stamps (Task 5 step 1b).
+ * Fails CLOSED — on a count error we do NOT bypass, because the failure mode of
+ * guessing wrong is blowing the send budget on a warming domain, while the cost
+ * of being conservative is one email arriving on the normal cadence.
+ */
+async function bypassBudgetAvailable(db: Db, tenantId: string): Promise<boolean> {
+  const cap = instantBypassCap();
+  if (cap === 0) return false;
+  try {
+    const since = new Date(Date.now() - 3_600_000).toISOString();
+    const r = await db
+      .from("lead_interactions")
+      .select("id", { count: "exact", head: true })
+      .eq("tenant_id", tenantId)
+      .eq("metadata->>sent_via", "instant")
+      .gte("created_at", since);
+    if (r.error) return false;
+    return (r.count || 0) < cap;
+  } catch {
+    return false;
+  }
+}
+
 /** Enroll + dispatch inline, returning what ACTUALLY happened. */
 export async function sendApplicationNow(args: {
   tenantId: string; leadId: string; stage: string;
@@ -193,7 +228,10 @@ export async function sendApplicationNow(args: {
 
   let tallies;
   try {
-    tallies = await dispatchRuns(db, [enrolled.runId], { immediate: true });
+    // Past the hourly ceiling the send still happens, just on the normal cadence.
+    // The rep is told "queued", which is true, rather than "sent", which would not be.
+    const mayBypass = await bypassBudgetAvailable(db, args.tenantId);
+    tallies = await dispatchRuns(db, [enrolled.runId], { immediate: mayBypass });
   } catch (err) {
     console.error("[send-application] inline dispatch threw", err);
     return { status: "failed", runId: enrolled.runId, reason: "dispatch_threw" };
