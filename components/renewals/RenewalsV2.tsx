@@ -20,7 +20,8 @@ import {
   getRenewalsRows,
   type FundedDealRow,
 } from "@/lib/queries";
-import { fmtCurrency, groupRows, RenewalRow } from "./renewals-shared";
+import { fmtCurrency, groupRows } from "@/lib/renewals-core";
+import { RenewalRow } from "./renewals-shared";
 
 const EMPTY_SUMMARY = {
   past_due_count: 0,

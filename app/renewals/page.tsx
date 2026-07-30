@@ -24,11 +24,8 @@ import {
   SUNBIZ_DEMO_RENEWALS_SUMMARY,
   SUNBIZ_DEMO_RENEWAL_ROWS,
 } from "@/lib/sunbiz-demo-data";
-import {
-  fmtCurrency,
-  groupRows,
-  RenewalRow,
-} from "@/components/renewals/renewals-shared";
+import { fmtCurrency, groupRows } from "@/lib/renewals-core";
+import { RenewalRow } from "@/components/renewals/renewals-shared";
 
 export const dynamic = "force-dynamic";
 
