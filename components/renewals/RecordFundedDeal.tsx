@@ -674,7 +674,7 @@ function PickerSkeleton() {
   );
 }
 
-type LenderOption = {
+export type LenderOption = {
   id: string;
   name: string;
   contact_name: string | null;
@@ -684,12 +684,14 @@ type LenderOption = {
   product_type: string | null;
 };
 
-function LenderPickerField({
+export function LenderPickerField({
   value,
+  initialName,
   error,
   onChange,
 }: {
   value: string;
+  initialName?: string;
   error?: string;
   onChange: (lender: LenderOption) => void;
 }) {
@@ -723,7 +725,7 @@ function LenderPickerField({
         <input
           id="fd-lender-search"
           className={`${inputCls} pl-10`}
-          value={open ? query : selected?.name || query}
+          value={open ? query : selected?.name || query || initialName || ""}
           onFocus={() => setOpen(true)}
           onChange={(event) => { setQuery(event.target.value); setOpen(true); }}
           placeholder="Search the lender directory…"
