@@ -62,17 +62,31 @@ export async function enrollNow(args: {
   const data = lead.data || {};
 
   // The enabled, stage-triggered, TRANSACTIONAL sequence for this stage.
+  // Ordered so a tenant with two live matches (happens naturally mid-edit,
+  // before the old one is disabled) picks the SAME one every time rather than
+  // whatever order PostgREST happens to return.
   const seqRes = await db
     .from("drip_sequences")
     .select("id, tenant_id, name, enabled, trigger_filter, steps, email_class")
     .eq("tenant_id", tenantId)
-    .eq("enabled", true);
-  const seq = ((seqRes.data || []) as Array<Record<string, unknown>>).find((s) => {
+    .eq("enabled", true)
+    .order("created_at", { ascending: true });
+  const matches = ((seqRes.data || []) as Array<Record<string, unknown>>).filter((s) => {
     const tf = (s.trigger_filter || {}) as Record<string, unknown>;
     const entityOk = !tf.entity || tf.entity === "lead";
     const fieldOk = !tf.field || tf.field === "stage";
     return entityOk && fieldOk && tf.to === stage && s.email_class === "transactional";
   });
+  if (matches.length > 1) {
+    // Two live sequences for one stage is a config problem, not a decision
+    // this code should make silently: sending the merchant one of two
+    // different letters is the kind of thing nobody notices until a merchant
+    // quotes it back. Deterministic pick (oldest first) + a loud warning.
+    console.warn("[send-application] multiple transactional sequences for stage", {
+      tenantId, stage, count: matches.length, chose: matches[0].id,
+    });
+  }
+  const seq = matches[0];
   if (!seq) return { ok: false, reason: "no_sequence" };
 
   const steps = Array.isArray(seq.steps) ? (seq.steps as DripStep[]) : null;
@@ -138,10 +152,21 @@ export async function enrollNow(args: {
     .select("id")
     .single();
 
-  // A unique violation here is duplicate-prevention layer 1 doing its job: an
-  // ACTIVE run already exists for this lead+sequence, so a retry, a refresh or
-  // a double-click already queued the send.
-  if (ins.error || !ins.data) return { ok: false, reason: "already_enrolled" };
+  if (ins.error || !ins.data) {
+    const msg = ins.error?.message || "";
+    // A unique violation here is duplicate-prevention layer 1 doing its job: an
+    // ACTIVE run already exists for this lead+sequence, so a retry, a refresh
+    // or a double-click already queued the send.
+    if (/duplicate key|unique constraint/i.test(msg)) {
+      return { ok: false, reason: "already_enrolled" };
+    }
+    // Anything else is a REAL failure (RLS denial, schema error, network
+    // fault). Reporting it as "duplicate" would tell the rep the merchant
+    // already has the link when nothing was written and nothing will be sent
+    // — the silent-success failure this whole contract exists to prevent.
+    console.error("[send-application] drip_runs insert failed", { tenantId, leadId, error: msg });
+    return { ok: false, reason: "insert_failed" };
+  }
 
   return {
     ok: true,
