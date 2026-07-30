@@ -45,6 +45,7 @@ import { wasShoppedRecently } from "@/lib/drips/enroller";
 import { SUNBIZ_BRAND, dripTrackingBase, platformTrackingBase, buildDripHtml, listUnsubscribeHeader, pixelUrl, unsubscribeUrl } from "@/lib/drips/html-email";
 import { resolveDripSmsIdentity, type DripSmsIdentity } from "@/lib/drips/rep-sms-identity";
 import { ACCELERATED_FLAG, acceleratedSystemLive, hasActiveAcceleratedRun } from "@/lib/drips/accelerated";
+import { shouldApplyEmailWindow } from "@/lib/drips/drip-rules-core";
 import {
   circuitOpen,
   consumeEmail,
@@ -190,10 +191,17 @@ const SOFT_BUDGET_MS = 50_000;
  * bad template that already went out) WITHOUT having to take DRIPS_LIVE down and
  * lose the distinction between "we never went live" and "we hit the brakes".
  * Rows keep rendering, logging and advancing as dry runs, so nothing is lost.
+ *
+ * `immediate` (the operator-initiated transactional send) deliberately does NOT
+ * require DRIPS_LIVE — that switch pauses AUTOMATED drip output, and pausing
+ * marketing must not silently disable a button a rep just pressed (spec 4.4).
+ * The two genuine safety switches still win over it: an explicit forced dry run
+ * and the circuit breaker.
  */
-function dripSendEnabled(): boolean {
+function dripSendEnabled(immediate = false): boolean {
   if ((process.env.BRAVO_FORCE_DRY_RUN || "").trim() === "1") return false;
   if (circuitOpen()) return false;
+  if (immediate) return true;
   return process.env.DRIPS_LIVE === "1";
 }
 
@@ -803,6 +811,7 @@ async function processEmailStep(
   steps: DripStep[],
   emailClass: string,
   run: RunState,
+  immediate: boolean,
 ): Promise<StepOutcome> {
   const email = typeof data.email === "string" ? data.email.trim() : "";
   // No email for an email step: SKIP + advance (the sequence may have SMS steps
@@ -815,8 +824,10 @@ async function processEmailStep(
 
   // Email business-hours gate ("every morning"): reschedule an off-hours email
   // step to the next window-start (no attempt burn) — mirrors the SMS TCPA
-  // reschedule above. Keeps drip email out of the middle of the night.
-  const emailWait = emailWindowNextStart();
+  // reschedule above. Keeps drip email out of the middle of the night. Skipped
+  // only for an operator-initiated transactional send (spec 4.3) — commercial
+  // drips and every cron dispatch keep the window unchanged.
+  const emailWait = shouldApplyEmailWindow({ immediate, emailClass }) ? emailWindowNextStart() : null;
   if (emailWait) {
     return markRescheduled(db, row, emailWait.toISOString(), `email_window (outside ${EMAIL_WIN_START}:00-${EMAIL_WIN_END}:00 ${EMAIL_WIN_TZ})`);
   }
@@ -894,7 +905,7 @@ async function processEmailStep(
   const cleanBody = stripDashes(rendered);
 
   const dripsLive = process.env.DRIPS_LIVE === "1";
-  const shouldSend = dripSendEnabled();
+  const shouldSend = dripSendEnabled(immediate);
 
   // Backstop: never re-send this lead the same sequence step (audit safety net).
   if (shouldSend && (await alreadySentStep(db, row))) {
@@ -908,7 +919,12 @@ async function processEmailStep(
   //
   // HOLD, never fail: hitting a cap is a "not yet", not an error, so the row is
   // rescheduled to when the window reopens and keeps its attempt budget.
-  if (shouldSend && run.emailBudget) {
+  //
+  // Volume PACING only. Bypassed for an operator-initiated transactional send
+  // (spec 4.2): a busy drip day must not silently hold a rep's button press.
+  // Consent (opted-out, drip_paused) and the circuit breaker are enforced
+  // elsewhere and are NEVER bypassed.
+  if (shouldSend && shouldApplyEmailWindow({ immediate, emailClass }) && run.emailBudget) {
     const gated = emailGateReason(run.emailBudget, row.lead_id);
     if (gated) {
       return markRescheduled(db, row, holdUntilIso(gated), `email_volume_gate (${gated})`);
@@ -1025,6 +1041,7 @@ async function processRow(
   leadMap: Map<string, LeadData>,
   seqMap: Map<string, SequenceRow>,
   run: RunState,
+  immediate: boolean,
 ): Promise<StepOutcome> {
   const data = leadMap.get(`${row.tenant_id}|${row.lead_id}`);
   const seq = seqMap.get(`${row.tenant_id}|${row.sequence_id}`);
@@ -1119,7 +1136,7 @@ async function processRow(
   }
 
   if (step.channel === "sms") return processSmsStep(db, row, data, step, steps, run);
-  return processEmailStep(db, row, data, step, steps, seq.emailClass || "commercial", run);
+  return processEmailStep(db, row, data, step, steps, seq.emailClass || "commercial", run, immediate);
 }
 
 export type DispatchOpts = {
@@ -1253,7 +1270,7 @@ export async function dispatchRuns(
     if (Date.now() - startedAt > SOFT_BUDGET_MS) break;
     let outcome: StepOutcome;
     try {
-      outcome = await processRow(db, row, leadMap, seqMap, run);
+      outcome = await processRow(db, row, leadMap, seqMap, run, opts.immediate === true);
     } catch (err) {
       console.error("[dispatch-drips] unhandled row error", row.id, err);
       outcome = await markRetryOrFail(db, row, err instanceof Error ? err.message : "unhandled_error").catch(
