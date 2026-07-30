@@ -69,8 +69,16 @@ export function skipToStatus(reason: EnrollNowSkip): InstantEmailStatus {
 export function statusFromRow(row: { status: string; last_error: string | null }): InstantEmailStatus {
   const err = (row.last_error || "").toLowerCase();
   if (row.status === "sent" || row.status === "done") return "sent";
-  if (err.includes("suppressed") || err.includes("unsubscrib")) return "skipped_suppressed";
-  if (err.includes("application link") || err.includes("app_link")) return "held_no_app_link";
+  if (err.includes("suppressed") || err.includes("unsubscrib") || err.includes("opted_out")) {
+    return "skipped_suppressed";
+  }
+  // Matches BOTH strings executor.ts writes for this condition: the 6h hold
+  // ("missing_application_link (no form/HMAC key)") and the give-up skip
+  // ("missing_application_link: skipped after retries (no form/HMAC key)").
+  // Matched on the underscore form because that is what the executor actually
+  // writes — an earlier draft matched "application link"/"app_link" and caught
+  // neither, silently degrading a halt into a generic "failed".
+  if (err.includes("missing_application_link")) return "held_no_app_link";
   if (err.includes("no_email_for_email_step")) return "skipped_no_email";
   if (row.status === "failed") return "failed";
   return "queued"; // scheduled / sending / rescheduled — the row survives

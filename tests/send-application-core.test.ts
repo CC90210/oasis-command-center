@@ -64,12 +64,6 @@ assert.equal(
 );
 
 assert.equal(
-  statusFromRow({ status: "scheduled", last_error: "no application link (mint failed)" }),
-  "held_no_app_link",
-  "an app-link halt is reported specifically, not as 'queued'",
-);
-
-assert.equal(
   statusFromRow({ status: "failed", last_error: "no_email_for_email_step" }),
   "skipped_no_email",
   "a missing address is reported plainly",
@@ -79,6 +73,40 @@ assert.equal(
   statusFromRow({ status: "failed", last_error: "smtp 550" }),
   "failed",
   "an unrecognised failure stays a failure",
+);
+
+// The exact strings executor.ts writes. Verified against lib/drips/executor.ts
+// (lines 683, 810, 813, 867, 870, 1055) — matching invented text instead of
+// these is how a halt silently degrades into a generic failure.
+assert.equal(
+  statusFromRow({ status: "scheduled", last_error: "missing_application_link (no form/HMAC key)" }),
+  "held_no_app_link",
+  "the 6h app-link HOLD is reported specifically",
+);
+assert.equal(
+  statusFromRow({ status: "sent", last_error: "missing_application_link: skipped after retries (no form/HMAC key)" }),
+  "sent",
+  "a settled row wins over a stale last_error",
+);
+assert.equal(
+  statusFromRow({ status: "failed", last_error: "missing_application_link: skipped after retries (no form/HMAC key)" }),
+  "held_no_app_link",
+  "the app-link GIVE-UP is reported specifically, not as a generic failure",
+);
+assert.equal(
+  statusFromRow({ status: "failed", last_error: "lead_opted_out_or_dead" }),
+  "skipped_suppressed",
+  "an opted-out lead reads as suppressed, not as a failure",
+);
+assert.equal(
+  statusFromRow({ status: "failed", last_error: "opted_out (replied STOP)" }),
+  "skipped_suppressed",
+  "a STOP reply reads as suppressed",
+);
+assert.equal(
+  statusFromRow({ status: "failed", last_error: "email_volume_gate (per_lead_weekly_cap)" }),
+  "failed",
+  "an unmatched reason stays a failure rather than being guessed at",
 );
 
 assert.equal(
