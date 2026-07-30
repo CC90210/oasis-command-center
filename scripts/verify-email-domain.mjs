@@ -19,7 +19,16 @@
  *      --suppression-verified to accept a changed one. Get this wrong and new
  *      opt-outs record against a null tenant and are silently never honored.
  *
- * Read-only. No writes, no sends, no secrets printed. Safe to run any time.
+ * SIDE EFFECTS, stated precisely rather than as a blanket "read-only" claim:
+ *   - No email is sent. No suppression is ever recorded. No secrets printed.
+ *   - The unsubscribe probe deliberately takes the `invalid_json` branch, which
+ *     returns before any write.
+ *   - ONE residual: if the source IP is ALREADY rate-limited, /api/unsubscribe
+ *     records a single `rate_limited` attempt before it parses the body. That
+ *     needs the IP to be over the limit already, so it cannot happen from a
+ *     normal preflight; it is documented rather than engineered around because
+ *     the alternative is a dedicated health endpoint for one probe.
+ *   Safe to run any time. Do not run it in a tight loop.
  *
  * Usage:
  *   node scripts/verify-email-domain.mjs
