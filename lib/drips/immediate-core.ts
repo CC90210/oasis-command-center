@@ -47,7 +47,11 @@ const SKIP_TO_STATUS: Record<EnrollNowSkip, InstantEmailStatus> = {
   no_contact_method: "skipped_no_email",
   already_enrolled: "duplicate",
   docs_on_file: "duplicate",
-  no_sequence: "queued",
+  // NOT "queued": when there is no lead or no enabled transactional sequence
+  // for this stage, no drip_runs row is created, so nothing is waiting and
+  // nothing will ever send. Reporting it as queued would tell the rep the
+  // email is on its way when the system has no way to send it.
+  no_sequence: "skipped_other",
   sequence_steps_invalid: "failed",
   insert_failed: "failed",
 };

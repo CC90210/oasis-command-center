@@ -46,6 +46,11 @@ assert.equal(skipToStatus("opted_out"), "skipped_suppressed", "opted out reads a
 assert.equal(skipToStatus("paused"), "skipped_paused", "paused is reported as paused");
 assert.equal(skipToStatus("no_contact_method"), "skipped_no_email", "no contact is reported plainly");
 assert.equal(skipToStatus("already_enrolled"), "duplicate", "a second Save reads as a duplicate");
+assert.equal(
+  skipToStatus("no_sequence"),
+  "skipped_other",
+  "no sequence means no row and no send, so it must not read as queued",
+);
 
 // ── Row read-back mapping ───────────────────────────────────────────────────
 // dispatchRuns returns only coarse tallies, while suppression and the app-link
