@@ -158,21 +158,24 @@ if (!TRACKING) {
       // could serve one and not the other, and this preflight explicitly
       // certifies unsubscribe availability (Codex review P2). So probe both.
       //
-      // POST is the unsubscribe route's only method. An empty JSON body is
-      // deliberately safe: with no email it returns 400 {ok:false,
-      // error:"invalid_email"} and writes NOTHING. That shape is also a strong
-      // app fingerprint a marketing site cannot produce.
+      // POST is the unsubscribe route's only method, and the BODY MATTERS for
+      // keeping this script's read-only promise honest (Codex review P2).
       //
-      // Note: that route rate-limits by IP, so this probe is cheap but not free.
-      // Running the preflight in a tight loop can trip the limiter (429 — which
-      // still proves the route is the app, and is accepted below).
+      // A well-formed `{}` reaches the invalid_email branch, which calls
+      // recordPairAttempt — inserting a pair_attempts row and counting against
+      // the IP rate limiter, so repeated preflights could 429 a real merchant's
+      // unsubscribe. A deliberately MALFORMED body short-circuits earlier, at
+      // `catch { return bad(400, "invalid_json") }`, which writes nothing at all.
+      //
+      // Same fingerprint ({ok:false} JSON that only this app produces), zero
+      // side effects.
       let unsubOk = false;
       let unsubDetail = "not attempted";
       try {
         const u = await fetch(`${TRACKING.replace(/\/+$/, "")}/api/unsubscribe`, {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: "{}",
+          body: "preflight-probe-not-json",
           redirect: "manual",
         });
         const uct = (u.headers.get("content-type") || "").toLowerCase();
