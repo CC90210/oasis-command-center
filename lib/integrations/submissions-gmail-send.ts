@@ -88,6 +88,13 @@ export type SendResult =
        * anchor passed in via payload.threadId.
        */
       thread_id: string;
+      /**
+       * The From header this message was ACTUALLY sent with, display name and
+       * all. Returned rather than left for the caller to re-derive, because a
+       * caller that re-derives gets the shared default and would audit a
+       * rebranded send under the wrong identity (Codex review P2).
+       */
+      from_identity: string;
     }
   | { ok: false; error: string };
 
@@ -121,7 +128,7 @@ function synthesizeMessageId(senderDomain?: string): string {
 async function sendOnce(
   payload: SendPayload,
   generatedMessageId: string,
-): Promise<{ ok: true; nodemailerMessageId: string } | { ok: false; error: string; transient: boolean }> {
+): Promise<{ ok: true; nodemailerMessageId: string; fromIdentity: string } | { ok: false; error: string; transient: boolean }> {
   try {
     const nodemailer = await import("nodemailer");
     const creds = await getSubmissionsCreds(payload.tenantId);
@@ -165,7 +172,7 @@ async function sendOnce(
       ...(payload.html ? { html: payload.html } : {}),
       headers,
     });
-    return { ok: true, nodemailerMessageId: info.messageId };
+    return { ok: true, nodemailerMessageId: info.messageId, fromIdentity: from };
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     // Common transient signals from Gmail SMTP: 4.x.x status codes, network errors.
@@ -218,6 +225,7 @@ export async function sendGmail(payload: SendPayload): Promise<SendResult> {
   return {
     ok: true,
     message_id: attempt.nodemailerMessageId,
+    from_identity: attempt.fromIdentity,
     rfc822_message_id: generatedMessageId,
     thread_id: threadAnchor,
   };

@@ -131,14 +131,22 @@ export async function sendDripEmail(
     fromName: fromDisplayName(),
   });
   if (!result.ok) return { ok: false, error: result.error };
-  // Label only — the send already happened. Falls back to the configured sending
-  // identity rather than a literal so it does not keep reporting SunBiz after the
-  // Bluerise cutover; the per-tenant lookup below still wins when it resolves.
-  let fromAddress = configuredFromAddress();
-  try {
-    fromAddress = await getSubmissionsFrom(tenantId);
-  } catch {
-    /* best-effort label only — the send already succeeded */
+  // Report the From header the message was ACTUALLY sent with. The executor
+  // persists this as from_identity, so re-deriving it here would audit a
+  // DRIP_FROM_NAME-rebranded send under the shared default and record an
+  // identity the recipient never saw (Codex review P2).
+  //
+  // The fallbacks exist only for the impossible case of a send that succeeded
+  // without reporting its own From, and prefer the configured identity over a
+  // literal so they do not keep saying SunBiz after the cutover either.
+  let fromAddress = result.from_identity;
+  if (!fromAddress) {
+    fromAddress = configuredFromAddress();
+    try {
+      fromAddress = await getSubmissionsFrom(tenantId);
+    } catch {
+      /* best-effort label only — the send already succeeded */
+    }
   }
   return { ok: true, messageId: result.rfc822_message_id, fromAddress };
 }
