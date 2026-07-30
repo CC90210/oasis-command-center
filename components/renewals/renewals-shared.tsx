@@ -1,3 +1,5 @@
+"use client";
+
 /**
  * Shared renewal-display primitives — single source of truth used by
  * BOTH /renewals (top-level) and /t/<slug>/renewals (manifest catch-all
