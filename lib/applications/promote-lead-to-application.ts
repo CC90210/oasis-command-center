@@ -31,7 +31,9 @@ import { createApplicationFromLead } from "@/lib/applications/create-from-lead";
 import { extractAppFields } from "@/lib/forms/application-upsert";
 import { generateApplicationDocumentFromRecord } from "@/lib/forms/application-document";
 import {
+  liveSubLifecyclePatches,
   mapLeadDataToApplicationFields,
+  matchesLegacyLiveSubIncident,
   reconcileLiveSubFields,
 } from "@/lib/applications/live-sub-mapping";
 import { writeAgentAlert } from "@/lib/notify/agent-alert";
@@ -88,6 +90,8 @@ export type PromoteResult =
       missingCritical: string[];
       /** True once the branded PDF regenerated; false if that step failed. */
       pdfOk: boolean;
+      /** True when this approval is intentionally visible in Leads → Live Subs. */
+      retainedInLiveSubs: boolean;
     }
   | { ok: false; error: string; stage: PromoteStage };
 
@@ -105,6 +109,8 @@ export async function promoteLeadToApplication(input: {
   leadId: string;
   /** Provenance stamped on a NEWLY created application (default live_sub_auto). */
   source?: string;
+  /** Signed one-shot repair for the known legacy auto-transfer incident. */
+  restoreLiveSubs?: boolean;
 }): Promise<PromoteResult> {
   const { tenantId, leadId } = input;
   const source = input.source || "live_sub_auto";
@@ -149,6 +155,21 @@ export async function promoteLeadToApplication(input: {
     //    prior form submission) already set on a reused application.
     const app = await getRecord({ tenant_id: tenantId, entity: "application", id: applicationId }).catch(() => null);
     const appData = (app?.data || {}) as Record<string, unknown>;
+    const legacyIncidentMatch = matchesLegacyLiveSubIncident({
+      leadSource: leadData.source,
+      applicationCreatedVia: appData.created_via,
+      leadCreatedAt:
+        (lead as { created_at?: unknown }).created_at ?? leadData.created_at,
+      leadTransferredAt: leadData.transferred_at,
+    });
+    const lifecycle = liveSubLifecyclePatches({
+      applicationId,
+      applicationCreated: appRes.created,
+      leadTransferredAt: leadData.transferred_at,
+      applicationPromotedAt: appData.promoted_at,
+      restoreLiveSubs: input.restoreLiveSubs,
+      legacyIncidentMatch,
+    });
     const patch: Record<string, unknown> = {};
     for (const [k, v] of Object.entries(fields)) {
       const cur = appData[k];
@@ -167,13 +188,21 @@ export async function promoteLeadToApplication(input: {
     // Provenance: mark a freshly created app as the live-sub auto path; leave a
     // reused app's existing created_via (e.g. form_submission) intact.
     if (appRes.created) patch.created_via = source;
-    // NOTE: `promoted_at` is deliberately NOT stamped — see step 4. It is the
-    // flag the Applications board filters ON (lib/manifest/data.ts), the exact
-    // mirror of the lead board's `transferred_at`. Stamping one without the
-    // other puts the same deal on BOTH boards. An already-promoted application
-    // (a re-run of a deal an operator has since transferred) keeps its own
-    // stamp — this only stops the promote from setting one.
+    Object.assign(patch, lifecycle.applicationPatch);
     if (!appData.phone_status) patch.phone_status = phoneStatus;
+
+    // When retaining/restoring Live Subs, expose the lead first. If the second
+    // write fails, the deal may briefly appear on both boards but can never
+    // disappear from both. The ordinary advanced/retry path keeps its existing
+    // application-first order because it does not clear lifecycle markers.
+    if (lifecycle.retainInLiveSubs) {
+      await updateRecord({
+        tenant_id: tenantId,
+        entity: "lead",
+        id: leadId,
+        patch: lifecycle.leadPatch,
+      });
+    }
 
     await updateRecord({ tenant_id: tenantId, entity: "application", id: applicationId, patch });
 
@@ -203,10 +232,9 @@ export async function promoteLeadToApplication(input: {
     //    (lib/applications/apply-extracted.ts), which lands its lead at uw_sheet
     //    and creates its backing application with neither marker.
     //
-    //    Nothing here stamps transferred_at, so a lead that was ALREADY
-    //    transferred (a re-run / retry_promote of a deal an operator had since
-    //    moved on manually) keeps whatever it had — this only stops the promote
-    //    from setting it, it never clears one.
+    //    The signed one-shot repair may explicitly clear both markers for rows
+    //    matching the known legacy incident fingerprint. Ordinary retries never
+    //    pull an operator-advanced application backwards.
     //    STAGE IS FORCED HERE, not just at creation. The dashboard approve path
     //    de-duplicates against an existing merchant lead
     //    (app/api/scrub-candidates/[id] findExistingLead), and that lead can sit
@@ -219,11 +247,14 @@ export async function promoteLeadToApplication(input: {
     //    Matching the create branch also means the dedup'd deal fires the same
     //    uw_sheet first-touch cadence, which is what a scrubber-fed live sub is
     //    supposed to get (it carries no docs_on_file — see lib/drips/enroller).
-    const leadPatch: Record<string, unknown> = { application_id: applicationId };
-    if (!leadData.transferred_at && leadData.stage !== "uw_sheet") {
-      leadPatch.stage = "uw_sheet";
+    if (!lifecycle.retainInLiveSubs) {
+      await updateRecord({
+        tenant_id: tenantId,
+        entity: "lead",
+        id: leadId,
+        patch: lifecycle.leadPatch,
+      });
     }
-    await updateRecord({ tenant_id: tenantId, entity: "lead", id: leadId, patch: leadPatch });
 
     // 5) Reconcile the final application fields against the pinned parser
     //    contract — no silent data loss. Log every expected field that came back
@@ -282,6 +313,7 @@ export async function promoteLeadToApplication(input: {
       emptyFields: emptyExpected,
       missingCritical,
       pdfOk,
+      retainedInLiveSubs: lifecycle.retainInLiveSubs,
     };
   } catch (err) {
     return await fail("unexpected", err instanceof Error ? err.message : "promote_failed");

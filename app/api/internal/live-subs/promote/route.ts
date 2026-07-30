@@ -114,7 +114,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ ok: false, error: "bad_signature" }, { status: 401 });
   }
 
-  let body: { lead_id?: unknown };
+  let body: { lead_id?: unknown; restore_live_subs?: unknown };
   try {
     body = JSON.parse(raw);
   } catch {
@@ -135,7 +135,12 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ ok: false, error: "tenant_unresolved" }, { status: 500 });
   }
 
-  const result = await promoteLeadToApplication({ tenantId, leadId, source: "live_sub_auto" });
+  const result = await promoteLeadToApplication({
+    tenantId,
+    leadId,
+    source: "live_sub_auto",
+    restoreLiveSubs: body.restore_live_subs === true,
+  });
   if (!result.ok) {
     const status = result.error === "lead_not_found" ? 404 : 500;
     return NextResponse.json({ ok: false, error: result.error, stage: result.stage }, { status });
@@ -149,5 +154,6 @@ export async function POST(req: NextRequest) {
     missing_critical: result.missingCritical,
     empty_fields: result.emptyFields,
     pdf_ok: result.pdfOk,
+    retained_in_live_subs: result.retainedInLiveSubs,
   });
 }

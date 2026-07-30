@@ -93,6 +93,7 @@ async function promoteAndSummarize(tenantId: string, leadId: string) {
     application_id: p.applicationId,
     phone_status: p.phoneStatus,
     missing_critical: p.missingCritical,
+    retained_in_live_subs: p.retainedInLiveSubs,
   };
 }
 
