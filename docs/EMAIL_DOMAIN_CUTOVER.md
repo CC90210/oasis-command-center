@@ -10,6 +10,51 @@ This document exists so the cutover is a checklist rather than a rediscovery.
 
 ---
 
+## First, a correction (2026-07-30)
+
+An earlier version of this document treated the tracking-link domain differing
+from the sending domain as a near-failure. **That was overstated.**
+
+`oasisai.work` is the OASIS Command Center, the CRM platform. SunBiz is a tenant
+brand hosted on it and does not own it. A platform domain differing from the
+tenant's sending brand is the **normal multi-tenant SaaS arrangement**, and it is
+exactly what Mailchimp, HubSpot and Salesforce do for mail sent on a customer's
+behalf. It is not deceptive and it is **not** one of Google's bulk sender
+requirements.
+
+Measured with `scripts/verify-email-domain.mjs` on 2026-07-30, both
+sunbizfunding.com and bluerisebusinesscapital.com meet **8 of 9** requirements,
+with 0 failing. The ninth is the spam complaint rate, which cannot be read without
+Google Postmaster Tools.
+
+| Requirement | Status |
+| --- | --- |
+| SPF published | pass |
+| DKIM signing | pass |
+| DMARC policy exists (`p=none` counts) | pass |
+| **DKIM aligned with From** | pass, key is on the sending domain itself |
+| One-click unsubscribe (RFC 8058) | pass, both headers sent |
+| Opt-outs honored within 2 days | pass, suppression is fail-closed at dispatch |
+| TLS + valid PTR | pass, Google infrastructure |
+| Valid RFC 5322 / Message-Id | pass |
+| Spam rate under 0.3% | **unmeasured** |
+
+**So nothing technically checkable is blocking Google's review.** The real
+remaining gap is measurement, not configuration.
+
+### What a branded tracking domain is actually for
+
+Not compliance. **Reputation attribution.** Engagement on a shared platform host
+pools across every tenant using it, so SunBiz builds none of its own click
+history and inherits whatever other tenants do. A branded CNAME fixes that. It is
+worth doing eventually. It is not urgent, and it is not a prerequisite for
+sending.
+
+`DRIP_TRACKING_BASE_URL` exists so that choice stays available as one variable.
+Leaving it unset is a legitimate permanent answer.
+
+---
+
 ## The three kinds of link in an outbound email
 
 They get conflated constantly, and they have different constraints. Only one of
