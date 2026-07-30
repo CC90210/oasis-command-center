@@ -13,6 +13,23 @@ import { type FormEvent, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Loader2, Plus, X } from "lucide-react";
 
+/** Operator-facing copy per send outcome. Deliberately never says "sent"
+ *  unless the server verified a send. */
+const EMAIL_STATUS_COPY: Record<string, string> = {
+  sent: "Application emailed.",
+  queued: "Lead saved. The application email is queued.",
+  disabled: "Lead saved. Instant send is off, so the drip will pick it up.",
+  duplicate: "Already emailed. Not sending it again.",
+  failed: "Lead saved, but the application email failed to send.",
+  skipped_no_email: "Lead saved. No email address on file, so nothing was sent.",
+  skipped_suppressed: "Lead saved. That address is unsubscribed, so nothing was sent.",
+  skipped_paused: "Lead saved. Drips are paused for this lead, so nothing was sent.",
+  skipped_other: "Lead saved. The application email was skipped. Check the lead's drip log.",
+  held_circuit_open: "Lead saved. Sending is halted right now, so nothing was sent.",
+  held_no_app_link: "Lead saved. No application link could be created, so nothing was sent.",
+  held_blocked_by_guard: "Lead saved. The compliance guard blocked this email, so nothing was sent.",
+};
+
 type Props = {
   open: boolean;
   onClose: () => void;
@@ -77,23 +94,25 @@ export function QuickAddLeadModal({
         }),
       });
       const json = (await res.json().catch(() => ({}))) as {
-        ok?: boolean;
-        error?: string;
-        message?: string;
-        existing?: boolean;
-        advanced?: boolean;
+        ok?: boolean; error?: string; message?: string;
+        existing?: boolean; advanced?: boolean;
+        email?: { status?: string; reason?: string };
       };
       if (!res.ok || !json.ok) {
         setError(json.message || json.error || `Couldn't add lead (${res.status}).`);
         return;
       }
-      // Surface a returning-merchant merge so the rep knows it wasn't a new dup.
+      // Surface the real application-email outcome instead of closing silently.
+      const status = json.email?.status || "queued";
+      const note = EMAIL_STATUS_COPY[status] || "Lead saved.";
       if (json.existing) {
         alert(
-          json.advanced
-            ? `That merchant already had a lead — moved it to ${stageLabel}.`
-            : `That merchant is already at ${stageLabel}.`,
+          `${json.advanced
+            ? `That merchant already had a lead, moved it to ${stageLabel}.`
+            : `That merchant is already at ${stageLabel}.`}\n\n${note}`,
         );
+      } else if (status !== "sent") {
+        alert(note);
       }
       reset();
       onClose();
