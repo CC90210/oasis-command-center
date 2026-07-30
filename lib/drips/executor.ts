@@ -1258,8 +1258,15 @@ export async function dispatchRuns(
   );
   const run: RunState = {
     creditExhausted: false,
+    // Load the volume budget whenever this run may actually SEND. Must agree with
+    // the per-row dripSendEnabled(immediate) check in processEmailStep: if the
+    // rows can move bytes, the budget must exist for consumeEmail to decrement.
+    // Otherwise an instant send happens but is never counted against the
+    // recipient's rolling window, and a later drip stacks on top of it.
     emailBudget:
-      dripSendEnabled() && emailLeadIds.length > 0 ? await loadEmailBudget(db, emailLeadIds) : null,
+      dripSendEnabled(opts.immediate === true) && emailLeadIds.length > 0
+        ? await loadEmailBudget(db, emailLeadIds)
+        : null,
   };
   if (run.emailBudget?.degraded) {
     // The global counts are best-effort this run; the per-lead cap still holds
