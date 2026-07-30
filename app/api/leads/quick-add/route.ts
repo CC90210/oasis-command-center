@@ -35,6 +35,9 @@ import type { InstantEmailOutcome } from "@/lib/drips/immediate-core";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+// This route performs an inline SMTP send (sendApplicationNow), synchronously,
+// in the request. Matches the other email-sending routes' 60s ceiling.
+export const maxDuration = 60;
 
 const DEFAULT_STAGE = "sent_application";
 

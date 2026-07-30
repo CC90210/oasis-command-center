@@ -19,7 +19,7 @@ const EMAIL_STATUS_COPY: Record<string, string> = {
   sent: "Application emailed.",
   queued: "Lead saved. The application email is queued.",
   disabled: "Lead saved. Instant send is off, so the drip will pick it up.",
-  duplicate: "Already emailed. Not sending it again.",
+  duplicate: "Already queued or emailed. Not sending it again.",
   failed: "Lead saved, but the application email failed to send.",
   skipped_no_email: "Lead saved. No email address on file, so nothing was sent.",
   skipped_suppressed: "Lead saved. That address is unsubscribed, so nothing was sent.",
@@ -96,7 +96,7 @@ export function QuickAddLeadModal({
       const json = (await res.json().catch(() => ({}))) as {
         ok?: boolean; error?: string; message?: string;
         existing?: boolean; advanced?: boolean;
-        email?: { status?: string; reason?: string };
+        email?: { status?: string; reason?: string; to?: string };
       };
       if (!res.ok || !json.ok) {
         setError(json.message || json.error || `Couldn't add lead (${res.status}).`);
@@ -107,13 +107,26 @@ export function QuickAddLeadModal({
       // send ran for this stage) — show no email note at all in that case,
       // rather than falling back to a fake "queued".
       const status = json.email?.status;
-      const note = status ? EMAIL_STATUS_COPY[status] || "Lead saved." : "";
+      const to = json.email?.to;
+      // A verified send with a known recipient names it: this is the one and
+      // only place the operator sees which address the mail went to, so a
+      // stale address on a phone-matched lead (never overwritten by policy) is
+      // visible instead of silently invisible under a truthful-but-vague
+      // "Application emailed." Without a recipient, fall back to the plain copy.
+      const note = status
+        ? status === "sent"
+          ? to ? `Application emailed to ${to}.` : EMAIL_STATUS_COPY.sent
+          : EMAIL_STATUS_COPY[status] || "Lead saved."
+        : "";
       if (json.existing) {
         const merge = json.advanced
           ? `That merchant already had a lead, moved it to ${stageLabel}.`
           : `That merchant is already at ${stageLabel}.`;
         alert(note ? `${merge}\n\n${note}` : merge);
-      } else if (status && status !== "sent") {
+      } else if (status && (status !== "sent" || to)) {
+        // Suppressed only for a NEW lead with a verified send but no known
+        // recipient (unchanged prior behavior). A 'sent' WITH a recipient is
+        // shown even for a new lead — seeing the address once is the point.
         alert(note);
       }
       reset();

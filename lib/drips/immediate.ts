@@ -25,7 +25,7 @@ import { isReEntryEligible, isTruthyFlag, staticSkipReason } from "@/lib/drips/d
 import { computeStep0DelayMinutes, enrollmentBufferForStage } from "@/lib/drips/stage-buffer";
 import { ACCELERATED_FLAG, acceleratedSystemLive, hasActiveAcceleratedRun } from "@/lib/drips/accelerated";
 import {
-  instantEnabled, skipToStatus, statusFromRow,
+  instantEnabled, maskEmail, skipToStatus, statusFromRow,
   type EnrollNowSkip, type InstantEmailOutcome,
 } from "@/lib/drips/immediate-core";
 import type { DripStep } from "./types";
@@ -33,7 +33,12 @@ import type { DripStep } from "./types";
 type Db = ReturnType<typeof getServiceSupabase>;
 
 export type EnrollNowResult =
-  | { ok: true; runId: string; sequenceId: string; emailClass: string }
+  // `email` is the address on the lead record AT ENROLL TIME (post the route's
+  // fill-if-missing patch, since this is a fresh read) — the address the
+  // dispatch that follows in the same request will actually send to. Masked
+  // before it ever reaches an operator-facing surface; carried raw only this
+  // far so sendApplicationNow can mask it once it knows a send was real.
+  | { ok: true; runId: string; sequenceId: string; emailClass: string; email: string | null }
   | { ok: false; reason: EnrollNowSkip };
 
 const REDRIP_COOLDOWN_DEFAULT_DAYS = 7;
@@ -173,6 +178,7 @@ export async function enrollNow(args: {
     runId: (ins.data as { id: string }).id,
     sequenceId: seq.id as string,
     emailClass: String(seq.email_class || "commercial"),
+    email: typeof data.email === "string" && data.email.trim() ? data.email.trim() : null,
   };
 }
 
@@ -244,14 +250,32 @@ export async function sendApplicationNow(args: {
   // a forced dry run does too. Only `tallies.sent` counts a genuine send
   // (finishStep with wasReal=true). So 'sent' is reported here and nowhere else,
   // and the row read-back below is used ONLY to explain why it did not send.
-  if (tallies.sent > 0) return { status: "sent", runId: enrolled.runId };
+  if (tallies.sent > 0) {
+    return {
+      status: "sent",
+      runId: enrolled.runId,
+      to: enrolled.email ? maskEmail(enrolled.email) : undefined,
+    };
+  }
 
-  const back = await db.from("drip_runs").select("status, last_error").eq("id", enrolled.runId).single();
+  // from_identity is read alongside status/last_error because the dedup and
+  // forced-dry-run paths terminalize the row to the SAME 'sent'/'done' status
+  // and leave last_error untouched (no "skipped: " prefix exists for them) —
+  // from_identity is the only marker that distinguishes a swallowed re-send
+  // from a genuine one, and statusFromRow checks it before the terminal
+  // check. Without reading it here, a legitimate re-send the never-double-send
+  // backstop ate was reported as "queued" for mail that was never sent and
+  // never would be (the row is already terminal; the cron won't touch it again).
+  const back = await db
+    .from("drip_runs")
+    .select("status, last_error, from_identity")
+    .eq("id", enrolled.runId)
+    .single();
   if (back.error || !back.data) {
     // Cannot verify. Never claim 'sent' on an unverified send.
     return { status: "queued", runId: enrolled.runId, reason: "status_unreadable" };
   }
-  const row = back.data as { status: string; last_error: string | null };
+  const row = back.data as { status: string; last_error: string | null; from_identity: string | null };
   const mapped = statusFromRow(row);
   return {
     // Clamp: no path through the row may upgrade a non-send to 'sent'. This is

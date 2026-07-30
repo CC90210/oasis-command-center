@@ -13,7 +13,17 @@ export type InstantEmailStatus =
   | "held_circuit_open" | "held_no_app_link"
   | "held_blocked_by_guard" | "skipped_other";
 
-export type InstantEmailOutcome = { status: InstantEmailStatus; reason?: string; runId?: string };
+export type InstantEmailOutcome = {
+  status: InstantEmailStatus;
+  reason?: string;
+  runId?: string;
+  /** MASKED recipient (see maskEmail) — set ONLY on a verified 'sent' where the
+   *  address is known. Never the raw address: this surfaces in an operator
+   *  alert, and the repo's rule is PII is redacted in logs/alerts. The point is
+   *  narrow: let the rep SEE which address it went to (catches a stale address
+   *  on a phone-matched lead), not expose the full address. */
+  to?: string;
+};
 
 export type EnrollNowSkip =
   | "no_sequence" | "sequence_steps_invalid" | "dead_or_declined" | "opted_out"
@@ -71,23 +81,51 @@ function reasonOf(err: string): InstantEmailStatus | null {
   return null;
 }
 
+/** The `from_identity` prefix advanceRow stamps on a step it terminalized
+ *  WITHOUT a real send: `alreadySentStep`'s dedup backstop, or a forced
+ *  DRIPS_LIVE=0 / dry-run pass. Both settle the row to the same 'sent'/'done'
+ *  status a genuine send gets, with no "skipped: " prefix on last_error — so
+ *  from_identity is the ONLY signal that distinguishes them from a real send,
+ *  which stamps the row with the actual sender address (e.g.
+ *  "submissions@sunbizfunding.com", no prefix). See executor.ts finishStep /
+ *  advanceRow and the two call sites at "dedup:...", "dry:...". */
+const DEDUP_PREFIX = "dedup:";
+const DRY_PREFIX = "dry:";
+
 /**
  * Map a drip_runs row to an operator-facing outcome.
  *
- * Three cases, because last_error is NEVER cleared by executor.ts and so means
- * different things depending on where the row ended up:
+ * FOUR cases, in order, because last_error is NEVER cleared by executor.ts and
+ * from_identity is stamped on every terminal row regardless of path:
  *
+ *  0. from_identity carries the dedup/dry marker. advanceRow gives THIS row the
+ *     SAME 'sent'/'done' status and (crucially) the SAME null/stale last_error
+ *     a real send would leave — no "skipped: " prefix exists for this path, so
+ *     from_identity must be checked FIRST, before the terminal check below ever
+ *     gets a chance to read the row as a genuine send. Without this a
+ *     legitimate re-send that the never-double-send backstop silently
+ *     swallowed (or a forced dry run) was reported to the rep as "queued" —
+ *     mail that was never sent and never would be, on a row the cron will
+ *     never touch again because it is already terminal.
  *  1. SKIPPED (last_error carries the "skipped: " prefix). advanceRow gives a
  *     skipped step the SAME 'sent'/'done' status as a real send, so the prefix
  *     is the only signal. Never report sent; explain the cause.
- *  2. TERMINAL with no skip prefix. This was a genuine send, and any last_error
- *     is STALE residue from an earlier hold or reschedule that was never
- *     cleared. It must NOT override the send.
+ *  2. TERMINAL with no skip prefix and no dedup/dry marker. This was a genuine
+ *     send, and any last_error is STALE residue from an earlier hold or
+ *     reschedule that was never cleared. It must NOT override the send.
  *  3. NOT TERMINAL. The row is still in flight, held, or failed, so last_error
  *     IS the current reason — match it (this is the 6h app-link hold, which is
  *     status 'scheduled' and carries no prefix).
  */
-export function statusFromRow(row: { status: string; last_error: string | null }): InstantEmailStatus {
+export function statusFromRow(row: {
+  status: string;
+  last_error: string | null;
+  from_identity?: string | null;
+}): InstantEmailStatus {
+  const from = (row.from_identity || "").toLowerCase();
+  if (from.startsWith(DEDUP_PREFIX)) return "duplicate";
+  if (from.startsWith(DRY_PREFIX)) return "disabled";
+
   const raw = (row.last_error || "").toLowerCase();
   const skipped = raw.startsWith(SKIP_PREFIX);
   const err = skipped ? raw.slice(SKIP_PREFIX.length) : raw;
@@ -96,4 +134,20 @@ export function statusFromRow(row: { status: string; last_error: string | null }
   if (skipped) return reasonOf(err) ?? "skipped_other";
   if (terminal) return "sent";
   return reasonOf(err) ?? (row.status === "failed" ? "failed" : "queued");
+}
+
+/**
+ * Mask an email address for a PII-safe operator alert: first character of the
+ * local part, then a fixed "***", then "@domain" verbatim (e.g.
+ * "acme@example.com" -> "a***@example.com"). Never returns the full address.
+ * Pure and total — no throwing on malformed input, because this only ever
+ * feeds a one-line alert, never a decision.
+ */
+export function maskEmail(email: string): string {
+  if (!email) return "";
+  const at = email.indexOf("@");
+  if (at === -1) return `${email[0]}***`;
+  const local = email.slice(0, at);
+  const domain = email.slice(at + 1);
+  return `${local[0] || ""}***@${domain}`;
 }

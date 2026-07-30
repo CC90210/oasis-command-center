@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import {
   instantEnabled,
+  maskEmail,
   skipToStatus,
   statusFromRow,
   type EnrollNowSkip,
@@ -183,6 +184,78 @@ for (const st of ["scheduled", "sending", "failed", "cancelled"]) {
     `an unsettled row must never report sent: ${st}`,
   );
 }
+
+// ── from_identity: the swallowed-resend / forced-dry-run honesty fix ───────
+// CRITICAL 1 (final whole-branch review): alreadySentStep's dedup backstop and
+// a forced dry run both terminalize the row to 'sent'/'done' via finishStep,
+// which does NOT set a "skipped: " prefix on last_error (advanceRow only adds
+// that prefix via skippedReason, which finishStep never passes). Before this
+// fix, statusFromRow's terminal check ran first and read BOTH cases as a
+// genuine send, so sendApplicationNow's clamp (mapped === "sent" ? "queued" :
+// mapped) turned them into "queued" — mail that was never sent and never
+// would be, on a row already terminal so the cron never revisits it.
+// from_identity is checked BEFORE the terminal/skip logic, using the exact
+// prefixes executor.ts stamps: "dedup:<repKey>:<senderId>" /
+// "dedup:submissions@sunbizfunding.com" for the backstop, and
+// "dry:<repKey>:<senderId>" / "dry:submissions@sunbizfunding.com" for a
+// forced dry run (see lib/drips/executor.ts lines ~402, 737, 740, 912, 939).
+assert.equal(
+  statusFromRow({ status: "done", last_error: null, from_identity: "dedup:submissions@sunbizfunding.com" }),
+  "duplicate",
+  "THE SWALLOWED-RESEND BUG: a dedup-backstopped terminal row must report duplicate, never sent/queued",
+);
+assert.equal(
+  statusFromRow({ status: "sent", last_error: null, from_identity: "dedup:accel:12065551234" }),
+  "duplicate",
+  "the per-rep SMS dedup identity shape is recognized too (repKey:senderId)",
+);
+assert.equal(
+  statusFromRow({ status: "done", last_error: null, from_identity: "dry:submissions@sunbizfunding.com" }),
+  "disabled",
+  "THE FORCED-DRY-RUN BUG: a dry-run terminal row must report disabled, never sent/queued",
+);
+assert.equal(
+  statusFromRow({ status: "sent", last_error: null, from_identity: "dry:accel:12065551234" }),
+  "disabled",
+  "the per-rep SMS dry-run identity shape is recognized too",
+);
+// from_identity wins even over an unrelated stale last_error on the row —
+// it is checked strictly before the skip-prefix / terminal logic.
+assert.equal(
+  statusFromRow({
+    status: "sent",
+    last_error: "email_volume_gate (per_lead_weekly_cap)",
+    from_identity: "dedup:submissions@sunbizfunding.com",
+  }),
+  "duplicate",
+  "from_identity is checked before stale last_error residue is consulted",
+);
+// REGRESSION GUARD: a genuine send stamps the row with the REAL sender
+// address (executor.ts: fromIdentity = result.fromAddress on the real-send
+// path), which starts with neither prefix — must still report sent.
+assert.equal(
+  statusFromRow({ status: "sent", last_error: null, from_identity: "submissions@sunbizfunding.com" }),
+  "sent",
+  "REGRESSION GUARD: a genuine send's real from_identity must still report sent",
+);
+assert.equal(
+  statusFromRow({ status: "done", last_error: null, from_identity: null }),
+  "sent",
+  "a terminal row with no from_identity at all (older rows, or the SMS non-real-sender shape) still reports sent",
+);
+assert.equal(
+  statusFromRow({ status: "sent", last_error: "skipped: no_email_for_email_step", from_identity: "dedup:submissions@sunbizfunding.com" }),
+  "duplicate",
+  "from_identity is checked strictly BEFORE the skip-prefix branch too (this combination doesn't occur in practice — finishStep never passes skippedReason — but the ordering must hold regardless of what last_error happens to carry)",
+);
+
+// ── maskEmail: PII-safe recipient surfaced in the 'sent' outcome (IMPORTANT 4) ─
+// Never returns the full address. Never throws on malformed input.
+assert.equal(maskEmail(""), "", "empty string masks to empty string, never throws");
+assert.equal(maskEmail("acme@example.com"), "a***@example.com", "normal case: first char + *** + @domain verbatim");
+assert.equal(maskEmail("a@acme.com"), "a***@acme.com", "single-character local part still masks correctly");
+assert.equal(maskEmail("notanemail"), "n***", "a missing '@' masks the first character with no domain revealed");
+assert.equal(maskEmail("@acme.com"), "***@acme.com", "an empty local part (leading '@') never crashes on undefined[0]");
 
 // ── The forbidden status ────────────────────────────────────────────────────
 // There is no test here: "filtered" is not a member of InstantEmailStatus, so

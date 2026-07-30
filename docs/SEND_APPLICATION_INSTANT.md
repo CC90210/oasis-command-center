@@ -36,7 +36,7 @@ table and the UI cannot drift; if you change one, change the other.
 | `sent` | "Application emailed." | A real, non-dry-run send happened. See the limitation below before reading this as "delivered." |
 | `queued` | "Lead saved. The application email is queued." | The lead is enrolled; the email goes out on the normal dispatch cadence instead of inline. Most often this is the hourly-bypass ceiling (section 6). |
 | `disabled` | "Lead saved. Instant send is off, so the drip will pick it up." | `SEND_APPLICATION_INSTANT=0`. The lead is still enrolled; only the inline dispatch was skipped. |
-| `duplicate` | "Already emailed. Not sending it again." | An active run for this lead and sequence already exists (double Save, retry, or a refresh), or the re-drip cooldown since the last run hasn't elapsed. |
+| `duplicate` | "Already queued or emailed. Not sending it again." | An active run for this lead and sequence already exists (double Save, retry, or a refresh), or the re-drip cooldown since the last run hasn't elapsed. `already_enrolled` covers BOTH a terminal (sent) run and an ACTIVE row that is merely scheduled/held (e.g. behind the volume gate) — the copy says "queued or emailed" rather than asserting a send that may not have happened yet. |
 | `failed` | "Lead saved, but the application email failed to send." | The inline dispatch threw, or the sequence's first step is malformed. |
 | `skipped_no_email` | "Lead saved. No email address on file, so nothing was sent." | The lead has no usable contact method for an email-first step. |
 | `skipped_suppressed` | "Lead saved. That address is unsubscribed, so nothing was sent." | The recipient previously opted out or is on the suppression list. |
