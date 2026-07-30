@@ -37,6 +37,7 @@ import {
 import type { DripSmsIdentity } from "@/lib/drips/rep-sms-identity";
 import { sendGmail } from "@/lib/integrations/submissions-gmail-send";
 import { getSubmissionsFrom } from "@/lib/integrations/submissions-gmail";
+import { fromAddress as configuredFromAddress } from "@/lib/email/sending-identity";
 
 export type DripSmsResult =
   | {
@@ -124,7 +125,10 @@ export async function sendDripEmail(
     listUnsubscribe: opts?.listUnsubscribe,
   });
   if (!result.ok) return { ok: false, error: result.error };
-  let fromAddress = "submissions@sunbizfunding.com";
+  // Label only — the send already happened. Falls back to the configured sending
+  // identity rather than a literal so it does not keep reporting SunBiz after the
+  // Bluerise cutover; the per-tenant lookup below still wins when it resolves.
+  let fromAddress = configuredFromAddress();
   try {
     fromAddress = await getSubmissionsFrom(tenantId);
   } catch {

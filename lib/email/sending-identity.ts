@@ -1,0 +1,182 @@
+/**
+ * lib/email/sending-identity.ts — the single source of truth for WHO outbound
+ * drip mail is from, and WHERE its links point.
+ *
+ * Built 2026-07-29 so the move from SunBiz to Bluerise Business Capital is a set
+ * of environment variables rather than a hunt through the codebase. Before this,
+ * the sending identity was scattered across five files as string literals: the
+ * From address, the unsubscribe mailto, the Message-Id domain, the click
+ * allowlist, and the safe-redirect default. Changing brand meant finding all of
+ * them and missing one.
+ *
+ * Pure, no I/O, no "server-only", so the cutover rules are unit-testable.
+ *
+ * EVERY DEFAULT IS TODAY'S BEHAVIOUR. With nothing set, this resolves to exactly
+ * the SunBiz values that were previously hardcoded. The cutover is config.
+ */
+
+import { resolveTrackingBase, trackingHost } from "./tracking-base";
+
+/** What the sender was before any of this was configurable. Kept as the default
+ *  so an unset environment is byte-identical to the pre-2026-07-29 behaviour. */
+const LEGACY_FROM = "submissions@sunbizfunding.com";
+const LEGACY_PLATFORM = "https://oasisai.work";
+
+function env(name: string): string | undefined {
+  const v = (process.env[name] || "").trim();
+  return v ? v : undefined;
+}
+
+/** The address drip mail is sent From. Per-tenant overrides still win at send
+ *  time (see getSubmissionsFrom); this is the fallback and the identity that
+ *  everything else here is derived from. */
+export function fromAddress(): string {
+  return env("DRIP_FROM_ADDRESS") || LEGACY_FROM;
+}
+
+/** The domain part of the From address. Drives the Message-Id domain and the
+ *  unsubscribe mailto so they can never disagree with the visible sender. */
+export function fromDomain(): string {
+  const at = fromAddress().lastIndexOf("@");
+  const domain = at >= 0 ? fromAddress().slice(at + 1) : "";
+  return domain || "sunbizfunding.com";
+}
+
+/**
+ * The mailto: half of the RFC 8058 List-Unsubscribe header.
+ *
+ * Derived from the From address rather than configured separately, because a
+ * mailto pointing at a different domain than the sender is both a deliverability
+ * signal and a dead end for the recipient: replies to it may not even be
+ * deliverable once the old mailbox is retired.
+ */
+export function unsubscribeMailto(): string {
+  return `mailto:${fromAddress()}?subject=unsubscribe`;
+}
+
+/** The domain used to synthesize RFC 5322 Message-Ids. Must match the sending
+ *  domain or receivers see a Message-Id that does not correspond to the sender,
+ *  which some filters score against. */
+export function messageIdDomain(): string {
+  return fromDomain();
+}
+
+/** The shared platform origin. */
+export function platformOrigin(): string {
+  return resolveTrackingBase(undefined, env("PUBLIC_APP_URL") || LEGACY_PLATFORM);
+}
+
+/**
+ * The origin drip tracking, unsubscribe and per-lead application links are built
+ * on. Keyed to the sending PATH, not to a brand name, because the brand is what
+ * is changing.
+ *
+ * Unset falls back to the platform origin, which is the current behaviour and is
+ * why this is safe to deploy before any DNS exists.
+ */
+export function trackingOrigin(): string {
+  return resolveTrackingBase(env("DRIP_TRACKING_BASE_URL"), platformOrigin());
+}
+
+/**
+ * THE SUPPRESSION BRAND, and the sharpest edge in this whole cutover.
+ *
+ * This string is NOT cosmetic. /api/unsubscribe resolves it to a tenant
+ * (tenants.name ILIKE <brand>) when RECORDING an opt-out. If it ever fails to
+ * match a real tenant, the suppression row lands with tenant_id = NULL, and
+ * checkEmailSuppressed — which filters by tenant_id — will never honor it. The
+ * unsubscribe silently does nothing and the merchant keeps receiving mail.
+ *
+ * The good news, verified 2026-07-29: enforcement keys on (tenant_id, email) and
+ * does NOT consult the brand, so previously recorded suppressions keep working
+ * through a rebrand. The hazard is only on the WRITE path, and only for
+ * suppressions recorded AFTER the brand changes.
+ *
+ * So this deliberately does NOT follow the From address. Changing who the mail
+ * is from must not silently repoint where opt-outs are filed. If Bluerise sends
+ * as its own tenant, set this to that tenant's exact name. If it sends under the
+ * existing tenant, leave it alone. scripts/verify-email-domain.mjs checks that
+ * whatever is set here actually resolves to a tenant before you go live.
+ */
+export function suppressionBrand(): string {
+  return env("DRIP_SUPPRESSION_BRAND") || "SunBiz";
+}
+
+/** Where the generic CTA sends a lead that has no per-lead application link. The
+ *  one link in an outbound email that is free to point at any website at all,
+ *  including a marketing site this app does not serve. */
+export function intakeUrl(): string {
+  return env("DRIP_INTAKE_URL") || `${platformOrigin()}/f/submissions/initial-lead-capture`;
+}
+
+/**
+ * Hosts a click may redirect to WITHOUT a valid signature.
+ *
+ * Derived rather than hardcoded so it cannot drift from what actually mints the
+ * links. The legacy hosts stay because mail already in inboxes points at them and
+ * must keep working long after the cutover: a merchant opening a three-week-old
+ * email should still land on the right page, not the safe default.
+ */
+export function clickAllowedHosts(): Set<string> {
+  const hosts = new Set([
+    "oasisai.work",
+    "www.oasisai.work",
+    "sunbizfunding.com",
+    "www.sunbizfunding.com",
+  ]);
+  const tracking = trackingHost(env("DRIP_TRACKING_BASE_URL"));
+  if (tracking) hosts.add(tracking);
+  // The sending domain itself, and its www form, so a hand-written link in a
+  // template body to the brand's own site is not downgraded.
+  const sending = fromDomain().toLowerCase();
+  if (sending) {
+    hosts.add(sending);
+    hosts.add(`www.${sending}`);
+  }
+  // The CTA destination may be an entirely separate marketing site.
+  try {
+    const intake = new URL(intakeUrl());
+    if (intake.protocol === "https:") hosts.add(intake.hostname.toLowerCase());
+  } catch {
+    /* an unparseable intake URL contributes nothing rather than widening */
+  }
+  return hosts;
+}
+
+/** Everything resolved at once, for the preflight script and for logging a
+ *  cutover so the state at send time is recoverable from the audit trail. */
+export type SendingIdentity = {
+  fromAddress: string;
+  fromDomain: string;
+  trackingOrigin: string;
+  platformOrigin: string;
+  intakeUrl: string;
+  suppressionBrand: string;
+  unsubscribeMailto: string;
+  /** True once tracking links are on the sending domain rather than the shared
+   *  platform origin — the whole point of the cutover. */
+  aligned: boolean;
+};
+
+export function sendingIdentity(): SendingIdentity {
+  const from = fromAddress();
+  const tracking = trackingOrigin();
+  const domain = fromDomain();
+  let aligned = false;
+  try {
+    const host = new URL(tracking).hostname.toLowerCase();
+    aligned = host === domain || host.endsWith(`.${domain}`);
+  } catch {
+    aligned = false;
+  }
+  return {
+    fromAddress: from,
+    fromDomain: domain,
+    trackingOrigin: tracking,
+    platformOrigin: platformOrigin(),
+    intakeUrl: intakeUrl(),
+    suppressionBrand: suppressionBrand(),
+    unsubscribeMailto: unsubscribeMailto(),
+    aligned,
+  };
+}

@@ -67,6 +67,63 @@ regression.
 
 ---
 
+## Preflight: run this before and after the cutover
+
+```
+node scripts/verify-email-domain.mjs
+```
+
+Read-only, no sends, no secrets printed. Flags override the environment so the
+cutover can be rehearsed from a laptop:
+
+```
+node scripts/verify-email-domain.mjs \
+  --from funding@bluerisebusinesscapital.com \
+  --tracking https://go.bluerisebusinesscapital.com \
+  --intake https://bluerisebusinesscapital.com/apply
+```
+
+It checks SPF, DKIM and DMARC on the sending domain, whether the tracking origin
+actually aligns with the visible sender, and whether the tracking host is really
+attached to this Vercel project (a host that resolves but 404s on
+`/api/unsubscribe` means dead unsubscribe links). Exit 1 on any failure.
+
+**Measured 2026-07-29, before any cutover work:**
+
+| Domain | SPF | DKIM | DMARC |
+| --- | --- | --- | --- |
+| sunbizfunding.com | pass | pass | `p=none`, **no `rua=`** |
+| bluerisebusinesscapital.com | pass | pass | `p=none`, **`rua=` present** |
+
+Bluerise is already correctly authenticated, and better configured than SunBiz:
+it has a reporting address, so aggregate DMARC data will actually arrive. Nothing
+is blocking the cutover on the DNS side.
+
+---
+
+## The one genuinely dangerous setting
+
+`DRIP_SUPPRESSION_BRAND` (default `SunBiz`).
+
+`/api/unsubscribe` resolves that string to a tenant (`tenants.name ILIKE`) when
+it RECORDS an opt-out. If it matches no tenant, the suppression row is written
+with `tenant_id = NULL`, and `checkEmailSuppressed` filters by `tenant_id`, so
+the opt-out is never honored. The unsubscribe appears to work and the merchant
+keeps receiving mail.
+
+Two mitigating facts, verified 2026-07-29:
+
+- Enforcement keys on `(tenant_id, email)` and does not consult the brand, so
+  **every suppression recorded before the rebrand keeps working.**
+- The value deliberately does NOT follow `DRIP_FROM_ADDRESS`. Changing who mail
+  is from cannot silently repoint where opt-outs are filed.
+
+**Decide explicitly before go-live:** if Bluerise sends as its own tenant, set
+this to that tenant's exact name. If it sends under the existing tenant, leave it
+alone. Confirm against the database either way.
+
+---
+
 ## Cutover checklist (day 5, once warmup completes)
 
 **In the DNS host for bluerisebusinesscapital.com:**
@@ -79,10 +136,23 @@ regression.
 2. Domains, add `go.bluerisebusinesscapital.com`. This attaches a hostname to the
    existing app. It does not move or affect the marketing site.
 3. Environment variables:
+   - `DRIP_FROM_ADDRESS = funding@bluerisebusinesscapital.com` (the real mailbox)
    - `DRIP_TRACKING_BASE_URL = https://go.bluerisebusinesscapital.com`
    - `DRIP_INTAKE_URL = https://bluerisebusinesscapital.com/apply` (or wherever
      the funnel should start)
+   - `DRIP_SUPPRESSION_BRAND` — only if Bluerise is a separate tenant. See the
+     warning above; getting this wrong breaks opt-outs silently.
 4. Redeploy so the new values are picked up.
+
+   Setting `DRIP_FROM_ADDRESS` moves the From address, the `List-Unsubscribe`
+   mailto and the synthesized `Message-Id` domain together, because all three
+   derive from it. That mattered: before this they were three separate literals in
+   three files and would have kept saying `sunbizfunding.com` on Bluerise mail.
+
+   Note the per-tenant mailbox lookup (`getSubmissionsFrom`) still wins at send
+   time when it resolves, so the actual sending mailbox credentials are configured
+   where they always were; `DRIP_FROM_ADDRESS` is the identity everything else is
+   derived from.
 
 **Before the first real send from the new domain:**
 

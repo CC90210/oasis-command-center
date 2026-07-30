@@ -28,6 +28,7 @@
 import "server-only";
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { resolveTrackingBase } from "./tracking-base";
+import { unsubscribeMailto } from "./sending-identity";
 
 // The brand string MUST resolve to the SunBiz tenant in /api/unsubscribe's
 // resolveTenantId (matches tenants.name ILIKE 'SunBiz') or the recorded
@@ -214,7 +215,10 @@ export function listUnsubscribeHeader(
   brand: string = SUNBIZ_BRAND,
   base: string = platformTrackingBase(),
 ): string {
-  return `<${unsubscribeApiUrl(email, brand, base)}>, <mailto:submissions@sunbizfunding.com?subject=unsubscribe>`;
+  // The mailto is derived from the configured From address, never hardcoded: a
+  // mailto pointing at a different domain than the visible sender is both a
+  // deliverability signal and a dead end once the old mailbox is retired.
+  return `<${unsubscribeApiUrl(email, brand, base)}>, <${unsubscribeMailto()}>`;
 }
 
 export type UnsubMode = "footer" | "none";

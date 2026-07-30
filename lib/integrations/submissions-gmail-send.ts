@@ -23,6 +23,7 @@
 import "server-only";
 import { randomUUID } from "node:crypto";
 import { getSubmissionsCreds, getSubmissionsFrom } from "./submissions-gmail";
+import { messageIdDomain } from "@/lib/email/sending-identity";
 
 export type SendPayload = {
   to: string;
@@ -95,7 +96,11 @@ export type SendResult =
  * side without needing the Gmail API.
  */
 function synthesizeMessageId(): string {
-  return `<${randomUUID()}@sunbizfunding.com>`;
+  // Derived from the configured sending domain (2026-07-29). A Message-Id whose
+  // domain does not match the visible sender is scored against by some filters,
+  // and hardcoding it here would have quietly kept saying sunbizfunding.com after
+  // the Bluerise cutover. Defaults to the legacy domain when unconfigured.
+  return `<${randomUUID()}@${messageIdDomain()}>`;
 }
 
 async function sendOnce(
