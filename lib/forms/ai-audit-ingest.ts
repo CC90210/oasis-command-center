@@ -195,7 +195,8 @@ export async function ingestAiAuditSubmission(input: IngestInput): Promise<Inges
         status: s.status,
         updated_at: new Date().toISOString(),
       })
-      .eq("id", leadId);
+      .eq("id", leadId)
+      .eq("tenant_id", tenantId);
     if (upd.error) {
       console.error("[ai-audit.ingest] lead update failed:", upd.error.message);
     }
