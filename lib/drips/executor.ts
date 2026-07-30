@@ -1122,7 +1122,15 @@ async function processRow(
   return processEmailStep(db, row, data, step, steps, seq.emailClass || "commercial", run);
 }
 
-export type DispatchOpts = { immediate?: boolean };
+export type DispatchOpts = {
+  immediate?: boolean;
+  /** Clock origin for the SOFT_BUDGET_MS early-exit. The cron passes its OWN
+   *  start time so the reclaim, hourly-cap and due-row queries stay inside the
+   *  50s window — the margin under the route's 60s maxDuration depends on it.
+   *  Omitted (the inline single-row path) means "this call is the whole
+   *  request", so the clock starts now. */
+  startedAt?: number;
+};
 
 /**
  * Claim → prefetch → process a KNOWN set of drip_runs ids. Extracted from
@@ -1139,7 +1147,7 @@ export async function dispatchRuns(
   runIds: string[],
   opts: DispatchOpts = {},
 ): Promise<DispatchDripsResult> {
-  const startedAt = Date.now();
+  const startedAt = opts.startedAt ?? Date.now();
   const empty = (): DispatchDripsResult => ({
     ok: true, reclaimed: 0, claimed: 0, processed: 0, sent: 0,
     dryRun: 0, rescheduled: 0, retryPending: 0, failed: 0, cancelled: 0,
@@ -1147,8 +1155,9 @@ export async function dispatchRuns(
   });
   if (runIds.length === 0) return empty();
 
-  // 3) Claim: conditional UPDATE (status still 'scheduled' at write time).
-  // Stamp claimed_at so the stale-reclaim above can tell a fresh claim from a
+  // 1) Claim: conditional UPDATE (status still 'scheduled' at write time).
+  // Stamp claimed_at so the stale-reclaim (in runDispatchDrips; it does not
+  // run for a direct caller of this function) can tell a fresh claim from a
   // genuinely stuck one (audit H3).
   const claimRes = await db
     .from("drip_runs")
@@ -1160,7 +1169,7 @@ export async function dispatchRuns(
   const claimed = (claimRes.data || []) as ClaimedRow[];
   if (claimed.length === 0) return empty();
 
-  // 4) Batch-prefetch every distinct lead + sequence this batch touches.
+  // 2) Batch-prefetch every distinct lead + sequence this batch touches.
   // Maps below are keyed by "tenant_id|id" so a (theoretical) cross-tenant
   // UUID collision can never mix up rows between tenants.
   const leadIds = Array.from(new Set(claimed.map((r) => r.lead_id)));
@@ -1209,7 +1218,7 @@ export async function dispatchRuns(
     console.error("[dispatch-drips] sequence prefetch failed", err);
   }
 
-  // 5) Process serially, each fully isolated by try/catch so one bad row
+  // 3) Process serially, each fully isolated by try/catch so one bad row
   // never blocks the rest of the batch. Stop early if we're eating into the
   // platform timeout — remainder stays 'sending' and is caught by the
   // stale-reclaim above on a later run. Outcomes are tallied in-process
@@ -1280,6 +1289,7 @@ export async function dispatchRuns(
 }
 
 export async function runDispatchDrips(): Promise<DispatchDripsResult> {
+  const startedAt = Date.now();
   const db = getServiceSupabase();
   const nowIso = new Date().toISOString();
   const staleBeforeIso = new Date(Date.now() - STALE_SENDING_MINUTES * 60_000).toISOString();
@@ -1349,7 +1359,7 @@ export async function runDispatchDrips(): Promise<DispatchDripsResult> {
   if (dueRes.error) return empty();
   const dueIds = (dueRes.data || []).map((r) => (r as { id: string }).id);
   if (dueIds.length === 0) return empty();
-  const result = await dispatchRuns(db, dueIds);
+  const result = await dispatchRuns(db, dueIds, { startedAt });
   // reclaimed is re-attached here because the stale-reclaim block stayed in
   // this function; dispatchRuns never reclaims.
   return { ...result, reclaimed };
