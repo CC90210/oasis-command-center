@@ -79,8 +79,10 @@ export default function PrivacyPage() {
           leads, and draft outbound communications without a human reviewing each
           step. These are operational decisions about workflow — they do not by
           themselves determine eligibility for credit, employment, housing, or
-          insurance. A human operator reviews and approves any communication sent
-          on a tenant&rsquo;s behalf and any financial action.
+          insurance. Transactional messages such as submission confirmations and
+          welcome emails are sent automatically. A human operator reviews and
+          approves any other communication sent on a tenant&rsquo;s behalf and
+          any financial action.
         </p>
         <p>
           If you are in Quebec, you have the right under the{" "}
