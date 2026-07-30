@@ -1122,77 +1122,30 @@ async function processRow(
   return processEmailStep(db, row, data, step, steps, seq.emailClass || "commercial", run);
 }
 
-export async function runDispatchDrips(): Promise<DispatchDripsResult> {
+export type DispatchOpts = { immediate?: boolean };
+
+/**
+ * Claim → prefetch → process a KNOWN set of drip_runs ids. Extracted from
+ * runDispatchDrips (2026-07-30) so the instant application send can dispatch a
+ * single row inline without duplicating claim/prefetch/telemetry logic.
+ *
+ * Deliberately does NOT decide which rows are due, reclaim stale 'sending'
+ * rows, or apply the hourly cap — those are properties of a scheduled sweep,
+ * not of dispatching a row someone just handed us, and they stay in
+ * runDispatchDrips.
+ */
+export async function dispatchRuns(
+  db: Db,
+  runIds: string[],
+  opts: DispatchOpts = {},
+): Promise<DispatchDripsResult> {
   const startedAt = Date.now();
-  const db = getServiceSupabase();
-  const nowIso = new Date().toISOString();
-  const staleBeforeIso = new Date(Date.now() - STALE_SENDING_MINUTES * 60_000).toISOString();
-
-  // 1) Stale-'sending' recovery — keyed on CLAIM age (claimed_at), NOT
-  // scheduled_for (audit H3). A row claimed seconds ago whose scheduled_for is
-  // >15 min old (normal when dispatch is backed up / after a quiet-hours
-  // reschedule) must NOT be reclaimed mid-send — that resurrects an in-flight
-  // send and double-texts the merchant. Only a genuine crash-mid-send (row
-  // stuck 'sending' with an aged claimed_at) is recovered.
-  let reclaimed = 0;
-  try {
-    const reclaim = await db
-      .from("drip_runs")
-      .update({ status: "scheduled" })
-      .eq("status", "sending")
-      .lt("claimed_at", staleBeforeIso)
-      .select("id");
-    reclaimed = reclaim.data?.length || 0;
-  } catch (err) {
-    console.error("[dispatch-drips] stale reclaim failed", err);
-  }
-
   const empty = (): DispatchDripsResult => ({
-    ok: true, reclaimed, claimed: 0, processed: 0, sent: 0,
+    ok: true, reclaimed: 0, claimed: 0, processed: 0, sent: 0,
     dryRun: 0, rescheduled: 0, retryPending: 0, failed: 0, cancelled: 0,
     creditHalted: false,
   });
-
-  // 2) Hourly send cap (live mode only) — the hard drip throttle. Count REAL
-  // drip sends in the rolling last hour and claim at most (HOURLY_CAP - that),
-  // so total output can never exceed ~HOURLY_CAP/hour no matter how many rows
-  // are due. (Dry runs and channel-skips also advance to 'sent'/'done', so this
-  // slightly over-counts and errs toward under-sending — the safe side of "no
-  // blast". Only enforced in live mode; dry runs move zero bytes.)
-  let claimBudget = BATCH_LIMIT;
-  if (dripSendEnabled() && HOURLY_CAP > 0) {
-    const oneHourAgoIso = new Date(Date.now() - 3_600_000).toISOString();
-    try {
-      // Count settled sends this hour PLUS any rows a concurrent run has already
-      // claimed ('sending', always recent — reclaimed after STALE_SENDING_MINUTES).
-      // Counting in-flight rows stops two overlapping ticks (the Vercel cron and
-      // the external pinger) from each budgeting a full HOURLY_CAP and stacking
-      // past it — the "pace, not blast" guarantee must hold under overlap.
-      const [settled, inflight] = await Promise.all([
-        db.from("drip_runs").select("id", { count: "exact", head: true }).in("status", ["sent", "done"]).gte("sent_at", oneHourAgoIso),
-        db.from("drip_runs").select("id", { count: "exact", head: true }).eq("status", "sending"),
-      ]);
-      const sentLastHour = (settled.count || 0) + (inflight.count || 0);
-      claimBudget = Math.max(0, Math.min(BATCH_LIMIT, HOURLY_CAP - sentLastHour));
-    } catch (err) {
-      // Can't measure the rate → trickle a few rather than risk a burst.
-      console.error("[dispatch-drips] hourly-cap count failed, trickling", err);
-      claimBudget = Math.min(BATCH_LIMIT, 5);
-    }
-    if (claimBudget <= 0) return empty(); // at the hourly ceiling — wait for the next tick
-  }
-
-  // 3) Find due 'scheduled' work (bounded by the hourly cap).
-  const dueRes = await db
-    .from("drip_runs")
-    .select("id")
-    .eq("status", "scheduled")
-    .lte("scheduled_for", nowIso)
-    .order("scheduled_for", { ascending: true })
-    .limit(claimBudget);
-  if (dueRes.error) return empty();
-  const dueIds = (dueRes.data || []).map((r) => (r as { id: string }).id);
-  if (dueIds.length === 0) return empty();
+  if (runIds.length === 0) return empty();
 
   // 3) Claim: conditional UPDATE (status still 'scheduled' at write time).
   // Stamp claimed_at so the stale-reclaim above can tell a fresh claim from a
@@ -1200,7 +1153,7 @@ export async function runDispatchDrips(): Promise<DispatchDripsResult> {
   const claimRes = await db
     .from("drip_runs")
     .update({ status: "sending", claimed_at: new Date().toISOString() })
-    .in("id", dueIds)
+    .in("id", runIds)
     .eq("status", "scheduled")
     .select("id, tenant_id, lead_id, sequence_id, sequence_name, step_index, channel, attempts");
   if (claimRes.error) return empty();
@@ -1321,7 +1274,83 @@ export async function runDispatchDrips(): Promise<DispatchDripsResult> {
   }
 
   return {
-    ok: true, reclaimed, claimed: claimed.length, processed, sent, dryRun,
+    ok: true, reclaimed: 0, claimed: claimed.length, processed, sent, dryRun,
     rescheduled, retryPending, failed, cancelled, creditHalted: run.creditExhausted,
   };
+}
+
+export async function runDispatchDrips(): Promise<DispatchDripsResult> {
+  const db = getServiceSupabase();
+  const nowIso = new Date().toISOString();
+  const staleBeforeIso = new Date(Date.now() - STALE_SENDING_MINUTES * 60_000).toISOString();
+
+  // 1) Stale-'sending' recovery — keyed on CLAIM age (claimed_at), NOT
+  // scheduled_for (audit H3). A row claimed seconds ago whose scheduled_for is
+  // >15 min old (normal when dispatch is backed up / after a quiet-hours
+  // reschedule) must NOT be reclaimed mid-send — that resurrects an in-flight
+  // send and double-texts the merchant. Only a genuine crash-mid-send (row
+  // stuck 'sending' with an aged claimed_at) is recovered.
+  let reclaimed = 0;
+  try {
+    const reclaim = await db
+      .from("drip_runs")
+      .update({ status: "scheduled" })
+      .eq("status", "sending")
+      .lt("claimed_at", staleBeforeIso)
+      .select("id");
+    reclaimed = reclaim.data?.length || 0;
+  } catch (err) {
+    console.error("[dispatch-drips] stale reclaim failed", err);
+  }
+
+  const empty = (): DispatchDripsResult => ({
+    ok: true, reclaimed, claimed: 0, processed: 0, sent: 0,
+    dryRun: 0, rescheduled: 0, retryPending: 0, failed: 0, cancelled: 0,
+    creditHalted: false,
+  });
+
+  // 2) Hourly send cap (live mode only) — the hard drip throttle. Count REAL
+  // drip sends in the rolling last hour and claim at most (HOURLY_CAP - that),
+  // so total output can never exceed ~HOURLY_CAP/hour no matter how many rows
+  // are due. (Dry runs and channel-skips also advance to 'sent'/'done', so this
+  // slightly over-counts and errs toward under-sending — the safe side of "no
+  // blast". Only enforced in live mode; dry runs move zero bytes.)
+  let claimBudget = BATCH_LIMIT;
+  if (dripSendEnabled() && HOURLY_CAP > 0) {
+    const oneHourAgoIso = new Date(Date.now() - 3_600_000).toISOString();
+    try {
+      // Count settled sends this hour PLUS any rows a concurrent run has already
+      // claimed ('sending', always recent — reclaimed after STALE_SENDING_MINUTES).
+      // Counting in-flight rows stops two overlapping ticks (the Vercel cron and
+      // the external pinger) from each budgeting a full HOURLY_CAP and stacking
+      // past it — the "pace, not blast" guarantee must hold under overlap.
+      const [settled, inflight] = await Promise.all([
+        db.from("drip_runs").select("id", { count: "exact", head: true }).in("status", ["sent", "done"]).gte("sent_at", oneHourAgoIso),
+        db.from("drip_runs").select("id", { count: "exact", head: true }).eq("status", "sending"),
+      ]);
+      const sentLastHour = (settled.count || 0) + (inflight.count || 0);
+      claimBudget = Math.max(0, Math.min(BATCH_LIMIT, HOURLY_CAP - sentLastHour));
+    } catch (err) {
+      // Can't measure the rate → trickle a few rather than risk a burst.
+      console.error("[dispatch-drips] hourly-cap count failed, trickling", err);
+      claimBudget = Math.min(BATCH_LIMIT, 5);
+    }
+    if (claimBudget <= 0) return empty(); // at the hourly ceiling — wait for the next tick
+  }
+
+  // 3) Find due 'scheduled' work (bounded by the hourly cap).
+  const dueRes = await db
+    .from("drip_runs")
+    .select("id")
+    .eq("status", "scheduled")
+    .lte("scheduled_for", nowIso)
+    .order("scheduled_for", { ascending: true })
+    .limit(claimBudget);
+  if (dueRes.error) return empty();
+  const dueIds = (dueRes.data || []).map((r) => (r as { id: string }).id);
+  if (dueIds.length === 0) return empty();
+  const result = await dispatchRuns(db, dueIds);
+  // reclaimed is re-attached here because the stale-reclaim block stayed in
+  // this function; dispatchRuns never reclaims.
+  return { ...result, reclaimed };
 }
