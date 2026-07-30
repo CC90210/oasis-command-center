@@ -52,7 +52,8 @@ import { notifyOasisFunnelSubmission } from "@/lib/forms/oasis-funnel-notify";
 import { buildOasisLeadPatch } from "@/lib/forms/oasis-funnel-format";
 import { OASIS_FUNNEL_SLUG, OASIS_FUNNEL_TENANT_ID } from "@/lib/forms/oasis-funnel-seed";
 import { AI_AUDIT_SLUG, AI_AUDIT_TENANT_ID } from "@/lib/forms/oasis-ai-audit-seed";
-import { ingestAiAuditSubmission } from "@/lib/forms/ai-audit-ingest";
+import { ingestAiAuditSubmission, scoreAiAuditLead } from "@/lib/forms/ai-audit-ingest";
+import { notifyAiAuditSubmission } from "@/lib/forms/ai-audit-notify";
 import { maybeGenerateApplicationDocument } from "@/lib/forms/application-document";
 import { sendSunbizLeadEvent } from "@/lib/notify/sunbiz-events";
 import { sendFormCompletionEmail } from "@/lib/notify/form-completion-email";
@@ -1126,21 +1127,33 @@ export async function POST(req: NextRequest) {
     form.slug === AI_AUDIT_SLUG
   ) {
     const answers = { ...mergedAnswers };
-    after(() =>
-      ingestAiAuditSubmission({
+    after(async () => {
+      const r = await ingestAiAuditSubmission({
         db,
         tenantId: form.tenant_id,
         leadId: link.lead_id,
         answers,
-      }).then((r) => {
-        if (!r.ok) {
-          console.error("[forms.submit.ai_audit_ingest.failed]", {
-            lead_id: link.lead_id,
-            error: r.error,
-          });
-        }
-      }),
-    );
+      });
+      if (!r.ok) {
+        console.error("[forms.submit.ai_audit_ingest.failed]", {
+          lead_id: link.lead_id,
+          error: r.error,
+        });
+      }
+      // Tell CC, and confirm to the lead. Until 2026-07-30 this block scored
+      // the lead and stopped — a funnel that ranks someone 90/100 in silence
+      // does the work and lets the lead go cold. Scoring is recomputed here
+      // only if ingest could not return it, so the alert always carries the
+      // same numbers that were written to the timeline.
+      const score = r.breakdown ?? scoreAiAuditLead(answers);
+      await notifyAiAuditSubmission({
+        db,
+        tenantId: form.tenant_id,
+        leadId: link.lead_id,
+        answers,
+        score,
+      });
+    });
   }
 
   return NextResponse.json({

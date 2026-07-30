@@ -29,6 +29,16 @@ export async function notifyOasisFunnelSubmission(
     sendTelegram(buildOasisFunnelAlert(answers)).then((r) => {
       if (!r.ok) console.error("[oasis-funnel.notify] telegram:", r.reason);
     }),
-    sendOasisFunnelWelcome({ db, tenantId, leadId, answers }),
+    // Inspect the email result too. This call used to discard it while the
+    // Telegram branch above logged its failure — so a dead GMAIL_APP_PASSWORD
+    // silently cost every lead their welcome email with nothing in the logs,
+    // and only the Telegram half was observable. "already_sent"/"suppressed"
+    // are correct outcomes, not failures, and stay quiet.
+    sendOasisFunnelWelcome({ db, tenantId, leadId, answers }).then((r) => {
+      if (!r.sent && r.reason &&
+          !["already_sent", "suppressed", "no_usable_email"].includes(r.reason)) {
+        console.error("[oasis-funnel.notify] welcome email:", r.reason);
+      }
+    }),
   ]);
 }

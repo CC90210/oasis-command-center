@@ -165,6 +165,11 @@ export type IngestResult = {
   ok: boolean;
   score?: number;
   status?: LeadStatus;
+  /** The full breakdown this call already computed. Returned so the notify
+   *  step can reuse it instead of re-scoring — CC's Telegram alert must quote
+   *  the SAME numbers and reasons that were written to the lead timeline, and
+   *  re-deriving them is how those two drift apart. */
+  breakdown?: ScoreBreakdown;
   interaction_id?: string;
   error?: string;
 };
@@ -220,13 +225,16 @@ export async function ingestAiAuditSubmission(input: IngestInput): Promise<Inges
       .maybeSingle();
     if (ins.error) {
       console.error("[ai-audit.ingest] interaction insert failed:", ins.error.message);
-      return { ok: false, score: s.score, status: s.status, error: ins.error.message };
+      // Still hand back the breakdown: the timeline write failed but the score
+      // is valid, and CC would rather get the alert than lose the lead too.
+      return { ok: false, score: s.score, status: s.status, breakdown: s, error: ins.error.message };
     }
 
     return {
       ok: true,
       score: s.score,
       status: s.status,
+      breakdown: s,
       interaction_id: (ins.data as { id?: string } | null)?.id,
     };
   } catch (err) {
