@@ -32,6 +32,7 @@ import {
 import RecordFundedDeal from "@/components/renewals/RecordFundedDeal";
 import { resolveSessionContext } from "@/lib/api-auth";
 import { canWriteCrm } from "@/lib/role-gates";
+import { RenewalDetailDrawer } from "@/components/renewals/RenewalDetailDrawer";
 
 export const dynamic = "force-dynamic";
 
@@ -71,6 +72,7 @@ export default async function RenewalsPage() {
 
   return (
     <div className="space-y-6 animate-fade-in">
+      <RenewalDetailDrawer />
       <PageHeader
         title="Renewals"
         subtitle={

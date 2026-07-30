@@ -30,6 +30,7 @@ const YMD_RE = /^\d{4}-\d{2}-\d{2}$/;
 
 type Body = {
   lead_id?: unknown;
+  lender_id?: unknown;
   merchant_name?: unknown;
   contact_name?: unknown;
   lender_name?: unknown;
@@ -61,6 +62,28 @@ export async function GET(req: NextRequest) {
 
   const query = (req.nextUrl.searchParams.get("q") || "").trim().toLowerCase().slice(0, 100);
   const db = getServiceSupabase();
+  if (req.nextUrl.searchParams.get("kind") === "lenders") {
+    const result = await db.from("tenant_records").select("id,data,updated_at")
+      .eq("tenant_id", sess.tenantId).eq("entity_type", "lender")
+      .order("updated_at", { ascending: false }).limit(250);
+    if (result.error) return NextResponse.json({ ok: false, error: "search_failed" }, { status: 500 });
+    const lenders = (result.data || []).map((row) => {
+      const data = (row.data || {}) as LeadData;
+      return {
+        id: row.id,
+        name: firstText(data, ["name", "lender_name"]) || "Unnamed lender",
+        contact_name: firstText(data, ["contact_name"]),
+        email: firstText(data, ["contact_email", "contact"]),
+        phone: firstText(data, ["contact_phone", "phone"]),
+        network: firstText(data, ["lender_network"]),
+        product_type: firstText(data, ["product_type"]),
+        active: data.active !== false,
+      };
+    }).filter((lender) => lender.active && (!query ||
+      [lender.name, lender.contact_name, lender.email, lender.phone].filter(Boolean)
+        .some((value) => value!.toLowerCase().includes(query)))).slice(0, 25);
+    return NextResponse.json({ ok: true, lenders });
+  }
   const result = await db
     .from("tenant_records")
     .select("id, data, updated_at")
@@ -217,6 +240,17 @@ export async function POST(req: NextRequest) {
     );
   }
   const leadData = (leadResult.data.data || {}) as LeadData;
+  const lender_id = typeof body.lender_id === "string" ? body.lender_id.trim() : "";
+  const lenderResult = lender_id ? await db.from("tenant_records").select("id,data")
+    .eq("tenant_id", tenantId).eq("entity_type", "lender").eq("id", lender_id).maybeSingle() : null;
+  if (!lenderResult?.data) {
+    return NextResponse.json(
+      { ok: false, error: "invalid_lender", errors: { lender_id: "Select a lender from the lender directory." } },
+      { status: 400 },
+    );
+  }
+  const lenderData = (lenderResult.data.data || {}) as LeadData;
+  const lender_name = firstText(lenderData, ["name", "lender_name"]);
 
   // ── validate ───────────────────────────────────────────────────────────────
   const errors: Record<string, string> = {};
@@ -315,9 +349,10 @@ export async function POST(req: NextRequest) {
     .insert({
       tenant_id: tenantId,
       lead_id,
+      lender_id,
       merchant_name,
       contact_name: text(body.contact_name, 200),
-      lender_name: text(body.lender_name, 200),
+      lender_name,
       funded_amount_usd,
       factor_rate,
       term_months,

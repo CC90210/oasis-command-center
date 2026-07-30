@@ -24,6 +24,7 @@ import { resolveSessionContext } from "@/lib/api-auth";
 import { canWriteCrm } from "@/lib/role-gates";
 import { fmtCurrency, groupRows, RenewalRow } from "./renewals-shared";
 import RecordFundedDeal from "./RecordFundedDeal";
+import { RenewalDetailDrawer } from "./RenewalDetailDrawer";
 
 const EMPTY_SUMMARY = {
   past_due_count: 0,
@@ -60,6 +61,7 @@ export async function RenewalsV2({ tenantId }: { tenantId: string | null }) {
 
   return (
     <div className="space-y-6">
+      <RenewalDetailDrawer />
       {/* Catch-all dispatcher renders the page title + subtitle. Dynamic
           counts surface here as a small caption above the KPIs so
           operators see at a glance how many deals carry renewal dates. */}
