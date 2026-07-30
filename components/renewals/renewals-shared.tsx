@@ -1,3 +1,5 @@
+"use client";
+
 /**
  * Shared renewal-display primitives — single source of truth used by
  * BOTH /renewals (top-level) and /t/<slug>/renewals (manifest catch-all
@@ -26,6 +28,7 @@ import {
 import { Tag } from "@/components/Card";
 import { formatMoney, initialsOf as initialsOfRaw } from "@/lib/format-helpers";
 import type { FundedDealRow } from "@/lib/queries";
+import { useRouter, useSearchParams } from "next/navigation";
 
 // Re-export the shared money formatter under its old local name so
 // every existing call site in this module keeps working. The two
@@ -118,6 +121,13 @@ export function groupRows(
 }
 
 export function RenewalRow({ row }: { row: FundedDealRow }) {
+  const router = useRouter();
+  const searchParams = useSearchParams();
+  const open = () => {
+    const next = new URLSearchParams(searchParams.toString());
+    next.set("renewal", row.id);
+    router.replace(`?${next}`, { scroll: false });
+  };
   const days = daysUntil(row.next_renewal_date);
   const hasLender = !!row.lender_name;
   const progress = renewalProgress(row);
@@ -128,7 +138,7 @@ export function RenewalRow({ row }: { row: FundedDealRow }) {
   const email = (row as FundedDealRow & { contact_email?: string }).contact_email || null;
 
   return (
-    <div className="flex items-center gap-4 px-5 py-3 hover:bg-bg-hover/30 transition-colors">
+    <div role="button" tabIndex={0} onClick={open} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); open(); } }} className="flex cursor-pointer items-center gap-4 px-5 py-3 hover:bg-bg-hover/30 transition-colors focus:outline-none focus:ring-2 focus:ring-inset focus:ring-accent/40">
       <div className="w-8 h-8 rounded-full bg-bg-elev border border-bg-border flex items-center justify-center text-fg-muted text-[10px] font-bold flex-shrink-0">
         {initialsOf(row.merchant_name)}
       </div>
@@ -200,6 +210,7 @@ export function RenewalRow({ row }: { row: FundedDealRow }) {
       <div className="flex items-center gap-2 text-fg-dim flex-shrink-0">
         {phone ? (
           <a
+            onClick={(event) => event.stopPropagation()}
             href={`tel:${phone}`}
             className="hover:text-fg p-1 transition-colors"
             title={`Call ${row.contact_name || "merchant"} — ${phone}`}
@@ -218,6 +229,7 @@ export function RenewalRow({ row }: { row: FundedDealRow }) {
         )}
         {email ? (
           <a
+            onClick={(event) => event.stopPropagation()}
             href={`mailto:${email}?subject=Renewal%20opportunity%20—%20${encodeURIComponent(row.merchant_name || "")}`}
             className="hover:text-fg p-1 transition-colors"
             title={`Email ${row.contact_name || "merchant"} — ${email}`}

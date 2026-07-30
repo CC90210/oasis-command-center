@@ -39,6 +39,7 @@ type LeadOption = {
 
 const EMPTY = {
   lead_id: "",
+  lender_id: "",
   merchant_name: "",
   contact_name: "",
   lender_name: "",
@@ -567,9 +568,16 @@ export default function RecordFundedDeal() {
                       <h3 className="text-[10px] font-bold uppercase tracking-[0.15em] text-fg-muted">Optional context</h3>
                     </div>
                     <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-                      <Field label="Funder" htmlFor="fd-lender-name" error={errors.lender_name}>
-                        <input id="fd-lender-name" className={inputCls} value={form.lender_name} onChange={setField("lender_name")} placeholder="Who funded the deal" />
-                      </Field>
+                      <div className="sm:col-span-2">
+                        <LenderPickerField
+                          value={form.lender_id}
+                          error={errors.lender_id}
+                          onChange={(lender) => {
+                            setForm((current) => ({ ...current, lender_id: lender.id, lender_name: lender.name }));
+                            setErrors((current) => ({ ...current, lender_id: "" }));
+                          }}
+                        />
+                      </div>
                       <Field label="Commission points" htmlFor="fd-points-pct" error={errors.points_pct} hint="%">
                         <input id="fd-points-pct" className={inputCls} value={form.points_pct} onChange={setField("points_pct")} placeholder="11" inputMode="decimal" aria-invalid={!!errors.points_pct} />
                       </Field>
@@ -662,6 +670,86 @@ function PickerSkeleton() {
           </div>
         </div>
       ))}
+    </div>
+  );
+}
+
+type LenderOption = {
+  id: string;
+  name: string;
+  contact_name: string | null;
+  email: string | null;
+  phone: string | null;
+  network: string | null;
+  product_type: string | null;
+};
+
+function LenderPickerField({
+  value,
+  error,
+  onChange,
+}: {
+  value: string;
+  error?: string;
+  onChange: (lender: LenderOption) => void;
+}) {
+  const [query, setQuery] = useState("");
+  const [options, setOptions] = useState<LenderOption[]>([]);
+  const [open, setOpen] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const selected = options.find((item) => item.id === value);
+
+  useEffect(() => {
+    if (!open && value) return;
+    const controller = new AbortController();
+    const timer = window.setTimeout(async () => {
+      setLoading(true);
+      try {
+        const response = await fetch(`/api/renewals?kind=lenders&q=${encodeURIComponent(query)}`, { signal: controller.signal });
+        const json = await response.json();
+        if (json?.ok) setOptions(json.lenders || []);
+      } finally {
+        if (!controller.signal.aborted) setLoading(false);
+      }
+    }, query ? 180 : 0);
+    return () => { window.clearTimeout(timer); controller.abort(); };
+  }, [open, query, value]);
+
+  return (
+    <div className="relative">
+      <label htmlFor="fd-lender-search" className={labelCls}>Funding lender *</label>
+      <div className="relative">
+        <Search size={15} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-accent" />
+        <input
+          id="fd-lender-search"
+          className={`${inputCls} pl-10`}
+          value={open ? query : selected?.name || query}
+          onFocus={() => setOpen(true)}
+          onChange={(event) => { setQuery(event.target.value); setOpen(true); }}
+          placeholder="Search the lender directory…"
+          required={!value}
+        />
+        {loading && <Loader2 size={14} className="absolute right-3.5 top-1/2 -translate-y-1/2 animate-spin text-accent" />}
+      </div>
+      {open && (
+        <div className="absolute z-30 mt-2 max-h-56 w-full overflow-y-auto rounded-xl border border-border bg-[#080c14] p-1.5 shadow-2xl">
+          {options.length ? options.map((lender) => (
+            <button key={lender.id} type="button" onPointerDown={(event) => {
+              event.preventDefault();
+              onChange(lender);
+              setQuery(lender.name);
+              setOpen(false);
+            }} className="w-full rounded-lg px-3 py-2.5 text-left hover:bg-accent/10">
+              <div className="text-sm font-semibold text-fg">{lender.name}</div>
+              <div className="mt-0.5 text-[11px] text-fg-muted">
+                {[lender.contact_name, lender.email, lender.phone, lender.product_type].filter(Boolean).join(" • ") || "Contact details missing"}
+              </div>
+              {!lender.email && <div className="mt-1 text-[10px] text-status-warm">Email missing — outreach will be blocked</div>}
+            </button>
+          )) : <div className="px-3 py-6 text-center text-xs text-fg-muted">No active lenders match.</div>}
+        </div>
+      )}
+      {error && <p className="mt-1.5 text-xs text-status-hot">{error}</p>}
     </div>
   );
 }
