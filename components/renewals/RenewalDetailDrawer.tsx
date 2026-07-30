@@ -3,8 +3,9 @@
 import { useCallback, useEffect, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
-import { Activity, Building2, ExternalLink, Loader2, RefreshCw, Settings2, X } from "lucide-react";
+import { Activity, Building2, ExternalLink, Loader2, RefreshCw, Settings2, Trash2, X } from "lucide-react";
 import { LeadFileBody, type DetailPayload } from "@/components/leads/LeadFileBody";
+import { LenderPickerField, type LenderOption } from "@/components/renewals/RecordFundedDeal";
 
 type Detail = {
   deal: Record<string, unknown>;
@@ -22,12 +23,14 @@ export function RenewalDetailDrawer() {
   const [leadDetail, setLeadDetail] = useState<DetailPayload | null>(null);
   const [tab, setTab] = useState<Tab>("overview");
   const [error, setError] = useState<string | null>(null);
+  const [dirty, setDirty] = useState(false);
 
   const close = useCallback(() => {
+    if (dirty && !window.confirm("Discard your unsaved renewal changes?")) return;
     const next = new URLSearchParams(params.toString());
     next.delete("renewal");
     router.replace(next.toString() ? `?${next}` : "?", { scroll: false });
-  }, [params, router]);
+  }, [dirty, params, router]);
 
   const load = useCallback(async () => {
     if (!id) return;
@@ -78,7 +81,13 @@ export function RenewalDetailDrawer() {
         <div className="min-h-0 flex-1 overflow-y-auto">
           {error && <div className="m-6 rounded-xl border border-status-hot/30 bg-status-hot/10 p-4 text-status-hot">{error}</div>}
           {!detail && !error && <div className="flex h-60 items-center justify-center gap-2 text-fg-muted"><Loader2 className="animate-spin" /> Loading renewal file…</div>}
-          {detail && tab === "overview" && <Overview deal={deal} lender={detail.lender} onSaved={load} />}
+          {detail && tab === "overview" && <Overview deal={deal} lender={detail.lender} onSaved={load} onDirtyChange={setDirty} onDeleted={() => {
+            setDirty(false);
+            const next = new URLSearchParams(params.toString());
+            next.delete("renewal");
+            router.replace(next.toString() ? `?${next}` : "?", { scroll: false });
+            router.refresh();
+          }} />}
           {detail && tab === "lead" && (leadDetail ? <LeadFileBody tenantSlug="sun" leadId={String(deal.lead_id)} entity="lead" record={leadDetail.record.data} documents={leadDetail.documents} application={leadDetail.application} onReload={load} /> :
             <Empty icon={<ExternalLink />} text="No linked lead file is available." />)}
           {detail && tab === "lender" && <LenderPanel lender={detail.lender} onSaved={load} />}
@@ -90,17 +99,73 @@ export function RenewalDetailDrawer() {
   );
 }
 
-function Overview({ deal, lender, onSaved }: { deal: Record<string, unknown>; lender: Detail["lender"]; onSaved: () => Promise<void> }) {
+function Overview({ deal, lender, onSaved, onDirtyChange, onDeleted }: {
+  deal: Record<string, unknown>;
+  lender: Detail["lender"];
+  onSaved: () => Promise<void>;
+  onDirtyChange: (dirty: boolean) => void;
+  onDeleted: () => void;
+}) {
   const [form, setForm] = useState({ funded_amount_usd: String(deal.funded_amount_usd || ""), factor_rate: String(deal.factor_rate || ""), term_months: String(deal.term_months || ""), funded_at: String(deal.funded_at || ""), points_pct: String(deal.points_pct || ""), notes: String(deal.notes || "") });
+  const [lenderId, setLenderId] = useState(String(deal.lender_id || ""));
   const [saving, setSaving] = useState(false);
-  async function save() { setSaving(true); await fetch(`/api/renewals/${deal.id}`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify(form) }); await onSaved(); setSaving(false); }
+  const [deleting, setDeleting] = useState(false);
+  const [message, setMessage] = useState<{ kind: "error" | "success"; text: string } | null>(null);
+  function update(key: string, value: string) {
+    setForm((current) => ({ ...current, [key]: value }));
+    onDirtyChange(true);
+  }
+  async function save() {
+    setSaving(true);
+    setMessage(null);
+    try {
+      const response = await fetch(`/api/renewals/${deal.id}`, {
+        method: "PATCH", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ ...form, lender_id: lenderId }),
+      });
+      const json = await response.json();
+      if (!response.ok || !json.ok) throw new Error(json.message || json.error || "Unable to save renewal.");
+      await onSaved();
+      onDirtyChange(false);
+      setMessage({ kind: "success", text: "Renewal updated." });
+    } catch (caught) {
+      setMessage({ kind: "error", text: caught instanceof Error ? caught.message : "Unable to save renewal." });
+    } finally {
+      setSaving(false);
+    }
+  }
+  async function remove() {
+    const merchant = String(deal.merchant_name || "this renewal");
+    if (!window.confirm(`Delete the renewal for ${merchant}? This cannot be undone.`)) return;
+    setDeleting(true);
+    setMessage(null);
+    try {
+      const response = await fetch(`/api/renewals/${deal.id}`, { method: "DELETE" });
+      const json = await response.json();
+      if (!response.ok || !json.ok) throw new Error(json.message || json.error || "Unable to delete renewal.");
+      onDeleted();
+    } catch (caught) {
+      setMessage({ kind: "error", text: caught instanceof Error ? caught.message : "Unable to delete renewal." });
+      setDeleting(false);
+    }
+  }
   return <div className="space-y-6 p-6">
     {!deal.lender_id && <div className="rounded-xl border border-status-warm/30 bg-status-warm/10 p-4 text-sm text-status-warm">Link a canonical lender before automated outreach can run.</div>}
     <div className="grid grid-cols-2 gap-4">{Object.entries(form).map(([key, value]) => key === "notes" ?
-      <label key={key} className="col-span-2 text-xs text-fg-muted">Notes<textarea className="input mt-1 min-h-24" value={value} onChange={(e) => setForm({ ...form, [key]: e.target.value })} /></label> :
-      <label key={key} className="text-xs text-fg-muted">{key.replaceAll("_", " ")}<input type={key === "funded_at" ? "date" : "text"} className="input mt-1" value={value} onChange={(e) => setForm({ ...form, [key]: e.target.value })} /></label>)}</div>
+      <label key={key} className="col-span-2 text-xs text-fg-muted">Notes<textarea className="input mt-1 min-h-24" value={value} onChange={(e) => update(key, e.target.value)} /></label> :
+      <label key={key} className="text-xs text-fg-muted">{key.replaceAll("_", " ")}<input type={key === "funded_at" ? "date" : "number"} step={key === "term_months" ? "1" : "0.01"} className="input mt-1" value={value} onChange={(e) => update(key, e.target.value)} /></label>)}</div>
+    <LenderPickerField value={lenderId} initialName={String(lender?.data?.name || deal.lender_name || "")} onChange={(selected: LenderOption) => {
+      setLenderId(selected.id);
+      onDirtyChange(true);
+    }} />
     <div className="rounded-xl border border-border bg-bg-panel p-4 text-sm"><Building2 size={16} className="mb-2 text-accent" />Linked lender: {String(lender?.data?.name || deal.lender_name || "None")}</div>
-    <button type="button" onClick={save} disabled={saving} className="btn-primary">{saving ? "Saving…" : "Save renewal"}</button>
+    {message && <div role="status" className={`rounded-xl border p-3 text-sm ${message.kind === "error" ? "border-status-hot/30 bg-status-hot/10 text-status-hot" : "border-status-good/30 bg-status-good/10 text-status-good"}`}>{message.text}</div>}
+    <div className="flex flex-wrap items-center justify-between gap-3">
+      <button type="button" onClick={save} disabled={saving || deleting} className="btn-primary">{saving ? "Saving…" : "Save changes"}</button>
+      <button type="button" onClick={remove} disabled={saving || deleting} className="inline-flex items-center gap-2 rounded-lg border border-status-hot/35 px-3 py-2 text-xs font-semibold text-status-hot hover:bg-status-hot/10 disabled:opacity-50">
+        {deleting ? <Loader2 size={14} className="animate-spin" /> : <Trash2 size={14} />} {deleting ? "Deleting…" : "Delete renewal"}
+      </button>
+    </div>
   </div>;
 }
 

@@ -60,3 +60,41 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
   if (saved.error) return NextResponse.json({ ok: false, error: saved.error.message }, { status: 500 });
   return NextResponse.json({ ok: true, deal: saved.data });
 }
+
+export async function DELETE(_: NextRequest, { params }: { params: Promise<{ id: string }> }) {
+  const session = await resolveSessionContext();
+  if (!session.ok) return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
+  if (!canWriteCrm(session.teamRole)) return NextResponse.json({ ok: false, error: "forbidden" }, { status: 403 });
+  const { id } = await params;
+  const db = getServiceSupabase();
+  const existing = await db.from("funded_deals").select("id").eq("tenant_id", session.tenantId).eq("id", id).maybeSingle();
+  if (!existing.data) return NextResponse.json({ ok: false, error: "not_found" }, { status: 404 });
+
+  const events = await db.from("renewal_outreach_events").select("scheduled_send_id")
+    .eq("tenant_id", session.tenantId).eq("funded_deal_id", id).not("scheduled_send_id", "is", null);
+  if (events.error) return NextResponse.json({ ok: false, error: "outreach_check_failed" }, { status: 500 });
+  const sendIds = (events.data || []).map((event) => event.scheduled_send_id as string | null)
+    .filter((sendId): sendId is string => Boolean(sendId));
+  if (sendIds.length) {
+    const sends = await db.from("scheduled_sends").select("id,status")
+      .eq("tenant_id", session.tenantId).in("id", sendIds);
+    if (sends.error) return NextResponse.json({ ok: false, error: "outreach_check_failed" }, { status: 500 });
+    if ((sends.data || []).some((send) => send.status === "sending")) {
+      return NextResponse.json(
+        { ok: false, error: "outreach_in_progress", message: "Wait for the active lender email attempt to finish before deleting this renewal." },
+        { status: 409 },
+      );
+    }
+    const cancellableIds = (sends.data || []).filter((send) => ["pending", "failed"].includes(String(send.status))).map((send) => send.id);
+    if (cancellableIds.length) {
+      const cancelled = await db.from("scheduled_sends").update({ status: "cancelled" })
+        .eq("tenant_id", session.tenantId).in("id", cancellableIds);
+      if (cancelled.error) return NextResponse.json({ ok: false, error: "cancel_failed" }, { status: 500 });
+    }
+  }
+
+  const removed = await db.from("funded_deals").delete().eq("tenant_id", session.tenantId).eq("id", id).select("id").maybeSingle();
+  if (removed.error) return NextResponse.json({ ok: false, error: removed.error.message }, { status: 500 });
+  if (!removed.data) return NextResponse.json({ ok: false, error: "not_found" }, { status: 404 });
+  return NextResponse.json({ ok: true, deleted_id: removed.data.id });
+}
