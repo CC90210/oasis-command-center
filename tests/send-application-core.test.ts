@@ -102,6 +102,33 @@ assert.equal(
   "an unmatched reason stays a failure rather than being guessed at",
 );
 
+// ── last_error is never cleared, so on a TERMINAL row it is stale residue ───
+// The 6h app-link hold can later succeed: the row sends via finishStep, which
+// does not touch last_error. Reporting that as "held" would call a delivered
+// email undelivered — the honesty contract failing in the opposite direction.
+assert.equal(
+  statusFromRow({ status: "sent", last_error: "missing_application_link (no form/HMAC key)" }),
+  "sent",
+  "REGRESSION GUARD: stale hold residue on a terminal row must not mask a real send",
+);
+assert.equal(
+  statusFromRow({ status: "done", last_error: "blast_safety_check_failed(subject) - retrying" }),
+  "sent",
+  "stale retry residue on a terminal row must not mask a real send",
+);
+
+// ── but on a NON-terminal row, last_error IS the current reason ─────────────
+assert.equal(
+  statusFromRow({ status: "scheduled", last_error: "missing_application_link (no form/HMAC key)" }),
+  "held_no_app_link",
+  "the 6h app-link HOLD is non-terminal and unprefixed, and must still report the halt",
+);
+assert.equal(
+  statusFromRow({ status: "failed", last_error: "suppressed (unsubscribed)" }),
+  "skipped_suppressed",
+  "a failed row's last_error is current, not stale",
+);
+
 // ── skipStep rows: terminal status, but nothing was sent ────────────────────
 // advanceRow gives these the SAME 'sent'/'done' status as a real send. Reading
 // status first is how a rep gets told "emailed" for mail that never left.

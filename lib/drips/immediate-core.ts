@@ -56,40 +56,40 @@ export function skipToStatus(reason: EnrollNowSkip): InstantEmailStatus {
   return SKIP_TO_STATUS[reason];
 }
 
-/**
- * Map the drip_runs row's OWN recorded state to an operator-facing outcome.
- *
- * Why not use dispatchRuns' return value: it reports coarse tallies, while
- * suppression and the application-link halt are decided inside processEmailStep
- * and recorded on the row as `last_error`. Mapping tallies alone could never
- * produce skipped_suppressed or held_no_app_link — they would surface as a
- * misleading `failed` or `queued`.
- *
- * Only a settled row that was NOT skipped ever reports 'sent'.
- */
-/** executor.ts advanceRow() terminalizes a SKIPPED step to the very same
- *  'sent'/'done' status a real send gets; the ONLY difference on the row is
- *  this prefix that skipStep writes into last_error. Checking status first
- *  would report "sent" for an email that never left the building. */
 const SKIP_PREFIX = "skipped: ";
 
-export function statusFromRow(row: { status: string; last_error: string | null }): InstantEmailStatus {
-  const raw = (row.last_error || "").toLowerCase();
-  const skipped = raw.startsWith(SKIP_PREFIX);
-  const err = skipped ? raw.slice(SKIP_PREFIX.length) : raw;
-
-  // Reason matching runs FIRST, on the un-prefixed remainder, so a skip is
-  // always explained by its cause rather than by its (misleading) row status.
+/** The specific cause encoded in a last_error, or null if we have no mapping. */
+function reasonOf(err: string): InstantEmailStatus | null {
   if (err.includes("suppressed") || err.includes("unsubscrib") || err.includes("opted_out")) return "skipped_suppressed";
   if (err.includes("missing_application_link")) return "held_no_app_link";
   if (err.includes("no_email_for_email_step")) return "skipped_no_email";
   if (err.includes("blast_safety") || err.includes("positioning")) return "held_blocked_by_guard";
+  return null;
+}
 
-  // A skip we have no specific mapping for: say so plainly rather than
-  // guessing. It is NOT sent and NOT merely queued — the sequence moved past it.
-  if (skipped) return "skipped_other";
+/**
+ * Map a drip_runs row to an operator-facing outcome.
+ *
+ * Three cases, because last_error is NEVER cleared by executor.ts and so means
+ * different things depending on where the row ended up:
+ *
+ *  1. SKIPPED (last_error carries the "skipped: " prefix). advanceRow gives a
+ *     skipped step the SAME 'sent'/'done' status as a real send, so the prefix
+ *     is the only signal. Never report sent; explain the cause.
+ *  2. TERMINAL with no skip prefix. This was a genuine send, and any last_error
+ *     is STALE residue from an earlier hold or reschedule that was never
+ *     cleared. It must NOT override the send.
+ *  3. NOT TERMINAL. The row is still in flight, held, or failed, so last_error
+ *     IS the current reason — match it (this is the 6h app-link hold, which is
+ *     status 'scheduled' and carries no prefix).
+ */
+export function statusFromRow(row: { status: string; last_error: string | null }): InstantEmailStatus {
+  const raw = (row.last_error || "").toLowerCase();
+  const skipped = raw.startsWith(SKIP_PREFIX);
+  const err = skipped ? raw.slice(SKIP_PREFIX.length) : raw;
+  const terminal = row.status === "sent" || row.status === "done";
 
-  if (row.status === "sent" || row.status === "done") return "sent";
-  if (row.status === "failed") return "failed";
-  return "queued"; // scheduled / sending / rescheduled — the row survives
+  if (skipped) return reasonOf(err) ?? "skipped_other";
+  if (terminal) return "sent";
+  return reasonOf(err) ?? (row.status === "failed" ? "failed" : "queued");
 }
