@@ -51,6 +51,8 @@ import { maybeSendNextStepsEmail, maybeSendApplicationCompleteEmail } from "@/li
 import { notifyOasisFunnelSubmission } from "@/lib/forms/oasis-funnel-notify";
 import { buildOasisLeadPatch } from "@/lib/forms/oasis-funnel-format";
 import { OASIS_FUNNEL_SLUG, OASIS_FUNNEL_TENANT_ID } from "@/lib/forms/oasis-funnel-seed";
+import { AI_AUDIT_SLUG, AI_AUDIT_TENANT_ID } from "@/lib/forms/oasis-ai-audit-seed";
+import { ingestAiAuditSubmission } from "@/lib/forms/ai-audit-ingest";
 import { maybeGenerateApplicationDocument } from "@/lib/forms/application-document";
 import { sendSunbizLeadEvent } from "@/lib/notify/sunbiz-events";
 import { sendFormCompletionEmail } from "@/lib/notify/form-completion-email";
@@ -1106,6 +1108,37 @@ export async function POST(req: NextRequest) {
         tenantId: form.tenant_id,
         leadId: link.lead_id,
         answers,
+      }),
+    );
+  }
+
+  // OASIS AI Solutions B2B qualification funnel (/f/oasis-ai-cc/ai-audit).
+  // Separate block with its own EXACT tenant+slug gate, mirroring the OASIS
+  // funnel above — the Codex audit finding that killed a startsWith() gate
+  // applies here identically, so no prefix matching and no shared condition.
+  //
+  // This is the ingestion the submit path never did: the lead row is already
+  // upserted by this point, but nothing scored it and nothing wrote a
+  // lead_interactions row, so funnel answers never reached the lead timeline.
+  if (
+    isLastStep &&
+    form.tenant_id === AI_AUDIT_TENANT_ID &&
+    form.slug === AI_AUDIT_SLUG
+  ) {
+    const answers = { ...mergedAnswers };
+    after(() =>
+      ingestAiAuditSubmission({
+        db,
+        tenantId: form.tenant_id,
+        leadId: link.lead_id,
+        answers,
+      }).then((r) => {
+        if (!r.ok) {
+          console.error("[forms.submit.ai_audit_ingest.failed]", {
+            lead_id: link.lead_id,
+            error: r.error,
+          });
+        }
       }),
     );
   }
