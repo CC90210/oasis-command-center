@@ -484,7 +484,7 @@ export function FormPublicClient({
             this renders on every tenant's public form (SunBiz funding + CC's
             personal-brand funnel), so it must not be funding-specific. */}
         <p className="text-center text-[11px] text-fg-dim">
-          Your information is kept private — only used to follow up on your request.
+          Your information is kept private — used to follow up on your request and process your submission.
         </p>
 
         {/* FTC AI disclosure. Deliberately BRAND-NEUTRAL and unlinked: this
@@ -497,7 +497,8 @@ export function FormPublicClient({
             see lib/legal/constants.ts DATA_MATRIX. */}
         <p className="text-center text-[11px] leading-relaxed text-fg-dim">
           Submissions and uploaded documents are processed using automated
-          systems and AI, which may include third-party AI providers.
+          systems and AI, including third-party AI providers, for tasks such
+          as document data extraction.
         </p>
 
         {/* Hardcoded "Powered by OASIS AI" footer removed 2026-05-25
