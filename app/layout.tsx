@@ -59,7 +59,7 @@ export default async function RootLayout({
     // itself: the matcher would swallow every route in the app and strip
     // the operator chrome site-wide.
     ...ALL_MARKETING_PATHS,
-    "/welcome",   // legacy URL, 308s to /start — kept so the redirect leg renders bare
+    "/welcome",   // legacy URL; next.config.js 308s it to /start before middleware or this layout ever see it. Inert backstop, same reasoning as the middleware entry.
     "/download",
     "/configure",
     "/login",

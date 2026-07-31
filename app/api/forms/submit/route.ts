@@ -1132,8 +1132,13 @@ export async function POST(req: NextRequest) {
     after(() =>
       notifyAiAuditStarted({
         db,
+        tenantId: form.tenant_id,
         formId: form.id,
         leadId: link.lead_id,
+        // The row inserted above. The helper fires only if THIS submission
+        // is the oldest one on record for the lead, which is what makes
+        // two racing step-0 submits produce exactly one alert.
+        submissionId,
         answers: startedAnswers,
       }),
     );

@@ -19,7 +19,7 @@ export const PUBLIC_PATH_PREFIXES = [
   // legal pages are listed individually further down — they predate the
   // marketing site and their comments explain why each must stay public.
   ...MARKETING_PATHS,
-  "/welcome",              // legacy landing URL — 308s to /start via next.config.js, kept public so the redirect is reachable
+  "/welcome",              // Legacy landing URL. app/welcome/ no longer exists — next.config.js 308s it to /start, and config redirects run BEFORE middleware, so this entry is never actually consulted today. Kept as a backstop: if that redirect is ever removed, /welcome should 404 rather than bounce an anonymous visitor to /login.
   "/download",             // public OASIS Desktop downloads
   "/configure",            // public agent configurator (pre-signup)
   "/demo/sun",             // public Sun Biz review shell; demo data only

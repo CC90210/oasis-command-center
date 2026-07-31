@@ -14,6 +14,7 @@
 import "server-only";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { sendTelegram } from "@/lib/notify/telegram";
+import { escapeTelegramHtml } from "@/lib/notify/telegram-format";
 import { deliverWelcomeEmail } from "@/lib/forms/oasis-funnel-email";
 import { buildAiAuditAlert, composeAiAuditWelcome } from "@/lib/forms/ai-audit-format";
 import type { ScoreBreakdown } from "@/lib/forms/ai-audit-ingest";
@@ -38,35 +39,67 @@ export const AI_AUDIT_WELCOME_SOURCE = "ai_audit_welcome";
  * two minutes later when they finish, reads as automated and earns a spam
  * complaint. This tells the operator; it does not talk to the lead.
  *
- * Deduped on submission count rather than on a flag: a returning visitor is
- * smart-matched onto their existing lead, so "is this their first step-0 on
- * this form" is the only question that actually distinguishes a new inbound
- * from someone reloading the page.
+ * Deduped by "is this submission the FIRST step-0 on this form for this
+ * lead", not by counting rows. A returning visitor is smart-matched onto
+ * their existing lead, so the count is the only thing that distinguishes a
+ * new inbound from a repeat — but counting is racy. Two near-simultaneous
+ * submits (double-click, or back-then-resubmit) both land their rows
+ * before either callback reads, so both observe a count of 2 and NEITHER
+ * fires: the alert disappears in exactly the case where a lead was most
+ * eager. Asking "is the oldest row mine" instead always has exactly one
+ * winner, whatever order the callbacks run in.
+ *
+ * KNOWN RESIDUAL, not fixed here. If two concurrent submits each create
+ * their OWN lead — possible because findExistingLead + createRecord in
+ * app/api/forms/submit/route.ts are not atomic, so both can look up, miss,
+ * and insert — then each lead has exactly one submission, each callback is
+ * legitimately the oldest for its own lead, and CC gets two pings. The
+ * duplicate ping is a symptom; the duplicate LEAD is the actual defect, and
+ * it predates this function. Fixing it means a uniqueness guarantee on lead
+ * creation (a partial unique index on tenant + lower(email), or an upsert),
+ * which changes shared intake behaviour for every tenant and every form —
+ * an architecture decision to raise with CC, not to make from inside a
+ * notification helper.
  */
 export async function notifyAiAuditStarted(input: {
   db: SupabaseClient;
+  tenantId: string;
   formId: string;
   leadId: string;
+  submissionId: string;
   answers: Record<string, unknown>;
 }): Promise<void> {
-  const { db, formId, leadId, answers } = input;
+  const { db, tenantId, formId, leadId, submissionId, answers } = input;
 
   try {
-    const { count, error } = await db
+    // (tenant_id, lead_id, submitted_at) is indexed — see migration 042.
+    // id is the tiebreak for two rows sharing a timestamp, so the winner
+    // is deterministic even at identical clock values.
+    const { data, error } = await db
       .from("form_submissions")
-      .select("id", { count: "exact", head: true })
+      .select("id")
+      .eq("tenant_id", tenantId)
       .eq("form_id", formId)
-      .eq("lead_id", leadId);
+      .eq("lead_id", leadId)
+      .order("submitted_at", { ascending: true })
+      .order("id", { ascending: true })
+      .limit(1);
 
-    // Fail closed on an unreadable count: a missed alert is recoverable
-    // (the lead is still in the pipeline), a duplicate alert every time
-    // someone refreshes trains the operator to ignore the channel.
-    if (error || (count ?? 0) !== 1) return;
+    // Fail closed on an unreadable result: a missed alert is recoverable
+    // (the lead is still in the pipeline), whereas an alert on every
+    // refresh trains the operator to ignore the channel.
+    if (error || !data?.length || data[0].id !== submissionId) return;
   } catch {
     return;
   }
 
-  const s = (k: string) => String(answers[k] ?? "").trim();
+  // sendTelegram posts with parse_mode: "HTML", and every value below is
+  // typed by a stranger into a public form. Unescaped, a company called
+  // "Barnes & Noble" is enough to make Telegram reject the message as
+  // malformed HTML — the alert would fail silently on ordinary input, let
+  // alone hostile input. Same helper ai-audit-format.ts uses.
+  const e = escapeTelegramHtml;
+  const s = (k: string) => e(String(answers[k] ?? "").trim());
   const name = s("name") || "Someone";
   const company = s("company");
   const email = s("email");
