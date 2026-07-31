@@ -51,6 +51,21 @@ export const SITE_ORIGIN = "https://oasisai.work";
 /** CC's booking link — the one CTA that leaves the site. */
 export const BOOKING_URL = "https://calendar.app.google/tpfvJYBGircnGu8G8";
 
+/**
+ * The address a prospect should actually write to.
+ *
+ * NOT lib/legal/constants.ts's LEGAL_CONTACTS.support. Those four role
+ * aliases (privacy@ / legal@ / dmca@ / support@) are what the legal pages
+ * publish, and at least support@ has no mailbox behind it — a contact
+ * route on the marketing site that silently bounces is worse than no
+ * contact route at all. This is the founder's real, monitored inbox.
+ *
+ * The legal pages deliberately still use their own constants: those
+ * addresses appear in an audited policy document and changing them is a
+ * change to a published legal commitment, not a copy tweak.
+ */
+export const CONTACT_EMAIL = "conaugh@oasisai.work";
+
 /** The live B2B qualification funnel the inline CTA form feeds. */
 export const AUDIT_FUNNEL = {
   tenantSlug: "oasis-ai-cc",

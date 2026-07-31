@@ -45,7 +45,7 @@ const PRINCIPLES = [
 export default function AboutPage() {
   return (
     <>
-      <section className="relative overflow-hidden border-b border-ops-line">
+      <section className="m-edge relative overflow-hidden">
         <ConsoleField />
         <div className="relative mx-auto w-full max-w-6xl px-5 pb-16 pt-20 sm:px-8 sm:pb-20 sm:pt-28">
           <Reveal>
@@ -68,7 +68,7 @@ export default function AboutPage() {
       </section>
 
       {/* ── The story ────────────────────────────────────────────────── */}
-      <Section className="border-b border-ops-line">
+      <Section className="m-edge">
         <div className="grid gap-10 lg:grid-cols-[minmax(0,0.85fr)_minmax(0,1.15fr)] lg:gap-16">
           <Reveal>
             <SectionHead eyebrow="Why this exists" title="Small teams got priced out of good systems." />
@@ -103,7 +103,7 @@ export default function AboutPage() {
       </Section>
 
       {/* ── Principles ───────────────────────────────────────────────── */}
-      <Section className="border-b border-ops-line">
+      <Section className="m-edge">
         <Reveal>
           <SectionHead
             eyebrow="How we work"
@@ -128,7 +128,7 @@ export default function AboutPage() {
       </Section>
 
       {/* ── Where we are ─────────────────────────────────────────────── */}
-      <Section className="border-b border-ops-line">
+      <Section className="m-edge">
         <div className="grid gap-10 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)] lg:gap-16">
           <Reveal>
             <SectionHead
@@ -152,7 +152,7 @@ export default function AboutPage() {
               </p>
               <Link
                 href="/privacy"
-                className="inline-flex items-center gap-2 font-data text-[12px] uppercase tracking-[0.16em] text-signal transition-opacity hover:opacity-80"
+                className="inline-flex items-center gap-1.5 text-[15px] font-medium text-signal transition-colors hover:text-fg"
               >
                 Read the data policy
                 <ArrowRight className="h-4 w-4" aria-hidden="true" />

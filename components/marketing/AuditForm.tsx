@@ -2,7 +2,7 @@
 
 import { useRef, useState } from "react";
 import { ArrowRight, Loader2 } from "lucide-react";
-import { AUDIT_FUNNEL } from "@/lib/marketing/routes";
+import { AUDIT_FUNNEL, CONTACT_EMAIL } from "@/lib/marketing/routes";
 import { CTA_PRIMARY } from "@/components/marketing/Cta";
 
 /**
@@ -81,7 +81,7 @@ export function AuditForm({ compact = false }: { compact?: boolean }) {
         setError(
           data?.error === "rate_limited"
             ? "Too many attempts just now. Give it a minute and try again."
-            : "That didn't go through. Try again, or email support@oasisai.work.",
+            : `That didn't go through. Try again, or email ${CONTACT_EMAIL}.`,
         );
         setStatus("error");
         inFlight.current = false; // let them correct and retry
@@ -153,7 +153,7 @@ export function AuditForm({ compact = false }: { compact?: boolean }) {
       <p
         role="status"
         aria-live="polite"
-        className={`mt-4 text-sm ${error ? "text-status-hot" : "text-fg-dim"}`}
+        className={`mt-4 text-[14px] ${error ? "text-status-hot" : "text-fg-dim"}`}
       >
         {error ?? "Three more screens after this. Takes about two minutes."}
       </p>
@@ -178,18 +178,22 @@ function Field({
 }) {
   return (
     <label className="block">
-      {/* gap-x-3 is load-bearing: justify-between alone lets a long label
+      {/* Field labels are the one place tiny mono uppercase actively hurt:
+          this is the form the whole site exists to get filled in, and
+          10px letterspaced caps is the least readable setting on the page.
+          Sentence case, body face, real size.
+          gap-x-3 is load-bearing: justify-between alone lets a long label
           and its hint touch at narrow column widths. */}
-      <span className="flex items-baseline justify-between gap-x-3 font-data text-[10px] uppercase tracking-[0.2em] text-fg-dim">
+      <span className="flex items-baseline justify-between gap-x-3 text-[14px] font-medium text-fg-muted">
         <span>{label}</span>
-        {hint ? <span className="shrink-0 text-fg-faint">{hint}</span> : null}
+        {hint ? <span className="shrink-0 text-[13px] font-normal text-fg-dim">{hint}</span> : null}
       </span>
       <input
         name={name}
         type={type}
         required={required}
         autoComplete={autoComplete}
-        className="mt-2 w-full border-b border-ops-edge bg-transparent py-2.5 text-[15px] text-fg outline-none transition-colors placeholder:text-fg-faint focus:border-signal"
+        className="mt-2 w-full rounded-md border border-ops-edge bg-ops-void/60 px-3.5 py-2.5 text-[15px] text-fg outline-none transition-colors placeholder:text-fg-faint hover:border-fg-faint focus:border-signal"
       />
     </label>
   );

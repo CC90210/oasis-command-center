@@ -2,10 +2,10 @@ import Link from "next/link";
 import { OasisLogo } from "@/components/brand/OasisLogo";
 import {
   AI_DISCLOSURE_NOTICE,
-  LEGAL_CONTACTS,
   LEGAL_ENTITY,
   LEGAL_PRINCIPAL_PLACE,
 } from "@/lib/legal/constants";
+import { CONTACT_EMAIL } from "@/lib/marketing/routes";
 
 /**
  * Public footer.
@@ -69,23 +69,15 @@ export function MarketingFooter() {
             {AI_DISCLOSURE_NOTICE}
           </p>
           <div className="mt-6 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-            <p className="font-data text-[11px] tracking-[0.1em] text-fg-dim">
+            <p className="text-[14px] text-fg-dim">
               © {year} {LEGAL_ENTITY}
             </p>
-            <div className="flex flex-wrap gap-x-5 gap-y-2">
-              <a
-                href={`mailto:${LEGAL_CONTACTS.support}`}
-                className="font-data text-[11px] tracking-[0.1em] text-fg-dim transition-colors hover:text-signal"
-              >
-                {LEGAL_CONTACTS.support}
-              </a>
-              <a
-                href={`mailto:${LEGAL_CONTACTS.privacy}`}
-                className="font-data text-[11px] tracking-[0.1em] text-fg-dim transition-colors hover:text-signal"
-              >
-                {LEGAL_CONTACTS.privacy}
-              </a>
-            </div>
+            <a
+              href={`mailto:${CONTACT_EMAIL}`}
+              className="text-[14px] text-fg-muted transition-colors hover:text-signal"
+            >
+              {CONTACT_EMAIL}
+            </a>
           </div>
         </div>
       </div>

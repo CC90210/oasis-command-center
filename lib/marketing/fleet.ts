@@ -147,6 +147,64 @@ export const FLEET: FleetMember[] = [
 ];
 
 /**
+ * What actually makes this work where a chatbot doesn't.
+ *
+ * Every claim maps to something real in this codebase — the state DB, the
+ * PreToolUse guard chain, the event bus, per-tenant RLS, the model
+ * registry, the approval gates. Written from the client's side of the
+ * screen, so no component or table names, but nothing here is aspirational.
+ */
+export const DIFFERENTIATORS = [
+  {
+    title: "It remembers",
+    body: "State persists between sessions. Ask on Thursday what changed on Monday and it knows, because it was the one that changed it. No re-briefing, no pasting last week's context back in, no starting over because the tab closed.",
+  },
+  {
+    title: "It can't be talked past",
+    body: "The guardrails sit underneath the agent, in the layer that actually executes. Destructive commands, credential reads, and outbound sends are stopped by code the model never sees and cannot argue with. Safety that depends on the model choosing to behave is not safety.",
+  },
+  {
+    title: "They hand work to each other",
+    body: "Shared state and an event bus between seats. Operations ships something, Finance sees the cost, Marketing gets the announcement — from one instruction, without you carrying the output of one tool into the input of the next.",
+  },
+  {
+    title: "It runs on your data, in your infrastructure",
+    body: "Your database, your account, row-level access control per tenant. Nothing is pooled with another client's data. If you ever stop working with us you keep the system running, because it was always yours.",
+  },
+  {
+    title: "It isn't married to one model",
+    body: "Work routes across providers on cost and capability, and sensitive jobs can run on a model hosted on your own hardware. When the frontier moves — and it moves every few months — you get the upgrade without a rebuild.",
+  },
+  {
+    title: "You choose the leash",
+    body: "Autonomy is scoped per action, not granted once. Draft freely but never send. Read every account but never move money. Anything that spends, signs, or leaves the building stops for a human unless you say otherwise.",
+  },
+] as const;
+
+/**
+ * The economic argument, in three moves. Deliberately free of numbers:
+ * pricing is not settled (see /work) and an invented ROI figure is the
+ * fastest way to lose a reader who does this arithmetic for a living.
+ */
+export const ECONOMICS = [
+  {
+    label: "Time",
+    headline: "The schedule stops needing a person",
+    body: "Work that runs on a cadence — the follow-up, the report, the reconciliation, the chase — stops consuming a human on that cadence. You get back the hours that were never the reason you started the business.",
+  },
+  {
+    label: "Cost",
+    headline: "A seat costs the same at any volume",
+    body: "Ten jobs or ten thousand, the seat costs what the seat costs. Payroll does not work that way, and neither does per-seat SaaS priced against a headcount you are trying not to grow.",
+  },
+  {
+    label: "Scale",
+    headline: "Growth stops meaning hiring",
+    body: "The ceiling moves from how many people you can afford and manage to how much work you can clearly define. That is a different business — one where taking on more clients is a decision rather than a hiring round.",
+  },
+] as const;
+
+/**
  * Products built as agents FOR clients, rather than seats in the OASIS
  * fleet. Kept separate because conflating "our staff" with "what we built
  * for someone else" is the fastest way to make both claims untrustworthy.

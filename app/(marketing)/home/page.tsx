@@ -7,7 +7,7 @@ import { FleetRoster } from "@/components/marketing/FleetRoster";
 import { Reveal } from "@/components/marketing/Reveal";
 import { Section, SectionHead, Eyebrow } from "@/components/marketing/Section";
 import { AuditForm } from "@/components/marketing/AuditForm";
-import { CLIENT_BUILDS } from "@/lib/marketing/fleet";
+import { CLIENT_BUILDS, DIFFERENTIATORS, ECONOMICS } from "@/lib/marketing/fleet";
 
 /**
  * The marketing home page.
@@ -41,22 +41,22 @@ const STEPS = [
   {
     label: "Discovery",
     when: "Day one",
-    body: "We map how the work actually moves through your business — not how the org chart says it does. You leave the call knowing what to automate first and what to leave alone.",
+    body: "We map how the work actually moves through your business — not how the org chart says it does. You leave the call knowing what to automate first, what it is worth, and what to leave alone.",
   },
   {
     label: "Build",
     when: "Weeks one to two",
-    body: "We design and build the system around your real data and your real tools. Custom, not a template with your logo dropped into it.",
+    body: "We design and build the system around your real data and your real tools. Custom, not a template with your logo dropped into it, because your process is the thing that makes you money.",
   },
   {
     label: "Deploy",
     when: "Week three",
-    body: "The agents go in behind guardrails: what they may do on their own, what needs your approval, and what they can never touch. You decide where those lines sit.",
+    body: "The agents go in behind guardrails: what they may do alone, what needs your approval, what they can never touch. You set those lines, and they are enforced in code rather than in a prompt.",
   },
   {
     label: "Run",
     when: "Ongoing",
-    body: "It keeps running, and we keep tuning it against what it actually does in production. Systems that are not maintained stop being assets.",
+    body: "It keeps running, and we keep tuning it against what it actually does in production. A system nobody maintains stops being an asset and starts being a liability.",
   },
 ];
 
@@ -64,7 +64,7 @@ export default function MarketingHome() {
   return (
     <>
       {/* ── Hero ─────────────────────────────────────────────────────── */}
-      <section className="relative overflow-hidden border-b border-ops-line">
+      <section className="m-edge relative overflow-hidden">
         <ConsoleField />
 
         <div className="relative mx-auto w-full max-w-6xl px-5 pb-24 pt-24 sm:px-8 sm:pb-32 sm:pt-32">
@@ -107,8 +107,8 @@ export default function MarketingHome() {
         </div>
       </section>
 
-      {/* ── Thesis ───────────────────────────────────────────────────── */}
-      <Section className="border-b border-ops-line">
+      {/* ── The arithmetic ───────────────────────────────────────────── */}
+      <Section className="m-edge">
         <div className="grid gap-10 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)] lg:gap-16">
           <Reveal>
             <h2 className="font-display text-[clamp(1.9rem,4vw,2.9rem)] font-bold leading-[1.08] tracking-tight text-fg">
@@ -125,14 +125,20 @@ export default function MarketingHome() {
                 remembers to do it again tomorrow. That someone is still you.
               </p>
               <p>
-                An agent is different in one specific way: it owns an outcome
+                Which leaves the arithmetic of your business exactly where it
+                was: to do twice as much, hire roughly twice the people. Every
+                tool of the last twenty years made each person faster and left
+                that ratio untouched.
+              </p>
+              <p>
+                An agent breaks it in one specific way — it owns an outcome
                 rather than a screen. It knows what happened last week, it has
                 access to the systems the work lives in, and it comes back to
                 you with the answer instead of waiting to be asked.
               </p>
               <p className="text-fg">
                 That difference is the entire product. Everything below is how
-                we make it hold up in a real business.
+                we make it survive contact with a real business.
               </p>
             </div>
           </Reveal>
@@ -140,7 +146,7 @@ export default function MarketingHome() {
       </Section>
 
       {/* ── The fleet ────────────────────────────────────────────────── */}
-      <Section id="fleet" className="border-b border-ops-line">
+      <Section id="fleet" className="m-edge">
         <Reveal>
           <SectionHead
             eyebrow="The fleet"
@@ -156,7 +162,7 @@ export default function MarketingHome() {
         <Reveal>
           <Link
             href="/fleet"
-            className="mt-10 inline-flex items-center gap-2 font-data text-[12px] uppercase tracking-[0.16em] text-signal transition-opacity hover:opacity-80"
+            className="mt-10 inline-flex items-center gap-1.5 text-[15px] font-medium text-signal transition-colors hover:text-fg"
           >
             Full fleet detail
             <ArrowRight className="h-4 w-4" aria-hidden="true" />
@@ -164,8 +170,70 @@ export default function MarketingHome() {
         </Reveal>
       </Section>
 
-      {/* ── What we build ────────────────────────────────────────────── */}
-      <Section className="border-b border-ops-line">
+      {/* ── What's actually different ────────────────────────────────── */}
+      <Section className="m-edge">
+        <Reveal>
+          <SectionHead
+            eyebrow="Under the hood"
+            title="Six things that make this work where a chatbot doesn't."
+            lede="Every one of these is a decision that costs us something to build and would be easier to skip. They are also the difference between a demo that impresses you and a system you can leave running."
+          />
+        </Reveal>
+
+        <div className="mt-12 grid gap-px border border-ops-line bg-ops-line md:grid-cols-2">
+          {DIFFERENTIATORS.map((d, i) => (
+            <Reveal key={d.title} delay={(i % 2) * 90}>
+              <article className="h-full bg-ops-void p-7 sm:p-8">
+                <h3 className="font-display text-lg font-bold tracking-tight text-fg">
+                  {d.title}
+                </h3>
+                <p className="mt-3 text-[15px] leading-relaxed text-fg-muted">
+                  {d.body}
+                </p>
+              </article>
+            </Reveal>
+          ))}
+        </div>
+      </Section>
+
+      {/* ── The economics ────────────────────────────────────────────── */}
+      <Section className="m-edge">
+        <Reveal>
+          <SectionHead
+            eyebrow="What it changes"
+            title="Time back. Cost flat. Headcount off the critical path."
+          />
+        </Reveal>
+
+        <div className="mt-12 grid gap-10 md:grid-cols-3 md:gap-8">
+          {ECONOMICS.map((e, i) => (
+            <Reveal key={e.label} delay={i * 90}>
+              <div>
+                <p className="font-data text-[10px] uppercase tracking-[0.26em] text-signal">
+                  {e.label}
+                </p>
+                <h3 className="mt-4 font-display text-xl font-bold leading-snug tracking-tight text-fg">
+                  {e.headline}
+                </h3>
+                <p className="mt-3 text-[15px] leading-relaxed text-fg-muted">
+                  {e.body}
+                </p>
+              </div>
+            </Reveal>
+          ))}
+        </div>
+
+        <Reveal>
+          <p className="mt-12 max-w-2xl border-l border-signal-dim pl-5 text-[15px] leading-relaxed text-fg-dim">
+            None of this is free, and it isn&rsquo;t instant. It is a build,
+            and then a system you own and run. What it is not is another
+            subscription that quietly becomes someone&rsquo;s job to babysit.
+          </p>
+        </Reveal>
+      </Section>
+
+      {/* ── In production ────────────────────────────────────────────── */}
+      <Section className="m-edge">
         <Reveal>
           <SectionHead
             eyebrow="In production"
@@ -193,9 +261,9 @@ export default function MarketingHome() {
         </div>
       </Section>
 
-      {/* ── How it works. Numbered because it genuinely is a sequence —
+      {/* ── How it goes. Numbered because it genuinely is a sequence —
              the only place on the site that uses ordinals. ───────────── */}
-      <Section className="border-b border-ops-line">
+      <Section className="m-edge">
         <Reveal>
           <SectionHead
             eyebrow="How it goes"
@@ -228,8 +296,9 @@ export default function MarketingHome() {
       </Section>
 
       {/* ── CTA ──────────────────────────────────────────────────────── */}
-      <Section id="start">
-        <div className="grid gap-12 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.1fr)] lg:gap-20">
+      <Section id="start" className="relative overflow-hidden">
+        <ConsoleField className="opacity-60" />
+        <div className="relative grid gap-12 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.1fr)] lg:gap-20">
           <Reveal>
             <div>
               <Eyebrow>Start here</Eyebrow>
@@ -248,7 +317,7 @@ export default function MarketingHome() {
           </Reveal>
 
           <Reveal delay={120}>
-            <div className="border border-ops-line bg-ops-panel p-6 sm:p-8">
+            <div className="border border-ops-edge bg-ops-panel/80 p-6 backdrop-blur-sm sm:p-8">
               <AuditForm />
             </div>
           </Reveal>

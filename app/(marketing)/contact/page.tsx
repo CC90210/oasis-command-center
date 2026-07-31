@@ -4,8 +4,7 @@ import { ConsoleField } from "@/components/marketing/ConsoleField";
 import { Reveal } from "@/components/marketing/Reveal";
 import { Section, Eyebrow } from "@/components/marketing/Section";
 import { AuditForm } from "@/components/marketing/AuditForm";
-import { BOOKING_URL } from "@/lib/marketing/routes";
-import { LEGAL_CONTACTS } from "@/lib/legal/constants";
+import { BOOKING_URL, CONTACT_EMAIL } from "@/lib/marketing/routes";
 
 /**
  * /contact — the conversion page.
@@ -36,8 +35,8 @@ const ALTERNATES = [
     icon: Mail,
     label: "Just email",
     body: "If you'd rather write a paragraph than fill in a form, that works too.",
-    href: `mailto:${LEGAL_CONTACTS.support}`,
-    action: LEGAL_CONTACTS.support,
+    href: `mailto:${CONTACT_EMAIL}`,
+    action: CONTACT_EMAIL,
     external: false,
   },
 ];
@@ -45,7 +44,7 @@ const ALTERNATES = [
 export default function ContactPage() {
   return (
     <>
-      <section className="relative overflow-hidden border-b border-ops-line">
+      <section className="m-edge relative overflow-hidden">
         <ConsoleField />
         <div className="relative mx-auto w-full max-w-6xl px-5 pb-16 pt-20 sm:px-8 sm:pb-20 sm:pt-28">
           <Reveal>
@@ -67,11 +66,11 @@ export default function ContactPage() {
         </div>
       </section>
 
-      <Section className="border-b border-ops-line">
+      <Section className="m-edge">
         <div className="grid gap-12 lg:grid-cols-[minmax(0,1.1fr)_minmax(0,0.9fr)] lg:gap-16">
           <Reveal>
             <div className="border border-ops-line bg-ops-panel p-6 sm:p-8">
-              <h2 className="mb-7 font-data text-[10px] uppercase tracking-[0.24em] text-fg-dim">
+              <h2 className="mb-7 font-data text-[11px] uppercase tracking-[0.22em] text-signal-dim">
                 Step 1 of 4
               </h2>
               <AuditForm />
@@ -142,7 +141,7 @@ export default function ContactPage() {
                     {...(a.external
                       ? { target: "_blank", rel: "noopener noreferrer" }
                       : {})}
-                    className="mt-5 inline-block font-data text-[12px] uppercase tracking-[0.16em] text-signal transition-opacity hover:opacity-80"
+                    className="mt-5 inline-block text-[15px] font-medium text-signal transition-colors hover:text-fg"
                   >
                     {a.action}
                   </a>

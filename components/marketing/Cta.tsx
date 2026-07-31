@@ -14,11 +14,27 @@ import { ArrowRight } from "lucide-react";
  * variant. Those import the string; everything else uses <CtaLink>.
  */
 
+/**
+ * TYPOGRAPHY NOTE. These were mono, uppercase, and wide-tracked, matching
+ * the eyebrows and the roster readouts. With the nav, every button, and
+ * every inline link set the same way, the whole page was shouting in
+ * monospace and nothing stood out because everything did.
+ *
+ * The mono face is now reserved for text that is genuinely data — eyebrows,
+ * status readouts, callsigns, field labels, timestamps. Anything a person
+ * reads as a sentence, including the label on a button, is set in the body
+ * face at a comfortable size. Buttons keep their weight and their size; they
+ * lost the costume.
+ */
 export const CTA_PRIMARY =
-  "inline-flex items-center justify-center gap-2.5 rounded-sm bg-signal px-6 py-3.5 font-data text-[13px] font-medium uppercase tracking-[0.16em] text-ops-void transition-opacity hover:opacity-90 disabled:opacity-60";
+  "inline-flex items-center justify-center gap-2 rounded-md bg-signal px-6 py-3 text-[15px] font-semibold tracking-[-0.01em] text-ops-void transition-all hover:brightness-110 disabled:opacity-60";
 
 export const CTA_SECONDARY =
-  "inline-flex items-center justify-center gap-2.5 rounded-sm border border-ops-edge px-6 py-3.5 font-data text-[13px] uppercase tracking-[0.16em] text-fg-muted transition-colors hover:border-signal/50 hover:text-fg";
+  "inline-flex items-center justify-center gap-2 rounded-md border border-ops-edge px-6 py-3 text-[15px] font-medium tracking-[-0.01em] text-fg-muted transition-colors hover:border-fg-dim hover:text-fg";
+
+/** Inline "read more" link. Sentence case, arrow carries the affordance. */
+export const CTA_INLINE =
+  "inline-flex items-center gap-1.5 text-[15px] font-medium text-signal transition-colors hover:text-fg";
 
 export function CtaLink({
   href,

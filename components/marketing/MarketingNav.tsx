@@ -53,10 +53,10 @@ export function MarketingNav() {
         <Link href="/" className="flex items-center gap-3" aria-label="OASIS AI, home">
           <OasisLogo size={30} priority />
           <span className="leading-none">
-            <span className="block font-display text-[13px] font-bold tracking-[0.14em] text-fg">
+            <span className="block font-display text-[15px] font-bold tracking-[0.02em] text-fg">
               OASIS AI
             </span>
-            <span className="block font-data text-[9px] uppercase tracking-[0.24em] text-fg-dim">
+            <span className="block font-data text-[9px] uppercase tracking-[0.22em] text-fg-dim">
               Montreal
             </span>
           </span>
@@ -68,9 +68,9 @@ export function MarketingNav() {
               key={l.href}
               href={l.href}
               aria-current={isActive(l.href) ? "page" : undefined}
-              className={`px-3 py-2 font-data text-[12px] uppercase tracking-[0.14em] transition-colors ${
+              className={`px-3.5 py-2 text-[15px] font-medium tracking-[-0.01em] transition-colors ${
                 isActive(l.href)
-                  ? "text-signal"
+                  ? "text-fg"
                   : "text-fg-muted hover:text-fg"
               }`}
             >
@@ -79,13 +79,13 @@ export function MarketingNav() {
           ))}
           <Link
             href="/login"
-            className="ml-2 rounded-sm border border-ops-edge px-3 py-2 font-data text-[12px] uppercase tracking-[0.14em] text-fg-muted transition-colors hover:border-signal/50 hover:text-fg"
+            className="ml-3 px-3 py-2 text-[15px] font-medium tracking-[-0.01em] text-fg-muted transition-colors hover:text-fg"
           >
             Sign in
           </Link>
           <Link
             href="/contact"
-            className="ml-1 rounded-sm bg-signal px-4 py-2 font-data text-[12px] font-medium uppercase tracking-[0.14em] text-ops-void transition-opacity hover:opacity-90"
+            className="ml-1 rounded-md bg-signal px-4 py-2 text-[15px] font-semibold tracking-[-0.01em] text-ops-void transition-all hover:brightness-110"
           >
             Start
           </Link>
@@ -116,8 +116,8 @@ export function MarketingNav() {
               key={l.href}
               href={l.href}
               aria-current={isActive(l.href) ? "page" : undefined}
-              className={`border-b border-ops-line/60 py-3 font-data text-sm uppercase tracking-[0.14em] ${
-                isActive(l.href) ? "text-signal" : "text-fg-muted"
+              className={`border-b border-ops-line/60 py-3.5 text-[16px] font-medium ${
+                isActive(l.href) ? "text-fg" : "text-fg-muted"
               }`}
             >
               {l.label}
@@ -125,13 +125,13 @@ export function MarketingNav() {
           ))}
           <Link
             href="/login"
-            className="border-b border-ops-line/60 py-3 font-data text-sm uppercase tracking-[0.14em] text-fg-muted"
+            className="border-b border-ops-line/60 py-3.5 text-[16px] font-medium text-fg-muted"
           >
             Sign in
           </Link>
           <Link
             href="/contact"
-            className="mt-4 rounded-sm bg-signal px-4 py-3 text-center font-data text-sm font-medium uppercase tracking-[0.14em] text-ops-void"
+            className="mt-5 rounded-md bg-signal px-4 py-3 text-center text-[16px] font-semibold text-ops-void"
           >
             Start
           </Link>

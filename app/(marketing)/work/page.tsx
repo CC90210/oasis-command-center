@@ -80,7 +80,7 @@ const ENGAGEMENTS = [
 export default function WorkPage() {
   return (
     <>
-      <section className="relative overflow-hidden border-b border-ops-line">
+      <section className="m-edge relative overflow-hidden">
         <ConsoleField />
         <div className="relative mx-auto w-full max-w-6xl px-5 pb-16 pt-20 sm:px-8 sm:pb-20 sm:pt-28">
           <Reveal>
@@ -102,7 +102,7 @@ export default function WorkPage() {
       </section>
 
       {/* ── Capabilities ─────────────────────────────────────────────── */}
-      <Section className="border-b border-ops-line">
+      <Section className="m-edge">
         <Reveal>
           <SectionHead
             eyebrow="Capabilities"
@@ -128,7 +128,7 @@ export default function WorkPage() {
       </Section>
 
       {/* ── Engagements ──────────────────────────────────────────────── */}
-      <Section className="border-b border-ops-line">
+      <Section className="m-edge">
         <Reveal>
           <SectionHead
             eyebrow="Where it starts"
@@ -175,7 +175,7 @@ export default function WorkPage() {
                 </ul>
                 <Link
                   href="/contact"
-                  className="mt-7 inline-flex items-center gap-2 font-data text-[12px] uppercase tracking-[0.16em] text-signal transition-opacity hover:opacity-80"
+                  className="mt-7 inline-flex items-center gap-1.5 text-[15px] font-medium text-signal transition-colors hover:text-fg"
                 >
                   Start here
                   <ArrowRight className="h-4 w-4" aria-hidden="true" />
