@@ -15,6 +15,7 @@ import "server-only";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { sendTelegram } from "@/lib/notify/telegram";
 import { escapeTelegramHtml } from "@/lib/notify/telegram-format";
+import { AI_AUDIT_STEP_COUNT } from "@/lib/forms/oasis-ai-audit-seed";
 import { deliverWelcomeEmail } from "@/lib/forms/oasis-funnel-email";
 import { buildAiAuditAlert, composeAiAuditWelcome } from "@/lib/forms/ai-audit-format";
 import type { ScoreBreakdown } from "@/lib/forms/ai-audit-ingest";
@@ -112,10 +113,9 @@ export async function notifyAiAuditStarted(input: {
     email ? `✉️ ${email}` : "",
     website ? `🔗 ${website}` : "",
     "",
-    // Four steps, per AI_AUDIT_STEPS in lib/forms/oasis-ai-audit-seed.ts.
-    // Keep this in step with the funnel or the alert quietly lies about
-    // how far along the lead actually is.
-    "Step 1 of 4 complete. Score arrives if they finish.",
+    // Derived from the seed, so the alert cannot drift out of step with
+    // the funnel the way the hardcoded version did.
+    `Step 1 of ${AI_AUDIT_STEP_COUNT} complete. Score arrives if they finish.`,
   ].filter(Boolean);
 
   const r = await sendTelegram(lines.join("\n"));

@@ -250,6 +250,19 @@ export const AI_AUDIT_STEPS: FormStep[] = [
 ];
 
 /**
+ * How many steps a visitor walks through.
+ *
+ * Derived, never typed twice. The public marketing site tells people how
+ * many questions they are signing up for, and the Telegram alert says how
+ * far along a lead got — both were hardcoded as "5" against a four-step
+ * funnel until 2026-07-31, so every one of those statements was wrong.
+ * Server-side callers import this. The prose on the marketing pages cannot
+ * template a number without wrecking the sentences, so it is guarded by an
+ * assertion in tests/ai-audit-notify.test.ts instead.
+ */
+export const AI_AUDIT_STEP_COUNT = AI_AUDIT_STEPS.length;
+
+/**
  * Assemble the `forms` table row (minus DB-generated id/timestamps).
  * Mirrors buildOasisFunnelRow so both funnels seed through the same shape.
  */

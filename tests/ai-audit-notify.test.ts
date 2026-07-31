@@ -7,9 +7,12 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 
 import { buildAiAuditAlert, composeAiAuditWelcome } from "../lib/forms/ai-audit-format";
 import { scoreAiAuditLead } from "../lib/forms/ai-audit-ingest";
+import { AI_AUDIT_STEP_COUNT } from "../lib/forms/oasis-ai-audit-seed";
 
 const HOT = {
   name: "Dana Whitfield",
@@ -131,4 +134,67 @@ test("a no-call lead gets a different next step than a call-requester", () => {
   const called = composeAiAuditWelcome(HOT).body;
   const quiet = composeAiAuditWelcome(COLD).body;
   assert.notEqual(called, quiet, "the email ignores what they actually asked for");
+});
+
+/**
+ * The public marketing site tells a visitor how many questions they are
+ * committing to before they type anything. Until 2026-07-31 every one of
+ * those statements said five against a four-step funnel — the number a
+ * visitor uses to decide whether to start, wrong on the homepage.
+ *
+ * The server side is now derived from AI_AUDIT_STEP_COUNT and cannot drift.
+ * The marketing copy is prose ("Four questions, two minutes") and cannot
+ * take a template without wrecking the sentence, so this scans the real
+ * files instead. Adding a step to the funnel fails here, with the list of
+ * files that carry the number.
+ */
+const NUMBER_WORD: Record<number, string> = {
+  2: "Two", 3: "Three", 4: "Four", 5: "Five", 6: "Six", 7: "Seven",
+};
+
+const COPY_FILES = [
+  "app/(marketing)/home/page.tsx",
+  "app/(marketing)/work/page.tsx",
+  "app/(marketing)/contact/page.tsx",
+  "components/marketing/AuditForm.tsx",
+];
+
+test("marketing copy states the real number of funnel steps", () => {
+  const total = NUMBER_WORD[AI_AUDIT_STEP_COUNT];
+  const remaining = NUMBER_WORD[AI_AUDIT_STEP_COUNT - 1];
+  assert.ok(total && remaining, `add ${AI_AUDIT_STEP_COUNT} to NUMBER_WORD`);
+
+  const wrongTotals = Object.entries(NUMBER_WORD)
+    .filter(([n]) => Number(n) !== AI_AUDIT_STEP_COUNT)
+    .map(([, word]) => word);
+
+  for (const rel of COPY_FILES) {
+    const src = readFileSync(join(process.cwd(), rel), "utf8");
+
+    // "Step 1 of N" — the literal count, wherever it appears.
+    for (const m of src.matchAll(/Step 1 of (\d+)/g)) {
+      assert.equal(
+        Number(m[1]),
+        AI_AUDIT_STEP_COUNT,
+        `${rel} says "${m[0]}" but the funnel has ${AI_AUDIT_STEP_COUNT} steps`,
+      );
+    }
+
+    // "<Word> questions" — the total, spelled out.
+    for (const bad of wrongTotals) {
+      assert.ok(
+        !src.includes(`${bad} questions`),
+        `${rel} says "${bad} questions" but the funnel has ${AI_AUDIT_STEP_COUNT} steps (expected "${total} questions")`,
+      );
+    }
+
+    // "<Word> more screens/questions" — what is left AFTER step 1.
+    for (const [n, word] of Object.entries(NUMBER_WORD)) {
+      if (Number(n) === AI_AUDIT_STEP_COUNT - 1) continue;
+      assert.ok(
+        !new RegExp(`${word} more (screens|questions)`, "i").test(src),
+        `${rel} promises "${word} more" after step 1, but ${remaining} remain`,
+      );
+    }
+  }
 });
