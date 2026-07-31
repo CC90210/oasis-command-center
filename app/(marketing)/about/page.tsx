@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import { ArrowRight } from "lucide-react";
+import { CtaLink } from "@/components/marketing/Cta";
 import { ConsoleField } from "@/components/marketing/ConsoleField";
 import { Reveal } from "@/components/marketing/Reveal";
 import { Section, SectionHead, Eyebrow } from "@/components/marketing/Section";
@@ -173,13 +174,9 @@ export default function AboutPage() {
               Tell us what your week actually looks like. We&rsquo;ll tell you
               which part of it a machine should be doing.
             </p>
-            <Link
-              href="/contact"
-              className="mt-8 inline-flex items-center justify-center gap-2.5 rounded-sm bg-signal px-6 py-3.5 font-data text-[13px] font-medium uppercase tracking-[0.16em] text-ops-void transition-opacity hover:opacity-90"
-            >
+            <CtaLink href="/contact" className="mt-8">
               Start the audit
-              <ArrowRight className="h-4 w-4" aria-hidden="true" />
-            </Link>
+            </CtaLink>
           </div>
         </Reveal>
       </Section>

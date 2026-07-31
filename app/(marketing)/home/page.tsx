@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import { ArrowRight } from "lucide-react";
+import { CtaLink } from "@/components/marketing/Cta";
 import { ConsoleField } from "@/components/marketing/ConsoleField";
 import { FleetRoster } from "@/components/marketing/FleetRoster";
 import { Reveal } from "@/components/marketing/Reveal";
@@ -88,19 +89,10 @@ export default function MarketingHome() {
 
           <Reveal delay={270}>
             <div className="mt-10 flex flex-col gap-3 sm:flex-row sm:items-center">
-              <Link
-                href="/contact"
-                className="inline-flex items-center justify-center gap-2.5 rounded-sm bg-signal px-6 py-3.5 font-data text-[13px] font-medium uppercase tracking-[0.16em] text-ops-void transition-opacity hover:opacity-90"
-              >
-                Start the audit
-                <ArrowRight className="h-4 w-4" aria-hidden="true" />
-              </Link>
-              <Link
-                href="/fleet"
-                className="inline-flex items-center justify-center gap-2.5 rounded-sm border border-ops-edge px-6 py-3.5 font-data text-[13px] uppercase tracking-[0.16em] text-fg-muted transition-colors hover:border-signal/50 hover:text-fg"
-              >
+              <CtaLink href="/contact">Start the audit</CtaLink>
+              <CtaLink href="/fleet" variant="secondary" arrow={false}>
                 Meet the fleet
-              </Link>
+              </CtaLink>
             </div>
           </Reveal>
 

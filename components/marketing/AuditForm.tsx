@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { ArrowRight, Loader2 } from "lucide-react";
 import { AUDIT_FUNNEL } from "@/lib/marketing/routes";
+import { CTA_PRIMARY } from "@/components/marketing/Cta";
 
 /**
  * The site's one conversion point.
@@ -119,7 +120,7 @@ export function AuditForm({ compact = false }: { compact?: boolean }) {
       <button
         type="submit"
         disabled={sending}
-        className="mt-6 inline-flex w-full items-center justify-center gap-2.5 rounded-sm bg-signal px-6 py-3.5 font-data text-[13px] font-medium uppercase tracking-[0.16em] text-ops-void transition-opacity hover:opacity-90 disabled:opacity-60 sm:w-auto"
+        className={`${CTA_PRIMARY} mt-6 w-full sm:w-auto`}
       >
         {sending ? (
           <>
