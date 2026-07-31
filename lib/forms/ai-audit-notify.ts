@@ -112,7 +112,10 @@ export async function notifyAiAuditStarted(input: {
     email ? `✉️ ${email}` : "",
     website ? `🔗 ${website}` : "",
     "",
-    "Step 1 of 5 complete. Score arrives if they finish.",
+    // Four steps, per AI_AUDIT_STEPS in lib/forms/oasis-ai-audit-seed.ts.
+    // Keep this in step with the funnel or the alert quietly lies about
+    // how far along the lead actually is.
+    "Step 1 of 4 complete. Score arrives if they finish.",
   ].filter(Boolean);
 
   const r = await sendTelegram(lines.join("\n"));

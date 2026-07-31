@@ -60,7 +60,7 @@ assert.deepEqual(
   installedAnalytics,
   [],
   `An analytics/telemetry package was added (${installedAnalytics.join(", ")}), but ` +
-    `app/privacy/page.tsx section 4 still tells users this app loads no third-party ` +
+    `app/(marketing)/privacy/page.tsx section 4 still tells users this app loads no third-party ` +
     `analytics SDK. Update that section, add the processor to SUBPROCESSORS in ` +
     `lib/legal/constants.ts, and add it to tracking.thirdPartyAnalyticsSdks in ` +
     `PRIVACY_NUTRITION_LABEL.json — then add it to this allowlist.`,

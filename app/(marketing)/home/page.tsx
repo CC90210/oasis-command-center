@@ -27,12 +27,14 @@ export const metadata: Metadata = {
   description:
     "OASIS builds AI agents that hold a seat in your business — operations, marketing, finance, legal — and the systems they run on. Montreal, Quebec.",
   alternates: { canonical: "/" },
-  openGraph: {
-    url: "/",
-    title: "OASIS AI — Operational agentic systems",
-    description:
-      "Agents that hold a seat in your business, and the systems they run on.",
-  },
+  // No openGraph override here on purpose. Next merges metadata shallowly:
+  // a page-level openGraph object REPLACES the layout's, and that includes
+  // dropping the file-based opengraph-image.tsx the route group provides.
+  // The previous version of this file set url/title/description here and
+  // silently shipped the homepage — the single most-shared URL on the site
+  // — with no share image at all, while every other marketing page had one.
+  // Verified by diffing the rendered og: tags on / against /fleet.
+  // og:title and og:description are derived from the fields above anyway.
 };
 
 const STEPS = [
@@ -235,7 +237,7 @@ export default function MarketingHome() {
                 Tell us what&rsquo;s eating your week.
               </h2>
               <p className="mt-5 max-w-md text-[16px] leading-relaxed text-fg-muted sm:text-[17px]">
-                Five questions about how your business actually runs. We read
+                Four questions about how your business actually runs. We read
                 every one and come back with where an agent would pay for
                 itself first — and where it wouldn&rsquo;t.
               </p>

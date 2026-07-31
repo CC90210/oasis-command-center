@@ -203,7 +203,7 @@ export default function WorkPage() {
               Find out what&rsquo;s worth automating before you spend anything.
             </h2>
             <p className="mt-5 max-w-xl text-[16px] leading-relaxed text-fg-muted">
-              Five questions, two minutes. We come back with where an agent
+              Four questions, two minutes. We come back with where an agent
               pays for itself first in your business — including if the answer
               is &ldquo;nowhere yet&rdquo;.
             </p>

@@ -19,7 +19,7 @@ import { LEGAL_CONTACTS } from "@/lib/legal/constants";
 export const metadata: Metadata = {
   title: "Contact",
   description:
-    "Tell OASIS AI what's eating your week. Five questions, two minutes, and an honest answer about where an AI agent would pay for itself first.",
+    "Tell OASIS AI what's eating your week. Four questions, two minutes, and an honest answer about where an AI agent would pay for itself first.",
   alternates: { canonical: "/contact" },
 };
 
@@ -58,7 +58,7 @@ export default function ContactPage() {
           </Reveal>
           <Reveal delay={180}>
             <p className="mt-6 max-w-xl text-[17px] leading-relaxed text-fg-muted">
-              Five questions about how your business actually runs. We read
+              Four questions about how your business actually runs. We read
               every one and come back with where an agent would pay for itself
               first — including when the honest answer is &ldquo;not
               yet&rdquo;.
@@ -72,7 +72,7 @@ export default function ContactPage() {
           <Reveal>
             <div className="border border-ops-line bg-ops-panel p-6 sm:p-8">
               <h2 className="mb-7 font-data text-[10px] uppercase tracking-[0.24em] text-fg-dim">
-                Step 1 of 5
+                Step 1 of 4
               </h2>
               <AuditForm />
             </div>
@@ -85,7 +85,7 @@ export default function ContactPage() {
               </h2>
               <ol className="mt-5 space-y-4">
                 {[
-                  "You answer four more short questions — goal, timeline, team, budget. Two minutes, and you can stop at any point; we'll still have your details.",
+                  "You answer three more short screens — what to automate, your scale, your timeline. Two minutes, and you can stop at any point; we'll still have your details.",
                   "It lands in our pipeline immediately and gets read by a person, not filed into an autoresponder.",
                   "You get back a specific answer about your business: what to automate first, roughly what it costs, and what to leave alone for now.",
                 ].map((t, i) => (

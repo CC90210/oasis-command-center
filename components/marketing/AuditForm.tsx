@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { ArrowRight, Loader2 } from "lucide-react";
 import { AUDIT_FUNNEL } from "@/lib/marketing/routes";
 import { CTA_PRIMARY } from "@/components/marketing/Cta";
@@ -31,10 +31,19 @@ type Status = "idle" | "sending" | "error";
 export function AuditForm({ compact = false }: { compact?: boolean }) {
   const [status, setStatus] = useState<Status>("idle");
   const [error, setError] = useState<string | null>(null);
+  // The in-flight guard has to be a ref, not `status`. React state updates
+  // are asynchronous: two submit events dispatched before the next render
+  // (double-click, Enter-then-click) would both read "idle" and both POST,
+  // creating two leads for one person. A ref mutates synchronously, so the
+  // second event sees the first one's flag. The disabled button is a UI
+  // affordance, not a guarantee — it only takes effect after that same
+  // render.
+  const inFlight = useRef(false);
 
   async function onSubmit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
-    if (status === "sending") return;
+    if (inFlight.current) return;
+    inFlight.current = true;
 
     const form = new FormData(e.currentTarget);
     const payload = {
@@ -75,18 +84,24 @@ export function AuditForm({ compact = false }: { compact?: boolean }) {
             : "That didn't go through. Try again, or email support@oasisai.work.",
         );
         setStatus("error");
+        inFlight.current = false; // let them correct and retry
         return;
       }
 
       // Continue into the funnel. Without a token there is nothing to
       // resume, so fall back to the anonymous funnel entry rather than
       // navigating to a broken personalised URL.
+      //
+      // inFlight is deliberately NOT released here. The navigation is
+      // already committed, and clearing it would reopen the double-submit
+      // window for however long the browser takes to leave the page.
       window.location.href = data.minted_token
         ? `${AUDIT_FUNNEL.path}/${encodeURIComponent(data.minted_token)}`
         : AUDIT_FUNNEL.path;
     } catch {
       setError("Couldn't reach the server. Check your connection and try again.");
       setStatus("error");
+      inFlight.current = false;
     }
   }
 
@@ -140,7 +155,7 @@ export function AuditForm({ compact = false }: { compact?: boolean }) {
         aria-live="polite"
         className={`mt-4 text-sm ${error ? "text-status-hot" : "text-fg-dim"}`}
       >
-        {error ?? "Four more questions after this. Takes about two minutes."}
+        {error ?? "Three more screens after this. Takes about two minutes."}
       </p>
     </form>
   );
