@@ -72,7 +72,7 @@ const nextConfig = {
   // self-contained server.js + trimmed node_modules. No effect on Vercel
   // (Vercel uses its own builder).
   output: "standalone",
-  // Cached / external links to retired routes land cleanly on /welcome
+  // Cached / external links to retired routes land cleanly on a live page
   // instead of bouncing through middleware (which would return 307→/login
   // for unauthenticated visitors because the path is no longer in
   // PUBLIC_PATH_PREFIXES). 308 = permanent redirect so search engines
@@ -80,8 +80,29 @@ const nextConfig = {
   async redirects() {
     return [
       {
+        // The entry-path page moved off the brand apex when the marketing
+        // site took over "/" (2026-07-31). /welcome had been shared
+        // directly, so the old URL has to keep resolving.
+        source: "/welcome",
+        destination: "/start",
+        permanent: true,
+      },
+      {
         source: "/command-centre-explained",
-        destination: "/welcome",
+        destination: "/start",
+        permanent: true,
+      },
+      // Inbound links from the previous marketing site
+      // (oasis-ai-platform-iota.vercel.app). Both of its commercial pages
+      // are consolidated into /work.
+      {
+        source: "/pricing",
+        destination: "/work",
+        permanent: true,
+      },
+      {
+        source: "/services",
+        destination: "/work",
         permanent: true,
       },
     ];

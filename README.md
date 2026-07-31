@@ -22,7 +22,10 @@ CC's working copy). Every push to `main` auto-deploys via Vercel.
 
 | Path | What it shows |
 |---|---|
-| `/welcome` | Public landing — 11-phase agent assembly scroll scene |
+| `/` (anonymous) | Public marketing home — rewritten to `app/(marketing)/home`, so the URL stays `/`. Signed in, the same path is the Today dashboard below. |
+| `/fleet` · `/work` · `/about` · `/contact` | Public marketing site. Not `/agents` — that is the auth-gated dashboard page. |
+| `/start` | Entry-path chooser (build / sign in / download). Was `/welcome` until 2026-07-31; the old URL 308s here. |
+| `/privacy` · `/terms` · `/dmca` | Public legal pages, rendered from `lib/legal/constants.ts` |
 | `/download` | Public download surface for the OASIS Desktop app (alpha.6) |
 | `/desktop-link` | Deep-link sign-in target for the desktop app (mints pair codes, fires `oasis://pair` deep link) |
 | `/login` · `/signup` | Supabase email + Google OAuth |

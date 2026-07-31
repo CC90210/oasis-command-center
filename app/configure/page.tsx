@@ -1,7 +1,7 @@
 /**
  * /configure — public agent-configurator landing.
  *
- * The "Configure your own agent" button on /welcome lands here. Visitor
+ * The "Configure your own agent" button on /start lands here. Visitor
  * picks an agent, answers a few personalization questions, the page
  * generates a custom install one-liner that clones the right repo +
  * pre-fills their answers, and surfaces the OASIS AI checkout link if
@@ -39,7 +39,7 @@ export default async function ConfigurePage() {
       </div>
 
       <header className="relative z-10 mx-auto max-w-5xl px-6 py-5 flex items-center justify-between">
-        <Link href="/welcome" className="flex items-center gap-2.5">
+        <Link href="/" className="flex items-center gap-2.5">
           <OasisLogo size={32} priority />
           <div className="leading-none">
             <div className="font-black text-fg tracking-tight text-sm">OASIS AI</div>
@@ -50,7 +50,7 @@ export default async function ConfigurePage() {
           <Link href="/login" className="text-fg-muted hover:text-fg transition-colors">
             Sign in
           </Link>
-          <Link href="/welcome" className="text-fg-muted hover:text-fg transition-colors">
+          <Link href="/" className="text-fg-muted hover:text-fg transition-colors">
             Back to home
           </Link>
         </div>

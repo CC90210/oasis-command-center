@@ -13,7 +13,9 @@
     "test:lead-advancements": "tsx tests/lead-declined-transfer.test.ts && tsx tests/lead-drawer-layout.test.ts",
     "test:chat-modes": "tsx tests/chat-modes.test.ts",
     "test:event-bus": "tsx tests/event-bus-display.test.ts",
-    "test:streaming-redactor": "tsx tests/streaming-redactor.test.ts"
+    "test:streaming-redactor": "tsx tests/streaming-redactor.test.ts",
+    "test:legal": "tsx tests/legal-compliance-drift.test.ts",
+    "test:funnels": "tsx tests/oasis-funnel.test.ts && tsx tests/ai-audit-ingest.test.ts && tsx tests/ai-audit-notify.test.ts"
   },
   "dependencies": {
     "@libsql/client": "^0.17.3",

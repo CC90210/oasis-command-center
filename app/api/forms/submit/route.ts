@@ -51,6 +51,9 @@ import { maybeSendNextStepsEmail, maybeSendApplicationCompleteEmail } from "@/li
 import { notifyOasisFunnelSubmission } from "@/lib/forms/oasis-funnel-notify";
 import { buildOasisLeadPatch } from "@/lib/forms/oasis-funnel-format";
 import { OASIS_FUNNEL_SLUG, OASIS_FUNNEL_TENANT_ID } from "@/lib/forms/oasis-funnel-seed";
+import { AI_AUDIT_SLUG, AI_AUDIT_TENANT_ID } from "@/lib/forms/oasis-ai-audit-seed";
+import { ingestAiAuditSubmission, scoreAiAuditLead } from "@/lib/forms/ai-audit-ingest";
+import { notifyAiAuditSubmission, notifyAiAuditStarted } from "@/lib/forms/ai-audit-notify";
 import { maybeGenerateApplicationDocument } from "@/lib/forms/application-document";
 import { sendSunbizLeadEvent } from "@/lib/notify/sunbiz-events";
 import { sendFormCompletionEmail } from "@/lib/notify/form-completion-email";
@@ -1108,6 +1111,80 @@ export async function POST(req: NextRequest) {
         answers,
       }),
     );
+  }
+
+  // AI-audit funnel, FIRST step. Same exact tenant+slug gate as the
+  // completion block below — no prefix matching, for the reason recorded
+  // there. Fires on step 0 only, so it can never double up with the
+  // last-step alert (the funnel has four steps).
+  //
+  // This exists because the marketing site's inline CTA submits step 0 by
+  // itself and then hands the visitor into the rest of the funnel. Before
+  // this, name + email + company arrived, a lead row was written, and
+  // nothing told anyone — a bounce at step 2 was indistinguishable from no
+  // visit at all. See notifyAiAuditStarted for the dedup rule.
+  if (
+    stepIndex === 0 &&
+    form.tenant_id === AI_AUDIT_TENANT_ID &&
+    form.slug === AI_AUDIT_SLUG
+  ) {
+    const startedAnswers = { ...mergedAnswers };
+    after(() =>
+      notifyAiAuditStarted({
+        db,
+        tenantId: form.tenant_id,
+        formId: form.id,
+        leadId: link.lead_id,
+        // The row inserted above. The helper fires only if THIS submission
+        // is the oldest one on record for the lead, which is what makes
+        // two racing step-0 submits produce exactly one alert.
+        submissionId,
+        answers: startedAnswers,
+      }),
+    );
+  }
+
+  // OASIS AI Solutions B2B qualification funnel (/f/oasis-ai-cc/ai-audit).
+  // Separate block with its own EXACT tenant+slug gate, mirroring the OASIS
+  // funnel above — the Codex audit finding that killed a startsWith() gate
+  // applies here identically, so no prefix matching and no shared condition.
+  //
+  // This is the ingestion the submit path never did: the lead row is already
+  // upserted by this point, but nothing scored it and nothing wrote a
+  // lead_interactions row, so funnel answers never reached the lead timeline.
+  if (
+    isLastStep &&
+    form.tenant_id === AI_AUDIT_TENANT_ID &&
+    form.slug === AI_AUDIT_SLUG
+  ) {
+    const answers = { ...mergedAnswers };
+    after(async () => {
+      const r = await ingestAiAuditSubmission({
+        db,
+        tenantId: form.tenant_id,
+        leadId: link.lead_id,
+        answers,
+      });
+      if (!r.ok) {
+        console.error("[forms.submit.ai_audit_ingest.failed]", {
+          lead_id: link.lead_id,
+          error: r.error,
+        });
+      }
+      // Tell CC, and confirm to the lead. Until 2026-07-30 this block scored
+      // the lead and stopped — a funnel that ranks someone 90/100 in silence
+      // does the work and lets the lead go cold. Scoring is recomputed here
+      // only if ingest could not return it, so the alert always carries the
+      // same numbers that were written to the timeline.
+      const score = r.breakdown ?? scoreAiAuditLead(answers);
+      await notifyAiAuditSubmission({
+        db,
+        tenantId: form.tenant_id,
+        leadId: link.lead_id,
+        answers,
+        score,
+      });
+    });
   }
 
   return NextResponse.json({

@@ -204,99 +204,141 @@ export type OasisFunnelWelcomeInput = {
   answers: Record<string, unknown>;
 };
 
-export async function sendOasisFunnelWelcome(input: OasisFunnelWelcomeInput): Promise<void> {
+export type DeliverResult = { sent: boolean; reason?: string };
+
+/**
+ * Send ONE transactional email to a lead and record it — the shared core.
+ *
+ * Extracted 2026-07-30 so the AI-audit funnel inherits this instead of growing
+ * a parallel copy. Everything valuable here is the stuff a second
+ * implementation forgets: idempotency per (lead, source), a FAIL-CLOSED
+ * suppression check, the Gmail-credential guard, and the lead_interactions row
+ * that makes the send auditable. Callers supply only what differs — the
+ * composed subject/body and the source tag.
+ *
+ * Returns a result instead of void: the previous caller discarded it, so a
+ * failed welcome email was invisible to the orchestrator (only a console line).
+ */
+export async function deliverWelcomeEmail(args: {
+  db: SupabaseClient;
+  tenantId: string;
+  leadId: string;
+  toEmail: string;
+  source: string;
+  subject: string;
+  body: string;
+}): Promise<DeliverResult> {
+  const { db, tenantId, leadId, toEmail, source, subject, body } = args;
+
+  if (!EMAIL_RE.test(toEmail)) return { sent: false, reason: "no_usable_email" };
+
+  // Idempotency — one email per (lead, source). A returning, smart-matched lead
+  // that re-submits is not re-emailed. Scoped BY SOURCE so an ai-audit
+  // confirmation and a funnel welcome do not suppress each other.
+  const prior = await db
+    .from("lead_interactions")
+    .select("id")
+    .eq("tenant_id", tenantId)
+    .eq("lead_id", leadId)
+    .eq("agent_source", source)
+    .limit(1);
+  if (!prior.error && (prior.data?.length ?? 0) > 0) {
+    return { sent: false, reason: "already_sent" };
+  }
+
+  // Suppression — a public form must never re-email someone who opted out.
+  // Match literally (escape LIKE wildcards); FAIL CLOSED on lookup error.
+  const suppPattern = toEmail.replace(/[%_\\]/g, "\\$&");
+  const supp = await db
+    .from("email_suppressions")
+    .select("email")
+    .eq("tenant_id", tenantId)
+    .ilike("email", suppPattern)
+    .limit(1);
+  if (supp.error) {
+    console.error("[funnel.welcome] suppression check errored — skipping (fail-closed)", {
+      lead_id: leadId,
+      source,
+      error: supp.error.message,
+    });
+    return { sent: false, reason: "suppression_check_failed" };
+  }
+  if ((supp.data?.length ?? 0) > 0) return { sent: false, reason: "suppressed" };
+
+  const gmailUser = process.env.GMAIL_USER;
+  const gmailPass = process.env.GMAIL_APP_PASSWORD;
+  if (!gmailUser || !gmailPass) {
+    console.error("[funnel.welcome] GMAIL_USER/GMAIL_APP_PASSWORD not set — skipping", { source });
+    return { sent: false, reason: "gmail_not_configured" };
+  }
+
+  let sentOk = false;
+  let reason: string | null = null;
+  try {
+    const transporter = nodemailer.createTransport({
+      service: "gmail",
+      auth: { user: gmailUser, pass: gmailPass },
+    });
+    await transporter.sendMail({
+      from: `"Conaugh McKenna" <${gmailUser}>`,
+      to: toEmail,
+      subject,
+      text: body,
+      html: wrapInHtml(body),
+    });
+    sentOk = true;
+  } catch (e) {
+    reason = e instanceof Error ? e.message : "send_failed";
+  }
+
+  await db.from("lead_interactions").insert({
+    tenant_id: tenantId,
+    lead_id: leadId,
+    type: sentOk ? "email_sent" : "email_queued",
+    channel: "email",
+    direction: "outbound",
+    agent_source: source,
+    subject: subject.slice(0, 200),
+    content: body,
+    content_preview: body.slice(0, 1024),
+    to_email: toEmail,
+    metadata: {
+      status: sentOk ? "sent" : "failed",
+      sent_at: sentOk ? new Date().toISOString() : null,
+      send_error: reason,
+      welcome: true,
+      intent: "transactional",
+    },
+  });
+
+  if (!sentOk) {
+    console.error("[funnel.welcome] send did not fire", { lead_id: leadId, source, reason });
+  }
+  return { sent: sentOk, reason: reason || undefined };
+}
+
+
+export async function sendOasisFunnelWelcome(
+  input: OasisFunnelWelcomeInput,
+): Promise<DeliverResult> {
   const { db, tenantId, leadId, answers } = input;
   try {
     const toEmail = str(answers.email).trim().toLowerCase();
-    if (!EMAIL_RE.test(toEmail)) return; // no usable email
-
-    // Idempotency — one welcome per lead (a returning, smart-matched lead that
-    // re-submits is not re-emailed).
-    const prior = await db
-      .from("lead_interactions")
-      .select("id")
-      .eq("tenant_id", tenantId)
-      .eq("lead_id", leadId)
-      .eq("agent_source", WELCOME_SOURCE)
-      .limit(1);
-    if (!prior.error && (prior.data?.length ?? 0) > 0) return;
-
-    // Suppression — a public form must never re-email someone who opted out.
-    // Match literally (escape LIKE wildcards); FAIL CLOSED on lookup error.
-    const suppPattern = toEmail.replace(/[%_\\]/g, "\\$&");
-    const supp = await db
-      .from("email_suppressions")
-      .select("email")
-      .eq("tenant_id", tenantId)
-      .ilike("email", suppPattern)
-      .limit(1);
-    if (supp.error) {
-      console.error("[oasis-funnel.welcome] suppression check errored — skipping (fail-closed)", {
-        lead_id: leadId,
-        error: supp.error.message,
-      });
-      return;
-    }
-    if ((supp.data?.length ?? 0) > 0) return; // suppressed
-
-    const gmailUser = process.env.GMAIL_USER;
-    const gmailPass = process.env.GMAIL_APP_PASSWORD;
-    if (!gmailUser || !gmailPass) {
-      console.error("[oasis-funnel.welcome] GMAIL_USER/GMAIL_APP_PASSWORD not set — skipping");
-      return;
-    }
+    if (!EMAIL_RE.test(toEmail)) return { sent: false, reason: "no_usable_email" };
 
     const interests = asArray(answers.interests);
     const details = extractDetails(answers);
     const name = str(answers.name) || str(answers.contact_name) || "there";
     const { subject, body } = await compose(name, interests, details);
 
-    let sentOk = false;
-    let reason: string | null = null;
-    try {
-      const transporter = nodemailer.createTransport({
-        service: "gmail",
-        auth: { user: gmailUser, pass: gmailPass },
-      });
-      await transporter.sendMail({
-        from: `"Conaugh McKenna" <${gmailUser}>`,
-        to: toEmail,
-        subject,
-        text: body,
-        html: wrapInHtml(body),
-      });
-      sentOk = true;
-    } catch (e) {
-      reason = e instanceof Error ? e.message : "send_failed";
-    }
-
-    await db.from("lead_interactions").insert({
-      tenant_id: tenantId,
-      lead_id: leadId,
-      type: sentOk ? "email_sent" : "email_queued",
-      channel: "email",
-      direction: "outbound",
-      agent_source: WELCOME_SOURCE,
-      subject: subject.slice(0, 200),
-      content: body,
-      content_preview: body.slice(0, 1024),
-      to_email: toEmail,
-      metadata: {
-        status: sentOk ? "sent" : "failed",
-        sent_at: sentOk ? new Date().toISOString() : null,
-        send_error: reason,
-        welcome: true,
-        intent: "transactional",
-      },
+    return await deliverWelcomeEmail({
+      db, tenantId, leadId, toEmail, source: WELCOME_SOURCE, subject, body,
     });
-
-    if (!sentOk) {
-      console.error("[oasis-funnel.welcome] send did not fire", { lead_id: leadId, reason });
-    }
   } catch (err) {
     console.error("[oasis-funnel.welcome] threw", {
       lead_id: leadId,
       error: err instanceof Error ? err.message : String(err),
     });
+    return { sent: false, reason: err instanceof Error ? err.message : "threw" };
   }
 }

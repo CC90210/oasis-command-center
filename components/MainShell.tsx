@@ -114,9 +114,23 @@ export function MainShell({
         {children}
       </div>
       <footer className={`mx-auto ${CONTENT_WIDTH} px-8 py-6 text-xs text-fg-faint`}>
-        <div className="border-t border-bg-border pt-4 flex justify-between">
+        <div className="border-t border-bg-border pt-4 flex flex-wrap items-center justify-between gap-y-2">
           <span>{footerLabel}</span>
-          <span>{footerTagline}</span>
+          <div className="flex items-center gap-4">
+            {/* Platform legal links. Deliberately UNBRANDED: this footer also
+                renders under a client tenant's shell (SunBiz et al), and the
+                2026-05-25 cross-tenant audit removed "Powered by OASIS AI"
+                from tenant surfaces. The distinction that makes these links
+                correct anyway — unlike on the public form — is WHO is reading:
+                an operator inside the Command Center is the platform's own
+                customer and these terms genuinely govern their use, whereas a
+                lead filling out a tenant's public form is not. Keep them
+                label-neutral so a SunBiz operator sees "Privacy", not
+                "OASIS AI Privacy". */}
+            <a href="/privacy" className="hover:text-fg-dim">Privacy</a>
+            <a href="/terms" className="hover:text-fg-dim">Terms</a>
+            <span>{footerTagline}</span>
+          </div>
         </div>
       </footer>
     </main>

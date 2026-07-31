@@ -47,6 +47,31 @@ const config: Config = {
           dormant: "#4b5563",
           lost: "#1f2937",
         },
+
+        // ── Public marketing site only (app/(marketing)/**) ──────────────
+        // Deliberately a separate namespace from the dashboard's `bg`/
+        // `accent` scales. The dashboard is a tool used for hours at a
+        // time and is tuned for legibility at density; the marketing site
+        // is a first impression and runs darker and higher-contrast. Two
+        // scales means neither has to compromise for the other, and a
+        // marketing restyle can never regress operator UI.
+        ops: {
+          void: "#050608",   // page
+          panel: "#0b0d11",  // recessed blocks
+          raised: "#12151b", // cards, roster rows
+          line: "#1a1e26",   // hairline rules + grid
+          edge: "#272c36",   // hover borders
+        },
+        // The OASIS logo cyan. Distinct from dashboard blue #3b82f6 on
+        // purpose. Used sparingly — active roster row, primary CTA,
+        // section rules. Roster STATE uses the existing `status.*` scale
+        // above; signal is identity, not semantics.
+        signal: {
+          DEFAULT: "#00D4FF",
+          dim: "#0891b2",
+          glow: "rgba(0, 212, 255, 0.30)",
+          wash: "rgba(0, 212, 255, 0.06)",
+        },
       },
       fontFamily: {
         sans: [
@@ -65,6 +90,14 @@ const config: Config = {
           "monospace",
         ],
         serif: ["Iowan Old Style", "Palatino Linotype", "Georgia", "serif"],
+        // Marketing faces. The CSS vars are defined by next/font in
+        // app/(marketing)/layout.tsx and only exist inside that subtree,
+        // so these utilities are inert on dashboard routes — the
+        // dashboard keeps its system-font stack and its zero-webfont
+        // first paint.
+        display: ["var(--font-display)", "Space Grotesk", "system-ui", "sans-serif"],
+        body: ["var(--font-body)", "Inter Tight", "system-ui", "sans-serif"],
+        data: ["var(--font-data)", "JetBrains Mono", "ui-monospace", "monospace"],
       },
       animation: {
         "pulse-slow": "pulse 3s cubic-bezier(0.4, 0, 0.6, 1) infinite",

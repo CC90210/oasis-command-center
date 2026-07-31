@@ -1,0 +1,229 @@
+/**
+ * Marketing-site styles. Imported by app/(marketing)/layout.tsx only.
+ *
+ * Everything here is namespaced under `.m-` or scoped inside `.marketing`
+ * so it can never reach the operator dashboard, which shares the same
+ * globals.css.
+ *
+ * PROGRESSIVE ENHANCEMENT CONTRACT
+ * The layout puts `class="js"` on <html> from a blocking inline script, so
+ * it is present before first paint (no flash). Every enhancement below is
+ * therefore written as: default = works with no JavaScript, `.js` = the
+ * enhanced state. Delete the script and the site is a plain, complete,
+ * readable document. That is also exactly what a crawler sees.
+ */
+
+/* ── Scroll reveal ─────────────────────────────────────────────────────
+   Without JS, or with reduced motion, elements are simply visible. The
+   hidden start state only exists once JS has confirmed it can undo it. */
+.js .m-reveal {
+  opacity: 0;
+  transform: translateY(14px);
+  transition:
+    opacity 0.7s cubic-bezier(0.22, 1, 0.36, 1),
+    transform 0.7s cubic-bezier(0.22, 1, 0.36, 1);
+  transition-delay: var(--reveal-delay, 0ms);
+  will-change: opacity, transform;
+}
+
+.js .m-reveal.is-in {
+  opacity: 1;
+  transform: none;
+}
+
+/* ── Hairline section rule ─────────────────────────────────────────────
+   The eyebrow device: a mono label preceded by a short rule that fades
+   out. Reads as a console section header rather than a decorative divider. */
+.m-eyebrow::before {
+  content: "";
+  display: inline-block;
+  width: 2rem;
+  height: 1px;
+  margin-right: 0.75rem;
+  vertical-align: middle;
+  background: linear-gradient(to right, theme("colors.signal.DEFAULT"), transparent);
+}
+
+/* ── Fleet roster ──────────────────────────────────────────────────────
+   Two columns on desktop: the roster list, and a detail pane.
+
+   The pane has a FIXED min-height, so switching agents never changes the
+   page height. That is the whole point — a scroll-adjacent component that
+   resizes the document under the reader's cursor is the single worst
+   failure mode of this pattern. Rows animate on entry; the detail is
+   changed by interaction, never by scrolling. */
+
+.m-roster-pane {
+  min-height: 20rem;
+}
+
+/* Panels: stacked and all visible without JS (the document is complete).
+   With JS, only the selected one renders. */
+.js .m-panel[data-active="false"] {
+  display: none;
+}
+
+.js .m-panel[data-active="true"] {
+  animation: m-panel-in 0.45s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+@keyframes m-panel-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* Status light. `data-state` mirrors the roster data, so the colour is
+   driven by the same value the readout text is. */
+.m-dot {
+  position: relative;
+  display: inline-block;
+  width: 0.5rem;
+  height: 0.5rem;
+  border-radius: 9999px;
+  background: theme("colors.status.cold");
+}
+
+.m-dot[data-state="live"] {
+  background: theme("colors.status.engaged");
+}
+
+.m-dot[data-state="scoped"] {
+  background: theme("colors.status.warm");
+}
+
+/* The pulse ring only runs on live agents, and only once the row has
+   entered — so the roster visibly boots as you scroll to it. */
+.js .m-dot[data-state="live"]::after {
+  content: "";
+  position: absolute;
+  inset: -3px;
+  border-radius: 9999px;
+  border: 1px solid theme("colors.status.engaged");
+  opacity: 0;
+}
+
+.js .is-in .m-dot[data-state="live"]::after {
+  animation: m-ping 2.8s ease-out infinite;
+}
+
+@keyframes m-ping {
+  0% {
+    opacity: 0.7;
+    transform: scale(0.8);
+  }
+  70%,
+  100% {
+    opacity: 0;
+    transform: scale(2.1);
+  }
+}
+
+/* ── Ambient grid ──────────────────────────────────────────────────────
+   Static hairline grid. Costs nothing, holds the "instrument panel" read
+   even where the canvas backdrop is not mounted. */
+.m-grid {
+  background-image:
+    linear-gradient(theme("colors.ops.line") 1px, transparent 1px),
+    linear-gradient(90deg, theme("colors.ops.line") 1px, transparent 1px);
+  background-size: 64px 64px;
+  mask-image: radial-gradient(ellipse 80% 60% at 50% 0%, #000 30%, transparent 75%);
+  -webkit-mask-image: radial-gradient(ellipse 80% 60% at 50% 0%, #000 30%, transparent 75%);
+}
+
+/* Grid cell flare — a single cell brightening and fading on a long cycle.
+   16s with hand-set offsets means no two are ever in phase, so it never
+   resolves into a pattern. */
+.m-flare {
+  position: absolute;
+  width: 64px;
+  height: 64px;
+  margin: -32px 0 0 -32px;
+  background: radial-gradient(circle, theme("colors.signal.wash") 0%, transparent 70%);
+  border: 1px solid theme("colors.signal.DEFAULT");
+  opacity: 0;
+  animation: m-flare 16s ease-in-out infinite;
+}
+
+@keyframes m-flare {
+  0%,
+  88%,
+  100% {
+    opacity: 0;
+  }
+  92% {
+    opacity: 0.16;
+  }
+  96% {
+    opacity: 0.04;
+  }
+}
+
+/* One slow pass down the hero. Low enough contrast that you notice it
+   only once, which is the right number of times. */
+.m-sweep {
+  position: absolute;
+  inset-inline: 0;
+  height: 30vh;
+  top: -30vh;
+  background: linear-gradient(to bottom, transparent, theme("colors.signal.wash"), transparent);
+  animation: m-sweep 14s linear infinite;
+}
+
+@keyframes m-sweep {
+  to {
+    transform: translateY(160vh);
+  }
+}
+
+/* ── Focus ─────────────────────────────────────────────────────────────
+   One visible, high-contrast focus ring for the whole marketing surface.
+   Never removed anywhere below. */
+.marketing :focus-visible {
+  outline: 2px solid theme("colors.signal.DEFAULT");
+  outline-offset: 2px;
+  border-radius: 2px;
+}
+
+/* ── Reduced motion ────────────────────────────────────────────────────
+   Reveals resolve to their end state and every animation stops. The
+   observers in Reveal/FleetRoster also bail, so this is belt and braces
+   rather than the only line of defence.
+
+   What this deliberately does NOT do is force the roster's panels open.
+   Reduced motion is a request to stop moving things, not a request to
+   stop working — the tabs still select one panel at a time, they just
+   swap instantly. Forcing every panel visible here would leave the tab
+   roles describing an interaction that no longer does anything, which is
+   worse for a screen-reader user than the animation ever was. The
+   all-panels-open layout is the NO-JAVASCRIPT fallback, where there are
+   no tab roles to contradict. */
+@media (prefers-reduced-motion: reduce) {
+  .js .m-reveal {
+    opacity: 1;
+    transform: none;
+    transition: none;
+  }
+
+  .js .m-panel[data-active="true"] {
+    animation: none;
+  }
+
+  .js .is-in .m-dot[data-state="live"]::after {
+    animation: none;
+  }
+
+  .marketing *,
+  .marketing *::before,
+  .marketing *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+}
