@@ -22,6 +22,8 @@ import { SEED_MANIFESTS } from "@/lib/manifest/seeds";
 import { getTenantManifestForUser } from "@/lib/manifest/tenant-scope";
 import { canPreviewTenantSlug } from "@/lib/tenant-access";
 import { resolveChatShellProps, type ChatShellProps } from "@/lib/chat-shell-props";
+import { matchesPathPrefix } from "@/lib/path-prefix";
+import { ALL_MARKETING_PATHS } from "@/lib/marketing/routes";
 
 // Default metadata — tenant-neutral. Individual pages override via
 // generateMetadata (forms, leads, etc.) with their own titles. Keeping
@@ -51,12 +53,15 @@ export default async function RootLayout({
   // PUBLIC_PATH_PREFIXES — kept as a separate list because middleware
   // also lists API routes that aren't page-rendered.
   const FULL_BLEED_PREFIXES = [
-    "/welcome",
+    // Public marketing site + the three legal pages, from the shared
+    // registry. "/home" is the rewrite target for an anonymous "/" —
+    // middleware re-stamps x-pathname so it lands here. Never add "/"
+    // itself: the matcher would swallow every route in the app and strip
+    // the operator chrome site-wide.
+    ...ALL_MARKETING_PATHS,
+    "/welcome",   // legacy URL, 308s to /start — kept so the redirect leg renders bare
     "/download",
     "/configure",
-    "/privacy",   // public legal pages render their own chrome (components/legal/LegalPage)
-    "/terms",
-    "/dmca",
     "/login",
     "/signup",
     "/forgot-password",
@@ -66,7 +71,11 @@ export default async function RootLayout({
     "/f/",        // public form pages (anonymous + personalized)
     "/invite/",   // pre-signup invite landing
   ];
-  const isFullBleed = FULL_BLEED_PREFIXES.some((p) => pathname.startsWith(p));
+  // Boundary-aware match, same rule as middleware's isPublic(). A raw
+  // startsWith() would let a future "/workflows" or "/aboutus" route
+  // silently inherit the marketing chrome (and skip the profile
+  // resolution the dashboard needs) purely because of a shared prefix.
+  const isFullBleed = FULL_BLEED_PREFIXES.some((p) => matchesPathPrefix(pathname, p));
 
   let profile = null;
   let primaryAgentLive = false;
@@ -256,8 +265,15 @@ export default async function RootLayout({
   // "every tab looks zoomed-in" report — two prior width-only fixes couldn't
   // fix a decision that was frozen at load time.)
 
+  // suppressHydrationWarning below covers the boot scripts that deliberately
+  // mutate <html> before React hydrates: SIDEBAR_BOOT_SCRIPT writes
+  // data-sidebar, and the marketing layout writes className="js". Both run
+  // pre-paint by design — that is the whole point of a boot script — so the
+  // server markup cannot match, and React logged a hydration error on every
+  // page load because of it. The suppression is one level deep: it silences
+  // <html>'s own attributes and nothing inside the tree.
   return (
-    <html lang="en">
+    <html lang="en" suppressHydrationWarning>
       <head>
         {/* Synchronous boot script — reads localStorage and writes
             data-sidebar=collapsed|expanded on <html> before paint. CSS

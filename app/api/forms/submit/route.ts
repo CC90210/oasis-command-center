@@ -53,7 +53,7 @@ import { buildOasisLeadPatch } from "@/lib/forms/oasis-funnel-format";
 import { OASIS_FUNNEL_SLUG, OASIS_FUNNEL_TENANT_ID } from "@/lib/forms/oasis-funnel-seed";
 import { AI_AUDIT_SLUG, AI_AUDIT_TENANT_ID } from "@/lib/forms/oasis-ai-audit-seed";
 import { ingestAiAuditSubmission, scoreAiAuditLead } from "@/lib/forms/ai-audit-ingest";
-import { notifyAiAuditSubmission } from "@/lib/forms/ai-audit-notify";
+import { notifyAiAuditSubmission, notifyAiAuditStarted } from "@/lib/forms/ai-audit-notify";
 import { maybeGenerateApplicationDocument } from "@/lib/forms/application-document";
 import { sendSunbizLeadEvent } from "@/lib/notify/sunbiz-events";
 import { sendFormCompletionEmail } from "@/lib/notify/form-completion-email";
@@ -1109,6 +1109,32 @@ export async function POST(req: NextRequest) {
         tenantId: form.tenant_id,
         leadId: link.lead_id,
         answers,
+      }),
+    );
+  }
+
+  // AI-audit funnel, FIRST step. Same exact tenant+slug gate as the
+  // completion block below — no prefix matching, for the reason recorded
+  // there. Fires on step 0 only, so it can never double up with the
+  // last-step alert (the funnel has four steps).
+  //
+  // This exists because the marketing site's inline CTA submits step 0 by
+  // itself and then hands the visitor into the rest of the funnel. Before
+  // this, name + email + company arrived, a lead row was written, and
+  // nothing told anyone — a bounce at step 2 was indistinguishable from no
+  // visit at all. See notifyAiAuditStarted for the dedup rule.
+  if (
+    stepIndex === 0 &&
+    form.tenant_id === AI_AUDIT_TENANT_ID &&
+    form.slug === AI_AUDIT_SLUG
+  ) {
+    const startedAnswers = { ...mergedAnswers };
+    after(() =>
+      notifyAiAuditStarted({
+        db,
+        formId: form.id,
+        leadId: link.lead_id,
+        answers: startedAnswers,
       }),
     );
   }

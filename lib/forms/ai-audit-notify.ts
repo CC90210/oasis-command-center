@@ -22,6 +22,70 @@ import type { ScoreBreakdown } from "@/lib/forms/ai-audit-ingest";
  *  and a personal-funnel welcome never suppress each other for the same lead. */
 export const AI_AUDIT_WELCOME_SOURCE = "ai_audit_welcome";
 
+/**
+ * First-touch alert for the ai-audit funnel.
+ *
+ * The completion alert above only fires on the LAST step. That was fine
+ * while the only way in was the funnel's own first page, but the marketing
+ * site's inline CTA (components/marketing/AuditForm.tsx) submits step 0 on
+ * its own and hands the visitor onward — so a visitor who fills in name,
+ * email and company and then closes the tab produced a real lead row that
+ * alerted nobody. A form that captures a qualified name in silence is a
+ * drop box, not a funnel.
+ *
+ * Telegram only, deliberately. The welcome EMAIL still belongs to
+ * completion: mailing someone the moment they type an address, then again
+ * two minutes later when they finish, reads as automated and earns a spam
+ * complaint. This tells the operator; it does not talk to the lead.
+ *
+ * Deduped on submission count rather than on a flag: a returning visitor is
+ * smart-matched onto their existing lead, so "is this their first step-0 on
+ * this form" is the only question that actually distinguishes a new inbound
+ * from someone reloading the page.
+ */
+export async function notifyAiAuditStarted(input: {
+  db: SupabaseClient;
+  formId: string;
+  leadId: string;
+  answers: Record<string, unknown>;
+}): Promise<void> {
+  const { db, formId, leadId, answers } = input;
+
+  try {
+    const { count, error } = await db
+      .from("form_submissions")
+      .select("id", { count: "exact", head: true })
+      .eq("form_id", formId)
+      .eq("lead_id", leadId);
+
+    // Fail closed on an unreadable count: a missed alert is recoverable
+    // (the lead is still in the pipeline), a duplicate alert every time
+    // someone refreshes trains the operator to ignore the channel.
+    if (error || (count ?? 0) !== 1) return;
+  } catch {
+    return;
+  }
+
+  const s = (k: string) => String(answers[k] ?? "").trim();
+  const name = s("name") || "Someone";
+  const company = s("company");
+  const email = s("email");
+  const website = s("website");
+
+  const lines = [
+    "🟢 New inbound — OASIS AI audit started",
+    "",
+    `${name}${company ? ` · ${company}` : ""}`,
+    email ? `✉️ ${email}` : "",
+    website ? `🔗 ${website}` : "",
+    "",
+    "Step 1 of 5 complete. Score arrives if they finish.",
+  ].filter(Boolean);
+
+  const r = await sendTelegram(lines.join("\n"));
+  if (!r.ok) console.error("[ai-audit.started] telegram:", r.reason);
+}
+
 export type AiAuditNotifyInput = {
   db: SupabaseClient;
   tenantId: string;

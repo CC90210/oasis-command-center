@@ -72,7 +72,7 @@ export default function DownloadPage() {
 
       {/* === Top brand strip ============================================ */}
       <header className="relative z-10 mx-auto flex max-w-6xl items-center justify-between px-6 py-6 sm:px-10">
-        <Link href="/welcome" className="group flex items-center gap-2.5">
+        <Link href="/" className="group flex items-center gap-2.5">
           <OasisLogo
             size={32}
             priority
