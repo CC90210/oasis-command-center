@@ -106,8 +106,10 @@ export async function ingestMessages(
     } catch {
       lead = null;
     }
-    if (!lead) { res.dropped += 1; continue; }
-    res.matched += 1;
+    // Mirror every work-mailbox message. Personal mailboxes retain the
+    // deal-only privacy gate so unrelated personal email is never shared.
+    if (!lead && args.mailbox === "personal") { res.dropped += 1; continue; }
+    if (lead) res.matched += 1;
 
     // Dedupe on the Gmail message id.
     try {
@@ -127,11 +129,17 @@ export async function ingestMessages(
     // Intelligence (Fable 5) — matched email only, so no personal/unmatched mail
     // ever reaches the model. Lender replies additionally get terms/decline
     // extracted (the learning signal). Both classifiers fence + fail closed.
-    const cls = await classifyDealEmail(msg.subject, msg.body);
+    const cls = lead
+      ? await classifyDealEmail(msg.subject, msg.body)
+      : { type: "other" as const, needs_attention: false, summary: "" };
     let lenderEnrichment: Record<string, unknown> = {};
-    if (cls.type === "lender_reply") {
+    if (lead && cls.type === "lender_reply") {
       try {
-        const lr = await classifyLenderReply(msg.subject, msg.body);
+        // Tenant-scope the queued prompt: the classifier now PERSISTS this
+        // content in inference_jobs, so it must carry its owner.
+        const lr = await classifyLenderReply(msg.subject, msg.body, {
+          tenantId: args.tenantId,
+        });
         lenderEnrichment = {
           lender_category: lr.category,
           lender_amount: lr.amount,
@@ -148,14 +156,14 @@ export async function ingestMessages(
     };
 
     if (args.dryRun) {
-      console.log(`[operator-email] DRY ${outbound ? "out" : "in"} msg=${msg.id} lead=${lead.id} type=${cls.type}${lenderEnrichment.lender_category ? "/" + lenderEnrichment.lender_category : ""} "${msg.subject.slice(0, 50)}"`);
+      console.log(`[operator-email] DRY ${outbound ? "out" : "in"} msg=${msg.id} lead=${lead?.id || "unmatched"} type=${cls.type}${lenderEnrichment.lender_category ? "/" + lenderEnrichment.lender_category : ""} "${msg.subject.slice(0, 50)}"`);
       res.ingested += 1;
       continue;
     }
 
     const row = {
       tenant_id: args.tenantId,
-      lead_id: lead.id,
+      lead_id: lead?.id || null,
       type: outbound ? "email_sent" : "email_received",
       channel: "email",
       direction: outbound ? "outbound" : "inbound",
@@ -172,6 +180,7 @@ export async function ingestMessages(
         from_address: fromEmail,
         monitored_mailbox: args.mailbox,
         routed_to_user_id: args.userId,
+        unmatched_work_email: !lead,
         ...enrichment,
       },
     };
@@ -181,7 +190,7 @@ export async function ingestMessages(
       res.ingested += 1;
       // Inbound replies route their thread to the owning rep (see helper
       // above). Outbound is skipped — sends don't change ownership.
-      if (!outbound) {
+      if (!outbound && lead) {
         await autoAssignThreadForInbound(db, {
           tenantId: args.tenantId,
           leadId: lead.id,

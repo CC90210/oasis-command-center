@@ -166,8 +166,35 @@ async function processSms(db: Db, row: ClaimedRow): Promise<void> {
   const dryRun = isDryRun("texttorrent");
   if (!dryRun) {
     try {
-      const creds = await getTextTorrentCredentials(row.tenant_id);
-      await ttSendSms(creds, { number: row.to_phone, message: row.body, sender_id: row.from_identity });
+      // Semi-mode drafts are approved for a specific employee identity. Resolve
+      // that identity again at fire time and require the frozen sender DID to
+      // still match, otherwise the tenant default act-as account could send an
+      // employee's approved reply from the wrong TextTorrent sub-account.
+      const identities = await db.from("sunbiz_agent_accounts")
+        .select("act_as_email,daily_cap,user_id,from_number")
+        .eq("tenant_id", row.tenant_id)
+        .eq("user_id", row.actor_user_id)
+        .eq("provider", "texttorrent")
+        .eq("enabled", true);
+      const frozenDid = row.from_identity.replace(/\D/g, "").slice(-10);
+      const identity = (identities.data || []).find(
+        (candidate) => candidate.from_number.replace(/\D/g, "").slice(-10) === frozenDid,
+      );
+      if (identities.error || !identity?.act_as_email) {
+        return markRetryOrFail(db, row, "sunbiz_agent_identity_unavailable");
+      }
+      const sentToday = await db.from("scheduled_sends").select("id", { count: "exact", head: true })
+        .eq("tenant_id", row.tenant_id).eq("actor_user_id", identity.user_id)
+        .eq("channel", "sms").in("status", ["sending", "sent"])
+        .gte("created_at", new Date(new Date().setHours(0, 0, 0, 0)).toISOString());
+      if (sentToday.error) return markRetryOrFail(db, row, "daily_cap_check_failed");
+      if ((sentToday.count || 0) > identity.daily_cap) return markRetryOrFail(db, row, "daily_cap_reached");
+      const creds = await getTextTorrentCredentials(row.tenant_id, {
+        actAsEmail: identity.act_as_email,
+      });
+      await ttSendSms(creds, {
+        number: row.to_phone, message: row.body, sender_id: row.from_identity, rate_priority: 80,
+      });
     } catch (err) {
       const reason =
         err instanceof TextTorrentError ? `${err.code}: ${err.message}` : err instanceof Error ? err.message : "send_failed";

@@ -17,7 +17,7 @@ import { EnrichmentTab } from "./EnrichmentTab";
 import { DefaultsCheckControl } from "./DefaultsCheckControl";
 import { useRouter, usePathname } from "next/navigation";
 import Link from "next/link";
-import { X, FileText, ImageIcon, Phone, Mail, ShoppingBag, Loader2, Trash2, CheckCircle2, AlertCircle, UploadCloud, RefreshCw, ArrowRightLeft, ChevronLeft, Eye, GripHorizontal, ChevronUp, ChevronDown } from "lucide-react";
+import { X, FileText, ImageIcon, Phone, Mail, ShoppingBag, Loader2, Trash2, CheckCircle2, AlertCircle, UploadCloud, RefreshCw, ArrowRightLeft, ChevronLeft, Eye, GripHorizontal, ChevronUp, ChevronDown, Pencil } from "lucide-react";
 import { LeadTimelinePanel } from "./LeadTimelinePanel";
 import { DocumentsViewer } from "./DocumentsViewer";
 import { AssignmentControl } from "./AssignmentControl";
@@ -411,7 +411,14 @@ export function LeadFileBody({
             {activeTab === "bank" && (
               <BankTab record={record} application={application} tenantSlug={tenantSlug} leadId={recordId} />
             )}
-            {activeTab === "bgc" && <EnrichmentTab leadId={recordId} record={record} />}
+            {activeTab === "bgc" && (
+              // onReload is required, not optional: a finished phone lookup
+              // writes phone_lookup_status + phone onto the RECORD, and both the
+              // summary chip and the CLAIR eligibility gate read that record.
+              // Without a refetch the tab would keep rendering the pre-lookup
+              // state and CLAIR would stay hidden after a no-match.
+              <EnrichmentTab leadId={recordId} record={record} onReload={onReload} />
+            )}
             {activeTab === "notes" && <NotesTab leadId={recordId} entity={entity} />}
             {activeTab === "documents" && (
               <DocumentsTab
@@ -1271,6 +1278,7 @@ const fmtMoney = formatMoney;
 
 type NoteRow = {
   id: string;
+  content: string | null;
   content_preview: string | null;
   created_at: string;
   metadata: Record<string, unknown> | null;
@@ -1281,6 +1289,9 @@ function NotesTab({ leadId, entity = "lead" }: { leadId: string; entity?: "lead"
   const [draft, setDraft] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editDraft, setEditDraft] = useState("");
+  const [mutatingId, setMutatingId] = useState<string | null>(null);
   // Applications must send ?entity=application so the route resolves the linked
   // lead id, else GET/POST 404 (Codex 2026-06-19).
   const entityQ = entity === "application" ? "?entity=application" : "";
@@ -1331,6 +1342,58 @@ function NotesTab({ leadId, entity = "lead" }: { leadId: string; entity?: "lead"
     }
   };
 
+  const updateNote = async (noteId: string) => {
+    if (!editDraft.trim()) return;
+    setMutatingId(noteId);
+    setError(null);
+    try {
+      const r = await fetch(`/api/leads/${leadId}/notes/${noteId}${entityQ}`, {
+        method: "PATCH",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ note: editDraft }),
+      });
+      const j = await r.json();
+      if (!j.ok) {
+        setError(j.error || `failed_${r.status}`);
+        return;
+      }
+      setEditingId(null);
+      setEditDraft("");
+      await reload();
+    } catch (e) {
+      setError(String((e as Error).message || e));
+    } finally {
+      setMutatingId(null);
+    }
+  };
+
+  const deleteNote = async (noteId: string) => {
+    if (!window.confirm("Delete this note? This cannot be undone.")) return;
+    setMutatingId(noteId);
+    setError(null);
+    try {
+      const r = await fetch(`/api/leads/${leadId}/notes/${noteId}${entityQ}`, {
+        method: "DELETE",
+        credentials: "include",
+      });
+      const j = await r.json();
+      if (!j.ok) {
+        setError(j.error || `failed_${r.status}`);
+        return;
+      }
+      if (editingId === noteId) {
+        setEditingId(null);
+        setEditDraft("");
+      }
+      await reload();
+    } catch (e) {
+      setError(String((e as Error).message || e));
+    } finally {
+      setMutatingId(null);
+    }
+  };
+
   return (
     <div className="space-y-3">
       <div className="space-y-2">
@@ -1373,12 +1436,41 @@ function NotesTab({ leadId, entity = "lead" }: { leadId: string; entity?: "lead"
               return (
                 <li key={n.id} className="rounded-md bg-bg-deep/60 border border-bg-border p-2.5">
                   <div className="text-[13px] text-fg whitespace-pre-wrap leading-relaxed">
-                    {n.content_preview}
+                    {n.content ?? n.content_preview}
                   </div>
                   <div className="text-[10.5px] text-fg-dim mt-1.5">
                     {typeof author === "string" ? `${author} · ` : ""}
                     {new Date(n.created_at).toLocaleString()}
                   </div>
+                  {editingId === n.id ? (
+                    <div className="mt-2 space-y-2">
+                      <textarea
+                        value={editDraft}
+                        onChange={(e) => setEditDraft(e.target.value)}
+                        rows={3}
+                        maxLength={4000}
+                        autoFocus
+                        className="w-full text-xs px-2 py-1.5 rounded-md bg-bg-deep border border-bg-border text-fg resize-none"
+                      />
+                      <div className="flex justify-end gap-1.5">
+                        <button type="button" onClick={() => { setEditingId(null); setEditDraft(""); }} className="text-[11px] px-2 py-1 rounded border border-bg-border text-fg-muted">
+                          Cancel
+                        </button>
+                        <button type="button" disabled={!editDraft.trim() || mutatingId === n.id} onClick={() => updateNote(n.id)} className="text-[11px] font-semibold px-2 py-1 rounded bg-accent text-bg-deep disabled:opacity-50">
+                          {mutatingId === n.id ? "Saving…" : "Save changes"}
+                        </button>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="mt-1 flex justify-end gap-1">
+                      <button type="button" aria-label="Edit note" title="Edit note" disabled={mutatingId !== null} onClick={() => { setEditingId(n.id); setEditDraft(n.content ?? n.content_preview ?? ""); }} className="p-1 rounded text-fg-dim hover:text-fg hover:bg-bg-elev disabled:opacity-40">
+                        <Pencil className="h-3.5 w-3.5" />
+                      </button>
+                      <button type="button" aria-label="Delete note" title="Delete note" disabled={mutatingId !== null} onClick={() => deleteNote(n.id)} className="p-1 rounded text-fg-dim hover:text-red-400 hover:bg-red-500/10 disabled:opacity-40">
+                        <Trash2 className="h-3.5 w-3.5" />
+                      </button>
+                    </div>
+                  )}
                 </li>
               );
             })}

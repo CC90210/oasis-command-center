@@ -10,6 +10,7 @@ import type { ConversationThread, ConversationMessage } from "@/lib/conversation
 import { ContactHeaderBar } from "./ContactHeaderBar";
 import { MessageList, type MessageStatusMap, type MessageRegistry } from "./MessageList";
 import { Composer } from "./Composer";
+import { SunbizDraftCard } from "./SunbizDraftCard";
 import type { ComposerChannel } from "./ChannelSwitcher";
 
 export function ThreadPane({
@@ -54,8 +55,8 @@ export function ThreadPane({
   onToggleContextPanel: () => void;
   channel: ComposerChannel;
   onChannelChange: (c: ComposerChannel) => void;
-  smsProvider: "texttorrent" | "kixie";
-  onSmsProviderChange: (p: "texttorrent" | "kixie") => void;
+  smsProvider: "texttorrent" | "kixie" | "twilio";
+  onSmsProviderChange: (p: "texttorrent" | "kixie" | "twilio") => void;
   draft: string;
   onDraftChange: (v: string) => void;
   emailSubject: string;
@@ -92,6 +93,7 @@ export function ThreadPane({
         onToggleContextPanel={onToggleContextPanel}
         onComposeEmail={() => onChannelChange("email")}
       />
+      <SunbizDraftCard threadKey={thread.key} />
       <MessageList messages={thread.messages} statusMap={statusMap} onRetry={onRetry} registryRef={registryRef} />
       <Composer
         thread={thread}

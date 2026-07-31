@@ -20,7 +20,12 @@ import {
   getRenewalsRows,
   type FundedDealRow,
 } from "@/lib/queries";
-import { fmtCurrency, groupRows, RenewalRow } from "./renewals-shared";
+import { resolveSessionContext } from "@/lib/api-auth";
+import { canWriteCrm } from "@/lib/role-gates";
+import { fmtCurrency, groupRows } from "@/lib/renewals-core";
+import { RenewalRow } from "./renewals-shared";
+import RecordFundedDeal from "./RecordFundedDeal";
+import { RenewalDetailDrawer } from "./RenewalDetailDrawer";
 
 const EMPTY_SUMMARY = {
   past_due_count: 0,
@@ -43,10 +48,21 @@ export async function RenewalsV2({ tenantId }: { tenantId: string | null }) {
       ])
     : [EMPTY_SUMMARY, [] as FundedDealRow[]];
 
+  // Intake is offered only when BOTH hold: the surface tenant is the caller's
+  // own, and the caller may actually write CRM data. Resolved with the exact
+  // helper /api/renewals authorizes with, so the button someone sees and the
+  // permission they have cannot drift apart — a read_only member was otherwise
+  // shown a full form that could only ever answer 403. Fail closed on any
+  // unresolved session.
+  const sess = await resolveSessionContext().catch(() => null);
+  const canRecord =
+    !!tenantId && !!sess?.ok && sess.tenantId === tenantId && canWriteCrm(sess.teamRole);
+
   const groups = groupRows(rows);
 
   return (
     <div className="space-y-6">
+      <RenewalDetailDrawer />
       {/* Catch-all dispatcher renders the page title + subtitle. Dynamic
           counts surface here as a small caption above the KPIs so
           operators see at a glance how many deals carry renewal dates. */}
@@ -111,6 +127,18 @@ export async function RenewalsV2({ tenantId }: { tenantId: string | null }) {
           />
         </Card>
       </section>
+
+      {/* Manual intake — kept in lock-step with the top-level /renewals page, so
+          a rep working in the tenant surface can record a funded deal without
+          leaving it.
+
+          ONLY on your OWN tenant. /api/renewals takes its tenant from the
+          SESSION, never from the page, so on an operator previewing someone
+          else's tenant this form would look tenant-scoped while writing the deal
+          into the operator's own tenant — and then refresh a view that can never
+          show it. Showing it is the bug; the endpoint is right to trust only the
+          session. */}
+      {canRecord && <RecordFundedDeal />}
 
       {/* Grouped rows */}
       {rows.length === 0 ? (

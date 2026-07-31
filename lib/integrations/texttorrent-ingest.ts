@@ -13,6 +13,7 @@
  * pulls up to `maxChats` threads, stopping early on a 429.
  */
 import "server-only";
+import { createHash } from "node:crypto";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import {
   getTextTorrentCredentials,
@@ -21,6 +22,7 @@ import {
   TextTorrentError,
   type TtInboxMessage,
 } from "@/lib/integrations/texttorrent";
+import { loadSunbizInboundContext } from "@/lib/sunbiz-inbound-context";
 
 type Db = ReturnType<typeof getServiceSupabase>;
 
@@ -29,6 +31,12 @@ const last10 = (p: string | null | undefined): string => (p || "").replace(/\D/g
 /** Dedup signature within a contact's thread: direction + normalized content. */
 function sig(direction: string, content: string | null | undefined): string {
   return `${direction}|${(content || "").trim().toLowerCase().slice(0, 300)}`;
+}
+
+export function textTorrentMessageFingerprint(m: TtInboxMessage): string {
+  const material = [m.to || "", m.from || "", (m.created_at || "").trim(),
+    (m.message || "").trim()].join("\n");
+  return `tt-fp:${createHash("sha256").update(material).digest("hex")}`;
 }
 
 /** Best-effort lead match by the inbound `from` phone (mirrors the webhook). */
@@ -110,6 +118,8 @@ export async function ingestTtInboxMessages(
         channel: "sms",
         direction: dir,
         agent_source: "texttorrent",
+        provider: "texttorrent",
+        provider_message_id: textTorrentMessageFingerprint(m),
         from_phone: m.from,
         to_phone: m.to,
         content: m.message,
@@ -118,13 +128,130 @@ export async function ingestTtInboxMessages(
         metadata: { tt_chat_id: m.chat_id || null, tt_synced: true, ...(m.sendStatus ? { tt_send_status: m.sendStatus } : {}) },
       });
     }
-    if (toInsert.length) {
-      const { error } = await db.from("lead_interactions").insert(toInsert);
+    {
+      const saved = toInsert.length
+        ? await db.from("lead_interactions").insert(toInsert)
+          .select("id,provider_message_id,to_phone,from_phone,direction,content,lead_id,metadata")
+        : { data: [], error: null };
+      const { error } = saved;
       if (error) {
         console.error("[tt-ingest] insert failed", error.message);
         skipped += toInsert.length;
       } else {
         inserted += toInsert.length;
+        // Re-read every inbound identity in this provider thread, including
+        // rows inserted by an earlier run whose work enqueue failed. This
+        // makes queue repair deterministic on every poll.
+        const identities = msgs.filter((m) => m.direction === "inbound").map(textTorrentMessageFingerprint);
+        const reconciled = identities.length ? await db.from("lead_interactions")
+          .select("id,provider_message_id,to_phone,from_phone,direction,content,lead_id,metadata")
+          .eq("tenant_id", tenantId).eq("provider", "texttorrent")
+          .in("provider_message_id", identities) : { data: [], error: null };
+        if (reconciled.error) {
+          console.error("[tt-ingest] work reconciliation failed", reconciled.error.message);
+          skipped += identities.length;
+          continue;
+        }
+        const accounts = await db.from("sunbiz_agent_accounts").select("id,from_number,voice_profile_id")
+          .eq("tenant_id", tenantId).eq("provider", "texttorrent").eq("enabled", true);
+        if (accounts.error) {
+          console.error("[tt-ingest] account lookup failed", accounts.error.message);
+          skipped += identities.length;
+        } else {
+          const accountRows = (accounts.data || []) as Array<{ id: string; from_number: string; voice_profile_id: string | null }>;
+          const profileIds = accountRows.flatMap((a) => a.voice_profile_id ? [a.voice_profile_id] : []);
+          const profiles = profileIds.length ? await db.from("agent_voice_profiles")
+            .select("id,style_descriptors,compiled_prompt,example_snippets,confidence,model_used,refreshed_at")
+            .eq("tenant_id", tenantId).eq("approved", true).in("id", profileIds) : { data: [], error: null };
+          if (profiles.error) {
+            console.error("[tt-ingest] approved voice profile lookup failed", profiles.error.message);
+            skipped += toInsert.length;
+            continue;
+          }
+          const profileById = new Map(((profiles.data || []) as Array<Record<string, unknown> & { id: string }>)
+            .map((p) => [p.id, p]));
+          const unmapped: Array<{ provider_message_id: string; to_phone: string }> = [];
+          const inboundRows = ((reconciled.data || []) as Array<{
+            id: string; provider_message_id: string; to_phone: string; from_phone: string;
+            direction: string; content: string; lead_id: string | null;
+            metadata: { tt_chat_id?: string | null } | null;
+          }>).filter((row) => row.direction === "inbound");
+          const existingWork = inboundRows.length ? await db.from("texttorrent_inbound_work")
+            .select("provider_message_id").eq("tenant_id", tenantId)
+            .in("provider_message_id", inboundRows.map((row) => row.provider_message_id))
+            : { data: [], error: null };
+          if (existingWork.error) {
+            console.error("[tt-ingest] existing work lookup failed", existingWork.error.message);
+            skipped += inboundRows.length;
+            continue;
+          }
+          const alreadyQueued = new Set(
+            ((existingWork.data || []) as Array<{ provider_message_id: string }>).map((row) => row.provider_message_id),
+          );
+          const work: Record<string, unknown>[] = [];
+          for (const row of inboundRows) {
+            if (alreadyQueued.has(row.provider_message_id)) continue;
+            const did = last10(row.to_phone);
+            const account = accountRows
+              .find((a) => last10(a.from_number) === did);
+            if (!account) {
+              unmapped.push({ provider_message_id: row.provider_message_id, to_phone: row.to_phone });
+              continue;
+            }
+            if (account.voice_profile_id && !profileById.has(account.voice_profile_id)) {
+              console.error("[tt-ingest] configured voice profile is not approved", account.voice_profile_id);
+              skipped++;
+              continue;
+            }
+            let scoped;
+            try {
+              scoped = await loadSunbizInboundContext(db, tenantId, row.lead_id, row.from_phone);
+            } catch {
+              skipped++;
+              continue;
+            }
+            const rawProfile = account.voice_profile_id ? profileById.get(account.voice_profile_id) : null;
+            work.push({
+              tenant_id: tenantId, account_id: account.id,
+              provider_message_id: row.provider_message_id,
+              provider_conversation_id: row.metadata?.tt_chat_id || null,
+              source_interaction_id: row.id, inbound_message: row.content,
+              conversation: {
+                ...scoped.conversation,
+                thread_key: row.lead_id ? `lead:${row.lead_id}` : `phone:+${row.from_phone.replace(/\D/g, "")}`,
+                to_phone: row.from_phone, lead_id: row.lead_id,
+              },
+              merchant_context: { ...scoped.merchantContext, ...(row.lead_id ? { lead_id: row.lead_id } : {}) },
+              voice_profile: rawProfile ? {
+                approved: true, instructions: rawProfile.compiled_prompt || "",
+                style_descriptors: rawProfile.style_descriptors,
+                example_snippets: rawProfile.example_snippets,
+                confidence: rawProfile.confidence, model_used: rawProfile.model_used,
+                refreshed_at: rawProfile.refreshed_at,
+              } : {},
+              status: "pending",
+            });
+          }
+          if (work.length) {
+            const queued = await db.from("texttorrent_inbound_work").upsert(work, {
+              onConflict: "tenant_id,provider_message_id", ignoreDuplicates: true,
+            });
+            if (queued.error) {
+              console.error("[tt-ingest] work enqueue failed", queued.error.message);
+              skipped += work.length;
+            }
+          }
+          if (unmapped.length) {
+            await db.from("agent_events").insert(unmapped.map((row) => ({
+              event_type: "TEXTTORRENT_UNMAPPED_DID", publisher_agent: "texttorrent",
+              severity: "warn", correlation_id: tenantId,
+              payload: {
+                tenant_id: tenantId, destination_last4: last10(row.to_phone).slice(-4),
+                provider_message_id: row.provider_message_id,
+              },
+            })));
+          }
+        }
       }
     }
   }
@@ -138,24 +265,34 @@ export async function ingestTtInboxMessages(
  */
 export async function syncTenantInbox(
   tenantId: string,
-  opts: { maxChats?: number } = {},
+  opts: { maxChats?: number; pages?: number } = {},
 ): Promise<{ chats: number; scanned: number; inserted: number; skipped: number }> {
   const db = getServiceSupabase();
   // PARENT account (actAsEmail:null) — the full account inbox across all reps.
   // The default (act-as the tenant's sub-account, e.g. jordan@) only sees that
   // sub-account's chats and returns empty threads here, so sync as the parent.
   const creds = await getTextTorrentCredentials(tenantId, { actAsEmail: null });
-  const maxChats = Math.max(1, Math.min(opts.maxChats ?? 40, 50));
+  const maxChats = Math.max(1, Math.min(opts.maxChats ?? 40, 200));
+  const pages = Math.max(1, Math.min(opts.pages ?? 1, 10));
 
-  const inbox = await getInbox(creds, { limit: 50, page: 1 }).catch(() => ({ data: [] as TtInboxMessage[] }));
-  const items = inbox.data || [];
-  // Skip chats with UNREAD messages. The live JARVIS Jordan agent detects new
-  // merchant replies via unread_count, and getThread() marks a thread read on
-  // view — so ingesting an unread chat here would steal that signal and make
-  // Jordan miss the reply. Only pull already-read threads (Jordan handles them
-  // fast); a reply we skip now is ingested on the next run once it's read.
+  // Gather candidate chats across `pages` pages of the inbox (each page = 50).
+  // page 1 alone is the recent inbox (ongoing sync); more pages reach further
+  // back for a history backfill. Stop early on a short/empty page (the last one)
+  // or when getInbox fails soft to [] (rate limit); the 429 break in the thread
+  // loop below is the real guard on the shared 60/min parent budget.
+  const items: TtInboxMessage[] = [];
+  for (let p = 1; p <= pages; p++) {
+    const page = await getInbox(creds, { limit: 50, page: p }).catch(() => ({ data: [] as TtInboxMessage[] }));
+    const pageItems = page.data || [];
+    items.push(...pageItems);
+    if (pageItems.length < 50) break;
+  }
+  // OASIS owns unread ingestion now that the local Jordan worker is retired.
+  // getThread may mark the provider thread read; OASIS is the signal owner,
+  // so reading it cannot hide work from a separate local consumer.
+  // Reconciliation persists and queues every provider message ID exactly once.
   const chatIds = Array.from(
-    new Set(items.filter((m) => !(m.unreadCount && m.unreadCount > 0)).map((m) => m.chat_id).filter(Boolean)),
+    new Set(items.map((m) => m.chat_id).filter(Boolean)),
   ).slice(0, maxChats);
 
   let chats = 0,

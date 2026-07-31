@@ -758,8 +758,26 @@ function StepsEditor({
               stepIndex={idx}
               currentSubject={step.subject || ""}
               currentBody={step.body}
+              currentHtml={step.body_html || ""}
               onApply={(patch) => update(idx, patch)}
             />
+          )}
+          {step.channel === "email" && (
+            <label className="block">
+              <span className="text-[10px] uppercase tracking-wider text-fg-dim block mb-0.5">
+                Optional custom HTML
+                <span className="ml-2 normal-case tracking-normal text-fg-dim/70">
+                  plain text above remains the fallback
+                </span>
+              </span>
+              <textarea
+                value={step.body_html || ""}
+                onChange={(e) => update(idx, { body_html: e.target.value || undefined })}
+                rows={8}
+                placeholder="Paste approved email-safe HTML, or load one from Templates."
+                className="w-full rounded-md border border-bg-border bg-bg-elev px-2 py-1.5 text-xs text-fg font-mono"
+              />
+            </label>
           )}
           {/* A/B variant pools — the executor picks ONE per lead at send time.
               Previously invisible + un-editable here, so merchants could get
@@ -879,13 +897,15 @@ function EmailStepRotation({
   stepIndex,
   currentSubject,
   currentBody,
+  currentHtml,
   onApply,
 }: {
   sequenceId: string;
   stepIndex: number;
   currentSubject: string;
   currentBody: string;
-  onApply: (patch: { subject: string; body: string }) => void;
+  currentHtml: string;
+  onApply: (patch: { subject: string; body: string; body_html?: string }) => void;
 }) {
   const [open, setOpen] = useState<null | "ai" | "library">(null);
   const [instruction, setInstruction] = useState("");
@@ -893,6 +913,25 @@ function EmailStepRotation({
   const [err, setErr] = useState<string | null>(null);
   const [suggestion, setSuggestion] = useState<{ subject: string; body: string } | null>(null);
   const [note, setNote] = useState<string | null>(null);
+  const [saved, setSaved] = useState<Array<{
+    id: string; label: string; subject: string; preheader: string; html: string; category: string;
+  }>>([]);
+  const [savingTemplate, setSavingTemplate] = useState(false);
+
+  useEffect(() => {
+    let alive = true;
+    fetch("/api/drip-templates", { cache: "no-store" })
+      .then((res) => res.json())
+      .then((data) => {
+        if (alive) {
+          setSaved(
+            data.templates || [],
+          );
+        }
+      })
+      .catch(() => {});
+    return () => { alive = false; };
+  }, []);
 
   async function runAi() {
     setLoading(true);
@@ -929,11 +968,60 @@ function EmailStepRotation({
   }
 
   function applyTemplate(id: string) {
+    const custom = saved.find((t) => t.id === id);
+    if (custom) {
+      onApply({
+        subject: toDripDialect(custom.subject),
+        body: toDripDialect(custom.preheader),
+        body_html: custom.html ? toDripDialect(custom.html) : undefined,
+      });
+      setNote(`Loaded "${custom.label}" from Drip Templates. Review, then Save.`);
+      setOpen(null);
+      return;
+    }
     const tpl = SUNBIZ_EMAIL_TEMPLATES.find((t) => t.id === id);
     if (!tpl) return;
     onApply({ subject: toDripDialect(tpl.subject), body: toDripDialect(tpl.body) });
     setNote(`Loaded "${tpl.label}". Edit the copy, then Save.`);
     setOpen(null);
+  }
+
+  async function saveCurrentTemplate() {
+    const templateName = window.prompt("Template name", `Sequence email ${stepIndex + 1}`);
+    if (!templateName?.trim()) return;
+    setSavingTemplate(true);
+    setErr(null);
+    try {
+      const res = await fetch("/api/drip-templates", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          name: templateName.trim(),
+          category: "drip:custom:jordan_direct",
+          subject: currentSubject,
+          preheader: currentBody,
+          html: currentHtml,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok || !data.ok) throw new Error(data.error || "save_failed");
+      setSaved((items) => [
+        ...items,
+        {
+          id: data.id,
+          label: templateName.trim(),
+          category: "drip:custom:jordan_direct",
+          subject: currentSubject,
+          preheader: currentBody,
+          html: currentHtml,
+        },
+      ]);
+      setNote(`Saved "${templateName.trim()}" to Templates > Drip Templates.`);
+    } catch (cause) {
+      setErr(cause instanceof Error ? cause.message : "save_failed");
+    } finally {
+      setSavingTemplate(false);
+    }
   }
 
   return (
@@ -964,6 +1052,14 @@ function EmailStepRotation({
             }`}
           >
             <BookOpen className="h-3 w-3" /> From saved
+          </button>
+          <button
+            type="button"
+            onClick={saveCurrentTemplate}
+            disabled={savingTemplate || !currentSubject.trim() || !currentBody.trim()}
+            className="inline-flex items-center gap-1 text-[11px] rounded border border-bg-border px-2 py-1 text-fg-muted hover:text-fg disabled:opacity-40"
+          >
+            <Save className="h-3 w-3" /> {savingTemplate ? "Saving..." : "Save to Templates"}
           </button>
         </div>
       </div>
@@ -1044,6 +1140,13 @@ function EmailStepRotation({
             className="w-full rounded border border-bg-border bg-bg-elev px-2 py-1 text-[11px] text-fg"
           >
             <option value="">Pick a saved template…</option>
+            {saved.length > 0 && (
+              <optgroup label="Your Drip Templates">
+                {saved.map((template) => (
+                  <option key={template.id} value={template.id}>{template.label}</option>
+                ))}
+              </optgroup>
+            )}
             {SUNBIZ_TEMPLATE_CATEGORIES.map((cat) => {
               const items = SUNBIZ_EMAIL_TEMPLATES.filter((t) => t.category === cat.category);
               if (items.length === 0) return null;

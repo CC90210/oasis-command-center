@@ -1208,11 +1208,16 @@ export async function mrrHistory(days = 30): Promise<
 /** Funded-deal row shape we render. Mirrors the migration 041 schema. */
 export type FundedDealRow = {
   id: string;
+  lead_id?: string | null;
+  lender_id?: string | null;
   merchant_name: string | null;
   contact_name: string | null;
   lender_name: string | null; // null = "No lender assigned"
   funded_amount_usd: number | null;
   factor_rate: number | null;
+  term_months?: number | null;
+  points_pct?: number | null;
+  notes?: string | null;
   funded_at: string | null;
   next_renewal_date: string | null;
   est_commission_usd: number | null;
@@ -1326,7 +1331,7 @@ export async function getRenewalsRows(
     const r = await db
       .from("funded_deals")
       .select(
-        "id, merchant_name, contact_name, lender_name, funded_amount_usd, factor_rate, funded_at, next_renewal_date, est_commission_usd"
+        "id, lead_id, lender_id, merchant_name, contact_name, lender_name, funded_amount_usd, factor_rate, term_months, points_pct, funded_at, next_renewal_date, est_commission_usd, notes"
       )
       .eq("tenant_id", tenantId)
       .order("next_renewal_date", { ascending: true, nullsFirst: false })

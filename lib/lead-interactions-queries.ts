@@ -87,6 +87,15 @@ export async function checkPhoneOptOut(
   if (last10.length < 10) return { optedOut: false, checkFailed: false };
   try {
     const db = getServiceSupabase();
+    const durable = await db.from("sunbiz_phone_suppressions").select("phone_last10")
+      .eq("tenant_id", tenantId).eq("phone_last10", last10).limit(1);
+    if (durable.error) {
+      console.error("[lead-interactions-queries] durable opt-out check errored", durable.error.message);
+      return { optedOut: false, checkFailed: true };
+    }
+    if (Array.isArray(durable.data) && durable.data.length > 0) {
+      return { optedOut: true, checkFailed: false };
+    }
     const r = await db
       .from("lead_interactions")
       .select("id")

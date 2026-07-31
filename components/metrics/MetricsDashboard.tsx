@@ -5,6 +5,7 @@ import { Card, Tag } from "@/components/Card";
 import { Sparkline } from "@/components/charts/Sparkline";
 import { Donut } from "@/components/charts/Donut";
 import { TrendArea } from "@/components/metrics/TrendArea";
+import { DripTrackerClient } from "@/components/drips/DripTrackerClient";
 import type { MetricsPayload, SourceBlock, SequenceMetric, MetricsHealth, SmsMetrics, CallMetrics, CallNumberHealth } from "@/lib/metrics";
 import type { EmailMetrics, MetricSource } from "@/lib/metrics/types";
 
@@ -616,6 +617,8 @@ export function MetricsDashboard({ payload: initialPayload }: { payload: Metrics
           <div className="text-[11px] text-fg-dim min-w-[68px] text-right">{loading ? "updating…" : `updated ${timeAgo(payload.generatedAt)}`}</div>
         </div>
       </div>
+
+      {active === "drips" && <DripTrackerClient compact />}
 
       {kind === "sms" ? (
         <SmsPanel sms={payload.sms} windowDays={payload.windowDays} />

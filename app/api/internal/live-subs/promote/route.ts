@@ -6,8 +6,9 @@
  * Ezra approves in Telegram, then POSTs { lead_id } here. This route resolves
  * the SunBiz ("submissions") tenant and runs promoteLeadToApplication — which
  * maps the full UW-sheet field set onto the application, stamps phone_status,
- * moves the lead off the Leads board, and regenerates the branded PDF. The same
- * endpoint backs the one-time backfill of already-approved leads.
+ * and regenerates the branded PDF. The lead REMAINS on the Live Subs board —
+ * an accepted Bridge deal is worked there, not routed to "Application In". The
+ * same endpoint backs the one-time backfill of already-approved leads.
  *
  * Trust boundary: NO Supabase session. Auth is HMAC-SHA256 over the raw body
  * with OASIS_OUTBOUND_HMAC_SECRET — the same shared secret the VPS send_gateway
@@ -113,7 +114,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ ok: false, error: "bad_signature" }, { status: 401 });
   }
 
-  let body: { lead_id?: unknown };
+  let body: { lead_id?: unknown; restore_live_subs?: unknown };
   try {
     body = JSON.parse(raw);
   } catch {
@@ -134,7 +135,12 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ ok: false, error: "tenant_unresolved" }, { status: 500 });
   }
 
-  const result = await promoteLeadToApplication({ tenantId, leadId, source: "live_sub_auto" });
+  const result = await promoteLeadToApplication({
+    tenantId,
+    leadId,
+    source: "live_sub_auto",
+    restoreLiveSubs: body.restore_live_subs === true,
+  });
   if (!result.ok) {
     const status = result.error === "lead_not_found" ? 404 : 500;
     return NextResponse.json({ ok: false, error: result.error, stage: result.stage }, { status });
@@ -148,5 +154,6 @@ export async function POST(req: NextRequest) {
     missing_critical: result.missingCritical,
     empty_fields: result.emptyFields,
     pdf_ok: result.pdfOk,
+    retained_in_live_subs: result.retainedInLiveSubs,
   });
 }

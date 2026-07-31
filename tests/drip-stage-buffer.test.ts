@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { computeStep0DelayMinutes, stageBufferMinutes } from "../lib/drips/stage-buffer";
+import { computeStep0DelayMinutes, enrollmentBufferForStage, stageBufferMinutes } from "../lib/drips/stage-buffer";
 import { selectStaleRunIds, triggerStageOf } from "../lib/drips/stage-cancel";
 
 // 24h stage-buffer + eager-cancel fix (2026-07-22). Locks the three rules:
@@ -29,6 +29,10 @@ process.env.DRIPS_STAGE_BUFFER_MIN = "  ";
 assert.equal(stageBufferMinutes(), 1440, "blank -> default (Number('')===0 trap)");
 process.env.DRIPS_STAGE_BUFFER_MIN = "90.9";
 assert.equal(stageBufferMinutes(), 90, "fractional floors");
+
+process.env.DRIPS_STAGE_BUFFER_MIN = "1440";
+assert.equal(enrollmentBufferForStage("sent_application"), 0, "sent application access is immediate");
+assert.equal(enrollmentBufferForStage("follow_up"), 1440, "other stages retain the safety buffer");
 if (priorEnv === undefined) delete process.env.DRIPS_STAGE_BUFFER_MIN;
 else process.env.DRIPS_STAGE_BUFFER_MIN = priorEnv;
 

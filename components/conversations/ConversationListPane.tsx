@@ -22,10 +22,6 @@ export const SECTIONS: { key: SectionKey; label: string }[] = [
   { key: "kixie", label: "Kixie" },
 ];
 
-const COMING_SOON: Partial<Record<SectionKey, string>> = {
-  twilio: "Twilio conversations will thread here once Twilio ingestion is wired (coming soon).",
-};
-
 export function ConversationListPane({
   filtered,
   selectedKey,
@@ -102,7 +98,7 @@ export function ConversationListPane({
       <div className="overflow-y-auto flex-1 min-h-0">
         {filtered.length === 0 ? (
           <div className="p-4 text-xs text-fg-dim italic">
-            {!search && COMING_SOON[section] ? COMING_SOON[section] : "No threads match."}
+            No threads match.
           </div>
         ) : (
           filtered.map((t) => (

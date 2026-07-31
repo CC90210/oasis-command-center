@@ -1,24 +1,26 @@
 "use client";
 
 /**
- * ClairReportPanel — the CLAIR (Thomson Reuters CLEAR) fallback, on a lead.
+ * ClairReportPanel — the CLAIR (Thomson Reuters CLEAR) enrichment, on a lead.
  *
- * TWO DELIBERATE CONSTRAINTS, both compliance-shaped rather than cosmetic:
+ * INDEPENDENT OF THE AUTOMATED LOOKUP (Adon, 2026-07-27). The "Pull CLAIR
+ * Report" button is always available to a permitted operator. It used to render
+ * only after TruePeopleSearch had run and failed; that coupling is gone, in the
+ * UI and in the route alike, because an automated match is often stale or wrong
+ * and CLEAR is how an operator verifies or expands it. When a pull would be
+ * redundant the panel says so in copy (clairAdvisory) and still lets the
+ * operator decide — advisory, never a lock.
  *
- * 1. STRICT FALLBACK. The "Pull CLAIR Report" button renders ONLY when the
- *    automated TruePeopleSearch path has already run and failed to produce a
- *    number. Before the automated lookup has run, or once it has succeeded,
- *    there is no button at all — CLAIR is billable and every query asserts a
- *    DPPA/GLB permissible use, so it is never the first thing tried. The same
- *    predicate is enforced server-side in the route (409 clair_not_applicable);
- *    this is the visible half of one rule, not the rule itself.
+ * ONE CONSTRAINT REMAINS, and it is compliance-shaped rather than cosmetic:
  *
- * 2. TOTAL DATA SEPARATION. Everything here reads from the clair_reports table
+ *    TOTAL DATA SEPARATION. Everything here reads from the clair_reports table
  *    via /api/leads/[id]/clair-report. Nothing in this component writes to, or
  *    renders alongside, the application form data. A CLEAR report is reference
  *    material an operator reads to find a phone number — copying a number onto
  *    the lead stays a separate, explicit act through the existing set-field
  *    path, so the vendor payload can never silently become application data.
+ *    This is also what lets CLEAR and TruePeopleSearch coexist on one lead
+ *    without a merge conflict: they never write to the same place.
  */
 
 import { useCallback, useEffect, useState } from "react";
@@ -30,7 +32,7 @@ import {
   Phone,
   ChevronRight,
 } from "lucide-react";
-import { clairEligibility } from "@/lib/clair/eligibility";
+import { clairAdvisory } from "@/lib/clair/eligibility";
 
 type ClairPhone = {
   number?: string;
@@ -97,8 +99,9 @@ export function ClairReportPanel({
   const [pulling, setPulling] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // Same predicate the API route enforces — imported, not re-implemented.
-  const applies = clairEligibility(leadData).eligible;
+  // Non-blocking context only. A CLEAR pull is always permitted here; this just
+  // tells the operator when it would duplicate what is already on the lead.
+  const advisory = clairAdvisory(leadData);
 
   const load = useCallback(async () => {
     try {
@@ -137,10 +140,6 @@ export function ClairReportPanel({
   const latest = reports?.[0] ?? null;
   const hasHistory = Boolean(reports && reports.length > 0);
 
-  // Nothing to show and nothing to offer — render nothing at all rather than an
-  // empty affordance the operator cannot act on.
-  if (!applies && !hasHistory) return null;
-
   return (
     <div className="mt-5 border-t border-bg-border pt-4">
       <div className="flex items-center gap-2 flex-wrap">
@@ -148,7 +147,7 @@ export function ClairReportPanel({
           CLAIR
         </h4>
         <span className="text-[10px] uppercase tracking-wider rounded-full border border-bg-border text-fg-dim px-1.5 py-0.5">
-          Manual fallback
+          Manual · billable
         </span>
         {latest && (
           <span className="text-[11px] text-fg-dim">
@@ -158,30 +157,28 @@ export function ClairReportPanel({
       </div>
 
       <p className="mt-1.5 text-[12px] text-fg-muted leading-relaxed">
-        {applies
-          ? "The automated lookup could not produce a number for this merchant. A CLAIR report is a billable, permissible-use query — run it only when you intend to use the result."
-          : "Reports previously pulled for this lead."}
+        {advisory ||
+          "A CLAIR report is a billable, permissible-use query against Thomson Reuters CLEAR. It runs independently of the automated lookup — run it when you intend to use the result."}
       </p>
 
       <div className="mt-2.5 flex items-center gap-2 flex-wrap">
-        {applies && (
-          <button
-            type="button"
-            onClick={() => void pull()}
-            disabled={pulling}
-            className="inline-flex items-center gap-1.5 rounded-md border border-accent/50 bg-accent/10 px-2.5 py-1 text-[11px] font-bold text-accent hover:bg-accent/20 disabled:opacity-50"
-          >
-            {pulling ? (
-              <>
-                <RefreshCw className="w-3 h-3 animate-spin" /> Pulling CLAIR report…
-              </>
-            ) : (
-              <>
-                <FileSearch className="w-3 h-3" /> Pull CLAIR Report
-              </>
-            )}
-          </button>
-        )}
+        <button
+          type="button"
+          onClick={() => void pull()}
+          disabled={pulling}
+          className="inline-flex items-center gap-1.5 rounded-md border border-accent/50 bg-accent/10 px-2.5 py-1 text-[11px] font-bold text-accent hover:bg-accent/20 disabled:opacity-50"
+        >
+          {pulling ? (
+            <>
+              <RefreshCw className="w-3 h-3 animate-spin" /> Pulling CLAIR report…
+            </>
+          ) : (
+            <>
+              <FileSearch className="w-3 h-3" />
+              {hasHistory ? "Pull new CLAIR Report" : "Pull CLAIR Report"}
+            </>
+          )}
+        </button>
         {hasHistory && (
           <button
             type="button"

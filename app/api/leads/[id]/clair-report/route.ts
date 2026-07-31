@@ -19,12 +19,18 @@
  * There is no service-to-service caller, no cron, and no retry-on-failure: a
  * failed CLEAR call returns the error and stops. If you are adding an automated
  * caller, you are breaking a compliance boundary, not a code style rule.
+ *
+ * NOT A FALLBACK ANY MORE (Adon, 2026-07-27). CLEAR used to 409 when the
+ * automated TruePeopleSearch path had not run, or had already produced a
+ * number. That coupling is gone: the two enrichments are independent and an
+ * operator may run CLEAR on a lead TruePeopleSearch already enriched. Cost and
+ * redundancy are now an operator judgement (the UI states both), not a lock.
+ * The manual/attributed/role/tenant constraints above are untouched.
  */
 
 import { NextResponse } from "next/server";
 import { authorizeBridgeRequest, callBridgeExecTool } from "@/lib/bridge-proxy";
 import { getServiceSupabase, getSessionUser } from "@/lib/supabase-server";
-import { clairEligibility } from "@/lib/clair/eligibility";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -81,11 +87,13 @@ export async function POST(_req: Request, ctx: Ctx) {
 
   const svc = getServiceSupabase();
 
-  // Guard 1 — the lead must exist in THIS tenant. Without this, a valid session
-  // could pull a regulated report against another tenant's merchant by id.
+  // Tenant guard — the lead must exist in THIS tenant. Without this, a valid
+  // session could pull a regulated report against another tenant's merchant by
+  // id. This is the only precondition on a pull; there is deliberately no
+  // second guard tying CLEAR to the state of the automated lookup.
   const { data: lead } = await svc
     .from("tenant_records")
-    .select("id,data")
+    .select("id")
     .eq("id", leadId)
     .eq("tenant_id", auth.tenantId)
     .maybeSingle();
@@ -93,21 +101,30 @@ export async function POST(_req: Request, ctx: Ctx) {
     return NextResponse.json({ ok: false, error: "lead_not_found" }, { status: 404 });
   }
 
-  // Guard 2 — CLAIR is the FALLBACK. Refuse when the automated path has not run
-  // or already produced a number. The UI hides the button in those cases; this
-  // is the same rule enforced where it cannot be bypassed.
-  const leadData = (lead.data ?? {}) as Record<string, unknown>;
-  const gate = clairEligibility(leadData);
-  if (!gate.eligible) {
+  // MANUAL GUARD — who asked, and a refusal if the answer is "nobody".
+  //
+  // A CLEAR query asserts a DPPA/GLB permissible use on a named person's
+  // behalf, so an unattributed pull is not a logging gap, it is an
+  // impermissible query. These fields used to fall back to null, which meant a
+  // caller that reached this line without a human behind it would still spend
+  // the query and write an anonymous report row — exactly the shape an
+  // automated caller produces. Both identifiers are now required and the route
+  // fails CLOSED without them, so "automated" cannot happen by accident: it
+  // would have to be a deliberate act of forging an operator identity.
+  const sessionUser = await getSessionUser();
+  const requestedBy = auth.userId?.trim() ?? "";
+  const requestedByEmail = sessionUser?.email?.trim() ?? "";
+  if (!requestedBy || !requestedByEmail) {
     return NextResponse.json(
-      { ok: false, error: "clair_not_applicable", message: gate.reason },
-      { status: 409 },
+      {
+        ok: false,
+        error: "manual_operator_required",
+        message:
+          "A CLEAR report must be pulled by a signed-in operator. No permissible-use query runs without one.",
+      },
+      { status: 403 },
     );
   }
-
-  // Who asked. Recorded on the report row because a permissible-use assertion
-  // is made on a person's behalf, so the row must name that person.
-  const sessionUser = await getSessionUser();
 
   const result = await callBridgeExecTool(
     auth.target,
@@ -115,8 +132,8 @@ export async function POST(_req: Request, ctx: Ctx) {
       tool_name: "clair_report",
       tenant_id: auth.tenantId,
       lead_id: leadId,
-      requested_by: auth.userId ?? null,
-      requested_by_email: sessionUser?.email ?? null,
+      requested_by: requestedBy,
+      requested_by_email: requestedByEmail,
     },
     { timeoutMs: BRIDGE_TIMEOUT_MS },
   );

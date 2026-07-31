@@ -42,7 +42,7 @@ import { renderTemplate } from "@/lib/drips/templates";
 import { parseDripSteps, type DripStep } from "@/lib/drips/types";
 import { sendDripSms, sendDripEmail } from "@/lib/drips/send";
 import { wasShoppedRecently } from "@/lib/drips/enroller";
-import { buildDripHtml, listUnsubscribeHeader } from "@/lib/drips/html-email";
+import { buildDripHtml, listUnsubscribeHeader, pixelUrl, unsubscribeUrl } from "@/lib/drips/html-email";
 import { resolveDripSmsIdentity, type DripSmsIdentity } from "@/lib/drips/rep-sms-identity";
 import { ACCELERATED_FLAG, acceleratedSystemLive, hasActiveAcceleratedRun } from "@/lib/drips/accelerated";
 import { nudgeConversations } from "@/lib/realtime/conversations-nudge";
@@ -246,7 +246,7 @@ async function logInteraction(
   },
 ) {
   try {
-    await db.from("lead_interactions").insert({
+    const { error } = await db.from("lead_interactions").insert({
       ...(args.interactionId ? { id: args.interactionId } : {}),
       tenant_id: args.tenantId,
       lead_id: args.leadId,
@@ -262,8 +262,47 @@ async function logInteraction(
       actor_user_id: null,
       metadata: args.metadata,
     });
+    if (error) throw error;
   } catch (err) {
     console.error("[dispatch-drips] interaction insert failed", err);
+  }
+}
+
+/** Exact payload telemetry for successfully dispatched email steps. Runs in
+ * parallel with the existing interaction audit after SMTP accepts the message,
+ * so it adds no latency to the delivery itself. */
+async function logDripEmailEvent(
+  db: Db,
+  args: {
+    tenantId: string;
+    merchantId: string;
+    sequenceId: string;
+    dripRunId: string;
+    stepIndex: number;
+    recipientEmail: string;
+    subject: string;
+    payloadText: string;
+    payloadHtml: string;
+    providerMessageId?: string;
+  },
+) {
+  try {
+    const { error } = await db.from("drip_email_events").insert({
+      tenant_id: args.tenantId,
+      merchant_id: args.merchantId,
+      sequence_id: args.sequenceId,
+      drip_run_id: args.dripRunId,
+      step_index: args.stepIndex,
+      recipient_email: args.recipientEmail,
+      subject_line: args.subject,
+      payload_text: args.payloadText,
+      payload_html: args.payloadHtml,
+      provider_message_id: args.providerMessageId ?? null,
+      sent_at: new Date().toISOString(),
+    });
+    if (error) throw error;
+  } catch (err) {
+    console.error("[dispatch-drips] exact email telemetry insert failed", err);
   }
 }
 
@@ -590,16 +629,16 @@ function resolveStepCopy(
   step: DripStep,
   leadId: string,
   stepIndex: number,
-): { subject: string; body: string; variantIndex: number } {
+): { subject: string; body: string; bodyHtml?: string; variantIndex: number } {
   const variants = step.body_variants;
   if (variants && variants.length > 0) {
     const i = stableIndex(`${leadId}:${stepIndex}`, variants.length);
     const subjectVariants = step.subject_variants;
     const subject =
       (subjectVariants && subjectVariants.length > 0 ? subjectVariants[i % subjectVariants.length] : step.subject) || "";
-    return { subject, body: variants[i], variantIndex: i };
+    return { subject, body: variants[i], bodyHtml: step.body_html, variantIndex: i };
   }
-  return { subject: step.subject || "", body: step.body, variantIndex: 0 };
+  return { subject: step.subject || "", body: step.body, bodyHtml: step.body_html, variantIndex: 0 };
 }
 
 async function processSmsStep(
@@ -692,7 +731,11 @@ async function processSmsStep(
       // Per-lead permanent: TT says the contact is blacklisted — retrying is
       // pointless and burns three dispatch slots per lead.
       if (/blacklisted/i.test(result.error)) {
-        return markPermanentFail(db, row, result.error);
+        return skipStep(db, row, steps, `sms_delivery_failed: ${result.error}`);
+      }
+      const attempts = (row.attempts || 0) + 1;
+      if (attempts >= MAX_ATTEMPTS) {
+        return skipStep(db, row, steps, `sms_delivery_failed_after_retries: ${result.error}`);
       }
       return markRetryOrFail(db, row, result.error);
     }
@@ -763,7 +806,9 @@ async function processEmailStep(
   // produced (no enabled intake form / HMAC key missing), HALT this email rather
   // than fall back to the generic no-lead link — never send a merchant a broken
   // or generic application link.
-  const usesLink = /\{\{\s*lead\.application_url\s*\}\}/.test(`${copy.subject || ""}\n${copy.body}`);
+  const usesLink = /\{\{\s*lead\.application_url\s*\}\}/.test(
+    `${copy.subject || ""}\n${copy.body}\n${copy.bodyHtml || ""}`,
+  );
   if (usesLink) {
     const existing = typeof data.application_url === "string" && data.application_url.trim() ? data.application_url.trim() : "";
     if (!existing) {
@@ -807,11 +852,17 @@ async function processEmailStep(
   const ctx = buildContext(data);
   const subjectRaw = renderTemplate(copy.subject, ctx) || "Following up";
   const rendered = renderTemplate(copy.body, ctx);
+  const renderedCustomHtml = copy.bodyHtml ? renderTemplate(copy.bodyHtml, ctx) : "";
   // Guard subject + body in ONE lender-lookup (was two separate calls — halves
   // the fail-closed surface + cost). positioning/lender is validated on the
   // COMBINED text; stripDashes is then the only per-field transform, matching
   // what sanitizeBlastMessage itself applies to each field.
-  const guard = await sanitizeBlastMessage(row.tenant_id, `${subjectRaw}\n${rendered}`, { checkPositioning: true });
+  const htmlAsText = renderedCustomHtml.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim();
+  const guard = await sanitizeBlastMessage(
+    row.tenant_id,
+    `${subjectRaw}\n${rendered}\n${htmlAsText}`,
+    { checkPositioning: true },
+  );
   if (!guard.ok) return handleGuardBlock(db, row, steps, guard, "email");
   const subject = stripDashes(subjectRaw).slice(0, 200) || "Following up";
   const cleanBody = stripDashes(rendered);
@@ -831,13 +882,24 @@ async function processEmailStep(
   const sendId = randomUUID();
   let fromIdentity = "dry:submissions@sunbizfunding.com";
   let providerMessageId: string | undefined;
+  let htmlPayload: string | null = null;
   if (shouldSend) {
     // Transactional/relationship email (application nudges, statements, etc.) is
     // CAN-SPAM opt-out-exempt → NO visible unsubscribe footer. The invisible
     // List-Unsubscribe header stays for BOTH classes (cuts spam complaints +
     // protects inbox placement). Commercial mail keeps the footer.
     const unsub = emailClass === "transactional" ? "none" : "footer";
-    const html = buildDripHtml(cleanBody, { sendId, email, unsub });
+    const customFooter =
+      emailClass === "transactional"
+        ? ""
+        : `<div style="margin:24px 0 0;color:#8a94a6;font:12px/1.5 Arial,sans-serif">` +
+          `Prefer not to receive these? <a href="${unsubscribeUrl(email)}" style="color:#8a94a6">Unsubscribe here</a>.</div>`;
+    const customTracking = `<img src="${pixelUrl(sendId)}" width="1" height="1" alt="" style="display:none;max-height:0;overflow:hidden" />`;
+    const instrumentedCustomHtml = renderedCustomHtml
+      ? renderedCustomHtml.replace(/<\/body>/i, `${customFooter}${customTracking}</body>`)
+      : "";
+    const html = instrumentedCustomHtml || buildDripHtml(cleanBody, { sendId, email, unsub });
+    htmlPayload = html;
     const result = await sendDripEmail(row.tenant_id, email, subject, cleanBody, {
       html,
       listUnsubscribe: listUnsubscribeHeader(email),
@@ -847,7 +909,7 @@ async function processEmailStep(
     providerMessageId = result.messageId;
   }
 
-  await logInteraction(db, {
+  const interactionLog = logInteraction(db, {
     tenantId: row.tenant_id,
     leadId: row.lead_id,
     sequenceName: row.sequence_name,
@@ -868,6 +930,25 @@ async function processEmailStep(
       drips_live: dripsLive,
     },
   });
+  await Promise.all([
+    interactionLog,
+    ...(shouldSend && htmlPayload
+      ? [
+          logDripEmailEvent(db, {
+            tenantId: row.tenant_id,
+            merchantId: row.lead_id,
+            sequenceId: row.sequence_id,
+            dripRunId: row.id,
+            stepIndex: row.step_index,
+            recipientEmail: email,
+            subject,
+            payloadText: cleanBody,
+            payloadHtml: htmlPayload,
+            providerMessageId,
+          }),
+        ]
+      : []),
+  ]);
   const outcome = await finishStep(db, row, steps, fromIdentity, shouldSend, providerMessageId);
   await nudgeConversations(row.tenant_id);
   return outcome;

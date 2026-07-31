@@ -24,11 +24,12 @@ import {
   SUNBIZ_DEMO_RENEWALS_SUMMARY,
   SUNBIZ_DEMO_RENEWAL_ROWS,
 } from "@/lib/sunbiz-demo-data";
-import {
-  fmtCurrency,
-  groupRows,
-  RenewalRow,
-} from "@/components/renewals/renewals-shared";
+import { fmtCurrency, groupRows } from "@/lib/renewals-core";
+import { RenewalRow } from "@/components/renewals/renewals-shared";
+import RecordFundedDeal from "@/components/renewals/RecordFundedDeal";
+import { resolveSessionContext } from "@/lib/api-auth";
+import { canWriteCrm } from "@/lib/role-gates";
+import { RenewalDetailDrawer } from "@/components/renewals/RenewalDetailDrawer";
 
 export const dynamic = "force-dynamic";
 
@@ -62,8 +63,13 @@ export default async function RenewalsPage() {
 
   const groups = groupRows(rows);
 
+  // Same gate as the endpoint (see the render site below). Fail closed.
+  const sess = await resolveSessionContext().catch(() => null);
+  const canRecord = !!tenantId && !!sess?.ok && sess.tenantId === tenantId && canWriteCrm(sess.teamRole);
+
   return (
     <div className="space-y-6 animate-fade-in">
+      <RenewalDetailDrawer />
       <PageHeader
         title="Renewals"
         subtitle={
@@ -126,6 +132,13 @@ export default async function RenewalsPage() {
           />
         </Card>
       </section>
+
+      {/* Manual intake. Hidden in demo mode (the rows are fixtures, so a write
+          would neither persist nor make sense), and hidden from anyone without
+          CRM write access — resolved with the same helper /api/renewals
+          authorizes with, so a read_only member is never handed a full form
+          that can only answer 403. */}
+      {!demoMode && canRecord && <RecordFundedDeal />}
 
       <div className="flex flex-wrap items-center gap-2">
         <button className="px-3 py-1.5 rounded-full bg-accent-soft text-accent text-xs font-semibold border border-accent/30">
