@@ -10,6 +10,7 @@
  */
 
 import { cache } from "react";
+import { chooseActiveProfile } from "./active-profile";
 import {
   getServiceSupabase,
   getSessionUser,
@@ -79,26 +80,9 @@ type ActiveUserProfile = UserProfile & {
   onboarding_completed_at?: string | null;
 };
 
-function chooseActiveProfile(rows: ActiveUserProfile[], email: string | null | undefined): UserProfile {
-  if (rows.length === 1) return rows[0];
-  const normalizedEmail = (email || "").trim().toLowerCase();
-  const exactEmail = normalizedEmail
-    ? rows.filter((row) => (row.email || "").trim().toLowerCase() === normalizedEmail)
-    : [];
-  const candidates = exactEmail.length > 0 ? exactEmail : rows;
-  // Architect P1 #11: the original "brand.includes('oasis')" tiebreaker
-  // baked CC's empire identity into the chooser, so a user with profiles
-  // across multiple tenants always resolved to OASIS even when their
-  // current session was a different tenant. Stripped the brand check —
-  // ownership + onboarding-completion is the right precedence. Callers
-  // that need tenant-explicit resolution should pass tenant_id directly.
-  return (
-    candidates.find((row) => row.is_owner && row.onboarding_completed_at) ||
-    candidates.find((row) => row.onboarding_completed_at) ||
-    candidates.find((row) => row.is_owner) ||
-    candidates[0]
-  );
-}
+// The chooser moved to lib/active-profile.ts (2026-07-29) so the API
+// authorization path can share it instead of diverging — see that file. Behavior
+// is unchanged, including the deliberate absence of a brand tiebreaker.
 
 // Memoized per-request (React cache): getTenant is called several times per
 // page render (layout + getTenantManifestForUser + chat-shell props all bottom

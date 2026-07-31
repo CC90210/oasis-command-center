@@ -20,6 +20,7 @@
  */
 
 import { getSessionUser, getServiceSupabase } from "./supabase-server";
+import { chooseActiveProfile } from "./active-profile";
 
 /**
  * Resolve the active tenant_id from the request's session cookie.
@@ -31,12 +32,22 @@ export async function resolveTenantId(): Promise<string | null> {
   const user = await getSessionUser();
   if (!user) return null;
   const db = getServiceSupabase();
+  // Same multi-profile handling as resolveSessionContext below — .maybeSingle()
+  // errors on more than one row and would return null here, reading as "no
+  // tenant" for a user who has one.
   const r = await db
     .from("user_profiles")
-    .select("tenant_id")
+    .select("tenant_id, email, is_owner, onboarding_completed_at")
     .eq("auth_user_id", user.id)
-    .maybeSingle();
-  return (r.data as { tenant_id: string | null } | null)?.tenant_id ?? null;
+    .limit(20);
+  const rows = (r.data || []) as Array<{
+    tenant_id: string | null;
+    email?: string | null;
+    is_owner?: boolean | null;
+    onboarding_completed_at?: string | null;
+  }>;
+  if (!rows.length) return null;
+  return chooseActiveProfile(rows, user.email)?.tenant_id ?? null;
 }
 
 /**
@@ -72,20 +83,29 @@ export async function resolveSessionContext(): Promise<SessionContext> {
   const user = await getSessionUser();
   if (!user) return { ok: false, reason: "no_session" };
   const db = getServiceSupabase();
+  // Multiple rows, then the SHARED chooser — not .maybeSingle().
+  //
+  // .maybeSingle() ERRORS when an auth account has more than one user_profiles
+  // row, so this returned "no_profile" and every one of the ~95 routes that
+  // authorize through here answered 401 — while getActiveProfile(), which
+  // renders the pages those routes serve, has always supported multiple
+  // profiles. A user could load a page and be refused by every write on it.
+  // Both paths now resolve the active profile identically (lib/active-profile).
   const r = await db
     .from("user_profiles")
-    .select("id, tenant_id, team_role, is_owner, admin_access")
+    .select("id, tenant_id, team_role, is_owner, admin_access, email, onboarding_completed_at")
     .eq("auth_user_id", user.id)
-    .maybeSingle();
-  const profile = r.data as
-    | {
-        id: string | null;
-        tenant_id: string | null;
-        team_role: string | null;
-        is_owner: boolean | null;
-        admin_access: boolean | null;
-      }
-    | null;
+    .limit(20);
+  const rows = (r.data || []) as Array<{
+    id: string | null;
+    tenant_id: string | null;
+    team_role: string | null;
+    is_owner: boolean | null;
+    admin_access: boolean | null;
+    email?: string | null;
+    onboarding_completed_at?: string | null;
+  }>;
+  const profile = rows.length ? chooseActiveProfile(rows, user.email) : null;
   if (!profile) return { ok: false, reason: "no_profile" };
   if (!profile.tenant_id) return { ok: false, reason: "no_tenant" };
   // Fail-closed for authorization (Codex adversarial review round-2, 2026-07-07).
