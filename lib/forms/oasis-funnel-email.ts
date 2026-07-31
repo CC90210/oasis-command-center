@@ -242,7 +242,17 @@ export async function deliverWelcomeEmail(args: {
     .eq("lead_id", leadId)
     .eq("agent_source", source)
     .limit(1);
-  if (!prior.error && (prior.data?.length ?? 0) > 0) {
+  if (prior.error) {
+    // FAIL CLOSED: an unreadable idempotency state must not authorise a
+    // second transactional email to the same lead.
+    console.error("[funnel.welcome] idempotency check errored — skipping (fail-closed)", {
+      lead_id: leadId,
+      source,
+      error: prior.error.message,
+    });
+    return { sent: false, reason: "idempotency_check_failed" };
+  }
+  if ((prior.data?.length ?? 0) > 0) {
     return { sent: false, reason: "already_sent" };
   }
 
