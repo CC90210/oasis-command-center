@@ -52,13 +52,13 @@ export function MarketingNav() {
       <div className="mx-auto flex h-16 w-full max-w-6xl items-center justify-between px-5 sm:px-8">
         <Link href="/" className="flex items-center gap-3" aria-label="OASIS AI, home">
           <OasisLogo size={30} priority />
-          <span className="leading-none">
-            <span className="block font-display text-[15px] font-bold tracking-[0.02em] text-fg">
-              OASIS AI
-            </span>
-            <span className="block font-data text-[9px] uppercase tracking-[0.22em] text-fg-dim">
-              Montreal
-            </span>
+          {/* Wordmark only. The "Montreal" sub-label read as a local
+              agency's calling card; the company works internationally and
+              the base is a legal detail, not a positioning statement. It
+              still appears in the footer and on the legal pages, which is
+              where a domicile belongs. */}
+          <span className="font-display text-[17px] font-bold tracking-[0.01em] text-fg">
+            OASIS AI
           </span>
         </Link>
 

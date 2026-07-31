@@ -215,6 +215,80 @@
     linear-gradient(to bottom, rgba(5, 6, 8, 0.6) 0%, transparent 22%, transparent 70%, #050608 100%);
 }
 
+/* ── O·A·S·I·S acronym mark ────────────────────────────────────────────
+   The name spelling itself out. See components/marketing/AcronymMark.tsx
+   for the behaviour; this is only the look and the transition.
+
+   Width animates via grid-template-columns 0fr -> 1fr, which interpolates
+   cleanly without measuring the text or running a JS layout loop. The
+   inner span needs overflow:hidden for the 0fr track to actually clip. */
+
+.m-acr {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.1em;
+  font-family: var(--font-display), system-ui, sans-serif;
+  font-weight: 700;
+  font-size: clamp(1.35rem, 3.4vw, 2.1rem);
+  letter-spacing: -0.02em;
+  line-height: 1.15;
+}
+
+.m-acr-item {
+  display: inline-flex;
+  align-items: baseline;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: theme("colors.fg.dim");
+  cursor: pointer;
+  transition: color 0.35s ease;
+}
+
+.m-acr-item[data-open="true"] {
+  color: theme("colors.fg.DEFAULT");
+}
+
+/* The capital stays put and stays bright — it is the letter of the name,
+   not part of the reveal. */
+.m-acr-head {
+  color: theme("colors.signal.DEFAULT");
+  transition: text-shadow 0.35s ease;
+}
+
+.m-acr-item[data-open="true"] .m-acr-head {
+  text-shadow: 0 0 22px theme("colors.signal.glow");
+}
+
+.m-acr-word {
+  display: grid;
+  grid-template-columns: 0fr;
+  transition: grid-template-columns 0.55s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.m-acr-item[data-open="true"] .m-acr-word {
+  grid-template-columns: 1fr;
+}
+
+.m-acr-word > span {
+  overflow: hidden;
+  min-width: 0;
+  white-space: nowrap;
+}
+
+/* A hair of space after a completed word, so "Operational Agentic" does
+   not read as one token. Collapses with the word. */
+.m-acr-item[data-open="true"] .m-acr-word > span::after {
+  content: "\00a0";
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .m-acr-word {
+    transition: none;
+  }
+}
+
 /* ── Section rule ──────────────────────────────────────────────────────
    A hairline that fades out at both ends instead of running edge to edge.
    A hard 1px border across a 1440px viewport is the single most common

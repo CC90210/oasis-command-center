@@ -51,11 +51,14 @@ export function MarketingFooter() {
               </span>
             </Link>
             <p className="mt-4 max-w-xs text-sm leading-relaxed text-fg-muted">
-              Agents that hold a seat in your business, and the systems they
-              run on.
+              Operational Agentic Systems Increasing Scalability. Agents that
+              hold a seat in your business, and the systems they run on.
             </p>
-            <p className="mt-4 font-data text-[11px] uppercase tracking-[0.18em] text-fg-dim">
-              {LEGAL_PRINCIPAL_PLACE}
+            <p className="mt-4 text-[13px] text-fg-dim">
+              Working internationally
+              <span className="mt-1 block text-fg-faint">
+                Registered in {LEGAL_PRINCIPAL_PLACE}
+              </span>
             </p>
           </div>
 

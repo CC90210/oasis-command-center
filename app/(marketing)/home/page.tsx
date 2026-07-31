@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import Link from "next/link";
 import { ArrowRight } from "lucide-react";
 import { CtaLink, CTA_INLINE } from "@/components/marketing/Cta";
+import { AcronymMark } from "@/components/marketing/AcronymMark";
 import { ConsoleField } from "@/components/marketing/ConsoleField";
 import { FleetRoster } from "@/components/marketing/FleetRoster";
 import { Reveal } from "@/components/marketing/Reveal";
@@ -25,7 +26,7 @@ export const metadata: Metadata = {
   // render "OASIS AI — Operational agentic systems · OASIS AI".
   title: { absolute: "OASIS AI — Operational agentic systems" },
   description:
-    "OASIS builds AI agents that hold a seat in your business — operations, marketing, finance, legal — and the systems they run on. Montreal, Quebec.",
+    "Operational Agentic Systems Increasing Scalability. OASIS builds AI agents that hold a seat in your business — operations, marketing, finance, legal — and the systems they run on. Working internationally.",
   alternates: { canonical: "/" },
   // No openGraph override here on purpose. Next merges metadata shallowly:
   // a page-level openGraph object REPLACES the layout's, and that includes
@@ -68,12 +69,15 @@ export default function MarketingHome() {
         <ConsoleField />
 
         <div className="relative mx-auto w-full max-w-6xl px-5 pb-24 pt-24 sm:px-8 sm:pb-32 sm:pt-32">
+          {/* The name, spelling itself out. This replaced a plain
+              "Operational agentic systems" eyebrow that never connected the
+              phrase to the five letters it comes from. */}
           <Reveal>
-            <Eyebrow>Operational agentic systems</Eyebrow>
+            <AcronymMark />
           </Reveal>
 
           <Reveal delay={90}>
-            <h1 className="mt-6 max-w-4xl font-display text-[clamp(2.4rem,7vw,4.6rem)] font-bold leading-[1.02] tracking-[-0.02em] text-fg">
+            <h1 className="mt-8 max-w-4xl font-display text-[clamp(2.4rem,7vw,4.6rem)] font-bold leading-[1.02] tracking-[-0.02em] text-fg">
               You don&rsquo;t hire a tool.
               <br />
               <span className="text-signal">You staff a company.</span>
@@ -100,8 +104,9 @@ export default function MarketingHome() {
 
           <Reveal delay={360}>
             <p className="mt-14 max-w-2xl border-l border-ops-line pl-4 font-data text-[11px] leading-relaxed tracking-[0.08em] text-fg-dim">
-              Montreal, Quebec. Systems running in production for lending,
-              property management, wholesale distribution, and consumer health.
+              Working internationally. Systems running in production for
+              lending, property management, wholesale distribution, and
+              consumer health.
             </p>
           </Reveal>
         </div>

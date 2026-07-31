@@ -5,7 +5,7 @@ import { CtaLink, CTA_INLINE } from "@/components/marketing/Cta";
 import { ConsoleField } from "@/components/marketing/ConsoleField";
 import { Reveal } from "@/components/marketing/Reveal";
 import { Section, SectionHead, Eyebrow } from "@/components/marketing/Section";
-import { LEGAL_ENTITY, LEGAL_PRINCIPAL_PLACE } from "@/lib/legal/constants";
+import { LEGAL_ENTITY } from "@/lib/legal/constants";
 
 /**
  * /about — who this is and how they work.
@@ -19,7 +19,7 @@ import { LEGAL_ENTITY, LEGAL_PRINCIPAL_PLACE } from "@/lib/legal/constants";
 export const metadata: Metadata = {
   title: "About",
   description:
-    "OASIS AI Solutions builds AI agents and the systems they run on, from Montreal, Quebec. How we work and what we won't do.",
+    "OASIS AI Solutions — Operational Agentic Systems Increasing Scalability. We build AI agents and the systems they run on, for clients internationally. How we work and what we won't do.",
   alternates: { canonical: "/about" },
 };
 
@@ -58,9 +58,10 @@ export default function AboutPage() {
           </Reveal>
           <Reveal delay={180}>
             <p className="mt-6 max-w-xl text-[17px] leading-relaxed text-fg-muted">
-              {LEGAL_ENTITY} is an AI automation studio in{" "}
-              {LEGAL_PRINCIPAL_PLACE}. The agents on this site aren&rsquo;t a
-              product roadmap — they&rsquo;re the staff that runs the studio,
+              {LEGAL_ENTITY} — Operational Agentic Systems Increasing
+              Scalability — builds AI agents and the systems they run on, for
+              clients wherever they are. The agents on this site aren&rsquo;t
+              a product roadmap; they&rsquo;re the staff that runs the studio,
               which is the only honest reason to sell them to anyone else.
             </p>
           </Reveal>
@@ -133,16 +134,18 @@ export default function AboutPage() {
           <Reveal>
             <SectionHead
               eyebrow="Where we are"
-              title={`${LEGAL_PRINCIPAL_PLACE.split(",")[0]}, working with anyone.`}
-              lede="Based in Quebec, which means Canadian privacy law is the floor we build to rather than an afterthought bolted on for a compliance review."
+              title="Wherever you are."
+              lede="Clients are on whichever continent they happen to be on. The work happens over video, shared systems, and the portal we hand you — being in the same city has never once been the thing that made a build succeed."
             />
           </Reveal>
           <Reveal delay={120}>
             <div className="space-y-5 text-[16px] leading-relaxed text-fg-muted sm:text-[17px]">
               <p>
-                Clients are wherever they are. The work happens over video,
-                shared systems, and the portal we hand you — being in the same
-                city has never once been the thing that made a build succeed.
+                We&rsquo;re registered in Canada, which is mostly relevant for
+                one reason: Canadian and Quebec privacy law is strict, and
+                building to it as the floor means the handling standard
+                travels with you rather than being retrofitted the first time
+                a client&rsquo;s counsel asks a hard question.
               </p>
               <p>
                 What we publish about data handling is on the record: which

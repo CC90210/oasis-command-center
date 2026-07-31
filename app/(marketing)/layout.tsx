@@ -52,7 +52,7 @@ export const metadata: Metadata = {
     template: "%s · OASIS AI",
   },
   description:
-    "OASIS builds AI agents that hold a seat in your business — operations, marketing, finance, legal — and the systems they run on.",
+    "Operational Agentic Systems Increasing Scalability. OASIS builds AI agents that hold a seat in your business — operations, marketing, finance, legal — and the systems they run on.",
   openGraph: {
     type: "website",
     siteName: "OASIS AI",
