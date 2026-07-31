@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import { ArrowRight } from "lucide-react";
+import { CTA_INLINE } from "@/components/marketing/Cta";
 import { ConsoleField } from "@/components/marketing/ConsoleField";
 import { FleetRoster } from "@/components/marketing/FleetRoster";
 import { Reveal } from "@/components/marketing/Reveal";
@@ -119,7 +120,7 @@ export default function FleetPage() {
               </p>
               <Link
                 href="/contact"
-                className="inline-flex items-center gap-1.5 text-[15px] font-medium text-signal transition-colors hover:text-fg"
+                className={CTA_INLINE}
               >
                 Describe the job
                 <ArrowRight className="h-4 w-4" aria-hidden="true" />

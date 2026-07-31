@@ -1,7 +1,7 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import { ArrowRight } from "lucide-react";
-import { CtaLink } from "@/components/marketing/Cta";
+import { CtaLink, CTA_INLINE } from "@/components/marketing/Cta";
 import { ConsoleField } from "@/components/marketing/ConsoleField";
 import { Reveal } from "@/components/marketing/Reveal";
 import { Section, SectionHead, Eyebrow } from "@/components/marketing/Section";
@@ -175,7 +175,7 @@ export default function WorkPage() {
                 </ul>
                 <Link
                   href="/contact"
-                  className="mt-7 inline-flex items-center gap-1.5 text-[15px] font-medium text-signal transition-colors hover:text-fg"
+                  className={`mt-7 ${CTA_INLINE}`}
                 >
                   Start here
                   <ArrowRight className="h-4 w-4" aria-hidden="true" />
