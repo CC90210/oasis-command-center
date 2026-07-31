@@ -1171,6 +1171,7 @@ export async function POST(req: NextRequest) {
           error: r.error,
         });
       }
+      if (r.error === "already_ingested") return;
       // Tell CC, and confirm to the lead. Until 2026-07-30 this block scored
       // the lead and stopped — a funnel that ranks someone 90/100 in silence
       // does the work and lets the lead go cold. Scoring is recomputed here

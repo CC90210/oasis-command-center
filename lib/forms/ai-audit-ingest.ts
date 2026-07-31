@@ -188,6 +188,21 @@ export async function ingestAiAuditSubmission(input: IngestInput): Promise<Inges
     const s = scoreAiAuditLead(answers);
     const summary = summarizeAiAuditLead(answers, s);
 
+    // Idempotency — one timeline row per (lead, funnel). The submit route lets
+    // a last-step POST repeat (sequential-progress check only requires steps
+    // 0..N-1 to exist), and a repeat must not re-append or re-notify. Same
+    // pattern as deliverWelcomeEmail in lib/forms/oasis-funnel-email.ts.
+    const prior = await db
+      .from("lead_interactions")
+      .select("id")
+      .eq("tenant_id", tenantId)
+      .eq("lead_id", leadId)
+      .eq("agent_source", "ai_audit_funnel")
+      .limit(1);
+    if (!prior.error && (prior.data?.length ?? 0) > 0) {
+      return { ok: true, score: s.score, status: s.status, breakdown: s, error: "already_ingested" };
+    }
+
     const upd = await db
       .from("leads")
       .update({
