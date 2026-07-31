@@ -250,6 +250,14 @@
   color: theme("colors.fg.DEFAULT");
 }
 
+/* Hover is a CSS-only affordance: it says "this is clickable" without
+   touching the open/closed state. Isolating a word on hover would change
+   the width of every letter in the row, slide a different letter under
+   the cursor, and fire again — see the note in AcronymMark.tsx. */
+.m-acr-item:hover .m-acr-head {
+  text-shadow: 0 0 26px theme("colors.signal.DEFAULT");
+}
+
 /* The capital stays put and stays bright — it is the letter of the name,
    not part of the reveal. */
 .m-acr-head {

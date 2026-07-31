@@ -44,7 +44,6 @@ export function AcronymMark() {
   // all agree. The collapse happens on mount, which is also the moment we
   // know JavaScript can undo it.
   const [open, setOpen] = useState<boolean[]>(() => LETTERS.map(() => true));
-  const [interactive, setInteractive] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
   const played = useRef(false);
 
@@ -54,13 +53,11 @@ export function AcronymMark() {
       window.matchMedia("(prefers-reduced-motion: reduce)").matches ||
       typeof IntersectionObserver === "undefined"
     ) {
-      setInteractive(true);
       return;
     }
 
     // Collapse, then unfold when it comes into view.
     setOpen(LETTERS.map(() => false));
-    setInteractive(true);
 
     const el = ref.current;
     if (!el) return;
@@ -95,11 +92,22 @@ export function AcronymMark() {
     };
   }, []);
 
-  /** Click isolates a letter; clicking the open one re-opens everything. */
+  /**
+   * Click isolates a letter; clicking the isolated one restores the full
+   * phrase, so there is always a way back to reading the whole thing.
+   *
+   * CLICK ONLY — NOT HOVER. Isolating a word changes the width of every
+   * letter in the row, so a hover handler feeds back on itself: point at
+   * "I", the row re-flows, a different letter slides under the cursor,
+   * that fires its own hover, and the row re-flows again. Measured:
+   * hovering the 4th letter reliably ended up opening the 5th. Keyboard
+   * users get the same behaviour for free, because Enter and Space fire
+   * click on a button.
+   */
   const toggle = (i: number) => {
     setOpen((prev) => {
-      const isolated = prev[i] && prev.filter(Boolean).length === 1;
-      return LETTERS.map((_, j) => (isolated ? true : j === i));
+      const alreadyAlone = prev[i] && prev.filter(Boolean).length === 1;
+      return LETTERS.map((_, j) => (alreadyAlone ? true : j === i));
     });
   };
 
@@ -116,7 +124,6 @@ export function AcronymMark() {
           type="button"
           data-open={open[i] ? "true" : "false"}
           onClick={() => toggle(i)}
-          onMouseEnter={() => interactive && toggle(i)}
           // The full word is the accessible name, so a screen reader hears
           // "Operational" rather than "O, perational".
           aria-label={l.head + l.tail}

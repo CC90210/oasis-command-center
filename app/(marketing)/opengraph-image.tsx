@@ -14,7 +14,8 @@ import { ImageResponse } from "next/og";
  */
 
 export const runtime = "edge";
-export const alt = "OASIS AI — Operational agentic systems";
+export const alt =
+  "OASIS AI — Operational Agentic Systems Increasing Scalability";
 export const size = { width: 1200, height: 630 };
 export const contentType = "image/png";
 
@@ -49,15 +50,19 @@ export default function OpengraphImage() {
               background: "#10b981",
             }}
           />
+          {/* The acronym in full, matching the hero. The card used to say
+              "Operational agentic systems", which is three of the five
+              words and reads as a tagline rather than as what OASIS
+              stands for. */}
           <div
             style={{
-              fontSize: 20,
-              letterSpacing: 6,
+              fontSize: 19,
+              letterSpacing: 4,
               color: "#9ca0a8",
               textTransform: "uppercase",
             }}
           >
-            Operational agentic systems
+            Operational Agentic Systems Increasing Scalability
           </div>
         </div>
 
