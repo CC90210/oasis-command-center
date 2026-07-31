@@ -116,8 +116,28 @@ const PUBLIC_FILE_EXTENSIONS = [
  * the exact-match case still hits and the prefix+`/` case is identical
  * to the original startsWith for those entries.
  */
+/**
+ * Next's generated metadata image routes: /opengraph-image-pwu6ef,
+ * /twitter-image-a1b2c3, /icon, /apple-icon. The build appends a content
+ * hash and emits NO file extension, so neither matcher above catches them —
+ * matchesPathPrefix needs an exact match or prefix + "/", and
+ * PUBLIC_FILE_EXTENSIONS keys off a suffix.
+ *
+ * They must be public. LinkedIn, Slack, iMessage and every other unfurler
+ * fetches the image URL directly with no session, so while these were gated
+ * the homepage's share card 307'd to /login and rendered as a login page in
+ * every preview. Caught by fetching the image on production rather than
+ * trusting that the og:image meta tag being present meant it resolved.
+ *
+ * Anchored so it cannot over-match: "icon" matches /icon, /icon-abc123 and
+ * /icon.png, but not /icons or /iconography.
+ */
+const METADATA_IMAGE_ROUTE =
+  /^\/(opengraph-image|twitter-image|icon|apple-icon)(-[A-Za-z0-9]+)?(\.[a-z0-9]+)?$/;
+
 export function isPublic(pathname: string): boolean {
   if (PUBLIC_PATH_PREFIXES.some((p) => matchesPathPrefix(pathname, p))) return true;
+  if (METADATA_IMAGE_ROUTE.test(pathname)) return true;
   const lower = pathname.toLowerCase();
   return PUBLIC_FILE_EXTENSIONS.some((ext) => lower.endsWith(ext));
 }

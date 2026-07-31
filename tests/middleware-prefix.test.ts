@@ -66,4 +66,26 @@ for (const notMarketing of ["/fleeting", "/workflows", "/aboutus", "/contacts", 
   assert.equal(isPublic(notMarketing), false, `${notMarketing} must not inherit a marketing prefix`);
 }
 
+// Next's generated metadata images. These carry a build hash and no file
+// extension, so they slip past both the prefix list and the extension list.
+// Gated, the homepage share card 307s to /login and every unfurl — LinkedIn,
+// Slack, iMessage — renders a login screen instead of the card. This shipped
+// to production on 2026-07-31 and was caught by fetching the image itself
+// rather than trusting the og:image meta tag to mean it resolved.
+for (const img of [
+  "/opengraph-image",
+  "/opengraph-image-pwu6ef",
+  "/opengraph-image.png",
+  "/twitter-image-a1b2c3",
+  "/icon",
+  "/apple-icon-9z8y7x",
+]) {
+  assert.equal(isPublic(img), true, `${img} must be fetchable by an unfurler with no session`);
+}
+
+// ...without opening up anything that merely starts the same way.
+for (const notAnImage of ["/icons", "/iconography", "/opengraph-image/secret", "/iconic-leads"]) {
+  assert.equal(isPublic(notAnImage), false, `${notAnImage} must not be treated as a metadata image`);
+}
+
 console.log("middleware-prefix ok");
