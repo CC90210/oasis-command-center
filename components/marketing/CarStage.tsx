@@ -105,22 +105,6 @@ const HOT_EMISSIVE = 2.2;
  */
 const CAMERA_FOV = 14;
 
-function sectionPoints(s: Station, segments: number) {
-  const pts: [number, number, number][] = [];
-  const n = 2 / s.squareness;
-  for (let i = 0; i < segments; i++) {
-    const t = (i / segments) * Math.PI * 2;
-    const c = Math.cos(t);
-    const si = Math.sin(t);
-    // Superellipse: |cos|^n keeps the corners square-ish without the
-    // discontinuity a rounded-rect extrusion would give at the seams.
-    const z = s.w * Math.sign(c) * Math.pow(Math.abs(c), n);
-    const y = s.y + s.h * Math.sign(si) * Math.pow(Math.abs(si), n);
-    pts.push([s.x, y, z]);
-  }
-  return pts;
-}
-
 export function CarStage({ bodyId, engineId, engineColor, onReady }: Props) {
   const mountRef = useRef<HTMLDivElement>(null);
   const readyRef = useRef(onReady);
@@ -162,7 +146,7 @@ export function CarStage({ bodyId, engineId, engineColor, onReady }: Props) {
       // near at 1.0 rather than 0.1: the subject never comes closer than a
       // couple of units even during the engine dive, and a 10x tighter near
       // plane buys depth precision that the neon-on-bodywork contact needs.
-      const camera = new THREE.PerspectiveCamera(CAMERA_FOV, 1, 1, 200);
+      const camera = new THREE.PerspectiveCamera(CAMERA_FOV, 1, 0.25, 200);
       const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
       renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
       renderer.outputColorSpace = THREE.SRGBColorSpace;
@@ -170,11 +154,15 @@ export function CarStage({ bodyId, engineId, engineColor, onReady }: Props) {
       // clips flat and a dark car with bright neon renders as black shapes
       // with blown-out stripes — no roll-off in either direction, which is
       // most of why it read as "computer graphics" rather than "photograph".
-      renderer.toneMapping = THREE.ACESFilmicToneMapping;
+      // AgX rather than ACES. ACES desaturates saturated colour toward
+      // white as it rolls off, which turned the brand cyan into a pale
+      // white-blue exactly where the neon is brightest — the one colour on
+      // the page that must not drift. AgX holds hue into the highlight.
+      renderer.toneMapping = THREE.AgXToneMapping;
       // 1.15 was tuned while an AmbientLight was still lifting the shadow
       // side. With that gone the body fell to near-black silhouette — the
       // env map alone carries the fill now, and it needs the headroom.
-      renderer.toneMappingExposure = 1.5;
+      renderer.toneMappingExposure = 1.75;
 
       // ── Studio environment ────────────────────────────────────────
       // The biggest single miss in the previous build: there was no
@@ -203,7 +191,11 @@ export function CarStage({ bodyId, engineId, engineColor, onReady }: Props) {
         pos: [number, number, number],
         rot: [number, number, number],
       ) => {
-        const m = new THREE.MeshBasicMaterial({ color });
+        // toneMapped:false so the bake keeps values above 1.0. Tone mapping
+        // the light sources themselves would compress them to grey cards
+        // before they ever reach the cube map, and the reflections would
+        // come back dull no matter how high the intensity was set.
+        const m = new THREE.MeshBasicMaterial({ color, toneMapped: false });
         m.color.multiplyScalar(intensity);
         envMats.push(m);
         const mesh = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), m);
@@ -213,15 +205,17 @@ export function CarStage({ bodyId, engineId, engineColor, onReady }: Props) {
       };
 
       // Overhead softboxes — the broad highlight down the centre of the roof.
-      panel(9, 0.1, 3.2, 0xffffff, 3.4, [0, 6, 0], [0, 0, 0]);
-      panel(6, 0.1, 2.0, 0xdff2ff, 1.8, [0, 5.4, -4], [0.5, 0, 0]);
+      // Intensities carry more now that AmbientLight and HemisphereLight
+      // are gone: the environment is the fill, not a supplement to it.
+      panel(9, 0.1, 3.2, 0xffffff, 7.0, [0, 6, 0], [0, 0, 0]);
+      panel(6, 0.1, 2.0, 0xdff2ff, 3.6, [0, 5.4, -4], [0.5, 0, 0]);
       // Flank strip lights — the long specular streaks along the body sides.
       panel(0.16, 0.16, 14, 0x00d4ff, 6.0, [-5.5, 2.6, 0], [0, 0, 0]);
       panel(0.16, 0.16, 14, 0x00d4ff, 6.0, [5.5, 2.6, 0], [0, 0, 0]);
       panel(0.14, 0.14, 12, 0x7fe6ff, 3.0, [-3.2, 4.6, 0], [0, 0, 0]);
       panel(0.14, 0.14, 12, 0x7fe6ff, 3.0, [3.2, 4.6, 0], [0, 0, 0]);
       // A cool floor bounce, so the sills and underbody are not dead black.
-      panel(16, 0.1, 16, 0x0a1a24, 1.2, [0, -1.2, 0], [0, 0, 0]);
+      panel(16, 0.1, 16, 0x0a1a24, 1.9, [0, -1.2, 0], [0, 0, 0]);
 
       const envRT = pmrem.fromScene(envScene, 0.04);
       scene.environment = envRT.texture;
@@ -244,25 +238,33 @@ export function CarStage({ bodyId, engineId, engineColor, onReady }: Props) {
       // out to a white blob. A dark car on a dark stage needs LESS light
       // than instinct says — the shape comes from a couple of hard
       // highlights tracing the edges, not from filling the surface.
-      scene.add(new THREE.HemisphereLight(0x9fd4e8, 0x05070a, 0.55));
+      // No HemisphereLight either. Like AmbientLight it feeds only the
+      // indirect DIFFUSE term and contributes zero specular, so on a
+      // metallic surface it cannot produce a highlight — it just raises the
+      // floor and flattens the panel it was supposed to be shaping. The
+      // comment that used to live here claimed the opposite.
       // No AmbientLight. It was here to lift the shadow side, which is what
       // scene.environment now does — and does directionally, from the
       // softboxes and floor bounce. A flat ambient term added on top only
       // washes out the contrast that makes the panels read as curved.
 
-      const key = new THREE.DirectionalLight(0xffffff, 1.2);
+      // Directionals are now accents on top of the environment, not the
+      // main source. At their old intensities they buried the env map's
+      // contribution and put a hard round hotspot where the reference has
+      // a long soft streak — a DirectionalLight cannot produce a streak.
+      const key = new THREE.DirectionalLight(0xffffff, 0.55);
       key.position.set(4.5, 6.5, 4.5);
       scene.add(key);
 
       // Hard cyan rim raking the shoulder line from behind — the single
       // light doing the most work in the shot.
-      const rim = new THREE.DirectionalLight(0x00d4ff, 2.2);
+      const rim = new THREE.DirectionalLight(0x00d4ff, 0.7);
       rim.position.set(-5, 2.4, -4);
       scene.add(rim);
 
       // Second rim from the opposite quarter so the far side of the body
       // separates from the background instead of dissolving into it.
-      const rim2 = new THREE.DirectionalLight(0x7fd8ff, 0.5);
+      const rim2 = new THREE.DirectionalLight(0x7fd8ff, 0.25);
       rim2.position.set(2, 1.2, -5);
       scene.add(rim2);
 
@@ -348,12 +350,20 @@ export function CarStage({ bodyId, engineId, engineColor, onReady }: Props) {
       // is what produces the tight highlight running along a car's shoulder
       // while the body itself stays dark.
       const paint = new THREE.MeshPhysicalMaterial({
-        color: 0x161d26,
-        metalness: 0.55,
-        roughness: 0.42,
+        // True carbon black. It was lifted to a grey-blue only to stop the
+        // body reading as a silhouette back when there was nothing lighting
+        // it — that was compensating for the missing environment, and with
+        // the environment doing its job the compensation makes it look like
+        // primer instead of paint. Dark base, bright reflections.
+        color: 0x05070a,
+        metalness: 0.5,
+        roughness: 0.38,
+        // clearcoatRoughness is the money value: this is the tight second
+        // specular lobe that reads as lacquer over pigment. Stay in
+        // 0.03-0.08; above that it stops being wet.
         clearcoat: 1,
-        clearcoatRoughness: 0.06,
-        envMapIntensity: 2.3,
+        clearcoatRoughness: 0.045,
+        envMapIntensity: 1.35,
         side: THREE.DoubleSide,
         // Transparent from the start so the x-ray during an engine dive is
         // an opacity tween rather than a material swap mid-render. The
@@ -403,32 +413,150 @@ export function CarStage({ bodyId, engineId, engineColor, onReady }: Props) {
       });
 
       /** Loft consecutive cross-sections into a closed surface. */
-      function loft(stations: Station[], segments = 40) {
-        const rings = stations.map((s) => sectionPoints(s, segments));
+      /**
+       * Catmull-Rom through a scalar series. Used to resample the eight
+       * hand-authored stations up to a dense ring count: eight sections
+       * across a 4.7-unit car is a section every 65cm, and no shading model
+       * can make 65cm flats look like a curved panel.
+       */
+      function crSpline(v: number[], u: number) {
+        const n = v.length - 1;
+        const f = Math.min(Math.max(u, 0), 1) * n;
+        const i = Math.min(Math.floor(f), n - 1);
+        const t = f - i;
+        const p0 = v[Math.max(i - 1, 0)];
+        const p1 = v[i];
+        const p2 = v[i + 1];
+        const p3 = v[Math.min(i + 2, n)];
+        return (
+          0.5 *
+          (2 * p1 +
+            (-p0 + p2) * t +
+            (2 * p0 - 5 * p1 + 4 * p2 - p3) * t * t +
+            (-p0 + 3 * p1 - 3 * p2 + p3) * t * t * t)
+        );
+      }
+
+      /**
+       * Loft a body from cross-sections.
+       *
+       * THIS WAS THE BIGGEST DEFECT IN THE STAGE and it was invisible in
+       * every screenshot until someone named it. The old version pushed raw
+       * triangle positions with NO INDEX BUFFER. On non-indexed geometry
+       * `computeVertexNormals()` can only write one face normal to all three
+       * of a triangle's vertices, because those vertices are not shared with
+       * any neighbour — so the entire car was FLAT SHADED. Every panel was a
+       * visible facet, and no amount of lighting, tone mapping or material
+       * work survives that: a faceted surface reflects in facets.
+       *
+       * Now: stations are spline-resampled to RINGS sections, vertices are
+       * shared between adjacent quads, and the geometry carries a real index
+       * buffer, so `computeVertexNormals()` averages across neighbours and
+       * the surface shades as the continuous curve it always was.
+       */
+      function loft(stations: Station[], segments = 48, RINGS = 44) {
+        const xs = stations.map((s) => s.x);
+        const ys = stations.map((s) => s.y);
+        const hs = stations.map((s) => s.h);
+        const ws = stations.map((s) => s.w);
+        const qs = stations.map((s) => s.squareness);
+
+        const rings: Station[] = [];
+        for (let i = 0; i < RINGS; i++) {
+          const u = i / (RINGS - 1);
+          rings.push({
+            x: crSpline(xs, u),
+            y: crSpline(ys, u),
+            h: crSpline(hs, u),
+            w: crSpline(ws, u),
+            squareness: crSpline(qs, u),
+          });
+        }
+
+        const cols = segments + 1; // last column duplicates the first
         const pos: number[] = [];
-        for (let i = 0; i < rings.length - 1; i++) {
-          for (let j = 0; j < segments; j++) {
-            const k = (j + 1) % segments;
-            const a = rings[i][j], b = rings[i][k];
-            const c = rings[i + 1][k], d = rings[i + 1][j];
-            pos.push(...a, ...b, ...c);
-            pos.push(...a, ...c, ...d);
+        const uv: number[] = [];
+
+        const ringPoint = (s: Station, j: number): [number, number, number] => {
+          const n = 2 / s.squareness;
+          const t = (j / segments) * Math.PI * 2;
+          const c = Math.cos(t);
+          const si = Math.sin(t);
+          return [
+            s.x,
+            s.y + s.h * Math.sign(si) * Math.pow(Math.abs(si), n),
+            s.w * Math.sign(c) * Math.pow(Math.abs(c), n),
+          ];
+        };
+
+        for (let i = 0; i < RINGS; i++) {
+          for (let j = 0; j < cols; j++) {
+            pos.push(...ringPoint(rings[i], j));
+            // A real UV set, so any texture assigned later samples across
+            // the surface instead of collapsing to a single texel.
+            uv.push(i / (RINGS - 1), j / segments);
           }
         }
-        // Cap both ends so the body reads solid from the front and rear.
-        for (const [ring, flip] of [[rings[0], true], [rings[rings.length - 1], false]] as const) {
-          const cx = ring.reduce((t, p) => t + p[0], 0) / ring.length;
-          const cy = ring.reduce((t, p) => t + p[1], 0) / ring.length;
+
+        const idx: number[] = [];
+        for (let i = 0; i < RINGS - 1; i++) {
           for (let j = 0; j < segments; j++) {
-            const k = (j + 1) % segments;
-            const a = ring[j], b = ring[k];
-            if (flip) pos.push(cx, cy, 0, ...b, ...a);
-            else pos.push(cx, cy, 0, ...a, ...b);
+            const a = i * cols + j;
+            const b = i * cols + j + 1;
+            const c = (i + 1) * cols + j + 1;
+            const d = (i + 1) * cols + j;
+            idx.push(a, b, c, a, c, d);
           }
         }
+
+        // Caps get their OWN copies of the end rings rather than sharing the
+        // body's vertices. Sharing would average the cap normal into the
+        // body normal and round off the tail, losing the crisp edge that
+        // makes the back of the car read as a cut-off rather than a nose.
+        for (const [ringIdx, flip] of [
+          [0, true],
+          [RINGS - 1, false],
+        ] as const) {
+          const s = rings[ringIdx];
+          const base = pos.length / 3;
+          const cy = s.y;
+          pos.push(s.x, cy, 0);
+          uv.push(0.5, 0.5);
+          for (let j = 0; j < cols; j++) {
+            pos.push(...ringPoint(s, j));
+            uv.push(0.5 + 0.5 * Math.cos((j / segments) * Math.PI * 2), 0.5 + 0.5 * Math.sin((j / segments) * Math.PI * 2));
+          }
+          for (let j = 0; j < segments; j++) {
+            const a = base + 1 + j;
+            const b = base + 1 + j + 1;
+            if (flip) idx.push(base, b, a);
+            else idx.push(base, a, b);
+          }
+        }
+
         const g = new THREE.BufferGeometry();
         g.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3));
+        g.setAttribute("uv", new THREE.Float32BufferAttribute(uv, 2));
+        g.setIndex(idx);
         g.computeVertexNormals();
+
+        // Weld the t=0 / t=2pi seam. The duplicate column exists so UVs can
+        // run 0..1 without wrapping, but it leaves two vertices at the same
+        // point with different averaged normals — a visible hairline down
+        // the centre of the bonnet. Average them and write both.
+        const nrm = g.getAttribute("normal") as ThreeNS.BufferAttribute;
+        for (let i = 0; i < RINGS; i++) {
+          const a = i * cols;
+          const b = i * cols + segments;
+          const nx = (nrm.getX(a) + nrm.getX(b)) / 2;
+          const ny = (nrm.getY(a) + nrm.getY(b)) / 2;
+          const nz = (nrm.getZ(a) + nrm.getZ(b)) / 2;
+          const len = Math.hypot(nx, ny, nz) || 1;
+          nrm.setXYZ(a, nx / len, ny / len, nz / len);
+          nrm.setXYZ(b, nx / len, ny / len, nz / len);
+        }
+        nrm.needsUpdate = true;
+
         return g;
       }
 
