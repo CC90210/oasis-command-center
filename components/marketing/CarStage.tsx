@@ -7,8 +7,10 @@ import {
   engineAnchor,
   flankPoint,
   nearestStation,
+  resampleStations,
   runHeight,
   surfaceHalfWidth,
+  LOFT_RINGS,
   MOUNT,
   type Station,
 } from "@/lib/marketing/car-geometry";
@@ -418,30 +420,6 @@ export function CarStage({ bodyId, engineId, engineColor, onReady }: Props) {
 
       /** Loft consecutive cross-sections into a closed surface. */
       /**
-       * Catmull-Rom through a scalar series. Used to resample the eight
-       * hand-authored stations up to a dense ring count: eight sections
-       * across a 4.7-unit car is a section every 65cm, and no shading model
-       * can make 65cm flats look like a curved panel.
-       */
-      function crSpline(v: number[], u: number) {
-        const n = v.length - 1;
-        const f = Math.min(Math.max(u, 0), 1) * n;
-        const i = Math.min(Math.floor(f), n - 1);
-        const t = f - i;
-        const p0 = v[Math.max(i - 1, 0)];
-        const p1 = v[i];
-        const p2 = v[i + 1];
-        const p3 = v[Math.min(i + 2, n)];
-        return (
-          0.5 *
-          (2 * p1 +
-            (-p0 + p2) * t +
-            (2 * p0 - 5 * p1 + 4 * p2 - p3) * t * t +
-            (-p0 + 3 * p1 - 3 * p2 + p3) * t * t * t)
-        );
-      }
-
-      /**
        * Loft a body from cross-sections.
        *
        * THIS WAS THE BIGGEST DEFECT IN THE STAGE and it was invisible in
@@ -458,24 +436,10 @@ export function CarStage({ bodyId, engineId, engineColor, onReady }: Props) {
        * buffer, so `computeVertexNormals()` averages across neighbours and
        * the surface shades as the continuous curve it always was.
        */
-      function loft(stations: Station[], segments = 48, RINGS = 44) {
-        const xs = stations.map((s) => s.x);
-        const ys = stations.map((s) => s.y);
-        const hs = stations.map((s) => s.h);
-        const ws = stations.map((s) => s.w);
-        const qs = stations.map((s) => s.squareness);
-
-        const rings: Station[] = [];
-        for (let i = 0; i < RINGS; i++) {
-          const u = i / (RINGS - 1);
-          rings.push({
-            x: crSpline(xs, u),
-            y: crSpline(ys, u),
-            h: crSpline(hs, u),
-            w: crSpline(ws, u),
-            squareness: crSpline(qs, u),
-          });
-        }
+      function loft(stations: Station[], segments = 48, RINGS = LOFT_RINGS) {
+        // Shared with the geometry test, so what it verifies clearance
+        // against is the same surface that renders.
+        const rings = resampleStations(stations, RINGS);
 
         const cols = segments + 1; // last column duplicates the first
         const pos: number[] = [];

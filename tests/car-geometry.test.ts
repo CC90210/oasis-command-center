@@ -26,15 +26,18 @@
 import { strict as assert } from "node:assert";
 import {
   CAR_SPECS,
+  LOFT_RINGS,
   MOUNT,
   flankPoint,
   nearestStation,
+  resampleStations,
   runHeight,
   surfaceHalfWidth,
   type Station,
 } from "../lib/marketing/car-geometry";
 
 let checks = 0;
+let worstClearance = { cm: Infinity, where: "" };
 const fail = (msg: string) => {
   throw new Error(msg);
 };
@@ -107,7 +110,15 @@ assert.equal(surfaceHalfWidth({ x: 0, y: 1, h: 0.4, w: 1, squareness: 4 }, 99), 
 assert.equal(surfaceHalfWidth({ x: 0, y: 1, h: 0.4, w: 1, squareness: 4 }, -99), 0);
 
 // ── Every mounted part must clear the skin, on every harness ─────────────
-type Mount = { label: string; stations: Station[]; heightOf: (s: Station) => number; radius: number; gap: number };
+type Mount = {
+  label: string;
+  stations: Station[];
+  heightOf: (s: Station) => number;
+  radius: number;
+  gap: number;
+  /** Rails mount on the greenhouse loft, everything else on the body. */
+  onCabin?: boolean;
+};
 
 for (const [name, spec] of Object.entries(CAR_SPECS)) {
   const mounts: Mount[] = [
@@ -134,6 +145,7 @@ for (const [name, spec] of Object.entries(CAR_SPECS)) {
       heightOf: (s) => s.y + s.h * MOUNT.railHeightFrac,
       radius: MOUNT.railThickness / 2,
       gap: MOUNT.gap,
+      onCabin: true,
     });
   }
   if (spec.features.skirts) {
@@ -146,19 +158,40 @@ for (const [name, spec] of Object.entries(CAR_SPECS)) {
     });
   }
 
+  // The rendered surface is the RESAMPLED loft, not the authored stations.
+  // Catmull-Rom passes through its control points but bulges between them,
+  // so a part can clear every authored station and still be swallowed by
+  // the surface in between. Checking only the authored stations would
+  // verify a shape that never reaches the screen.
+  const bodyRings = resampleStations(spec.body);
+  const cabinRings = resampleStations(spec.cabin);
+  assert.equal(bodyRings.length, LOFT_RINGS);
+
   for (const m of mounts) {
     assert.ok(m.stations.length > 1, `${name}/${m.label}: needs 2+ stations to sweep`);
-    for (const s of m.stations) {
+
+    // Which resampled rings this run actually spans.
+    const minX = Math.min(...m.stations.map((s) => s.x));
+    const maxX = Math.max(...m.stations.map((s) => s.x));
+    const rings = (m.onCabin ? cabinRings : bodyRings).filter(
+      (r) => r.x >= minX && r.x <= maxX,
+    );
+    assert.ok(rings.length > 2, `${name}/${m.label}: resampled span is too short to test`);
+
+    for (const s of rings) {
       for (const side of [-1, 1]) {
         const [, py, pz] = flankPoint(s, m.heightOf(s), side, m.radius + m.gap);
         // SIGNED, and measured at the part's inner face rather than its
         // centreline. Negative means the tube's near side is in the paint.
         const signed = isInside(s, py, pz) ? -distanceToSurface(s, py, pz) : distanceToSurface(s, py, pz);
         const clearance = signed - m.radius;
+        if (clearance < worstClearance.cm) {
+          worstClearance = { cm: clearance, where: `${name}/${m.label}` };
+        }
         if (clearance <= 0) {
           fail(
-            `${name}/${m.label} at x=${s.x}: part is ${(-clearance * 100).toFixed(2)}cm ` +
-              `INSIDE the bodywork — this z-fights and strobes per frame`,
+            `${name}/${m.label} at x=${s.x.toFixed(3)}: part is ${(-clearance * 100).toFixed(2)}cm ` +
+              `INSIDE the rendered bodywork — this z-fights and strobes per frame`,
           );
         }
         checks++;
@@ -199,4 +232,8 @@ for (const [name, spec] of Object.entries(CAR_SPECS)) {
   checks += 2;
 }
 
-console.log(`car-geometry: ok (${checks} assertions)`);
+console.log(
+  `car-geometry: ok (${checks} assertions, ` +
+    `tightest mount ${(worstClearance.cm * 100).toFixed(2)}cm proud ` +
+    `at ${worstClearance.where})`,
+);

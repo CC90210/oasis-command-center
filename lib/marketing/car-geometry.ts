@@ -186,6 +186,66 @@ const CUSTOM: CarSpec = {
  * core and the camera flew to a point below the parts it was meant to be
  * showing you. One function, three callers.
  */
+/** How many rings the body is lofted from after resampling. */
+export const LOFT_RINGS = 44;
+
+/** Catmull-Rom through a scalar series, clamped at both ends. */
+function crSpline(v: number[], u: number): number {
+  const n = v.length - 1;
+  const f = Math.min(Math.max(u, 0), 1) * n;
+  const i = Math.min(Math.floor(f), n - 1);
+  const t = f - i;
+  const p0 = v[Math.max(i - 1, 0)];
+  const p1 = v[i];
+  const p2 = v[i + 1];
+  const p3 = v[Math.min(i + 2, n)];
+  return (
+    0.5 *
+    (2 * p1 +
+      (-p0 + p2) * t +
+      (2 * p0 - 5 * p1 + 4 * p2 - p3) * t * t +
+      (-p0 + 3 * p1 - 3 * p2 + p3) * t * t * t)
+  );
+}
+
+/**
+ * The sections the body is ACTUALLY lofted from.
+ *
+ * Eight hand-authored stations across a 4.7-unit car is a section every
+ * 65cm, and no shading model makes 65cm flats look like a curved panel, so
+ * the loft resamples them up before building geometry.
+ *
+ * This lives here rather than inside the renderer because the rendered
+ * surface is what mounted parts have to clear, and a clearance measured
+ * against the eight authored stations is not the same claim: Catmull-Rom
+ * interpolates between control points and can bulge outward past them, so
+ * a strip that clears every authored station can still be swallowed by the
+ * surface in between. The geometry test checks against these rings.
+ */
+export function resampleStations(
+  stations: Station[],
+  count = LOFT_RINGS,
+): Station[] {
+  const xs = stations.map((s) => s.x);
+  const ys = stations.map((s) => s.y);
+  const hs = stations.map((s) => s.h);
+  const ws = stations.map((s) => s.w);
+  const qs = stations.map((s) => s.squareness);
+
+  const out: Station[] = [];
+  for (let i = 0; i < count; i++) {
+    const u = i / (count - 1);
+    out.push({
+      x: crSpline(xs, u),
+      y: crSpline(ys, u),
+      h: crSpline(hs, u),
+      w: crSpline(ws, u),
+      squareness: crSpline(qs, u),
+    });
+  }
+  return out;
+}
+
 /**
  * Where surface-mounted hardware sits.
  *

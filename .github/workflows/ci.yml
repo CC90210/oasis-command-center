@@ -29,6 +29,7 @@ jobs:
           npm run test:sunbiz
           npm run test:event-bus
           npm run test:streaming-redactor
+          npm run test:marketing
       - name: Build
         env:
           # Minimal env so the build doesn't blow up on missing required vars.
