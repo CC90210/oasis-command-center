@@ -200,7 +200,7 @@ export function HarnessBuilder() {
               to a form. Pointer-events off: it must never eat a click. */}
           <div
             aria-hidden="true"
-            className={`pointer-events-none absolute inset-0 z-40 bg-ops-void transition-opacity duration-700 ${
+            className={`pointer-events-none absolute inset-0 z-40 bg-ops-void transition-opacity duration-700 motion-reduce:transition-none motion-reduce:delay-0 ${
               launching ? "opacity-100 delay-[1600ms]" : "opacity-0"
             }`}
           />

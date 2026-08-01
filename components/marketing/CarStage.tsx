@@ -1825,7 +1825,16 @@ export function CarStage({
         // is not. Driving everything from the frame count keeps the
         // sequence and the picture on the same clock by construction.
         if (launchRef.current && launchFrame === 0) launchFrame = 1;
-        if (launchFrame > 0) {
+        if (launchFrame > 0 && reduced) {
+          // Reduced motion gets the destination, not the cinematic. A
+          // camera flight, spinning wheels and a car accelerating out of
+          // frame is precisely the class of motion this preference exists
+          // to suppress — and every other animation in this stage already
+          // honours it, so the launch skipping it was inconsistent as well
+          // as unkind. Held one frame so the button's state is seen.
+          launchFrame = -1;
+          launchDoneRef.current?.();
+        } else if (launchFrame > 0) {
           launchFrame++;
           const [ex, ey, ez] = engineAnchor(spec);
 
