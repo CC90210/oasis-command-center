@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { BODIES, ENGINES, CHASSIS } from "@/lib/marketing/harness";
+import { CarStage } from "@/components/marketing/CarStage";
 
 /**
  * The car analogy, made touchable.
@@ -27,6 +28,8 @@ import { BODIES, ENGINES, CHASSIS } from "@/lib/marketing/harness";
 export function HarnessBuilder() {
   const [bodyId, setBodyId] = useState(BODIES[0].id);
   const [engineId, setEngineId] = useState(ENGINES[0].id);
+  // Flips once WebGL has painted a frame, retiring the SVG fallback.
+  const [stageReady, setStageReady] = useState(false);
 
   const body = BODIES.find((b) => b.id === bodyId) ?? BODIES[0];
   const engine = ENGINES.find((e) => e.id === engineId) ?? ENGINES[0];
@@ -35,12 +38,22 @@ export function HarnessBuilder() {
     <div className="border border-ops-line bg-ops-panel/60">
       {/* ── The car ─────────────────────────────────────────────────── */}
       <div className="relative border-b border-ops-line px-4 pt-8 sm:px-8">
-        <svg
-          viewBox="0 0 420 150"
-          className="mx-auto block h-auto w-full max-w-2xl"
-          role="img"
-          aria-label={`${body.name} body fitted with the ${engine.name} engine, on the OASIS harness`}
-        >
+        {/*
+          Two layers. The SVG blueprint below is what renders on the server,
+          without JavaScript, and on a machine with no WebGL — a complete,
+          labelled diagram in its own right. The 3D stage mounts on top of
+          it once three.js has loaded, so there is never an empty box and
+          never a spinner.
+        */}
+        <div className="relative mx-auto aspect-[16/9] w-full max-w-3xl sm:aspect-[2/1]">
+          <svg
+            viewBox="0 0 420 150"
+            className={`absolute inset-0 h-full w-full transition-opacity duration-700 ${
+              stageReady ? "opacity-0" : "opacity-70"
+            }`}
+            role="img"
+            aria-label={`${body.name} body fitted with the ${engine.name} engine, on the OASIS harness`}
+          >
           {/* Ground line */}
           <line
             x1="10"
@@ -138,8 +151,16 @@ export function HarnessBuilder() {
               />
               <circle cx={cx} cy="122" r="6" fill="#00D4FF" opacity="0.55" />
             </g>
-          ))}
-        </svg>
+            ))}
+          </svg>
+
+          <CarStage
+            bodyId={body.id}
+            engineId={engine.id}
+            engineColor={engine.glow}
+            onReady={() => setStageReady(true)}
+          />
+        </div>
 
         {/* Callouts */}
         <div className="mx-auto mb-6 mt-2 flex max-w-2xl flex-wrap justify-center gap-x-8 gap-y-2 text-center">
