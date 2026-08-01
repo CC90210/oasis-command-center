@@ -7,7 +7,9 @@ import {
   engineAnchor,
   flankPoint,
   nearestStation,
+  runHeight,
   surfaceHalfWidth,
+  MOUNT,
   type Station,
 } from "@/lib/marketing/car-geometry";
 import { ENGINES } from "@/lib/marketing/harness";
@@ -562,6 +564,44 @@ export function CarStage({ bodyId, engineId, engineColor, onReady }: Props) {
         return g;
       }
 
+      /**
+       * Sweep a tube along the body surface.
+       *
+       * Every part that RUNS ALONG the car — neon contour strips, roof
+       * rails, side skirts — is this same operation: walk the stations,
+       * find the skin at a per-station height, step out along its normal,
+       * spline the result. A straight box cannot do it, because a roofline
+       * and a sill are both curves: a box meets the surface at one station
+       * and lifts off it everywhere else.
+       *
+       * This existed twice, once for the neon and once for rails/skirts,
+       * which is two chances to fix a placement bug in only one of them.
+       */
+      function surfaceRun(
+        stations: Station[],
+        heightOf: (s: Station) => number,
+        radius: number,
+        gap: number,
+        side: number,
+        material: ThreeNS.Material,
+        radialSegments = 8,
+      ) {
+        const pts = stations.map((s) => {
+          const [px, py, pz] = flankPoint(s, heightOf(s), side, radius + gap);
+          return new THREE.Vector3(px, py, pz);
+        });
+        return new THREE.Mesh(
+          new THREE.TubeGeometry(
+            new THREE.CatmullRomCurve3(pts),
+            60,
+            radius,
+            radialSegments,
+            false,
+          ),
+          material,
+        );
+      }
+
       let parts: ThreeNS.Object3D[] = [];
       // Materials whose colour depends on the current selection, so they
       // genuinely cannot be shared across builds. Tracked explicitly and
@@ -737,42 +777,23 @@ export function CarStage({ bodyId, engineId, engineColor, onReady }: Props) {
         const stripMat = new THREE.MeshBasicMaterial({ color: 0x00d4ff });
         perBuildMats.push(stripMat);
 
-        // Each run is placed on the SURFACE, not against the bounding box.
-        // `st.w` is the widest the section ever gets — true only at its
-        // vertical centre — so using it put the shoulder strip inside the
-        // bodywork at every station (z-fighting along its whole length,
-        // strobing as the car turned) while the sill strip floated up to
-        // 13.9cm clear of the flank. flankPoint() solves the superellipse
-        // for the real skin at that height and steps out along its normal.
-        const STRIP_RADIUS = 0.017;
-        const runs: ThreeNS.Vector3[][] = [];
         for (const heightFrac of [
-          0.72, // shoulder line, high on the flank
-          0.12, // sill line, low along the rocker
-        ] as const) {
+          MOUNT.shoulderFrac, // shoulder line, high on the flank
+          MOUNT.sillFrac, // sill line, low along the rocker
+        ]) {
           for (const side of [-1, 1]) {
-            runs.push(
-              spec.body.map((st) => {
-                const y = st.y - st.h + st.h * 2 * heightFrac;
-                const [px, py, pz] = flankPoint(
-                  st,
-                  y,
-                  side,
-                  STRIP_RADIUS + 0.004,
-                );
-                return new THREE.Vector3(px, py, pz);
-              }),
+            const strip = surfaceRun(
+              spec.body,
+              (s) => runHeight(s, heightFrac),
+              MOUNT.stripRadius,
+              MOUNT.stripGap,
+              side,
+              stripMat,
+              6,
             );
+            carGroup.add(strip);
+            parts.push(strip);
           }
-        }
-        for (const pts of runs) {
-          const curve = new THREE.CatmullRomCurve3(pts);
-          const strip = new THREE.Mesh(
-            new THREE.TubeGeometry(curve, 60, STRIP_RADIUS, 6, false),
-            stripMat,
-          );
-          carGroup.add(strip);
-          parts.push(strip);
         }
 
         // Rear light bar, straight from the reference.
@@ -829,64 +850,18 @@ export function CarStage({ bodyId, engineId, engineColor, onReady }: Props) {
         // roof, and the skirts used maxHalfWidth — the widest point of the
         // whole body — at a height where the section is far narrower, so
         // they floated outboard in mid-air.
-        // The offset each part needs is its OWN half-thickness plus a
-        // clearance — anything less and the part's inner face is inside the
-        // skin even though its centre is outside. Derived rather than
-        // guessed, because a guessed offset is what buried the strips.
-        // MOUNT_GAP is generous on purpose: the rendered surface is the
-        // 44-ring resampled loft, which passes through the stations but
-        // interpolates between them, so a hairline margin measured at a
-        // station is not a real margin at the part's actual position.
-        const MOUNT_GAP = 0.012;
-        const RAIL_THICKNESS = 0.075;
-        const SKIRT_THICKNESS = 0.09;
-
-        /**
-         * Both rails and skirts run ALONG the body, so a straight box is
-         * wrong even when its centre is placed correctly: it meets the
-         * surface at one station and lifts off it everywhere else, because
-         * a roofline and a sill are both curves. Swept as tubes down the
-         * per-station surface points, exactly like the neon runs — the same
-         * fix applied to the same class of part, rather than two different
-         * approaches to one problem.
-         */
-        const sweep = (
-          stations: Station[],
-          heightOf: (s: Station) => number,
-          radius: number,
-          side: number,
-        ) => {
-          const pts = stations.map((s) => {
-            const [px, py, pz] = flankPoint(
-              s,
-              heightOf(s),
-              side,
-              radius + MOUNT_GAP,
-            );
-            return new THREE.Vector3(px, py, pz);
-          });
-          return new THREE.Mesh(
-            new THREE.TubeGeometry(
-              new THREE.CatmullRomCurve3(pts),
-              40,
-              radius,
-              8,
-              false,
-            ),
-            paint,
-          );
-        };
-
         if (f.rails) {
           // Skip the degenerate end sections where the greenhouse tapers to
           // nothing; a rail there would spear out past the glass.
           const run = spec.cabin.filter((s) => s.h > 0.1);
           for (const side of [-1, 1]) {
-            const rail = sweep(
+            const rail = surfaceRun(
               run,
-              (s) => s.y + s.h * 0.8,
-              RAIL_THICKNESS / 2,
+              (s) => s.y + s.h * MOUNT.railHeightFrac,
+              MOUNT.railThickness / 2,
+              MOUNT.gap,
               side,
+              paint,
             );
             carGroup.add(rail);
             parts.push(rail);
@@ -898,11 +873,13 @@ export function CarStage({ bodyId, engineId, engineColor, onReady }: Props) {
           // continue around the nose and tail.
           const run = spec.body.filter((s) => Math.abs(s.x) < 1.7);
           for (const side of [-1, 1]) {
-            const skirt = sweep(
+            const skirt = surfaceRun(
               run,
-              (s) => s.y - s.h * 0.55,
-              SKIRT_THICKNESS / 2,
+              (s) => s.y + s.h * MOUNT.skirtHeightFrac,
+              MOUNT.skirtThickness / 2,
+              MOUNT.gap,
               side,
+              paint,
             );
             carGroup.add(skirt);
             parts.push(skirt);

@@ -186,6 +186,41 @@ const CUSTOM: CarSpec = {
  * core and the camera flew to a point below the parts it was meant to be
  * showing you. One function, three callers.
  */
+/**
+ * Where surface-mounted hardware sits.
+ *
+ * These live here, next to the surface maths, rather than in the renderer —
+ * they ARE geometry, and keeping them here is what lets the geometry test
+ * exercise the real placement rather than a copy of it. Every one of these
+ * numbers was a magic literal buried in the renderer at some point, and
+ * every one of them was wrong: the strips were placed against the bounding
+ * half-width and ended up inside the bodywork, the rails were placed at a
+ * fixed world height and ended up above the roof.
+ *
+ * `gap` is deliberately generous. The rendered surface is a spline
+ * resample of these stations, so it passes through them but interpolates
+ * between them — a hairline clearance measured AT a station is not a real
+ * clearance at the part's true position.
+ */
+export const MOUNT = {
+  stripRadius: 0.017,
+  stripGap: 0.004,
+  gap: 0.012,
+  railThickness: 0.075,
+  skirtThickness: 0.09,
+  /** Height up the section, 0 = bottom, 1 = top. */
+  shoulderFrac: 0.72,
+  sillFrac: 0.12,
+  /** Offsets from a section's centre, as a fraction of its half-height. */
+  railHeightFrac: 0.8,
+  skirtHeightFrac: -0.55,
+} as const;
+
+/** Absolute height of a contour run on a section, from a 0..1 fraction. */
+export function runHeight(s: Station, frac: number): number {
+  return s.y - s.h + s.h * 2 * frac;
+}
+
 /** The station closest to a given position along the car. */
 export function nearestStation(stations: Station[], x: number): Station {
   return stations.reduce((best, st) =>
