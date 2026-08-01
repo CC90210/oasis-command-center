@@ -423,11 +423,21 @@ export function CarStage({ bodyId, engineId, engineColor, onReady }: Props) {
         }
 
         // Rear light bar, straight from the reference.
+        //
+        // Sits PROUD of the tail cap, not inside it. The first version put
+        // it at tail.y + 0.12, which on every one of the four harnesses was
+        // still below the top of the rear section — so it rendered, cost
+        // its draw call, and was never once visible from outside the car.
+        const tailStation = spec.body[0];
         const bar = new THREE.Mesh(
-          new THREE.BoxGeometry(0.04, 0.05, spec.body[1].w * 1.5),
+          new THREE.BoxGeometry(0.05, 0.055, tailStation.w * 1.35),
           stripMat,
         );
-        bar.position.set(spec.body[0].x + 0.02, spec.body[0].y + 0.12, 0);
+        bar.position.set(
+          tailStation.x - 0.03,
+          tailStation.y + tailStation.h * 0.45,
+          0,
+        );
         carGroup.add(bar);
         parts.push(bar);
 

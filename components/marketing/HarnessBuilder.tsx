@@ -55,7 +55,7 @@ export function HarnessBuilder() {
               stageReady ? "opacity-0" : "opacity-70"
             }`}
             role="img"
-            aria-label={`${body.name} body fitted with the ${engine.name} engine, on the OASIS harness`}
+            aria-label={`The ${body.name} harness running the ${engine.name} engine on the OASIS platform`}
           >
           {/* Ground line */}
           <line
