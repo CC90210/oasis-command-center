@@ -609,6 +609,7 @@ export function CarStage({
         // at a disposed mesh from the previous harness and the loop would
         // keep driving geometry that is no longer in the scene.
         aeroFlap = null;
+        hudRef = null;
         wheelSpinners = [];
 
         const spec = CAR_SPECS[id] ?? CAR_SPECS.bravo;
@@ -627,6 +628,127 @@ export function CarStage({
         const cabinMesh = new THREE.Mesh(loft(spec.cabin, 32), glass);
         carGroup.add(cabinMesh);
         parts.push(cabinMesh);
+
+        // ── INTERIOR ────────────────────────────────────────────────
+        // The cabin was an empty tinted shell. That is fine at showroom
+        // distance and indefensible the moment the camera dives, which is
+        // exactly when someone looks through the glass — and finds nothing
+        // behind it. Built from the cabin stations so it sits inside the
+        // greenhouse on every body rather than at fixed coordinates.
+        {
+          const mid = spec.cabin[Math.floor(spec.cabin.length / 2)];
+          const floorY = mid.y - mid.h * 0.92;
+          const seatZ = Math.min(0.34, mid.w * 0.42);
+
+          const trimMat = new THREE.MeshStandardMaterial({
+            color: 0x10151c,
+            metalness: 0.35,
+            roughness: 0.62,
+            envMapIntensity: 0.9,
+          });
+          const hudMat = new THREE.MeshBasicMaterial({
+            color: 0x00d4ff,
+            transparent: true,
+            opacity: 0.72,
+          });
+          perBuildMats.push(trimMat, hudMat);
+
+          // Cabin floor, so the seats stand on something.
+          const pan = new THREE.Mesh(
+            new THREE.BoxGeometry(mid.w * 2.1, 0.03, mid.w * 1.55),
+            trimMat,
+          );
+          pan.position.set(mid.x, floorY, 0);
+          carGroup.add(pan);
+          parts.push(pan);
+
+          // Twin bucket seats: squab, raked back, headrest, and a neon
+          // piping strip down the bolster.
+          for (const side of [-1, 1]) {
+            const sx = mid.x - 0.12;
+            const base = new THREE.Mesh(
+              new THREE.BoxGeometry(0.38, 0.07, 0.3),
+              trimMat,
+            );
+            base.position.set(sx, floorY + 0.08, side * seatZ);
+            carGroup.add(base);
+            parts.push(base);
+
+            const back = new THREE.Mesh(
+              new THREE.BoxGeometry(0.1, 0.42, 0.3),
+              trimMat,
+            );
+            back.position.set(sx - 0.17, floorY + 0.28, side * seatZ);
+            back.rotation.z = 0.22; // rake
+            carGroup.add(back);
+            parts.push(back);
+
+            const head = new THREE.Mesh(
+              new THREE.BoxGeometry(0.09, 0.13, 0.19),
+              trimMat,
+            );
+            head.position.set(sx - 0.26, floorY + 0.53, side * seatZ);
+            carGroup.add(head);
+            parts.push(head);
+
+            // Piping: the one lit line per seat, which is what makes a
+            // dark box read as a bucket seat rather than a crate.
+            const piping = new THREE.Mesh(
+              new THREE.BoxGeometry(0.1, 0.44, 0.012),
+              hudMat,
+            );
+            piping.position.set(sx - 0.19, floorY + 0.29, side * (seatZ + 0.15));
+            piping.rotation.z = 0.22;
+            carGroup.add(piping);
+            parts.push(piping);
+          }
+
+          // Dashboard, a HUD pane standing off it, and a steering yoke.
+          const dash = new THREE.Mesh(
+            new THREE.BoxGeometry(0.14, 0.16, mid.w * 1.35),
+            trimMat,
+          );
+          dash.position.set(mid.x + 0.42, floorY + 0.2, 0);
+          carGroup.add(dash);
+          parts.push(dash);
+
+          const hud = new THREE.Mesh(
+            new THREE.PlaneGeometry(mid.w * 1.1, 0.13),
+            hudMat,
+          );
+          hud.position.set(mid.x + 0.36, floorY + 0.34, 0);
+          hud.rotation.y = Math.PI / 2;
+          hud.rotation.z = -0.22;
+          carGroup.add(hud);
+          parts.push(hud);
+          hudRef = hud;
+
+          const yoke = new THREE.Mesh(
+            new THREE.TorusGeometry(0.11, 0.018, 8, 20, Math.PI * 1.35),
+            trimMat,
+          );
+          yoke.position.set(mid.x + 0.26, floorY + 0.27, 0);
+          yoke.rotation.y = Math.PI / 2;
+          yoke.rotation.z = Math.PI * 0.32;
+          carGroup.add(yoke);
+          parts.push(yoke);
+
+          // Centre console running back between the seats.
+          const console3d = new THREE.Mesh(
+            new THREE.BoxGeometry(0.62, 0.09, 0.16),
+            trimMat,
+          );
+          console3d.position.set(mid.x + 0.02, floorY + 0.1, 0);
+          carGroup.add(console3d);
+          parts.push(console3d);
+
+          // Ambient cabin light, so the interior is legible through tinted
+          // glass instead of being a black void behind a window.
+          const cabinLight = new THREE.PointLight(0x2ea8ff, 1.5, 2.2, 2);
+          cabinLight.position.set(mid.x, floorY + 0.42, 0);
+          carGroup.add(cabinLight);
+          parts.push(cabinLight);
+        }
 
         // WINDOWS. The greenhouse was one uninterrupted glass loft, which
         // reads as a tinted bubble rather than as a car — a car has a
@@ -941,6 +1063,71 @@ export function CarStage({
         carGroup.add(bar);
         parts.push(bar);
 
+        // ── Aero furniture, on every body ───────────────────────────
+        // Side blades, intakes and a diffuser. Without them the flank is
+        // one unbroken surface from nose to tail and the sill line runs
+        // straight past the wheels as if they were painted on — CC's
+        // "lining on the side of the car body moulding into the tyres".
+        // These give the side a middle: something for the eye to read
+        // between the two arches.
+        {
+          const rear = nearestStation(spec.body, spec.axles[0].x);
+          const front = nearestStation(
+            spec.body,
+            spec.axles[spec.axles.length - 1].x,
+          );
+
+          for (const side of [-1, 1]) {
+            // Intake ahead of the rear arch, feeding the bay.
+            const iy = rear.y + rear.h * 0.05;
+            const [, ipy, ipz] = flankPoint(rear, iy, side, 0.03);
+            const intake = new THREE.Mesh(
+              new THREE.BoxGeometry(0.34, 0.16, 0.06),
+              accentMat,
+            );
+            intake.position.set(rear.x + 0.42, ipy, ipz);
+            intake.rotation.y = side * 0.12;
+            carGroup.add(intake);
+            parts.push(intake);
+
+            // Carbon side blade: a long thin fin along the lower flank,
+            // running arch to arch, which is what visually ties the two
+            // wheels into one body line.
+            const bladeRun = spec.body.filter(
+              (s) => s.x > rear.x - 0.1 && s.x < front.x + 0.1,
+            );
+            if (bladeRun.length > 1) {
+              const blade = surfaceRun(
+                bladeRun,
+                (s) => s.y - s.h * 0.78,
+                0.02,
+                MOUNT.gap,
+                side,
+                accentMat,
+              );
+              carGroup.add(blade);
+              parts.push(blade);
+            }
+          }
+
+          // Rear diffuser: vertical strakes under the tail.
+          const tail = spec.body[0];
+          const dw = surfaceHalfWidth(tail, tail.y - tail.h * 0.45);
+          for (let i = -2; i <= 2; i++) {
+            const fin = new THREE.Mesh(
+              new THREE.BoxGeometry(0.3, 0.12, 0.022),
+              accentMat,
+            );
+            fin.position.set(
+              tail.x + 0.16,
+              tail.y - tail.h * 0.62,
+              (i / 2) * dw * 0.7,
+            );
+            carGroup.add(fin);
+            parts.push(fin);
+          }
+        }
+
         // ── Body-specific hardware ──────────────────────────────────
         const f = spec.features;
         const rearX = spec.body[0].x;
@@ -1127,12 +1314,18 @@ export function CarStage({
       let pulseRate = 1;
       /** The moving element of an active-aero wing, if this body has one. */
       let aeroFlap: { mesh: ThreeNS.Object3D; base: number } | null = null;
+      /** Cockpit HUD pane, flickered during ignition. */
+      let hudRef: ThreeNS.Mesh | null = null;
       /**
        * Launch sequence progress, in frames. 0 = idle, >0 = running,
        * -1 = finished and latched so it cannot fire twice.
        */
       let launchFrame = 0;
       let wheelSpin = 0;
+      /** Warp track and streaks, built lazily on the first launch frame. */
+      let warpGroup: ThreeNS.Group | null = null;
+      let warpMats: ThreeNS.MeshBasicMaterial[] = [];
+      const warpStreaks: ThreeNS.Object3D[] = [];
       /** Wheel meshes, turned during the launch. */
       let wheelSpinners: ThreeNS.Object3D[] = [];
       let hotRef: ThreeNS.MeshStandardMaterial | null = null;
@@ -1541,13 +1734,43 @@ export function CarStage({
         // faster-breathing machine than a four. Tracked on `pulseParts` so
         // the animation loop can drive it per frame.
         const coreScale = 0.55 + eng.cylinders * 0.022;
-        const core = new THREE.Mesh(
-          new THREE.IcosahedronGeometry(0.14 * coreScale, 1),
-          hotMat,
-        );
+
+        // The core's SHAPE is per provider, not just its colour. Swapping
+        // a model is the single most-used control on this page, and until
+        // now the only thing that changed at the core was a hue — which is
+        // exactly the "cheap colour-swap" CC ruled out. Each is a
+        // different solid, so you can tell them apart with the colour off.
+        const coreGeo = (() => {
+          const r = 0.14 * coreScale;
+          switch (eng.id) {
+            case "claude":
+              // Amethyst lattice: a faceted crystal.
+              return new THREE.OctahedronGeometry(r * 1.18, 1);
+            case "gpt":
+              // Neural nexus: a dense many-noded solid.
+              return new THREE.IcosahedronGeometry(r, 2);
+            case "gemini":
+              // Dual-core: two lobes, expressed as a stretched capsule.
+              return new THREE.CapsuleGeometry(r * 0.72, r * 1.5, 6, 14);
+            case "grok":
+              // High-RPM turbine: a bladed drum.
+              return new THREE.CylinderGeometry(r, r, r * 1.7, 9);
+            case "kimi":
+              // Laser-traced power cell: a tight prism.
+              return new THREE.TetrahedronGeometry(r * 1.42, 1);
+            default:
+              // Local: a machined block, deliberately the least exotic.
+              return new THREE.BoxGeometry(r * 1.5, r * 1.5, r * 1.5);
+          }
+        })();
+        const core = new THREE.Mesh(coreGeo, hotMat);
         core.position.set(bx, by + 0.02, bz);
         add(core);
         pulseParts.push(core);
+        // The turbine and the lattice turn; a battery block does not.
+        if (eng.id === "grok" || eng.id === "claude") {
+          spinParts.push({ mesh: core, rate: 0.05, axis: "y" });
+        }
 
         // Containment rings around the core. More cylinders, more rings.
         const ringCount = eng.layout === "electric" ? 1 : Math.max(2, Math.round(eng.cylinders / 3));
@@ -1682,11 +1905,21 @@ export function CarStage({
       // touch. `touch-action: none` on the canvas is what stops a finger
       // drag scrolling the page instead of turning the car; without it the
       // whole interaction is unusable on a phone.
-      let spin = 0;          // user-applied rotation, radians
+      let spin = 0;          // user-applied yaw, radians
       let spinVel = 0;       // carries the throw after release
+      let pitch = 0;         // user-applied pitch, radians
+      let pitchVel = 0;
       let dragging = false;
       let lastX = 0;
+      let lastY = 0;
       let dragged = false;   // true once a drag has happened, killing idle sway
+      /**
+       * Pitch limit. Beyond about 62 degrees you are looking at the
+       * underside of a car that has no underside modelled, and past
+       * vertical the controls invert and feel broken. Yaw stays unbounded
+       * — spinning all the way round is the point of the turntable.
+       */
+      const PITCH_LIMIT = 1.08;
 
       const canvasEl = renderer.domElement;
       canvasEl.style.touchAction = "none";
@@ -1696,16 +1929,26 @@ export function CarStage({
         dragging = true;
         dragged = true;
         lastX = e.clientX;
+        lastY = e.clientY;
         spinVel = 0;
+        pitchVel = 0;
         canvasEl.style.cursor = "grabbing";
         canvasEl.setPointerCapture(e.pointerId);
       };
       const onMove = (e: PointerEvent) => {
         if (!dragging) return;
         const dx = e.clientX - lastX;
+        const dy = e.clientY - lastY;
         lastX = e.clientX;
+        lastY = e.clientY;
         spin += dx * 0.008;
         spinVel = dx * 0.008;
+        // Vertical drag tips the car toward and away from you, so you can
+        // look down onto the deck or up under the nose. Clamped rather
+        // than free: past vertical the horizontal control inverts and the
+        // turntable stops feeling like an object you are holding.
+        pitch = Math.max(-PITCH_LIMIT, Math.min(PITCH_LIMIT, pitch + dy * 0.006));
+        pitchVel = dy * 0.006;
       };
       const onUp = (e: PointerEvent) => {
         dragging = false;
@@ -1758,12 +2001,25 @@ export function CarStage({
           // Close enough to read individual cylinders. The previous framing
           // hung back at showroom distance and the whole point of the dive,
           // seeing the hardware change, was lost at that range.
-          // Scaled with the lens so the bay frames identically — see
-          // DIVE_OFFSET, which the geometry test holds to that invariant.
+          // Approached from ABOVE the bay, using the same vector as the
+          // engine callout.
+          //
+          // This was the bug CC kept hitting: I re-vectored the hotspot
+          // cameras last round but left the engine PICKER on the old
+          // side-on DIVE_OFFSET. Selecting a model is the one action whose
+          // entire purpose is to show you the engine change, and it was
+          // flying to a point level with the bay — where a wheel sits 20cm
+          // away and 90cm across, so the wheel filled the frame and the
+          // engine was behind it. Two code paths reach the same subject;
+          // only one of them had been fixed.
+          const spot = HOTSPOTS.find((h) => h.anchor === "engine");
+          const dv = spot?.dir ?? DIVE_OFFSET;
+          const dvl = Math.hypot(dv[0], dv[1], dv[2]) || 1;
+          const dvDist = Math.hypot(...DIVE_OFFSET);
           targetPos.set(
-            ex + DIVE_OFFSET[0],
-            ey + DIVE_OFFSET[1],
-            ez + DIVE_OFFSET[2],
+            ex + (dv[0] / dvl) * dvDist,
+            ey + (dv[1] / dvl) * dvDist,
+            ez + (dv[2] / dvl) * dvDist,
           );
           targetAt.set(ex, ey + 0.05, ez);
           if (diveFrames === 0) frameBody(sel.current.bodyId);
@@ -1838,6 +2094,61 @@ export function CarStage({
           launchFrame++;
           const [ex, ey, ez] = engineAnchor(spec);
 
+          // Warp streaks and the grid track are built once, on the first
+          // frame of the launch, and torn down with the scene. Building
+          // them up front would leave 60 unused meshes in every scene that
+          // never launches, which is most of them.
+          if (!warpGroup) {
+            warpGroup = new THREE.Group();
+            const streakMat = new THREE.MeshBasicMaterial({
+              color: 0x9fe8ff,
+              transparent: true,
+              opacity: 0,
+            });
+            const gridMat = new THREE.MeshBasicMaterial({
+              color: 0x00d4ff,
+              transparent: true,
+              opacity: 0,
+            });
+            warpMats = [streakMat, gridMat];
+
+            // Neon track: rungs receding ahead of the car.
+            for (let i = 0; i < 26; i++) {
+              const rung = new THREE.Mesh(
+                new THREE.BoxGeometry(0.05, 0.006, 7),
+                gridMat,
+              );
+              rung.position.set(-6 + i * 2.2, 0.005, 0);
+              warpGroup.add(rung);
+            }
+            for (const z of [-2.6, 2.6]) {
+              const rail = new THREE.Mesh(
+                new THREE.BoxGeometry(64, 0.006, 0.05),
+                gridMat,
+              );
+              rail.position.set(20, 0.005, z);
+              warpGroup.add(rail);
+            }
+
+            // Light streaks: long thin bars that stretch as speed builds.
+            for (let i = 0; i < 34; i++) {
+              const s = new THREE.Mesh(
+                new THREE.BoxGeometry(1, 0.012, 0.012),
+                streakMat,
+              );
+              const a = (i / 34) * Math.PI * 2;
+              const rad = 0.7 + (i % 5) * 0.42;
+              s.position.set(
+                -4 + (i % 7) * 2.6,
+                0.5 + Math.sin(a) * rad,
+                Math.cos(a) * rad,
+              );
+              warpGroup.add(s);
+              warpStreaks.push(s);
+            }
+            scene.add(warpGroup);
+          }
+
           if (launchFrame < LAUNCH.ignite) {
             // Stage 1 — ignition. The bay flares, the accent lines come
             // up, and the wheels start turning before anything moves.
@@ -1847,6 +2158,13 @@ export function CarStage({
             targetPos.set(ex + 3.4, ey + 1.1, ez + 4.2);
             targetAt.set(ex, ey, ez);
             wheelSpin += k * 0.5;
+            // Track lights up under the car before it moves.
+            warpMats[1].opacity = k * 0.55;
+            // Cockpit HUD flashes as the systems come up.
+            if (hudRef) {
+              (hudRef.material as ThreeNS.MeshBasicMaterial).opacity =
+                0.72 + Math.sin(launchFrame * 0.5) * 0.28;
+            }
           } else if (launchFrame < LAUNCH.track) {
             // Stage 2 — drop to a low, wide tracking shot behind the car.
             const k =
@@ -1854,6 +2172,9 @@ export function CarStage({
             targetPos.set(-9 - k * 3, 0.75, 3.2);
             targetAt.set(0, 0.6, 0);
             wheelSpin += 0.5 + k * 0.8;
+            warpMats[1].opacity = 0.55;
+            warpMats[0].opacity = k * 0.5;
+            for (const s of warpStreaks) s.scale.x = 1 + k * 6;
           } else {
             // Stage 3 — away. The car accelerates out of the studio; the
             // camera holds, so it leaves frame rather than being followed.
@@ -1863,6 +2184,15 @@ export function CarStage({
             carGroup.position.y = k * k * 1.2;
             wheelSpin += 1.3;
             engineLight.intensity = 6.4 * (1 - k);
+            // WARP. Streaks stretch hard and rush past the lens while the
+            // track dims out beneath — the car does not simply drive off,
+            // the whole frame accelerates with it.
+            warpMats[0].opacity = 0.5 + k * 0.5;
+            warpMats[1].opacity = 0.55 * (1 - k);
+            for (const s of warpStreaks) {
+              s.scale.x = 7 + k * 90;
+              s.position.x -= 1.6 + k * 9;
+            }
             if (launchFrame >= LAUNCH.away) {
               launchFrame = -1; // latched: fire once, never re-enter
               launchDoneRef.current?.();
@@ -1946,6 +2276,11 @@ export function CarStage({
         if (!dragging) {
           spin += spinVel;
           spinVel *= 0.94; // inertia, so a flick coasts to a stop
+          pitch = Math.max(
+            -PITCH_LIMIT,
+            Math.min(PITCH_LIMIT, pitch + pitchVel),
+          );
+          pitchVel *= 0.94;
         }
         // The car used to sway +/-9 degrees forever to look alive. That
         // turns every flaw in the surface toward the viewer in turn, and a
@@ -1955,7 +2290,13 @@ export function CarStage({
         // geometry rather than parading it. Costs nothing, no rebuild.
         // Drag is suspended during the launch — the car is leaving, and
         // letting someone spin it mid-departure looks like a bug.
-        if (launchFrame === 0) carGroup.rotation.y = dragged ? spin : 0;
+        if (launchFrame === 0) {
+          carGroup.rotation.y = dragged ? spin : 0;
+          // Pitch is applied on z rather than x because the car's long
+          // axis runs along x — rolling it about x would barrel-roll it
+          // down its own length instead of tipping the nose.
+          carGroup.rotation.z = dragged ? pitch : 0;
+        }
         if (!reduced) {
           const sweep = Math.sin(t * 0.35);
           rim.position.set(-5 + sweep * 2.6, 2.4, -4 + sweep * 1.1);
@@ -2052,6 +2393,12 @@ export function CarStage({
         releaseParts([scene], []);
         // Every material created in this effect, not just the obvious four.
         floorTex.dispose();
+        // The warp rig is built lazily on the first launch frame, so it
+        // exists only in sessions where someone pressed the button — but
+        // when it does exist it is 62 meshes, and they are added to the
+        // SCENE rather than to carGroup, so releaseParts never sees them.
+        if (warpGroup) releaseParts([warpGroup], warpMats, scene);
+
         [paint, glass, rubber, hubMat, shadowMat, floorMat].forEach((m) =>
           m.dispose(),
         );
