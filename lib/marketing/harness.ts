@@ -1,11 +1,19 @@
 /**
  * The car analogy, as data.
  *
- * CC has explained OASIS this way in every sales conversation, and it is
- * the clearest thing we say: the BODY is the agent, the ENGINE is the
- * model, and the CHASSIS — the harness — is what we actually build. The
- * point of the metaphor is that the first two are swappable BECAUSE the
- * third exists. Someone who buys a "GPT chatbot" has bought an engine
+ * TERMINOLOGY, fixed 2026-08-01. The first version used three words that
+ * fought each other: it called the agent the "body", called the constant
+ * the "chassis", and then labelled that constant "the OASIS harness" —
+ * while CC uses "harness" to mean the agent itself (Bravo, Atlas, Maven).
+ * Two different things wearing the same word is the fastest way to lose a
+ * reader on the one diagram meant to explain the product. Now:
+ *
+ *   HARNESS  = the agent.    Bravo / Atlas / Maven / Custom. The bodywork.
+ *   ENGINE   = the model.    Claude / GPT / Gemini / Grok / Kimi / Local.
+ *   PLATFORM = what we build. The constant underneath both.
+ *
+ * The point of the metaphor is that the first two are swappable BECAUSE
+ * the third exists. Someone who buys a "GPT chatbot" has bought an engine
  * bolted to the road.
  *
  * Body silhouettes are hand-authored SVG paths on a shared 420x140
@@ -170,8 +178,9 @@ export const ENGINES: Engine[] = [
 ];
 
 /** The fixed parts. This is the actual product, and the reason the two
- *  selectors above are selectors at all. */
-export const CHASSIS = [
+ *  selectors above are selectors at all. Named PLATFORM, not "chassis" or
+ *  "harness": harness now unambiguously means the agent. */
+export const PLATFORM = [
   "Memory that survives the session",
   "Guardrails the model cannot argue past",
   "Your data, your infrastructure, per-tenant isolation",

@@ -192,6 +192,24 @@ export function CarStage({ bodyId, engineId, engineColor, onReady }: Props) {
       shadow.scale.set(1, 0.42, 1);
       scene.add(shadow);
 
+      // Wet floor. The reference sits the car on a dark reflective surface,
+      // and the pooled light under it is doing as much work as the car. A
+      // true planar reflection means rendering the scene twice; an additive
+      // radial pool costs one transparent quad and reads the same at this
+      // camera distance.
+      const floorMat = new THREE.MeshBasicMaterial({
+        color: 0x00d4ff,
+        transparent: true,
+        opacity: 0.13,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+      });
+      const floor = new THREE.Mesh(new THREE.CircleGeometry(4.2, 56), floorMat);
+      floor.rotation.x = -Math.PI / 2;
+      floor.position.y = 0.001;
+      floor.scale.set(1, 0.55, 1);
+      scene.add(floor);
+
       // Dark metallic, but light enough to hold a highlight. At the near-
       // black it started on, every lit face crushed to the background and
       // only the wireframe was visible — a wireframe toy, not a car.
@@ -325,39 +343,93 @@ export function CarStage({ bodyId, engineId, engineColor, onReady }: Props) {
             carGroup.add(tyre);
             parts.push(tyre);
 
+            // TURBINE WHEELS, from the reference image: concentric glowing
+            // rings with many fine blades between them, not a few flat
+            // spokes. The blade count is what reads as a turbine, so it is
+            // deliberately high, and it still differs per harness.
             const rimMat = new THREE.MeshStandardMaterial({
               color: spec.wheel.tint,
               emissive: spec.wheel.tint,
-              emissiveIntensity: 0.9,
+              emissiveIntensity: 2.6,
               metalness: 0.5,
               roughness: 0.3,
             });
             perBuildMats.push(rimMat);
 
-            const hub = new THREE.Mesh(
-              new THREE.TorusGeometry(axle.radius * 0.52, 0.035 * spec.wheel.rimDepth, 8, 28),
-              rimMat,
-            );
-            hub.position.copy(tyre.position);
-            hub.position.z += side * (axle.width / 2 + 0.005);
-            carGroup.add(hub);
-            parts.push(hub);
+            const face = tyre.position.clone();
+            face.z += side * (axle.width / 2 + 0.01);
 
-            // Spokes. Different counts per body are the cheapest way to
-            // make two cars distinguishable at the corners, which is where
-            // people actually look to tell models apart.
-            for (let s = 0; s < spec.wheel.spokes; s++) {
-              const spoke = new THREE.Mesh(
-                new THREE.BoxGeometry(axle.radius * 0.92, 0.045, 0.03),
+            // Two rings: outer lip and inner boss.
+            for (const [r, thick] of [
+              [axle.radius * 0.74, 0.028],
+              [axle.radius * 0.3, 0.032],
+            ] as const) {
+              const ring = new THREE.Mesh(
+                new THREE.TorusGeometry(r, thick * spec.wheel.rimDepth, 8, 40),
                 rimMat,
               );
-              spoke.position.copy(hub.position);
-              spoke.rotation.z = (s / spec.wheel.spokes) * Math.PI * 2;
-              carGroup.add(spoke);
-              parts.push(spoke);
+              ring.position.copy(face);
+              carGroup.add(ring);
+              parts.push(ring);
+            }
+
+            const blades = spec.wheel.spokes * 3;
+            for (let s = 0; s < blades; s++) {
+              const blade = new THREE.Mesh(
+                new THREE.BoxGeometry(axle.radius * 0.44, 0.022, 0.014),
+                rimMat,
+              );
+              const a = (s / blades) * Math.PI * 2;
+              blade.position.copy(face);
+              blade.position.x += Math.cos(a) * axle.radius * 0.52;
+              blade.position.y += Math.sin(a) * axle.radius * 0.52;
+              blade.rotation.z = a + 0.42; // swept, like turbine vanes
+              carGroup.add(blade);
+              parts.push(blade);
             }
           }
         }
+
+        // ── Neon contour strips ─────────────────────────────────────
+        // The signature of the reference image: light tracing the body's
+        // own lines rather than sitting on top of it. Both runs are
+        // generated FROM the station data, so they follow whichever
+        // silhouette is selected instead of being drawn per body.
+        const stripMat = new THREE.MeshBasicMaterial({ color: 0x00d4ff });
+        perBuildMats.push(stripMat);
+
+        const runs: ThreeNS.Vector3[][] = [];
+        for (const [heightFrac, inset] of [
+          [0.72, 0.97], // shoulder line, high on the flank
+          [0.12, 0.99], // sill line, low along the rocker
+        ] as const) {
+          for (const side of [-1, 1]) {
+            runs.push(
+              spec.body.map((st) => {
+                const y = st.y - st.h + st.h * 2 * heightFrac;
+                return new THREE.Vector3(st.x, y, side * st.w * inset);
+              }),
+            );
+          }
+        }
+        for (const pts of runs) {
+          const curve = new THREE.CatmullRomCurve3(pts);
+          const strip = new THREE.Mesh(
+            new THREE.TubeGeometry(curve, 60, 0.017, 6, false),
+            stripMat,
+          );
+          carGroup.add(strip);
+          parts.push(strip);
+        }
+
+        // Rear light bar, straight from the reference.
+        const bar = new THREE.Mesh(
+          new THREE.BoxGeometry(0.04, 0.05, spec.body[1].w * 1.5),
+          stripMat,
+        );
+        bar.position.set(spec.body[0].x + 0.02, spec.body[0].y + 0.12, 0);
+        carGroup.add(bar);
+        parts.push(bar);
 
         // ── Body-specific hardware ──────────────────────────────────
         const f = spec.features;
@@ -496,17 +568,19 @@ export function CarStage({ bodyId, engineId, engineColor, onReady }: Props) {
           }
         }
 
-        // Exhaust tips at the rear valance.
-        const tailX = carSpec.body[0].x - 0.04;
+        // Exhaust tips in the rear valance. Small and shallow: at 0.055
+        // radius and 0.16 long they read as a stack of orange blocks bolted
+        // to the tail rather than as pipe ends set into it.
+        const tail = carSpec.body[0];
         for (let i = 0; i < eng.exhausts; i++) {
-          const offset = eng.exhausts === 1 ? 0 : (i / (eng.exhausts - 1) - 0.5) * 0.72;
+          const offset =
+            eng.exhausts === 1 ? 0 : (i / (eng.exhausts - 1) - 0.5) * tail.w * 0.85;
           const pipe = new THREE.Mesh(
-            new THREE.CylinderGeometry(0.055, 0.06, 0.16, 14),
+            new THREE.CylinderGeometry(0.032, 0.036, 0.075, 14),
             hotMat,
           );
           pipe.rotation.z = Math.PI / 2;
-          // Tucked into the rear valance rather than hanging below it.
-          pipe.position.set(tailX, 0.44, offset);
+          pipe.position.set(tail.x + 0.015, tail.y - tail.h * 0.45, offset);
           add(pipe);
         }
       }
@@ -692,7 +766,9 @@ export function CarStage({ bodyId, engineId, engineColor, onReady }: Props) {
         releaseParts([...parts, ...engineParts], [...perBuildMats, ...engineMats], carGroup);
         releaseParts([scene], []);
         // Every material created in this effect, not just the obvious four.
-        [paint, glass, rubber, wireMat, hubMat, shadowMat].forEach((m) => m.dispose());
+        [paint, glass, rubber, wireMat, hubMat, shadowMat, floorMat].forEach((m) =>
+          m.dispose(),
+        );
         renderer.dispose();
         if (renderer.domElement.parentNode === mount) {
           mount.removeChild(renderer.domElement);

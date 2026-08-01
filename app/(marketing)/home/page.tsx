@@ -154,8 +154,8 @@ export default function MarketingHome() {
         <Reveal>
           <SectionHead
             eyebrow="How it fits together"
-            title="The body is the agent. The engine is the model."
-            lede="Swap either one. The chassis underneath is the part we build, and it is the only reason swapping is a menu choice instead of starting over."
+            title="The harness is the agent. The engine is the model."
+            lede="Bravo, Atlas and Maven are harnesses. Claude, GPT and Gemini are engines. Swap either one, because the platform underneath is the part we actually build."
           />
         </Reveal>
 

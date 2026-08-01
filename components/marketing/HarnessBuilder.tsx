@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { BODIES, ENGINES, CHASSIS } from "@/lib/marketing/harness";
+import { BODIES, ENGINES, PLATFORM } from "@/lib/marketing/harness";
 import { CarStage } from "@/components/marketing/CarStage";
 
 /**
@@ -45,7 +45,10 @@ export function HarnessBuilder() {
           it once three.js has loaded, so there is never an empty box and
           never a spinner.
         */}
-        <div className="relative mx-auto aspect-[16/9] w-full max-w-3xl sm:aspect-[2/1]">
+        {/* Taller on phones. At 16/9 the stage came out 316x178 on a 390px
+            screen, which is a letterbox rather than a showpiece. Portrait
+            devices have height to spare and width they do not. */}
+        <div className="relative mx-auto aspect-[5/4] w-full max-w-3xl sm:aspect-[16/9] lg:aspect-[2/1]">
           <svg
             viewBox="0 0 420 150"
             className={`absolute inset-0 h-full w-full transition-opacity duration-700 ${
@@ -163,10 +166,10 @@ export function HarnessBuilder() {
         </div>
 
         {/* Callouts */}
-        <div className="mx-auto mb-6 mt-2 flex max-w-2xl flex-wrap justify-center gap-x-8 gap-y-2 text-center">
-          <Callout label="Body" value={body.name} tone="fg" />
+        <div className="mx-auto mb-6 mt-2 flex max-w-2xl flex-wrap justify-center gap-x-6 gap-y-3 text-center sm:gap-x-8">
+          <Callout label="Harness" value={body.name} tone="fg" />
           <Callout label="Engine" value={`${engine.name} · ${engine.vendor}`} tone="engine" color={engine.glow} />
-          <Callout label="Chassis" value="OASIS harness" tone="signal" />
+          <Callout label="Platform" value="OASIS" tone="signal" />
         </div>
 
         {/* Names the change as well as showing it, so nobody has to squint
@@ -181,8 +184,8 @@ export function HarnessBuilder() {
       {/* ── Selectors ───────────────────────────────────────────────── */}
       <div className="grid gap-px bg-ops-line md:grid-cols-2">
         <Picker
-          legend="Body, the agent"
-          hint="What the seat is shaped for."
+          legend="Harness, the agent"
+          hint="Bravo, Atlas, Maven, or one built for you. The bodywork."
           options={BODIES.map((b) => ({ id: b.id, label: b.name, sub: b.seat }))}
           value={bodyId}
           onChange={setBodyId}
@@ -202,10 +205,10 @@ export function HarnessBuilder() {
       {/* ── The constant ────────────────────────────────────────────── */}
       <div className="border-t border-ops-line bg-ops-void/60 p-6 sm:p-8">
         <h3 className="font-display text-base font-bold tracking-tight text-fg">
-          What doesn&rsquo;t change when you swap either one
+          The platform. What doesn&rsquo;t change when you swap either one
         </h3>
         <ul className="mt-4 flex flex-wrap gap-x-6 gap-y-2.5">
-          {CHASSIS.map((c) => (
+          {PLATFORM.map((c) => (
             <li key={c} className="flex items-baseline gap-2 text-[14px] text-fg-muted">
               <span aria-hidden="true" className="h-px w-3 shrink-0 translate-y-[-4px] bg-signal" />
               {c}
@@ -214,7 +217,7 @@ export function HarnessBuilder() {
         </ul>
         <p className="mt-5 max-w-2xl text-[15px] leading-relaxed text-fg-dim">
           Buy a chatbot and you have bought an engine bolted to the road. The
-          chassis is the part that takes months, and it is the part that means
+          platform is the part that takes months, and it is the part that means
           a better model next year is a swap rather than a rebuild.
         </p>
       </div>
