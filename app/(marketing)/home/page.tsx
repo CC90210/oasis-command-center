@@ -155,7 +155,7 @@ export default function MarketingHome() {
           <SectionHead
             eyebrow="How it fits together"
             title="The harness is the agent. The engine is the model."
-            lede="Bravo, Atlas and Maven are harnesses. Claude, GPT and Gemini are engines. Swap either one, because the platform underneath is the part we actually build."
+            lede="Here is the whole thing as a car, because it is the fastest way to explain it. The engine is the AI model. The body is the agent that does a specific job for you. The platform underneath is everything that makes it survive contact with your business, and it is the part we actually build. Take it apart below."
           />
         </Reveal>
 
@@ -194,8 +194,8 @@ export default function MarketingHome() {
         <Reveal>
           <SectionHead
             eyebrow="Under the hood"
-            title="Six things that make this work where a chatbot doesn't."
-            lede="Every one of these is a decision that costs us something to build and would be easier to skip. They are also the difference between a demo that impresses you and a system you can leave running."
+            title="Six reasons this is still running in a year."
+            lede="Anyone can show you a clever demo. These are the six things that decide whether it is still earning its keep next quarter."
           />
         </Reveal>
 

@@ -612,6 +612,75 @@ export function CarStage({
         carGroup.add(cabinMesh);
         parts.push(cabinMesh);
 
+        // WINDOWS. The greenhouse was one uninterrupted glass loft, which
+        // reads as a tinted bubble rather than as a car — a car has a
+        // windscreen, side glass and a rear screen, separated by pillars,
+        // and the pillars are most of what makes it legible as a cabin.
+        // Drawn as bright trim following the cabin surface rather than as
+        // cut geometry: a real cutout needs CSG, and the DLO graphic is
+        // what the eye actually reads at this distance.
+        const dloMat = new THREE.MeshStandardMaterial({
+          color: 0x1a2029,
+          metalness: 0.9,
+          roughness: 0.3,
+          envMapIntensity: 2.0,
+        });
+        perBuildMats.push(dloMat);
+
+        // Beltline: the lower edge of the side glass, running the cabin.
+        for (const side of [-1, 1]) {
+          const belt = surfaceRun(
+            spec.cabin.filter((s) => s.h > 0.06),
+            (s) => s.y - s.h * 0.72,
+            0.016,
+            MOUNT.gap,
+            side,
+            dloMat,
+          );
+          carGroup.add(belt);
+          parts.push(belt);
+        }
+
+        // Pillars. A-pillar at the windscreen, B-pillar behind the door,
+        // C-pillar at the rear screen — positioned as fractions along the
+        // greenhouse so they land correctly on every body.
+        //
+        // Each one is swept UP the cross-section rather than drawn as a
+        // straight box. The greenhouse narrows toward the roof, so a
+        // vertical box pinned at the glass's widest point has its whole
+        // upper half outside the glass — which rendered as three dark bars
+        // standing proud of the roof instead of as pillars in it.
+        for (const frac of [0.14, 0.52, 0.88]) {
+          const i = Math.min(
+            spec.cabin.length - 1,
+            Math.max(0, Math.round(frac * (spec.cabin.length - 1))),
+          );
+          const st = spec.cabin[i];
+          if (st.h <= 0.06) continue;
+          const lo = st.y - st.h * 0.7;
+          const hi = st.y + st.h * 0.72;
+          for (const side of [-1, 1]) {
+            const pts: ThreeNS.Vector3[] = [];
+            for (let s = 0; s <= 6; s++) {
+              const y = lo + ((hi - lo) * s) / 6;
+              const [, py, pz] = flankPoint(st, y, side, 0.018);
+              pts.push(new THREE.Vector3(st.x, py, pz));
+            }
+            const pillar = new THREE.Mesh(
+              new THREE.TubeGeometry(
+                new THREE.CatmullRomCurve3(pts),
+                12,
+                0.019,
+                6,
+                false,
+              ),
+              dloMat,
+            );
+            carGroup.add(pillar);
+            parts.push(pillar);
+          }
+        }
+
         // Widest half-width in the body, so the wheels sit in the arches
         // rather than inside the bodywork. The first pass hard-coded 1.02
         // and subtracted half the tyre width, which buried every wheel
@@ -1272,6 +1341,8 @@ export function CarStage({
       const projected = new THREE.Vector3();
       /** Last published pin positions, for change detection. */
       let lastPins: { id: string; x: number; y: number; visible: boolean }[] = [];
+      /** Previous focus, so releasing it can hand the camera back. */
+      let lastFocus: string | null = null;
 
       function frameBody(id: string) {
         const shot = BODY_SHOTS[id] ?? BODY_SHOTS.bravo;
@@ -1430,6 +1501,14 @@ export function CarStage({
         // already a deliberate camera move and would otherwise be fought
         // for its whole duration.
         const wantFocus = focusRef.current;
+        // Releasing focus has to hand the camera BACK. Without this the
+        // target vectors keep whatever the last callout set, so closing a
+        // card left the car parked off to one side of the panel forever —
+        // there was no code path that ever restored the body framing.
+        if (wantFocus !== lastFocus) {
+          if (!wantFocus && diveFrames === 0) frameBody(sel.current.bodyId);
+          lastFocus = wantFocus;
+        }
         if (wantFocus && diveFrames === 0) {
           const spot = HOTSPOTS.find((h) => h.id === wantFocus);
           if (spot) {

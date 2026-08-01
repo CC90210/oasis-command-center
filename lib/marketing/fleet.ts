@@ -154,30 +154,40 @@ export const FLEET: FleetMember[] = [
  * registry, the approval gates. Written from the client's side of the
  * screen, so no component or table names, but nothing here is aspirational.
  */
+/**
+ * Six reasons this outlives a demo.
+ *
+ * Rewritten short on purpose. The previous version was six paragraphs of
+ * architecture, and a business owner scanning a page does not read six
+ * paragraphs — they feel the first line or they leave. Each entry is now a
+ * claim you can react to in one breath, with a single sentence behind it
+ * for the reader who wants the mechanism. The lead line does the work;
+ * the sentence proves it is not a slogan.
+ */
 export const DIFFERENTIATORS = [
   {
-    title: "It remembers",
-    body: "State persists between sessions. Ask on Thursday what changed on Monday and it knows, because it was the one that changed it. No re-briefing, no pasting last week's context back in, no starting over because the tab closed.",
+    title: "You never explain twice",
+    body: "Ask on Thursday what changed on Monday. It knows, because it was the one that changed it.",
   },
   {
-    title: "It can't be talked past",
-    body: "The guardrails sit underneath the agent, in the layer that actually executes. Destructive commands, credential reads, and outbound sends are stopped by code the model never sees and cannot argue with. Safety that depends on the model choosing to behave is not safety.",
+    title: "It can't be sweet-talked",
+    body: "The limits are code underneath the AI, not instructions to it. Nothing that spends or sends gets through by asking nicely.",
   },
   {
-    title: "They hand work to each other",
-    body: "Shared state and an event bus between seats. Operations ships something, Finance sees the cost, Marketing gets the announcement. All from one instruction, without you carrying the output of one tool into the input of the next.",
+    title: "One instruction, everyone moves",
+    body: "Operations ships it, Finance sees the cost, Marketing announces it. You said it once.",
   },
   {
-    title: "It runs on your data, in your infrastructure",
-    body: "Your database, your account, row-level access control per tenant. Nothing is pooled with another client's data. If you ever stop working with us you keep the system running, because it was always yours.",
+    title: "It's yours, on your accounts",
+    body: "Your data, your infrastructure, never pooled with anyone else's. Walk away and it keeps running, because it was always yours.",
   },
   {
-    title: "It isn't married to one model",
-    body: "Work routes across providers on cost and capability, and sensitive jobs can run on a model hosted on your own hardware. The frontier moves every few months. You get the upgrade without a rebuild.",
+    title: "It gets better without you paying again",
+    body: "A better model ships every few months. You get the upgrade, not a rebuild invoice.",
   },
   {
-    title: "You choose the leash",
-    body: "Autonomy is scoped per action, not granted once. Draft freely but never send. Read every account but never move money. Anything that spends, signs, or leaves the building stops for a human unless you say otherwise.",
+    title: "You decide how far it goes",
+    body: "Draft everything, send nothing. Read every account, move no money. You set the line, per action.",
   },
 ] as const;
 

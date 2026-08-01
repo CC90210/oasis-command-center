@@ -203,7 +203,6 @@ export function HarnessBuilder() {
                   key={p.id}
                   type="button"
                   onClick={() => setFocus(open ? null : p.id)}
-                  onMouseEnter={() => setFocus(p.id)}
                   aria-expanded={open}
                   aria-label={`${spot.kicker}: ${spot.title}`}
                   className="group absolute z-20 -translate-x-1/2 -translate-y-1/2 focus-visible:outline-none"
@@ -228,49 +227,47 @@ export function HarnessBuilder() {
               );
             })}
 
-          {/* Detail card. One at a time; anchored to the panel rather than
-              to the pin so it never runs off the edge of the viewport on a
-              phone. */}
-          {stageReady && activeSpot && (
-            <div className="pointer-events-none absolute inset-x-3 bottom-3 z-30 sm:inset-x-auto sm:left-4 sm:max-w-xs">
-              <div className="pointer-events-auto border border-signal/25 bg-ops-void/80 p-5 shadow-[0_8px_40px_-12px_rgba(0,0,0,0.9)] backdrop-blur-md">
-                <div className="flex items-start justify-between gap-4">
-                  <span className="font-data text-[10px] uppercase tracking-[0.22em] text-signal">
-                    {activeSpot.kicker}
-                  </span>
-                  <button
-                    type="button"
-                    onClick={() => setFocus(null)}
-                    className="-m-1 p-1 font-data text-[11px] text-fg-faint transition-colors hover:text-fg"
-                    aria-label="Close callout"
-                  >
-                    ESC
-                  </button>
-                </div>
-                <h4 className="mt-2 font-display text-[15px] font-bold tracking-tight text-fg">
-                  {activeSpot.title}
-                </h4>
-                <p className="mt-2 text-[13.5px] leading-relaxed text-fg-dim">
-                  {activeSpot.body}
-                </p>
-                <ul className="mt-3 space-y-1.5">
-                  {activeSpot.points.map((pt) => (
-                    <li
-                      key={pt}
-                      className="flex items-baseline gap-2 text-[12.5px] text-fg-muted"
-                    >
-                      <span
-                        aria-hidden="true"
-                        className="h-px w-2.5 shrink-0 translate-y-[-4px] bg-signal"
-                      />
-                      {pt}
-                    </li>
-                  ))}
-                </ul>
-              </div>
-            </div>
-          )}
         </div>
+
+        {/* Detail card, BELOW the stage rather than floating over it. As an
+            overlay it covered the exact part of the car it was describing,
+            which is the one thing a callout must never do. */}
+        {activeSpot && (
+          <div className="mx-auto mt-4 max-w-3xl border border-signal/25 bg-ops-raised/70 p-5 backdrop-blur-sm sm:p-6">
+            <div className="flex items-start justify-between gap-4">
+              <span className="font-data text-[10px] uppercase tracking-[0.22em] text-signal">
+                {activeSpot.kicker}
+              </span>
+              <button
+                type="button"
+                onClick={() => setFocus(null)}
+                className="-m-1 p-1 font-data text-[10px] uppercase tracking-[0.18em] text-fg-faint transition-colors hover:text-fg"
+              >
+                Close
+              </button>
+            </div>
+            <h4 className="mt-2 font-display text-[17px] font-bold tracking-tight text-fg">
+              {activeSpot.title}
+            </h4>
+            <p className="mt-2 max-w-2xl text-[14.5px] leading-relaxed text-fg-dim">
+              {activeSpot.body}
+            </p>
+            <ul className="mt-4 grid gap-x-8 gap-y-2 sm:grid-cols-2">
+              {activeSpot.points.map((pt) => (
+                <li
+                  key={pt}
+                  className="flex items-baseline gap-2.5 text-[13.5px] text-fg-muted"
+                >
+                  <span
+                    aria-hidden="true"
+                    className="h-px w-3 shrink-0 translate-y-[-4px] bg-signal"
+                  />
+                  {pt}
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
 
         {/* Callouts */}
         <div className="mx-auto mb-6 mt-2 flex max-w-2xl flex-wrap justify-center gap-x-6 gap-y-3 text-center sm:gap-x-8">
