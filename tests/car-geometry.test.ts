@@ -28,9 +28,6 @@ import {
   BODY_SHOTS,
   CAMERA_FOV,
   CAR_SPECS,
-  DIVE_OFFSET,
-  LEGACY_DIVE_OFFSET,
-  LEGACY_FOV,
   LOFT_RINGS,
   MOUNT,
   flankPoint,
@@ -42,6 +39,7 @@ import {
   wheelTrack,
   type Station,
 } from "../lib/marketing/car-geometry";
+import { HOTSPOTS } from "../lib/marketing/hotspots";
 
 let checks = 0;
 let worstClearance = { cm: Infinity, where: "" };
@@ -216,20 +214,46 @@ for (const [name, spec] of Object.entries(CAR_SPECS)) {
 // of the stage that cannot be verified by screenshot: the engine dive lasts
 // 1.6s, which is shorter than a single browser-automation round trip.
 {
-  // Compare against the PINNED original offset. An earlier version of this
-  // derived the expected distance from CAMERA_FOV, which made the whole
-  // assertion reduce to `2·d·tan(fov/2) === 2·d·tan(fov/2)` — true at every
-  // FOV, catching nothing. Both sides must come from independent values or
-  // the check is decorative.
-  const now = framedHeight(Math.hypot(...DIVE_OFFSET), CAMERA_FOV);
-  const before = framedHeight(Math.hypot(...LEGACY_DIVE_OFFSET), LEGACY_FOV);
-  assert.ok(
-    Math.abs(now - before) < 0.01,
-    `engine dive reframed: at ${CAMERA_FOV}deg it shows ${now.toFixed(3)} units ` +
-      `of frame height, but was tuned to show ${before.toFixed(3)}. ` +
-      `Change CAMERA_FOV and DIVE_OFFSET must be rescaled by ` +
-      `tan(${LEGACY_FOV}/2)/tan(${CAMERA_FOV}/2).`,
-  );
+  // Every shot on the page is now described by a hotspot's `frame` and
+  // `dir`. The engine dive used to carry its own DIVE_OFFSET, and this
+  // block used to assert that offset still framed what it was tuned for —
+  // but the dive now goes through the same shot data as the callout, so
+  // that constant became unused and the assertion vacuous. It was guarding
+  // a number nothing read. Assert the shipping data instead.
+  const engineSpot = HOTSPOTS.find((h) => h.anchor === "engine");
+  assert.ok(engineSpot, "no hotspot targets the engine — the dive has no shot");
+  const now = engineSpot.frame;
+
+  for (const h of HOTSPOTS) {
+    // A shot has to actually see something. Below the height of a wheel is
+    // a macro of paint; wider than three car lengths is not a callout.
+    assert.ok(
+      h.frame > 0.6 && h.frame < 14,
+      `${h.id}: frame height ${h.frame} is not a usable shot`,
+    );
+    // A zero-length direction leaves the camera exactly on its subject.
+    const len = Math.hypot(...h.dir);
+    assert.ok(len > 0.2, `${h.id}: approach direction is degenerate`);
+    // Every approach must come from ABOVE the ground plane, or the camera
+    // is placed under the floor looking up through it.
+    assert.ok(
+      h.dir[1] / len > 0.05,
+      `${h.id}: approach dips below the floor (y=${(h.dir[1] / len).toFixed(2)})`,
+    );
+    checks += 3;
+  }
+
+  // The engine is the tightest shot on the car; it is a detail of a ~40cm
+  // assembly. If something else ever frames tighter, the engine callout has
+  // stopped being the close-up.
+  for (const h of HOTSPOTS) {
+    if (h.anchor === "engine") continue;
+    assert.ok(
+      h.frame > now,
+      `${h.id} frames tighter (${h.frame}) than the engine (${now})`,
+    );
+    checks++;
+  }
 
   // Hero shots must frame the actual car: tall enough to hold it with
   // headroom, not so far out that it is lost in the frame. Checked against

@@ -422,6 +422,14 @@
   transition: grid-template-columns 0.55s cubic-bezier(0.22, 1, 0.36, 1);
 }
 
+/* Applied for one frame on mount so the initial collapse is instant.
+   Without it the collapse animates on the same 0.55s curve as the unfold,
+   and since the mark sits in the hero the two overlap on first paint —
+   the word expands, contracts and re-expands while fading in. */
+.m-acr-instant .m-acr-word {
+  transition: none;
+}
+
 .m-acr-item[data-open="true"] .m-acr-word {
   grid-template-columns: 1fr;
 }

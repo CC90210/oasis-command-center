@@ -56,8 +56,25 @@ export function AcronymMark() {
       return;
     }
 
-    // Collapse, then unfold when it comes into view.
+    // Collapse INSTANTLY, then unfold.
+    //
+    // The mark renders server-side fully open, so it is readable with no
+    // JavaScript. Collapsing it on mount used to animate over 0.55s (the
+    // same `grid-template-columns` transition the unfold uses), and because
+    // this sits in the hero the IntersectionObserver fired on first paint —
+    // so the first letter began reopening 220ms into a 550ms close, while
+    // Reveal was still fading the whole block in. Three gestures at once:
+    // the word expanded, contracted and re-expanded as the page appeared.
+    //
+    // `m-acr-instant` kills the transition for exactly one frame so the
+    // collapse is a state change rather than an animation, and the unfold
+    // is then the single deliberate movement the visitor sees.
+    const node = ref.current;
+    node?.classList.add("m-acr-instant");
     setOpen(LETTERS.map(() => false));
+    const unlock = requestAnimationFrame(() => {
+      requestAnimationFrame(() => node?.classList.remove("m-acr-instant"));
+    });
 
     const el = ref.current;
     if (!el) return;
@@ -77,7 +94,11 @@ export function AcronymMark() {
                   next[i] = true;
                   return next;
                 });
-              }, 220 + i * STAGGER),
+              // Starts AFTER Reveal's 0.7s fade rather than against it, so
+              // the block arrives first and then the word opens. Two
+              // sequenced gestures read as intent; two overlapping ones
+              // read as a glitch.
+              }, 620 + i * STAGGER),
             );
           });
         }
@@ -89,6 +110,7 @@ export function AcronymMark() {
     return () => {
       io.disconnect();
       timers.forEach(clearTimeout);
+      cancelAnimationFrame(unlock);
     };
   }, []);
 

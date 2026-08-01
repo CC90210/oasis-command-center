@@ -8,6 +8,9 @@ import { CarStage } from "@/components/marketing/CarStage";
 
 type Pin = { id: string; x: number; y: number; visible: boolean };
 
+/** Where the visitor's harness + engine choice is kept across a reload. */
+const BUILD_KEY = "oasis:harness-build";
+
 /**
  * The car analogy, made touchable.
  *
@@ -32,6 +35,42 @@ type Pin = { id: string; x: number; y: number; visible: boolean };
 export function HarnessBuilder() {
   const [bodyId, setBodyId] = useState(BODIES[0].id);
   const [engineId, setEngineId] = useState(ENGINES[0].id);
+
+  /**
+   * Restore the visitor's build after a back-navigation.
+   *
+   * `app/layout.tsx` calls `await headers()`, which forces dynamic
+   * rendering, so this page is served `cache-control: no-store`. That
+   * blocks Chrome's bfcache outright — pressing Back is a full RELOAD, not
+   * a restore, so a `pageshow` handler would never fire and would fix
+   * nothing. What actually happens is that React state resets to
+   * BODIES[0]/ENGINES[0] and the visitor is looking at a stock Bravo with
+   * Claude: CC's "a rudimentary image of the car we first built". Their
+   * configuration was not corrupted, it was forgotten.
+   *
+   * sessionStorage survives the reload and is scoped to the tab, which is
+   * the right lifetime for "what I was looking at a moment ago".
+   */
+  useEffect(() => {
+    try {
+      const saved = sessionStorage.getItem(BUILD_KEY);
+      if (!saved) return;
+      const { b, e } = JSON.parse(saved) as { b?: string; e?: string };
+      if (b && BODIES.some((x) => x.id === b)) setBodyId(b);
+      if (e && ENGINES.some((x) => x.id === e)) setEngineId(e);
+    } catch {
+      // Private mode, disabled storage, or corrupt JSON. A visitor who
+      // cannot persist simply gets the default build — never a crash.
+    }
+  }, []);
+
+  useEffect(() => {
+    try {
+      sessionStorage.setItem(BUILD_KEY, JSON.stringify({ b: bodyId, e: engineId }));
+    } catch {
+      /* storage unavailable — the page works without it */
+    }
+  }, [bodyId, engineId]);
   // Flips once WebGL has painted a frame, retiring the SVG fallback.
   const [stageReady, setStageReady] = useState(false);
   // Screen positions of the spatial callouts, pushed up from the render
@@ -339,6 +378,25 @@ export function HarnessBuilder() {
           />
           {launching ? "Igniting…" : "Ignite & deploy to OASIS"}
         </button>
+
+        {/* Skip. Six seconds is a good length for a launch you WANT to
+            watch and an eternity for someone who just wants the form.
+            Appears only once the sequence is running, so it never competes
+            with the primary action. */}
+        {launching && (
+          <div className="mt-3">
+            <button
+              type="button"
+              onClick={() => {
+                window.location.href = AUDIT_FUNNEL.path;
+              }}
+              className="font-data text-[11px] uppercase tracking-[0.18em] text-fg-faint underline-offset-4 transition-colors hover:text-fg hover:underline"
+            >
+              Skip →
+            </button>
+          </div>
+        )}
+
         <p className="mx-auto mt-3 max-w-md text-[13px] leading-relaxed text-fg-dim">
           Start this build and tell us about your business. Four questions,
           about two minutes.

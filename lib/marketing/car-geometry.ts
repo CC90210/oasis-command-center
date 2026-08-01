@@ -445,37 +445,6 @@ export const CAR_SPECS: Record<string, CarSpec> = {
  */
 export const CAMERA_FOV = 14;
 
-/** The FOV every camera position in this file was originally framed at. */
-export const LEGACY_FOV = 38;
-
-/**
- * Camera offset from the engine anchor during an engine-swap dive.
- *
- * Scaled from the original (0.95, 0.62, 1.35) by the same factor the body
- * shots were, so the bay fills the frame exactly as it did before the lens
- * changed. That factor is not arbitrary: framing is preserved when
- * distance scales by tan(LEGACY_FOV/2) / tan(CAMERA_FOV/2), and the
- * geometry test asserts the two still agree — change the FOV without
- * rescaling this and the dive either buries the camera inside the engine
- * or leaves it too far out to read.
- */
-export const DIVE_OFFSET: [number, number, number] = [2.66, 1.74, 3.79];
-
-/**
- * How much of the world a hotspot close-up should show, in world units of
- * frame height.
- *
- * Tuned as a framing, not as a distance: at a 14-degree lens a "reasonable
- * looking" offset vector puts the camera about 4.5 units out, which frames
- * 1.1 units — less than the height of the car, so the body overflows the
- * panel on every side and the callout reads as a crash zoom. 2.4 units
- * holds the subsystem plus enough of its surroundings to locate it.
- */
-export const FOCUS_FRAME_HEIGHT = 3.2;
-
-/** Direction the focus camera approaches a hotspot from (normalised). */
-export const FOCUS_DIR: [number, number, number] = [0.571, 0.253, 0.769];
-
 /**
  * Launch sequence stage boundaries, in FRAMES.
  *
@@ -485,19 +454,12 @@ export const FOCUS_DIR: [number, number, number] = [0.571, 0.253, 0.769];
  * somewhere the camera is not pointing. Counting frames keeps the motion
  * and the camera on one clock by construction.
  *
- * At 60fps: ignition ~1.2s, tracking shot ~1.0s, drive-away ~1.3s.
+ * At 60fps: ignition ~1.2s, tracking shot ~1.3s, drive-away ~3.5s — six
+ * seconds total, weighted to the departure because that is the shot worth
+ * watching. Anyone who does not want to watch it has a Skip control; an
+ * unskippable six seconds between a click and a form is where people leave.
  */
-export const LAUNCH = { ignite: 72, track: 132, away: 246 } as const;
-
-/**
- * What DIVE_OFFSET was before the lens change, when the stage ran at
- * LEGACY_FOV. Kept as a fixed historical value, not derived — it is the
- * anchor the framing assertion compares against. Deriving the expected
- * framing from CAMERA_FOV instead makes the check an algebraic identity
- * that passes at every FOV, which is exactly what the first version of
- * that test did.
- */
-export const LEGACY_DIVE_OFFSET: [number, number, number] = [0.95, 0.62, 1.35];
+export const LAUNCH = { ignite: 72, track: 150, away: 360 } as const;
 
 /**
  * Where a wheel sits, and the fender that covers it.

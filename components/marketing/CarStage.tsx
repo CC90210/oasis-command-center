@@ -14,9 +14,6 @@ import {
   wheelTrack,
   ARCH,
   CAMERA_FOV,
-  DIVE_OFFSET,
-  FOCUS_DIR,
-  FOCUS_FRAME_HEIGHT,
   LAUNCH,
   LOFT_RINGS,
   MOUNT,
@@ -121,6 +118,31 @@ function releaseParts(
  * material does nothing, since the loop overwrites it on the next frame.
  */
 const HOT_EMISSIVE = 2.2;
+
+/**
+ * The engine shot, resolved once.
+ *
+ * `dir` and `frame` are required on Hotspot, so each shot is described in
+ * exactly one place. Earlier versions carried `?? FOCUS_DIR` fallbacks that
+ * were unreachable but re-created the two-sources-of-truth shape which let
+ * the engine picker and the engine callout drift apart — twice.
+ */
+const ENGINE_SHOT = HOTSPOTS.find((h) => h.anchor === "engine")!;
+
+/**
+ * Heading the car settles to while a callout is open, in radians of yaw.
+ *
+ * Focusing eases the car to a known angle, so the same click always ends at
+ * the same composition however far the visitor has spun it beforehand.
+ * Without this the shot is still geometrically correct after the world-space
+ * fix, but its composition varies with whatever rotation they left behind.
+ */
+const ANCHOR_HEADING: Record<string, number> = {
+  cockpit: -0.5,
+  engine: -0.35,
+  chassis: 0.6,
+  tail: 2.5,
+};
 
 export function CarStage({
   bodyId,
@@ -1063,6 +1085,78 @@ export function CarStage({
         carGroup.add(bar);
         parts.push(bar);
 
+        // ── Shut lines ──────────────────────────────────────────────
+        // A real car is not one surface, it is panels with gaps between
+        // them. The body had none — no bonnet line, no door shut, no boot
+        // line — which is precisely why CC read it as "blank pieces of
+        // metal". Nothing else on the car communicates scale either: a
+        // door shut tells you how big the thing is.
+        //
+        // Drawn as thin DARK runs sitting a hair proud of the skin, not
+        // cut into it. A real gap needs CSG on a lofted surface; a shadow
+        // line at this scale is what the eye reads as a gap anyway.
+        {
+          const shutMat = new THREE.MeshStandardMaterial({
+            color: 0x05070a,
+            metalness: 0.4,
+            roughness: 0.85,
+            envMapIntensity: 0.25,
+          });
+          perBuildMats.push(shutMat);
+
+          const frontAxle = spec.axles[spec.axles.length - 1].x;
+          const rearAxle = spec.axles[0].x;
+
+          // Longitudinal door shut, running the flank between the axles at
+          // the height where a real door break sits.
+          for (const side of [-1, 1]) {
+            const run = spec.body.filter(
+              (s) => s.x > rearAxle - 0.05 && s.x < frontAxle + 0.05,
+            );
+            if (run.length > 1) {
+              const shut = surfaceRun(
+                run,
+                (s) => runHeight(s, 0.44),
+                0.007,
+                0.004,
+                side,
+                shutMat,
+              );
+              carGroup.add(shut);
+              parts.push(shut);
+            }
+          }
+
+          // Cross-body panel breaks: bonnet/decklid at the axle lines.
+          // Built as a ring of surface points around each station, so the
+          // line follows the crown of the body rather than cutting a
+          // straight chord through it.
+          for (const bx2 of [rearAxle + 0.28, frontAxle - 0.24]) {
+            const st = nearestStation(spec.body, bx2);
+            const pts: ThreeNS.Vector3[] = [];
+            for (let i = 0; i <= 14; i++) {
+              // Sweep the upper half only — an underbody shut line is
+              // invisible and would only cost draw calls.
+              const y = st.y - st.h * 0.55 + (st.h * 1.5 * i) / 14;
+              const side = i < 7 ? -1 : 1;
+              const [, py, pz] = flankPoint(st, Math.min(y, st.y + st.h * 0.92), side, 0.006);
+              pts.push(new THREE.Vector3(bx2, py, pz));
+            }
+            const brk = new THREE.Mesh(
+              new THREE.TubeGeometry(
+                new THREE.CatmullRomCurve3(pts),
+                24,
+                0.007,
+                5,
+                false,
+              ),
+              shutMat,
+            );
+            carGroup.add(brk);
+            parts.push(brk);
+          }
+        }
+
         // ── Aero furniture, on every body ───────────────────────────
         // Side blades, intakes and a diffuser. Without them the flank is
         // one unbroken surface from nose to tail and the sill line runs
@@ -1859,10 +1953,81 @@ export function CarStage({
       // — a fresh Vector3 per pin per frame is 240/sec of garbage for
       // something that never needs to outlive the loop body.
       const projected = new THREE.Vector3();
+      /** Scratch for local->world anchor conversion in aimAt(). */
+      const worldAnchor = new THREE.Vector3();
       /** Last published pin positions, for change detection. */
       let lastPins: { id: string; x: number; y: number; visible: boolean }[] = [];
       /** Previous focus, so releasing it can hand the camera back. */
       let lastFocus: string | null = null;
+
+      /**
+       * Point the camera at a part of the car.
+       *
+       * THE BUG THIS EXISTS TO KILL. hotspotAnchor() and engineAnchor()
+       * return coordinates in the car's LOCAL space. The hotspot pins have
+       * always transformed them by carGroup.matrixWorld before projecting;
+       * the camera did not, and used them raw as world positions. While the
+       * car sat at rotation 0 the two spaces coincide, so it looked correct
+       * from a fresh page load and passed every test I ran. The moment a
+       * visitor dragged the car the spaces diverged and the camera flew to
+       * where the part WOULD be if the car had never turned — inside it,
+       * behind it, or past it entirely.
+       *
+       * The `chassis` anchor is the worst case: it sits off-centre on the
+       * flank, so it travels furthest under rotation.
+       *
+       * Second reason this function exists: the engine picker's dive and
+       * the hotspot focus were two near-identical blocks expressing one
+       * intent. They drifted apart twice, and both times shipped a bug CC
+       * had to find. One path now, two callers.
+       */
+      function aimAt(
+        kind: Parameters<typeof hotspotAnchor>[1],
+        frameHeight: number,
+        approach: readonly [number, number, number],
+      ) {
+        // Local -> world, against the car's CURRENT transform, so the shot
+        // is right at every instant including mid-rotation.
+        worldAnchor
+          .set(...hotspotAnchor(spec, kind))
+          .applyMatrix4(carGroup.matrixWorld);
+
+        // The approach direction is expressed relative to the car, so it
+        // has to ride the car's yaw too — otherwise "from above and ahead
+        // of the bay" becomes "from above and behind" after a half turn.
+        const yaw = carGroup.rotation.y;
+        const cy = Math.cos(yaw);
+        const sy = Math.sin(yaw);
+        const dl = Math.hypot(...approach) || 1;
+        const [dx, dy, dz] = [
+          approach[0] / dl,
+          approach[1] / dl,
+          approach[2] / dl,
+        ];
+        const rx = dx * cy + dz * sy;
+        const rz = -dx * sy + dz * cy;
+
+        const dist = frameHeight / (2 * Math.tan((CAMERA_FOV * Math.PI) / 360));
+        targetPos.set(
+          worldAnchor.x + rx * dist,
+          worldAnchor.y + dy * dist,
+          worldAnchor.z + rz * dist,
+        );
+
+        // Floor the camera above the tyres. Several shots are deliberately
+        // low, and a low shot that keeps descending as framing tightens
+        // ends up inside a wheel, rendering it from the inside out.
+        const wheelTop = Math.max(...spec.axles.map((a) => a.radius)) + 0.12;
+        if (targetPos.y < wheelTop) targetPos.y = wheelTop;
+
+        // Aim slightly below the anchor, scaled with the shot, so a tight
+        // detail does not drop its subject out of the bottom of frame.
+        targetAt.set(
+          worldAnchor.x,
+          worldAnchor.y - 0.11 * frameHeight,
+          worldAnchor.z,
+        );
+      }
 
       function frameBody(id: string) {
         const shot = BODY_SHOTS[id] ?? BODY_SHOTS.bravo;
@@ -1907,19 +2072,11 @@ export function CarStage({
       // whole interaction is unusable on a phone.
       let spin = 0;          // user-applied yaw, radians
       let spinVel = 0;       // carries the throw after release
-      let pitch = 0;         // user-applied pitch, radians
-      let pitchVel = 0;
       let dragging = false;
       let lastX = 0;
-      let lastY = 0;
       let dragged = false;   // true once a drag has happened, killing idle sway
-      /**
-       * Pitch limit. Beyond about 62 degrees you are looking at the
-       * underside of a car that has no underside modelled, and past
-       * vertical the controls invert and feel broken. Yaw stays unbounded
-       * — spinning all the way round is the point of the turntable.
-       */
-      const PITCH_LIMIT = 1.08;
+      /** Heading to settle at while a callout is open; null when free. */
+      let headingTarget: number | null = null;
 
       const canvasEl = renderer.domElement;
       canvasEl.style.touchAction = "none";
@@ -1929,26 +2086,21 @@ export function CarStage({
         dragging = true;
         dragged = true;
         lastX = e.clientX;
-        lastY = e.clientY;
         spinVel = 0;
-        pitchVel = 0;
+        // Taking hold releases any focus heading — the car is theirs again.
+        headingTarget = null;
         canvasEl.style.cursor = "grabbing";
         canvasEl.setPointerCapture(e.pointerId);
       };
       const onMove = (e: PointerEvent) => {
         if (!dragging) return;
+        // Yaw only — a turntable. Vertical drag briefly tipped and flipped
+        // the car; CC asked for it gone. It stays flat on the ground and
+        // spins, like a lazy Susan.
         const dx = e.clientX - lastX;
-        const dy = e.clientY - lastY;
         lastX = e.clientX;
-        lastY = e.clientY;
         spin += dx * 0.008;
         spinVel = dx * 0.008;
-        // Vertical drag tips the car toward and away from you, so you can
-        // look down onto the deck or up under the nose. Clamped rather
-        // than free: past vertical the horizontal control inverts and the
-        // turntable stops feeling like an object you are holding.
-        pitch = Math.max(-PITCH_LIMIT, Math.min(PITCH_LIMIT, pitch + dy * 0.006));
-        pitchVel = dy * 0.006;
       };
       const onUp = (e: PointerEvent) => {
         dragging = false;
@@ -1997,31 +2149,11 @@ export function CarStage({
 
         if (diveFrames > 0) {
           diveFrames--;
-          const [ex, ey, ez] = engineAnchor(spec);
-          // Close enough to read individual cylinders. The previous framing
-          // hung back at showroom distance and the whole point of the dive,
-          // seeing the hardware change, was lost at that range.
-          // Approached from ABOVE the bay, using the same vector as the
-          // engine callout.
-          //
-          // This was the bug CC kept hitting: I re-vectored the hotspot
-          // cameras last round but left the engine PICKER on the old
-          // side-on DIVE_OFFSET. Selecting a model is the one action whose
-          // entire purpose is to show you the engine change, and it was
-          // flying to a point level with the bay — where a wheel sits 20cm
-          // away and 90cm across, so the wheel filled the frame and the
-          // engine was behind it. Two code paths reach the same subject;
-          // only one of them had been fixed.
-          const spot = HOTSPOTS.find((h) => h.anchor === "engine");
-          const dv = spot?.dir ?? DIVE_OFFSET;
-          const dvl = Math.hypot(dv[0], dv[1], dv[2]) || 1;
-          const dvDist = Math.hypot(...DIVE_OFFSET);
-          targetPos.set(
-            ex + (dv[0] / dvl) * dvDist,
-            ey + (dv[1] / dvl) * dvDist,
-            ez + (dv[2] / dvl) * dvDist,
-          );
-          targetAt.set(ex, ey + 0.05, ez);
+          // Same path the engine callout uses. Selecting a model is the
+          // one action whose entire purpose is showing the engine change,
+          // and it has now been fixed twice by editing only one of the two
+          // places that aimed at it. There is one place now.
+          aimAt("engine", ENGINE_SHOT.frame, ENGINE_SHOT.dir);
           if (diveFrames === 0) frameBody(sel.current.bodyId);
         }
 
@@ -2243,6 +2375,9 @@ export function CarStage({
         // there was no code path that ever restored the body framing.
         if (wantFocus !== lastFocus) {
           if (!wantFocus && diveFrames === 0) frameBody(sel.current.bodyId);
+          // Kill residual throw so inertia does not fight the heading ease.
+          if (wantFocus) spinVel = 0;
+          headingTarget = null;
           lastFocus = wantFocus;
         }
         // The launch owns the camera outright while it runs. Without this
@@ -2250,40 +2385,8 @@ export function CarStage({
         // drag the camera back onto a hotspot mid-drive-away.
         if (wantFocus && diveFrames === 0 && launchFrame === 0) {
           const spot = HOTSPOTS.find((h) => h.id === wantFocus);
-          if (spot) {
-            const [ax, ay, az] = hotspotAnchor(spec, spot.anchor);
-            // Approach from the same side the viewer has rotated the car
-            // to, so focusing never swings the camera around behind the
-            // body and leaves them looking at the far flank.
-            const face = Math.cos(carGroup.rotation.y);
-            const dir = face >= 0 ? 1 : -1;
-            // Distance derived from the framing we want, not guessed. A
-            // hand-picked offset framed 1.1 units at this lens — narrower
-            // than the car is tall — so the body overflowed the panel and
-            // the push-in read as a crash zoom.
-            const dist =
-              (spot.frame ?? FOCUS_FRAME_HEIGHT) /
-              (2 * Math.tan((CAMERA_FOV * Math.PI) / 360));
-            const d = spot.dir ?? FOCUS_DIR;
-            const dl = Math.hypot(d[0], d[1], d[2]) || 1;
-            targetPos.set(
-              ax + (d[0] / dl) * dist * dir,
-              ay + (d[1] / dl) * dist,
-              az + (d[2] / dl) * dist,
-            );
-            // Floor the camera above the top of the tyres. Several shots
-            // are deliberately low, and a low shot that keeps descending
-            // as the framing tightens ends up inside a wheel — geometry
-            // the lens then renders from the inside out.
-            const wheelTop = Math.max(...spec.axles.map((a) => a.radius)) + 0.12;
-            if (targetPos.y < wheelTop) targetPos.y = wheelTop;
-            // Aim a little below the anchor. Looking dead-on at a point
-            // near the roofline pushes the wheels out of the bottom of the
-            // frame, and a car cropped at the tyres reads as a mistake
-            // rather than as a close-up. Scaled with the shot: a tight
-            // engine detail must not drop its subject out of frame.
-            targetAt.set(ax, ay - 0.11 * (spot.frame ?? FOCUS_FRAME_HEIGHT), az);
-          }
+          if (spot) aimAt(spot.anchor, spot.frame, spot.dir);
+          if (spot) headingTarget = ANCHOR_HEADING[spot.anchor];
         }
 
         if (reduced) {
@@ -2306,14 +2409,24 @@ export function CarStage({
         // Idle sway until the visitor takes hold, then it is theirs. Coming
         // back to swaying under someone's finger would feel like the car
         // fighting them.
+        // Ease toward the focused callout's heading.
+        //
+        // This drives `spin`, NOT carGroup.rotation.y — the line below
+        // reassigns rotation.y from `spin` every frame, so anything written
+        // straight to the group is overwritten on the next tick and the
+        // ease would silently do nothing. `spin` is the state of record.
+        // Shortest angular path, or a car sitting at 350 degrees unwinds
+        // the long way round.
+        if (headingTarget !== null && !dragging) {
+          dragged = true; // rotation.y is only applied once dragged is set
+          let delta = headingTarget - spin;
+          delta = Math.atan2(Math.sin(delta), Math.cos(delta));
+          spin += delta * 0.09;
+        }
+
         if (!dragging) {
           spin += spinVel;
           spinVel *= 0.94; // inertia, so a flick coasts to a stop
-          pitch = Math.max(
-            -PITCH_LIMIT,
-            Math.min(PITCH_LIMIT, pitch + pitchVel),
-          );
-          pitchVel *= 0.94;
         }
         // The car used to sway +/-9 degrees forever to look alive. That
         // turns every flaw in the surface toward the viewer in turn, and a
@@ -2325,17 +2438,10 @@ export function CarStage({
         // letting someone spin it mid-departure looks like a bug.
         if (launchFrame === 0) {
           carGroup.rotation.y = dragged ? spin : 0;
-          // Pitch is applied on z rather than x because the car's long
-          // axis runs along x — rolling it about x would barrel-roll it
-          // down its own length instead of tipping the nose.
-          carGroup.rotation.z = dragged ? pitch : 0;
         } else if (launchFrame > 0) {
-          // LEVEL OUT before driving off. Freezing rotation at whatever
-          // the viewer left it meant a car they had tipped 60 degrees
-          // launched still tipped 60 degrees — accelerating away on its
-          // door. Eased rather than snapped so the correction reads as
-          // the car settling onto its wheels, not as a glitch.
-          carGroup.rotation.z += (0 - carGroup.rotation.z) * 0.12;
+          // Square up before driving off. Freezing the heading at whatever
+          // the viewer left meant a car spun 90 degrees drove away sideways.
+          // Eased so it reads as the car lining up, not as a snap.
           carGroup.rotation.y += (0 - carGroup.rotation.y) * 0.12;
         }
         if (!reduced) {
