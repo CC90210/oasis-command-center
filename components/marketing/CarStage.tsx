@@ -5,6 +5,7 @@ import {
   CAR_SPECS,
   BODY_SHOTS,
   engineAnchor,
+  flankPoint,
   type Station,
 } from "@/lib/marketing/car-geometry";
 import { ENGINES } from "@/lib/marketing/harness";
@@ -81,6 +82,29 @@ function releaseParts(
 }
 
 /** One closed cross-section outline as 3D points. */
+/**
+ * Resting emissive of the glowing engine hardware. Named because the
+ * animation loop drives it — a duplicated literal here means changing the
+ * material does nothing, since the loop overwrites it on the next frame.
+ */
+const HOT_EMISSIVE = 2.2;
+
+/**
+ * Camera field of view, in degrees.
+ *
+ * Was 38, which at the stage's ~6.5-unit subject distance is a 32mm lens
+ * standing 6.5 metres from a car. Nobody photographs a car that way: wide
+ * lenses stretch the near corner and shrink the far one, which is the
+ * universal signature of a screenshot taken inside a 3D editor. Studio car
+ * photography is a long lens from far back, which compresses the body and
+ * keeps the wheels the same size at both ends.
+ *
+ * 14° is roughly a 135mm equivalent. Camera positions in BODY_SHOTS are
+ * scaled out to match so the framing is unchanged — this is purely a change
+ * of lens and distance, not of composition.
+ */
+const CAMERA_FOV = 14;
+
 function sectionPoints(s: Station, segments: number) {
   const pts: [number, number, number][] = [];
   const n = 2 / s.squareness;
@@ -135,7 +159,10 @@ export function CarStage({ bodyId, engineId, engineColor, onReady }: Props) {
       const reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
       const scene = new THREE.Scene();
-      const camera = new THREE.PerspectiveCamera(38, 1, 0.1, 100);
+      // near at 1.0 rather than 0.1: the subject never comes closer than a
+      // couple of units even during the engine dive, and a 10x tighter near
+      // plane buys depth precision that the neon-on-bodywork contact needs.
+      const camera = new THREE.PerspectiveCamera(CAMERA_FOV, 1, 1, 200);
       const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
       renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
       renderer.outputColorSpace = THREE.SRGBColorSpace;
@@ -144,7 +171,10 @@ export function CarStage({ bodyId, engineId, engineColor, onReady }: Props) {
       // with blown-out stripes — no roll-off in either direction, which is
       // most of why it read as "computer graphics" rather than "photograph".
       renderer.toneMapping = THREE.ACESFilmicToneMapping;
-      renderer.toneMappingExposure = 1.15;
+      // 1.15 was tuned while an AmbientLight was still lifting the shadow
+      // side. With that gone the body fell to near-black silhouette — the
+      // env map alone carries the fill now, and it needs the headroom.
+      renderer.toneMappingExposure = 1.5;
 
       // ── Studio environment ────────────────────────────────────────
       // The biggest single miss in the previous build: there was no
@@ -215,9 +245,12 @@ export function CarStage({ bodyId, engineId, engineColor, onReady }: Props) {
       // than instinct says — the shape comes from a couple of hard
       // highlights tracing the edges, not from filling the surface.
       scene.add(new THREE.HemisphereLight(0x9fd4e8, 0x05070a, 0.55));
-      scene.add(new THREE.AmbientLight(0x223040, 0.35));
+      // No AmbientLight. It was here to lift the shadow side, which is what
+      // scene.environment now does — and does directionally, from the
+      // softboxes and floor bounce. A flat ambient term added on top only
+      // washes out the contrast that makes the panels read as curved.
 
-      const key = new THREE.DirectionalLight(0xffffff, 1.5);
+      const key = new THREE.DirectionalLight(0xffffff, 1.2);
       key.position.set(4.5, 6.5, 4.5);
       scene.add(key);
 
@@ -229,7 +262,7 @@ export function CarStage({ bodyId, engineId, engineColor, onReady }: Props) {
 
       // Second rim from the opposite quarter so the far side of the body
       // separates from the background instead of dissolving into it.
-      const rim2 = new THREE.DirectionalLight(0x7fd8ff, 0.8);
+      const rim2 = new THREE.DirectionalLight(0x7fd8ff, 0.5);
       rim2.position.set(2, 1.2, -5);
       scene.add(rim2);
 
@@ -315,12 +348,12 @@ export function CarStage({ bodyId, engineId, engineColor, onReady }: Props) {
       // is what produces the tight highlight running along a car's shoulder
       // while the body itself stays dark.
       const paint = new THREE.MeshPhysicalMaterial({
-        color: 0x0d1319,
+        color: 0x161d26,
         metalness: 0.55,
         roughness: 0.42,
         clearcoat: 1,
         clearcoatRoughness: 0.06,
-        envMapIntensity: 1.5,
+        envMapIntensity: 2.3,
         side: THREE.DoubleSide,
         // Transparent from the start so the x-ray during an engine dive is
         // an opacity tween rather than a material swap mid-render. The
@@ -331,6 +364,13 @@ export function CarStage({ bodyId, engineId, engineColor, onReady }: Props) {
       });
       // Roughness this low turns the greenhouse into a mirror and it
       // catches the rim light as one flat blown-out panel.
+      // Resting opacity of the greenhouse. Named, because the animation loop
+      // scales it against the paint's x-ray fade every frame — and when that
+      // multiplier was a hardcoded 0.34, raising this value to 0.42 for the
+      // new physical material did precisely nothing: the loop overwrote it on
+      // the first frame and every frame after.
+      const GLASS_OPACITY = 0.42;
+
       const glass = new THREE.MeshPhysicalMaterial({
         color: 0x060d14,
         metalness: 0.2,
@@ -339,7 +379,7 @@ export function CarStage({ bodyId, engineId, engineColor, onReady }: Props) {
         clearcoatRoughness: 0.03,
         envMapIntensity: 2.2,
         transparent: true,
-        opacity: 0.42,
+        opacity: GLASS_OPACITY,
       });
       // Tyres must NOT take the environment. Rubber is the one part of a car
       // with almost no specular return, and letting it reflect the strip
@@ -350,15 +390,6 @@ export function CarStage({ bodyId, engineId, engineColor, onReady }: Props) {
         roughness: 0.95,
         envMapIntensity: 0.15,
       });
-      // A hint of blueprint through the paint. Any higher and it stops
-      // being a finished surface with engineering showing through, and
-      // starts being a mesh preview.
-      const wireMat = new THREE.LineBasicMaterial({
-        color: 0x00d4ff,
-        transparent: true,
-        opacity: 0.09,
-      });
-
       // Hoisted out of buildCar deliberately. Created in the wheel loop it
       // allocated four fresh GPU materials on EVERY body swap and disposed
       // none of them — a leak that grows for as long as someone plays with
@@ -419,12 +450,11 @@ export function CarStage({ bodyId, engineId, engineColor, onReady }: Props) {
         carGroup.add(bodyMesh);
         parts.push(bodyMesh);
 
-        // Hairline wireframe over the paint: the blueprint showing through
-        // the finished surface. Subtle — 24% opacity — so it reads as
-        // engineering rather than as a wireframe toy.
-        const wire = new THREE.LineSegments(new THREE.WireframeGeometry(bodyGeo), wireMat);
-        carGroup.add(wire);
-        parts.push(wire);
+        // No wireframe overlay. It was here as "blueprint showing through
+        // the paint", but a triangle mesh drawn over a surface is what 3D
+        // software looks like mid-edit, and it read as an unfinished model
+        // no matter how far the opacity came down. The engineering story is
+        // carried by the exposed engine bay, which is real hardware.
 
         const cabinMesh = new THREE.Mesh(loft(spec.cabin, 32), glass);
         carGroup.add(cabinMesh);
@@ -449,50 +479,123 @@ export function CarStage({ bodyId, engineId, engineColor, onReady }: Props) {
             carGroup.add(tyre);
             parts.push(tyre);
 
-            // TURBINE WHEELS, from the reference image: concentric glowing
-            // rings with many fine blades between them, not a few flat
-            // spokes. The blade count is what reads as a turbine, so it is
-            // deliberately high, and it still differs per harness.
-            const rimMat = new THREE.MeshStandardMaterial({
+            // WHEELS.
+            //
+            // These used to be 18 emissive blades per face plus two emissive
+            // rings, all at emissiveIntensity 2.6. Two things went wrong at
+            // once. Emissive ignores lighting, so the whole face rendered at
+            // full brightness and clipped to flat white under tone mapping —
+            // the wheels became the brightest object in the frame, brighter
+            // than the studio lights, and read as spirograph discs rather
+            // than as wheels. And at 72-120 blades of 0.022 x 0.014 units
+            // they were sub-pixel at any hero distance, so all that geometry
+            // bought was aliasing shimmer, which reads as cheap.
+            //
+            // A real wheel is dark machined metal that is INTERESTING
+            // BECAUSE IT REFLECTS. Now that there is an environment to
+            // reflect, the rim can do what an actual rim does: pick up the
+            // softboxes along its polished edges and stay dark elsewhere.
+            // One thin lit accent ring keeps the brand cue.
+            const rimMetal = new THREE.MeshStandardMaterial({
+              color: 0x23282f,
+              metalness: 0.95,
+              roughness: 0.24,
+              envMapIntensity: 2.2,
+            });
+            const rimAccent = new THREE.MeshStandardMaterial({
               color: spec.wheel.tint,
               emissive: spec.wheel.tint,
-              emissiveIntensity: 2.6,
-              metalness: 0.5,
+              emissiveIntensity: 1.1,
+              metalness: 0.6,
               roughness: 0.3,
             });
-            perBuildMats.push(rimMat);
+            const discMat = new THREE.MeshStandardMaterial({
+              color: 0x14181d,
+              metalness: 0.8,
+              roughness: 0.55,
+              envMapIntensity: 0.8,
+            });
+            perBuildMats.push(rimMetal, rimAccent, discMat);
 
             const face = tyre.position.clone();
             face.z += side * (axle.width / 2 + 0.01);
 
-            // Two rings: outer lip and inner boss.
-            for (const [r, thick] of [
-              [axle.radius * 0.74, 0.028],
-              [axle.radius * 0.3, 0.032],
-            ] as const) {
-              const ring = new THREE.Mesh(
-                new THREE.TorusGeometry(r, thick * spec.wheel.rimDepth, 8, 40),
-                rimMat,
+            // Brake disc, set back behind the spokes. Gives the wheel a
+            // dark cavity so the spokes have something to read against
+            // instead of showing the background through the gaps.
+            const disc = new THREE.Mesh(
+              new THREE.CylinderGeometry(
+                axle.radius * 0.58,
+                axle.radius * 0.58,
+                0.03,
+                28,
+              ),
+              discMat,
+            );
+            disc.position.copy(face);
+            disc.position.z -= side * 0.05;
+            disc.rotation.x = Math.PI / 2;
+            carGroup.add(disc);
+            parts.push(disc);
+
+            // Outer rim lip, polished. This is the part that catches the
+            // strip lights and draws the wheel's circle.
+            const lip = new THREE.Mesh(
+              new THREE.TorusGeometry(
+                axle.radius * 0.82,
+                0.03 * spec.wheel.rimDepth,
+                10,
+                44,
+              ),
+              rimMetal,
+            );
+            lip.position.copy(face);
+            carGroup.add(lip);
+            parts.push(lip);
+
+            // One lit ring, inboard of the lip. The only emissive part of
+            // the wheel, at an intensity that sits under the strip lights
+            // rather than over them.
+            const accent = new THREE.Mesh(
+              new THREE.TorusGeometry(axle.radius * 0.66, 0.012, 8, 40),
+              rimAccent,
+            );
+            accent.position.copy(face);
+            carGroup.add(accent);
+            parts.push(accent);
+
+            // Spokes: the real count from the harness spec, not tripled.
+            // Bigger, fewer, and metal — so they catch a highlight along
+            // one edge and fall dark on the other, which is what makes a
+            // spoke look machined instead of drawn.
+            for (let s = 0; s < spec.wheel.spokes; s++) {
+              const spoke = new THREE.Mesh(
+                new THREE.BoxGeometry(axle.radius * 0.62, 0.085, 0.05),
+                rimMetal,
               );
-              ring.position.copy(face);
-              carGroup.add(ring);
-              parts.push(ring);
+              const a = (s / spec.wheel.spokes) * Math.PI * 2;
+              spoke.position.copy(face);
+              spoke.position.x += Math.cos(a) * axle.radius * 0.42;
+              spoke.position.y += Math.sin(a) * axle.radius * 0.42;
+              spoke.rotation.z = a + 0.26; // slight sweep, like a real face
+              carGroup.add(spoke);
+              parts.push(spoke);
             }
 
-            const blades = spec.wheel.spokes * 3;
-            for (let s = 0; s < blades; s++) {
-              const blade = new THREE.Mesh(
-                new THREE.BoxGeometry(axle.radius * 0.44, 0.022, 0.014),
-                rimMat,
-              );
-              const a = (s / blades) * Math.PI * 2;
-              blade.position.copy(face);
-              blade.position.x += Math.cos(a) * axle.radius * 0.52;
-              blade.position.y += Math.sin(a) * axle.radius * 0.52;
-              blade.rotation.z = a + 0.42; // swept, like turbine vanes
-              carGroup.add(blade);
-              parts.push(blade);
-            }
+            // Centre cap.
+            const cap = new THREE.Mesh(
+              new THREE.CylinderGeometry(
+                axle.radius * 0.14,
+                axle.radius * 0.14,
+                0.04,
+                20,
+              ),
+              rimAccent,
+            );
+            cap.position.copy(face);
+            cap.rotation.x = Math.PI / 2;
+            carGroup.add(cap);
+            parts.push(cap);
           }
         }
 
@@ -504,16 +607,30 @@ export function CarStage({ bodyId, engineId, engineColor, onReady }: Props) {
         const stripMat = new THREE.MeshBasicMaterial({ color: 0x00d4ff });
         perBuildMats.push(stripMat);
 
+        // Each run is placed on the SURFACE, not against the bounding box.
+        // `st.w` is the widest the section ever gets — true only at its
+        // vertical centre — so using it put the shoulder strip inside the
+        // bodywork at every station (z-fighting along its whole length,
+        // strobing as the car turned) while the sill strip floated up to
+        // 13.9cm clear of the flank. flankPoint() solves the superellipse
+        // for the real skin at that height and steps out along its normal.
+        const STRIP_RADIUS = 0.017;
         const runs: ThreeNS.Vector3[][] = [];
-        for (const [heightFrac, inset] of [
-          [0.72, 0.97], // shoulder line, high on the flank
-          [0.12, 0.99], // sill line, low along the rocker
+        for (const heightFrac of [
+          0.72, // shoulder line, high on the flank
+          0.12, // sill line, low along the rocker
         ] as const) {
           for (const side of [-1, 1]) {
             runs.push(
               spec.body.map((st) => {
                 const y = st.y - st.h + st.h * 2 * heightFrac;
-                return new THREE.Vector3(st.x, y, side * st.w * inset);
+                const [px, py, pz] = flankPoint(
+                  st,
+                  y,
+                  side,
+                  STRIP_RADIUS + 0.004,
+                );
+                return new THREE.Vector3(px, py, pz);
               }),
             );
           }
@@ -521,7 +638,7 @@ export function CarStage({ bodyId, engineId, engineColor, onReady }: Props) {
         for (const pts of runs) {
           const curve = new THREE.CatmullRomCurve3(pts);
           const strip = new THREE.Mesh(
-            new THREE.TubeGeometry(curve, 60, 0.017, 6, false),
+            new THREE.TubeGeometry(curve, 60, STRIP_RADIUS, 6, false),
             stripMat,
           );
           carGroup.add(strip);
@@ -642,7 +759,7 @@ export function CarStage({ bodyId, engineId, engineColor, onReady }: Props) {
         const hotMat = new THREE.MeshStandardMaterial({
           color: col,
           emissive: col,
-          emissiveIntensity: 2.2,
+          emissiveIntensity: HOT_EMISSIVE,
           metalness: 0.3,
           roughness: 0.4,
         });
@@ -931,7 +1048,10 @@ export function CarStage({ bodyId, engineId, engineColor, onReady }: Props) {
           // Close enough to read individual cylinders. The previous framing
           // hung back at showroom distance and the whole point of the dive,
           // seeing the hardware change, was lost at that range.
-          targetPos.set(ex + 0.95, ey + 0.62, ez + 1.35);
+          // Same 2.804 the body shots were scaled by. The dive offsets were
+          // tuned against a 38-degree lens; left alone at 14 they put the
+          // camera so close that the bay fills the frame past legibility.
+          targetPos.set(ex + 2.66, ey + 1.74, ez + 3.79);
           targetAt.set(ex, ey + 0.05, ez);
           if (diveFrames === 0) frameBody(sel.current.bodyId);
         }
@@ -948,7 +1068,7 @@ export function CarStage({ bodyId, engineId, engineColor, onReady }: Props) {
             p.scale.setScalar(s);
           }
           for (const s of spinParts) s.mesh.rotation.z += s.rate * pulseRate;
-          if (hotRef) hotRef.emissiveIntensity = 2.2 + beat * 0.9;
+          if (hotRef) hotRef.emissiveIntensity = HOT_EMISSIVE + beat * 0.9;
         }
 
         // X-ray the bodywork while diving. The engine is genuinely inside
@@ -957,7 +1077,7 @@ export function CarStage({ bodyId, engineId, engineColor, onReady }: Props) {
         // rather than blinking.
         const wantOpacity = diveFrames > 0 ? 0.16 : 1;
         paint.opacity += (wantOpacity - paint.opacity) * (reduced ? 1 : 0.08);
-        glass.opacity = 0.34 * paint.opacity;
+        glass.opacity = GLASS_OPACITY * paint.opacity;
 
         if (reduced) {
           camPos.copy(targetPos);
@@ -975,7 +1095,17 @@ export function CarStage({ bodyId, engineId, engineColor, onReady }: Props) {
           spin += spinVel;
           spinVel *= 0.94; // inertia, so a flick coasts to a stop
         }
-        carGroup.rotation.y = dragged ? spin : Math.sin(t) * 0.16;
+        // The car used to sway +/-9 degrees forever to look alive. That
+        // turns every flaw in the surface toward the viewer in turn, and a
+        // car that rocks on its own springs at rest is not a thing anyone
+        // has seen. Sweep the RIM LIGHT instead: the highlight travels down
+        // the flank, which reads as alive for the same reason and hides
+        // geometry rather than parading it. Costs nothing, no rebuild.
+        carGroup.rotation.y = dragged ? spin : 0;
+        if (!reduced) {
+          const sweep = Math.sin(t * 0.35);
+          rim.position.set(-5 + sweep * 2.6, 2.4, -4 + sweep * 1.1);
+        }
 
         camera.position.copy(camPos);
         camera.lookAt(camAt);
@@ -1003,7 +1133,7 @@ export function CarStage({ bodyId, engineId, engineColor, onReady }: Props) {
         releaseParts([scene], []);
         // Every material created in this effect, not just the obvious four.
         floorTex.dispose();
-        [paint, glass, rubber, wireMat, hubMat, shadowMat, floorMat].forEach((m) =>
+        [paint, glass, rubber, hubMat, shadowMat, floorMat].forEach((m) =>
           m.dispose(),
         );
         renderer.dispose();

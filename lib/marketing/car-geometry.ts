@@ -194,6 +194,70 @@ export function engineAnchor(spec: CarSpec): [number, number, number] {
   return [bx, nearest.y + nearest.h - 0.04, bz];
 }
 
+/**
+ * Half-width of the actual body SURFACE at a given height on a station.
+ *
+ * This is the inverse of the superellipse that `sectionPoints` sweeps, and
+ * its absence was the single most expensive bug in the stage.
+ *
+ * Anything mounted on the flank — the neon runs, the sill strip, the roof
+ * rails, the light bar — needs to know where the skin is at that height.
+ * Without this they were placed against `station.w`, which is the section's
+ * BOUNDING half-width: the widest the body ever gets, reached only at the
+ * vertical centre of the section. Everywhere above or below that line the
+ * real surface is narrower, and by a margin that varies with `squareness`.
+ *
+ * Measured consequence: the shoulder strip sat INSIDE the bodywork at all
+ * 16 stations across all four harnesses (up to 2.1cm deep against a tube of
+ * 1.7cm radius), so it z-fought along its entire length and strobed as the
+ * car turned. The sill strip had the opposite error and floated up to
+ * 13.9cm off the flank. The signature element of the whole design was
+ * broken in both directions at once, for one missing function.
+ *
+ * @param y absolute world height, same space as `Station.y`
+ * @returns half-width at that height, or 0 above/below the section
+ */
+export function surfaceHalfWidth(s: Station, y: number): number {
+  const n = 2 / s.squareness;
+  const dy = (y - s.y) / s.h;
+  if (Math.abs(dy) >= 1) return 0;
+  // y = s.y + h·sign(sin)|sin|^n  ->  |sin| = |dy|^(1/n)
+  const sinT = Math.pow(Math.abs(dy), 1 / n);
+  const cosT = Math.sqrt(Math.max(0, 1 - sinT * sinT));
+  return s.w * Math.pow(cosT, n);
+}
+
+/**
+ * A point sitting `offset` proud of the body surface, on one flank.
+ *
+ * Offsetting straight out in z is only right where the flank is vertical.
+ * At the shoulder the surface has already begun to roll over, so a pure-z
+ * offset re-buries the part on its upper side — which is exactly how the
+ * shoulder strip ended up grazing even where the half-width was correct.
+ * The normal is taken numerically from the superellipse, which is cheap
+ * (three evaluations) and cannot drift out of sync with the curve itself
+ * the way a hand-derived analytic normal would.
+ *
+ * @param side -1 or 1, which flank
+ * @param offset distance proud of the skin; use tube radius + a hair
+ */
+export function flankPoint(
+  s: Station,
+  y: number,
+  side: number,
+  offset: number,
+): [number, number, number] {
+  const eps = 1e-3;
+  const z0 = surfaceHalfWidth(s, y);
+  const dzdy =
+    (surfaceHalfWidth(s, y + eps) - surfaceHalfWidth(s, y - eps)) / (2 * eps);
+  // Outward normal of the curve z(y), normalised.
+  const len = Math.hypot(1, dzdy) || 1;
+  const ny = -dzdy / len;
+  const nz = 1 / len;
+  return [s.x, y + ny * offset, side * (z0 + nz * offset)];
+}
+
 export const CAR_SPECS: Record<string, CarSpec> = {
   bravo: BRAVO,
   atlas: ATLAS,
@@ -219,8 +283,15 @@ export const BODY_SHOTS: Record<string, { pos: [number, number, number]; at: [nu
   // (0.72 / 0.58 / 0.58 with a -0.2 x-offset on Maven), so switching
   // harness nudged the car off-centre in the frame and the whole stage
   // read as slightly crooked. Distances vary; the target does not.
-  bravo: { pos: [4.6, 2.15, 4.6], at: [0, 0.62, 0] },
-  atlas: { pos: [5.4, 1.05, 3.4], at: [0, 0.62, 0] },
-  maven: { pos: [-4.4, 1.55, 4.7], at: [0, 0.62, 0] },
-  custom: { pos: [0.0, 4.2, 5.4], at: [0, 0.62, 0] },
+  // Distances are ~2.8x what they were, which is exactly the factor that
+  // keeps framing identical when the lens goes from 38 degrees to 14. The
+  // heights are NOT a rescale — they are a correction. Every shot used to
+  // sit above the car's shoulder looking down at it, and `custom` was at
+  // y=4.2 almost directly overhead, which flattens a car into a floorplan.
+  // A car is photographed from near its own beltline; that is what makes
+  // the roofline read against the background instead of against the floor.
+  bravo: { pos: [13.25, 1.05, 13.25], at: [0, 0.62, 0] }, // front 3/4, long roof
+  atlas: { pos: [15.18, 0.8, 9.56], at: [0, 0.62, 0] }, // low + frontal, planted
+  maven: { pos: [-12.47, 0.88, 13.31], at: [0, 0.62, 0] }, // rear 3/4 over the hips
+  custom: { pos: [6.21, 0.85, 17.07], at: [0, 0.62, 0] }, // near-profile, blueprint
 };
