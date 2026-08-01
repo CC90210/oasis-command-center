@@ -89,7 +89,7 @@ export default function MarketingLayout({
       <Ambient />
       <a
         href="#main"
-        className="sr-only focus:not-sr-only focus:fixed focus:left-4 focus:top-4 focus:z-[100] focus:rounded focus:bg-signal focus:px-4 focus:py-2 focus:font-data focus:text-sm focus:font-medium focus:text-ops-void"
+        className="m-skip rounded-md bg-signal px-4 py-2 text-sm font-semibold text-ops-void"
       >
         Skip to content
       </a>

@@ -195,8 +195,13 @@ export const CAR_SPECS: Record<string, CarSpec> = {
  * [position, lookAt]
  */
 export const BODY_SHOTS: Record<string, { pos: [number, number, number]; at: [number, number, number] }> = {
-  bravo: { pos: [4.1, 2.1, 4.4], at: [0, 0.72, 0] },
-  atlas: { pos: [5.3, 0.78, 2.6], at: [0, 0.58, 0] },
-  maven: { pos: [-3.8, 1.3, 4.6], at: [-0.2, 0.58, 0] },
-  custom: { pos: [0.3, 4.3, 5.0], at: [0, 0.5, 0] },
+  // Every shot looks at the SAME point: the car's own centre of mass at
+  // [0, 0.62, 0]. Previously each body aimed somewhere slightly different
+  // (0.72 / 0.58 / 0.58 with a -0.2 x-offset on Maven), so switching
+  // harness nudged the car off-centre in the frame and the whole stage
+  // read as slightly crooked. Distances vary; the target does not.
+  bravo: { pos: [4.6, 2.15, 4.6], at: [0, 0.62, 0] },
+  atlas: { pos: [5.4, 1.05, 3.4], at: [0, 0.62, 0] },
+  maven: { pos: [-4.4, 1.55, 4.7], at: [0, 0.62, 0] },
+  custom: { pos: [0.0, 4.2, 5.4], at: [0, 0.62, 0] },
 };

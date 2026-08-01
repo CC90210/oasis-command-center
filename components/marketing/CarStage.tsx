@@ -188,8 +188,11 @@ export function CarStage({ bodyId, engineId, engineColor, onReady }: Props) {
       });
       const shadow = new THREE.Mesh(new THREE.CircleGeometry(2.6, 48), shadowMat);
       shadow.rotation.x = -Math.PI / 2;
-      shadow.position.y = 0.002;
-      shadow.scale.set(1, 0.42, 1);
+      shadow.position.set(0, 0.002, 0);
+      // Elliptical is right for a shadow — a car is longer than it is wide —
+      // but it must be centred on the origin and scaled along the car's own
+      // length axis, which after the -90° X rotation is local X.
+      shadow.scale.set(1, 0.45, 1);
       scene.add(shadow);
 
       // Wet floor. The reference sits the car on a dark reflective surface,
@@ -204,10 +207,13 @@ export function CarStage({ bodyId, engineId, engineColor, onReady }: Props) {
         blending: THREE.AdditiveBlending,
         depthWrite: false,
       });
-      const floor = new THREE.Mesh(new THREE.CircleGeometry(4.2, 56), floorMat);
+      // Circular and centred on the origin, so the pool stays symmetrical
+      // under the car from any camera angle. The previous ellipse (scaled
+      // 0.55 on one axis) read as a tilted, off-centre platform because its
+      // long axis never lined up with wherever the camera happened to be.
+      const floor = new THREE.Mesh(new THREE.CircleGeometry(3.4, 64), floorMat);
       floor.rotation.x = -Math.PI / 2;
-      floor.position.y = 0.001;
-      floor.scale.set(1, 0.55, 1);
+      floor.position.set(0, 0.001, 0);
       scene.add(floor);
 
       // Dark metallic, but light enough to hold a highlight. At the near-
@@ -504,15 +510,38 @@ export function CarStage({ bodyId, engineId, engineColor, onReady }: Props) {
        */
       let engineParts: ThreeNS.Object3D[] = [];
       let engineMats: ThreeNS.Material[] = [];
+      // Live bits the animation loop drives: the reactor breathes, the
+      // containment rings counter-rotate. Rebuilt with the engine.
+      let pulseParts: ThreeNS.Object3D[] = [];
+      let spinParts: { mesh: ThreeNS.Object3D; rate: number }[] = [];
+      // Pulse rate scales with cylinder count, so a V12 idles faster than
+      // a four and the electric pack barely breathes at all.
+      let pulseRate = 1;
+      let hotRef: ThreeNS.MeshStandardMaterial | null = null;
 
       function buildEngine(engineId: string, carSpec: (typeof CAR_SPECS)[string]) {
         releaseParts(engineParts, engineMats, carGroup);
         engineParts = [];
         engineMats = [];
+        pulseParts = [];
+        spinParts = [];
 
         const eng = ENGINES.find((e) => e.id === engineId) ?? ENGINES[0];
-        const [bx, by, bz] = carSpec.engineBay;
+        const [bx, , bz] = carSpec.engineBay;
         const col = new THREE.Color(eng.glow);
+
+        // EXPOSED bay, per CC. The stored engineBay height sits inside the
+        // bodywork, which is where an engine really lives and also where
+        // nobody can see it — the same "renders but is invisible" trap the
+        // rear light bar fell into. So the deck height is derived from the
+        // nearest body station and the hardware is seated just above it,
+        // like a hypercar with an open engine cover. The camera dive still
+        // x-rays the panels, but the core is on show at all times.
+        const nearest = carSpec.body.reduce((best, st) =>
+          Math.abs(st.x - bx) < Math.abs(best.x - bx) ? st : best,
+        );
+        const deckY = nearest.y + nearest.h;
+        const by = deckY - 0.04;
 
         const blockMat = new THREE.MeshStandardMaterial({
           color: 0x14181f,
@@ -527,6 +556,8 @@ export function CarStage({ bodyId, engineId, engineColor, onReady }: Props) {
           roughness: 0.4,
         });
         engineMats.push(blockMat, hotMat);
+        hotRef = hotMat;
+        pulseRate = eng.layout === "electric" ? 0.6 : 1 + eng.cylinders * 0.16;
 
         const add = (m: ThreeNS.Object3D) => {
           carGroup.add(m);
@@ -577,6 +608,78 @@ export function CarStage({ bodyId, engineId, engineColor, onReady }: Props) {
             }
           }
         }
+
+        // ── Core reactor ────────────────────────────────────────────
+        // The centrepiece. Its size, ring count and pulse rate all come
+        // from the engine, so a twelve-cylinder core is visibly a bigger,
+        // faster-breathing machine than a four. Tracked on `pulseParts` so
+        // the animation loop can drive it per frame.
+        const coreScale = 0.55 + eng.cylinders * 0.022;
+        const core = new THREE.Mesh(
+          new THREE.IcosahedronGeometry(0.14 * coreScale, 1),
+          hotMat,
+        );
+        core.position.set(bx, by + 0.02, bz);
+        add(core);
+        pulseParts.push(core);
+
+        // Containment rings around the core. More cylinders, more rings.
+        const ringCount = eng.layout === "electric" ? 1 : Math.max(2, Math.round(eng.cylinders / 3));
+        for (let i = 0; i < ringCount; i++) {
+          const ring = new THREE.Mesh(
+            new THREE.TorusGeometry(0.2 * coreScale + i * 0.05, 0.012, 8, 30),
+            hotMat,
+          );
+          ring.position.copy(core.position);
+          ring.rotation.x = Math.PI / 2;
+          ring.rotation.z = i * 0.5;
+          add(ring);
+          spinParts.push({ mesh: ring, rate: (i % 2 ? -1 : 1) * (0.004 + i * 0.002) });
+        }
+
+        // Manifold pipes running from the core out toward the tail. These
+        // are the "energy conduits": count follows the cylinder count, so
+        // the plumbing genuinely thickens with the engine.
+        const conduits = eng.layout === "electric" ? 2 : Math.min(6, eng.cylinders);
+        for (let i = 0; i < conduits; i++) {
+          const a = (i / conduits) * Math.PI * 2;
+          const path = new THREE.CatmullRomCurve3([
+            new THREE.Vector3(bx, by + 0.02, bz),
+            new THREE.Vector3(
+              bx - 0.22,
+              by + 0.06 + Math.sin(a) * 0.1,
+              bz + Math.cos(a) * 0.16,
+            ),
+            new THREE.Vector3(
+              bx - 0.5,
+              by - 0.02 + Math.sin(a) * 0.06,
+              bz + Math.cos(a) * 0.22,
+            ),
+          ]);
+          const conduit = new THREE.Mesh(
+            new THREE.TubeGeometry(path, 18, 0.018, 6, false),
+            hotMat,
+          );
+          add(conduit);
+        }
+
+        // Cooling coils: a helix wrapped around the bay.
+        const coilPts: ThreeNS.Vector3[] = [];
+        for (let i = 0; i <= 40; i++) {
+          const a = (i / 40) * Math.PI * 6;
+          coilPts.push(
+            new THREE.Vector3(
+              bx + 0.34 - (i / 40) * 0.6,
+              by + 0.06 + Math.sin(a) * 0.09,
+              bz + Math.cos(a) * 0.14,
+            ),
+          );
+        }
+        const coil = new THREE.Mesh(
+          new THREE.TubeGeometry(new THREE.CatmullRomCurve3(coilPts), 60, 0.009, 5, false),
+          blockMat,
+        );
+        add(coil);
 
         // Exhaust tips in the rear valance. Small and shallow: at 0.055
         // radius and 0.16 long they read as a stack of orange blocks bolted
@@ -724,6 +827,21 @@ export function CarStage({ bodyId, engineId, engineColor, onReady }: Props) {
           targetPos.set(ex + 0.95, ey + 0.62, ez + 1.35);
           targetAt.set(ex, ey + 0.05, ez);
           if (diveFrames === 0) frameBody(sel.current.bodyId);
+        }
+
+        // The engine runs. Reactor breathes, containment rings counter-
+        // rotate, emissive intensity throbs — all at a rate set by the
+        // selected engine, so a V12 is visibly busier than a four and the
+        // battery pack is nearly still. This is what makes the swap read as
+        // a different MACHINE rather than a different colour.
+        if (!reduced) {
+          const beat = Math.sin(t * pulseRate * 2.4);
+          for (const p of pulseParts) {
+            const s = 1 + beat * 0.09;
+            p.scale.setScalar(s);
+          }
+          for (const s of spinParts) s.mesh.rotation.z += s.rate * pulseRate;
+          if (hotRef) hotRef.emissiveIntensity = 2.2 + beat * 0.9;
         }
 
         // X-ray the bodywork while diving. The engine is genuinely inside

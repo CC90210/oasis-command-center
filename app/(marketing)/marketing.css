@@ -183,9 +183,30 @@
 }
 
 /* Marketing content rides above it. */
-.marketing > *:not(.m-ambient) {
+.marketing > *:not(.m-ambient):not(.m-skip) {
   position: relative;
   z-index: 1;
+}
+
+/* ── Skip link ─────────────────────────────────────────────────────────
+   Hidden by transform, NOT by Tailwind's sr-only.
+   sr-only hides an element by shrinking it to 1px and clipping, which only
+   works while it is position:absolute. The rule above set position:relative
+   on every direct child of .marketing — including this link — which killed
+   the clip and left "Skip to content" sitting in normal flow at the top of
+   every page. A transform-based hide cannot be broken that way, because it
+   does not care what the position value is. */
+.m-skip {
+  position: fixed;
+  top: 0.75rem;
+  left: 0.75rem;
+  z-index: 100;
+  transform: translateY(-250%);
+  transition: transform 0.18s ease-out;
+}
+
+.m-skip:focus {
+  transform: translateY(0);
 }
 
 .m-aurora {
