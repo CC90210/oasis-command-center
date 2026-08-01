@@ -35,6 +35,18 @@ export type Hotspot = {
    * cropped to a wheel. One shared distance made the engine unreadable.
    */
   frame: number;
+  /**
+   * Direction the camera approaches from, in car space. Normalised on use.
+   *
+   * Per-callout because one shared direction cannot work: the engine bay
+   * sits 20cm from the front axle on three of the four bodies, and a wheel
+   * is 90cm across, so a side-on approach at engine framing puts a tyre
+   * squarely between the lens and the subject. An engine is photographed
+   * from ABOVE for exactly this reason. The others each want their own
+   * angle too — a platform claim wants a low hero profile, a tail wants to
+   * be below the diffuser looking up.
+   */
+  dir: [number, number, number];
 };
 
 export const HOTSPOTS: Hotspot[] = [
@@ -51,6 +63,7 @@ export const HOTSPOTS: Hotspot[] = [
       "Add a seat when you need one, not a headcount",
     ],
     anchor: "cockpit",
+    dir: [0.52, 0.68, 0.52],
     frame: 2.4,
   },
   {
@@ -66,6 +79,7 @@ export const HOTSPOTS: Hotspot[] = [
       "Never locked to one vendor's pricing",
     ],
     anchor: "engine",
+    dir: [0.34, 0.86, 0.38],
     frame: 1.25,
   },
   {
@@ -81,6 +95,7 @@ export const HOTSPOTS: Hotspot[] = [
       "Your data, your accounts, never pooled",
     ],
     anchor: "chassis",
+    dir: [0.66, 0.20, 0.72],
     frame: 4.2,
   },
   {
@@ -96,6 +111,7 @@ export const HOTSPOTS: Hotspot[] = [
       "Hand it to your accountant or your lawyer",
     ],
     anchor: "tail",
+    dir: [-0.72, 0.16, 0.68],
     frame: 2.2,
   },
 ];

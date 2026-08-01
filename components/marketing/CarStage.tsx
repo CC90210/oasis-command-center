@@ -17,6 +17,7 @@ import {
   DIVE_OFFSET,
   FOCUS_DIR,
   FOCUS_FRAME_HEIGHT,
+  LAUNCH,
   LOFT_RINGS,
   MOUNT,
   type Station,
@@ -84,6 +85,10 @@ type Props = {
   ) => void;
   /** Which hotspot the camera should push in on, or null to sit back. */
   focus?: string | null;
+  /** Flips true to run the ignition and drive-away sequence. */
+  launch?: boolean;
+  /** Fires when the car has left frame, so the caller can navigate. */
+  onLaunchComplete?: () => void;
 };
 
 /**
@@ -124,6 +129,8 @@ export function CarStage({
   onReady,
   onHotspots,
   focus,
+  launch,
+  onLaunchComplete,
 }: Props) {
   const mountRef = useRef<HTMLDivElement>(null);
   const readyRef = useRef(onReady);
@@ -133,6 +140,10 @@ export function CarStage({
   // Read inside the loop so changing focus never tears down the scene.
   const focusRef = useRef<string | null>(focus ?? null);
   focusRef.current = focus ?? null;
+  const launchRef = useRef(false);
+  launchRef.current = !!launch;
+  const launchDoneRef = useRef(onLaunchComplete);
+  launchDoneRef.current = onLaunchComplete;
   // Latest selection, readable from inside the animation loop without
   // tearing it down and rebuilding on every click.
   const sel = useRef({ bodyId, engineId, engineColor, dirtyBody: true, dirtyEngine: false });
@@ -594,6 +605,11 @@ export function CarStage({
         releaseParts(parts, perBuildMats, carGroup);
         parts = [];
         perBuildMats = [];
+        // Cleared with the body it belongs to. Left dangling it would point
+        // at a disposed mesh from the previous harness and the loop would
+        // keep driving geometry that is no longer in the scene.
+        aeroFlap = null;
+        wheelSpinners = [];
 
         const spec = CAR_SPECS[id] ?? CAR_SPECS.bravo;
 
@@ -720,6 +736,7 @@ export function CarStage({
             tyre.position.set(axle.x, axle.radius, side * hubZ);
             carGroup.add(tyre);
             parts.push(tyre);
+            wheelSpinners.push(tyre);
 
             // FENDER. A half-torus arcing over the top of the wheel,
             // radius = tyre + clearance, sitting in the tyre's own plane.
@@ -1016,6 +1033,11 @@ export function CarStage({
             el.rotation.z = tilt;
             carGroup.add(el);
             parts.push(el);
+            // ACTIVE aero: the upper element is the one that moves. It
+            // sits near-flat at rest and pitches up under load, which is
+            // the whole reason the word "active" is on it — a wing that
+            // never changes angle is just a wing.
+            if (i === 1) aeroFlap = { mesh: el, base: tilt };
           }
           for (const side of [-1, 1]) {
             const plate = new THREE.Mesh(
@@ -1078,6 +1100,18 @@ export function CarStage({
       // Live bits the animation loop drives: the reactor breathes, the
       // containment rings counter-rotate. Rebuilt with the engine.
       let pulseParts: ThreeNS.Object3D[] = [];
+      /**
+       * Charge packets that travel ALONG a conduit rather than sitting on
+       * it. Each carries the curve it rides and its offset around it, so
+       * the loop advances `t` and reads a position off the curve — energy
+       * moving through the engine instead of parts that merely glow.
+       */
+      let flowParts: {
+        mesh: ThreeNS.Object3D;
+        curve: ThreeNS.CatmullRomCurve3;
+        offset: number;
+        speed: number;
+      }[] = [];
       // `axis` is the part's OWN spin axis. Rotating everything on z was
       // fine while the only spinning parts were rings already lying in the
       // xy-plane, but a pulley or a turbo has been rotated onto another
@@ -1091,6 +1125,16 @@ export function CarStage({
       // Pulse rate scales with cylinder count, so a V12 idles faster than
       // a four and the electric pack barely breathes at all.
       let pulseRate = 1;
+      /** The moving element of an active-aero wing, if this body has one. */
+      let aeroFlap: { mesh: ThreeNS.Object3D; base: number } | null = null;
+      /**
+       * Launch sequence progress, in frames. 0 = idle, >0 = running,
+       * -1 = finished and latched so it cannot fire twice.
+       */
+      let launchFrame = 0;
+      let wheelSpin = 0;
+      /** Wheel meshes, turned during the launch. */
+      let wheelSpinners: ThreeNS.Object3D[] = [];
       let hotRef: ThreeNS.MeshStandardMaterial | null = null;
 
       function buildEngine(engineId: string, carSpec: (typeof CAR_SPECS)[string]) {
@@ -1098,6 +1142,7 @@ export function CarStage({
         engineParts = [];
         engineMats = [];
         pulseParts = [];
+        flowParts = [];
         spinParts = [];
 
         const eng = ENGINES.find((e) => e.id === engineId) ?? ENGINES[0];
@@ -1334,23 +1379,38 @@ export function CarStage({
           // Ignition loom: one lead per cylinder, fanning out of the ECU
           // and arcing over to each cam cover. This is the "wiring" the
           // bay was missing entirely.
+          //
+          // Each lead also carries a charge packet that RUNS DOWN IT, so
+          // the loom reads as live rather than as decorative cable. The
+          // packets are offset around the firing order, which is what
+          // makes a V12 look busier than an inline four without changing
+          // anything but the cylinder count.
           for (const [i, top] of cylTops.entries()) {
             const lift = 0.1 + (i % 3) * 0.022;
-            add(
-              tube(
-                [
-                  new THREE.Vector3(ecuX, by + 0.14, bz - 0.2),
-                  new THREE.Vector3(
-                    (ecuX + top.x) / 2,
-                    by + 0.16 + lift,
-                    (bz - 0.2 + top.z) / 2,
-                  ),
-                  new THREE.Vector3(top.x, top.y + 0.05, top.z),
-                ],
-                0.011,
-                wireMat,
+            const path = [
+              new THREE.Vector3(ecuX, by + 0.14, bz - 0.2),
+              new THREE.Vector3(
+                (ecuX + top.x) / 2,
+                by + 0.16 + lift,
+                (bz - 0.2 + top.z) / 2,
               ),
+              new THREE.Vector3(top.x, top.y + 0.05, top.z),
+            ];
+            const curve = new THREE.CatmullRomCurve3(path);
+            add(tube(path, 0.011, wireMat));
+
+            const packet = new THREE.Mesh(
+              new THREE.SphereGeometry(0.018, 8, 6),
+              hotMat,
             );
+            curve.getPointAt(0, packet.position);
+            add(packet);
+            flowParts.push({
+              mesh: packet,
+              curve,
+              offset: i / cylTops.length,
+              speed: 0.55,
+            });
           }
 
           // Intake plenum with a runner to every cylinder.
@@ -1723,6 +1783,25 @@ export function CarStage({
           for (const s of spinParts) {
             s.mesh.rotation[s.axis ?? "z"] += s.rate * pulseRate;
           }
+          // Active aero deploys while the engine is under load — during a
+          // dive or a hotspot focus — and settles back at rest.
+          if (aeroFlap) {
+            const deployed = diveFrames > 0 || !!focusRef.current;
+            const want = aeroFlap.base + (deployed ? -0.5 : 0);
+            aeroFlap.mesh.rotation.z +=
+              (want - aeroFlap.mesh.rotation.z) * 0.08;
+          }
+
+          // Charge packets travelling the loom. Wrapped to 0..1 so each
+          // one runs ECU -> cylinder, repeatedly, at the engine's own rate.
+          for (const f of flowParts) {
+            const u = (t * f.speed * pulseRate + f.offset) % 1;
+            f.curve.getPointAt(u, f.mesh.position);
+            // Fade in and out at the ends so packets appear to enter and
+            // leave the lead rather than teleporting back to its start.
+            const fade = Math.sin(u * Math.PI);
+            f.mesh.scale.setScalar(0.5 + fade * 0.9);
+          }
           if (hotRef) hotRef.emissiveIntensity = HOT_EMISSIVE + beat * 0.9;
         }
 
@@ -1739,6 +1818,52 @@ export function CarStage({
         // Overrides the body framing but never the engine dive, which is
         // already a deliberate camera move and would otherwise be fought
         // for its whole duration.
+        // ── IGNITE & DEPLOY ──────────────────────────────────────────
+        // Three stages off one frame counter rather than three timers:
+        // a timer that fires while the tab is backgrounded desynchronises
+        // from the render loop and the car arrives somewhere the camera
+        // is not. Driving everything from the frame count keeps the
+        // sequence and the picture on the same clock by construction.
+        if (launchRef.current && launchFrame === 0) launchFrame = 1;
+        if (launchFrame > 0) {
+          launchFrame++;
+          const [ex, ey, ez] = engineAnchor(spec);
+
+          if (launchFrame < LAUNCH.ignite) {
+            // Stage 1 — ignition. The bay flares, the accent lines come
+            // up, and the wheels start turning before anything moves.
+            const k = launchFrame / LAUNCH.ignite;
+            if (hotRef) hotRef.emissiveIntensity = HOT_EMISSIVE + k * 9;
+            engineLight.intensity = 3.2 + k * 5;
+            targetPos.set(ex + 3.4, ey + 1.1, ez + 4.2);
+            targetAt.set(ex, ey, ez);
+            wheelSpin += k * 0.5;
+          } else if (launchFrame < LAUNCH.track) {
+            // Stage 2 — drop to a low, wide tracking shot behind the car.
+            const k =
+              (launchFrame - LAUNCH.ignite) / (LAUNCH.track - LAUNCH.ignite);
+            targetPos.set(-9 - k * 3, 0.75, 3.2);
+            targetAt.set(0, 0.6, 0);
+            wheelSpin += 0.5 + k * 0.8;
+          } else {
+            // Stage 3 — away. The car accelerates out of the studio; the
+            // camera holds, so it leaves frame rather than being followed.
+            const k =
+              (launchFrame - LAUNCH.track) / (LAUNCH.away - LAUNCH.track);
+            carGroup.position.x = k * k * 46;
+            carGroup.position.y = k * k * 1.2;
+            wheelSpin += 1.3;
+            engineLight.intensity = 6.4 * (1 - k);
+            if (launchFrame >= LAUNCH.away) {
+              launchFrame = -1; // latched: fire once, never re-enter
+              launchDoneRef.current?.();
+            }
+          }
+
+          // Wheels turn for the whole sequence.
+          for (const w of wheelSpinners) w.rotation.z = -wheelSpin;
+        }
+
         const wantFocus = focusRef.current;
         // Releasing focus has to hand the camera BACK. Without this the
         // target vectors keep whatever the last callout set, so closing a
@@ -1748,7 +1873,10 @@ export function CarStage({
           if (!wantFocus && diveFrames === 0) frameBody(sel.current.bodyId);
           lastFocus = wantFocus;
         }
-        if (wantFocus && diveFrames === 0) {
+        // The launch owns the camera outright while it runs. Without this
+        // the focus block below would recompute targetPos every frame and
+        // drag the camera back onto a hotspot mid-drive-away.
+        if (wantFocus && diveFrames === 0 && launchFrame === 0) {
           const spot = HOTSPOTS.find((h) => h.id === wantFocus);
           if (spot) {
             const [ax, ay, az] = hotspotAnchor(spec, spot.anchor);
@@ -1764,11 +1892,19 @@ export function CarStage({
             const dist =
               (spot.frame ?? FOCUS_FRAME_HEIGHT) /
               (2 * Math.tan((CAMERA_FOV * Math.PI) / 360));
+            const d = spot.dir ?? FOCUS_DIR;
+            const dl = Math.hypot(d[0], d[1], d[2]) || 1;
             targetPos.set(
-              ax + FOCUS_DIR[0] * dist * dir,
-              ay + FOCUS_DIR[1] * dist,
-              az + FOCUS_DIR[2] * dist,
+              ax + (d[0] / dl) * dist * dir,
+              ay + (d[1] / dl) * dist,
+              az + (d[2] / dl) * dist,
             );
+            // Floor the camera above the top of the tyres. Several shots
+            // are deliberately low, and a low shot that keeps descending
+            // as the framing tightens ends up inside a wheel — geometry
+            // the lens then renders from the inside out.
+            const wheelTop = Math.max(...spec.axles.map((a) => a.radius)) + 0.12;
+            if (targetPos.y < wheelTop) targetPos.y = wheelTop;
             // Aim a little below the anchor. Looking dead-on at a point
             // near the roofline pushes the wheels out of the bottom of the
             // frame, and a car cropped at the tyres reads as a mistake
@@ -1808,7 +1944,9 @@ export function CarStage({
         // has seen. Sweep the RIM LIGHT instead: the highlight travels down
         // the flank, which reads as alive for the same reason and hides
         // geometry rather than parading it. Costs nothing, no rebuild.
-        carGroup.rotation.y = dragged ? spin : 0;
+        // Drag is suspended during the launch — the car is leaving, and
+        // letting someone spin it mid-departure looks like a bug.
+        if (launchFrame === 0) carGroup.rotation.y = dragged ? spin : 0;
         if (!reduced) {
           const sweep = Math.sin(t * 0.35);
           rim.position.set(-5 + sweep * 2.6, 2.4, -4 + sweep * 1.1);

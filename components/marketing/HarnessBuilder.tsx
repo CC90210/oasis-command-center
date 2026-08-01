@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { BODIES, ENGINES, PLATFORM } from "@/lib/marketing/harness";
 import { HOTSPOTS } from "@/lib/marketing/hotspots";
+import { AUDIT_FUNNEL } from "@/lib/marketing/routes";
 import { CarStage } from "@/components/marketing/CarStage";
 
 type Pin = { id: string; x: number; y: number; visible: boolean };
@@ -37,6 +38,7 @@ export function HarnessBuilder() {
   // loop every frame.
   const [pins, setPins] = useState<Pin[]>([]);
   const [focus, setFocus] = useState<string | null>(null);
+  const [launching, setLaunching] = useState(false);
   const activeSpot = HOTSPOTS.find((h) => h.id === focus) ?? null;
 
   // setPins is called on every animation frame, so it must be referentially
@@ -187,6 +189,20 @@ export function HarnessBuilder() {
             onReady={() => setStageReady(true)}
             onHotspots={handlePins}
             focus={focus}
+            launch={launching}
+            onLaunchComplete={() => {
+              window.location.href = AUDIT_FUNNEL.path;
+            }}
+          />
+
+          {/* Fade to black as the car leaves, so the hand-off to the funnel
+              is one continuous move rather than a hard cut from a 3D stage
+              to a form. Pointer-events off: it must never eat a click. */}
+          <div
+            aria-hidden="true"
+            className={`pointer-events-none absolute inset-0 z-40 bg-ops-void transition-opacity duration-700 ${
+              launching ? "opacity-100 delay-[1600ms]" : "opacity-0"
+            }`}
           />
 
           {/* Spatial callouts. Positioned from the projected 3D anchors, so
@@ -307,6 +323,28 @@ export function HarnessBuilder() {
       </div>
 
       {/* ── The constant ────────────────────────────────────────────── */}
+      {/* ── Launch ──────────────────────────────────────────────────
+          The payoff for having configured something. You picked a harness
+          and an engine; this starts it and takes you to the funnel. */}
+      <div className="border-t border-ops-line bg-ops-void/60 px-6 py-7 text-center sm:px-8">
+        <button
+          type="button"
+          onClick={() => setLaunching(true)}
+          disabled={launching}
+          className="group relative inline-flex items-center gap-3 border border-signal bg-signal/10 px-7 py-3.5 font-data text-[12px] uppercase tracking-[0.2em] text-fg transition-all duration-200 hover:bg-signal/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-signal disabled:cursor-wait"
+        >
+          <span
+            aria-hidden="true"
+            className={`h-1.5 w-1.5 rounded-full bg-signal ${launching ? "animate-ping" : ""}`}
+          />
+          {launching ? "Igniting…" : "Ignite & deploy to OASIS"}
+        </button>
+        <p className="mx-auto mt-3 max-w-md text-[13px] leading-relaxed text-fg-dim">
+          Start this build and tell us about your business. Four questions,
+          about two minutes.
+        </p>
+      </div>
+
       <div className="border-t border-ops-line bg-ops-void/60 p-6 sm:p-8">
         <h3 className="font-display text-base font-bold tracking-tight text-fg">
           The platform. What doesn&rsquo;t change when you swap either one

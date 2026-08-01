@@ -477,6 +477,19 @@ export const FOCUS_FRAME_HEIGHT = 3.2;
 export const FOCUS_DIR: [number, number, number] = [0.571, 0.253, 0.769];
 
 /**
+ * Launch sequence stage boundaries, in FRAMES.
+ *
+ * Frames rather than milliseconds on purpose: a setTimeout keeps running
+ * while the tab is backgrounded but the render loop does not, so a
+ * time-driven sequence desynchronises from the picture and the car ends up
+ * somewhere the camera is not pointing. Counting frames keeps the motion
+ * and the camera on one clock by construction.
+ *
+ * At 60fps: ignition ~1.2s, tracking shot ~1.0s, drive-away ~1.3s.
+ */
+export const LAUNCH = { ignite: 72, track: 132, away: 210 } as const;
+
+/**
  * What DIVE_OFFSET was before the lens change, when the stage ran at
  * LEGACY_FOV. Kept as a fixed historical value, not derived — it is the
  * anchor the framing assertion compares against. Deriving the expected
