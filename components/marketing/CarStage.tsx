@@ -52,6 +52,29 @@ type Props = {
   onReady?: () => void;
 };
 
+/**
+ * Detach objects from their parent and free every GPU resource they own.
+ *
+ * Extracted because this exact traversal appeared FOUR times — in both
+ * rebuild paths and twice in teardown — and duplicated cleanup is precisely
+ * where the wheel-hub material leak hid last time. One helper means a newly
+ * added kind of part can only be forgotten in one place instead of four.
+ */
+function releaseParts(
+  objs: ThreeNS.Object3D[],
+  mats: ThreeNS.Material[],
+  parent?: ThreeNS.Object3D,
+) {
+  for (const o of objs) {
+    parent?.remove(o);
+    o.traverse((child: ThreeNS.Object3D) => {
+      const mesh = child as ThreeNS.Mesh;
+      if (mesh.geometry) mesh.geometry.dispose();
+    });
+  }
+  for (const m of mats) m.dispose();
+}
+
 /** One closed cross-section outline as 3D points. */
 function sectionPoints(s: Station, segments: number) {
   const pts: [number, number, number][] = [];
@@ -261,15 +284,8 @@ export function CarStage({ bodyId, engineId, engineColor, onReady }: Props) {
       let perBuildMats: ThreeNS.Material[] = [];
 
       function buildCar(id: string) {
-        for (const p of parts) {
-          carGroup.remove(p);
-          p.traverse((o: ThreeNS.Object3D) => {
-            const m = o as ThreeNS.Mesh;
-            if (m.geometry) m.geometry.dispose();
-          });
-        }
+        releaseParts(parts, perBuildMats, carGroup);
         parts = [];
-        perBuildMats.forEach((m) => m.dispose());
         perBuildMats = [];
 
         const spec = CAR_SPECS[id] ?? CAR_SPECS.bravo;
@@ -408,15 +424,8 @@ export function CarStage({ bodyId, engineId, engineColor, onReady }: Props) {
       let engineMats: ThreeNS.Material[] = [];
 
       function buildEngine(engineId: string, carSpec: (typeof CAR_SPECS)[string]) {
-        for (const p of engineParts) {
-          carGroup.remove(p);
-          p.traverse((o: ThreeNS.Object3D) => {
-            const m = o as ThreeNS.Mesh;
-            if (m.geometry) m.geometry.dispose();
-          });
-        }
+        releaseParts(engineParts, engineMats, carGroup);
         engineParts = [];
-        engineMats.forEach((m) => m.dispose());
         engineMats = [];
 
         const eng = ENGINES.find((e) => e.id === engineId) ?? ENGINES[0];
@@ -678,17 +687,10 @@ export function CarStage({ bodyId, engineId, engineColor, onReady }: Props) {
         canvasEl.removeEventListener("pointermove", onMove);
         canvasEl.removeEventListener("pointerup", onUp);
         canvasEl.removeEventListener("pointercancel", onUp);
-        engineParts.forEach((p) =>
-          p.traverse((o: ThreeNS.Object3D) => {
-            const m = o as ThreeNS.Mesh;
-            if (m.geometry) m.geometry.dispose();
-          }),
-        );
-        [...engineMats, ...perBuildMats].forEach((m) => m.dispose());
-        scene.traverse((o: ThreeNS.Object3D) => {
-          const m = o as ThreeNS.Mesh;
-          if (m.geometry) m.geometry.dispose();
-        });
+        // Per-selection parts first, then everything still hanging off the
+        // scene (car body, wheels, shadow).
+        releaseParts([...parts, ...engineParts], [...perBuildMats, ...engineMats], carGroup);
+        releaseParts([scene], []);
         // Every material created in this effect, not just the obvious four.
         [paint, glass, rubber, wireMat, hubMat, shadowMat].forEach((m) => m.dispose());
         renderer.dispose();
