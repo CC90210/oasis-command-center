@@ -157,14 +157,12 @@ export function CarStage({ bodyId, engineId, engineColor, onReady }: Props) {
       // Contact shadow. Without something under it the car reads as
       // floating in a void; a soft dark ellipse on the ground plane is
       // what tells the eye where the ground is.
-      const shadow = new THREE.Mesh(
-        new THREE.CircleGeometry(2.6, 48),
-        new THREE.MeshBasicMaterial({
-          color: 0x000000,
-          transparent: true,
-          opacity: 0.55,
-        }),
-      );
+      const shadowMat = new THREE.MeshBasicMaterial({
+        color: 0x000000,
+        transparent: true,
+        opacity: 0.55,
+      });
+      const shadow = new THREE.Mesh(new THREE.CircleGeometry(2.6, 48), shadowMat);
       shadow.rotation.x = -Math.PI / 2;
       shadow.position.y = 0.002;
       shadow.scale.set(1, 0.42, 1);
@@ -205,6 +203,18 @@ export function CarStage({ bodyId, engineId, engineColor, onReady }: Props) {
         color: 0x00d4ff,
         transparent: true,
         opacity: 0.09,
+      });
+
+      // Hoisted out of buildCar deliberately. Created in the wheel loop it
+      // allocated four fresh GPU materials on EVERY body swap and disposed
+      // none of them — a leak that grows for as long as someone plays with
+      // the picker. Materials here are shared and disposed once.
+      const hubMat = new THREE.MeshStandardMaterial({
+        color: 0x00d4ff,
+        emissive: 0x00d4ff,
+        emissiveIntensity: 1.4,
+        metalness: 0.4,
+        roughness: 0.3,
       });
 
       /** Loft consecutive cross-sections into a closed surface. */
@@ -288,13 +298,7 @@ export function CarStage({ bodyId, engineId, engineColor, onReady }: Props) {
 
             const hub = new THREE.Mesh(
               new THREE.TorusGeometry(axle.radius * 0.52, 0.035, 8, 28),
-              new THREE.MeshStandardMaterial({
-                color: 0x00d4ff,
-                emissive: 0x00d4ff,
-                emissiveIntensity: 1.4,
-                metalness: 0.4,
-                roughness: 0.3,
-              }),
+              hubMat,
             );
             hub.position.copy(tyre.position);
             hub.position.z += side * (axle.width / 2 + 0.005);
@@ -351,6 +355,11 @@ export function CarStage({ bodyId, engineId, engineColor, onReady }: Props) {
 
       let raf = 0;
       let t = 0;
+      // Declared before tick rather than after it. It worked either way —
+      // the closure only runs once tick() is called — but reading a
+      // variable declared twenty lines below its use is a trap for the
+      // next person.
+      let announced = false;
       const tick = () => {
         raf = requestAnimationFrame(tick);
         if (!visible) return;
@@ -402,7 +411,6 @@ export function CarStage({ bodyId, engineId, engineColor, onReady }: Props) {
           readyRef.current?.();
         }
       };
-      let announced = false;
       tick();
 
       cleanup = () => {
@@ -413,7 +421,8 @@ export function CarStage({ bodyId, engineId, engineColor, onReady }: Props) {
           const m = o as ThreeNS.Mesh;
           if (m.geometry) m.geometry.dispose();
         });
-        [paint, glass, rubber, wireMat].forEach((m) => m.dispose());
+        // Every material created in this effect, not just the obvious four.
+        [paint, glass, rubber, wireMat, hubMat, shadowMat].forEach((m) => m.dispose());
         renderer.dispose();
         if (renderer.domElement.parentNode === mount) {
           mount.removeChild(renderer.domElement);
