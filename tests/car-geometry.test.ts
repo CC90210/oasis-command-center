@@ -39,6 +39,7 @@ import {
   resampleStations,
   runHeight,
   surfaceHalfWidth,
+  wheelTrack,
   type Station,
 } from "../lib/marketing/car-geometry";
 
@@ -267,6 +268,65 @@ for (const [name, spec] of Object.entries(CAR_SPECS)) {
     checks += 4;
   }
   checks++;
+}
+
+// ── Wheels must clear the bodywork, and the fender must cover them ──────
+// Tyres were previously planted against the car's widest point anywhere
+// along its length, so on every harness the outer face sat proud of the
+// widest panel while the flank at wheel height was much narrower — the
+// tyre passed straight through the bodywork. There is no such thing as a
+// subtle version of that defect, but it is invisible from most angles.
+for (const [name, spec] of Object.entries(CAR_SPECS)) {
+  for (const axle of spec.axles) {
+    const { flankAtHub, hubZ, outer, archRadius } = wheelTrack(spec, axle);
+
+    // The wheel must not be swallowed by the body.
+    assert.ok(
+      outer >= flankAtHub,
+      `${name} axle x=${axle.x}: tyre outer face at ${outer.toFixed(3)} is ` +
+        `inboard of the flank at ${flankAtHub.toFixed(3)} — wheel is inside the car`,
+    );
+
+    // The fender must be larger than the tyre or it cuts through the tread.
+    assert.ok(
+      archRadius > axle.radius,
+      `${name} axle x=${axle.x}: fender radius ${archRadius.toFixed(3)} does not ` +
+        `clear tyre radius ${axle.radius.toFixed(3)}`,
+    );
+
+    // The fender rides in the tyre's own plane, so it must actually span it.
+    assert.ok(
+      Math.abs(hubZ - (outer - axle.width / 2)) < 1e-9,
+      `${name} axle x=${axle.x}: hub is not centred under its own fender`,
+    );
+
+    // And the track must stay plausible — a wheel a metre off the flank
+    // technically "clears" but is not a car.
+    assert.ok(
+      outer - flankAtHub < 0.45,
+      `${name} axle x=${axle.x}: track stands ${((outer - flankAtHub) * 100).toFixed(1)}cm ` +
+        `off the flank — the wheel is detached from the body`,
+    );
+    checks += 4;
+  }
+}
+
+// The widebody package must actually widen the track, or it is a label.
+{
+  const wide = Object.values(CAR_SPECS).filter((s) => s.features.wideBody);
+  assert.ok(wide.length > 0, "no body carries the widebody package");
+  for (const spec of wide) {
+    const got = wheelTrack(spec, spec.axles[0]);
+    const narrowed = wheelTrack(
+      { ...spec, features: { ...spec.features, wideBody: false } },
+      spec.axles[0],
+    );
+    assert.ok(
+      got.outer > narrowed.outer,
+      "widebody package does not widen the track",
+    );
+    checks++;
+  }
 }
 
 // ── nearestStation ──────────────────────────────────────────────────────

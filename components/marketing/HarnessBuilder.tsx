@@ -1,8 +1,11 @@
 "use client";
 
-import { useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { BODIES, ENGINES, PLATFORM } from "@/lib/marketing/harness";
+import { HOTSPOTS } from "@/lib/marketing/hotspots";
 import { CarStage } from "@/components/marketing/CarStage";
+
+type Pin = { id: string; x: number; y: number; visible: boolean };
 
 /**
  * The car analogy, made touchable.
@@ -30,6 +33,26 @@ export function HarnessBuilder() {
   const [engineId, setEngineId] = useState(ENGINES[0].id);
   // Flips once WebGL has painted a frame, retiring the SVG fallback.
   const [stageReady, setStageReady] = useState(false);
+  // Screen positions of the spatial callouts, pushed up from the render
+  // loop every frame.
+  const [pins, setPins] = useState<Pin[]>([]);
+  const [focus, setFocus] = useState<string | null>(null);
+  const activeSpot = HOTSPOTS.find((h) => h.id === focus) ?? null;
+
+  // setPins is called on every animation frame, so it must be referentially
+  // stable — an inline arrow would hand CarStage a new function 60x/sec.
+  const handlePins = useCallback((next: Pin[]) => setPins(next), []);
+
+  // Escape closes the callout. Without it a keyboard user who opened a card
+  // can move focus off it but has no way to dismiss it.
+  useEffect(() => {
+    if (!focus) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setFocus(null);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [focus]);
 
   const body = BODIES.find((b) => b.id === bodyId) ?? BODIES[0];
   const engine = ENGINES.find((e) => e.id === engineId) ?? ENGINES[0];
@@ -162,7 +185,91 @@ export function HarnessBuilder() {
             engineId={engine.id}
             engineColor={engine.glow}
             onReady={() => setStageReady(true)}
+            onHotspots={handlePins}
+            focus={focus}
           />
+
+          {/* Spatial callouts. Positioned from the projected 3D anchors, so
+              each pin rides its part of the car as the body turns. Hidden
+              until WebGL has painted — over the SVG fallback they would sit
+              at coordinates that mean nothing. */}
+          {stageReady &&
+            pins.map((p) => {
+              const spot = HOTSPOTS.find((h) => h.id === p.id);
+              if (!spot || !p.visible) return null;
+              const open = focus === p.id;
+              return (
+                <button
+                  key={p.id}
+                  type="button"
+                  onClick={() => setFocus(open ? null : p.id)}
+                  onMouseEnter={() => setFocus(p.id)}
+                  aria-expanded={open}
+                  aria-label={`${spot.kicker}: ${spot.title}`}
+                  className="group absolute z-20 -translate-x-1/2 -translate-y-1/2 focus-visible:outline-none"
+                  style={{ left: p.x, top: p.y }}
+                >
+                  <span
+                    className={`flex h-7 w-7 items-center justify-center rounded-full border font-data text-[10px] tabular-nums backdrop-blur-sm transition-all duration-200 group-focus-visible:ring-2 group-focus-visible:ring-signal ${
+                      open
+                        ? "border-signal bg-signal/25 text-fg"
+                        : "border-signal/50 bg-ops-void/60 text-signal group-hover:border-signal group-hover:bg-signal/20"
+                    }`}
+                  >
+                    {spot.pin}
+                  </span>
+                  {!open && (
+                    <span
+                      aria-hidden="true"
+                      className="pointer-events-none absolute inset-0 animate-ping rounded-full border border-signal/40 [animation-duration:2.6s] motion-reduce:hidden"
+                    />
+                  )}
+                </button>
+              );
+            })}
+
+          {/* Detail card. One at a time; anchored to the panel rather than
+              to the pin so it never runs off the edge of the viewport on a
+              phone. */}
+          {stageReady && activeSpot && (
+            <div className="pointer-events-none absolute inset-x-3 bottom-3 z-30 sm:inset-x-auto sm:left-4 sm:max-w-xs">
+              <div className="pointer-events-auto border border-signal/25 bg-ops-void/80 p-5 shadow-[0_8px_40px_-12px_rgba(0,0,0,0.9)] backdrop-blur-md">
+                <div className="flex items-start justify-between gap-4">
+                  <span className="font-data text-[10px] uppercase tracking-[0.22em] text-signal">
+                    {activeSpot.kicker}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => setFocus(null)}
+                    className="-m-1 p-1 font-data text-[11px] text-fg-faint transition-colors hover:text-fg"
+                    aria-label="Close callout"
+                  >
+                    ESC
+                  </button>
+                </div>
+                <h4 className="mt-2 font-display text-[15px] font-bold tracking-tight text-fg">
+                  {activeSpot.title}
+                </h4>
+                <p className="mt-2 text-[13.5px] leading-relaxed text-fg-dim">
+                  {activeSpot.body}
+                </p>
+                <ul className="mt-3 space-y-1.5">
+                  {activeSpot.points.map((pt) => (
+                    <li
+                      key={pt}
+                      className="flex items-baseline gap-2 text-[12.5px] text-fg-muted"
+                    >
+                      <span
+                        aria-hidden="true"
+                        className="h-px w-2.5 shrink-0 translate-y-[-4px] bg-signal"
+                      />
+                      {pt}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            </div>
+          )}
         </div>
 
         {/* Callouts */}

@@ -10,12 +10,18 @@ import {
   resampleStations,
   runHeight,
   surfaceHalfWidth,
+  hotspotAnchor,
+  wheelTrack,
+  ARCH,
   CAMERA_FOV,
   DIVE_OFFSET,
+  FOCUS_DIR,
+  FOCUS_FRAME_HEIGHT,
   LOFT_RINGS,
   MOUNT,
   type Station,
 } from "@/lib/marketing/car-geometry";
+import { HOTSPOTS } from "@/lib/marketing/hotspots";
 import { ENGINES } from "@/lib/marketing/harness";
 // Types only — erased at compile time, so this does NOT pull three.js into
 // the bundle. The runtime copy arrives via the dynamic import below.
@@ -64,6 +70,20 @@ type Props = {
    *  SVG fallback. Without it both drawings render at once and the flat
    *  outline sits on top of the render. */
   onReady?: () => void;
+  /**
+   * Screen positions of the spatial callouts, recomputed every frame and
+   * handed back so the overlay can be plain DOM.
+   *
+   * This is what drei's <Html> does internally — project a world point
+   * through the camera and drive a CSS transform. Doing it directly avoids
+   * migrating a working raw-three scene onto react-three-fiber (which drei
+   * requires) for the sake of one component.
+   */
+  onHotspots?: (
+    pts: { id: string; x: number; y: number; visible: boolean }[],
+  ) => void;
+  /** Which hotspot the camera should push in on, or null to sit back. */
+  focus?: string | null;
 };
 
 /**
@@ -97,10 +117,22 @@ function releaseParts(
  */
 const HOT_EMISSIVE = 2.2;
 
-export function CarStage({ bodyId, engineId, engineColor, onReady }: Props) {
+export function CarStage({
+  bodyId,
+  engineId,
+  engineColor,
+  onReady,
+  onHotspots,
+  focus,
+}: Props) {
   const mountRef = useRef<HTMLDivElement>(null);
   const readyRef = useRef(onReady);
   readyRef.current = onReady;
+  const hotspotsRef = useRef(onHotspots);
+  hotspotsRef.current = onHotspots;
+  // Read inside the loop so changing focus never tears down the scene.
+  const focusRef = useRef<string | null>(focus ?? null);
+  focusRef.current = focus ?? null;
   // Latest selection, readable from inside the animation loop without
   // tearing it down and rebuilding on every click.
   const sel = useRef({ bodyId, engineId, engineColor, dirtyBody: true, dirtyEngine: false });
@@ -585,19 +617,80 @@ export function CarStage({ bodyId, engineId, engineColor, onReady }: Props) {
         // and subtracted half the tyre width, which buried every wheel
         // inside a body that is itself ~1.05 wide — four tyres completely
         // hidden inside the car.
-        const maxHalfWidth = Math.max(...spec.body.map((s) => s.w));
+        // Track width is derived from the body AT THE AXLE, not from the
+        // car's widest point anywhere along its length. The old code used
+        // the global max, so the tyre's outer face sat proud of the widest
+        // panel — and because the flank is much narrower at wheel-centre
+        // height than at its widest, the tyre cut clean through the
+        // bodywork. Every wheel now sits under an arch that is itself
+        // derived from the local surface.
+        const archMat = new THREE.MeshPhysicalMaterial({
+          color: 0x0a0d12,
+          metalness: 0.5,
+          roughness: 0.4,
+          clearcoat: 1,
+          clearcoatRoughness: 0.06,
+          envMapIntensity: 1.35,
+        });
+        const accentMat = new THREE.MeshStandardMaterial({
+          color: spec.accent,
+          metalness: 0.98,
+          roughness: 0.22,
+          envMapIntensity: 2.4,
+        });
+        perBuildMats.push(archMat, accentMat);
 
         for (const axle of spec.axles) {
+          // Shared with the geometry test, which asserts the tyre clears
+          // the bodywork and the fender covers the tyre.
+          const { flankAtHub, hubZ, archRadius } = wheelTrack(spec, axle);
+
           for (const side of [-1, 1]) {
             const tyre = new THREE.Mesh(
               new THREE.CylinderGeometry(axle.radius, axle.radius, axle.width, 32),
               rubber,
             );
             tyre.rotation.x = Math.PI / 2;
-            // Sit the tyre's outer face just proud of the widest panel.
-            tyre.position.set(axle.x, axle.radius, side * (maxHalfWidth - axle.width * 0.35));
+            tyre.position.set(axle.x, axle.radius, side * hubZ);
             carGroup.add(tyre);
             parts.push(tyre);
+
+            // FENDER. A half-torus arcing over the top of the wheel,
+            // radius = tyre + clearance, sitting in the tyre's own plane.
+            // This is the part that was missing entirely: it gives the
+            // wheel somewhere to live and hides the tyre/body junction.
+            const arch = new THREE.Mesh(
+              new THREE.TorusGeometry(archRadius, ARCH.lip, 10, 28, Math.PI),
+              archMat,
+            );
+            arch.position.set(axle.x, axle.radius, side * (hubZ + 0.01));
+            carGroup.add(arch);
+            parts.push(arch);
+
+            // Inner liner: a dark band bridging arch to body, so you can't
+            // see daylight between the fender and the flank.
+            const liner = new THREE.Mesh(
+              new THREE.CylinderGeometry(
+                archRadius,
+                archRadius,
+                Math.max(0.04, hubZ - flankAtHub + axle.width / 2),
+                24,
+                1,
+                true,
+                0,
+                Math.PI,
+              ),
+              rubber,
+            );
+            liner.rotation.x = Math.PI / 2;
+            liner.rotation.y = Math.PI / 2;
+            liner.position.set(
+              axle.x,
+              axle.radius,
+              side * ((hubZ + flankAtHub - axle.width / 2) / 2 + axle.width / 4),
+            );
+            carGroup.add(liner);
+            parts.push(liner);
 
             // WHEELS.
             //
@@ -836,6 +929,56 @@ export function CarStage({ bodyId, engineId, engineColor, onReady }: Props) {
           }
         }
 
+        if (f.activeAero) {
+          // Two-element spoiler standing off the deck on end plates. Reads
+          // as engineered rather than bolted on, which is the whole point
+          // of the "precision engineering" body.
+          const st = nearestStation(spec.body, rearX + 0.3);
+          const deck = st.y + st.h;
+          const halfW = surfaceHalfWidth(st, deck - st.h * 0.15);
+          for (const [i, [lift, chord, tilt]] of (
+            [
+              [0.16, 0.3, -0.06],
+              [0.34, 0.22, -0.22],
+            ] as const
+          ).entries()) {
+            const el = new THREE.Mesh(
+              new THREE.BoxGeometry(chord, 0.028, halfW * 1.72),
+              i === 1 ? accentMat : paint,
+            );
+            el.position.set(rearX + 0.3, deck + lift, 0);
+            el.rotation.z = tilt;
+            carGroup.add(el);
+            parts.push(el);
+          }
+          for (const side of [-1, 1]) {
+            const plate = new THREE.Mesh(
+              new THREE.BoxGeometry(0.34, 0.4, 0.02),
+              accentMat,
+            );
+            plate.position.set(rearX + 0.3, deck + 0.24, side * halfW * 0.86);
+            carGroup.add(plate);
+            parts.push(plate);
+          }
+        }
+
+        if (f.gtTrim) {
+          // Brightwork down the shoulder. Same swept-tube treatment as the
+          // neon, in titanium rather than light — a GT wears metal, not neon.
+          for (const side of [-1, 1]) {
+            const trim = surfaceRun(
+              spec.body,
+              (s) => runHeight(s, 0.86),
+              0.014,
+              MOUNT.gap,
+              side,
+              accentMat,
+            );
+            carGroup.add(trim);
+            parts.push(trim);
+          }
+        }
+
         if (f.exposedFrame) {
           // A roll hoop, so the unbuilt slot reads as a chassis waiting for
           // bodywork rather than as a plainer car.
@@ -912,15 +1055,72 @@ export function CarStage({ bodyId, engineId, engineColor, onReady }: Props) {
         };
 
         if (eng.layout === "electric") {
-          // A flat pack instead of a block. The absence of cylinders is
-          // the message.
+          // LOCAL: an industrial heatsink stack, not a plasma core. Runs on
+          // your own hardware, so it should look like hardware — finned
+          // aluminium, two fans, braided power conduits. Deliberately the
+          // least exotic option in the picker, because that is the honest
+          // difference between a local model and a hosted one.
           const pack = new THREE.Mesh(new THREE.BoxGeometry(0.95, 0.16, 1.15), blockMat);
           pack.position.set(bx, by - 0.12, bz);
           add(pack);
-          for (let i = 0; i < 4; i++) {
-            const cell = new THREE.Mesh(new THREE.BoxGeometry(0.2, 0.06, 1.0), hotMat);
-            cell.position.set(bx - 0.33 + i * 0.22, by - 0.02, bz);
-            add(cell);
+
+          // Heatsink fins.
+          for (let i = 0; i < 11; i++) {
+            const fin = new THREE.Mesh(
+              new THREE.BoxGeometry(0.02, 0.17, 1.0),
+              blockMat,
+            );
+            fin.position.set(bx - 0.36 + i * 0.072, by + 0.02, bz);
+            add(fin);
+          }
+
+          // Two cooling fans, counter-rotating, with a lit hub each.
+          for (const [i, fz] of [-0.3, 0.3].entries()) {
+            const shroud = new THREE.Mesh(
+              new THREE.TorusGeometry(0.2, 0.022, 8, 24),
+              blockMat,
+            );
+            shroud.position.set(bx, by + 0.14, bz + fz);
+            shroud.rotation.x = Math.PI / 2;
+            add(shroud);
+
+            const hub = new THREE.Mesh(
+              new THREE.CylinderGeometry(0.05, 0.05, 0.03, 16),
+              hotMat,
+            );
+            hub.position.set(bx, by + 0.14, bz + fz);
+            add(hub);
+            pulseParts.push(hub);
+
+            for (let b = 0; b < 7; b++) {
+              const blade = new THREE.Mesh(
+                new THREE.BoxGeometry(0.15, 0.008, 0.05),
+                blockMat,
+              );
+              const a = (b / 7) * Math.PI * 2;
+              blade.position.set(
+                bx + Math.cos(a) * 0.1,
+                by + 0.14,
+                bz + fz + Math.sin(a) * 0.1,
+              );
+              blade.rotation.y = -a;
+              blade.rotation.z = 0.4;
+              add(blade);
+              // Fans spin opposite ways, which is what makes it read as a
+              // working machine rather than a decal.
+              spinParts.push({ mesh: blade, rate: i === 0 ? 0.09 : -0.09 });
+            }
+          }
+
+          // Braided power conduits running out to the rear.
+          for (const cz of [-0.42, 0, 0.42]) {
+            const conduit = new THREE.Mesh(
+              new THREE.CylinderGeometry(0.028, 0.028, 0.62, 10),
+              blockMat,
+            );
+            conduit.position.set(bx - 0.45, by - 0.1, bz + cz);
+            conduit.rotation.z = Math.PI / 2;
+            add(conduit);
           }
         } else {
           const block = new THREE.Mesh(
@@ -1069,6 +1269,12 @@ export function CarStage({ bodyId, engineId, engineColor, onReady }: Props) {
       const camAt = new THREE.Vector3();
       const targetPos = new THREE.Vector3();
       const targetAt = new THREE.Vector3();
+      // Scratch vectors for the per-frame hotspot projection. Allocated
+      // once — creating three Vector3s per pin per frame is 720/sec of
+      // garbage for something that never needs to persist.
+      const projected = new THREE.Vector3();
+      const viewDir = new THREE.Vector3();
+      const toPin = new THREE.Vector3();
 
       function frameBody(id: string) {
         const shot = BODY_SHOTS[id] ?? BODY_SHOTS.bravo;
@@ -1221,12 +1427,54 @@ export function CarStage({ bodyId, engineId, engineColor, onReady }: Props) {
         paint.opacity += (wantOpacity - paint.opacity) * (reduced ? 1 : 0.08);
         glass.opacity = GLASS_OPACITY * paint.opacity;
 
+        // ── Hotspot focus ────────────────────────────────────────────
+        // Selecting a callout pushes the camera in on that subsystem.
+        // Overrides the body framing but never the engine dive, which is
+        // already a deliberate camera move and would otherwise be fought
+        // for its whole duration.
+        const wantFocus = focusRef.current;
+        if (wantFocus && diveFrames === 0) {
+          const spot = HOTSPOTS.find((h) => h.id === wantFocus);
+          if (spot) {
+            const [ax, ay, az] = hotspotAnchor(spec, spot.anchor);
+            // Approach from the same side the viewer has rotated the car
+            // to, so focusing never swings the camera around behind the
+            // body and leaves them looking at the far flank.
+            const face = Math.cos(carGroup.rotation.y);
+            const dir = face >= 0 ? 1 : -1;
+            // Distance derived from the framing we want, not guessed. A
+            // hand-picked offset framed 1.1 units at this lens — narrower
+            // than the car is tall — so the body overflowed the panel and
+            // the push-in read as a crash zoom.
+            const dist =
+              FOCUS_FRAME_HEIGHT / (2 * Math.tan((CAMERA_FOV * Math.PI) / 360));
+            targetPos.set(
+              ax + FOCUS_DIR[0] * dist * dir,
+              ay + FOCUS_DIR[1] * dist,
+              az + FOCUS_DIR[2] * dist,
+            );
+            // Aim a little below the anchor. Looking dead-on at a point
+            // near the roofline pushes the wheels out of the bottom of the
+            // frame, and a car cropped at the tyres reads as a mistake
+            // rather than as a close-up.
+            targetAt.set(ax, ay - 0.35, az);
+          }
+        }
+
         if (reduced) {
           camPos.copy(targetPos);
           camAt.copy(targetAt);
         } else {
-          camPos.lerp(targetPos, 0.045);
-          camAt.lerp(targetAt, 0.06);
+          // Critically damped rather than a fixed lerp: the further the
+          // camera is from its mark the faster it closes, so a long move
+          // between framings does not crawl and a short one does not snap.
+          // gsap/react-spring would do the same job, at the cost of a
+          // dependency and of owning a tween that the drag handler then
+          // has to interrupt mid-flight.
+          const reach = camPos.distanceTo(targetPos);
+          const ease = Math.min(0.12, 0.035 + reach * 0.012);
+          camPos.lerp(targetPos, ease);
+          camAt.lerp(targetAt, ease * 1.3);
           t += 0.006;
         }
 
@@ -1252,6 +1500,43 @@ export function CarStage({ bodyId, engineId, engineColor, onReady }: Props) {
         camera.position.copy(camPos);
         camera.lookAt(camAt);
         renderer.render(scene, camera);
+
+        // ── Spatial callouts ─────────────────────────────────────────
+        // Project each anchor through the camera into CSS pixels. The
+        // anchors live in carGroup's local space, so applying the group's
+        // world matrix is what makes a pin ride the body as it turns
+        // instead of hovering at a fixed point in the frame.
+        if (hotspotsRef.current) {
+          const rect = renderer.domElement.getBoundingClientRect();
+          const out: { id: string; x: number; y: number; visible: boolean }[] = [];
+          for (const h of HOTSPOTS) {
+            projected
+              .set(...hotspotAnchor(spec, h.anchor))
+              .applyMatrix4(carGroup.matrixWorld);
+            // Facing test before projection: a pin on the far flank must
+            // not punch through the bodywork and float over the near side.
+            camera.getWorldDirection(viewDir);
+            toPin.copy(projected).sub(camera.position);
+            const behindBody =
+              h.anchor === "chassis" && toPin.dot(viewDir) > 0 && projected.z * camPos.z < 0;
+            projected.project(camera);
+            const px = (projected.x * 0.5 + 0.5) * rect.width;
+            const py = (-projected.y * 0.5 + 0.5) * rect.height;
+            // Cull off-panel as well as behind-camera. z<1 alone only
+            // rejects points behind the lens, so on a close-up the pins
+            // for other subsystems projected to coordinates outside the
+            // canvas and rendered as loose dots floating over the page.
+            const onPanel =
+              px > 8 && px < rect.width - 8 && py > 8 && py < rect.height - 8;
+            out.push({
+              id: h.id,
+              x: px,
+              y: py,
+              visible: projected.z < 1 && onPanel && !behindBody && diveFrames === 0,
+            });
+          }
+          hotspotsRef.current(out);
+        }
 
         if (!announced) {
           announced = true;
