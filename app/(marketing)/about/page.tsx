@@ -18,7 +18,7 @@ import { LEGAL_ENTITY } from "@/lib/legal/constants";
 export const metadata: Metadata = {
   title: "About",
   description:
-    "OASIS AI Solutions — Operational Agentic Systems Increasing Scalability. We build AI agents and the systems they run on, for clients internationally. How we work and what we won't do.",
+    "OASIS AI Solutions, Operational Agentic Systems Increasing Scalability. We build AI agents and the systems they run on, for clients internationally. How we work and what we won't do.",
   alternates: { canonical: "/about" },
 };
 
@@ -56,8 +56,8 @@ export default function AboutPage() {
           </Reveal>
           <Reveal delay={180}>
             <p className="mt-6 max-w-xl text-[17px] leading-relaxed text-fg-muted">
-              {LEGAL_ENTITY} — Operational Agentic Systems Increasing
-              Scalability — builds AI agents and the systems they run on, for
+              {LEGAL_ENTITY}, Operational Agentic Systems Increasing
+              Scalability, builds AI agents and the systems they run on, for
               clients wherever they are. The agents on this site aren&rsquo;t
               a product roadmap; they&rsquo;re the staff that runs the studio,
               which is the only honest reason to sell them to anyone else.
@@ -75,9 +75,9 @@ export default function AboutPage() {
           <Reveal delay={120}>
             <div className="space-y-5 text-[16px] leading-relaxed text-fg-muted sm:text-[17px]">
               <p>
-                The tooling that makes a large company efficient — the internal
+                The tooling that makes a large company efficient, the internal
                 portal, the pipeline that never drops a lead, the reporting
-                that arrives without anyone building it — has always existed.
+                that arrives without anyone building it, has always existed.
                 It was just priced for companies with a department to run it.
               </p>
               <p>
@@ -133,7 +133,7 @@ export default function AboutPage() {
             <SectionHead
               eyebrow="Where we are"
               title="Wherever you are."
-              lede="Clients are on whichever continent they happen to be on. The work happens over video, shared systems, and the portal we hand you — being in the same city has never once been the thing that made a build succeed."
+              lede="Clients are on whichever continent they happen to be on. The work happens over video, shared systems, and the portal we hand you, being in the same city has never once been the thing that made a build succeed."
             />
           </Reveal>
           <Reveal delay={120}>

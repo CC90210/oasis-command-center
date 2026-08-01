@@ -16,7 +16,7 @@ import { Section, SectionHead, Eyebrow } from "@/components/marketing/Section";
 export const metadata: Metadata = {
   title: "The fleet",
   description:
-    "The AI agents OASIS runs — operations, marketing, finance, legal, voice, and deployed client seats. What each one owns and what it produces.",
+    "The AI agents OASIS runs, operations, marketing, finance, legal, voice, and deployed client seats. What each one owns and what it produces.",
   alternates: { canonical: "/fleet" },
 };
 
@@ -99,7 +99,7 @@ export default function FleetPage() {
             <SectionHead
               eyebrow="Custom seats"
               title="Or a seat that only exists in your business."
-              lede="The roster is what we needed. Most of what we build is what a client needed and nobody sells — a desk job that is specific enough that no product will ever cover it."
+              lede="The roster is what we needed. Most of what we build is what a client needed and nobody sells, a desk job that is specific enough that no product will ever cover it."
             />
           </Reveal>
           <Reveal delay={120}>
@@ -112,7 +112,7 @@ export default function FleetPage() {
               <p>
                 If the job can be described, has inputs you can point at, and
                 someone is currently doing it by hand, it is a candidate. If it
-                needs judgement nobody can articulate, it isn&rsquo;t — and
+                needs judgement nobody can articulate, it isn&rsquo;t, and
                 we&rsquo;ll say so on the first call rather than after the
                 invoice.
               </p>

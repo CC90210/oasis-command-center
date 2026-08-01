@@ -110,7 +110,7 @@ export const FLEET: FleetMember[] = [
     duties: [
       "Delivers the morning brief and the end-of-day debrief as voice",
       "Carries alerts to you wherever you are, not to a dashboard nobody opens",
-      "Connects the ambient layer — home, devices, environment",
+      "Connects the ambient layer: home, devices, environment",
     ],
     artifact: "A ninety-second voice note that replaces reading a status page.",
   },
@@ -125,7 +125,7 @@ export const FLEET: FleetMember[] = [
       "Packages applications and matches them to the right counterparties",
       "Reports pipeline status to the team that owns it",
       "Runs renewal sweeps so nothing ages out unnoticed",
-      "Never drafts outreach — that is a separate seat, on purpose",
+      "Never drafts outreach. That is a separate seat, on purpose",
     ],
     artifact: "A day's pipeline, packaged and routed, before the team logs in.",
   },
@@ -165,7 +165,7 @@ export const DIFFERENTIATORS = [
   },
   {
     title: "They hand work to each other",
-    body: "Shared state and an event bus between seats. Operations ships something, Finance sees the cost, Marketing gets the announcement — from one instruction, without you carrying the output of one tool into the input of the next.",
+    body: "Shared state and an event bus between seats. Operations ships something, Finance sees the cost, Marketing gets the announcement. All from one instruction, without you carrying the output of one tool into the input of the next.",
   },
   {
     title: "It runs on your data, in your infrastructure",
@@ -173,7 +173,7 @@ export const DIFFERENTIATORS = [
   },
   {
     title: "It isn't married to one model",
-    body: "Work routes across providers on cost and capability, and sensitive jobs can run on a model hosted on your own hardware. When the frontier moves — and it moves every few months — you get the upgrade without a rebuild.",
+    body: "Work routes across providers on cost and capability, and sensitive jobs can run on a model hosted on your own hardware. The frontier moves every few months. You get the upgrade without a rebuild.",
   },
   {
     title: "You choose the leash",
@@ -190,7 +190,7 @@ export const ECONOMICS = [
   {
     label: "Time",
     headline: "The schedule stops needing a person",
-    body: "Work that runs on a cadence — the follow-up, the report, the reconciliation, the chase — stops consuming a human on that cadence. You get back the hours that were never the reason you started the business.",
+    body: "The follow-up. The report. The reconciliation. The chase. Work that runs on a cadence stops consuming a human on that cadence, and you get back the hours that were never the reason you started the business.",
   },
   {
     label: "Cost",
@@ -200,7 +200,7 @@ export const ECONOMICS = [
   {
     label: "Scale",
     headline: "Growth stops meaning hiring",
-    body: "The ceiling moves from how many people you can afford and manage to how much work you can clearly define. That is a different business — one where taking on more clients is a decision rather than a hiring round.",
+    body: "The ceiling moves from how many people you can afford and manage to how much work you can clearly define. That is a different business, one where taking on more clients is a decision rather than a hiring round.",
   },
 ] as const;
 
@@ -214,7 +214,7 @@ export const CLIENT_BUILDS = [
     name: "Commerce back office",
     summary:
       "A wholesale operation's order desk, run end to end: purchase orders parsed out of PDFs, spreadsheets and EDI, entered into the desktop ERP, invoiced, and confirmed by email.",
-    proof: "Runs local-first — customer data never leaves the client's machine.",
+    proof: "Runs local-first. Customer data never leaves the client's machine.",
   },
   {
     name: "Funding operator portal",

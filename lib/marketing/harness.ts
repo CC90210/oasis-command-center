@@ -62,6 +62,17 @@ export const BODIES: Body[] = [
   },
 ];
 
+/**
+ * Engine layouts.
+ *
+ * These drive real geometry in the 3D stage, not just a colour swap. The
+ * first version recoloured a light and called it a change, which CC
+ * correctly said you could not see. Cylinder count, bank angle, block size
+ * and exhaust count all differ per engine now, so selecting one visibly
+ * rebuilds the hardware in the bay.
+ */
+export type EngineLayout = "v8" | "v12" | "inline6" | "inline4" | "flat6" | "electric";
+
 export type Engine = {
   id: string;
   name: string;
@@ -71,6 +82,16 @@ export type Engine = {
   /** Hex for the engine glow. Kept off the brand cyan so the engine reads
    *  as a separate, swappable part rather than as more chrome. */
   glow: string;
+  layout: EngineLayout;
+  /** Cylinders drawn in the bay. */
+  cylinders: number;
+  /** Bank angle in degrees. 0 = inline, 180 = flat, 60-90 = V. */
+  bank: number;
+  /** Exhaust tips at the rear. Electric has none, which is the point. */
+  exhausts: number;
+  /** One-line spec, shown under the car so the change is named as well as
+   *  seen. */
+  spec: string;
 };
 
 export const ENGINES: Engine[] = [
@@ -80,6 +101,11 @@ export const ENGINES: Engine[] = [
     vendor: "Anthropic",
     trait: "Long context and careful reasoning. What we run most seats on.",
     glow: "#d97757",
+    layout: "v8",
+    cylinders: 8,
+    bank: 90,
+    exhausts: 4,
+    spec: "V8 · 90° · quad exhaust",
   },
   {
     id: "gpt",
@@ -87,6 +113,11 @@ export const ENGINES: Engine[] = [
     vendor: "OpenAI",
     trait: "Strong at backend implementation and adversarial code review.",
     glow: "#10a37f",
+    layout: "inline6",
+    cylinders: 6,
+    bank: 0,
+    exhausts: 2,
+    spec: "Inline six · twin exhaust",
   },
   {
     id: "gemini",
@@ -94,6 +125,35 @@ export const ENGINES: Engine[] = [
     vendor: "Google",
     trait: "Fast and cheap at scale. Good for high-volume classification.",
     glow: "#4285f4",
+    layout: "flat6",
+    cylinders: 6,
+    bank: 180,
+    exhausts: 2,
+    spec: "Flat six · low centre of gravity",
+  },
+  {
+    id: "grok",
+    name: "Grok",
+    vendor: "xAI",
+    trait: "Fast, current, and happy to be blunt. Good for live research.",
+    glow: "#e8e8ea",
+    layout: "v12",
+    cylinders: 12,
+    bank: 60,
+    exhausts: 2,
+    spec: "V12 · 60° · centre-exit",
+  },
+  {
+    id: "kimi",
+    name: "Kimi",
+    vendor: "Moonshot",
+    trait: "Very long context at low cost. Good for reading whole archives.",
+    glow: "#8b7fd4",
+    layout: "inline4",
+    cylinders: 4,
+    bank: 0,
+    exhausts: 1,
+    spec: "Inline four · turbo · single exit",
   },
   {
     id: "local",
@@ -101,6 +161,11 @@ export const ENGINES: Engine[] = [
     vendor: "On your hardware",
     trait: "Nothing leaves the building. For work that legally cannot.",
     glow: "#9ca0a8",
+    layout: "electric",
+    cylinders: 0,
+    bank: 0,
+    exhausts: 0,
+    spec: "Battery pack · no exhaust",
   },
 ];
 

@@ -26,7 +26,7 @@ export const metadata: Metadata = {
 const CAPABILITIES = [
   {
     name: "Operator portals",
-    body: "The internal system your team actually works in all day. Pipeline, records, documents, roles, and permissions — built around your process instead of bending your process around a product.",
+    body: "The internal system your team actually works in all day. Pipeline, records, documents, roles, and permissions, built around your process instead of bending your process around a product.",
   },
   {
     name: "Document pipelines",
@@ -42,7 +42,7 @@ const CAPABILITIES = [
   },
   {
     name: "Voice",
-    body: "Agents that answer, qualify, and hand off — with hard limits on what they may commit to out loud, because a voice agent that improvises pricing is a liability.",
+    body: "Agents that answer, qualify, and hand off, with hard limits on what they may commit to out loud, because a voice agent that improvises pricing is a liability.",
   },
   {
     name: "Integration and cleanup",
@@ -64,7 +64,7 @@ const ENGAGEMENTS = [
   {
     name: "System build",
     price: "from $2,500", // TODO(CC): confirm with Atlas before launch
-    body: "A custom platform plus the agents that operate it. This is the bulk of what we do — the portal, the pipeline, and the automation as one thing rather than three.",
+    body: "A custom platform plus the agents that operate it. This is the bulk of what we do, the portal, the pipeline, and the automation as one thing rather than three.",
     detail: ["Custom software built for your process", "Multiple agents, coordinated", "Guardrails scoped with you", "Ongoing tuning against real usage"],
     featured: true,
   },
@@ -185,7 +185,7 @@ export default function WorkPage() {
 
         <Reveal>
           <p className="mt-8 max-w-2xl font-data text-[11px] leading-relaxed tracking-[0.06em] text-fg-dim">
-            Running costs — hosting, model usage, maintenance — are quoted
+            Running costs, hosting, model usage, maintenance, are quoted
             separately and monthly, so you can see what the system costs to
             own rather than only what it cost to build.
           </p>
@@ -202,7 +202,7 @@ export default function WorkPage() {
             </h2>
             <p className="mt-5 max-w-xl text-[16px] leading-relaxed text-fg-muted">
               Four questions, two minutes. We come back with where an agent
-              pays for itself first in your business — including if the answer
+              pays for itself first in your business, including if the answer
               is &ldquo;nowhere yet&rdquo;.
             </p>
             <div className="mt-8 flex flex-col gap-3 sm:flex-row">

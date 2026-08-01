@@ -40,6 +40,26 @@ export type CarSpec = {
   axles: { x: number; radius: number; width: number }[];
   /** Where the engine sits, for the camera to dive at. */
   engineBay: [number, number, number];
+  /**
+   * Bodywork that is NOT shared. Selecting a body has to change more than
+   * the silhouette or it reads as one car being stretched: each of these
+   * adds or removes real parts.
+   */
+  features: {
+    /** Rear wing on struts. The coupe's signature. */
+    wing?: boolean;
+    /** Roof rails. Says "carries things" at a glance. */
+    rails?: boolean;
+    /** Side skirts along the sill. Reads as heavy and planted. */
+    skirts?: boolean;
+    /** Exposed roll structure, for the not-yet-built slot. */
+    exposedFrame?: boolean;
+  };
+  /**
+   * Wheel treatment. Spoke count and rim depth differ per body so the cars
+   * are told apart at the corners as well as at the roofline.
+   */
+  wheel: { spokes: number; rimDepth: number; tint: number };
 };
 
 /** BRAVO — long-roof shooting brake. Carries load, hence the volume. */
@@ -66,6 +86,8 @@ const BRAVO: CarSpec = {
     { x: 1.42, radius: 0.46, width: 0.28 },
   ],
   engineBay: [1.62, 0.72, 0],
+  features: { rails: true },
+  wheel: { spokes: 6, rimDepth: 0.9, tint: 0x00d4ff },
 };
 
 /** ATLAS — long, low, heavy. A vault on wheels. */
@@ -92,6 +114,8 @@ const ATLAS: CarSpec = {
     { x: 1.50, radius: 0.44, width: 0.30 },
   ],
   engineBay: [1.70, 0.66, 0],
+  features: { skirts: true },
+  wheel: { spokes: 10, rimDepth: 0.62, tint: 0x7fd8ff },
 };
 
 /** MAVEN — mid-engine coupe. Low nose, big hips, cab-forward. */
@@ -119,6 +143,8 @@ const MAVEN: CarSpec = {
   ],
   /** Mid-engine: the bay sits behind the cabin, not under a front hood. */
   engineBay: [-1.05, 0.62, 0],
+  features: { wing: true },
+  wheel: { spokes: 5, rimDepth: 1.15, tint: 0x00d4ff },
 };
 
 /** CUSTOM — the shape that doesn't exist yet. Deliberately generic. */
@@ -145,6 +171,8 @@ const CUSTOM: CarSpec = {
     { x: 1.45, radius: 0.45, width: 0.30 },
   ],
   engineBay: [1.65, 0.70, 0],
+  features: { exposedFrame: true },
+  wheel: { spokes: 8, rimDepth: 0.8, tint: 0x9ca0a8 },
 };
 
 export const CAR_SPECS: Record<string, CarSpec> = {

@@ -40,7 +40,7 @@ export function HarnessBuilder() {
       <div className="relative border-b border-ops-line px-4 pt-8 sm:px-8">
         {/*
           Two layers. The SVG blueprint below is what renders on the server,
-          without JavaScript, and on a machine with no WebGL — a complete,
+          without JavaScript, and on a machine with no WebGL, a complete,
           labelled diagram in its own right. The 3D stage mounts on top of
           it once three.js has loaded, so there is never an empty box and
           never a spinner.
@@ -65,7 +65,7 @@ export function HarnessBuilder() {
             strokeWidth="1"
           />
 
-          {/* Chassis rail — the constant. Drawn under the shell and in the
+          {/* Chassis rail, the constant. Drawn under the shell and in the
               brand cyan, because it is the thing being sold. */}
           <path
             d="M 56 122 L 380 122"
@@ -168,12 +168,20 @@ export function HarnessBuilder() {
           <Callout label="Engine" value={`${engine.name} · ${engine.vendor}`} tone="engine" color={engine.glow} />
           <Callout label="Chassis" value="OASIS harness" tone="signal" />
         </div>
+
+        {/* Names the change as well as showing it, so nobody has to squint
+            to work out what just happened in the bay. */}
+        <p className="mb-6 text-center font-data text-[11px] uppercase tracking-[0.2em] text-fg-dim">
+          {engine.spec}
+          <span className="mx-2 text-fg-faint">/</span>
+          Drag the car to turn it
+        </p>
       </div>
 
       {/* ── Selectors ───────────────────────────────────────────────── */}
       <div className="grid gap-px bg-ops-line md:grid-cols-2">
         <Picker
-          legend="Body — the agent"
+          legend="Body, the agent"
           hint="What the seat is shaped for."
           options={BODIES.map((b) => ({ id: b.id, label: b.name, sub: b.seat }))}
           value={bodyId}
@@ -181,7 +189,7 @@ export function HarnessBuilder() {
           detail={body.brief}
         />
         <Picker
-          legend="Engine — the model"
+          legend="Engine, the model"
           hint="Swappable. Today's best model is not next quarter's."
           options={ENGINES.map((e) => ({ id: e.id, label: e.name, sub: e.vendor }))}
           value={engineId}
@@ -259,12 +267,20 @@ function Picker({
   detail: string;
   accent?: string;
 }) {
+  const groupId = `harness-${legend.replace(/[^a-z]/gi, "").toLowerCase()}`;
   return (
-    <fieldset className="bg-ops-void p-6 sm:p-7">
-      <legend className="font-data text-[10px] uppercase tracking-[0.22em] text-signal">
+    // A <legend> is positioned ON the fieldset's top border by the UA, which
+    // is why the label was sitting across the panel edge. Since the panel
+    // draws its own border via the grid gap, the semantics are kept with
+    // role="group" + aria-labelledby and the label becomes normal flow.
+    <div role="group" aria-labelledby={groupId} className="bg-ops-void p-6 pt-7 sm:p-7 sm:pt-8">
+      <p
+        id={groupId}
+        className="font-data text-[10px] uppercase tracking-[0.22em] text-signal"
+      >
         {legend}
-      </legend>
-      <p className="mt-2 text-[13px] text-fg-dim">{hint}</p>
+      </p>
+      <p className="mt-2.5 text-[13px] text-fg-dim">{hint}</p>
 
       <div className="mt-5 flex flex-wrap gap-2">
         {options.map((o) => {
@@ -294,6 +310,6 @@ function Picker({
       <p className="mt-5 min-h-[4.5rem] text-[14px] leading-relaxed text-fg-muted">
         {detail}
       </p>
-    </fieldset>
+    </div>
   );
 }

@@ -2,6 +2,7 @@
 
 import { useEffect, useRef } from "react";
 import { CAR_SPECS, BODY_SHOTS, type Station } from "@/lib/marketing/car-geometry";
+import { ENGINES } from "@/lib/marketing/harness";
 // Types only — erased at compile time, so this does NOT pull three.js into
 // the bundle. The runtime copy arrives via the dynamic import below.
 import type * as ThreeNS from "three";
@@ -181,6 +182,12 @@ export function CarStage({ bodyId, engineId, engineColor, onReady }: Props) {
         metalness: 0.86,
         roughness: 0.32,
         side: THREE.DoubleSide,
+        // Transparent from the start so the x-ray during an engine dive is
+        // an opacity tween rather than a material swap mid-render. The
+        // engine lives INSIDE the bodywork, which is correct and also means
+        // it is invisible until the panels get out of the way.
+        transparent: true,
+        opacity: 1,
       });
       // Roughness this low turns the greenhouse into a mirror and it
       // catches the rim light as one flat blown-out panel.
@@ -248,6 +255,10 @@ export function CarStage({ bodyId, engineId, engineColor, onReady }: Props) {
       }
 
       let parts: ThreeNS.Object3D[] = [];
+      // Materials whose colour depends on the current selection, so they
+      // genuinely cannot be shared across builds. Tracked explicitly and
+      // disposed on the next rebuild — the same leak the hub material had.
+      let perBuildMats: ThreeNS.Material[] = [];
 
       function buildCar(id: string) {
         for (const p of parts) {
@@ -258,6 +269,8 @@ export function CarStage({ bodyId, engineId, engineColor, onReady }: Props) {
           });
         }
         parts = [];
+        perBuildMats.forEach((m) => m.dispose());
+        perBuildMats = [];
 
         const spec = CAR_SPECS[id] ?? CAR_SPECS.bravo;
 
@@ -296,20 +309,201 @@ export function CarStage({ bodyId, engineId, engineColor, onReady }: Props) {
             carGroup.add(tyre);
             parts.push(tyre);
 
+            const rimMat = new THREE.MeshStandardMaterial({
+              color: spec.wheel.tint,
+              emissive: spec.wheel.tint,
+              emissiveIntensity: 0.9,
+              metalness: 0.5,
+              roughness: 0.3,
+            });
+            perBuildMats.push(rimMat);
+
             const hub = new THREE.Mesh(
-              new THREE.TorusGeometry(axle.radius * 0.52, 0.035, 8, 28),
-              hubMat,
+              new THREE.TorusGeometry(axle.radius * 0.52, 0.035 * spec.wheel.rimDepth, 8, 28),
+              rimMat,
             );
             hub.position.copy(tyre.position);
             hub.position.z += side * (axle.width / 2 + 0.005);
             carGroup.add(hub);
             parts.push(hub);
+
+            // Spokes. Different counts per body are the cheapest way to
+            // make two cars distinguishable at the corners, which is where
+            // people actually look to tell models apart.
+            for (let s = 0; s < spec.wheel.spokes; s++) {
+              const spoke = new THREE.Mesh(
+                new THREE.BoxGeometry(axle.radius * 0.92, 0.045, 0.03),
+                rimMat,
+              );
+              spoke.position.copy(hub.position);
+              spoke.rotation.z = (s / spec.wheel.spokes) * Math.PI * 2;
+              carGroup.add(spoke);
+              parts.push(spoke);
+            }
           }
         }
+
+        // ── Body-specific hardware ──────────────────────────────────
+        const f = spec.features;
+        const rearX = spec.body[0].x;
+
+        if (f.wing) {
+          const blade = new THREE.Mesh(new THREE.BoxGeometry(0.42, 0.05, 1.9), paint);
+          blade.position.set(rearX + 0.18, 1.16, 0);
+          blade.rotation.z = -0.09;
+          carGroup.add(blade);
+          parts.push(blade);
+          for (const side of [-1, 1]) {
+            const strut = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.4, 0.07), paint);
+            strut.position.set(rearX + 0.18, 0.95, side * 0.7);
+            carGroup.add(strut);
+            parts.push(strut);
+          }
+        }
+
+        if (f.rails) {
+          for (const side of [-1, 1]) {
+            const rail = new THREE.Mesh(new THREE.BoxGeometry(2.1, 0.055, 0.075), paint);
+            rail.position.set(-0.35, 1.5, side * 0.6);
+            carGroup.add(rail);
+            parts.push(rail);
+          }
+        }
+
+        if (f.skirts) {
+          for (const side of [-1, 1]) {
+            const skirt = new THREE.Mesh(new THREE.BoxGeometry(3.0, 0.12, 0.09), paint);
+            skirt.position.set(0, 0.2, side * (maxHalfWidth - 0.03));
+            carGroup.add(skirt);
+            parts.push(skirt);
+          }
+        }
+
+        if (f.exposedFrame) {
+          // A roll hoop, so the unbuilt slot reads as a chassis waiting for
+          // bodywork rather than as a plainer car.
+          const hoop = new THREE.Mesh(
+            new THREE.TorusGeometry(0.62, 0.045, 8, 24, Math.PI),
+            hubMat,
+          );
+          hoop.position.set(-0.7, 1.05, 0);
+          hoop.rotation.y = Math.PI / 2;
+          carGroup.add(hoop);
+          parts.push(hoop);
+        }
+
         return spec;
       }
 
+      /**
+       * The engine, as actual hardware in the bay.
+       *
+       * Recolouring a light was not a visible change, and CC was right to
+       * say so. Cylinder count, bank angle, block size and exhaust count
+       * all come from the selected engine, so a V12 is unmistakably not an
+       * inline four, and the electric pack has no cylinders and no pipes
+       * at all.
+       */
+      let engineParts: ThreeNS.Object3D[] = [];
+      let engineMats: ThreeNS.Material[] = [];
+
+      function buildEngine(engineId: string, carSpec: (typeof CAR_SPECS)[string]) {
+        for (const p of engineParts) {
+          carGroup.remove(p);
+          p.traverse((o: ThreeNS.Object3D) => {
+            const m = o as ThreeNS.Mesh;
+            if (m.geometry) m.geometry.dispose();
+          });
+        }
+        engineParts = [];
+        engineMats.forEach((m) => m.dispose());
+        engineMats = [];
+
+        const eng = ENGINES.find((e) => e.id === engineId) ?? ENGINES[0];
+        const [bx, by, bz] = carSpec.engineBay;
+        const col = new THREE.Color(eng.glow);
+
+        const blockMat = new THREE.MeshStandardMaterial({
+          color: 0x14181f,
+          metalness: 0.9,
+          roughness: 0.35,
+        });
+        const hotMat = new THREE.MeshStandardMaterial({
+          color: col,
+          emissive: col,
+          emissiveIntensity: 2.2,
+          metalness: 0.3,
+          roughness: 0.4,
+        });
+        engineMats.push(blockMat, hotMat);
+
+        const add = (m: ThreeNS.Object3D) => {
+          carGroup.add(m);
+          engineParts.push(m);
+        };
+
+        if (eng.layout === "electric") {
+          // A flat pack instead of a block. The absence of cylinders is
+          // the message.
+          const pack = new THREE.Mesh(new THREE.BoxGeometry(0.95, 0.16, 1.15), blockMat);
+          pack.position.set(bx, by - 0.12, bz);
+          add(pack);
+          for (let i = 0; i < 4; i++) {
+            const cell = new THREE.Mesh(new THREE.BoxGeometry(0.2, 0.06, 1.0), hotMat);
+            cell.position.set(bx - 0.33 + i * 0.22, by - 0.02, bz);
+            add(cell);
+          }
+        } else {
+          const block = new THREE.Mesh(
+            new THREE.BoxGeometry(eng.cylinders >= 8 ? 0.85 : 0.6, 0.3, 0.5),
+            blockMat,
+          );
+          block.position.set(bx, by - 0.06, bz);
+          add(block);
+
+          // Cylinders, arranged by bank angle: 0 is a single inline row,
+          // 180 lays two rows flat, anything between is a V.
+          const perBank = eng.bank === 0 ? eng.cylinders : eng.cylinders / 2;
+          const banks = eng.bank === 0 ? [0] : [-1, 1];
+          const half = THREE.MathUtils.degToRad(eng.bank) / 2;
+
+          for (const b of banks) {
+            for (let i = 0; i < perBank; i++) {
+              const cyl = new THREE.Mesh(
+                new THREE.CylinderGeometry(0.055, 0.055, 0.26, 12),
+                hotMat,
+              );
+              const spread = perBank > 1 ? (i / (perBank - 1) - 0.5) : 0;
+              cyl.position.set(
+                bx + spread * (eng.cylinders >= 8 ? 0.62 : 0.44),
+                // Sits inside the bay, not proud of the deck. It was
+                // poking through the bonnet at +0.14.
+                by + 0.04,
+                bz + b * Math.sin(half) * 0.24,
+              );
+              cyl.rotation.x = b * half;
+              add(cyl);
+            }
+          }
+        }
+
+        // Exhaust tips at the rear valance.
+        const tailX = carSpec.body[0].x - 0.04;
+        for (let i = 0; i < eng.exhausts; i++) {
+          const offset = eng.exhausts === 1 ? 0 : (i / (eng.exhausts - 1) - 0.5) * 0.72;
+          const pipe = new THREE.Mesh(
+            new THREE.CylinderGeometry(0.055, 0.06, 0.16, 14),
+            hotMat,
+          );
+          pipe.rotation.z = Math.PI / 2;
+          // Tucked into the rear valance rather than hanging below it.
+          pipe.position.set(tailX, 0.44, offset);
+          add(pipe);
+        }
+      }
+
       let spec = buildCar(sel.current.bodyId);
+      buildEngine(sel.current.engineId, spec);
 
       // ── Camera choreography ───────────────────────────────────────
       const camPos = new THREE.Vector3();
@@ -353,6 +547,50 @@ export function CarStage({ bodyId, engineId, engineColor, onReady }: Props) {
       );
       io.observe(mount);
 
+      // ── Drag to orbit ─────────────────────────────────────────────
+      // Pointer Events, so one code path covers mouse, trackpad, pen and
+      // touch. `touch-action: none` on the canvas is what stops a finger
+      // drag scrolling the page instead of turning the car; without it the
+      // whole interaction is unusable on a phone.
+      let spin = 0;          // user-applied rotation, radians
+      let spinVel = 0;       // carries the throw after release
+      let dragging = false;
+      let lastX = 0;
+      let dragged = false;   // true once a drag has happened, killing idle sway
+
+      const canvasEl = renderer.domElement;
+      canvasEl.style.touchAction = "none";
+      canvasEl.style.cursor = "grab";
+
+      const onDown = (e: PointerEvent) => {
+        dragging = true;
+        dragged = true;
+        lastX = e.clientX;
+        spinVel = 0;
+        canvasEl.style.cursor = "grabbing";
+        canvasEl.setPointerCapture(e.pointerId);
+      };
+      const onMove = (e: PointerEvent) => {
+        if (!dragging) return;
+        const dx = e.clientX - lastX;
+        lastX = e.clientX;
+        spin += dx * 0.008;
+        spinVel = dx * 0.008;
+      };
+      const onUp = (e: PointerEvent) => {
+        dragging = false;
+        canvasEl.style.cursor = "grab";
+        try {
+          canvasEl.releasePointerCapture(e.pointerId);
+        } catch {
+          /* pointer already released */
+        }
+      };
+      canvasEl.addEventListener("pointerdown", onDown);
+      canvasEl.addEventListener("pointermove", onMove);
+      canvasEl.addEventListener("pointerup", onUp);
+      canvasEl.addEventListener("pointercancel", onUp);
+
       let raf = 0;
       let t = 0;
       // Declared before tick rather than after it. It worked either way —
@@ -367,6 +605,9 @@ export function CarStage({ bodyId, engineId, engineColor, onReady }: Props) {
         if (sel.current.dirtyBody) {
           sel.current.dirtyBody = false;
           spec = buildCar(sel.current.bodyId);
+          // The engine has to be rebuilt too: the bay moved with the body,
+          // and on the mid-engine coupe it moved to the other end of the car.
+          buildEngine(sel.current.engineId, spec);
           frameBody(sel.current.bodyId);
           diveFrames = 0;
         }
@@ -374,8 +615,9 @@ export function CarStage({ bodyId, engineId, engineColor, onReady }: Props) {
         if (sel.current.dirtyEngine) {
           sel.current.dirtyEngine = false;
           engineLight.color.set(sel.current.engineColor);
+          buildEngine(sel.current.engineId, spec);
           // Push in on the bay, hold, then the easing below pulls back.
-          diveFrames = reduced ? 0 : 78;
+          diveFrames = reduced ? 0 : 96;
         }
 
         engineLight.position.set(spec.engineBay[0], spec.engineBay[1], spec.engineBay[2]);
@@ -383,10 +625,21 @@ export function CarStage({ bodyId, engineId, engineColor, onReady }: Props) {
         if (diveFrames > 0) {
           diveFrames--;
           const [ex, ey, ez] = spec.engineBay;
-          targetPos.set(ex + 1.9, ey + 1.15, ez + 2.5);
-          targetAt.set(ex, ey, ez);
+          // Close enough to read individual cylinders. The previous framing
+          // hung back at showroom distance and the whole point of the dive,
+          // seeing the hardware change, was lost at that range.
+          targetPos.set(ex + 0.95, ey + 0.62, ez + 1.35);
+          targetAt.set(ex, ey + 0.05, ez);
           if (diveFrames === 0) frameBody(sel.current.bodyId);
         }
+
+        // X-ray the bodywork while diving. The engine is genuinely inside
+        // the car, so without this the camera flies in and shows you a
+        // closed panel. Eased both ways so panels dissolve and re-form
+        // rather than blinking.
+        const wantOpacity = diveFrames > 0 ? 0.16 : 1;
+        paint.opacity += (wantOpacity - paint.opacity) * (reduced ? 1 : 0.08);
+        glass.opacity = 0.34 * paint.opacity;
 
         if (reduced) {
           camPos.copy(targetPos);
@@ -394,13 +647,17 @@ export function CarStage({ bodyId, engineId, engineColor, onReady }: Props) {
         } else {
           camPos.lerp(targetPos, 0.045);
           camAt.lerp(targetAt, 0.06);
-          // A gentle sway rather than a full orbit. Continuous rotation
-          // fought the whole point of per-body camera framing: whatever
-          // angle was chosen for a body, the spin had turned the car away
-          // from it a few seconds later.
           t += 0.006;
-          carGroup.rotation.y = Math.sin(t) * 0.16;
         }
+
+        // Idle sway until the visitor takes hold, then it is theirs. Coming
+        // back to swaying under someone's finger would feel like the car
+        // fighting them.
+        if (!dragging) {
+          spin += spinVel;
+          spinVel *= 0.94; // inertia, so a flick coasts to a stop
+        }
+        carGroup.rotation.y = dragged ? spin : Math.sin(t) * 0.16;
 
         camera.position.copy(camPos);
         camera.lookAt(camAt);
@@ -417,6 +674,17 @@ export function CarStage({ bodyId, engineId, engineColor, onReady }: Props) {
         cancelAnimationFrame(raf);
         ro.disconnect();
         io.disconnect();
+        canvasEl.removeEventListener("pointerdown", onDown);
+        canvasEl.removeEventListener("pointermove", onMove);
+        canvasEl.removeEventListener("pointerup", onUp);
+        canvasEl.removeEventListener("pointercancel", onUp);
+        engineParts.forEach((p) =>
+          p.traverse((o: ThreeNS.Object3D) => {
+            const m = o as ThreeNS.Mesh;
+            if (m.geometry) m.geometry.dispose();
+          }),
+        );
+        [...engineMats, ...perBuildMats].forEach((m) => m.dispose());
         scene.traverse((o: ThreeNS.Object3D) => {
           const m = o as ThreeNS.Mesh;
           if (m.geometry) m.geometry.dispose();
@@ -439,5 +707,5 @@ export function CarStage({ bodyId, engineId, engineColor, onReady }: Props) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  return <div ref={mountRef} className="absolute inset-0" aria-hidden="true" />;
+  return <div ref={mountRef} className="absolute inset-0 cursor-grab" aria-hidden="true" />;
 }

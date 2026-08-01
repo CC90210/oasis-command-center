@@ -57,7 +57,7 @@ export default function ContactPage() {
             <p className="mt-6 max-w-xl text-[17px] leading-relaxed text-fg-muted">
               Four questions about how your business actually runs. We read
               every one and come back with where an agent would pay for itself
-              first — including when the honest answer is &ldquo;not
+              first, including when the honest answer is &ldquo;not
               yet&rdquo;.
             </p>
           </Reveal>
@@ -82,7 +82,7 @@ export default function ContactPage() {
               </h2>
               <ol className="mt-5 space-y-4">
                 {[
-                  "You answer three more short screens — what to automate, your scale, your timeline. Two minutes, and you can stop at any point; we'll still have your details.",
+                  "You answer three more short screens, what to automate, your scale, your timeline. Two minutes, and you can stop at any point; we'll still have your details.",
                   "It lands in our pipeline immediately and gets read by a person, not filed into an autoresponder.",
                   "You get back a specific answer about your business: what to automate first, roughly what it costs, and what to leave alone for now.",
                 ].map((t, i) => (

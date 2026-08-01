@@ -24,9 +24,9 @@ export const metadata: Metadata = {
   // `absolute` bypasses the layout's "%s · OASIS AI" template — the brand
   // is already the first two words of this title, and the template would
   // render "OASIS AI — Operational agentic systems · OASIS AI".
-  title: { absolute: "OASIS AI — Operational agentic systems" },
+  title: { absolute: "OASIS AI · Operational Agentic Systems Increasing Scalability" },
   description:
-    "Operational Agentic Systems Increasing Scalability. OASIS builds AI agents that hold a seat in your business — operations, marketing, finance, legal — and the systems they run on. Working internationally.",
+    "Operational Agentic Systems Increasing Scalability. OASIS builds AI agents that hold a seat in your business: operations, marketing, finance, legal. Plus the systems they run on. Working internationally.",
   alternates: { canonical: "/" },
   // No openGraph override here on purpose. Next merges metadata shallowly:
   // a page-level openGraph object REPLACES the layout's, and that includes
@@ -42,7 +42,7 @@ const STEPS = [
   {
     label: "Discovery",
     when: "Day one",
-    body: "We map how the work actually moves through your business — not how the org chart says it does. You leave the call knowing what to automate first, what it is worth, and what to leave alone.",
+    body: "We map how the work actually moves through your business, not how the org chart says it does. You leave the call knowing what to automate first, what it is worth, and what to leave alone.",
   },
   {
     label: "Build",
@@ -52,7 +52,7 @@ const STEPS = [
   {
     label: "Deploy",
     when: "Week three",
-    body: "The agents go in behind guardrails: what they may do alone, what needs your approval, what they can never touch. You set those lines, and they are enforced in code rather than in a prompt.",
+    body: "The agents go in behind guardrails. What they may do alone, what needs your approval, what they can never touch. You set those lines, and they are enforced in code rather than in a prompt.",
   },
   {
     label: "Run",
@@ -85,10 +85,10 @@ export default function MarketingHome() {
 
           <Reveal delay={180}>
             <p className="mt-7 max-w-xl text-[17px] leading-relaxed text-fg-muted sm:text-lg">
-              OASIS builds AI agents that hold a seat in your business —
-              operations, marketing, finance, legal — and the systems they run
-              on. Each one owns a function, works from your real data, and
-              reports back in plain English.
+              OASIS builds AI agents that hold a seat in your business:
+              operations, marketing, finance, legal. We build the systems they
+              run on too. Each one owns a function, works from your real data,
+              and reports back in plain English.
             </p>
           </Reveal>
 
@@ -135,7 +135,7 @@ export default function MarketingHome() {
                 that ratio untouched.
               </p>
               <p>
-                An agent breaks it in one specific way — it owns an outcome
+                An agent breaks it in one specific way. It owns an outcome
                 rather than a screen. It knows what happened last week, it has
                 access to the systems the work lives in, and it comes back to
                 you with the answer instead of waiting to be asked.
@@ -170,7 +170,7 @@ export default function MarketingHome() {
           <SectionHead
             eyebrow="The fleet"
             title="Seven seats. Pick the ones you're missing."
-            lede="These are the agents we run our own company on. You get the same ones, scoped to your business — or a custom seat built for a job only you have."
+            lede="These are the agents we run our own company on. You get the same ones, scoped to your business, or a custom seat built for a job only you have."
           />
         </Reveal>
 
@@ -326,7 +326,7 @@ export default function MarketingHome() {
               <p className="mt-5 max-w-md text-[16px] leading-relaxed text-fg-muted sm:text-[17px]">
                 Four questions about how your business actually runs. We read
                 every one and come back with where an agent would pay for
-                itself first — and where it wouldn&rsquo;t.
+                itself first, and where it wouldn&rsquo;t.
               </p>
               <p className="mt-6 font-data text-[11px] leading-relaxed tracking-[0.08em] text-fg-dim">
                 No call required to get the answer.
