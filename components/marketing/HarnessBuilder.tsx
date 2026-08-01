@@ -1,0 +1,278 @@
+"use client";
+
+import { useState } from "react";
+import { BODIES, ENGINES, CHASSIS } from "@/lib/marketing/harness";
+
+/**
+ * The car analogy, made touchable.
+ *
+ * Pick a BODY (the agent) and an ENGINE (the model) and watch the same car
+ * carry both. The teaching point is the part that never changes: the
+ * chassis underneath is the harness we build, and it is the only reason
+ * swapping either of the other two is a menu choice rather than a rebuild.
+ *
+ * Deliberately a 2D technical cutaway rather than a 3D model. A real 3D
+ * car means a WebGL runtime and an asset pipeline for a decorative object;
+ * a blueprint reads as engineering, matches the rest of the site, weighs
+ * nothing, and — unlike a mediocre 3D model — cannot look cheap.
+ *
+ * The shell is one SVG path per body on a shared viewBox with the
+ * wheelbase aligned, so switching morphs the outline in place rather than
+ * cutting to a different picture.
+ *
+ * Server-rendered with the first body and engine already selected, so the
+ * section is a complete, readable explanation with no JavaScript at all.
+ */
+
+export function HarnessBuilder() {
+  const [bodyId, setBodyId] = useState(BODIES[0].id);
+  const [engineId, setEngineId] = useState(ENGINES[0].id);
+
+  const body = BODIES.find((b) => b.id === bodyId) ?? BODIES[0];
+  const engine = ENGINES.find((e) => e.id === engineId) ?? ENGINES[0];
+
+  return (
+    <div className="border border-ops-line bg-ops-panel/60">
+      {/* ── The car ─────────────────────────────────────────────────── */}
+      <div className="relative border-b border-ops-line px-4 pt-8 sm:px-8">
+        <svg
+          viewBox="0 0 420 150"
+          className="mx-auto block h-auto w-full max-w-2xl"
+          role="img"
+          aria-label={`${body.name} body fitted with the ${engine.name} engine, on the OASIS harness`}
+        >
+          {/* Ground line */}
+          <line
+            x1="10"
+            y1="139"
+            x2="410"
+            y2="139"
+            stroke="currentColor"
+            className="text-ops-edge"
+            strokeWidth="1"
+          />
+
+          {/* Chassis rail — the constant. Drawn under the shell and in the
+              brand cyan, because it is the thing being sold. */}
+          <path
+            d="M 56 122 L 380 122"
+            stroke="#00D4FF"
+            strokeWidth="3"
+            strokeLinecap="round"
+            opacity="0.9"
+          />
+          <path
+            d="M 76 122 L 76 112 M 200 122 L 200 108 M 330 122 L 330 112"
+            stroke="#00D4FF"
+            strokeWidth="1.5"
+            opacity="0.45"
+          />
+
+          {/* Body shell */}
+          <path
+            d={body.path}
+            fill="none"
+            stroke="currentColor"
+            className="m-car-shell text-fg"
+            strokeWidth="2"
+            strokeLinejoin="round"
+            strokeDasharray={body.blueprint ? "7 6" : undefined}
+            opacity={body.blueprint ? 0.65 : 1}
+          />
+
+          {/* Glasshouse, so the shell reads as a vehicle rather than a blob */}
+          <path
+            d="M 132 56 L 150 34 L 244 34 L 262 56 Z"
+            fill="#00D4FF"
+            opacity="0.07"
+            className="m-car-shell"
+          />
+
+          {/* Engine bay, front right */}
+          <g className="m-car-engine">
+            <rect
+              x="306"
+              y="82"
+              width="66"
+              height="34"
+              rx="4"
+              fill={engine.glow}
+              opacity="0.16"
+            />
+            <rect
+              x="306"
+              y="82"
+              width="66"
+              height="34"
+              rx="4"
+              fill="none"
+              stroke={engine.glow}
+              strokeWidth="1.5"
+            />
+            {/* Four cylinders. A readable "engine" at a glance. */}
+            {[0, 1, 2, 3].map((i) => (
+              <rect
+                key={i}
+                x={314 + i * 15}
+                y={90}
+                width="8"
+                height="18"
+                rx="1.5"
+                fill={engine.glow}
+                opacity="0.85"
+              />
+            ))}
+          </g>
+
+          {/* Wheels */}
+          {[110, 322].map((cx) => (
+            <g key={cx}>
+              <circle
+                cx={cx}
+                cy="122"
+                r="17"
+                fill="#050608"
+                stroke="currentColor"
+                className="text-ops-edge"
+                strokeWidth="2"
+              />
+              <circle cx={cx} cy="122" r="6" fill="#00D4FF" opacity="0.55" />
+            </g>
+          ))}
+        </svg>
+
+        {/* Callouts */}
+        <div className="mx-auto mb-6 mt-2 flex max-w-2xl flex-wrap justify-center gap-x-8 gap-y-2 text-center">
+          <Callout label="Body" value={body.name} tone="fg" />
+          <Callout label="Engine" value={`${engine.name} · ${engine.vendor}`} tone="engine" color={engine.glow} />
+          <Callout label="Chassis" value="OASIS harness" tone="signal" />
+        </div>
+      </div>
+
+      {/* ── Selectors ───────────────────────────────────────────────── */}
+      <div className="grid gap-px bg-ops-line md:grid-cols-2">
+        <Picker
+          legend="Body — the agent"
+          hint="What the seat is shaped for."
+          options={BODIES.map((b) => ({ id: b.id, label: b.name, sub: b.seat }))}
+          value={bodyId}
+          onChange={setBodyId}
+          detail={body.brief}
+        />
+        <Picker
+          legend="Engine — the model"
+          hint="Swappable. Today's best model is not next quarter's."
+          options={ENGINES.map((e) => ({ id: e.id, label: e.name, sub: e.vendor }))}
+          value={engineId}
+          onChange={setEngineId}
+          detail={engine.trait}
+          accent={engine.glow}
+        />
+      </div>
+
+      {/* ── The constant ────────────────────────────────────────────── */}
+      <div className="border-t border-ops-line bg-ops-void/60 p-6 sm:p-8">
+        <h3 className="font-display text-base font-bold tracking-tight text-fg">
+          What doesn&rsquo;t change when you swap either one
+        </h3>
+        <ul className="mt-4 flex flex-wrap gap-x-6 gap-y-2.5">
+          {CHASSIS.map((c) => (
+            <li key={c} className="flex items-baseline gap-2 text-[14px] text-fg-muted">
+              <span aria-hidden="true" className="h-px w-3 shrink-0 translate-y-[-4px] bg-signal" />
+              {c}
+            </li>
+          ))}
+        </ul>
+        <p className="mt-5 max-w-2xl text-[15px] leading-relaxed text-fg-dim">
+          Buy a chatbot and you have bought an engine bolted to the road. The
+          chassis is the part that takes months, and it is the part that means
+          a better model next year is a swap rather than a rebuild.
+        </p>
+      </div>
+    </div>
+  );
+}
+
+function Callout({
+  label,
+  value,
+  tone,
+  color,
+}: {
+  label: string;
+  value: string;
+  tone: "fg" | "signal" | "engine";
+  color?: string;
+}) {
+  return (
+    <div>
+      <div className="font-data text-[10px] uppercase tracking-[0.22em] text-fg-dim">
+        {label}
+      </div>
+      <div
+        className={`mt-1 text-[15px] font-semibold ${
+          tone === "signal" ? "text-signal" : tone === "fg" ? "text-fg" : ""
+        }`}
+        style={tone === "engine" ? { color } : undefined}
+      >
+        {value}
+      </div>
+    </div>
+  );
+}
+
+function Picker({
+  legend,
+  hint,
+  options,
+  value,
+  onChange,
+  detail,
+  accent,
+}: {
+  legend: string;
+  hint: string;
+  options: { id: string; label: string; sub: string }[];
+  value: string;
+  onChange: (id: string) => void;
+  detail: string;
+  accent?: string;
+}) {
+  return (
+    <fieldset className="bg-ops-void p-6 sm:p-7">
+      <legend className="font-data text-[10px] uppercase tracking-[0.22em] text-signal">
+        {legend}
+      </legend>
+      <p className="mt-2 text-[13px] text-fg-dim">{hint}</p>
+
+      <div className="mt-5 flex flex-wrap gap-2">
+        {options.map((o) => {
+          const active = o.id === value;
+          return (
+            <button
+              key={o.id}
+              type="button"
+              onClick={() => onChange(o.id)}
+              aria-pressed={active}
+              className={`rounded-md border px-3.5 py-2 text-left transition-colors ${
+                active
+                  ? "border-transparent bg-ops-raised text-fg"
+                  : "border-ops-edge text-fg-muted hover:border-fg-faint hover:text-fg"
+              }`}
+              style={active && accent ? { boxShadow: `inset 0 0 0 1px ${accent}` } : undefined}
+            >
+              <span className="block text-[14px] font-semibold">{o.label}</span>
+              <span className="mt-0.5 block text-[12px] text-fg-dim">{o.sub}</span>
+            </button>
+          );
+        })}
+      </div>
+
+      {/* Fixed height so switching options never resizes the panel and
+          nudges the car above it. */}
+      <p className="mt-5 min-h-[4.5rem] text-[14px] leading-relaxed text-fg-muted">
+        {detail}
+      </p>
+    </fieldset>
+  );
+}

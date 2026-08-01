@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { Space_Grotesk, Inter_Tight, JetBrains_Mono } from "next/font/google";
+import { Ambient } from "@/components/marketing/Ambient";
 import { MarketingNav } from "@/components/marketing/MarketingNav";
 import { MarketingFooter } from "@/components/marketing/MarketingFooter";
 import { SITE_ORIGIN } from "@/lib/marketing/routes";
@@ -81,6 +82,11 @@ export default function MarketingLayout({
       className={`marketing ${display.variable} ${body.variable} ${data.variable} min-h-screen bg-ops-void font-body text-fg antialiased`}
     >
       <script dangerouslySetInnerHTML={{ __html: JS_FLAG }} />
+      {/* One fixed atmosphere behind the entire site. Each page used to
+          mount its own hero-height backdrop, so everything below the fold
+          was flat black — the reason the site felt like it stopped having
+          a design after the first screen. */}
+      <Ambient />
       <a
         href="#main"
         className="sr-only focus:not-sr-only focus:fixed focus:left-4 focus:top-4 focus:z-[100] focus:rounded focus:bg-signal focus:px-4 focus:py-2 focus:font-data focus:text-sm focus:font-medium focus:text-ops-void"

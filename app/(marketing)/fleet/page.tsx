@@ -2,7 +2,6 @@ import type { Metadata } from "next";
 import Link from "next/link";
 import { ArrowRight } from "lucide-react";
 import { CTA_INLINE } from "@/components/marketing/Cta";
-import { ConsoleField } from "@/components/marketing/ConsoleField";
 import { FleetRoster } from "@/components/marketing/FleetRoster";
 import { Reveal } from "@/components/marketing/Reveal";
 import { Section, SectionHead, Eyebrow } from "@/components/marketing/Section";
@@ -44,7 +43,6 @@ export default function FleetPage() {
   return (
     <>
       <section className="m-edge relative overflow-hidden">
-        <ConsoleField />
         <div className="relative mx-auto w-full max-w-6xl px-5 pb-16 pt-20 sm:px-8 sm:pb-20 sm:pt-28">
           <Reveal>
             <Eyebrow>Roster</Eyebrow>

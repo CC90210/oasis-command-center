@@ -111,13 +111,15 @@ export function AcronymMark() {
     });
   };
 
+  const allOpen = open.every(Boolean);
+
   return (
-    <div
-      ref={ref}
-      className="m-acr"
-      role="group"
-      aria-label="OASIS — Operational Agentic Systems Increasing Scalability"
-    >
+    <div ref={ref}>
+      <div
+        className="m-acr"
+        role="group"
+        aria-label="OASIS — Operational Agentic Systems Increasing Scalability"
+      >
       {LETTERS.map((l, i) => (
         <button
           key={i}
@@ -135,6 +137,32 @@ export function AcronymMark() {
           </span>
         </button>
       ))}
+      </div>
+
+      {/*
+        Discoverability. With every word expanded by default there was
+        nothing telling a visitor the letters were interactive, and once
+        they had clicked one there was no visible route back to the whole
+        phrase — the way out was "click the same letter again", which is
+        not something anyone guesses.
+
+        So: a permanent one-line hint that becomes the way back the moment
+        it is needed. Hidden from assistive tech when it is only a hint,
+        because a screen-reader user already has each word as a full label.
+      */}
+      <p className="mt-3 h-5 font-data text-[11px] tracking-[0.14em] text-fg-dim">
+        {allOpen ? (
+          <span aria-hidden="true">Click a letter to take it apart</span>
+        ) : (
+          <button
+            type="button"
+            onClick={() => setOpen(LETTERS.map(() => true))}
+            className="text-signal underline decoration-dotted underline-offset-4 transition-colors hover:text-fg"
+          >
+            Show the whole name
+          </button>
+        )}
+      </p>
     </div>
   );
 }

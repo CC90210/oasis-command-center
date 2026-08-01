@@ -285,7 +285,12 @@ export default async function RootLayout({
           dangerouslySetInnerHTML={{ __html: SIDEBAR_BOOT_SCRIPT }}
         />
       </head>
-      <body className="grain">
+      {/* `grain` draws globals.css's fixed 40px "Iron Man HUD" grid across
+          the whole viewport. That belongs to the operator dashboard. On
+          the public site it tiled a checkerboard behind every page and
+          every scroll position — the thing CC kept pointing at. Scoped to
+          the dashboard branch; marketing brings its own atmosphere. */}
+      <body className={isFullBleed ? undefined : "grain"}>
         {isFullBleed || !manifest ? (
           children
         ) : (

@@ -1,6 +1,5 @@
 import type { Metadata } from "next";
 import { Calendar, Mail, ShieldCheck } from "lucide-react";
-import { ConsoleField } from "@/components/marketing/ConsoleField";
 import { Reveal } from "@/components/marketing/Reveal";
 import { Section, Eyebrow } from "@/components/marketing/Section";
 import { AuditForm } from "@/components/marketing/AuditForm";
@@ -45,7 +44,6 @@ export default function ContactPage() {
   return (
     <>
       <section className="m-edge relative overflow-hidden">
-        <ConsoleField />
         <div className="relative mx-auto w-full max-w-6xl px-5 pb-16 pt-20 sm:px-8 sm:pb-20 sm:pt-28">
           <Reveal>
             <Eyebrow>Start here</Eyebrow>

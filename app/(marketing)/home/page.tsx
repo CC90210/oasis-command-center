@@ -3,7 +3,7 @@ import Link from "next/link";
 import { ArrowRight } from "lucide-react";
 import { CtaLink, CTA_INLINE } from "@/components/marketing/Cta";
 import { AcronymMark } from "@/components/marketing/AcronymMark";
-import { ConsoleField } from "@/components/marketing/ConsoleField";
+import { HarnessBuilder } from "@/components/marketing/HarnessBuilder";
 import { FleetRoster } from "@/components/marketing/FleetRoster";
 import { Reveal } from "@/components/marketing/Reveal";
 import { Section, SectionHead, Eyebrow } from "@/components/marketing/Section";
@@ -66,7 +66,6 @@ export default function MarketingHome() {
     <>
       {/* ── Hero ─────────────────────────────────────────────────────── */}
       <section className="m-edge relative overflow-hidden">
-        <ConsoleField />
 
         <div className="relative mx-auto w-full max-w-6xl px-5 pb-24 pt-24 sm:px-8 sm:pb-32 sm:pt-32">
           {/* The name, spelling itself out. This replaced a plain
@@ -147,6 +146,21 @@ export default function MarketingHome() {
               </p>
             </div>
           </Reveal>
+        </div>
+      </Section>
+
+      {/* ── The harness ──────────────────────────────────────────────── */}
+      <Section id="harness" className="m-edge">
+        <Reveal>
+          <SectionHead
+            eyebrow="How it fits together"
+            title="The body is the agent. The engine is the model."
+            lede="Swap either one. The chassis underneath is the part we build, and it is the only reason swapping is a menu choice instead of starting over."
+          />
+        </Reveal>
+
+        <div className="mt-12">
+          <HarnessBuilder />
         </div>
       </Section>
 
@@ -302,7 +316,6 @@ export default function MarketingHome() {
 
       {/* ── CTA ──────────────────────────────────────────────────────── */}
       <Section id="start" className="relative overflow-hidden">
-        <ConsoleField className="opacity-60" />
         <div className="relative grid gap-12 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.1fr)] lg:gap-20">
           <Reveal>
             <div>

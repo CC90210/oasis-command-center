@@ -13,6 +13,43 @@
  * readable document. That is also exactly what a crawler sees.
  */
 
+/* ── Typography ────────────────────────────────────────────────────────
+   Three settings that do most of the work and that a hand-tuned class on
+   each heading cannot: they depend on where the line actually breaks,
+   which only the browser knows.
+
+   `text-wrap: balance` evens the ragged edge of a heading, so a two-line
+   headline never leaves one word stranded on line two. It is capped at a
+   few lines by spec, which is why it is scoped to headings.
+
+   `text-wrap: pretty` does the narrower job on body copy: prevent a single
+   short word ending a paragraph.
+
+   Both degrade to normal wrapping where unsupported — no fallback needed. */
+.marketing h1,
+.marketing h2,
+.marketing h3 {
+  text-wrap: balance;
+}
+
+.marketing p,
+.marketing li {
+  text-wrap: pretty;
+}
+
+/* Optical alignment: large display type needs to start slightly left of
+   the body text beneath it, or the eye reads the heading as indented.
+   Only applied at the sizes where the effect is visible. */
+.marketing h1 {
+  margin-left: -0.045em;
+}
+
+/* Tabular figures wherever numbers sit in a column (step numbers, the
+   roster, stat rows) so digits do not jitter between values. */
+.marketing .font-data {
+  font-variant-numeric: tabular-nums;
+}
+
 /* ── Scroll reveal ─────────────────────────────────────────────────────
    Without JS, or with reduced motion, elements are simply visible. The
    hidden start state only exists once JS has confirmed it can undo it. */
@@ -135,11 +172,100 @@
    Cost is three composited layers and transform-only animation. No canvas,
    no requestAnimationFrame, no per-frame JavaScript. */
 
+/* The whole atmosphere layer is fixed, so it sits behind every page and
+   every scroll position instead of being bolted to the top of each hero. */
+.m-ambient {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+/* Marketing content rides above it. */
+.marketing > *:not(.m-ambient) {
+  position: relative;
+  z-index: 1;
+}
+
 .m-aurora {
   position: absolute;
   inset: -20%;
   filter: blur(90px);
   opacity: 0.75;
+}
+
+/* ── Double helix ──────────────────────────────────────────────────────
+   Two strands of nodes on one slow rotation. Each node's vertical slot
+   comes from --i; its horizontal position is a sine of that slot, phase-
+   shifted 180deg between strands, so the pair reads as a twist without
+   any 3D or any JavaScript. */
+.m-helix {
+  position: absolute;
+  top: -10%;
+  right: 6%;
+  width: 190px;
+  height: 120%;
+  opacity: 0.5;
+  animation: m-helix-turn 46s linear infinite;
+}
+
+/* --x and --depth are computed in Ambient.tsx; see the note there for why
+   they are not derived from CSS sin()/abs(). */
+.m-helix span {
+  position: absolute;
+  left: 50%;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: theme("colors.signal.DEFAULT");
+  box-shadow: 0 0 10px theme("colors.signal.glow");
+  transform: translateX(var(--x));
+  opacity: calc(0.22 + 0.68 * var(--depth));
+}
+
+.m-helix span[data-strand="b"] {
+  background: theme("colors.status.engaged");
+  box-shadow: 0 0 10px rgba(16, 185, 129, 0.35);
+  opacity: calc(0.16 + 0.54 * var(--depth));
+}
+
+@keyframes m-helix-turn {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* ── Drift ─────────────────────────────────────────────────────────────
+   Small nodes travelling up the viewport on long offset cycles. Sparse on
+   purpose: six, not sixty. */
+.m-drift {
+  position: absolute;
+  bottom: -6%;
+  border-radius: 50%;
+  background: theme("colors.signal.DEFAULT");
+  box-shadow: 0 0 12px theme("colors.signal.glow");
+  opacity: 0;
+  animation-name: m-drift-up;
+  animation-timing-function: linear;
+  animation-iteration-count: infinite;
+}
+
+@keyframes m-drift-up {
+  0% {
+    opacity: 0;
+    transform: translateY(0) translateX(0);
+  }
+  12% {
+    opacity: 0.5;
+  }
+  88% {
+    opacity: 0.35;
+  }
+  100% {
+    opacity: 0;
+    transform: translateY(-115vh) translateX(26px);
+  }
 }
 
 .m-aurora span {
@@ -294,6 +420,31 @@
 @media (prefers-reduced-motion: reduce) {
   .m-acr-word {
     transition: none;
+  }
+}
+
+/* ── Harness builder ───────────────────────────────────────────────────
+   Body and engine swaps cross-fade rather than cutting, so the car reads
+   as one object being reconfigured instead of four pictures. */
+.m-car-shell,
+.m-car-engine {
+  transition: opacity 0.3s ease;
+}
+
+.m-car-shell {
+  animation: m-part-in 0.4s ease-out;
+}
+
+.m-car-engine {
+  animation: m-part-in 0.35s ease-out;
+}
+
+@keyframes m-part-in {
+  from {
+    opacity: 0.15;
+  }
+  to {
+    opacity: 1;
   }
 }
 

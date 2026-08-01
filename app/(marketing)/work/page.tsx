@@ -2,7 +2,6 @@ import type { Metadata } from "next";
 import Link from "next/link";
 import { ArrowRight } from "lucide-react";
 import { CtaLink, CTA_INLINE } from "@/components/marketing/Cta";
-import { ConsoleField } from "@/components/marketing/ConsoleField";
 import { Reveal } from "@/components/marketing/Reveal";
 import { Section, SectionHead, Eyebrow } from "@/components/marketing/Section";
 import { BOOKING_URL } from "@/lib/marketing/routes";
@@ -81,7 +80,6 @@ export default function WorkPage() {
   return (
     <>
       <section className="m-edge relative overflow-hidden">
-        <ConsoleField />
         <div className="relative mx-auto w-full max-w-6xl px-5 pb-16 pt-20 sm:px-8 sm:pb-20 sm:pt-28">
           <Reveal>
             <Eyebrow>What we build</Eyebrow>
