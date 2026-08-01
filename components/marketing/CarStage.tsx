@@ -2180,18 +2180,51 @@ export function CarStage({
             // camera holds, so it leaves frame rather than being followed.
             const k =
               (launchFrame - LAUNCH.track) / (LAUNCH.away - LAUNCH.track);
-            carGroup.position.x = k * k * 46;
-            carGroup.position.y = k * k * 1.2;
+            // The car pulls away, and the CAMERA CHASES IT — at 78% of its
+            // speed, so it recedes without vanishing. The first version
+            // launched it to 46 units on a squared curve while the camera
+            // held station, so it was out of frame within a few frames and
+            // the warp played to an empty stage. The whole spectacle was
+            // happening where nobody could see it.
+            // The camera is RIGGED to the car, not lerped after it. A lerp
+            // cannot chase a squared acceleration — it falls behind, and
+            // since the bodywork is near-black it simply vanished. Two
+            // failures at once: losing the subject and, as the grid dimmed,
+            // losing the only thing lighting it. Position the camera
+            // directly at a fixed offset instead, so the car holds its
+            // place in frame for the whole departure and the streaks rush
+            // past it. That is the shot.
+            // The camera KEEPS the tracking framing it already reached and
+            // the car pulls away from it down the track. Every attempt to
+            // move the camera during this stage — lerped chase, then a
+            // rigid rig — ended with a black frame, and the tracking shot
+            // at the end of stage 2 is already the shot. Leaving it alone
+            // is both the fix and the better composition: you watch the car
+            // go, from where you were standing.
+            const travel = k * k * 16;
+            carGroup.position.x = travel;
             wheelSpin += 1.3;
-            engineLight.intensity = 6.4 * (1 - k);
+            // Keep it lit. The engine glow rising through the departure is
+            // what reads as acceleration.
+            engineLight.intensity = 6.4 + k * 4;
+            // Hold the tracking framing explicitly. Without this the
+            // easing block below keeps lerping toward whatever stage 2
+            // left, which is fine — but stating it makes the intent
+            // legible next to a stage that deliberately does not move.
+            targetPos.set(-12, 0.75, 3.2);
+            targetAt.set(0, 0.6, 0);
             // WARP. Streaks stretch hard and rush past the lens while the
             // track dims out beneath — the car does not simply drive off,
             // the whole frame accelerates with it.
             warpMats[0].opacity = 0.5 + k * 0.5;
-            warpMats[1].opacity = 0.55 * (1 - k);
+            // Grid stays lit almost to the end — it is the floor the car is
+            // read against, and dimming it early erased the car with it.
+            warpMats[1].opacity = 0.55 * Math.max(0, 1 - k * k * 1.4);
+            // Streaks ride with the car so they rush the lens for the whole
+            // departure rather than being left behind at the start line.
             for (const s of warpStreaks) {
-              s.scale.x = 7 + k * 90;
-              s.position.x -= 1.6 + k * 9;
+              s.scale.x = 7 + k * 70;
+              s.position.x += 1.1 + k * 16;
             }
             if (launchFrame >= LAUNCH.away) {
               launchFrame = -1; // latched: fire once, never re-enter
@@ -2296,6 +2329,14 @@ export function CarStage({
           // axis runs along x — rolling it about x would barrel-roll it
           // down its own length instead of tipping the nose.
           carGroup.rotation.z = dragged ? pitch : 0;
+        } else if (launchFrame > 0) {
+          // LEVEL OUT before driving off. Freezing rotation at whatever
+          // the viewer left it meant a car they had tipped 60 degrees
+          // launched still tipped 60 degrees — accelerating away on its
+          // door. Eased rather than snapped so the correction reads as
+          // the car settling onto its wheels, not as a glitch.
+          carGroup.rotation.z += (0 - carGroup.rotation.z) * 0.12;
+          carGroup.rotation.y += (0 - carGroup.rotation.y) * 0.12;
         }
         if (!reduced) {
           const sweep = Math.sin(t * 0.35);
@@ -2339,7 +2380,15 @@ export function CarStage({
               id: h.id,
               x: px,
               y: py,
-              visible: projected.z < 1 && onPanel && !behindBody && diveFrames === 0,
+              // Hidden during the launch too. They are annotations on a
+              // stationary exhibit; riding along on a car accelerating off
+              // into the distance reads as UI that forgot to leave.
+              visible:
+                projected.z < 1 &&
+                onPanel &&
+                !behindBody &&
+                diveFrames === 0 &&
+                launchFrame === 0,
             });
           }
 

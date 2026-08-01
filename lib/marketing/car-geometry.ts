@@ -487,7 +487,7 @@ export const FOCUS_DIR: [number, number, number] = [0.571, 0.253, 0.769];
  *
  * At 60fps: ignition ~1.2s, tracking shot ~1.0s, drive-away ~1.3s.
  */
-export const LAUNCH = { ignite: 72, track: 132, away: 210 } as const;
+export const LAUNCH = { ignite: 72, track: 132, away: 246 } as const;
 
 /**
  * What DIVE_OFFSET was before the lens change, when the stage ran at
