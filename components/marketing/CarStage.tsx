@@ -1078,7 +1078,16 @@ export function CarStage({
       // Live bits the animation loop drives: the reactor breathes, the
       // containment rings counter-rotate. Rebuilt with the engine.
       let pulseParts: ThreeNS.Object3D[] = [];
-      let spinParts: { mesh: ThreeNS.Object3D; rate: number }[] = [];
+      // `axis` is the part's OWN spin axis. Rotating everything on z was
+      // fine while the only spinning parts were rings already lying in the
+      // xy-plane, but a pulley or a turbo has been rotated onto another
+      // axis to sit correctly — driving z on those tumbles them end over
+      // end instead of spinning them.
+      let spinParts: {
+        mesh: ThreeNS.Object3D;
+        rate: number;
+        axis?: "x" | "y" | "z";
+      }[] = [];
       // Pulse rate scales with cylinder count, so a V12 idles faster than
       // a four and the electric pack barely breathes at all.
       let pulseRate = 1;
@@ -1158,24 +1167,29 @@ export function CarStage({
             add(hub);
             pulseParts.push(hub);
 
+            // Blades live in a group centred on the hub and the GROUP
+            // spins. Spinning each blade on its own axis would rotate it
+            // in place like a propeller pinned to a wall — the blades have
+            // to orbit the hub, which means the rotation belongs to their
+            // parent, not to them.
+            const rotor = new THREE.Group();
+            rotor.position.set(bx, by + 0.14, bz + fz);
             for (let b = 0; b < 7; b++) {
               const blade = new THREE.Mesh(
                 new THREE.BoxGeometry(0.15, 0.008, 0.05),
                 blockMat,
               );
               const a = (b / 7) * Math.PI * 2;
-              blade.position.set(
-                bx + Math.cos(a) * 0.1,
-                by + 0.14,
-                bz + fz + Math.sin(a) * 0.1,
-              );
+              blade.position.set(Math.cos(a) * 0.1, 0, Math.sin(a) * 0.1);
               blade.rotation.y = -a;
               blade.rotation.z = 0.4;
-              add(blade);
-              // Fans spin opposite ways, which is what makes it read as a
-              // working machine rather than a decal.
-              spinParts.push({ mesh: blade, rate: i === 0 ? 0.09 : -0.09 });
+              rotor.add(blade);
             }
+            add(rotor);
+            // Fans spin opposite ways, which is what makes it read as a
+            // working machine rather than a decal. The rotor lies flat, so
+            // its axis is y.
+            spinParts.push({ mesh: rotor, rate: i === 0 ? 0.09 : -0.09, axis: "y" });
           }
 
           // Braided power conduits running out to the rear.
@@ -1201,6 +1215,13 @@ export function CarStage({
           const perBank = eng.bank === 0 ? eng.cylinders : eng.cylinders / 2;
           const banks = eng.bank === 0 ? [0] : [-1, 1];
           const half = THREE.MathUtils.degToRad(eng.bank) / 2;
+
+          // Cylinder positions are collected as they are built so the
+          // plumbing can be routed to them. Everything downstream — plug
+          // leads, intake runners, exhaust headers — has to land on the
+          // actual barrel, not on a guessed coordinate, or a V12 gets an
+          // inline-four's wiring.
+          const cylTops: ThreeNS.Vector3[] = [];
 
           for (const b of banks) {
             for (let i = 0; i < perBank; i++) {
@@ -1234,8 +1255,179 @@ export function CarStage({
               cap.position.y += 0.14;
               cap.rotation.copy(cyl.rotation);
               add(cap);
+              cylTops.push(cap.position.clone());
             }
           }
+
+          // ── Plumbing and wiring ──────────────────────────────────
+          // An engine is mostly what is bolted to the block. Bare barrels
+          // read as a machined part; barrels plus a loom, an intake and
+          // headers read as an engine. All of it is routed from cylTops,
+          // so it rebuilds correctly for an inline four, a flat six or a
+          // sixty-degree V12 without a special case for each.
+
+          const wireMat = new THREE.MeshStandardMaterial({
+            color: 0x141922,
+            metalness: 0.1,
+            roughness: 0.75,
+            envMapIntensity: 0.5,
+          });
+          const pipeMat = new THREE.MeshStandardMaterial({
+            color: 0x8d949c,
+            metalness: 1,
+            roughness: 0.32,
+            envMapIntensity: 2.6,
+          });
+          engineMats.push(wireMat, pipeMat);
+
+          const tube = (
+            pts: ThreeNS.Vector3[],
+            r: number,
+            mat: ThreeNS.Material,
+          ) =>
+            new THREE.Mesh(
+              new THREE.TubeGeometry(new THREE.CatmullRomCurve3(pts), 16, r, 6, false),
+              mat,
+            );
+
+          // ECU, at the back of the block. Every plug lead starts here.
+          const ecuX = bx - (eng.cylinders >= 8 ? 0.4 : 0.3);
+          const ecu = new THREE.Mesh(
+            new THREE.BoxGeometry(0.13, 0.09, 0.22),
+            blockMat,
+          );
+          ecu.position.set(ecuX, by + 0.12, bz - 0.2);
+          add(ecu);
+
+          // Ignition loom: one lead per cylinder, fanning out of the ECU
+          // and arcing over to each cam cover. This is the "wiring" the
+          // bay was missing entirely.
+          for (const [i, top] of cylTops.entries()) {
+            const lift = 0.1 + (i % 3) * 0.022;
+            add(
+              tube(
+                [
+                  new THREE.Vector3(ecuX, by + 0.14, bz - 0.2),
+                  new THREE.Vector3(
+                    (ecuX + top.x) / 2,
+                    by + 0.16 + lift,
+                    (bz - 0.2 + top.z) / 2,
+                  ),
+                  new THREE.Vector3(top.x, top.y + 0.05, top.z),
+                ],
+                0.011,
+                wireMat,
+              ),
+            );
+          }
+
+          // Intake plenum with a runner to every cylinder.
+          const plenumY = by + 0.26;
+          const plenum = new THREE.Mesh(
+            new THREE.CylinderGeometry(0.06, 0.06, eng.cylinders >= 8 ? 0.66 : 0.46, 14),
+            pipeMat,
+          );
+          plenum.rotation.z = Math.PI / 2;
+          plenum.position.set(bx, plenumY, bz + 0.18);
+          add(plenum);
+
+          for (const top of cylTops) {
+            add(
+              tube(
+                [
+                  new THREE.Vector3(top.x, plenumY, bz + 0.18),
+                  new THREE.Vector3(top.x, plenumY - 0.06, (bz + 0.18 + top.z) / 2),
+                  new THREE.Vector3(top.x, top.y + 0.03, top.z),
+                ],
+                0.017,
+                pipeMat,
+              ),
+            );
+          }
+
+          // Exhaust headers: one primary per cylinder, all merging into a
+          // collector behind the block.
+          const collector = new THREE.Vector3(bx - 0.34, by - 0.14, bz - 0.3);
+          for (const top of cylTops) {
+            add(
+              tube(
+                [
+                  new THREE.Vector3(top.x, top.y - 0.12, top.z),
+                  new THREE.Vector3(top.x, by - 0.1, top.z - 0.12),
+                  new THREE.Vector3((top.x + collector.x) / 2, by - 0.13, collector.z + 0.06),
+                  collector,
+                ],
+                0.015,
+                pipeMat,
+              ),
+            );
+          }
+          const collectorCan = new THREE.Mesh(
+            new THREE.CylinderGeometry(0.05, 0.05, 0.16, 12),
+            pipeMat,
+          );
+          collectorCan.rotation.z = Math.PI / 2;
+          collectorCan.position.copy(collector);
+          add(collectorCan);
+
+          // Turbo, where the engine is specified with one. Snail housing,
+          // compressor can, and the charge pipe back to the plenum.
+          if (/turbo/i.test(eng.spec)) {
+            const snail = new THREE.Mesh(
+              new THREE.TorusGeometry(0.075, 0.038, 10, 20),
+              pipeMat,
+            );
+            snail.position.set(bx - 0.46, by - 0.02, bz - 0.3);
+            snail.rotation.y = Math.PI / 2;
+            add(snail);
+            // Rotated onto y to face down the car, so it spins about y.
+            spinParts.push({ mesh: snail, rate: 0.14, axis: "y" });
+
+            const compressor = new THREE.Mesh(
+              new THREE.CylinderGeometry(0.05, 0.05, 0.07, 14),
+              blockMat,
+            );
+            compressor.position.set(bx - 0.46, by - 0.02, bz - 0.22);
+            compressor.rotation.x = Math.PI / 2;
+            add(compressor);
+
+            add(
+              tube(
+                [
+                  new THREE.Vector3(bx - 0.46, by - 0.02, bz - 0.18),
+                  new THREE.Vector3(bx - 0.3, by + 0.2, bz + 0.06),
+                  new THREE.Vector3(bx, plenumY, bz + 0.18),
+                ],
+                0.026,
+                pipeMat,
+              ),
+            );
+          }
+
+          // Accessory drive at the front of the block: crank pulley, an
+          // idler, and the belt around them. Spins with the engine.
+          const pulleyX = bx + (eng.cylinders >= 8 ? 0.46 : 0.34);
+          for (const [py2, pr] of [
+            [by - 0.06, 0.06],
+            [by + 0.12, 0.038],
+          ] as const) {
+            const pulley = new THREE.Mesh(
+              new THREE.CylinderGeometry(pr, pr, 0.03, 16),
+              pipeMat,
+            );
+            pulley.position.set(pulleyX, py2, bz);
+            pulley.rotation.z = Math.PI / 2;
+            add(pulley);
+            // Lying on its side across the car: its own axis is x.
+            spinParts.push({ mesh: pulley, rate: 0.1, axis: "x" });
+          }
+          const belt = new THREE.Mesh(
+            new THREE.TorusGeometry(0.1, 0.008, 6, 24),
+            wireMat,
+          );
+          belt.position.set(pulleyX, by + 0.03, bz);
+          belt.rotation.y = Math.PI / 2;
+          add(belt);
         }
 
         // ── Core reactor ────────────────────────────────────────────
@@ -1483,7 +1675,9 @@ export function CarStage({
             const s = 1 + beat * 0.09;
             p.scale.setScalar(s);
           }
-          for (const s of spinParts) s.mesh.rotation.z += s.rate * pulseRate;
+          for (const s of spinParts) {
+            s.mesh.rotation[s.axis ?? "z"] += s.rate * pulseRate;
+          }
           if (hotRef) hotRef.emissiveIntensity = HOT_EMISSIVE + beat * 0.9;
         }
 
@@ -1523,7 +1717,8 @@ export function CarStage({
             // than the car is tall — so the body overflowed the panel and
             // the push-in read as a crash zoom.
             const dist =
-              FOCUS_FRAME_HEIGHT / (2 * Math.tan((CAMERA_FOV * Math.PI) / 360));
+              (spot.frame ?? FOCUS_FRAME_HEIGHT) /
+              (2 * Math.tan((CAMERA_FOV * Math.PI) / 360));
             targetPos.set(
               ax + FOCUS_DIR[0] * dist * dir,
               ay + FOCUS_DIR[1] * dist,
@@ -1532,8 +1727,9 @@ export function CarStage({
             // Aim a little below the anchor. Looking dead-on at a point
             // near the roofline pushes the wheels out of the bottom of the
             // frame, and a car cropped at the tyres reads as a mistake
-            // rather than as a close-up.
-            targetAt.set(ax, ay - 0.35, az);
+            // rather than as a close-up. Scaled with the shot: a tight
+            // engine detail must not drop its subject out of frame.
+            targetAt.set(ax, ay - 0.11 * (spot.frame ?? FOCUS_FRAME_HEIGHT), az);
           }
         }
 

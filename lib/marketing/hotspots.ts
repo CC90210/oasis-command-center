@@ -27,6 +27,14 @@ export type Hotspot = {
    * engine bay moves), otherwise fixed.
    */
   anchor: "cockpit" | "engine" | "chassis" | "tail";
+  /**
+   * How much of the world this close-up should show, in world units of
+   * frame height. Per-callout because they are not the same kind of shot:
+   * the engine is a detail of a 40cm assembly and needs to fill the frame,
+   * while the platform is a claim about the whole car and looks absurd
+   * cropped to a wheel. One shared distance made the engine unreadable.
+   */
+  frame: number;
 };
 
 export const HOTSPOTS: Hotspot[] = [
@@ -43,6 +51,7 @@ export const HOTSPOTS: Hotspot[] = [
       "Add a seat when you need one, not a headcount",
     ],
     anchor: "cockpit",
+    frame: 2.4,
   },
   {
     id: "engine",
@@ -57,6 +66,7 @@ export const HOTSPOTS: Hotspot[] = [
       "Never locked to one vendor's pricing",
     ],
     anchor: "engine",
+    frame: 1.25,
   },
   {
     id: "chassis",
@@ -71,6 +81,7 @@ export const HOTSPOTS: Hotspot[] = [
       "Your data, your accounts, never pooled",
     ],
     anchor: "chassis",
+    frame: 4.2,
   },
   {
     id: "tail",
@@ -85,5 +96,6 @@ export const HOTSPOTS: Hotspot[] = [
       "Hand it to your accountant or your lawyer",
     ],
     anchor: "tail",
+    frame: 2.2,
   },
 ];

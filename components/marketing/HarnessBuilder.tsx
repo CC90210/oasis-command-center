@@ -233,7 +233,7 @@ export function HarnessBuilder() {
             overlay it covered the exact part of the car it was describing,
             which is the one thing a callout must never do. */}
         {activeSpot && (
-          <div className="mx-auto mt-4 max-w-3xl border border-signal/25 bg-ops-raised/70 p-5 backdrop-blur-sm sm:p-6">
+          <div className="mx-auto mt-8 max-w-3xl border border-signal/25 bg-ops-raised/70 p-5 backdrop-blur-sm sm:mt-10 sm:p-6">
             <div className="flex items-start justify-between gap-4">
               <span className="font-data text-[10px] uppercase tracking-[0.22em] text-signal">
                 {activeSpot.kicker}
