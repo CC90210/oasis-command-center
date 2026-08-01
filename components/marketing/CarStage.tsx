@@ -10,6 +10,8 @@ import {
   resampleStations,
   runHeight,
   surfaceHalfWidth,
+  CAMERA_FOV,
+  DIVE_OFFSET,
   LOFT_RINGS,
   MOUNT,
   type Station,
@@ -94,22 +96,6 @@ function releaseParts(
  * material does nothing, since the loop overwrites it on the next frame.
  */
 const HOT_EMISSIVE = 2.2;
-
-/**
- * Camera field of view, in degrees.
- *
- * Was 38, which at the stage's ~6.5-unit subject distance is a 32mm lens
- * standing 6.5 metres from a car. Nobody photographs a car that way: wide
- * lenses stretch the near corner and shrink the far one, which is the
- * universal signature of a screenshot taken inside a 3D editor. Studio car
- * photography is a long lens from far back, which compresses the body and
- * keeps the wheels the same size at both ends.
- *
- * 14° is roughly a 135mm equivalent. Camera positions in BODY_SHOTS are
- * scaled out to match so the framing is unchanged — this is purely a change
- * of lens and distance, not of composition.
- */
-const CAMERA_FOV = 14;
 
 export function CarStage({ bodyId, engineId, engineColor, onReady }: Props) {
   const mountRef = useRef<HTMLDivElement>(null);
@@ -1201,10 +1187,13 @@ export function CarStage({ bodyId, engineId, engineColor, onReady }: Props) {
           // Close enough to read individual cylinders. The previous framing
           // hung back at showroom distance and the whole point of the dive,
           // seeing the hardware change, was lost at that range.
-          // Same 2.804 the body shots were scaled by. The dive offsets were
-          // tuned against a 38-degree lens; left alone at 14 they put the
-          // camera so close that the bay fills the frame past legibility.
-          targetPos.set(ex + 2.66, ey + 1.74, ez + 3.79);
+          // Scaled with the lens so the bay frames identically — see
+          // DIVE_OFFSET, which the geometry test holds to that invariant.
+          targetPos.set(
+            ex + DIVE_OFFSET[0],
+            ey + DIVE_OFFSET[1],
+            ez + DIVE_OFFSET[2],
+          );
           targetAt.set(ex, ey + 0.05, ez);
           if (diveFrames === 0) frameBody(sel.current.bodyId);
         }

@@ -25,10 +25,16 @@
  */
 import { strict as assert } from "node:assert";
 import {
+  BODY_SHOTS,
+  CAMERA_FOV,
   CAR_SPECS,
+  DIVE_OFFSET,
+  LEGACY_DIVE_OFFSET,
+  LEGACY_FOV,
   LOFT_RINGS,
   MOUNT,
   flankPoint,
+  framedHeight,
   nearestStation,
   resampleStations,
   runHeight,
@@ -198,6 +204,69 @@ for (const [name, spec] of Object.entries(CAR_SPECS)) {
       }
     }
   }
+}
+
+// ── Camera framing survived the lens change ─────────────────────────────
+// Going from a 38-degree lens to a 14-degree one only preserves the shot if
+// every camera distance is scaled by tan(38/2)/tan(14/2). That factor is
+// invisible in the numbers themselves — the positions just look like
+// arbitrary coordinates — so nothing stops a future edit changing the FOV
+// and silently reframing every shot on the page. This is also the one part
+// of the stage that cannot be verified by screenshot: the engine dive lasts
+// 1.6s, which is shorter than a single browser-automation round trip.
+{
+  // Compare against the PINNED original offset. An earlier version of this
+  // derived the expected distance from CAMERA_FOV, which made the whole
+  // assertion reduce to `2·d·tan(fov/2) === 2·d·tan(fov/2)` — true at every
+  // FOV, catching nothing. Both sides must come from independent values or
+  // the check is decorative.
+  const now = framedHeight(Math.hypot(...DIVE_OFFSET), CAMERA_FOV);
+  const before = framedHeight(Math.hypot(...LEGACY_DIVE_OFFSET), LEGACY_FOV);
+  assert.ok(
+    Math.abs(now - before) < 0.01,
+    `engine dive reframed: at ${CAMERA_FOV}deg it shows ${now.toFixed(3)} units ` +
+      `of frame height, but was tuned to show ${before.toFixed(3)}. ` +
+      `Change CAMERA_FOV and DIVE_OFFSET must be rescaled by ` +
+      `tan(${LEGACY_FOV}/2)/tan(${CAMERA_FOV}/2).`,
+  );
+
+  // Hero shots must frame the actual car: tall enough to hold it with
+  // headroom, not so far out that it is lost in the frame. Checked against
+  // the car's real measured height rather than against the FOV, so this
+  // cannot collapse into an identity the way the dive check did.
+  for (const [body, shot] of Object.entries(BODY_SHOTS)) {
+    const spec = CAR_SPECS[body];
+    const carTop = Math.max(...[...spec.body, ...spec.cabin].map((s) => s.y + s.h));
+    const d = Math.hypot(
+      shot.pos[0] - shot.at[0],
+      shot.pos[1] - shot.at[1],
+      shot.pos[2] - shot.at[2],
+    );
+    const frame = framedHeight(d, CAMERA_FOV);
+    assert.ok(
+      frame > carTop * 1.6,
+      `${body}: frame height ${frame.toFixed(2)} is too tight for a car ` +
+        `${carTop.toFixed(2)} tall — the roof would be cropped`,
+    );
+    assert.ok(
+      frame < carTop * 6,
+      `${body}: frame height ${frame.toFixed(2)} leaves a ${carTop.toFixed(2)}-tall ` +
+        `car as a speck in the middle of the canvas`,
+    );
+    assert.ok(
+      frame > now * 2,
+      `${body}: hero shot is not meaningfully wider than the engine dive — ` +
+        `the dive would read as a jump cut, not a push in`,
+    );
+    // And every hero shot must sit near the beltline, not above the roof.
+    // Shooting down at a car flattens it into a floorplan.
+    assert.ok(
+      shot.pos[1] < 1.6,
+      `${body}: camera is at y=${shot.pos[1]}, above the car's shoulder`,
+    );
+    checks += 4;
+  }
+  checks++;
 }
 
 // ── nearestStation ──────────────────────────────────────────────────────

@@ -377,6 +377,49 @@ export const CAR_SPECS: Record<string, CarSpec> = {
  *
  * [position, lookAt]
  */
+/**
+ * Camera field of view, in degrees.
+ *
+ * Was 38, which at the stage's ~6.5-unit subject distance is a 32mm lens
+ * standing 6.5 metres from a car. Nobody photographs a car that way: wide
+ * lenses stretch the near corner and shrink the far one, which is the
+ * universal signature of a screenshot taken inside a 3D editor. Studio car
+ * photography is a long lens from far back, which compresses the body and
+ * keeps the wheels the same size at both ends.
+ */
+export const CAMERA_FOV = 14;
+
+/** The FOV every camera position in this file was originally framed at. */
+export const LEGACY_FOV = 38;
+
+/**
+ * Camera offset from the engine anchor during an engine-swap dive.
+ *
+ * Scaled from the original (0.95, 0.62, 1.35) by the same factor the body
+ * shots were, so the bay fills the frame exactly as it did before the lens
+ * changed. That factor is not arbitrary: framing is preserved when
+ * distance scales by tan(LEGACY_FOV/2) / tan(CAMERA_FOV/2), and the
+ * geometry test asserts the two still agree — change the FOV without
+ * rescaling this and the dive either buries the camera inside the engine
+ * or leaves it too far out to read.
+ */
+export const DIVE_OFFSET: [number, number, number] = [2.66, 1.74, 3.79];
+
+/**
+ * What DIVE_OFFSET was before the lens change, when the stage ran at
+ * LEGACY_FOV. Kept as a fixed historical value, not derived — it is the
+ * anchor the framing assertion compares against. Deriving the expected
+ * framing from CAMERA_FOV instead makes the check an algebraic identity
+ * that passes at every FOV, which is exactly what the first version of
+ * that test did.
+ */
+export const LEGACY_DIVE_OFFSET: [number, number, number] = [0.95, 0.62, 1.35];
+
+/** Framed height at a given distance for a vertical FOV, in world units. */
+export function framedHeight(distance: number, fovDegrees: number): number {
+  return 2 * distance * Math.tan((fovDegrees * Math.PI) / 360);
+}
+
 export const BODY_SHOTS: Record<string, { pos: [number, number, number]; at: [number, number, number] }> = {
   // Every shot looks at the SAME point: the car's own centre of mass at
   // [0, 0.62, 0]. Previously each body aimed somewhere slightly different
