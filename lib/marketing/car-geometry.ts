@@ -175,6 +175,25 @@ const CUSTOM: CarSpec = {
   wheel: { spokes: 8, rimDepth: 0.8, tint: 0x9ca0a8 },
 };
 
+/**
+ * Where the exposed engine hardware actually sits.
+ *
+ * `engineBay` stores the height an engine would occupy INSIDE the body.
+ * The hardware is mounted proud of the deck instead, so it can be seen —
+ * and three separate things need to agree on where that is: the core
+ * geometry, the coloured fill light, and the camera's dive target. When
+ * only the geometry knew, the light pooled inside the bodywork under the
+ * core and the camera flew to a point below the parts it was meant to be
+ * showing you. One function, three callers.
+ */
+export function engineAnchor(spec: CarSpec): [number, number, number] {
+  const [bx, , bz] = spec.engineBay;
+  const nearest = spec.body.reduce((best, st) =>
+    Math.abs(st.x - bx) < Math.abs(best.x - bx) ? st : best,
+  );
+  return [bx, nearest.y + nearest.h - 0.04, bz];
+}
+
 export const CAR_SPECS: Record<string, CarSpec> = {
   bravo: BRAVO,
   atlas: ATLAS,

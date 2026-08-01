@@ -1,7 +1,12 @@
 "use client";
 
 import { useEffect, useRef } from "react";
-import { CAR_SPECS, BODY_SHOTS, type Station } from "@/lib/marketing/car-geometry";
+import {
+  CAR_SPECS,
+  BODY_SHOTS,
+  engineAnchor,
+  type Station,
+} from "@/lib/marketing/car-geometry";
 import { ENGINES } from "@/lib/marketing/harness";
 // Types only — erased at compile time, so this does NOT pull three.js into
 // the bundle. The runtime copy arrives via the dynamic import below.
@@ -527,21 +532,11 @@ export function CarStage({ bodyId, engineId, engineColor, onReady }: Props) {
         spinParts = [];
 
         const eng = ENGINES.find((e) => e.id === engineId) ?? ENGINES[0];
-        const [bx, , bz] = carSpec.engineBay;
         const col = new THREE.Color(eng.glow);
-
-        // EXPOSED bay, per CC. The stored engineBay height sits inside the
-        // bodywork, which is where an engine really lives and also where
-        // nobody can see it — the same "renders but is invisible" trap the
-        // rear light bar fell into. So the deck height is derived from the
-        // nearest body station and the hardware is seated just above it,
-        // like a hypercar with an open engine cover. The camera dive still
-        // x-rays the panels, but the core is on show at all times.
-        const nearest = carSpec.body.reduce((best, st) =>
-          Math.abs(st.x - bx) < Math.abs(best.x - bx) ? st : best,
-        );
-        const deckY = nearest.y + nearest.h;
-        const by = deckY - 0.04;
+        // EXPOSED bay, per CC: mounted proud of the deck so it can be seen.
+        // engineAnchor is shared with the fill light and the camera dive so
+        // all three point at the same place.
+        const [bx, by, bz] = engineAnchor(carSpec);
 
         const blockMat = new THREE.MeshStandardMaterial({
           color: 0x14181f,
@@ -816,11 +811,11 @@ export function CarStage({ bodyId, engineId, engineColor, onReady }: Props) {
           diveFrames = reduced ? 0 : 96;
         }
 
-        engineLight.position.set(spec.engineBay[0], spec.engineBay[1], spec.engineBay[2]);
+        engineLight.position.set(...engineAnchor(spec));
 
         if (diveFrames > 0) {
           diveFrames--;
-          const [ex, ey, ez] = spec.engineBay;
+          const [ex, ey, ez] = engineAnchor(spec);
           // Close enough to read individual cylinders. The previous framing
           // hung back at showroom distance and the whole point of the dive,
           // seeing the hardware change, was lost at that range.
