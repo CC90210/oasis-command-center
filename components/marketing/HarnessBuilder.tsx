@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import { BODIES, ENGINES, PLATFORM } from "@/lib/marketing/harness";
 import { HOTSPOTS } from "@/lib/marketing/hotspots";
 import { AUDIT_FUNNEL } from "@/lib/marketing/routes";
+import { LAUNCH_MS } from "@/lib/marketing/car-geometry";
 import { CarStage } from "@/components/marketing/CarStage";
 
 type Pin = { id: string; x: number; y: number; visible: boolean };
@@ -237,12 +238,43 @@ export function HarnessBuilder() {
           {/* Fade to black as the car leaves, so the hand-off to the funnel
               is one continuous move rather than a hard cut from a 3D stage
               to a form. Pointer-events off: it must never eat a click. */}
+          {/* Fade to black, timed from LAUNCH_MS so it cannot drift out of
+              step with the sequence again. It covers only the hand-off to
+              the funnel — it must not come down while the car is still on
+              screen, which is exactly what it did when the sequence was
+              lengthened and this delay was left behind. */}
           <div
             aria-hidden="true"
-            className={`pointer-events-none absolute inset-0 z-40 bg-ops-void transition-opacity duration-700 motion-reduce:transition-none motion-reduce:delay-0 ${
-              launching ? "opacity-100 delay-[1600ms]" : "opacity-0"
+            style={
+              launching
+                ? {
+                    transitionDelay: `${LAUNCH_MS.fadeDelay}ms`,
+                    transitionDuration: `${LAUNCH_MS.fade}ms`,
+                  }
+                : undefined
+            }
+            className={`pointer-events-none absolute inset-0 z-40 bg-ops-void transition-opacity duration-500 motion-reduce:transition-none motion-reduce:!delay-0 ${
+              launching ? "opacity-100" : "opacity-0"
             }`}
           />
+
+          {/* Skip — ON THE STAGE, not below it.
+              It was first placed under the selectors, which put it ~300px
+              below the fold while the visitor is watching the canvas: a
+              skip control you cannot see during the thing you want to skip.
+              z-50 so it stays above the fade and remains clickable as the
+              screen goes dark. */}
+          {launching && (
+            <button
+              type="button"
+              onClick={() => {
+                window.location.href = AUDIT_FUNNEL.path;
+              }}
+              className="absolute bottom-4 right-4 z-50 border border-fg-faint/30 bg-ops-void/70 px-3 py-1.5 font-data text-[10px] uppercase tracking-[0.18em] text-fg-dim backdrop-blur-sm transition-colors hover:border-fg-faint hover:text-fg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-signal"
+            >
+              Skip →
+            </button>
+          )}
 
           {/* Spatial callouts. Positioned from the projected 3D anchors, so
               each pin rides its part of the car as the body turns. Hidden
@@ -378,24 +410,6 @@ export function HarnessBuilder() {
           />
           {launching ? "Igniting…" : "Ignite & deploy to OASIS"}
         </button>
-
-        {/* Skip. Six seconds is a good length for a launch you WANT to
-            watch and an eternity for someone who just wants the form.
-            Appears only once the sequence is running, so it never competes
-            with the primary action. */}
-        {launching && (
-          <div className="mt-3">
-            <button
-              type="button"
-              onClick={() => {
-                window.location.href = AUDIT_FUNNEL.path;
-              }}
-              className="font-data text-[11px] uppercase tracking-[0.18em] text-fg-faint underline-offset-4 transition-colors hover:text-fg hover:underline"
-            >
-              Skip →
-            </button>
-          </div>
-        )}
 
         <p className="mx-auto mt-3 max-w-md text-[13px] leading-relaxed text-fg-dim">
           Start this build and tell us about your business. Four questions,

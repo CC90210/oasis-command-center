@@ -462,6 +462,29 @@ export const CAMERA_FOV = 14;
 export const LAUNCH = { ignite: 72, track: 150, away: 360 } as const;
 
 /**
+ * Launch timings in MILLISECONDS, derived from the frame counts above.
+ *
+ * The fade-to-black used to be a hardcoded `delay-[1600ms]` in the builder
+ * while the sequence length lived here in frames. When the sequence was
+ * extended from 4.1s to 6s the fade was not touched, so the screen went
+ * fully black at 2.3s and stayed black for 3.7 seconds while the car drove
+ * away underneath, unseen — the whole point of the sequence, hidden behind
+ * a curtain that came down too early.
+ *
+ * Deriving both from one source is the only way that cannot drift again.
+ */
+export const LAUNCH_MS = {
+  /** Whole sequence, at 60fps. */
+  total: (LAUNCH.away / 60) * 1000,
+  /** How long the fade itself takes. */
+  fade: 650,
+  /** When the fade starts: late enough that it covers only the hand-off. */
+  get fadeDelay() {
+    return this.total - this.fade;
+  },
+} as const;
+
+/**
  * Where a wheel sits, and the fender that covers it.
  *
  * Derived from the body AT THE AXLE. The old code planted tyres against
