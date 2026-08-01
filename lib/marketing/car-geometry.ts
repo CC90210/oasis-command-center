@@ -88,8 +88,15 @@ export const ARCH = {
   gap: 0.05,
   /** Thickness of the fender lip itself. */
   lip: 0.05,
-  /** How far the widebody package pushes the track out per side. */
-  wideTrack: 0.09,
+  /**
+   * How far the widebody package pushes the track out per side.
+   *
+   * Small on purpose. The flare lives in the bodywork (see MAVEN's haunch
+   * stations); this is only the extra track that makes the wheels fill
+   * those arches. Pushing the wheels out without widening the body is what
+   * detaches them from it.
+   */
+  wideTrack: 0.04,
 } as const;
 
 /** BRAVO — long-roof shooting brake. Carries load, hence the volume. */
@@ -158,13 +165,20 @@ const ATLAS: CarSpec = {
 /** MAVEN — mid-engine coupe. Low nose, big hips, cab-forward. */
 const MAVEN: CarSpec = {
   body: [
+    // WIDEBODY. The haunches over both axles are in the station data
+    // rather than applied at render time, so every consumer — the loft,
+    // the neon runs, the skirts, and the wheel track — sees the same
+    // shape. Flaring only the wheels (pushing the track out and leaving
+    // the bodywork alone) is what made this read as an open-wheel racer
+    // with the tyres floating off a narrow tub.
     { x: -2.20, y: 0.50, h: 0.24, w: 0.78, squareness: 4.6 },
-    { x: -1.80, y: 0.48, h: 0.34, w: 1.02, squareness: 4.0 },
-    { x: -1.05, y: 0.46, h: 0.38, w: 1.12, squareness: 3.6 },
+    { x: -1.80, y: 0.48, h: 0.34, w: 1.10, squareness: 4.0 },
+    { x: -1.30, y: 0.47, h: 0.37, w: 1.22, squareness: 3.7 }, // rear haunch
+    { x: -0.75, y: 0.46, h: 0.38, w: 1.14, squareness: 3.5 },
     { x: -0.20, y: 0.44, h: 0.38, w: 1.10, squareness: 3.4 },
-    { x: 0.60, y: 0.42, h: 0.34, w: 1.02, squareness: 3.4 },
-    { x: 1.35, y: 0.38, h: 0.28, w: 0.92, squareness: 3.8 },
-    { x: 1.95, y: 0.34, h: 0.20, w: 0.78, squareness: 4.2 },
+    { x: 0.60, y: 0.42, h: 0.34, w: 1.08, squareness: 3.4 },
+    { x: 1.40, y: 0.39, h: 0.30, w: 1.14, squareness: 3.6 }, // front haunch
+    { x: 1.95, y: 0.34, h: 0.20, w: 0.80, squareness: 4.2 },
     { x: 2.25, y: 0.32, h: 0.13, w: 0.58, squareness: 4.8 },
   ],
   cabin: [

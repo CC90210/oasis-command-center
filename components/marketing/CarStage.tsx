@@ -1269,12 +1269,10 @@ export function CarStage({
       const camAt = new THREE.Vector3();
       const targetPos = new THREE.Vector3();
       const targetAt = new THREE.Vector3();
-      // Scratch vectors for the per-frame hotspot projection. Allocated
-      // once — creating three Vector3s per pin per frame is 720/sec of
-      // garbage for something that never needs to persist.
+      // Scratch vector for the per-frame hotspot projection. Allocated once
+      // — a fresh Vector3 per pin per frame is 240/sec of garbage for
+      // something that never needs to outlive the loop body.
       const projected = new THREE.Vector3();
-      const viewDir = new THREE.Vector3();
-      const toPin = new THREE.Vector3();
 
       function frameBody(id: string) {
         const shot = BODY_SHOTS[id] ?? BODY_SHOTS.bravo;
@@ -1513,12 +1511,14 @@ export function CarStage({
             projected
               .set(...hotspotAnchor(spec, h.anchor))
               .applyMatrix4(carGroup.matrixWorld);
-            // Facing test before projection: a pin on the far flank must
-            // not punch through the bodywork and float over the near side.
-            camera.getWorldDirection(viewDir);
-            toPin.copy(projected).sub(camera.position);
+            // Occlusion test, before projection. Only the platform pin sits
+            // off the centreline — the others are on it and can never be on
+            // a "far" flank — so this asks one question: has the car been
+            // turned far enough that this pin is now on the opposite side
+            // of the body from the camera? If so it would punch through the
+            // bodywork and hover over the near flank.
             const behindBody =
-              h.anchor === "chassis" && toPin.dot(viewDir) > 0 && projected.z * camPos.z < 0;
+              h.anchor === "chassis" && projected.z * camPos.z < 0;
             projected.project(camera);
             const px = (projected.x * 0.5 + 0.5) * rect.width;
             const py = (-projected.y * 0.5 + 0.5) * rect.height;
