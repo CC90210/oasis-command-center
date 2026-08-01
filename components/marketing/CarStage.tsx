@@ -139,6 +139,68 @@ export function CarStage({ bodyId, engineId, engineColor, onReady }: Props) {
       const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
       renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
       renderer.outputColorSpace = THREE.SRGBColorSpace;
+      // Filmic response curve. Without tone mapping, everything above 1.0
+      // clips flat and a dark car with bright neon renders as black shapes
+      // with blown-out stripes — no roll-off in either direction, which is
+      // most of why it read as "computer graphics" rather than "photograph".
+      renderer.toneMapping = THREE.ACESFilmicToneMapping;
+      renderer.toneMappingExposure = 1.15;
+
+      // ── Studio environment ────────────────────────────────────────
+      // The biggest single miss in the previous build: there was no
+      // environment map at all. Car paint is almost entirely REFLECTION —
+      // a dark metallic surface with nothing to reflect has no information
+      // in it, which is exactly why the body read as a flat silhouette no
+      // matter how the lights were tuned.
+      //
+      // Built procedurally, so it stays asset-free: a dark room with large
+      // emissive softbox panels overhead and long cyan strip lights down
+      // both flanks, rendered through PMREMGenerator into a prefiltered
+      // cube map. Those strips are what will rake along the shoulder line
+      // and read as automotive.
+      const pmrem = new THREE.PMREMGenerator(renderer);
+      pmrem.compileEquirectangularShader();
+
+      const envScene = new THREE.Scene();
+      envScene.background = new THREE.Color(0x05070b);
+      const envMats: ThreeNS.Material[] = [];
+      const panel = (
+        w: number,
+        h: number,
+        d: number,
+        color: number,
+        intensity: number,
+        pos: [number, number, number],
+        rot: [number, number, number],
+      ) => {
+        const m = new THREE.MeshBasicMaterial({ color });
+        m.color.multiplyScalar(intensity);
+        envMats.push(m);
+        const mesh = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), m);
+        mesh.position.set(...pos);
+        mesh.rotation.set(...rot);
+        envScene.add(mesh);
+      };
+
+      // Overhead softboxes — the broad highlight down the centre of the roof.
+      panel(9, 0.1, 3.2, 0xffffff, 3.4, [0, 6, 0], [0, 0, 0]);
+      panel(6, 0.1, 2.0, 0xdff2ff, 1.8, [0, 5.4, -4], [0.5, 0, 0]);
+      // Flank strip lights — the long specular streaks along the body sides.
+      panel(0.16, 0.16, 14, 0x00d4ff, 6.0, [-5.5, 2.6, 0], [0, 0, 0]);
+      panel(0.16, 0.16, 14, 0x00d4ff, 6.0, [5.5, 2.6, 0], [0, 0, 0]);
+      panel(0.14, 0.14, 12, 0x7fe6ff, 3.0, [-3.2, 4.6, 0], [0, 0, 0]);
+      panel(0.14, 0.14, 12, 0x7fe6ff, 3.0, [3.2, 4.6, 0], [0, 0, 0]);
+      // A cool floor bounce, so the sills and underbody are not dead black.
+      panel(16, 0.1, 16, 0x0a1a24, 1.2, [0, -1.2, 0], [0, 0, 0]);
+
+      const envRT = pmrem.fromScene(envScene, 0.04);
+      scene.environment = envRT.texture;
+      envScene.traverse((o: ThreeNS.Object3D) => {
+        const m = o as ThreeNS.Mesh;
+        if (m.geometry) m.geometry.dispose();
+      });
+      envMats.forEach((m) => m.dispose());
+      pmrem.dispose();
       mount.appendChild(renderer.domElement);
       renderer.domElement.style.width = "100%";
       renderer.domElement.style.height = "100%";
@@ -205,10 +267,26 @@ export function CarStage({ bodyId, engineId, engineColor, onReady }: Props) {
       // true planar reflection means rendering the scene twice; an additive
       // radial pool costs one transparent quad and reads the same at this
       // camera distance.
+      // Radial falloff painted into a texture rather than a flat disc.
+      // A uniform circle has a hard rim, and a hard rim on the ground reads
+      // as a grey plate the car is parked on — which is precisely how it
+      // looked once tone mapping lifted the midtones. A gradient has no
+      // edge to notice.
+      const floorCanvas = document.createElement("canvas");
+      floorCanvas.width = floorCanvas.height = 256;
+      const fctx = floorCanvas.getContext("2d")!;
+      const grad = fctx.createRadialGradient(128, 128, 8, 128, 128, 128);
+      grad.addColorStop(0, "rgba(0,212,255,0.55)");
+      grad.addColorStop(0.35, "rgba(0,150,200,0.22)");
+      grad.addColorStop(1, "rgba(0,0,0,0)");
+      fctx.fillStyle = grad;
+      fctx.fillRect(0, 0, 256, 256);
+      const floorTex = new THREE.CanvasTexture(floorCanvas);
+
       const floorMat = new THREE.MeshBasicMaterial({
-        color: 0x00d4ff,
+        map: floorTex,
         transparent: true,
-        opacity: 0.13,
+        opacity: 0.5,
         blending: THREE.AdditiveBlending,
         depthWrite: false,
       });
@@ -216,7 +294,7 @@ export function CarStage({ bodyId, engineId, engineColor, onReady }: Props) {
       // under the car from any camera angle. The previous ellipse (scaled
       // 0.55 on one axis) read as a tilted, off-centre platform because its
       // long axis never lined up with wherever the camera happened to be.
-      const floor = new THREE.Mesh(new THREE.CircleGeometry(3.4, 64), floorMat);
+      const floor = new THREE.Mesh(new THREE.PlaneGeometry(7.6, 7.6), floorMat);
       floor.rotation.x = -Math.PI / 2;
       floor.position.set(0, 0.001, 0);
       scene.add(floor);
@@ -229,10 +307,20 @@ export function CarStage({ bodyId, engineId, engineColor, onReady }: Props) {
       // wherever a section's radius crosses its neighbour's. With the
       // default FrontSide those triangles are culled and you look straight
       // through the car at its own inside — the body rendered as a ghost.
-      const paint = new THREE.MeshStandardMaterial({
-        color: 0x1c242f,
-        metalness: 0.86,
-        roughness: 0.32,
+      // Automotive paint: a dark base with a separate clear lacquer on top.
+      // MeshStandardMaterial cannot express that — it has one roughness for
+      // the whole surface, so it renders either as dull plastic or as a
+      // mirror, never as a deep coat over a matte carbon base. Clearcoat is
+      // a second, much smoother specular lobe layered over the base, which
+      // is what produces the tight highlight running along a car's shoulder
+      // while the body itself stays dark.
+      const paint = new THREE.MeshPhysicalMaterial({
+        color: 0x0d1319,
+        metalness: 0.55,
+        roughness: 0.42,
+        clearcoat: 1,
+        clearcoatRoughness: 0.06,
+        envMapIntensity: 1.5,
         side: THREE.DoubleSide,
         // Transparent from the start so the x-ray during an engine dive is
         // an opacity tween rather than a material swap mid-render. The
@@ -243,17 +331,24 @@ export function CarStage({ bodyId, engineId, engineColor, onReady }: Props) {
       });
       // Roughness this low turns the greenhouse into a mirror and it
       // catches the rim light as one flat blown-out panel.
-      const glass = new THREE.MeshStandardMaterial({
-        color: 0x0a1620,
-        metalness: 0.45,
-        roughness: 0.22,
+      const glass = new THREE.MeshPhysicalMaterial({
+        color: 0x060d14,
+        metalness: 0.2,
+        roughness: 0.08,
+        clearcoat: 1,
+        clearcoatRoughness: 0.03,
+        envMapIntensity: 2.2,
         transparent: true,
-        opacity: 0.34,
+        opacity: 0.42,
       });
+      // Tyres must NOT take the environment. Rubber is the one part of a car
+      // with almost no specular return, and letting it reflect the strip
+      // lights is a classic tell that everything shares one material setup.
       const rubber = new THREE.MeshStandardMaterial({
-        color: 0x07090c,
-        metalness: 0.1,
-        roughness: 0.85,
+        color: 0x0a0c0f,
+        metalness: 0,
+        roughness: 0.95,
+        envMapIntensity: 0.15,
       });
       // A hint of blueprint through the paint. Any higher and it stops
       // being a finished surface with engineering showing through, and
@@ -539,9 +634,10 @@ export function CarStage({ bodyId, engineId, engineColor, onReady }: Props) {
         const [bx, by, bz] = engineAnchor(carSpec);
 
         const blockMat = new THREE.MeshStandardMaterial({
-          color: 0x14181f,
-          metalness: 0.9,
-          roughness: 0.35,
+          color: 0x2a3038,
+          metalness: 0.95,
+          roughness: 0.28,
+          envMapIntensity: 1.4,
         });
         const hotMat = new THREE.MeshStandardMaterial({
           color: col,
@@ -586,9 +682,14 @@ export function CarStage({ bodyId, engineId, engineColor, onReady }: Props) {
 
           for (const b of banks) {
             for (let i = 0; i < perBank; i++) {
+              // Cylinder BARRELS are hardware, not light. Rendering every
+              // part with the emissive material turned the bay into a
+              // cluster of glowing lumps that read as debris rather than as
+              // an engine. Metal housings, glowing internals: that contrast
+              // is what makes machinery legible.
               const cyl = new THREE.Mesh(
                 new THREE.CylinderGeometry(0.055, 0.055, 0.26, 12),
-                hotMat,
+                blockMat,
               );
               const spread = perBank > 1 ? (i / (perBank - 1) - 0.5) : 0;
               cyl.position.set(
@@ -600,6 +701,17 @@ export function CarStage({ bodyId, engineId, engineColor, onReady }: Props) {
               );
               cyl.rotation.x = b * half;
               add(cyl);
+
+              // A glowing cam cover on top of each barrel — the only lit
+              // part, so the eye reads a row of cylinders rather than a pile.
+              const cap = new THREE.Mesh(
+                new THREE.CylinderGeometry(0.032, 0.032, 0.03, 10),
+                hotMat,
+              );
+              cap.position.copy(cyl.position);
+              cap.position.y += 0.14;
+              cap.rotation.copy(cyl.rotation);
+              add(cap);
             }
           }
         }
@@ -878,6 +990,7 @@ export function CarStage({ bodyId, engineId, engineColor, onReady }: Props) {
 
       cleanup = () => {
         cancelAnimationFrame(raf);
+        envRT.dispose();
         ro.disconnect();
         io.disconnect();
         canvasEl.removeEventListener("pointerdown", onDown);
@@ -889,6 +1002,7 @@ export function CarStage({ bodyId, engineId, engineColor, onReady }: Props) {
         releaseParts([...parts, ...engineParts], [...perBuildMats, ...engineMats], carGroup);
         releaseParts([scene], []);
         // Every material created in this effect, not just the obvious four.
+        floorTex.dispose();
         [paint, glass, rubber, wireMat, hubMat, shadowMat, floorMat].forEach((m) =>
           m.dispose(),
         );
