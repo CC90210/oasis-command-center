@@ -186,11 +186,16 @@ const CUSTOM: CarSpec = {
  * core and the camera flew to a point below the parts it was meant to be
  * showing you. One function, three callers.
  */
+/** The station closest to a given position along the car. */
+export function nearestStation(stations: Station[], x: number): Station {
+  return stations.reduce((best, st) =>
+    Math.abs(st.x - x) < Math.abs(best.x - x) ? st : best,
+  );
+}
+
 export function engineAnchor(spec: CarSpec): [number, number, number] {
   const [bx, , bz] = spec.engineBay;
-  const nearest = spec.body.reduce((best, st) =>
-    Math.abs(st.x - bx) < Math.abs(best.x - bx) ? st : best,
-  );
+  const nearest = nearestStation(spec.body, bx);
   return [bx, nearest.y + nearest.h - 0.04, bz];
 }
 

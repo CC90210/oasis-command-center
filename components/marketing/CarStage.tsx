@@ -6,6 +6,8 @@ import {
   BODY_SHOTS,
   engineAnchor,
   flankPoint,
+  nearestStation,
+  surfaceHalfWidth,
   type Station,
 } from "@/lib/marketing/car-geometry";
 import { ENGINES } from "@/lib/marketing/harness";
@@ -780,15 +782,15 @@ export function CarStage({ bodyId, engineId, engineColor, onReady }: Props) {
         // still below the top of the rear section — so it rendered, cost
         // its draw call, and was never once visible from outside the car.
         const tailStation = spec.body[0];
+        const barY = tailStation.y + tailStation.h * 0.45;
+        // Width comes from the surface at the bar's OWN height. It used to
+        // be tailStation.w * 1.35 — 135% of the section's widest point — so
+        // the bar poked out past both rear corners on every harness.
         const bar = new THREE.Mesh(
-          new THREE.BoxGeometry(0.05, 0.055, tailStation.w * 1.35),
+          new THREE.BoxGeometry(0.05, 0.055, surfaceHalfWidth(tailStation, barY) * 1.72),
           stripMat,
         );
-        bar.position.set(
-          tailStation.x - 0.03,
-          tailStation.y + tailStation.h * 0.45,
-          0,
-        );
+        bar.position.set(tailStation.x - 0.03, barY, 0);
         carGroup.add(bar);
         parts.push(bar);
 
@@ -797,32 +799,111 @@ export function CarStage({ bodyId, engineId, engineColor, onReady }: Props) {
         const rearX = spec.body[0].x;
 
         if (f.wing) {
+          // The wing sits above the tail, and its struts have to land ON the
+          // deck rather than at a guessed height — the deck height differs
+          // per body, so a fixed 0.95 either floated or sank depending on
+          // which harness was selected.
+          const tailSt = nearestStation(spec.body, rearX + 0.18);
+          const deckY = tailSt.y + tailSt.h;
+          const strutZ = surfaceHalfWidth(tailSt, deckY - tailSt.h * 0.12) * 0.72;
+          const wingY = deckY + 0.46;
+
           const blade = new THREE.Mesh(new THREE.BoxGeometry(0.42, 0.05, 1.9), paint);
-          blade.position.set(rearX + 0.18, 1.16, 0);
+          blade.position.set(rearX + 0.18, wingY, 0);
           blade.rotation.z = -0.09;
           carGroup.add(blade);
           parts.push(blade);
           for (const side of [-1, 1]) {
-            const strut = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.4, 0.07), paint);
-            strut.position.set(rearX + 0.18, 0.95, side * 0.7);
+            const strutH = wingY - deckY;
+            const strut = new THREE.Mesh(new THREE.BoxGeometry(0.08, strutH, 0.07), paint);
+            strut.position.set(rearX + 0.18, deckY + strutH / 2, side * strutZ);
             carGroup.add(strut);
             parts.push(strut);
           }
         }
 
+        // Rails and skirts mount ON the surface, so they are derived from it
+        // rather than from hardcoded world coordinates. Both had the same
+        // bug the neon strips did: the rails sat at a fixed z=0.6 where
+        // bravo's roof surface is at 0.655, burying them 5.5cm into the
+        // roof, and the skirts used maxHalfWidth — the widest point of the
+        // whole body — at a height where the section is far narrower, so
+        // they floated outboard in mid-air.
+        // The offset each part needs is its OWN half-thickness plus a
+        // clearance — anything less and the part's inner face is inside the
+        // skin even though its centre is outside. Derived rather than
+        // guessed, because a guessed offset is what buried the strips.
+        // MOUNT_GAP is generous on purpose: the rendered surface is the
+        // 44-ring resampled loft, which passes through the stations but
+        // interpolates between them, so a hairline margin measured at a
+        // station is not a real margin at the part's actual position.
+        const MOUNT_GAP = 0.012;
+        const RAIL_THICKNESS = 0.075;
+        const SKIRT_THICKNESS = 0.09;
+
+        /**
+         * Both rails and skirts run ALONG the body, so a straight box is
+         * wrong even when its centre is placed correctly: it meets the
+         * surface at one station and lifts off it everywhere else, because
+         * a roofline and a sill are both curves. Swept as tubes down the
+         * per-station surface points, exactly like the neon runs — the same
+         * fix applied to the same class of part, rather than two different
+         * approaches to one problem.
+         */
+        const sweep = (
+          stations: Station[],
+          heightOf: (s: Station) => number,
+          radius: number,
+          side: number,
+        ) => {
+          const pts = stations.map((s) => {
+            const [px, py, pz] = flankPoint(
+              s,
+              heightOf(s),
+              side,
+              radius + MOUNT_GAP,
+            );
+            return new THREE.Vector3(px, py, pz);
+          });
+          return new THREE.Mesh(
+            new THREE.TubeGeometry(
+              new THREE.CatmullRomCurve3(pts),
+              40,
+              radius,
+              8,
+              false,
+            ),
+            paint,
+          );
+        };
+
         if (f.rails) {
+          // Skip the degenerate end sections where the greenhouse tapers to
+          // nothing; a rail there would spear out past the glass.
+          const run = spec.cabin.filter((s) => s.h > 0.1);
           for (const side of [-1, 1]) {
-            const rail = new THREE.Mesh(new THREE.BoxGeometry(2.1, 0.055, 0.075), paint);
-            rail.position.set(-0.35, 1.5, side * 0.6);
+            const rail = sweep(
+              run,
+              (s) => s.y + s.h * 0.8,
+              RAIL_THICKNESS / 2,
+              side,
+            );
             carGroup.add(rail);
             parts.push(rail);
           }
         }
 
         if (f.skirts) {
+          // Between the axles only — a skirt is a sill part, it does not
+          // continue around the nose and tail.
+          const run = spec.body.filter((s) => Math.abs(s.x) < 1.7);
           for (const side of [-1, 1]) {
-            const skirt = new THREE.Mesh(new THREE.BoxGeometry(3.0, 0.12, 0.09), paint);
-            skirt.position.set(0, 0.2, side * (maxHalfWidth - 0.03));
+            const skirt = sweep(
+              run,
+              (s) => s.y - s.h * 0.55,
+              SKIRT_THICKNESS / 2,
+              side,
+            );
             carGroup.add(skirt);
             parts.push(skirt);
           }
@@ -831,11 +912,14 @@ export function CarStage({ bodyId, engineId, engineColor, onReady }: Props) {
         if (f.exposedFrame) {
           // A roll hoop, so the unbuilt slot reads as a chassis waiting for
           // bodywork rather than as a plainer car.
+          const hoopSt = nearestStation(spec.body, -0.7);
           const hoop = new THREE.Mesh(
-            new THREE.TorusGeometry(0.62, 0.045, 8, 24, Math.PI),
+            new THREE.TorusGeometry(hoopSt.w * 0.86, 0.045, 8, 24, Math.PI),
             hubMat,
           );
-          hoop.position.set(-0.7, 1.05, 0);
+          // Springs from the deck, not from a fixed height that happened to
+          // suit one body's proportions.
+          hoop.position.set(-0.7, hoopSt.y + hoopSt.h * 0.72, 0);
           hoop.rotation.y = Math.PI / 2;
           carGroup.add(hoop);
           parts.push(hoop);
