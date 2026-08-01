@@ -624,21 +624,18 @@ export function CarStage({
         // height than at its widest, the tyre cut clean through the
         // bodywork. Every wheel now sits under an arch that is itself
         // derived from the local surface.
-        const archMat = new THREE.MeshPhysicalMaterial({
-          color: 0x0a0d12,
-          metalness: 0.5,
-          roughness: 0.4,
-          clearcoat: 1,
-          clearcoatRoughness: 0.06,
-          envMapIntensity: 1.35,
-        });
+        // Fenders use `paint`, not a material of their own. A fender IS
+        // bodywork, and `paint` is the material the engine dive fades to
+        // 16% — a separate opaque one left the arches sitting solid black
+        // around a ghosted body for the whole x-ray, which reads as four
+        // detached rings rather than as panels dissolving.
         const accentMat = new THREE.MeshStandardMaterial({
           color: spec.accent,
           metalness: 0.98,
           roughness: 0.22,
           envMapIntensity: 2.4,
         });
-        perBuildMats.push(archMat, accentMat);
+        perBuildMats.push(accentMat);
 
         for (const axle of spec.axles) {
           // Shared with the geometry test, which asserts the tyre clears
@@ -661,7 +658,7 @@ export function CarStage({
             // wheel somewhere to live and hides the tyre/body junction.
             const arch = new THREE.Mesh(
               new THREE.TorusGeometry(archRadius, ARCH.lip, 10, 28, Math.PI),
-              archMat,
+              paint,
             );
             arch.position.set(axle.x, axle.radius, side * (hubZ + 0.01));
             carGroup.add(arch);
@@ -1273,6 +1270,8 @@ export function CarStage({
       // — a fresh Vector3 per pin per frame is 240/sec of garbage for
       // something that never needs to outlive the loop body.
       const projected = new THREE.Vector3();
+      /** Last published pin positions, for change detection. */
+      let lastPins: { id: string; x: number; y: number; visible: boolean }[] = [];
 
       function frameBody(id: string) {
         const shot = BODY_SHOTS[id] ?? BODY_SHOTS.bravo;
@@ -1535,7 +1534,33 @@ export function CarStage({
               visible: projected.z < 1 && onPanel && !behindBody && diveFrames === 0,
             });
           }
-          hotspotsRef.current(out);
+
+          // Only publish when something actually moved. This callback is a
+          // React setState, and handing it a fresh array every frame
+          // re-renders the whole builder — selectors, callouts and all — 60
+          // times a second. The car is static at rest (there is no idle
+          // sway any more), so at rest that is 60 identical renders per
+          // second for nothing. Half a pixel is below the threshold of
+          // anyone noticing a pin lag a frame behind the body.
+          let moved = out.length !== lastPins.length;
+          if (!moved) {
+            for (let i = 0; i < out.length; i++) {
+              const a = out[i];
+              const b = lastPins[i];
+              if (
+                a.visible !== b.visible ||
+                Math.abs(a.x - b.x) > 0.5 ||
+                Math.abs(a.y - b.y) > 0.5
+              ) {
+                moved = true;
+                break;
+              }
+            }
+          }
+          if (moved) {
+            lastPins = out;
+            hotspotsRef.current(out);
+          }
         }
 
         if (!announced) {
