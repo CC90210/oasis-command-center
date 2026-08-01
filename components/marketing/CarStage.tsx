@@ -1280,6 +1280,38 @@ export function CarStage({
           });
           engineMats.push(wireMat, pipeMat);
 
+          /**
+           * A part that spins on its OWN axis, wrapped in a group that
+           * orients it.
+           *
+           * Spinning an oriented mesh directly does not work: a torus or a
+           * cylinder has already had a Euler rotation applied to point it
+           * the right way, and adding more rotation on any single axis
+           * compounds with that instead of turning the part about its own
+           * centre — the wheel tumbles end over end. Orienting the PARENT
+           * and spinning the untransformed child on z removes the question
+           * entirely.
+           */
+          const spinner = (
+            geo: ThreeNS.BufferGeometry,
+            mat: ThreeNS.Material,
+            pos: [number, number, number],
+            orient: [number, number, number],
+            rate: number,
+            // The GEOMETRY's own axis, untransformed: a torus is built
+            // around z, a cylinder around y. Getting this wrong is the
+            // difference between a wheel turning and a wheel wobbling.
+            selfAxis: "x" | "y" | "z",
+          ) => {
+            const holder = new THREE.Group();
+            holder.position.set(...pos);
+            holder.rotation.set(...orient);
+            const mesh = new THREE.Mesh(geo, mat);
+            holder.add(mesh);
+            spinParts.push({ mesh, rate, axis: selfAxis });
+            return holder;
+          };
+
           const tube = (
             pts: ThreeNS.Vector3[],
             r: number,
@@ -1347,14 +1379,19 @@ export function CarStage({
 
           // Exhaust headers: one primary per cylinder, all merging into a
           // collector behind the block.
-          const collector = new THREE.Vector3(bx - 0.34, by - 0.14, bz - 0.3);
+          // `by` is the DECK — the top of the bodywork the bay is mounted
+          // on. Anything routed below it is inside the car and invisible,
+          // which is how the rear light bar, the engine core and the neon
+          // strips each got lost earlier in this build. The headers dip
+          // only as far as the deck and the collector sits above it.
+          const collector = new THREE.Vector3(bx - 0.34, by + 0.03, bz - 0.28);
           for (const top of cylTops) {
             add(
               tube(
                 [
-                  new THREE.Vector3(top.x, top.y - 0.12, top.z),
-                  new THREE.Vector3(top.x, by - 0.1, top.z - 0.12),
-                  new THREE.Vector3((top.x + collector.x) / 2, by - 0.13, collector.z + 0.06),
+                  new THREE.Vector3(top.x, top.y - 0.1, top.z),
+                  new THREE.Vector3(top.x, by + 0.02, top.z - 0.12),
+                  new THREE.Vector3((top.x + collector.x) / 2, by + 0.02, collector.z + 0.06),
                   collector,
                 ],
                 0.015,
@@ -1373,29 +1410,34 @@ export function CarStage({
           // Turbo, where the engine is specified with one. Snail housing,
           // compressor can, and the charge pipe back to the plenum.
           if (/turbo/i.test(eng.spec)) {
-            const snail = new THREE.Mesh(
-              new THREE.TorusGeometry(0.075, 0.038, 10, 20),
-              pipeMat,
+            // Above the deck, like everything else in the bay — the first
+            // placement sank it into the bodywork where nobody would ever
+            // see it, which is the whole reason it exists.
+            const turboY = by + 0.1;
+            add(
+              spinner(
+                new THREE.TorusGeometry(0.075, 0.038, 10, 20),
+                pipeMat,
+                [bx - 0.5, turboY, bz - 0.26],
+                [0, Math.PI / 2, 0],
+                0.14,
+                "z", // torus is built around z
+              ),
             );
-            snail.position.set(bx - 0.46, by - 0.02, bz - 0.3);
-            snail.rotation.y = Math.PI / 2;
-            add(snail);
-            // Rotated onto y to face down the car, so it spins about y.
-            spinParts.push({ mesh: snail, rate: 0.14, axis: "y" });
 
             const compressor = new THREE.Mesh(
               new THREE.CylinderGeometry(0.05, 0.05, 0.07, 14),
               blockMat,
             );
-            compressor.position.set(bx - 0.46, by - 0.02, bz - 0.22);
+            compressor.position.set(bx - 0.5, turboY, bz - 0.18);
             compressor.rotation.x = Math.PI / 2;
             add(compressor);
 
             add(
               tube(
                 [
-                  new THREE.Vector3(bx - 0.46, by - 0.02, bz - 0.18),
-                  new THREE.Vector3(bx - 0.3, by + 0.2, bz + 0.06),
+                  new THREE.Vector3(bx - 0.5, turboY, bz - 0.14),
+                  new THREE.Vector3(bx - 0.3, by + 0.24, bz + 0.06),
                   new THREE.Vector3(bx, plenumY, bz + 0.18),
                 ],
                 0.026,
@@ -1408,24 +1450,27 @@ export function CarStage({
           // idler, and the belt around them. Spins with the engine.
           const pulleyX = bx + (eng.cylinders >= 8 ? 0.46 : 0.34);
           for (const [py2, pr] of [
-            [by - 0.06, 0.06],
-            [by + 0.12, 0.038],
+            [by + 0.04, 0.06],
+            [by + 0.18, 0.038],
           ] as const) {
-            const pulley = new THREE.Mesh(
-              new THREE.CylinderGeometry(pr, pr, 0.03, 16),
-              pipeMat,
+            // A cylinder's own axis is y; the group lays it across the car
+            // and the mesh spins about that y inside it.
+            add(
+              spinner(
+                new THREE.CylinderGeometry(pr, pr, 0.03, 16),
+                pipeMat,
+                [pulleyX, py2, bz],
+                [0, 0, Math.PI / 2],
+                0.1,
+                "y", // cylinder is built around y
+              ),
             );
-            pulley.position.set(pulleyX, py2, bz);
-            pulley.rotation.z = Math.PI / 2;
-            add(pulley);
-            // Lying on its side across the car: its own axis is x.
-            spinParts.push({ mesh: pulley, rate: 0.1, axis: "x" });
           }
           const belt = new THREE.Mesh(
             new THREE.TorusGeometry(0.1, 0.008, 6, 24),
             wireMat,
           );
-          belt.position.set(pulleyX, by + 0.03, bz);
+          belt.position.set(pulleyX, by + 0.11, bz);
           belt.rotation.y = Math.PI / 2;
           add(belt);
         }
