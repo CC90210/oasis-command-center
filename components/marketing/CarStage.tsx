@@ -53,7 +53,9 @@ import type * as ThreeNS from "three";
  * the camera in toward that car's engine bay, holds, then pulls back to
  * the body's framing — a cinematic beat that also tells you where the
  * engine physically is (note the mid-engine coupe's bay is behind the
- * cabin, not under a hood).
+ * cabin, not under a hood). Changing the harness plays the same beat on
+ * the cockpit — seats, HUD and dash telemetry through a faded canopy —
+ * because the interior is what a harness choice is about.
  *
  * Reduced motion: no idle rotation, no flight — the camera jumps straight
  * to each framing.
@@ -130,6 +132,14 @@ const HOT_EMISSIVE = 2.2;
 const ENGINE_SHOT = HOTSPOTS.find((h) => h.anchor === "engine")!;
 
 /**
+ * The cockpit shot, resolved once — same single-source pattern as
+ * ENGINE_SHOT. Selecting a HARNESS pushes the camera in on the interior
+ * (bucket seats, HUD, dash telemetry) before settling back to the body's
+ * hero framing, mirroring what an engine select does for the bay.
+ */
+const COCKPIT_SHOT = HOTSPOTS.find((h) => h.anchor === "cockpit")!;
+
+/**
  * Heading the car settles to while a callout is open, in radians of yaw.
  *
  * Focusing eases the car to a known angle, so the same click always ends at
@@ -140,7 +150,7 @@ const ENGINE_SHOT = HOTSPOTS.find((h) => h.anchor === "engine")!;
 const ANCHOR_HEADING: Record<string, number> = {
   cockpit: -0.5,
   engine: -0.35,
-  chassis: 0.6,
+  chassis: 0, // dead side-on: the platform shot is a full level profile
   tail: 2.5,
 };
 
@@ -2040,6 +2050,17 @@ export function CarStage({
 
       /** Frames left of an engine-bay push-in before returning to the body shot. */
       let diveFrames = 0;
+      /**
+       * Frames left of a cockpit push-in before returning to the body shot.
+       * Fired on HARNESS selection (the engine dive's twin): the interior —
+       * seats, HUD, dash telemetry — is what a harness choice is about.
+       */
+      let cockpitFrames = 0;
+      /**
+       * The first build is the page load, not a selection — it must settle
+       * straight on the hero framing, not open with an unasked-for dive.
+       */
+      let firstBuild = true;
 
       // Re-bound after the await: TypeScript drops the outer null-narrowing
       // across the async boundary, and `mount!` at four call sites is worse
@@ -2135,6 +2156,11 @@ export function CarStage({
           buildEngine(sel.current.engineId, spec);
           frameBody(sel.current.bodyId);
           diveFrames = 0;
+          // Harness select pushes in on the cockpit, holds, then the easing
+          // pulls back to the hero framing — the same beat an engine select
+          // plays on the bay. Skipped on the initial page load.
+          cockpitFrames = reduced || firstBuild ? 0 : 110;
+          firstBuild = false;
         }
 
         if (sel.current.dirtyEngine) {
@@ -2157,6 +2183,17 @@ export function CarStage({
           if (diveFrames === 0) frameBody(sel.current.bodyId);
         }
 
+        // Harness-select cockpit push-in. Runs only when the engine dive is
+        // not — the two never fight; a body change zeroes diveFrames and an
+        // engine change leaves cockpitFrames to finish first on the next
+        // body. The glass canopy fades down for the duration so the seats,
+        // HUD and dash read through it instead of behind a tinted bubble.
+        if (cockpitFrames > 0 && diveFrames === 0) {
+          cockpitFrames--;
+          aimAt("cockpit", COCKPIT_SHOT.frame, COCKPIT_SHOT.dir);
+          if (cockpitFrames === 0) frameBody(sel.current.bodyId);
+        }
+
         // The engine runs. Reactor breathes, containment rings counter-
         // rotate, emissive intensity throbs — all at a rate set by the
         // selected engine, so a V12 is visibly busier than a four and the
@@ -2174,7 +2211,8 @@ export function CarStage({
           // Active aero deploys while the engine is under load — during a
           // dive or a hotspot focus — and settles back at rest.
           if (aeroFlap) {
-            const deployed = diveFrames > 0 || !!focusRef.current;
+            const deployed =
+              diveFrames > 0 || cockpitFrames > 0 || !!focusRef.current;
             const want = aeroFlap.base + (deployed ? -0.5 : 0);
             aeroFlap.mesh.rotation.z +=
               (want - aeroFlap.mesh.rotation.z) * 0.08;
@@ -2199,7 +2237,12 @@ export function CarStage({
         // rather than blinking.
         const wantOpacity = diveFrames > 0 ? 0.16 : 1;
         paint.opacity += (wantOpacity - paint.opacity) * (reduced ? 1 : 0.08);
-        glass.opacity = GLASS_OPACITY * paint.opacity;
+        // The canopy also fades during a cockpit push-in — the interior is
+        // the subject of that shot, and 42%-tinted glass over it reads as a
+        // smoked bubble hiding the seats it is meant to be showing.
+        const glassTarget =
+          GLASS_OPACITY * paint.opacity * (cockpitFrames > 0 ? 0.22 : 1);
+        glass.opacity += (glassTarget - glass.opacity) * (reduced ? 1 : 0.08);
 
         // ── Hotspot focus ────────────────────────────────────────────
         // Selecting a callout pushes the camera in on that subsystem.
@@ -2212,7 +2255,12 @@ export function CarStage({
         // from the render loop and the car arrives somewhere the camera
         // is not. Driving everything from the frame count keeps the
         // sequence and the picture on the same clock by construction.
-        if (launchRef.current && launchFrame === 0) launchFrame = 1;
+        if (launchRef.current && launchFrame === 0) {
+          launchFrame = 1;
+          // The launch owns the camera from here — a cockpit push-in still
+          // running when the button is hit would fight the ignition framing.
+          cockpitFrames = 0;
+        }
         if (launchFrame > 0 && reduced) {
           // Reduced motion gets the destination, not the cinematic. A
           // camera flight, spinning wheels and a car accelerating out of
@@ -2374,16 +2422,22 @@ export function CarStage({
         // card left the car parked off to one side of the panel forever —
         // there was no code path that ever restored the body framing.
         if (wantFocus !== lastFocus) {
-          if (!wantFocus && diveFrames === 0) frameBody(sel.current.bodyId);
+          if (!wantFocus && diveFrames === 0 && cockpitFrames === 0)
+            frameBody(sel.current.bodyId);
           // Kill residual throw so inertia does not fight the heading ease.
-          if (wantFocus) spinVel = 0;
+          // Opening a callout also cancels any cockpit push-in still
+          // running — the deliberate focus wins over the selection beat.
+          if (wantFocus) {
+            spinVel = 0;
+            cockpitFrames = 0;
+          }
           headingTarget = null;
           lastFocus = wantFocus;
         }
         // The launch owns the camera outright while it runs. Without this
         // the focus block below would recompute targetPos every frame and
         // drag the camera back onto a hotspot mid-drive-away.
-        if (wantFocus && diveFrames === 0 && launchFrame === 0) {
+        if (wantFocus && diveFrames === 0 && cockpitFrames === 0 && launchFrame === 0) {
           const spot = HOTSPOTS.find((h) => h.id === wantFocus);
           if (spot) aimAt(spot.anchor, spot.frame, spot.dir);
           if (spot) headingTarget = ANCHOR_HEADING[spot.anchor];
@@ -2494,6 +2548,7 @@ export function CarStage({
                 onPanel &&
                 !behindBody &&
                 diveFrames === 0 &&
+                cockpitFrames === 0 &&
                 launchFrame === 0,
             });
           }

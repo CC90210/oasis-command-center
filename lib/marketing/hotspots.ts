@@ -95,8 +95,11 @@ export const HOTSPOTS: Hotspot[] = [
       "Your data, your accounts, never pooled",
     ],
     anchor: "chassis",
-    dir: [0.66, 0.20, 0.72],
-    frame: 4.2,
+    // Full level side-profile: the platform claim is about the WHOLE car,
+    // so the camera stands off at beltline height, dead side-on, and frames
+    // the entire length — a 360° turntable hero rather than a detail crop.
+    dir: [0, 0.1, 1],
+    frame: 5.4,
   },
   {
     id: "tail",
