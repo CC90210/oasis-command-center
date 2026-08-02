@@ -24,6 +24,11 @@ import { canPreviewTenantSlug } from "@/lib/tenant-access";
 import { resolveChatShellProps, type ChatShellProps } from "@/lib/chat-shell-props";
 import { matchesPathPrefix } from "@/lib/path-prefix";
 import { ALL_MARKETING_PATHS } from "@/lib/marketing/routes";
+// NOTE: lib/marketing/* above is the PUBLIC marketing SITE (/home, /work, ...).
+// lib/founders/* below is the private founders portal. Different concerns,
+// similar words — keep them apart.
+import { isFounder } from "@/lib/founders/gate";
+import type { NavItem } from "@/lib/nav-config";
 
 // Default metadata — tenant-neutral. Individual pages override via
 // generateMetadata (forms, leads, etc.) with their own titles. Keeping
@@ -255,6 +260,21 @@ export default async function RootLayout({
     ? demoProfileSlug
     : pathOverrideSlug ?? tenantProfileSlug;
   const manifest = isFullBleed ? null : await getManifest(manifestSlug);
+
+  // Founders portal nav. Injected here rather than added to CC_NAV because
+  // OASIS_SEED.nav IS navToManifest(CC_NAV) and getSeedManifest() falls back to
+  // OASIS_SEED for ANY unrecognised slug — so an entry in CC_NAV would render a
+  // Marketing tab for every newly-onboarded tenant before their manifest exists.
+  // The route would 404 them (fail-closed), but the tab itself would advertise
+  // that a founders portal exists, which is exactly what this must not do.
+  //
+  // Calls the SAME gate the /founders/marketing route calls, so the tab can never render
+  // for someone the route would reject. Skipped entirely on full-bleed routes,
+  // which have no sidebar.
+  const foundersNavItems: NavItem[] =
+    !isFullBleed && !demoMode && (await isFounder())
+      ? [{ group: "Founders", href: "/founders/marketing", label: "Marketing", icon: "Megaphone" }]
+      : [];
   // The chat-shell-vs-constrained <main> decision lives in MainShell (a CLIENT
   // component using usePathname) — NOT here. This root layout is a Server
   // Component that reads headers() once per full load and does NOT re-render on
@@ -312,7 +332,7 @@ export default async function RootLayout({
               }
               logo={manifestLogoToSidebarLogo(manifest.brand.logo)}
               subtitle={manifest.brand.subtitle}
-              items={manifestNavToNavItems(manifest.nav)}
+              items={[...manifestNavToNavItems(manifest.nav), ...foundersNavItems]}
               operatorName={
                 demoMode
                   ? "Sun Demo Operator"
