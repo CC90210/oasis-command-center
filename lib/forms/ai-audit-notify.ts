@@ -132,7 +132,22 @@ export async function notifyAiAuditStarted(input: {
   ].filter(Boolean);
 
   const r = await sendTelegram(lines.join("\n"));
-  if (!r.ok) console.error("[ai-audit.started] telegram:", r.reason);
+  if (!r.ok) {
+    console.error("[ai-audit.started] telegram:", r.reason);
+    // The step-0 alert matters MORE than the completion one, not less: it
+    // fires for someone who filled in their details and then bounced at
+    // step 2. There is no welcome email and no score for that visitor, so
+    // this alert is the only thing that exists. Losing it silently loses
+    // the lead entirely.
+    await recordAlertFailure({
+      db, tenantId, leadId,
+      source: AI_AUDIT_ALERT_SOURCE,
+      label: "AI audit (started)",
+      reason: r.reason ?? "unknown",
+      extra: "This visitor started the funnel but has not completed it.",
+      tag: "ai-audit.started",
+    });
+  }
 }
 
 export type AiAuditNotifyInput = {
