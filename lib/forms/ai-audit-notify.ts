@@ -18,11 +18,24 @@ import { escapeTelegramHtml } from "@/lib/notify/telegram-format";
 import { AI_AUDIT_STEP_COUNT } from "@/lib/forms/oasis-ai-audit-seed";
 import { deliverWelcomeEmail } from "@/lib/forms/oasis-funnel-email";
 import { buildAiAuditAlert, composeAiAuditWelcome } from "@/lib/forms/ai-audit-format";
+import { recordAlertFailure } from "@/lib/forms/alert-failure";
 import type { ScoreBreakdown } from "@/lib/forms/ai-audit-ingest";
 
 /** Distinct source tag → its own idempotency slot, so an ai-audit confirmation
  *  and a personal-funnel welcome never suppress each other for the same lead. */
 export const AI_AUDIT_WELCOME_SOURCE = "ai_audit_welcome";
+
+/**
+ * Source tag for the "alert could not be delivered" marker.
+ *
+ * Deliberately NOT "ai_audit_funnel": ingestAiAuditSubmission treats the
+ * presence of ANY row with that source as proof the submission was already
+ * processed, so filing a failure marker under it would make every retry
+ * return already_ingested and permanently suppress both the ingest and the
+ * alert for that lead. A record that a notification broke must never be
+ * able to silence the notification.
+ */
+export const AI_AUDIT_ALERT_SOURCE = "ai_audit_alert";
 
 /**
  * First-touch alert for the ai-audit funnel.
@@ -188,18 +201,13 @@ export async function notifyAiAuditSubmission(
     // why. Leave a durable row on the lead's own timeline, so the failure
     // is visible in the dashboard next to the lead it belongs to even when
     // the notification channel itself is the thing that is broken.
-    try {
-      await db.from("lead_interactions").insert({
-        tenant_id: tenantId,
-        lead_id: leadId,
-        agent_source: "ai_audit_funnel",
-        interaction_type: "note",
-        direction: "internal",
-        subject: "Telegram alert FAILED",
-        body: `The AI audit alert could not be delivered to Telegram: ${tg.reason ?? "unknown"}. The lead is real and the welcome email was ${emailNote}.`,
-      });
-    } catch (err) {
-      console.error("[ai-audit.notify] could not record telegram failure:", err);
-    }
+    await recordAlertFailure({
+      db, tenantId, leadId,
+      source: AI_AUDIT_ALERT_SOURCE,
+      label: "AI audit",
+      reason: tg.reason ?? "unknown",
+      extra: `The welcome email was ${emailNote}.`,
+      tag: "ai-audit.notify",
+    });
   }
 }
