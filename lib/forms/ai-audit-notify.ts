@@ -131,7 +131,8 @@ export async function notifyAiAuditStarted(input: {
     `Step 1 of ${AI_AUDIT_STEP_COUNT} complete. Score arrives if they finish.`,
   ].filter(Boolean);
 
-  const r = await sendTelegram(lines.join("\n"));
+  // operator: this is CC's own funnel — a lead submitted on oasisai.work.
+  const r = await sendTelegram(lines.join("\n"), { lane: "operator" });
   if (!r.ok) {
     console.error("[ai-audit.started] telegram:", r.reason);
     // The step-0 alert matters MORE than the completion one, not less: it
@@ -203,7 +204,7 @@ export async function notifyAiAuditSubmission(
       : "",
   });
 
-  const tg = await sendTelegram(alert).catch((err) => ({
+  const tg = await sendTelegram(alert, { lane: "operator" }).catch((err) => ({
     ok: false as const,
     reason: err instanceof Error ? err.message : String(err),
   }));

@@ -31,7 +31,8 @@ export async function notifyOasisFunnelSubmission(
 ): Promise<void> {
   const { db, tenantId, leadId, answers } = input;
   await Promise.allSettled([
-    sendTelegram(buildOasisFunnelAlert(answers)).then(async (r) => {
+    // operator: CC's OASIS funnel.
+    sendTelegram(buildOasisFunnelAlert(answers), { lane: "operator" }).then(async (r) => {
       if (r.ok) return;
       console.error("[oasis-funnel.notify] telegram:", r.reason);
       // Same defect the ai-audit funnel had: the only record of a failed

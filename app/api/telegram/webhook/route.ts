@@ -21,6 +21,29 @@ export const dynamic = "force-dynamic";
 
 const TOKEN = process.env.SUNBIZ_TELEGRAM_BOT_TOKEN || undefined;
 
+/**
+ * Reply as the bot the user actually messaged.
+ *
+ * This route needs SUNBIZ_TELEGRAM_BOT_TOKEN specifically — a reply from any
+ * other bot is not a reply, it is a message from a stranger. Before 2026-08-02
+ * sendTelegram() fell through to a shared env default when this was unset, so
+ * someone linking their account could be answered by an unrelated bot in a
+ * different conversation entirely. Now the reply is skipped and logged.
+ *
+ * Still returns 200 to the caller regardless: Telegram retry-storms on anything
+ * else, and no number of retries will conjure a missing credential.
+ */
+async function reply(text: string, chat: string): Promise<void> {
+  if (!TOKEN) {
+    console.error(
+      "[telegram-webhook] SUNBIZ_TELEGRAM_BOT_TOKEN unset — cannot reply as the bot " +
+        "the user messaged; dropping reply rather than sending it from another bot",
+    );
+    return;
+  }
+  await sendTelegram(text, { token: TOKEN, chatId: chat });
+}
+
 export async function POST(req: NextRequest) {
   // Verify Telegram's secret header (configured at setWebhook time) if set.
   const secret = process.env.TELEGRAM_WEBHOOK_SECRET;
@@ -41,9 +64,9 @@ export async function POST(req: NextRequest) {
 
   const m = text.match(/^\/start\s+([A-Za-z0-9]{6,16})\b/);
   if (!m) {
-    await sendTelegram(
+    await reply(
       "To link SunBiz alerts, open Settings in your dashboard, tap “Link Telegram,” then send the code here as /start &lt;CODE&gt;.",
-      { token: TOKEN, chatId: chat },
+      chat,
     );
     return NextResponse.json({ ok: true });
   }
@@ -59,19 +82,13 @@ export async function POST(req: NextRequest) {
     | { auth_user_id: string; custom_fields: Record<string, unknown> | null }
     | undefined;
   if (!row) {
-    await sendTelegram("That code wasn't found or was already used. Generate a fresh one in the dashboard.", {
-      token: TOKEN,
-      chatId: chat,
-    });
+    await reply("That code wasn't found or was already used. Generate a fresh one in the dashboard.", chat);
     return NextResponse.json({ ok: true });
   }
   const cf = row.custom_fields || {};
   const link = cf.telegram_link as { expires_at?: string } | undefined;
   if (!link?.expires_at || Date.parse(link.expires_at) < Date.now()) {
-    await sendTelegram("That code has expired. Generate a fresh one in the dashboard.", {
-      token: TOKEN,
-      chatId: chat,
-    });
+    await reply("That code has expired. Generate a fresh one in the dashboard.", chat);
     return NextResponse.json({ ok: true });
   }
 
@@ -82,15 +99,9 @@ export async function POST(req: NextRequest) {
     .update({ custom_fields: nextCf })
     .eq("auth_user_id", row.auth_user_id);
   if (upd.error) {
-    await sendTelegram("Something went wrong linking your account — try again from the dashboard.", {
-      token: TOKEN,
-      chatId: chat,
-    });
+    await reply("Something went wrong linking your account — try again from the dashboard.", chat);
     return NextResponse.json({ ok: true });
   }
-  await sendTelegram("✅ Linked! You'll now get SunBiz application alerts for your leads here.", {
-    token: TOKEN,
-    chatId: chat,
-  });
+  await reply("✅ Linked! You'll now get SunBiz application alerts for your leads here.", chat);
   return NextResponse.json({ ok: true });
 }

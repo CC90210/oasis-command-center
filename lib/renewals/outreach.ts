@@ -58,8 +58,16 @@ export async function notifyRenewalAgent(input: {
   } catch (error) { console.error("[renewal-outreach] internal email", error); }
   try {
     const recipients = await resolveSunbizRecipients(input.db, input.tenantId, input.agentId);
-    const sends = await Promise.all(recipients.chatIds.map((chatId) => sendTelegram(text, { chatId, token: process.env.SUNBIZ_TELEGRAM_BOT_TOKEN || undefined })));
-    results.telegram = sends.some((result) => result.ok);
+    // Per-user chats linked to the SunBiz bot specifically — see sunbiz-events.ts.
+    // No cross-bot fallback: results.telegram stays false so the caller records
+    // an honest "not sent" instead of a delivery that never happened.
+    const token = process.env.SUNBIZ_TELEGRAM_BOT_TOKEN;
+    if (!token) {
+      console.error("[renewal-outreach] SUNBIZ_TELEGRAM_BOT_TOKEN unset — skipping per-user telegram");
+    } else {
+      const sends = await Promise.all(recipients.chatIds.map((chatId) => sendTelegram(text, { chatId, token })));
+      results.telegram = sends.some((result) => result.ok);
+    }
   } catch (error) { console.error("[renewal-outreach] telegram", error); }
   return results;
 }

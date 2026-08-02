@@ -242,7 +242,7 @@ export async function GET(req: NextRequest) {
             alerts.push(`spammy_number:${sf}`);
             if (write) {
               const body = `🚨 Sending number ${sf} is getting blocked — ${failureRate}% failure across ${sent} sends. Rotate it out of the campaign pool.`;
-              await sendTelegram(body).catch(() => {});
+              await sendTelegram(body, { lane: "sunbiz-ops" }).catch(() => {});
               await postMessageDb({ tenantId: TENANT_ID, from: "outreach-intel", to: "owner", subject: `Number ${sf} going spammy (${failureRate}% fail)`, body, priority: "high" }).catch(() => {});
               await db.from("campaign_number_health").update({ last_alerted_at: nowIso, last_alert_signature: sig }).eq("tenant_id", TENANT_ID).eq("send_from", sf).eq("window_key", "global");
             }
@@ -276,7 +276,7 @@ export async function GET(req: NextRequest) {
         if (s.verdict === "dead" && existing?.verdict !== "dead") {
           alerts.push(`dead_list:${s.lid}`);
           const body = `📉 List "${s.L.name || s.lid}" looks dead — ${s.L.sent} sent, ${s.replyRate}% reply, ${s.convRate}% conversion. Stop blasting it.`;
-          await sendTelegram(body).catch(() => {});
+          await sendTelegram(body, { lane: "sunbiz-ops" }).catch(() => {});
           await postMessageDb({ tenantId: TENANT_ID, from: "outreach-intel", to: "owner", subject: `Dead list: ${s.L.name || s.lid}`, body, priority: "normal" }).catch(() => {});
           await db.from("list_intelligence").update({ last_alerted_at: nowIso }).eq("tenant_id", TENANT_ID).eq("list_id", s.lid);
         }

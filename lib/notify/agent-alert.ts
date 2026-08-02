@@ -24,7 +24,7 @@
 
 import "server-only";
 import { getServiceSupabase } from "@/lib/supabase-server";
-import { sendTelegram } from "@/lib/notify/telegram";
+import { sendTelegram, type TelegramLane } from "@/lib/notify/telegram";
 
 export type AlertSeverity = "info" | "warn" | "urgent";
 
@@ -34,6 +34,17 @@ export async function writeAgentAlert(input: {
   severity: AlertSeverity;
   title: string;
   body?: string;
+  /**
+   * Who gets paged. Required, and deliberately not defaulted.
+   *
+   * This app is multi-tenant and its alerts have two different audiences: CC for
+   * OASIS matters, Adon/APEX for SunBiz operations. A default here would decide
+   * that on the author's behalf and be silently wrong for half the callers —
+   * which is exactly how SunBiz scraper alerts ended up in CC's DM on
+   * 2026-08-02. The dashboard row is tenant-scoped already; this makes the push
+   * scoped too.
+   */
+  lane: TelegramLane;
   subjectType?: string;
   subjectId?: string;
   payload?: Record<string, unknown>;
@@ -98,6 +109,6 @@ export async function writeAgentAlert(input: {
   if (wantTelegram) {
     const tag = input.severity === "urgent" ? "🚨" : "⚠️";
     const text = `${tag} ${input.title}${input.body ? `\n${input.body}` : ""}`;
-    await sendTelegram(text).catch(() => {});
+    await sendTelegram(text, { lane: input.lane }).catch(() => {});
   }
 }

@@ -97,7 +97,10 @@ export async function GET(req: NextRequest) {
 
   // sendTelegram returns {ok, reason} — it does not throw. Faithful reporting:
   // surface a send failure rather than claiming we alerted.
-  const sent = await sendTelegram(msg);
+  // sunbiz-ops: only Adon can act on this — it asks someone to go check that a
+  // workstation is powered on and a scheduled task is running. Routing it to CC
+  // is pure noise to him and silence to the one person who can fix it.
+  const sent = await sendTelegram(msg, { lane: "sunbiz-ops" });
   if (!sent.ok) {
     return NextResponse.json(
       { ok: false, pending, running, ageHours: Number(ageH.toFixed(1)), error: `telegram_failed:${sent.reason}` },

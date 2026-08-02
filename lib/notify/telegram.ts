@@ -1,11 +1,50 @@
 /**
- * notify/telegram.ts — minimal server-side Telegram sender.
+ * notify/telegram.ts — server-side Telegram sender with EXPLICIT lanes.
  *
- * Used by the OASIS funnel to ping CC the moment a lead submits (the behavior
- * ported from the retired cc-funnel app). Generic + tenant-agnostic: the caller
- * supplies the message; tokens come from env. Soft-fail — returns
- * {ok:false, reason} instead of throwing, so a notification never breaks the
- * request that triggered it.
+ * Every send must name who it is for. There is no default.
+ *
+ * WHY THERE IS NO DEFAULT
+ * -----------------------
+ * There used to be one, and it caused a cross-tenant notification leak.
+ *
+ * This app serves two different audiences out of one codebase: CC, who owns
+ * OASIS and wants his own funnel leads, and Adon/APEX, who run SunBiz
+ * operations and need alerts about scrapers, bounces and dialer compliance.
+ * Until 2026-08-02 both audiences shared one credential pair — sendTelegram()
+ * fell back to OASIS_TELEGRAM_BOT_TOKEN / OASIS_TELEGRAM_CHAT_ID, and those
+ * were the ONLY Telegram variables set in Vercel production. Nine call sites
+ * across funnel alerts, cron watchdogs and agent alerts all relied on that
+ * single implicit default.
+ *
+ * So the credential pair had exactly one correct value and two audiences, and
+ * whichever audience it pointed at, the other was misrouted:
+ *
+ *   - pointing at @KnutRPEbot (Adon): SunBiz ops alerts landed correctly, and
+ *     CC's own lead notifications went silently into a partner's private chat
+ *     for 34 days, every send returning ok:true.
+ *   - repointing it at CC (2026-08-02 01:22) fixed the funnel and immediately
+ *     redirected TPS backlog, bounce-reader and Kixie compliance alerts into
+ *     CC's DM, while Adon — the only person who can action them — went blind.
+ *
+ * Both states were broken, because the defect was never the value. It was that
+ * one implicit default served two audiences, so any change to it silently
+ * rerouted traffic belonging to somebody else. A shared default is an invisible
+ * coupling between unrelated features.
+ *
+ * Hence: `lane` is required, and the type is a discriminated union so omitting
+ * it is a compile error rather than a silent inheritance. Adding a new caller
+ * now forces the author to answer "who is this for?" — which is the question
+ * whose absence caused the leak.
+ *
+ * FAIL CLOSED
+ * -----------
+ * An unconfigured lane returns {ok:false, reason:"telegram_lane_not_configured:<lane>"}.
+ * It must NEVER fall back to another lane's credentials. Delivering an
+ * operational alert to the wrong person is worse than not delivering it: silence
+ * gets investigated, whereas a misroute looks like success to every layer that
+ * can observe it — retries, status checks, durable failure markers — and stays
+ * invisible until a human happens to mention they are getting someone else's
+ * mail.
  */
 import "server-only";
 
@@ -13,21 +52,85 @@ import "server-only";
 // stay unit-testable. Re-exported here for callers that already import this.
 export { escapeTelegramHtml } from "./telegram-format";
 
+/**
+ * Who a message is for. Not which bot sends it — that is a deployment detail.
+ * Naming the audience rather than the credential is deliberate: a lane survives
+ * a bot swap, and it makes the wrong choice read as wrong at the call site.
+ */
+export type TelegramLane =
+  /** CC — OASIS funnel leads, his own business alerts. */
+  | "operator"
+  /** Adon / APEX — SunBiz operational alerts (scrapers, bounces, dialer). */
+  | "sunbiz-ops";
+
+type LaneSpec = { tokenKeys: string[]; chatKeys: string[]; audience: string };
+
+/**
+ * Credential resolution per lane, in order. Fallback chains stay WITHIN a lane —
+ * never across lanes, which is the whole point of this module.
+ */
+const LANES: Record<TelegramLane, LaneSpec> = {
+  operator: {
+    tokenKeys: ["OASIS_TELEGRAM_BOT_TOKEN", "TELEGRAM_BOT_TOKEN"],
+    chatKeys: ["OASIS_TELEGRAM_CHAT_ID", "TELEGRAM_CHAT_ID"],
+    audience: "CC (OASIS operator)",
+  },
+  "sunbiz-ops": {
+    // Deliberately does NOT list OASIS_* or bare TELEGRAM_*. If this lane is
+    // unset the send fails loudly instead of quietly becoming CC's problem.
+    tokenKeys: ["SUNBIZ_OPS_TELEGRAM_BOT_TOKEN", "SUNBIZ_TELEGRAM_BOT_TOKEN"],
+    chatKeys: ["SUNBIZ_OPS_TELEGRAM_CHAT_ID"],
+    audience: "SunBiz operations (Adon / APEX)",
+  },
+};
+
+/**
+ * Either name a lane, or supply both credentials explicitly (per-user sends
+ * resolved from the database — the linked-account webhook and sunbiz-events).
+ * A union rather than optional fields, so "I forgot" cannot compile.
+ */
+export type TelegramTarget =
+  | { lane: TelegramLane }
+  | { token: string; chatId: string };
+
+function resolve(target: TelegramTarget):
+  | { ok: true; token: string; chatId: string }
+  | { ok: false; reason: string } {
+  if ("token" in target) {
+    if (!target.token || !target.chatId) {
+      return { ok: false, reason: "telegram_explicit_target_incomplete" };
+    }
+    return { ok: true, token: target.token, chatId: target.chatId };
+  }
+  const spec = LANES[target.lane];
+  if (!spec) return { ok: false, reason: `telegram_unknown_lane:${target.lane}` };
+  const token = spec.tokenKeys.map((k) => process.env[k]).find((v) => v && v.trim());
+  const chatId = spec.chatKeys.map((k) => process.env[k]).find((v) => v && v.trim());
+  if (!token || !chatId) {
+    // Name the lane AND the keys that would fix it. A bare "not configured"
+    // sends the next person reading a 502 on a hunt through the env list.
+    return {
+      ok: false,
+      reason:
+        `telegram_lane_not_configured:${target.lane} ` +
+        `(set ${spec.tokenKeys[0]} + ${spec.chatKeys[0]} for ${spec.audience})`,
+    };
+  }
+  return { ok: true, token: token.trim(), chatId: chatId.trim() };
+}
+
 export async function sendTelegram(
   text: string,
-  opts?: { token?: string; chatId?: string },
+  target: TelegramTarget,
 ): Promise<{ ok: boolean; reason?: string }> {
-  const token =
-    opts?.token || process.env.OASIS_TELEGRAM_BOT_TOKEN || process.env.TELEGRAM_BOT_TOKEN;
-  const chatId =
-    opts?.chatId || process.env.OASIS_TELEGRAM_CHAT_ID || process.env.TELEGRAM_CHAT_ID;
-  if (!token || !chatId) return { ok: false, reason: "telegram_not_configured" };
+  const r = resolve(target);
+  if (!r.ok) return { ok: false, reason: r.reason };
   try {
-    const res = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+    const res = await fetch(`https://api.telegram.org/bot${r.token}/sendMessage`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
-        chat_id: chatId,
+        chat_id: r.chatId,
         text: text.slice(0, 4096), // Telegram hard caps messages at 4096 chars
         parse_mode: "HTML",
       }),
