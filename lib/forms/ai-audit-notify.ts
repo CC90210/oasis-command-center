@@ -137,23 +137,69 @@ export async function notifyAiAuditSubmission(
   const toEmail = String(answers.email ?? "").trim().toLowerCase();
   const { subject, body } = composeAiAuditWelcome(answers);
 
-  // Independent side-effects: a dead Gmail credential must not cost CC the
-  // Telegram alert, and a missing Telegram token must not cost the lead their
-  // confirmation. allSettled, and BOTH results are inspected — the sibling
-  // orchestrator discarded the email result, which is how a broken welcome
-  // email stays invisible.
-  await Promise.allSettled([
-    sendTelegram(buildAiAuditAlert(answers, score)).then((r) => {
-      if (!r.ok) console.error("[ai-audit.notify] telegram:", r.reason);
-    }),
-    deliverWelcomeEmail({
+  // The email goes FIRST, and its result is carried into the alert.
+  //
+  // These used to run concurrently via allSettled so neither could block the
+  // other. That was defensible, but it meant the Telegram alert could not say
+  // whether the lead had actually been emailed — and CC's ask is one message
+  // that says a form came in AND that we replied to it. Sequencing costs a
+  // few hundred ms inside an `after()` callback the visitor never waits on,
+  // and buys an alert that describes the whole event instead of half of it.
+  // A failing email still cannot stop the alert: deliverWelcomeEmail returns
+  // a result rather than throwing, and the alert reports the failure.
+  let emailNote = "";
+  try {
+    const r = await deliverWelcomeEmail({
       db, tenantId, leadId, toEmail,
       source: AI_AUDIT_WELCOME_SOURCE, subject, body,
-    }).then((r) => {
-      // "already_sent" and "suppressed" are correct outcomes, not failures.
-      if (!r.sent && r.reason && !["already_sent", "suppressed", "no_usable_email"].includes(r.reason)) {
-        console.error("[ai-audit.notify] welcome email:", r.reason);
-      }
-    }),
-  ]);
+    });
+    if (r.sent) {
+      emailNote = "sent";
+    } else if (r.reason === "already_sent") {
+      emailNote = "already sent earlier";
+    } else if (r.reason === "suppressed") {
+      emailNote = "NOT sent — address suppressed";
+    } else {
+      emailNote = `NOT sent — ${r.reason ?? "unknown"}`;
+      console.error("[ai-audit.notify] welcome email:", r.reason);
+    }
+  } catch (err) {
+    emailNote = "NOT sent — threw";
+    console.error("[ai-audit.notify] welcome email threw:", err);
+  }
+
+  const alert = buildAiAuditAlert(answers, score, {
+    emailStatus: emailNote,
+    inboxUrl: toEmail
+      ? `https://mail.google.com/mail/u/0/#search/${encodeURIComponent(toEmail)}`
+      : "",
+  });
+
+  const tg = await sendTelegram(alert).catch((err) => ({
+    ok: false as const,
+    reason: err instanceof Error ? err.message : String(err),
+  }));
+
+  if (!tg.ok) {
+    console.error("[ai-audit.notify] telegram:", tg.reason);
+    // A LEAD ALERT THAT FAILS SILENTLY IS THE WORST FAILURE MODE HERE.
+    // console.error goes to a Vercel log nobody reads; CC's actual
+    // experience was a lead arriving with no notification and no trace of
+    // why. Leave a durable row on the lead's own timeline, so the failure
+    // is visible in the dashboard next to the lead it belongs to even when
+    // the notification channel itself is the thing that is broken.
+    try {
+      await db.from("lead_interactions").insert({
+        tenant_id: tenantId,
+        lead_id: leadId,
+        agent_source: "ai_audit_funnel",
+        interaction_type: "note",
+        direction: "internal",
+        subject: "Telegram alert FAILED",
+        body: `The AI audit alert could not be delivered to Telegram: ${tg.reason ?? "unknown"}. The lead is real and the welcome email was ${emailNote}.`,
+      });
+    } catch (err) {
+      console.error("[ai-audit.notify] could not record telegram failure:", err);
+    }
+  }
 }
