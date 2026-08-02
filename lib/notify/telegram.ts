@@ -93,6 +93,46 @@ export type TelegramTarget =
   | { lane: TelegramLane }
   | { token: string; chatId: string };
 
+/**
+ * Every lane, with the env var NAME that actually resolved for it — never a
+ * value. Feeds /api/notify/telegram-identity so the diagnostic enumerates the
+ * same lanes the sender uses.
+ *
+ * Derived from LANES rather than hand-listed on purpose: the first version of
+ * that endpoint inspected only the OASIS pair, so it reported a healthy lane
+ * while SunBiz alerts were misrouting — a diagnostic blind to the thing that
+ * broke. Adding a lane above now adds it to the audit automatically, which is
+ * the only version of this that stays true.
+ */
+export function describeLanes(): Array<{
+  lane: TelegramLane;
+  audience: string;
+  tokenVar: string | null;
+  chatVar: string | null;
+  configured: boolean;
+}> {
+  return (Object.keys(LANES) as TelegramLane[]).map((lane) => {
+    const spec = LANES[lane];
+    const tokenVar = spec.tokenKeys.find((k) => (process.env[k] || "").trim()) ?? null;
+    const chatVar = spec.chatKeys.find((k) => (process.env[k] || "").trim()) ?? null;
+    return {
+      lane,
+      audience: spec.audience,
+      tokenVar,
+      chatVar,
+      configured: Boolean(tokenVar && chatVar),
+    };
+  });
+}
+
+/** Credentials for a lane, for diagnostics that must call Telegram directly. */
+export function laneCredentials(
+  lane: TelegramLane,
+): { token: string; chatId: string } | null {
+  const r = resolve({ lane });
+  return r.ok ? { token: r.token, chatId: r.chatId } : null;
+}
+
 function resolve(target: TelegramTarget):
   | { ok: true; token: string; chatId: string }
   | { ok: false; reason: string } {

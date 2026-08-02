@@ -24,6 +24,7 @@
  */
 import { NextResponse } from "next/server";
 import { resolveSessionContext } from "@/lib/api-auth";
+import { describeLanes, laneCredentials } from "@/lib/notify/telegram";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -52,48 +53,54 @@ export async function GET() {
     return NextResponse.json({ ok: false, error: sess.reason }, { status: 401 });
   }
 
-  const token = process.env.OASIS_TELEGRAM_BOT_TOKEN || process.env.TELEGRAM_BOT_TOKEN;
-  const chatId = process.env.OASIS_TELEGRAM_CHAT_ID || process.env.TELEGRAM_CHAT_ID;
-
-  if (!token || !chatId) {
-    return NextResponse.json({
-      ok: false,
-      configured: false,
-      // Which NAME resolved, never the value.
-      tokenVar: process.env.OASIS_TELEGRAM_BOT_TOKEN
-        ? "OASIS_TELEGRAM_BOT_TOKEN"
-        : process.env.TELEGRAM_BOT_TOKEN
-          ? "TELEGRAM_BOT_TOKEN"
-          : null,
-      chatVar: process.env.OASIS_TELEGRAM_CHAT_ID
-        ? "OASIS_TELEGRAM_CHAT_ID"
-        : process.env.TELEGRAM_CHAT_ID
-          ? "TELEGRAM_CHAT_ID"
-          : null,
-    });
-  }
-
-  const me = await tg(token, "getMe");
-  const chat = await tg(token, "getChat", { chat_id: chatId });
+  // Every lane, not just CC's. The first version of this route inspected only
+  // the OASIS pair, so on 2026-08-02 it would have reported everything healthy
+  // while SunBiz operational alerts were landing in the wrong DM — a diagnostic
+  // blind to the exact failure it exists to catch. describeLanes() is derived
+  // from the sender's own lane table, so this can never drift behind it again.
+  const lanes = await Promise.all(
+    describeLanes().map(async (l) => {
+      if (!l.configured) {
+        return {
+          lane: l.lane,
+          audience: l.audience,
+          configured: false,
+          tokenVar: l.tokenVar,
+          chatVar: l.chatVar,
+          note: "sends on this lane fail closed — they do NOT fall back to another lane",
+        };
+      }
+      const creds = laneCredentials(l.lane);
+      if (!creds) {
+        return { lane: l.lane, audience: l.audience, configured: false, tokenVar: l.tokenVar, chatVar: l.chatVar };
+      }
+      const me = await tg(creds.token, "getMe");
+      const chat = await tg(creds.token, "getChat", { chat_id: creds.chatId });
+      return {
+        lane: l.lane,
+        audience: l.audience,
+        configured: true,
+        tokenVar: l.tokenVar,
+        chatVar: l.chatVar,
+        bot: me.ok
+          ? { username: me.result?.username, id: me.result?.id, name: me.result?.first_name }
+          : { error: me.description ?? "getMe_failed" },
+        chat: chat.ok
+          ? {
+              id: chat.result?.id,
+              type: chat.result?.type,
+              title: chat.result?.title ?? chat.result?.username ?? null,
+            }
+          : { error: chat.description ?? "getChat_failed" },
+      };
+    }),
+  );
 
   return NextResponse.json({
     ok: true,
-    configured: true,
-    tokenVar: process.env.OASIS_TELEGRAM_BOT_TOKEN
-      ? "OASIS_TELEGRAM_BOT_TOKEN"
-      : "TELEGRAM_BOT_TOKEN",
-    bot: me.ok
-      ? { username: me.result?.username, id: me.result?.id, name: me.result?.first_name }
-      : { error: me.description ?? "getMe_failed" },
-    chat: chat.ok
-      ? {
-          id: chat.result?.id,
-          type: chat.result?.type,
-          title: chat.result?.title ?? chat.result?.username ?? null,
-        }
-      : { error: chat.description ?? "getChat_failed" },
+    lanes,
     // The question this endpoint exists to answer.
     hint:
-      "Compare `bot.username` and `chat.title`/`chat.id` with the Telegram conversation you actually read. If they differ, alerts have been delivering successfully somewhere you never see.",
+      "For each lane, compare `bot.username` and `chat.title`/`chat.id` against who `audience` says should be reading it. A lane whose destination is not that person has been delivering successfully to the wrong place — which looks identical to working from every other angle.",
   });
 }
