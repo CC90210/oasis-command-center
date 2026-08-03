@@ -28,6 +28,7 @@ import { ALL_MARKETING_PATHS } from "@/lib/marketing/routes";
 // lib/founders/* below is the private founders portal. Different concerns,
 // similar words — keep them apart.
 import { isFounder } from "@/lib/founders/gate";
+import { shouldShowFoundersNav } from "@/lib/founders-marketing-core";
 import type { NavItem } from "@/lib/nav-config";
 
 // Default metadata — tenant-neutral. Individual pages override via
@@ -268,13 +269,25 @@ export default async function RootLayout({
   // The route would 404 them (fail-closed), but the tab itself would advertise
   // that a founders portal exists, which is exactly what this must not do.
   //
-  // Calls the SAME gate the /founders/marketing route calls, so the tab can never render
-  // for someone the route would reject. Skipped entirely on full-bleed routes,
-  // which have no sidebar.
-  const foundersNavItems: NavItem[] =
-    !isFullBleed && !demoMode && (await isFounder())
-      ? [{ group: "Founders", href: "/founders/marketing", label: "Marketing", icon: "Megaphone" }]
-      : [];
+  // Calls the SAME gate the /founders/marketing route calls, so the tab can
+  // never render for someone the route would reject.
+  //
+  // Being a founder is necessary but NOT sufficient: manifestSlug below is
+  // `pathOverrideSlug ?? tenantProfileSlug`, so a founder browsing /t/sun/...
+  // sees the SunBiz-branded sidebar. Rendering the tab there would paint a
+  // Founders entry onto SunBiz's own portal — no data leak, but it advertises
+  // the portal exists to anyone looking at that screen, which is exactly what
+  // choosing 404-over-403 was meant to prevent. shouldShowFoundersNav() adds
+  // the own-shell-only condition and is unit-tested.
+  const foundersNavItems: NavItem[] = shouldShowFoundersNav({
+    isFounder: !isFullBleed && (await isFounder()),
+    isFullBleed,
+    demoMode,
+    pathOverrideSlug,
+    tenantProfileSlug,
+  })
+    ? [{ group: "Founders", href: "/founders/marketing", label: "Marketing", icon: "Megaphone" }]
+    : [];
   // The chat-shell-vs-constrained <main> decision lives in MainShell (a CLIENT
   // component using usePathname) — NOT here. This root layout is a Server
   // Component that reads headers() once per full load and does NOT re-render on

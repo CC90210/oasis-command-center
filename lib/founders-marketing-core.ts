@@ -214,6 +214,40 @@ export function parseFoundersAllowlist(raw: string | null | undefined): string[]
     .filter(Boolean);
 }
 
+/**
+ * Whether the Founders nav tab may render in the CURRENTLY DISPLAYED shell.
+ *
+ * Being a founder is necessary but NOT sufficient. `app/layout.tsx` resolves
+ * the shell from `pathOverrideSlug ?? tenantProfileSlug`, so a founder browsing
+ * `/t/sun/...` gets the SunBiz-branded sidebar — and a founder-only check alone
+ * would paint a "Marketing" tab onto SunBiz's own portal.
+ *
+ * Nothing leaks (the route still gates on tenant identity, and it is the
+ * founder's own tab), but the SunBiz portal would visibly advertise that a
+ * founders portal exists. That is precisely what choosing 404-over-403 was
+ * meant to prevent, undone by a sidebar entry.
+ *
+ * Rule: the tab renders only while a founder is looking at their OWN shell.
+ * Previewing another tenant, or any demo shell, hides it.
+ */
+export function shouldShowFoundersNav(input: {
+  isFounder: boolean;
+  isFullBleed: boolean;
+  demoMode: boolean;
+  /** Slug from a /t/<slug>/ URL, if any. */
+  pathOverrideSlug: string | null;
+  /** The viewer's own tenant slug. */
+  tenantProfileSlug: string | null;
+}): boolean {
+  const { isFounder, isFullBleed, demoMode, pathOverrideSlug, tenantProfileSlug } = input;
+  if (!isFounder) return false;
+  if (isFullBleed) return false; // no sidebar on these routes at all
+  if (demoMode) return false; // demo shells are public-facing previews
+  // Previewing another tenant's shell: the sidebar is theirs, not ours.
+  if (pathOverrideSlug && pathOverrideSlug !== tenantProfileSlug) return false;
+  return true;
+}
+
 // ───────────────────────────────────────────────────────── formatting
 
 export function fmtBytes(bytes: number | null | undefined): string {

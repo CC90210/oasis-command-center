@@ -11,7 +11,11 @@ import assert from "node:assert/strict";
 // Imported from the PURE module, not from lib/founders/gate.ts.
 // That wrapper needs a session and drags in the server chain; the security
 // decision itself must stay testable in isolation.
-import { isFounderTenant, parseFoundersAllowlist } from "../lib/founders-marketing-core";
+import {
+  isFounderTenant,
+  parseFoundersAllowlist,
+  shouldShowFoundersNav,
+} from "../lib/founders-marketing-core";
 
 const FOUNDER = "ef8d389e-3f15-43f2-ae00-3660f69a1452";
 const SUNBIZ = "11111111-2222-3333-4444-555555555555";
@@ -81,5 +85,61 @@ assert.deepEqual(parseFoundersAllowlist(",,,"), [], "only commas parses to empty
 const parsed = parseFoundersAllowlist(` ${FOUNDER}, `);
 assert.equal(isFounderTenant(FOUNDER, parsed), true, "parse + check admits the founder");
 assert.equal(isFounderTenant(SUNBIZ, parsed), false, "parse + check refuses SunBiz");
+
+// ── the nav must not bleed into another tenant's shell ───────────────
+// Being a founder is necessary but not sufficient. app/layout.tsx resolves the
+// shell from `pathOverrideSlug ?? tenantProfileSlug`, so a founder browsing
+// /t/sun/... sees the SunBiz-branded sidebar. A founder-only check would paint
+// a Founders tab onto SunBiz's own portal — no data leak, but it advertises the
+// portal to anyone looking at that screen, undoing the 404-over-403 decision.
+const own = { isFullBleed: false, demoMode: false, tenantProfileSlug: "oasis" };
+
+assert.equal(
+  shouldShowFoundersNav({ ...own, isFounder: true, pathOverrideSlug: null }),
+  true,
+  "founder on their own shell sees the tab",
+);
+assert.equal(
+  shouldShowFoundersNav({ ...own, isFounder: true, pathOverrideSlug: "oasis" }),
+  true,
+  "explicit /t/oasis/ is still the founder's own shell",
+);
+assert.equal(
+  shouldShowFoundersNav({ ...own, isFounder: true, pathOverrideSlug: "sun" }),
+  false,
+  "THE BUG: founder previewing /t/sun/ must NOT see the tab in SunBiz's shell",
+);
+assert.equal(
+  shouldShowFoundersNav({ ...own, isFounder: true, pathOverrideSlug: "suga" }),
+  false,
+  "same for any other tenant's shell",
+);
+assert.equal(
+  shouldShowFoundersNav({ ...own, isFounder: true, demoMode: true, pathOverrideSlug: null }),
+  false,
+  "demo shells are public-facing previews — never show the tab",
+);
+assert.equal(
+  shouldShowFoundersNav({ ...own, isFounder: true, isFullBleed: true, pathOverrideSlug: null }),
+  false,
+  "full-bleed routes have no sidebar at all",
+);
+assert.equal(
+  shouldShowFoundersNav({ ...own, isFounder: false, pathOverrideSlug: null }),
+  false,
+  "a non-founder never sees it, own shell or not",
+);
+// A SunBiz operator viewing their own SunBiz shell: both conditions fail.
+assert.equal(
+  shouldShowFoundersNav({
+    isFounder: false,
+    isFullBleed: false,
+    demoMode: false,
+    pathOverrideSlug: "sun",
+    tenantProfileSlug: "sun",
+  }),
+  false,
+  "SunBiz operator on the SunBiz shell sees nothing",
+);
 
 console.log("marketing-founders-gate: all assertions passed");
