@@ -381,11 +381,43 @@ export async function watermarkStoredBankStatement(
 }
 
 /**
+ * Extension for a watermarked derived copy, keyed off the mime the watermarker
+ * ACTUALLY produced (which can differ from the source — HEIC/GIF flatten to
+ * JPEG). Before 2026-08-03 every copy was written as `.pdf`, so an image
+ * statement was stored under a `.pdf` key holding JPEG bytes and the lender
+ * received a "PDF" their reader refused to open.
+ */
+function wmCopyExtension(mimeType: string): string {
+  switch ((mimeType || "").toLowerCase().split(";")[0].trim()) {
+    case "image/png":
+      return "png";
+    case "image/webp":
+      return "webp";
+    case "image/jpeg":
+    case "image/jpg":
+      return "jpg";
+    default:
+      return "pdf";
+  }
+}
+
+/** Swap an attachment filename's extension to match the branded copy's mime. */
+function retargetFilename(filename: string, ext: string): string {
+  const base = (filename || "statement").replace(/\.[A-Za-z0-9]{1,8}$/, "");
+  return `${base}.${ext}`;
+}
+
+/**
  * Get (or create) the watermarked DERIVED copy of a stored bank statement, for
  * the lender-facing send. Downloads the CLEAN original → SunBiz-watermarks →
- * uploads to a separate `_shopout_wm/{docId}_v{version}.pdf` path. NEVER touches
- * the original (lead storage + FundMate keep reading it clean). Idempotent: a
- * copy already recorded at the current version is reused.
+ * uploads to a separate `_shopout_wm/{docId}_v{version}.{ext}` path. NEVER
+ * touches the original (lead storage + FundMate keep reading it clean).
+ * Idempotent: a copy already recorded at the current version is reused.
+ *
+ * The extension/mime are derived from the watermarker's OUTPUT, and both are
+ * returned so callers can retarget the outbound attachment. A statement whose
+ * copy still sits at a stale-extension path simply misses the reuse check and
+ * gets rebuilt at the correct path (the orphan cleanup below removes the old).
  */
 async function getOrCreateWatermarkedCopy(
   db: ReturnType<typeof getServiceSupabase>,
@@ -397,13 +429,31 @@ async function getOrCreateWatermarkedCopy(
     mime_type: string | null;
     metadata: Record<string, unknown> | null;
   },
-): Promise<{ ok: true; wmPath: string; raster: boolean } | { ok: false; error: string }> {
-  const wmPath = `${row.tenant_id}/${row.lead_id}/_shopout_wm/${row.id}_v${WATERMARK_VERSION}.pdf`;
+): Promise<
+  | { ok: true; wmPath: string; raster: boolean; mimeType: string }
+  | { ok: false; error: string }
+> {
+  const wmDir = `${row.tenant_id}/${row.lead_id}/_shopout_wm/${row.id}_v${WATERMARK_VERSION}`;
+  const recordedPath =
+    typeof row.metadata?.shopout_wm_path === "string" ? (row.metadata.shopout_wm_path as string) : null;
+  const recordedMime =
+    typeof row.metadata?.shopout_wm_mime === "string"
+      ? (row.metadata.shopout_wm_mime as string)
+      : "application/pdf";
+  // Reuse when the recorded copy is at the current version AND its path matches
+  // the extension its recorded mime implies (so pre-2026-08-03 `.pdf`-keyed
+  // image copies are rebuilt rather than re-sent broken).
   if (
-    row.metadata?.shopout_wm_path === wmPath &&
+    recordedPath &&
+    recordedPath === `${wmDir}.${wmCopyExtension(recordedMime)}` &&
     row.metadata?.shopout_wm_version === WATERMARK_VERSION
   ) {
-    return { ok: true, wmPath, raster: row.metadata?.shopout_wm_raster === true }; // reuse
+    return {
+      ok: true,
+      wmPath: recordedPath,
+      raster: row.metadata?.shopout_wm_raster === true,
+      mimeType: recordedMime,
+    };
   }
   const dl = await db.storage.from(LEAD_DOC_BUCKET).download(row.storage_path);
   if (dl.error || !dl.data) {
@@ -417,20 +467,21 @@ async function getOrCreateWatermarkedCopy(
     provenance: await resolveProvenance(db, row.tenant_id, row.lead_id),
   });
   if (!wm.ok) return { ok: false, error: wm.error };
+  const wmPath = `${wmDir}.${wmCopyExtension(wm.mimeType)}`;
   const up = await db.storage
     .from(LEAD_DOC_BUCKET)
     .upload(wmPath, wm.bytes, { contentType: wm.mimeType, upsert: true });
   if (up.error) return { ok: false, error: `wm_copy_upload_failed: ${up.error.message}` };
-  // Orphan cleanup: a version bump (e.g. v2→v3) writes a NEW path; best-effort
-  // delete the prior-version copy so old rasterized copies don't pile up.
-  const prior = typeof row.metadata?.shopout_wm_path === "string" ? (row.metadata.shopout_wm_path as string) : null;
-  if (prior && prior !== wmPath && prior.startsWith(`${row.tenant_id}/`)) {
-    try { await db.storage.from(LEAD_DOC_BUCKET).remove([prior]); } catch { /* best-effort */ }
+  // Orphan cleanup: a version bump (e.g. v2→v3) or an extension correction
+  // writes a NEW path; best-effort delete the prior copy so stale ones don't
+  // pile up.
+  if (recordedPath && recordedPath !== wmPath && recordedPath.startsWith(`${row.tenant_id}/`)) {
+    try { await db.storage.from(LEAD_DOC_BUCKET).remove([recordedPath]); } catch { /* best-effort */ }
   }
   // Pointer on the ORIGINAL row so we reuse the copy + can re-resolve on retry.
   // shopout_wm_raster flags a LOSSY (flattened) copy — set when the overlay had
   // to fall back to raster (e.g. an encrypted source) so it's never silent.
-  await db
+  const stamp = await db
     .from("lead_documents")
     .update({
       metadata: {
@@ -439,10 +490,22 @@ async function getOrCreateWatermarkedCopy(
         shopout_wm_version: WATERMARK_VERSION,
         shopout_wm_at: new Date().toISOString(),
         shopout_wm_raster: wm.raster === true,
+        shopout_wm_mime: wm.mimeType,
       },
     })
     .eq("id", row.id);
-  return { ok: true, wmPath, raster: wm.raster === true };
+  if (stamp.error) {
+    // NOT fatal to the send: the branded bytes are uploaded and `wmPath` is
+    // correct, so the lender still receives a watermarked statement. The only
+    // casualty is the reuse cache — this doc gets re-branded on every future
+    // shop-out. Loud, because a persistent failure here is invisible work.
+    // (Contrast watermarkStoredBankStatement, which DOES fail closed: there the
+    // stamp is what stops an endless re-rasterize of the stored object.)
+    console.error(
+      `[watermark] shopout_wm stamp write failed for doc ${row.id}: ${stamp.error.message} — copy is valid, reuse cache not persisted`,
+    );
+  }
+  return { ok: true, wmPath, raster: wm.raster === true, mimeType: wm.mimeType };
 }
 
 export type ShopOutAttachmentBase = {
@@ -491,6 +554,22 @@ export async function watermarkAttachmentsForShopOut<T extends ShopOutAttachment
     .select("id, tenant_id, lead_id, storage_path, doc_type, mime_type, metadata")
     .eq("tenant_id", tenantId)
     .in("storage_path", paths);
+  if (rows.error) {
+    // Still fail closed — but say WHAT failed. Until 2026-08-03 this error was
+    // unchecked, so a transient DB fault left `byPath` empty and EVERY
+    // attachment was reported as "unresolved_attachment_no_lead_document".
+    // That sent the operator hunting a document problem that did not exist,
+    // and it looked identical to a genuinely un-uploadable statement.
+    return {
+      ok: false,
+      attachments,
+      failures: attachments.map((a) => ({
+        filename: a.filename,
+        storage_path: a.storage_path,
+        reason: `lead_document_lookup_failed: ${rows.error.message}`,
+      })),
+    };
+  }
   const byPath = new Map<string, WmDocRow>();
   for (const r of (rows.data || []) as WmDocRow[]) byPath.set(r.storage_path, r);
 
@@ -512,7 +591,20 @@ export async function watermarkAttachmentsForShopOut<T extends ShopOutAttachment
       failures.push({ filename: att.filename, storage_path: att.storage_path, reason: cp.error });
       continue;
     }
-    out.push({ ...att, storage_path: cp.wmPath, original_path: op } as T);
+    // Retarget filename + mime to the branded copy. The watermarker can change
+    // the container (HEIC/GIF flatten to JPEG), and the attachment previously
+    // kept the SOURCE mime/extension while storage_path pointed at the derived
+    // copy — so a lender could receive `statement.heic` holding JPEG bytes.
+    const ext = wmCopyExtension(cp.mimeType);
+    out.push({
+      ...att,
+      storage_path: cp.wmPath,
+      original_path: op,
+      filename: retargetFilename(att.filename, ext),
+      ...(typeof (att as { mime_type?: unknown }).mime_type === "string"
+        ? { mime_type: cp.mimeType }
+        : {}),
+    } as T);
   }
   return { ok: failures.length === 0, attachments: out, failures };
 }

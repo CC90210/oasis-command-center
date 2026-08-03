@@ -202,7 +202,7 @@ export async function POST(
   const initiatedByAgent = sess.email ? findAgentByEmail(sess.email) : null;
   const initiatedBy = initiatedByAgent?.name || sess.email || sess.userId;
 
-  const runAttachments = Array.isArray(body.attachments) ? body.attachments : [];
+  let runAttachments = Array.isArray(body.attachments) ? body.attachments : [];
 
   // Watermark guard (CC 2026-06-28). NOTE: today this direct-Gmail path does NOT
   // attach statements (executeShopOutRun → sendGmail sends to/cc/subject/body
@@ -211,6 +211,13 @@ export async function POST(
   // selected statement objects here so storage is consistent AND so this path is
   // already fail-closed if attachments ever get plumbed into the Gmail send.
   // Skipped on dry_run (read-only preview).
+  //
+  // 2026-08-03: the guard's REWRITTEN attachments are now what flows onward.
+  // Previously the branded list was computed and then discarded — the original,
+  // clean-original-pointing array was handed to executeShopOutRun. Harmless only
+  // for exactly as long as this path never attaches bytes; the moment it did,
+  // it would have shipped UNWATERMARKED statements while reporting the guard
+  // passed. A guard whose output is thrown away is not a guard.
   if (body.dry_run !== true && runAttachments.length > 0) {
     const wmGuard = await watermarkAttachmentsForShopOut(sess.tenantId, runAttachments);
     if (!wmGuard.ok) {
@@ -220,6 +227,7 @@ export async function POST(
         watermark_failures: wmGuard.failures,
       });
     }
+    runAttachments = wmGuard.attachments;
   }
 
   // Fire the engine.

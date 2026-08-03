@@ -151,6 +151,64 @@ function friendlyThreadError(raw: string | null): string | null {
   return "Send failed. Retry — hover for details.";
 }
 
+/**
+ * Plain-English cause for ONE failed statement, from the reason code the
+ * watermark guard returns. The raw code is appended so a screenshot is still
+ * enough to debug from.
+ */
+function friendlyWatermarkReason(reason: string): string {
+  const s = (reason || "").toLowerCase();
+  if (s.includes("unresolved_attachment"))
+    return "not found in this deal's documents (re-upload it to the lead)";
+  if (s.includes("lead_document_lookup_failed"))
+    return "the document lookup itself failed — a database problem, not a document problem. Retry";
+  if (s.includes("download_failed"))
+    return "the stored file could not be downloaded (it may have been removed)";
+  if (s.includes("wm_copy_upload_failed"))
+    return "the branded copy could not be saved back to storage. Retry";
+  if (s.includes("pdf_too_many_pages"))
+    return "too many pages to brand — split it and re-upload";
+  if (s.includes("pdf_page_too_large")) return "a page is too large to brand — re-export it smaller";
+  if (s.includes("encrypted"))
+    return "it is a password/permission-protected PDF that could not be branded — re-save it as a plain PDF and re-upload";
+  if (s.includes("unsupported_type"))
+    return "the file type cannot be branded — re-upload it as a PDF";
+  if (s.includes("empty_file")) return "the stored file is empty — re-upload it";
+  if (s.includes("dommatrix") || s.includes("canvas_unavailable"))
+    return "the server-side image renderer is unavailable — this is a deploy problem, not a document problem";
+  return "branding failed";
+}
+
+/**
+ * Turn a failed shop-out response into something an operator can act on.
+ *
+ * The API already returns `message` plus a `watermark_failures[]` array naming
+ * the exact file and reason; until 2026-08-03 the UI rendered only `json.error`,
+ * so every branding failure surfaced as the bare string
+ * "bank_statement_watermark_failed" — which is why "it says it can't watermark
+ * it" was all anyone could report. Never drop the detail.
+ */
+function describeSendError(json: Record<string, unknown>): string {
+  const failures = Array.isArray(json.watermark_failures)
+    ? (json.watermark_failures as Array<{ filename?: string; reason?: string }>)
+    : [];
+  if (failures.length > 0) {
+    const lines = failures.map(
+      (f) =>
+        `• ${f.filename || "(unnamed file)"} — ${friendlyWatermarkReason(f.reason || "")} [${f.reason || "no reason given"}]`,
+    );
+    return `Could not watermark ${failures.length} bank statement${
+      failures.length === 1 ? "" : "s"
+    }, so nothing was sent:\n${lines.join("\n")}`;
+  }
+  if (typeof json.message === "string" && json.message.trim()) {
+    return typeof json.error === "string" ? `${json.message} (${json.error})` : json.message;
+  }
+  if (typeof json.hint === "string" && json.hint.trim()) return json.hint;
+  if (typeof json.error === "string" && json.error.trim()) return json.error;
+  return "Send failed.";
+}
+
 export function ShoppingOutClient({
   tenantSlug,
   tenantId,
@@ -467,9 +525,15 @@ export function ShoppingOutClient({
                 : t,
             ),
           );
+        } else {
+          // Retry runs the SAME watermark door guard as the send, so an
+          // unbrandable statement makes this 422 every time. Silently ignoring
+          // it (the behaviour until 2026-08-03) meant the operator clicked
+          // Retry, saw the row stay red, and had no way to learn why.
+          setSendResult({ ok: false, message: describeSendError(j) });
         }
-      } catch {
-        // Fail-silent on network blip; the daemon picks up on next refresh.
+      } catch (err) {
+        setSendResult({ ok: false, message: `Retry failed: ${String((err as Error).message || err)}` });
       } finally {
         setRetrying((prev) => {
           const next = new Set(prev);
@@ -489,14 +553,17 @@ export function ShoppingOutClient({
     if (!selectedAppId) return;
     setRetryingAll(true);
     try {
-      await fetch(`/api/applications/${selectedAppId}/lender-threads/retry-all`, {
+      const j = await fetch(`/api/applications/${selectedAppId}/lender-threads/retry-all`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ email_identity: lenderNetwork }),
       }).then((r) => r.json().catch(() => ({})));
+      // Same guard, same silence as the per-row retry: "Retry all" would run,
+      // report nothing, and leave every thread red.
+      if (!j?.ok) setSendResult({ ok: false, message: describeSendError(j || {}) });
       await refreshThreads();
-    } catch {
-      // Network blip — next refresh / per-row retry still available.
+    } catch (err) {
+      setSendResult({ ok: false, message: `Retry all failed: ${String((err as Error).message || err)}` });
     } finally {
       setRetryingAll(false);
     }
@@ -624,7 +691,7 @@ export function ShoppingOutClient({
         setSendResult({ ok: true, message: queuedMsg + sendMsg });
         await refreshPlanAndThreads();
       } else {
-        setSendResult({ ok: false, message: json.error || "Send failed." });
+        setSendResult({ ok: false, message: describeSendError(json) });
       }
     } catch (err) {
       setSendResult({ ok: false, message: String((err as Error).message || err) });
@@ -983,7 +1050,7 @@ export function ShoppingOutClient({
             </div>
             {sendResult && (
               <div
-                className={`rounded-md border p-2.5 text-[12px] ${
+                className={`rounded-md border p-2.5 text-[12px] whitespace-pre-line ${
                   sendResult.ok
                     ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-100"
                     : "border-rose-500/30 bg-rose-500/10 text-rose-100"

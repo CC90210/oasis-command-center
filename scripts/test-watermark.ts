@@ -5,6 +5,8 @@
  *   node --conditions=react-server --import tsx scripts/test-watermark.ts
  */
 import { writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { watermarkBankStatement } from "../lib/forms/watermark";
 
 const PDF_MAGIC = Buffer.from("%PDF");
@@ -14,9 +16,11 @@ const isPdf = (b: Buffer) => b.subarray(0, 4).equals(PDF_MAGIC);
 const isJpg = (b: Buffer) => b.subarray(0, 3).equals(JPG_MAGIC);
 const isPng = (b: Buffer) => b.subarray(0, 4).equals(PNG_MAGIC);
 
+// Default to the OS temp dir — the previous default was one developer's
+// absolute macOS scratchpad, so the sample write silently failed everywhere
+// else.
 const SAMPLE_OUT =
-  process.env.WM_SAMPLE_OUT ||
-  "/private/tmp/claude-501/-Users-conaugh-CEO-Agent/8e524508-5854-49ef-9f72-d7df1c7b158f/scratchpad/watermarked-sample.pdf";
+  process.env.WM_SAMPLE_OUT || join(tmpdir(), "watermarked-sample.pdf");
 
 async function main() {
   let failures = 0;
@@ -98,11 +102,61 @@ async function main() {
     mimeType: "application/pdf",
     provenance: prov,
   });
-  if (!wmBig.ok && wmBig.error.startsWith("pdf_too_many_pages")) {
+  // The renderer now tries the pdf-lib overlay FIRST and falls back to raster,
+  // so the page cap surfaces as a combined "overlay_failed[...]|raster_failed[...]"
+  // string. Asserting startsWith("pdf_too_many_pages") made this test fail on a
+  // correctly-failing-closed renderer — a red test that was reporting a
+  // non-existent product bug. Assert the CAUSE appears, not its position.
+  if (!wmBig.ok && wmBig.error.includes("pdf_too_many_pages")) {
     console.log("ok over-cap PDF fails closed:", wmBig.error);
   } else {
     console.error("FAIL: over-cap PDF did not fail closed:", wmBig);
     failures++;
+  }
+
+  // 6) ENCRYPTED PDF -> must still produce a branded statement.
+  //
+  // This is the case that matters most in production and had ZERO coverage:
+  // permission-encrypted PDFs are a large share of real bank exports, pdf-lib
+  // cannot decrypt them, so the overlay MUST bail and the pdfjs raster fallback
+  // MUST take over. Every "it can't watermark it" report runs through this path.
+  // The fixture is committed (see scripts/make-encrypted-pdf-fixture.py) so this
+  // check never silently degrades to a skip on a machine without qpdf.
+  const { readFileSync } = await import("node:fs");
+  const fixture = join(import.meta.dirname, "..", "tests", "fixtures", "encrypted-statement.pdf");
+  let encBytes: Buffer | null = null;
+  try {
+    encBytes = readFileSync(fixture);
+  } catch (e) {
+    console.error("FAIL: encrypted fixture missing —", e instanceof Error ? e.message : e);
+    console.error("      regenerate with: python scripts/make-encrypted-pdf-fixture.py");
+    failures++;
+  }
+  if (encBytes) {
+    const wmEnc = await watermarkBankStatement({
+      bytes: encBytes,
+      mimeType: "application/pdf",
+      provenance: prov,
+    });
+    if (wmEnc.ok && isPdf(wmEnc.bytes)) {
+      const reload = await PDFDocument.load(wmEnc.bytes);
+      const okPages = reload.getPageCount() === 2;
+      console.log(
+        `ok ENCRYPTED PDF -> branded ${wmEnc.bytes.length} bytes, ${reload.getPageCount()} pages, raster=${wmEnc.raster === true}${okPages ? "" : " (PAGE COUNT MISMATCH!)"}`,
+      );
+      if (!okPages) failures++;
+      // The overlay cannot handle an encrypted source, so a healthy run MUST
+      // have come from the raster fallback. If this ever reports raster=false,
+      // pdf-lib accepted an encrypted PDF and the output is likely a corrupt,
+      // mostly-blank statement — the exact bug the encryption guard prevents.
+      if (wmEnc.raster !== true) {
+        console.error("FAIL: encrypted source did not go through the raster path");
+        failures++;
+      }
+    } else {
+      console.error("FAIL ENCRYPTED PDF:", wmEnc);
+      failures++;
+    }
   }
 
   console.log(failures === 0 ? "\nALL WATERMARK TESTS PASSED" : `\n${failures} FAILURE(S)`);
