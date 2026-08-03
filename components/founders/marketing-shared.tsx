@@ -75,10 +75,10 @@ export function AssetTile({
             className="h-full w-full object-cover"
           />
         ) : posterUrl ? (
-          // eslint-disable-next-line @next/next/no-img-element -- signed Storage
-          // URLs are short-lived and host-varying; next/image would need every
-          // Supabase project host in remotePatterns and re-fetch through the
-          // optimizer, which cannot see a private object.
+          // Signed Storage URLs are short-lived and host-varying; next/image
+          // would need every Supabase project host in remotePatterns and would
+          // re-fetch through the optimizer, which cannot read a private object.
+          // eslint-disable-next-line @next/next/no-img-element
           <img src={posterUrl} alt="" className="h-full w-full object-cover" />
         ) : (
           <div className="px-4 text-center text-xs text-fg-dim">

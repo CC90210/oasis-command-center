@@ -263,3 +263,81 @@ export async function signMediaUrls(
 }
 
 export const mediaKey = (bucket: string, path: string) => `${bucket}\n${path}`;
+
+/* ─────────────────────────────────────────────────────────── corpus */
+
+export type CorpusRow = {
+  id: string;
+  kind: string;
+  label: string;
+  title: string | null;
+  source_url: string | null;
+  state: string;
+  last_error: string | null;
+  contributed_by: string;
+  created_at: string;
+  indexed_at: string | null;
+};
+
+export type CorpusStats = {
+  total: number;
+  queued: number;
+  extracting: number;
+  indexed: number;
+  failed: number;
+  exemplars: number;
+  counter_examples: number;
+};
+
+export const EMPTY_CORPUS_STATS: CorpusStats = {
+  total: 0, queued: 0, extracting: 0, indexed: 0, failed: 0,
+  exemplars: 0, counter_examples: 0,
+};
+
+/** Counts for the Train screen. Never throws; pre-migration returns zeroes. */
+export async function getCorpusStats(tenantId: string): Promise<CorpusStats> {
+  if (!tenantId) return EMPTY_CORPUS_STATS;
+  try {
+    const db = getServiceSupabase();
+    const r = await db.from("marketing_corpus").select("state, label").eq("tenant_id", tenantId);
+    if (r.error) {
+      quiet("corpus.stats", r.error);
+      return EMPTY_CORPUS_STATS;
+    }
+    const rows = (r.data || []) as Array<{ state: string; label: string }>;
+    return {
+      total: rows.length,
+      queued: rows.filter((x) => x.state === "queued").length,
+      extracting: rows.filter((x) => x.state === "extracting").length,
+      indexed: rows.filter((x) => x.state === "indexed").length,
+      failed: rows.filter((x) => x.state === "failed").length,
+      exemplars: rows.filter((x) => x.label === "exemplar").length,
+      counter_examples: rows.filter((x) => x.label === "counter_example").length,
+    };
+  } catch (e) {
+    console.warn("[marketing:corpus.stats] unexpected", e);
+    return EMPTY_CORPUS_STATS;
+  }
+}
+
+/** Most recent corpus items, newest first. */
+export async function getCorpusItems(tenantId: string, limit = 40): Promise<CorpusRow[]> {
+  if (!tenantId) return [];
+  try {
+    const db = getServiceSupabase();
+    const r = await db
+      .from("marketing_corpus")
+      .select("id, kind, label, title, source_url, state, last_error, contributed_by, created_at, indexed_at")
+      .eq("tenant_id", tenantId)
+      .order("created_at", { ascending: false })
+      .limit(limit);
+    if (r.error) {
+      quiet("corpus.items", r.error);
+      return [];
+    }
+    return (r.data || []) as CorpusRow[];
+  } catch (e) {
+    console.warn("[marketing:corpus.items] unexpected", e);
+    return [];
+  }
+}
