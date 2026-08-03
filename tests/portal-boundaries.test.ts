@@ -3,9 +3,11 @@ import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join, sep } from "node:path";
 
 import {
+  COMPOSITION_ROOTS,
   FOUNDERS_PORTAL,
   KNOWN_BOUNDARY_DEBT,
   PORTALS,
+  isCompositionRoot,
   isImportAllowed,
   isSharedPath,
   portalForPath,
@@ -126,6 +128,51 @@ for (const debt of KNOWN_BOUNDARY_DEBT) {
   assert.ok(
     debt.reason.length > 80,
     `Boundary debt ${debt.from} -> ${debt.to} needs a real reason, not a placeholder`,
+  );
+}
+
+// ── composition roots: few, findable, and real ───────────────────────
+// These are the ONLY files allowed to cross the boundary. The list staying
+// short is what keeps the rule meaningful — if it grows, the boundary has
+// stopped being one.
+assert.ok(
+  COMPOSITION_ROOTS.length <= 3,
+  `${COMPOSITION_ROOTS.length} composition roots is too many — each is a permanent hole in the boundary`,
+);
+for (const root of COMPOSITION_ROOTS) {
+  assert.ok(
+    root.startsWith("lib/portals/"),
+    `composition root ${root} must live under lib/portals/ so every boundary crossing is findable in one place`,
+  );
+  assert.ok(
+    files.some((f) => rel(f) === root),
+    `composition root ${root} is declared but does not exist`,
+  );
+  assert.equal(portalForPath(root), null, `composition root ${root} must not be owned by a portal`);
+}
+assert.equal(isCompositionRoot("lib/portals/stage-hooks.ts"), true);
+assert.equal(
+  isCompositionRoot("lib/manifest/data.ts"),
+  false,
+  "shared infrastructure is not a composition root — that was the original bug",
+);
+
+// The fix itself: the shared record layer must no longer reach into SunBiz.
+{
+  const dataTs = files.find((f) => rel(f) === "lib/manifest/data.ts");
+  assert.ok(dataTs, "lib/manifest/data.ts should exist");
+  const src = readFileSync(dataTs!, "utf8");
+  // Match an IMPORT, not a mention: the file carries a comment explaining why
+  // the old import was removed, and that comment is worth keeping.
+  assert.ok(
+    !/(?:from|import)\s*\(?\s*["']@\/lib\/drips\//.test(src),
+    "lib/manifest/data.ts imports @/lib/drips/ again — the generic multi-tenant record layer " +
+      "must not depend on SunBiz's drip engine. Route it through lib/portals/stage-hooks.ts.",
+  );
+  assert.ok(
+    src.includes("runStageTransitionHooks"),
+    "lib/manifest/data.ts must still run the stage-transition hooks — dropping the call " +
+      "silently stops drip cancellation and merchants get texted after they convert",
   );
 }
 

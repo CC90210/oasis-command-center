@@ -49,7 +49,8 @@ shared   → any portal     REFUSED
 `shared → any portal` is the subtle and important one. **Shared infrastructure
 that reaches into one portal is no longer shared.** It is how a platform file
 quietly becomes SunBiz-only, and how the next industry inherits lending
-behaviour nobody asked for. The known debt below is exactly that shape.
+behaviour nobody asked for. It is also the rule that caught the one real leak
+in the tree — see Known debt below.
 
 ### The trap: there are two different "marketing"
 
@@ -96,30 +97,52 @@ test over the whole tree**, the same mechanism as
 defended ("no file in one portal reaches into another") belongs to the tree, not
 to any function, so it cannot be established by exercising one.
 
-Current scan: **918 files, 2038 imports, 3 portals, 0 new cross-portal dependencies.**
+Current scan: **919 files, 2039 imports, 3 portals, 0 cross-portal dependencies, 0 known debt.**
 
 ### Known debt
 
-Found by this test on its first run, 2026-08-03:
+**None.** `KNOWN_BOUNDARY_DEBT` is empty.
+
+The one entry that ever lived there was found by this test on its first run,
+2026-08-03:
 
 ```
-lib/manifest/data.ts  →  @/lib/drips/stage-cancel
+lib/manifest/data.ts  ->  @/lib/drips/stage-cancel
 ```
 
-`lib/manifest/data.ts` is the generic multi-tenant record layer behind every
-`/t/<slug>/` surface. It calls SunBiz's drip cancellation on a stage transition,
-so **every tenant — including a future real-estate portal — routes through the
-lending drip engine.**
+`data.ts` is the generic multi-tenant record layer behind every `/t/<slug>/`
+surface, and it called SunBiz's drip cancellation on a stage transition — so
+every tenant, including a future real-estate portal, routed its stage writes
+through the lending drip engine. **Fixed properly, not grandfathered**, via the
+composition root below.
 
-Recorded in `KNOWN_BOUNDARY_DEBT`, not fixed, on purpose: `data.ts` is
-load-bearing shared production code and `stage-cancel` is what stops a merchant
-being texted after they convert. The correct fix is an event/hook seam so each
-portal registers its own stage-transition handler. That is a change to shared
-production code and belongs to Adon's call, not to a founders-portal PR.
+## Composition roots
 
-The list cannot rot: the test asserts every entry is **still** a real edge, so
-fixing one forces deleting it, rather than leaving a stale allowlist that
-silently re-permits the import later.
+Something has to know about every portal in order to wire them together. The
+rule does not pretend otherwise; it confines that knowledge to a short, named
+list in `COMPOSITION_ROOTS` instead of letting it seep into shared code.
+
+| Root | Wires |
+|---|---|
+| `lib/portals/stage-hooks.ts` | portal reactions to a tenant-record stage transition |
+
+Rules the boundary test enforces on them:
+
+- at most 3, because each is a permanent hole in the boundary
+- all under `lib/portals/`, so every crossing is findable in one place
+- none may be owned by a portal
+- a composition root's only job is **wiring**. If one grows portal logic,
+  extract that logic back to the portal that owns it.
+
+### Why a static import list, not a self-registering hook
+
+A `registerHook()` side effect at module load would be more elegant and is the
+wrong choice here. Next.js builds a module graph per route, so a handler that
+nothing statically imports is silently absent from that bundle. The failure mode
+would be "drips stop being cancelled in some routes but not others" — merchants
+texted after they convert, with nothing to notice it. A static list cannot fail
+that way: if it compiles, it is wired. `tests/portal-stage-hooks.test.ts` also
+asserts the hook list is non-empty, so an accidental deletion fails the build.
 
 ## Adding a portal (e.g. real estate)
 

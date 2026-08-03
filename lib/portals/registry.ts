@@ -195,20 +195,31 @@ export const KNOWN_BOUNDARY_DEBT: ReadonlyArray<{
   to: string;
   reason: string;
 }> = [
-  {
-    from: "lib/manifest/data.ts",
-    to: "lib/drips/stage-cancel",
-    reason:
-      "The generic multi-tenant record layer calls SunBiz's drip cancellation on a stage " +
-      "transition, so EVERY tenant — including a future real-estate portal — routes through " +
-      "the lending drip engine. Found by this test on its first run, 2026-08-03. " +
-      "Pre-existing and load-bearing: data.ts is read by every /t/<slug>/ surface and " +
-      "stage-cancel is what stops a merchant being texted after they convert. The correct " +
-      "fix is an event/hook seam so a portal registers its own stage-transition handler, " +
-      "but that is a change to shared production code and belongs to Adon, not to a " +
-      "founders-portal PR. Tracked, not fixed here.",
-  },
+  // Empty. The one entry that lived here — lib/manifest/data.ts importing
+  // @/lib/drips/stage-cancel — was fixed properly on 2026-08-03 by introducing
+  // the composition root below, not grandfathered. See lib/portals/stage-hooks.ts.
 ];
+
+/**
+ * COMPOSITION ROOTS — the only files permitted to import across portals.
+ *
+ * Something has to know about every portal in order to wire them together. The
+ * boundary rule does not pretend otherwise; it confines that knowledge to a
+ * short, named list instead of letting it seep into shared infrastructure.
+ *
+ * A composition root's ONLY job is wiring. If one starts containing portal
+ * logic, extract the logic back into the portal that owns it.
+ *
+ * Keep this list very short. Every entry is a permanent, deliberate exception,
+ * and the boundary test asserts they all live under lib/portals/ so they are
+ * findable in one place.
+ */
+export const COMPOSITION_ROOTS = ["lib/portals/stage-hooks.ts"] as const;
+
+export function isCompositionRoot(path: string): boolean {
+  const p = path.replace(/\\/g, "/");
+  return (COMPOSITION_ROOTS as readonly string[]).includes(p);
+}
 
 function isKnownDebt(from: string, to: string): boolean {
   const f = from.replace(/\\/g, "/");
@@ -248,6 +259,10 @@ export function isImportAllowed(
 ): { allowed: true } | { allowed: false; reason: string } {
   const from = portalForPath(fromPath);
   const to = portalForPath(toPath);
+
+  // Composition roots exist precisely to wire portals together. This is the one
+  // sanctioned way to cross the boundary, and the list is deliberately tiny.
+  if (isCompositionRoot(fromPath)) return { allowed: true };
 
   // Grandfathered, listed with a reason in KNOWN_BOUNDARY_DEBT. Reported by the
   // test as debt rather than silently permitted.
