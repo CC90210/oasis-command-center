@@ -387,7 +387,7 @@ export async function watermarkStoredBankStatement(
  * statement was stored under a `.pdf` key holding JPEG bytes and the lender
  * received a "PDF" their reader refused to open.
  */
-function wmCopyExtension(mimeType: string): string {
+export function wmCopyExtension(mimeType: string): string {
   switch ((mimeType || "").toLowerCase().split(";")[0].trim()) {
     case "image/png":
       return "png";
@@ -402,10 +402,41 @@ function wmCopyExtension(mimeType: string): string {
 }
 
 /** Swap an attachment filename's extension to match the branded copy's mime. */
-function retargetFilename(filename: string, ext: string): string {
+export function retargetFilename(filename: string, ext: string): string {
   const base = (filename || "statement").replace(/\.[A-Za-z0-9]{1,8}$/, "");
   return `${base}.${ext}`;
 }
+
+/**
+ * The mime lib/forms/watermark.ts WILL emit for a given source mime. Mirrors
+ * watermarkImage's format policy: PNG and WebP are preserved, everything else
+ * raster (JPEG/GIF/HEIC/HEIF) flattens to JPEG, and PDFs stay PDFs.
+ *
+ * Used to judge copies branded BEFORE shopout_wm_mime was recorded. Assuming
+ * "no recorded mime" meant PDF would let a legacy image copy — a `.pdf` key
+ * holding JPEG bytes, the exact artifact this change exists to repair — pass the
+ * reuse check and be re-sent broken forever. Inferring from the source instead
+ * heals precisely the wrong ones without re-branding every healthy PDF.
+ */
+export function expectedWmMimeForSource(sourceMime: string | null): string {
+  const mt = (sourceMime || "application/pdf").toLowerCase().split(";")[0].trim();
+  if (mt === "application/pdf") return "application/pdf";
+  if (mt === "image/png") return "image/png";
+  if (mt === "image/webp") return "image/webp";
+  if (IMAGE_MIME_TYPES.has(mt)) return "image/jpeg";
+  return "application/pdf";
+}
+
+// Mirrors IMAGE_MIME in lib/forms/watermark.ts.
+const IMAGE_MIME_TYPES = new Set([
+  "image/png",
+  "image/jpeg",
+  "image/jpg",
+  "image/webp",
+  "image/gif",
+  "image/heic",
+  "image/heif",
+]);
 
 /**
  * Get (or create) the watermarked DERIVED copy of a stored bank statement, for
@@ -436,13 +467,16 @@ async function getOrCreateWatermarkedCopy(
   const wmDir = `${row.tenant_id}/${row.lead_id}/_shopout_wm/${row.id}_v${WATERMARK_VERSION}`;
   const recordedPath =
     typeof row.metadata?.shopout_wm_path === "string" ? (row.metadata.shopout_wm_path as string) : null;
+  // Copies branded before 2026-08-03 have no recorded mime; infer what the
+  // watermarker would have produced from the SOURCE mime rather than assuming
+  // PDF, so legacy `.pdf`-keyed image copies fail the check below and get
+  // rebuilt instead of being re-sent broken.
   const recordedMime =
     typeof row.metadata?.shopout_wm_mime === "string"
       ? (row.metadata.shopout_wm_mime as string)
-      : "application/pdf";
+      : expectedWmMimeForSource(row.mime_type);
   // Reuse when the recorded copy is at the current version AND its path matches
-  // the extension its recorded mime implies (so pre-2026-08-03 `.pdf`-keyed
-  // image copies are rebuilt rather than re-sent broken).
+  // the extension its mime implies.
   if (
     recordedPath &&
     recordedPath === `${wmDir}.${wmCopyExtension(recordedMime)}` &&
