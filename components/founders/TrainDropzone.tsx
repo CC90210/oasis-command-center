@@ -14,6 +14,7 @@
  */
 
 import { useCallback, useMemo, useRef, useState } from "react";
+import { useRouter } from "next/navigation";
 import {
   CORPUS_LABEL_COPY,
   CORPUS_LABELS,
@@ -42,6 +43,7 @@ const KIND_ICON: Record<string, string> = {
 };
 
 export function TrainDropzone({ onQueued }: { onQueued?: () => void }) {
+  const router = useRouter();
   const [text, setText] = useState("");
   const [label, setLabel] = useState<CorpusLabel>("exemplar");
   const [dragging, setDragging] = useState(false);
@@ -90,6 +92,9 @@ export function TrainDropzone({ onQueued }: { onQueued?: () => void }) {
         const dup = body.duplicates ? ` · ${body.duplicates} already queued` : "";
         setResult({ tone: "ok", msg: `Queued ${body.queued} to learn from${dup}.` });
         setText("");
+        // The queue and the counters above are server-rendered, so without this
+        // a successful drop just empties the box and nothing visibly arrives.
+        router.refresh();
         onQueued?.();
       } else if (res.status === 503 && body.error === "migration_pending") {
         // Say exactly what is wrong rather than "failed" — this one is fixable

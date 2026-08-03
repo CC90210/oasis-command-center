@@ -28,6 +28,12 @@ export const maxDuration = 30;
 /** Bounded so one paste cannot enqueue a thousand jobs by accident. */
 const MAX_PER_REQUEST = 25;
 
+type QueuedRow = { id: string; source_url: string; state: string };
+
+/** Postgres 23505 unique_violation — the in-flight guard fired. A dedup, not a failure. */
+const isUniqueViolation = (err: { code?: string } | null | undefined): boolean =>
+  err?.code === "23505";
+
 const notFound = () => NextResponse.json({ ok: false, error: "not_found" }, { status: 404 });
 
 export async function POST(req: Request) {
@@ -100,33 +106,73 @@ export async function POST(req: Request) {
     };
   });
 
-  // ignoreDuplicates: a link already queued or extracting hits the partial
-  // unique index. That is a no-op, not an error — re-pasting something is a
-  // normal thing to do and should not look like a failure.
-  const ins = await db
-    .from("marketing_corpus")
-    .upsert(rows, { onConflict: "tenant_id,source_url", ignoreDuplicates: true })
-    .select("id, source_url, state");
+  const migrationPending = () =>
+    NextResponse.json(
+      {
+        ok: false,
+        error: "migration_pending",
+        detail:
+          "database/133_marketing_hub.sql has not been applied yet, so there is nowhere to store this. Nothing was lost — re-drop these links once it is applied.",
+        would_have_queued: accepted,
+      },
+      { status: 503 },
+    );
 
-  if (ins.error) {
-    if (isMissingTableError(ins.error)) {
-      return NextResponse.json(
-        {
-          ok: false,
-          error: "migration_pending",
-          detail:
-            "database/133_marketing_hub.sql has not been applied yet, so there is nowhere to store this. Nothing was lost — re-drop these links once it is applied.",
-          would_have_queued: accepted,
-        },
-        { status: 503 },
-      );
-    }
-    console.warn("[founders.ingest]", ins.error.message);
+  // The in-flight guard is a PARTIAL unique index (source_url is not null AND
+  // state in ('queued','extracting')), and PostgREST's upsert CANNOT target it:
+  // onConflict emits a bare ON CONFLICT (tenant_id, source_url) with no WHERE
+  // predicate, Postgres refuses to infer a partial index from that, and answers
+  // 42P10 for the whole batch. This repo has already paid for that lesson once
+  // (the open-tracking dedup outage). The index stays partial on purpose — it is
+  // what lets a link be re-ingested after an earlier run finished — so the dedup
+  // moves here: ask what is already in flight, then insert only the rest.
+  const inFlight = await db
+    .from("marketing_corpus")
+    .select("source_url")
+    .eq("tenant_id", founder.tenantId) // service role bypasses RLS
+    .in("source_url", accepted.map((a) => a.url))
+    .in("state", ["queued", "extracting"]);
+
+  if (inFlight.error) {
+    if (isMissingTableError(inFlight.error)) return migrationPending();
+    console.warn("[founders.ingest]", inFlight.error.message);
     return NextResponse.json({ ok: false, error: "insert_failed" }, { status: 500 });
   }
 
-  const queued = ins.data ?? [];
-  // Anything accepted but not returned was already in flight.
+  const busy = new Set((inFlight.data ?? []).map((r) => r.source_url as string));
+  const fresh = rows.filter((r) => !busy.has(r.source_url));
+
+  const queued: QueuedRow[] = [];
+  if (fresh.length) {
+    const ins = await db.from("marketing_corpus").insert(fresh).select("id, source_url, state");
+    if (!ins.error) {
+      queued.push(...((ins.data ?? []) as QueuedRow[]));
+    } else if (isMissingTableError(ins.error)) {
+      return migrationPending();
+    } else if (isUniqueViolation(ins.error)) {
+      // A concurrent paste won the race between the select above and this
+      // insert. The index did its job; retry row by row so one collision does
+      // not throw away the rest of the batch.
+      for (const row of fresh) {
+        const one = await db
+          .from("marketing_corpus")
+          .insert(row)
+          .select("id, source_url, state")
+          .single();
+        if (!one.error) {
+          queued.push(one.data as QueuedRow);
+        } else if (!isUniqueViolation(one.error)) {
+          console.warn("[founders.ingest]", one.error.message);
+          return NextResponse.json({ ok: false, error: "insert_failed" }, { status: 500 });
+        }
+      }
+    } else {
+      console.warn("[founders.ingest]", ins.error.message);
+      return NextResponse.json({ ok: false, error: "insert_failed" }, { status: 500 });
+    }
+  }
+
+  // Anything accepted but not queued was already in flight.
   const duplicates = accepted.length - queued.length;
 
   await db
