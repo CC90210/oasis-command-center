@@ -1,0 +1,309 @@
+{
+  "generated_at": "2026-08-03T14:48:02+00:00",
+  "video_base": null,
+  "media_in_git": false,
+  "generated_by": "scripts/publish_marketing_to_command_center.py (CMO-Agent)",
+  "source": "CMO-Agent output/showroom",
+  "count": 32,
+  "total_bytes": 140509432,
+  "brands": [
+    "blyss",
+    "oasis-ai",
+    "propflow"
+  ],
+  "kinds": [
+    "ad",
+    "asset",
+    "reel"
+  ],
+  "assets": [
+    {
+      "slug": "gen-g3-no-off-switch",
+      "file": "/marketing/assets/gen-g3-no-off-switch.mp4",
+      "poster": "/marketing/assets/gen-g3-no-off-switch.jpg",
+      "bytes": 4224847,
+      "brand": "oasis-ai",
+      "kind": "reel",
+      "modified": "2026-08-03T12:00:49+00:00"
+    },
+    {
+      "slug": "oasis-load-bearing-ad",
+      "file": "/marketing/assets/oasis-load-bearing-ad.mp4",
+      "poster": "/marketing/assets/oasis-load-bearing-ad.jpg",
+      "bytes": 5139315,
+      "brand": "oasis-ai",
+      "kind": "ad",
+      "modified": "2026-08-03T05:08:13+00:00"
+    },
+    {
+      "slug": "gen-g3-every-beam",
+      "file": "/marketing/assets/gen-g3-every-beam.mp4",
+      "poster": "/marketing/assets/gen-g3-every-beam.jpg",
+      "bytes": 3484011,
+      "brand": "oasis-ai",
+      "kind": "reel",
+      "modified": "2026-08-02T22:22:58+00:00"
+    },
+    {
+      "slug": "gen-g2-evidence",
+      "file": "/marketing/assets/gen-g2-evidence.mp4",
+      "poster": "/marketing/assets/gen-g2-evidence.jpg",
+      "bytes": 1781874,
+      "brand": "oasis-ai",
+      "kind": "reel",
+      "modified": "2026-08-02T22:22:16+00:00"
+    },
+    {
+      "slug": "gen-g2-eleven",
+      "file": "/marketing/assets/gen-g2-eleven.mp4",
+      "poster": "/marketing/assets/gen-g2-eleven.jpg",
+      "bytes": 1849207,
+      "brand": "oasis-ai",
+      "kind": "reel",
+      "modified": "2026-08-02T22:21:09+00:00"
+    },
+    {
+      "slug": "gen-g2-wind",
+      "file": "/marketing/assets/gen-g2-wind.mp4",
+      "poster": "/marketing/assets/gen-g2-wind.jpg",
+      "bytes": 2023570,
+      "brand": "oasis-ai",
+      "kind": "reel",
+      "modified": "2026-08-02T22:19:21+00:00"
+    },
+    {
+      "slug": "gen-g2-stamp-run",
+      "file": "/marketing/assets/gen-g2-stamp-run.mp4",
+      "poster": "/marketing/assets/gen-g2-stamp-run.jpg",
+      "bytes": 1699434,
+      "brand": "oasis-ai",
+      "kind": "reel",
+      "modified": "2026-08-02T20:29:49+00:00"
+    },
+    {
+      "slug": "gen-g2-tick-tax",
+      "file": "/marketing/assets/gen-g2-tick-tax.mp4",
+      "poster": "/marketing/assets/gen-g2-tick-tax.jpg",
+      "bytes": 1541394,
+      "brand": "oasis-ai",
+      "kind": "reel",
+      "modified": "2026-08-01T12:00:45+00:00"
+    },
+    {
+      "slug": "gen-g2-receipt-week",
+      "file": "/marketing/assets/gen-g2-receipt-week.mp4",
+      "poster": "/marketing/assets/gen-g2-receipt-week.jpg",
+      "bytes": 1665931,
+      "brand": "oasis-ai",
+      "kind": "reel",
+      "modified": "2026-07-31T12:00:36+00:00"
+    },
+    {
+      "slug": "blyss-60s-fume-safety-4x5",
+      "file": "/marketing/assets/blyss-60s-fume-safety-4x5.mp4",
+      "poster": "/marketing/assets/blyss-60s-fume-safety-4x5.jpg",
+      "bytes": 16400968,
+      "brand": "blyss",
+      "kind": "asset",
+      "modified": "2026-07-28T13:22:47+00:00"
+    },
+    {
+      "slug": "blyss-60s-fume-safety-9x16",
+      "file": "/marketing/assets/blyss-60s-fume-safety-9x16.mp4",
+      "poster": "/marketing/assets/blyss-60s-fume-safety-9x16.jpg",
+      "bytes": 16534005,
+      "brand": "blyss",
+      "kind": "asset",
+      "modified": "2026-07-28T13:19:18+00:00"
+    },
+    {
+      "slug": "warner-showcase-16x9",
+      "file": "/marketing/assets/warner-showcase-16x9.mp4",
+      "poster": "/marketing/assets/warner-showcase-16x9.jpg",
+      "bytes": 29274555,
+      "brand": "propflow",
+      "kind": "asset",
+      "modified": "2026-07-28T12:54:04+00:00"
+    },
+    {
+      "slug": "g2-pile-v2",
+      "file": "/marketing/assets/g2-pile-v2.mp4",
+      "poster": "/marketing/assets/g2-pile-v2.jpg",
+      "bytes": 1652800,
+      "brand": "oasis-ai",
+      "kind": "asset",
+      "modified": "2026-07-27T23:12:32+00:00"
+    },
+    {
+      "slug": "g2-once-v2",
+      "file": "/marketing/assets/g2-once-v2.mp4",
+      "poster": "/marketing/assets/g2-once-v2.jpg",
+      "bytes": 1306546,
+      "brand": "oasis-ai",
+      "kind": "asset",
+      "modified": "2026-07-27T23:12:25+00:00"
+    },
+    {
+      "slug": "g2-night-v2",
+      "file": "/marketing/assets/g2-night-v2.mp4",
+      "poster": "/marketing/assets/g2-night-v2.jpg",
+      "bytes": 1316220,
+      "brand": "oasis-ai",
+      "kind": "asset",
+      "modified": "2026-07-27T23:12:18+00:00"
+    },
+    {
+      "slug": "ad-evidence",
+      "file": "/marketing/assets/ad-evidence.mp4",
+      "poster": "/marketing/assets/ad-evidence.jpg",
+      "bytes": 1780550,
+      "brand": "oasis-ai",
+      "kind": "ad",
+      "modified": "2026-07-27T17:27:01+00:00"
+    },
+    {
+      "slug": "test-paper-outro",
+      "file": "/marketing/assets/test-paper-outro.mp4",
+      "poster": "/marketing/assets/test-paper-outro.jpg",
+      "bytes": 1290451,
+      "brand": "oasis-ai",
+      "kind": "asset",
+      "modified": "2026-07-27T17:01:42+00:00"
+    },
+    {
+      "slug": "preview-wind",
+      "file": "/marketing/assets/preview-wind.mp4",
+      "poster": "/marketing/assets/preview-wind.jpg",
+      "bytes": 2262646,
+      "brand": "oasis-ai",
+      "kind": "asset",
+      "modified": "2026-07-27T16:52:04+00:00"
+    },
+    {
+      "slug": "preview-tick-tax",
+      "file": "/marketing/assets/preview-tick-tax.mp4",
+      "poster": "/marketing/assets/preview-tick-tax.jpg",
+      "bytes": 1780349,
+      "brand": "oasis-ai",
+      "kind": "asset",
+      "modified": "2026-07-27T16:51:20+00:00"
+    },
+    {
+      "slug": "preview-receipt-week",
+      "file": "/marketing/assets/preview-receipt-week.mp4",
+      "poster": "/marketing/assets/preview-receipt-week.jpg",
+      "bytes": 1904965,
+      "brand": "oasis-ai",
+      "kind": "asset",
+      "modified": "2026-07-27T16:50:43+00:00"
+    },
+    {
+      "slug": "g2-night",
+      "file": "/marketing/assets/g2-night.mp4",
+      "poster": "/marketing/assets/g2-night.jpg",
+      "bytes": 1879374,
+      "brand": "oasis-ai",
+      "kind": "asset",
+      "modified": "2026-07-27T16:46:40+00:00"
+    },
+    {
+      "slug": "g2-once",
+      "file": "/marketing/assets/g2-once.mp4",
+      "poster": "/marketing/assets/g2-once.jpg",
+      "bytes": 1868877,
+      "brand": "oasis-ai",
+      "kind": "asset",
+      "modified": "2026-07-27T16:45:54+00:00"
+    },
+    {
+      "slug": "g2-pile",
+      "file": "/marketing/assets/g2-pile.mp4",
+      "poster": "/marketing/assets/g2-pile.jpg",
+      "bytes": 2254423,
+      "brand": "oasis-ai",
+      "kind": "asset",
+      "modified": "2026-07-27T16:45:11+00:00"
+    },
+    {
+      "slug": "g2-loop",
+      "file": "/marketing/assets/g2-loop.mp4",
+      "poster": "/marketing/assets/g2-loop.jpg",
+      "bytes": 1952803,
+      "brand": "oasis-ai",
+      "kind": "asset",
+      "modified": "2026-07-27T16:44:30+00:00"
+    },
+    {
+      "slug": "gen-job-title",
+      "file": "/marketing/assets/gen-job-title.mp4",
+      "poster": "/marketing/assets/gen-job-title.jpg",
+      "bytes": 3268722,
+      "brand": "oasis-ai",
+      "kind": "reel",
+      "modified": "2026-07-27T16:03:39+00:00"
+    },
+    {
+      "slug": "gen-night-shift",
+      "file": "/marketing/assets/gen-night-shift.mp4",
+      "poster": "/marketing/assets/gen-night-shift.jpg",
+      "bytes": 3184089,
+      "brand": "oasis-ai",
+      "kind": "reel",
+      "modified": "2026-07-27T15:39:17+00:00"
+    },
+    {
+      "slug": "combo-turn",
+      "file": "/marketing/assets/combo-turn.mp4",
+      "poster": "/marketing/assets/combo-turn.jpg",
+      "bytes": 1690192,
+      "brand": "oasis-ai",
+      "kind": "reel",
+      "modified": "2026-07-25T19:38:59+00:00"
+    },
+    {
+      "slug": "combo-payoff",
+      "file": "/marketing/assets/combo-payoff.mp4",
+      "poster": "/marketing/assets/combo-payoff.jpg",
+      "bytes": 3198394,
+      "brand": "oasis-ai",
+      "kind": "reel",
+      "modified": "2026-07-25T19:38:23+00:00"
+    },
+    {
+      "slug": "combo-loop",
+      "file": "/marketing/assets/combo-loop.mp4",
+      "poster": "/marketing/assets/combo-loop.jpg",
+      "bytes": 1769962,
+      "brand": "oasis-ai",
+      "kind": "reel",
+      "modified": "2026-07-25T19:37:45+00:00"
+    },
+    {
+      "slug": "combo-drowning",
+      "file": "/marketing/assets/combo-drowning.mp4",
+      "poster": "/marketing/assets/combo-drowning.jpg",
+      "bytes": 3454687,
+      "brand": "oasis-ai",
+      "kind": "reel",
+      "modified": "2026-07-25T19:37:10+00:00"
+    },
+    {
+      "slug": "warner-reel-9x16",
+      "file": "/marketing/assets/warner-reel-9x16.mp4",
+      "poster": "/marketing/assets/warner-reel-9x16.jpg",
+      "bytes": 12569037,
+      "brand": "propflow",
+      "kind": "reel",
+      "modified": "2026-07-24T22:45:24+00:00"
+    },
+    {
+      "slug": "oasis-broll-master",
+      "file": "/marketing/assets/oasis-broll-master.mp4",
+      "poster": "/marketing/assets/oasis-broll-master.jpg",
+      "bytes": 4505234,
+      "brand": "oasis-ai",
+      "kind": "asset",
+      "modified": "2026-07-24T22:22:15+00:00"
+    }
+  ]
+}

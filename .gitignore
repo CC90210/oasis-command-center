@@ -30,3 +30,12 @@ Thumbs.db
 .vercel
 .env*.local
 .env.preview
+
+# Marketing library media (published from CMO-Agent).
+# Posters + manifest ARE tracked (736K) so the grid renders; the 135MB of MP4s
+# are not — this repo had zero video precedent and .git is only 59MB. The
+# manifest carries absolute URLs when a video_base is configured, so the real
+# home for the media is Supabase Storage / a CDN, not git.
+public/marketing/assets/*.mp4
+public/marketing/assets/*.webm
+public/marketing/assets/*.mov

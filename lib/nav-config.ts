@@ -12,6 +12,7 @@
 
 export type NavIconKey =
   | "LayoutDashboard"
+  | "Clapperboard"
   | "GitBranch"
   | "Brain"
   | "BookOpen"
@@ -99,6 +100,11 @@ export const CC_NAV: NavItem[] = [
   { group: "Operations", href: "/agent", label: "Agents", icon: "Bot" },
   { group: "Operations", href: "/reasoning", label: "Reasoning", icon: "Brain" },
   { group: "Operations", href: "/playbook", label: "Playbook", icon: "BookOpen" },
+  // Marketing — the creative library, published from CMO-Agent by
+  // scripts/publish_marketing_to_command_center.py. Replaces the standalone
+  // showroom Vercel app (2026-08-03): creative belongs on the operator
+  // surface, and Adon's marketing suite is being built for this same shell.
+  { group: "Operations", href: "/marketing", label: "Marketing", icon: "Clapperboard" },
   // System group — observability + control surfaces.
   { group: "System", href: "/operations", label: "Operations", icon: "Activity" },
   { group: "System", href: "/automations", label: "Automations", icon: "RefreshCcw" },
