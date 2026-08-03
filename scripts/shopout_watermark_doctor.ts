@@ -16,17 +16,23 @@
  * (Note the real guard DOES persist its copy; this deliberately does not, so
  * running the doctor can't mask a problem by fixing it half-way.)
  *
- * Run (from the repo root; --conditions is required by the server-only module):
- *   node --conditions=react-server --env-file=.env.local --import tsx \
- *     scripts/shopout_watermark_doctor.ts --application <application-uuid>
+ * A tenant is REQUIRED. This runs under the service role, which bypasses RLS,
+ * so every lookup here is explicitly tenant-scoped exactly like the app's own
+ * queries — a diagnostic must not be the one thing that can read another
+ * tenant's statements.
+ *
+ * Run (from the repo root; --conditions is required by the server-only module,
+ * and --env-file should point at your local env file):
+ *   node --conditions=react-server --env-file=<env file> --import tsx \
+ *     scripts/shopout_watermark_doctor.ts --tenant-slug submissions --application <uuid>
  *
  *   # or sweep every statement on a lead
- *   node --conditions=react-server --env-file=.env.local --import tsx \
- *     scripts/shopout_watermark_doctor.ts --lead <lead-uuid>
+ *   ... --tenant-slug submissions --lead <lead-uuid>
  *
  *   # or check one document directly
- *   node --conditions=react-server --env-file=.env.local --import tsx \
- *     scripts/shopout_watermark_doctor.ts --doc <lead-document-uuid>
+ *   ... --tenant-slug submissions --doc <lead-document-uuid>
+ *
+ * `--tenant <uuid>` works in place of `--tenant-slug`.
  *
  * Prints no merchant names, no PII, no file contents — ids, types, sizes and
  * failure reasons only, so the output is safe to paste into chat.
@@ -42,6 +48,8 @@ const argOf = (flag: string): string | null => {
 const APPLICATION_ID = argOf("--application");
 const LEAD_ID = argOf("--lead");
 const DOC_ID = argOf("--doc");
+const TENANT_ID = argOf("--tenant");
+const TENANT_SLUG = argOf("--tenant-slug");
 
 type DocRow = {
   id: string;
@@ -64,31 +72,92 @@ const label = (d: DocRow) =>
 
 async function main() {
   if (!APPLICATION_ID && !LEAD_ID && !DOC_ID) {
-    console.error("Usage: --application <uuid> | --lead <uuid> | --doc <uuid>");
+    console.error(
+      "Usage: --tenant-slug <slug>|--tenant <uuid>  (--application <uuid> | --lead <uuid> | --doc <uuid>)",
+    );
+    process.exit(2);
+  }
+  if (!TENANT_ID && !TENANT_SLUG) {
+    console.error("Refusing to run without a tenant: pass --tenant-slug <slug> or --tenant <uuid>.");
+    console.error(
+      "This runs under the service role, which bypasses RLS — an unscoped lookup could read another tenant's statements.",
+    );
     process.exit(2);
   }
   const db = getServiceSupabase();
 
+  // Resolve the tenant ONCE; every query below is filtered by it.
+  let tenantId = TENANT_ID;
+  if (!tenantId) {
+    const t = await db.from("tenants").select("id").eq("slug", TENANT_SLUG!).maybeSingle();
+    if (t.error) {
+      console.error(`tenant lookup FAILED: ${t.error.message}`);
+      process.exit(1);
+    }
+    if (!t.data) {
+      console.error(`no tenant with slug "${TENANT_SLUG}"`);
+      process.exit(1);
+    }
+    tenantId = (t.data as { id: string }).id;
+  }
+
   // ── Resolve the document set the same way shop-out would.
   let docs: DocRow[] = [];
   if (DOC_ID) {
-    const r = await db.from("lead_documents").select(SELECT).eq("id", DOC_ID).maybeSingle();
+    const r = await db
+      .from("lead_documents")
+      .select(SELECT)
+      .eq("id", DOC_ID)
+      .eq("tenant_id", tenantId)
+      .maybeSingle();
     if (r.error) {
       console.error(`document lookup FAILED: ${r.error.message}`);
       process.exit(1);
     }
     if (!r.data) {
-      console.error(`no lead_documents row with id ${DOC_ID}`);
+      console.error(`no lead_documents row with id ${DOC_ID} in this tenant`);
       process.exit(1);
     }
     docs = [r.data as DocRow];
   } else {
-    // An application's statements hang off its lead_id. Applications are
-    // tenant_records rows; the documents are keyed by the same record id.
-    const parentId = LEAD_ID || APPLICATION_ID!;
+    // Documents hang off the LEAD. An application is a separate tenant_records
+    // row that points at its lead via data.lead_id (see
+    // lib/applications/create-from-lead.ts: "application_id -> lead_id ->
+    // lead_documents"), so --application must dereference that link first —
+    // querying lead_documents by the application's own id finds nothing and
+    // would look exactly like "this deal has no statements".
+    let parentId = LEAD_ID;
+    if (!parentId) {
+      const app = await db
+        .from("tenant_records")
+        .select("id, data")
+        .eq("tenant_id", tenantId)
+        .eq("entity_type", "application")
+        .eq("id", APPLICATION_ID!)
+        .maybeSingle();
+      if (app.error) {
+        console.error(`application lookup FAILED: ${app.error.message}`);
+        process.exit(1);
+      }
+      if (!app.data) {
+        console.error(`no application ${APPLICATION_ID} in this tenant`);
+        process.exit(1);
+      }
+      const appData = ((app.data as { data?: Record<string, unknown> }).data) || {};
+      const linked = typeof appData.lead_id === "string" ? appData.lead_id : null;
+      if (!linked) {
+        console.error(
+          `application ${APPLICATION_ID} has no data.lead_id — its documents cannot be resolved. Pass --lead <uuid> directly.`,
+        );
+        process.exit(1);
+      }
+      parentId = linked;
+      console.log(`application ${APPLICATION_ID!.slice(0, 8)} -> lead ${parentId.slice(0, 8)}`);
+    }
     const r = await db
       .from("lead_documents")
       .select(SELECT)
+      .eq("tenant_id", tenantId)
       .eq("lead_id", parentId)
       .is("metadata->>deleted_at", null);
     if (r.error) {
