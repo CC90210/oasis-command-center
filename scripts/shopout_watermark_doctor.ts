@@ -21,18 +21,23 @@
  * queries — a diagnostic must not be the one thing that can read another
  * tenant's statements.
  *
- * Run (from the repo root; --conditions is required by the server-only module,
- * and --env-file should point at your local env file):
- *   node --conditions=react-server --env-file=<env file> --import tsx \
- *     scripts/shopout_watermark_doctor.ts --tenant-slug submissions --application <uuid>
+ * Run from the REPO ROOT (--conditions is required by the server-only watermark
+ * module; --env-file supplies the Supabase service credentials).
  *
- *   # or sweep every statement on a lead
- *   ... --tenant-slug submissions --lead <lead-uuid>
+ * Easiest: check the deals most recently shopped out, no UUID needed.
  *
- *   # or check one document directly
- *   ... --tenant-slug submissions --doc <lead-document-uuid>
+ *   node --conditions=react-server --env-file=.env.local --import tsx scripts/shopout_watermark_doctor.ts --tenant-slug submissions --recent
  *
- * `--tenant <uuid>` works in place of `--tenant-slug`.
+ * Target one specific thing (substitute a real UUID; note there are no angle
+ * brackets — in PowerShell a bare `<` is a reserved redirection operator and
+ * pasting a placeholder fails before node ever starts):
+ *
+ *   ... --tenant-slug submissions --application 1234abcd-...
+ *   ... --tenant-slug submissions --lead 1234abcd-...
+ *   ... --tenant-slug submissions --doc 1234abcd-...
+ *
+ * `--tenant <uuid>` works in place of `--tenant-slug`. `--recent 5` widens the
+ * sweep (default 3, max 20).
  *
  * Prints no merchant names, no PII, no file contents — ids, types, sizes and
  * failure reasons only, so the output is safe to paste into chat.
@@ -50,6 +55,11 @@ const LEAD_ID = argOf("--lead");
 const DOC_ID = argOf("--doc");
 const TENANT_ID = argOf("--tenant");
 const TENANT_SLUG = argOf("--tenant-slug");
+// --recent [n] checks the most recently shopped deals so nobody has to go
+// hunting for a UUID first. Bare `--recent` defaults to 3.
+const RECENT = process.argv.includes("--recent")
+  ? Math.max(1, Math.min(20, Number(argOf("--recent")) || 3))
+  : 0;
 
 type DocRow = {
   id: string;
@@ -70,10 +80,73 @@ const label = (d: DocRow) =>
     d.size_bytes ? `${Math.round(d.size_bytes / 1024)}KB` : "size?"
   }`;
 
-async function main() {
-  if (!APPLICATION_ID && !LEAD_ID && !DOC_ID) {
+type Db = ReturnType<typeof getServiceSupabase>;
+
+/** Application -> its linked lead. Returns null (with a printed reason) if unresolvable. */
+async function leadIdForApplication(
+  db: Db,
+  tenantId: string,
+  applicationId: string,
+): Promise<string | null> {
+  const app = await db
+    .from("tenant_records")
+    .select("id, data")
+    .eq("tenant_id", tenantId)
+    .eq("entity_type", "application")
+    .eq("id", applicationId)
+    .maybeSingle();
+  if (app.error) {
+    console.error(`application lookup FAILED: ${app.error.message}`);
+    return null;
+  }
+  if (!app.data) {
+    console.error(`no application ${applicationId} in this tenant`);
+    return null;
+  }
+  const appData = ((app.data as { data?: Record<string, unknown> }).data) || {};
+  const linked = typeof appData.lead_id === "string" ? appData.lead_id : null;
+  if (!linked) {
     console.error(
-      "Usage: --tenant-slug <slug>|--tenant <uuid>  (--application <uuid> | --lead <uuid> | --doc <uuid>)",
+      `application ${applicationId} has no data.lead_id — its documents cannot be resolved. Pass --lead <uuid> directly.`,
+    );
+    return null;
+  }
+  return linked;
+}
+
+/**
+ * The applications most recently shopped out, newest first. Driven off
+ * application_lender_threads rather than the records table because "the deal I
+ * just tried to send" is exactly what someone running this wants to inspect.
+ */
+async function recentlyShoppedApplications(
+  db: Db,
+  tenantId: string,
+  limit: number,
+): Promise<string[]> {
+  const r = await db
+    .from("application_lender_threads")
+    .select("application_id, created_at")
+    .eq("tenant_id", tenantId)
+    .order("created_at", { ascending: false })
+    .limit(limit * 25); // many threads per shop-out; dedupe below
+  if (r.error) {
+    console.error(`recent-thread lookup FAILED: ${r.error.message}`);
+    return [];
+  }
+  const seen: string[] = [];
+  for (const row of (r.data || []) as Array<{ application_id: string | null }>) {
+    const id = row.application_id;
+    if (id && !seen.includes(id)) seen.push(id);
+    if (seen.length >= limit) break;
+  }
+  return seen;
+}
+
+async function main() {
+  if (!APPLICATION_ID && !LEAD_ID && !DOC_ID && !RECENT) {
+    console.error(
+      "Usage: --tenant-slug <slug>|--tenant <uuid>  (--recent [n] | --application <uuid> | --lead <uuid> | --doc <uuid>)",
     );
     process.exit(2);
   }
@@ -123,42 +196,39 @@ async function main() {
     // Documents hang off the LEAD. An application is a separate tenant_records
     // row that points at its lead via data.lead_id (see
     // lib/applications/create-from-lead.ts: "application_id -> lead_id ->
-    // lead_documents"), so --application must dereference that link first —
+    // lead_documents"), so an application id must be dereferenced first —
     // querying lead_documents by the application's own id finds nothing and
     // would look exactly like "this deal has no statements".
-    let parentId = LEAD_ID;
-    if (!parentId) {
-      const app = await db
-        .from("tenant_records")
-        .select("id, data")
-        .eq("tenant_id", tenantId)
-        .eq("entity_type", "application")
-        .eq("id", APPLICATION_ID!)
-        .maybeSingle();
-      if (app.error) {
-        console.error(`application lookup FAILED: ${app.error.message}`);
-        process.exit(1);
+    const leadIds: string[] = [];
+    if (LEAD_ID) {
+      leadIds.push(LEAD_ID);
+    } else if (APPLICATION_ID) {
+      const lid = await leadIdForApplication(db, tenantId, APPLICATION_ID);
+      if (!lid) process.exit(1);
+      console.log(`application ${APPLICATION_ID.slice(0, 8)} -> lead ${lid.slice(0, 8)}`);
+      leadIds.push(lid);
+    } else {
+      const apps = await recentlyShoppedApplications(db, tenantId, RECENT);
+      if (apps.length === 0) {
+        console.log("No shopped applications found for this tenant — nothing recent to check.");
+        console.log("Pass --application <uuid> or --lead <uuid> to target one directly.");
+        return;
       }
-      if (!app.data) {
-        console.error(`no application ${APPLICATION_ID} in this tenant`);
-        process.exit(1);
+      console.log(`${apps.length} most recently shopped application(s):\n`);
+      for (const appId of apps) {
+        const lid = await leadIdForApplication(db, tenantId, appId);
+        if (!lid) continue;
+        console.log(`application ${appId.slice(0, 8)} -> lead ${lid.slice(0, 8)}`);
+        leadIds.push(lid);
       }
-      const appData = ((app.data as { data?: Record<string, unknown> }).data) || {};
-      const linked = typeof appData.lead_id === "string" ? appData.lead_id : null;
-      if (!linked) {
-        console.error(
-          `application ${APPLICATION_ID} has no data.lead_id — its documents cannot be resolved. Pass --lead <uuid> directly.`,
-        );
-        process.exit(1);
-      }
-      parentId = linked;
-      console.log(`application ${APPLICATION_ID!.slice(0, 8)} -> lead ${parentId.slice(0, 8)}`);
+      if (leadIds.length === 0) process.exit(1);
     }
+
     const r = await db
       .from("lead_documents")
       .select(SELECT)
       .eq("tenant_id", tenantId)
-      .eq("lead_id", parentId)
+      .in("lead_id", leadIds)
       .is("metadata->>deleted_at", null);
     if (r.error) {
       console.error(`document lookup FAILED: ${r.error.message}`);
