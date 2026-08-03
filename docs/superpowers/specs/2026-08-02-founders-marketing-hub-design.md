@@ -3,7 +3,9 @@
 **Date:** 2026-08-02 (rev 2, after Adon's vision clarification)
 **Author:** APEX / Maven (CMO)
 **Repo:** `CC90210/oasis-command-center` · branch `apex/founders-marketing` · worktree `C:/Users/echel/oasis-marketing-wt`
-**Status:** DESIGN — awaiting Adon's review. No code written yet.
+**Status:** Phase 1 IMPLEMENTED (PR #117) — founders gate, `database/133_marketing_hub.sql`,
+and the library. Phases 2-8 below are still design. Sections describing Phase 1 are now a
+record of what shipped, not a proposal.
 
 ---
 
@@ -110,13 +112,13 @@ discipline here; the repo's reviewer rule is to grep new routes for `.from(` wit
 
 This is the core mechanism. Everything in the data model serves it.
 
-```
+```text
    INGEST                    EXTRACT                 STORE              USE
  ┌──────────────┐        ┌───────────────┐      ┌────────────┐    ┌──────────────┐
  │ drop a video │──┐     │ transcript    │      │            │    │              │
  │ paste a link │──┼────▶│ hook timing   │─────▶│  corpus    │───▶│  retrieved   │
  │ metrics CSV  │──┤     │ on-screen text│      │  + labels  │    │  at generate │
- │ write lesson │──┘     │ teardown      │      │  + vectors │    │              │
+ │ write lesson │──┘     │ teardown      │      │  + lexical │    │              │
  └──────────────┘        └───────────────┘      └────────────┘    └──────┬───────┘
         ▲                   (async, queued)                              │
         │                                                                ▼

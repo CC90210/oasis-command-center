@@ -102,7 +102,7 @@ export function AssetTile({
         {openReviews > 0 && (
           <span
             className="absolute right-2 top-2 h-2 w-2 rounded-full bg-accent shadow-glow"
-            aria-label={`${openReviews} unread review`}
+            aria-label={`${openReviews} unread review${openReviews === 1 ? "" : "s"}`}
           />
         )}
       </div>

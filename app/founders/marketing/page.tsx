@@ -66,7 +66,8 @@ export default async function MarketingPage() {
           </span>
           {needsYou > 0 && (
             <span className="text-xs text-fg-dim">
-              {summary.open_reviews} review · {summary.open_requests} request
+              {summary.open_reviews} review{summary.open_reviews === 1 ? "" : "s"} ·{" "}
+              {summary.open_requests} request{summary.open_requests === 1 ? "" : "s"}
             </span>
           )}
         </div>

@@ -18,8 +18,8 @@
 -- and had nowhere to live at all.
 --
 -- TENANCY
--- Routing for /marketing is founders-only via an env allowlist (see
--- lib/marketing/founders-gate.ts), NOT via these policies. tenant_id + RLS is
+-- Routing for /founders/marketing is founders-only via an env allowlist (see
+-- lib/founders/gate.ts), NOT via these policies. tenant_id + RLS is
 -- defence in depth: getServiceSupabase() bypasses RLS repo-wide, so every read
 -- must still filter manually. Same five-line ritual as 110/121.
 --
@@ -43,9 +43,27 @@ create table if not exists public.marketing_asset (
                      'organic-instagram','organic-facebook','organic-tiktok',
                      'organic-youtube','paid-meta','paid-google',
                      'seo-article','seo-landing','email')),
-  -- Derived from channel, stored so the UI can group without a CASE everywhere.
-  track          text not null
-                   check (track in ('organic','paid','seo','email')),
+  -- GENERATED, not merely checked. An earlier draft had `track` as a plain
+  -- column with its own CHECK, which let an 'organic-instagram' row declare
+  -- track='paid' and satisfy both constraints independently — silently wrong
+  -- grouping that no query would flag. Derived here so desync is impossible
+  -- rather than improbable. Mirrors trackForChannel() in
+  -- lib/founders-marketing-core.ts, which is the authority in TypeScript.
+  -- Written out per-channel rather than by LIKE 'organic-%' so the mapping does
+  -- not silently depend on channel names happening to be prefixed by track.
+  track          text generated always as (
+                   case channel
+                     when 'organic-instagram' then 'organic'
+                     when 'organic-facebook'  then 'organic'
+                     when 'organic-tiktok'    then 'organic'
+                     when 'organic-youtube'   then 'organic'
+                     when 'paid-meta'         then 'paid'
+                     when 'paid-google'       then 'paid'
+                     when 'seo-article'       then 'seo'
+                     when 'seo-landing'       then 'seo'
+                     when 'email'             then 'email'
+                   end
+                 ) stored,
   format         text not null
                    check (format in ('video','image','carousel','html','article','copy','audio')),
   aspect         text,                       -- '9:16' | '1:1' | '4:5' | '16:9'
@@ -69,7 +87,16 @@ create table if not exists public.marketing_asset (
   external_id    text,                       -- platform post/ad id once published
   created_at     timestamptz not null default now(),
   updated_at     timestamptz not null default now(),
-  meta           jsonb not null default '{}'::jsonb
+  meta           jsonb not null default '{}'::jsonb,
+
+  -- Target for the child tables' COMPOSITE foreign keys. Every marketing_*
+  -- child references (tenant_id, asset_id) rather than the bare asset id, so a
+  -- tenant-A row physically cannot attach to a tenant-B asset. This matters
+  -- here more than in most codebases: getServiceSupabase() BYPASSES RLS, so
+  -- tenant isolation is otherwise only an application-code convention, and a
+  -- single missing .eq('tenant_id') would create the cross-tenant relation
+  -- with nothing to object. The database now objects.
+  constraint marketing_asset_tenant_id_key unique (tenant_id, id)
 );
 create index if not exists idx_marketing_asset_tenant_track
   on public.marketing_asset (tenant_id, track, status, created_at desc);
@@ -96,7 +123,7 @@ create policy marketing_asset_tenant on public.marketing_asset for all
 create table if not exists public.marketing_asset_media (
   id             uuid primary key default gen_random_uuid(),
   tenant_id      uuid not null references public.tenants(id) on delete cascade,
-  asset_id       uuid not null references public.marketing_asset(id) on delete cascade,
+  asset_id       uuid not null,
 
   kind           text not null
                    check (kind in ('video','poster','preview','thumb','audio','html','source','caption')),
@@ -109,7 +136,10 @@ create table if not exists public.marketing_asset_media (
   label          text,
   created_at     timestamptz not null default now(),
 
-  unique (tenant_id, storage_bucket, storage_path)
+  unique (tenant_id, storage_bucket, storage_path),
+  -- Composite FK: a tenant's media cannot attach to another tenant's asset.
+  constraint marketing_asset_media_asset_fk
+    foreign key (tenant_id, asset_id) references public.marketing_asset (tenant_id, id) on delete cascade
 );
 create index if not exists idx_marketing_media_asset
   on public.marketing_asset_media (asset_id, kind);
@@ -131,7 +161,7 @@ create policy marketing_asset_media_tenant on public.marketing_asset_media for a
 create table if not exists public.marketing_review (
   id             uuid primary key default gen_random_uuid(),
   tenant_id      uuid not null references public.tenants(id) on delete cascade,
-  asset_id       uuid not null references public.marketing_asset(id) on delete cascade,
+  asset_id       uuid not null,
 
   decision       text not null
                    check (decision in ('approve','approve_with_changes','request_changes','reject','comment')),
@@ -146,7 +176,9 @@ create table if not exists public.marketing_review (
   acted_on_at    timestamptz,
 
   constraint marketing_review_reason_required
-    check (decision in ('approve','comment') or coalesce(btrim(note), '') <> '')
+    check (decision in ('approve','comment') or coalesce(btrim(note), '') <> ''),
+  constraint marketing_review_asset_fk
+    foreign key (tenant_id, asset_id) references public.marketing_asset (tenant_id, id) on delete cascade
 );
 create index if not exists idx_marketing_review_open
   on public.marketing_review (tenant_id, acted_on_at, created_at)
@@ -175,7 +207,7 @@ create table if not exists public.marketing_request (
   title          text not null,
   detail         text,
   channel        text,
-  asset_id       uuid references public.marketing_asset(id) on delete set null,
+  asset_id       uuid,
   priority       int not null default 50,
   status         text not null default 'open'
                    check (status in ('open','claimed','done','dropped')),
@@ -184,7 +216,11 @@ create table if not exists public.marketing_request (
   response       text,
   created_at     timestamptz not null default now(),
   claimed_at     timestamptz,
-  done_at        timestamptz
+  done_at        timestamptz,
+  -- Nullable asset_id: MATCH SIMPLE skips the check when asset_id is NULL,
+  -- which is the intended "request not tied to an asset" case.
+  constraint marketing_request_asset_fk
+    foreign key (tenant_id, asset_id) references public.marketing_asset (tenant_id, id) on delete set null
 );
 create index if not exists idx_marketing_request_open
   on public.marketing_request (tenant_id, status, priority desc, created_at);
@@ -222,7 +258,7 @@ create table if not exists public.marketing_corpus (
   source_url     text,
   storage_bucket text,
   storage_path   text,
-  asset_id       uuid references public.marketing_asset(id) on delete set null,
+  asset_id       uuid,
 
   transcript     text,
   extraction     jsonb not null default '{}'::jsonb,   -- hooks, pacing, on-screen text, teardown
@@ -240,7 +276,9 @@ create table if not exists public.marketing_corpus (
   contributed_by text not null default 'adon',
   created_at     timestamptz not null default now(),
   updated_at     timestamptz not null default now(),
-  indexed_at     timestamptz
+  indexed_at     timestamptz,
+  constraint marketing_corpus_asset_fk
+    foreign key (tenant_id, asset_id) references public.marketing_asset (tenant_id, id) on delete set null
 );
 create index if not exists idx_marketing_corpus_due
   on public.marketing_corpus (state, created_at)
@@ -275,7 +313,7 @@ create policy marketing_corpus_tenant on public.marketing_corpus for all
 -- unfalsifiable. Metrics are recorded, never fabricated.
 create table if not exists public.marketing_metric_daily (
   tenant_id      uuid not null references public.tenants(id) on delete cascade,
-  asset_id       uuid not null references public.marketing_asset(id) on delete cascade,
+  asset_id       uuid not null,
   date           date not null,
 
   impressions    bigint,
@@ -293,7 +331,9 @@ create table if not exists public.marketing_metric_daily (
   source         text not null,              -- 'meta-api' | 'ig-graph' | 'gsc-api' | 'csv-import' | 'manual'
   captured_at    timestamptz not null default now(),
 
-  primary key (tenant_id, asset_id, date, source)
+  primary key (tenant_id, asset_id, date, source),
+  constraint marketing_metric_daily_asset_fk
+    foreign key (tenant_id, asset_id) references public.marketing_asset (tenant_id, id) on delete cascade
 );
 create index if not exists idx_marketing_metric_date
   on public.marketing_metric_daily (tenant_id, date desc);
@@ -315,8 +355,10 @@ create table if not exists public.marketing_event (
   at             timestamptz not null default now(),
   actor          text not null,              -- 'adon' | 'cc' | 'maven-adon' | 'maven-cc' | 'system'
   verb           text not null,
-  asset_id       uuid references public.marketing_asset(id) on delete set null,
-  detail         text
+  asset_id       uuid,
+  detail         text,
+  constraint marketing_event_asset_fk
+    foreign key (tenant_id, asset_id) references public.marketing_asset (tenant_id, id) on delete set null
 );
 create index if not exists idx_marketing_event_at
   on public.marketing_event (tenant_id, at desc);

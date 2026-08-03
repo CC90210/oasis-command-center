@@ -217,3 +217,49 @@ export async function signMediaUrl(
     return null;
   }
 }
+
+/**
+ * Batch-sign every media object the library needs, grouped by bucket.
+ *
+ * The per-object version costs one Storage round-trip each: a 200-asset library
+ * with a video and a poster apiece is 400 sequential requests, and that is the
+ * page's whole render time. `createSignedUrls` signs a whole bucket's worth in
+ * one call, so the same page is one request per bucket.
+ *
+ * Returns a `bucket\npath` -> url map. Missing entries mean "could not sign",
+ * which the caller renders as a tile without playback rather than an error.
+ */
+export async function signMediaUrls(
+  refs: Array<{ bucket: string; path: string }>,
+  expiresInSeconds = 60 * 60,
+): Promise<Map<string, string>> {
+  const out = new Map<string, string>();
+  if (!refs.length) return out;
+
+  const byBucket = new Map<string, Set<string>>();
+  for (const r of refs) {
+    if (!r.bucket || !r.path) continue;
+    if (!byBucket.has(r.bucket)) byBucket.set(r.bucket, new Set());
+    byBucket.get(r.bucket)!.add(r.path);
+  }
+
+  const db = getServiceSupabase();
+  await Promise.all(
+    [...byBucket.entries()].map(async ([bucket, pathSet]) => {
+      const paths = [...pathSet];
+      try {
+        const r = await db.storage.from(bucket).createSignedUrls(paths, expiresInSeconds);
+        if (r.error || !r.data) return; // whole bucket unsignable: tiles degrade, page renders
+        for (const row of r.data) {
+          // `path` is echoed back per row; signedUrl is null on a per-object failure.
+          if (row.path && row.signedUrl) out.set(`${bucket}\n${row.path}`, row.signedUrl);
+        }
+      } catch {
+        // Same posture as the readers above: never throw from a read path.
+      }
+    }),
+  );
+  return out;
+}
+
+export const mediaKey = (bucket: string, path: string) => `${bucket}\n${path}`;

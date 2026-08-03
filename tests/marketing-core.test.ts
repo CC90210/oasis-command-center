@@ -50,6 +50,38 @@ const partitioned = (["organic", "paid", "seo", "email"] as const).flatMap((t) =
 assert.equal(partitioned.length, CHANNELS.length, "tracks partition all channels");
 assert.equal(new Set(partitioned).size, CHANNELS.length, "no channel appears twice");
 
+// The library's channel-filter row is driven by channelsForTrack(). A prior
+// version hand-rolled `CHANNELS.filter(c => c.startsWith(track))`, which only
+// worked because every channel name currently happens to begin with its track
+// name. Renaming one channel would have silently emptied a filter row. These
+// assertions pin the real mapping as the basis.
+assert.deepEqual(channelsForTrack("organic"), [
+  "organic-instagram",
+  "organic-facebook",
+  "organic-tiktok",
+  "organic-youtube",
+]);
+assert.deepEqual(channelsForTrack("paid"), ["paid-meta", "paid-google"]);
+assert.deepEqual(channelsForTrack("seo"), ["seo-article", "seo-landing"]);
+// email is a single-channel track, which is why the UI shows the channel row
+// only when there is more than one option — otherwise it renders a row with one
+// pill that does nothing.
+assert.deepEqual(channelsForTrack("email"), ["email"]);
+assert.equal(channelsForTrack("email").length, 1, "email needs no channel sub-filter");
+for (const t of ["organic", "paid", "seo"] as const) {
+  assert.ok(channelsForTrack(t).length > 1, `${t} shows a channel sub-filter`);
+}
+// Drilling into a channel must resolve back to its track, so the track pill
+// stays lit and the channel row stays mounted (the dead-end bug: selecting a
+// channel used to unmount the row, leaving no way to switch or clear it).
+for (const c of CHANNELS) {
+  const t = trackForChannel(c);
+  assert.ok(
+    channelsForTrack(t).includes(c),
+    `${c} must appear in its own track's channel list, or drilling in unmounts the filter`,
+  );
+}
+
 assert.equal(isChannel("organic-instagram"), true);
 assert.equal(isChannel("organic-linkedin"), false, "unknown channel refused");
 assert.equal(isChannel(null), false);

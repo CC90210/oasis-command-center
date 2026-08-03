@@ -17,12 +17,13 @@ import Link from "next/link";
 import { Card, PageHeader } from "@/components/Card";
 import { safe } from "@/lib/api-helpers";
 import { resolveFounder } from "@/lib/founders/gate";
-import { getMarketingAssets, signMediaUrl } from "@/lib/founders/marketing-queries";
+import { getMarketingAssets, mediaKey, signMediaUrls } from "@/lib/founders/marketing-queries";
 import {
-  CHANNELS,
   TRACKS,
   channelLabel,
+  channelsForTrack,
   isChannel,
+  trackForChannel,
   trackLabel,
   type Channel,
   type Track,
@@ -57,25 +58,46 @@ export default async function MarketingLibraryPage({
     [],
   );
 
-  // Sign every playable object in one pass. Failures resolve to null so a single
-  // missing object degrades one tile instead of blanking the grid.
-  const signed = await Promise.all(
-    assets.map(async (a) => {
-      const media = a.media || [];
-      const video = media.find((m) => m.kind === "video");
-      const poster =
+  // Pick the objects each tile needs, then sign them ALL in one batched call per
+  // bucket. Signing per object was one Storage round-trip each — 400 sequential
+  // requests on a full 200-asset library, which is the entire render time.
+  const pick = (a: (typeof assets)[number]) => {
+    const media = a.media || [];
+    return {
+      video: media.find((m) => m.kind === "video"),
+      poster:
         media.find((m) => m.kind === "poster") ||
         media.find((m) => m.kind === "thumb") ||
-        media.find((m) => m.kind === "preview");
-      const [playbackUrl, posterUrl] = await Promise.all([
-        video ? signMediaUrl(video.storage_bucket, video.storage_path) : Promise.resolve(null),
-        poster ? signMediaUrl(poster.storage_bucket, poster.storage_path) : Promise.resolve(null),
-      ]);
-      return { asset: a, playbackUrl, posterUrl };
-    }),
-  );
+        media.find((m) => m.kind === "preview"),
+    };
+  };
 
-  const activeChannels = channel ? [channel] : track ? CHANNELS.filter((c) => c) : [];
+  const refs = assets.flatMap((a) => {
+    const { video, poster } = pick(a);
+    return [video, poster]
+      .filter((m): m is NonNullable<typeof m> => !!m)
+      .map((m) => ({ bucket: m.storage_bucket, path: m.storage_path }));
+  });
+  const urls = await safe("marketing.library.sign", signMediaUrls(refs), new Map<string, string>());
+
+  const signed = assets.map((a) => {
+    const { video, poster } = pick(a);
+    return {
+      asset: a,
+      playbackUrl: video ? (urls.get(mediaKey(video.storage_bucket, video.storage_path)) ?? null) : null,
+      posterUrl: poster ? (urls.get(mediaKey(poster.storage_bucket, poster.storage_path)) ?? null) : null,
+    };
+  });
+
+  // Derive ONE supported-channel list and use it for row visibility, pill
+  // rendering and active state. The earlier version made `activeChannels` a
+  // length-1 array as soon as a channel was picked, so the channel row unmounted
+  // and there was no way to switch or clear the filter — a dead end. It also
+  // matched channels with startsWith(track), which happens to work only because
+  // every channel name is currently prefixed by its track; channelsForTrack()
+  // uses the real mapping and cannot drift.
+  const activeTrack: Track | undefined = track ?? (channel ? trackForChannel(channel) : undefined);
+  const channelOptions: Channel[] = activeTrack ? channelsForTrack(activeTrack) : [];
 
   return (
     <div className="space-y-6 animate-fade-in">
@@ -104,24 +126,31 @@ export default async function MarketingLibraryPage({
             key={t}
             href={`/founders/marketing/library?track=${t}`}
             label={trackLabel(t)}
-            active={track === t && !channel}
+            // Stays lit while drilled into one of its channels, so the view
+            // always shows where you are.
+            active={activeTrack === t}
           />
         ))}
       </div>
 
-      {activeChannels.length > 1 && (
+      {channelOptions.length > 1 && (
         <div className="flex flex-wrap items-center gap-2">
-          {CHANNELS.filter((c) => !track || c.startsWith(track === "email" ? "email" : track)).map(
-            (c) => (
-              <FilterPill
-                key={c}
-                href={`/founders/marketing/library?channel=${c}`}
-                label={channelLabel(c)}
-                active={channel === c}
-                subtle
-              />
-            ),
-          )}
+          {/* "All <track>" clears the channel filter without losing the track. */}
+          <FilterPill
+            href={`/founders/marketing/library?track=${activeTrack}`}
+            label={`All ${trackLabel(activeTrack as Track)}`}
+            active={!channel}
+            subtle
+          />
+          {channelOptions.map((c) => (
+            <FilterPill
+              key={c}
+              href={`/founders/marketing/library?channel=${c}`}
+              label={channelLabel(c)}
+              active={channel === c}
+              subtle
+            />
+          ))}
         </div>
       )}
 

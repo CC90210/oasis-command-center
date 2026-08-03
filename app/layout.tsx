@@ -27,8 +27,8 @@ import { ALL_MARKETING_PATHS } from "@/lib/marketing/routes";
 // NOTE: lib/marketing/* above is the PUBLIC marketing SITE (/home, /work, ...).
 // lib/founders/* below is the private founders portal. Different concerns,
 // similar words — keep them apart.
-import { isFounder } from "@/lib/founders/gate";
-import { shouldShowFoundersNav } from "@/lib/founders-marketing-core";
+import { foundersAllowlist } from "@/lib/founders/gate";
+import { isFounderTenant, shouldShowFoundersNav } from "@/lib/founders-marketing-core";
 import type { NavItem } from "@/lib/nav-config";
 
 // Default metadata — tenant-neutral. Individual pages override via
@@ -279,8 +279,13 @@ export default async function RootLayout({
   // the portal exists to anyone looking at that screen, which is exactly what
   // choosing 404-over-403 was meant to prevent. shouldShowFoundersNav() adds
   // the own-shell-only condition and is unit-tested.
+  // Uses the `profile` this layout already loaded rather than calling
+  // isFounder(), which would re-run getActiveProfile() and cost a second
+  // Supabase round-trip on every authenticated page render. Same decision, same
+  // pure predicate — this is exactly why the check was split out of the
+  // session-touching wrapper.
   const foundersNavItems: NavItem[] = shouldShowFoundersNav({
-    isFounder: !isFullBleed && (await isFounder()),
+    isFounder: isFounderTenant(profile?.tenant_id, foundersAllowlist()),
     isFullBleed,
     demoMode,
     pathOverrideSlug,
