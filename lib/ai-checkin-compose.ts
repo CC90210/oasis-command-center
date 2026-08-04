@@ -22,8 +22,8 @@
 
 import { OASIS_CHECKIN_COMPOSE_PROMPT } from "./prompts";
 
-const ANTHROPIC_VERSION = "2023-06-01";
-const COMPOSE_MODEL = "claude-sonnet-4-6";
+import { inferText } from "./subscription-infer";
+
 const MAX_TOKENS = 800;
 
 export interface CheckinInteractionSnapshot {
@@ -120,40 +120,21 @@ Remember: sign off with first_name on its own line, then "OASIS AI Solutions" on
 
 export async function composeCheckin(
   input: ComposeCheckinInput,
+  opts?: { tenantId?: string | null },
 ): Promise<ComposeCheckinResult> {
-  const apiKey = (process.env.BRAVO_ANTHROPIC_API_KEY || process.env.ANTHROPIC_API_KEY || "").trim();
-  if (!apiKey) {
-    throw new Error("anthropic_key_missing");
-  }
-
-  const res = await fetch("https://api.anthropic.com/v1/messages", {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      "x-api-key": apiKey,
-      "anthropic-version": ANTHROPIC_VERSION,
-    },
-    body: JSON.stringify({
-      model: COMPOSE_MODEL,
-      max_tokens: MAX_TOKENS,
-      system: OASIS_CHECKIN_COMPOSE_PROMPT,
-      messages: [{ role: "user", content: buildUserPrompt(input) }],
-    }),
+  // Subscription, not the paid API. See lib/subscription-infer.ts.
+  const inf = await inferText({
+    source: "checkin-compose",
+    system: OASIS_CHECKIN_COMPOSE_PROMPT,
+    prompt: buildUserPrompt(input),
+    maxTokens: MAX_TOKENS,
+    tenantId: opts?.tenantId ?? null,
+    modelTier: "smart",
   });
-
-  if (!res.ok) {
-    const detail = await res.text().catch(() => "");
-    throw new Error(`anthropic_${res.status}: ${detail.slice(0, 300)}`);
+  if (!inf.ok) {
+    throw new Error(inf.pending ? `checkin_pending: ${inf.error}` : `checkin_unavailable: ${inf.error}`);
   }
-
-  const body = (await res.json()) as {
-    content?: Array<{ type: string; text?: string }>;
-  };
-  const text = (body.content || [])
-    .filter((b) => b.type === "text")
-    .map((b) => b.text || "")
-    .join("")
-    .trim();
+  const text = inf.text.trim();
 
   let cleaned = text;
   if (cleaned.startsWith("```")) {

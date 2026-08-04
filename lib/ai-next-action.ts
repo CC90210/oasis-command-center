@@ -27,8 +27,8 @@
  *     Deals case study", not "Send relevant material")
  */
 
-const ANTHROPIC_VERSION = "2023-06-01";
-const NEXT_ACTION_MODEL = "claude-sonnet-4-6";
+import { inferText } from "./subscription-infer";
+
 const MAX_TOKENS = 350;
 
 export interface InteractionSnapshot {
@@ -66,11 +66,8 @@ Output ONLY a single JSON object on one line — no markdown, no code fence, no 
 export async function recommendNextAction(
   leadData: Record<string, unknown>,
   interactions: InteractionSnapshot[],
+  opts?: { tenantId?: string | null },
 ): Promise<NextActionResult> {
-  const apiKey = (process.env.BRAVO_ANTHROPIC_API_KEY || process.env.ANTHROPIC_API_KEY || "").trim();
-  if (!apiKey) {
-    throw new Error("anthropic_key_missing");
-  }
 
   // Same field filter as the scorer — operator-facing only, drop bookkeeping.
   const INCLUDED = ["name", "company", "email", "phone", "source", "stage",
@@ -101,34 +98,19 @@ export async function recommendNextAction(
         : JSON.stringify(recentInteractions, null, 2)
     }\n\nWhat is the single highest-value next move?`;
 
-  const res = await fetch("https://api.anthropic.com/v1/messages", {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      "x-api-key": apiKey,
-      "anthropic-version": ANTHROPIC_VERSION,
-    },
-    body: JSON.stringify({
-      model: NEXT_ACTION_MODEL,
-      max_tokens: MAX_TOKENS,
-      system: SYSTEM_PROMPT,
-      messages: [{ role: "user", content: userPrompt }],
-    }),
+  // Subscription, not the paid API. See lib/subscription-infer.ts.
+  const inf = await inferText({
+    source: "next-action",
+    system: SYSTEM_PROMPT,
+    prompt: userPrompt,
+    maxTokens: MAX_TOKENS,
+    tenantId: opts?.tenantId ?? null,
+    modelTier: "smart",
   });
-
-  if (!res.ok) {
-    const detail = await res.text().catch(() => "");
-    throw new Error(`anthropic_${res.status}: ${detail.slice(0, 300)}`);
+  if (!inf.ok) {
+    throw new Error(inf.pending ? `next_action_pending: ${inf.error}` : `next_action_unavailable: ${inf.error}`);
   }
-
-  const body = (await res.json()) as {
-    content?: Array<{ type: string; text?: string }>;
-  };
-  const text = (body.content || [])
-    .filter((b) => b.type === "text")
-    .map((b) => b.text || "")
-    .join("")
-    .trim();
+  const text = inf.text.trim();
 
   let cleaned = text;
   if (cleaned.startsWith("```")) {

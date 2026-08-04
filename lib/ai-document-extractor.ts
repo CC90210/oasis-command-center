@@ -58,6 +58,21 @@ export async function extractApplicationFields(
   bytes: Buffer,
   mimeType: string,
 ): Promise<ExtractResult> {
+  /*
+   * STILL ON THE PAID API, and deliberately so as of 2026-08-04.
+   *
+   * Every other env-keyed caller in oasis moved to the subscription queue
+   * (lib/subscription-infer.ts) when Adon asked for the billing to stop. This
+   * one cannot follow yet: it sends the document itself as a base64
+   * `document`/`image` content block, and queueInfer's contract is a TEXT
+   * prompt — there is nowhere to put the bytes. Forcing it through would mean
+   * silently dropping the attachment and extracting from nothing, which is the
+   * failure mode this codebase keeps having.
+   *
+   * So it stays paid until the queue grows a multimodal path. It is
+   * operator-triggered (document upload), not autonomous, so it bills per
+   * action rather than on a timer.
+   */
   const apiKey = (process.env.BRAVO_ANTHROPIC_API_KEY || process.env.ANTHROPIC_API_KEY || "").trim();
   if (!apiKey) return { ok: false, error: "anthropic_key_missing" };
 

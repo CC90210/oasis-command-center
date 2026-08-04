@@ -26,8 +26,8 @@
  *   }
  */
 
-const ANTHROPIC_VERSION = "2023-06-01";
-const DRAFTER_MODEL = "claude-sonnet-4-6";
+import { inferText } from "./subscription-infer";
+
 const MAX_TOKENS = 2400;
 
 export interface AutomationDraft {
@@ -77,44 +77,27 @@ Return ONLY a single JSON object on one line. Schema:
 
 NO markdown, NO code fence, NO prose outside the JSON. The script_content must be a valid JSON string (newlines as \\n).`;
 
-export async function draftAutomation(description: string): Promise<AutomationDraft> {
-  const apiKey = (process.env.BRAVO_ANTHROPIC_API_KEY || process.env.ANTHROPIC_API_KEY || "").trim();
-  if (!apiKey) {
-    throw new Error("anthropic_key_missing");
-  }
-
+export async function draftAutomation(
+  description: string,
+  opts?: { tenantId?: string | null },
+): Promise<AutomationDraft> {
   const userPrompt =
     `Operator description:\n\n${description.trim()}\n\n` +
     `Generate the automation. Be specific about the cron schedule — if they said "every morning" pick 0 8 * * *, if "weekly" pick a sensible day + time, etc.`;
 
-  const res = await fetch("https://api.anthropic.com/v1/messages", {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      "x-api-key": apiKey,
-      "anthropic-version": ANTHROPIC_VERSION,
-    },
-    body: JSON.stringify({
-      model: DRAFTER_MODEL,
-      max_tokens: MAX_TOKENS,
-      system: SYSTEM_PROMPT,
-      messages: [{ role: "user", content: userPrompt }],
-    }),
+  // Subscription, not the paid API. See lib/subscription-infer.ts.
+  const inf = await inferText({
+    source: "automation-drafter",
+    system: SYSTEM_PROMPT,
+    prompt: userPrompt,
+    maxTokens: MAX_TOKENS,
+    tenantId: opts?.tenantId ?? null,
+    modelTier: "smart",
   });
-
-  if (!res.ok) {
-    const detail = await res.text().catch(() => "");
-    throw new Error(`anthropic_${res.status}: ${detail.slice(0, 300)}`);
+  if (!inf.ok) {
+    throw new Error(inf.pending ? `drafter_pending: ${inf.error}` : `drafter_unavailable: ${inf.error}`);
   }
-
-  const body = (await res.json()) as {
-    content?: Array<{ type: string; text?: string }>;
-  };
-  const text = (body.content || [])
-    .filter((b) => b.type === "text")
-    .map((b) => b.text || "")
-    .join("")
-    .trim();
+  const text = inf.text.trim();
 
   let cleaned = text;
   if (cleaned.startsWith("```")) {
