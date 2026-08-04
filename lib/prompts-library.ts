@@ -921,11 +921,28 @@ Run the full check before I sign anything.
     agent: "bravo",
     title: "Inbox triage",
     description:
-      "Read every unread email + agent-inbox message in the last 24h. Classify each (respond / schedule / archive / ignore), rank by what moves the business most, draft replies for the respond-now bucket — no sends.",
+      "Triages email + the agent-inbox together. Classifies each message, ranks by business impact, drafts the replies that need one — and tells you what the native pipeline already handled. No sends.",
     foundational: true,
     tags: ["daily", "comms", "inbox", "triage"],
-    prompt:
-      "Triage every unread message across (a) my email inbox and (b) the agent-inbox (messages other agents posted to me). For each one: who sent it, what they need in one line, the priority (P1 / P2 / P3). Then classify: respond now (high signal), schedule for later (defer with date), archive (no action needed), or ignore (noise). Rank the respond-now bucket by what'll move the business most. For each respond-now item, draft my reply in my voice — don't send anything, draft only. End with a one-line recommendation on what to action first.",
+    prompt: `Triage everything unread across both inboxes.
+
+**Pull both sources.** Email via \`lead_interactions\` (the native inbound pipeline classifies and stores every message — read from there rather than re-fetching), and \`python scripts/core/agent_inbox.py list --to bravo\` for what Atlas / Maven / Aura / Hermes posted to me. Don't run \`email_engine.py check-inbox\` unless the pipeline is visibly stalled — it marks messages read as a side effect and the */5 cron already owns that path.
+
+**Separate what needs me from what's handled.** The inbound pipeline auto-replies to some things. Lead with the count it handled so I know the system is working, then spend the report on what it didn't.
+
+**For each message that needs a human:** sender, what they want in one line, and P1 / P2 / P3.
+
+**Then classify into exactly one bucket:**
+- **Respond now** — real signal, someone is waiting
+- **Schedule** — needs a reply but not today; give it a date
+- **Archive** — read it, no action
+- **Ignore** — noise. Vendor mail and newsletters live here; if one created a lead row, flag it, because junk in the pipeline has been a real problem.
+
+**Rank the respond-now bucket by what moves the business**, not by age. A client blocked on me outranks a cold pitch that arrived first.
+
+**Draft every respond-now reply** in my voice, ready to read. Draft only — no send_gateway, no sends. I approve outbound myself.
+
+**Close with one line:** what to action first, and why it beats the others. Flag anything that's been waiting on me more than 48h at the top — that's my failure, not a queue item.`,
   },
 
   // ── OPS REVIEW ──────────────────────────────────────────────────
@@ -1065,11 +1082,25 @@ Revenue targets and MRR are Atlas's call — reference them if I bring them up, 
     agent: "bravo",
     title: "Hand off to another agent",
     description:
-      "Drafts a clear handoff message to another OASIS agent (Atlas / Maven / Aura / Hermes) and posts it to their agent-inbox so they pick it up next run. One prompt for any target agent.",
+      "Writes a self-contained handoff to Atlas / Maven / Aura / Hermes and posts it to their agent-inbox via agent_inbox.py, so they pick it up next run with everything they need.",
     foundational: true,
     tags: ["inbox", "handoff", "atlas", "maven", "aura", "hermes"],
-    prompt:
-      "I need <target agent: atlas | maven | aura | hermes> to take something on. Take what we just discussed (or what I'm pasting next), write a clear, specific handoff in 5–8 lines: who's asking + what they need + priority + needs-reply flag. Concrete asks only — no generic 'review this and let me know your thoughts.' Post it to the agent inbox addressed to that agent, then confirm the message id back to me. Context for this handoff: ",
+    prompt: `I need <target agent: atlas | maven | aura | hermes> to take something on.
+
+**Check the target owns it first.** Atlas = finance, tax, revenue, anything with a dollar figure (Bravo never reports MRR). Maven = content, brand, ads, funnel. Aura = life, home, habits, calendar. Hermes = commerce ops, EDI, POs. If it doesn't belong to any of them, say so and keep it here rather than posting a handoff nobody owns.
+
+**Write it self-contained.** The receiving agent is a fresh context that never saw this conversation — it cannot ask a follow-up. Anything you leave implicit is lost. 5–8 lines:
+- Who's asking and what they need, in one sentence
+- The specific ask — an action with a verb, not "review this and share your thoughts"
+- The context needed to act: names, amounts, dates, file paths, record ids
+- Priority (P1 / P2 / P3) and whether it's blocking me
+- Needs-reply: yes/no, and by when if yes
+
+**Post it:** \`python scripts/core/agent_inbox.py post --to <agent> --from bravo --subject "<subject>" --body "<body>"\`. Confirm the message id back to me — if the post fails, show me the actual error rather than reporting success.
+
+**Don't hand off a decision that's mine.** If the real blocker is a call I need to make, tell me that instead of routing it sideways.
+
+Context for this handoff: `,
   },
 ];
 

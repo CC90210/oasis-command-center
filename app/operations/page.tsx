@@ -19,7 +19,8 @@ import { getServiceSupabase, getSessionUser } from "@/lib/supabase-server";
 import { ALL_AGENT_KEYS, FAMILY_AGENT_KEYS, getAgentInfo, resolveAgentKey } from "@/lib/agents";
 import { getTenantEnabledAgents } from "@/lib/manifest/tenant-scope";
 import { isOperatorEmail } from "@/lib/operator-credentials";
-import { statusColor, timeAgo, truncate } from "@/lib/fmt";
+import { timeAgo, truncate } from "@/lib/fmt";
+import { AgentDecisionsCard } from "@/components/AgentDecisionsCard";
 import { buildRecordResolver, projectEvent } from "@/lib/event-projection";
 import { WarmPoolPanel } from "@/components/WarmPoolPanel";
 import { BridgeCliPanel } from "@/components/BridgeCliPanel";
@@ -459,53 +460,11 @@ export default async function OperationsPage({
       </Card>
 
       {/* Agent decisions — the autonomous loop's own choices, as opposed to
-          the Activity Tape above which is the event stream. Ported verbatim
-          from /reasoning (dropped from nav 2026-08-04) so the data surface
-          survives the page that used to host it. */}
-      <Card
-        title="Agent decisions"
-        subtitle={
-          decisions.length > 0
-            ? `Each row is a choice your agent made on its own — last ${decisions.length} cycles. Confidence + outcome shown so you can see whether the autonomous loop is making good calls.`
-            : "Once your agents start cycling autonomously, every decision they make (lead scoring, send vs. skip, prioritize vs. defer) shows up here with confidence + outcome."
-        }
-      >
-        {decisions.length === 0 ? (
-          <EmptyState message="No decisions yet. The reasoning loop hasn't run today — start your local agent runner from your bridge terminal." />
-        ) : (
-          <ul className="space-y-3">
-            {decisions.map((d) => (
-              <li key={d.id} className="rounded-lg border border-bg-border bg-bg-elev p-4">
-                <div className="flex justify-between items-start gap-4">
-                  <div className="flex-1 min-w-0">
-                    <div className="flex items-center gap-2 mb-1.5">
-                      <Tag tone="accent">{d.decision_type}</Tag>
-                      <span className="text-xs text-fg-dim font-mono">cycle {truncate(d.tick_id, 12)}</span>
-                    </div>
-                    <div className="text-fg font-medium text-sm">
-                      {d.target_description || "(no target description)"}
-                    </div>
-                    {d.reasoning && (
-                      <p className="text-sm text-fg-muted mt-2 leading-relaxed">{truncate(d.reasoning, 280)}</p>
-                    )}
-                  </div>
-                  <div className="text-right shrink-0">
-                    <div className={`text-sm font-bold ${statusColor(d.outcome_status)}`}>
-                      {d.outcome_status || d.chosen_action || "—"}
-                    </div>
-                    {d.confidence != null && (
-                      <div className="text-xs text-fg-dim mt-1 font-mono">
-                        conf {Number(d.confidence).toFixed(2)}
-                      </div>
-                    )}
-                    <div className="text-xs text-fg-dim mt-1">{timeAgo(d.created_at)}</div>
-                  </div>
-                </div>
-              </li>
-            ))}
-          </ul>
-        )}
-      </Card>
+          the Activity Tape above which is the event stream. Moved here from
+          /reasoning when that page left CC's nav (2026-08-04). Shared
+          component: /reasoning still renders the same tape for SunBiz + Suga
+          tenants, so the markup lives in one place. */}
+      <AgentDecisionsCard decisions={decisions} />
     </div>
   );
 }
