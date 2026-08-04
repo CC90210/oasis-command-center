@@ -29,13 +29,6 @@ const SECTIONS: PlaybookSection[] = [
       "Three client offers, two partner paths, and the canonical 50% strategic-partner model. The math is simple enough to defend in any room.",
   },
   {
-    href: "/playbook/drills",
-    title: "Daily Drills",
-    subtitle: "5 core reps - client delivery - pipeline - content - review",
-    body:
-      "Short operating reps for voice, relationship-led pipeline work, client delivery, content, and reflection. Built around the work OASIS does now, not retired cold-call volume.",
-  },
-  {
     href: "/playbook/business",
     title: "Business Documentation",
     subtitle: "Strategy + finance + brand + operations + legal",
@@ -50,20 +43,6 @@ const SECTIONS: PlaybookSection[] = [
       "Reusable prompts for daily operations, reviews, system work, and client deployment. Open a prompt in chat or copy it unchanged for your IDE. Universal agent tools appear once instead of repeating across audiences.",
   },
   {
-    href: "/playbook/client-deploy",
-    title: "Client Deployment Runbook",
-    subtitle: "Six phases - readiness gates - one accountable handoff",
-    body:
-      "The current deployment path from pre-flight and primary bridge setup through identity, integrations, scope, validation, and owner handoff. Multi-machine pairing is included as an optional setup step, not a duplicate playbook.",
-  },
-  {
-    href: "/playbook/onboarding",
-    title: "Operator Onboarding (V6.0)",
-    subtitle: "What your agent does - Safe asks - Escalation triggers - Pause + rollback",
-    body:
-      "Four short SOPs for new operators. Render markdown directly from docs/playbooks/ so non-technical clients can read the agent's contract in the dashboard without opening the repo. Update the markdown, redeploy, and every operator sees the new SOP next refresh.",
-  },
-  {
     href: "/playbook/security",
     title: "Security Model",
     subtitle: "Multi-tenant RLS - AES-256-GCM at rest - SHA-256 bridge tokens - HMAC self-pair",
@@ -72,10 +51,13 @@ const SECTIONS: PlaybookSection[] = [
   },
   {
     href: "/playbook/10-oasis-loop",
-    title: "10 The OASIS Loop",
+    // Title was "10 The OASIS Loop" — the leading "10" was the markdown
+    // filename's sort prefix leaking into the UI, which read as a duplicate
+    // of the card's own "05" badge once the index was consolidated.
+    title: "The OASIS Loop",
     subtitle: "Closed-loop AI interaction - 4 phases - 1 clean chat",
     body:
-      "The definitive method for getting production-grade output from any AI system. Two AIs (Prompt Engineer + Executor) working hand-in-hand to translate your raw ideas into precision execution. Prime, Translate, Execute, Reflect.",
+      "The method for getting production-grade output from any AI system. Two AIs — a Prompt Engineer that translates your raw ideas into precision instructions, and an Executor that builds — sharing one agent harness. Prime, Translate, Execute, Reflect. The translator's system message is the Prompt translator entry in the Prompts Library.",
   },
 ];
 
@@ -183,7 +165,16 @@ export default async function PlaybookIndex() {
     return <SunBizPlaybookIndex />;
   }
 
-  const defaultManual = operatingManual.filter((f) => !isSunBizPlaybook(f));
+  // Single-source rule: a runbook that already has its own numbered card
+  // above must not ALSO appear in the operating manual below — card 05 and
+  // the 10-oasis-loop.md manual entry resolved to the SAME /playbook/
+  // route, so the index listed one destination twice. Deduping by href
+  // (rather than hardcoding the slug) means any future card that points at
+  // a markdown file is deduped automatically instead of drifting.
+  const cardHrefs = new Set(SECTIONS.map((s) => s.href));
+  const defaultManual = operatingManual.filter(
+    (f) => !isSunBizPlaybook(f) && !cardHrefs.has(`/playbook/${f.slug}`)
+  );
   return <DefaultPlaybookIndex operatingManual={defaultManual} />;
 }
 

@@ -18,25 +18,26 @@ const OPERATOR_CATEGORIES: PromptCategory[] = [
   "system_integration",
 ];
 
-const CLIENT_CATEGORIES: PromptCategory[] = [
-  "client_setup",
-  "client_optimization",
-  "client_handoff",
-];
-
 export default function PromptsLibraryPage() {
-  // Operator section: prompts tagged "operator" + the "shared" ones that
-  // are universally useful (override syntax, health checks, end-of-day).
-  const operatorPrompts = PROMPTS_LIBRARY.filter((p) => p.audience === "operator");
-  // Client deployment section: prompts tagged "client" + the shared ones
-  // (operator runs them when SSH'd into a client's machine).
-  const clientPrompts = PROMPTS_LIBRARY.filter((p) => p.audience === "client");
-  const sharedPrompts = PROMPTS_LIBRARY.filter((p) => p.audience === "shared");
+  // Client-deployment prompts are hidden from the operator page (2026-08-04
+  // consolidation audit). They're the "SSH'd into a client's machine"
+  // toolkit — 17 entries that pushed CC's own daily prompts below the fold
+  // on the surface he opens every morning. The entries are NOT deleted:
+  // they stay in PROMPTS_LIBRARY and a client deployment surfaces them
+  // through its own tenant-scoped manifest view.
+  const visiblePrompts = PROMPTS_LIBRARY.filter((p) => p.audience !== "client");
 
-  // Total count for the header tag — the filter component computes
-  // filtered counts client-side, but the page header shows the full
-  // library size so the operator knows the scope.
-  const totalPrompts = PROMPTS_LIBRARY.length;
+  // Operator section: prompts tagged "operator". Shared ones render in
+  // their own "Universal prompts" block below (override syntax, health
+  // checks, end-of-day, the prompt translator).
+  const operatorPrompts = visiblePrompts.filter((p) => p.audience === "operator");
+  const sharedPrompts = visiblePrompts.filter((p) => p.audience === "shared");
+
+  // Header tag counts what's actually on this page — the filter component
+  // computes filtered counts client-side, but the header shows the scope
+  // the operator can see, not the full library size (which would promise
+  // 17 prompts that never render here).
+  const totalPrompts = visiblePrompts.length;
 
   return (
     <div className="space-y-6 animate-fade-in">
@@ -56,7 +57,7 @@ export default function PromptsLibraryPage() {
         subtitle="Current, reusable system messages. Open one in chat or copy it unchanged for your IDE."
         action={
           <Tag tone="accent">
-            {totalPrompts} prompts · {operatorPrompts.length} operator · {clientPrompts.length} client · {sharedPrompts.length} universal
+            {totalPrompts} prompts · {operatorPrompts.length} operator · {sharedPrompts.length} universal
           </Tag>
         }
       />
@@ -76,14 +77,15 @@ Disable every cron in vercel.json by setting it to a date in the past...`}</pre>
         </div>
       </Card>
 
-      {/* Client-side filter — single input narrows the whole library
-          (operator + client sections) by title, description, tag, or
-          category label. Lives in a small client island so the SSR
-          page stays static and the filter UX is instant. */}
+      {/* Client-side filter — single input narrows the operator + universal
+          sections by title, description, tag, or category label. Lives in a
+          small client island so the SSR page stays static and the filter UX
+          is instant. clientCategories is empty here: the client-deployment
+          prompts are filtered out upstream, so the section never renders. */}
       <PromptsLibraryFilter
-        prompts={PROMPTS_LIBRARY}
+        prompts={visiblePrompts}
         operatorCategories={OPERATOR_CATEGORIES}
-        clientCategories={CLIENT_CATEGORIES}
+        clientCategories={[]}
         categoryDefs={PROMPT_CATEGORIES}
       />
     </div>

@@ -13,13 +13,13 @@
 
 import Link from "next/link";
 import { Card, PageHeader, Tag, EmptyState } from "@/components/Card";
-import { agentStates, getActiveProfile, recentEvents } from "@/lib/queries";
+import { agentStates, getActiveProfile, recentDecisions, recentEvents } from "@/lib/queries";
 import { safe } from "@/lib/api-helpers";
 import { getServiceSupabase, getSessionUser } from "@/lib/supabase-server";
 import { ALL_AGENT_KEYS, FAMILY_AGENT_KEYS, getAgentInfo, resolveAgentKey } from "@/lib/agents";
 import { getTenantEnabledAgents } from "@/lib/manifest/tenant-scope";
 import { isOperatorEmail } from "@/lib/operator-credentials";
-import { timeAgo, truncate } from "@/lib/fmt";
+import { statusColor, timeAgo, truncate } from "@/lib/fmt";
 import { buildRecordResolver, projectEvent } from "@/lib/event-projection";
 import { WarmPoolPanel } from "@/components/WarmPoolPanel";
 import { BridgeCliPanel } from "@/components/BridgeCliPanel";
@@ -90,7 +90,7 @@ export default async function OperationsPage({
   const now7Ago = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
   const now14Ago = new Date(Date.now() - 14 * 24 * 60 * 60 * 1000).toISOString();
 
-  const [snaps, pairings, events, errorsCount, failedCronsCount, stuckThreadsCount, staleLeadsCount] = await Promise.all([
+  const [snaps, pairings, events, decisions, errorsCount, failedCronsCount, stuckThreadsCount, staleLeadsCount] = await Promise.all([
     safe(
       "operations.agent_state_snapshot",
       agentStates(agentNamesForOps).then((rows) =>
@@ -131,8 +131,28 @@ export default async function OperationsPage({
       }),
       []
     ),
-    // Health tile #1: error/warn events in last 24h (tenant-scoped via
-    // enabled agents — same posture as the activity tape above).
+    // Agent decisions tape — moved here from /reasoning 2026-08-04 when that
+    // page was dropped from CC's nav. Scoping is deliberately IDENTICAL to
+    // the reasoning page it replaced: recentDecisions() filters
+    // .eq(tenant_id).in(agent_name), and passing agentNamesForOps keeps it
+    // consistent with the activity tape and worker cards on this same page.
+    // Both guards inside recentDecisions still hold — a null tenant or an
+    // empty agent list returns [] rather than leaking another tenant's loop.
+    safe(
+      "operations.recent_decisions",
+      recentDecisions(profile?.tenant_id ?? null, agentNamesForOps, 20),
+      []
+    ),
+    // Health tile #1: ERROR events in last 24h (tenant-scoped via enabled
+    // agents — same posture as the activity tape above).
+    //
+    // 'warn' was dropped from this count 2026-08-04. Routine warnings are
+    // high-volume and non-actionable, so bundling them made the tile read
+    // ~1600 on a day nothing was actually broken — a number that big stops
+    // being a signal and starts being wallpaper. Warnings are NOT suppressed:
+    // they still publish to agent_events, still render in the Activity Tape,
+    // and still show on the /health drill-down. They just don't inflate the
+    // tile that's supposed to answer "is something broken right now."
     safe(
       "operations.errors_24h",
       (async () => {
@@ -140,7 +160,7 @@ export default async function OperationsPage({
         let q = db
           .from("agent_events")
           .select("id", { count: "exact", head: true })
-          .in("severity", ["error", "warn"])
+          .in("severity", ["error"])
           .gte("published_at", now24Ago);
         if (!isOperator) q = q.in("publisher_agent", agentNamesForOps);
         const r = await q;
@@ -262,7 +282,7 @@ export default async function OperationsPage({
           shows just the counts so CC can see "do I have anything to look
           at right now" without leaving Operations. */}
       <div className="grid grid-cols-2 sm:grid-cols-5 gap-2">
-        <HealthMiniTile label="Errors today" count={errorsCount} tone={errorsCount === 0 ? "engaged" : "warm"} href="/health" hint="Anything that broke or warned in the last 24h." />
+        <HealthMiniTile label="Errors today" count={errorsCount} tone={errorsCount === 0 ? "engaged" : "warm"} href="/health" hint="Errors in the last 24h. Warnings are excluded — see the Activity Tape or /health for those." />
         <HealthMiniTile label="Failed automations" count={failedCronsCount} tone={failedCronsCount === 0 ? "engaged" : "warm"} href="/automations" hint="Scheduled jobs whose last run errored." />
         <HealthMiniTile label="Quiet shop-outs" count={stuckThreadsCount} tone={stuckThreadsCount === 0 ? "engaged" : "accent"} href="/health" hint="Lender emails sent >7d ago with no reply yet." />
         <HealthMiniTile label="Cold leads" count={staleLeadsCount} tone={staleLeadsCount === 0 ? "engaged" : "accent"} href="/pipeline" hint="Pipeline leads you haven't touched in 2+ weeks." />
@@ -434,6 +454,55 @@ export default async function OperationsPage({
                 </li>
               );
             })}
+          </ul>
+        )}
+      </Card>
+
+      {/* Agent decisions — the autonomous loop's own choices, as opposed to
+          the Activity Tape above which is the event stream. Ported verbatim
+          from /reasoning (dropped from nav 2026-08-04) so the data surface
+          survives the page that used to host it. */}
+      <Card
+        title="Agent decisions"
+        subtitle={
+          decisions.length > 0
+            ? `Each row is a choice your agent made on its own — last ${decisions.length} cycles. Confidence + outcome shown so you can see whether the autonomous loop is making good calls.`
+            : "Once your agents start cycling autonomously, every decision they make (lead scoring, send vs. skip, prioritize vs. defer) shows up here with confidence + outcome."
+        }
+      >
+        {decisions.length === 0 ? (
+          <EmptyState message="No decisions yet. The reasoning loop hasn't run today — start your local agent runner from your bridge terminal." />
+        ) : (
+          <ul className="space-y-3">
+            {decisions.map((d) => (
+              <li key={d.id} className="rounded-lg border border-bg-border bg-bg-elev p-4">
+                <div className="flex justify-between items-start gap-4">
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2 mb-1.5">
+                      <Tag tone="accent">{d.decision_type}</Tag>
+                      <span className="text-xs text-fg-dim font-mono">cycle {truncate(d.tick_id, 12)}</span>
+                    </div>
+                    <div className="text-fg font-medium text-sm">
+                      {d.target_description || "(no target description)"}
+                    </div>
+                    {d.reasoning && (
+                      <p className="text-sm text-fg-muted mt-2 leading-relaxed">{truncate(d.reasoning, 280)}</p>
+                    )}
+                  </div>
+                  <div className="text-right shrink-0">
+                    <div className={`text-sm font-bold ${statusColor(d.outcome_status)}`}>
+                      {d.outcome_status || d.chosen_action || "—"}
+                    </div>
+                    {d.confidence != null && (
+                      <div className="text-xs text-fg-dim mt-1 font-mono">
+                        conf {Number(d.confidence).toFixed(2)}
+                      </div>
+                    )}
+                    <div className="text-xs text-fg-dim mt-1">{timeAgo(d.created_at)}</div>
+                  </div>
+                </div>
+              </li>
+            ))}
           </ul>
         )}
       </Card>
