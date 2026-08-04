@@ -33,9 +33,8 @@ import {
   OASIS_LEAD_SCORING_PROMPT,
   LEAD_SCORING_INCLUDED_FIELDS,
 } from "./prompts";
+import { inferText } from "./subscription-infer";
 
-const ANTHROPIC_VERSION = "2023-06-01";
-const SCORING_MODEL = "claude-sonnet-4-6";
 const MAX_TOKENS = 400;
 
 export interface LeadScoreResult {
@@ -62,11 +61,8 @@ export interface LeadScoringInteraction {
 export async function scoreLead(
   leadData: Record<string, unknown>,
   interactions: LeadScoringInteraction[] = [],
+  opts: { tenantId: string | null },
 ): Promise<LeadScoreResult> {
-  const apiKey = (process.env.BRAVO_ANTHROPIC_API_KEY || process.env.ANTHROPIC_API_KEY || "").trim();
-  if (!apiKey) {
-    throw new Error("anthropic_key_missing");
-  }
 
   // Filter to the operator-facing fields Claude should weight — drop
   // internal bookkeeping like _legacy_id, ai_* fields (don't let prior
@@ -105,34 +101,24 @@ ${JSON.stringify(relevant, null, 2)}
 Interactions (most recent first, ${tape.length} of ${interactions.length} shown):
 ${tape.length === 0 ? "[none recorded — score from lead data only, note 'limited signal' in reasoning if so]" : JSON.stringify(tape, null, 2)}`;
 
-  const res = await fetch("https://api.anthropic.com/v1/messages", {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      "x-api-key": apiKey,
-      "anthropic-version": ANTHROPIC_VERSION,
-    },
-    body: JSON.stringify({
-      model: SCORING_MODEL,
-      max_tokens: MAX_TOKENS,
-      system: OASIS_LEAD_SCORING_PROMPT,
-      messages: [{ role: "user", content: userPrompt }],
-    }),
+  // Subscription, not the paid API. See lib/subscription-infer.ts for what
+  // changes when a call moves onto the queue (persistence, redaction, and why a
+  // timeout is not an answer).
+  const inf = await inferText({
+    source: "lead-scoring",
+    system: OASIS_LEAD_SCORING_PROMPT,
+    prompt: userPrompt,
+    maxTokens: MAX_TOKENS,
+    tenantId: opts.tenantId,
+    modelTier: "smart",
   });
-
-  if (!res.ok) {
-    const detail = await res.text().catch(() => "");
-    throw new Error(`anthropic_${res.status}: ${detail.slice(0, 300)}`);
+  if (!inf.ok) {
+    // Distinct error so the caller can tell "ask again in a moment" from
+    // "inference is down" — this one is an operator clicking a button, so a
+    // retry is the right prompt rather than a recorded failure.
+    throw new Error(inf.pending ? `scoring_pending: ${inf.error}` : `scoring_unavailable: ${inf.error}`);
   }
-
-  const body = (await res.json()) as {
-    content?: Array<{ type: string; text?: string }>;
-  };
-  const text = (body.content || [])
-    .filter((b) => b.type === "text")
-    .map((b) => b.text || "")
-    .join("")
-    .trim();
+  const text = inf.text.trim();
 
   // Strip markdown code fences if Claude added them despite the prompt.
   let cleaned = text;

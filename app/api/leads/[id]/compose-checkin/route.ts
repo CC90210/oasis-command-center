@@ -142,7 +142,7 @@ export async function POST(
         email: profile.email,
         brand: profile.brand,
       },
-    });
+    }, { tenantId: sess.tenantId });
     return NextResponse.json({
       ok: true,
       subject: composed.subject,

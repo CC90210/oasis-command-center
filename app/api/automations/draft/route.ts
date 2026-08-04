@@ -53,7 +53,7 @@ export async function POST(req: NextRequest) {
   }
 
   try {
-    const draft = await draftAutomation(description);
+    const draft = await draftAutomation(description, { tenantId: ctx.tenantId });
     return NextResponse.json({ ok: true, draft });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
