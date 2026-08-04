@@ -229,7 +229,15 @@ for (const bad of [
 }
 
 // ...and public addresses are untouched, including public IP literals.
-for (const good of ["https://example.com/a", "https://8.8.8.8/a", "https://172.32.0.1/a", "https://192.169.0.1/a"]) {
+for (const good of [
+  "https://example.com/a",
+  "https://8.8.8.8/a",
+  "https://172.32.0.1/a",
+  "https://192.169.0.1/a",
+  "https://[2606:4700::1111]/a", // public IPv6
+  "https://[64:ff9b::808:808]/a", // NAT64 translation of 8.8.8.8 — public
+  "https://[::ffff:8.8.8.8]/a", // IPv4-mapped public address
+]) {
   assert.ok(normalizeUrl(good), `still accepts a public target: ${good}`);
 }
 

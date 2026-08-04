@@ -85,6 +85,23 @@ function host(u: URL): string {
  * hostname whose DNS answer is private. The fetcher must still refuse to follow
  * redirects into this space and re-check the resolved address.
  */
+/**
+ * The trailing 32 bits of an IPv4-embedding IPv6 literal, as dotted quad.
+ *
+ * Both spellings have to be understood: a URL may be written
+ * `[::ffff:10.0.0.1]`, but the parser re-serialises it as `[::ffff:a00:1]`, so
+ * checking only the dotted form is bypassed by writing the address the obvious
+ * way and letting the platform convert it.
+ */
+function decodeEmbeddedV4(rest: string): string | null {
+  if (/^\d{1,3}(\.\d{1,3}){3}$/.test(rest)) return rest;
+  const hex = /^([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(rest);
+  if (!hex) return null;
+  const hi = parseInt(hex[1]!, 16);
+  const lo = parseInt(hex[2]!, 16);
+  return `${hi >> 8}.${hi & 255}.${lo >> 8}.${lo & 255}`;
+}
+
 function isBlockedHost(hostname: string): boolean {
   const h = hostname.toLowerCase().replace(/\.$/, "");
   if (!h) return true;
@@ -100,21 +117,20 @@ function isBlockedHost(hostname: string): boolean {
     if (/^f[cd]/.test(v6)) return true; // fc00::/7 unique-local
     if (/^fe[89ab]/.test(v6)) return true; // fe80::/10 link-local
     if (/^ff/.test(v6)) return true; // ff00::/8 multicast, incl. ff02::1 all-nodes
-    if (/^64:ff9b:/.test(v6)) return true; // NAT64 — an IPv4 target in v6 clothing
-    // ::ffff:10.0.0.1 — an IPv4 address wearing an IPv6 costume. The URL parser
-    // re-serialises it in hex (`::ffff:a00:1`), so BOTH spellings have to be
-    // decoded or the dotted-quad check is trivially bypassed.
-    const mapped = /^::ffff:(.+)$/.exec(v6);
-    if (!mapped) return false;
-    const rest = mapped[1]!;
-    if (/^\d{1,3}(\.\d{1,3}){3}$/.test(rest)) return isBlockedHost(rest);
-    const hex = /^([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(rest);
-    if (hex) {
-      const hi = parseInt(hex[1]!, 16);
-      const lo = parseInt(hex[2]!, 16);
-      return isBlockedHost(`${hi >> 8}.${hi & 255}.${lo >> 8}.${lo & 255}`);
-    }
-    return true; // an IPv4-mapped form we cannot decode is refused, not allowed
+
+    /*
+     * Two forms carry an IPv4 address inside a v6 literal: ::ffff:/96
+     * (IPv4-mapped) and 64:ff9b::/96 (NAT64). Neither is blocked or allowed
+     * wholesale — the embedded address is decoded and put through the SAME v4
+     * rules, so ::ffff:10.0.0.1 is refused and 64:ff9b::808:808 (8.8.8.8) is
+     * not. Blanket-rejecting the NAT64 prefix would have refused legitimate
+     * public destinations, which this function otherwise permits.
+     */
+    const embedded = /^(?:::ffff|64:ff9b:):(.+)$/.exec(v6);
+    if (!embedded) return false;
+    const v4 = decodeEmbeddedV4(embedded[1]!);
+    // A form we cannot decode is refused, not allowed.
+    return v4 ? isBlockedHost(v4) : true;
   }
 
   const v4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(h);
