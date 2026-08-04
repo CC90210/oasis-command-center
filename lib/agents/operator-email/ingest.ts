@@ -36,6 +36,13 @@ export interface IngestResult {
    * cursor to just before this instead of freezing it — see markProcessed.
    */
   oldestDeferredAt?: string | null;
+  /**
+   * Deferred messages with NO trusted receipt time. If this is non-zero the
+   * caller must not advance the cursor at all: there is no safe point to stop
+   * behind, and the mailbox cursor is shared across mailboxes, so a timestamp
+   * from one cannot bound a deferral in another.
+   */
+  deferredUntimed: number;
 }
 
 function emailFromHeader(h: string): string {
@@ -100,7 +107,7 @@ export async function ingestMessages(
   messages: MonitoredMessage[],
 ): Promise<IngestResult> {
   const db = getServiceSupabase();
-  const res: IngestResult = { scanned: messages.length, matched: 0, ingested: 0, dropped: 0, skipped: 0, deferred: 0, oldestDeferredAt: null };
+  const res: IngestResult = { scanned: messages.length, matched: 0, ingested: 0, dropped: 0, skipped: 0, deferred: 0, oldestDeferredAt: null, deferredUntimed: 0 };
 
   for (const msg of messages) {
     const fromEmail = emailFromHeader(msg.from);
@@ -191,6 +198,8 @@ export async function ingestMessages(
       if (Number.isFinite(ms) && ms > 0) {
         const at = new Date(ms).toISOString();
         if (!res.oldestDeferredAt || at < res.oldestDeferredAt) res.oldestDeferredAt = at;
+      } else {
+        res.deferredUntimed += 1;
       }
       continue;
     }

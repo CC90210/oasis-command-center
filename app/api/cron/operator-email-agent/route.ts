@@ -88,8 +88,21 @@ async function runAgent(agent: AgentEmailSettings, write: boolean) {
 
   // Only advance the cursor on a real (write) run — a DRY tick must not consume
   // the window, or it silently skips messages the live run should have ingested.
+  /*
+   * A deferral with NO trusted receipt time forces a full hold, even if another
+   * mailbox in the same tick supplied one. The cursor is shared across
+   * mailboxes, so bounding it with the OAuth mailbox's oldest timestamp would
+   * happily step past an untimestamped deferral in the other one — losing it
+   * for good in the branch written to prevent exactly that. Codex review.
+   */
+  const untimed = Object.values(results).reduce((n, r) => n + (r?.deferredUntimed || 0), 0);
+
   if (write) {
-    if (deferred > 0 && oldestDeferred) {
+    if (untimed > 0) {
+      console.warn(
+        `[operator-email] ${untimed} deferred message(s) have no trusted receipt time — holding cursor entirely`,
+      );
+    } else if (deferred > 0 && oldestDeferred) {
       // Clamped to now: internalDate is server-set so it should never be in the
       // future, but the cursor must never jump forward on a bad value either.
       const upTo = new Date(Math.min(Date.parse(oldestDeferred) - 1000, Date.now())).toISOString();
@@ -97,13 +110,6 @@ async function runAgent(agent: AgentEmailSettings, write: boolean) {
         `[operator-email] ${deferred} message(s) awaiting classification — cursor held at ${upTo} (not frozen)`,
       );
       await markProcessed(agent.tenantId, agent.userId, upTo);
-    } else if (deferred > 0) {
-      // Deferred, but no trusted receipt time to hold behind. Do NOT advance:
-      // advancing to now would move the window past the deferred email and lose
-      // it. A stale cursor costs a re-read of a small window.
-      console.warn(
-        `[operator-email] ${deferred} message(s) awaiting classification with no internalDate — holding cursor`,
-      );
     } else {
       await markProcessed(agent.tenantId, agent.userId);
     }
