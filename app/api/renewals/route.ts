@@ -21,7 +21,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { resolveSessionContext } from "@/lib/api-auth";
 import { canWriteCrm } from "@/lib/role-gates";
-import { nextRenewalDate, estCommissionUsd } from "@/lib/renewals/derive";
+import { nextRenewalDate, estCommissionUsd, isTermUnit, type TermUnit } from "@/lib/renewals/derive";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -37,6 +37,8 @@ type Body = {
   funded_amount_usd?: unknown;
   factor_rate?: unknown;
   term_months?: unknown;
+  term_value?: unknown;
+  term_unit?: unknown;
   points_pct?: unknown;
   funded_at?: unknown;
   notes?: unknown;
@@ -277,12 +279,16 @@ export async function POST(req: NextRequest) {
   // Without it, term_months: "abc" parses to null, looks identical to omitted,
   // and the request quietly succeeds having thrown the operator's input away —
   // leaving no renewal date on a deal they thought they had dated.
-  const term = optionalNum(body.term_months);
-  const term_months = term.value;
-  if (!term.provided) errors.term_months = "Term is required.";
-  else if (term_months === null) errors.term_months = "Term must be a number of months.";
-  else if (term_months !== null && (!Number.isInteger(term_months) || term_months < 1 || term_months > 60)) {
-    errors.term_months = "Term must be a whole number of months, 1 to 60.";
+  const legacyTerm = body.term_value === undefined && body.term_months !== undefined;
+  const term = optionalNum(legacyTerm ? body.term_months : body.term_value);
+  const term_value = term.value;
+  const term_unit: TermUnit | null = legacyTerm ? "months" : (isTermUnit(body.term_unit) ? body.term_unit : null);
+  const maxByUnit: Record<TermUnit, number> = { months: 60, weeks: 260, days: 1825 };
+  if (!term.provided) errors.term_value = "Term is required.";
+  else if (term_value === null || !Number.isInteger(term_value)) errors.term_value = "Term must be a whole number.";
+  if (!term_unit) errors.term_unit = "Choose months, weeks, or days.";
+  else if (term_value !== null && (term_value < 1 || term_value > maxByUnit[term_unit])) {
+    errors.term_value = `Term must be between 1 and ${maxByUnit[term_unit]} ${term_unit}.`;
   }
 
   const factor = optionalNum(body.factor_rate);
@@ -305,7 +311,7 @@ export async function POST(req: NextRequest) {
   }
 
   // ── derive the two fields the operator does NOT type ───────────────────────
-  const next_renewal_date = nextRenewalDate(funded_at, term_months);
+  const next_renewal_date = nextRenewalDate(funded_at, term_value, term_unit!);
   const est_commission_usd = estCommissionUsd(funded_amount_usd, points_pct);
 
   // ── duplicate guard ────────────────────────────────────────────────────────
@@ -355,7 +361,9 @@ export async function POST(req: NextRequest) {
       lender_name,
       funded_amount_usd,
       factor_rate,
-      term_months,
+      term_months: term_unit === "months" ? term_value : null,
+      term_value,
+      term_unit,
       points_pct,
       funded_at,
       next_renewal_date,
