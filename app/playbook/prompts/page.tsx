@@ -22,9 +22,18 @@ export default function PromptsLibraryPage() {
   // Client-deployment prompts are hidden from the operator page (2026-08-04
   // consolidation audit). They're the "SSH'd into a client's machine"
   // toolkit — 17 entries that pushed CC's own daily prompts below the fold
-  // on the surface he opens every morning. The entries are NOT deleted:
-  // they stay in PROMPTS_LIBRARY and a client deployment surfaces them
-  // through its own tenant-scoped manifest view.
+  // on the surface he opens every morning.
+  //
+  // They are NOT orphaned. All 17 render on /playbook/client-deploy, which
+  // looks each one up by id (PROMPT_BY_ID) and shows it at the deployment
+  // phase where it's actually used — a better home than an alphabetical
+  // dump, since that page is where an operator IS when they need them.
+  //
+  // Two of them (client-wire-integrations, client-cron-scope) had no step
+  // referencing them and were reachable ONLY from this page, so hiding them
+  // here made them unreachable entirely; Codex caught it in review and they
+  // now have steps in phases 04 and 05. If you add a client-audience prompt,
+  // give it a step on that page or it will be dead data the moment it lands.
   const visiblePrompts = PROMPTS_LIBRARY.filter((p) => p.audience !== "client");
 
   // Operator section: prompts tagged "operator". Shared ones render in
