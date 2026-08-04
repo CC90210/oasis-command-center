@@ -30,8 +30,8 @@ So it is a **training instrument** first, a content dashboard second.
 | Portal boundaries + chrome | **MERGED** in the same commit |
 | Production deploy | **READY**, oasisai.work serving 200 |
 | `FOUNDERS_TENANT_IDS` | **SET** to `ef8d389e-3f15-43f2-ae00-3660f69a1452` (CC's tenant) |
-| Migration 133 | 🔴 **NOT APPLIED — this is the blocker.** See §3 |
-| Link ingestion (PR) | Pushed, branch `apex/founders-marketing-v2`, PR not yet opened |
+| Migration 133 | ✅ **APPLIED to production 2026-08-04.** Verified: 7 tables, RLS enabled + forced, 2 policies each, 0 grants to public roles. See §3 |
+| Link ingestion (PR) | ✅ **MERGED** to `main` 2026-08-04, PR #120, squash `aa4dbb5` |
 | Extraction worker | ❌ not built |
 | Inspiration → ad generation | ❌ not built |
 | Studio/Library visual upgrade | ❌ not built |
@@ -45,13 +45,29 @@ profile on tenant `ef8d389e-…` and widen the allowlist.
 
 ---
 
-## 3. 🔴 THE BLOCKER — apply migration 133
+## 3. ✅ RESOLVED — migration 133 is applied
 
-Nothing persists until this runs. Every reader degrades to an empty state, so the UI works but
-stores nothing; the ingest API returns `503 migration_pending`.
+**Applied 2026-08-04 by APEX**, not by hand. Verification output is at the end of this section.
 
-**Where:** Supabase SQL Editor, project **`phctllmtsogkovoilwos`** (the one containing `tenants`,
-`user_profiles`, `drip_runs`, `funded_deals`).
+Until it ran, nothing persisted: every reader degraded to an empty state, so the UI worked but
+stored nothing, and the ingest API returned `503 migration_pending`.
+
+**How to apply this or any future migration — do not paste into a dashboard:**
+
+```
+python scripts/apply_migration.py <repo>/database/<n>_<name>.sql \
+  --project bravo --allow-privileges --allow-rls
+```
+
+from the **JARVIS repo, regular PowerShell**. It uses the Management API token in `.env.agents`.
+`--allow-privileges` is required for the standard `revoke all ... from anon, authenticated` ritual;
+it does **not** unlock irreversible verbs or any `grant ... to anon/authenticated/public`, both of
+which the wrapper refuses under every flag.
+
+**Target project:** **`phctllmtsogkovoilwos`** (the one containing `tenants`, `user_profiles`,
+`drip_runs`, `funded_deals`).
+
+The SQL below is kept for reference; the file of record is `database/133_marketing_hub.sql`.
 
 Idempotent, additive, re-runnable. Touches nothing existing.
 
@@ -334,9 +350,33 @@ where table_schema='public' and table_name like 'marketing_%'
 order by table_name;
 ```
 
-Expect **7 rows, all `rls_on = true`**: `marketing_asset` (23 cols), `marketing_asset_media` (12),
-`marketing_corpus` (18), `marketing_event` (7), `marketing_metric_daily` (16),
-`marketing_request` (14), `marketing_review` (8).
+Expect **7 rows, all `rls_on = true`**: `marketing_asset` (22 cols), `marketing_asset_media` (12),
+`marketing_corpus` (19), `marketing_event` (7), `marketing_metric_daily` (16),
+`marketing_request` (15), `marketing_review` (9).
+
+> These counts were 23/18/14/8 in an earlier revision of this doc, written before the CodeRabbit
+> fix `1687ef0` reshaped the schema. **The counts above are the ones actually observed in
+> production on 2026-08-04** and they match the migration file. If you hit the old numbers
+> somewhere, the doc is stale, not the schema.
+
+`rls_on = true` alone is a weak check — a table can have RLS enabled and still be readable
+through a stray grant. The stronger query, which is what was actually run:
+
+```sql
+select c.relname as tbl,
+       c.relrowsecurity as rls_on,
+       c.relforcerowsecurity as rls_forced,
+       (select count(*) from pg_policies p
+          where p.schemaname='public' and p.tablename=c.relname) as policies,
+       (select count(*) from information_schema.role_table_grants g
+          where g.table_schema='public' and g.table_name=c.relname
+            and g.grantee in ('anon','authenticated','PUBLIC')) as public_grants
+from pg_class c join pg_namespace n on n.oid=c.relnamespace
+where n.nspname='public' and c.relkind='r' and c.relname like 'marketing\_%'
+order by 1;
+```
+
+Expect all 7 rows: `rls_on=t`, `rls_forced=t`, `policies=2`, **`public_grants=0`**.
 
 If `create extension pg_trgm` errors on permissions, **skip that one line** — it is almost
 certainly already enabled (`find_similar_merchants` uses it). Everything else still applies.
