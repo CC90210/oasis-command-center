@@ -95,18 +95,34 @@ update public.application_underwriting
 --    where status = 'pending'
 --      and (triggered_by is distinct from 'manual' and triggered_by is distinct from 'rerun');
 --
--- (b) Nothing was claimed out from under the update. This counts rows that were
---     PENDING at snapshot and are PARSING now — a transition, not a level, so
---     pre-existing in-flight rows cannot hide it and cannot trigger it:
+-- (b) EVERY row that was pending at snapshot actually got retired. Asked as
+--     "does it carry the retirement message", not "is it parsing right now":
+--     a row claimed during the window can reach complete or error before you
+--     run this, and a status check would then report clean while the read was
+--     billed. Outcome-based, so it holds however long you take to check:
 --
---   select count(*) as claimed_during_migration
---     from public.application_underwriting a
---     join public.uw_backlog_snapshot s on s.id = a.id
+--   select count(*) as escaped_the_retirement
+--     from public.uw_backlog_snapshot s
+--     join public.application_underwriting a on a.id = s.id
 --    where s.status_at_snapshot = 'pending'
---      and a.status = 'parsing';
+--      and (a.status <> 'error'
+--           or coalesce(a.error_message, '') not like 'Queued automatically by an older version%');
 --
--- If (b) is non-zero the consumer was still live and those rows are being billed
--- right now. Stop it, wait for them to settle, then re-run step 2.
+-- (coalesce because `null not like ...` is NULL, not true — without it a row
+--  with no message would slip through the very check meant to catch it.)
+--
+-- If (b) is non-zero, those rows escaped the update: the consumer was still
+-- live and claimed them. Stop it, then list them and decide per row —
+--
+--   select a.id, a.application_id, a.status, a.run_at
+--     from public.uw_backlog_snapshot s
+--     join public.application_underwriting a on a.id = s.id
+--    where s.status_at_snapshot = 'pending'
+--      and (a.status <> 'error'
+--           or coalesce(a.error_message, '') not like 'Queued automatically by an older version%');
+--
+-- — a row now 'complete' was already paid for and is best left alone; one back
+-- at 'pending' is cleared by re-running step 2.
 
 -- ── STEP 4. Clean up (only once step 3 reads 0 / 0). ─────────────────────
 --
