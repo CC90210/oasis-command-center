@@ -129,15 +129,37 @@ export async function ingestMessages(
     // Intelligence (Fable 5) — matched email only, so no personal/unmatched mail
     // ever reaches the model. Lender replies additionally get terms/decline
     // extracted (the learning signal). Both classifiers fence + fail closed.
-    // Tenant-scoped for the same reason as the lender classifier below: this
-    // one now queues through the subscription seam, so its prompt — which
-    // carries merchant email content — is PERSISTED in inference_jobs and must
-    // carry its owner.
-    const cls = lead
-      ? await classifyDealEmail(msg.subject, msg.body, { tenantId: args.tenantId })
-      : { type: "other" as const, needs_attention: false, summary: "" };
+    /*
+     * DRY RUN SPENDS NOTHING. Both classifiers now queue through the
+     * subscription seam, which PERSISTS the prompt in inference_jobs and
+     * consumes CLI work. This function documents dryRun as "logs only", and the
+     * operator cron defaults to it — so classifying here meant a validation tick
+     * repeatedly storing email content and doing real inference for output
+     * nobody keeps. Dry runs report the match, not a classification.
+     * Caught by Codex review 2026-08-04.
+     *
+     * Tenant-scoped for the same reason as the lender classifier below: the
+     * prompt carries merchant email content and is persisted, so it must carry
+     * its owner.
+     */
+    const cls =
+      lead && !args.dryRun
+        ? await classifyDealEmail(msg.subject, msg.body, { tenantId: args.tenantId })
+        : { type: "other" as const, needs_attention: false, summary: "" };
+
+    /*
+     * Still in flight — defer, do NOT persist. There is no cursor to advance
+     * (ingest dedupes on metadata.gmail_message_id), so leaving this message
+     * unwritten simply means the next tick sees it again, and the classifier's
+     * dedupeKey collects the finished job rather than queueing a twin.
+     */
+    if (cls.pending) {
+      res.skipped += 1;
+      continue;
+    }
+
     let lenderEnrichment: Record<string, unknown> = {};
-    if (lead && cls.type === "lender_reply") {
+    if (lead && !args.dryRun && cls.type === "lender_reply") {
       try {
         // Tenant-scope the queued prompt: the classifier now PERSISTS this
         // content in inference_jobs, so it must carry its owner.
@@ -160,7 +182,9 @@ export async function ingestMessages(
     };
 
     if (args.dryRun) {
-      console.log(`[operator-email] DRY ${outbound ? "out" : "in"} msg=${msg.id} lead=${lead?.id || "unmatched"} type=${cls.type}${lenderEnrichment.lender_category ? "/" + lenderEnrichment.lender_category : ""} "${msg.subject.slice(0, 50)}"`);
+      // type is deliberately absent: a dry run does not classify, so printing
+      // "other" here would read as a real verdict on every message.
+      console.log(`[operator-email] DRY ${outbound ? "out" : "in"} msg=${msg.id} lead=${lead?.id || "unmatched"} type=not-classified(dry) "${msg.subject.slice(0, 50)}"`);
       res.ingested += 1;
       continue;
     }

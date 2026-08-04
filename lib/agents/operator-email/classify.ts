@@ -21,12 +21,19 @@
 import "server-only";
 import { createHash } from "node:crypto";
 import { queueInfer } from "@/lib/bridge-infer";
+import { redactAll } from "@/lib/secret-redaction";
 
 export type DealEmailType = "lender_reply" | "merchant_reply" | "internal" | "other";
 export interface DealEmailClass {
   type: DealEmailType;
   needs_attention: boolean;
   summary: string;
+  /**
+   * The job is still running — this is NOT a classification. The caller must
+   * defer the message rather than persist it, or a slow queue would be recorded
+   * as a real "other" and the true answer never collected.
+   */
+  pending?: boolean;
 }
 
 const TYPES: DealEmailType[] = ["lender_reply", "merchant_reply", "internal", "other"];
@@ -57,11 +64,20 @@ export async function classifyDealEmail(
 ): Promise<DealEmailClass> {
   const fallback: DealEmailClass = { type: "other", needs_attention: false, summary: "" };
 
-  const content = `Subject: ${String(subject || "").slice(0, 300)}\n\n<<<UNTRUSTED_EMAIL>>>\n${String(body || "").slice(0, 3500)}\n<<<END_UNTRUSTED>>>`;
+  /*
+   * REDACT BEFORE QUEUEING. The direct API call this replaced was transient —
+   * queueInfer PERSISTS the prompt in inference_jobs, so a credential or key
+   * quoted inside a deal email would be stored in plaintext. The fence is
+   * defence in depth, not a reason to skip redaction. [[redact-pii-logs]]
+   * Missed on the first cut of this migration; caught by Codex review.
+   */
+  const content = redactAll(
+    `Subject: ${String(subject || "").slice(0, 300)}\n\n<<<UNTRUSTED_EMAIL>>>\n${String(body || "").slice(0, 3500)}\n<<<END_UNTRUSTED>>>`,
+  );
 
   // Content-addressed so a job that outlives one tick's budget is adopted next
-  // tick instead of queueing an identical twin every scan. Hashed over exactly
-  // what gets sent.
+  // tick instead of queueing an identical twin every scan. Hashed AFTER
+  // redaction so the key matches what is actually stored and sent.
   const dedupeKey = createHash("sha256").update(content).digest("hex").slice(0, 32);
 
   let q: Awaited<ReturnType<typeof queueInfer>>;
@@ -86,6 +102,21 @@ export async function classifyDealEmail(
   }
 
   if (!q.ok) {
+    /*
+     * A TIMEOUT IS NOT AN ANSWER. queueInfer leaves the job running and reports
+     * timedOut; the dedupeKey means the next tick collects the finished result
+     * instead of queueing a twin. Folding that into the "other" fallback would
+     * persist a wrong classification and the real one would never be collected
+     * — a lender reply would silently lose its attention flag and its extracted
+     * terms every time the serial consumer happened to be busy. Say pending and
+     * let the caller defer. A STALLED queue is reported with timedOut false, so
+     * a dead daemon still surfaces as a genuine failure rather than waiting
+     * forever. Caught by Codex review.
+     */
+    if (q.timedOut) {
+      console.warn("[operator-email.classify] still in flight, deferring:", q.error);
+      return { ...fallback, pending: true };
+    }
     console.error("[operator-email.classify] inference unavailable:", q.error);
     return fallback;
   }
