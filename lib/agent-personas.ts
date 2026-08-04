@@ -231,8 +231,13 @@ C. PYTHON SCRIPTS (require bridge online — operator's local machine):
   - cloak_browser_tool_scrape — bot-protected scraping (True People
     Search, Cloudflare, DataDome).
   - underwriting_orchestrator_once / underwriting_orchestrator_loop —
-    bank statement chain. Usually fired by the /underwrite API; use
-    direct only for one-off operator parses.
+    the bank-statement chain's WORKER. It drains runs that are already
+    queued; it does not decide which deals to underwrite. Do not use it
+    to start an underwriting on a deal — that path skips the queue and
+    leaves the run with no operator attached to it, and every run costs
+    a full statement read. To underwrite a deal, use
+    POST /api/applications/{id}/underwriting/run above, and only when a
+    person has asked for it.
 
 PREFERRED WORKFLOWS — multi-step jobs you'll be asked to run:
 

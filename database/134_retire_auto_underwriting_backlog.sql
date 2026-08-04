@@ -18,6 +18,30 @@
 -- state the UI renders with a Re-run button, so each deal reappears as "needs
 -- underwriting" and one click queues a fresh, attributed run. Nothing is lost.
 
+-- ══ ORDER MATTERS. STOP THE CONSUMER FIRST. ═════════════════════════════
+--
+-- The underwriting orchestrator is RUNNING while you read this, and it claims
+-- pending rows by moving them to 'parsing'. If it claims one between step 1 and
+-- step 2 below, that row is no longer 'pending', this update skips it, and the
+-- statement read is billed anyway — the one outcome the migration exists to
+-- prevent. The window is small and the spend is real, so do not gamble on it.
+--
+-- Before running anything below:
+--
+--   1. Turn OFF "SunBiz Underwriting Orchestrator" in the dashboard's
+--      scheduled-jobs screen (the same switch the Cron tab exposes), and
+--      confirm it reads disabled.
+--   2. If the VPS orchestrator loop is running outside that switch, stop it
+--      there too. Ask MCC — the VPS is theirs. See JARVIS
+--      docs/UNDERWRITING_CUTOVER.md §0, which has to be resolved for the
+--      cutover regardless; this is the same stop.
+--   3. Only then run steps 1-3 here, and re-check step 3 before turning
+--      anything back on.
+--
+-- Rows already at 'parsing' when you stop it are legitimately mid-run and are
+-- deliberately left alone; they finish or they get reclaimed. This migration is
+-- about the queue, not about work in flight.
+--
 -- ── 1. LOOK FIRST. Run this on its own and read the number. ──────────────
 --
 --   select count(*) as will_be_retired,
@@ -44,11 +68,20 @@ update public.application_underwriting
 -- NULL comparison would evaluate to NULL, quietly leaving those rows pending
 -- forever — the one shape this migration exists to clear.
 
--- ── 3. Verify. Expect 0. ─────────────────────────────────────────────────
+-- ── 3. Verify. Expect 0 for BOTH. ────────────────────────────────────────
 --
 --   select count(*) as still_pending_and_unrequested
 --     from public.application_underwriting
 --    where status = 'pending'
+--      and (triggered_by is distinct from 'manual' and triggered_by is distinct from 'rerun');
+--
+-- And check nothing was claimed out from under the update while it ran — if
+-- this is non-zero, the consumer was still live and those rows are being billed
+-- right now. Stop it, then wait for them to settle and re-run step 2.
+--
+--   select count(*) as claimed_during_migration
+--     from public.application_underwriting
+--    where status = 'parsing'
 --      and (triggered_by is distinct from 'manual' and triggered_by is distinct from 'rerun');
 
 -- ── ROLLBACK, if this was applied by mistake ─────────────────────────────
