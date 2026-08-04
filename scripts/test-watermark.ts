@@ -6,7 +6,8 @@
  */
 import { writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { watermarkBankStatement } from "../lib/forms/watermark";
 
 const PDF_MAGIC = Buffer.from("%PDF");
@@ -123,12 +124,27 @@ async function main() {
   // The fixture is committed (see scripts/make-encrypted-pdf-fixture.py) so this
   // check never silently degrades to a skip on a machine without qpdf.
   const { readFileSync } = await import("node:fs");
-  const fixture = join(import.meta.dirname, "..", "tests", "fixtures", "encrypted-statement.pdf");
+  /*
+   * `fileURLToPath(import.meta.url)`, not `import.meta.dirname`.
+   *
+   * package.json has no `"type": "module"`, so whether this file is ESM depends
+   * on HOW it is launched. The documented command (`--import tsx`) makes it ESM
+   * and `import.meta.dirname` resolves; `npx tsx scripts/test-watermark.ts`
+   * does not, and there `import.meta.dirname` is undefined — `join(undefined,
+   * …)` then throws a TypeError from OUTSIDE the try below, so the run dies
+   * with a path error instead of reporting on the encrypted PDF. Loud, but it
+   * points at the wrong thing. `import.meta.url` is defined in both, and
+   * predates the Node 20.11 that `dirname` needs. Flagged by CodeRabbit on
+   * PR #119.
+   */
+  const here = dirname(fileURLToPath(import.meta.url));
+  const fixture = join(here, "..", "tests", "fixtures", "encrypted-statement.pdf");
   let encBytes: Buffer | null = null;
   try {
     encBytes = readFileSync(fixture);
   } catch (e) {
     console.error("FAIL: encrypted fixture missing —", e instanceof Error ? e.message : e);
+    console.error(`      looked in: ${fixture}`);
     console.error("      regenerate with: python scripts/make-encrypted-pdf-fixture.py");
     failures++;
   }
