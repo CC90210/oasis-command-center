@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { checkCronAuth } from "@/lib/cron-auth";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { lenderContact, lenderRenewalMessage, notifyRenewalAgent, resolveAgentMailbox } from "@/lib/renewals/outreach";
+import { formatTerm, isTermUnit } from "@/lib/renewals/derive";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
@@ -26,7 +27,8 @@ async function run(req: NextRequest) {
     const deal = raw as {
       id: string; tenant_id: string; lead_id: string | null; lender_id: string | null;
       merchant_name: string; lender_name: string | null; funded_amount_usd: number;
-      funded_at: string; term_months: number; next_renewal_date: string;
+      funded_at: string; term_months: number | null; term_value: number | null;
+      term_unit: string | null; next_renewal_date: string;
     };
     const existing = await db.from("renewal_outreach_events").select("id").eq("funded_deal_id", deal.id).eq("event_kind", "50_percent").maybeSingle();
     if (existing.data) continue;
@@ -51,7 +53,8 @@ async function run(req: NextRequest) {
     const notice = await notifyRenewalAgent({
       db, tenantId: deal.tenant_id, leadId: deal.lead_id, agentId,
       merchant: deal.merchant_name, lender: String(lender.name || deal.lender_name || "Unlinked"),
-      amount: Number(deal.funded_amount_usd), fundedAt: deal.funded_at, term: Number(deal.term_months),
+      amount: Number(deal.funded_amount_usd), fundedAt: deal.funded_at,
+      termLabel: formatTerm(Number(deal.term_value ?? deal.term_months), isTermUnit(deal.term_unit) ? deal.term_unit : "months"),
       thresholdDate: deal.next_renewal_date, dealId: deal.id, status,
     });
     await db.from("renewal_outreach_events").update({

@@ -19,6 +19,19 @@
  */
 export const RENEWAL_TERM_FRACTION = 0.5;
 
+export const TERM_UNITS = ["months", "weeks", "days"] as const;
+export type TermUnit = (typeof TERM_UNITS)[number];
+
+export function isTermUnit(value: unknown): value is TermUnit {
+  return typeof value === "string" && TERM_UNITS.includes(value as TermUnit);
+}
+
+export function formatTerm(value: number, unit: TermUnit): string {
+  if (!Number.isFinite(value) || value <= 0) return "Unknown term";
+  const singular = unit.slice(0, -1);
+  return `${value} ${value === 1 ? singular : unit}`;
+}
+
 /** Days used for the fractional half-month on an odd term. */
 const DAYS_PER_HALF_MONTH = 15;
 
@@ -50,31 +63,39 @@ function addMonthsClamped(d: Date, months: number): Date {
 }
 
 /**
- * When a deal funded on `fundedAt` with a `termMonths` term becomes renewable.
+ * When a deal funded on `fundedAt` with a term becomes renewable.
  *
  * Returns null when either input is missing or unusable — a null renewal date
  * is a first-class state the tab already renders ("no date"), and is far better
  * than inventing one from a guess.
  *
  * @param fundedAt  calendar date, "YYYY-MM-DD"
- * @param termMonths whole months, 1..60
+ * @param termValue whole-number term in the selected unit
  */
 export function nextRenewalDate(
   fundedAt: string | null | undefined,
-  termMonths: number | null | undefined,
+  termValue: number | null | undefined,
+  unit: TermUnit = "months",
   fraction: number = RENEWAL_TERM_FRACTION,
 ): string | null {
   if (!fundedAt || !isValidYmd(fundedAt)) return null;
-  if (typeof termMonths !== "number" || !Number.isFinite(termMonths) || termMonths <= 0) return null;
+  if (typeof termValue !== "number" || !Number.isFinite(termValue) || termValue <= 0) return null;
+  if (!isTermUnit(unit)) return null;
 
-  const halfTerm = termMonths * fraction;
+  const start = new Date(`${fundedAt}T00:00:00Z`);
+  if (unit !== "months") {
+    const days = termValue * (unit === "weeks" ? 7 : 1);
+    start.setUTCDate(start.getUTCDate() + Math.round(days * fraction));
+    return start.toISOString().slice(0, 10);
+  }
+
+  const halfTerm = termValue * fraction;
   const wholeMonths = Math.floor(halfTerm);
   // An odd term leaves half a month; express it as days rather than letting a
   // fractional month silently truncate (a 9-month term is renewable at 4.5
   // months, not 4).
   const extraDays = Math.round((halfTerm - wholeMonths) * 2 * DAYS_PER_HALF_MONTH);
 
-  const start = new Date(`${fundedAt}T00:00:00Z`);
   const withMonths = addMonthsClamped(start, wholeMonths);
   withMonths.setUTCDate(withMonths.getUTCDate() + extraDays);
   return withMonths.toISOString().slice(0, 10);

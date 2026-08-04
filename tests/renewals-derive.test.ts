@@ -6,7 +6,7 @@
  * in the wrong column. Worth pinning down properly.
  */
 import assert from "node:assert/strict";
-import { nextRenewalDate, estCommissionUsd, RENEWAL_TERM_FRACTION } from "../lib/renewals/derive";
+import { nextRenewalDate, estCommissionUsd, formatTerm, RENEWAL_TERM_FRACTION } from "../lib/renewals/derive";
 
 // The rule Adon locked on 2026-07-29.
 assert.equal(RENEWAL_TERM_FRACTION, 0.5, "renewable at 50% of term");
@@ -21,6 +21,14 @@ assert.equal(nextRenewalDate("2026-06-30", 24), "2027-06-30", "24mo → +12 mont
 assert.equal(nextRenewalDate("2026-01-01", 9), "2026-05-16", "9mo → +4 months +15 days, not +4");
 assert.equal(nextRenewalDate("2026-01-01", 3), "2026-02-16", "3mo → +1 month +15 days");
 assert.equal(nextRenewalDate("2026-01-01", 1), "2026-01-16", "1mo → +15 days");
+
+// Week/day terms use calendar days at the same 50% threshold.
+assert.equal(nextRenewalDate("2026-01-01", 10, "weeks"), "2026-02-05", "10 weeks → +35 days");
+assert.equal(nextRenewalDate("2026-01-01", 30, "days"), "2026-01-16", "30 days → +15 days");
+assert.equal(nextRenewalDate("2026-01-01", 1, "week" as never), null, "unknown unit fails closed");
+assert.equal(formatTerm(1, "days"), "1 day");
+assert.equal(formatTerm(12, "weeks"), "12 weeks");
+assert.equal(formatTerm(Number.NaN, "months"), "Unknown term");
 
 // ── month-end clamping: JS would silently roll over ──────────────────────────
 {

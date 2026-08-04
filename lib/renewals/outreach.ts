@@ -31,7 +31,7 @@ export async function notifyRenewalAgent(input: {
   lender: string;
   amount: number;
   fundedAt: string;
-  term: number;
+  termLabel: string;
   thresholdDate: string;
   dealId: string;
   status: string;
@@ -39,7 +39,7 @@ export async function notifyRenewalAgent(input: {
   const lines = [
     `Renewal threshold reached — ${input.merchant}`,
     `Lender: ${input.lender}`, `Funded: $${input.amount.toLocaleString()} on ${input.fundedAt}`,
-    `Term: ${input.term} months`, `50% date: ${input.thresholdDate}`,
+    `Term: ${input.termLabel}`, `50% date: ${input.thresholdDate}`,
     `Outreach: ${input.status}`, `Open: ${process.env.NEXT_PUBLIC_APP_URL || ""}/t/sun/renewals?renewal=${input.dealId}`,
   ];
   const text = lines.join("\n");
