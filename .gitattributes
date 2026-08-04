@@ -1,0 +1,16 @@
+# Binary test fixtures must never go through line-ending normalization.
+#
+# tests/fixtures/encrypted-statement.pdf is an ENCRYPTED PDF: its object stream
+# offsets and encryption dictionary are byte-exact. Git on Windows was about to
+# apply LF->CRLF to it ("LF will be replaced by CRLF" on `git add`), which would
+# have shifted every byte after the first newline and produced a fixture that
+# fails to parse on checkout — a broken raster-path test that looks like a
+# broken watermarker.
+*.pdf binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.webp binary
+*.ttf binary
+*.wasm binary
+*.ico binary
