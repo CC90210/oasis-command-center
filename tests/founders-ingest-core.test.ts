@@ -216,6 +216,9 @@ for (const bad of [
   "http://[fe80::1]/",
   "http://[fd00::1]/",
   "http://[::ffff:10.0.0.1]/",
+  "http://[ff02::1]/", // multicast all-nodes
+  "http://[ff05::2]/", // site-local multicast
+  "http://[64:ff9b::a00:1]/", // NAT64-embedded 10.0.0.1
   "http://localhost:3000/",
   "http://printer.local/",
   "http://vault.internal/",

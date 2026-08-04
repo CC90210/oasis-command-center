@@ -99,6 +99,8 @@ function isBlockedHost(hostname: string): boolean {
     if (v6 === "::1" || v6 === "::") return true;
     if (/^f[cd]/.test(v6)) return true; // fc00::/7 unique-local
     if (/^fe[89ab]/.test(v6)) return true; // fe80::/10 link-local
+    if (/^ff/.test(v6)) return true; // ff00::/8 multicast, incl. ff02::1 all-nodes
+    if (/^64:ff9b:/.test(v6)) return true; // NAT64 — an IPv4 target in v6 clothing
     // ::ffff:10.0.0.1 — an IPv4 address wearing an IPv6 costume. The URL parser
     // re-serialises it in hex (`::ffff:a00:1`), so BOTH spellings have to be
     // decoded or the dotted-quad check is trivially bypassed.
