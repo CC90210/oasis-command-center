@@ -176,8 +176,22 @@ export async function ingestMessages(
      */
     if (cls.pending) {
       res.deferred += 1;
-      const at = toISO(msg.date);
-      if (at && (!res.oldestDeferredAt || at < res.oldestDeferredAt)) res.oldestDeferredAt = at;
+      /*
+       * internalDate, NOT the Date header. The header is sender-controlled and
+       * Gmail passes it through verbatim: a forged future date would push the
+       * cursor past legitimate later mail, and a missing or unparseable one
+       * would leave this null. internalDate is Gmail's own receipt time.
+       * Codex review 2026-08-04.
+       *
+       * If it is absent we leave oldestDeferredAt null, and the caller HOLDS
+       * the cursor rather than advancing — a stale cursor costs a re-read, an
+       * advanced one costs the email.
+       */
+      const ms = Number(msg.internalDate);
+      if (Number.isFinite(ms) && ms > 0) {
+        const at = new Date(ms).toISOString();
+        if (!res.oldestDeferredAt || at < res.oldestDeferredAt) res.oldestDeferredAt = at;
+      }
       continue;
     }
 

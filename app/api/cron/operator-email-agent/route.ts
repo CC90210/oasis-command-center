@@ -90,11 +90,20 @@ async function runAgent(agent: AgentEmailSettings, write: boolean) {
   // the window, or it silently skips messages the live run should have ingested.
   if (write) {
     if (deferred > 0 && oldestDeferred) {
-      const upTo = new Date(Date.parse(oldestDeferred) - 1000).toISOString();
+      // Clamped to now: internalDate is server-set so it should never be in the
+      // future, but the cursor must never jump forward on a bad value either.
+      const upTo = new Date(Math.min(Date.parse(oldestDeferred) - 1000, Date.now())).toISOString();
       console.warn(
         `[operator-email] ${deferred} message(s) awaiting classification — cursor held at ${upTo} (not frozen)`,
       );
       await markProcessed(agent.tenantId, agent.userId, upTo);
+    } else if (deferred > 0) {
+      // Deferred, but no trusted receipt time to hold behind. Do NOT advance:
+      // advancing to now would move the window past the deferred email and lose
+      // it. A stale cursor costs a re-read of a small window.
+      console.warn(
+        `[operator-email] ${deferred} message(s) awaiting classification with no internalDate — holding cursor`,
+      );
     } else {
       await markProcessed(agent.tenantId, agent.userId);
     }
