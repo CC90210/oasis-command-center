@@ -81,10 +81,19 @@ export async function inferText(args: {
   const prompt = redactAll(args.prompt);
   const system = redactAll(args.system);
 
-  // tenantId is IN the key: without it, two tenants producing an identical
-  // prompt share a job, and whichever asks second collects the other's answer.
+  /*
+   * tenantId is IN the key: without it, two tenants producing an identical
+   * prompt share a job, and whichever asks second collects the other's answer.
+   *
+   * JSON.stringify, not a delimiter. Joining with "|" is ambiguous because a
+   * system prompt or a workflow persona overlay may itself contain that
+   * character: (system "a", prompt "b|c") and (system "a|b", prompt "c") hash
+   * identically, and one request adopts the other's unrelated job. JSON quotes
+   * and escapes each field, so the boundaries survive any content.
+   * Codex review 2026-08-04.
+   */
   const dedupeKey = createHash("sha256")
-    .update(`${args.tenantId ?? "no-tenant"}|${args.source}|${system}|${prompt}`)
+    .update(JSON.stringify([args.tenantId ?? null, args.source, system, prompt]))
     .digest("hex")
     .slice(0, 32);
 
