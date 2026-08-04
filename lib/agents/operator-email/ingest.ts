@@ -129,8 +129,12 @@ export async function ingestMessages(
     // Intelligence (Fable 5) — matched email only, so no personal/unmatched mail
     // ever reaches the model. Lender replies additionally get terms/decline
     // extracted (the learning signal). Both classifiers fence + fail closed.
+    // Tenant-scoped for the same reason as the lender classifier below: this
+    // one now queues through the subscription seam, so its prompt — which
+    // carries merchant email content — is PERSISTED in inference_jobs and must
+    // carry its owner.
     const cls = lead
-      ? await classifyDealEmail(msg.subject, msg.body)
+      ? await classifyDealEmail(msg.subject, msg.body, { tenantId: args.tenantId })
       : { type: "other" as const, needs_attention: false, summary: "" };
     let lenderEnrichment: Record<string, unknown> = {};
     if (lead && cls.type === "lender_reply") {
