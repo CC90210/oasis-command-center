@@ -120,7 +120,7 @@ Remember: sign off with first_name on its own line, then "OASIS AI Solutions" on
 
 export async function composeCheckin(
   input: ComposeCheckinInput,
-  opts?: { tenantId?: string | null },
+  opts: { tenantId: string | null },
 ): Promise<ComposeCheckinResult> {
   // Subscription, not the paid API. See lib/subscription-infer.ts.
   const inf = await inferText({
@@ -128,7 +128,7 @@ export async function composeCheckin(
     system: OASIS_CHECKIN_COMPOSE_PROMPT,
     prompt: buildUserPrompt(input),
     maxTokens: MAX_TOKENS,
-    tenantId: opts?.tenantId ?? null,
+    tenantId: opts.tenantId,
     modelTier: "smart",
   });
   if (!inf.ok) {

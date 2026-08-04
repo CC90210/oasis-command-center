@@ -90,7 +90,7 @@ function buildUserPrompt(input: RotationComposeInput): string {
 
 export async function composeRotationSuggestion(
   input: RotationComposeInput,
-  opts?: { tenantId?: string | null },
+  opts: { tenantId: string | null },
 ): Promise<RotationComposeResult> {
   // Subscription, not the paid API. See lib/subscription-infer.ts.
   const inf = await inferText({
@@ -98,7 +98,7 @@ export async function composeRotationSuggestion(
     system: SYSTEM_PROMPT,
     prompt: buildUserPrompt(input),
     maxTokens: MAX_TOKENS,
-    tenantId: opts?.tenantId ?? null,
+    tenantId: opts.tenantId,
     modelTier: "smart",
   });
   if (!inf.ok) {

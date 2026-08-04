@@ -95,7 +95,7 @@ Return ONLY a JSON object with "subject" and "body" keys. The body should be pla
       system: "",
       prompt,
       maxTokens: 400,
-      tenantId,
+      tenantId: tenantId ?? null,
       modelTier: "smart",
     });
     // Fallback copy is a complete, sendable email — a slow or unavailable queue

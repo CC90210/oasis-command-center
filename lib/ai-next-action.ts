@@ -66,7 +66,7 @@ Output ONLY a single JSON object on one line — no markdown, no code fence, no 
 export async function recommendNextAction(
   leadData: Record<string, unknown>,
   interactions: InteractionSnapshot[],
-  opts?: { tenantId?: string | null },
+  opts: { tenantId: string | null },
 ): Promise<NextActionResult> {
 
   // Same field filter as the scorer — operator-facing only, drop bookkeeping.
@@ -104,7 +104,7 @@ export async function recommendNextAction(
     system: SYSTEM_PROMPT,
     prompt: userPrompt,
     maxTokens: MAX_TOKENS,
-    tenantId: opts?.tenantId ?? null,
+    tenantId: opts.tenantId,
     modelTier: "smart",
   });
   if (!inf.ok) {

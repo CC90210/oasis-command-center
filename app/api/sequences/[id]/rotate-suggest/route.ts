@@ -99,7 +99,7 @@ export async function POST(
         currentBody,
         instruction,
         correction,
-      });
+      }, { tenantId });
     } catch (e) {
       const msg = e instanceof Error ? e.message : "compose_failed";
       const status = msg.startsWith("anthropic_key_missing") ? 503 : 502;

@@ -61,7 +61,7 @@ export interface LeadScoringInteraction {
 export async function scoreLead(
   leadData: Record<string, unknown>,
   interactions: LeadScoringInteraction[] = [],
-  opts?: { tenantId?: string | null },
+  opts: { tenantId: string | null },
 ): Promise<LeadScoreResult> {
 
   // Filter to the operator-facing fields Claude should weight — drop
@@ -109,7 +109,7 @@ ${tape.length === 0 ? "[none recorded — score from lead data only, note 'limit
     system: OASIS_LEAD_SCORING_PROMPT,
     prompt: userPrompt,
     maxTokens: MAX_TOKENS,
-    tenantId: opts?.tenantId ?? null,
+    tenantId: opts.tenantId,
     modelTier: "smart",
   });
   if (!inf.ok) {

@@ -79,7 +79,7 @@ NO markdown, NO code fence, NO prose outside the JSON. The script_content must b
 
 export async function draftAutomation(
   description: string,
-  opts?: { tenantId?: string | null },
+  opts: { tenantId: string | null },
 ): Promise<AutomationDraft> {
   const userPrompt =
     `Operator description:\n\n${description.trim()}\n\n` +
@@ -91,7 +91,7 @@ export async function draftAutomation(
     system: SYSTEM_PROMPT,
     prompt: userPrompt,
     maxTokens: MAX_TOKENS,
-    tenantId: opts?.tenantId ?? null,
+    tenantId: opts.tenantId,
     modelTier: "smart",
   });
   if (!inf.ok) {
