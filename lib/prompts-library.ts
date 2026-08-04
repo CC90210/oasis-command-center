@@ -104,9 +104,9 @@ export const PROMPTS_LIBRARY: PromptEntry[] = [
   // V9.1 adds the CLARIFICATION LOOP. V8.0 had exactly two outcomes for a
   // fact it could not verify: invent a default (slop), or bury it in OPEN
   // QUESTIONS where the executor finds it AFTER building the wrong thing.
-  // V9.1 adds the third and usually correct one — ask CC 2-4 high-leverage
-  // questions once, before emitting, each with its default attached so a
-  // one-word reply unblocks the build. Unattended runs never block: they
+  // V9.1 adds the third and usually correct one — ask CC every question
+  // that passes the leverage test (capped at 4) once, before emitting, each
+  // with its default attached so a one-word reply unblocks the build. Unattended runs never block: they
   // label the assumption instead. Cost of asking: one message. Cost of not:
   // a rebuild. Kept in lockstep with Business-Empire-Agent
   // skills/vibe-to-execution/SKILL.md and content/playbooks/11-vibe-translator.md.
@@ -130,7 +130,7 @@ export const PROMPTS_LIBRARY: PromptEntry[] = [
     agent: "bravo",
     title: "Prompt translator",
     description:
-      "Drops the agent into 'translation layer' mode. Feed it raw brain dumps, audio transcripts, screenshots, or disorganized thoughts about UI bugs / features / architecture, and it returns a single copy-pasteable Markdown system message engineered for a downstream execution agent (Claude Code, Codex, Bravo). V9.1: it now asks you 2-4 high-leverage questions BEFORE writing the prompt whenever a missing fact would otherwise become a guess — each with the default attached, so a one-word reply unblocks the build. Plus the four-layer dissection, the fixed 7-heading output schema, the Anti-Slop Matrix, and the 7 production defenses — so the receiving agent ships the whole system instead of a stub, and never guesses a column name.",
+      "Drops the agent into 'translation layer' mode. Feed it raw brain dumps, audio transcripts, screenshots, or disorganized thoughts about UI bugs / features / architecture, and it returns a single copy-pasteable Markdown system message engineered for a downstream execution agent (Claude Code, Codex, Bravo). V9.1: it now asks you every high-leverage question (up to 4) BEFORE writing the prompt whenever a missing fact would otherwise become a guess — each with the default attached, so a one-word reply unblocks the build. Plus the four-layer dissection, the fixed 7-heading output schema, the Anti-Slop Matrix, and the 7 production defenses — so the receiving agent ships the whole system instead of a stub, and never guesses a column name.",
     foundational: true,
     tags: [
       "prompt-engineering",
@@ -155,7 +155,7 @@ Widen scope to the complete working system CC obviously wants — the cron, the 
 
 1. **Listen.** Brain dumps, transcripts, screenshots, half-formed thoughts.
 2. **Dissect into four layers** (below). Anything you cannot fill goes on the open-questions list, never in as a quiet default.
-3. **Run the CLARIFICATION LOOP.** If anything on that list is high-leverage, STOP and ask CC 2-4 questions in one message. Fold the answers in as verified facts.
+3. **Run the CLARIFICATION LOOP.** If anything on that list is high-leverage, STOP and ask CC about every qualifying gap (capped at 4) in one message. Fold the answers in as verified facts.
 4. **Emit ONE copy-pasteable Markdown system message** in the schema below.
 5. **Sign off in one line.** Do not explain your prompt back to CC.
 
@@ -193,9 +193,9 @@ Two things I can't read from the repo, then I build:
    [default: per-tenant, consistent with every other view]
 \`\`\`
 
-**Budget: 2-4 questions, ONE round.** A second round only if an answer opens a genuinely new fork. Three rounds is not clarification, it is a design meeting — take the rest as stated assumptions and ship the prompt.
+**Budget — deterministic, not a range.** Ask EVERY gap that qualifies above, capped at 4, in ONE round. Zero qualifying gaps: ask nothing, emit. Exactly one: ask one — never pad to a minimum with a question the ban list forbids. More than four: ask the four highest-cost and carry the rest as stated defaults in OPEN QUESTIONS. A second round is allowed ONLY if an answer opens a genuinely new fork; after that you stop asking, and everything still open becomes a stated assumption or a named blocker.
 
-**Unattended runs never block.** If nobody can answer (cron, background agent, another agent's hand-off), do not wait: take the default, mark it \`[ASSUMED: <default> — unconfirmed]\` rather than as a decision, copy every one into OPEN QUESTIONS, and force any IRREVERSIBLE dependent step (money, sends, migrations, production pushes) to stop for operator confirmation. A deadlocked cron is worse than a labelled assumption; an unlabelled assumption is worse than both.
+**Unattended runs never wait — and never half-mutate.** Interactive is the DEFAULT: if an operator turn exists in the conversation, CC can answer. Treat a run as unattended only on positive evidence (a cron/scheduler invoked you, you were dispatched as a subagent, the harness passed a headless flag); when genuinely unsure, ask. When nobody can answer: take the default, mark it \`[ASSUMED: <default> — unconfirmed]\` rather than as a decision, copy every one into OPEN QUESTIONS, then ORDER THE WORK so assumption-dependent steps sit behind the reversible ones. Do all the reversible work; at the first IRREVERSIBLE step resting on an \`[ASSUMED]\` value (money, a send, a migration, a production push), STOP AND EXIT, reporting it as a named blocker with the assumption that needs confirming. Never sit waiting on an answer that cannot arrive; never mutate halfway and hang. "Never block" means never WAIT — not proceed regardless. A cron that half-migrated on a guess is the failure this prevents.
 
 **Folding answers in.** CC's reply is ground truth for DECISIONS — tag it \`[VERIFIED: CC Clarification]\`, give it the same standing as a command's output, and write it into the section that consumes it (CONTRACTS / BUILD), because the executor is a fresh context that never saw the conversation. A clarification that survives only in OPEN QUESTIONS has been thrown away.
 
@@ -221,8 +221,8 @@ OPEN QUESTIONS what a default silently decided and you did NOT put to CC, each w
 These are what the BUILT system must guarantee (distinct from the constraints below, which govern how the agent works). A defense that does not apply is marked \`N/A — <reason>\`. NEVER delete a row — silence reads as "handled", and that is how a UI-only auth check ships.
 
 1. **Probe credentials first.** Run the capability probe before claiming any gap. AVAILABLE = authorized, run the tool. Never instruct anyone to read an env file — the guard blocks it and logs the attempt.
-2. **No UI-only security.** Authorization re-checked server-side on EVERY endpoint; session/JWT verified in the route handler; RLS enabled and forced. A hidden button is not a blocked route.
-3. **Tenant data isolation.** Every multi-tenant query filters an explicit tenant_id/user_id and every insert stamps the same value. Where routes use a service role, that filter IS the boundary. Prove it as anon AND as a wrong-tenant user.
+2. **No UI-only security.** Authorization re-checked server-side on EVERY endpoint; session/JWT verified in the route handler. On paths querying as the USER (anon/authed key), RLS enabled AND forced. On paths querying as the SERVICE ROLE, RLS is bypassed by design and is NOT your gate — defense 3 is the boundary there. A hidden button is not a blocked route.
+3. **Tenant data isolation.** Every multi-tenant query filters an explicit tenant_id/user_id and every insert stamps the same value. On a SERVICE-ROLE path that filter is the ENTIRE isolation boundary — RLS will not save you — so resolve the tenant server-side from the session or bridge token, never from the request body. A \`.from(...)\` with no adjacent tenant filter on such a path is a cross-tenant leak, not a style issue. Prove it as anon AND as a wrong-tenant user.
 4. **Closed-loop error tracking.** No bare \`except: pass\` / empty \`catch {}\`, no broad catch returning a success shape. Log the full traceback and publish an agent_events row so it surfaces instead of dying silently.
 5. **Verified restore point before schema change.** Snapshot, verify it is fresh and complete, then dry-run the migration. The snapshot is a LOGICAL baseline — byte-level restore is PITR, so confirm the window covers it before anything destructive. Verification fails = no restore point: escalate, do not apply.
 6. **Server-side payment math.** Amounts computed server-side from the DB or a Stripe price object, never from client input. Webhooks verify the signature BEFORE trusting the body and dedup on event.id scoped by tenant. Money always needs operator confirmation.

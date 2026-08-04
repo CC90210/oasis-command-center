@@ -129,24 +129,33 @@ Two things I can't read from the repo, then I build:
    [default: per-tenant, consistent with every other view]
 ```
 
-**Budget: 2–4 questions, one round.** A second round only if an answer opens a genuinely new
-fork. Three rounds isn't clarification, it's a design meeting — at that point it takes the rest
-as stated assumptions and ships the prompt.
+**Budget — a rule, not a range.** It asks **every** gap that qualifies above, capped at four, in
+one round. No qualifying gaps: it asks nothing and writes the prompt. Exactly one: it asks one —
+it never pads to a minimum with a question the ban list forbids. More than four: the four
+highest-cost get asked, the rest carry as stated defaults in OPEN QUESTIONS. A second round only
+if an answer opens a genuinely new fork; after that it stops asking, and anything still open
+becomes a stated assumption or a named blocker.
 
 **Where it asks.** In chat by default. If the runtime has a native question control and you're at
 the keyboard, it uses that instead — same budget, recommended option first. Never a modal in an
 unattended run.
 
-### Unattended runs never block
+### Unattended runs never wait — and never half-finish
 
-When the protocol runs where nobody can answer — a cron job, a background agent, a hand-off from
-another agent — the loop does not wait. It takes the default, marks it in the prompt as
-`[ASSUMED: … — unconfirmed]` rather than as a decision, copies every one into OPEN QUESTIONS, and
-forces any **irreversible** dependent step to stop for your confirmation before it runs: money,
-sends, migrations, production pushes.
+Interactive is the default: if you're in the conversation, you can answer. It treats a run as
+unattended only on real evidence — a cron fired it, it was dispatched as a background agent, the
+harness passed a headless flag — and when genuinely unsure, it asks.
 
-A deadlocked cron is worse than a labelled assumption. An *unlabelled* assumption is worse than
-both.
+When nobody can answer, the loop does not wait. It takes the default, marks it
+`[ASSUMED: … — unconfirmed]` rather than as a decision, copies every one into OPEN QUESTIONS, then
+**orders the work so anything resting on an assumption sits behind the reversible parts.** It does
+all the reversible work, and at the first **irreversible** step standing on an assumption — money,
+a send, a migration, a production push — it **stops and reports that as a named blocker** instead
+of waiting for an answer that can't arrive.
+
+"Never block" means never *wait*. It does not mean proceed regardless. A deadlocked cron is worse
+than a labelled assumption; an *unlabelled* assumption is worse than both; and a cron that spent
+real money on a default nobody confirmed is worse than all three.
 
 ### What your answer is — and what it isn't
 
