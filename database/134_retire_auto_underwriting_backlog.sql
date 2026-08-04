@@ -42,16 +42,21 @@
 -- deliberately left alone; they finish or they get reclaimed. This migration is
 -- about the queue, not about work in flight.
 --
--- ── 1. LOOK FIRST. Run this on its own and read the number. ──────────────
+-- ── 1. LOOK FIRST. Run this on its own and WRITE DOWN both numbers. ──────
 --
---   select count(*) as will_be_retired,
---          min(run_at) as oldest,
---          max(run_at) as newest
---     from public.application_underwriting
---    where status = 'pending'
---      and (triggered_by is distinct from 'manual' and triggered_by is distinct from 'rerun');
+--   select
+--     count(*) filter (where status = 'pending') as will_be_retired,
+--     count(*) filter (where status = 'parsing') as already_in_flight,
+--     min(run_at) filter (where status = 'pending') as oldest,
+--     max(run_at) filter (where status = 'pending') as newest
+--   from public.application_underwriting
+--   where status in ('pending','parsing')
+--     and (triggered_by is distinct from 'manual' and triggered_by is distinct from 'rerun');
 --
--- If that count is 0, there is no backlog and nothing below will change a row.
+-- `will_be_retired` = 0 means there is no backlog and nothing below changes a
+-- row. `already_in_flight` is the BASELINE for step 3 — those rows are
+-- legitimately mid-parse and are left alone on purpose, so the check afterwards
+-- compares against this number rather than expecting zero.
 
 -- ── 2. Retire it. ────────────────────────────────────────────────────────
 update public.application_underwriting
@@ -75,11 +80,14 @@ update public.application_underwriting
 --    where status = 'pending'
 --      and (triggered_by is distinct from 'manual' and triggered_by is distinct from 'rerun');
 --
--- And check nothing was claimed out from under the update while it ran — if
--- this is non-zero, the consumer was still live and those rows are being billed
--- right now. Stop it, then wait for them to settle and re-run step 2.
+-- And check nothing was claimed out from under the update while it ran. Compare
+-- this against the `already_in_flight` number you wrote down in step 1 — NOT
+-- against zero. Rows that were mid-parse before you started are expected and
+-- are deliberately preserved; only an INCREASE means the consumer was still
+-- live and is billing right now. If it went up: stop the consumer, let those
+-- rows settle, then re-run step 2.
 --
---   select count(*) as claimed_during_migration
+--   select count(*) as unrequested_in_flight_now
 --     from public.application_underwriting
 --    where status = 'parsing'
 --      and (triggered_by is distinct from 'manual' and triggered_by is distinct from 'rerun');
