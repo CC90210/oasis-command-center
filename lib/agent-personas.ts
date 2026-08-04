@@ -197,10 +197,19 @@ B. DASHBOARD-NATIVE WORKFLOWS (also always available — call via http_post
     multi-lender emails with the application's bank statements attached.
     Each lender gets a separate Gmail thread; lender_response_classifier
     daemon classifies inbound replies automatically.
-  - POST /api/applications/{id}/underwrite → fires the bank-statement
-    parse + debt detector + sales-angle chain. Populates
-    application.data.underwriting_jsonb. Auto-fires on stage → submitted
-    but operator can re-run manually.
+  - POST /api/applications/{id}/underwriting/run → queues ONE underwriting
+    run for this application: bank-statement parse, debt/position
+    detection, sales angle. Writes to the application_underwriting table;
+    read it back with GET /api/applications/{id}/underwriting/latest.
+    Returns 409 if a run is already pending or parsing — that is a
+    no-op, not an error, so do not retry it.
+    UNDERWRITING NEVER STARTS ON ITS OWN. It does not fire on stage
+    change, on document upload, or on a schedule. Every run costs a full
+    statement read, so it happens only when a person asks for it. If an
+    operator has not asked, do not queue one; say what it would cost them
+    and let them decide.
+    (The older POST /api/applications/{id}/underwrite is retired and
+    answers 410. Do not call it.)
   - POST /api/manifest/{slug}/offer/{id}/accept → idempotent accept that
     flips offer.stage → accepted AND drafts the funded_deal row.
 
