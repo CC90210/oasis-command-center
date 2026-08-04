@@ -72,7 +72,7 @@ export const FOUNDERS_PORTAL: Portal = {
   sections: [
     { href: "/founders/marketing", label: "Studio", enabled: true },
     { href: "/founders/marketing/library", label: "Library", enabled: true },
-    { href: "/founders/marketing/train", label: "Train", enabled: false },
+    { href: "/founders/marketing/train", label: "Train", enabled: true },
     { href: "/founders/marketing/performance", label: "Performance", enabled: false },
   ],
 };
