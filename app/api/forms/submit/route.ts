@@ -59,7 +59,6 @@ import { sendSunbizLeadEvent } from "@/lib/notify/sunbiz-events";
 import { sendFormCompletionEmail } from "@/lib/notify/form-completion-email";
 import { mintFormLinkBySlug } from "@/lib/forms/agent-routing";
 import { upsertApplicationFromFormStep } from "@/lib/forms/application-upsert";
-import { autoRunUnderwritingForLead } from "@/lib/underwriting/run";
 import { resolveRepAssignment, mintFullApplicationLink, findExistingLead } from "@/lib/forms/agent-routing";
 import { LEAD_PIPELINE_STAGES } from "@/lib/sunbiz-stage-meta";
 import { isFormStageDowngrade } from "@/lib/forms/stage-transition";
@@ -1042,26 +1041,22 @@ export async function POST(req: NextRequest) {
     }
   }
 
-  // Final step of either document-complete path → auto-run underwriting.
-  // Standalone bank-statement form gates on uploadedDocs from THIS request. The
-  // in-flow full application reaches this branch on the later signature step, so
-  // its required documents were already validated on the earlier upload step.
-  if (
-    (isLastStep && form.slug === "bank-statement-upload" && uploadedDocs.length > 0) ||
-    (isLastStep && fullApplicationCollectsDocuments)
-  ) {
-    after(() =>
-      autoRunUnderwritingForLead({
-        db,
-        tenantId: form.tenant_id,
-        leadId: link.lead_id,
-        source:
-          form.slug === "full-application"
-            ? "form_intake_full_application"
-            : "form_intake_bank_statements",
-      }),
-    );
-  }
+  /*
+   * UNDERWRITING IS NOT FIRED HERE ANY MORE. Adon, 2026-08-04.
+   *
+   * This branch used to auto-run underwriting whenever a document-complete form
+   * step landed. Every one of those runs spends model credit on a full
+   * bank-statement read, for a deal nobody had asked about yet — and the queue
+   * it fed accumulated for the 33 days the parser was silently returning
+   * nothing, so the spend bought no answer either.
+   *
+   * Underwriting is now operator-initiated only: the "Start underwriting" /
+   * "Re-run" button on the individual lead (components/leads/LeadFileBody.tsx →
+   * POST /api/applications/[id]/underwriting/run). Documents still arrive and
+   * still attach to the lead; a human decides when they are worth reading.
+   *
+   * tests/underwriting-manual-only.test.ts is the enforcement, not this comment.
+   */
 
   // OASIS personal-brand funnel (CC): final step. Gated to CC's EXACT tenant +
   // form so no other tenant can fire CC's Telegram/Gmail notifications. (Codex

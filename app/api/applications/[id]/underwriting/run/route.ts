@@ -26,7 +26,11 @@ import { enqueueUnderwritingRun } from "@/lib/underwriting/run";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-type TriggeredBy = "manual" | "automatic" | "rerun";
+// "automatic" is NOT accepted. This route is session-authed and therefore
+// always operator-initiated; honouring an "automatic" body value would let a
+// caller mislabel a human's run as a machine's, which is exactly the
+// distinction the poller and the spend audit rely on.
+type TriggeredBy = "manual" | "rerun";
 
 export async function POST(
   req: NextRequest,
@@ -46,10 +50,7 @@ export async function POST(
     // Body is optional — empty body is fine, we default to 'manual'.
   }
 
-  const triggeredBy: TriggeredBy =
-    body.triggered_by === "automatic" || body.triggered_by === "rerun"
-      ? body.triggered_by
-      : "manual";
+  const triggeredBy: TriggeredBy = body.triggered_by === "rerun" ? "rerun" : "manual";
 
   const db = getServiceSupabase();
 
@@ -66,6 +67,12 @@ export async function POST(
   if (!enq.ok) {
     if (enq.reason === "application_not_found") {
       return NextResponse.json({ ok: false, error: "application_not_found" }, { status: 404 });
+    }
+    if (enq.reason === "not_operator_initiated") {
+      // Unreachable from here (the session always carries a user id) — but the
+      // enqueue fails closed on it, and swallowing that into a generic 500
+      // would hide the one refusal that means "someone wired up a machine".
+      return NextResponse.json({ ok: false, error: "not_operator_initiated" }, { status: 403 });
     }
     if (enq.reason === "run_in_progress") {
       return NextResponse.json(
