@@ -75,9 +75,13 @@ export function AssetTile({
             className="h-full w-full object-cover"
           />
         ) : posterUrl ? (
-          // Signed Storage URLs are short-lived and host-varying; next/image
-          // would need every Supabase project host in remotePatterns and would
-          // re-fetch through the optimizer, which cannot read a private object.
+          // Plain <img> on purpose. next/image would need a matching
+          // remotePatterns entry for the Storage host, and it re-fetches the
+          // source server-side through the optimizer — an extra round trip on a
+          // URL that is deliberately short-lived. The optimizer CAN read the
+          // object (the signature is in the query string), but its cached
+          // derivative outlives the signature, so a re-optimize after expiry
+          // fails while the tile still looks cached. Not worth it for a poster.
           // eslint-disable-next-line @next/next/no-img-element
           <img src={posterUrl} alt="" className="h-full w-full object-cover" />
         ) : (
