@@ -50,6 +50,15 @@ jobs:
           npm run test:event-bus
           npm run test:streaming-redactor
           npm run test:marketing
+          # Watermarking had NO CI coverage until 2026-08-04, which is how the
+          # shop-out outage reached production: the operator's Clean|WM route
+          # shipped without its watermark assets bundled, and nothing failed.
+          # This exercises the real renderer end to end, including the
+          # permission-encrypted PDF that only the pdfjs raster fallback can
+          # brand — the exact path every "it can't watermark it" report runs
+          # through. It needs --conditions=react-server because the renderer
+          # imports server-only.
+          npm run test:watermark
       - name: Build
         env:
           # Minimal env so the build doesn't blow up on missing required vars.
