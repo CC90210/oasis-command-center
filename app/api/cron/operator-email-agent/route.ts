@@ -62,9 +62,28 @@ async function runAgent(agent: AgentEmailSettings, write: boolean) {
     );
     results[mailbox] = { ...ing, diag: read.diag };
   }
+  /*
+   * Hold the cursor if any message was DEFERRED.
+   *
+   * A deferred message is one whose classification was still running: ingest
+   * deliberately did not write it, so it must be seen again. Since the next
+   * read is `after:last_processed_at`, advancing the cursor here would move the
+   * window past that email and it would never be ingested at all — the
+   * classifier's dedupe would be collecting a result for a message nobody looks
+   * at again. Holding costs one re-read of a small window; advancing costs the
+   * email. Codex review 2026-08-04.
+   *
+   * This cannot wedge: queueInfer reports a STALLED queue as a terminal failure
+   * (timedOut false), which classifies as the plain fallback rather than
+   * deferring, so a dead daemon lets the cursor move on.
+   */
+  const deferred = Object.values(results).reduce((n, r) => n + (r?.deferred || 0), 0);
+  if (deferred > 0) {
+    console.warn(`[operator-email] holding cursor — ${deferred} message(s) awaiting classification`);
+  }
   // Only advance the cursor on a real (write) run — a DRY tick must not consume
   // the window, or it silently skips messages the live run should have ingested.
-  if (write) {
+  if (write && deferred === 0) {
     await markProcessed(agent.tenantId, agent.userId);
     await writeSnapshot(agent.tenantId, agent.userId); // metrics for the dashboard cards
   }

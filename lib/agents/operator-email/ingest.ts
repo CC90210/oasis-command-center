@@ -24,6 +24,13 @@ export interface IngestResult {
   ingested: number;
   dropped: number; // unmatched / personal — intentionally not stored
   skipped: number; // already ingested (dedupe)
+  /**
+   * Classification was still in flight, so the message was NOT written and must
+   * be seen again. Counted separately from `skipped` because the caller has to
+   * act on it: advancing the mailbox cursor past a deferred message loses it
+   * for good.
+   */
+  deferred: number;
 }
 
 function emailFromHeader(h: string): string {
@@ -88,7 +95,7 @@ export async function ingestMessages(
   messages: MonitoredMessage[],
 ): Promise<IngestResult> {
   const db = getServiceSupabase();
-  const res: IngestResult = { scanned: messages.length, matched: 0, ingested: 0, dropped: 0, skipped: 0 };
+  const res: IngestResult = { scanned: messages.length, matched: 0, ingested: 0, dropped: 0, skipped: 0, deferred: 0 };
 
   for (const msg of messages) {
     const fromEmail = emailFromHeader(msg.from);
@@ -148,13 +155,22 @@ export async function ingestMessages(
         : { type: "other" as const, needs_attention: false, summary: "" };
 
     /*
-     * Still in flight — defer, do NOT persist. There is no cursor to advance
-     * (ingest dedupes on metadata.gmail_message_id), so leaving this message
-     * unwritten simply means the next tick sees it again, and the classifier's
-     * dedupeKey collects the finished job rather than queueing a twin.
+     * Still in flight — defer, do NOT persist.
+     *
+     * THIS ONLY WORKS IF THE CALLER HOLDS THE CURSOR. Not writing the row is
+     * necessary but not sufficient: the cron advances `last_processed_at` via
+     * markProcessed() and reads with `after:<that>`, so a deferred message would
+     * fall outside the next window and be lost for good. It is reported as
+     * `deferred` so the caller can hold the cursor. (An earlier version of this
+     * comment claimed there was no cursor to advance — there is one, in
+     * app/api/cron/operator-email-agent/route.ts. Codex review caught it.)
+     *
+     * A permanently slow queue cannot wedge the cursor forever: queueInfer
+     * reports a STALLED queue with timedOut false, which returns the plain
+     * fallback rather than pending.
      */
     if (cls.pending) {
-      res.skipped += 1;
+      res.deferred += 1;
       continue;
     }
 
