@@ -90,8 +90,19 @@ export function TrainDropzone({ onQueued }: { onQueued?: () => void }) {
       const body = await res.json().catch(() => ({}));
       if (res.ok && body.ok) {
         const dup = body.duplicates ? ` · ${body.duplicates} already queued` : "";
-        setResult({ tone: "ok", msg: `Queued ${body.queued} to learn from${dup}.` });
-        setText("");
+        if (body.over_cap) {
+          // Over the per-request cap is a WARNING, not a success. The links are
+          // left in the box so the operator can submit them, instead of being
+          // told "queued 25" while 15 disappeared.
+          setResult({
+            tone: "warn",
+            msg: `Queued ${body.queued}${dup}. ${body.over_cap} more were over the per-drop limit and are still in the box — submit again to queue them.`,
+          });
+          setText((body.over_cap_links as string[] | undefined)?.join("\n") ?? "");
+        } else {
+          setResult({ tone: "ok", msg: `Queued ${body.queued} to learn from${dup}.` });
+          setText("");
+        }
         // The queue and the counters above are server-rendered, so without this
         // a successful drop just empties the box and nothing visibly arrives.
         router.refresh();

@@ -70,9 +70,74 @@ function host(u: URL): string {
 }
 
 /**
+ * Hosts an ingested link must never point at.
+ *
+ * The extraction worker fetches these URLs from a server, so every corpus row
+ * is a server-side request an operator can aim. Rejecting single-label hosts
+ * (`http://intranet/`) was the original SSRF control and it is not enough: a
+ * literal IP has a dot in it, so `http://10.0.0.5/`, `http://127.0.0.1/` and
+ * most importantly `http://169.254.169.254/` — the cloud instance-metadata
+ * endpoint, the standard SSRF prize — all sailed through it. Blocked at parse
+ * time so a bad target is never even stored, let alone queued.
+ * [[fail-closed-default]]
+ *
+ * This is a necessary check, not a sufficient one: it cannot see a public
+ * hostname whose DNS answer is private. The fetcher must still refuse to follow
+ * redirects into this space and re-check the resolved address.
+ */
+function isBlockedHost(hostname: string): boolean {
+  const h = hostname.toLowerCase().replace(/\.$/, "");
+  if (!h) return true;
+
+  // Names that never leave the machine or the LAN.
+  if (h === "localhost" || h.endsWith(".localhost")) return true;
+  if (h.endsWith(".local") || h.endsWith(".internal") || h.endsWith(".home.arpa")) return true;
+
+  // IPv6 literals arrive bracketed from the URL parser.
+  if (h.startsWith("[")) {
+    const v6 = h.slice(1, -1);
+    if (v6 === "::1" || v6 === "::") return true;
+    if (/^f[cd]/.test(v6)) return true; // fc00::/7 unique-local
+    if (/^fe[89ab]/.test(v6)) return true; // fe80::/10 link-local
+    // ::ffff:10.0.0.1 — an IPv4 address wearing an IPv6 costume. The URL parser
+    // re-serialises it in hex (`::ffff:a00:1`), so BOTH spellings have to be
+    // decoded or the dotted-quad check is trivially bypassed.
+    const mapped = /^::ffff:(.+)$/.exec(v6);
+    if (!mapped) return false;
+    const rest = mapped[1]!;
+    if (/^\d{1,3}(\.\d{1,3}){3}$/.test(rest)) return isBlockedHost(rest);
+    const hex = /^([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(rest);
+    if (hex) {
+      const hi = parseInt(hex[1]!, 16);
+      const lo = parseInt(hex[2]!, 16);
+      return isBlockedHost(`${hi >> 8}.${hi & 255}.${lo >> 8}.${lo & 255}`);
+    }
+    return true; // an IPv4-mapped form we cannot decode is refused, not allowed
+  }
+
+  const v4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(h);
+  if (v4) {
+    const [a, b] = [Number(v4[1]), Number(v4[2])];
+    if (a === 0 || a === 10 || a === 127) return true;
+    if (a === 169 && b === 254) return true; // link-local AND instance metadata
+    if (a === 172 && b >= 16 && b <= 31) return true;
+    if (a === 192 && b === 168) return true;
+    if (a === 192 && b === 0) return true; // 192.0.0.0/24 IETF protocol assignments
+    if (a === 100 && b >= 64 && b <= 127) return true; // CGNAT
+    if (a === 198 && (b === 18 || b === 19)) return true; // benchmarking
+    if (a >= 224) return true; // multicast + reserved
+    return false;
+  }
+
+  // Not an IP literal: a public name needs at least one dot.
+  return !h.includes(".");
+}
+
+/**
  * Accepts what a human actually pastes: bare domains, a URL with surrounding
  * whitespace, a link copied out of a share sheet. Rejects anything that is not
- * http(s) — a `javascript:` or `data:` URL must never reach a fetcher.
+ * http(s) — a `javascript:` or `data:` URL must never reach a fetcher — and
+ * anything pointing inside the network.
  */
 export function normalizeUrl(raw: string): URL | null {
   const trimmed = (raw || "").trim().replace(/^<|>$/g, "");
@@ -85,7 +150,7 @@ export function normalizeUrl(raw: string): URL | null {
     return null;
   }
   if (u.protocol !== "http:" && u.protocol !== "https:") return null;
-  if (!u.hostname.includes(".")) return null;
+  if (isBlockedHost(u.hostname)) return null;
   return stripTracking(u);
 }
 
@@ -102,8 +167,12 @@ export function parseIngestUrl(raw: string): IngestParseResult {
     if (h === "youtu.be") id = seg[0] || null;
     else if (seg[0] === "shorts" || seg[0] === "embed" || seg[0] === "live") id = seg[1] || null;
     else if (u.pathname === "/watch") id = u.searchParams.get("v");
-    if (!id) {
-      return { ok: false, reason: "YouTube link has no video id — paste a watch, shorts or youtu.be link." };
+    // Charset-allowlist before it goes into a URL we will later fetch. `v` is
+    // operator-supplied and reaches the canonical URL by interpolation, so a
+    // value carrying `&`, `#` or a path separator would rewrite the target.
+    // Encoding alone is not the control. [[argv-for-path-handling]]
+    if (!id || !/^[A-Za-z0-9_-]{6,20}$/.test(id)) {
+      return { ok: false, reason: "YouTube link has no usable video id — paste a watch, shorts or youtu.be link." };
     }
     return {
       ok: true,
@@ -296,6 +365,15 @@ export function ingestStateCopy(s: IngestState): { label: string; tone: "pending
       return { label: "Failed", tone: "bad" };
     case "skipped":
       return { label: "Skipped", tone: "bad" };
+    default:
+      /*
+       * `IngestState` makes this unreachable to the compiler, but the value
+       * comes off a database row, not out of the type system. A state written
+       * by a later migration (or by the extraction worker) would fall through,
+       * return undefined, and crash the Train page on destructuring — the whole
+       * screen, over one unfamiliar row.
+       */
+      return { label: String(s || "Unknown"), tone: "pending" };
   }
 }
 

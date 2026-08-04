@@ -197,4 +197,60 @@ for (const raw of [
   assert.ok(d.length > 20, `${raw} has a real description of what will happen`);
 }
 
+// ── SSRF: an ingested link becomes a SERVER-side fetch ───────────────
+// The extraction worker fetches whatever is in the corpus, so the parser is the
+// place a hostile target has to die. Rejecting single-label hosts was the
+// original control and it missed every IP literal, because an IP has dots in
+// it. Found by CodeRabbit on PR #120.
+for (const bad of [
+  "http://127.0.0.1/x",
+  "http://127.0.0.1./x", // trailing dot, still loopback
+  "http://10.0.0.5/internal",
+  "http://172.16.4.4/",
+  "http://172.31.255.255/",
+  "http://192.168.1.1/admin",
+  "http://169.254.169.254/latest/meta-data/", // cloud instance metadata
+  "http://0.0.0.0/",
+  "http://100.64.0.1/", // CGNAT
+  "http://[::1]/",
+  "http://[fe80::1]/",
+  "http://[fd00::1]/",
+  "http://[::ffff:10.0.0.1]/",
+  "http://localhost:3000/",
+  "http://printer.local/",
+  "http://vault.internal/",
+  "http://intranet/", // the original single-label case, still refused
+]) {
+  assert.equal(normalizeUrl(bad), null, `refuses an internal target: ${bad}`);
+  assert.equal(parseIngestUrl(bad).ok, false, `refuses to classify an internal target: ${bad}`);
+}
+
+// ...and public addresses are untouched, including public IP literals.
+for (const good of ["https://example.com/a", "https://8.8.8.8/a", "https://172.32.0.1/a", "https://192.169.0.1/a"]) {
+  assert.ok(normalizeUrl(good), `still accepts a public target: ${good}`);
+}
+
+// ── a YouTube id reaches a fetched URL by interpolation ──────────────
+// So it is charset-allowlisted, not merely encoded.
+for (const bad of [
+  "https://www.youtube.com/watch?v=abc%26list%3Devil",
+  "https://www.youtube.com/watch?v=../../etc",
+  "https://www.youtube.com/watch?v=",
+]) {
+  assert.equal(parseIngestUrl(bad).ok, false, `refuses a malformed video id: ${bad}`);
+}
+{
+  const okVid = parseIngestUrl("https://www.youtube.com/watch?v=dQw4w9WgXcQ");
+  assert.ok(okVid.ok && okVid.target.canonicalUrl === "https://www.youtube.com/watch?v=dQw4w9WgXcQ");
+}
+
+// ── an unrecognised state must not take the Train page down ──────────
+// `state` comes off a database row, not out of the type system: a later
+// migration or the extraction worker can write one this build has never seen.
+{
+  const unknown = ingestStateCopy("something_new" as never);
+  assert.ok(unknown && unknown.label.length > 0, "an unknown state still renders");
+  assert.ok(["pending", "active", "done", "bad"].includes(unknown.tone));
+}
+
 console.log("founders-ingest-core: all assertions passed");

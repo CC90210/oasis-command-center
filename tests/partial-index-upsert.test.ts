@@ -29,11 +29,22 @@ const ROOT = join(__dirname, "..");
 
 type IndexInfo = { table: string; cols: string; partial: boolean; name: string };
 
+/**
+ * A conflict target is a SET of columns, not a sequence.
+ *
+ * PostgreSQL matches `ON CONFLICT (a, b)` against a unique index on `(b, a)`
+ * perfectly happily, so comparing the two as ordered strings let a real
+ * violation through: an `onConflict: "source_url,tenant_id"` aimed at a partial
+ * index declared `(tenant_id, source_url)` reported clean, and the 42P10 this
+ * whole file exists to prevent would have shipped anyway. Sorting makes the
+ * comparison mean what Postgres means. Found by CodeRabbit on PR #120.
+ */
 const normalize = (cols: string): string =>
   cols
     .split(",")
     .map((c) => c.trim().replace(/\s+(asc|desc)$/i, "").replace(/["`]/g, "").toLowerCase())
     .filter(Boolean)
+    .sort()
     .join(",");
 
 /** Every `create unique index` in a SQL blob, flagged partial if it has a WHERE. */
@@ -125,6 +136,24 @@ const fired = violations(fixtureIdx, fixtureTargets);
 assert.equal(fired.length, 1, "exactly the partial-index upsert is flagged");
 assert.equal(fired[0].table, "demo_partial");
 assert.equal(fired[0].cols, "tenant_id,url");
+
+// The same violation written with the columns the other way round. Postgres
+// matches conflict targets as a SET, so this must fire identically; before the
+// sort in `normalize` it reported clean and the 42P10 shipped anyway.
+const reversedTargets = findUpsertTargets(`
+  const d = await db.from("demo_partial").upsert(rows, { onConflict: "url,tenant_id" });
+`);
+const reversedFired = violations(fixtureIdx, reversedTargets);
+assert.equal(reversedFired.length, 1, "column ORDER does not hide a partial-index upsert");
+assert.equal(reversedFired[0].cols, "tenant_id,url", "normalised to a canonical, sorted set");
+
+// And the total-index case must stay clean when reversed, or the sort would
+// have turned a fix into a false positive.
+assert.equal(
+  violations(fixtureIdx, findUpsertTargets(`db.from("demo_total").upsert(r, { onConflict: "url,tenant_id" })`)).length,
+  0,
+  "a total index still serves a reversed conflict target",
+);
 
 // ── now the real repo ────────────────────────────────────────────────
 function walk(dir: string, exts: string[], acc: string[] = []): string[] {

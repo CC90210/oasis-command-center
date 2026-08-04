@@ -42,7 +42,14 @@ export async function POST(req: Request) {
 
   let body: { text?: string; urls?: string[]; label?: string; note?: string };
   try {
-    body = await req.json();
+    const parsed = await req.json();
+    // `req.json()` does NOT throw on a literal `null` body — it returns null,
+    // and the first property read below then throws a TypeError, turning a
+    // malformed request into a 500.
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return NextResponse.json({ ok: false, error: "invalid_json" }, { status: 400 });
+    }
+    body = parsed as typeof body;
   } catch {
     return NextResponse.json({ ok: false, error: "invalid_json" }, { status: 400 });
   }
@@ -64,6 +71,13 @@ export async function POST(req: Request) {
   const rejected: Array<{ url: string; reason: string }> = [];
   const seen = new Set<string>();
 
+  /*
+   * Anything over the cap is REPORTED, never silently dropped. Pasting 40 links
+   * and being told "25 queued" with no mention of the other 15 is the failure
+   * this codebase keeps having: the operator reads it as done and the missing
+   * items are only discovered much later, if ever.
+   */
+  const overCap = Math.max(0, raw.length - MAX_PER_REQUEST);
   for (const r of raw.slice(0, MAX_PER_REQUEST)) {
     const parsed = parseIngestUrl(r);
     if (!parsed.ok) {
@@ -114,6 +128,8 @@ export async function POST(req: Request) {
         detail:
           "database/133_marketing_hub.sql has not been applied yet, so there is nowhere to store this. Nothing was lost — re-drop these links once it is applied.",
         would_have_queued: accepted,
+        over_cap: overCap,
+        over_cap_links: overCap ? raw.slice(MAX_PER_REQUEST) : [],
       },
       { status: 503 },
     );
@@ -193,6 +209,9 @@ export async function POST(req: Request) {
     queued: queued.length,
     duplicates,
     rejected,
+    // Named, not just counted, so the operator can re-drop exactly these.
+    over_cap: overCap,
+    over_cap_links: overCap ? raw.slice(MAX_PER_REQUEST) : [],
     items: queued,
   });
 }
