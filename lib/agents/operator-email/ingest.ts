@@ -31,6 +31,11 @@ export interface IngestResult {
    * for good.
    */
   deferred: number;
+  /**
+   * ISO date of the OLDEST deferred message, if any. The caller advances its
+   * cursor to just before this instead of freezing it — see markProcessed.
+   */
+  oldestDeferredAt?: string | null;
 }
 
 function emailFromHeader(h: string): string {
@@ -95,7 +100,7 @@ export async function ingestMessages(
   messages: MonitoredMessage[],
 ): Promise<IngestResult> {
   const db = getServiceSupabase();
-  const res: IngestResult = { scanned: messages.length, matched: 0, ingested: 0, dropped: 0, skipped: 0, deferred: 0 };
+  const res: IngestResult = { scanned: messages.length, matched: 0, ingested: 0, dropped: 0, skipped: 0, deferred: 0, oldestDeferredAt: null };
 
   for (const msg of messages) {
     const fromEmail = emailFromHeader(msg.from);
@@ -171,6 +176,8 @@ export async function ingestMessages(
      */
     if (cls.pending) {
       res.deferred += 1;
+      const at = toISO(msg.date);
+      if (at && (!res.oldestDeferredAt || at < res.oldestDeferredAt)) res.oldestDeferredAt = at;
       continue;
     }
 

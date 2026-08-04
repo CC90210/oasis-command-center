@@ -78,14 +78,31 @@ async function runAgent(agent: AgentEmailSettings, write: boolean) {
    * deferring, so a dead daemon lets the cursor move on.
    */
   const deferred = Object.values(results).reduce((n, r) => n + (r?.deferred || 0), 0);
-  if (deferred > 0) {
-    console.warn(`[operator-email] holding cursor — ${deferred} message(s) awaiting classification`);
-  }
+  // Oldest deferred message across both mailboxes; the cursor stops just short
+  // of it (1s) rather than freezing, so the agent keeps its place in the
+  // rotation while the email stays inside the next `after:` window.
+  const oldestDeferred = Object.values(results)
+    .map((r) => r?.oldestDeferredAt)
+    .filter((v): v is string => typeof v === "string")
+    .sort()[0];
+
   // Only advance the cursor on a real (write) run — a DRY tick must not consume
   // the window, or it silently skips messages the live run should have ingested.
-  if (write && deferred === 0) {
-    await markProcessed(agent.tenantId, agent.userId);
-    await writeSnapshot(agent.tenantId, agent.userId); // metrics for the dashboard cards
+  if (write) {
+    if (deferred > 0 && oldestDeferred) {
+      const upTo = new Date(Date.parse(oldestDeferred) - 1000).toISOString();
+      console.warn(
+        `[operator-email] ${deferred} message(s) awaiting classification — cursor held at ${upTo} (not frozen)`,
+      );
+      await markProcessed(agent.tenantId, agent.userId, upTo);
+    } else {
+      await markProcessed(agent.tenantId, agent.userId);
+    }
+    // Snapshot ALWAYS on a write run. Messages ingested earlier in this same
+    // tick have already changed the dashboard metrics, so gating this on
+    // `deferred === 0` left the cards stale for as long as the queue was slow —
+    // which is exactly when someone would be looking at them. Codex review.
+    await writeSnapshot(agent.tenantId, agent.userId);
   }
   return results;
 }
