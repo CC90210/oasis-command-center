@@ -19,7 +19,14 @@ export interface MonitoredMessage {
   subject: string;
   from: string;
   to: string;
+  /** The `Date` HEADER — sender-controlled. Display only; never drive a cursor from it. */
   date: string;
+  /**
+   * Gmail's own receipt time (ms since epoch, as a string). Set by the server,
+   * not by the sender, so this is the one timestamp safe to make scheduling
+   * decisions on. Undefined only if the API omits it.
+   */
+  internalDate?: string;
   body: string;
   mailboxAddress: string; // the connected account (Alex's work/personal address)
 }
@@ -134,7 +141,7 @@ export async function readMailbox(
         const mr = await fetch(`${GMAIL_API}/messages/${id}?format=full`, { headers: H, signal: AbortSignal.timeout(20_000) });
         if (!mr.ok) continue;
         const msg = (await mr.json()) as {
-          id: string; threadId: string;
+          id: string; threadId: string; internalDate?: string;
           payload?: { headers?: { name?: string; value?: string }[] };
         };
         const hs = msg.payload?.headers || [];
@@ -145,6 +152,7 @@ export async function readMailbox(
           from: header(hs, "From"),
           to: header(hs, "To"),
           date: header(hs, "Date"),
+          internalDate: msg.internalDate,
           body: extractBody(msg.payload).slice(0, 8000),
           mailboxAddress,
         });
