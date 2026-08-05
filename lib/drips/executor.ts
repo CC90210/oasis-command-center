@@ -42,6 +42,7 @@ import { renderTemplate } from "@/lib/drips/templates";
 import { parseDripSteps, type DripStep } from "@/lib/drips/types";
 import { sendDripSms, sendDripEmail } from "@/lib/drips/send";
 import { brandIsSendable, type BrandKey } from "@/lib/email/brands";
+import { brandFooter } from "@/lib/email/brand-shell";
 import { loadBrandsForLeads } from "@/lib/drips/brand-store";
 import { wasShoppedRecently } from "@/lib/drips/enroller";
 import { SUNBIZ_BRAND, dripTrackingBase, platformTrackingBase, buildDripHtml, listUnsubscribeHeader, pixelUrl, unsubscribeUrl } from "@/lib/drips/html-email";
@@ -969,17 +970,20 @@ async function processEmailStep(
       return markRetryOrFail(db, row, `brand_not_sendable: ${sendable.reason}`);
     }
 
-    const customFooter =
-      emailClass === "transactional"
-        ? ""
-        : `<div style="margin:24px 0 0;color:#8a94a6;font:12px/1.5 Arial,sans-serif">` +
-          `Prefer not to receive these? <a href="${unsubscribeUrl(email, SUNBIZ_BRAND, trackingBase)}" style="color:#8a94a6">Unsubscribe here</a>.</div>`;
+    // Custom-HTML templates get the SAME brand footer as the plain path, or a
+    // templated drip would ship with no postal address while a plain one carries
+    // it. Transactional drops only the unsubscribe line, never the address.
+    const customFooter = brandFooter(
+      brand,
+      emailClass === "transactional" ? null : unsubscribeUrl(email, SUNBIZ_BRAND, trackingBase),
+    );
     const customTracking = `<img src="${pixelUrl(sendId, trackingBase)}" width="1" height="1" alt="" style="display:none;max-height:0;overflow:hidden" />`;
     const instrumentedCustomHtml = renderedCustomHtml
       ? renderedCustomHtml.replace(/<\/body>/i, `${customFooter}${customTracking}</body>`)
       : "";
     const html =
-      instrumentedCustomHtml || buildDripHtml(cleanBody, { sendId, email, unsub, trackingBase });
+      instrumentedCustomHtml ||
+      buildDripHtml(cleanBody, { sendId, email, unsub, trackingBase, sendingBrand: brand });
     htmlPayload = html;
     sentTrackingBase = trackingBase;
     sentBrand = brand;

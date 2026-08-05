@@ -83,9 +83,11 @@ const REGISTRY: Record<BrandKey, () => Brand> = {
     sendingDomain: "sunbizfunding.com",
     // Matches send_gateway.BRAND_IDENTITY["sunbiz"].business_address
     // (provenance: CC provided it 2026-06-17). Change BRAND_IDENTITY first.
+    // STREET ADDRESS ONLY. The legal entity is rendered separately by
+    // brand-shell.ts, so including it here would print the name twice.
     postalAddress:
       env("SUNBIZ_POSTAL_ADDRESS") ||
-      "SunBiz Funding LLC, 221 W Hallandale Beach Blvd, Suite 518, Hallandale, FL 33009",
+      "221 W Hallandale Beach Blvd, Suite 518, Hallandale, FL 33009",
     trackingOrigin: safeOrigin(env("DRIP_TRACKING_BASE_URL") || env("SUNBIZ_TRACKING_ORIGIN")),
     credentialService: "gws",
     accent: "#D4A843",
@@ -109,9 +111,10 @@ const REGISTRY: Record<BrandKey, () => Brand> = {
     // premises, so this is a real address at which it receives mail. Two
     // companies at one office is ordinary and truthful. Do NOT substitute an
     // invented or merely nearby address.
+    // STREET ADDRESS ONLY, as above. Same premises as SunBiz.
     postalAddress:
       env("BLUERISE_POSTAL_ADDRESS") ||
-      "Bluerise Business Capital, 221 W Hallandale Beach Blvd, Suite 518, Hallandale, FL 33009",
+      "221 W Hallandale Beach Blvd, Suite 518, Hallandale, FL 33009",
     trackingOrigin: safeOrigin(env("BLUERISE_TRACKING_ORIGIN")),
     credentialService: "gws_bluerise",
     accent: "#2E6BE6",
