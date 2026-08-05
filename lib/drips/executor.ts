@@ -919,10 +919,20 @@ async function processEmailStep(
   //
   // HOLD, never fail: hitting a cap is a "not yet", not an error, so the row is
   // rescheduled to when the window reopens and keeps its attempt budget.
+  // Which company is speaking to this merchant. Stamped on the lead at
+  // enrolment and read here, never derived at send time, so a lead cannot flip
+  // brand mid-sequence. Absent => sunbiz, the pre-existing behaviour.
+  //
+  // Resolved BEFORE the volume gate because the daily and hourly ceilings are
+  // per-brand: each brand carries its own domain reputation, and gating both
+  // against one shared pool would mean splitting across two domains bought no
+  // extra throughput.
+  const brand: BrandKey = run.brandByLead.get(row.lead_id) ?? "sunbiz";
+
   if (shouldSend && run.emailBudget) {
-    const gated = emailGateReason(run.emailBudget, row.lead_id);
+    const gated = emailGateReason(run.emailBudget, row.lead_id, brand);
     if (gated) {
-      return markRescheduled(db, row, holdUntilIso(gated), `email_volume_gate (${gated})`);
+      return markRescheduled(db, row, holdUntilIso(gated), `email_volume_gate (${brand}: ${gated})`);
     }
   }
 
@@ -956,11 +966,6 @@ async function processEmailStep(
     // below. Cold outreach deliberately does NOT do this: it sends from isolated
     // domains and its links must stay on the platform origin.
     const trackingBase = dripTrackingBase();
-
-    // Which company is speaking to this merchant. Stamped on the lead at
-    // enrolment and read here; never derived at send time, so a lead cannot
-    // flip brand mid-sequence. Absent => sunbiz, the pre-existing behaviour.
-    const brand = run.brandByLead.get(row.lead_id) ?? "sunbiz";
 
     // A brand missing its CAN-SPAM postal address must never reach a merchant.
     // HOLD the row rather than failing it: the fix is configuration, and the
@@ -1002,7 +1007,7 @@ async function processEmailStep(
     // Spend the budget only on a send that actually left, so later rows in this
     // same run see the decremented remainder without re-querying. A failed send
     // deliberately does not consume: nothing reached the recipient.
-    if (run.emailBudget) consumeEmail(run.emailBudget, row.lead_id);
+    if (run.emailBudget) consumeEmail(run.emailBudget, row.lead_id, brand);
   }
 
   const interactionLog = logInteraction(db, {

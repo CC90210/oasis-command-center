@@ -14,9 +14,18 @@
 
 // ── Send-volume budget ──────────────────────────────────────────────────────
 
+/** Brand keys, duplicated here as a string union rather than imported, to keep
+ *  this module free of every other dependency. Must match lib/email/brands.ts. */
+export type BudgetBrand = "sunbiz" | "bluerise";
+
 export type EmailBudget = {
-  dailyRemaining: number;
-  hourlyRemaining: number;
+  /** Remaining sends per BRAND. Each brand carries its own domain reputation,
+   *  so a shared ceiling would mean splitting across domains bought no extra
+   *  throughput — which is the whole point of running two. */
+  dailyRemaining: Record<BudgetBrand, number>;
+  hourlyRemaining: Record<BudgetBrand, number>;
+  /** Brand-BLIND: two emails in a week is two emails whichever company sent
+   *  them. This is the cap that decides how mail FEELS to one human. */
   perLeadSent7d: Map<string, number>;
   perLeadCap: number;
   /** A GLOBAL count query failed; the two global caps are best-effort this run. */
@@ -46,10 +55,14 @@ export type EmailGateReason =
  *   - the per-lead count fails CLOSED, because the failure mode it guards is
  *     over-mailing one person, and "hold for an hour" costs nothing.
  */
-export function emailGateReason(budget: EmailBudget, leadId: string): EmailGateReason | null {
+export function emailGateReason(
+  budget: EmailBudget,
+  leadId: string,
+  brand: BudgetBrand = "sunbiz",
+): EmailGateReason | null {
   if (budget.perLeadDegraded) return "per_lead_budget_unavailable";
-  if (budget.dailyRemaining <= 0) return "daily_cap";
-  if (budget.hourlyRemaining <= 0) return "hourly_cap";
+  if ((budget.dailyRemaining[brand] ?? 0) <= 0) return "daily_cap";
+  if ((budget.hourlyRemaining[brand] ?? 0) <= 0) return "hourly_cap";
   const sent = budget.perLeadSent7d.get(leadId) || 0;
   if (sent >= budget.perLeadCap) return "per_lead_weekly_cap";
   return null;
@@ -57,9 +70,13 @@ export function emailGateReason(budget: EmailBudget, leadId: string): EmailGateR
 
 /** Record that a real email just went out, so later rows in the SAME run see the
  *  decremented budget without re-querying. Call only after a real send. */
-export function consumeEmail(budget: EmailBudget, leadId: string): void {
-  budget.dailyRemaining -= 1;
-  budget.hourlyRemaining -= 1;
+export function consumeEmail(
+  budget: EmailBudget,
+  leadId: string,
+  brand: BudgetBrand = "sunbiz",
+): void {
+  budget.dailyRemaining[brand] = (budget.dailyRemaining[brand] ?? 0) - 1;
+  budget.hourlyRemaining[brand] = (budget.hourlyRemaining[brand] ?? 0) - 1;
   budget.perLeadSent7d.set(leadId, (budget.perLeadSent7d.get(leadId) || 0) + 1);
 }
 
