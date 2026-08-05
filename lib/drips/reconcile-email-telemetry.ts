@@ -86,6 +86,19 @@ export async function reconcileDripEmailTelemetry(db: Db, limit = 1000) {
           sendId: row.id,
           email: recipient,
           unsub: sequenceClasses.get(sequenceId) === "transactional" ? "none" : "footer",
+          // Rebuild on the origin the SEND recorded, never today's config. This
+          // reconciler scans historical interactions, so resolving the domain now
+          // would rebuild aligned URLs for messages sent before the rollout, or
+          // sent while the variable was unset and fell back — messages whose
+          // links really were on the platform origin. Absence means platform,
+          // which is correct for exactly those rows. This function's contract is
+          // to reconstruct the payload EXACTLY; a plausible-looking wrong payload
+          // is worse than none, because nothing downstream can tell it is wrong
+          // (Codex review P2).
+          trackingBase:
+            typeof meta.tracking_base === "string" && meta.tracking_base
+              ? meta.tracking_base
+              : undefined,
         }),
         provider_message_id:
           typeof meta.rfc822_message_id === "string" ? meta.rfc822_message_id : null,

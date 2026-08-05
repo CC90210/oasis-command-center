@@ -37,6 +37,10 @@ import {
 import type { DripSmsIdentity } from "@/lib/drips/rep-sms-identity";
 import { sendGmail } from "@/lib/integrations/submissions-gmail-send";
 import { getSubmissionsFrom } from "@/lib/integrations/submissions-gmail";
+import {
+  fromAddress as configuredFromAddress,
+  fromDisplayName,
+} from "@/lib/email/sending-identity";
 
 export type DripSmsResult =
   | {
@@ -122,13 +126,27 @@ export async function sendDripEmail(
     body,
     html: opts?.html,
     listUnsubscribe: opts?.listUnsubscribe,
+    // Drip-only display name. Undefined unless DRIP_FROM_NAME is set, so lender
+    // shop-out mail through the same mailbox keeps the shared default.
+    fromName: fromDisplayName(),
   });
   if (!result.ok) return { ok: false, error: result.error };
-  let fromAddress = "submissions@sunbizfunding.com";
-  try {
-    fromAddress = await getSubmissionsFrom(tenantId);
-  } catch {
-    /* best-effort label only — the send already succeeded */
+  // Report the From header the message was ACTUALLY sent with. The executor
+  // persists this as from_identity, so re-deriving it here would audit a
+  // DRIP_FROM_NAME-rebranded send under the shared default and record an
+  // identity the recipient never saw (Codex review P2).
+  //
+  // The fallbacks exist only for the impossible case of a send that succeeded
+  // without reporting its own From, and prefer the configured identity over a
+  // literal so they do not keep saying SunBiz after the cutover either.
+  let fromAddress = result.from_identity;
+  if (!fromAddress) {
+    fromAddress = configuredFromAddress();
+    try {
+      fromAddress = await getSubmissionsFrom(tenantId);
+    } catch {
+      /* best-effort label only — the send already succeeded */
+    }
   }
   return { ok: true, messageId: result.rfc822_message_id, fromAddress };
 }
