@@ -17,7 +17,7 @@ import Link from "next/link";
 import { Card, PageHeader } from "@/components/Card";
 import { safe } from "@/lib/api-helpers";
 import { resolveFounder } from "@/lib/founders/gate";
-import { getMarketingAssets, mediaKey, signMediaUrls } from "@/lib/founders/marketing-queries";
+import { getMarketingAssets, getMarketingBrands, mediaKey, signMediaUrls } from "@/lib/founders/marketing-queries";
 import {
   TRACKS,
   channelLabel,
@@ -43,7 +43,7 @@ function isTrack(v: string | undefined): v is Track {
 export default async function MarketingLibraryPage({
   searchParams,
 }: {
-  searchParams: Promise<{ track?: string; channel?: string }>;
+  searchParams: Promise<{ track?: string; channel?: string; brand?: string }>;
 }) {
   const founder = await resolveFounder();
   if (!founder) notFound();
@@ -51,12 +51,14 @@ export default async function MarketingLibraryPage({
   const sp = await searchParams;
   const track = isTrack(sp.track) ? sp.track : undefined;
   const channel = isChannel(sp.channel) ? (sp.channel as Channel) : undefined;
+  const brand = typeof sp.brand === "string" && /^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(sp.brand)
+    ? sp.brand
+    : undefined;
 
-  const assets = await safe(
-    "marketing.library",
-    getMarketingAssets(founder.tenantId, { track, channel }),
-    [],
-  );
+  const [assets, brands] = await Promise.all([
+    safe("marketing.library", getMarketingAssets(founder.tenantId, { track, channel, brand }), []),
+    safe("marketing.library.brands", getMarketingBrands(founder.tenantId), []),
+  ]);
 
   // Pick the objects each tile needs, then sign them ALL in one batched call per
   // bucket. Signing per object was one Storage round-trip each — 400 sequential
@@ -133,6 +135,22 @@ export default async function MarketingLibraryPage({
         ))}
       </div>
 
+      {brands.length > 1 && (
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="mr-1 text-[10px] font-bold uppercase tracking-[0.14em] text-fg-dim">Brand</span>
+          <FilterPill href="/founders/marketing/library" label="All brands" active={!brand} subtle />
+          {brands.map((item) => (
+            <FilterPill
+              key={item.slug}
+              href={`/founders/marketing/library?brand=${item.slug}`}
+              label={item.name}
+              active={brand === item.slug}
+              subtle
+            />
+          ))}
+        </div>
+      )}
+
       {channelOptions.length > 1 && (
         <div className="flex flex-wrap items-center gap-2">
           {/* "All <track>" clears the channel filter without losing the track. */}
@@ -175,6 +193,7 @@ export default async function MarketingLibraryPage({
               key={asset.id}
               id={asset.id}
               title={asset.title}
+              brandName={asset.brand_name}
               channel={asset.channel}
               status={asset.status}
               hook={asset.hook}

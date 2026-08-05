@@ -31,6 +31,8 @@ export type MarketingAssetRow = {
   id: string;
   tenant_id: string;
   title: string;
+  brand_slug: string;
+  brand_name: string;
   channel: Channel;
   track: Track;
   format: AssetFormat;
@@ -137,7 +139,7 @@ export async function getMarketingSummary(tenantId: string): Promise<MarketingSu
  */
 export async function getMarketingAssets(
   tenantId: string,
-  opts: { track?: Track; channel?: Channel; status?: AssetStatus; limit?: number } = {},
+  opts: { track?: Track; channel?: Channel; status?: AssetStatus; brand?: string; limit?: number } = {},
 ): Promise<MarketingAssetRow[]> {
   if (!tenantId) return [];
   const db = getServiceSupabase();
@@ -151,6 +153,7 @@ export async function getMarketingAssets(
     if (opts.track) q = q.eq("track", opts.track);
     if (opts.channel) q = q.eq("channel", opts.channel);
     if (opts.status) q = q.eq("status", opts.status);
+    if (opts.brand) q = q.eq("brand_slug", opts.brand);
 
     const r = await q;
     if (r.error) {
@@ -263,6 +266,30 @@ export async function signMediaUrls(
 }
 
 export const mediaKey = (bucket: string, path: string) => `${bucket}\n${path}`;
+
+/** Brand choices for the library filter, deduped from tenant-scoped assets. */
+export async function getMarketingBrands(
+  tenantId: string,
+): Promise<Array<{ slug: string; name: string }>> {
+  if (!tenantId) return [];
+  try {
+    const db = getServiceSupabase();
+    const r = await db
+      .from("marketing_asset")
+      .select("brand_slug, brand_name")
+      .eq("tenant_id", tenantId)
+      .order("brand_name")
+      .limit(1000);
+    if (r.error) return [];
+    const unique = new Map<string, string>();
+    for (const row of (r.data || []) as Array<{ brand_slug: string; brand_name: string }>) {
+      if (row.brand_slug && !unique.has(row.brand_slug)) unique.set(row.brand_slug, row.brand_name);
+    }
+    return [...unique].map(([slug, name]) => ({ slug, name }));
+  } catch {
+    return [];
+  }
+}
 
 /* ─────────────────────────────────────────────────────────── corpus */
 

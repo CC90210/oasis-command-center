@@ -38,6 +38,7 @@ export function StatusTag({ status }: { status: AssetStatus }) {
 export function AssetTile({
   id,
   title,
+  brandName,
   channel,
   status,
   hook,
@@ -50,6 +51,7 @@ export function AssetTile({
 }: {
   id: string;
   title: string;
+  brandName: string;
   channel: Channel;
   status: AssetStatus;
   hook?: string | null;
@@ -112,6 +114,9 @@ export function AssetTile({
       </div>
 
       <div className="flex flex-col gap-2 p-4">
+        <span className="text-[9px] font-bold uppercase tracking-[0.14em] text-accent">
+          {brandName}
+        </span>
         <Link
           href={`/founders/marketing/asset/${id}`}
           className="text-sm font-medium text-fg hover:text-accent transition-colors line-clamp-2"
