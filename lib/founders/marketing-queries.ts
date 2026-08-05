@@ -274,16 +274,21 @@ export async function getMarketingBrands(
   if (!tenantId) return [];
   try {
     const db = getServiceSupabase();
-    const r = await db
-      .from("marketing_asset")
-      .select("brand_slug, brand_name")
-      .eq("tenant_id", tenantId)
-      .order("brand_name")
-      .limit(1000);
-    if (r.error) return [];
     const unique = new Map<string, string>();
-    for (const row of (r.data || []) as Array<{ brand_slug: string; brand_name: string }>) {
-      if (row.brand_slug && !unique.has(row.brand_slug)) unique.set(row.brand_slug, row.brand_name);
+    const pageSize = 1000;
+    for (let from = 0; ; from += pageSize) {
+      const r = await db
+        .from("marketing_asset")
+        .select("brand_slug, brand_name")
+        .eq("tenant_id", tenantId)
+        .order("brand_name")
+        .range(from, from + pageSize - 1);
+      if (r.error) return [];
+      const rows = (r.data || []) as Array<{ brand_slug: string; brand_name: string }>;
+      for (const row of rows) {
+        if (row.brand_slug && !unique.has(row.brand_slug)) unique.set(row.brand_slug, row.brand_name);
+      }
+      if (rows.length < pageSize) break;
     }
     return [...unique].map(([slug, name]) => ({ slug, name }));
   } catch {

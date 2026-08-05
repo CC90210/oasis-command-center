@@ -61,7 +61,11 @@ async function main() {
   const hook = typeof args.hook === "string" ? args.hook : null;
   const body = typeof args.body === "string" ? args.body : null;
   const cta = typeof args.cta === "string" ? args.cta : null;
-  const duration = Number(typeof args.duration === "string" ? args.duration : "0") || null;
+  const durationRaw = typeof args.duration === "string" ? args.duration.trim() : null;
+  const duration = durationRaw === null ? null : Number(durationRaw);
+  if (durationRaw !== null && (!Number.isFinite(duration) || (duration as number) <= 0)) {
+    throw new Error("--duration must be a positive number of seconds");
+  }
   const aspect = typeof args.aspect === "string" ? args.aspect : "9:16";
   if (!["9:16", "1:1", "4:5", "16:9"].includes(aspect)) throw new Error("--aspect must be 9:16, 1:1, 4:5, or 16:9");
   const [defaultWidth, defaultHeight] = aspect === "16:9" ? [1920, 1080] : aspect === "1:1" ? [1080, 1080] : aspect === "4:5" ? [1080, 1350] : [1080, 1920];
@@ -145,6 +149,13 @@ async function main() {
       registered_by: "scripts/register-marketing-asset.ts",
     },
   }).select("id, title, status, created_at").single();
+  if (asset.error?.code === "23505") {
+    const winner = await db.from("marketing_asset").select("id, title").eq("tenant_id", resolvedTenantId).eq("source", source).maybeSingle();
+    if (!winner.error && winner.data) {
+      console.log(JSON.stringify({ status: "already_registered", tenant: tenant.data, asset: winner.data }, null, 2));
+      return;
+    }
+  }
   if (asset.error) throw new Error(`Asset insert failed: ${asset.error.message}`);
 
   const bucket = "marketing-media";
@@ -189,9 +200,15 @@ async function main() {
     if (media.error) throw new Error(`Media insert failed: ${media.error.message}`);
     console.log(JSON.stringify({ status: "registered", tenant: tenant.data, asset: asset.data, media: media.data }, null, 2));
   } catch (error) {
-    if (uploaded.length) await db.storage.from(bucket).remove(uploaded);
-    await db.from("marketing_asset").delete().eq("tenant_id", resolvedTenantId).eq("id", assetId);
-    throw error;
+    const cleanupErrors: string[] = [];
+    if (uploaded.length) {
+      const removed = await db.storage.from(bucket).remove(uploaded);
+      if (removed.error) cleanupErrors.push(`storage cleanup failed: ${removed.error.message}`);
+    }
+    const deleted = await db.from("marketing_asset").delete().eq("tenant_id", resolvedTenantId).eq("id", assetId);
+    if (deleted.error) cleanupErrors.push(`asset cleanup failed: ${deleted.error.message}`);
+    const original = error instanceof Error ? error.message : String(error);
+    throw new Error(cleanupErrors.length ? `${original}; ${cleanupErrors.join("; ")}` : original);
   }
 }
 

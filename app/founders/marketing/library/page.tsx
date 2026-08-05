@@ -100,6 +100,17 @@ export default async function MarketingLibraryPage({
   // uses the real mapping and cannot drift.
   const activeTrack: Track | undefined = track ?? (channel ? trackForChannel(channel) : undefined);
   const channelOptions: Channel[] = activeTrack ? channelsForTrack(activeTrack) : [];
+  const filterHref = (next: { track?: Track | null; channel?: Channel | null; brand?: string | null }) => {
+    const params = new URLSearchParams();
+    const nextTrack = next.track === undefined ? track : next.track || undefined;
+    const nextChannel = next.channel === undefined ? channel : next.channel || undefined;
+    const nextBrand = next.brand === undefined ? brand : next.brand || undefined;
+    if (nextTrack) params.set("track", nextTrack);
+    if (nextChannel) params.set("channel", nextChannel);
+    if (nextBrand) params.set("brand", nextBrand);
+    const query = params.toString();
+    return `/founders/marketing/library${query ? `?${query}` : ""}`;
+  };
 
   return (
     <div className="space-y-6 animate-fade-in">
@@ -122,11 +133,11 @@ export default async function MarketingLibraryPage({
       {/* Filters. Plain links so the page stays a server component and every
           view is a shareable URL. */}
       <div className="flex flex-wrap items-center gap-2">
-        <FilterPill href="/founders/marketing/library" label="All" active={!track && !channel} />
+        <FilterPill href={filterHref({ track: null, channel: null })} label="All" active={!track && !channel} />
         {TRACKS.map((t) => (
           <FilterPill
             key={t}
-            href={`/founders/marketing/library?track=${t}`}
+            href={filterHref({ track: t, channel: null })}
             label={trackLabel(t)}
             // Stays lit while drilled into one of its channels, so the view
             // always shows where you are.
@@ -138,11 +149,11 @@ export default async function MarketingLibraryPage({
       {brands.length > 1 && (
         <div className="flex flex-wrap items-center gap-2">
           <span className="mr-1 text-[10px] font-bold uppercase tracking-[0.14em] text-fg-dim">Brand</span>
-          <FilterPill href="/founders/marketing/library" label="All brands" active={!brand} subtle />
+          <FilterPill href={filterHref({ brand: null })} label="All brands" active={!brand} subtle />
           {brands.map((item) => (
             <FilterPill
               key={item.slug}
-              href={`/founders/marketing/library?brand=${item.slug}`}
+              href={filterHref({ brand: item.slug })}
               label={item.name}
               active={brand === item.slug}
               subtle
@@ -155,7 +166,7 @@ export default async function MarketingLibraryPage({
         <div className="flex flex-wrap items-center gap-2">
           {/* "All <track>" clears the channel filter without losing the track. */}
           <FilterPill
-            href={`/founders/marketing/library?track=${activeTrack}`}
+            href={filterHref({ track: activeTrack as Track, channel: null })}
             label={`All ${trackLabel(activeTrack as Track)}`}
             active={!channel}
             subtle
@@ -163,7 +174,7 @@ export default async function MarketingLibraryPage({
           {channelOptions.map((c) => (
             <FilterPill
               key={c}
-              href={`/founders/marketing/library?channel=${c}`}
+              href={filterHref({ track: null, channel: c })}
               label={channelLabel(c)}
               active={channel === c}
               subtle

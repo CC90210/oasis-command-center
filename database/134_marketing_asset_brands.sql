@@ -16,3 +16,8 @@ alter table public.marketing_asset
 create index if not exists idx_marketing_asset_tenant_brand_created
   on public.marketing_asset (tenant_id, brand_slug, created_at desc);
 
+-- A source key identifies one produced asset. Application checks provide the
+-- friendly response; this index closes the concurrent-agent race.
+create unique index if not exists marketing_asset_tenant_source_unique_idx
+  on public.marketing_asset (tenant_id, source)
+  where source is not null;
