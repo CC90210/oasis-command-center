@@ -33,7 +33,7 @@ import { getClientIp } from "@/lib/api-helpers";
 import { publishAgentEvent } from "@/lib/manifest/events";
 import { dispatchLeadStageEvent } from "@/lib/lead-stage-dispatcher";
 import { b64urlDecode, verifyClickTarget } from "@/lib/drips/html-email";
-import { trackingHost } from "@/lib/email/tracking-base";
+import { clickAllowedHosts } from "@/lib/email/sending-identity";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -43,24 +43,20 @@ const APP_BASE = (process.env.PUBLIC_APP_URL || "https://oasisai.work").replace(
 const SAFE_DEFAULT = `${APP_BASE}/f/submissions/initial-lead-capture`;
 // Hosts we redirect to WITHOUT a valid signature (first-party surfaces only).
 //
-// The configured SunBiz tracking host is included (2026-07-29) because drip mail
-// now builds its links on the sending domain rather than the platform domain, so
+// The configured drip tracking host is included (2026-07-29) because drip mail
+// now builds its links on the SENDING domain rather than the platform domain, so
 // a link that legitimately targets that host must not be downgraded to
 // SAFE_DEFAULT. Read from env rather than hardcoded so the allowlist cannot
 // drift from lib/email/tracked-html.ts, which is what actually mints the links.
 // Only the HOST is taken, and only from a valid https URL — a malformed value
 // contributes nothing rather than widening the allowlist.
-function allowedHosts(): Set<string> {
-  const hosts = new Set([
-    "oasisai.work",
-    "www.oasisai.work",
-    "sunbizfunding.com",
-    "www.sunbizfunding.com",
-  ]);
-  const tracking = trackingHost(process.env.SUNBIZ_TRACKING_BASE_URL);
-  if (tracking) hosts.add(tracking);
-  return hosts;
-}
+// Derived in lib/email/sending-identity.ts so it cannot drift from what mints
+// the links, and so it automatically covers the sending domain and the CTA
+// destination after a brand cutover. The legacy hosts stay in that set on
+// purpose: mail already sitting in inboxes points at them, and a merchant
+// opening a three-week-old email must still land on the right page rather than
+// the safe default.
+const allowedHosts = clickAllowedHosts;
 
 function hashIp(ip: string | null): string | null {
   if (!ip) return null;
