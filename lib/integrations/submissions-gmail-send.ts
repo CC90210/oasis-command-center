@@ -24,6 +24,7 @@ import "server-only";
 import { randomUUID } from "node:crypto";
 import { getSubmissionsCreds, getSubmissionsFrom } from "./submissions-gmail";
 import { domainOfAddress, messageIdDomain } from "@/lib/email/sending-identity";
+import type { BrandKey } from "@/lib/email/brands";
 
 export type SendPayload = {
   to: string;
@@ -68,6 +69,16 @@ export type SendPayload = {
   fromName?: string;
   /** Per-tenant credential lookup; pass through from the route's auth context. */
   tenantId: string;
+  /**
+   * Which brand sends this message. Selects the credential row, and therefore
+   * the mailbox that authenticates and the domain that DKIM-signs.
+   *
+   * Omit for SunBiz, which is every existing caller. Lender shop-out mail must
+   * NEVER set this: lenders only ever receive paper from the SunBiz brand,
+   * whatever brand the merchant sits on (Adon, 2026-08-05). That rule is held
+   * by tests/shopout-brand-lock.test.ts, not by convention.
+   */
+  brand?: BrandKey;
 };
 
 export type SendResult =
@@ -131,7 +142,10 @@ async function sendOnce(
 ): Promise<{ ok: true; nodemailerMessageId: string; fromIdentity: string } | { ok: false; error: string; transient: boolean }> {
   try {
     const nodemailer = await import("nodemailer");
-    const creds = await getSubmissionsCreds(payload.tenantId);
+    // The brand selects the CREDENTIAL, which is what makes the visible sender
+    // and the DKIM signature agree. Absent brand = SunBiz = today's behaviour,
+    // and lender shop-out mail deliberately never passes one.
+    const creds = await getSubmissionsCreds(payload.tenantId, payload.brand);
     // The display name in front of the address. getSubmissionsFrom() supplies a
     // shared default ("SunBiz Submissions") used by lender shop-out mail as well,
     // so a caller that needs to rebrand ONLY its own mail passes `fromName` and
@@ -139,7 +153,7 @@ async function sendOnce(
     // real authenticated mailbox either way — only the label changes.
     const from = payload.fromName
       ? `${payload.fromName} <${creds.fromAddress}>`
-      : await getSubmissionsFrom(payload.tenantId);
+      : await getSubmissionsFrom(payload.tenantId, payload.brand);
 
     const transporter = nodemailer.createTransport({
       host: "smtp.gmail.com",
@@ -193,11 +207,16 @@ export async function sendGmail(payload: SendPayload): Promise<SendResult> {
   // threading aid, and sendOnce will surface a genuine credential problem.
   let senderDomain: string | undefined;
   try {
-    senderDomain = domainOfAddress(await getSubmissionsFrom(payload.tenantId)) || undefined;
+    senderDomain =
+      domainOfAddress(await getSubmissionsFrom(payload.tenantId, payload.brand)) || undefined;
   } catch {
     /* fall back to the configured identity */
   }
-  const generatedMessageId = synthesizeMessageId(senderDomain);
+  // Fall back to the BRAND's Message-Id domain, not the global one: on a
+  // Bluerise send whose credential lookup transiently failed, stamping the
+  // SunBiz domain would put the wrong brand in the Message-Id of a message the
+  // retry then sends as Bluerise.
+  const generatedMessageId = synthesizeMessageId(senderDomain || messageIdDomain(payload.brand));
 
   let attempt = await sendOnce(payload, generatedMessageId);
 

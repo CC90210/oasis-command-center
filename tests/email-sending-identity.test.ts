@@ -233,4 +233,85 @@ withEnv({ DRIP_FROM_NAME: "   " }, () => {
   assert.equal(fromDisplayName(), undefined, "whitespace-only is treated as unset, not an empty name");
 });
 
+// ---------------------------------------------------------------------------
+// PER-BRAND RESOLUTION (2026-08-05, dual-brand build)
+//
+// Every resolver takes an optional brand. The no-arg form must stay exactly
+// what it was, because that is what every existing caller uses and what makes
+// this change safe to deploy before any brand routing exists.
+// ---------------------------------------------------------------------------
+
+// No-arg behaviour is unchanged. This is the deploy-safety guarantee.
+assert.equal(fromAddress(), "submissions@sunbizfunding.com", "no-arg From is unchanged");
+assert.equal(fromDomain(), "sunbizfunding.com", "no-arg domain is unchanged");
+assert.equal(messageIdDomain(), "sunbizfunding.com", "no-arg Message-Id domain is unchanged");
+assert.equal(unsubscribeMailto(), "mailto:submissions@sunbizfunding.com?subject=unsubscribe");
+
+// Explicit sunbiz equals the no-arg form.
+assert.equal(fromAddress("sunbiz"), fromAddress());
+assert.equal(fromDomain("sunbiz"), fromDomain());
+
+// Bluerise resolves to its own identity.
+assert.equal(fromAddress("bluerise"), "submissions@bluerisebusinesscapital.com");
+assert.equal(fromDomain("bluerise"), "bluerisebusinesscapital.com");
+assert.equal(messageIdDomain("bluerise"), "bluerisebusinesscapital.com",
+  "Message-Id must follow the sending domain or filters score against it");
+assert.equal(unsubscribeMailto("bluerise"),
+  "mailto:submissions@bluerisebusinesscapital.com?subject=unsubscribe",
+  "the unsubscribe mailto must reach the mailbox that actually sent");
+
+// An unknown brand falls back to SunBiz rather than erroring or going blank.
+assert.equal(fromAddress("nonsense" as never), "submissions@sunbizfunding.com");
+
+// ---------------------------------------------------------------------------
+// The click allowlist must cover EVERY brand at once, not just the caller's.
+//
+// After a handoff, mail from the PREVIOUS brand is still sitting in inboxes and
+// cannot be re-sent. Scoping the allowlist to the current brand would silently
+// downgrade every click on that older mail to the safe default, which looks
+// like a dead campaign rather than a config error.
+// ---------------------------------------------------------------------------
+{
+  const hosts = clickAllowedHosts();
+  assert.ok(hosts.has("sunbizfunding.com"), "sunbiz host allowed");
+  assert.ok(hosts.has("www.sunbizfunding.com"), "sunbiz www allowed");
+  assert.ok(hosts.has("bluerisebusinesscapital.com"), "bluerise host allowed");
+  assert.ok(hosts.has("www.bluerisebusinesscapital.com"), "bluerise www allowed");
+  assert.ok(hosts.has("oasisai.work"), "platform host allowed");
+  // And it must not become a wildcard.
+  assert.ok(!hosts.has("evil.test"), "allowlist is not open");
+  assert.ok(!hosts.has(""), "allowlist has no empty entry");
+}
+
+// A configured per-brand tracking host joins the allowlist for that brand.
+withEnv({ BLUERISE_TRACKING_ORIGIN: "https://go.bluerisebusinesscapital.com" }, () => {
+  const hosts = clickAllowedHosts();
+  assert.ok(hosts.has("go.bluerisebusinesscapital.com"),
+    "a configured bluerise tracking host must be trusted, or every click 302s to the safe default");
+  assert.ok(hosts.has("sunbizfunding.com"), "configuring one brand must not drop the other");
+});
+
+// A malformed tracking origin contributes NOTHING rather than widening the set.
+// This is the one place that must fail closed: the allowlist decides where an
+// unsigned link may send a merchant.
+withEnv({ BLUERISE_TRACKING_ORIGIN: "http://insecure.test" }, () => {
+  assert.ok(!clickAllowedHosts().has("insecure.test"), "plain http must not be trusted");
+});
+withEnv({ BLUERISE_TRACKING_ORIGIN: "not-a-url" }, () => {
+  const hosts = clickAllowedHosts();
+  assert.ok(!hosts.has("not-a-url"), "unparseable origin contributes nothing");
+  assert.ok(hosts.has("bluerisebusinesscapital.com"), "and does not break the rest");
+});
+
+// ---------------------------------------------------------------------------
+// The suppression brand deliberately does NOT follow the sending brand.
+//
+// /api/unsubscribe resolves this string to a tenant when RECORDING an opt-out.
+// Both brands live on ONE tenant precisely so an opt-out to either stops both.
+// Making this follow the sender would file Bluerise opt-outs against a tenant
+// that may not exist, landing tenant_id = NULL, which checkEmailSuppressed can
+// never match. That exact failure has already happened once in production.
+// ---------------------------------------------------------------------------
+assert.equal(suppressionBrand(), "SunBiz", "suppression brand is not derived from the sender");
+
 console.log("email-sending-identity.test.ts — all assertions passed ✓");

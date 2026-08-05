@@ -16,6 +16,7 @@
  */
 
 import { resolveTrackingBase, trackingHost } from "./tracking-base";
+import { ALL_BRAND_KEYS, getBrand, resolveBrandKey, type BrandKey } from "./brands";
 
 /** What the sender was before any of this was configurable. Kept as the default
  *  so an unset environment is byte-identical to the pre-2026-07-29 behaviour. */
@@ -27,11 +28,17 @@ function env(name: string): string | undefined {
   return v ? v : undefined;
 }
 
-/** The address drip mail is sent From. Per-tenant overrides still win at send
- *  time (see getSubmissionsFrom); this is the fallback and the identity that
- *  everything else here is derived from. */
-export function fromAddress(): string {
-  return env("DRIP_FROM_ADDRESS") || LEGACY_FROM;
+/**
+ * The address drip mail is sent From. Per-tenant overrides still win at send
+ * time (see getSubmissionsFrom); this is the fallback and the identity that
+ * everything else here is derived from.
+ *
+ * The optional `brand` makes this per-SEND rather than global (2026-08-05).
+ * Omitting it resolves to SunBiz, which is what every pre-existing caller does
+ * and why this change is safe to deploy before any routing exists.
+ */
+export function fromAddress(brand?: BrandKey): string {
+  return getBrand(resolveBrandKey(brand)).fromAddress;
 }
 
 /**
@@ -87,8 +94,9 @@ export function fromDisplayName(): string | undefined {
  *  available (see submissions-gmail-send.ts). This global value is the fallback,
  *  and using it unconditionally would stamp one tenant's domain onto another
  *  tenant's mail. */
-export function fromDomain(): string {
-  return domainOfAddress(fromAddress()) || "sunbizfunding.com";
+export function fromDomain(brand?: BrandKey): string {
+  const key = resolveBrandKey(brand);
+  return domainOfAddress(fromAddress(key)) || getBrand(key).sendingDomain;
 }
 
 /**
@@ -99,15 +107,15 @@ export function fromDomain(): string {
  * signal and a dead end for the recipient: replies to it may not even be
  * deliverable once the old mailbox is retired.
  */
-export function unsubscribeMailto(): string {
-  return `mailto:${fromAddress()}?subject=unsubscribe`;
+export function unsubscribeMailto(brand?: BrandKey): string {
+  return `mailto:${fromAddress(brand)}?subject=unsubscribe`;
 }
 
 /** The domain used to synthesize RFC 5322 Message-Ids. Must match the sending
  *  domain or receivers see a Message-Id that does not correspond to the sender,
  *  which some filters score against. */
-export function messageIdDomain(): string {
-  return fromDomain();
+export function messageIdDomain(brand?: BrandKey): string {
+  return fromDomain(brand);
 }
 
 /** The shared platform origin. */
@@ -123,8 +131,15 @@ export function platformOrigin(): string {
  * Unset falls back to the platform origin, which is the current behaviour and is
  * why this is safe to deploy before any DNS exists.
  */
-export function trackingOrigin(): string {
-  return resolveTrackingBase(env("DRIP_TRACKING_BASE_URL"), platformOrigin());
+export function trackingOrigin(brand?: BrandKey): string {
+  const key = resolveBrandKey(brand);
+  // DRIP_TRACKING_BASE_URL remains the SunBiz-side name so anything already
+  // configured keeps working; Bluerise gets its own so the two can move apart.
+  const configured =
+    key === "sunbiz"
+      ? env("DRIP_TRACKING_BASE_URL") || env("SUNBIZ_TRACKING_ORIGIN")
+      : env("BLUERISE_TRACKING_ORIGIN");
+  return resolveTrackingBase(configured, platformOrigin());
 }
 
 /**
@@ -165,23 +180,49 @@ export function intakeUrl(): string {
  * links. The legacy hosts stay because mail already in inboxes points at them and
  * must keep working long after the cutover: a merchant opening a three-week-old
  * email should still land on the right page, not the safe default.
+ *
+ * UNIONS EVERY BRAND, deliberately, and takes no brand argument.
+ *
+ * This route serves clicks on mail that was sent at some point in the PAST. After
+ * a brand handoff the merchant's inbox still holds messages minted on the
+ * previous brand's origin, and those cannot be re-sent. Scoping this to the
+ * brand a lead is on TODAY would silently downgrade every click on that older
+ * mail to SAFE_DEFAULT, which presents as a dead campaign rather than a config
+ * error. Breadth here is correct; the narrowing happens at signature
+ * verification, not at the allowlist.
+ *
+ * This is also load-bearing rather than defence-in-depth while
+ * OASIS_UNSUBSCRIBE_HMAC_SECRET is unset in production: with no secret,
+ * signClickTarget() returns empty, every link ships unsigned, and this set is
+ * the ONLY thing deciding where a merchant lands.
  */
 export function clickAllowedHosts(): Set<string> {
+  // LEGACY hosts, unconditional and never derived. Every message sent before
+  // this file existed points at these, and overriding DRIP_FROM_ADDRESS must
+  // not evict them — that would strand years of mail already in inboxes.
   const hosts = new Set([
     "oasisai.work",
     "www.oasisai.work",
     "sunbizfunding.com",
     "www.sunbizfunding.com",
   ]);
-  const tracking = trackingHost(env("DRIP_TRACKING_BASE_URL"));
-  if (tracking) hosts.add(tracking);
-  // The sending domain itself, and its www form, so a hand-written link in a
-  // template body to the brand's own site is not downgraded.
-  const sending = fromDomain().toLowerCase();
-  if (sending) {
-    hosts.add(sending);
-    hosts.add(`www.${sending}`);
+
+  for (const key of ALL_BRAND_KEYS) {
+    // The sending domain itself, and its www form, so a hand-written link in a
+    // template body to the brand's own site is not downgraded.
+    const sending = fromDomain(key).toLowerCase();
+    if (sending) {
+      hosts.add(sending);
+      hosts.add(`www.${sending}`);
+    }
+    // The configured tracking host for that brand, when it is a valid https
+    // origin. A malformed value contributes NOTHING rather than widening the
+    // allowlist — this is the one place that must fail closed, because the
+    // allowlist decides where an unsigned link may send a merchant.
+    const tracking = trackingHost(trackingOrigin(key));
+    if (tracking) hosts.add(tracking);
   }
+
   // The CTA destination may be an entirely separate marketing site.
   try {
     const intake = new URL(intakeUrl());
