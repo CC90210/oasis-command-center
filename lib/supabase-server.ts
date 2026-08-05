@@ -44,12 +44,19 @@ function makeSupabaseService(): SupabaseClient {
  * migration plan). Any other value, or missing Turso config, is 100% Supabase.
  * Rollback is therefore one env var, no deploy.
  *
- * `rpc` stays on Supabase deliberately: the adapter's rpc() throws, and the 14
- * RPCs this app calls still exist in Postgres until each is ported. Sending
- * rpc to Supabase while tables live in Turso means an RPC that WRITES tables
- * would write the old database — the RPC inventory in the migration notes flags
- * which ones those are; they are ported first during the cutover window.
+ * `rpc` FAILS CLOSED under Turso mode. The first design delegated rpc to
+ * Supabase "until each is ported" — an adversarial review traced a concrete
+ * split-brain through app/api/applications/[id]/edit: verify the record in
+ * Turso, patch_tenant_record_data WRITES Postgres, reread from Turso → success
+ * reported, stale data returned, and the databases permanently diverge. A
+ * loud 400 naming the unported RPC is strictly better than that. Read-only
+ * RPCs that have been explicitly verified safe can be listed in
+ * TURSO_RPC_PASSTHROUGH (comma-separated) to delegate to Supabase.
  */
+const RPC_PASSTHROUGH = new Set(
+  (process.env.TURSO_RPC_PASSTHROUGH ?? "").split(",").map((s) => s.trim()).filter(Boolean),
+);
+
 export function getServiceSupabase(): SupabaseClient {
   if (process.env.EMPIRE_DATA_BACKEND !== "turso_cloud" || !tursoConfigured()) {
     return makeSupabaseService();
@@ -60,6 +67,28 @@ export function getServiceSupabase(): SupabaseClient {
   _hybridCached = new Proxy(supa, {
     get(target, prop, receiver) {
       if (prop === "from") return (table: string) => turso.from(table);
+      if (prop === "rpc") {
+        return (name: string, args?: Record<string, unknown>) => {
+          if (RPC_PASSTHROUGH.has(name)) return target.rpc(name, args);
+          // Thenable error response, matching supabase-js's non-throwing shape.
+          return Promise.resolve({
+            data: null,
+            count: null,
+            status: 400,
+            statusText: "Bad Request",
+            error: {
+              message:
+                `rpc("${name}") is blocked under EMPIRE_DATA_BACKEND=turso_cloud: ` +
+                `PL/pgSQL did not migrate, and delegating to Postgres while tables ` +
+                `read from Turso splits writes across databases. Port the RPC, or — ` +
+                `only if it is verified read-only — add it to TURSO_RPC_PASSTHROUGH.`,
+              code: "TURSO_RPC_BLOCKED",
+              details: null,
+              hint: null,
+            },
+          });
+        };
+      }
       return Reflect.get(target, prop, receiver);
     },
   }) as SupabaseClient;
