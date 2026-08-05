@@ -9,15 +9,26 @@ import { NextResponse, type NextRequest } from "next/server";
 import { createServerClient } from "@supabase/ssr";
 import { matchesPathPrefix } from "./lib/path-prefix";
 import { shouldRedirectToOnboarding } from "./lib/onboarding-gate";
+import { MARKETING_PATHS, MARKETING_HOME_PATH } from "./lib/marketing/routes";
 
 export const PUBLIC_PATH_PREFIXES = [
-  "/welcome",              // public marketing landing
+  // Public marketing site — /home (served at "/" via the rewrite below),
+  // /fleet, /work, /about, /contact, /start. Sourced from
+  // lib/marketing/routes.ts so this list and the root layout's
+  // FULL_BLEED_PREFIXES can never disagree about what is public. The three
+  // legal pages are listed individually further down — they predate the
+  // marketing site and their comments explain why each must stay public.
+  ...MARKETING_PATHS,
+  "/welcome",              // Legacy landing URL. app/welcome/ no longer exists — next.config.js 308s it to /start, and config redirects run BEFORE middleware, so this entry is never actually consulted today. Kept as a backstop: if that redirect is ever removed, /welcome should 404 rather than bounce an anonymous visitor to /login.
   "/download",             // public OASIS Desktop downloads
   "/configure",            // public agent configurator (pre-signup)
   "/demo/sun",             // public Sun Biz review shell; demo data only
   "/oasis-loop",           // public static OASIS Loop HTML deliverables under /public/oasis-loop
   "/unsubscribe",          // CASL-compliant email unsubscribe landing — reached from email footers (DEFAULT_UNSUBSCRIBE_BASE in BEA/scripts/casl_compliance.py). Recipients may not have an account; the confirmation page reads ?email=&brand=&token= from the URL and POSTs to /api/unsubscribe (also public, service-role insert into email_suppressions). MUST be public or every unsub link 401s before the form renders, which is itself a CASL violation.
   "/api/unsubscribe",      // companion API for /unsubscribe — POST records the suppression via service-role Supabase client. Token-validated INSIDE the route when OASIS_UNSUBSCRIBE_HMAC_SECRET is set; otherwise email-only opt-out is accepted (matches the URL format casl_compliance.py emits today).
+  "/privacy",              // public legal route — linked from signup consent, public form pages, and email footers. MUST be public or the consent link 401s for the exact audience that has no account yet.
+  "/terms",                // public legal route — same reason; the arbitration + DMCA policy has to be readable BEFORE acceptance to be binding.
+  "/dmca",                 // public copyright-notice intake; complainants are third parties who will never have an account.
   "/login",
   "/signup",
   "/forgot-password",
@@ -74,7 +85,10 @@ export const PUBLIC_PATH_PREFIXES = [
   "/favicon",
 ];
 
-const MARKETING_REDIRECT_TARGET = "/welcome"; // unauthed home goes here, not login
+// Unauthed "/" is REWRITTEN (not redirected) to the marketing home, so
+// oasisai.work stays the canonical URL for the brand apex in the address
+// bar, in shares, and in search. See lib/marketing/routes.ts for why "/"
+// itself can never be added to PUBLIC_PATH_PREFIXES.
 
 // Public static-asset extensions. Anything served from /public with one of
 // these suffixes is allowed without auth — install scripts (curl|bash) and
@@ -102,8 +116,28 @@ const PUBLIC_FILE_EXTENSIONS = [
  * the exact-match case still hits and the prefix+`/` case is identical
  * to the original startsWith for those entries.
  */
+/**
+ * Next's generated metadata image routes: /opengraph-image-pwu6ef,
+ * /twitter-image-a1b2c3, /icon, /apple-icon. The build appends a content
+ * hash and emits NO file extension, so neither matcher above catches them —
+ * matchesPathPrefix needs an exact match or prefix + "/", and
+ * PUBLIC_FILE_EXTENSIONS keys off a suffix.
+ *
+ * They must be public. LinkedIn, Slack, iMessage and every other unfurler
+ * fetches the image URL directly with no session, so while these were gated
+ * the homepage's share card 307'd to /login and rendered as a login page in
+ * every preview. Caught by fetching the image on production rather than
+ * trusting that the og:image meta tag being present meant it resolved.
+ *
+ * Anchored so it cannot over-match: "icon" matches /icon, /icon-abc123 and
+ * /icon.png, but not /icons or /iconography.
+ */
+const METADATA_IMAGE_ROUTE =
+  /^\/(opengraph-image|twitter-image|icon|apple-icon)(-[A-Za-z0-9]+)?(\.[a-z0-9]+)?$/;
+
 export function isPublic(pathname: string): boolean {
   if (PUBLIC_PATH_PREFIXES.some((p) => matchesPathPrefix(pathname, p))) return true;
+  if (METADATA_IMAGE_ROUTE.test(pathname)) return true;
   const lower = pathname.toLowerCase();
   return PUBLIC_FILE_EXTENSIONS.some((ext) => lower.endsWith(ext));
 }
@@ -120,6 +154,13 @@ export async function middleware(req: NextRequest) {
   const REDIRECT_MAP: Record<string, string> = {
     "/feed": "/operations",
     "/integrations": "/settings",
+    // The marketing home is a real route so the rewrite below has
+    // something to resolve to, which also makes it directly reachable —
+    // two URLs serving one page. Collapse it here so "/" is the only
+    // address that page ever has. Safe against a loop: Next does not
+    // re-run middleware on an internal rewrite, so the "/" -> "/home"
+    // rewrite further down never re-enters this map.
+    [MARKETING_HOME_PATH]: "/",
   };
   if (pathname in REDIRECT_MAP) {
     return NextResponse.redirect(new URL(REDIRECT_MAP[pathname], req.url));
@@ -130,6 +171,26 @@ export async function middleware(req: NextRequest) {
   const requestHeaders = new Headers(req.headers);
   requestHeaders.set("x-pathname", pathname);
 
+  const isHome = pathname === "/" || pathname === "";
+
+  /**
+   * Serve the marketing home in place at "/".
+   *
+   * A rewrite, not a redirect: the brand apex should not bounce visitors
+   * to a sub-path, and search engines should index "/". x-pathname is
+   * re-stamped because the root layout keys its full-bleed decision off
+   * that header — left as "/", the layout falls through to the dashboard
+   * branch, wraps the marketing page in an operator sidebar, and runs a
+   * full profile + tenant-manifest resolution for someone with no account.
+   */
+  const rewriteMarketingHome = () => {
+    const rewriteHeaders = new Headers(req.headers);
+    rewriteHeaders.set("x-pathname", MARKETING_HOME_PATH);
+    return NextResponse.rewrite(new URL(MARKETING_HOME_PATH, req.url), {
+      request: { headers: rewriteHeaders },
+    });
+  };
+
   // Always allow public paths
   if (isPublic(pathname)) {
     return NextResponse.next({ request: { headers: requestHeaders } });
@@ -139,8 +200,19 @@ export async function middleware(req: NextRequest) {
   const anon =
     process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ||
     process.env.BRAVO_SUPABASE_ANON_KEY;
-  // If env not configured (preview/local), let it through — page-level guards still run
-  if (!url || !anon) return NextResponse.next({ request: { headers: requestHeaders } });
+  // If env not configured (preview/local), let it through — page-level guards still run.
+  //
+  // Except "/". Without Supabase credentials nobody CAN be authenticated,
+  // so a request to the brand apex is definitionally an anonymous visit and
+  // belongs on the marketing home. Falling through instead renders the
+  // operator dashboard, which immediately throws on its first service-role
+  // query — i.e. a missing env var takes down the homepage rather than just
+  // the app behind it. (Caught on a local dev box with no .env.local,
+  // 2026-07-31; the same branch runs on any preview deploy missing config.)
+  if (!url || !anon) {
+    if (isHome) return rewriteMarketingHome();
+    return NextResponse.next({ request: { headers: requestHeaders } });
+  }
 
   // Canonical @supabase/ssr cookie-sync pattern.
   //
@@ -224,11 +296,8 @@ export async function middleware(req: NextRequest) {
         { status: 401 }
       );
     }
-    // For the home page, send unauthed visitors to the marketing landing.
-    // For deep links into the app, send them to login with a return path.
-    if (pathname === "/" || pathname === "") {
-      return NextResponse.redirect(new URL(MARKETING_REDIRECT_TARGET, req.url));
-    }
+    // Unauthenticated visitor at the brand apex → the marketing site.
+    if (isHome) return rewriteMarketingHome();
     const loginUrl = new URL("/login", req.url);
     loginUrl.searchParams.set("next", pathname);
     return NextResponse.redirect(loginUrl);

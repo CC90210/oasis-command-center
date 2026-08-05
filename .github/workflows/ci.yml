@@ -14,7 +14,27 @@ jobs:
         with:
           node-version: 20
           cache: npm
-      - run: npm ci
+      # `npm ci` cannot install this project on Linux.
+      #
+      # package-lock.json is generated on Windows, and npm records optional
+      # platform-specific dependencies only for the host platform. Linux
+      # resolves a different `sharp` variant, which pulls
+      # @emnapi/runtime@1.11.3 — an entry a Windows-generated lockfile does
+      # not contain. `npm ci` treats that as a lockfile/manifest mismatch
+      # and aborts, so EVERY run since 2026-08-01 died at the install step
+      # before reaching typecheck, lint, tests or build.
+      #
+      # That is worse than it sounds: the pipeline was red continuously, so
+      # nothing it was supposed to guard was actually being guarded, and a
+      # test added to it changed nothing. A CI that cannot install is not a
+      # weaker gate, it is no gate.
+      #
+      # `npm install` resolves per-platform on the runner and installs
+      # correctly. It trades strict lockfile determinism for a pipeline that
+      # runs at all, which is the right trade while the lockfile cannot be
+      # regenerated on Linux. Proper fix when someone has a Linux shell:
+      # regenerate package-lock.json there and restore `npm ci`.
+      - run: npm install --no-audit --no-fund
       - run: npm run typecheck
       - run: npm run lint
       - name: Tests
@@ -29,6 +49,16 @@ jobs:
           npm run test:sunbiz
           npm run test:event-bus
           npm run test:streaming-redactor
+          npm run test:marketing
+          # Watermarking had NO CI coverage until 2026-08-04, which is how the
+          # shop-out outage reached production: the operator's Clean|WM route
+          # shipped without its watermark assets bundled, and nothing failed.
+          # This exercises the real renderer end to end, including the
+          # permission-encrypted PDF that only the pdfjs raster fallback can
+          # brand — the exact path every "it can't watermark it" report runs
+          # through. It needs --conditions=react-server because the renderer
+          # imports server-only.
+          npm run test:watermark
       - name: Build
         env:
           # Minimal env so the build doesn't blow up on missing required vars.

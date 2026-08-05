@@ -29,13 +29,13 @@ Both share the same **agent harness** — the same contextual system message, br
 
 Open AI #1 — your Prompt Engineer. Before you give it any task, load it with a dedicated system message that wires it as a specialist in converting raw human thoughts into structured, compelling prompts.
 
-This system message lives in your **Agent Command Centre** on the OASIS AI portal. It's the same one available in the playbook section of the OASIS profile.
+That system message is **Prompt translator** in the [Prompts Library](/playbook/prompts) — copy it straight from there. The prompt body is the full protocol; it documents its own behaviour as it runs.
 
 **What the Prompt Engineer system message does:**
 - Tells the AI its sole job is translation — not execution
 - Gives it the formatting rules for output (sequential, structured, specific)
 - Wires it with the brand voice and domain context from the agent harness
-- Makes it ask clarifying questions before outputting a system message
+- Makes it ask you 2–4 clarifying questions before it writes the system message, each with a default attached — so a one-word reply unblocks the build (V9.1)
 
 **You do this once per session.** The Prompt Engineer stays primed until you close the chat.
 

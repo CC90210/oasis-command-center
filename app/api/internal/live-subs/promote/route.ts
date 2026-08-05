@@ -101,6 +101,7 @@ export async function POST(req: NextRequest) {
       await writeAgentAlert({
         tenantId,
         alertType: "live_sub_hmac_bad_signature",
+        lane: "sunbiz-ops",
         severity: "urgent",
         subjectType: "tenant",
         subjectId: tenantId,

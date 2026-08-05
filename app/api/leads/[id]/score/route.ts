@@ -76,7 +76,7 @@ export async function POST(
 
   let result;
   try {
-    result = await scoreLead(leadData, interactions);
+    result = await scoreLead(leadData, interactions, { tenantId });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     // Specific status codes for diagnostics that surface clearly in the UI.

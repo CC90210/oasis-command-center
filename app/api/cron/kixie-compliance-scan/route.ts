@@ -309,7 +309,8 @@ export async function GET(req: NextRequest) {
       `mentioned lender relationships in the last ${SCAN_WINDOW_HOURS}h:\n\n` +
       lines.join("\n") +
       more;
-    const tg = await sendTelegram(msg);
+    // sunbiz-ops: dialer compliance on SunBiz sending numbers.
+    const tg = await sendTelegram(msg, { lane: "sunbiz-ops" });
     if (!tg.ok) failures.push(`telegram_alert_failed: ${tg.reason || "unknown"}`);
     else alertSent = true;
   }
@@ -379,7 +380,7 @@ export async function GET(req: NextRequest) {
         const digest =
           `📊 <b>Kixie rep scorecard</b> — last ${WEEKLY_WINDOW_DAYS} days\n` +
           `<pre>${escapeTelegramHtml([header, ...rows].join("\n"))}</pre>`;
-        const tg = await sendTelegram(digest);
+        const tg = await sendTelegram(digest, { lane: "sunbiz-ops" });
         if (!tg.ok) failures.push(`telegram_digest_failed: ${tg.reason || "unknown"}`);
       }
     } catch (e) {

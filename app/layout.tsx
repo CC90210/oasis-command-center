@@ -22,6 +22,14 @@ import { SEED_MANIFESTS } from "@/lib/manifest/seeds";
 import { getTenantManifestForUser } from "@/lib/manifest/tenant-scope";
 import { canPreviewTenantSlug } from "@/lib/tenant-access";
 import { resolveChatShellProps, type ChatShellProps } from "@/lib/chat-shell-props";
+import { matchesPathPrefix } from "@/lib/path-prefix";
+import { ALL_MARKETING_PATHS } from "@/lib/marketing/routes";
+// NOTE: lib/marketing/* above is the PUBLIC marketing SITE (/home, /work, ...).
+// lib/founders/* below is the private founders portal. Different concerns,
+// similar words — keep them apart.
+import { foundersAllowlist } from "@/lib/founders/gate";
+import { isFounderTenant, shouldShowFoundersNav } from "@/lib/founders-marketing-core";
+import type { NavItem } from "@/lib/nav-config";
 
 // Default metadata — tenant-neutral. Individual pages override via
 // generateMetadata (forms, leads, etc.) with their own titles. Keeping
@@ -51,7 +59,13 @@ export default async function RootLayout({
   // PUBLIC_PATH_PREFIXES — kept as a separate list because middleware
   // also lists API routes that aren't page-rendered.
   const FULL_BLEED_PREFIXES = [
-    "/welcome",
+    // Public marketing site + the three legal pages, from the shared
+    // registry. "/home" is the rewrite target for an anonymous "/" —
+    // middleware re-stamps x-pathname so it lands here. Never add "/"
+    // itself: the matcher would swallow every route in the app and strip
+    // the operator chrome site-wide.
+    ...ALL_MARKETING_PATHS,
+    "/welcome",   // legacy URL; next.config.js 308s it to /start before middleware or this layout ever see it. Inert backstop, same reasoning as the middleware entry.
     "/download",
     "/configure",
     "/login",
@@ -63,7 +77,11 @@ export default async function RootLayout({
     "/f/",        // public form pages (anonymous + personalized)
     "/invite/",   // pre-signup invite landing
   ];
-  const isFullBleed = FULL_BLEED_PREFIXES.some((p) => pathname.startsWith(p));
+  // Boundary-aware match, same rule as middleware's isPublic(). A raw
+  // startsWith() would let a future "/workflows" or "/aboutus" route
+  // silently inherit the marketing chrome (and skip the profile
+  // resolution the dashboard needs) purely because of a shared prefix.
+  const isFullBleed = FULL_BLEED_PREFIXES.some((p) => matchesPathPrefix(pathname, p));
 
   let profile = null;
   let primaryAgentLive = false;
@@ -243,6 +261,38 @@ export default async function RootLayout({
     ? demoProfileSlug
     : pathOverrideSlug ?? tenantProfileSlug;
   const manifest = isFullBleed ? null : await getManifest(manifestSlug);
+
+  // Founders portal nav. Injected here rather than added to CC_NAV because
+  // OASIS_SEED.nav IS navToManifest(CC_NAV) and getSeedManifest() falls back to
+  // OASIS_SEED for ANY unrecognised slug — so an entry in CC_NAV would render a
+  // Marketing tab for every newly-onboarded tenant before their manifest exists.
+  // The route would 404 them (fail-closed), but the tab itself would advertise
+  // that a founders portal exists, which is exactly what this must not do.
+  //
+  // Calls the SAME gate the /founders/marketing route calls, so the tab can
+  // never render for someone the route would reject.
+  //
+  // Being a founder is necessary but NOT sufficient: manifestSlug below is
+  // `pathOverrideSlug ?? tenantProfileSlug`, so a founder browsing /t/sun/...
+  // sees the SunBiz-branded sidebar. Rendering the tab there would paint a
+  // Founders entry onto SunBiz's own portal — no data leak, but it advertises
+  // the portal exists to anyone looking at that screen, which is exactly what
+  // choosing 404-over-403 was meant to prevent. shouldShowFoundersNav() adds
+  // the own-shell-only condition and is unit-tested.
+  // Uses the `profile` this layout already loaded rather than calling
+  // isFounder(), which would re-run getActiveProfile() and cost a second
+  // Supabase round-trip on every authenticated page render. Same decision, same
+  // pure predicate — this is exactly why the check was split out of the
+  // session-touching wrapper.
+  const foundersNavItems: NavItem[] = shouldShowFoundersNav({
+    isFounder: isFounderTenant(profile?.tenant_id, foundersAllowlist()),
+    isFullBleed,
+    demoMode,
+    pathOverrideSlug,
+    tenantProfileSlug,
+  })
+    ? [{ group: "Founders", href: "/founders/marketing", label: "Marketing", icon: "Megaphone" }]
+    : [];
   // The chat-shell-vs-constrained <main> decision lives in MainShell (a CLIENT
   // component using usePathname) — NOT here. This root layout is a Server
   // Component that reads headers() once per full load and does NOT re-render on
@@ -253,8 +303,15 @@ export default async function RootLayout({
   // "every tab looks zoomed-in" report — two prior width-only fixes couldn't
   // fix a decision that was frozen at load time.)
 
+  // suppressHydrationWarning below covers the boot scripts that deliberately
+  // mutate <html> before React hydrates: SIDEBAR_BOOT_SCRIPT writes
+  // data-sidebar, and the marketing layout writes className="js". Both run
+  // pre-paint by design — that is the whole point of a boot script — so the
+  // server markup cannot match, and React logged a hydration error on every
+  // page load because of it. The suppression is one level deep: it silences
+  // <html>'s own attributes and nothing inside the tree.
   return (
-    <html lang="en">
+    <html lang="en" suppressHydrationWarning>
       <head>
         {/* Synchronous boot script — reads localStorage and writes
             data-sidebar=collapsed|expanded on <html> before paint. CSS
@@ -266,7 +323,12 @@ export default async function RootLayout({
           dangerouslySetInnerHTML={{ __html: SIDEBAR_BOOT_SCRIPT }}
         />
       </head>
-      <body className="grain">
+      {/* `grain` draws globals.css's fixed 40px "Iron Man HUD" grid across
+          the whole viewport. That belongs to the operator dashboard. On
+          the public site it tiled a checkerboard behind every page and
+          every scroll position — the thing CC kept pointing at. Scoped to
+          the dashboard branch; marketing brings its own atmosphere. */}
+      <body className={isFullBleed ? undefined : "grain"}>
         {isFullBleed || !manifest ? (
           children
         ) : (
@@ -288,7 +350,7 @@ export default async function RootLayout({
               }
               logo={manifestLogoToSidebarLogo(manifest.brand.logo)}
               subtitle={manifest.brand.subtitle}
-              items={manifestNavToNavItems(manifest.nav)}
+              items={[...manifestNavToNavItems(manifest.nav), ...foundersNavItems]}
               operatorName={
                 demoMode
                   ? "Sun Demo Operator"

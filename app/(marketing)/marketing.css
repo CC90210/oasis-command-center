@@ -1,0 +1,565 @@
+/**
+ * Marketing-site styles. Imported by app/(marketing)/layout.tsx only.
+ *
+ * Everything here is namespaced under `.m-` or scoped inside `.marketing`
+ * so it can never reach the operator dashboard, which shares the same
+ * globals.css.
+ *
+ * PROGRESSIVE ENHANCEMENT CONTRACT
+ * The layout puts `class="js"` on <html> from a blocking inline script, so
+ * it is present before first paint (no flash). Every enhancement below is
+ * therefore written as: default = works with no JavaScript, `.js` = the
+ * enhanced state. Delete the script and the site is a plain, complete,
+ * readable document. That is also exactly what a crawler sees.
+ */
+
+/* ── Typography ────────────────────────────────────────────────────────
+   Three settings that do most of the work and that a hand-tuned class on
+   each heading cannot: they depend on where the line actually breaks,
+   which only the browser knows.
+
+   `text-wrap: balance` evens the ragged edge of a heading, so a two-line
+   headline never leaves one word stranded on line two. It is capped at a
+   few lines by spec, which is why it is scoped to headings.
+
+   `text-wrap: pretty` does the narrower job on body copy: prevent a single
+   short word ending a paragraph.
+
+   Both degrade to normal wrapping where unsupported — no fallback needed. */
+.marketing h1,
+.marketing h2,
+.marketing h3 {
+  text-wrap: balance;
+}
+
+.marketing p,
+.marketing li {
+  text-wrap: pretty;
+}
+
+/* Optical alignment: large display type needs to start slightly left of
+   the body text beneath it, or the eye reads the heading as indented.
+   Only applied at the sizes where the effect is visible. */
+.marketing h1 {
+  margin-left: -0.045em;
+}
+
+/* Tabular figures wherever numbers sit in a column (step numbers, the
+   roster, stat rows) so digits do not jitter between values. */
+.marketing .font-data {
+  font-variant-numeric: tabular-nums;
+}
+
+/* ── Scroll reveal ─────────────────────────────────────────────────────
+   Without JS, or with reduced motion, elements are simply visible. The
+   hidden start state only exists once JS has confirmed it can undo it. */
+.js .m-reveal {
+  opacity: 0;
+  transform: translateY(14px);
+  transition:
+    opacity 0.7s cubic-bezier(0.22, 1, 0.36, 1),
+    transform 0.7s cubic-bezier(0.22, 1, 0.36, 1);
+  transition-delay: var(--reveal-delay, 0ms);
+  will-change: opacity, transform;
+}
+
+.js .m-reveal.is-in {
+  opacity: 1;
+  transform: none;
+}
+
+/* ── Hairline section rule ─────────────────────────────────────────────
+   The eyebrow device: a mono label preceded by a short rule that fades
+   out. Reads as a console section header rather than a decorative divider. */
+.m-eyebrow::before {
+  content: "";
+  display: inline-block;
+  width: 2rem;
+  height: 1px;
+  margin-right: 0.75rem;
+  vertical-align: middle;
+  background: linear-gradient(to right, theme("colors.signal.DEFAULT"), transparent);
+}
+
+/* ── Fleet roster ──────────────────────────────────────────────────────
+   Two columns on desktop: the roster list, and a detail pane.
+
+   The pane has a FIXED min-height, so switching agents never changes the
+   page height. That is the whole point — a scroll-adjacent component that
+   resizes the document under the reader's cursor is the single worst
+   failure mode of this pattern. Rows animate on entry; the detail is
+   changed by interaction, never by scrolling. */
+
+.m-roster-pane {
+  min-height: 20rem;
+}
+
+/* Panels: stacked and all visible without JS (the document is complete).
+   With JS, only the selected one renders. */
+.js .m-panel[data-active="false"] {
+  display: none;
+}
+
+.js .m-panel[data-active="true"] {
+  animation: m-panel-in 0.45s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+@keyframes m-panel-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* Status light. `data-state` mirrors the roster data, so the colour is
+   driven by the same value the readout text is. */
+.m-dot {
+  position: relative;
+  display: inline-block;
+  width: 0.5rem;
+  height: 0.5rem;
+  border-radius: 9999px;
+  background: theme("colors.status.cold");
+}
+
+.m-dot[data-state="live"] {
+  background: theme("colors.status.engaged");
+}
+
+.m-dot[data-state="scoped"] {
+  background: theme("colors.status.warm");
+}
+
+/* The pulse ring only runs on live agents, and only once the row has
+   entered — so the roster visibly boots as you scroll to it. */
+.js .m-dot[data-state="live"]::after {
+  content: "";
+  position: absolute;
+  inset: -3px;
+  border-radius: 9999px;
+  border: 1px solid theme("colors.status.engaged");
+  opacity: 0;
+}
+
+.js .is-in .m-dot[data-state="live"]::after {
+  animation: m-ping 2.8s ease-out infinite;
+}
+
+@keyframes m-ping {
+  0% {
+    opacity: 0.7;
+    transform: scale(0.8);
+  }
+  70%,
+  100% {
+    opacity: 0;
+    transform: scale(2.1);
+  }
+}
+
+/* ── Atmosphere ────────────────────────────────────────────────────────
+   The hairline grid this replaced read as graph paper: a repeating
+   checkerboard that said "technical diagram" rather than "OASIS", and that
+   any product could have used. This is built from the name instead —
+   light through water. Three very large, very soft blooms drifting on
+   long, mutually prime cycles, so the composition never repeats and never
+   resolves into a pattern you can name.
+
+   Cost is three composited layers and transform-only animation. No canvas,
+   no requestAnimationFrame, no per-frame JavaScript. */
+
+/* The whole atmosphere layer is fixed, so it sits behind every page and
+   every scroll position instead of being bolted to the top of each hero. */
+.m-ambient {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+/* Marketing content rides above it. */
+.marketing > *:not(.m-ambient):not(.m-skip) {
+  position: relative;
+  z-index: 1;
+}
+
+/* ── Skip link ─────────────────────────────────────────────────────────
+   Hidden by transform, NOT by Tailwind's sr-only.
+   sr-only hides an element by shrinking it to 1px and clipping, which only
+   works while it is position:absolute. The rule above set position:relative
+   on every direct child of .marketing — including this link — which killed
+   the clip and left "Skip to content" sitting in normal flow at the top of
+   every page. A transform-based hide cannot be broken that way, because it
+   does not care what the position value is. */
+.m-skip {
+  position: fixed;
+  top: 0.75rem;
+  left: 0.75rem;
+  z-index: 100;
+  transform: translateY(-250%);
+  transition: transform 0.18s ease-out;
+}
+
+.m-skip:focus {
+  transform: translateY(0);
+}
+
+.m-aurora {
+  position: absolute;
+  inset: -20%;
+  filter: blur(90px);
+  opacity: 0.75;
+}
+
+/* ── Double helix ──────────────────────────────────────────────────────
+   Two strands of nodes on one slow rotation. Each node's vertical slot
+   comes from --i; its horizontal position is a sine of that slot, phase-
+   shifted 180deg between strands, so the pair reads as a twist without
+   any 3D or any JavaScript. */
+.m-helix {
+  position: absolute;
+  top: -10%;
+  right: 6%;
+  width: 190px;
+  height: 120%;
+  opacity: 0.5;
+  animation: m-helix-turn 46s linear infinite;
+}
+
+/* --x and --depth are computed in Ambient.tsx; see the note there for why
+   they are not derived from CSS sin()/abs(). */
+.m-helix span {
+  position: absolute;
+  left: 50%;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: theme("colors.signal.DEFAULT");
+  box-shadow: 0 0 10px theme("colors.signal.glow");
+  transform: translateX(var(--x));
+  opacity: calc(0.22 + 0.68 * var(--depth));
+}
+
+.m-helix span[data-strand="b"] {
+  background: theme("colors.status.engaged");
+  box-shadow: 0 0 10px rgba(16, 185, 129, 0.35);
+  opacity: calc(0.16 + 0.54 * var(--depth));
+}
+
+@keyframes m-helix-turn {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* ── Drift ─────────────────────────────────────────────────────────────
+   Small nodes travelling up the viewport on long offset cycles. Sparse on
+   purpose: six, not sixty. */
+.m-drift {
+  position: absolute;
+  bottom: -6%;
+  border-radius: 50%;
+  background: theme("colors.signal.DEFAULT");
+  box-shadow: 0 0 12px theme("colors.signal.glow");
+  opacity: 0;
+  animation-name: m-drift-up;
+  animation-timing-function: linear;
+  animation-iteration-count: infinite;
+}
+
+@keyframes m-drift-up {
+  0% {
+    opacity: 0;
+    transform: translateY(0) translateX(0);
+  }
+  12% {
+    opacity: 0.5;
+  }
+  88% {
+    opacity: 0.35;
+  }
+  100% {
+    opacity: 0;
+    transform: translateY(-115vh) translateX(26px);
+  }
+}
+
+.m-aurora span {
+  position: absolute;
+  display: block;
+  border-radius: 50%;
+  will-change: transform;
+}
+
+/* Deep teal, the largest and slowest — the body of water. */
+.m-aurora span:nth-child(1) {
+  top: -10%;
+  left: -5%;
+  width: 70%;
+  height: 70%;
+  background: radial-gradient(circle, rgba(6, 148, 178, 0.5) 0%, transparent 68%);
+  animation: m-drift-a 41s ease-in-out infinite;
+}
+
+/* The brand cyan, smaller and brighter — the light on the surface. */
+.m-aurora span:nth-child(2) {
+  top: 5%;
+  right: -10%;
+  width: 55%;
+  height: 65%;
+  background: radial-gradient(circle, rgba(0, 212, 255, 0.34) 0%, transparent 66%);
+  animation: m-drift-b 53s ease-in-out infinite;
+}
+
+/* A cold indigo low in the frame, to stop the palette going flat cyan. */
+.m-aurora span:nth-child(3) {
+  bottom: -25%;
+  left: 20%;
+  width: 65%;
+  height: 60%;
+  background: radial-gradient(circle, rgba(37, 99, 235, 0.26) 0%, transparent 70%);
+  animation: m-drift-c 67s ease-in-out infinite;
+}
+
+@keyframes m-drift-a {
+  0%, 100% { transform: translate3d(0, 0, 0) scale(1); }
+  50%      { transform: translate3d(6%, 4%, 0) scale(1.12); }
+}
+
+@keyframes m-drift-b {
+  0%, 100% { transform: translate3d(0, 0, 0) scale(1.06); }
+  50%      { transform: translate3d(-7%, 6%, 0) scale(0.94); }
+}
+
+@keyframes m-drift-c {
+  0%, 100% { transform: translate3d(0, 0, 0) scale(0.96); }
+  50%      { transform: translate3d(5%, -5%, 0) scale(1.1); }
+}
+
+/* Film grain. Two jobs: it kills the banding that large soft gradients
+   produce on 8-bit displays, and it gives the flat colour a surface. An
+   inline SVG turbulence so there is no image request. */
+.m-grain {
+  position: absolute;
+  inset: 0;
+  opacity: 0.16;
+  mix-blend-mode: overlay;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='140' height='140' filter='url(%23n)' opacity='0.55'/%3E%3C/svg%3E");
+}
+
+/* Vignette — pulls the eye to the centre column and stops the blooms
+   bleeding into the nav and the section below. */
+.m-vignette {
+  position: absolute;
+  inset: 0;
+  background:
+    radial-gradient(ellipse 90% 70% at 50% 35%, transparent 40%, rgba(5, 6, 8, 0.75) 100%),
+    linear-gradient(to bottom, rgba(5, 6, 8, 0.6) 0%, transparent 22%, transparent 70%, #050608 100%);
+}
+
+/* ── O·A·S·I·S acronym mark ────────────────────────────────────────────
+   The name spelling itself out. See components/marketing/AcronymMark.tsx
+   for the behaviour; this is only the look and the transition.
+
+   Width animates via grid-template-columns 0fr -> 1fr, which interpolates
+   cleanly without measuring the text or running a JS layout loop. The
+   inner span needs overflow:hidden for the 0fr track to actually clip. */
+
+.m-acr {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.1em;
+  font-family: var(--font-display), system-ui, sans-serif;
+  font-weight: 700;
+  font-size: clamp(1.35rem, 3.4vw, 2.1rem);
+  letter-spacing: -0.02em;
+  line-height: 1.15;
+}
+
+.m-acr-item {
+  display: inline-flex;
+  align-items: baseline;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: theme("colors.fg.dim");
+  cursor: pointer;
+  transition: color 0.35s ease;
+}
+
+.m-acr-item[data-open="true"] {
+  color: theme("colors.fg.DEFAULT");
+}
+
+/* Hover is a CSS-only affordance: it says "this is clickable" without
+   touching the open/closed state. Isolating a word on hover would change
+   the width of every letter in the row, slide a different letter under
+   the cursor, and fire again — see the note in AcronymMark.tsx. */
+.m-acr-item:hover .m-acr-head {
+  text-shadow: 0 0 26px theme("colors.signal.DEFAULT");
+}
+
+/* The capital stays put and stays bright — it is the letter of the name,
+   not part of the reveal. */
+.m-acr-head {
+  color: theme("colors.signal.DEFAULT");
+  transition: text-shadow 0.35s ease;
+}
+
+.m-acr-item[data-open="true"] .m-acr-head {
+  text-shadow: 0 0 22px theme("colors.signal.glow");
+}
+
+.m-acr-word {
+  display: grid;
+  grid-template-columns: 0fr;
+  transition: grid-template-columns 0.55s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+/* Applied for one frame on mount so the initial collapse is instant.
+   Without it the collapse animates on the same 0.55s curve as the unfold,
+   and since the mark sits in the hero the two overlap on first paint —
+   the word expands, contracts and re-expands while fading in. */
+.m-acr-instant .m-acr-word {
+  transition: none;
+}
+
+.m-acr-item[data-open="true"] .m-acr-word {
+  grid-template-columns: 1fr;
+}
+
+.m-acr-word > span {
+  overflow: hidden;
+  min-width: 0;
+  white-space: nowrap;
+}
+
+/* A hair of space after a completed word, so "Operational Agentic" does
+   not read as one token. Collapses with the word. */
+.m-acr-item[data-open="true"] .m-acr-word > span::after {
+  content: "\00a0";
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .m-acr-word {
+    transition: none;
+  }
+}
+
+/* ── Harness builder ───────────────────────────────────────────────────
+   Body and engine swaps cross-fade rather than cutting, so the car reads
+   as one object being reconfigured instead of four pictures. */
+.m-car-shell,
+.m-car-engine {
+  transition: opacity 0.3s ease;
+}
+
+.m-car-shell {
+  animation: m-part-in 0.4s ease-out;
+}
+
+.m-car-engine {
+  animation: m-part-in 0.35s ease-out;
+}
+
+@keyframes m-part-in {
+  from {
+    opacity: 0.15;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+/* ── Section rule ──────────────────────────────────────────────────────
+   A hairline that fades out at both ends instead of running edge to edge.
+   A hard 1px border across a 1440px viewport is the single most common
+   tell of a template; a rule that knows where the content is reads as
+   drawn rather than defaulted. */
+.m-rule {
+  height: 1px;
+  border: 0;
+  background: linear-gradient(
+    to right,
+    transparent,
+    theme("colors.ops.edge") 18%,
+    theme("colors.ops.edge") 82%,
+    transparent
+  );
+}
+
+/* Same rule as a section boundary, so sections can carry it without an
+   extra element in the markup. */
+.m-edge {
+  position: relative;
+}
+
+.m-edge::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 1px;
+  background: linear-gradient(
+    to right,
+    transparent,
+    theme("colors.ops.line") 12%,
+    theme("colors.ops.edge") 50%,
+    theme("colors.ops.line") 88%,
+    transparent
+  );
+}
+
+/* ── Focus ─────────────────────────────────────────────────────────────
+   One visible, high-contrast focus ring for the whole marketing surface.
+   Never removed anywhere below. */
+.marketing :focus-visible {
+  outline: 2px solid theme("colors.signal.DEFAULT");
+  outline-offset: 2px;
+  border-radius: 2px;
+}
+
+/* ── Reduced motion ────────────────────────────────────────────────────
+   Reveals resolve to their end state and every animation stops. The
+   observers in Reveal/FleetRoster also bail, so this is belt and braces
+   rather than the only line of defence.
+
+   What this deliberately does NOT do is force the roster's panels open.
+   Reduced motion is a request to stop moving things, not a request to
+   stop working — the tabs still select one panel at a time, they just
+   swap instantly. Forcing every panel visible here would leave the tab
+   roles describing an interaction that no longer does anything, which is
+   worse for a screen-reader user than the animation ever was. The
+   all-panels-open layout is the NO-JAVASCRIPT fallback, where there are
+   no tab roles to contradict. */
+@media (prefers-reduced-motion: reduce) {
+  .js .m-reveal {
+    opacity: 1;
+    transform: none;
+    transition: none;
+  }
+
+  .js .m-panel[data-active="true"] {
+    animation: none;
+  }
+
+  .js .is-in .m-dot[data-state="live"]::after {
+    animation: none;
+  }
+
+  .marketing *,
+  .marketing *::before,
+  .marketing *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+}

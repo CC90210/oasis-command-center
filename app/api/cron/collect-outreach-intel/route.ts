@@ -24,6 +24,7 @@ import {
   campaignMessageList,
 } from "@/lib/integrations/texttorrent";
 import { sendTelegram } from "@/lib/notify/telegram";
+import { shouldAlert } from "@/lib/notify/alert-decay";
 import { postMessageDb } from "@/lib/agent-inbox-db";
 
 export const runtime = "nodejs";
@@ -42,7 +43,9 @@ const SPAM_FAIL_RATE = Number(process.env.INTEL_SPAM_FAIL_RATE || 20); // %
 const WATCH_FAIL_RATE = Number(process.env.INTEL_WATCH_FAIL_RATE || 10);
 const MIN_SENDS_HEALTH = Number(process.env.INTEL_MIN_SENDS_HEALTH || 50);
 const DEAD_LIST_MIN_SENT = Number(process.env.INTEL_DEAD_MIN_SENT || 200);
-const ALERT_COOLDOWN_H = Number(process.env.INTEL_ALERT_COOLDOWN_H || 12);
+// INTEL_ALERT_COOLDOWN_H removed 2026-08-03: the flat window it configured was
+// the bug (an OR gate that re-fired forever). Cadence now comes from
+// lib/notify/alert-decay.ts DECAY_LADDER_H.
 
 const last10 = (p: unknown) => String(p || "").replace(/\D/g, "").slice(-10);
 const isDelivered = (s?: string) => s === "delivered" || s === "sent";
@@ -227,24 +230,37 @@ export async function GET(req: NextRequest) {
         const replyRate = +((repliesN / sent) * 100).toFixed(1);
         const health = failureRate >= SPAM_FAIL_RATE ? "spammy" : failureRate >= WATCH_FAIL_RATE ? "watch" : "healthy";
 
-        const existing = ((await db.from("campaign_number_health").select("last_alerted_at,last_alert_signature").eq("tenant_id", TENANT_ID).eq("send_from", sf).eq("window_key", "global").maybeSingle()).data) as { last_alerted_at?: string; last_alert_signature?: string } | null;
+        const existing = ((await db.from("campaign_number_health").select("last_alerted_at,last_alert_signature,repeat_n").eq("tenant_id", TENANT_ID).eq("send_from", sf).eq("window_key", "global").maybeSingle()).data) as { last_alerted_at?: string; last_alert_signature?: string; repeat_n?: number } | null;
         await db.from("campaign_number_health").upsert({
           tenant_id: TENANT_ID, send_from: sf, window_key: "global", sent, delivered: deliveredN,
           failed: failedN, replies: repliesN, failure_rate: failureRate, reply_rate: replyRate,
           health, last_computed_at: nowIso,
           last_alerted_at: existing?.last_alerted_at ?? null, last_alert_signature: existing?.last_alert_signature ?? null,
+          repeat_n: existing?.repeat_n ?? 1,
         }, { onConflict: "tenant_id,send_from,window_key" });
 
         if (health === "spammy" && sent >= MIN_SENDS_HEALTH) {
-          const sig = `spammy:${Math.round(failureRate)}`;
-          const cooled = !existing?.last_alerted_at || (Date.now() - new Date(existing.last_alerted_at).getTime()) > ALERT_COOLDOWN_H * 3600_000;
-          if ((existing?.last_alert_signature !== sig || cooled)) {
+          // Bucket the rate to the nearest 10. `Math.round(failureRate)` made 22%
+          // and 23% different conditions, so ordinary jitter minted a new identity
+          // and re-alerted. A jump into the next decade IS materially worse and
+          // still cuts through immediately.
+          const sig = `spammy:${Math.floor(failureRate / 10) * 10}`;
+          // Was `(signatureChanged || cooled)` — an OR, so an unchanged condition
+          // re-fired every ALERT_COOLDOWN_H forever. That is why CC and Adon got
+          // the identical "+1 860 452 7608 is getting blocked" message every day.
+          // Same ladder as the TPS watchdog now: 6h → 12h → 24h, 72h resets.
+          const decision = shouldAlert(sig, {
+            lastSignature: existing?.last_alert_signature,
+            lastAlertedAt: existing?.last_alerted_at,
+            repeatN: existing?.repeat_n,
+          });
+          if (decision.send) {
             alerts.push(`spammy_number:${sf}`);
             if (write) {
               const body = `🚨 Sending number ${sf} is getting blocked — ${failureRate}% failure across ${sent} sends. Rotate it out of the campaign pool.`;
-              await sendTelegram(body).catch(() => {});
+              await sendTelegram(body, { lane: "sunbiz-ops" }).catch(() => {});
               await postMessageDb({ tenantId: TENANT_ID, from: "outreach-intel", to: "owner", subject: `Number ${sf} going spammy (${failureRate}% fail)`, body, priority: "high" }).catch(() => {});
-              await db.from("campaign_number_health").update({ last_alerted_at: nowIso, last_alert_signature: sig }).eq("tenant_id", TENANT_ID).eq("send_from", sf).eq("window_key", "global");
+              await db.from("campaign_number_health").update({ last_alerted_at: nowIso, last_alert_signature: sig, repeat_n: decision.nextRepeatN }).eq("tenant_id", TENANT_ID).eq("send_from", sf).eq("window_key", "global");
             }
           }
         }
@@ -276,7 +292,7 @@ export async function GET(req: NextRequest) {
         if (s.verdict === "dead" && existing?.verdict !== "dead") {
           alerts.push(`dead_list:${s.lid}`);
           const body = `📉 List "${s.L.name || s.lid}" looks dead — ${s.L.sent} sent, ${s.replyRate}% reply, ${s.convRate}% conversion. Stop blasting it.`;
-          await sendTelegram(body).catch(() => {});
+          await sendTelegram(body, { lane: "sunbiz-ops" }).catch(() => {});
           await postMessageDb({ tenantId: TENANT_ID, from: "outreach-intel", to: "owner", subject: `Dead list: ${s.L.name || s.lid}`, body, priority: "normal" }).catch(() => {});
           await db.from("list_intelligence").update({ last_alerted_at: nowIso }).eq("tenant_id", TENANT_ID).eq("list_id", s.lid);
         }

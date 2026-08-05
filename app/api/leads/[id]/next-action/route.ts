@@ -112,7 +112,7 @@ export async function POST(
 
   let result;
   try {
-    result = await recommendNextAction(leadData, interactions.map(toSnapshot));
+    result = await recommendNextAction(leadData, interactions.map(toSnapshot), { tenantId });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     if (message === "anthropic_key_missing") {

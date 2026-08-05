@@ -22,7 +22,8 @@ import {
 } from "@/lib/queries";
 import { resolveSessionContext } from "@/lib/api-auth";
 import { canWriteCrm } from "@/lib/role-gates";
-import { fmtCurrency, groupRows, RenewalRow } from "./renewals-shared";
+import { fmtCurrency, groupRows } from "@/lib/renewals-core";
+import { RenewalRow } from "./renewals-shared";
 import RecordFundedDeal from "./RecordFundedDeal";
 import { RenewalDetailDrawer } from "./RenewalDetailDrawer";
 

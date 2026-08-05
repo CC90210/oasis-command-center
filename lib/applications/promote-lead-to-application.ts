@@ -123,6 +123,7 @@ export async function promoteLeadToApplication(input: {
     await writeAgentAlert({
       tenantId,
       alertType: "live_sub_promote_failed",
+      lane: "sunbiz-ops",
       severity: "urgent",
       subjectType: "lead",
       subjectId: leadId,
@@ -272,6 +273,7 @@ export async function promoteLeadToApplication(input: {
       await writeAgentAlert({
         tenantId,
         alertType: "live_sub_incomplete",
+        lane: "sunbiz-ops",
         severity: severe ? "urgent" : "warn",
         subjectType: "lead",
         subjectId: leadId,
@@ -295,6 +297,7 @@ export async function promoteLeadToApplication(input: {
       await writeAgentAlert({
         tenantId,
         alertType: "live_sub_pdf_failed",
+        lane: "sunbiz-ops",
         severity: "warn",
         subjectType: "application",
         subjectId: applicationId,

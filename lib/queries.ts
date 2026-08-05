@@ -1216,6 +1216,8 @@ export type FundedDealRow = {
   funded_amount_usd: number | null;
   factor_rate: number | null;
   term_months?: number | null;
+  term_value?: number | null;
+  term_unit?: "months" | "weeks" | "days" | null;
   points_pct?: number | null;
   notes?: string | null;
   funded_at: string | null;
@@ -1331,7 +1333,7 @@ export async function getRenewalsRows(
     const r = await db
       .from("funded_deals")
       .select(
-        "id, lead_id, lender_id, merchant_name, contact_name, lender_name, funded_amount_usd, factor_rate, term_months, points_pct, funded_at, next_renewal_date, est_commission_usd, notes"
+        "id, lead_id, lender_id, merchant_name, contact_name, lender_name, funded_amount_usd, factor_rate, term_months, term_value, term_unit, points_pct, funded_at, next_renewal_date, est_commission_usd, notes"
       )
       .eq("tenant_id", tenantId)
       .order("next_renewal_date", { ascending: true, nullsFirst: false })

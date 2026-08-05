@@ -24,9 +24,14 @@
 
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { detectStatusTransitions, publishStatusChange } from "./events";
-// Standalone on purpose (no enroller/executor import): executor.ts imports
-// THIS file, so the eager drip-cancel lives in its own cycle-free module.
-import { cancelStaleDripRunsForLead } from "@/lib/drips/stage-cancel";
+// Portal reactions to a stage transition go through the composition root, NOT
+// imported here directly. This file is the generic multi-tenant record layer;
+// when it imported @/lib/drips/stage-cancel it made EVERY tenant — including a
+// future real-estate portal — route its stage writes through SunBiz's lending
+// drip engine. See lib/portals/stage-hooks.ts and docs/PORTALS.md.
+// (The cycle note still holds: stage-cancel stays standalone because
+// executor.ts imports THIS file.)
+import { runStageTransitionHooks } from "@/lib/portals/stage-hooks";
 import { signFormLink } from "@/lib/form-links";
 
 export class RecordsError extends Error {
@@ -561,42 +566,24 @@ export async function updateRecord(input: UpdateRecordInput): Promise<TenantReco
     });
   }
 
-  // Debounce stale drips (2026-07-22 stage-buffer fix): the moment a lead
-  // changes stage, flush its pending prior-stage drip rows; when an
-  // application advances to shopping, flush ALL of the linked lead's stage
-  // drips (shop-out moves the application's status, not the lead's stage).
-  // cancelStaleDripRunsForLead never throws (fail-soft) — a drip hiccup must
-  // not fail the stage write, and the dispatcher's stage/shopped rechecks
-  // remain the backstop.
-  if (transitions.length > 0) {
-    if (input.entity === "lead") {
-      const stageT = transitions.find((t) => t.field === "stage" && typeof ((t as { to: unknown }).to) === "string");
-      if (stageT) {
-        await cancelStaleDripRunsForLead(
-          db,
-          input.tenant_id,
-          row.id,
-          String(stageT.to),
-          `stage_changed_eager: lead moved to ${String(stageT.to)}`,
-        );
-      }
-    } else if (input.entity === "application") {
-      const shopped = transitions.some((t) => t.field === "status" && t.to === "shopping");
-      const leadId =
-        typeof (row.data as Record<string, unknown>).lead_id === "string"
-          ? String((row.data as Record<string, unknown>).lead_id)
-          : null;
-      if (shopped && leadId) {
-        await cancelStaleDripRunsForLead(
-          db,
-          input.tenant_id,
-          leadId,
-          null,
-          "shopped_out_eager: application moved to shopping",
-        );
-      }
-    }
-  }
+  // Let each portal react to the transition. For SunBiz this is the debounce
+  // half of the 2026-07-22 stage-buffer fix: the moment a lead changes stage,
+  // flush its pending prior-stage drip rows; when an application advances to
+  // shopping, flush ALL of the linked lead's stage drips (shop-out moves the
+  // application's status, not the lead's stage). That logic is unchanged, it
+  // now lives behind the composition root so this shared file does not depend
+  // on one portal's engine.
+  //
+  // Fail-soft, per hook: a drip hiccup must not fail the stage write, and the
+  // dispatcher's stage/shopped rechecks remain the backstop.
+  await runStageTransitionHooks({
+    db,
+    tenantId: input.tenant_id,
+    entity: input.entity,
+    recordId: row.id,
+    data: row.data as Record<string, unknown>,
+    transitions,
+  });
 
   return row;
 }

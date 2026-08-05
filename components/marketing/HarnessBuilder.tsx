@@ -1,0 +1,532 @@
+"use client";
+
+import { useCallback, useEffect, useState } from "react";
+import { BODIES, ENGINES, PLATFORM } from "@/lib/marketing/harness";
+import { HOTSPOTS } from "@/lib/marketing/hotspots";
+import { AUDIT_FUNNEL } from "@/lib/marketing/routes";
+import { LAUNCH_MS } from "@/lib/marketing/car-geometry";
+import { CarStage } from "@/components/marketing/CarStage";
+
+type Pin = { id: string; x: number; y: number; visible: boolean };
+
+/** Where the visitor's harness + engine choice is kept across a reload. */
+const BUILD_KEY = "oasis:harness-build";
+
+/**
+ * The car analogy, made touchable.
+ *
+ * Pick a BODY (the agent) and an ENGINE (the model) and watch the same car
+ * carry both. The teaching point is the part that never changes: the
+ * chassis underneath is the harness we build, and it is the only reason
+ * swapping either of the other two is a menu choice rather than a rebuild.
+ *
+ * Deliberately a 2D technical cutaway rather than a 3D model. A real 3D
+ * car means a WebGL runtime and an asset pipeline for a decorative object;
+ * a blueprint reads as engineering, matches the rest of the site, weighs
+ * nothing, and — unlike a mediocre 3D model — cannot look cheap.
+ *
+ * The shell is one SVG path per body on a shared viewBox with the
+ * wheelbase aligned, so switching morphs the outline in place rather than
+ * cutting to a different picture.
+ *
+ * Server-rendered with the first body and engine already selected, so the
+ * section is a complete, readable explanation with no JavaScript at all.
+ */
+
+export function HarnessBuilder() {
+  const [bodyId, setBodyId] = useState(BODIES[0].id);
+  const [engineId, setEngineId] = useState(ENGINES[0].id);
+
+  /**
+   * Restore the visitor's build after a back-navigation.
+   *
+   * `app/layout.tsx` calls `await headers()`, which forces dynamic
+   * rendering, so this page is served `cache-control: no-store`. That
+   * blocks Chrome's bfcache outright — pressing Back is a full RELOAD, not
+   * a restore, so a `pageshow` handler would never fire and would fix
+   * nothing. What actually happens is that React state resets to
+   * BODIES[0]/ENGINES[0] and the visitor is looking at a stock Bravo with
+   * Claude: CC's "a rudimentary image of the car we first built". Their
+   * configuration was not corrupted, it was forgotten.
+   *
+   * sessionStorage survives the reload and is scoped to the tab, which is
+   * the right lifetime for "what I was looking at a moment ago".
+   */
+  useEffect(() => {
+    try {
+      const saved = sessionStorage.getItem(BUILD_KEY);
+      if (!saved) return;
+      const { b, e } = JSON.parse(saved) as { b?: string; e?: string };
+      if (b && BODIES.some((x) => x.id === b)) setBodyId(b);
+      if (e && ENGINES.some((x) => x.id === e)) setEngineId(e);
+    } catch {
+      // Private mode, disabled storage, or corrupt JSON. A visitor who
+      // cannot persist simply gets the default build — never a crash.
+    }
+  }, []);
+
+  useEffect(() => {
+    try {
+      sessionStorage.setItem(BUILD_KEY, JSON.stringify({ b: bodyId, e: engineId }));
+    } catch {
+      /* storage unavailable — the page works without it */
+    }
+  }, [bodyId, engineId]);
+  // Flips once WebGL has painted a frame, retiring the SVG fallback.
+  const [stageReady, setStageReady] = useState(false);
+  // Screen positions of the spatial callouts, pushed up from the render
+  // loop every frame.
+  const [pins, setPins] = useState<Pin[]>([]);
+  const [focus, setFocus] = useState<string | null>(null);
+  const [launching, setLaunching] = useState(false);
+  const activeSpot = HOTSPOTS.find((h) => h.id === focus) ?? null;
+
+  // setPins is called on every animation frame, so it must be referentially
+  // stable — an inline arrow would hand CarStage a new function 60x/sec.
+  const handlePins = useCallback((next: Pin[]) => setPins(next), []);
+
+  // Escape closes the callout. Without it a keyboard user who opened a card
+  // can move focus off it but has no way to dismiss it.
+  useEffect(() => {
+    if (!focus) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setFocus(null);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [focus]);
+
+  const body = BODIES.find((b) => b.id === bodyId) ?? BODIES[0];
+  const engine = ENGINES.find((e) => e.id === engineId) ?? ENGINES[0];
+
+  return (
+    <div className="border border-ops-line bg-ops-panel/60">
+      {/* ── The car ─────────────────────────────────────────────────── */}
+      <div className="relative border-b border-ops-line px-4 pt-8 sm:px-8">
+        {/*
+          Two layers. The SVG blueprint below is what renders on the server,
+          without JavaScript, and on a machine with no WebGL, a complete,
+          labelled diagram in its own right. The 3D stage mounts on top of
+          it once three.js has loaded, so there is never an empty box and
+          never a spinner.
+        */}
+        {/* Taller on phones. At 16/9 the stage came out 316x178 on a 390px
+            screen, which is a letterbox rather than a showpiece. Portrait
+            devices have height to spare and width they do not. */}
+        <div className="relative mx-auto aspect-[5/4] w-full max-w-3xl sm:aspect-[16/9] lg:aspect-[2/1]">
+          <svg
+            viewBox="0 0 420 150"
+            className={`absolute inset-0 h-full w-full transition-opacity duration-700 ${
+              stageReady ? "opacity-0" : "opacity-70"
+            }`}
+            role="img"
+            aria-label={`The ${body.name} harness running the ${engine.name} engine on the OASIS platform`}
+          >
+          {/* Ground line */}
+          <line
+            x1="10"
+            y1="139"
+            x2="410"
+            y2="139"
+            stroke="currentColor"
+            className="text-ops-edge"
+            strokeWidth="1"
+          />
+
+          {/* Chassis rail, the constant. Drawn under the shell and in the
+              brand cyan, because it is the thing being sold. */}
+          <path
+            d="M 56 122 L 380 122"
+            stroke="#00D4FF"
+            strokeWidth="3"
+            strokeLinecap="round"
+            opacity="0.9"
+          />
+          <path
+            d="M 76 122 L 76 112 M 200 122 L 200 108 M 330 122 L 330 112"
+            stroke="#00D4FF"
+            strokeWidth="1.5"
+            opacity="0.45"
+          />
+
+          {/* Body shell */}
+          <path
+            d={body.path}
+            fill="none"
+            stroke="currentColor"
+            className="m-car-shell text-fg"
+            strokeWidth="2"
+            strokeLinejoin="round"
+            strokeDasharray={body.blueprint ? "7 6" : undefined}
+            opacity={body.blueprint ? 0.65 : 1}
+          />
+
+          {/* Glasshouse, so the shell reads as a vehicle rather than a blob */}
+          <path
+            d="M 132 56 L 150 34 L 244 34 L 262 56 Z"
+            fill="#00D4FF"
+            opacity="0.07"
+            className="m-car-shell"
+          />
+
+          {/* Engine bay, front right */}
+          <g className="m-car-engine">
+            <rect
+              x="306"
+              y="82"
+              width="66"
+              height="34"
+              rx="4"
+              fill={engine.glow}
+              opacity="0.16"
+            />
+            <rect
+              x="306"
+              y="82"
+              width="66"
+              height="34"
+              rx="4"
+              fill="none"
+              stroke={engine.glow}
+              strokeWidth="1.5"
+            />
+            {/* Four cylinders. A readable "engine" at a glance. */}
+            {[0, 1, 2, 3].map((i) => (
+              <rect
+                key={i}
+                x={314 + i * 15}
+                y={90}
+                width="8"
+                height="18"
+                rx="1.5"
+                fill={engine.glow}
+                opacity="0.85"
+              />
+            ))}
+          </g>
+
+          {/* Wheels */}
+          {[110, 322].map((cx) => (
+            <g key={cx}>
+              <circle
+                cx={cx}
+                cy="122"
+                r="17"
+                fill="#050608"
+                stroke="currentColor"
+                className="text-ops-edge"
+                strokeWidth="2"
+              />
+              <circle cx={cx} cy="122" r="6" fill="#00D4FF" opacity="0.55" />
+            </g>
+            ))}
+          </svg>
+
+          <CarStage
+            bodyId={body.id}
+            engineId={engine.id}
+            engineColor={engine.glow}
+            onReady={() => setStageReady(true)}
+            onHotspots={handlePins}
+            focus={focus}
+            launch={launching}
+            onLaunchComplete={() => {
+              window.location.href = AUDIT_FUNNEL.path;
+            }}
+          />
+
+          {/* Fade to black as the car leaves, so the hand-off to the funnel
+              is one continuous move rather than a hard cut from a 3D stage
+              to a form. Pointer-events off: it must never eat a click. */}
+          {/* Fade to black, timed from LAUNCH_MS so it cannot drift out of
+              step with the sequence again. It covers only the hand-off to
+              the funnel — it must not come down while the car is still on
+              screen, which is exactly what it did when the sequence was
+              lengthened and this delay was left behind. */}
+          <div
+            aria-hidden="true"
+            style={
+              launching
+                ? {
+                    transitionDelay: `${LAUNCH_MS.fadeDelay}ms`,
+                    transitionDuration: `${LAUNCH_MS.fade}ms`,
+                  }
+                : undefined
+            }
+            className={`pointer-events-none absolute inset-0 z-40 bg-ops-void transition-opacity duration-500 motion-reduce:transition-none motion-reduce:!delay-0 ${
+              launching ? "opacity-100" : "opacity-0"
+            }`}
+          />
+
+          {/* Skip — ON THE STAGE, not below it.
+              It was first placed under the selectors, which put it ~300px
+              below the fold while the visitor is watching the canvas: a
+              skip control you cannot see during the thing you want to skip.
+              z-50 so it stays above the fade and remains clickable as the
+              screen goes dark. */}
+          {launching && (
+            <button
+              type="button"
+              onClick={() => {
+                window.location.href = AUDIT_FUNNEL.path;
+              }}
+              className="absolute bottom-4 right-4 z-50 border border-fg-faint/30 bg-ops-void/70 px-3 py-1.5 font-data text-[10px] uppercase tracking-[0.18em] text-fg-dim backdrop-blur-sm transition-colors hover:border-fg-faint hover:text-fg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-signal"
+            >
+              Skip →
+            </button>
+          )}
+
+          {/* Spatial callouts. Positioned from the projected 3D anchors, so
+              each pin rides its part of the car as the body turns. Hidden
+              until WebGL has painted — over the SVG fallback they would sit
+              at coordinates that mean nothing. */}
+          {stageReady &&
+            pins.map((p) => {
+              const spot = HOTSPOTS.find((h) => h.id === p.id);
+              if (!spot || !p.visible) return null;
+              const open = focus === p.id;
+              return (
+                <button
+                  key={p.id}
+                  type="button"
+                  onClick={() => setFocus(open ? null : p.id)}
+                  aria-expanded={open}
+                  aria-label={`${spot.kicker}: ${spot.title}`}
+                  className="group absolute z-20 -translate-x-1/2 -translate-y-1/2 focus-visible:outline-none"
+                  style={{ left: p.x, top: p.y }}
+                >
+                  <span
+                    className={`flex h-7 w-7 items-center justify-center rounded-full border font-data text-[10px] tabular-nums backdrop-blur-sm transition-all duration-200 group-focus-visible:ring-2 group-focus-visible:ring-signal ${
+                      open
+                        ? "border-signal bg-signal/25 text-fg"
+                        : "border-signal/50 bg-ops-void/60 text-signal group-hover:border-signal group-hover:bg-signal/20"
+                    }`}
+                  >
+                    {spot.pin}
+                  </span>
+                  {!open && (
+                    <span
+                      aria-hidden="true"
+                      className="pointer-events-none absolute inset-0 animate-ping rounded-full border border-signal/40 [animation-duration:2.6s] motion-reduce:hidden"
+                    />
+                  )}
+                </button>
+              );
+            })}
+
+        </div>
+
+        {/* Detail card, BELOW the stage rather than floating over it. As an
+            overlay it covered the exact part of the car it was describing,
+            which is the one thing a callout must never do. */}
+        {activeSpot && (
+          <div className="mx-auto mt-8 max-w-3xl border border-signal/25 bg-ops-raised/70 p-5 backdrop-blur-sm sm:mt-10 sm:p-6">
+            <div className="flex items-start justify-between gap-4">
+              <span className="font-data text-[10px] uppercase tracking-[0.22em] text-signal">
+                {activeSpot.kicker}
+              </span>
+              <button
+                type="button"
+                onClick={() => setFocus(null)}
+                className="-m-1 p-1 font-data text-[10px] uppercase tracking-[0.18em] text-fg-faint transition-colors hover:text-fg"
+              >
+                Close
+              </button>
+            </div>
+            <h4 className="mt-2 font-display text-[17px] font-bold tracking-tight text-fg">
+              {activeSpot.title}
+            </h4>
+            <p className="mt-2 max-w-2xl text-[14.5px] leading-relaxed text-fg-dim">
+              {activeSpot.body}
+            </p>
+            <ul className="mt-4 grid gap-x-8 gap-y-2 sm:grid-cols-2">
+              {activeSpot.points.map((pt) => (
+                <li
+                  key={pt}
+                  className="flex items-baseline gap-2.5 text-[13.5px] text-fg-muted"
+                >
+                  <span
+                    aria-hidden="true"
+                    className="h-px w-3 shrink-0 translate-y-[-4px] bg-signal"
+                  />
+                  {pt}
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+
+        {/* Callouts */}
+        <div className="mx-auto mb-6 mt-2 flex max-w-2xl flex-wrap justify-center gap-x-6 gap-y-3 text-center sm:gap-x-8">
+          <Callout label="Harness" value={body.name} tone="fg" />
+          <Callout label="Engine" value={`${engine.name} · ${engine.vendor}`} tone="engine" color={engine.glow} />
+          <Callout label="Platform" value="OASIS" tone="signal" />
+        </div>
+
+        {/* Names the change as well as showing it, so nobody has to squint
+            to work out what just happened in the bay. */}
+        <p className="mb-6 text-center font-data text-[11px] uppercase tracking-[0.2em] text-fg-dim">
+          {engine.spec}
+          <span className="mx-2 text-fg-faint">/</span>
+          Drag the car to turn it
+        </p>
+      </div>
+
+      {/* ── Selectors ───────────────────────────────────────────────── */}
+      <div className="grid gap-px bg-ops-line md:grid-cols-2">
+        <Picker
+          legend="Harness, the agent"
+          hint="Bravo, Atlas, Maven, or one built for you. The bodywork."
+          options={BODIES.map((b) => ({ id: b.id, label: b.name, sub: b.seat }))}
+          value={bodyId}
+          onChange={setBodyId}
+          detail={body.brief}
+        />
+        <Picker
+          legend="Engine, the model"
+          hint="Swappable. Today's best model is not next quarter's."
+          options={ENGINES.map((e) => ({ id: e.id, label: e.name, sub: e.vendor }))}
+          value={engineId}
+          onChange={setEngineId}
+          detail={engine.trait}
+          accent={engine.glow}
+        />
+      </div>
+
+      {/* ── The constant ────────────────────────────────────────────── */}
+      {/* ── Launch ──────────────────────────────────────────────────
+          The payoff for having configured something. You picked a harness
+          and an engine; this starts it and takes you to the funnel. */}
+      <div className="border-t border-ops-line bg-ops-void/60 px-6 py-7 text-center sm:px-8">
+        <button
+          type="button"
+          onClick={() => setLaunching(true)}
+          disabled={launching}
+          className="group relative inline-flex items-center gap-3 border border-signal bg-signal/10 px-7 py-3.5 font-data text-[12px] uppercase tracking-[0.2em] text-fg transition-all duration-200 hover:bg-signal/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-signal disabled:cursor-wait"
+        >
+          <span
+            aria-hidden="true"
+            className={`h-1.5 w-1.5 rounded-full bg-signal ${launching ? "animate-ping" : ""}`}
+          />
+          {launching ? "Igniting…" : "Ignite & deploy to OASIS"}
+        </button>
+
+        <p className="mx-auto mt-3 max-w-md text-[13px] leading-relaxed text-fg-dim">
+          Start this build and tell us about your business. Four questions,
+          about two minutes.
+        </p>
+      </div>
+
+      <div className="border-t border-ops-line bg-ops-void/60 p-6 sm:p-8">
+        <h3 className="font-display text-base font-bold tracking-tight text-fg">
+          The platform. What doesn&rsquo;t change when you swap either one
+        </h3>
+        <ul className="mt-4 flex flex-wrap gap-x-6 gap-y-2.5">
+          {PLATFORM.map((c) => (
+            <li key={c} className="flex items-baseline gap-2 text-[14px] text-fg-muted">
+              <span aria-hidden="true" className="h-px w-3 shrink-0 translate-y-[-4px] bg-signal" />
+              {c}
+            </li>
+          ))}
+        </ul>
+        <p className="mt-5 max-w-2xl text-[15px] leading-relaxed text-fg-dim">
+          Buy a chatbot and you have bought an engine bolted to the road. The
+          platform is the part that takes months, and it is the part that means
+          a better model next year is a swap rather than a rebuild.
+        </p>
+      </div>
+    </div>
+  );
+}
+
+function Callout({
+  label,
+  value,
+  tone,
+  color,
+}: {
+  label: string;
+  value: string;
+  tone: "fg" | "signal" | "engine";
+  color?: string;
+}) {
+  return (
+    <div>
+      <div className="font-data text-[10px] uppercase tracking-[0.22em] text-fg-dim">
+        {label}
+      </div>
+      <div
+        className={`mt-1 text-[15px] font-semibold ${
+          tone === "signal" ? "text-signal" : tone === "fg" ? "text-fg" : ""
+        }`}
+        style={tone === "engine" ? { color } : undefined}
+      >
+        {value}
+      </div>
+    </div>
+  );
+}
+
+function Picker({
+  legend,
+  hint,
+  options,
+  value,
+  onChange,
+  detail,
+  accent,
+}: {
+  legend: string;
+  hint: string;
+  options: { id: string; label: string; sub: string }[];
+  value: string;
+  onChange: (id: string) => void;
+  detail: string;
+  accent?: string;
+}) {
+  const groupId = `harness-${legend.replace(/[^a-z]/gi, "").toLowerCase()}`;
+  return (
+    // A <legend> is positioned ON the fieldset's top border by the UA, which
+    // is why the label was sitting across the panel edge. Since the panel
+    // draws its own border via the grid gap, the semantics are kept with
+    // role="group" + aria-labelledby and the label becomes normal flow.
+    <div role="group" aria-labelledby={groupId} className="bg-ops-void p-6 pt-7 sm:p-7 sm:pt-8">
+      <p
+        id={groupId}
+        className="font-data text-[10px] uppercase tracking-[0.22em] text-signal"
+      >
+        {legend}
+      </p>
+      <p className="mt-2.5 text-[13px] text-fg-dim">{hint}</p>
+
+      <div className="mt-5 flex flex-wrap gap-2">
+        {options.map((o) => {
+          const active = o.id === value;
+          return (
+            <button
+              key={o.id}
+              type="button"
+              onClick={() => onChange(o.id)}
+              aria-pressed={active}
+              className={`rounded-md border px-3.5 py-2 text-left transition-colors ${
+                active
+                  ? "border-transparent bg-ops-raised text-fg"
+                  : "border-ops-edge text-fg-muted hover:border-fg-faint hover:text-fg"
+              }`}
+              style={active && accent ? { boxShadow: `inset 0 0 0 1px ${accent}` } : undefined}
+            >
+              <span className="block text-[14px] font-semibold">{o.label}</span>
+              <span className="mt-0.5 block text-[12px] text-fg-dim">{o.sub}</span>
+            </button>
+          );
+        })}
+      </div>
+
+      {/* Fixed height so switching options never resizes the panel and
+          nudges the car above it. */}
+      <p className="mt-5 min-h-[4.5rem] text-[14px] leading-relaxed text-fg-muted">
+        {detail}
+      </p>
+    </div>
+  );
+}

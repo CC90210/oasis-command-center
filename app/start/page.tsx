@@ -9,7 +9,12 @@ import { getSessionUser } from "@/lib/supabase-server";
 export const dynamic = "force-dynamic";
 
 /**
- * /welcome — V7.1 single-viewport landing page.
+ * /start — V7.1 single-viewport entry-path page.
+ *
+ * Was /welcome until 2026-07-31, when the marketing site took over the
+ * brand apex at "/". The page itself is unchanged; only its URL moved and
+ * the wordmark now links up to the marketing home instead of to itself.
+ * /welcome still resolves — next.config.js 308s it here.
  *
  * STRICT no-scroll requirement (per CC, 2026-06-08): the page is locked
  * to `h-screen overflow-hidden` and all content sized to fit any
@@ -40,7 +45,7 @@ export default async function WelcomePage() {
       <div className="relative z-10 flex min-h-screen w-full flex-col md:h-full md:min-h-0">
         {/* Header */}
         <header className="mx-auto flex w-full max-w-7xl shrink-0 items-center justify-between px-5 py-4 sm:px-8 sm:py-5">
-          <Link href="/welcome" className="flex items-center gap-3">
+          <Link href="/" className="flex items-center gap-3">
             <OasisLogo size={32} priority />
             <span className="leading-none">
               <span className="block text-[11px] font-black uppercase tracking-[0.2em] text-white">

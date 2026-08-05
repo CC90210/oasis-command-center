@@ -20,6 +20,7 @@
 
 import type { StepContext, StepResult, WorkflowStep } from "./types";
 import { getPersona } from "@/lib/agent-personas";
+import { inferText } from "@/lib/subscription-infer";
 
 type AiAgentInput = {
   agent_slug?: string;
@@ -31,12 +32,6 @@ type AiAgentInput = {
 
 const DEFAULT_MODEL = "claude-sonnet-4-6";
 const MAX_TOKENS_CAP = 8192;
-const ANTHROPIC_URL = "https://api.anthropic.com/v1/messages";
-// Matches the version every other Anthropic call in this repo uses
-// (lib/ai-lead-scoring.ts, lib/ai-next-action.ts, lib/cloud-tool-runner.ts).
-// V6.9.5 hotfix: prior value "2026-01-01" was a made-up future date and
-// would 400 at the API.
-const ANTHROPIC_VERSION = "2023-06-01";
 
 /**
  * Replace {{trigger.x}} + {{step_id.field}} placeholders with values from
@@ -76,47 +71,39 @@ const handler: WorkflowStep = {
     if (!input.agent_slug) return { status: "failed", error: "missing_agent_slug" };
     if (!input.prompt) return { status: "failed", error: "missing_prompt" };
 
-    const apiKey = process.env.ANTHROPIC_API_KEY;
-    if (!apiKey) return { status: "failed", error: "missing_anthropic_api_key" };
-
     const systemPrompt = getPersona(input.agent_slug, input.prompt_overlay);
     const userPrompt = substituteTemplate(input.prompt, ctx.trigger_event, ctx.prior_outputs);
     const model = input.model ?? DEFAULT_MODEL;
     const maxTokens = Math.min(input.max_tokens ?? 1024, MAX_TOKENS_CAP);
 
     try {
-      const res = await fetch(ANTHROPIC_URL, {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          "x-api-key": apiKey,
-          "anthropic-version": ANTHROPIC_VERSION,
-        },
-        body: JSON.stringify({
-          model,
-          max_tokens: maxTokens,
-          system: systemPrompt,
-          messages: [{ role: "user", content: userPrompt }],
-        }),
+      // Subscription, not the paid API. A workflow step runs unattended, so
+      // this was billable on a trigger rather than on a click.
+      // See lib/subscription-infer.ts.
+      const inf = await inferText({
+        source: `workflow:${input.agent_slug}`,
+        system: systemPrompt,
+        prompt: userPrompt,
+        maxTokens,
+        tenantId: ctx.tenant_id ?? null,
+        modelTier: "smart",
       });
-      if (!res.ok) {
-        const text = await res.text();
-        return { status: "failed", error: `anthropic_http_${res.status}: ${text.slice(0, 200)}` };
+      if (!inf.ok) {
+        return {
+          status: "failed",
+          error: inf.pending ? `inference_pending: ${inf.error}` : `inference_unavailable: ${inf.error}`,
+        };
       }
-      const payload = (await res.json()) as {
-        content?: Array<{ type: string; text?: string }>;
-        model?: string;
-        usage?: { input_tokens?: number; output_tokens?: number };
-      };
-      const textBlocks = (payload.content || []).filter((b) => b.type === "text" && b.text);
-      const text = textBlocks.map((b) => b.text ?? "").join("\n");
+      const text = inf.text;
       return {
         status: "complete",
         output: {
           text,
-          model: payload.model ?? model,
-          input_tokens: payload.usage?.input_tokens ?? 0,
-          output_tokens: payload.usage?.output_tokens ?? 0,
+          model,
+          // Token counts come from the paid API's usage block, which the queue
+          // does not surface. Reported as 0 rather than invented.
+          input_tokens: 0,
+          output_tokens: 0,
         },
       };
     } catch (err) {

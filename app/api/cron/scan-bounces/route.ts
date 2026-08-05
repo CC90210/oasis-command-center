@@ -104,7 +104,8 @@ function originalMessageId(raw: string): string | null {
 
 /** Watchdog alert — soft-fail wrapper so a bad token never affects the run. */
 async function watchdogAlert(text: string): Promise<void> {
-  try { await sendTelegram(text); } catch { /* sendTelegram already soft-fails; belt-and-suspenders */ }
+  // sunbiz-ops: IMAP/bounce-reader health on the SunBiz submissions mailbox.
+  try { await sendTelegram(text, { lane: "sunbiz-ops" }); } catch { /* sendTelegram already soft-fails; belt-and-suspenders */ }
 }
 
 export async function GET(req: NextRequest) {

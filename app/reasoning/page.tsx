@@ -1,7 +1,7 @@
 import { Card, PageHeader, EmptyState, Tag } from "@/components/Card";
-import { timeAgo, truncate, statusColor } from "@/lib/fmt";
 import { recentDecisions, getActiveProfile } from "@/lib/queries";
 import { safe } from "@/lib/api-helpers";
+import { AgentDecisionsCard } from "@/components/AgentDecisionsCard";
 import { QuickActionsGrid } from "@/components/reasoning/QuickActionsGrid";
 import { quickActionsFor } from "@/lib/quick-actions";
 import { getTenantEnabledAgents } from "@/lib/manifest/tenant-scope";
@@ -54,53 +54,11 @@ export default async function ReasoningPage() {
         )}
       </Card>
 
-      <Card
-        title="Agent decisions"
-        subtitle={
-          decisions.length > 0
-            ? `Each row is a choice your agent made on its own — last ${decisions.length} cycles. Confidence + outcome shown so you can see whether the autonomous loop is making good calls.`
-            : "Once your agents start cycling autonomously, every decision they make (lead scoring, send vs. skip, prioritize vs. defer) shows up here with confidence + outcome."
-        }
-      >
-        {decisions.length === 0 ? (
-          // Brand-neutralized 2026-05-25 cross-tenant audit. Was
-          // "from your Bravo terminal" — leaked CC's empire agent
-          // name onto every tenant's reasoning page.
-          <EmptyState message="No decisions yet. The reasoning loop hasn't run today — start your local agent runner from your bridge terminal." />
-        ) : (
-          <ul className="space-y-3">
-            {decisions.map((d) => (
-              <li key={d.id} className="rounded-lg border border-bg-border bg-bg-elev p-4">
-                <div className="flex justify-between items-start gap-4">
-                  <div className="flex-1 min-w-0">
-                    <div className="flex items-center gap-2 mb-1.5">
-                      <Tag tone="accent">{d.decision_type}</Tag>
-                      <span className="text-xs text-fg-dim font-mono">cycle {truncate(d.tick_id, 12)}</span>
-                    </div>
-                    <div className="text-fg font-medium text-sm">
-                      {d.target_description || "(no target description)"}
-                    </div>
-                    {d.reasoning && (
-                      <p className="text-sm text-fg-muted mt-2 leading-relaxed">{truncate(d.reasoning, 280)}</p>
-                    )}
-                  </div>
-                  <div className="text-right shrink-0">
-                    <div className={`text-sm font-bold ${statusColor(d.outcome_status)}`}>
-                      {d.outcome_status || d.chosen_action || "—"}
-                    </div>
-                    {d.confidence != null && (
-                      <div className="text-xs text-fg-dim mt-1 font-mono">
-                        conf {Number(d.confidence).toFixed(2)}
-                      </div>
-                    )}
-                    <div className="text-xs text-fg-dim mt-1">{timeAgo(d.created_at)}</div>
-                  </div>
-                </div>
-              </li>
-            ))}
-          </ul>
-        )}
-      </Card>
+      {/* Same tape /operations renders for CC. Shared component so the two
+          surfaces can't drift — the empty-state copy in particular is
+          brand-neutral on purpose (2026-05-25 cross-tenant audit) and that
+          fix should never have to be made twice. */}
+      <AgentDecisionsCard decisions={decisions} />
     </div>
   );
 }

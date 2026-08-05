@@ -106,8 +106,12 @@ export const FRIENDLY_DESCRIPTIONS: Record<string, string> = {
     "Every morning at 6:30am (right after the follow-up list), sorts the day's work into buckets — priority calls, missing info, stuck deals, new offers, deals to shop today, renewals coming due — and fills the Daily Plan tab so the team opens to a ready-made plan.",
   "SunBiz Renewal Reminder":
     "Every morning at 9am, checks funded deals that are 40-50% through their term and flags them on the Daily Plan (under \"renewal eligible\") so the team can re-shop them before a competitor does. No alert is sent anywhere else — it shows up in the dashboard.",
+  // Rewritten 2026-08-04: underwriting no longer runs on its own. The old copy
+  // promised a deal would be "graded without anyone clicking Run Underwriting",
+  // which is now the opposite of the truth — leaving it would have had the
+  // dashboard telling the team to wait for something that is never coming.
   "SunBiz Underwriting Orchestrator":
-    "Every 15 minutes, picks up any application whose bank statements are in and runs underwriting automatically — parses the statements, finds existing debt/positions, drafts the sales angle — so a deal is graded without anyone clicking \"Run Underwriting.\" Nothing is sent out; results land on the deal.",
+    "Every 15 minutes, picks up underwriting runs that someone has actually requested and works through them — parses the statements, finds existing debt/positions, drafts the sales angle. It does NOT pick deals on its own: underwriting starts when you press \"Start underwriting\" or \"Re-run\" on a lead. Nothing is sent out; results land on the deal.",
   "SunBiz Shop-Out Sender":
     "Every minute, sends any lender submissions you've queued in Shopping Out — one email per lender, through the compliance gates (suppression, daily cap, send window). Turn it off here to pause all outbound lender sends instantly.",
   "SunBiz Cold Outreach Runner":

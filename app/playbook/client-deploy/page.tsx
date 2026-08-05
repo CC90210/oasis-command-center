@@ -165,7 +165,8 @@ const PHASES: Phase[] = [
       {
         title: "Walk the integration registry",
         detail:
-          "Open /integrations on the client's dashboard. For each api_key tile (Stripe, OpenRouter, Anthropic, Late, Firecrawl, ElevenLabs, etc.), ask if they have a key. If yes, paste via the modal. If no, decide together whether to grab one now or skip.",
+          "Open /integrations on the client's dashboard. For each api_key tile (Stripe, OpenRouter, Anthropic, Late, Firecrawl, ElevenLabs, etc.), ask if they have a key. If yes, paste via the modal. If no, decide together whether to grab one now or skip. The wire-integrations prompt drives the same walk from chat, reading lib/integrations-registry.ts so nothing gets skipped.",
+        promptId: "client-wire-integrations",
         cta: { label: "Open /integrations", href: "/integrations" },
       },
       {
@@ -202,9 +203,15 @@ const PHASES: Phase[] = [
         promptId: "client-prune-skills",
       },
       {
+        title: "Audit which crons even apply",
+        detail:
+          "Before changing any cadence, decide what should run at all. Most crons in the default repo are CC-specific. The scope prompt walks vercel.json + .agents/workflows/ and returns an enable / disable / retune recommendation per job — recommendation only, it changes nothing.",
+        promptId: "client-cron-scope",
+      },
+      {
         title: "Tighten the cron schedule",
         detail:
-          "Audit every scheduled job against the client's real operating rhythm. Default to the minimum useful cadence, keep outbound opt-in and approval-gated, and remove inherited schedules that do not serve the deployment.",
+          "Then act on that list. Audit every surviving job against the client's real operating rhythm. Default to the minimum useful cadence, keep outbound opt-in and approval-gated, and remove inherited schedules that do not serve the deployment.",
         promptId: "client-tighten-cron-schedule",
       },
       {

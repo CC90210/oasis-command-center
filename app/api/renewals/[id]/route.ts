@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { resolveSessionContext } from "@/lib/api-auth";
 import { canWriteCrm } from "@/lib/role-gates";
 import { getServiceSupabase } from "@/lib/supabase-server";
-import { nextRenewalDate, estCommissionUsd } from "@/lib/renewals/derive";
+import { nextRenewalDate, estCommissionUsd, isTermUnit, type TermUnit } from "@/lib/renewals/derive";
 
 export const dynamic = "force-dynamic";
 
@@ -33,11 +33,16 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
   if (!existing.data) return NextResponse.json({ ok: false, error: "not_found" }, { status: 404 });
   const current = existing.data as Record<string, unknown>;
   const amount = Number(body.funded_amount_usd ?? current.funded_amount_usd);
-  const term = Number(body.term_months ?? current.term_months);
+  const legacyTermPatch = body.term_value === undefined && body.term_months !== undefined;
+  const termValue = Number(body.term_value ?? body.term_months ?? current.term_value ?? current.term_months);
+  const termUnit: TermUnit = legacyTermPatch ? "months" : isTermUnit(body.term_unit)
+    ? body.term_unit
+    : isTermUnit(current.term_unit) ? current.term_unit : "months";
+  const maxByUnit: Record<TermUnit, number> = { months: 60, weeks: 260, days: 1825 };
   const rate = Number(body.factor_rate ?? current.factor_rate);
   const points = body.points_pct === "" || body.points_pct === null ? null : Number(body.points_pct ?? current.points_pct);
   const fundedAt = String(body.funded_at ?? current.funded_at);
-  if (!(amount > 0) || !Number.isInteger(term) || term < 1 || term > 60 || rate < 1 || rate > 2 || !/^\d{4}-\d{2}-\d{2}$/.test(fundedAt)) {
+  if (!(amount > 0) || !Number.isInteger(termValue) || termValue < 1 || termValue > maxByUnit[termUnit] || rate < 1 || rate > 2 || !/^\d{4}-\d{2}-\d{2}$/.test(fundedAt)) {
     return NextResponse.json({ ok: false, error: "validation_failed" }, { status: 400 });
   }
   let lenderName = current.lender_name;
@@ -50,9 +55,11 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
   }
   const update = {
     lender_id: lenderId || null, lender_name: lenderName,
-    funded_amount_usd: amount, factor_rate: rate, term_months: term,
+    funded_amount_usd: amount, factor_rate: rate,
+    term_months: termUnit === "months" ? termValue : null,
+    term_value: termValue, term_unit: termUnit,
     points_pct: Number.isFinite(points) ? points : null, funded_at: fundedAt,
-    next_renewal_date: nextRenewalDate(fundedAt, term),
+    next_renewal_date: nextRenewalDate(fundedAt, termValue, termUnit),
     est_commission_usd: estCommissionUsd(amount, Number.isFinite(points) ? points : null),
     notes: typeof body.notes === "string" ? body.notes.slice(0, 2000) : current.notes,
   };

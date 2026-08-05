@@ -293,6 +293,29 @@ export default function SignupPage() {
               </div>
             )}
 
+            {/* Consent must be visible BEFORE the action that forms the
+                contract — a link buried in a footer is not assent. Covers both
+                the email/password submit below and the Google button, which is
+                why the copy says "or continuing". */}
+            <p className="text-xs leading-relaxed text-fg-dim">
+              By creating an account or continuing, you agree to our{" "}
+              <a
+                href="/terms"
+                className="text-fg underline underline-offset-2 hover:text-accent"
+              >
+                Terms of Service
+              </a>{" "}
+              (including Binding Arbitration) and{" "}
+              <a
+                href="/privacy"
+                className="text-fg underline underline-offset-2 hover:text-accent"
+              >
+                Privacy Policy
+              </a>
+              . This product uses AI and large language models to process your
+              data.
+            </p>
+
             <button
               type="submit"
               disabled={busy}

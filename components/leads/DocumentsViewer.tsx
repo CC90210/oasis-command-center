@@ -70,10 +70,16 @@ export function DocumentsViewer({
   const [toggling, setToggling] = useState<null | "clean" | "watermarked">(null);
   const variantOf = (d?: ViewerDoc) =>
     d ? variants[d.id] || (d.active_variant === "watermarked" ? "watermarked" : "clean") : "clean";
+  // Why a WM toggle refused. Until 2026-08-03 a failed toggle did NOTHING
+  // visible — the switch snapped back and the operator had no idea whether the
+  // statement was branded, which is the same blindness that made "it says it
+  // can't watermark it" the most anyone could report about shop-out.
+  const [variantError, setVariantError] = useState<string | null>(null);
   const setVariant = useCallback(
     async (d: ViewerDoc, target: "clean" | "watermarked") => {
       if (toggling || variantOf(d) === target) return;
       setToggling(target);
+      setVariantError(null);
       try {
         const r = await fetch(`/api/lead-documents/${d.id}/watermark-variant`, {
           method: "POST",
@@ -86,7 +92,15 @@ export function DocumentsViewer({
           setVariants((p) => ({ ...p, [d.id]: j.active }));
           delete cacheRef.current[d.id]; // invalidate the signed URL → re-fetch the new variant
           await load(d);
+        } else if (j.ok && j.state === "legacy_baked") {
+          setVariantError(j.message || "No clean original — re-upload to get a clean version.");
+        } else {
+          setVariantError(
+            j.error ? `Could not switch: ${j.error}` : "Could not switch this statement.",
+          );
         }
+      } catch (e) {
+        setVariantError(`Could not switch: ${String((e as Error).message || e)}`);
       } finally {
         setToggling(null);
       }
@@ -195,6 +209,12 @@ export function DocumentsViewer({
           Close
         </button>
       </header>
+
+      {variantError && (
+        <div className="shrink-0 border-b border-rose-500/30 bg-rose-500/10 px-3 py-2 text-[11px] text-rose-100">
+          {variantError}
+        </div>
+      )}
 
       <div
         className="relative flex-1 min-h-0 bg-bg-deep"

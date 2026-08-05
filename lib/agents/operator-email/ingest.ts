@@ -24,6 +24,25 @@ export interface IngestResult {
   ingested: number;
   dropped: number; // unmatched / personal — intentionally not stored
   skipped: number; // already ingested (dedupe)
+  /**
+   * Classification was still in flight, so the message was NOT written and must
+   * be seen again. Counted separately from `skipped` because the caller has to
+   * act on it: advancing the mailbox cursor past a deferred message loses it
+   * for good.
+   */
+  deferred: number;
+  /**
+   * ISO date of the OLDEST deferred message, if any. The caller advances its
+   * cursor to just before this instead of freezing it — see markProcessed.
+   */
+  oldestDeferredAt?: string | null;
+  /**
+   * Deferred messages with NO trusted receipt time. If this is non-zero the
+   * caller must not advance the cursor at all: there is no safe point to stop
+   * behind, and the mailbox cursor is shared across mailboxes, so a timestamp
+   * from one cannot bound a deferral in another.
+   */
+  deferredUntimed: number;
 }
 
 function emailFromHeader(h: string): string {
@@ -88,7 +107,7 @@ export async function ingestMessages(
   messages: MonitoredMessage[],
 ): Promise<IngestResult> {
   const db = getServiceSupabase();
-  const res: IngestResult = { scanned: messages.length, matched: 0, ingested: 0, dropped: 0, skipped: 0 };
+  const res: IngestResult = { scanned: messages.length, matched: 0, ingested: 0, dropped: 0, skipped: 0, deferred: 0, oldestDeferredAt: null, deferredUntimed: 0 };
 
   for (const msg of messages) {
     const fromEmail = emailFromHeader(msg.from);
@@ -129,11 +148,64 @@ export async function ingestMessages(
     // Intelligence (Fable 5) — matched email only, so no personal/unmatched mail
     // ever reaches the model. Lender replies additionally get terms/decline
     // extracted (the learning signal). Both classifiers fence + fail closed.
-    const cls = lead
-      ? await classifyDealEmail(msg.subject, msg.body)
-      : { type: "other" as const, needs_attention: false, summary: "" };
+    /*
+     * DRY RUN SPENDS NOTHING. Both classifiers now queue through the
+     * subscription seam, which PERSISTS the prompt in inference_jobs and
+     * consumes CLI work. This function documents dryRun as "logs only", and the
+     * operator cron defaults to it — so classifying here meant a validation tick
+     * repeatedly storing email content and doing real inference for output
+     * nobody keeps. Dry runs report the match, not a classification.
+     * Caught by Codex review 2026-08-04.
+     *
+     * Tenant-scoped for the same reason as the lender classifier below: the
+     * prompt carries merchant email content and is persisted, so it must carry
+     * its owner.
+     */
+    const cls =
+      lead && !args.dryRun
+        ? await classifyDealEmail(msg.subject, msg.body, { tenantId: args.tenantId })
+        : { type: "other" as const, needs_attention: false, summary: "" };
+
+    /*
+     * Still in flight — defer, do NOT persist.
+     *
+     * THIS ONLY WORKS IF THE CALLER HOLDS THE CURSOR. Not writing the row is
+     * necessary but not sufficient: the cron advances `last_processed_at` via
+     * markProcessed() and reads with `after:<that>`, so a deferred message would
+     * fall outside the next window and be lost for good. It is reported as
+     * `deferred` so the caller can hold the cursor. (An earlier version of this
+     * comment claimed there was no cursor to advance — there is one, in
+     * app/api/cron/operator-email-agent/route.ts. Codex review caught it.)
+     *
+     * A permanently slow queue cannot wedge the cursor forever: queueInfer
+     * reports a STALLED queue with timedOut false, which returns the plain
+     * fallback rather than pending.
+     */
+    if (cls.pending) {
+      res.deferred += 1;
+      /*
+       * internalDate, NOT the Date header. The header is sender-controlled and
+       * Gmail passes it through verbatim: a forged future date would push the
+       * cursor past legitimate later mail, and a missing or unparseable one
+       * would leave this null. internalDate is Gmail's own receipt time.
+       * Codex review 2026-08-04.
+       *
+       * If it is absent we leave oldestDeferredAt null, and the caller HOLDS
+       * the cursor rather than advancing — a stale cursor costs a re-read, an
+       * advanced one costs the email.
+       */
+      const ms = Number(msg.internalDate);
+      if (Number.isFinite(ms) && ms > 0) {
+        const at = new Date(ms).toISOString();
+        if (!res.oldestDeferredAt || at < res.oldestDeferredAt) res.oldestDeferredAt = at;
+      } else {
+        res.deferredUntimed += 1;
+      }
+      continue;
+    }
+
     let lenderEnrichment: Record<string, unknown> = {};
-    if (lead && cls.type === "lender_reply") {
+    if (lead && !args.dryRun && cls.type === "lender_reply") {
       try {
         // Tenant-scope the queued prompt: the classifier now PERSISTS this
         // content in inference_jobs, so it must carry its owner.
@@ -156,7 +228,9 @@ export async function ingestMessages(
     };
 
     if (args.dryRun) {
-      console.log(`[operator-email] DRY ${outbound ? "out" : "in"} msg=${msg.id} lead=${lead?.id || "unmatched"} type=${cls.type}${lenderEnrichment.lender_category ? "/" + lenderEnrichment.lender_category : ""} "${msg.subject.slice(0, 50)}"`);
+      // type is deliberately absent: a dry run does not classify, so printing
+      // "other" here would read as a real verdict on every message.
+      console.log(`[operator-email] DRY ${outbound ? "out" : "in"} msg=${msg.id} lead=${lead?.id || "unmatched"} type=not-classified(dry) "${msg.subject.slice(0, 50)}"`);
       res.ingested += 1;
       continue;
     }

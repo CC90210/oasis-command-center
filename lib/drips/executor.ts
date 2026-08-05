@@ -525,6 +525,7 @@ async function handleGuardBlock(
     await writeAgentAlert({
       tenantId: row.tenant_id,
       alertType: "drip_blast_safety_block",
+      lane: "sunbiz-ops",
       severity: "warn",
       title: `Drip copy blocked by compliance: ${row.sequence_name}`,
       body: `${where} step ${row.step_index}: ${guard.message} Fix the sequence template; leads are skipping this step until you do.`,
@@ -538,6 +539,7 @@ async function handleGuardBlock(
   await writeAgentAlert({
     tenantId: row.tenant_id,
     alertType: "drip_safety_lookup_failed",
+    lane: "sunbiz-ops",
     severity: "warn",
     title: "Drip compliance check can't run — sends rescheduling",
     body: "The lender-name safety lookup is failing; drip sends are rescheduling (fail-closed, not dropped) until it recovers.",
@@ -746,6 +748,7 @@ async function processSmsStep(
         await writeAgentAlert({
           tenantId: row.tenant_id,
           alertType: "tt_credits_exhausted",
+          lane: "sunbiz-ops",
           severity: "urgent",
           title: "TextTorrent credits exhausted — SMS drips parked",
           body: "Drip SMS sends are failing with 'not enough credits'. Every affected row reschedules +6h (no retry burn, no auto-dead) until credits are topped up.",
@@ -855,6 +858,7 @@ async function processEmailStep(
           await writeAgentAlert({
             tenantId: row.tenant_id,
             alertType: "drip_missing_app_link",
+            lane: "sunbiz-ops",
             severity: attempts >= CAP ? "urgent" : "warn",
             title: `Drip email ${attempts >= CAP ? "skipped" : "held"}: no application link (${row.sequence_name})`,
             body: `Lead ${row.lead_id} has no application link and one couldn't be minted (no enabled intake form or HMAC key). ${attempts >= CAP ? "Skipped this email after retries so the sequence keeps moving." : "Holding this email so no generic link reaches the merchant."}`,

@@ -45,6 +45,22 @@ const nextConfig = {
     // can't follow runtime paths, so without these includes the assets don't
     // ship and real (scanned/encrypted) statements fail to rasterize on Vercel.
     // Bundle them into every route that can trigger watermarking.
+    //
+    // KEEP THIS LIST IN SYNC with the routes that import the watermark chain
+    // (setLeadDocumentVariant / watermarkAttachmentsForShopOut /
+    // ensureApplicationThreadsWatermarked / watermarkStoredBankStatement /
+    // watermarkBankStatement). To re-derive it:
+    //   grep -rl "setLeadDocumentVariant\|watermarkAttachmentsForShopOut\|\
+    //     ensureApplicationThreadsWatermarked\|watermarkBankStatement" app --include=route.ts
+    // A route that watermarks but is MISSING here still "works" for simple PDFs
+    // (the pdf-lib overlay is pure JS) but silently degrades and then fails:
+    //   - public/brand/sunbiz-logo.png absent -> the mark falls back to a tiled
+    //     TEXT wordmark, so the same statement gets a DIFFERENT brand depending
+    //     on which route branded it;
+    //   - pdfjs wasm/fonts/cmaps/worker absent -> the raster fallback dies, and
+    //     the raster fallback is the ONLY path for permission-encrypted bank
+    //     PDFs (a large share of real statements, which pdf-lib cannot decrypt).
+    //     Net effect: "can't watermark it" on exactly the files that need it.
     ...Object.fromEntries(
       [
         "/api/bridge/exec-tool",
@@ -52,6 +68,14 @@ const nextConfig = {
         "/api/applications/*/shop-out/run",
         "/api/applications/*/lender-threads/retry-all",
         "/api/applications/*/lender-threads/*/retry",
+        // 2026-08-03: MISSING since the 2026-06-29 variant-toggle shipped. This
+        // is the operator's "Clean | WM" switch in the lead drawer + documents
+        // viewer, so the one surface whose entire job is watermarking was the
+        // one surface without the watermark assets.
+        "/api/lead-documents/*/watermark-variant",
+        // Retained: these two no longer watermark (statements have been stored
+        // CLEAN since 2026-06-29) but they still read/serve statement bytes, and
+        // the includes are cheap insurance if branding is ever re-added there.
         "/api/leads/*/documents",
         "/api/forms/submit",
       ].map((route) => [
@@ -72,7 +96,7 @@ const nextConfig = {
   // self-contained server.js + trimmed node_modules. No effect on Vercel
   // (Vercel uses its own builder).
   output: "standalone",
-  // Cached / external links to retired routes land cleanly on /welcome
+  // Cached / external links to retired routes land cleanly on a live page
   // instead of bouncing through middleware (which would return 307→/login
   // for unauthenticated visitors because the path is no longer in
   // PUBLIC_PATH_PREFIXES). 308 = permanent redirect so search engines
@@ -80,8 +104,29 @@ const nextConfig = {
   async redirects() {
     return [
       {
+        // The entry-path page moved off the brand apex when the marketing
+        // site took over "/" (2026-07-31). /welcome had been shared
+        // directly, so the old URL has to keep resolving.
+        source: "/welcome",
+        destination: "/start",
+        permanent: true,
+      },
+      {
         source: "/command-centre-explained",
-        destination: "/welcome",
+        destination: "/start",
+        permanent: true,
+      },
+      // Inbound links from the previous marketing site
+      // (oasis-ai-platform-iota.vercel.app). Both of its commercial pages
+      // are consolidated into /work.
+      {
+        source: "/pricing",
+        destination: "/work",
+        permanent: true,
+      },
+      {
+        source: "/services",
+        destination: "/work",
         permanent: true,
       },
     ];

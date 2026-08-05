@@ -22,7 +22,7 @@ import {
   UserRound,
   X,
 } from "lucide-react";
-import { nextRenewalDate, estCommissionUsd } from "@/lib/renewals/derive";
+import { nextRenewalDate, estCommissionUsd, type TermUnit } from "@/lib/renewals/derive";
 
 type FieldErrors = Record<string, string>;
 
@@ -44,7 +44,8 @@ const EMPTY = {
   contact_name: "",
   lender_name: "",
   funded_amount_usd: "",
-  term_months: "",
+  term_value: "",
+  term_unit: "months" as TermUnit,
   factor_rate: "",
   points_pct: "",
   funded_at: "",
@@ -119,7 +120,7 @@ export default function RecordFundedDeal() {
   const [confirmDuplicate, setConfirmDuplicate] = useState(false);
   const [saved, setSaved] = useState<string | null>(null);
 
-  const renewalDate = nextRenewalDate(form.funded_at || null, toNum(form.term_months));
+  const renewalDate = nextRenewalDate(form.funded_at || null, toNum(form.term_value), form.term_unit);
   const commission = estCommissionUsd(toNum(form.funded_amount_usd), toNum(form.points_pct));
 
   useEffect(() => setMounted(true), []);
@@ -283,14 +284,15 @@ export default function RecordFundedDeal() {
 
   const setField =
     (key: keyof typeof EMPTY) =>
-    (event: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => {
-      setForm((current) => ({ ...current, [key]: event.target.value }));
+    (event: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>) => {
+      const value = key === "term_unit" ? event.target.value as TermUnit : event.target.value;
+      setForm((current) => ({ ...current, [key]: value }));
       setErrors((current) => (current[key] ? { ...current, [key]: "" } : current));
       setConfirmDuplicate(false);
     };
 
   function focusFirstError(nextErrors: FieldErrors) {
-    const order = ["funded_amount_usd", "factor_rate", "term_months", "funded_at"];
+    const order = ["funded_amount_usd", "factor_rate", "term_value", "term_unit", "funded_at"];
     const first = order.find((key) => nextErrors[key]) || Object.keys(nextErrors)[0];
     if (!first) return;
     window.setTimeout(() => document.getElementById(`fd-${first.replaceAll("_", "-")}`)?.focus(), 0);
@@ -553,8 +555,15 @@ export default function RecordFundedDeal() {
                       <Field label="Factor rate" htmlFor="fd-factor-rate" error={errors.factor_rate} required>
                         <input id="fd-factor-rate" className={inputCls} value={form.factor_rate} onChange={setField("factor_rate")} placeholder="1.35" inputMode="decimal" required aria-invalid={!!errors.factor_rate} />
                       </Field>
-                      <Field label="Term" htmlFor="fd-term-months" error={errors.term_months} hint="Months" required>
-                        <input id="fd-term-months" className={inputCls} value={form.term_months} onChange={setField("term_months")} placeholder="10" inputMode="numeric" required aria-invalid={!!errors.term_months} />
+                      <Field label="Term" htmlFor="fd-term-value" error={errors.term_value || errors.term_unit} required>
+                        <div className="grid grid-cols-[minmax(0,1fr)_9rem] gap-2">
+                          <input id="fd-term-value" className={inputCls} value={form.term_value} onChange={setField("term_value")} placeholder="10" inputMode="numeric" required aria-invalid={!!errors.term_value} />
+                          <select id="fd-term-unit" className={inputCls} value={form.term_unit} onChange={setField("term_unit")} required aria-label="Term unit" aria-invalid={!!errors.term_unit}>
+                            <option value="months">Months</option>
+                            <option value="weeks">Weeks</option>
+                            <option value="days">Days</option>
+                          </select>
+                        </div>
                       </Field>
                       <Field label="Funded date" htmlFor="fd-funded-at" error={errors.funded_at} required>
                         <input id="fd-funded-at" type="date" className={inputCls} value={form.funded_at} onChange={setField("funded_at")} required aria-invalid={!!errors.funded_at} />

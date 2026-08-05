@@ -85,7 +85,18 @@ export async function sendSunbizLeadEvent(input: {
     if (chatIds.length === 0) return; // nobody linked yet — nothing to send
 
     const text = buildSunbizEventMessage(kind, { ...leadData, ...(extra || {}) });
-    const token = process.env.SUNBIZ_TELEGRAM_BOT_TOKEN || undefined;
+    // These chat ids belong to individual SunBiz users who linked their account
+    // to a specific bot. Sending from any other bot is not a fallback — it is a
+    // stranger messaging them, and Telegram rejects it anyway because that bot
+    // was never started in their chat. Bail loudly instead.
+    const token = process.env.SUNBIZ_TELEGRAM_BOT_TOKEN;
+    if (!token) {
+      console.error(
+        "[sunbiz-events] SUNBIZ_TELEGRAM_BOT_TOKEN unset — skipping " +
+          `${chatIds.length} per-user alert(s) rather than sending from another bot`,
+      );
+      return;
+    }
     await Promise.allSettled(
       chatIds.map((chatId) =>
         sendTelegram(text, { token, chatId }).then((r) => {
