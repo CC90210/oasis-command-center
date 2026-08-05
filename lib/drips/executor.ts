@@ -41,6 +41,8 @@ import { checkTcpaWindow, nextTcpaWindowStart } from "@/lib/tcpa-window";
 import { renderTemplate } from "@/lib/drips/templates";
 import { parseDripSteps, type DripStep } from "@/lib/drips/types";
 import { sendDripSms, sendDripEmail } from "@/lib/drips/send";
+import { brandIsSendable, type BrandKey } from "@/lib/email/brands";
+import { loadBrandsForLeads } from "@/lib/drips/brand-store";
 import { wasShoppedRecently } from "@/lib/drips/enroller";
 import { SUNBIZ_BRAND, dripTrackingBase, platformTrackingBase, buildDripHtml, listUnsubscribeHeader, pixelUrl, unsubscribeUrl } from "@/lib/drips/html-email";
 import { resolveDripSmsIdentity, type DripSmsIdentity } from "@/lib/drips/rep-sms-identity";
@@ -245,6 +247,10 @@ type RunState = {
   /** Email volume budget for this dispatch run (governor.ts). Null when the run
    *  claimed no email rows, or in dry-run mode where no bytes move. */
   emailBudget: EmailBudget | null;
+  /** Sending brand per lead_id, resolved once per run from the stamp the
+   *  enroller wrote. Absent lead => sunbiz, which is the pre-existing
+   *  behaviour and what every lead currently in the CRM knows. */
+  brandByLead: Map<string, BrandKey>;
 };
 
 /** Best-effort lead_interactions log — never throws; a logging failure must
@@ -931,6 +937,11 @@ async function processEmailStep(
   // Defaults to the platform origin so a dry run (which builds no HTML) records
   // the truthful "nothing aligned happened here".
   let sentTrackingBase: string = platformTrackingBase();
+  // The brand this message ACTUALLY went out as, recorded on the interaction
+  // row. Telemetry that cannot say which company sent a message cannot
+  // reconstruct a complaint, and after a handoff the lead's current brand is no
+  // longer what older mail carried.
+  let sentBrand: BrandKey = "sunbiz";
   if (shouldSend) {
     // Transactional/relationship email (application nudges, statements, etc.) is
     // CAN-SPAM opt-out-exempt → NO visible unsubscribe footer. The invisible
@@ -944,6 +955,20 @@ async function processEmailStep(
     // below. Cold outreach deliberately does NOT do this: it sends from isolated
     // domains and its links must stay on the platform origin.
     const trackingBase = dripTrackingBase();
+
+    // Which company is speaking to this merchant. Stamped on the lead at
+    // enrolment and read here; never derived at send time, so a lead cannot
+    // flip brand mid-sequence. Absent => sunbiz, the pre-existing behaviour.
+    const brand = run.brandByLead.get(row.lead_id) ?? "sunbiz";
+
+    // A brand missing its CAN-SPAM postal address must never reach a merchant.
+    // HOLD the row rather than failing it: the fix is configuration, and the
+    // message is still worth sending once it lands.
+    const sendable = brandIsSendable(brand);
+    if (!sendable.ok) {
+      return markRetryOrFail(db, row, `brand_not_sendable: ${sendable.reason}`);
+    }
+
     const customFooter =
       emailClass === "transactional"
         ? ""
@@ -957,9 +982,15 @@ async function processEmailStep(
       instrumentedCustomHtml || buildDripHtml(cleanBody, { sendId, email, unsub, trackingBase });
     htmlPayload = html;
     sentTrackingBase = trackingBase;
+    sentBrand = brand;
     const result = await sendDripEmail(row.tenant_id, email, subject, cleanBody, {
       html,
+      // SUNBIZ_BRAND here is the SUPPRESSION brand (the tenant resolver on the
+      // opt-out write path), NOT the sending brand. It deliberately does not
+      // follow `brand`: both brands share one tenant so a single opt-out stops
+      // both, and a value matching no tenant would land tenant_id = NULL.
       listUnsubscribe: listUnsubscribeHeader(email, SUNBIZ_BRAND, trackingBase),
+      brand,
     });
     if (!result.ok) return markRetryOrFail(db, row, result.error);
     fromIdentity = result.fromAddress;
@@ -997,6 +1028,12 @@ async function processEmailStep(
       // variable was unset and silently fell back. Absence means the platform
       // origin, which is exactly right for historical rows (Codex review P2).
       tracking_base: sentTrackingBase,
+      // The brand this message ACTUALLY went out as. Recorded for the same
+      // reason tracking_base is: a lead that has since been handed off now
+      // carries a different sending_brand than the mail already in its inbox,
+      // so re-deriving from the lead row would misattribute every historical
+      // send. Absence means sunbiz, correct for every row predating this.
+      sending_brand: sentBrand,
     },
   });
   await Promise.all([
@@ -1281,10 +1318,20 @@ export async function runDispatchDrips(): Promise<DispatchDripsResult> {
   const emailLeadIds = Array.from(
     new Set(claimed.filter((r) => r.channel === "email").map((r) => r.lead_id)),
   );
+  // Sending brand per lead, resolved ONCE for the run alongside the budget.
+  // Read-only: the brand is stamped at enrolment, never derived here, so a lead
+  // cannot flip brand mid-sequence. Fails safe to sunbiz.
+  const brandTenantId = claimed[0]?.tenant_id;
+  const brandByLead =
+    emailLeadIds.length > 0 && brandTenantId
+      ? await loadBrandsForLeads(db, brandTenantId, emailLeadIds)
+      : new Map<string, BrandKey>();
+
   const run: RunState = {
     creditExhausted: false,
     emailBudget:
       dripSendEnabled() && emailLeadIds.length > 0 ? await loadEmailBudget(db, emailLeadIds) : null,
+    brandByLead,
   };
   if (run.emailBudget?.degraded) {
     // The global counts are best-effort this run; the per-lead cap still holds

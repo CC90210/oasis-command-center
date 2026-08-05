@@ -40,6 +40,7 @@ import { ACCELERATED_FLAG, acceleratedSystemLive, hasActiveAcceleratedRun } from
 import type { DripStep } from "./types";
 import { computeStep0DelayMinutes, enrollmentBufferForStage } from "./stage-buffer";
 import { isPaused, isReEntryEligible } from "./drip-rules-core";
+import { ensureInitialBrand } from "./brand-store";
 
 type Db = ReturnType<typeof getServiceSupabase>;
 
@@ -137,7 +138,7 @@ type SequenceRow = {
   steps: unknown;
 };
 
-type LeadRow = { id: string; data: Record<string, unknown> };
+type LeadRow = { id: string; data: Record<string, unknown>; created_at?: string | null };
 
 function emptySkipCounts(): Record<SkipReason, number> {
   return {
@@ -325,7 +326,10 @@ async function collectCandidates(
     const from = page * CANDIDATE_PAGE_SIZE;
     const leadsRes = await db
       .from("tenant_records")
-      .select("id, data")
+      // created_at comes from the ROW, not from data: measured 2026-08-05, zero
+      // of 1,194 leads carry a created_at inside their jsonb. Brand assignment
+      // needs it to tell a pre-Bluerise lead from a genuinely new one.
+      .select("id, data, created_at")
       .eq("tenant_id", seq.tenant_id)
       .eq("entity_type", "lead")
       .filter("data->>stage", "eq", stage)
@@ -713,6 +717,26 @@ export async function runEnrollDrips(): Promise<EnrollDripsResult> {
       const patch = await backfillLeadMetadata(db, lead);
       if (patch) {
         await db.from("tenant_records").update({ data: patch }).eq("id", lead.id).eq("tenant_id", seq.tenant_id);
+      }
+
+      // Stamp the sending brand once, at enrolment. Deliberately AFTER the
+      // backfill so it reads the patched row, and inside this live-only branch
+      // so the dry-run contract holds: a reporting run never writes a brand.
+      // Best-effort — a lead that fails to stamp resolves to sunbiz at dispatch
+      // (loadBrandsForLeads fails safe), which is the pre-existing behaviour.
+      try {
+        await ensureInitialBrand(
+          db,
+          seq.tenant_id,
+          lead.id,
+          patch ?? lead.data ?? {},
+          lead.created_at,
+        );
+      } catch (err) {
+        console.error("[enroll-drips] brand stamp failed", {
+          leadId: lead.id,
+          err: err instanceof Error ? err.message : String(err),
+        });
       }
     }
 
