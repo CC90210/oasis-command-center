@@ -109,8 +109,50 @@ export function getServiceSupabase(): SupabaseClient {
   return _hybridCached;
 }
 
-/** Authed Supabase — RLS enforced via the user's session. */
+/** Authed Supabase — RLS enforced via the user's session.
+ *
+ * Under EMPIRE_DATA_BACKEND=turso_cloud this client's DATA surface routes to
+ * Turso exactly like the service client: .from() -> adapter, .rpc() -> shim.
+ * Without this, routes that log audit events via authed.rpc("log_tenant_event")
+ * kept writing Supabase after the flip — a bounded but real split-brain
+ * (caught in the post-flip self-review). Auth methods stay on the real client.
+ */
 export async function getAuthedSupabase() {
+  const supa = await makeAuthedSupabase();
+  if (process.env.EMPIRE_DATA_BACKEND !== "turso_cloud" || !tursoConfigured()) {
+    return supa;
+  }
+  const turso = createTursoPostgrest(getTursoClient());
+  return new Proxy(supa, {
+    get(target, prop, receiver) {
+      if (prop === "from") return (table: string) => turso.from(table);
+      if (prop === "rpc") {
+        return (name: string, args?: Record<string, unknown>) => {
+          const shimmed = TURSO_RPC_SHIM[name];
+          if (shimmed) {
+            return shimmed(getTursoClient(), args ?? {}).then(
+              (data) => ({ data, error: null, count: null, status: 200, statusText: "OK" }),
+              (e: unknown) => ({
+                data: null, count: null, status: 400, statusText: "Bad Request",
+                error: { message: e instanceof Error ? e.message : String(e),
+                         code: "TURSO_RPC_ERROR", details: null, hint: null },
+              }),
+            );
+          }
+          if (RPC_PASSTHROUGH.has(name)) return target.rpc(name, args);
+          return Promise.resolve({
+            data: null, count: null, status: 400, statusText: "Bad Request",
+            error: { message: `rpc("${name}") is blocked under EMPIRE_DATA_BACKEND=turso_cloud`,
+                     code: "TURSO_RPC_BLOCKED", details: null, hint: null },
+          });
+        };
+      }
+      return Reflect.get(target, prop, receiver);
+    },
+  }) as Awaited<ReturnType<typeof makeAuthedSupabase>>;
+}
+
+async function makeAuthedSupabase() {
   const url = process.env.BRAVO_SUPABASE_URL;
   const anon =
     process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ||
