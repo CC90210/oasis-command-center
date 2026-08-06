@@ -25,6 +25,10 @@ export async function POST(req: NextRequest) {
   });
 
   await supa.auth.signOut();
+  // Clear the Turso session cookie too — unconditionally; a cookie from a
+  // previous auth mode must never survive a signout. (Self-review catch:
+  // without this, Turso-mode users could not log out.)
+  res.cookies.set({ name: "oasis_session", value: "", path: "/", maxAge: 0 });
   return res;
 }
 

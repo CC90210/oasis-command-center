@@ -23,7 +23,11 @@ const nextConfig = {
   // path → "fake worker failed" / "Cannot find module" on Vercel). Keeping it
   // external makes it run from node_modules with normal resolution — and copies
   // its wasm/fonts/cmaps/worker subdirs into the function alongside it.
-  serverExternalPackages: ["@napi-rs/canvas", "pdfjs-dist"],
+  // @libsql/client + libsql added 2026-08-06: the Turso data-plane hybrid makes
+  // supabase-server.ts import @libsql/client on every route, so its native
+  // bindings now get traced — they must stay external or the build fails
+  // (seen on nostalgic-requests' first Turso deploy).
+  serverExternalPackages: ["@napi-rs/canvas", "pdfjs-dist", "@libsql/client", "libsql"],
   outputFileTracingRoot: path.join(__dirname),
   // lib/prompts/index.ts reads the .txt + .json prompt files at module init
   // via fs.readFileSync. Next.js's static tracer doesn't follow runtime paths,
