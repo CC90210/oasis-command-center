@@ -14,6 +14,7 @@
  * soft-fail: every error is caught + logged; the submission is never affected.
  */
 import "server-only";
+import { inferText } from "@/lib/subscription-infer";
 import nodemailer from "nodemailer";
 import type { SupabaseClient } from "@supabase/supabase-js";
 
@@ -58,12 +59,8 @@ async function compose(
   name: string,
   interests: string[],
   details: Record<string, string>,
+  tenantId?: string | null,
 ): Promise<Composed> {
-  const apiKey =
-    process.env.BRAVO_ANTHROPIC_API_KEY ||
-    process.env.ANTHROPIC_API_KEY ||
-    process.env.PLATFORM_DEFAULT_ANTHROPIC_API_KEY;
-  if (!apiKey) return fallback(name, interests, details);
 
   const firstName = name.split(" ")[0] || "there";
   const context = buildContext(interests, details).join("\n");
@@ -87,22 +84,24 @@ Write a SHORT, personalized email to ${firstName}. Rules:
 Return ONLY a JSON object with "subject" and "body" keys. The body should be plain text (not HTML). No markdown, no code fences, just the JSON.`;
 
   try {
-    const res = await fetch("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-api-key": apiKey,
-        "anthropic-version": "2023-06-01",
-      },
-      body: JSON.stringify({
-        model: "claude-sonnet-4-6",
-        max_tokens: 400,
-        messages: [{ role: "user", content: prompt }],
-      }),
+    /*
+     * Subscription, not the paid API. This one fires on a PUBLIC form
+     * submission, so it was the only remaining paid call with no human in the
+     * loop at all — a prospect filling in the funnel spent money directly.
+     * See lib/subscription-infer.ts.
+     */
+    const inf = await inferText({
+      source: "oasis-funnel-email",
+      system: "",
+      prompt,
+      maxTokens: 400,
+      tenantId: tenantId ?? null,
+      modelTier: "smart",
     });
-    if (!res.ok) return fallback(name, interests, details);
-    const data = (await res.json()) as { content?: Array<{ text?: string }> };
-    const text = data.content?.[0]?.text || "";
+    // Fallback copy is a complete, sendable email — a slow or unavailable queue
+    // must not delay the prospect's confirmation.
+    if (!inf.ok) return fallback(name, interests, details);
+    const text = inf.text;
     // Strip code fences if Claude wrapped the JSON (mirrors ai-checkin-compose).
     const cleaned = text
       .trim()
@@ -339,7 +338,7 @@ export async function sendOasisFunnelWelcome(
     const interests = asArray(answers.interests);
     const details = extractDetails(answers);
     const name = str(answers.name) || str(answers.contact_name) || "there";
-    const { subject, body } = await compose(name, interests, details);
+    const { subject, body } = await compose(name, interests, details, tenantId);
 
     return await deliverWelcomeEmail({
       db, tenantId, leadId, toEmail, source: WELCOME_SOURCE, subject, body,

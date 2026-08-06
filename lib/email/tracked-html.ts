@@ -27,6 +27,8 @@
 
 import "server-only";
 import { createHmac, timingSafeEqual } from "node:crypto";
+import { resolveTrackingBase } from "./tracking-base";
+import { unsubscribeMailto } from "./sending-identity";
 
 // The brand string MUST resolve to the SunBiz tenant in /api/unsubscribe's
 // resolveTenantId (matches tenants.name ILIKE 'SunBiz') or the recorded
@@ -34,8 +36,82 @@ import { createHmac, timingSafeEqual } from "node:crypto";
 // never honors it. Verified: tenants.name='SunBiz'.
 export const SUNBIZ_BRAND = "SunBiz";
 
-function appBase(): string {
-  return (process.env.PUBLIC_APP_URL || "https://oasisai.work").replace(/\/+$/, "");
+/**
+ * SENDING-DOMAIN ALIGNMENT (2026-07-29).
+ *
+ * Drip mail goes out From submissions@sunbizfunding.com, but every URL inside it
+ * — the open pixel, every click-wrapped link, the unsubscribe link and the
+ * List-Unsubscribe header — was built on PUBLIC_APP_URL, which is oasisai.work.
+ * A visible sender whose links all point at an unrelated domain is one of the
+ * more reliable spam signals, because it is the shape phishing takes. It also
+ * means sunbizfunding.com earns no reputation from opens or clicks while
+ * carrying all of the complaint risk: the engagement accrues to the other domain.
+ *
+ * The base is therefore resolved PER BRAND, not globally. oasisai.work is the
+ * platform domain and remains correct for everything that is not SunBiz mail, so
+ * a blanket swap would misattribute other tenants' links.
+ *
+ * Set SUNBIZ_TRACKING_BASE_URL to a host on the sending domain (for example
+ * https://go.sunbizfunding.com) that is added to this Vercel project and
+ * CNAME'd to it. Middleware is path-based rather than host-based and
+ * /api/track + /api/unsubscribe are both public, so the same routes serve
+ * unchanged from the new hostname.
+ *
+ * UNSET IS TODAY'S BEHAVIOUR, EXACTLY. This is deliberate so the code can merge
+ * before the DNS exists: nothing changes until the variable is set, and setting
+ * it is the deploy.
+ */
+/**
+ * WHICH DOMAIN a message's tracked URLs are built on.
+ *
+ * This is NOT derivable from `brand`. Brand is a SUPPRESSION key: it must be
+ * "SunBiz" for anything whose unsubscribe should record against the SunBiz
+ * tenant, including cold outreach, or the suppression lands with a null tenant
+ * and is never honored. Sending IDENTITY is a different axis, and conflating
+ * them is a real hazard: cold blasts deliberately send from isolated mailbox
+ * domains precisely so their reputation cannot touch sunbizfunding.com, and
+ * keying the tracking domain off brand would have moved their pixels and
+ * unsubscribe links onto it (Codex review P1).
+ *
+ * Callers therefore pass an explicit ORIGIN, not a flag, and everything defaults
+ * to the shared platform origin. A future caller that does not think about this
+ * gets reputation isolation rather than silently borrowing a sending domain.
+ *
+ * Passing the RESOLVED origin is also what makes a send auditable: the executor
+ * stamps the exact string it used onto the interaction row, so the telemetry
+ * reconciler can rebuild that message months later byte-identically even if the
+ * configuration has changed since, or was unset at the time and fell back.
+ */
+function platformFallback(): string {
+  return process.env.PUBLIC_APP_URL || "https://oasisai.work";
+}
+
+/** The shared platform origin. The default for every tracked URL. */
+export function platformTrackingBase(): string {
+  return resolveTrackingBase(undefined, platformFallback());
+}
+
+/**
+ * The origin for OUTBOUND DRIP mail, resolved now.
+ *
+ * Deliberately keyed to the sending PATH, not to a brand name, because the
+ * sending brand is expected to change: SunBiz drips move to Bluerise Business
+ * Capital once that domain finishes warming. Keying this to "SunBiz" would have
+ * made that rebrand a code change; keying it to the drip path makes it one
+ * environment variable.
+ *
+ * Reputation isolation for cold outreach is achieved by WHO CALLS THIS, not by a
+ * brand check: the drip executor calls it, cold-sending does not, so cold mail
+ * stays on the platform origin and its domain reputation stays separate.
+ *
+ * Falls back to the platform origin when unconfigured or invalid, so the return
+ * value is always the origin that will REALLY be used. That is why callers stamp
+ * this resolved string on the send rather than their intent: a message sent while
+ * the variable was unset really did carry platform URLs, and recording an
+ * intention would make the telemetry reconciler rebuild it wrong later.
+ */
+export function dripTrackingBase(): string {
+  return resolveTrackingBase(process.env.DRIP_TRACKING_BASE_URL, platformFallback());
 }
 
 export function escapeHtml(s: string): string {
@@ -83,15 +159,19 @@ export function verifyClickTarget(uEncoded: string, sig: string): boolean {
   }
 }
 
-export function pixelUrl(sendId: string): string {
-  return `${appBase()}/api/track/open/${encodeURIComponent(sendId)}`;
+export function pixelUrl(sendId: string, base: string = platformTrackingBase()): string {
+  return `${base}/api/track/open/${encodeURIComponent(sendId)}`;
 }
 
-export function clickUrl(sendId: string, target: string): string {
+export function clickUrl(
+  sendId: string,
+  target: string,
+  base: string = platformTrackingBase(),
+): string {
   const u = b64urlEncode(target);
   const s = signClickTarget(u);
-  const base = `${appBase()}/api/track/click/${encodeURIComponent(sendId)}?u=${u}`;
-  return s ? `${base}&s=${s}` : base;
+  const clickBase = `${base}/api/track/click/${encodeURIComponent(sendId)}?u=${u}`;
+  return s ? `${clickBase}&s=${s}` : clickBase;
 }
 
 /** Signed query string (email|brand|token) shared by the page + API unsub URLs.
@@ -110,20 +190,35 @@ function unsubQuery(email: string, brand: string): string {
 
 /** Human-facing unsubscribe PAGE (renders a confirmation) — used by the visible
  *  in-body footer link on commercial mail. */
-export function unsubscribeUrl(email: string, brand: string = SUNBIZ_BRAND): string {
-  return `${appBase()}/unsubscribe?${unsubQuery(email, brand)}`;
+export function unsubscribeUrl(
+  email: string,
+  brand: string = SUNBIZ_BRAND,
+  base: string = platformTrackingBase(),
+): string {
+  return `${base}/unsubscribe?${unsubQuery(email, brand)}`;
 }
 
 /** Machine-facing unsubscribe API — the RFC 8058 one-click POST target. Points at
  *  /api/unsubscribe (which accepts the query params on POST), NOT the page, so a
  *  mail client's one-click actually suppresses instead of 405-ing on the page. */
-export function unsubscribeApiUrl(email: string, brand: string = SUNBIZ_BRAND): string {
-  return `${appBase()}/api/unsubscribe?${unsubQuery(email, brand)}`;
+export function unsubscribeApiUrl(
+  email: string,
+  brand: string = SUNBIZ_BRAND,
+  base: string = platformTrackingBase(),
+): string {
+  return `${base}/api/unsubscribe?${unsubQuery(email, brand)}`;
 }
 
 /** RFC 8058 List-Unsubscribe header value (one-click HTTPS URL + mailto fallback). */
-export function listUnsubscribeHeader(email: string, brand: string = SUNBIZ_BRAND): string {
-  return `<${unsubscribeApiUrl(email, brand)}>, <mailto:submissions@sunbizfunding.com?subject=unsubscribe>`;
+export function listUnsubscribeHeader(
+  email: string,
+  brand: string = SUNBIZ_BRAND,
+  base: string = platformTrackingBase(),
+): string {
+  // The mailto is derived from the configured From address, never hardcoded: a
+  // mailto pointing at a different domain than the visible sender is both a
+  // deliverability signal and a dead end once the old mailbox is retired.
+  return `<${unsubscribeApiUrl(email, brand, base)}>, <${unsubscribeMailto()}>`;
 }
 
 export type UnsubMode = "footer" | "none";
@@ -136,11 +231,12 @@ export type UnsubMode = "footer" | "none";
  */
 export function buildTrackedHtml(
   plain: string,
-  opts: { sendId: string; email: string; brand?: string; unsub?: UnsubMode },
+  opts: { sendId: string; email: string; brand?: string; unsub?: UnsubMode; trackingBase?: string },
 ): string {
   const { sendId, email } = opts;
   const brand = opts.brand || SUNBIZ_BRAND;
   const unsub: UnsubMode = opts.unsub || "footer";
+  const trackingBase = opts.trackingBase || platformTrackingBase();
 
   const urlRe = /(https?:\/\/[^\s<>"')]+)/g;
   let out = "";
@@ -149,19 +245,19 @@ export function buildTrackedHtml(
     const idx = m.index ?? 0;
     out += escapeHtml(plain.slice(last, idx));
     const target = m[0];
-    out += `<a href="${escapeHtml(clickUrl(sendId, target))}" style="color:#0B1F4F;text-decoration:underline;">${escapeHtml(target)}</a>`;
+    out += `<a href="${escapeHtml(clickUrl(sendId, target, trackingBase))}" style="color:#0B1F4F;text-decoration:underline;">${escapeHtml(target)}</a>`;
     last = idx + target.length;
   }
   out += escapeHtml(plain.slice(last));
   const bodyHtml = out.replace(/\n/g, "<br />\n");
 
-  const pixel = `<img src="${escapeHtml(pixelUrl(sendId))}" width="1" height="1" alt="" style="display:none;max-height:0;overflow:hidden;" />`;
+  const pixel = `<img src="${escapeHtml(pixelUrl(sendId, trackingBase))}" width="1" height="1" alt="" style="display:none;max-height:0;overflow:hidden;" />`;
   const footer =
     unsub === "none"
       ? ""
       : `<div style="margin-top:24px;color:#8a94a6;font-size:12px;line-height:1.5;">` +
         `If you would prefer not to receive these, you can ` +
-        `<a href="${escapeHtml(unsubscribeUrl(email, brand))}" style="color:#8a94a6;">unsubscribe here</a>.` +
+        `<a href="${escapeHtml(unsubscribeUrl(email, brand, trackingBase))}" style="color:#8a94a6;">unsubscribe here</a>.` +
         `</div>`;
 
   return (
@@ -172,6 +268,6 @@ export function buildTrackedHtml(
 }
 
 /** Back-compat alias for the drip executor's original call shape. */
-export function buildDripHtml(plain: string, opts: { sendId: string; email: string; brand?: string; unsub?: UnsubMode }): string {
+export function buildDripHtml(plain: string, opts: { sendId: string; email: string; brand?: string; unsub?: UnsubMode; trackingBase?: string }): string {
   return buildTrackedHtml(plain, opts);
 }

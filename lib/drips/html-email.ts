@@ -7,6 +7,8 @@
 
 export {
   SUNBIZ_BRAND,
+  dripTrackingBase,
+  platformTrackingBase,
   escapeHtml,
   b64urlDecode,
   signClickTarget,

@@ -82,11 +82,20 @@ export async function listActiveAgents(limit = 10): Promise<AgentEmailSettings[]
 }
 
 /** Advance the poller cursor (call after a successful tick). Best-effort. */
-export async function markProcessed(tenantId: string, userId: string): Promise<void> {
+/**
+ * @param upToISO advance the cursor only this far. Used when a message was
+ *   deferred (classification still running): the cursor must stay BEHIND that
+ *   email so the next `after:` read still contains it, but it must still MOVE —
+ *   `listActiveAgents` polls the stalest 10 agents, so an agent whose cursor is
+ *   frozen holds a polling slot indefinitely and can starve newer agents out of
+ *   the rotation entirely. Codex review 2026-08-04.
+ */
+export async function markProcessed(tenantId: string, userId: string, upToISO?: string): Promise<void> {
   try {
+    const stamp = upToISO || new Date().toISOString();
     await getServiceSupabase()
       .from("agent_email_settings")
-      .update({ last_processed_at: new Date().toISOString(), updated_at: new Date().toISOString() })
+      .update({ last_processed_at: stamp, updated_at: new Date().toISOString() })
       .eq("tenant_id", tenantId)
       .eq("user_id", userId);
   } catch { /* best-effort cursor */ }

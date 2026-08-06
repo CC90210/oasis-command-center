@@ -62,11 +62,62 @@ async function runAgent(agent: AgentEmailSettings, write: boolean) {
     );
     results[mailbox] = { ...ing, diag: read.diag };
   }
+  /*
+   * Hold the cursor if any message was DEFERRED.
+   *
+   * A deferred message is one whose classification was still running: ingest
+   * deliberately did not write it, so it must be seen again. Since the next
+   * read is `after:last_processed_at`, advancing the cursor here would move the
+   * window past that email and it would never be ingested at all — the
+   * classifier's dedupe would be collecting a result for a message nobody looks
+   * at again. Holding costs one re-read of a small window; advancing costs the
+   * email. Codex review 2026-08-04.
+   *
+   * This cannot wedge: queueInfer reports a STALLED queue as a terminal failure
+   * (timedOut false), which classifies as the plain fallback rather than
+   * deferring, so a dead daemon lets the cursor move on.
+   */
+  const deferred = Object.values(results).reduce((n, r) => n + (r?.deferred || 0), 0);
+  // Oldest deferred message across both mailboxes; the cursor stops just short
+  // of it (1s) rather than freezing, so the agent keeps its place in the
+  // rotation while the email stays inside the next `after:` window.
+  const oldestDeferred = Object.values(results)
+    .map((r) => r?.oldestDeferredAt)
+    .filter((v): v is string => typeof v === "string")
+    .sort()[0];
+
   // Only advance the cursor on a real (write) run — a DRY tick must not consume
   // the window, or it silently skips messages the live run should have ingested.
+  /*
+   * A deferral with NO trusted receipt time forces a full hold, even if another
+   * mailbox in the same tick supplied one. The cursor is shared across
+   * mailboxes, so bounding it with the OAuth mailbox's oldest timestamp would
+   * happily step past an untimestamped deferral in the other one — losing it
+   * for good in the branch written to prevent exactly that. Codex review.
+   */
+  const untimed = Object.values(results).reduce((n, r) => n + (r?.deferredUntimed || 0), 0);
+
   if (write) {
-    await markProcessed(agent.tenantId, agent.userId);
-    await writeSnapshot(agent.tenantId, agent.userId); // metrics for the dashboard cards
+    if (untimed > 0) {
+      console.warn(
+        `[operator-email] ${untimed} deferred message(s) have no trusted receipt time — holding cursor entirely`,
+      );
+    } else if (deferred > 0 && oldestDeferred) {
+      // Clamped to now: internalDate is server-set so it should never be in the
+      // future, but the cursor must never jump forward on a bad value either.
+      const upTo = new Date(Math.min(Date.parse(oldestDeferred) - 1000, Date.now())).toISOString();
+      console.warn(
+        `[operator-email] ${deferred} message(s) awaiting classification — cursor held at ${upTo} (not frozen)`,
+      );
+      await markProcessed(agent.tenantId, agent.userId, upTo);
+    } else {
+      await markProcessed(agent.tenantId, agent.userId);
+    }
+    // Snapshot ALWAYS on a write run. Messages ingested earlier in this same
+    // tick have already changed the dashboard metrics, so gating this on
+    // `deferred === 0` left the cards stale for as long as the queue was slow —
+    // which is exactly when someone would be looking at them. Codex review.
+    await writeSnapshot(agent.tenantId, agent.userId);
   }
   return results;
 }

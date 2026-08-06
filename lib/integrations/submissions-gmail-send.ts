@@ -23,6 +23,7 @@
 import "server-only";
 import { randomUUID } from "node:crypto";
 import { getSubmissionsCreds, getSubmissionsFrom } from "./submissions-gmail";
+import { domainOfAddress, messageIdDomain } from "@/lib/email/sending-identity";
 
 export type SendPayload = {
   to: string;
@@ -58,6 +59,13 @@ export type SendPayload = {
    * transactional/reply sends — every existing caller keeps working unchanged.
    */
   listUnsubscribe?: string;
+  /**
+   * Optional display name for the From header, e.g. "Bluerise Business Capital".
+   * Omit to keep the shared default from getSubmissionsFrom(). Exists so ONE
+   * caller can rebrand without dragging lender shop-out mail along with it; the
+   * sending address is unchanged either way.
+   */
+  fromName?: string;
   /** Per-tenant credential lookup; pass through from the route's auth context. */
   tenantId: string;
 };
@@ -80,6 +88,13 @@ export type SendResult =
        * anchor passed in via payload.threadId.
        */
       thread_id: string;
+      /**
+       * The From header this message was ACTUALLY sent with, display name and
+       * all. Returned rather than left for the caller to re-derive, because a
+       * caller that re-derives gets the shared default and would audit a
+       * rebranded send under the wrong identity (Codex review P2).
+       */
+      from_identity: string;
     }
   | { ok: false; error: string };
 
@@ -94,18 +109,37 @@ export type SendResult =
  * which is what makes our chain-via-References work on the recipient
  * side without needing the Gmail API.
  */
-function synthesizeMessageId(): string {
-  return `<${randomUUID()}@sunbizfunding.com>`;
+function synthesizeMessageId(senderDomain?: string): string {
+  // Derived from the domain of the address the recipient will actually SEE
+  // (2026-07-29). A Message-Id whose domain does not match the visible sender is
+  // scored against by some filters.
+  //
+  // `senderDomain` is the RESOLVED per-tenant sender. It matters that this is not
+  // simply the global configured domain: sendOnce resolves From per tenant via
+  // getSubmissionsFrom, so stamping a globally-configured domain here would put
+  // one tenant's domain on another tenant's mail, and would put the new brand's
+  // domain on mail still going out under the old sender during a cutover. That is
+  // the very mismatch this work exists to remove (Codex review P1).
+  //
+  // Falls back to the configured identity, then to the legacy domain.
+  return `<${randomUUID()}@${senderDomain || messageIdDomain()}>`;
 }
 
 async function sendOnce(
   payload: SendPayload,
   generatedMessageId: string,
-): Promise<{ ok: true; nodemailerMessageId: string } | { ok: false; error: string; transient: boolean }> {
+): Promise<{ ok: true; nodemailerMessageId: string; fromIdentity: string } | { ok: false; error: string; transient: boolean }> {
   try {
     const nodemailer = await import("nodemailer");
     const creds = await getSubmissionsCreds(payload.tenantId);
-    const from = await getSubmissionsFrom(payload.tenantId);
+    // The display name in front of the address. getSubmissionsFrom() supplies a
+    // shared default ("SunBiz Submissions") used by lender shop-out mail as well,
+    // so a caller that needs to rebrand ONLY its own mail passes `fromName` and
+    // leaves every other caller untouched. The ADDRESS is always the tenant's
+    // real authenticated mailbox either way — only the label changes.
+    const from = payload.fromName
+      ? `${payload.fromName} <${creds.fromAddress}>`
+      : await getSubmissionsFrom(payload.tenantId);
 
     const transporter = nodemailer.createTransport({
       host: "smtp.gmail.com",
@@ -138,7 +172,7 @@ async function sendOnce(
       ...(payload.html ? { html: payload.html } : {}),
       headers,
     });
-    return { ok: true, nodemailerMessageId: info.messageId };
+    return { ok: true, nodemailerMessageId: info.messageId, fromIdentity: from };
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     // Common transient signals from Gmail SMTP: 4.x.x status codes, network errors.
@@ -153,7 +187,17 @@ async function sendOnce(
  * fires through Gmail SMTP. Returns the persistable IDs.
  */
 export async function sendGmail(payload: SendPayload): Promise<SendResult> {
-  const generatedMessageId = synthesizeMessageId();
+  // Resolve the tenant's real sender FIRST so the Message-Id domain matches the
+  // From header the recipient sees. sendOnce resolves the same value for the
+  // actual send; a failure here is non-fatal because the Message-Id is only a
+  // threading aid, and sendOnce will surface a genuine credential problem.
+  let senderDomain: string | undefined;
+  try {
+    senderDomain = domainOfAddress(await getSubmissionsFrom(payload.tenantId)) || undefined;
+  } catch {
+    /* fall back to the configured identity */
+  }
+  const generatedMessageId = synthesizeMessageId(senderDomain);
 
   let attempt = await sendOnce(payload, generatedMessageId);
 
@@ -181,6 +225,7 @@ export async function sendGmail(payload: SendPayload): Promise<SendResult> {
   return {
     ok: true,
     message_id: attempt.nodemailerMessageId,
+    from_identity: attempt.fromIdentity,
     rfc822_message_id: generatedMessageId,
     thread_id: threadAnchor,
   };
