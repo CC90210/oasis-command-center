@@ -14,6 +14,7 @@ import { getServiceSupabase } from "@/lib/supabase-server";
 import { resolveSessionContext } from "@/lib/api-auth";
 import { getWritableLead } from "@/lib/lead-access";
 import { updateRecord, RecordsError } from "@/lib/manifest/data";
+import { isAcceleratedEligible } from "@/lib/drips/accelerated-eligibility";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -45,6 +46,12 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
       : NextResponse.json({ ok: false, error: "not_found" }, { status: 404 });
   }
   const lead = acc.record;
+  if (on && !isAcceleratedEligible(lead.data)) {
+    return NextResponse.json(
+      { ok: false, error: "accelerated_live_subs_only", message: "Accelerated chase is only available for Live Subs." },
+      { status: 409 },
+    );
+  }
   const was =
     lead.data.accelerated_followup === true || lead.data.accelerated_followup === "true";
   if (was === on) {
