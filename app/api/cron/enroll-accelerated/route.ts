@@ -29,6 +29,7 @@ import { checkCronAuth } from "@/lib/cron-auth";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { updateRecord } from "@/lib/manifest/data";
 import { parseDripSteps } from "@/lib/drips/types";
+import { isAcceleratedEligible } from "@/lib/drips/accelerated-eligibility";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -200,7 +201,7 @@ async function handle(req: NextRequest): Promise<NextResponse> {
 
         // 2. STOP — reached the funnel / terminal → clear the flag (executor
         // cancels remaining steps; lead de-lists from the accelerated view).
-        if (STOP_STAGES.has(stage) || isOptedOut(d)) {
+        if (!isAcceleratedEligible(d) || STOP_STAGES.has(stage) || isOptedOut(d)) {
           wouldStop++;
           if (LIVE) {
             try {

@@ -31,6 +31,7 @@ import { LEAD_PIPELINE_STAGES, OPPORTUNITY_PIPELINE_STAGES } from "@/lib/sunbiz-
 import { SUNBIZ_EMAIL_TEMPLATES, renderSunbizTemplate } from "@/lib/sunbiz-templates-library";
 import { runBlast, resolveLeadsAudience, renderTemplate, getDefaultSender } from "@/lib/integrations/constant-contact/blast";
 import { publishAgentEvent } from "@/lib/manifest/events";
+import { assignLifecycleOwner } from "@/lib/lifecycle-assignment";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -131,12 +132,16 @@ export async function POST(req: NextRequest) {
         out.skipped += 1;
         continue;
       }
-      const upd = await db.rpc("patch_tenant_record_data", {
-        p_id: id,
-        p_tenant_id: tenantId,
-        p_patch: { assigned_to: nextAssignedTo },
+      const upd = await assignLifecycleOwner({
+        tenantId,
+        record: existing.data as {
+          id: string;
+          entity_type: "lead" | "application" | "funded_deal" | "renewal";
+          data: Record<string, unknown>;
+        },
+        assignedTo: nextAssignedTo,
       });
-      if (upd.error) {
+      if (!upd.ok) {
         out.failed += 1;
         continue;
       }

@@ -27,6 +27,7 @@ import { getServiceSupabase } from "@/lib/supabase-server";
 import { resolveSessionContext } from "@/lib/api-auth";
 import { canWriteCrm } from "@/lib/role-gates";
 import { nudgeBoards } from "@/lib/realtime/board-nudge";
+import { assignLifecycleOwner } from "@/lib/lifecycle-assignment";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -128,10 +129,11 @@ export async function POST(
   // doesn't confirm a lead they can't see exists. Fail closed.
   // Current owner — read for the board nudge below (the old owner's board also
   // refreshes when a lead leaves it). Authorization already happened at the top.
-  const currentOwner =
-    typeof (existing.data as { data?: Record<string, unknown> }).data?.assigned_to === "string"
-      ? ((existing.data as { data?: Record<string, unknown> }).data!.assigned_to as string).toLowerCase()
-      : null;
+  const record = existing.data as {
+    id: string;
+    entity_type: "lead" | "application" | "funded_deal" | "renewal";
+    data: Record<string, unknown>;
+  };
 
   // 2026-06-06 (Codex audit self-review extension) — atomic merge via
   // the patch_tenant_record_data RPC. The previous read-then-spread-then-
@@ -139,14 +141,10 @@ export async function POST(
   // tenant_records.data blob. Unassign sets the key to null (consumers
   // already treat null as "not assigned") rather than deleting the key,
   // which keeps this on the same RPC.
-  const update = await db.rpc("patch_tenant_record_data", {
-    p_id: recordId,
-    p_tenant_id: tenantId,
-    p_patch: { assigned_to: nextAssignedTo },
-  });
-  if (update.error) {
+  const update = await assignLifecycleOwner({ tenantId, record, assignedTo: nextAssignedTo });
+  if (!update.ok) {
     return NextResponse.json(
-      { ok: false, error: "update_failed", message: update.error.message },
+      { ok: false, error: "update_failed", message: update.error },
       { status: 500 },
     );
   }
@@ -172,6 +170,7 @@ export async function POST(
         assigned_to: nextAssignedTo,
         assigned_by: sess.userId,
         entity_type: existing.data.entity_type,
+        linked_record_ids: update.updatedIds.filter((id) => id !== recordId),
       },
     });
   } catch {
@@ -180,7 +179,7 @@ export async function POST(
 
   // Live nudge — the deal left the previous owner's board and joined the new
   // owner's. Refresh both (no-op for whichever is null).
-  await nudgeBoards([currentOwner, nextAssignedTo]);
+  await nudgeBoards([...update.previousOwners, nextAssignedTo]);
 
-  return NextResponse.json({ ok: true, assigned_to: nextAssignedTo });
+  return NextResponse.json({ ok: true, assigned_to: nextAssignedTo, updated_record_ids: update.updatedIds });
 }
