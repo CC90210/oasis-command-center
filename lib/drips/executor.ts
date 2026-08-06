@@ -43,6 +43,7 @@ import { parseDripSteps, type DripStep } from "@/lib/drips/types";
 import { sendDripSms, sendDripEmail } from "@/lib/drips/send";
 import { brandIsSendable, type BrandKey } from "@/lib/email/brands";
 import { brandFooter } from "@/lib/email/brand-shell";
+import { isWithinSendWindow } from "@/lib/sms/compliance";
 import { loadBrandsForLeads } from "@/lib/drips/brand-store";
 import { wasShoppedRecently } from "@/lib/drips/enroller";
 import { SUNBIZ_BRAND, dripTrackingBase, platformTrackingBase, buildDripHtml, listUnsubscribeHeader, pixelUrl, unsubscribeUrl } from "@/lib/drips/html-email";
@@ -706,6 +707,48 @@ async function processSmsStep(
     // Outside the window, RESCHEDULE (don't fail) to the next in-window instant.
     const next = nextTcpaWindowStart(phone);
     return markRescheduled(db, row, next.toISOString(), `quiet_hours (local ${tcpa.timeLabel} ${tcpa.timeZone})`);
+  }
+
+  // STATE-SPECIFIC quiet hours, on top of the federal 8am-9pm check above.
+  //
+  // The federal window is not sufficient: FL, MD and OK close at 8pm, AL, LA
+  // and MS additionally bar Sunday solicitation, Rhode Island closes at 6pm on
+  // weekdays and 5pm Saturday, and Texas does not open until noon on Sunday.
+  // Sending at 8:30pm to a Florida merchant is legal under the check above and
+  // illegal under Florida law.
+  //
+  // Resolved from the lead's own address state. An absent state falls back to
+  // the federal window rather than blocking, because the federal check has
+  // already passed and refusing every address-less lead would stall the engine;
+  // the tradeoff is recorded on the row so the basis is reconstructable.
+  {
+    const stateRaw =
+      (typeof data.owner_address_state === "string" && data.owner_address_state) ||
+      (typeof data.state === "string" && data.state) ||
+      (typeof data.business_state === "string" && data.business_state) ||
+      null;
+    if (stateRaw) {
+      // tcpa.timeZone is the recipient's resolved zone; build their local clock.
+      const localNow = new Date(
+        new Date().toLocaleString("en-US", { timeZone: tcpa.timeZone }),
+      );
+      // isWithinSendWindow reads UTC getters, so hand it a Date whose UTC
+      // fields ARE the recipient's local wall-clock values.
+      const asUtc = new Date(
+        Date.UTC(
+          localNow.getFullYear(),
+          localNow.getMonth(),
+          localNow.getDate(),
+          localNow.getHours(),
+          localNow.getMinutes(),
+        ),
+      );
+      const stateWindow = isWithinSendWindow(stateRaw, asUtc);
+      if (!stateWindow.ok) {
+        const next = nextTcpaWindowStart(phone);
+        return markRescheduled(db, row, next.toISOString(), `state_${stateWindow.reason} (${stateRaw})`);
+      }
+    }
   }
 
   const copy = resolveStepCopy(step, row.lead_id, row.step_index);

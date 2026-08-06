@@ -2,10 +2,39 @@ import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 
-const STOP_COMMAND_RE = /^(STOP|UNSUBSCRIBE|QUIT|CANCEL|END)$/i;
+/**
+ * Was this inbound reply an opt-out?
+ *
+ * THIS WAS ANCHORED AND EXACT until 2026-08-05: /^(STOP|UNSUBSCRIBE|QUIT|
+ * CANCEL|END)$/i. A bare unpunctuated keyword matched and nothing else did, so
+ * "Stop." with a period, "STOP!", "please stop texting me" and "take me off
+ * your list" all sailed through as ordinary replies.
+ *
+ * The effect was measurable: 600 outbound SMS over 30 days produced ZERO
+ * recorded opt-outs and ZERO suppression rows, against an expected 1-5%.
+ *
+ * That is not a style problem. 47 CFR 64.1200(a)(10), in force since
+ * 2025-04-11, requires honoring revocation by ANY REASONABLE MEANS — a
+ * consumer may not be required to use a particular word. Statutory damages are
+ * $500 per message, $1,500 willful, with a private right of action and no cap.
+ *
+ * Detection now lives in lib/sms/compliance.ts, which is pure and tested
+ * against both the regulatory keywords and natural-language revocation, and is
+ * checked for FALSE POSITIVES too ("I want to cancel my other loan" must not
+ * suppress a live deal).
+ */
+import { detectOptOut } from "@/lib/sms/compliance";
 
 export function isStopCommand(body: unknown): boolean {
-  return typeof body === "string" && STOP_COMMAND_RE.test(body.trim());
+  if (typeof body !== "string") return false;
+  return detectOptOut(body).optOut;
+}
+
+/** The full verdict, for callers that want to route "likely" opt-outs to human
+ *  review while still suppressing immediately. Suppression is not deferred
+ *  pending review: honoring late is the violation. */
+export function classifyOptOut(body: unknown) {
+  return detectOptOut(typeof body === "string" ? body : "");
 }
 
 function findCaslComplianceScript(): string | null {
