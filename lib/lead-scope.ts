@@ -86,6 +86,11 @@ export function isAdminProfile(
 
 export type AdminLeadFilter = { agent?: string | null; unassigned?: boolean };
 
+/** Admin agent-filter tabs remain available even if assignment isolation is off. */
+export function leadFiltersEnabled(viewer: LeadViewer, scopingEnabled: boolean): boolean {
+  return scopingEnabled || viewer.isAdmin;
+}
+
 /**
  * Resolve the assigned_to filter for a lead/application LIST read.
  *   undefined → no filter (admin: all leads)
