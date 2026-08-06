@@ -16,6 +16,7 @@ import { createServerClient } from "@supabase/ssr";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import { getTursoClient, tursoConfigured } from "@/lib/turso";
 import { createTursoPostgrest } from "@/lib/turso-postgrest";
+import { TURSO_RPC_SHIM } from "@/lib/turso-rpc-shim";
 
 let _serviceCached: SupabaseClient | null = null;
 let _hybridCached: SupabaseClient | null = null;
@@ -69,6 +70,19 @@ export function getServiceSupabase(): SupabaseClient {
       if (prop === "from") return (table: string) => turso.from(table);
       if (prop === "rpc") {
         return (name: string, args?: Record<string, unknown>) => {
+          // Ported RPCs run on Turso — same database the tables live in, so no
+          // split-brain. Shape matches supabase-js: resolves { data, error }.
+          const shimmed = TURSO_RPC_SHIM[name];
+          if (shimmed) {
+            return shimmed(getTursoClient(), args ?? {}).then(
+              (data) => ({ data, error: null, count: null, status: 200, statusText: "OK" }),
+              (e: unknown) => ({
+                data: null, count: null, status: 400, statusText: "Bad Request",
+                error: { message: e instanceof Error ? e.message : String(e),
+                         code: "TURSO_RPC_ERROR", details: null, hint: null },
+              }),
+            );
+          }
           if (RPC_PASSTHROUGH.has(name)) return target.rpc(name, args);
           // Thenable error response, matching supabase-js's non-throwing shape.
           return Promise.resolve({
