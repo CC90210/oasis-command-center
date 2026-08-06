@@ -139,8 +139,29 @@ export async function getAuthedSupabase() {
   });
 }
 
-/** Resolve the currently signed-in user. Returns null if unauthenticated. */
+/** Resolve the currently signed-in user. Returns null if unauthenticated.
+ *
+ * Turso auth mode: identity comes from OUR HMAC session cookie, verified here
+ * directly. The returned object keeps the two fields every caller actually
+ * uses (id, email) with the same auth.users uuid — role lookups downstream
+ * are unchanged. Supabase mode is byte-identical to before.
+ */
 export async function getSessionUser() {
+  if (process.env.EMPIRE_AUTH_BACKEND === "turso" && process.env.AUTH_SESSION_SECRET) {
+    const { cookies } = await import("next/headers");
+    const { verifySession, SESSION_COOKIE } = await import("@/lib/turso-auth");
+    const store = await cookies();
+    const session = verifySession(store.get(SESSION_COOKIE)?.value);
+    if (!session) return null;
+    // user_metadata is present-but-empty: callers optional-chain into it for
+    // display names and fall back to the email local-part, which is exactly
+    // the degradation we want until profile metadata is served from Turso.
+    return {
+      id: session.sub,
+      email: session.email,
+      user_metadata: {} as Record<string, unknown>,
+    };
+  }
   const supa = await getAuthedSupabase();
   const { data, error } = await supa.auth.getUser();
   if (error || !data.user) return null;
