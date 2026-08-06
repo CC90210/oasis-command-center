@@ -38,6 +38,12 @@ export const PUBLIC_PATH_PREFIXES = [
   "/invite",               // Tenant-invite landing /invite/<token>. Token is opaque; preview RPC validates server-side (Phase A, master multi-tenant infra plan, 2026-05-17).
   "/api/inbound",          // n8n inbound webhook (Bearer-auth gated inside the route)
   "/api/auth/signout",
+  // Turso auth endpoints — the login POST cannot require a session
+  // (chicken-and-egg; the class of bug breeze's first flipped deploy hit).
+  // Each rate-limits / CSRF-guards inside.
+  "/api/auth/turso-login",
+  "/api/auth/google/start",
+  "/api/auth/google/callback",
   "/api/auth/provision",   // legacy + setup-wizard provision (Bearer-auth gated inside)
   "/api/auth/provision-cli", // setup-wizard operator-account creation, called by install/bootstrap.py — CLI_SIGNUP_SECRET bearer gated INSIDE the route, no session. MUST be public or installer account-creation 401s before its secret check ("/api/auth/provision" can't cover the "-cli" suffix — matchesPathPrefix needs prefix+"/").
   "/api/auth/pair",        // setup-wizard pairing (Bearer-auth gated inside)
