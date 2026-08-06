@@ -27,6 +27,7 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 const YMD_RE = /^\d{4}-\d{2}-\d{2}$/;
+const LEAD_SEARCH_PAGE_SIZE = 1_000;
 
 type Body = {
   lead_id?: unknown;
@@ -86,20 +87,33 @@ export async function GET(req: NextRequest) {
         .some((value) => value!.toLowerCase().includes(query)))).slice(0, 25);
     return NextResponse.json({ ok: true, lenders });
   }
-  const result = await db
-    .from("tenant_records")
-    .select("id, data, updated_at")
-    .eq("tenant_id", sess.tenantId)
-    .eq("entity_type", "lead")
-    .order("updated_at", { ascending: false })
-    .limit(250);
+  // The picker used to fetch the newest 250 rows and only then filter them in
+  // memory. That made every older CRM lead impossible to find. Supabase caps a
+  // response page, so walk every tenant-scoped page before applying the text
+  // filter. An empty query remains a fast recent-leads browse.
+  const leadRows: Array<{ id: string; data: unknown; updated_at: string }> = [];
+  let from = 0;
+  do {
+    const result = await db
+      .from("tenant_records")
+      .select("id, data, updated_at")
+      .eq("tenant_id", sess.tenantId)
+      .eq("entity_type", "lead")
+      .order("updated_at", { ascending: false })
+      .range(from, from + LEAD_SEARCH_PAGE_SIZE - 1);
 
-  if (result.error) {
-    console.error("[renewals] lead search failed:", result.error.message);
-    return NextResponse.json({ ok: false, error: "search_failed" }, { status: 500 });
-  }
+    if (result.error) {
+      console.error("[renewals] lead search failed:", result.error.message);
+      return NextResponse.json({ ok: false, error: "search_failed" }, { status: 500 });
+    }
 
-  const leads = (result.data || [])
+    const page = (result.data || []) as typeof leadRows;
+    leadRows.push(...page);
+    if (!query || page.length < LEAD_SEARCH_PAGE_SIZE) break;
+    from += LEAD_SEARCH_PAGE_SIZE;
+  } while (true);
+
+  const leads = leadRows
     .map((row) => {
       const data = (row.data || {}) as LeadData;
       return {
