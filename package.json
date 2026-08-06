@@ -25,6 +25,7 @@
     "@supabase/ssr": "^0.10.2",
     "@supabase/supabase-js": "^2.45.0",
     "@types/nodemailer": "^8.0.0",
+    "bcryptjs": "^3.0.3",
     "framer-motion": "^12.29.2",
     "imapflow": "^1.4.2",
     "lucide-react": "^0.460.0",

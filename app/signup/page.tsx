@@ -199,6 +199,14 @@ export default function SignupPage() {
     setBusy(true);
     setErr(null);
     try {
+      // Turso auth mode: new-account creation is a deliberate provisioning
+      // flow, not an OAuth side effect — Google SIGNUP is disabled until the
+      // Turso signup path ships. Existing Google users sign in at /login.
+      if (process.env.NEXT_PUBLIC_EMPIRE_AUTH_BACKEND === "turso") {
+        setErr("Google signup is temporarily unavailable — existing users can sign in at /login.");
+        setBusy(false);
+        return;
+      }
       const supa = getBrowserSupabase();
       const oauthBrand = (brand || brandHint || "OASIS AI").trim();
       const oauthName = fullName.trim();

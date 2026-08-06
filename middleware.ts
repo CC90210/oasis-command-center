@@ -7,6 +7,7 @@
 
 import { NextResponse, type NextRequest } from "next/server";
 import { createServerClient } from "@supabase/ssr";
+import { verifySessionEdge } from "@/lib/turso-auth-edge";
 import { matchesPathPrefix } from "./lib/path-prefix";
 import { shouldRedirectToOnboarding } from "./lib/onboarding-gate";
 import { MARKETING_PATHS, MARKETING_HOME_PATH } from "./lib/marketing/routes";
@@ -194,6 +195,21 @@ export async function middleware(req: NextRequest) {
   // Always allow public paths
   if (isPublic(pathname)) {
     return NextResponse.next({ request: { headers: requestHeaders } });
+  }
+
+  // Turso auth mode: session = our HMAC cookie, verified inline (Edge-safe Web
+  // Crypto, no Supabase round trip). Unset the env var and the Supabase path
+  // below is byte-identical — that is the rollback.
+  if (process.env.EMPIRE_AUTH_BACKEND === "turso" && process.env.AUTH_SESSION_SECRET) {
+    const token = req.cookies.get("oasis_session")?.value;
+    const session = await verifySessionEdge(token, process.env.AUTH_SESSION_SECRET);
+    if (session) {
+      return NextResponse.next({ request: { headers: requestHeaders } });
+    }
+    if (isHome) return rewriteMarketingHome();
+    const redirect = new URL("/login", req.url);
+    redirect.searchParams.set("next", pathname);
+    return NextResponse.redirect(redirect);
   }
 
   const url = process.env.BRAVO_SUPABASE_URL;
