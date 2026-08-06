@@ -109,6 +109,86 @@ export function selectFromPool(
   return bag[stableIndex(`${leadId}:${stepIndex}`, bag.length)];
 }
 
+/**
+ * The copy actually sent for one step, and where it came from.
+ *
+ * PRECEDENCE, in order:
+ *   1. an APPROVED pool template for this (brand, stage, role)
+ *   2. the step's own body_variants / subject_variants  ← today's behaviour
+ *   3. the step's plain body / subject
+ *
+ * An empty or fully-unapproved pool therefore produces byte-identical output to
+ * the pre-pool engine, which is what makes this safe to deploy before a single
+ * template is seeded, and what the tests pin.
+ *
+ * `source` and `templateId` come back so the send can be audited: knowing which
+ * template a merchant actually received is the difference between being able to
+ * explain a complaint and guessing.
+ */
+export type ResolvedCopy = {
+  subject: string;
+  body: string;
+  bodyHtml?: string;
+  variantIndex: number;
+  source: "pool" | "step_variants" | "step_body";
+  templateId: string | null;
+};
+
+type StepLike = {
+  subject?: string;
+  body: string;
+  body_html?: string;
+  subject_variants?: string[];
+  body_variants?: string[];
+};
+
+export function resolveCopy(
+  step: StepLike,
+  leadId: string,
+  stepIndex: number,
+  pool: PoolTemplate[],
+): ResolvedCopy {
+  // 1. Approved pool wins.
+  const picked = selectFromPool(pool, leadId, stepIndex);
+  if (picked) {
+    return {
+      subject: picked.subject || step.subject || "",
+      body: picked.bodyText,
+      bodyHtml: step.body_html,
+      variantIndex: 0,
+      source: "pool",
+      templateId: picked.id,
+    };
+  }
+
+  // 2. The step's own variants — unchanged from the pre-pool engine, including
+  //    the subject/body pairing by index.
+  const variants = step.body_variants;
+  if (variants && variants.length > 0) {
+    const i = stableIndex(`${leadId}:${stepIndex}`, variants.length);
+    const sv = step.subject_variants;
+    const subject = (sv && sv.length > 0 ? sv[i % sv.length] : step.subject) || "";
+    return {
+      subject,
+      body: variants[i],
+      bodyHtml: step.body_html,
+      variantIndex: i,
+      source: "step_variants",
+      templateId: null,
+    };
+  }
+
+  // 3. Plain copy.
+  return {
+    subject: step.subject || "",
+    body: step.body,
+    bodyHtml: step.body_html,
+    variantIndex: 0,
+    source: "step_body",
+    templateId: null,
+  };
+}
+
 /** Narrow a loaded pool to the (brand, stage, role) that a step calls for. */
 export function poolFor(
   pool: PoolTemplate[],

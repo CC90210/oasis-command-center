@@ -45,6 +45,8 @@ import { brandIsSendable, type BrandKey } from "@/lib/email/brands";
 import { brandFooter } from "@/lib/email/brand-shell";
 import { isWithinSendWindow } from "@/lib/sms/compliance";
 import { loadBrandsForLeads } from "@/lib/drips/brand-store";
+import { poolFor, resolveCopy, type PoolTemplate } from "@/lib/drips/template-pool";
+import { loadApprovedPool } from "@/lib/drips/template-pool-store";
 import { wasShoppedRecently } from "@/lib/drips/enroller";
 import { SUNBIZ_BRAND, dripTrackingBase, platformTrackingBase, buildDripHtml, listUnsubscribeHeader, pixelUrl, unsubscribeUrl } from "@/lib/drips/html-email";
 import { resolveDripSmsIdentity, type DripSmsIdentity } from "@/lib/drips/rep-sms-identity";
@@ -253,6 +255,9 @@ type RunState = {
    *  enroller wrote. Absent lead => sunbiz, which is the pre-existing
    *  behaviour and what every lead currently in the CRM knows. */
   brandByLead: Map<string, BrandKey>;
+  /** APPROVED drip templates for this tenant, loaded once. Empty means copy
+   *  falls back to each step's own variants, i.e. the pre-pool behaviour. */
+  templatePool: PoolTemplate[];
 };
 
 /** Best-effort lead_interactions log — never throws; a logging failure must
@@ -642,19 +647,15 @@ function buildContext(data: LeadData): Record<string, unknown> {
   };
 }
 
-/** Deterministic per-(lead, step) index into a variant set. STABLE across
- *  retries/reclaims — the reclaim + alreadySentStep dedup key on step_index, so
- *  a RANDOM pick could send a lead a *different* variation on a re-dispatch.
- *  FNV-1a over `${leadId}:${stepIndex}`. */
-function stableIndex(seed: string, n: number): number {
-  if (n <= 1) return 0;
-  let h = 2166136261;
-  for (let i = 0; i < seed.length; i++) {
-    h ^= seed.charCodeAt(i);
-    h = Math.imul(h, 16777619);
-  }
-  return (h >>> 0) % n;
-}
+// The deterministic per-(lead, step) variant hash moved to
+// lib/drips/template-pool.ts when copy resolution did (2026-08-06). It is
+// FNV-1a over `${leadId}:${stepIndex}` and must stay STABLE across
+// retries/reclaims: reclaim + alreadySentStep dedup on step_index, so a random
+// pick would send a lead a DIFFERENT variation on re-dispatch, which reads to
+// the merchant as a second, different message.
+//
+// Deliberately not re-declared here. Two copies of a hash that must agree is a
+// drift waiting to happen, and the failure would be silent.
 
 /** Resolve the subject+body to actually send for this step. When the step
  *  defines body_variants (the "same message in nice variations" mechanism),
@@ -664,16 +665,20 @@ function resolveStepCopy(
   step: DripStep,
   leadId: string,
   stepIndex: number,
-): { subject: string; body: string; bodyHtml?: string; variantIndex: number } {
-  const variants = step.body_variants;
-  if (variants && variants.length > 0) {
-    const i = stableIndex(`${leadId}:${stepIndex}`, variants.length);
-    const subjectVariants = step.subject_variants;
-    const subject =
-      (subjectVariants && subjectVariants.length > 0 ? subjectVariants[i % subjectVariants.length] : step.subject) || "";
-    return { subject, body: variants[i], bodyHtml: step.body_html, variantIndex: i };
-  }
-  return { subject: step.subject || "", body: step.body, bodyHtml: step.body_html, variantIndex: 0 };
+  opts?: { brand?: BrandKey; stage?: string; pool?: PoolTemplate[] },
+): { subject: string; body: string; bodyHtml?: string; variantIndex: number; source: string; templateId: string | null } {
+  // Narrow the run's pool to templates doing the SAME JOB for this brand and
+  // stage, so an opener is never substituted by a last call. An unset role on
+  // the step means "nudge", the neutral middle of the arc.
+  const scoped =
+    opts?.pool && opts.pool.length > 0 && opts.brand && opts.stage
+      ? poolFor(opts.pool, opts.brand, opts.stage, String(step.role || "nudge"))
+      : [];
+  // Precedence lives in the pure module: approved pool, then the step's own
+  // variants, then its plain copy. An empty pool reproduces the pre-pool engine
+  // byte for byte, which is what makes this deployable before anything is
+  // seeded.
+  return resolveCopy(step, leadId, stepIndex, scoped);
 }
 
 async function processSmsStep(
@@ -751,7 +756,15 @@ async function processSmsStep(
     }
   }
 
-  const copy = resolveStepCopy(step, row.lead_id, row.step_index);
+  // SMS copy comes from the same approved pool, scoped to this lead's brand and
+  // stage. The brand map is email-keyed for the volume gate, so resolve it here
+  // directly; absent means sunbiz, the pre-existing behaviour.
+  const smsBrand: BrandKey = run.brandByLead.get(row.lead_id) ?? "sunbiz";
+  const copy = resolveStepCopy(step, row.lead_id, row.step_index, {
+    brand: smsBrand,
+    stage: typeof data.stage === "string" ? data.stage : undefined,
+    pool: run.templatePool,
+  });
   const rendered = renderTemplate(copy.body, buildContext(data));
   const clean = await sanitizeBlastMessage(row.tenant_id, rendered, { checkPositioning: true });
   if (!clean.ok) return handleGuardBlock(db, row, steps, clean, "sms");
@@ -874,8 +887,25 @@ async function processEmailStep(
     return markRescheduled(db, row, emailWait.toISOString(), `email_window (outside ${EMAIL_WIN_START}:00-${EMAIL_WIN_END}:00 ${EMAIL_WIN_TZ})`);
   }
 
+  // Which company is speaking to this merchant. Stamped on the lead at
+  // enrolment and read here, never derived at send time, so a lead cannot flip
+  // brand mid-sequence. Absent => sunbiz, the pre-existing behaviour.
+  //
+  // Resolved here, before BOTH the copy lookup and the volume gate: the copy
+  // pool is scoped per brand, and the daily/hourly ceilings are per-brand
+  // because each brand carries its own domain reputation. Gating both against
+  // one shared pool would mean splitting across two domains bought no extra
+  // throughput.
+  const brand: BrandKey = run.brandByLead.get(row.lead_id) ?? "sunbiz";
+
   // Resolve the copy first so the app-link pre-flight can inspect it.
-  const copy = resolveStepCopy(step, row.lead_id, row.step_index);
+  // Drawn from the APPROVED pool for this brand+stage+role when one exists;
+  // otherwise the step's own variants, unchanged.
+  const copy = resolveStepCopy(step, row.lead_id, row.step_index, {
+    brand,
+    stage: typeof data.stage === "string" ? data.stage : undefined,
+    pool: run.templatePool,
+  });
 
   // ── Dynamic application-link pre-flight (2026-07-21) ────────────────────────
   // If this email injects the merchant's resumable application link
@@ -962,16 +992,6 @@ async function processEmailStep(
   //
   // HOLD, never fail: hitting a cap is a "not yet", not an error, so the row is
   // rescheduled to when the window reopens and keeps its attempt budget.
-  // Which company is speaking to this merchant. Stamped on the lead at
-  // enrolment and read here, never derived at send time, so a lead cannot flip
-  // brand mid-sequence. Absent => sunbiz, the pre-existing behaviour.
-  //
-  // Resolved BEFORE the volume gate because the daily and hourly ceilings are
-  // per-brand: each brand carries its own domain reputation, and gating both
-  // against one shared pool would mean splitting across two domains bought no
-  // extra throughput.
-  const brand: BrandKey = run.brandByLead.get(row.lead_id) ?? "sunbiz";
-
   if (shouldSend && run.emailBudget) {
     const gated = emailGateReason(run.emailBudget, row.lead_id, brand);
     if (gated) {
@@ -1379,11 +1399,18 @@ export async function runDispatchDrips(): Promise<DispatchDripsResult> {
       ? await loadBrandsForLeads(db, brandTenantId, emailLeadIds)
       : new Map<string, BrandKey>();
 
+  // Approved template pool, loaded once per run alongside the budget and brand
+  // map. Fails SAFE to empty, which makes copy resolution fall back to the
+  // step's own variants — today's behaviour — rather than stalling the engine
+  // over a template table being briefly unreachable.
+  const templatePool = brandTenantId ? await loadApprovedPool(db, brandTenantId) : [];
+
   const run: RunState = {
     creditExhausted: false,
     emailBudget:
       dripSendEnabled() && emailLeadIds.length > 0 ? await loadEmailBudget(db, emailLeadIds) : null,
     brandByLead,
+    templatePool,
   };
   if (run.emailBudget?.degraded) {
     // The global counts are best-effort this run; the per-lead cap still holds

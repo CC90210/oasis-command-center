@@ -85,9 +85,26 @@ assert.ok(executor.includes("isWithinSendWindow"),
 assert.ok(executor.includes("tcpa.usedFallback"),
   "an unresolved timezone must still fail closed");
 
-// ── Template pool is ready to be read ──────────────────────────────────────
+// ── Template pool is actually READ, not just written ───────────────────────
 const pool = read("lib/drips/template-pool.ts");
 assert.ok(pool.includes("status !== \"approved\""), "approval must be a filter, not a sort");
 assert.ok(pool.includes("stableIndex"), "selection must reuse the proven deterministic hash");
+
+// This is the exact failure this codebase already produced once: the drip
+// engine never read cc_email_templates, so the Templates UI edited copy that
+// could not reach a merchant. The pool must not repeat it.
+assert.ok(executor.includes("loadApprovedPool"), "the executor must LOAD the approved pool");
+assert.ok(executor.includes("run.templatePool"), "and hold it on the run state");
+assert.ok(
+  (executor.match(/pool: run\.templatePool/g) || []).length >= 2,
+  "BOTH the email and SMS copy paths must draw from the pool, not just one",
+);
+assert.ok(executor.includes("poolFor("), "the pool must be scoped by brand+stage+role before selection");
+assert.ok(
+  read("lib/drips/template-pool-store.ts").includes('.eq("status", "approved")'),
+  "the loader must filter to approved at the query as well as in the selector",
+);
+// The step type must carry a role, or every step collapses into one bucket.
+assert.ok(read("lib/drips/types.ts").includes("role?: string"), "DripStep must carry a role");
 
 console.log("drip-wiring-audit.test.ts — full chain verified wired ✓");

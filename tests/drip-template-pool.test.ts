@@ -20,7 +20,7 @@
  */
 
 import assert from "node:assert/strict";
-import { selectFromPool, type PoolTemplate } from "../lib/drips/template-pool";
+import { selectFromPool, poolFor, resolveCopy, type PoolTemplate } from "../lib/drips/template-pool";
 
 const mk = (over: Partial<PoolTemplate> = {}): PoolTemplate => ({
   id: "t1",
@@ -115,5 +115,80 @@ assert.equal(
   null,
   "a negative weight cannot resurrect a template",
 );
+
+// ---------------------------------------------------------------------------
+// poolFor: rotation only ever swaps templates doing the SAME JOB
+// ---------------------------------------------------------------------------
+{
+  const mixed = [
+    mk({ id: "sb-fu-open", brand: "sunbiz", stage: "follow_up", role: "opener" }),
+    mk({ id: "sb-fu-last", brand: "sunbiz", stage: "follow_up", role: "last_call" }),
+    mk({ id: "br-fu-open", brand: "bluerise", stage: "follow_up", role: "opener" }),
+    mk({ id: "sb-vw-open", brand: "sunbiz", stage: "viewed_application", role: "opener" }),
+  ];
+  assert.deepEqual(
+    poolFor(mixed, "sunbiz", "follow_up", "opener").map((t) => t.id),
+    ["sb-fu-open"],
+    "an opener must never be substituted by a last call, another brand, or another stage",
+  );
+  assert.deepEqual(poolFor(mixed, "bluerise", "follow_up", "opener").map((t) => t.id), ["br-fu-open"]);
+  assert.deepEqual(poolFor(mixed, "sunbiz", "follow_up", "revive"), [], "no match yields nothing");
+}
+
+// ---------------------------------------------------------------------------
+// COPY PRECEDENCE — the property that makes this safe to deploy.
+//
+// With an empty pool the result must be byte-identical to the pre-pool
+// behaviour, because that is what every live sequence relies on today.
+// ---------------------------------------------------------------------------
+{
+  const step = {
+    channel: "email" as const,
+    delay_minutes: 0,
+    subject: "plain subject",
+    body: "plain body",
+    subject_variants: ["sv0", "sv1", "sv2"],
+    body_variants: ["bv0", "bv1", "bv2"],
+  };
+
+  // 1. Empty pool -> falls back to the step's variants, exactly as before.
+  const noPool = resolveCopy(step, "lead-1", 0, []);
+  assert.ok(noPool.body.startsWith("bv"), "empty pool falls back to body_variants");
+  assert.equal(noPool.source, "step_variants");
+  // And it picks the SAME variant the old code would have.
+  const expectedIdx = [0, 1, 2].findIndex((i) => `bv${i}` === noPool.body);
+  assert.equal(noPool.subject, `sv${expectedIdx}`, "subject stays paired with body by index");
+
+  // 2. A step with no variants at all -> the plain body.
+  const bare = resolveCopy(
+    { channel: "email", delay_minutes: 0, subject: "s", body: "b" },
+    "lead-1",
+    0,
+    [],
+  );
+  assert.equal(bare.body, "b");
+  assert.equal(bare.subject, "s");
+  assert.equal(bare.source, "step_body");
+
+  // 3. An approved pool WINS over the step's own variants.
+  const withPool = resolveCopy(step, "lead-1", 0, [mk({ id: "p1", subject: "pool subj", bodyText: "pool body" })]);
+  assert.equal(withPool.body, "pool body", "an approved pool template takes precedence");
+  assert.equal(withPool.subject, "pool subj");
+  assert.equal(withPool.source, "pool");
+  assert.equal(withPool.templateId, "p1", "the chosen template id is reported for the audit trail");
+
+  // 4. A pool of ONLY drafts must fall back, not send a draft.
+  const draftsOnly = resolveCopy(step, "lead-1", 0, [mk({ id: "d", status: "draft" })]);
+  assert.equal(draftsOnly.source, "step_variants", "unapproved pool falls back to step copy");
+  assert.ok(draftsOnly.body.startsWith("bv"));
+
+  // 5. Determinism holds through the pool path too.
+  const pool2 = [mk({ id: "a" }), mk({ id: "b" }), mk({ id: "c" })];
+  assert.equal(
+    resolveCopy(step, "lead-9", 3, pool2).templateId,
+    resolveCopy(step, "lead-9", 3, pool2).templateId,
+    "same lead + step must yield the same template every time",
+  );
+}
 
 console.log("drip-template-pool.test.ts — all assertions passed ✓");
