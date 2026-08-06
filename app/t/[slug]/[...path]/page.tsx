@@ -62,6 +62,7 @@ import {
   leadScopingMode,
   SCOPED_ENTITIES,
   isAdminProfile,
+  leadFiltersEnabled,
   type LeadViewer,
 } from "@/lib/lead-scope";
 import { Card, PageHeader, Tag } from "@/components/Card";
@@ -192,11 +193,12 @@ export default async function TenantCatchAllPage({
     userId: user?.id ?? null,
   };
   const scopingOn = leadScopingEnabled();
+  const filterScopeEnabled = leadFiltersEnabled(viewer, scopingOn);
   const leadScope = (() => {
     const base = resolveAssignedScope(
       viewer,
       { agent: agentFilter, unassigned: unassignedFilter },
-      scopingOn,
+      filterScopeEnabled,
     );
     // Filtered-view model: when a non-admin is SEARCHING (?q=), the board reaches
     // across the whole tenant so they can find ANY lead; browsing (no query) keeps
@@ -211,7 +213,6 @@ export default async function TenantCatchAllPage({
   // lead/application surfaces, only for admins. Agents never see the bar (they
   // only ever have their own leads). Roster fetched once for the chips.
   const showLeadFilter =
-    scopingOn &&
     viewer.isAdmin &&
     !!dataTenantId &&
     (pageDef.kind === "pipeline" ||
