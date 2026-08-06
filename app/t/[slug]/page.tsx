@@ -11,7 +11,7 @@ import { BoardLiveRefresh } from "@/components/leads/BoardLiveRefresh";
 import { parseTenantDrawerIds } from "@/lib/tenant-drawer-params";
 import { getManifest, manifestExists } from "@/lib/manifest/loader";
 import { resolveDataTenant } from "@/lib/manifest/tenant-scope";
-import { resolveAssignedScope, leadScopingEnabled, isAdminProfile } from "@/lib/lead-scope";
+import { resolveAssignedScope, leadScopingEnabled, canViewAllTenantLeads } from "@/lib/lead-scope";
 import { CATEGORY_LABELS } from "@/lib/agents/library";
 import { getSessionUser, getServiceSupabase } from "@/lib/supabase-server";
 import { requireTenantPreviewAccess } from "@/lib/tenant-access";
@@ -88,12 +88,12 @@ async function RootPageRenderer({
   const profileRes = user
     ? await service
         .from("user_profiles")
-        .select("tenant_id, team_role, is_owner, admin_access")
+        .select("tenant_id, email, team_role, is_owner, admin_access")
         .eq("auth_user_id", user.id)
         .maybeSingle()
     : { data: null };
   const profile = profileRes.data as
-    | { tenant_id: string | null; team_role: string | null; is_owner: boolean | null; admin_access: boolean | null }
+    | { tenant_id: string | null; email: string | null; team_role: string | null; is_owner: boolean | null; admin_access: boolean | null }
     | null;
   const userTenantId = profile?.tenant_id ?? null;
   const dataTenantId = await resolveDataTenant(slug, userTenantId);
@@ -103,7 +103,7 @@ async function RootPageRenderer({
   // (owner / Jordan / Matt) see all; agents see their own + collaborated. Same
   // resolution as the catch-all pipeline page, threaded into the scoped surfaces.
   const viewer = {
-    isAdmin: isAdminProfile(profile),
+    isAdmin: canViewAllTenantLeads(profile, slug),
     userId: user?.id ?? null,
   };
   const assignedScope = resolveAssignedScope(viewer, {}, leadScopingEnabled());

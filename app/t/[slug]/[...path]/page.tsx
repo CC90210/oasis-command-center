@@ -62,6 +62,8 @@ import {
   leadScopingMode,
   SCOPED_ENTITIES,
   isAdminProfile,
+  canViewAllTenantLeads,
+  leadFiltersEnabled,
   type LeadViewer,
 } from "@/lib/lead-scope";
 import { Card, PageHeader, Tag } from "@/components/Card";
@@ -168,12 +170,12 @@ export default async function TenantCatchAllPage({
   const profileRes = user
     ? await service
         .from("user_profiles")
-        .select("tenant_id, team_role, is_owner, admin_access")
+        .select("tenant_id, email, team_role, is_owner, admin_access")
         .eq("auth_user_id", user.id)
         .maybeSingle()
     : { data: null };
   const profileRow = profileRes.data as
-    | { tenant_id: string | null; team_role: string | null; is_owner: boolean | null; admin_access: boolean | null }
+    | { tenant_id: string | null; email: string | null; team_role: string | null; is_owner: boolean | null; admin_access: boolean | null }
     | null;
   const userTenantId = profileRow?.tenant_id ?? null;
   // Resolve which tenant_id should scope record reads. If the caller
@@ -187,16 +189,18 @@ export default async function TenantCatchAllPage({
   // see only leads/applications assigned to them; owner/admin see all and can
   // narrow via the filter chips (?agent= / ?unassigned=). Resolved here once and
   // threaded into every server-side lead/application read below.
+  const canManageLeads = isAdminProfile(profileRow);
   const viewer: LeadViewer = {
-    isAdmin: isAdminProfile(profileRow),
+    isAdmin: canViewAllTenantLeads(profileRow, normalised),
     userId: user?.id ?? null,
   };
   const scopingOn = leadScopingEnabled();
+  const filterScopeEnabled = leadFiltersEnabled(viewer, scopingOn);
   const leadScope = (() => {
     const base = resolveAssignedScope(
       viewer,
       { agent: agentFilter, unassigned: unassignedFilter },
-      scopingOn,
+      filterScopeEnabled,
     );
     // Filtered-view model: when a non-admin is SEARCHING (?q=), the board reaches
     // across the whole tenant so they can find ANY lead; browsing (no query) keeps
@@ -211,7 +215,6 @@ export default async function TenantCatchAllPage({
   // lead/application surfaces, only for admins. Agents never see the bar (they
   // only ever have their own leads). Roster fetched once for the chips.
   const showLeadFilter =
-    scopingOn &&
     viewer.isAdmin &&
     !!dataTenantId &&
     (pageDef.kind === "pipeline" ||
@@ -508,7 +511,7 @@ export default async function TenantCatchAllPage({
         oppStageFilter={oppStageFilter}
         query={query}
         assignedScope={leadScope}
-        canManage={viewer.isAdmin}
+        canManage={canManageLeads}
         viewerUserId={viewer.userId}
       />
       <TenantLeadDrawerMount

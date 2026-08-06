@@ -58,6 +58,8 @@ import {
 } from "@/lib/oasis-sla";
 import { InlineStageControl } from "@/components/manifest/InlineStageControl";
 import { QuickAddLeadModal } from "@/components/manifest/QuickAddLeadModal";
+import { isAcceleratedEligible } from "@/lib/drips/accelerated-eligibility";
+import { isLeadListVisible } from "@/lib/lead-list-visibility";
 
 type Row = { id: string; data: Record<string, unknown>; updated_at?: string; created_at?: string };
 
@@ -217,7 +219,7 @@ export function LeadPipelineView({
   // board entirely — cards AND stage counts — leaving one card per deal. Only
   // leads carry data.transferred_at; the Applications board is untouched.
   const rows = useMemo(
-    () => (entityName === "lead" ? rawRows.filter((r) => !r.data.transferred_at) : rawRows),
+    () => (entityName === "lead" ? rawRows.filter((r) => isLeadListVisible(r.data)) : rawRows),
     [rawRows, entityName],
   );
   const titleText = isLeads ? "Lead Pipeline" : "Opportunity Pipeline";
@@ -1260,7 +1262,7 @@ function DesktopRow({
               <span className="truncate font-semibold text-fg" title={model.businessName}>
                 {model.businessName}
               </span>
-              {entityName === "lead" && (
+              {entityName === "lead" && isAcceleratedEligible(row.data) && (
                 <AcceleratedToggle recordId={row.id} on={isAccelerated(row)} />
               )}
             </span>
@@ -1376,7 +1378,7 @@ function MobileRow({
             <div className="min-w-0">
               <div className="flex min-w-0 items-center gap-1.5">
                 <div className="truncate text-sm font-semibold text-fg">{model.businessName}</div>
-                {entityName === "lead" && (
+                {entityName === "lead" && isAcceleratedEligible(row.data) && (
                   <AcceleratedToggle recordId={row.id} on={isAccelerated(row)} />
                 )}
               </div>

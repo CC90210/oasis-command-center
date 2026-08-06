@@ -106,15 +106,12 @@ export async function listRecords(input: ListRecordsInput): Promise<ListRecordsR
     }
   }
 
-  // Transferred leads have graduated into the Applications pipeline. Exclude them
-  // from EVERY lead LIST surface (single + combined pipeline, dashboard counts,
-  // kanban, search, exports) so a transferred deal never resurfaces as a lead
-  // card. One source of truth at the read layer (Bravo follow-up 2026-06-21);
-  // the client-side LeadPipelineView filter stays as defense-in-depth. Lead
-  // DETAIL via getRecord is intentionally unaffected (a transferred lead is
-  // still openable by id). Applications never carry transferred_at.
+  // Transferred leads normally graduate to Applications. Live Subs are the
+  // exception: uw_sheet is an intentional Leads-board work queue, including
+  // legacy rows that were incorrectly stamped transferred_at by auto-promotion.
+  // Keep that exception in every list surface and in the client-side guard.
   if (input.entity === "lead") {
-    q = q.is("data->>transferred_at", null);
+    q = q.or("data->>transferred_at.is.null,data->>stage.eq.uw_sheet");
   } else if (input.entity === "application") {
     // Mirror of the lead filter: only deals EXPLICITLY transferred from a lead
     // (or standalone apps) belong on the Applications board. "Run underwriting"
@@ -196,7 +193,9 @@ export async function listRecordsForViewer(input: {
     .eq("entity_type", input.entity)
     .contains("data->collaborators", JSON.stringify([id]))
     .limit(MAX_RECORD_LIST_LIMIT);
-  if (input.entity === "lead") sq = sq.is("data->>transferred_at", null);
+  if (input.entity === "lead") {
+    sq = sq.or("data->>transferred_at.is.null,data->>stage.eq.uw_sheet");
+  }
 
   // Owned + shared are independent reads (merged by id below, order-independent)
   // — run them as ONE parallel DB wave instead of two serial round-trips. This
