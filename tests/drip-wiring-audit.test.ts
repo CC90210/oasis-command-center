@@ -60,8 +60,11 @@ assert.ok(!governor.includes('.eq("metadata->>dry_run", "false")'),
 assert.ok(governor.includes('String(md.dry_run) === "true"'),
   "only an EXPLICIT dry run may be excluded from the count");
 assert.ok(governor.includes("countDripEmailByBrand"), "counts must be per-brand");
-assert.ok(executor.includes("emailGateReason(run.emailBudget, row.lead_id, brand)"),
-  "the volume gate must be evaluated per-brand");
+assert.ok(executor.includes("emailGateReason(run.emailBudget, row.lead_id, brand, gateStage)"),
+  "the volume gate must be evaluated per-brand AND per-stage — a flat cap either " +
+  "starves the hot stages or over-mails the cold ones");
+assert.ok(read("lib/drips/drip-rules-core.ts").includes("perLeadCapForStage"),
+  "the per-stage cap must exist");
 
 // The brand must be resolved BEFORE the gate, or the gate cannot use it.
 assert.ok(

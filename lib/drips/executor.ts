@@ -993,9 +993,18 @@ async function processEmailStep(
   // HOLD, never fail: hitting a cap is a "not yet", not an error, so the row is
   // rescheduled to when the window reopens and keeps its attempt budget.
   if (shouldSend && run.emailBudget) {
-    const gated = emailGateReason(run.emailBudget, row.lead_id, brand);
+    // The per-lead weekly ceiling varies BY STAGE: a merchant mid-application
+    // expects contact, a lead six weeks into follow-up does not. Passing the
+    // stage raises the cap only where engagement justifies it.
+    const gateStage = typeof data.stage === "string" ? data.stage : undefined;
+    const gated = emailGateReason(run.emailBudget, row.lead_id, brand, gateStage);
     if (gated) {
-      return markRescheduled(db, row, holdUntilIso(gated), `email_volume_gate (${brand}: ${gated})`);
+      return markRescheduled(
+        db,
+        row,
+        holdUntilIso(gated),
+        `email_volume_gate (${brand}/${gateStage || "no-stage"}: ${gated})`,
+      );
     }
   }
 

@@ -55,16 +55,68 @@ export type EmailGateReason =
  *   - the per-lead count fails CLOSED, because the failure mode it guards is
  *     over-mailing one person, and "hold for an hour" costs nothing.
  */
+/**
+ * How many emails one lead may receive in a rolling week, BY STAGE.
+ *
+ * A flat number either starves the hot stages or over-mails the cold ones. A
+ * merchant mid-application is expecting to hear from us; a lead sitting in
+ * follow-up for six weeks is not. Defaults come from the cadence matrix
+ * measured against the real stage populations on 2026-08-06.
+ *
+ * The cap is raised BY STAGE, never globally, so the extra frequency lands only
+ * where engagement is likely to justify it. That is what keeps the complaint
+ * budget intact: at ~150 Gmail inbox deliveries/day, 0.1% is one complaint per
+ * WEEK, so frequency spent in the wrong place is expensive.
+ *
+ * An unrecognised stage resolves to the CONSERVATIVE default. A stage we do not
+ * know about is not a licence to send more.
+ */
+const STAGE_WEEKLY_CAP: Record<string, number> = {
+  uw_sheet: 7,            // live subs, hottest, daily in week 1
+  signed_application: 7,  // chasing bank statements
+  sent_application: 7,    // application started, not finished
+  missing_info: 4,        // blocked on a specific item
+  viewed_application: 4,  // opened the app
+  follow_up: 3,           // general nurture
+  declined: 1,            // long-cycle re-engagement
+  default: 1,
+};
+
+const CONSERVATIVE_DEFAULT = 2;
+
+export function perLeadCapForStage(stage: unknown): number {
+  const key = String(stage ?? "").trim().toLowerCase();
+  if (!key) return CONSERVATIVE_DEFAULT;
+
+  // Per-stage env override, so a stage can be retuned or paused (0) without a
+  // deploy. A non-numeric value falls back to the built-in rather than
+  // disabling the cap, but an explicit 0 IS honored: pausing a stage is a
+  // legitimate operation and must not be indistinguishable from a typo.
+  const raw = process.env[`DRIPS_WEEKLY_CAP_${key.toUpperCase()}`];
+  if (raw !== undefined && String(raw).trim() !== "") {
+    const n = parseInt(String(raw).trim(), 10);
+    if (Number.isFinite(n) && n >= 0) return n;
+  }
+
+  const builtin = STAGE_WEEKLY_CAP[key];
+  return builtin === undefined ? CONSERVATIVE_DEFAULT : builtin;
+}
+
 export function emailGateReason(
   budget: EmailBudget,
   leadId: string,
   brand: BudgetBrand = "sunbiz",
+  stage?: unknown,
 ): EmailGateReason | null {
   if (budget.perLeadDegraded) return "per_lead_budget_unavailable";
   if ((budget.dailyRemaining[brand] ?? 0) <= 0) return "daily_cap";
   if ((budget.hourlyRemaining[brand] ?? 0) <= 0) return "hourly_cap";
   const sent = budget.perLeadSent7d.get(leadId) || 0;
-  if (sent >= budget.perLeadCap) return "per_lead_weekly_cap";
+  // A supplied stage takes precedence over the budget's flat cap; omitting the
+  // stage preserves the pre-2026-08-06 behaviour for any caller not yet passing
+  // one, so this is safe to land before every call site is updated.
+  const cap = stage === undefined ? budget.perLeadCap : perLeadCapForStage(stage);
+  if (sent >= cap) return "per_lead_weekly_cap";
   return null;
 }
 
