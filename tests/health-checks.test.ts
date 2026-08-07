@@ -7,7 +7,8 @@
  */
 
 import assert from "node:assert/strict";
-import { evaluate, median, worstVerdict, shouldAlert } from "../lib/health/checks-core";
+import { readFileSync } from "node:fs";
+import { evaluate, median, worstVerdict, alertSignature } from "../lib/health/checks-core";
 
 // ── median ─────────────────────────────────────────────────────────────────
 assert.equal(median([]), null);
@@ -88,41 +89,26 @@ assert.equal(
   "a broken check outranks a healthy one — it means we do not know",
 );
 
-// ── The alert ladder ───────────────────────────────────────────────────────
-const HOUR = 3_600_000;
-const NOW = 1_000 * HOUR;
-
-// Healthy never alerts.
-assert.equal(shouldAlert({ verdict: "ok", lastAlertedAtMs: null, firstFailedAtMs: null, nowMs: NOW }), false);
-// First failure always alerts, immediately.
-assert.equal(shouldAlert({ verdict: "failing", lastAlertedAtMs: null, firstFailedAtMs: NOW, nowMs: NOW }), true);
-// Within the first hour, do not re-alert 5 minutes later.
+// ── Alert decay is NOT reimplemented here ──────────────────────────────────
+// It lives in lib/notify/alert-decay.ts. Two decay implementations that must
+// agree is the exact drift this codebase was bitten by twice this week. This
+// file only supplies the SIGNATURE, which must describe the condition rather
+// than the rendered message — embedding a changing number defeats suppression.
+assert.equal(alertSignature("sms.delivered_24h", "failing"), "health:sms.delivered_24h:failing");
 assert.equal(
-  shouldAlert({ verdict: "failing", lastAlertedAtMs: NOW - 5 * 60_000, firstFailedAtMs: NOW - 5 * 60_000, nowMs: NOW }),
-  false,
-  "ten checks failing must not produce ten messages a minute",
+  alertSignature("sms.delivered_24h", "failing"),
+  alertSignature("sms.delivered_24h", "failing"),
+  "the same condition must produce a stable signature across runs",
 );
-// After an hour of failing, re-alert hourly.
-assert.equal(
-  shouldAlert({ verdict: "failing", lastAlertedAtMs: NOW - 61 * 60_000, firstFailedAtMs: NOW - 61 * 60_000, nowMs: NOW }),
-  true,
+assert.notEqual(
+  alertSignature("sms.delivered_24h", "failing"),
+  alertSignature("sms.delivered_24h", "degraded"),
+  "a change in severity is news, not a repeat",
 );
-// Failing for a day: back off to daily, not hourly.
-assert.equal(
-  shouldAlert({ verdict: "failing", lastAlertedAtMs: NOW - 7 * HOUR, firstFailedAtMs: NOW - 30 * HOUR, nowMs: NOW }),
-  false,
-  "a day-old condition must not page every hour",
-);
-assert.equal(
-  shouldAlert({ verdict: "failing", lastAlertedAtMs: NOW - 25 * HOUR, firstFailedAtMs: NOW - 30 * HOUR, nowMs: NOW }),
-  true,
-  "after a day the daily re-alert must still fire",
-);
-// A broken check alerts on the same ladder — not knowing is not healthy.
-assert.equal(
-  shouldAlert({ verdict: "check_broken", lastAlertedAtMs: null, firstFailedAtMs: NOW, nowMs: NOW }),
-  true,
-  "a check that cannot run must alert, not stay silent",
-);
+{
+  const core = readFileSync("lib/health/checks-core.ts", "utf8");
+  assert.ok(!/export function shouldAlert/.test(core),
+    "checks-core must NOT define its own shouldAlert — alert-decay owns the ladder");
+}
 
 console.log("health-checks.test.ts — all assertions passed ✓");

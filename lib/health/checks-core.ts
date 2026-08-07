@@ -106,33 +106,20 @@ export function worstVerdict(results: CheckResult[]): CheckVerdict {
 }
 
 /**
- * Should this condition alert right now, given when it last alerted?
+ * ALERT DECAY LIVES IN lib/notify/alert-decay.ts — deliberately NOT here.
  *
- * Escalating ladder keyed on the CONDITION, not the rendered message, so a
- * reworded alert does not reset the clock. Ten checks failing at once must not
- * produce ten messages a minute; a muted channel is the same outcome as no
- * monitoring at all.
+ * An earlier draft of this file grew its own shouldAlert() with a parallel
+ * ladder. Two decay implementations that must agree is exactly the drift this
+ * codebase has been bitten by twice this week (the click allowlist reading a
+ * different env var than the link minter; two copies of the variant hash). The
+ * existing module is signature-keyed, ladders 6h/12h/24h, and forgets after 72h
+ * so a fresh episode restarts the ladder. Use it.
+ *
+ * The signature passed to it must describe the CONDITION, not the rendered
+ * message: embedding a changing number ("oldest ~236.7h") in the signature
+ * defeats suppression entirely, which is the bug that module was written for.
+ * For a health check the right signature is `health:<id>:<verdict>`.
  */
-export function shouldAlert(args: {
-  verdict: CheckVerdict;
-  lastAlertedAtMs: number | null;
-  firstFailedAtMs: number | null;
-  nowMs: number;
-}): boolean {
-  if (args.verdict === "ok") return false;
-  if (args.lastAlertedAtMs === null) return true; // first time, always
-
-  const sinceAlert = args.nowMs - args.lastAlertedAtMs;
-  const failingFor = args.firstFailedAtMs === null ? 0 : args.nowMs - args.firstFailedAtMs;
-  const HOUR = 3_600_000;
-
-  // Escalating backoff: hourly for the first 6 hours, then every 6 hours for
-  // the rest of the first day, then daily. Keyed on how long the CONDITION has
-  // been failing, so a long-running outage stops shouting while a fresh one
-  // still gets attention.
-  const interval =
-    failingFor < 6 * HOUR ? HOUR
-    : failingFor < 24 * HOUR ? 6 * HOUR
-    : 24 * HOUR;
-  return sinceAlert >= interval;
+export function alertSignature(id: string, verdict: CheckVerdict): string {
+  return `health:${id}:${verdict}`;
 }
