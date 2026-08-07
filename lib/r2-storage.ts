@@ -1,4 +1,27 @@
-import "server-only";
+/*
+ * NO `import "server-only"` HERE, and that is deliberate.
+ *
+ * It was added with this module and took CI down for four merges without
+ * anyone noticing. The chain: dozens of tests import `@/lib/supabase-server`,
+ * which imports this file for the storage surface — and supabase-server itself
+ * carries NO server-only marker, on purpose, precisely so the suite can import
+ * it. Under plain `tsx` the marker throws "This module cannot be imported from
+ * a Client Component module", so `tests/team-invites.test.ts` (test 12 of 48 in
+ * the `&&`-chained test:sunbiz) died and took the remaining 36 with it.
+ *
+ * Those 36 include clair-manual-only, underwriting-manual-only,
+ * watermark-copy-path and partial-index-upsert — guards whose whole job is to
+ * fail a build. They had not executed in CI since 4b647ee.
+ *
+ * The marker was also not protecting anything WHERE IT SAT: its only importer
+ * is unguarded, so any bundling path that could reach this file could already
+ * reach supabase-server. It bought nothing and cost the test suite. The real
+ * protection is that supabase-server is imported only by server code.
+ *
+ * If this file ever needs the guard back, supabase-server must import it
+ * LAZILY first, or test:sunbiz must run under --conditions=react-server the
+ * way test:watermark already does.
+ */
 /**
  * Cloudflare R2 behind the shape of `supabase.storage`.
  *
