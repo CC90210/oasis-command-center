@@ -84,7 +84,38 @@ export function isAdminProfile(
   return isTrueAdmin(profile) || profile.admin_access === true;
 }
 
+/**
+ * Tenant-wide lead visibility is deliberately separate from administrative
+ * mutation powers. SunBiz explicitly grants Alex the same lead roster/filter
+ * view as Matt and Jordan, even if a stale session or profile projection does
+ * not expose the orthogonal `admin_access` flag. This fallback grants read
+ * scope only; callers must continue to use `isAdminProfile` for write gates.
+ */
+export function canViewAllTenantLeads(
+  profile:
+    | {
+        email?: string | null;
+        is_owner?: boolean | null;
+        team_role?: string | null;
+        admin_access?: boolean | null;
+      }
+    | null
+    | undefined,
+  tenantSlug: string,
+): boolean {
+  if (isAdminProfile(profile)) return true;
+  return (
+    tenantSlug.trim().toLowerCase() === "sun" &&
+    profile?.email?.trim().toLowerCase() === "alex@sunbizfunding.com"
+  );
+}
+
 export type AdminLeadFilter = { agent?: string | null; unassigned?: boolean };
+
+/** Admin agent-filter tabs remain available even if assignment isolation is off. */
+export function leadFiltersEnabled(viewer: LeadViewer, scopingEnabled: boolean): boolean {
+  return scopingEnabled || viewer.isAdmin;
+}
 
 /**
  * Resolve the assigned_to filter for a lead/application LIST read.

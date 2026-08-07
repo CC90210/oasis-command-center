@@ -1,6 +1,7 @@
 import "server-only";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { BOARD_CHANGED_EVENT, boardChannel } from "@/lib/realtime/board-channel";
+import { bumpScopes, nudgePollingActive } from "@/lib/realtime/nudge-store";
 
 /**
  * board-nudge.ts — live "your board changed" push (2026-06-22).
@@ -38,6 +39,13 @@ export async function nudgeBoards(
     ),
   );
   if (ids.length === 0) return;
+  // Turso mode: no Realtime service, so bump the version tokens the clients
+  // poll. Returns rather than falling through — sending to a Supabase channel
+  // that no longer exists is a silent no-op that looks like success.
+  if (nudgePollingActive()) {
+    await bumpScopes(ids.map((id) => `board:${id}`));
+    return;
+  }
   try {
     const sb = getServiceSupabase();
     await Promise.all(

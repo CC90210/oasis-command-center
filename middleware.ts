@@ -7,6 +7,7 @@
 
 import { NextResponse, type NextRequest } from "next/server";
 import { createServerClient } from "@supabase/ssr";
+import { verifySessionEdge } from "@/lib/turso-auth-edge";
 import { matchesPathPrefix } from "./lib/path-prefix";
 import { shouldRedirectToOnboarding } from "./lib/onboarding-gate";
 import { MARKETING_PATHS, MARKETING_HOME_PATH } from "./lib/marketing/routes";
@@ -37,6 +38,23 @@ export const PUBLIC_PATH_PREFIXES = [
   "/invite",               // Tenant-invite landing /invite/<token>. Token is opaque; preview RPC validates server-side (Phase A, master multi-tenant infra plan, 2026-05-17).
   "/api/inbound",          // n8n inbound webhook (Bearer-auth gated inside the route)
   "/api/auth/signout",
+  // Turso auth endpoints — the login POST cannot require a session
+  // (chicken-and-egg; the class of bug breeze's first flipped deploy hit).
+  // Each rate-limits / CSRF-guards inside.
+  "/api/auth/turso-login",
+  // The rest of the Turso auth surface, for the same chicken-and-egg reason:
+  // none of these can require the session they exist to create or repair.
+  // Verified by execution, not assumed — without these entries middleware
+  // rewrote them to the login page and they answered 200 with HTML, so a
+  // caller doing response.json() got a parse error rather than a 401.
+  "/api/auth/turso-signup",
+  "/api/auth/turso-me",             // returns {user:null} when signed out — by design
+  "/api/auth/turso-reset-request",  // always 200; no account enumeration
+  "/api/auth/turso-reset-confirm",  // the reset TOKEN is the credential
+  // NOTE: /api/auth/turso-change-password is deliberately NOT here. It requires
+  // a live session and verifies the current password inside.
+  "/api/auth/google/start",
+  "/api/auth/google/callback",
   "/api/auth/provision",   // legacy + setup-wizard provision (Bearer-auth gated inside)
   "/api/auth/provision-cli", // setup-wizard operator-account creation, called by install/bootstrap.py — CLI_SIGNUP_SECRET bearer gated INSIDE the route, no session. MUST be public or installer account-creation 401s before its secret check ("/api/auth/provision" can't cover the "-cli" suffix — matchesPathPrefix needs prefix+"/").
   "/api/auth/pair",        // setup-wizard pairing (Bearer-auth gated inside)
@@ -80,6 +98,7 @@ export const PUBLIC_PATH_PREFIXES = [
   "/api/agents/operator-email/connect-imap", // operator mailbox connect (app-password). Self-authenticates INSIDE the route: Bearer SCAN_TRIGGER_SECRET (admin seed) OR the operator's own session. MUST be public or the admin-seed bearer path 401s here before its own auth runs (verified 2026-07: returned {ok:false,error:unauthorized}). Session self-serve still works either way. Runs IMAP+SMTP verify before storing; password never returned.
   "/api/cold-sending/",    // COLD/marketing sending pool (separate domains). Both sub-routes (/mailboxes, /blast) self-authenticate INSIDE: Bearer SCAN_TRIGGER_SECRET (admin/automation seed) OR a signed-in ADMIN session. MUST be public or the bearer-seed path 401s before its own auth runs (same failure mode as connect-imap). Trailing slash → covers every /api/cold-sending/* sub-path.
   "/api/webhook",          // public webhooks for clients (HMAC/Bearer gated inside)
+  "/api/ingest/",          // machine ingest for n8n client automations — the Turso repoint target for automation_logs. Self-authenticates with a timing-safe X-Ingest-Secret compare INSIDE the route (no session exists for an n8n HTTP node), so the prefix must be public or every client-automation log write 401s before reaching its own check.
   "/api/webhooks/",        // inbound provider webhooks — Kixie / TextTorrent / Twilio (and future). Each route self-authenticates via a timing-safe HMAC signature check INSIDE the route, so the prefix is public. Trailing slash → matchesPathPrefix covers every /api/webhooks/* sub-path. MUST be public or registered Kixie/TT/Twilio callbacks 401 before their signature verification runs — the singular "/api/webhook" entry can't cover the plural "/api/webhooks/" (matchesPathPrefix needs prefix+"/").
   "/_next",
   "/favicon",
@@ -194,6 +213,28 @@ export async function middleware(req: NextRequest) {
   // Always allow public paths
   if (isPublic(pathname)) {
     return NextResponse.next({ request: { headers: requestHeaders } });
+  }
+
+  // Turso auth mode: session = our HMAC cookie, verified inline (Edge-safe Web
+  // Crypto, no Supabase round trip). Unset the env var and the Supabase path
+  // below is byte-identical — that is the rollback.
+  if (process.env.EMPIRE_AUTH_BACKEND === "turso" && process.env.AUTH_SESSION_SECRET) {
+    const token = req.cookies.get("oasis_session")?.value;
+    const session = await verifySessionEdge(token, process.env.AUTH_SESSION_SECRET);
+    if (session) {
+      return NextResponse.next({ request: { headers: requestHeaders } });
+    }
+    // Same rule the Supabase branch below applies, and for the same reason:
+    // an /api/* caller doing response.json() on a 307 redirect to an HTML login
+    // page gets a parse error, not an auth error. Turso mode was redirecting
+    // API requests — caught by executing the routes rather than reading them.
+    if (pathname.startsWith("/api/")) {
+      return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
+    }
+    if (isHome) return rewriteMarketingHome();
+    const redirect = new URL("/login", req.url);
+    redirect.searchParams.set("next", pathname);
+    return NextResponse.redirect(redirect);
   }
 
   const url = process.env.BRAVO_SUPABASE_URL;

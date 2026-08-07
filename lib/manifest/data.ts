@@ -106,15 +106,12 @@ export async function listRecords(input: ListRecordsInput): Promise<ListRecordsR
     }
   }
 
-  // Transferred leads have graduated into the Applications pipeline. Exclude them
-  // from EVERY lead LIST surface (single + combined pipeline, dashboard counts,
-  // kanban, search, exports) so a transferred deal never resurfaces as a lead
-  // card. One source of truth at the read layer (Bravo follow-up 2026-06-21);
-  // the client-side LeadPipelineView filter stays as defense-in-depth. Lead
-  // DETAIL via getRecord is intentionally unaffected (a transferred lead is
-  // still openable by id). Applications never carry transferred_at.
+  // Transferred leads normally graduate to Applications. Live Subs are the
+  // exception: uw_sheet is an intentional Leads-board work queue, including
+  // legacy rows that were incorrectly stamped transferred_at by auto-promotion.
+  // Keep that exception in every list surface and in the client-side guard.
   if (input.entity === "lead") {
-    q = q.is("data->>transferred_at", null);
+    q = q.or("data->>transferred_at.is.null,data->>stage.eq.uw_sheet");
   } else if (input.entity === "application") {
     // Mirror of the lead filter: only deals EXPLICITLY transferred from a lead
     // (or standalone apps) belong on the Applications board. "Run underwriting"
@@ -196,7 +193,9 @@ export async function listRecordsForViewer(input: {
     .eq("entity_type", input.entity)
     .contains("data->collaborators", JSON.stringify([id]))
     .limit(MAX_RECORD_LIST_LIMIT);
-  if (input.entity === "lead") sq = sq.is("data->>transferred_at", null);
+  if (input.entity === "lead") {
+    sq = sq.or("data->>transferred_at.is.null,data->>stage.eq.uw_sheet");
+  }
 
   // Owned + shared are independent reads (merged by id below, order-independent)
   // — run them as ONE parallel DB wave instead of two serial round-trips. This
@@ -482,6 +481,35 @@ export async function updateRecord(input: UpdateRecordInput): Promise<TenantReco
   const existing = await getRecord({ tenant_id: input.tenant_id, entity: input.entity, id: input.id });
   if (!existing) throw new RecordsError("not_found", "record not found");
   const merged = { ...existing.data, ...input.patch };
+
+  // STAGE-ENTRY TIMESTAMP (2026-07-29). Stamp `stage_entered_at` whenever the
+  // pipeline field actually changes value. This is the ONE chokepoint every
+  // stage change already flows through (it is where BRAVO_RECORD_STATUS_CHANGED
+  // is emitted below), so stamping here means no caller has to remember to.
+  //
+  // Why it exists: drip enrollment used to key off "is the lead currently in
+  // this stage", which cannot tell a lead that just arrived from one that has
+  // sat there for six weeks and already been dripped. That made re-entry into a
+  // stage un-drippable forever (see lib/drips/enroller.ts). With an entry
+  // timestamp, enrollment can compare stage entry against the last run and
+  // treat a genuine RE-entry as a new edge.
+  //
+  // Folded into `merged` rather than written as a second update so a stage
+  // change stays a single write, and so the value is already present on the row
+  // that publishStatusChange broadcasts.
+  const stageField = input.entity === "application" ? "status" : "stage";
+  const priorStage = existing.data?.[stageField];
+  const nextStage = merged[stageField];
+  if (
+    typeof nextStage === "string" &&
+    nextStage !== "" &&
+    String(priorStage ?? "") !== String(nextStage) &&
+    // Never let a caller's patch spoof the entry time; we own this field.
+    input.patch.stage_entered_at === undefined
+  ) {
+    merged.stage_entered_at = new Date().toISOString();
+  }
+
   const db = getServiceSupabase();
   const result = await db
     .from("tenant_records")

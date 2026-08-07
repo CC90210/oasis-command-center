@@ -13,7 +13,7 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { ArrowRight, Loader2, CheckCircle2, AlertCircle, Mail, Shield } from "lucide-react";
-import { getBrowserSupabase } from "@/lib/supabase-browser";
+import { getCurrentUser } from "@/lib/auth-client";
 
 type Props = {
   token: string;
@@ -31,9 +31,8 @@ export function InviteRedeemForSignedInUser({ token, tenantName, roleLabel, emai
     setBusy(true);
     setError(null);
     try {
-      const supa = getBrowserSupabase();
-      const { data } = await supa.auth.getUser();
-      if (!data.user) {
+      const user = await getCurrentUser();
+      if (!user) {
         setError("Not signed in. Refresh and try again.");
         setBusy(false);
         return;

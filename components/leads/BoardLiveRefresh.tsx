@@ -18,6 +18,7 @@ import { useRouter } from "next/navigation";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { getBrowserSupabase } from "@/lib/supabase-browser";
 import { BOARD_CHANGED_EVENT, boardChannel } from "@/lib/realtime/board-channel";
+import { useNudgePoll } from "@/lib/realtime/use-nudge-poll";
 
 // Module-level singleton so multiple mounts (dashboard ↔ pipeline navigation)
 // reuse one WebSocket instead of opening duplicates.
@@ -36,8 +37,16 @@ export function BoardLiveRefresh({ userId }: { userId: string | null }) {
   const router = useRouter();
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  // Turso mode: Supabase Realtime is gone, so the same nudge arrives by polling
+  // a version token. Returns true only when the server says polling is active,
+  // so the two transports never both run.
+  const polling = useNudgePoll("board", () => {
+    if (timer.current) clearTimeout(timer.current);
+    timer.current = setTimeout(() => router.refresh(), 600);
+  });
+
   useEffect(() => {
-    if (!userId) return;
+    if (!userId || polling) return;
     const sb = client();
     if (!sb) return;
     const channel = sb
@@ -52,7 +61,7 @@ export function BoardLiveRefresh({ userId }: { userId: string | null }) {
       if (timer.current) clearTimeout(timer.current);
       sb.removeChannel(channel);
     };
-  }, [userId, router]);
+  }, [userId, router, polling]);
 
   return null;
 }

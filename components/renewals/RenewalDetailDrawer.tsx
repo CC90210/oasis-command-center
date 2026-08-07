@@ -6,6 +6,7 @@ import Link from "next/link";
 import { Activity, Building2, ExternalLink, Loader2, RefreshCw, Settings2, Trash2, X } from "lucide-react";
 import { LeadFileBody, type DetailPayload } from "@/components/leads/LeadFileBody";
 import { LenderPickerField, type LenderOption } from "@/components/renewals/RecordFundedDeal";
+import { isTermUnit, type TermUnit } from "@/lib/renewals/derive";
 
 type Detail = {
   deal: Record<string, unknown>;
@@ -14,6 +15,15 @@ type Detail = {
   events: Array<Record<string, unknown>>;
 };
 type Tab = "overview" | "lead" | "lender" | "activity" | "automation";
+type RenewalEditForm = {
+  funded_amount_usd: string;
+  factor_rate: string;
+  term_value: string;
+  term_unit: TermUnit;
+  funded_at: string;
+  points_pct: string;
+  notes: string;
+};
 
 export function RenewalDetailDrawer() {
   const params = useSearchParams();
@@ -106,13 +116,14 @@ function Overview({ deal, lender, onSaved, onDirtyChange, onDeleted }: {
   onDirtyChange: (dirty: boolean) => void;
   onDeleted: () => void;
 }) {
-  const [form, setForm] = useState({ funded_amount_usd: String(deal.funded_amount_usd || ""), factor_rate: String(deal.factor_rate || ""), term_months: String(deal.term_months || ""), funded_at: String(deal.funded_at || ""), points_pct: String(deal.points_pct || ""), notes: String(deal.notes || "") });
+  const initialTermUnit: TermUnit = isTermUnit(deal.term_unit) ? deal.term_unit : "months";
+  const [form, setForm] = useState<RenewalEditForm>({ funded_amount_usd: String(deal.funded_amount_usd || ""), factor_rate: String(deal.factor_rate || ""), term_value: String(deal.term_value || deal.term_months || ""), term_unit: initialTermUnit, funded_at: String(deal.funded_at || ""), points_pct: String(deal.points_pct || ""), notes: String(deal.notes || "") });
   const [lenderId, setLenderId] = useState(String(deal.lender_id || ""));
   const [saving, setSaving] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [message, setMessage] = useState<{ kind: "error" | "success"; text: string } | null>(null);
-  function update(key: string, value: string) {
-    setForm((current) => ({ ...current, [key]: value }));
+  function update(key: keyof RenewalEditForm, value: string) {
+    setForm((current) => ({ ...current, [key]: key === "term_unit" ? value as TermUnit : value }));
     onDirtyChange(true);
   }
   async function save() {
@@ -152,8 +163,10 @@ function Overview({ deal, lender, onSaved, onDirtyChange, onDeleted }: {
   return <div className="space-y-6 p-6">
     {!deal.lender_id && <div className="rounded-xl border border-status-warm/30 bg-status-warm/10 p-4 text-sm text-status-warm">Link a canonical lender before automated outreach can run.</div>}
     <div className="grid grid-cols-2 gap-4">{Object.entries(form).map(([key, value]) => key === "notes" ?
-      <label key={key} className="col-span-2 text-xs text-fg-muted">Notes<textarea className="input mt-1 min-h-24" value={value} onChange={(e) => update(key, e.target.value)} /></label> :
-      <label key={key} className="text-xs text-fg-muted">{key.replaceAll("_", " ")}<input type={key === "funded_at" ? "date" : "number"} step={key === "term_months" ? "1" : "0.01"} className="input mt-1" value={value} onChange={(e) => update(key, e.target.value)} /></label>)}</div>
+      <label key={key} className="col-span-2 text-xs text-fg-muted">Notes<textarea className="input mt-1 min-h-24" value={value} onChange={(e) => update(key as keyof RenewalEditForm, e.target.value)} /></label> :
+      key === "term_unit" ?
+      <label key={key} className="text-xs text-fg-muted">Term unit<select className="input mt-1" value={value} onChange={(e) => update(key as keyof RenewalEditForm, e.target.value)}><option value="months">Months</option><option value="weeks">Weeks</option><option value="days">Days</option></select></label> :
+      <label key={key} className="text-xs text-fg-muted">{key.replaceAll("_", " ")}<input type={key === "funded_at" ? "date" : "number"} step={key === "term_value" ? "1" : "0.01"} className="input mt-1" value={value} onChange={(e) => update(key as keyof RenewalEditForm, e.target.value)} /></label>)}</div>
     <LenderPickerField value={lenderId} initialName={String(lender?.data?.name || deal.lender_name || "")} onChange={(selected: LenderOption) => {
       setLenderId(selected.id);
       onDirtyChange(true);

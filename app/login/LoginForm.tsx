@@ -4,6 +4,7 @@ import { useState } from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { getBrowserSupabase } from "@/lib/supabase-browser";
+import { getCurrentUser, signInWithPassword } from "@/lib/auth-client";
 import { OasisLogo } from "@/components/brand/OasisLogo";
 
 export function LoginForm() {
@@ -42,16 +43,52 @@ export function LoginForm() {
     setBusy(true);
     setErr(null);
     try {
-      const supa = getBrowserSupabase();
-      const { data, error } = await supa.auth.signInWithPassword({ email, password });
-      if (error) {
-        setErr(error.message);
+      // Turso auth mode: same credentials, verified server-side against the
+      // migrated hash store. Invite redemption below still works — the redeem
+      // route resolves the user from the session either way.
+      if (process.env.NEXT_PUBLIC_EMPIRE_AUTH_BACKEND === "turso") {
+        const r = await fetch("/api/auth/turso-login", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ email, password }),
+        });
+        if (!r.ok) {
+          setErr(r.status === 429 ? "Too many attempts — wait a few minutes."
+                                  : "Invalid email or password.");
+          return;
+        }
+        if (inviteToken) {
+          const rr = await fetch("/api/auth/redeem-invite", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ raw_token: inviteToken }),
+          });
+          const b = (await rr.json().catch(() => ({}))) as {
+            ok?: boolean; message?: string; error?: string; tenant_slug?: string | null };
+          if (!rr.ok || !b.ok) {
+            setErr(b.message || b.error || "Invite redemption failed");
+            return;
+          }
+          const slug = b.tenant_slug?.trim();
+          window.location.assign(slug ? `/t/${slug}` : "/");
+          return;
+        }
+        window.location.assign(`/auth/land?next=${encodeURIComponent(next)}`);
         return;
       }
+      // Routes to /api/auth/turso-login under Turso auth, Supabase otherwise.
+      // Supabase is still the rollback path, so both stay wired until the
+      // subscription is actually cancelled.
+      const signIn = await signInWithPassword(email, password);
+      if (!signIn.ok) {
+        setErr(signIn.error);
+        return;
+      }
+      const signedIn = await getCurrentUser();
       // If the user followed an invite link, redeem it against their
       // existing account before routing. The redeem RPC is atomic so a
       // second submit (network retry / refresh) is safe.
-      if (inviteToken && data.user) {
+      if (inviteToken && signedIn) {
         const r = await fetch("/api/auth/redeem-invite", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -97,6 +134,14 @@ export function LoginForm() {
     setBusy(true);
     setErr(null);
     try {
+      // Turso auth mode: our own OAuth flow with the same Google client —
+      // users see the identical consent screen; Supabase is not in the loop.
+      if (process.env.NEXT_PUBLIC_EMPIRE_AUTH_BACKEND === "turso") {
+        const start = new URL("/api/auth/google/start", window.location.origin);
+        start.searchParams.set("next", next);
+        window.location.assign(start.toString());
+        return;
+      }
       const supa = getBrowserSupabase();
       const callback = new URL("/auth/callback", window.location.origin);
       callback.searchParams.set("next", next);

@@ -1,6 +1,7 @@
 import "server-only";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { CONVERSATION_CHANGED_EVENT, conversationsChannel } from "@/lib/realtime/conversations-channel";
+import { bumpScopes, nudgePollingActive } from "@/lib/realtime/nudge-store";
 
 /**
  * conversations-nudge.ts — live "this tenant's inbox changed" push
@@ -29,6 +30,13 @@ import { CONVERSATION_CHANGED_EVENT, conversationsChannel } from "@/lib/realtime
 export async function nudgeConversations(tenantId: string | null | undefined): Promise<void> {
   const id = typeof tenantId === "string" ? tenantId.trim() : "";
   if (!id) return;
+  // Turso mode: no Realtime service, so bump the version token the clients poll.
+  // Returns instead of falling through — sending to a Supabase channel that no
+  // longer exists would be a silent no-op that looks like it worked.
+  if (nudgePollingActive()) {
+    await bumpScopes([`conversations:${id}`]);
+    return;
+  }
   try {
     const sb = getServiceSupabase();
     const channel = sb.channel(conversationsChannel(id), { config: { broadcast: { ack: false } } });

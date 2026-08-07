@@ -9,6 +9,8 @@ import {
   recordMatchesViewer,
   isAdminProfile,
   leadScopingMode,
+  leadFiltersEnabled,
+  canViewAllTenantLeads,
 } from "../lib/lead-scope";
 
 // Per-agent lead scoping (Adon Batch 2). These lock the fail-closed contract:
@@ -31,6 +33,23 @@ assert.equal(resolveAssignedScope({ isAdmin: false, userId: null }), NO_LEADS);
 
 // Admin → all by default, or the requested narrowing.
 assert.equal(resolveAssignedScope(ADMIN), undefined, "admin default = all leads");
+assert.equal(leadFiltersEnabled(ADMIN, false), true, "admins keep agent-filter tabs when scoping rollout is off");
+assert.equal(leadFiltersEnabled(AGENT, false), false, "ordinary agents do not gain tenant-wide filter tabs");
+assert.equal(
+  canViewAllTenantLeads({ email: "alex@sunbizfunding.com", team_role: "member", admin_access: false }, "sun"),
+  true,
+  "Alex has deterministic tenant-wide SunBiz lead visibility",
+);
+assert.equal(
+  canViewAllTenantLeads({ email: "alex@sunbizfunding.com", team_role: "member", admin_access: false }, "other"),
+  false,
+  "Alex's explicit visibility grant is limited to the SunBiz tenant",
+);
+assert.equal(
+  canViewAllTenantLeads({ email: "another@sunbizfunding.com", team_role: "member", admin_access: false }, "sun"),
+  false,
+  "ordinary SunBiz members do not inherit Alex's grant",
+);
 assert.equal(resolveAssignedScope(ADMIN, { unassigned: true }), null, "admin unassigned bucket");
 assert.equal(
   resolveAssignedScope(ADMIN, { agent: "ABC-123" }),

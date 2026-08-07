@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import Link from "next/link";
-import { getBrowserSupabase } from "@/lib/supabase-browser";
+import { requestPasswordReset } from "@/lib/auth-client";
 
 export default function ForgotPasswordPage() {
   const [email, setEmail] = useState("");
@@ -15,12 +15,10 @@ export default function ForgotPasswordPage() {
     setBusy(true);
     setErr(null);
     try {
-      const supa = getBrowserSupabase();
-      const { error } = await supa.auth.resetPasswordForEmail(email, {
-        redirectTo: `${window.location.origin}/auth/reset-password`,
-      });
-      if (error) {
-        setErr(error.message);
+      const res = await requestPasswordReset(
+        email, `${window.location.origin}/auth/reset-password`);
+      if (!res.ok) {
+        setErr(res.error ?? "could not send reset email");
         return;
       }
       setSent(true);

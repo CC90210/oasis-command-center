@@ -29,7 +29,7 @@ Both share the same **agent harness** — the same contextual system message, br
 
 Open AI #1 — your Prompt Engineer. Before you give it any task, load it with a dedicated system message that wires it as a specialist in converting raw human thoughts into structured, compelling prompts.
 
-That system message is **Prompt translator** in the [Prompts Library](/playbook/prompts) — copy it straight from there. What it does once loaded, in full, is the [Vibe Translator playbook](/playbook/11-vibe-translator).
+That system message is **Prompt translator** in the [Prompts Library](/playbook/prompts) — copy it straight from there. The prompt body is the full protocol; it documents its own behaviour as it runs.
 
 **What the Prompt Engineer system message does:**
 - Tells the AI its sole job is translation — not execution

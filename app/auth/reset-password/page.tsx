@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { getBrowserSupabase } from "@/lib/supabase-browser";
+import { confirmPasswordReset } from "@/lib/auth-client";
 import { OasisLogo } from "@/components/brand/OasisLogo";
 import { validatePassword, PASSWORD_HINT } from "@/lib/password-validation";
 
@@ -23,9 +24,19 @@ export default function ResetPasswordPage() {
   const [done, setDone] = useState(false);
   const [sessionReady, setSessionReady] = useState(false);
 
-  // The reset link puts the recovery token in the URL fragment;
-  // @supabase/ssr browser client picks it up automatically via auth state events.
+  // Two link shapes, because two auth backends are live during the migration:
+  //   Turso    ?turso_token=<raw>  — an opaque single-use token we POST back
+  //   Supabase #access_token=...   — a recovery session the browser client
+  //                                  picks up from the URL fragment
+  const tursoToken = searchParams.get("turso_token");
+
   useEffect(() => {
+    if (tursoToken) {
+      // Nothing to establish: the token IS the credential, verified server-side
+      // when the new password is submitted.
+      setSessionReady(true);
+      return;
+    }
     const supa = getBrowserSupabase();
     // Force session pickup in case the URL fragment hasn't been parsed yet
     supa.auth.getSession().then(({ data }) => {
@@ -37,7 +48,7 @@ export default function ResetPasswordPage() {
       }
     });
     return () => sub.subscription.unsubscribe();
-  }, []);
+  }, [tursoToken]);
 
   // Treat any error in the URL search params as a hard fail (Supabase appends ?error=...)
   const urlError = searchParams.get("error_description") || searchParams.get("error");
@@ -59,14 +70,25 @@ export default function ResetPasswordPage() {
     }
     setBusy(true);
     try {
-      const supa = getBrowserSupabase();
-      const { error } = await supa.auth.updateUser({ password: pwd });
-      if (error) {
-        setErr(error.message);
-        return;
+      if (tursoToken) {
+        const res = await confirmPasswordReset(tursoToken, pwd);
+        if (!res.ok) {
+          setErr(res.error ?? "could not reset password");
+          return;
+        }
+      } else {
+        const supa = getBrowserSupabase();
+        const { error } = await supa.auth.updateUser({ password: pwd });
+        if (error) {
+          setErr(error.message);
+          return;
+        }
       }
       setDone(true);
-      setTimeout(() => router.push("/"), 1200);
+      // Supabase's recovery flow leaves you signed in; the Turso flow does not
+      // (the token is a credential for ONE action, not a session), so send
+      // those users to /login rather than bouncing them off a guarded page.
+      setTimeout(() => router.push(tursoToken ? "/login" : "/"), 1200);
     } finally {
       setBusy(false);
     }
@@ -100,7 +122,8 @@ export default function ResetPasswordPage() {
             </div>
           ) : done ? (
             <div className="text-sm text-status-engaged bg-status-engaged/10 border border-status-engaged/30 rounded-md px-3 py-3">
-              Password updated. Signing you in…
+              {tursoToken ? "Password updated. Taking you to sign in…"
+                          : "Password updated. Signing you in…"}
             </div>
           ) : !sessionReady ? (
             <div className="text-sm text-fg-muted text-center py-3">
@@ -146,7 +169,7 @@ export default function ResetPasswordPage() {
                 disabled={busy}
                 className="w-full bg-accent text-bg font-bold py-2.5 rounded-md hover:bg-accent-muted transition-colors disabled:opacity-50"
               >
-                {busy ? "Updating…" : "Set password & sign in"}
+                {busy ? "Updating…" : tursoToken ? "Set new password" : "Set password & sign in"}
               </button>
             </form>
           )}

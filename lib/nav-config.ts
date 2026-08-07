@@ -97,7 +97,13 @@ export const CC_NAV: NavItem[] = [
   // full-bleed (isChatShellPath matches /agent). The richer /agents dashboard
   // page — agent states, stats, integration health — stays reachable by URL.
   { group: "Operations", href: "/agent", label: "Agents", icon: "Bot" },
-  { group: "Operations", href: "/reasoning", label: "Reasoning", icon: "Brain" },
+  // /reasoning dropped from CC's nav 2026-08-04 (consolidation audit). It
+  // carried two things: a Quick Actions grid that the Prompts Library now
+  // does better (every prompt has its own "Open in chat" button, plus search
+  // and copy), and the Agent Decisions tape — which moved to /operations,
+  // where the rest of the autonomous-loop observability already lives.
+  // The ROUTE stays alive and tenant-scoped: SUN_NAV + SUGA_NAV below still
+  // link to it, so deleting the page would 404 those client portals.
   { group: "Operations", href: "/playbook", label: "Playbook", icon: "BookOpen" },
   // System group — observability + control surfaces.
   { group: "System", href: "/operations", label: "Operations", icon: "Activity" },

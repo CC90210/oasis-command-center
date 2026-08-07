@@ -39,6 +39,7 @@ import { checkTcpaWindow } from "@/lib/tcpa-window";
 import { ACCELERATED_FLAG, acceleratedSystemLive, hasActiveAcceleratedRun } from "@/lib/drips/accelerated";
 import type { DripStep } from "./types";
 import { computeStep0DelayMinutes, enrollmentBufferForStage } from "./stage-buffer";
+import { isPaused, isReEntryEligible } from "./drip-rules-core";
 
 type Db = ReturnType<typeof getServiceSupabase>;
 
@@ -101,10 +102,12 @@ export type SkipReason =
   | "already_enrolled"
   | "dead_or_declined"
   | "opted_out"
+  | "paused"
   | "no_contact_method"
   | "shopped_recently"
   | "accelerated_chase"
   | "docs_on_file"
+  | "daily_enroll_cap"
   | "invalid_sequence_steps";
 
 export type SequenceEnrollSummary = {
@@ -141,12 +144,262 @@ function emptySkipCounts(): Record<SkipReason, number> {
     already_enrolled: 0,
     dead_or_declined: 0,
     opted_out: 0,
+    paused: 0,
     no_contact_method: 0,
     shopped_recently: 0,
     accelerated_chase: 0,
     docs_on_file: 0,
+    daily_enroll_cap: 0,
     invalid_sequence_steps: 0,
   };
+}
+
+/** Global NEW-enrollments-per-rolling-24h cap ACROSS all sequences. The
+ *  per-sequence DRIPS_ENROLL_LIMIT only caps a single sequence's single run;
+ *  this bounds the whole funnel's intake so that a backlog, an import, or
+ *  several stages unfreezing at once cannot flood the one sending mailbox.
+ *
+ *  This is load-bearing as of 2026-07-29: the two enrollment bugs fixed in this
+ *  file were, between them, suppressing most enrollment. Removing them without
+ *  a global intake ceiling would convert a stalled funnel straight into a blast.
+ *  Ramp via env, 15 -> 50 over the warm-up. 0 = unlimited. */
+function parseEnrollDailyCap(raw: string | undefined): number {
+  const n = parseInt((raw || "").trim(), 10);
+  if (!Number.isFinite(n) || n < 0) return 50;
+  return n;
+}
+
+/** Count step-0 (NEW) enrollments created in the last rolling 24h. Returns -1 on
+ *  error so the caller can fail SOFT — the per-sequence limit and stage
+ *  allowlist still bound each run's blast radius. */
+async function countEnrolledLast24h(db: Db): Promise<number> {
+  const since = new Date(Date.now() - 24 * 3_600_000).toISOString();
+  try {
+    const r = await db
+      .from("drip_runs")
+      .select("id", { count: "exact", head: true })
+      .eq("step_index", 0)
+      .gte("created_at", since);
+    if (r.error) return -1;
+    return r.count ?? 0;
+  } catch {
+    return -1;
+  }
+}
+
+/** Re-drip cooldown. Once a lead has run a sequence, a genuine RE-entry into the
+ *  trigger stage re-drips (see the stage-entry edge below) — but not sooner than
+ *  this, so a lead being triaged back and forth between two stages cannot be
+ *  re-dripped every pass. Days. */
+function parseRedripCooldownDays(raw: string | undefined): number {
+  const n = parseInt((raw || "").trim(), 10);
+  if (!Number.isFinite(n) || n < 0) return 14;
+  return n;
+}
+
+/** How many leads to pull per page while hunting for eligible candidates, and
+ *  how many pages we are willing to walk in one pass. 500 x 40 = 20,000 leads
+ *  per sequence per run, which comfortably covers every SunBiz stage while
+ *  keeping a pathological stage from running the function out of time. */
+const CANDIDATE_PAGE_SIZE = 500;
+const CANDIDATE_MAX_PAGES = 40;
+
+type CandidateResult = {
+  leads: LeadRow[];
+  /** Leads examined and rejected because they have already had their run. */
+  skippedAlreadyRan: number;
+  /** Permanent-guard rejections, counted during collection so they do not
+   *  consume the enrollment limit. */
+  staticSkips: Partial<Record<SkipReason, number>>;
+  /** Set when the stage held more leads than we were willing to walk. */
+  truncated: boolean;
+  error?: string;
+};
+
+/**
+ * The guards whose answer does NOT change between one cron pass and the next:
+ * a dead file stays dead, an opt-out stays opted out, a lead with no phone and
+ * no email stays uncontactable.
+ *
+ * These are evaluated during candidate COLLECTION rather than after it, and the
+ * reason is subtle enough to be worth stating. The enrollment limit bounds how
+ * many leads we take per pass. If the limit were filled with leads that a
+ * permanent guard then rejects, every pass would select and reject that same
+ * set, and leads behind them would never be reached — the exact starvation this
+ * change exists to fix, just relocated one step downstream (Codex review P1).
+ * Counting a lead against the limit only once it has passed every permanent
+ * guard is what makes the limit mean "leads we will actually try to enroll".
+ *
+ * The two remaining guards in the enrollment loop, wasShoppedRecently and the
+ * accelerated-chase overlap, are deliberately NOT here: both are TRANSIENT (a
+ * 7-day shopping window, a chase that clears), so a lead they reject becomes
+ * eligible on its own without ever being permanently stuck behind them. They
+ * are also per-lead DB calls, which is why they stay in the bounded path.
+ */
+function staticSkipReason(
+  data: Record<string, unknown>,
+  stage: string,
+  firstChannel: "sms" | "email",
+): SkipReason | null {
+  if (DEAD_STAGES.has(String(data.stage))) return "dead_or_declined";
+  if (isOptedOut(data)) return "opted_out";
+  if (isPaused(data)) return "paused";
+  // Docs-on-file suppression is scoped to the uw_sheet first-touch cadence only
+  // (see the enrollment loop's original note): the flag is never cleared, so it
+  // gates on the CURRENT trigger stage, letting a docs-complete deal re-triaged
+  // elsewhere still receive its generic nurture.
+  if (data.docs_on_file === true && stage === "uw_sheet") return "docs_on_file";
+  const hasPhone = typeof data.phone === "string" && data.phone.trim().length > 0;
+  const hasEmail = typeof data.email === "string" && data.email.trim().length > 0;
+  if (!hasPhone && !hasEmail) return "no_contact_method";
+  // The step-0 channel needs a matching contact method: an SMS-first sequence
+  // can never reach an email-only lead, and vice versa. This is as PERMANENT as
+  // the checks above for a given sequence, so it belongs in the same place —
+  // leaving it downstream let an email-only lead occupy a slot in an SMS
+  // sequence's candidate window on every pass forever (Codex review P1, round 2).
+  if (firstChannel === "sms" && !hasPhone) return "no_contact_method";
+  if (firstChannel === "email" && !hasEmail) return "no_contact_method";
+  return null;
+}
+
+/**
+ * Find leads in `stage` that are eligible to ENTER this sequence.
+ *
+ * This replaces two bugs that between them were suppressing most enrollment
+ * (audit 2026-07-29):
+ *
+ * BUG 1, the >500-lead freeze. The old query took the oldest 500 leads in the
+ * stage, ordered by created_at ascending, and filtered out already-enrolled ones
+ * in application code AFTER the fetch, with no pagination. Once those oldest 500
+ * had each run once — which BUG 2 guaranteed they eventually would — every
+ * subsequent pass re-fetched the same 500, skipped all of them, and enrolled
+ * zero. Lead 501 and everything newer was never loaded. The run reported success
+ * with a high skip count, so it looked healthy while being permanently frozen.
+ * Fixed by paging until we have enough eligible leads rather than trusting one
+ * fixed window to contain them.
+ *
+ * BUG 2, once per lead per lifetime. The old rule skipped any lead with a
+ * non-cancelled run for the sequence, including finished ones. That is correct
+ * for a lead SITTING in a stage (it must not be re-dripped every 15 minutes) but
+ * wrong for a lead that legitimately RE-ENTERS the stage weeks later, which
+ * never re-dripped. The old comment named the missing fix outright: "Phase 3
+ * upgrades this to a stage-entry edge so a genuine RE-entry into the stage
+ * re-drips." This is that.
+ *
+ * The stage-entry edge: a lead re-enters the funnel when it entered the stage
+ * MORE RECENTLY than its last run for this sequence was created. `stage_entered_at`
+ * is stamped centrally in lib/manifest/data.ts updateRecord, so every path that
+ * changes a stage sets it without having to know about drips. Sitting still does
+ * not move that timestamp, so a parked lead is still skipped forever, which is
+ * the property the original rule was protecting.
+ *
+ * Two safety properties are deliberate:
+ *  - A lead with a prior run and NO `stage_entered_at` is skipped, not enrolled.
+ *    The column is new, so most historical leads lack it, and reading "absent" as
+ *    "just arrived" would re-drip the entire back catalogue on the first deploy.
+ *    They become eligible the next time they genuinely change stage.
+ *  - Re-entry is additionally rate-limited by `cooldownDays` against the last
+ *    run, so a lead being triaged back and forth cannot be re-dripped repeatedly.
+ */
+async function collectCandidates(
+  db: Db,
+  seq: SequenceRow,
+  stage: string,
+  enrollLimit: number,
+  cooldownDays: number,
+  firstChannel: "sms" | "email",
+): Promise<CandidateResult> {
+  const out: LeadRow[] = [];
+  let skippedAlreadyRan = 0;
+  const staticSkips: Partial<Record<SkipReason, number>> = {};
+  const noteSkip = (r: SkipReason) => {
+    staticSkips[r] = (staticSkips[r] || 0) + 1;
+  };
+  // Unlimited (enrollLimit === 0) still needs a bound on how many candidates we
+  // hand downstream in one pass; the per-run ceiling is the page size.
+  const want = enrollLimit > 0 ? enrollLimit : CANDIDATE_PAGE_SIZE;
+  const cooldownMs = cooldownDays * 24 * 3_600_000;
+  const now = Date.now();
+
+  for (let page = 0; page < CANDIDATE_MAX_PAGES; page++) {
+    const from = page * CANDIDATE_PAGE_SIZE;
+    const leadsRes = await db
+      .from("tenant_records")
+      .select("id, data")
+      .eq("tenant_id", seq.tenant_id)
+      .eq("entity_type", "lead")
+      .filter("data->>stage", "eq", stage)
+      .order("created_at", { ascending: true })
+      .range(from, from + CANDIDATE_PAGE_SIZE - 1);
+    if (leadsRes.error) {
+      return { leads: out, skippedAlreadyRan, staticSkips, truncated: false, error: leadsRes.error.message };
+    }
+    const pageLeads = (leadsRes.data || []) as LeadRow[];
+    if (pageLeads.length === 0) {
+      return { leads: out, skippedAlreadyRan, staticSkips, truncated: false };
+    }
+
+    // Most recent run per lead for THIS sequence. 'cancelled' rows do not block
+    // (an operator halt should not permanently burn the lead), matching the
+    // original rule.
+    const pageIds = pageLeads.map((l) => l.id);
+    const priorRes = await db
+      .from("drip_runs")
+      .select("lead_id, created_at")
+      .eq("tenant_id", seq.tenant_id)
+      .eq("sequence_id", seq.id)
+      .in("lead_id", pageIds)
+      .neq("status", "cancelled")
+      .order("created_at", { ascending: false });
+    if (priorRes.error) {
+      // Fail CLOSED on this page: without the prior-run history we cannot tell a
+      // first-time lead from one we already dripped, and guessing wrong means
+      // re-sending step 0 to people who already got it.
+      return { leads: out, skippedAlreadyRan, staticSkips, truncated: false, error: priorRes.error.message };
+    }
+    const lastRunAt = new Map<string, number>();
+    for (const r of (priorRes.data || []) as Array<{ lead_id: string; created_at: string }>) {
+      // Rows arrive newest-first, so the first one seen per lead is the latest.
+      if (!lastRunAt.has(r.lead_id)) {
+        lastRunAt.set(r.lead_id, new Date(r.created_at).getTime());
+      }
+    }
+
+    for (const lead of pageLeads) {
+      const prior = lastRunAt.get(lead.id);
+      const eligibleByRunHistory =
+        prior === undefined ||
+        isReEntryEligible({
+          lastRunAtMs: prior,
+          stageEnteredAt: (lead.data || {}).stage_entered_at,
+          nowMs: now,
+          cooldownMs,
+        });
+      if (!eligibleByRunHistory) {
+        skippedAlreadyRan++;
+        continue;
+      }
+      // Permanent guards are applied HERE so a rejected lead does not occupy a
+      // slot under `want` and block the leads behind it forever.
+      const staticSkip = staticSkipReason(lead.data || {}, stage, firstChannel);
+      if (staticSkip) {
+        noteSkip(staticSkip);
+        continue;
+      }
+      out.push(lead);
+      if (out.length >= want) {
+        return { leads: out, skippedAlreadyRan, staticSkips, truncated: true };
+      }
+    }
+
+    // A short page means we reached the end of the stage.
+    if (pageLeads.length < CANDIDATE_PAGE_SIZE) {
+      return { leads: out, skippedAlreadyRan, staticSkips, truncated: false };
+    }
+  }
+  // Walked the page budget without exhausting the stage. Not silent: the caller
+  // surfaces `candidates`, and this flag records that more leads exist behind it.
+  return { leads: out, skippedAlreadyRan, staticSkips, truncated: true };
 }
 
 
@@ -296,7 +549,21 @@ export async function runEnrollDrips(): Promise<EnrollDripsResult> {
   const live = process.env.DRIPS_LIVE === "1";
   const enrollStages = parseEnrollStages(process.env.DRIPS_ENROLL_STAGES);
   const enrollLimit = parseEnrollLimit(process.env.DRIPS_ENROLL_LIMIT);
+  const redripCooldownDays = parseRedripCooldownDays(process.env.DRIPS_REDRIP_COOLDOWN_DAYS);
+  const enrollDailyCap = parseEnrollDailyCap(process.env.DRIPS_ENROLL_DAILY_CAP);
   const db = getServiceSupabase();
+
+  // Global intake ceiling across ALL sequences (rolling 24h). Computed once per
+  // run. This is the surge brake on the two enrollment fixes in this file: they
+  // release leads that have been frozen out of the funnel, potentially many at
+  // once, and the send-side caps alone would leave a very large queue of
+  // scheduled rows behind. Fails SOFT (-1 -> treat as unlimited) because the
+  // per-sequence limit and the stage allowlist still bound each run.
+  let enrollBudget = Number.POSITIVE_INFINITY;
+  if (enrollDailyCap > 0) {
+    const used = await countEnrolledLast24h(db);
+    if (used >= 0) enrollBudget = Math.max(0, enrollDailyCap - used);
+  }
 
   const seqRes = await db
     .from("drip_sequences")
@@ -343,15 +610,10 @@ export async function runEnrollDrips(): Promise<EnrollDripsResult> {
       continue;
     }
 
-    const leadsRes = await db
-      .from("tenant_records")
-      .select("id, data")
-      .eq("tenant_id", seq.tenant_id)
-      .eq("entity_type", "lead")
-      .filter("data->>stage", "eq", stage)
-      .order("created_at", { ascending: true }) // stable order so >500-lead stages don't starve later leads (audit L13)
-      .limit(500);
-    if (leadsRes.error) {
+    // Candidate collection — see collectCandidates() for the two bugs this
+    // replaces (the >500-lead freeze and the permanent once-per-lifetime block).
+    const collected = await collectCandidates(db, seq, stage, enrollLimit, redripCooldownDays, firstStep[0].channel);
+    if (collected.error) {
       perSequence.push({
         sequenceId: seq.id,
         tenantId: seq.tenant_id,
@@ -360,11 +622,15 @@ export async function runEnrollDrips(): Promise<EnrollDripsResult> {
         candidates: 0,
         skipped,
         enrolled: 0,
-        error: leadsRes.error.message,
+        error: collected.error,
       });
       continue;
     }
-    const leads = (leadsRes.data || []) as LeadRow[];
+    const leads = collected.leads;
+    skipped.already_enrolled += collected.skippedAlreadyRan;
+    for (const [reason, n] of Object.entries(collected.staticSkips)) {
+      skipped[reason as SkipReason] += n ?? 0;
+    }
     candidates = leads.length;
     totalCandidates += candidates;
 
@@ -373,73 +639,13 @@ export async function runEnrollDrips(): Promise<EnrollDripsResult> {
       continue;
     }
 
-    // ONCE PER LEAD PER SEQUENCE (audit C2 — the re-enrollment loop fix).
-    // Skip any lead that already has a NON-CANCELLED run for this sequence, not
-    // just an active (scheduled|sending) one. A terminal run (sent/done/failed)
-    // MUST block re-enrollment: the executor never advances a lead's stage and
-    // the pipeline often doesn't either, so a lead that just sits at a drip
-    // stage would otherwise be re-enrolled and re-sent step 0 on every 15-min
-    // pass. 'cancelled' rows (an operator halt) intentionally do NOT block, so a
-    // clean first drip can still run after a pause. (Phase 3 upgrades this to a
-    // stage-entry edge so a genuine RE-entry into the stage re-drips.)
-    const leadIds = leads.map((l) => l.id);
-    const priorRes = await db
-      .from("drip_runs")
-      .select("lead_id")
-      .eq("tenant_id", seq.tenant_id)
-      .eq("sequence_id", seq.id)
-      .in("lead_id", leadIds)
-      .neq("status", "cancelled");
-    const alreadyRan = new Set(((priorRes.data || []) as { lead_id: string }[]).map((r) => r.lead_id));
-
     for (const lead of leads) {
       const data = lead.data || {};
-
-      if (alreadyRan.has(lead.id)) {
-        skipped.already_enrolled++;
-        continue;
-      }
-      if (DEAD_STAGES.has(String(data.stage))) {
-        skipped.dead_or_declined++;
-        continue;
-      }
-      if (isOptedOut(data)) {
-        skipped.opted_out++;
-        continue;
-      }
-      // Docs-on-file suppression (2026-07-23): a deal received COMPLETE via the
-      // document-extraction parser (dropped application + bank statements
-      // already in hand) must not be re-asked for the app/statements we already
-      // hold. SCOPED to the uw_sheet first-touch collection cadence only: the
-      // flag is never cleared, so we gate on the CURRENT trigger `stage` (the
-      // sequence's trigger_filter.to). That way a docs-complete deal later
-      // re-triaged to another stage (e.g. a negative-reply reclass to
-      // follow_up) still gets its generic re-engagement nurture — we only ever
-      // block the uw_sheet doc-collection drip, not all future sends. Set ONLY
-      // by apply-extracted's new-deal path; scrubber-fed uw_sheet leads never
-      // carry it, so their first-touch cadence is unchanged.
-      if (data.docs_on_file === true && stage === "uw_sheet") {
-        skipped.docs_on_file++;
-        continue;
-      }
-      const hasPhone = typeof data.phone === "string" && data.phone.trim().length > 0;
-      const hasEmail = typeof data.email === "string" && data.email.trim().length > 0;
-      if (!hasPhone && !hasEmail) {
-        skipped.no_contact_method++;
-        continue;
-      }
-      // The first step needs a matching contact method — sms needs a phone,
-      // email needs an address. Route selection at dispatch time re-derives
-      // this from the same lead row; checked here too so we don't enroll a
-      // lead into a sequence whose step-0 channel it can never receive.
-      if (firstStep[0].channel === "sms" && !hasPhone) {
-        skipped.no_contact_method++;
-        continue;
-      }
-      if (firstStep[0].channel === "email" && !hasEmail) {
-        skipped.no_contact_method++;
-        continue;
-      }
+      // NOTE: the permanent guards (dead file, opted out, paused, docs-on-file,
+      // no contact method) already ran inside collectCandidates. They are
+      // applied there rather than here so that a lead they reject does not
+      // consume a slot under the enrollment limit and starve the leads behind
+      // it — see staticSkipReason() for why that ordering is load-bearing.
       // Enrollment writes only when BOTH the global DRIPS_LIVE act holds AND
       // this stage is on the DRIPS_ENROLL_STAGES allowlist; otherwise this is a
       // report-only pass (candidate counted, nothing written). The per-sequence
@@ -449,6 +655,13 @@ export async function runEnrollDrips(): Promise<EnrollDripsResult> {
       // backlog (that made the endpoint exceed maxDuration on a full scan).
       if (!live || !stageAllowed) continue;
       if (enrollLimit !== 0 && enrolled >= enrollLimit) break;
+      // Global rolling-24h intake ceiling across every sequence. Checked here,
+      // inside the write path, so a report-only pass still reports true
+      // candidate counts and only real enrollment consumes budget.
+      if (enrollBudget <= 0) {
+        skipped.daily_enroll_cap++;
+        break;
+      }
 
       // Expensive per-lead guards — only reached for leads we're about to
       // actually enroll (bounded by DRIPS_ENROLL_LIMIT).
@@ -495,6 +708,7 @@ export async function runEnrollDrips(): Promise<EnrollDripsResult> {
         continue;
       }
       enrolled++;
+      enrollBudget--; // consume from the global rolling-24h intake ceiling
 
       const patch = await backfillLeadMetadata(db, lead);
       if (patch) {

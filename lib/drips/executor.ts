@@ -42,9 +42,18 @@ import { renderTemplate } from "@/lib/drips/templates";
 import { parseDripSteps, type DripStep } from "@/lib/drips/types";
 import { sendDripSms, sendDripEmail } from "@/lib/drips/send";
 import { wasShoppedRecently } from "@/lib/drips/enroller";
-import { buildDripHtml, listUnsubscribeHeader, pixelUrl, unsubscribeUrl } from "@/lib/drips/html-email";
+import { SUNBIZ_BRAND, dripTrackingBase, platformTrackingBase, buildDripHtml, listUnsubscribeHeader, pixelUrl, unsubscribeUrl } from "@/lib/drips/html-email";
 import { resolveDripSmsIdentity, type DripSmsIdentity } from "@/lib/drips/rep-sms-identity";
 import { ACCELERATED_FLAG, acceleratedSystemLive, hasActiveAcceleratedRun } from "@/lib/drips/accelerated";
+import {
+  circuitOpen,
+  consumeEmail,
+  emailGateReason,
+  holdUntilIso,
+  isPaused,
+  loadEmailBudget,
+  type EmailBudget,
+} from "@/lib/drips/governor";
 import { nudgeConversations } from "@/lib/realtime/conversations-nudge";
 
 export const BATCH_LIMIT = 12;
@@ -67,6 +76,10 @@ function envNum(name: string, def: number): number {
 // NOTE: this is a GLOBAL (all-tenant) ceiling — correct while SunBiz is the only
 // active drip tenant; make it per-tenant if a second tenant goes live.
 const HOURLY_CAP = envNum("DRIPS_HOURLY_CAP", 30);
+// How long a paused lead's row waits before being reconsidered. Long enough
+// that a paused lead costs almost nothing per dispatch tick, short enough that
+// un-pausing resumes the sequence the same day.
+const PAUSE_HOLD_MS = 6 * 3_600_000;
 // Scheduling jitter (minutes) — spread a cohort's scheduled_for across a window
 // so a batch enrolled/advanced together doesn't all come due at the same instant
 // (the clustering half of the blast). Same env the enroller uses for step 0.
@@ -171,9 +184,16 @@ const SOFT_BUDGET_MS = 50_000;
  * act for the drip engine; BRAVO_FORCE_DRY_RUN=1 is the global hard kill that
  * always wins. Intentionally NOT coupled to the global LIVE_SEND_* /
  * DASHBOARD_LIVE_SEND flags — see the file header.
+ *
+ * DRIPS_CIRCUIT_OPEN=1 (2026-07-29) is the third stop: a one-flag halt for a
+ * human or a watchdog to trip when something is visibly wrong (a bounce spike, a
+ * bad template that already went out) WITHOUT having to take DRIPS_LIVE down and
+ * lose the distinction between "we never went live" and "we hit the brakes".
+ * Rows keep rendering, logging and advancing as dry runs, so nothing is lost.
  */
 function dripSendEnabled(): boolean {
   if ((process.env.BRAVO_FORCE_DRY_RUN || "").trim() === "1") return false;
+  if (circuitOpen()) return false;
   return process.env.DRIPS_LIVE === "1";
 }
 
@@ -220,7 +240,12 @@ type StepOutcome = "sent" | "dry_run" | "rescheduled" | "retry_pending" | "faile
  *  existing +6h behaviour) fixes the retry burn but NOT the chat litter; the main
  *  loop must also stop claiming further work. 2026-07-23 incident: 1,232 chats,
  *  0 messages delivered. */
-type RunState = { creditExhausted: boolean };
+type RunState = {
+  creditExhausted: boolean;
+  /** Email volume budget for this dispatch run (governor.ts). Null when the run
+   *  claimed no email rows, or in dry-run mode where no bytes move. */
+  emailBudget: EmailBudget | null;
+};
 
 /** Best-effort lead_interactions log — never throws; a logging failure must
  *  never fail an actual send. agent_source is 'sequence:<name>' per the
@@ -780,6 +805,7 @@ async function processEmailStep(
   step: DripStep,
   steps: DripStep[],
   emailClass: string,
+  run: RunState,
 ): Promise<StepOutcome> {
   const email = typeof data.email === "string" ? data.email.trim() : "";
   // No email for an email step: SKIP + advance (the sequence may have SMS steps
@@ -879,6 +905,20 @@ async function processEmailStep(
     return finishStep(db, row, steps, "dedup:submissions@sunbizfunding.com", false);
   }
 
+  // EMAIL VOLUME GATE (2026-07-29, governor.ts). The pre-existing DRIPS_HOURLY_CAP
+  // paces the SYSTEM; this paces what one PERSON receives, which is the thing a
+  // recipient actually experiences as spam. Only consulted on a real send: a dry
+  // run moves no bytes, so capping it would just distort the rehearsal.
+  //
+  // HOLD, never fail: hitting a cap is a "not yet", not an error, so the row is
+  // rescheduled to when the window reopens and keeps its attempt budget.
+  if (shouldSend && run.emailBudget) {
+    const gated = emailGateReason(run.emailBudget, row.lead_id);
+    if (gated) {
+      return markRescheduled(db, row, holdUntilIso(gated), `email_volume_gate (${gated})`);
+    }
+  }
+
   // send_id pins the lead_interactions row id so /api/track/open|click/<send_id>
   // resolves this exact send (tenant + lead) without trusting the URL. Generated
   // up front so the open pixel + click-wrapped links in the HTML body and the
@@ -887,30 +927,47 @@ async function processEmailStep(
   let fromIdentity = "dry:submissions@sunbizfunding.com";
   let providerMessageId: string | undefined;
   let htmlPayload: string | null = null;
+  // The origin the HTML was actually built on, recorded on the interaction row.
+  // Defaults to the platform origin so a dry run (which builds no HTML) records
+  // the truthful "nothing aligned happened here".
+  let sentTrackingBase: string = platformTrackingBase();
   if (shouldSend) {
     // Transactional/relationship email (application nudges, statements, etc.) is
     // CAN-SPAM opt-out-exempt → NO visible unsubscribe footer. The invisible
     // List-Unsubscribe header stays for BOTH classes (cuts spam complaints +
     // protects inbox placement). Commercial mail keeps the footer.
     const unsub = emailClass === "transactional" ? "none" : "footer";
+    // Drip mail is genuinely sent From submissions@sunbizfunding.com, so its
+    // links belong on the SunBiz sending domain rather than the shared platform
+    // one. Resolved ONCE here and passed everywhere, so every URL in this message
+    // agrees, and so the exact origin used can be recorded on the interaction row
+    // below. Cold outreach deliberately does NOT do this: it sends from isolated
+    // domains and its links must stay on the platform origin.
+    const trackingBase = dripTrackingBase();
     const customFooter =
       emailClass === "transactional"
         ? ""
         : `<div style="margin:24px 0 0;color:#8a94a6;font:12px/1.5 Arial,sans-serif">` +
-          `Prefer not to receive these? <a href="${unsubscribeUrl(email)}" style="color:#8a94a6">Unsubscribe here</a>.</div>`;
-    const customTracking = `<img src="${pixelUrl(sendId)}" width="1" height="1" alt="" style="display:none;max-height:0;overflow:hidden" />`;
+          `Prefer not to receive these? <a href="${unsubscribeUrl(email, SUNBIZ_BRAND, trackingBase)}" style="color:#8a94a6">Unsubscribe here</a>.</div>`;
+    const customTracking = `<img src="${pixelUrl(sendId, trackingBase)}" width="1" height="1" alt="" style="display:none;max-height:0;overflow:hidden" />`;
     const instrumentedCustomHtml = renderedCustomHtml
       ? renderedCustomHtml.replace(/<\/body>/i, `${customFooter}${customTracking}</body>`)
       : "";
-    const html = instrumentedCustomHtml || buildDripHtml(cleanBody, { sendId, email, unsub });
+    const html =
+      instrumentedCustomHtml || buildDripHtml(cleanBody, { sendId, email, unsub, trackingBase });
     htmlPayload = html;
+    sentTrackingBase = trackingBase;
     const result = await sendDripEmail(row.tenant_id, email, subject, cleanBody, {
       html,
-      listUnsubscribe: listUnsubscribeHeader(email),
+      listUnsubscribe: listUnsubscribeHeader(email, SUNBIZ_BRAND, trackingBase),
     });
     if (!result.ok) return markRetryOrFail(db, row, result.error);
     fromIdentity = result.fromAddress;
     providerMessageId = result.messageId;
+    // Spend the budget only on a send that actually left, so later rows in this
+    // same run see the decremented remainder without re-querying. A failed send
+    // deliberately does not consume: nothing reached the recipient.
+    if (run.emailBudget) consumeEmail(run.emailBudget, row.lead_id);
   }
 
   const interactionLog = logInteraction(db, {
@@ -932,6 +989,14 @@ async function processEmailStep(
       rfc822_message_id: providerMessageId ?? null,
       dry_run: !shouldSend,
       drips_live: dripsLive,
+      // The RESOLVED origin this message's tracked URLs were actually built on,
+      // not the intent. Stamped at SEND time because it is the only reliable
+      // record: the telemetry reconciler rebuilds payload_html from this row long
+      // afterwards, and inferring the domain from today's config would
+      // misreconstruct any message sent before the rollout, or sent while the
+      // variable was unset and silently fell back. Absence means the platform
+      // origin, which is exactly right for historical rows (Codex review P2).
+      tracking_base: sentTrackingBase,
     },
   });
   await Promise.all([
@@ -993,6 +1058,25 @@ async function processRow(
 
   if (isOptedOutOrDead(data)) return markPermanentFail(db, row, "lead_opted_out_or_dead");
 
+  // PER-LEAD PAUSE (2026-07-29). /api/leads/[id]/drip-toggle has written
+  // data.drip_paused since it shipped and nothing ever read it, so an operator
+  // pausing a lead changed nothing and the drip kept sending. If anyone ever
+  // paused a lead because the merchant asked them to stop, that request was
+  // silently ignored.
+  //
+  // HOLD, do not cancel: a pause is a reversible operator act, so the row is
+  // rescheduled rather than killed. Un-pausing resumes the sequence where it
+  // left off instead of requiring a re-enrollment. Checked here (before any
+  // channel work, guard, or send) so a paused lead costs nothing.
+  if (isPaused(data)) {
+    return markRescheduled(
+      db,
+      row,
+      new Date(Date.now() + PAUSE_HOLD_MS).toISOString(),
+      "drip_paused (operator paused this lead)",
+    );
+  }
+
   // Cancel-old-start-new (2026-07-20): if the lead has moved to a different
   // stage than the one this sequence targets, this sequence is stale for them —
   // cancel it (no send, no advance) instead of continuing to nag about an old
@@ -1039,7 +1123,7 @@ async function processRow(
   }
 
   if (step.channel === "sms") return processSmsStep(db, row, data, step, steps, run);
-  return processEmailStep(db, row, data, step, steps, seq.emailClass || "commercial");
+  return processEmailStep(db, row, data, step, steps, seq.emailClass || "commercial", run);
 }
 
 export async function runDispatchDrips(): Promise<DispatchDripsResult> {
@@ -1190,7 +1274,23 @@ export async function runDispatchDrips(): Promise<DispatchDripsResult> {
   let retryPending = 0;
   let failed = 0;
   let cancelled = 0;
-  const run: RunState = { creditExhausted: false };
+  // Email volume budget, computed once for the whole run (2 aggregate queries +
+  // one batched per-lead query) so per-row gating costs nothing. Only loaded
+  // when this run actually claimed email rows AND real sends are enabled: a dry
+  // run moves no bytes, so there is no volume to govern.
+  const emailLeadIds = Array.from(
+    new Set(claimed.filter((r) => r.channel === "email").map((r) => r.lead_id)),
+  );
+  const run: RunState = {
+    creditExhausted: false,
+    emailBudget:
+      dripSendEnabled() && emailLeadIds.length > 0 ? await loadEmailBudget(db, emailLeadIds) : null,
+  };
+  if (run.emailBudget?.degraded) {
+    // The global counts are best-effort this run; the per-lead cap still holds
+    // (it fails closed inside emailGateReason). Visible, not silent.
+    console.warn("[dispatch-drips] email budget degraded — global caps are best-effort this run");
+  }
   for (const row of claimed) {
     if (Date.now() - startedAt > SOFT_BUDGET_MS) break;
     let outcome: StepOutcome;

@@ -17,7 +17,10 @@ let _cached: Client | null = null;
 export function getTursoClient(): Client {
   if (_cached) return _cached;
   const path = process.env.TURSO_DB_PATH;
-  const remote = process.env.TURSO_DB_URL;
+  // TURSO_DATABASE_URL is the canonical name (matches turso_admin --write-env
+  // and the Python DAL); TURSO_DB_URL kept as the legacy fallback this file
+  // originally shipped with.
+  const remote = process.env.TURSO_DATABASE_URL || process.env.TURSO_DB_URL;
   const token = process.env.TURSO_AUTH_TOKEN;
 
   if (path) {
@@ -29,10 +32,14 @@ export function getTursoClient(): Client {
     return _cached;
   }
   throw new Error(
-    "Turso misconfigured: set TURSO_DB_PATH (local file) or TURSO_DB_URL (+ TURSO_AUTH_TOKEN)."
+    "Turso misconfigured: set TURSO_DB_PATH (local file) or TURSO_DATABASE_URL (+ TURSO_AUTH_TOKEN)."
   );
 }
 
 export function tursoConfigured(): boolean {
-  return !!(process.env.TURSO_DB_PATH || process.env.TURSO_DB_URL);
+  return !!(
+    process.env.TURSO_DB_PATH ||
+    process.env.TURSO_DATABASE_URL ||
+    process.env.TURSO_DB_URL
+  );
 }

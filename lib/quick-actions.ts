@@ -1,14 +1,22 @@
 /**
- * Quick Actions for the Reasoning page.
+ * Quick Actions for the CLIENT-TENANT Reasoning surface.
  *
- * Replaces the dev-tool slash-command catalog. Each entry maps to a chat
- * prompt the operator can fire by clicking — no terminal, no `cd`, no
- * `claude /command`. Click → routes to /agents with the prompt pre-filled
- * and the right agent selected. Hit Enter to send.
+ * Each entry maps to a chat prompt the operator can fire by clicking — no
+ * terminal, no `cd`, no `claude /command`. Click → routes to /agents with the
+ * prompt pre-filled and the right agent selected. Hit Enter to send.
  *
- * Curated to ~5 per agent — the highest-leverage operator moves. The full
- * 56-command palette is still available behind /reasoning?dev=1 for
- * power-users.
+ * CONSUMERS (2026-08-04): app/reasoning/page.tsx and
+ * components/manifest/ManifestReasoning.tsx (/t/<slug>/reasoning). Both are
+ * reached by SunBiz + Suga client tenants via SUN_NAV / SUGA_NAV — CC's own
+ * CC_NAV dropped /reasoning in the consolidation audit, because the Prompts
+ * Library does the same job better for the operator (search, copy, and an
+ * "Open in chat" button per prompt).
+ *
+ * So this file is NOT dead code and must not be deleted with the operator
+ * nav entry: the Solara + Helios blocks below are Sun Biz Funding's live
+ * quick actions. Bravo's genuinely unique entries were ported into
+ * lib/prompts-library.ts; the rest were duplicates of prompts that already
+ * existed there.
  */
 
 export type AgentSlug =
@@ -35,8 +43,12 @@ export const QUICK_ACTIONS: QuickAction[] = [
   // ── BRAVO — daily ops + sales ──
   {
     agent: "bravo", title: "Run the daily briefing", category: "Daily", icon: "Sparkles",
-    description: "MRR, pipeline, client health, top priority for today — all in one read.",
-    prompt: "Run my daily briefing. Pull MRR, pipeline, client health, recent inbound, and tell me the #1 thing I should focus on today.",
+    // MRR removed 2026-08-04 — revenue is Atlas's domain (CFO-Agent), and
+    // Bravo has no first-party MRR process, so the figure came back either
+    // empty or inferred. Kept in lockstep with the ops-morning-briefing
+    // entry in lib/prompts-library.ts.
+    description: "Pipeline, client delivery, inbound, calendar, top priority for today — all in one read.",
+    prompt: "Run my daily briefing. Pull pipeline movement since yesterday, client delivery health (anything due or blocked today), inbound that needs a reply, today's calendar, and tell me the #1 thing I should focus on today. No revenue or MRR figures — that's Atlas's domain.",
   },
   {
     agent: "bravo", title: "What leads are qualified?", category: "Sales", icon: "Target",

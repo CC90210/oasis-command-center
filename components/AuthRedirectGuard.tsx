@@ -2,7 +2,7 @@
 
 import { useEffect } from "react";
 import { useRouter } from "next/navigation";
-import { getBrowserSupabase } from "@/lib/supabase-browser";
+import { getCurrentUser } from "@/lib/auth-client";
 
 /**
  * AuthRedirectGuard — defensive client-side bounce for pages that are
@@ -31,10 +31,11 @@ export function AuthRedirectGuard({ to = "/" }: { to?: string }) {
     let cancelled = false;
     (async () => {
       try {
-        const supa = getBrowserSupabase();
-        const { data } = await supa.auth.getUser();
+        // Asks the server under Turso auth (the session cookie is httpOnly, so
+        // the browser cannot inspect it), Supabase otherwise.
+        const user = await getCurrentUser();
         if (cancelled) return;
-        if (data?.user) router.replace(to);
+        if (user) router.replace(to);
       } catch {
         // Network glitch / cold-start — leave the landing visible. The
         // user can still click Sign in manually.
