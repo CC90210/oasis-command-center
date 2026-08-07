@@ -1,9 +1,10 @@
 "use client";
 
 import { useState } from "react";
-import { getBrowserSupabase } from "@/lib/supabase-browser";
+import { changePassword, getCurrentUser, requestPasswordReset } from "@/lib/auth-client";
 
 export function ChangePasswordForm() {
+  const [currentPwd, setCurrentPwd] = useState("");
   const [pwd, setPwd] = useState("");
   const [confirm, setConfirm] = useState("");
   const [busy, setBusy] = useState(false);
@@ -26,13 +27,17 @@ export function ChangePasswordForm() {
     }
     setBusy(true);
     try {
-      const supa = getBrowserSupabase();
-      const { error } = await supa.auth.updateUser({ password: pwd });
-      if (error) {
-        setErr(error.message);
+      // Under Turso this re-verifies the current password server-side, so a
+      // stolen session cookie can't be used to lock the real owner out.
+      // Supabase's updateUser never checked; the field is optional here so an
+      // OAuth account with no password set can still create one.
+      const res = await changePassword(currentPwd, pwd);
+      if (!res.ok) {
+        setErr(res.error ?? "could not change password");
         return;
       }
       setMsg("Password updated.");
+      setCurrentPwd("");
       setPwd("");
       setConfirm("");
     } finally {
@@ -45,18 +50,16 @@ export function ChangePasswordForm() {
     setErr(null);
     setResetBusy(true);
     try {
-      const supa = getBrowserSupabase();
-      const { data: u } = await supa.auth.getUser();
-      const email = u?.user?.email;
+      const user = await getCurrentUser();
+      const email = user?.email;
       if (!email) {
         setErr("Couldn't resolve your email — sign out and use Forgot password on the sign-in page.");
         return;
       }
-      const { error } = await supa.auth.resetPasswordForEmail(email, {
-        redirectTo: `${window.location.origin}/auth/reset-password`,
-      });
-      if (error) {
-        setErr(error.message);
+      const res = await requestPasswordReset(
+        email, `${window.location.origin}/auth/reset-password`);
+      if (!res.ok) {
+        setErr(res.error ?? "could not send reset email");
         return;
       }
       setResetSent(true);
@@ -67,6 +70,21 @@ export function ChangePasswordForm() {
 
   return (
     <form onSubmit={onSubmit} className="space-y-3 max-w-md">
+      <div>
+        <label className="text-xs uppercase tracking-wider font-bold text-fg-muted">
+          Current password
+        </label>
+        <input
+          type="password"
+          value={currentPwd}
+          onChange={(e) => setCurrentPwd(e.target.value)}
+          className="mt-1.5 w-full bg-bg-elev border border-bg-border rounded-md px-3 py-2 text-fg focus:border-accent focus:outline-none"
+          autoComplete="current-password"
+        />
+        <div className="text-xs text-fg-dim mt-1">
+          Leave blank if you signed up with Google and have never set a password.
+        </div>
+      </div>
       <div>
         <label className="text-xs uppercase tracking-wider font-bold text-fg-muted">
           New password

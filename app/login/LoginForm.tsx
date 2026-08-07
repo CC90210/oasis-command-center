@@ -4,6 +4,7 @@ import { useState } from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { getBrowserSupabase } from "@/lib/supabase-browser";
+import { getCurrentUser, signInWithPassword } from "@/lib/auth-client";
 import { OasisLogo } from "@/components/brand/OasisLogo";
 
 export function LoginForm() {
@@ -75,16 +76,19 @@ export function LoginForm() {
         window.location.assign(`/auth/land?next=${encodeURIComponent(next)}`);
         return;
       }
-      const supa = getBrowserSupabase();
-      const { data, error } = await supa.auth.signInWithPassword({ email, password });
-      if (error) {
-        setErr(error.message);
+      // Routes to /api/auth/turso-login under Turso auth, Supabase otherwise.
+      // Supabase is still the rollback path, so both stay wired until the
+      // subscription is actually cancelled.
+      const signIn = await signInWithPassword(email, password);
+      if (!signIn.ok) {
+        setErr(signIn.error);
         return;
       }
+      const signedIn = await getCurrentUser();
       // If the user followed an invite link, redeem it against their
       // existing account before routing. The redeem RPC is atomic so a
       // second submit (network retry / refresh) is safe.
-      if (inviteToken && data.user) {
+      if (inviteToken && signedIn) {
         const r = await fetch("/api/auth/redeem-invite", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
