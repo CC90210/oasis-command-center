@@ -26,6 +26,7 @@ import { useRouter } from "next/navigation";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { getBrowserSupabase } from "@/lib/supabase-browser";
 import { CONVERSATION_CHANGED_EVENT, conversationsChannel } from "@/lib/realtime/conversations-channel";
+import { useNudgePoll } from "@/lib/realtime/use-nudge-poll";
 
 // Module-level singleton so multiple mounts reuse one WebSocket instead of
 // opening duplicates (mirrors BoardLiveRefresh).
@@ -44,8 +45,17 @@ export function ConversationsLiveRefresh({ tenantId }: { tenantId: string | null
   const router = useRouter();
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+    // Turso mode: Supabase Realtime is gone, so the same nudge arrives by polling
+  // a version token. The scope is resolved from the SESSION server-side, not
+  // from tenantId here — a client-supplied tenant would let any signed-in user
+  // learn when another tenant's conversations change.
+  const polling = useNudgePoll("conversations", () => {
+    if (timer.current) clearTimeout(timer.current);
+    timer.current = setTimeout(() => router.refresh(), 600);
+  });
+
   useEffect(() => {
-    if (!tenantId) return;
+    if (!tenantId || polling) return;
     const sb = client();
     if (!sb) return;
     const channel = sb
@@ -61,7 +71,7 @@ export function ConversationsLiveRefresh({ tenantId }: { tenantId: string | null
       if (timer.current) clearTimeout(timer.current);
       sb.removeChannel(channel);
     };
-  }, [tenantId, router]);
+  }, [tenantId, router, polling]);
 
   return null;
 }

@@ -184,12 +184,16 @@ try:
                          {"token": raw, "password": PW3})
     check("reset-confirm accepts a valid token", code == 200, text[:70])
     code, _t, _ = call("/api/auth/turso-login", "POST", {"email": EMAIL, "password": PW3})
-    check("password after reset authenticates", code == 200)
+    check("password after reset authenticates", code == 200,
+          "RATE LIMITED (429) — rerun after 5 min; not an auth failure"
+          if code == 429 else f"status {code}")
     code, text, _ = call("/api/auth/turso-reset-confirm", "POST",
                          {"token": raw, "password": "YetAnother!2026"})
     check("the same token cannot be reused (single-use)", code == 400, text[:70])
     code, _t, _ = call("/api/auth/turso-login", "POST", {"email": EMAIL, "password": PW3})
-    check("password unchanged after the replay attempt", code == 200)
+    check("password unchanged after the replay attempt", code == 200,
+          "RATE LIMITED (429) — rerun after 5 min; not an auth failure"
+          if code == 429 else f"status {code}")
     code, text, _ = call("/api/auth/turso-reset-confirm", "POST",
                          {"token": "not-a-real-token", "password": "Whatever!2026"})
     check("a bogus token is refused", code == 400)
