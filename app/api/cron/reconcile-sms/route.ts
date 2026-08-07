@@ -30,6 +30,7 @@ function esc(s: string): string {
 async function handle(req: NextRequest): Promise<NextResponse> {
   const denied = checkCronAuth(req);
   if (denied) return denied;
+  const startedAt = Date.now();
 
   try {
     // Reconcile EVERY tenant with open receipts, not just SunBiz. The executor
@@ -48,10 +49,27 @@ async function handle(req: NextRequest): Promise<NextResponse> {
         { status: 500 },
       );
     }
-    const tenants = [...new Set([SUNBIZ_TENANT_ID, ...discovered])];
+    const all = [...new Set([SUNBIZ_TENANT_ID, ...discovered])].sort();
+
+    // ROTATE the order. Each thread costs a sequential API call, so a big
+    // backlog on whichever tenant goes first can consume the whole 60s budget.
+    // With a fixed order that tenant would starve every other one on EVERY
+    // invocation, and a starved tenant's receipts stay open forever, which
+    // leaves its breaker with no terminal evidence — the exact blindness this
+    // subsystem removes. Rotating by the 15-minute slot gives every tenant the
+    // front of the queue in turn.
+    const slot = Math.floor(Date.now() / (15 * 60_000));
+    const pivot = all.length ? slot % all.length : 0;
+    const tenants = [...all.slice(pivot), ...all.slice(0, pivot)];
+
+    // Leave headroom inside maxDuration for the breaker reads and alerts below.
+    const deadlineMs = startedAt + 45_000;
+    const perTenantLimit = Math.max(25, Math.floor(200 / Math.max(1, tenants.length)));
 
     const perTenant: Record<string, Awaited<ReturnType<typeof reconcileReceipts>>> = {};
-    for (const t of tenants) perTenant[t] = await reconcileReceipts(t);
+    for (const t of tenants) {
+      perTenant[t] = await reconcileReceipts(t, { limit: perTenantLimit, deadlineMs });
+    }
 
     const r = Object.values(perTenant).reduce(
       (acc, x) => ({

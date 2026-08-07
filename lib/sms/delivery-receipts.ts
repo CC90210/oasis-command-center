@@ -118,11 +118,18 @@ const MIN_AGE_MS = 90_000;
  */
 export async function reconcileReceipts(
   tenantId: string,
-  opts: { limit?: number; nowMs?: number } = {},
+  opts: { limit?: number; nowMs?: number; deadlineMs?: number } = {},
 ): Promise<ReconcileResult> {
   const db = getServiceSupabase();
   const limit = opts.limit ?? 200;
   const nowMs = opts.nowMs ?? Date.now();
+  // Wall-clock budget. Each thread costs a sequential API call, so a large
+  // backlog can outrun the 60s function limit; without a deadline the run is
+  // killed mid-flight and, because the caller processes tenants in order, the
+  // same early tenant would consume every invocation and starve the rest
+  // forever.
+  const deadlineMs = opts.deadlineMs ?? Infinity;
+  const outOfTime = () => Date.now() >= deadlineMs;
   const out: ReconcileResult = {
     examined: 0, resolved: 0, delivered: 0, failed: 0, stillOpen: 0, abandoned: 0, errors: [],
   };
@@ -168,6 +175,13 @@ export async function reconcileReceipts(
   }
 
   for (const [k, group] of byThread) {
+    if (outOfTime()) {
+      // Stop cleanly and say so. The untouched receipts stay open and are
+      // picked up next run; reporting a partial pass as complete is what turns
+      // a backlog into permanent blindness.
+      out.errors.push(`deadline reached with ${byThread.size} thread(s) queued; remainder deferred`);
+      break;
+    }
     const [actAsEmail, chatId] = [k.slice(0, k.indexOf("|")), k.slice(k.indexOf("|") + 1)];
     let messages: Awaited<ReturnType<typeof getThreadRaw>>;
     try {
