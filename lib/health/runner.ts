@@ -21,6 +21,7 @@ import { sendTelegram } from "@/lib/notify/telegram";
 import { shouldAlert } from "@/lib/notify/alert-decay";
 import { alertSignature, worstVerdict, type CheckResult } from "./checks-core";
 import { DRIP_CHECKS, runCheck } from "./drip-checks";
+import { computeCoverage } from "./coverage";
 
 type Db = ReturnType<typeof getServiceSupabase>;
 
@@ -59,6 +60,7 @@ export async function runHealthChecks(
   const results: CheckResult[] = [];
   const alerted: string[] = [];
   const recovered: string[] = [];
+  let telegramFailures = 0;
 
   for (const check of DRIP_CHECKS) {
     let result: CheckResult;
@@ -143,11 +145,79 @@ export async function runHealthChecks(
     }, { onConflict: "alert_key" }).then(() => undefined, () => undefined);
 
     if (!sent.ok) {
+      // THE ALERT CHANNEL IS A SINGLE POINT OF FAILURE (2026-06-30 audit,
+      // finding #1) and on 2026-08-07 it was genuinely down: @KnutRPEbot had
+      // been kicked from the sunbiz-ops group, so every alert returned 403 and
+      // the only record was a console line nobody reads.
+      //
+      // A delivery failure is therefore recorded as its own check result, in
+      // the DATABASE — a path that does not depend on the channel that just
+      // failed. Otherwise a dead alert channel is indistinguishable from a
+      // healthy fleet, which is the exact failure this whole system exists to
+      // prevent.
+      //
+      // Note also: Telegram's getChat returns ok for a group the bot has been
+      // kicked from. Only a real send proves deliverability, so any future
+      // self-test must SEND, not probe.
       console.error("[health] telegram delivery failed", { check: result.id });
+      telegramFailures += 1;
+      await db.from("health_check_runs").insert({
+        tenant_id: tenantId,
+        check_id: "alerting.telegram_delivery",
+        surface: "oasis",
+        verdict: "failing",
+        observed: 0,
+        baseline: 1,
+        reason: `could not deliver the ${result.id} alert to the sunbiz-ops lane`.slice(0, 500),
+        ran_at: new Date(nowMs).toISOString(),
+      }).then(() => undefined, () => undefined);
     }
   }
 
+  // One summary row per run, so "was anything even checked" is answerable from
+  // the database alone, without trusting the alert channel.
+  await db.from("health_check_runs").insert({
+    tenant_id: tenantId,
+    check_id: "health.run_completed",
+    surface: "oasis",
+    verdict: telegramFailures > 0 ? "degraded" : "ok",
+    observed: results.length,
+    baseline: DRIP_CHECKS.length,
+    reason: `${results.length} checks ran; ${alerted.length} alerted; ${telegramFailures} undeliverable`,
+    ran_at: new Date(nowMs).toISOString(),
+  }).then(() => undefined, () => undefined);
+
   return { ran: results.length, results, alerted, recovered, worst: worstVerdict(results) };
+}
+
+/**
+ * What exists but is not checked.
+ *
+ * The 2026-08-06 incident was caused by a hand-maintained watch list, not by a
+ * missing check. So the gap itself is monitored: crons come from vercel.json,
+ * brands from the registry, and anything without a corresponding check is
+ * reported. Low severity and weekly, because it is a backlog rather than an
+ * outage — but never silent, because silence is how the list fell behind.
+ */
+export async function reportCoverageGap(
+  vercelConfig: unknown,
+  opts: { notify?: boolean } = {},
+): Promise<{ uncovered: string[]; crons: number }> {
+  const cov = computeCoverage({
+    vercelConfig,
+    knownCheckIds: DRIP_CHECKS.map((c) => c.id),
+  });
+  if (opts.notify && cov.uncovered.length > 0) {
+    const shown = cov.uncovered.slice(0, 15);
+    await sendTelegram(
+      `⚪ <b>MONITORING GAP</b> — ${cov.uncovered.length} surface(s) have no health check\n` +
+        shown.map((u) => `· ${esc(u)}`).join("\n") +
+        (cov.uncovered.length > shown.length ? `\n…and ${cov.uncovered.length - shown.length} more` : "") +
+        `\n<i>${cov.crons.length} cron routes discovered from vercel.json</i>`,
+      { lane: "sunbiz-ops" },
+    ).catch(() => undefined);
+  }
+  return { uncovered: cov.uncovered, crons: cov.crons.length };
 }
 
 /**
