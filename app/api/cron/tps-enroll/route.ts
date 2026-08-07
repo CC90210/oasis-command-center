@@ -48,18 +48,31 @@ const DEDUPE_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
  * leads Adon is cutting. The end-state design still holds for anything AFTER
  * the cutoff.
  *
- * Unset = no cutoff (original backfill behaviour), so a missing env var cannot
- * silently switch enrolment off — it fails toward the documented old behaviour,
- * and the response reports which mode it ran in. An unparseable value is
- * treated as unset and reported, never as epoch-0 or as "now".
+ * THE DEFAULT IS COMMITTED, NOT ENV-ONLY, AND THAT IS THE WHOLE POINT.
+ *
+ * The first cut made an unset variable mean "no cutoff — enrol everything",
+ * reasoning that a missing var should not silently switch enrolment off. That
+ * is backwards: the harm being prevented is SPEND on historical leads, so
+ * "enrol everything" is the expensive failure, and a preview deploy, a typo, or
+ * a deleted variable would quietly restore exactly the behaviour this removes.
+ * Fail closed. (Codex review 2026-08-07.)
+ *
+ * So the cutoff lives in git and works with no configuration at all. The env
+ * var only MOVES it, which lets Adon change the line without a deploy. A
+ * malformed value falls back to this constant and is reported as misconfigured
+ * — never read as epoch-0 (enrol everything) and never as "now" (enrol nothing).
  */
-const AUTO_ENROLL_SINCE: string | null = (() => {
-  const raw = (process.env.TPS_AUTO_ENROLL_SINCE || "").trim();
-  if (!raw) return null;
-  const t = Date.parse(raw);
+const DEFAULT_AUTO_ENROLL_SINCE = "2026-08-07T18:14:30Z";
+
+const AUTO_ENROLL_SINCE_RAW = (process.env.TPS_AUTO_ENROLL_SINCE || "").trim();
+const AUTO_ENROLL_SINCE_OVERRIDE: string | null = (() => {
+  if (!AUTO_ENROLL_SINCE_RAW) return null;
+  const t = Date.parse(AUTO_ENROLL_SINCE_RAW);
   return Number.isFinite(t) ? new Date(t).toISOString() : null;
 })();
-const AUTO_ENROLL_SINCE_RAW = (process.env.TPS_AUTO_ENROLL_SINCE || "").trim();
+/** Always a real instant. There is no "no cutoff" mode any more. */
+const AUTO_ENROLL_SINCE: string =
+  AUTO_ENROLL_SINCE_OVERRIDE ?? new Date(DEFAULT_AUTO_ENROLL_SINCE).toISOString();
 
 function checkAuth(req: NextRequest): boolean {
   const auth = req.headers.get("authorization") || "";
@@ -132,11 +145,12 @@ export async function GET(req: NextRequest) {
     // like a healthy sweep finding nothing to do, so the mode is reported
     // rather than inferred. `misconfigured` means the env var was set to
     // something unparseable and was IGNORED — surfaced, never guessed at.
-    autoEnrollMode: AUTO_ENROLL_SINCE
-      ? `live_subs_approved_since:${AUTO_ENROLL_SINCE}`
-      : AUTO_ENROLL_SINCE_RAW
-        ? `misconfigured:TPS_AUTO_ENROLL_SINCE=${AUTO_ENROLL_SINCE_RAW.slice(0, 40)} — ignored, enrolling ALL approved`
-        : "no_cutoff:enrolling ALL approved (backfill behaviour)",
+    autoEnrollMode:
+      AUTO_ENROLL_SINCE_RAW && !AUTO_ENROLL_SINCE_OVERRIDE
+        ? `live_subs_approved_since:${AUTO_ENROLL_SINCE} (committed default — TPS_AUTO_ENROLL_SINCE=${AUTO_ENROLL_SINCE_RAW.slice(0, 40)} is unparseable and was IGNORED)`
+        : AUTO_ENROLL_SINCE_OVERRIDE
+          ? `live_subs_approved_since:${AUTO_ENROLL_SINCE} (env override)`
+          : `live_subs_approved_since:${AUTO_ENROLL_SINCE} (committed default)`,
     reclaimed: 0,
     scanned: 0,
     needPhone: 0,
@@ -208,9 +222,9 @@ export async function GET(req: NextRequest) {
      * mode this codebase keeps having. The page filter runs server-side so the
      * cutoff cannot be defeated by pagination.
      */
-    if (AUTO_ENROLL_SINCE) {
-      q = q.or(`reviewed_at.gte.${AUTO_ENROLL_SINCE},and(reviewed_at.is.null,created_at.gte.${AUTO_ENROLL_SINCE})`);
-    }
+    // Unconditional: AUTO_ENROLL_SINCE is always a real instant, so there is no
+    // code path in which the cutoff is skipped.
+    q = q.or(`reviewed_at.gte.${AUTO_ENROLL_SINCE},and(reviewed_at.is.null,created_at.gte.${AUTO_ENROLL_SINCE})`);
     const { data, error } = await q;
     if (error) {
       return NextResponse.json({ ok: false, error: error.message }, { status: 500 });
