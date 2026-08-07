@@ -207,9 +207,20 @@ export async function reconcileReceipts(
       continue;
     }
 
-    for (const r of group) {
+    // One carrier message may resolve only ONE receipt. A retried step re-sends
+    // the same rendered text, so two receipts in a chat can share a body hash
+    // and a 30-minute window. Searching the full list per receipt would let a
+    // single delivered row close both — and if the other send never reached the
+    // carrier at all, that failure would vanish from the breaker's evidence.
+    // Consumed rows are withdrawn from the pool as they are claimed; the group
+    // is walked oldest-first so the pairing is stable across runs.
+    const consumed = new Set<string>();
+    const remaining = () => messages.filter((m) => !consumed.has(String(m.id ?? "")));
+
+    for (const r of [...group].sort((a, b) => Date.parse(a.sent_at) - Date.parse(b.sent_at))) {
       const sentAtMs = Date.parse(r.sent_at);
-      const hit = matchThreadMessage(messages, { bodyHash: r.body_hash, sentAtMs });
+      const hit = matchThreadMessage(remaining(), { bodyHash: r.body_hash, sentAtMs });
+      if (hit) consumed.add(String(hit.id ?? ""));
       if (!hit) {
         // The thread WAS read and our message is not in it. That is a real
         // answer, so this attempt counts.

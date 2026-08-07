@@ -126,6 +126,26 @@ assert.equal(
   "a web-only thread yields no match, never a false delivered",
 );
 
+// ── One carrier row resolves ONE receipt ──────────────────────────────────
+// A retried step re-sends identical text, so two receipts in one chat can share
+// a body hash and a window. If both matched the same delivered row, a send that
+// never reached the carrier would vanish from the breaker's evidence. The
+// reconciler withdraws each matched row from the pool; this pins the matcher
+// behaviour that makes that possible — a stable, id-bearing choice.
+const twoSends = [
+  { direction: "outbound", platform: "api", message: "Our drip copy", api_send_status: "delivered", msg_sid: "sid-a", id: 1, created_at: "2026-08-07 13:04:12" },
+  { direction: "outbound", platform: "api", message: "Our drip copy", api_send_status: "Failed", msg_sid: null, id: 2, created_at: "2026-08-07 13:20:00" },
+];
+const firstPick = matchThreadMessage(twoSends, { bodyHash: ourCopy, sentAtMs: Date.parse("2026-08-07T13:04:12Z") });
+assert.equal(firstPick?.id, 1, "nearest in time wins");
+// With row 1 withdrawn, the later receipt must land on row 2 and see its failure.
+const secondPick = matchThreadMessage(
+  twoSends.filter((m) => m.id !== 1),
+  { bodyHash: ourCopy, sentAtMs: Date.parse("2026-08-07T13:20:00Z") },
+);
+assert.equal(secondPick?.id, 2);
+assert.equal(readReceiptFacts(secondPick!).status, "failed", "the second send's failure must survive");
+
 // ── The breaker ───────────────────────────────────────────────────────────
 const at = (n: number) => sentAt - n * 60_000;
 const fails = (n: number): ReceiptSample[] =>
