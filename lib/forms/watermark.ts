@@ -404,6 +404,20 @@ async function watermarkPdf(bytes: Buffer, prov: WatermarkProvenance): Promise<W
 
   const raster = await watermarkPdfRaster(bytes, prov);
   if (raster.ok) return raster;
+
+  // Same rule on the way out. When RASTER is the one refusing on document
+  // policy, that refusal is the terminal, ACTIONABLE reason — the operator has
+  // to split the file. The overlay's own failure here is "I could not read this
+  // source" (encrypted / broken), which is neither actionable nor the blocker,
+  // and pairing them produces
+  // `overlay_failed[overlay_encrypted_source]|raster_failed[pdf_too_many_pages:121]`
+  // — the same two-faults-in-one-string confusion this function exists to avoid.
+  // Any OTHER raster failure keeps the compound string, because then both halves
+  // are genuinely diagnostic. Flagged by CodeRabbit on PR #136.
+  if (SHARED_POLICY_REFUSAL.some((code) => raster.error.includes(code))) {
+    return raster;
+  }
+
   return { ok: false, error: `overlay_failed[${overlay.error}]|raster_failed[${raster.error}]` };
 }
 

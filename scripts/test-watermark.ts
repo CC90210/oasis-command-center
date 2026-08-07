@@ -215,6 +215,56 @@ async function main() {
     }
   }
 
+  // 7) The RASTER page cap must actually fire, and report a single cause.
+  //
+  // MAX_PAGES_RASTER is only reachable through a source the OVERLAY cannot read,
+  // because the overlay's own cap is far higher and refuses first. An
+  // unencrypted over-cap PDF (case 5b) therefore never reaches raster — so
+  // without this fixture the raster cap would ship as a guard whose timing
+  // guarantee nothing proves. Encryption is the realistic way in: pdf-lib cannot
+  // decrypt, so the overlay bails and raster is the only path left.
+  //
+  // The reason must come back CLEAN. The overlay's "I could not read this"
+  // (`overlay_encrypted_source`) is not the blocker and is not actionable; the
+  // page count is. Pairing them into
+  // `overlay_failed[overlay_encrypted_source]|raster_failed[pdf_too_many_pages:121]`
+  // reproduces the same two-faults-in-one-string confusion this branch set out
+  // to remove. Flagged by CodeRabbit on PR #136.
+  const overCapFixture = join(here, "..", "tests", "fixtures", "encrypted-statement-over-cap.pdf");
+  let overCapBytes: Buffer | null = null;
+  try {
+    overCapBytes = readFileSync(overCapFixture);
+  } catch (e) {
+    console.error("FAIL: over-cap encrypted fixture missing —", e instanceof Error ? e.message : e);
+    console.error(`      looked in: ${overCapFixture}`);
+    console.error("      regenerate with: python scripts/make-encrypted-pdf-fixture.py");
+    failures++;
+  }
+  if (overCapBytes) {
+    const wmOver = await watermarkBankStatement({
+      bytes: overCapBytes,
+      mimeType: "application/pdf",
+      provenance: prov,
+    });
+    if (wmOver.ok) {
+      console.error("FAIL: an over-cap encrypted PDF was branded — the raster cap did not fire:", {
+        pages: wmOver.pages,
+      });
+      failures++;
+    } else if (!wmOver.error.includes("pdf_too_many_pages")) {
+      console.error("FAIL: over-cap encrypted PDF failed for the wrong reason:", wmOver.error);
+      failures++;
+    } else if (wmOver.error.includes("overlay_failed") || wmOver.error.includes("raster_failed")) {
+      console.error(
+        "FAIL: raster page-cap refusal is still a compound error, not one cause:",
+        wmOver.error,
+      );
+      failures++;
+    } else {
+      console.log("ok raster page cap fires and reports a single cause:", wmOver.error);
+    }
+  }
+
   console.log(failures === 0 ? "\nALL WATERMARK TESTS PASSED" : `\n${failures} FAILURE(S)`);
   process.exit(failures === 0 ? 0 : 1);
 }
