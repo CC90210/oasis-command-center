@@ -22,6 +22,76 @@ import { r2Configured, r2StorageSurface } from "@/lib/r2-storage";
 let _serviceCached: SupabaseClient | null = null;
 let _hybridCached: SupabaseClient | null = null;
 
+type RpcShape = {
+  data: unknown;
+  error: { message: string; code?: string; details?: unknown; hint?: unknown } | null;
+  count: number | null;
+  status: number;
+  statusText: string;
+};
+
+/**
+ * Make an rpc() result chainable, the way supabase-js's PostgrestFilterBuilder is.
+ *
+ * The proxy used to return a bare Promise. Real supabase-js returns a builder,
+ * so any `.rpc(...).abortSignal(sig)` — or .single(), .maybeSingle(),
+ * .throwOnError() — was a TypeError thrown INSIDE the caller's try block.
+ *
+ * That took down every TextTorrent SMS path: operator replies, per-lead SMS,
+ * drip SMS steps, scheduled sends, inbox sync. Each surfaced as a 503
+ * "rate_limiter_unavailable", which reads like a vendor outage. tsc could not
+ * catch it because getServiceSupabase() is typed as SupabaseClient.
+ *
+ * abortSignal is honoured rather than accepted-and-ignored — the caller uses it
+ * as a timeout, and silently dropping it would turn a fast failure into a hang.
+ */
+function chainableRpc(promise: Promise<RpcShape>): Promise<RpcShape> {
+  const api = {
+    then: (...a: Parameters<Promise<RpcShape>["then"]>) => promise.then(...a),
+    catch: (...a: Parameters<Promise<RpcShape>["catch"]>) => promise.catch(...a),
+    finally: (...a: Parameters<Promise<RpcShape>["finally"]>) => promise.finally(...a),
+
+    abortSignal(signal: AbortSignal) {
+      return chainableRpc(new Promise<RpcShape>((resolve, reject) => {
+        if (signal.aborted) {
+          reject(new DOMException("The operation was aborted.", "AbortError"));
+          return;
+        }
+        const onAbort = () =>
+          reject(new DOMException("The operation was aborted.", "AbortError"));
+        signal.addEventListener("abort", onAbort, { once: true });
+        promise.then(
+          (v) => { signal.removeEventListener("abort", onAbort); resolve(v); },
+          (e) => { signal.removeEventListener("abort", onAbort); reject(e); },
+        );
+      }));
+    },
+
+    single() {
+      return chainableRpc(promise.then((r) => ({
+        ...r,
+        data: Array.isArray(r.data) ? (r.data[0] ?? null) : r.data,
+      })));
+    },
+    maybeSingle() {
+      return api.single();
+    },
+    // PostgREST's .select() on an rpc() shapes the returned columns; the shim
+    // already returns full rows, so this is an accepted no-op rather than an
+    // error — refusing it would break callers for no behavioural gain.
+    select() {
+      return api;
+    },
+    throwOnError() {
+      return chainableRpc(promise.then((r) => {
+        if (r.error) throw new Error(r.error.message);
+        return r;
+      }));
+    },
+  };
+  return api as unknown as Promise<RpcShape>;
+}
+
 function makeSupabaseService(): SupabaseClient {
   if (_serviceCached) return _serviceCached;
   const url = process.env.BRAVO_SUPABASE_URL;
@@ -102,18 +172,18 @@ export function getServiceSupabase(): SupabaseClient {
           // split-brain. Shape matches supabase-js: resolves { data, error }.
           const shimmed = TURSO_RPC_SHIM[name];
           if (shimmed) {
-            return shimmed(getTursoClient(), args ?? {}).then(
+            return chainableRpc(shimmed(getTursoClient(), args ?? {}).then(
               (data) => ({ data, error: null, count: null, status: 200, statusText: "OK" }),
               (e: unknown) => ({
                 data: null, count: null, status: 400, statusText: "Bad Request",
                 error: { message: e instanceof Error ? e.message : String(e),
                          code: "TURSO_RPC_ERROR", details: null, hint: null },
               }),
-            );
+            ));
           }
           if (RPC_PASSTHROUGH.has(name)) return target.rpc(name, args);
           // Thenable error response, matching supabase-js's non-throwing shape.
-          return Promise.resolve({
+          return chainableRpc(Promise.resolve({
             data: null,
             count: null,
             status: 400,
@@ -128,7 +198,7 @@ export function getServiceSupabase(): SupabaseClient {
               details: null,
               hint: null,
             },
-          });
+          }));
         };
       }
       // Storage: Turso has no object store, so `.storage` routes to R2 when
@@ -166,21 +236,21 @@ export async function getAuthedSupabase() {
         return (name: string, args?: Record<string, unknown>) => {
           const shimmed = TURSO_RPC_SHIM[name];
           if (shimmed) {
-            return shimmed(getTursoClient(), args ?? {}).then(
+            return chainableRpc(shimmed(getTursoClient(), args ?? {}).then(
               (data) => ({ data, error: null, count: null, status: 200, statusText: "OK" }),
               (e: unknown) => ({
                 data: null, count: null, status: 400, statusText: "Bad Request",
                 error: { message: e instanceof Error ? e.message : String(e),
                          code: "TURSO_RPC_ERROR", details: null, hint: null },
               }),
-            );
+            ));
           }
           if (RPC_PASSTHROUGH.has(name)) return target.rpc(name, args);
-          return Promise.resolve({
+          return chainableRpc(Promise.resolve({
             data: null, count: null, status: 400, statusText: "Bad Request",
             error: { message: `rpc("${name}") is blocked under EMPIRE_DATA_BACKEND=turso_cloud`,
                      code: "TURSO_RPC_BLOCKED", details: null, hint: null },
-          });
+          }));
         };
       }
       // Storage: Turso has no object store, so `.storage` routes to R2 when
