@@ -51,7 +51,10 @@ export const DRIP_CHECKS: DripCheck[] = [
     observe: (db, tenantId, endMs) =>
       countOrNull(
         db.from("drip_runs").select("id", { count: "exact", head: true })
-          .eq("tenant_id", tenantId).eq("channel", "sms").eq("status", "sent")
+          // 'done' as well as 'sent': a sequence-final SMS lands as 'done', and
+          // a delivery failure on the LAST step is no less invisible than one
+          // in the middle.
+          .eq("tenant_id", tenantId).eq("channel", "sms").in("status", ["sent", "done"])
           .is("provider_message_id", null).like("last_error", "delivery_failed:%")
           .gte("created_at", iso(endMs - DAY)).lt("created_at", iso(endMs)),
       ),
@@ -128,7 +131,12 @@ export const DRIP_CHECKS: DripCheck[] = [
       // accident this file exists to catch, so both are stated.
       const sent = await countOrNull(
         db.from("drip_runs").select("id", { count: "exact", head: true })
-          .eq("tenant_id", tenantId).eq("channel", "sms").eq("status", "sent")
+          // BOTH terminal statuses. advanceRow writes `isLast ? "done" : "sent"`,
+          // so every sequence-final SMS lands as 'done' — 84 of 568 real sends
+          // over 60 days, 15%. Keyed on 'sent' alone this check ignored all of
+          // them, and a one-step SMS sequence would leave both sides of the
+          // comparison at zero: perfectly healthy-looking, entirely unmeasured.
+          .eq("tenant_id", tenantId).eq("channel", "sms").in("status", ["sent", "done"])
           .not("from_identity", "is", null)
           .not("from_identity", "like", "dry:%")
           // Bounded on sent_at, NOT created_at. A drip row is created when the
