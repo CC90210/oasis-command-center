@@ -42,6 +42,17 @@ export const PUBLIC_PATH_PREFIXES = [
   // (chicken-and-egg; the class of bug breeze's first flipped deploy hit).
   // Each rate-limits / CSRF-guards inside.
   "/api/auth/turso-login",
+  // The rest of the Turso auth surface, for the same chicken-and-egg reason:
+  // none of these can require the session they exist to create or repair.
+  // Verified by execution, not assumed — without these entries middleware
+  // rewrote them to the login page and they answered 200 with HTML, so a
+  // caller doing response.json() got a parse error rather than a 401.
+  "/api/auth/turso-signup",
+  "/api/auth/turso-me",             // returns {user:null} when signed out — by design
+  "/api/auth/turso-reset-request",  // always 200; no account enumeration
+  "/api/auth/turso-reset-confirm",  // the reset TOKEN is the credential
+  // NOTE: /api/auth/turso-change-password is deliberately NOT here. It requires
+  // a live session and verifies the current password inside.
   "/api/auth/google/start",
   "/api/auth/google/callback",
   "/api/auth/provision",   // legacy + setup-wizard provision (Bearer-auth gated inside)
@@ -212,6 +223,13 @@ export async function middleware(req: NextRequest) {
     const session = await verifySessionEdge(token, process.env.AUTH_SESSION_SECRET);
     if (session) {
       return NextResponse.next({ request: { headers: requestHeaders } });
+    }
+    // Same rule the Supabase branch below applies, and for the same reason:
+    // an /api/* caller doing response.json() on a 307 redirect to an HTML login
+    // page gets a parse error, not an auth error. Turso mode was redirecting
+    // API requests — caught by executing the routes rather than reading them.
+    if (pathname.startsWith("/api/")) {
+      return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
     }
     if (isHome) return rewriteMarketingHome();
     const redirect = new URL("/login", req.url);

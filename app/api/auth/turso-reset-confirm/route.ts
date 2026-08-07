@@ -54,10 +54,17 @@ export async function POST(req: NextRequest) {
   const now = new Date().toISOString();
 
   // Compare-and-swap: claim the token and confirm we were the one who claimed it.
+  //
+  // unixepoch() on both sides, NOT a string comparison. expires_at and `now`
+  // are produced independently, and TEXT comparison silently mis-orders the two
+  // common shapes: '2026-08-07 05:55:31' (SQLite datetime) vs
+  // '2026-08-07T04:55:31.951Z' (ISO). At character 11 a space sorts before 'T',
+  // so a token valid for another hour reads as ALREADY EXPIRED and the user is
+  // told their link is invalid with nothing to diagnose. unixepoch parses both.
   const claim = await db.execute({
     sql: `UPDATE "_auth_tokens" SET used_at = ?
           WHERE token_hash = ? AND purpose = 'password_reset'
-            AND used_at IS NULL AND expires_at > ?`,
+            AND used_at IS NULL AND unixepoch(expires_at) > unixepoch(?)`,
     args: [now, hash, now],
   });
   if (!claim.rowsAffected) {
