@@ -44,6 +44,8 @@ import { sendDripSms, sendDripEmail } from "@/lib/drips/send";
 import { brandIsSendable, type BrandKey } from "@/lib/email/brands";
 import { brandFooter } from "@/lib/email/brand-shell";
 import { isWithinSendWindow } from "@/lib/sms/compliance";
+import { smsSendAllowed } from "@/lib/sms/send-breaker";
+import { openReceipt } from "@/lib/sms/delivery-receipts";
 import { loadBrandsForLeads } from "@/lib/drips/brand-store";
 import { poolFor, resolveCopy, type PoolTemplate } from "@/lib/drips/template-pool";
 import { loadApprovedPool } from "@/lib/drips/template-pool-store";
@@ -814,6 +816,35 @@ async function processSmsStep(
 
   let fromIdentity = `dry:${identity.repKey}:${identity.senderId}`;
   if (shouldSend) {
+    // DELIVERY BREAKER. TextTorrent's send endpoint returns 201 for messages the
+    // carrier then refuses; between 2026-07-27 and 2026-08-07 it returned 201 to
+    // 51 consecutive sends that all failed, and we were billed for every one.
+    // The breaker reads the carrier's own verdicts and stops the bleed.
+    //
+    // RESCHEDULE rather than fail: the route being dead is not this lead's
+    // fault, and burning an attempt (or advancing the sequence past a step the
+    // merchant never received) would turn a vendor outage into permanent damage
+    // to the sequence.
+    const breaker = await smsSendAllowed(row.tenant_id);
+    if (breaker.halt) {
+      await writeAgentAlert({
+        tenantId: row.tenant_id,
+        alertType: "sms_carrier_route_dead",
+        lane: "sunbiz-ops",
+        severity: "urgent",
+        title: "SMS halted — the carrier is refusing our sends",
+        body:
+          `${breaker.reason}. Drip SMS is paused and every affected step reschedules +2h ` +
+          `(no attempt burned, no merchant dropped). TextTorrent returns HTTP 201 on these, ` +
+          `so nothing else would have caught it.`,
+        telegramOncePerOpen: true, // one page per outage, not one per row
+      }).catch(() => {});
+      return markRescheduled(
+        db, row, new Date(Date.now() + 2 * 3_600_000).toISOString(),
+        `sms_carrier_halt: ${breaker.reason}`,
+      );
+    }
+
     const result = await sendDripSms(row.tenant_id, phone, clean.cleaned, identity);
     if (!result.ok) {
       // GLOBAL transient: TT credit exhaustion hits EVERY send at once. Burning
@@ -849,6 +880,27 @@ async function processSmsStep(
       return markRetryOrFail(db, row, result.error);
     }
     fromIdentity = `${identity.repKey}:${result.fromNumber}`;
+
+    // Open a delivery receipt. A 201 means TextTorrent accepted the REQUEST;
+    // the carrier rules on it seconds-to-minutes later and that verdict is the
+    // only proof of arrival. /api/cron/reconcile-sms closes this out.
+    //
+    // Best-effort by design: bookkeeping must never fail a merchant's step. A
+    // receipt that fails to open surfaces as missing coverage in the
+    // sms.receipt_coverage health check, not as a lost send.
+    if (result.chatId) {
+      await openReceipt(db, {
+        tenantId: row.tenant_id,
+        dripRunId: row.id,
+        leadId: row.lead_id,
+        chatId: String(result.chatId),
+        repKey: identity.repKey,
+        actAsEmail: identity.actAsEmail,
+        fromNumber: result.fromNumber,
+        toPhone: phone,
+        body: clean.cleaned,
+      });
+    }
   }
 
   await logInteraction(db, {

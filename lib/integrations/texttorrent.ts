@@ -552,6 +552,29 @@ export async function getThread(
   };
 }
 
+/**
+ * Pull a chat's messages WITHOUT normalising away the carrier fields.
+ *
+ * getThread() above flattens each message for the Conversations UI and drops
+ * `msg_sid`, `segment`, `credit` and `platform`. Delivery reconciliation needs
+ * all of them: msg_sid is null exactly when the carrier refused, and credits are
+ * how we account for spend on mail that never arrived. Returning the raw rows
+ * keeps that decision in one place instead of widening the UI shape.
+ */
+export async function getThreadRaw(
+  creds: TextTorrentCredentials,
+  chatId: string,
+  opts: { limit?: number } = {},
+): Promise<Array<Record<string, unknown>>> {
+  const resp = await ttFetch<{
+    data?: { messages?: { data?: Array<Record<string, unknown>> } | Array<Record<string, unknown>> };
+  }>(creds, `/inbox/${encodeURIComponent(chatId)}`, {
+    query: { limit: opts.limit },
+  });
+  const msgsRaw = resp?.data?.messages;
+  return Array.isArray(msgsRaw) ? msgsRaw : msgsRaw?.data || [];
+}
+
 export function replyToThread(
   creds: TextTorrentCredentials,
   args: { number: string; message: string; sender_id?: string },

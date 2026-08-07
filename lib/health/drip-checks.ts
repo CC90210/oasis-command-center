@@ -84,6 +84,50 @@ export const DRIP_CHECKS: DripCheck[] = [
     describe: (r) => `Emails sent in the last 24h: ${r.observed} (normal ${r.baseline}). ${r.reason}`,
   },
   {
+    // THE check for the 2026-07-27 outage: the carrier's own verdict. 51
+    // consecutive API sends were refused over ten days while every row read
+    // 'sent', because nothing compared what we sent against what arrived.
+    // must_be_zero on FAILURES rather than a rate, so a low-volume day cannot
+    // dilute a dead route into looking merely quiet.
+    id: "sms.carrier_failures_24h",
+    severity: "critical",
+    rule: { kind: "must_be_zero" },
+    observe: (db, tenantId, endMs) =>
+      countOrNull(
+        db.from("sms_delivery_receipts").select("id", { count: "exact", head: true })
+          .eq("tenant_id", tenantId).eq("carrier_status", "failed")
+          .gte("sent_at", iso(endMs - DAY)).lt("sent_at", iso(endMs)),
+      ),
+    describe: (r) =>
+      `${r.observed} SMS rejected by the carrier in the last 24h. These were billed and did NOT arrive. ` +
+      `TextTorrent returns HTTP 201 on exactly these, so no other signal shows them.`,
+  },
+  {
+    // Receipts are the instrument. If sends stop producing them, the instrument
+    // is broken and every other SMS check silently reads clean — the precise
+    // shape of failure this whole subsystem exists to prevent.
+    id: "sms.receipt_coverage",
+    severity: "high",
+    rule: { kind: "must_be_zero" },
+    observe: async (db, tenantId, endMs) => {
+      const sent = await countOrNull(
+        db.from("lead_interactions").select("id", { count: "exact", head: true })
+          .eq("tenant_id", tenantId).eq("type", "sms_sent").eq("direction", "outbound")
+          .gte("created_at", iso(endMs - DAY)).lt("created_at", iso(endMs)),
+      );
+      const receipts = await countOrNull(
+        db.from("sms_delivery_receipts").select("id", { count: "exact", head: true })
+          .eq("tenant_id", tenantId)
+          .gte("sent_at", iso(endMs - DAY)).lt("sent_at", iso(endMs)),
+      );
+      if (sent === null || receipts === null) return null;
+      return Math.max(0, sent - receipts);
+    },
+    describe: (r) =>
+      `${r.observed} SMS send(s) in the last 24h have no delivery receipt. ` +
+      `Those sends are unverifiable: we cannot tell whether they arrived.`,
+  },
+  {
     // A backlog that stops draining is the shape of a stalled dispatcher, and
     // it is visible before output drops to zero.
     id: "drips.overdue_backlog",

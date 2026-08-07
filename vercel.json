@@ -88,6 +88,10 @@
     {
       "path": "/api/cron/sync-sms-numbers",
       "schedule": "0 6,18 * * *"
+    },
+    {
+      "path": "/api/cron/reconcile-sms",
+      "schedule": "*/15 * * * *"
     }
   ]
 }
