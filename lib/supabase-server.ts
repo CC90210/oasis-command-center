@@ -17,6 +17,7 @@ import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import { getTursoClient, tursoConfigured } from "@/lib/turso";
 import { createTursoPostgrest } from "@/lib/turso-postgrest";
 import { TURSO_RPC_SHIM } from "@/lib/turso-rpc-shim";
+import { r2Configured, r2StorageSurface } from "@/lib/r2-storage";
 
 let _serviceCached: SupabaseClient | null = null;
 let _hybridCached: SupabaseClient | null = null;
@@ -103,6 +104,14 @@ export function getServiceSupabase(): SupabaseClient {
           });
         };
       }
+      // Storage: Turso has no object store, so `.storage` routes to R2 when
+      // it is configured. Intercepting here rather than editing 23 call sites
+      // across 11 files — the same approach `.from()` and `.rpc()` already use.
+      // Without this, `.storage` passed straight through to Supabase and stayed
+      // a hard dependency no matter what the data plane did.
+      if (prop === "storage" && r2Configured()) {
+        return r2StorageSurface();
+      }
       return Reflect.get(target, prop, receiver);
     },
   }) as SupabaseClient;
@@ -146,6 +155,14 @@ export async function getAuthedSupabase() {
                      code: "TURSO_RPC_BLOCKED", details: null, hint: null },
           });
         };
+      }
+      // Storage: Turso has no object store, so `.storage` routes to R2 when
+      // it is configured. Intercepting here rather than editing 23 call sites
+      // across 11 files — the same approach `.from()` and `.rpc()` already use.
+      // Without this, `.storage` passed straight through to Supabase and stayed
+      // a hard dependency no matter what the data plane did.
+      if (prop === "storage" && r2Configured()) {
+        return r2StorageSurface();
       }
       return Reflect.get(target, prop, receiver);
     },
