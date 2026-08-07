@@ -284,18 +284,19 @@ async function bumpAttempt(
  * Returns null on a failed read so the caller can tell "no work" from "could
  * not look".
  */
-export async function tenantsWithOpenReceipts(
-  opts: { nowMs?: number; lookbackMs?: number } = {},
-): Promise<string[] | null> {
+export async function tenantsWithOpenReceipts(): Promise<string[] | null> {
   const db = getServiceSupabase();
-  const nowMs = opts.nowMs ?? Date.now();
-  const since = new Date(nowMs - (opts.lookbackMs ?? 7 * 24 * 3_600_000)).toISOString();
   try {
+    // No lookback window. An earlier version looked back 7 days, which was
+    // strictly worse than useless: retirement happens at 3 days, so any receipt
+    // that aged past the window could never be DISCOVERED and therefore could
+    // never be retired either. After a cron outage longer than the window, a
+    // non-SunBiz tenant's queue would have been stale forever. Retirement is
+    // what bounds this set, so the window bought nothing.
     const r = await db
       .from("sms_delivery_receipts")
       .select("tenant_id")
       .is("resolved_at", null)
-      .gte("sent_at", since)
       .limit(5000);
     if (r.error) return null;
     return [...new Set((r.data || []).map((x) => String(x.tenant_id)))];
