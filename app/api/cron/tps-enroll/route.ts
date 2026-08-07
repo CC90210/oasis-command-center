@@ -32,6 +32,35 @@ const ENROLL_BATCH = Number(process.env.TPS_ENROLL_BATCH || 25);
 const MAX_AUTO_ATTEMPTS = Number(process.env.TPS_MAX_AUTO_ATTEMPTS || 3);
 const DEDUPE_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
 
+/**
+ * Only auto-enrol Live Subs approved AT OR AFTER this instant. Everything
+ * approved before it is manual-button only.
+ *
+ * Adon, 2026-08-07: "For every single live sub that comes in starting now, it
+ * should have automatic people search... the leads we want to get now are done
+ * manually and all the new leads that are coming in are done automatically."
+ *
+ * This sweep was written to enrol on END STATE — approved + has a lead + has no
+ * phone — deliberately, so a Live Sub could not be missed because of the route
+ * it arrived through, and so the first run doubled as the backfill. That is
+ * exactly the behaviour to stop now: without a cutoff the sweep re-queues the
+ * entire approved history on every run, which is the automatic spend on old
+ * leads Adon is cutting. The end-state design still holds for anything AFTER
+ * the cutoff.
+ *
+ * Unset = no cutoff (original backfill behaviour), so a missing env var cannot
+ * silently switch enrolment off — it fails toward the documented old behaviour,
+ * and the response reports which mode it ran in. An unparseable value is
+ * treated as unset and reported, never as epoch-0 or as "now".
+ */
+const AUTO_ENROLL_SINCE: string | null = (() => {
+  const raw = (process.env.TPS_AUTO_ENROLL_SINCE || "").trim();
+  if (!raw) return null;
+  const t = Date.parse(raw);
+  return Number.isFinite(t) ? new Date(t).toISOString() : null;
+})();
+const AUTO_ENROLL_SINCE_RAW = (process.env.TPS_AUTO_ENROLL_SINCE || "").trim();
+
 function checkAuth(req: NextRequest): boolean {
   const auth = req.headers.get("authorization") || "";
   const bearer = auth.startsWith("Bearer ") ? auth.slice(7) : "";
@@ -99,6 +128,15 @@ export async function GET(req: NextRequest) {
   const summary = {
     ok: true,
     write,
+    // Stated on every run. A cutoff that quietly stops enrolling looks exactly
+    // like a healthy sweep finding nothing to do, so the mode is reported
+    // rather than inferred. `misconfigured` means the env var was set to
+    // something unparseable and was IGNORED — surfaced, never guessed at.
+    autoEnrollMode: AUTO_ENROLL_SINCE
+      ? `live_subs_approved_since:${AUTO_ENROLL_SINCE}`
+      : AUTO_ENROLL_SINCE_RAW
+        ? `misconfigured:TPS_AUTO_ENROLL_SINCE=${AUTO_ENROLL_SINCE_RAW.slice(0, 40)} — ignored, enrolling ALL approved`
+        : "no_cutoff:enrolling ALL approved (backfill behaviour)",
     reclaimed: 0,
     scanned: 0,
     needPhone: 0,
@@ -153,17 +191,34 @@ export async function GET(req: NextRequest) {
   while (!done) {
     let q = db
       .from(CANDIDATE_TABLE)
-      .select("id, tenant_id, created_lead_id")
+      .select("id, tenant_id, created_lead_id, reviewed_at, created_at")
       .eq("status", "approved")
       .not("created_lead_id", "is", null)
       .order("id", { ascending: true })
       .limit(PAGE);
     if (cursor) q = q.gt("id", cursor);
+    /*
+     * `reviewed_at` is when a candidate BECAME a Live Sub (an operator approved
+     * it), which is the event Adon means by "comes in". created_at is when the
+     * scrubber first wrote the row, which can predate approval by days.
+     *
+     * `or(...)` rather than a plain gte so a row with a NULL reviewed_at falls
+     * back to created_at instead of vanishing: PostgREST drops NULLs on a gte,
+     * and silently never enrolling a whole class of Live Sub is the failure
+     * mode this codebase keeps having. The page filter runs server-side so the
+     * cutoff cannot be defeated by pagination.
+     */
+    if (AUTO_ENROLL_SINCE) {
+      q = q.or(`reviewed_at.gte.${AUTO_ENROLL_SINCE},and(reviewed_at.is.null,created_at.gte.${AUTO_ENROLL_SINCE})`);
+    }
     const { data, error } = await q;
     if (error) {
       return NextResponse.json({ ok: false, error: error.message }, { status: 500 });
     }
-    const rows = (data ?? []) as { id: string; tenant_id: string; created_lead_id: string }[];
+    const rows = (data ?? []) as {
+      id: string; tenant_id: string; created_lead_id: string;
+      reviewed_at: string | null; created_at: string | null;
+    }[];
     if (!rows.length) break;
 
     // Batch job history for this page.
