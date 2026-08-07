@@ -215,6 +215,38 @@ async function bumpAttempt(db: Db, id: string, attempts: number | null, out: Rec
   if (r.error) out.errors.push(`bump ${id}: ${r.error.message}`.slice(0, 160));
 }
 
+/**
+ * Every tenant with receipts still waiting on a verdict.
+ *
+ * The executor opens receipts under each drip row's own tenant_id, so a
+ * reconciler hardcoded to one tenant would leave every other tenant's receipts
+ * open forever — and an all-open history reads as "nothing terminal yet", which
+ * the breaker correctly permits. The result is that the protection silently
+ * applies to exactly one tenant on a multi-tenant platform.
+ *
+ * Returns null on a failed read so the caller can tell "no work" from "could
+ * not look".
+ */
+export async function tenantsWithOpenReceipts(
+  opts: { nowMs?: number; lookbackMs?: number } = {},
+): Promise<string[] | null> {
+  const db = getServiceSupabase();
+  const nowMs = opts.nowMs ?? Date.now();
+  const since = new Date(nowMs - (opts.lookbackMs ?? 7 * 24 * 3_600_000)).toISOString();
+  try {
+    const r = await db
+      .from("sms_delivery_receipts")
+      .select("tenant_id")
+      .is("resolved_at", null)
+      .gte("sent_at", since)
+      .limit(5000);
+    if (r.error) return null;
+    return [...new Set((r.data || []).map((x) => String(x.tenant_id)))];
+  } catch {
+    return null;
+  }
+}
+
 export type RecentReceipt = { status: CarrierStatus; at: number };
 
 /**

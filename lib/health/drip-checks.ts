@@ -110,9 +110,27 @@ export const DRIP_CHECKS: DripCheck[] = [
     severity: "high",
     rule: { kind: "must_be_zero" },
     observe: async (db, tenantId, endMs) => {
+      // Counted against DRIP sends only, not every outbound SMS. Reps send far
+      // more by hand than the drip engine does (530 vs 113 on 2026-08-07) and
+      // those never open a receipt, so comparing against all sms_sent traffic
+      // would leave this check permanently red. A check that is always failing
+      // is one nobody reads, which is the alert-fatigue failure this subsystem
+      // exists to prevent.
+      //
+      // Two exclusions, both explicit on purpose:
+      //   from_identity NULL  — the row was ADVANCED, never sent. Measured
+      //     2026-08-07: 864 of 1,348 'sent' rows, of which a 400-row sample was
+      //     100% skips ("no_email_for_email_step",
+      //     "sms_delivery_failed_after_retries") and 0% carried a provider id.
+      //   from_identity "dry:%" — a rehearsal under DRIPS_LIVE unset.
+      // `NULL NOT LIKE 'dry:%'` is NULL in SQL, so a single not-like would have
+      // dropped the first group silently. Relying on that would be the same
+      // accident this file exists to catch, so both are stated.
       const sent = await countOrNull(
-        db.from("lead_interactions").select("id", { count: "exact", head: true })
-          .eq("tenant_id", tenantId).eq("type", "sms_sent").eq("direction", "outbound")
+        db.from("drip_runs").select("id", { count: "exact", head: true })
+          .eq("tenant_id", tenantId).eq("channel", "sms").eq("status", "sent")
+          .not("from_identity", "is", null)
+          .not("from_identity", "like", "dry:%")
           .gte("created_at", iso(endMs - DAY)).lt("created_at", iso(endMs)),
       );
       const receipts = await countOrNull(
@@ -124,7 +142,7 @@ export const DRIP_CHECKS: DripCheck[] = [
       return Math.max(0, sent - receipts);
     },
     describe: (r) =>
-      `${r.observed} SMS send(s) in the last 24h have no delivery receipt. ` +
+      `${r.observed} drip SMS send(s) in the last 24h have no delivery receipt. ` +
       `Those sends are unverifiable: we cannot tell whether they arrived.`,
   },
   {
