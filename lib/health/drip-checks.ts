@@ -131,7 +131,13 @@ export const DRIP_CHECKS: DripCheck[] = [
           .eq("tenant_id", tenantId).eq("channel", "sms").eq("status", "sent")
           .not("from_identity", "is", null)
           .not("from_identity", "like", "dry:%")
-          .gte("created_at", iso(endMs - DAY)).lt("created_at", iso(endMs)),
+          // Bounded on sent_at, NOT created_at. A drip row is created when the
+          // step is scheduled and sent much later: measured 2026-08-07, 91 of
+          // 200 sampled sends had a gap over 24h, the widest 171h. Keyed on
+          // created_at this check would have ignored roughly half of all real
+          // sends while receipts were counted on their true send time, so it
+          // could read "no missing receipts" over a total outage.
+          .gte("sent_at", iso(endMs - DAY)).lt("sent_at", iso(endMs)),
       );
       const receipts = await countOrNull(
         db.from("sms_delivery_receipts").select("id", { count: "exact", head: true })
