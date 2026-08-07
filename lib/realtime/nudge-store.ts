@@ -52,13 +52,21 @@ export async function bumpScopes(scopes: string[]): Promise<void> {
 export async function readScope(scope: string): Promise<string> {
   try {
     const db = getServiceSupabase();
-    const { data } = await db
+    const { data, error } = await db
       .from("_realtime_nudges")
       .select("bumped_at")
       .eq("scope", scope.trim().toLowerCase())
       .maybeSingle();
+    // Log rather than swallow. An empty return is indistinguishable from "never
+    // bumped", so a query error here silently disables live refresh forever and
+    // looks exactly like a working system with nothing to report.
+    if (error) {
+      console.error("[nudge] read failed", { scope, error });
+      return "";
+    }
     return (data as { bumped_at?: string } | null)?.bumped_at ?? "";
-  } catch {
+  } catch (e) {
+    console.error("[nudge] read threw", { scope, e });
     return "";
   }
 }

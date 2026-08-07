@@ -27,6 +27,33 @@ function makeSupabaseService(): SupabaseClient {
   const url = process.env.BRAVO_SUPABASE_URL;
   const key = process.env.BRAVO_SUPABASE_SERVICE_ROLE_KEY;
   if (!url || !key) {
+    // Turso mode does not need Supabase credentials, but this factory used to
+    // demand them anyway: the hybrid proxy wraps a REAL client, so constructing
+    // it threw before any routing could happen.
+    //
+    // That is a cancellation blocker, not a config nicety. The day the Supabase
+    // project is deleted these env vars go away, and every one of the 205
+    // service-role routes would throw here — with data, auth and storage all
+    // already migrated and working. Found because a local Turso-mode run
+    // happened to lack the vars and accidentally simulated post-cancellation.
+    //
+    // So under Turso mode, hand back a stub whose data surface the proxy
+    // replaces wholesale. Anything the proxy does NOT intercept (auth, channel)
+    // throws a message naming the real problem instead of a generic
+    // "misconfigured".
+    if (process.env.EMPIRE_DATA_BACKEND === "turso_cloud") {
+      _serviceCached = new Proxy({} as SupabaseClient, {
+        get(_t, prop) {
+          throw new Error(
+            `supabase.${String(prop)} is unavailable: Supabase is not configured and ` +
+            `EMPIRE_DATA_BACKEND=turso_cloud. Data goes through the Turso adapter, ` +
+            `storage through R2, and auth through the turso-* routes — this surface ` +
+            `has no replacement yet and must be ported.`
+          );
+        },
+      });
+      return _serviceCached;
+    }
     throw new Error(
       "Service Supabase misconfigured: BRAVO_SUPABASE_URL + BRAVO_SUPABASE_SERVICE_ROLE_KEY required."
     );
