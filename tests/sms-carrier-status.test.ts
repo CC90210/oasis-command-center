@@ -84,7 +84,14 @@ assert.equal(hashBody("  Our drip copy  "), ourCopy);
 assert.notEqual(hashBody("Our drip copy."), ourCopy);
 const facts = readReceiptFacts(hit!);
 assert.equal(facts.status, "failed");
-assert.equal(facts.msgSid, null, "a failed send carries no carrier sid");
+// Recorded, but NOT a delivery signal. Refused messages were observed both with
+// and without a sid on 2026-08-07, so only api_send_status may decide.
+assert.equal(facts.msgSid, null);
+assert.equal(
+  readReceiptFacts({ api_send_status: "failed", msg_sid: "6a76100c8479f998d605d3ab" }).status,
+  "failed",
+  "a present sid must never override a failed status",
+);
 assert.equal(facts.segments, 2);
 assert.equal(facts.credits, 6, "we are billed for failures, so credits must be recorded");
 assert.equal(facts.messageId, "42");
@@ -97,12 +104,26 @@ assert.equal(
   null,
   "outside the window there is no match",
 );
-// The rep's web message is in the same thread and delivered. It must never be
-// picked up as ours: that single mistake would have reported this outage green.
+// ── A rep pasting our template must never close our receipt ───────────────
+// This is the subtlest way the whole subsystem could fail. Reps work the same
+// threads and sometimes paste the same copy. Their sends go out on platform
+// "web" and DELIVER (0 failures in 530); ours go on "api" and do not (98 in
+// 113). Matching theirs would close our receipt as delivered and report a dead
+// route as healthy — the exact false green this exists to prevent.
+const sameCopyBothPlatforms = [
+  { direction: "outbound", platform: "web", message: "Our drip copy", api_send_status: "delivered", msg_sid: "sid-rep", id: 99, created_at: "2026-08-07 13:04:13" },
+  { direction: "outbound", platform: "api", message: "Our drip copy", api_send_status: "Failed", msg_sid: null, id: 42, created_at: "2026-08-07 13:04:12" },
+];
+const picked = matchThreadMessage(sameCopyBothPlatforms, { bodyHash: ourCopy, sentAtMs: sentAt });
+assert.equal(picked?.id, 42, "must pick the api send, not the rep's web send");
+assert.equal(readReceiptFacts(picked!).status, "failed");
+
+// And with ONLY the rep's message present, there is no match at all — better to
+// leave the receipt open than to close it on someone else's delivery.
 assert.equal(
-  matchThreadMessage(thread, { bodyHash: hashBody("Quick question for you"), sentAtMs: sentAt })?.platform,
-  "web",
-  "sanity: the matcher CAN see the rep message, it just must not match our hash",
+  matchThreadMessage([sameCopyBothPlatforms[0]], { bodyHash: ourCopy, sentAtMs: sentAt }),
+  null,
+  "a web-only thread yields no match, never a false delivered",
 );
 
 // ── The breaker ───────────────────────────────────────────────────────────

@@ -557,8 +557,10 @@ export async function getThread(
  *
  * getThread() above flattens each message for the Conversations UI and drops
  * `msg_sid`, `segment`, `credit` and `platform`. Delivery reconciliation needs
- * all of them: msg_sid is null exactly when the carrier refused, and credits are
- * how we account for spend on mail that never arrived. Returning the raw rows
+ * all of them: msg_sid identifies the message at the carrier, and credits are
+ * how we account for spend on mail that never arrived. Note that msg_sid is
+ * NOT a delivery signal — refused messages are observed both with and without
+ * one, so api_send_status is the only field that decides. Returning the raw rows
  * keeps that decision in one place instead of widening the UI shape.
  */
 export async function getThreadRaw(

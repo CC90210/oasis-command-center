@@ -4,8 +4,10 @@
 -- rejected by the carrier and every one was recorded as 'sent'. TextTorrent's
 -- send endpoint returns HTTP 201 for a message the carrier will refuse; the real
 -- verdict lands afterwards on the message object as `api_send_status`
--- (delivered | pending | failed) with a null `msg_sid` on failure. Nothing read
--- it, so a dead channel and a healthy one wrote identical rows.
+-- (delivered | pending | failed). Nothing read it, so a dead channel and a
+-- healthy one wrote identical rows. `api_send_status` is the only deciding
+-- field: a refused message may or may not carry a `msg_sid`, so a present sid
+-- proves nothing about arrival.
 --
 -- Measured 2026-08-07 across 643 outbound messages on the same numbers:
 --   platform=api (this codebase)       113 sent,  10 delivered,  98 failed

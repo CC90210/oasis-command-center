@@ -90,9 +90,22 @@ export type ReconcileResult = {
   errors: string[];
 };
 
-/** Give up on a receipt after this many attempts; the carrier is not going to
- *  report on it and an immortal row would be re-fetched forever. */
+/**
+ * Give up after this many attempts THAT ACTUALLY READ THE THREAD. A fetch that
+ * failed never asked the carrier anything, so it must not count: an hour of 429s
+ * from the shared 60/min limiter would otherwise burn every receipt's budget and
+ * resolve the lot as 'unknown', which the breaker ignores — quietly deleting the
+ * evidence of the outage this exists to catch.
+ */
 const MAX_CHECK_ATTEMPTS = 8;
+
+/**
+ * Absolute backstop so the queue cannot clog. Without it, a permanently
+ * unreadable thread is retried forever and, because the queue is oldest-first
+ * and capped per run, a few hundred of them would starve every newer receipt.
+ * Closed as 'unknown' — never counted as delivered.
+ */
+const MAX_RECEIPT_AGE_MS = 3 * 24 * 3_600_000;
 /** Do not bother the API about a send younger than this — the carrier has not
  *  had time to report and every early look burns a request for nothing. */
 const MIN_AGE_MS = 90_000;
@@ -113,6 +126,19 @@ export async function reconcileReceipts(
   const out: ReconcileResult = {
     examined: 0, resolved: 0, delivered: 0, failed: 0, stillOpen: 0, abandoned: 0, errors: [],
   };
+
+  // Retire anything past the absolute age first, so a wedge of unreadable
+  // threads cannot starve the queue head. 'unknown', never 'delivered'.
+  const tooOld = new Date(nowMs - MAX_RECEIPT_AGE_MS).toISOString();
+  const aged = await db
+    .from("sms_delivery_receipts")
+    .update({ resolved_at: new Date(nowMs).toISOString(), last_checked_at: new Date(nowMs).toISOString() })
+    .eq("tenant_id", tenantId)
+    .is("resolved_at", null)
+    .lt("sent_at", tooOld)
+    .select("id");
+  if (aged.error) out.errors.push(`retire aged: ${aged.error.message}`.slice(0, 160));
+  else out.abandoned += aged.data?.length ?? 0;
 
   const open = await db
     .from("sms_delivery_receipts")
@@ -151,11 +177,19 @@ export async function reconcileReceipts(
       });
       messages = await getThreadRaw(creds, chatId, { limit: 30 });
     } catch (err) {
-      // The thread could not be read. Count the attempt so a permanently
-      // unreadable chat eventually stops being retried, but leave the receipt
-      // OPEN — an unreadable carrier is not a delivery.
+      // The thread could not be read, so the carrier was never asked. Touch the
+      // timestamp but do NOT spend an attempt: a spell of 429s from the shared
+      // rate limiter would otherwise exhaust every receipt's budget and retire
+      // the batch as 'unknown', erasing exactly the evidence we are here to
+      // collect. The absolute age cutoff above is what bounds these instead.
       out.errors.push(`chat ${chatId}: ${err instanceof Error ? err.message : String(err)}`.slice(0, 160));
-      for (const r of group) await bumpAttempt(db, r.id, r.check_attempts, out);
+      out.stillOpen += group.length;
+      const touch = await db
+        .from("sms_delivery_receipts")
+        .update({ last_checked_at: new Date(nowMs).toISOString() })
+        .eq("tenant_id", tenantId)
+        .in("id", group.map((r) => r.id));
+      if (touch.error) out.errors.push(`touch: ${touch.error.message}`.slice(0, 160));
       continue;
     }
 
@@ -163,7 +197,9 @@ export async function reconcileReceipts(
       const sentAtMs = Date.parse(r.sent_at);
       const hit = matchThreadMessage(messages, { bodyHash: r.body_hash, sentAtMs });
       if (!hit) {
-        await bumpAttempt(db, r.id, r.check_attempts, out);
+        // The thread WAS read and our message is not in it. That is a real
+        // answer, so this attempt counts.
+        await bumpAttempt(db, tenantId, r.id, r.check_attempts, out);
         continue;
       }
       const facts = readReceiptFacts(hit);
@@ -178,7 +214,13 @@ export async function reconcileReceipts(
       };
       if (terminal) patch.resolved_at = new Date(nowMs).toISOString();
 
-      const upd = await db.from("sms_delivery_receipts").update(patch).eq("id", r.id);
+      // tenant_id on every write: the service role bypasses RLS, so the filter
+      // is the only thing keeping a mis-sourced id inside its own tenant.
+      const upd = await db
+        .from("sms_delivery_receipts")
+        .update(patch)
+        .eq("tenant_id", tenantId)
+        .eq("id", r.id);
       if (upd.error) {
         out.errors.push(`update ${r.id}: ${upd.error.message}`.slice(0, 160));
         continue;
@@ -196,13 +238,24 @@ export async function reconcileReceipts(
 }
 
 /**
- * Record a look that produced no verdict.
+ * Record a successful look that produced no verdict.
  *
- * A receipt we have chased MAX_CHECK_ATTEMPTS times is closed as 'unknown' with
- * a resolved_at, so it leaves the queue. It is deliberately NOT counted as
+ * Called ONLY when the thread was actually read and our message was not in it.
+ * A failed fetch never reaches here — see the catch above — because spending an
+ * attempt on a question we never asked is how a rate-limit spell would quietly
+ * retire the whole queue.
+ *
+ * A receipt chased MAX_CHECK_ATTEMPTS times is closed as 'unknown' with a
+ * resolved_at so it leaves the queue. It is deliberately NOT counted as
  * delivered or failed anywhere downstream: an unanswered question is not a pass.
  */
-async function bumpAttempt(db: Db, id: string, attempts: number | null, out: ReconcileResult): Promise<void> {
+async function bumpAttempt(
+  db: Db,
+  tenantId: string,
+  id: string,
+  attempts: number | null,
+  out: ReconcileResult,
+): Promise<void> {
   const next = (attempts ?? 0) + 1;
   const patch: Record<string, unknown> = { check_attempts: next, last_checked_at: new Date().toISOString() };
   if (next >= MAX_CHECK_ATTEMPTS) {
@@ -211,7 +264,11 @@ async function bumpAttempt(db: Db, id: string, attempts: number | null, out: Rec
   } else {
     out.stillOpen++;
   }
-  const r = await db.from("sms_delivery_receipts").update(patch).eq("id", id);
+  const r = await db
+    .from("sms_delivery_receipts")
+    .update(patch)
+    .eq("tenant_id", tenantId)
+    .eq("id", id);
   if (r.error) out.errors.push(`bump ${id}: ${r.error.message}`.slice(0, 160));
 }
 

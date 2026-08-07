@@ -8,9 +8,12 @@
  *
  * The 201 is the trap. It means TextTorrent accepted the REQUEST. The carrier
  * (SignalHouse) decides delivery afterwards and reports it on the message
- * object as `api_send_status`, with a null `msg_sid` on failure. Nothing in
- * this codebase had ever read that field, so a dead channel and a healthy one
- * produced identical rows.
+ * object as `api_send_status`. Nothing in this codebase had ever read that
+ * field, so a dead channel and a healthy one produced identical rows.
+ *
+ * `api_send_status` is the ONLY field that decides. A refused message may or
+ * may not carry a `msg_sid` — both were observed on 2026-08-07 — so treating a
+ * present sid as proof of arrival would reintroduce the same false green.
  *
  * Measured over 643 outbound messages on 2026-08-07:
  *
@@ -73,6 +76,7 @@ export function parseTtTimestamp(raw: unknown): number | null {
 export type ThreadMessage = {
   id?: string | number;
   direction?: string;
+  /** "api" is us. "web"/"app"/"ext" is a human in TextTorrent's own UI. */
   platform?: string;
   message?: string;
   api_send_status?: unknown;
@@ -106,10 +110,14 @@ export function hashBody(body: string): string {
 /**
  * Find OUR message inside a thread we sent on.
  *
- * Matched on body fingerprint first, because a rep can be typing in the same
- * thread at the same moment and their message must never be mistaken for the
- * drip's — theirs delivers, ours does not, and crediting theirs to us would
- * report a dead channel as healthy. The time window only breaks ties between
+ * Constrained to platform="api" — the only platform this codebase can produce.
+ * A rep working the same thread sends on "web", and a rep who pastes the same
+ * template within the window would otherwise be a candidate. Theirs DELIVERS
+ * and ours does not (0 failures in 530 web sends against 98 in 113 api sends),
+ * so matching theirs would close our receipt as delivered and report a dead
+ * route as healthy. That single confusion would undo the whole subsystem.
+ *
+ * Then matched on body fingerprint. The time window only breaks ties between
  * repeat sends of identical copy, a real case since a retried step re-sends the
  * same rendered text.
  */
@@ -122,6 +130,7 @@ export function matchThreadMessage(
   let bestDelta = Infinity;
   for (const m of messages) {
     if (String(m.direction ?? "").toLowerCase() !== "outbound") continue;
+    if (String(m.platform ?? "") !== "api") continue;
     if (hashBody(String(m.message ?? "")) !== target.bodyHash) continue;
     const at = parseTtTimestamp(m.created_at);
     // A body match with an unparseable timestamp is still our message; take it
