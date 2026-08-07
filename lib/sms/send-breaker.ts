@@ -15,6 +15,7 @@
  */
 
 import "server-only";
+import { getServiceSupabase } from "@/lib/supabase-server";
 import { breakerVerdict, type BreakerVerdict } from "./carrier-status";
 import { readRecentReceipts, newestOpenReceiptAt } from "./delivery-receipts";
 
@@ -69,4 +70,47 @@ export async function smsSendAllowed(
 export function resetBreakerCache(tenantId?: string): void {
   if (tenantId) cache.delete(tenantId);
   else cache.clear();
+}
+
+/** How long a claimed probe blocks the next one. Matches the breaker's own
+ *  probe interval so the lease and the verdict agree. */
+const PROBE_LEASE_MS = 30 * 60_000;
+
+/**
+ * Try to claim the one half-open probe.
+ *
+ * Returns true for EXACTLY ONE caller per interval, across every process.
+ *
+ * The in-process cache cannot provide that. Dispatch runs concurrently on
+ * Vercel (cron plus external pingers), so each instance would independently see
+ * "probe due", clear only its own cache, and send — the one-probe guarantee was
+ * a comment, not a mechanism. The conditional UPDATE below is the mechanism:
+ * Postgres serialises writers on the row, so only the caller that observes the
+ * stale timestamp gets a row back.
+ *
+ * FAILS CLOSED. Any error means we did not claim it, so the probe simply does
+ * not go out this cycle and the next run tries again.
+ */
+export async function claimBreakerProbe(tenantId: string, nowMs = Date.now()): Promise<boolean> {
+  const db = getServiceSupabase();
+  const cutoff = new Date(nowMs - PROBE_LEASE_MS).toISOString();
+  try {
+    // Make sure the row exists. ignoreDuplicates so a concurrent creator does
+    // not overwrite a lease that was just claimed.
+    const seed = await db
+      .from("sms_breaker_probes")
+      .upsert({ tenant_id: tenantId }, { onConflict: "tenant_id", ignoreDuplicates: true });
+    if (seed.error) return false;
+
+    const claim = await db
+      .from("sms_breaker_probes")
+      .update({ last_probe_at: new Date(nowMs).toISOString(), updated_at: new Date(nowMs).toISOString() })
+      .eq("tenant_id", tenantId)
+      .lt("last_probe_at", cutoff)
+      .select("tenant_id");
+    if (claim.error) return false;
+    return (claim.data?.length ?? 0) > 0;
+  } catch {
+    return false;
+  }
 }

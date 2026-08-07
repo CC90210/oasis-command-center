@@ -44,7 +44,7 @@ import { sendDripSms, sendDripEmail } from "@/lib/drips/send";
 import { brandIsSendable, type BrandKey } from "@/lib/email/brands";
 import { brandFooter } from "@/lib/email/brand-shell";
 import { isWithinSendWindow } from "@/lib/sms/compliance";
-import { smsSendAllowed, resetBreakerCache } from "@/lib/sms/send-breaker";
+import { smsSendAllowed, resetBreakerCache, claimBreakerProbe } from "@/lib/sms/send-breaker";
 import { openReceipt } from "@/lib/sms/delivery-receipts";
 import { loadBrandsForLeads } from "@/lib/drips/brand-store";
 import { poolFor, resolveCopy, type PoolTemplate } from "@/lib/drips/template-pool";
@@ -826,11 +826,15 @@ async function processSmsStep(
     // merchant never received) would turn a vendor outage into permanent damage
     // to the sequence.
     const breaker = await smsSendAllowed(row.tenant_id);
-    if (breaker.halt && breaker.halfOpen) {
-      // Halted, but due for a probe: let exactly this one through to find out
-      // whether the route recovered. Dropping the cached verdict immediately
-      // means the very next row re-reads, sees this send outstanding, and holds
-      // — otherwise the 60s cache would wave the whole batch through.
+    // Halted but due for a probe: try to CLAIM it. The claim is a conditional
+    // update in Postgres, so exactly one caller wins across every concurrent
+    // dispatch instance — an in-process flag would let each instance send its
+    // own "one" probe into a dead route. Losing the claim means holding, same
+    // as any other halted row.
+    const probing = breaker.halt && breaker.halfOpen && (await claimBreakerProbe(row.tenant_id));
+    if (probing) {
+      // Drop the cached verdict so the next row re-reads, sees this send
+      // outstanding, and holds rather than riding the 60s cache.
       resetBreakerCache(row.tenant_id);
     } else if (breaker.halt) {
       await writeAgentAlert({

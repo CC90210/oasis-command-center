@@ -293,13 +293,31 @@ export async function tenantsWithOpenReceipts(): Promise<string[] | null> {
     // never be retired either. After a cron outage longer than the window, a
     // non-SunBiz tenant's queue would have been stale forever. Retirement is
     // what bounds this set, so the window bought nothing.
-    const r = await db
-      .from("sms_delivery_receipts")
-      .select("tenant_id")
-      .is("resolved_at", null)
-      .limit(5000);
-    if (r.error) return null;
-    return [...new Set((r.data || []).map((x) => String(x.tenant_id)))];
+    // Paginated and ORDERED BY tenant_id. A single capped, unordered read can
+    // return 5,000 rows that all belong to one busy tenant, hiding every other
+    // tenant indefinitely — their receipts would then never be reconciled and
+    // their breaker would never see terminal evidence. Ordering guarantees the
+    // walk covers the whole set; the page cap only bounds a pathological case,
+    // and it reports null rather than a partial answer if it is ever hit.
+    const PAGE = 1000;
+    const MAX_PAGES = 50;
+    const seen = new Set<string>();
+    for (let page = 0; page < MAX_PAGES; page++) {
+      const r = await db
+        .from("sms_delivery_receipts")
+        .select("tenant_id")
+        .is("resolved_at", null)
+        .order("tenant_id", { ascending: true })
+        .range(page * PAGE, page * PAGE + PAGE - 1);
+      if (r.error) return null;
+      const rows = r.data || [];
+      for (const x of rows) seen.add(String(x.tenant_id));
+      if (rows.length < PAGE) return [...seen];
+    }
+    // Ran out of pages with rows still to go. Refuse to report a partial set as
+    // complete — the caller treats null as "could not look", which is honest.
+    console.error("[sms-receipts] open-receipt backlog exceeds the discovery cap");
+    return null;
   } catch {
     return null;
   }
