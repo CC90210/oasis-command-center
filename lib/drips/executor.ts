@@ -456,9 +456,27 @@ async function finishStep(
  *  email for an email step). Skip it and advance — the sequence may have later
  *  steps on the other channel. Do NOT markPermanentFail (that would drop the
  *  lead from the whole sequence over a single unreachable step). audit H5. */
-async function skipStep(db: Db, row: ClaimedRow, steps: DripStep[], reason: string): Promise<StepOutcome> {
-  await advanceRow(db, row, steps, { skippedReason: reason });
-  return "dry_run"; // nothing sent
+async function skipStep(
+  db: Db,
+  row: ClaimedRow,
+  steps: DripStep[],
+  reason: string,
+  opts: { deliveryFailed?: boolean } = {},
+): Promise<StepOutcome> {
+  // A BENIGN skip (no phone for an sms step) and a DELIVERY FAILURE (the
+  // provider rejected the message three times) are not the same event, and
+  // until 2026-08-06 both were recorded identically: advanced, status 'sent',
+  // last_error prefixed 'skipped:'. That is how 1,070 TextTorrent 422s over
+  // three weeks stayed invisible — 865 of 1,348 rows read 'sent' while nothing
+  // had been delivered, and every dashboard counted them as sends.
+  //
+  // The row still ADVANCES either way: a lead must not be stranded mid-sequence
+  // because one provider call failed. What changes is that the failure is now
+  // labelled as one and counted as one, so a health check can see it.
+  await advanceRow(db, row, steps, {
+    skippedReason: opts.deliveryFailed ? `delivery_failed: ${reason}` : reason,
+  });
+  return opts.deliveryFailed ? "failed" : "dry_run";
 }
 
 /** Defense-in-depth backstop (the safety net the go-live incident lacked): has
@@ -822,11 +840,11 @@ async function processSmsStep(
       // Per-lead permanent: TT says the contact is blacklisted — retrying is
       // pointless and burns three dispatch slots per lead.
       if (/blacklisted/i.test(result.error)) {
-        return skipStep(db, row, steps, `sms_delivery_failed: ${result.error}`);
+        return skipStep(db, row, steps, `sms_delivery_failed: ${result.error}`, { deliveryFailed: true });
       }
       const attempts = (row.attempts || 0) + 1;
       if (attempts >= MAX_ATTEMPTS) {
-        return skipStep(db, row, steps, `sms_delivery_failed_after_retries: ${result.error}`);
+        return skipStep(db, row, steps, `sms_delivery_failed_after_retries: ${result.error}`, { deliveryFailed: true });
       }
       return markRetryOrFail(db, row, result.error);
     }
@@ -948,7 +966,7 @@ async function processEmailStep(
           }).catch(() => {});
         }
         if (attempts >= CAP) {
-          return skipStep(db, row, steps, "missing_application_link: skipped after retries (no form/HMAC key)");
+          return skipStep(db, row, steps, "missing_application_link: skipped after retries (no form/HMAC key)", { deliveryFailed: true });
         }
         await db
           .from("drip_runs")
