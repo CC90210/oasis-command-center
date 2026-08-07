@@ -44,7 +44,7 @@ import { sendDripSms, sendDripEmail } from "@/lib/drips/send";
 import { brandIsSendable, type BrandKey } from "@/lib/email/brands";
 import { brandFooter } from "@/lib/email/brand-shell";
 import { isWithinSendWindow } from "@/lib/sms/compliance";
-import { smsSendAllowed } from "@/lib/sms/send-breaker";
+import { smsSendAllowed, resetBreakerCache } from "@/lib/sms/send-breaker";
 import { openReceipt } from "@/lib/sms/delivery-receipts";
 import { loadBrandsForLeads } from "@/lib/drips/brand-store";
 import { poolFor, resolveCopy, type PoolTemplate } from "@/lib/drips/template-pool";
@@ -826,7 +826,13 @@ async function processSmsStep(
     // merchant never received) would turn a vendor outage into permanent damage
     // to the sequence.
     const breaker = await smsSendAllowed(row.tenant_id);
-    if (breaker.halt) {
+    if (breaker.halt && breaker.halfOpen) {
+      // Halted, but due for a probe: let exactly this one through to find out
+      // whether the route recovered. Dropping the cached verdict immediately
+      // means the very next row re-reads, sees this send outstanding, and holds
+      // — otherwise the 60s cache would wave the whole batch through.
+      resetBreakerCache(row.tenant_id);
+    } else if (breaker.halt) {
       await writeAgentAlert({
         tenantId: row.tenant_id,
         alertType: "sms_carrier_route_dead",

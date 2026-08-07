@@ -13,6 +13,7 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { checkCronAuth } from "@/lib/cron-auth";
 import { sendTelegram } from "@/lib/notify/telegram";
+import { writeAgentAlert } from "@/lib/notify/agent-alert";
 import { reconcileReceipts, tenantsWithOpenReceipts } from "@/lib/sms/delivery-receipts";
 import { smsSendAllowed, resetBreakerCache } from "@/lib/sms/send-breaker";
 
@@ -74,30 +75,29 @@ async function handle(req: NextRequest): Promise<NextResponse> {
     const breaker = breakers[SUNBIZ_TENANT_ID];
     const halted = tenants.filter((t) => breakers[t]?.halt);
 
-    if (breaker.halt) {
-      // The breaker itself pages through writeAgentAlert on the send path, which
-      // dedupes per open condition. This line is the reconciler's own summary so
-      // the numbers behind the halt are visible without opening the database.
-      await sendTelegram(
-        `🔴 <b>SMS carrier route is refusing sends</b>\n` +
-          `${esc(breaker.reason)}\n` +
-          `sample: ${breaker.sample} recent verdicts, ${Math.round(breaker.failRatio * 100)}% failed\n` +
-          `<i>drip SMS is halted and rescheduling; TextTorrent returns HTTP 201 on these</i>`,
-        { lane: "sunbiz-ops" },
-      ).catch(() => undefined);
+    // Page through writeAgentAlert, NOT raw sendTelegram. This cron runs every
+    // 15 minutes, so a raw send would produce up to 96 identical pages a day for
+    // one ongoing outage. telegramOncePerOpen fires once per open condition and
+    // goes quiet until it clears, which is the standing alert-decay rule.
+    for (const t of halted) {
+      const v = breakers[t];
+      await writeAgentAlert({
+        tenantId: t,
+        alertType: "sms_carrier_route_dead",
+        lane: "sunbiz-ops",
+        severity: "urgent",
+        title: "SMS halted — the carrier is refusing our sends",
+        body:
+          `${v.reason}. Sample: ${v.sample} recent verdicts, ${Math.round(v.failRatio * 100)}% failed. ` +
+          `Drip SMS is paused and rescheduling; TextTorrent returns HTTP 201 on these, so nothing ` +
+          `else would catch it. One probe send is allowed every 30 minutes to detect recovery.`,
+        telegramOncePerOpen: true,
+      }).catch(() => undefined);
     }
 
     if (r.errors.length) {
       await sendTelegram(
         `⚪ <b>SMS reconcile had errors</b>\n${esc(r.errors.slice(0, 3).join("; ")).slice(0, 400)}`,
-        { lane: "sunbiz-ops" },
-      ).catch(() => undefined);
-    }
-
-    // A non-SunBiz tenant whose route has died still needs to page someone.
-    for (const t of halted.filter((x) => x !== SUNBIZ_TENANT_ID)) {
-      await sendTelegram(
-        `🔴 <b>SMS carrier route refusing sends</b> (tenant ${esc(t.slice(0, 8))})\n${esc(breakers[t].reason)}`,
         { lane: "sunbiz-ops" },
       ).catch(() => undefined);
     }

@@ -168,10 +168,30 @@ export type BreakerOptions = {
   minSample?: number;
   /** Halt when the failure ratio over the sample reaches this. */
   failRatio?: number;
+  /** Now, for the half-open probe clock. */
+  nowMs?: number;
+  /** How long after the last verdict to let one probe through. */
+  probeAfterMs?: number;
+  /** Newest UNRESOLVED receipt, or null. A probe already in flight means we
+   *  wait for its answer instead of sending more. */
+  newestOpenAt?: number | null;
 };
 
 export type BreakerVerdict = {
+  /** Do not send. */
   halt: boolean;
+  /**
+   * Halted, but this one send is a sanctioned probe.
+   *
+   * WITHOUT THIS THE BREAKER WEDGES SHUT. Once it trips, the executor stops
+   * sending, so no new receipts arrive, so the failure ratio cannot fall and
+   * the consecutive-failure streak cannot be broken — the breaker holds the
+   * channel down long after the route recovers, and only luck (old failures
+   * ageing out of the 24h window) releases it. The same shape took down TPS on
+   * this repo in August 2026. A breaker must be able to find out that it was
+   * wrong.
+   */
+  halfOpen: boolean;
   reason: string;
   consecutiveFailures: number;
   failRatio: number;
@@ -201,6 +221,7 @@ export function breakerVerdict(
   if (recent === null) {
     return {
       halt: true,
+      halfOpen: false,
       reason: "delivery history unreadable - failing closed rather than sending blind",
       consecutiveFailures: 0,
       failRatio: 0,
@@ -214,8 +235,27 @@ export function breakerVerdict(
     .sort((a, b) => b.at - a.at);
 
   if (terminal.length === 0) {
-    return { halt: false, reason: "no terminal receipts yet", consecutiveFailures: 0, failRatio: 0, sample: 0 };
+    return { halt: false, halfOpen: false, reason: "no terminal receipts yet", consecutiveFailures: 0, failRatio: 0, sample: 0 };
   }
+
+  /**
+   * Is it time to test whether the route came back?
+   *
+   * Only when nothing is already in flight: an unresolved receipt newer than
+   * the last verdict IS the outstanding probe, and firing more while waiting
+   * would turn "one careful test" into a slow resumption of full sending into a
+   * dead route.
+   */
+  const nowMs = opts.nowMs ?? Date.now();
+  const probeAfterMs = opts.probeAfterMs ?? 30 * 60_000;
+  const newestTerminalAt = terminal[0].at;
+  const probeInFlight = opts.newestOpenAt != null && opts.newestOpenAt >= newestTerminalAt;
+  const dueForProbe = !probeInFlight && nowMs - newestTerminalAt >= probeAfterMs;
+  const halted = (r: Omit<BreakerVerdict, "halfOpen">): BreakerVerdict => ({
+    ...r,
+    halfOpen: dueForProbe,
+    reason: dueForProbe ? `${r.reason} (letting one probe through to retest)` : r.reason,
+  });
 
   let consecutive = 0;
   for (const r of terminal) {
@@ -226,25 +266,26 @@ export function breakerVerdict(
   const ratio = failed / terminal.length;
 
   if (consecutive >= consecutiveLimit) {
-    return {
+    return halted({
       halt: true,
       reason: `${consecutive} consecutive carrier failures - the send route is not delivering`,
       consecutiveFailures: consecutive,
       failRatio: ratio,
       sample: terminal.length,
-    };
+    });
   }
   if (terminal.length >= minSample && ratio >= failRatioLimit) {
-    return {
+    return halted({
       halt: true,
       reason: `${Math.round(ratio * 100)}% of the last ${terminal.length} sends failed at the carrier`,
       consecutiveFailures: consecutive,
       failRatio: ratio,
       sample: terminal.length,
-    };
+    });
   }
   return {
     halt: false,
+    halfOpen: false,
     reason: `${terminal.length - failed}/${terminal.length} delivered`,
     consecutiveFailures: consecutive,
     failRatio: ratio,

@@ -159,6 +159,40 @@ const tiny: ReceiptSample[] = [
 ];
 assert.equal(breakerVerdict(tiny).halt, false, "below minSample the ratio is not trusted");
 
+// ── The breaker must be able to discover it was wrong ─────────────────────
+// A tripped breaker stops sending, so no new receipts arrive, so the ratio
+// cannot fall and the streak cannot break. Without a probe it holds the channel
+// down long after the route recovers — the shape that wedged TPS on this repo
+// in August 2026. These assertions are the release valve.
+const streak = fails(12); // newest at at(0)
+const justTripped = breakerVerdict(streak, { nowMs: at(0) + 60_000 });
+assert.equal(justTripped.halt, true);
+assert.equal(justTripped.halfOpen, false, "no probe one minute after the last verdict");
+
+const stale = breakerVerdict(streak, { nowMs: at(0) + 31 * 60_000 });
+assert.equal(stale.halt, true, "still halted - the probe does not clear the verdict");
+assert.equal(stale.halfOpen, true, "after 30 quiet minutes, one probe is due");
+assert.match(stale.reason, /probe/);
+
+// A probe already in flight means WAIT. Otherwise every row in a dispatch batch
+// reads "due for a probe" and the single careful test becomes a full resumption
+// of sending into a dead route.
+const inFlight = breakerVerdict(streak, { nowMs: at(0) + 31 * 60_000, newestOpenAt: at(0) + 20 * 60_000 });
+assert.equal(inFlight.halfOpen, false, "an unresolved send newer than the last verdict is the outstanding probe");
+
+// An OLD unresolved receipt is not an in-flight probe and must not block one.
+const staleOpen = breakerVerdict(streak, { nowMs: at(0) + 31 * 60_000, newestOpenAt: at(5) });
+assert.equal(staleOpen.halfOpen, true, "an open receipt older than the last verdict is not a probe");
+
+// Recovery: once the probe delivers, the streak breaks and the ratio falls
+// below the limit, so the breaker releases on its own.
+const afterGoodProbe = breakerVerdict(
+  [{ status: "delivered", at: at(0) }, ...Array.from({ length: 5 }, (_, i) => ({ status: "failed" as const, at: at(i + 1) }))],
+  { nowMs: at(0) + 60_000 },
+);
+assert.equal(afterGoodProbe.halt, false, "a delivered probe with a small sample releases the breaker");
+assert.equal(afterGoodProbe.consecutiveFailures, 0);
+
 // Healthy traffic passes.
 const healthy: ReceiptSample[] = Array.from({ length: 30 }, (_, i) => ({
   status: i % 10 === 0 ? ("failed" as const) : ("delivered" as const),

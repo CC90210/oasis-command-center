@@ -338,3 +338,32 @@ export async function readRecentReceipts(
     return null;
   }
 }
+
+/**
+ * When did we last send something we are still waiting on?
+ *
+ * This is how the breaker knows a half-open probe is already in flight. Without
+ * it, every row in a dispatch batch would read "due for a probe" and the one
+ * careful test would become a full resumption of sending into a dead route.
+ *
+ * null means nothing outstanding. A read failure also returns null, which is
+ * the safe direction here: it makes the breaker believe no probe is in flight,
+ * and the probe path is gated on a 30-minute clock anyway.
+ */
+export async function newestOpenReceiptAt(tenantId: string): Promise<number | null> {
+  const db = getServiceSupabase();
+  try {
+    const r = await db
+      .from("sms_delivery_receipts")
+      .select("sent_at")
+      .eq("tenant_id", tenantId)
+      .is("resolved_at", null)
+      .order("sent_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    if (r.error || !r.data?.sent_at) return null;
+    return Date.parse(r.data.sent_at);
+  } catch {
+    return null;
+  }
+}

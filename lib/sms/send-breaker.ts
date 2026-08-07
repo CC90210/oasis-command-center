@@ -16,7 +16,7 @@
 
 import "server-only";
 import { breakerVerdict, type BreakerVerdict } from "./carrier-status";
-import { readRecentReceipts } from "./delivery-receipts";
+import { readRecentReceipts, newestOpenReceiptAt } from "./delivery-receipts";
 
 /**
  * Re-reading the receipt window per drip row would issue one query per send.
@@ -46,6 +46,7 @@ export async function smsSendAllowed(
   if (disabled()) {
     return {
       halt: false,
+      halfOpen: false,
       reason: "breaker disabled by SMS_BREAKER_DISABLED",
       consecutiveFailures: 0,
       failRatio: 0,
@@ -57,7 +58,8 @@ export async function smsSendAllowed(
   if (!opts.force && hit && nowMs - hit.at < CACHE_MS) return hit.verdict;
 
   const recent = await readRecentReceipts(tenantId, { sinceMs: nowMs - 24 * 3_600_000, limit: 100 });
-  const verdict = breakerVerdict(recent);
+  const newestOpenAt = await newestOpenReceiptAt(tenantId);
+  const verdict = breakerVerdict(recent, { nowMs, newestOpenAt });
   cache.set(tenantId, { at: nowMs, verdict });
   return verdict;
 }
