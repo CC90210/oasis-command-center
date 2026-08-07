@@ -84,6 +84,10 @@
     {
       "path": "/api/cron/health-check",
       "schedule": "*/15 * * * *"
+    },
+    {
+      "path": "/api/cron/sync-sms-numbers",
+      "schedule": "0 6,18 * * *"
     }
   ]
 }
