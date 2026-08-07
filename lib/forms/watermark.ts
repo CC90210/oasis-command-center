@@ -37,7 +37,27 @@ const WORDMARK = "SUNBIZ FUNDING";
 const PDF_RENDER_SCALE = 2.0; // ~144 DPI from the 72 DPI PDF user space — legible, bounded
 const MAX_PDF_DIM = 3500; // px on the long side after scaling
 const MAX_PDF_PIXELS = 24_000_000; // ~24 MP per-page / per-image ceiling
-const MAX_PAGES = 50; // statements above this FAIL (never truncate) — see watermarkPdf
+// PAGE CAPS ARE PER-PATH, because the two paths are not remotely the same price
+// (measured 2026-08-07 on this runtime, and against production statements):
+//
+//   overlay (pdf-lib)  400 pages in  858ms / 332MB RSS  -> ~2ms/page
+//   raster  (pdfjs)    ~165ms/page on real scanned statements (production doctor:
+//                      10pp/1686ms, 9pp/1480ms, 7pp/1074ms)
+//
+// A single shared cap of 50 was sized for raster and silently imposed on the
+// overlay as well, so ordinary long statements were refused outright by the very
+// path that could brand them instantly. Production distribution for tenant
+// `submissions` (150 largest statements): p50 13, p90 30, p99 47, max 59 — the
+// old cap sat INSIDE the live distribution, and both over-cap statements were
+// unencrypted (overlay-eligible). Shop-out refuses the WHOLE send when any one
+// statement fails to brand, so each blocked an entire deal on every retry.
+//
+// Both remain FAIL-CLOSED: over the cap is an error, never a truncation.
+const MAX_PAGES_OVERLAY = 400; // measured 858ms — bounded by memory, not time
+const MAX_PAGES_RASTER = 120; // ~20s at 165ms/page — inside the 120s floor of
+// every route that watermarks (shop-out 120s, shop-out/run 300s, thread retries
+// 120s, watermark-variant 120s). Raster only runs for encrypted/unreadable
+// sources, so this ceiling is reached far less often than the overlay's.
 const PAGE_JPEG_QUALITY = 80; // raster page encode — bounds output PDF size
 const IMAGE_JPEG_QUALITY = 85;
 
@@ -263,8 +283,12 @@ async function watermarkPdfOverlay(bytes: Buffer, prov: WatermarkProvenance): Pr
     }
     const pages = doc.getPages();
     if (pages.length < 1) return { ok: false, error: "pdf_no_pages" };
-    // FAIL CLOSED — never truncate (mirrors the raster path).
-    if (pages.length > MAX_PAGES) return { ok: false, error: `pdf_too_many_pages:${pages.length}` };
+    // FAIL CLOSED — never truncate. The cap here is the OVERLAY's own (400), not
+    // the raster path's: this path never rasterizes, so its cost per page is
+    // ~2ms and a long statement is not a burden. See MAX_PAGES_OVERLAY.
+    if (pages.length > MAX_PAGES_OVERLAY) {
+      return { ok: false, error: `pdf_too_many_pages:${pages.length}` };
+    }
 
     const font = await doc.embedFont(StandardFonts.HelveticaBold);
 
@@ -347,6 +371,14 @@ async function watermarkPdfOverlay(bytes: Buffer, prov: WatermarkProvenance): Pr
   }
 }
 
+/**
+ * Overlay failures that the raster path enforces IDENTICALLY, so falling
+ * through to it can only waste a full re-parse and muddy the reason. Default is
+ * to fall through (raster handles sources pdf-lib cannot read); this list is the
+ * narrow exception.
+ */
+const SHARED_POLICY_REFUSAL = ["pdf_too_many_pages", "pdf_no_pages"] as const;
+
 async function watermarkPdf(bytes: Buffer, prov: WatermarkProvenance): Promise<WatermarkResult> {
   // Prefer the NON-DESTRUCTIVE overlay: it preserves the original page content
   // (selectable text, full resolution) and is the model Adon asked for. Fall
@@ -355,6 +387,21 @@ async function watermarkPdf(bytes: Buffer, prov: WatermarkProvenance): Promise<W
   // { ok:false } so the caller refuses the send.
   const overlay = await watermarkPdfOverlay(bytes, prov);
   if (overlay.ok) return overlay;
+
+  // Fall back ONLY when raster could plausibly do better — i.e. the overlay
+  // could not READ the source (encrypted, or structurally broken), which is
+  // exactly what pdfjs is more tolerant of.
+  //
+  // A DOCUMENT-POLICY refusal is different: both paths enforce it, so retrying
+  // re-parses the whole file just to fail identically. That cost the operator
+  // double the latency and produced the compound string
+  // `overlay_failed[pdf_too_many_pages:55]|raster_failed[pdf_too_many_pages:55]`,
+  // which reads like two separate faults and is what got reported as
+  // "Overlay failed ... PDF too many pages". Surface the one real reason.
+  if (SHARED_POLICY_REFUSAL.some((code) => overlay.error.includes(code))) {
+    return overlay;
+  }
+
   const raster = await watermarkPdfRaster(bytes, prov);
   if (raster.ok) return raster;
   return { ok: false, error: `overlay_failed[${overlay.error}]|raster_failed[${raster.error}]` };
@@ -439,12 +486,17 @@ async function watermarkPdfRaster(bytes: Buffer, prov: WatermarkProvenance): Pro
   const srcDoc = await loadingTask.promise;
   try {
     if (srcDoc.numPages < 1) return { ok: false, error: "pdf_no_pages" };
-    if (srcDoc.numPages > MAX_PAGES) {
+    if (srcDoc.numPages > MAX_PAGES_RASTER) {
       // FAIL CLOSED — never truncate-and-overwrite. A watermark result overwrites
-      // the stored object, so silently emitting only the first MAX_PAGES would
-      // permanently lose a statement's later pages AND ship a partial statement
-      // to lenders. An oversized statement (rare) instead surfaces an explicit
+      // the stored object, so silently emitting only the first MAX_PAGES_RASTER
+      // would permanently lose a statement's later pages AND ship a partial
+      // statement to lenders. An oversized statement instead surfaces an explicit
       // error at the guard for an operator to handle (e.g. split + re-upload).
+      //
+      // This cap is TIME-bound (rasterizing costs ~165ms/page), unlike the
+      // overlay's. Reaching it means the source was also unusable by the overlay
+      // — encrypted or structurally broken — so the operator genuinely has to
+      // split the file.
       return { ok: false, error: `pdf_too_many_pages:${srcDoc.numPages}` };
     }
     const numPages = srcDoc.numPages;

@@ -90,28 +90,68 @@ async function main() {
     failures++;
   }
 
-  // 5) Over-cap statement FAILS CLOSED — must NOT truncate-and-succeed (the
-  //    result overwrites the stored object, so truncation would lose pages).
-  const big = await PDFDocument.create();
-  const bigFont = await big.embedFont(StandardFonts.Helvetica);
-  for (let i = 0; i < 55; i++) {
-    const p = big.addPage([612, 792]);
-    p.drawText(`page ${i + 1}`, { x: 50, y: 740, size: 12, font: bigFont });
-  }
-  const wmBig = await watermarkBankStatement({
-    bytes: Buffer.from(await big.save()),
+  const mkPages = async (n: number) => {
+    const d = await PDFDocument.create();
+    const f = await d.embedFont(StandardFonts.Helvetica);
+    for (let i = 0; i < n; i++) {
+      const p = d.addPage([612, 792]);
+      p.drawText(`page ${i + 1}`, { x: 50, y: 740, size: 12, font: f });
+    }
+    return Buffer.from(await d.save());
+  };
+
+  // 5) A LONG BUT ORDINARY statement must BRAND, not be refused.
+  //
+  //    This is the regression that took shop-out down for real deals. The page
+  //    cap was ONE constant (50) applied to BOTH render paths, but the paths
+  //    cost ~80x different per page: measured 2026-08-07, the pdf-lib overlay
+  //    does 400 pages in 858ms, while the pdfjs raster path runs ~165ms/page on
+  //    real scanned statements. The cap was sized for raster and silently
+  //    imposed on overlay too.
+  //
+  //    Measured against production (tenant `submissions`, 150 largest
+  //    statements): p50 13 pages, p90 30, p99 47, max 59 — the cap sat INSIDE
+  //    the live distribution. Two statements (59pp and 53pp) were refused, and
+  //    both were unencrypted, i.e. pdf-lib could have branded them in ~200ms.
+  //    Because shop-out refuses the WHOLE send when any statement fails, each
+  //    one blocked an entire deal on every retry.
+  const wm55 = await watermarkBankStatement({
+    bytes: await mkPages(55),
     mimeType: "application/pdf",
     provenance: prov,
   });
-  // The renderer now tries the pdf-lib overlay FIRST and falls back to raster,
-  // so the page cap surfaces as a combined "overlay_failed[...]|raster_failed[...]"
-  // string. Asserting startsWith("pdf_too_many_pages") made this test fail on a
-  // correctly-failing-closed renderer — a red test that was reporting a
-  // non-existent product bug. Assert the CAUSE appears, not its position.
-  if (!wmBig.ok && wmBig.error.includes("pdf_too_many_pages")) {
-    console.log("ok over-cap PDF fails closed:", wmBig.error);
+  if (wm55.ok && wm55.pages === 55 && !wm55.raster && isPdf(wm55.bytes)) {
+    console.log(`ok 55-page statement brands losslessly (${wm55.pages} pages, overlay)`);
   } else {
-    console.error("FAIL: over-cap PDF did not fail closed:", wmBig);
+    console.error("FAIL: an ordinary 55-page statement was not branded via the overlay:", wm55);
+    failures++;
+  }
+
+  // 5b) Genuinely absurd page counts STILL fail closed — never truncate. The
+  //     result overwrites the stored object, so emitting only the first N pages
+  //     would permanently lose a statement's later pages AND ship a partial
+  //     statement to lenders.
+  const wmHuge = await watermarkBankStatement({
+    bytes: await mkPages(420),
+    mimeType: "application/pdf",
+    provenance: prov,
+  });
+  if (!wmHuge.ok && wmHuge.error.includes("pdf_too_many_pages")) {
+    console.log("ok over-cap PDF still fails closed:", wmHuge.error);
+  } else {
+    console.error("FAIL: over-cap PDF did not fail closed:", wmHuge);
+    failures++;
+  }
+
+  // 5c) A page-cap refusal must surface ONE reason, not a compound
+  //     "overlay_failed[...]|raster_failed[...]" string. Falling through to
+  //     raster on a limit BOTH paths enforce re-parses the whole document only
+  //     to fail identically — it doubles the latency and reads to the operator
+  //     like two separate faults ("Overlay failed ... PDF too many pages").
+  if (!wmHuge.ok && !wmHuge.error.includes("raster_failed")) {
+    console.log("ok page-cap refusal reports a single cause");
+  } else if (!wmHuge.ok) {
+    console.error("FAIL: page-cap refusal still fell through to raster:", wmHuge.error);
     failures++;
   }
 
