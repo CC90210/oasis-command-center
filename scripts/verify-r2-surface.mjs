@@ -36,8 +36,12 @@ check("download() returns a Blob, as supabase-js does",
       /new Blob\(\[buf\]\)/.test(src));
 check("remove() treats 404 as success (already gone)",
       /status === 404/.test(src));
-check("list() refuses rather than returning an empty array",
-      /not implemented on the R2 adapter/.test(src) && !/return ok\(\[\]\)/.test(src));
+check("list() is IMPLEMENTED (lead-documents uses it as an anti-spoof size check)",
+      /list-type.*2/.test(src) && /<Contents>/.test(src));
+check("list() is non-recursive, matching supabase-js",
+      /name\.includes\("\/"\)/.test(src));
+check("list() honours the search filter",
+      /opts\?\.search/.test(src));
 check("errors are returned, never thrown ({data,error} shape)",
       /const fail = \(message/.test(src) && /data: null/.test(src));
 
@@ -79,6 +83,29 @@ for (const frag of [
 console.log("\nkey convention matches the migration uploader");
 check("bucket name becomes the R2 key prefix",
       /return `\$\{bucket\}\/\$\{path\.replace/.test(src));
+
+// This exact adapter is copied into nostalgic-requests and realestate-App —
+// separate repos with no shared package. Copying is defensible; silently
+// diverging is not, and it already happened once: list() was implemented here
+// only, leaving those two REFUSING a call that lead-documents makes as an
+// anti-spoof size check. Fail loudly on drift.
+console.log("\ncopies in sibling repos are byte-identical");
+const mine = createHash("sha256").update(src).digest("hex");
+for (const other of [
+    "C:/Users/User/APPS/nostalgic-requests/lib/r2-storage.ts",
+    "C:/Users/User/realestate-App/src/lib/supabase/r2-storage.ts",
+]) {
+    const label = other.split("/").slice(-3).join("/");
+    let theirs = null;
+    try {
+        theirs = createHash("sha256").update(readFileSync(other, "utf8")).digest("hex");
+    } catch {
+        check(`present: ${label}`, false, "file missing");
+        continue;
+    }
+    check(`byte-identical: ${label}`, theirs === mine,
+          theirs === mine ? "" : `${theirs.slice(0, 12)} vs ${mine.slice(0, 12)}`);
+}
 
 console.log(failures ? `\n${failures} FAILED` : "\nall checks passed");
 process.exit(failures ? 1 : 0);

@@ -168,6 +168,53 @@ async function signedFetch(
   });
 }
 
+/**
+ * Signed request against the BUCKET root with a query string — ListObjectsV2.
+ * Separate from signedFetch because the canonical request signs the query, and
+ * the resource is the bucket rather than an object key.
+ */
+async function signedFetchQuery(
+  method: "GET",
+  params: URLSearchParams,
+): Promise<Response> {
+  const { key, secret, bucket: r2Bucket } = cfg();
+  const { amz, date } = stamps();
+  const canonicalUri = `/${r2Bucket}`;
+  const payloadHash = sha256Hex("");
+  const canonicalQuery = [...params.entries()]
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+    .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`)
+    .join("&");
+
+  const headers: Record<string, string> = {
+    host: host(),
+    "x-amz-content-sha256": payloadHash,
+    "x-amz-date": amz,
+  };
+  const signedHeaders = Object.keys(headers).sort().join(";");
+  const canonicalHeaders =
+    Object.keys(headers).sort().map((h) => `${h}:${headers[h]}`).join("\n") + "\n";
+  const canonicalRequest = [
+    method, canonicalUri, canonicalQuery, canonicalHeaders, signedHeaders, payloadHash,
+  ].join("\n");
+  const stringToSign = [
+    "AWS4-HMAC-SHA256", amz, `${date}/${REGION}/${SERVICE}/aws4_request`,
+    sha256Hex(canonicalRequest),
+  ].join("\n");
+  const sig = createHmac("sha256", signingKey(secret, date))
+    .update(stringToSign, "utf8").digest("hex");
+
+  return fetch(`https://${host()}${canonicalUri}?${canonicalQuery}`, {
+    method,
+    headers: {
+      ...headers,
+      Authorization:
+        `AWS4-HMAC-SHA256 Credential=${key}/${date}/${REGION}/${SERVICE}/aws4_request, ` +
+        `SignedHeaders=${signedHeaders}, Signature=${sig}`,
+    },
+  });
+}
+
 type Err = { message: string; name?: string; status?: number };
 const ok = <T,>(data: T) => ({ data, error: null as Err | null });
 const fail = (message: string, status?: number) => ({
@@ -272,14 +319,51 @@ function bucketApi(bucket: string) {
       return ok(results);
     },
 
-    async list(_prefix?: string) {
-      // Deliberately unimplemented rather than silently returning []. An empty
-      // list is indistinguishable from "no objects", which would make a caller
-      // conclude a merchant has no documents and act on it.
-      return fail(
-        "storage.list() is not implemented on the R2 adapter. " +
-        "Query the database for the object paths instead of listing the bucket.",
-      );
+    /**
+     * List objects under a prefix. Implemented, not stubbed — lead-documents.ts
+     * uses it to confirm an uploaded object exists AND to read its REAL size as
+     * an anti-spoof check against the size the client claimed. Returning an
+     * error (or worse, []) would silently disable a security control.
+     *
+     * Shaped like supabase-js: `{ name, metadata: { size } }`, where `name` is
+     * relative to the listed directory.
+     */
+    async list(
+      prefix?: string,
+      opts?: { search?: string; limit?: number },
+    ) {
+      const dir = (prefix || "").replace(/^\/+|\/+$/g, "");
+      const keyPrefix = objectKey(bucket, dir ? `${dir}/` : "");
+      const params = new URLSearchParams({
+        "list-type": "2",
+        prefix: keyPrefix,
+        "max-keys": String(Math.min(opts?.limit ?? 1000, 1000)),
+      });
+      try {
+        const res = await signedFetchQuery("GET", params);
+        if (!res.ok) {
+          const text = await res.text().catch(() => "");
+          return fail(`R2 list failed (${res.status}): ${text.slice(0, 200)}`, res.status);
+        }
+        const xml = await res.text();
+        const out: { name: string; id: string; metadata: { size: number } }[] = [];
+        // ListObjectsV2 returns XML; each object is one <Contents> block.
+        for (const m of xml.matchAll(/<Contents>([\s\S]*?)<\/Contents>/g)) {
+          const block = m[1];
+          const key = /<Key>([\s\S]*?)<\/Key>/.exec(block)?.[1] ?? "";
+          const size = Number(/<Size>(\d+)<\/Size>/.exec(block)?.[1] ?? "0");
+          if (!key.startsWith(keyPrefix)) continue;
+          const name = key.slice(keyPrefix.length);
+          // Supabase's list() is not recursive; skip nested paths so a caller
+          // matching on exact `name` behaves the same on both backends.
+          if (name.includes("/")) continue;
+          if (opts?.search && !name.includes(opts.search)) continue;
+          out.push({ name, id: key, metadata: { size } });
+        }
+        return ok(out);
+      } catch (e) {
+        return fail(e instanceof Error ? e.message : "R2 list failed");
+      }
     },
   };
 }
