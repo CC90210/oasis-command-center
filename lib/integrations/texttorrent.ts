@@ -566,15 +566,33 @@ export async function getThread(
 export async function getThreadRaw(
   creds: TextTorrentCredentials,
   chatId: string,
-  opts: { limit?: number } = {},
+  opts: { limit?: number; maxPages?: number } = {},
 ): Promise<Array<Record<string, unknown>>> {
-  const resp = await ttFetch<{
-    data?: { messages?: { data?: Array<Record<string, unknown>> } | Array<Record<string, unknown>> };
-  }>(creds, `/inbox/${encodeURIComponent(chatId)}`, {
-    query: { limit: opts.limit },
-  });
-  const msgsRaw = resp?.data?.messages;
-  return Array.isArray(msgsRaw) ? msgsRaw : msgsRaw?.data || [];
+  const limit = opts.limit ?? 100;
+  // Threads are paginated and the envelope reports last_page, so we can follow
+  // it exactly instead of hoping one page is enough. A receipt whose message
+  // falls off the end is never matched, and after enough attempts it retires as
+  // 'unknown' — a real carrier failure that never reaches the breaker. Measured
+  // 2026-08-07, live merchant threads hold 0-3 messages, so this is a single
+  // request in practice and correct in the tail.
+  const maxPages = opts.maxPages ?? 5;
+  const out: Array<Record<string, unknown>> = [];
+  for (let page = 1; page <= maxPages; page++) {
+    const resp = await ttFetch<{
+      data?: {
+        messages?:
+          | { data?: Array<Record<string, unknown>>; current_page?: number; last_page?: number }
+          | Array<Record<string, unknown>>;
+      };
+    }>(creds, `/inbox/${encodeURIComponent(chatId)}`, { query: { limit, page } });
+    const msgsRaw = resp?.data?.messages;
+    if (Array.isArray(msgsRaw)) return msgsRaw; // unpaginated shape
+    const rows = msgsRaw?.data || [];
+    out.push(...rows);
+    const lastPage = Number(msgsRaw?.last_page ?? 1);
+    if (rows.length === 0 || page >= lastPage) break;
+  }
+  return out;
 }
 
 export function replyToThread(

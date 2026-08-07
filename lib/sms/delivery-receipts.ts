@@ -175,7 +175,7 @@ export async function reconcileReceipts(
         service: "texttorrent",
         actAsEmail: actAsEmail || null,
       });
-      messages = await getThreadRaw(creds, chatId, { limit: 30 });
+      messages = await getThreadRaw(creds, chatId);
     } catch (err) {
       // The thread could not be read, so the carrier was never asked. Touch the
       // timestamp but do NOT spend an attempt: a spell of 429s from the shared
