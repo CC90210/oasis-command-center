@@ -272,6 +272,30 @@ async function makeAuthedSupabase() {
     process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ||
     process.env.BRAVO_SUPABASE_ANON_KEY;
   if (!url || !anon) {
+    // Same stub as makeSupabaseService, and for the same reason — this one was
+    // missed, which mattered because getAuthedSupabase() awaits this BEFORE
+    // reaching its turso_cloud branch, making that branch unreachable.
+    //
+    // The visible cost was narrow and silent: nine privileged routes log to
+    // tenant_audit_log via authed.rpc("log_tenant_event") inside
+    // `try { } catch { /* audit-log soft-fail */ }` with an EMPTY catch. Role
+    // changes, admin_access grants, member removal, invite creation and
+    // agent-config/API-key changes would all keep returning ok:true while the
+    // compliance trail stopped receiving a single row, with nothing in the
+    // logs. log_tenant_event is already ported in TURSO_RPC_SHIM, so the throw
+    // was preempting the very shim built for it.
+    if (process.env.EMPIRE_DATA_BACKEND === "turso_cloud") {
+      return new Proxy({} as Awaited<ReturnType<typeof createServerClient>>, {
+        get(_t, prop) {
+          throw new Error(
+            `authed supabase.${String(prop)} is unavailable: Supabase is not ` +
+            `configured and EMPIRE_DATA_BACKEND=turso_cloud. Data goes through ` +
+            `the Turso adapter and storage through R2 — this surface has no ` +
+            `replacement yet and must be ported.`
+          );
+        },
+      });
+    }
     throw new Error(
       "Authed Supabase misconfigured: BRAVO_SUPABASE_URL + anon key required."
     );
