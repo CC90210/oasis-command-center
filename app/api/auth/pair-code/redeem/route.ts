@@ -35,6 +35,8 @@ import {
   isRateLimited,
   recordPairAttempt,
 } from "@/lib/pair-rate-limit";
+import { adminGetUser, mintSessionLinkToken } from "@/lib/turso-auth-admin";
+import { tursoAuthActive } from "@/lib/turso-auth";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -143,31 +145,56 @@ export async function POST(req: NextRequest) {
   }
 
   // V0.1.0 alpha.5 — desktop sign-in is now turnkey via oasis:// deep-link.
-  // After the redeem succeeds, we ALSO mint a one-time magic-link the
+  // After the redeem succeeds, we ALSO mint a one-time sign-in link the
   // desktop will load in its main Electron window. Loading that link sets
-  // a Supabase session cookie on the Electron browser's domain so the
-  // user is already signed in when the dashboard renders — no second
-  // sign-in step inside the Electron view. The pair-code was already the
-  // authentication; the magic-link just transports the session into the
-  // desktop's cookie jar. Magic-links are single-use and Supabase-default
-  // 1-hour TTL'd so leak window matches the pair-code's 15-min window.
+  // the session cookie on the Electron browser's domain so the user is
+  // already signed in when the dashboard renders — no second sign-in step
+  // inside the Electron view. The pair-code was already the authentication;
+  // the link just transports the session into the desktop's cookie jar.
+  //
+  // Under Turso auth the link is ours: a single-use _auth_tokens row redeemed
+  // at /auth/turso-session, 15-min TTL (tighter than Supabase's 1-hour
+  // magic-link default, and matched to the pair-code that minted it).
+  // auth.admin.generateLink is GoTrue and dies with the Supabase project, so
+  // on that path the desktop would silently lose turnkey sign-in forever.
+  //
+  // The response field stays `magic_link_url` — the desktop client reads that
+  // key, and renaming it would break pairing on every already-shipped build.
   let magicLinkUrl: string | null = null;
   try {
-    const userLookup = await db.auth.admin.getUserById(row.auth_user_id);
-    const email = userLookup.data.user?.email;
+    const emailLookup = await adminGetUser(db, row.auth_user_id);
+    if (!emailLookup.ok) throw new Error(emailLookup.error);
+    const email = emailLookup.value.email;
     if (email) {
-      const callbackUrl = `${baseUrl.replace(/\/$/, "")}/auth/callback?next=/`;
-      const linkRes = await db.auth.admin.generateLink({
-        type: "magiclink",
-        email,
-        options: { redirectTo: callbackUrl },
-      });
-      magicLinkUrl = linkRes.data?.properties?.action_link || null;
+      if (tursoAuthActive()) {
+        const linkToken = await mintSessionLinkToken(email);
+        magicLinkUrl =
+          `${baseUrl.replace(/\/$/, "")}/auth/turso-session` +
+          `?token=${encodeURIComponent(linkToken)}&next=${encodeURIComponent("/")}`;
+      } else {
+        const callbackUrl = `${baseUrl.replace(/\/$/, "")}/auth/callback?next=/`;
+        const linkRes = await db.auth.admin.generateLink({
+          type: "magiclink",
+          email,
+          options: { redirectTo: callbackUrl },
+        });
+        magicLinkUrl = linkRes.data?.properties?.action_link || null;
+      }
     }
-  } catch {
-    // Magic-link minting must never block pairing. If it fails the desktop
-    // falls back to "open Command Center in browser" — degraded UX but
-    // pairing itself still succeeded.
+  } catch (linkErr) {
+    // Sign-in-link minting must never block pairing: the pairing token above
+    // is already durable and is the thing the CLI actually needs. If this
+    // fails the desktop falls back to "open Command Center in browser" —
+    // degraded UX, working pairing.
+    //
+    // But it is LOGGED, not swallowed. The previous empty catch turned a
+    // broken auth backend into an invisible UX regression: every desktop
+    // install silently lost turnkey sign-in with nothing in the logs to say
+    // why. `session: null` in the response is the client-visible signal.
+    console.error(
+      "[pair-code/redeem] sign-in link minting failed (pairing itself succeeded):",
+      linkErr instanceof Error ? linkErr.message : linkErr,
+    );
     magicLinkUrl = null;
   }
 

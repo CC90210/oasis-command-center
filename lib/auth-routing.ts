@@ -250,9 +250,14 @@ async function tryRecoverOrphanInvite(
   // token, which only the original recipient holds. The SECURITY
   // DEFINER function still enforces email_pinned vs auth.users.email
   // so we can't accidentally redeem onto a wrong user.
+  // p_redeemer_email is REQUIRED by the Turso port — the shim cannot read
+  // auth.users the way the Postgres SECURITY DEFINER function did, so it fails
+  // closed without it. normalizedEmail is the same address this function used
+  // to FIND the invite three queries up, so the email pin still holds.
   const { data, error } = await db.rpc("redeem_tenant_invite", {
     p_token_hash: invite.token_hash,
     p_redeemer_auth_id: authUserId,
+    p_redeemer_email: normalizedEmail,
   });
   if (error || !data?.ok) {
     // Structured server log so ops can see when recovery WAS attempted
