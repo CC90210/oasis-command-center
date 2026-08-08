@@ -49,6 +49,37 @@ function accountId(): string | undefined {
   return process.env.R2_ACCOUNT_ID || process.env.CLOUDFLARE_ACCOUNT_ID;
 }
 
+/**
+ * Buckets that were `public: true` in Supabase.
+ *
+ * This is a SECURITY BOUNDARY, not a convenience list. The /api/media route
+ * signs whatever object key it is handed, so this set is the only thing
+ * standing between a request for
+ * `/api/media/lead-documents/<tenant>/<lead>/statement.pdf` and a working link
+ * to a merchant bank statement. 4,088 of those live in the private bucket.
+ *
+ * It lives HERE because this file is byte-identical across four repos with a
+ * drift check that fails the build (scripts/verify-r2-surface.mjs). A copy of
+ * this list in each app's route would drift silently, and the failure mode of
+ * drift is "one app starts serving a private bucket" — the copies would not
+ * even disagree visibly, they would just diverge.
+ *
+ * Read from storage.buckets.public on 2026-08-07, not assumed. Anything absent
+ * is PRIVATE: deny-by-default, so a bucket added later is refused until someone
+ * makes an explicit decision to list it.
+ */
+export const PUBLIC_BUCKET_PREFIXES: ReadonlySet<string> = new Set([
+  "tenant-assets",                  // bravo
+  "avatars",                        // nostalgic
+  "application-documents",          // propflow
+  "application-screening-reports",  // propflow
+  "documents",                      // propflow
+  "logos",                          // propflow
+  "media",                          // propflow
+  "properties",                     // propflow
+  "property-photos",                // propflow
+]);
+
 export function r2Configured(): boolean {
   return Boolean(
     accountId() &&
