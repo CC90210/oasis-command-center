@@ -31,6 +31,8 @@
 import { NextResponse } from "next/server";
 import { authorizeBridgeRequest, callBridgeExecTool } from "@/lib/bridge-proxy";
 import { getServiceSupabase, getSessionUser } from "@/lib/supabase-server";
+import { resolveClientProfileSlug } from "@/lib/client-profiles";
+import { clairEnabledForTenantSlug } from "@/lib/clair/tenant-access";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -44,11 +46,24 @@ const ALLOWED_ROLES = new Set(["owner", "admin", "member", "loan_officer", "proc
 
 type Ctx = { params: Promise<{ id: string }> };
 
+async function clairAvailableForTenant(tenantId: string): Promise<boolean> {
+  const svc = getServiceSupabase();
+  const { data: tenant } = await svc
+    .from("tenants")
+    .select("slug, custom_fields")
+    .eq("id", tenantId)
+    .maybeSingle();
+  return clairEnabledForTenantSlug(resolveClientProfileSlug(tenant));
+}
+
 export async function GET(_req: Request, ctx: Ctx) {
   const { id: leadId } = await ctx.params;
   const auth = await authorizeBridgeRequest();
   if (!auth.ok) {
     return NextResponse.json({ ok: false, error: auth.error }, { status: auth.status });
+  }
+  if (!(await clairAvailableForTenant(auth.tenantId))) {
+    return NextResponse.json({ ok: false, error: "not_found" }, { status: 404 });
   }
 
   const svc = getServiceSupabase();
@@ -77,6 +92,9 @@ export async function POST(_req: Request, ctx: Ctx) {
   const auth = await authorizeBridgeRequest();
   if (!auth.ok) {
     return NextResponse.json({ ok: false, error: auth.error }, { status: auth.status });
+  }
+  if (!(await clairAvailableForTenant(auth.tenantId))) {
+    return NextResponse.json({ ok: false, error: "not_found" }, { status: 404 });
   }
   if (!ALLOWED_ROLES.has(auth.teamRole)) {
     return NextResponse.json(
