@@ -41,6 +41,14 @@ import { checkTcpaWindow, nextTcpaWindowStart } from "@/lib/tcpa-window";
 import { renderTemplate } from "@/lib/drips/templates";
 import { parseDripSteps, type DripStep } from "@/lib/drips/types";
 import { sendDripSms, sendDripEmail } from "@/lib/drips/send";
+import { brandIsSendable, type BrandKey } from "@/lib/email/brands";
+import { brandFooter } from "@/lib/email/brand-shell";
+import { isWithinSendWindow } from "@/lib/sms/compliance";
+import { smsSendAllowed, resetBreakerCache, claimBreakerProbe } from "@/lib/sms/send-breaker";
+import { openReceipt } from "@/lib/sms/delivery-receipts";
+import { loadBrandsForLeads } from "@/lib/drips/brand-store";
+import { poolFor, resolveCopy, type PoolTemplate } from "@/lib/drips/template-pool";
+import { loadApprovedPool } from "@/lib/drips/template-pool-store";
 import { wasShoppedRecently } from "@/lib/drips/enroller";
 import { SUNBIZ_BRAND, dripTrackingBase, platformTrackingBase, buildDripHtml, listUnsubscribeHeader, pixelUrl, unsubscribeUrl } from "@/lib/drips/html-email";
 import { resolveDripSmsIdentity, type DripSmsIdentity } from "@/lib/drips/rep-sms-identity";
@@ -245,6 +253,13 @@ type RunState = {
   /** Email volume budget for this dispatch run (governor.ts). Null when the run
    *  claimed no email rows, or in dry-run mode where no bytes move. */
   emailBudget: EmailBudget | null;
+  /** Sending brand per lead_id, resolved once per run from the stamp the
+   *  enroller wrote. Absent lead => sunbiz, which is the pre-existing
+   *  behaviour and what every lead currently in the CRM knows. */
+  brandByLead: Map<string, BrandKey>;
+  /** APPROVED drip templates for this tenant, loaded once. Empty means copy
+   *  falls back to each step's own variants, i.e. the pre-pool behaviour. */
+  templatePool: PoolTemplate[];
 };
 
 /** Best-effort lead_interactions log — never throws; a logging failure must
@@ -443,9 +458,27 @@ async function finishStep(
  *  email for an email step). Skip it and advance — the sequence may have later
  *  steps on the other channel. Do NOT markPermanentFail (that would drop the
  *  lead from the whole sequence over a single unreachable step). audit H5. */
-async function skipStep(db: Db, row: ClaimedRow, steps: DripStep[], reason: string): Promise<StepOutcome> {
-  await advanceRow(db, row, steps, { skippedReason: reason });
-  return "dry_run"; // nothing sent
+async function skipStep(
+  db: Db,
+  row: ClaimedRow,
+  steps: DripStep[],
+  reason: string,
+  opts: { deliveryFailed?: boolean } = {},
+): Promise<StepOutcome> {
+  // A BENIGN skip (no phone for an sms step) and a DELIVERY FAILURE (the
+  // provider rejected the message three times) are not the same event, and
+  // until 2026-08-06 both were recorded identically: advanced, status 'sent',
+  // last_error prefixed 'skipped:'. That is how 1,070 TextTorrent 422s over
+  // three weeks stayed invisible — 865 of 1,348 rows read 'sent' while nothing
+  // had been delivered, and every dashboard counted them as sends.
+  //
+  // The row still ADVANCES either way: a lead must not be stranded mid-sequence
+  // because one provider call failed. What changes is that the failure is now
+  // labelled as one and counted as one, so a health check can see it.
+  await advanceRow(db, row, steps, {
+    skippedReason: opts.deliveryFailed ? `delivery_failed: ${reason}` : reason,
+  });
+  return opts.deliveryFailed ? "failed" : "dry_run";
 }
 
 /** Defense-in-depth backstop (the safety net the go-live incident lacked): has
@@ -634,19 +667,15 @@ function buildContext(data: LeadData): Record<string, unknown> {
   };
 }
 
-/** Deterministic per-(lead, step) index into a variant set. STABLE across
- *  retries/reclaims — the reclaim + alreadySentStep dedup key on step_index, so
- *  a RANDOM pick could send a lead a *different* variation on a re-dispatch.
- *  FNV-1a over `${leadId}:${stepIndex}`. */
-function stableIndex(seed: string, n: number): number {
-  if (n <= 1) return 0;
-  let h = 2166136261;
-  for (let i = 0; i < seed.length; i++) {
-    h ^= seed.charCodeAt(i);
-    h = Math.imul(h, 16777619);
-  }
-  return (h >>> 0) % n;
-}
+// The deterministic per-(lead, step) variant hash moved to
+// lib/drips/template-pool.ts when copy resolution did (2026-08-06). It is
+// FNV-1a over `${leadId}:${stepIndex}` and must stay STABLE across
+// retries/reclaims: reclaim + alreadySentStep dedup on step_index, so a random
+// pick would send a lead a DIFFERENT variation on re-dispatch, which reads to
+// the merchant as a second, different message.
+//
+// Deliberately not re-declared here. Two copies of a hash that must agree is a
+// drift waiting to happen, and the failure would be silent.
 
 /** Resolve the subject+body to actually send for this step. When the step
  *  defines body_variants (the "same message in nice variations" mechanism),
@@ -656,16 +685,20 @@ function resolveStepCopy(
   step: DripStep,
   leadId: string,
   stepIndex: number,
-): { subject: string; body: string; bodyHtml?: string; variantIndex: number } {
-  const variants = step.body_variants;
-  if (variants && variants.length > 0) {
-    const i = stableIndex(`${leadId}:${stepIndex}`, variants.length);
-    const subjectVariants = step.subject_variants;
-    const subject =
-      (subjectVariants && subjectVariants.length > 0 ? subjectVariants[i % subjectVariants.length] : step.subject) || "";
-    return { subject, body: variants[i], bodyHtml: step.body_html, variantIndex: i };
-  }
-  return { subject: step.subject || "", body: step.body, bodyHtml: step.body_html, variantIndex: 0 };
+  opts?: { brand?: BrandKey; stage?: string; pool?: PoolTemplate[] },
+): { subject: string; body: string; bodyHtml?: string; variantIndex: number; source: string; templateId: string | null } {
+  // Narrow the run's pool to templates doing the SAME JOB for this brand and
+  // stage, so an opener is never substituted by a last call. An unset role on
+  // the step means "nudge", the neutral middle of the arc.
+  const scoped =
+    opts?.pool && opts.pool.length > 0 && opts.brand && opts.stage
+      ? poolFor(opts.pool, opts.brand, opts.stage, String(step.role || "nudge"))
+      : [];
+  // Precedence lives in the pure module: approved pool, then the step's own
+  // variants, then its plain copy. An empty pool reproduces the pre-pool engine
+  // byte for byte, which is what makes this deployable before anything is
+  // seeded.
+  return resolveCopy(step, leadId, stepIndex, scoped);
 }
 
 async function processSmsStep(
@@ -701,7 +734,57 @@ async function processSmsStep(
     return markRescheduled(db, row, next.toISOString(), `quiet_hours (local ${tcpa.timeLabel} ${tcpa.timeZone})`);
   }
 
-  const copy = resolveStepCopy(step, row.lead_id, row.step_index);
+  // STATE-SPECIFIC quiet hours, on top of the federal 8am-9pm check above.
+  //
+  // The federal window is not sufficient: FL, MD and OK close at 8pm, AL, LA
+  // and MS additionally bar Sunday solicitation, Rhode Island closes at 6pm on
+  // weekdays and 5pm Saturday, and Texas does not open until noon on Sunday.
+  // Sending at 8:30pm to a Florida merchant is legal under the check above and
+  // illegal under Florida law.
+  //
+  // Resolved from the lead's own address state. An absent state falls back to
+  // the federal window rather than blocking, because the federal check has
+  // already passed and refusing every address-less lead would stall the engine;
+  // the tradeoff is recorded on the row so the basis is reconstructable.
+  {
+    const stateRaw =
+      (typeof data.owner_address_state === "string" && data.owner_address_state) ||
+      (typeof data.state === "string" && data.state) ||
+      (typeof data.business_state === "string" && data.business_state) ||
+      null;
+    if (stateRaw) {
+      // tcpa.timeZone is the recipient's resolved zone; build their local clock.
+      const localNow = new Date(
+        new Date().toLocaleString("en-US", { timeZone: tcpa.timeZone }),
+      );
+      // isWithinSendWindow reads UTC getters, so hand it a Date whose UTC
+      // fields ARE the recipient's local wall-clock values.
+      const asUtc = new Date(
+        Date.UTC(
+          localNow.getFullYear(),
+          localNow.getMonth(),
+          localNow.getDate(),
+          localNow.getHours(),
+          localNow.getMinutes(),
+        ),
+      );
+      const stateWindow = isWithinSendWindow(stateRaw, asUtc);
+      if (!stateWindow.ok) {
+        const next = nextTcpaWindowStart(phone);
+        return markRescheduled(db, row, next.toISOString(), `state_${stateWindow.reason} (${stateRaw})`);
+      }
+    }
+  }
+
+  // SMS copy comes from the same approved pool, scoped to this lead's brand and
+  // stage. The brand map is email-keyed for the volume gate, so resolve it here
+  // directly; absent means sunbiz, the pre-existing behaviour.
+  const smsBrand: BrandKey = run.brandByLead.get(row.lead_id) ?? "sunbiz";
+  const copy = resolveStepCopy(step, row.lead_id, row.step_index, {
+    brand: smsBrand,
+    stage: typeof data.stage === "string" ? data.stage : undefined,
+    pool: run.templatePool,
+  });
   const rendered = renderTemplate(copy.body, buildContext(data));
   const clean = await sanitizeBlastMessage(row.tenant_id, rendered, { checkPositioning: true });
   if (!clean.ok) return handleGuardBlock(db, row, steps, clean, "sms");
@@ -733,6 +816,45 @@ async function processSmsStep(
 
   let fromIdentity = `dry:${identity.repKey}:${identity.senderId}`;
   if (shouldSend) {
+    // DELIVERY BREAKER. TextTorrent's send endpoint returns 201 for messages the
+    // carrier then refuses; between 2026-07-27 and 2026-08-07 it returned 201 to
+    // 51 consecutive sends that all failed, and we were billed for every one.
+    // The breaker reads the carrier's own verdicts and stops the bleed.
+    //
+    // RESCHEDULE rather than fail: the route being dead is not this lead's
+    // fault, and burning an attempt (or advancing the sequence past a step the
+    // merchant never received) would turn a vendor outage into permanent damage
+    // to the sequence.
+    const breaker = await smsSendAllowed(row.tenant_id);
+    // Halted but due for a probe: try to CLAIM it. The claim is a conditional
+    // update in Postgres, so exactly one caller wins across every concurrent
+    // dispatch instance — an in-process flag would let each instance send its
+    // own "one" probe into a dead route. Losing the claim means holding, same
+    // as any other halted row.
+    const probing = breaker.halt && breaker.halfOpen && (await claimBreakerProbe(row.tenant_id));
+    if (probing) {
+      // Drop the cached verdict so the next row re-reads, sees this send
+      // outstanding, and holds rather than riding the 60s cache.
+      resetBreakerCache(row.tenant_id);
+    } else if (breaker.halt) {
+      await writeAgentAlert({
+        tenantId: row.tenant_id,
+        alertType: "sms_carrier_route_dead",
+        lane: "sunbiz-ops",
+        severity: "urgent",
+        title: "SMS halted — the carrier is refusing our sends",
+        body:
+          `${breaker.reason}. Drip SMS is paused and every affected step reschedules +2h ` +
+          `(no attempt burned, no merchant dropped). TextTorrent returns HTTP 201 on these, ` +
+          `so nothing else would have caught it.`,
+        telegramOncePerOpen: true, // one page per outage, not one per row
+      }).catch(() => {});
+      return markRescheduled(
+        db, row, new Date(Date.now() + 2 * 3_600_000).toISOString(),
+        `sms_carrier_halt: ${breaker.reason}`,
+      );
+    }
+
     const result = await sendDripSms(row.tenant_id, phone, clean.cleaned, identity);
     if (!result.ok) {
       // GLOBAL transient: TT credit exhaustion hits EVERY send at once. Burning
@@ -759,15 +881,36 @@ async function processSmsStep(
       // Per-lead permanent: TT says the contact is blacklisted — retrying is
       // pointless and burns three dispatch slots per lead.
       if (/blacklisted/i.test(result.error)) {
-        return skipStep(db, row, steps, `sms_delivery_failed: ${result.error}`);
+        return skipStep(db, row, steps, `sms_delivery_failed: ${result.error}`, { deliveryFailed: true });
       }
       const attempts = (row.attempts || 0) + 1;
       if (attempts >= MAX_ATTEMPTS) {
-        return skipStep(db, row, steps, `sms_delivery_failed_after_retries: ${result.error}`);
+        return skipStep(db, row, steps, `sms_delivery_failed_after_retries: ${result.error}`, { deliveryFailed: true });
       }
       return markRetryOrFail(db, row, result.error);
     }
     fromIdentity = `${identity.repKey}:${result.fromNumber}`;
+
+    // Open a delivery receipt. A 201 means TextTorrent accepted the REQUEST;
+    // the carrier rules on it seconds-to-minutes later and that verdict is the
+    // only proof of arrival. /api/cron/reconcile-sms closes this out.
+    //
+    // Best-effort by design: bookkeeping must never fail a merchant's step. A
+    // receipt that fails to open surfaces as missing coverage in the
+    // sms.receipt_coverage health check, not as a lost send.
+    if (result.chatId) {
+      await openReceipt(db, {
+        tenantId: row.tenant_id,
+        dripRunId: row.id,
+        leadId: row.lead_id,
+        chatId: String(result.chatId),
+        repKey: identity.repKey,
+        actAsEmail: identity.actAsEmail,
+        fromNumber: result.fromNumber,
+        toPhone: phone,
+        body: clean.cleaned,
+      });
+    }
   }
 
   await logInteraction(db, {
@@ -824,8 +967,25 @@ async function processEmailStep(
     return markRescheduled(db, row, emailWait.toISOString(), `email_window (outside ${EMAIL_WIN_START}:00-${EMAIL_WIN_END}:00 ${EMAIL_WIN_TZ})`);
   }
 
+  // Which company is speaking to this merchant. Stamped on the lead at
+  // enrolment and read here, never derived at send time, so a lead cannot flip
+  // brand mid-sequence. Absent => sunbiz, the pre-existing behaviour.
+  //
+  // Resolved here, before BOTH the copy lookup and the volume gate: the copy
+  // pool is scoped per brand, and the daily/hourly ceilings are per-brand
+  // because each brand carries its own domain reputation. Gating both against
+  // one shared pool would mean splitting across two domains bought no extra
+  // throughput.
+  const brand: BrandKey = run.brandByLead.get(row.lead_id) ?? "sunbiz";
+
   // Resolve the copy first so the app-link pre-flight can inspect it.
-  const copy = resolveStepCopy(step, row.lead_id, row.step_index);
+  // Drawn from the APPROVED pool for this brand+stage+role when one exists;
+  // otherwise the step's own variants, unchanged.
+  const copy = resolveStepCopy(step, row.lead_id, row.step_index, {
+    brand,
+    stage: typeof data.stage === "string" ? data.stage : undefined,
+    pool: run.templatePool,
+  });
 
   // ── Dynamic application-link pre-flight (2026-07-21) ────────────────────────
   // If this email injects the merchant's resumable application link
@@ -868,7 +1028,7 @@ async function processEmailStep(
           }).catch(() => {});
         }
         if (attempts >= CAP) {
-          return skipStep(db, row, steps, "missing_application_link: skipped after retries (no form/HMAC key)");
+          return skipStep(db, row, steps, "missing_application_link: skipped after retries (no form/HMAC key)", { deliveryFailed: true });
         }
         await db
           .from("drip_runs")
@@ -913,9 +1073,18 @@ async function processEmailStep(
   // HOLD, never fail: hitting a cap is a "not yet", not an error, so the row is
   // rescheduled to when the window reopens and keeps its attempt budget.
   if (shouldSend && run.emailBudget) {
-    const gated = emailGateReason(run.emailBudget, row.lead_id);
+    // The per-lead weekly ceiling varies BY STAGE: a merchant mid-application
+    // expects contact, a lead six weeks into follow-up does not. Passing the
+    // stage raises the cap only where engagement justifies it.
+    const gateStage = typeof data.stage === "string" ? data.stage : undefined;
+    const gated = emailGateReason(run.emailBudget, row.lead_id, brand, gateStage);
     if (gated) {
-      return markRescheduled(db, row, holdUntilIso(gated), `email_volume_gate (${gated})`);
+      return markRescheduled(
+        db,
+        row,
+        holdUntilIso(gated),
+        `email_volume_gate (${brand}/${gateStage || "no-stage"}: ${gated})`,
+      );
     }
   }
 
@@ -931,6 +1100,11 @@ async function processEmailStep(
   // Defaults to the platform origin so a dry run (which builds no HTML) records
   // the truthful "nothing aligned happened here".
   let sentTrackingBase: string = platformTrackingBase();
+  // The brand this message ACTUALLY went out as, recorded on the interaction
+  // row. Telemetry that cannot say which company sent a message cannot
+  // reconstruct a complaint, and after a handoff the lead's current brand is no
+  // longer what older mail carried.
+  let sentBrand: BrandKey = "sunbiz";
   if (shouldSend) {
     // Transactional/relationship email (application nudges, statements, etc.) is
     // CAN-SPAM opt-out-exempt → NO visible unsubscribe footer. The invisible
@@ -944,22 +1118,40 @@ async function processEmailStep(
     // below. Cold outreach deliberately does NOT do this: it sends from isolated
     // domains and its links must stay on the platform origin.
     const trackingBase = dripTrackingBase();
-    const customFooter =
-      emailClass === "transactional"
-        ? ""
-        : `<div style="margin:24px 0 0;color:#8a94a6;font:12px/1.5 Arial,sans-serif">` +
-          `Prefer not to receive these? <a href="${unsubscribeUrl(email, SUNBIZ_BRAND, trackingBase)}" style="color:#8a94a6">Unsubscribe here</a>.</div>`;
+
+    // A brand missing its CAN-SPAM postal address must never reach a merchant.
+    // HOLD the row rather than failing it: the fix is configuration, and the
+    // message is still worth sending once it lands.
+    const sendable = brandIsSendable(brand);
+    if (!sendable.ok) {
+      return markRetryOrFail(db, row, `brand_not_sendable: ${sendable.reason}`);
+    }
+
+    // Custom-HTML templates get the SAME brand footer as the plain path, or a
+    // templated drip would ship with no postal address while a plain one carries
+    // it. Transactional drops only the unsubscribe line, never the address.
+    const customFooter = brandFooter(
+      brand,
+      emailClass === "transactional" ? null : unsubscribeUrl(email, SUNBIZ_BRAND, trackingBase),
+    );
     const customTracking = `<img src="${pixelUrl(sendId, trackingBase)}" width="1" height="1" alt="" style="display:none;max-height:0;overflow:hidden" />`;
     const instrumentedCustomHtml = renderedCustomHtml
       ? renderedCustomHtml.replace(/<\/body>/i, `${customFooter}${customTracking}</body>`)
       : "";
     const html =
-      instrumentedCustomHtml || buildDripHtml(cleanBody, { sendId, email, unsub, trackingBase });
+      instrumentedCustomHtml ||
+      buildDripHtml(cleanBody, { sendId, email, unsub, trackingBase, sendingBrand: brand });
     htmlPayload = html;
     sentTrackingBase = trackingBase;
+    sentBrand = brand;
     const result = await sendDripEmail(row.tenant_id, email, subject, cleanBody, {
       html,
+      // SUNBIZ_BRAND here is the SUPPRESSION brand (the tenant resolver on the
+      // opt-out write path), NOT the sending brand. It deliberately does not
+      // follow `brand`: both brands share one tenant so a single opt-out stops
+      // both, and a value matching no tenant would land tenant_id = NULL.
       listUnsubscribe: listUnsubscribeHeader(email, SUNBIZ_BRAND, trackingBase),
+      brand,
     });
     if (!result.ok) return markRetryOrFail(db, row, result.error);
     fromIdentity = result.fromAddress;
@@ -967,7 +1159,7 @@ async function processEmailStep(
     // Spend the budget only on a send that actually left, so later rows in this
     // same run see the decremented remainder without re-querying. A failed send
     // deliberately does not consume: nothing reached the recipient.
-    if (run.emailBudget) consumeEmail(run.emailBudget, row.lead_id);
+    if (run.emailBudget) consumeEmail(run.emailBudget, row.lead_id, brand);
   }
 
   const interactionLog = logInteraction(db, {
@@ -997,6 +1189,12 @@ async function processEmailStep(
       // variable was unset and silently fell back. Absence means the platform
       // origin, which is exactly right for historical rows (Codex review P2).
       tracking_base: sentTrackingBase,
+      // The brand this message ACTUALLY went out as. Recorded for the same
+      // reason tracking_base is: a lead that has since been handed off now
+      // carries a different sending_brand than the mail already in its inbox,
+      // so re-deriving from the lead row would misattribute every historical
+      // send. Absence means sunbiz, correct for every row predating this.
+      sending_brand: sentBrand,
     },
   });
   await Promise.all([
@@ -1281,10 +1479,27 @@ export async function runDispatchDrips(): Promise<DispatchDripsResult> {
   const emailLeadIds = Array.from(
     new Set(claimed.filter((r) => r.channel === "email").map((r) => r.lead_id)),
   );
+  // Sending brand per lead, resolved ONCE for the run alongside the budget.
+  // Read-only: the brand is stamped at enrolment, never derived here, so a lead
+  // cannot flip brand mid-sequence. Fails safe to sunbiz.
+  const brandTenantId = claimed[0]?.tenant_id;
+  const brandByLead =
+    emailLeadIds.length > 0 && brandTenantId
+      ? await loadBrandsForLeads(db, brandTenantId, emailLeadIds)
+      : new Map<string, BrandKey>();
+
+  // Approved template pool, loaded once per run alongside the budget and brand
+  // map. Fails SAFE to empty, which makes copy resolution fall back to the
+  // step's own variants — today's behaviour — rather than stalling the engine
+  // over a template table being briefly unreachable.
+  const templatePool = brandTenantId ? await loadApprovedPool(db, brandTenantId) : [];
+
   const run: RunState = {
     creditExhausted: false,
     emailBudget:
       dripSendEnabled() && emailLeadIds.length > 0 ? await loadEmailBudget(db, emailLeadIds) : null,
+    brandByLead,
+    templatePool,
   };
   if (run.emailBudget?.degraded) {
     // The global counts are best-effort this run; the per-lead cap still holds

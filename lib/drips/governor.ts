@@ -43,6 +43,7 @@
 import "server-only";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import type { EmailBudget } from "./drip-rules-core";
+import { ALL_BRAND_KEYS, resolveBrandKey, type BrandKey } from "@/lib/email/brands";
 
 type Db = ReturnType<typeof getServiceSupabase>;
 
@@ -53,8 +54,15 @@ function intEnv(name: string, def: number): number {
 
 /** Reputation-safe defaults (warm inbound audience, single mailbox). During the
  *  6-week warm-up these are raised via env: 25 -> 40 -> 60 -> 90 -> 120 -> 150. */
-export const emailDailyCap = () => intEnv("DRIPS_EMAIL_DAILY_CAP", 150);
-export const emailHourlyCap = () => intEnv("DRIPS_EMAIL_HOURLY_CAP", 25);
+/** Per-brand ceilings. Each brand carries its own domain reputation, so each
+ *  gets its own ceiling, and a per-brand override wins over the shared one.
+ *  Unset resolves to the shared value, which is today's behaviour exactly. */
+export const emailDailyCap = (brand: BrandKey = "sunbiz") =>
+  intEnv(`DRIPS_EMAIL_DAILY_CAP_${brand.toUpperCase()}`, intEnv("DRIPS_EMAIL_DAILY_CAP", 150));
+export const emailHourlyCap = (brand: BrandKey = "sunbiz") =>
+  intEnv(`DRIPS_EMAIL_HOURLY_CAP_${brand.toUpperCase()}`, intEnv("DRIPS_EMAIL_HOURLY_CAP", 25));
+/** Brand-BLIND on purpose: this cap is about how mail feels to one human, and
+ *  two emails in a week is two emails whichever company sent them. */
 export const perLeadWeeklyEmailCap = () => intEnv("DRIPS_PER_LEAD_WEEKLY_EMAIL_CAP", 2);
 
 /** Runtime kill switch. DRIPS_CIRCUIT_OPEN=1 halts ALL real drip sends this run.
@@ -72,20 +80,64 @@ const WEEK = 7 * DAY;
  *  lead_interactions audit trail — the same source alreadySentStep() trusts.
  *  agent_source LIKE 'sequence:%' scopes to drip sends only, not lender
  *  shop-out from the same mailbox. Returns -1 on error. */
-async function countDripEmail(db: Db, sinceIso: string): Promise<number> {
+/**
+ * Count REAL drip EMAIL sends in a rolling window, bucketed by SENDING BRAND.
+ *
+ * TWO CORRECTIONS OVER THE ORIGINAL (2026-08-05), both found by measuring
+ * production rather than reading the code:
+ *
+ * 1. It counted `metadata->>dry_run = 'false'` EXACTLY, so any row whose
+ *    metadata lacks a dry_run key was invisible to the cap. That was not
+ *    hypothetical: a SECOND sender (the VPS send_gateway, metadata shape
+ *    {brand,intent,sent_at,reservation_status}) writes rows for the SAME
+ *    sequences and never sets dry_run. Over 30 days it sent 105 emails the cap
+ *    could not see, against 320 from this engine. A cap of 25 would really have
+ *    permitted ~33. Now anything not EXPLICITLY dry_run counts, so an unknown
+ *    writer makes the cap bite sooner rather than disappear. Fail closed.
+ *
+ * 2. The counts were global across brands. With two brands on one tenant, a
+ *    shared ceiling means splitting the volume across two domains buys no extra
+ *    throughput, which defeats the reason for the split. Counts are now
+ *    per-brand, read from metadata.sending_brand, defaulting to sunbiz for
+ *    every historical row (correct: they all predate Bluerise).
+ *
+ * Counted in JS rather than by a PostgREST predicate because "dry_run is absent
+ * OR false" and "sending_brand is absent OR equals X" are both awkward to
+ * express as filters, and the daily window is only a few hundred rows.
+ *
+ * Returns null on error so the caller can degrade explicitly.
+ */
+async function countDripEmailByBrand(
+  db: Db,
+  sinceIso: string,
+): Promise<Record<BrandKey, number> | null> {
+  const out: Record<BrandKey, number> = { sunbiz: 0, bluerise: 0 };
   try {
-    const r = await db
-      .from("lead_interactions")
-      .select("id", { count: "exact", head: true })
-      .eq("type", "email_sent")
-      .eq("direction", "outbound")
-      .eq("metadata->>dry_run", "false")
-      .like("agent_source", "sequence:%")
-      .gte("created_at", sinceIso);
-    if (r.error) return -1;
-    return r.count ?? 0;
+    // Bounded: a rolling day of drip mail is small. Paginate defensively anyway
+    // so a backlog cannot silently truncate the count and under-report volume.
+    for (let page = 0; page < 6; page++) {
+      const r = await db
+        .from("lead_interactions")
+        .select("metadata")
+        .eq("type", "email_sent")
+        .eq("direction", "outbound")
+        .like("agent_source", "sequence:%")
+        .gte("created_at", sinceIso)
+        .range(page * 1000, page * 1000 + 999);
+      if (r.error) return null;
+      const rows = (r.data || []) as Array<{ metadata: Record<string, unknown> | null }>;
+      for (const row of rows) {
+        const md = row.metadata || {};
+        // Only an EXPLICIT dry run is excluded. Absent means "some writer we do
+        // not control produced this", and that must count against the ceiling.
+        if (String(md.dry_run) === "true") continue;
+        out[resolveBrandKey(md.sending_brand)] += 1;
+      }
+      if (rows.length < 1000) break;
+    }
+    return out;
   } catch {
-    return -1;
+    return null;
   }
 }
 
@@ -99,27 +151,40 @@ export async function loadEmailBudget(db: Db, emailLeadIds: string[]): Promise<E
   let perLeadDegraded = false;
 
   const [today, thisHour] = await Promise.all([
-    countDripEmail(db, ISO(DAY)),
-    countDripEmail(db, ISO(HOUR)),
+    countDripEmailByBrand(db, ISO(DAY)),
+    countDripEmailByBrand(db, ISO(HOUR)),
   ]);
-  if (today < 0 || thisHour < 0) degraded = true;
+  if (today === null || thisHour === null) degraded = true;
 
-  const dailyRemaining = today < 0 ? emailDailyCap() : Math.max(0, emailDailyCap() - today);
-  const hourlyRemaining = thisHour < 0 ? emailHourlyCap() : Math.max(0, emailHourlyCap() - thisHour);
+  // Per-brand remaining. Each brand carries its own domain reputation, so each
+  // gets its own ceiling; a shared one would mean splitting across two domains
+  // bought no throughput.
+  const dailyRemaining = {} as Record<BrandKey, number>;
+  const hourlyRemaining = {} as Record<BrandKey, number>;
+  for (const b of ALL_BRAND_KEYS) {
+    dailyRemaining[b] = today === null ? emailDailyCap(b) : Math.max(0, emailDailyCap(b) - today[b]);
+    hourlyRemaining[b] =
+      thisHour === null ? emailHourlyCap(b) : Math.max(0, emailHourlyCap(b) - thisHour[b]);
+  }
 
   if (emailLeadIds.length > 0) {
     try {
+      // The per-lead cap is about how mail FEELS to one human, so it is
+      // deliberately brand-BLIND: two emails this week is two emails whichever
+      // company sent them. It also drops the dry_run predicate for the same
+      // reason the global counts did — a send from an unknown writer still
+      // landed in that person's inbox.
       const r = await db
         .from("lead_interactions")
-        .select("lead_id")
+        .select("lead_id, metadata")
         .eq("type", "email_sent")
         .eq("direction", "outbound")
-        .eq("metadata->>dry_run", "false")
         .like("agent_source", "sequence:%")
         .gte("created_at", ISO(WEEK))
         .in("lead_id", emailLeadIds);
       if (r.error) perLeadDegraded = true;
-      for (const row of (r.data || []) as Array<{ lead_id: string }>) {
+      for (const row of (r.data || []) as Array<{ lead_id: string; metadata: Record<string, unknown> | null }>) {
+        if (String(row.metadata?.dry_run) === "true") continue;
         perLeadSent7d.set(row.lead_id, (perLeadSent7d.get(row.lead_id) || 0) + 1);
       }
     } catch {

@@ -28,6 +28,10 @@
 
 import "server-only";
 import { resolveTextTorrentSenderId } from "@/lib/integrations/texttorrent-sender";
+import { getServiceSupabase } from "@/lib/supabase-server";
+import { liveNumbersFor } from "@/lib/drips/sender-sync";
+import { classifyRep } from "./rep-keys";
+export { classifyRep };
 
 export type DripSmsIdentity = {
   /** X-ACT-AS-USER sub-account email, or null to send as the parent/admin account. */
@@ -111,31 +115,6 @@ function registry(): Record<string, RepEntry> {
   return reg;
 }
 
-// assigned_to userIds we can pin directly. rep_name is the primary signal; this
-// is the fallback for leads whose rep_name hasn't been backfilled yet.
-const USERID_TO_REP: Record<string, string> = {
-  "871a3e7e-a49a-4ac4-b44d-b1ad2eb6b7d6": "admin", // Matt / submissions@ / owner
-};
-
-/** Map a lead's rep_name / assigned_to to a registry rep key. Matches on
- *  whole-word first names (NOT substring) so "Joe Alexson" / "Jordana Smith"
- *  can't misroute to Alex/Jordan and land a reply in the wrong rep's inbox.
- *  Fail-safe: any lead we can't confidently attribute goes on the admin
- *  (owner) account. */
-export function classifyRep(data: Record<string, unknown>): string {
-  const tokens = String(data.rep_name || "")
-    .toLowerCase()
-    .split(/[^a-z]+/)
-    .filter(Boolean);
-  const has = (w: string) => tokens.includes(w);
-  if (has("alex")) return "alex";
-  if (has("jordan")) return "jordan";
-  if (has("joe")) return "joe";
-  if (has("matt")) return "admin";
-  const asg = String(data.assigned_to || "");
-  if (USERID_TO_REP[asg]) return USERID_TO_REP[asg];
-  return "admin";
-}
 
 /** Deterministic per-lead number pick: a given lead always texts from the same
  *  number (stable inbound threading) while the pool still spreads load across
@@ -159,6 +138,36 @@ export async function resolveDripSmsIdentity(
 ): Promise<DripSmsIdentity | { error: string }> {
   const reg = registry();
   const repKey = classifyRep(data);
+
+  // LIVE NUMBERS FIRST (2026-08-07). The static registry below is a snapshot,
+  // and TextTorrent numbers rotate: the list was "VERIFIED live 2026-07-09" and
+  // had rotted by 07-13 — jordan's only configured number gone, joe's
+  // sub-account vanished, 3 of admin's 5 dead. Every send from a dead number
+  // returned 422, and 1,070 of them were recorded as 'sent'.
+  //
+  // sms_sender_numbers is refreshed twice daily by /api/cron/sync-sms-numbers,
+  // so a rotation is picked up automatically instead of silently failing until
+  // someone notices.
+  try {
+    const db = getServiceSupabase();
+    const live = await liveNumbersFor(db, tenantId, repKey);
+    if (live.length > 0) {
+      return { actAsEmail: reg[repKey]?.actAs ?? null, senderId: pickNumber(live, leadId), repKey };
+    }
+    // The rep has no live number. Fall through to admin's LIVE pool rather than
+    // to this rep's stale static list: sending from a number we know is dead is
+    // strictly worse than sending from a working one attributed to admin.
+    if (repKey !== "admin") {
+      const adminLive = await liveNumbersFor(db, tenantId, "admin");
+      if (adminLive.length > 0) {
+        return { actAsEmail: null, senderId: pickNumber(adminLive, leadId), repKey: "admin" };
+      }
+    }
+  } catch {
+    // Sync table unreadable — fall through to the static registry below. Being
+    // wrong about WHICH number is recoverable; sending nothing at all is not.
+  }
+
   const entry = reg[repKey] || reg.admin;
   if (entry && entry.numbers.length > 0) {
     return { actAsEmail: entry.actAs, senderId: pickNumber(entry.numbers, leadId), repKey };
