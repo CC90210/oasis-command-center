@@ -92,11 +92,19 @@ export async function loadProviderAvailability(tenantId: string): Promise<Provid
 
   // Env-provided credentials count too: TextTorrent has historically been
   // configured that way, and a provider that works must not read as absent.
+  //
+  // These names MUST match ENV_FALLBACKS in lib/tenant-integration-store.ts,
+  // which is the resolver's source of truth. Inventing a plausible-looking name
+  // here (GWS_APP_PASSWORD rather than the real GMAIL_APP_PASSWORD) reports a
+  // working mailbox as unprovisioned and holds all of its traffic — a wrong
+  // guess about our own configuration, dressed as a safety check.
+  //
+  // gws_bluerise is deliberately absent: it has no ENV_FALLBACKS entry and is
+  // DB-only, so there is no env path to check.
   const envConfigured: Partial<Record<ProviderId, boolean>> = {
     texttorrent: Boolean(process.env.TEXTTORRENT_API_SID),
     twilio: Boolean(process.env.TWILIO_ACCOUNT_SID && process.env.TWILIO_AUTH_TOKEN),
-    gws: Boolean(process.env.GWS_APP_PASSWORD),
-    gws_bluerise: Boolean(process.env.GWS_BLUERISE_APP_PASSWORD),
+    gws: Boolean(process.env.GMAIL_APP_PASSWORD),
   };
 
   return Object.fromEntries(

@@ -261,7 +261,10 @@ type RunState = {
   brandByLead: Map<string, BrandKey>;
   /** APPROVED drip templates for this tenant, loaded once. Empty means copy
    *  falls back to each step's own variants, i.e. the pre-pool behaviour. */
-  templatePool: PoolTemplate[];
+  /** Keyed by tenant. A batch can span tenants and approved copy is tenant
+   *  property: one flat pool would let tenant A's templates render for
+   *  tenant B's merchants. */
+  templatePoolByTenant: Map<string, PoolTemplate[]>;
 };
 
 /** Best-effort lead_interactions log — never throws; a logging failure must
@@ -786,7 +789,7 @@ async function processSmsStep(
   const copy = resolveStepCopy(step, row.lead_id, row.step_index, {
     brand: smsBrand,
     stage: typeof data.stage === "string" ? data.stage : undefined,
-    pool: run.templatePool,
+    pool: run.templatePoolByTenant.get(row.tenant_id) ?? [],
   });
   const rendered = renderTemplate(copy.body, buildContext(data));
   const clean = await sanitizeBlastMessage(row.tenant_id, rendered, { checkPositioning: true });
@@ -840,6 +843,21 @@ async function processSmsStep(
       return markRescheduled(
         db, row, new Date(Date.now() + 6 * 3_600_000).toISOString(),
         `sms_channel_unavailable: ${route.reason}`,
+      );
+    }
+    // The route names a provider and everything below this point is
+    // TextTorrent-specific: the breaker, the act-as identity, sendDripSms. If
+    // the route picks anything else we must HOLD, not carry on.
+    //
+    // Without this, the gate is a decoration that happens to work only because
+    // Twilio is switched off. The day Twilio is enabled for Bluerise, route.send
+    // flips true and the code below would push Bluerise copy out of SunBiz's
+    // TextTorrent account — the precise mismatch this gate exists to prevent,
+    // reintroduced by the act of provisioning the fix for it.
+    if (route.provider !== "texttorrent") {
+      return markRescheduled(
+        db, row, new Date(Date.now() + 6 * 3_600_000).toISOString(),
+        `sms_provider_not_wired: ${route.provider} has no sender in the drip executor yet`,
       );
     }
 
@@ -1011,7 +1029,7 @@ async function processEmailStep(
   const copy = resolveStepCopy(step, row.lead_id, row.step_index, {
     brand,
     stage: typeof data.stage === "string" ? data.stage : undefined,
-    pool: run.templatePool,
+    pool: run.templatePoolByTenant.get(row.tenant_id) ?? [],
   });
 
   // ── Dynamic application-link pre-flight (2026-07-21) ────────────────────────
@@ -1516,25 +1534,42 @@ export async function runDispatchDrips(): Promise<DispatchDripsResult> {
   // Bluerise merchant and, once the allocation gate landed, waved that merchant
   // straight through to a SunBiz TextTorrent number. The gate would have been
   // bypassed in precisely the case it exists for. One batched query either way.
-  const brandLeadIds = Array.from(new Set(claimed.map((r) => r.lead_id)));
-  const brandTenantId = claimed[0]?.tenant_id;
-  const brandByLead =
-    brandLeadIds.length > 0 && brandTenantId
-      ? await loadBrandsForLeads(db, brandTenantId, brandLeadIds)
-      : new Map<string, BrandKey>();
+  //
+  // Loaded PER TENANT. A batch can span tenants, and keying the whole load on
+  // claimed[0].tenant_id left every later tenant's leads absent from the map and
+  // defaulting to sunbiz — the same bypass as above, plus a tenant-filtering
+  // violation: it would have looked up one tenant's leads under another's id.
+  const leadIdsByTenant = new Map<string, Set<string>>();
+  for (const r of claimed) {
+    const set = leadIdsByTenant.get(r.tenant_id) ?? new Set<string>();
+    set.add(r.lead_id);
+    leadIdsByTenant.set(r.tenant_id, set);
+  }
+  const brandByLead = new Map<string, BrandKey>();
+  for (const [tid, ids] of leadIdsByTenant) {
+    if (ids.size === 0) continue;
+    const m = await loadBrandsForLeads(db, tid, Array.from(ids));
+    for (const [leadId, brand] of m) brandByLead.set(leadId, brand);
+  }
 
   // Approved template pool, loaded once per run alongside the budget and brand
   // map. Fails SAFE to empty, which makes copy resolution fall back to the
   // step's own variants — today's behaviour — rather than stalling the engine
   // over a template table being briefly unreachable.
-  const templatePool = brandTenantId ? await loadApprovedPool(db, brandTenantId) : [];
+  // Per tenant, for the same reason the brand map is: claimed[0].tenant_id
+  // would have rendered every tenant's merchants from the first tenant's
+  // approved copy.
+  const templatePoolByTenant = new Map<string, PoolTemplate[]>();
+  for (const tid of leadIdsByTenant.keys()) {
+    templatePoolByTenant.set(tid, await loadApprovedPool(db, tid));
+  }
 
   const run: RunState = {
     creditExhausted: false,
     emailBudget:
       dripSendEnabled() && emailLeadIds.length > 0 ? await loadEmailBudget(db, emailLeadIds) : null,
     brandByLead,
-    templatePool,
+    templatePoolByTenant,
   };
   if (run.emailBudget?.degraded) {
     // The global counts are best-effort this run; the per-lead cap still holds
