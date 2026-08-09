@@ -54,11 +54,18 @@ assert.equal(isTerminal("failed"), true);
 assert.equal(isTerminal("pending"), false);
 assert.equal(isTerminal("unknown"), false);
 
-// ── Timestamps are UTC, and JS will not assume that ───────────────────────
-// "2026-08-07 13:04:12" through `new Date(...)` parses as LOCAL time. On any
-// machine west of UTC that shifts every message hours into the future and the
-// send/receipt match silently finds nothing.
+// ── Timestamps are ORDERABLE, not absolute ────────────────────────────────
+// TextTorrent stamps in US Eastern, not UTC: a send made at 2026-08-09T02:53:18Z
+// came back as "2026-08-08 22:53:17". A previous version of this file asserted
+// UTC and matched inside a 30-minute window, which matched NOTHING — every
+// receipt would have retired 'unknown' and the breaker would never have seen a
+// verdict. Parsing must be STABLE and ordered; it must never be trusted as an
+// instant on our own clock.
 assert.equal(parseTtTimestamp("2026-08-07 13:04:12"), Date.parse("2026-08-07T13:04:12Z"));
+assert.ok(
+  parseTtTimestamp("2026-08-07 13:04:12")! < parseTtTimestamp("2026-08-07 13:04:13")!,
+  "ordering is the only property matching may rely on",
+);
 assert.equal(parseTtTimestamp("2026-08-07T13:04:12Z"), Date.parse("2026-08-07T13:04:12Z"));
 assert.equal(parseTtTimestamp(""), null);
 assert.equal(parseTtTimestamp("not a date"), null);
@@ -74,7 +81,7 @@ const thread = [
   { direction: "outbound", platform: "api", message: "Our drip copy", api_send_status: "Failed", msg_sid: null, segment: 2, credit: 6, id: 42, created_at: "2026-08-07 13:04:12" },
 ];
 const ourCopy = hashBody("Our drip copy");
-const hit = matchThreadMessage(thread, { bodyHash: ourCopy, sentAtMs: sentAt });
+const hit = matchThreadMessage(thread, { bodyHash: ourCopy });
 assert.ok(hit, "must find our outbound message");
 assert.equal(hit?.id, 42);
 
@@ -96,13 +103,20 @@ assert.equal(facts.segments, 2);
 assert.equal(facts.credits, 6, "we are billed for failures, so credits must be recorded");
 assert.equal(facts.messageId, "42");
 
-// Body match wins over proximity: an identical-copy retry an hour later must not
-// steal the older send's receipt.
-assert.equal(matchThreadMessage(thread, { bodyHash: hashBody("Different copy"), sentAtMs: sentAt }), null);
+// A body that was never sent has no match, however busy the thread is.
+assert.equal(matchThreadMessage(thread, { bodyHash: hashBody("Different copy") }), null);
+
+// A LARGE clock gap must NOT prevent a match. This is the regression that
+// broke a live smoke test: our clock said 02:53:18Z, TextTorrent said 22:53:17
+// for the same send. Any absolute-time window narrower than the provider's
+// timezone offset silently matches nothing at all.
+const skewed = [
+  { direction: "outbound", platform: "api", message: "Our drip copy", api_send_status: "failed", msg_sid: "sid-skew", id: 7, created_at: "2026-08-08 22:53:17" },
+];
 assert.equal(
-  matchThreadMessage(thread, { bodyHash: ourCopy, sentAtMs: sentAt + 4 * 3_600_000 }),
-  null,
-  "outside the window there is no match",
+  matchThreadMessage(skewed, { bodyHash: ourCopy })?.id,
+  7,
+  "a four-hour provider/our clock offset must not defeat matching",
 );
 // ── A rep pasting our template must never close our receipt ───────────────
 // This is the subtlest way the whole subsystem could fail. Reps work the same
@@ -114,14 +128,14 @@ const sameCopyBothPlatforms = [
   { direction: "outbound", platform: "web", message: "Our drip copy", api_send_status: "delivered", msg_sid: "sid-rep", id: 99, created_at: "2026-08-07 13:04:13" },
   { direction: "outbound", platform: "api", message: "Our drip copy", api_send_status: "Failed", msg_sid: null, id: 42, created_at: "2026-08-07 13:04:12" },
 ];
-const picked = matchThreadMessage(sameCopyBothPlatforms, { bodyHash: ourCopy, sentAtMs: sentAt });
+const picked = matchThreadMessage(sameCopyBothPlatforms, { bodyHash: ourCopy });
 assert.equal(picked?.id, 42, "must pick the api send, not the rep's web send");
 assert.equal(readReceiptFacts(picked!).status, "failed");
 
 // And with ONLY the rep's message present, there is no match at all — better to
 // leave the receipt open than to close it on someone else's delivery.
 assert.equal(
-  matchThreadMessage([sameCopyBothPlatforms[0]], { bodyHash: ourCopy, sentAtMs: sentAt }),
+  matchThreadMessage([sameCopyBothPlatforms[0]], { bodyHash: ourCopy }),
   null,
   "a web-only thread yields no match, never a false delivered",
 );
@@ -136,12 +150,12 @@ const twoSends = [
   { direction: "outbound", platform: "api", message: "Our drip copy", api_send_status: "delivered", msg_sid: "sid-a", id: 1, created_at: "2026-08-07 13:04:12" },
   { direction: "outbound", platform: "api", message: "Our drip copy", api_send_status: "Failed", msg_sid: null, id: 2, created_at: "2026-08-07 13:20:00" },
 ];
-const firstPick = matchThreadMessage(twoSends, { bodyHash: ourCopy, sentAtMs: Date.parse("2026-08-07T13:04:12Z") });
-assert.equal(firstPick?.id, 1, "nearest in time wins");
+const firstPick = matchThreadMessage(twoSends, { bodyHash: ourCopy });
+assert.equal(firstPick?.id, 1, "the EARLIEST candidate is taken, so oldest-receipt-to-oldest-message pairing holds");
 // With row 1 withdrawn, the later receipt must land on row 2 and see its failure.
 const secondPick = matchThreadMessage(
   twoSends.filter((m) => m.id !== 1),
-  { bodyHash: ourCopy, sentAtMs: Date.parse("2026-08-07T13:20:00Z") },
+  { bodyHash: ourCopy },
 );
 assert.equal(secondPick?.id, 2);
 assert.equal(readReceiptFacts(secondPick!).status, "failed", "the second send's failure must survive");
