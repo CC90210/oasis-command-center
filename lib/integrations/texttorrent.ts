@@ -566,9 +566,16 @@ export async function getThread(
 export async function getThreadRaw(
   creds: TextTorrentCredentials,
   chatId: string,
-  opts: { limit?: number; maxPages?: number } = {},
+  opts: { limit?: number; maxPages?: number; priority?: number } = {},
 ): Promise<Array<Record<string, unknown>>> {
   const limit = opts.limit ?? 100;
+  // LOW priority by default. This is a backfill read, and the shared 60/min
+  // parent-SID budget is the same one merchant sends draw on. Reconciliation
+  // can issue hundreds of reads per run; at the default tier (50) it would hold
+  // 50 of 60 tokens and leave real sends, which run at 80, fighting for the
+  // remainder. Tier <50 caps this at 40 and reserves twenty for higher-priority
+  // work, which is exactly what the limiter's own comment reserves it for.
+  const priority = opts.priority ?? 20;
   // Threads are paginated and the envelope reports last_page, so we can follow
   // it exactly instead of hoping one page is enough. A receipt whose message
   // falls off the end is never matched, and after enough attempts it retires as
@@ -584,7 +591,7 @@ export async function getThreadRaw(
           | { data?: Array<Record<string, unknown>>; current_page?: number; last_page?: number }
           | Array<Record<string, unknown>>;
       };
-    }>(creds, `/inbox/${encodeURIComponent(chatId)}`, { query: { limit, page } });
+    }>(creds, `/inbox/${encodeURIComponent(chatId)}`, { query: { limit, page }, priority });
     const msgsRaw = resp?.data?.messages;
     if (Array.isArray(msgsRaw)) return msgsRaw; // unpaginated shape
     const rows = msgsRaw?.data || [];

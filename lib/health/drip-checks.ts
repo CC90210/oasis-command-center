@@ -30,6 +30,19 @@ export type DripCheck = {
 const DAY = 86_400_000;
 const iso = (ms: number) => new Date(ms).toISOString();
 
+/**
+ * When delivery receipts started being written.
+ *
+ * sms.receipt_coverage compares sends against receipts. Sends that went out
+ * BEFORE this code shipped have no receipt and never will, so without a floor
+ * the check fires red the moment it deploys and pages about history rather than
+ * about a fault. A monitor whose first act is a false alarm is one people learn
+ * to ignore, which is the failure this whole subsystem exists to prevent.
+ *
+ * Self-expiring: once the deploy is more than 24h old the clamp stops binding.
+ */
+const RECEIPTS_LIVE_FROM_MS = Date.parse("2026-08-08T00:00:00Z");
+
 async function countOrNull(q: PromiseLike<{ error: unknown; count: number | null }>): Promise<number | null> {
   try {
     const r = await q;
@@ -113,6 +126,10 @@ export const DRIP_CHECKS: DripCheck[] = [
     severity: "high",
     rule: { kind: "must_be_zero" },
     observe: async (db, tenantId, endMs) => {
+      // Never look back past the day receipts began. Both sides use the same
+      // clamped start so the comparison stays like-for-like.
+      const startMs = Math.max(endMs - DAY, RECEIPTS_LIVE_FROM_MS);
+      if (startMs >= endMs) return 0; // window fully predates instrumentation
       // Counted against DRIP sends only, not every outbound SMS. Reps send far
       // more by hand than the drip engine does (530 vs 113 on 2026-08-07) and
       // those never open a receipt, so comparing against all sms_sent traffic
@@ -145,12 +162,12 @@ export const DRIP_CHECKS: DripCheck[] = [
           // created_at this check would have ignored roughly half of all real
           // sends while receipts were counted on their true send time, so it
           // could read "no missing receipts" over a total outage.
-          .gte("sent_at", iso(endMs - DAY)).lt("sent_at", iso(endMs)),
+          .gte("sent_at", iso(startMs)).lt("sent_at", iso(endMs)),
       );
       const receipts = await countOrNull(
         db.from("sms_delivery_receipts").select("id", { count: "exact", head: true })
           .eq("tenant_id", tenantId)
-          .gte("sent_at", iso(endMs - DAY)).lt("sent_at", iso(endMs)),
+          .gte("sent_at", iso(startMs)).lt("sent_at", iso(endMs)),
       );
       if (sent === null || receipts === null) return null;
       return Math.max(0, sent - receipts);
