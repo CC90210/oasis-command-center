@@ -28,6 +28,25 @@ const CREDENTIAL_SERVICE: Record<ProviderId, string> = {
   twilio: "twilio",
 };
 
+/**
+ * The fields a provider needs before it can actually send. Outer array = OR,
+ * inner array = AND.
+ *
+ * A service row existing is NOT the same as a usable credential. A TextTorrent
+ * row holding only api_sid would report configured, the gate would allow the
+ * send, and getTextTorrentCredentials would then fail it — converting a clean
+ * hold into a burned attempt and a failed drip. Half-provisioned must read as
+ * not provisioned.
+ */
+const REQUIRED_FIELDS: Record<ProviderId, string[][]> = {
+  gws: [["app_password", "from_address"]],
+  gws_bluerise: [["app_password", "from_address"]],
+  // api_key doubles as SID and public key in the legacy shape, so either bundle
+  // is genuinely sendable.
+  texttorrent: [["api_sid", "api_public_key"], ["api_key"]],
+  twilio: [["account_sid", "auth_token"]],
+};
+
 /** Per-provider kill switch. Set to "0" to stop using a provider without
  *  deleting its credentials. */
 const ENABLE_ENV: Record<ProviderId, string> = {
@@ -73,22 +92,35 @@ export async function loadProviderAvailability(tenantId: string): Promise<Provid
     ids.map((p) => [p, { configured: false, enabled: false }]),
   ) as ProviderAvailability;
 
-  let services = new Set<string>();
+  // field_key too, not just service: a row's existence says nothing about
+  // whether the bundle is complete enough to send with.
+  const fieldsByService = new Map<string, Set<string>>();
   try {
     const db = getServiceSupabase();
     const r = await db
       .from("tenant_integration_credentials")
-      .select("service")
+      .select("service, field_key")
       .eq("tenant_id", tenantId);
     if (r.error) {
       console.error("[provider-availability] credential read failed, holding everything", r.error.message);
       return none;
     }
-    services = new Set((r.data || []).map((x) => String(x.service)));
+    for (const row of r.data || []) {
+      const svc = String(row.service);
+      const set = fieldsByService.get(svc) ?? new Set<string>();
+      set.add(String(row.field_key));
+      fieldsByService.set(svc, set);
+    }
   } catch (err) {
     console.error("[provider-availability] credential read threw, holding everything", err);
     return none;
   }
+
+  const hasCompleteBundle = (p: ProviderId): boolean => {
+    const have = fieldsByService.get(CREDENTIAL_SERVICE[p]);
+    if (!have) return false;
+    return REQUIRED_FIELDS[p].some((bundle) => bundle.every((f) => have.has(f)));
+  };
 
   // Env-provided credentials count too: TextTorrent has historically been
   // configured that way, and a provider that works must not read as absent.
@@ -109,7 +141,7 @@ export async function loadProviderAvailability(tenantId: string): Promise<Provid
 
   return Object.fromEntries(
     ids.map((p) => {
-      const configured = services.has(CREDENTIAL_SERVICE[p]) || Boolean(envConfigured[p]);
+      const configured = hasCompleteBundle(p) || Boolean(envConfigured[p]);
       return [p, { configured, enabled: configured && envEnabled(p) }];
     }),
   ) as ProviderAvailability;
