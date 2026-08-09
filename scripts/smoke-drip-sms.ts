@@ -119,6 +119,16 @@ async function main(): Promise<void> {
   });
   step("receipt opened", receiptId !== null, receiptId ? `id ${String(receiptId).slice(0, 8)}` : "openReceipt returned null");
 
+  // --leave-open: do NOT reconcile here. Leaves the receipt for the deployed
+  // */15 cron to close, which is the only way to prove the AUTOMATIC path runs
+  // in production rather than just proving this script can call the function.
+  if (process.argv.includes("--leave-open")) {
+    console.log(`\n4) leaving receipt ${String(receiptId).slice(0, 8)} OPEN for the production cron`);
+    console.log("   re-check with: node --conditions=react-server --import tsx scripts/reconcile-now.ts");
+    console.log("   (that prints recent receipts; this one should flip to resolved WITHOUT a manual run)");
+    return finish();
+  }
+
   // 5) Give the carrier a moment, then run the real reconciler.
   // Must exceed reconcileReceipts' MIN_AGE_MS (90s), which deliberately ignores
   // very fresh sends because the carrier has not ruled on them yet. Waiting less
