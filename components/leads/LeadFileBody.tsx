@@ -37,6 +37,7 @@ import {
   renderSunbizTemplate,
 } from "@/lib/sunbiz-templates-library";
 import { isLeadChannelEnabled } from "@/lib/leads/channel-registry";
+import { clairEnabledForTenantSlug } from "@/lib/clair/tenant-access";
 
 export type DocRow = {
   id: string;
@@ -417,7 +418,12 @@ export function LeadFileBody({
               // summary chip and the CLAIR eligibility gate read that record.
               // Without a refetch the tab would keep rendering the pre-lookup
               // state and CLAIR would stay hidden after a no-match.
-              <EnrichmentTab leadId={recordId} record={record} onReload={onReload} />
+              <EnrichmentTab
+                leadId={recordId}
+                record={record}
+                onReload={onReload}
+                clairEnabled={clairEnabledForTenantSlug(tenantSlug)}
+              />
             )}
             {activeTab === "notes" && <NotesTab leadId={recordId} entity={entity} />}
             {activeTab === "documents" && (

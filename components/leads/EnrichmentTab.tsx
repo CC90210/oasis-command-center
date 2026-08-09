@@ -129,10 +129,12 @@ function EnrichmentSummary({
   leadId,
   refreshKey,
   leadData,
+  clairEnabled,
 }: {
   leadId: string;
   refreshKey: number;
   leadData: Record<string, unknown>;
+  clairEnabled: boolean;
 }) {
   const [bg, setBg] = useState<BgCheck>(null);
   const [clair, setClair] = useState<ClairReport>(null);
@@ -144,12 +146,14 @@ function EnrichmentSummary({
     // panels below are the source of truth and surface their own errors.
     const [bgRes, clairRes] = await Promise.allSettled([
       fetch(`/api/leads/${leadId}/background-check/latest`, { cache: "no-store" }).then((r) => r.json()),
-      fetch(`/api/leads/${leadId}/clair-report`, { cache: "no-store" }).then((r) => r.json()),
+      clairEnabled
+        ? fetch(`/api/leads/${leadId}/clair-report`, { cache: "no-store" }).then((r) => r.json())
+        : Promise.resolve(null),
     ]);
     if (bgRes.status === "fulfilled") setBg(bgRes.value?.check ?? null);
-    if (clairRes.status === "fulfilled") setClair(clairRes.value?.reports?.[0] ?? null);
+    if (clairEnabled && clairRes.status === "fulfilled") setClair(clairRes.value?.reports?.[0] ?? null);
     setLoaded(true);
-  }, [leadId]);
+  }, [clairEnabled, leadId]);
 
   useEffect(() => {
     void load();
@@ -321,6 +325,7 @@ export function EnrichmentTab({
   leadId,
   record,
   onReload,
+  clairEnabled,
 }: {
   leadId: string;
   // In the lead drawer, `record` IS the flattened lead data object (the same
@@ -328,6 +333,7 @@ export function EnrichmentTab({
   record: Record<string, unknown>;
   /** Refetch the lead record from the drawer. */
   onReload?: () => void | Promise<void>;
+  clairEnabled: boolean;
 }) {
   const [refreshKey, setRefreshKey] = useState(0);
   // A finished lookup writes to the LEAD (phone, phone_lookup_status), not just
@@ -343,14 +349,14 @@ export function EnrichmentTab({
 
   return (
     <div className="space-y-5">
-      <EnrichmentSummary leadId={leadId} refreshKey={refreshKey} leadData={record} />
+      <EnrichmentSummary leadId={leadId} refreshKey={refreshKey} leadData={record} clairEnabled={clairEnabled} />
       <BackgroundCheckTab leadId={leadId} record={record} onChanged={bump} />
       {/* Order is a recommendation, not a lock: the free automated lookup reads
           first because it is the cheaper thing to try. CLAIR sits below it and
           is independently runnable at any time — including on a lead this panel
           has already enriched. */}
-      <PhoneLookupPanel leadId={leadId} leadData={record} onChanged={bump} />
-      <ClairReportPanel leadId={leadId} leadData={record} onChanged={bump} />
+      <PhoneLookupPanel leadId={leadId} leadData={record} onChanged={bump} clairEnabled={clairEnabled} />
+      {clairEnabled ? <ClairReportPanel leadId={leadId} leadData={record} onChanged={bump} /> : null}
     </div>
   );
 }

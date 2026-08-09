@@ -116,11 +116,13 @@ export function PhoneLookupPanel({
   leadId,
   leadData,
   onChanged,
+  clairEnabled = true,
 }: {
   leadId: string;
   /** The flattened lead data object — same value ClairReportPanel receives. */
   leadData: Record<string, unknown>;
   onChanged?: () => void;
+  clairEnabled?: boolean;
 }) {
   const [jobs, setJobs] = useState<Job[] | null>(null);
   const [starting, setStarting] = useState(false);
@@ -242,7 +244,9 @@ export function PhoneLookupPanel({
       <p className="mt-1.5 text-[12px] leading-relaxed text-fg-muted">
         {alreadyHasPhone
           ? "This lead has a number on file. The history below shows where it came from."
-          : "Searches public people-search records for this owner's phone number. Free, and the cheaper of the two enrichments to try first — CLAIR below can be run independently at any time."}
+          : clairEnabled
+            ? "Searches public people-search records for this owner's phone number. Free, and the cheaper of the two enrichments to try first — CLAIR below can be run independently at any time."
+            : "Searches public people-search records for this owner's phone number."}
       </p>
 
       {!alreadyHasPhone && (
@@ -355,18 +359,20 @@ export function PhoneLookupPanel({
           <PhoneOff className="mr-1.5 inline h-3.5 w-3.5" />
           The search ran and found no usable number for{" "}
           {latest.query_first_name} {latest.query_last_name}
-          {latest.query_state ? ` in ${latest.query_state}` : ""}. A CLAIR report is now available
-          below.
+          {latest.query_state ? ` in ${latest.query_state}` : ""}.
+          {clairEnabled ? " A CLAIR report is now available below." : ""}
         </div>
       )}
 
       {(latest?.status === "blocked" || latest?.status === "error") && (
         <div className="mt-3 rounded-lg border border-status-warm/40 bg-status-warm/5 p-3 text-[12px] text-status-warm">
           {latest.status === "blocked"
-            ? "The source site blocked the automated search, so this is not an answer about the merchant — it is a failed lookup. Try again later, or run a CLAIR report below."
+            ? clairEnabled
+              ? "The source site blocked the automated search, so this is not an answer about the merchant — it is a failed lookup. Try again later, or run a CLAIR report below."
+              : "The source site blocked the automated search, so this is not an answer about the merchant. Try again later."
             : `The lookup failed before it could produce an answer${
                 latest.error_message ? `: ${latest.error_message}` : "."
-              } Try again, or run a CLAIR report below.`}
+              } ${clairEnabled ? "Try again, or run a CLAIR report below." : "Try again later."}`}
         </div>
       )}
     </div>
