@@ -35,8 +35,10 @@ export const PUBLIC_PATH_PREFIXES = [
   "/forgot-password",
   "/auth/callback",
   "/auth/reset-password",
+  "/auth/turso-session",   // Turso replacement for /auth/callback's ?code= exchange. Redeems a single-use _auth_tokens row into the session cookie (desktop pairing). Same chicken-and-egg as the rest of the Turso auth surface: it cannot require the session it exists to create. The TOKEN is the credential — sha256-at-rest, single-use via compare-and-swap, 15-min TTL, IP rate-limited, and `next` is forced same-origin.
   "/invite",               // Tenant-invite landing /invite/<token>. Token is opaque; preview RPC validates server-side (Phase A, master multi-tenant infra plan, 2026-05-17).
   "/api/inbound",          // n8n inbound webhook (Bearer-auth gated inside the route)
+  "/api/pg",               // PostgREST-compatible bridge for the TextTorrent SMS runtime. Same shape as /api/inbound: it is a machine-to-machine endpoint that cannot carry a session cookie, and it is gated INSIDE the route by a constant-time compare against TT_PG_BRIDGE_TOKEN which fails closed when unset. Without this entry middleware returns {ok:false,error:"unauthorized"} before the route ever runs — which is exactly how this was found.
   "/api/auth/signout",
   // Turso auth endpoints — the login POST cannot require a session
   // (chicken-and-egg; the class of bug breeze's first flipped deploy hit).
