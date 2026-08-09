@@ -45,6 +45,8 @@ import { brandIsSendable, type BrandKey } from "@/lib/email/brands";
 import { brandFooter } from "@/lib/email/brand-shell";
 import { isWithinSendWindow } from "@/lib/sms/compliance";
 import { smsSendAllowed, resetBreakerCache, claimBreakerProbe } from "@/lib/sms/send-breaker";
+import { routeOutbound } from "@/lib/routing/outbound-routing";
+import { loadProviderAvailability } from "@/lib/routing/provider-availability";
 import { openReceipt } from "@/lib/sms/delivery-receipts";
 import { loadBrandsForLeads } from "@/lib/drips/brand-store";
 import { poolFor, resolveCopy, type PoolTemplate } from "@/lib/drips/template-pool";
@@ -780,6 +782,27 @@ async function processSmsStep(
   // stage. The brand map is email-keyed for the volume gate, so resolve it here
   // directly; absent means sunbiz, the pre-existing behaviour.
   const smsBrand: BrandKey = run.brandByLead.get(row.lead_id) ?? "sunbiz";
+
+  // ALLOCATION GATE. Brand used to be an email-only concept, so a
+  // Bluerise-branded merchant would be emailed as Bluerise and texted as SunBiz
+  // from a rep's number: two company names in one conversation, which is the
+  // confusing first impression the brand split exists to prevent and the thing
+  // that earns spam complaints. It is also a carrier problem, since 10DLC
+  // registration is per brand and Bluerise copy on SunBiz's registered numbers
+  // is a campaign/content mismatch.
+  //
+  // HOLD, never fail: the merchant is fine, we are the ones not ready. A held
+  // step reschedules so nobody is dropped from a sequence over provisioning.
+  {
+    const availability = await loadProviderAvailability(row.tenant_id);
+    const route = routeOutbound({ channel: "sms", purpose: "drip", brand: smsBrand, available: availability });
+    if (!route.send) {
+      return markRescheduled(
+        db, row, new Date(Date.now() + 6 * 3_600_000).toISOString(),
+        `sms_channel_unavailable: ${route.reason}`,
+      );
+    }
+  }
   const copy = resolveStepCopy(step, row.lead_id, row.step_index, {
     brand: smsBrand,
     stage: typeof data.stage === "string" ? data.stage : undefined,
