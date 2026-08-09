@@ -783,26 +783,6 @@ async function processSmsStep(
   // directly; absent means sunbiz, the pre-existing behaviour.
   const smsBrand: BrandKey = run.brandByLead.get(row.lead_id) ?? "sunbiz";
 
-  // ALLOCATION GATE. Brand used to be an email-only concept, so a
-  // Bluerise-branded merchant would be emailed as Bluerise and texted as SunBiz
-  // from a rep's number: two company names in one conversation, which is the
-  // confusing first impression the brand split exists to prevent and the thing
-  // that earns spam complaints. It is also a carrier problem, since 10DLC
-  // registration is per brand and Bluerise copy on SunBiz's registered numbers
-  // is a campaign/content mismatch.
-  //
-  // HOLD, never fail: the merchant is fine, we are the ones not ready. A held
-  // step reschedules so nobody is dropped from a sequence over provisioning.
-  {
-    const availability = await loadProviderAvailability(row.tenant_id);
-    const route = routeOutbound({ channel: "sms", purpose: "drip", brand: smsBrand, available: availability });
-    if (!route.send) {
-      return markRescheduled(
-        db, row, new Date(Date.now() + 6 * 3_600_000).toISOString(),
-        `sms_channel_unavailable: ${route.reason}`,
-      );
-    }
-  }
   const copy = resolveStepCopy(step, row.lead_id, row.step_index, {
     brand: smsBrand,
     stage: typeof data.stage === "string" ? data.stage : undefined,
@@ -839,6 +819,30 @@ async function processSmsStep(
 
   let fromIdentity = `dry:${identity.repKey}:${identity.senderId}`;
   if (shouldSend) {
+    // ALLOCATION GATE. Brand used to be an email-only concept, so a
+    // Bluerise-branded merchant would be emailed as Bluerise and texted as
+    // SunBiz from a rep's number: two company names in one conversation, which
+    // is the confusing first impression the brand split exists to prevent and
+    // the thing that earns spam complaints. It is also a carrier problem, since
+    // 10DLC registration is per brand and Bluerise copy on SunBiz's registered
+    // numbers is a campaign/content mismatch.
+    //
+    // INSIDE shouldSend on purpose. A dry run is contracted to render, log and
+    // ADVANCE every row without touching a provider; gating it on live
+    // credentials would reschedule rows forever on any tenant without keys, and
+    // would stop the emergency dry-run switch from draining scheduled work.
+    //
+    // HOLD, never fail: the merchant is fine, we are the ones not ready. A held
+    // step reschedules so nobody is dropped from a sequence over provisioning.
+    const availability = await loadProviderAvailability(row.tenant_id);
+    const route = routeOutbound({ channel: "sms", purpose: "drip", brand: smsBrand, available: availability });
+    if (!route.send) {
+      return markRescheduled(
+        db, row, new Date(Date.now() + 6 * 3_600_000).toISOString(),
+        `sms_channel_unavailable: ${route.reason}`,
+      );
+    }
+
     // DELIVERY BREAKER. TextTorrent's send endpoint returns 201 for messages the
     // carrier then refuses; between 2026-07-27 and 2026-08-07 it returned 201 to
     // 51 consecutive sends that all failed, and we were billed for every one.
@@ -1505,10 +1509,18 @@ export async function runDispatchDrips(): Promise<DispatchDripsResult> {
   // Sending brand per lead, resolved ONCE for the run alongside the budget.
   // Read-only: the brand is stamped at enrolment, never derived here, so a lead
   // cannot flip brand mid-sequence. Fails safe to sunbiz.
+  //
+  // Built from EVERY claimed lead, not just the email ones. Scoping it to
+  // emailLeadIds left any lead whose batch contained only SMS steps absent from
+  // the map, so it silently defaulted to sunbiz — which picked SunBiz copy for a
+  // Bluerise merchant and, once the allocation gate landed, waved that merchant
+  // straight through to a SunBiz TextTorrent number. The gate would have been
+  // bypassed in precisely the case it exists for. One batched query either way.
+  const brandLeadIds = Array.from(new Set(claimed.map((r) => r.lead_id)));
   const brandTenantId = claimed[0]?.tenant_id;
   const brandByLead =
-    emailLeadIds.length > 0 && brandTenantId
-      ? await loadBrandsForLeads(db, brandTenantId, emailLeadIds)
+    brandLeadIds.length > 0 && brandTenantId
+      ? await loadBrandsForLeads(db, brandTenantId, brandLeadIds)
       : new Map<string, BrandKey>();
 
   // Approved template pool, loaded once per run alongside the budget and brand
