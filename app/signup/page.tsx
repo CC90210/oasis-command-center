@@ -4,6 +4,7 @@ import { useState } from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { getBrowserSupabase } from "@/lib/supabase-browser";
+import { authMode } from "@/lib/auth-client";
 import { OasisLogo } from "@/components/brand/OasisLogo";
 import { AuthRedirectGuard } from "@/components/AuthRedirectGuard";
 import { validatePassword, PASSWORD_HINT } from "@/lib/password-validation";
@@ -44,6 +45,52 @@ export default function SignupPage() {
       if (passwordIssue) {
         setErr(passwordIssue);
         setBusy(false);
+        return;
+      }
+
+      // Turso auth mode: create the account server-side, then provision the
+      // tenant with the session we just received. getSessionUser() already
+      // reads Turso sessions, so /api/auth/provision needs no changes.
+      if ((await authMode()) === "turso") {
+        const r = await fetch("/api/auth/turso-signup", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ email, password, full_name: fullName.trim() }),
+        });
+        const b = (await r.json().catch(() => ({}))) as { ok?: boolean; error?: string };
+        if (!r.ok || !b.ok) {
+          setErr(b.error || "Could not create your account.");
+          return;
+        }
+        if (inviteToken) {
+          const rr = await fetch("/api/auth/redeem-invite", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ raw_token: inviteToken }),
+          });
+          const rb = (await rr.json().catch(() => ({}))) as {
+            ok?: boolean; message?: string; error?: string; tenant_slug?: string | null };
+          if (!rr.ok || !rb.ok) {
+            setErr(rb.message || rb.error || "Invite redemption failed");
+            return;
+          }
+          const slug = rb.tenant_slug?.trim();
+          // Full-page assign: the session is an httpOnly cookie and server
+          // components must re-render with it.
+          window.location.assign(slug ? `/t/${slug}` : "/");
+          return;
+        }
+        const pr = await fetch("/api/auth/provision", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ full_name: fullName.trim(), brand: brand || "OASIS AI" }),
+        });
+        if (!pr.ok) {
+          const pb = (await pr.json().catch(() => ({}))) as { error?: string };
+          setErr(pb.error || "Account created, but workspace setup failed — sign in and retry.");
+          return;
+        }
+        window.location.assign("/onboarding/wizard");
         return;
       }
 
@@ -202,7 +249,10 @@ export default function SignupPage() {
       // Turso auth mode: new-account creation is a deliberate provisioning
       // flow, not an OAuth side effect — Google SIGNUP is disabled until the
       // Turso signup path ships. Existing Google users sign in at /login.
-      if (process.env.NEXT_PUBLIC_EMPIRE_AUTH_BACKEND === "turso") {
+      // Gate reads the SERVER's answer, not NEXT_PUBLIC_EMPIRE_AUTH_BACKEND —
+      // that mirror is a separate flag, and leaving it unset would send signups
+      // to Supabase while the rest of auth ran on Turso.
+      if ((await authMode()) === "turso") {
         setErr("Google signup is temporarily unavailable — existing users can sign in at /login.");
         setBusy(false);
         return;

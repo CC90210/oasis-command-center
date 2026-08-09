@@ -1,5 +1,6 @@
 import { createHash, randomBytes } from "node:crypto";
 import { getServiceSupabase, getSessionUser } from "@/lib/supabase-server";
+import { adminGetUser } from "@/lib/turso-auth-admin";
 
 export type TeamRole =
   | "owner"
@@ -241,14 +242,31 @@ export async function redeemInvite(
     }
     return { ok: false, error: "invalid_or_expired" };
   }
-  const { data: authUser, error: authErr } = await supa.auth.admin.getUserById(redeemerAuthId);
-  if (authErr || !authUser?.user) return { ok: false, error: "auth_user_not_found" };
-  if (!inviteEmailMatchesUser(preview.email_pinned, authUser.user.email)) {
+  // adminGetUser, not supa.auth.admin.getUserById — GoTrue disappears with the
+  // Supabase project, and this line is the FIRST thing every join path touches
+  // (signup redeem, login redeem, OAuth callback, finalize-invite-signup). It
+  // stays a hard requirement rather than a best-effort lookup: the email pin is
+  // what stops a leaked token being redeemed onto an unrelated account.
+  const authUser = await adminGetUser(supa, redeemerAuthId);
+  if (!authUser.ok) return { ok: false, error: "auth_user_not_found" };
+  if (!inviteEmailMatchesUser(preview.email_pinned, authUser.value.email)) {
     return { ok: false, error: "email_mismatch" };
   }
+  // p_redeemer_email is REQUIRED by the Turso port. Postgres read the email
+  // from auth.users inside the SECURITY DEFINER function; there is no auth.users
+  // to read under Turso, so the shim takes it as an argument and fails closed
+  // without it — returning "auth_user_not_found", the SAME string the lookup
+  // above returns on failure. That collision is why this went unnoticed: the
+  // join simply reported the error it would have reported anyway.
+  // The value is already in hand from the adminGetUser call one line up.
   const { data, error } = await supa.rpc("redeem_tenant_invite", {
     p_token_hash: hash,
     p_redeemer_auth_id: redeemerAuthId,
+    p_redeemer_email: authUser.value.email,
+    // Postgres pulled this from auth.users metadata inside the function; the
+    // Turso port takes it as an argument, and without it a new member's profile
+    // is created with full_name set to their email address.
+    p_redeemer_full_name: authUser.value.fullName,
   });
   if (error) return { ok: false, error: error.message };
   if (!data?.ok) return { ok: false, error: data?.error ?? "invalid_or_expired" };
