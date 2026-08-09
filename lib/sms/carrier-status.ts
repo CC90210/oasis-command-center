@@ -59,11 +59,21 @@ export function isTerminal(status: CarrierStatus): boolean {
 }
 
 /**
- * TextTorrent timestamps arrive as "2026-08-07 13:04:12" with no zone marker.
- * They are UTC — verified by matching send timestamps we generated ourselves
- * against the values the API echoed back. `new Date("2026-08-07 13:04:12")`
- * parses as LOCAL time, which on a machine west of UTC shifts every message
- * into the future and breaks the send/receipt match by hours.
+ * Parse a TextTorrent timestamp into a COMPARABLE instant — usable for ordering
+ * messages against each other, and for nothing else.
+ *
+ * DO NOT COMPARE THIS TO OUR OWN CLOCK. TextTorrent returns
+ * "2026-08-08 22:53:17" with no zone marker, and it is NOT UTC: a send we made
+ * at 2026-08-09T02:53:18Z came back stamped 22:53:17, exactly four hours behind,
+ * i.e. US Eastern. An earlier version of this file asserted "they are UTC,
+ * verified" and matched sends to receipts inside a 30-minute window. That
+ * combination matched NOTHING: every receipt would have aged out as 'unknown'
+ * and the breaker would never have seen a single carrier verdict. The
+ * subsystem built to end silent failure would have failed silently.
+ *
+ * Which is why matching no longer depends on absolute time at all — see
+ * matchThreadMessage. Relative ORDER survives any fixed offset; absolute
+ * instants do not, and a DST shift would move the offset underneath us anyway.
  */
 export function parseTtTimestamp(raw: unknown): number | null {
   const s = String(raw ?? "").trim();
@@ -117,29 +127,36 @@ export function hashBody(body: string): string {
  * so matching theirs would close our receipt as delivered and report a dead
  * route as healthy. That single confusion would undo the whole subsystem.
  *
- * Then matched on body fingerprint. The time window only breaks ties between
- * repeat sends of identical copy, a real case since a retried step re-sends the
- * same rendered text.
+ * Then matched on body fingerprint, and among equal candidates the EARLIEST is
+ * taken.
+ *
+ * NO ABSOLUTE TIME WINDOW. The obvious design — "the message closest in time to
+ * when we sent" — is broken here, because TextTorrent's timestamps are US
+ * Eastern while ours are UTC, so every comparison is off by hours and a tight
+ * window matches nothing at all. Rather than hardcode an offset that DST will
+ * move twice a year, matching relies on the fingerprint plus one-to-one
+ * consumption by the caller: receipts are walked oldest-first and each matched
+ * message is withdrawn from the pool, so repeat sends of identical copy pair up
+ * in order. Relative order is invariant under any fixed offset; absolute
+ * instants are not.
  */
 export function matchThreadMessage(
   messages: ThreadMessage[],
-  target: { bodyHash: string; sentAtMs: number; windowMs?: number },
+  target: { bodyHash: string },
 ): ThreadMessage | null {
-  const windowMs = target.windowMs ?? 30 * 60_000;
   let best: ThreadMessage | null = null;
-  let bestDelta = Infinity;
+  let bestAt = Infinity;
   for (const m of messages) {
     if (String(m.direction ?? "").toLowerCase() !== "outbound") continue;
     if (String(m.platform ?? "") !== "api") continue;
     if (hashBody(String(m.message ?? "")) !== target.bodyHash) continue;
-    const at = parseTtTimestamp(m.created_at);
-    // A body match with an unparseable timestamp is still our message; take it
-    // only if nothing better turns up.
-    const delta = at === null ? windowMs : Math.abs(at - target.sentAtMs);
-    if (delta > windowMs) continue;
-    if (delta < bestDelta) {
+    // Earliest first, so oldest-receipt-to-oldest-message pairing holds. An
+    // unparseable timestamp sorts last rather than being discarded: a
+    // fingerprint match is still our message.
+    const at = parseTtTimestamp(m.created_at) ?? Number.MAX_SAFE_INTEGER;
+    if (at < bestAt) {
       best = m;
-      bestDelta = delta;
+      bestAt = at;
     }
   }
   return best;
