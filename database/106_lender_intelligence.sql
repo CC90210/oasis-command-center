@@ -40,7 +40,12 @@ create index if not exists lender_reply_outcomes_app_idx on public.lender_reply_
 alter table public.lender_reply_outcomes enable row level security;
 alter table public.lender_reply_outcomes force row level security;
 revoke all on public.lender_reply_outcomes from anon, authenticated;
+-- DROP-then-CREATE: `create policy` has no IF NOT EXISTS, so without these the
+-- file errors on its second run despite the header promising idempotency. That
+-- mattered — this migration had never been applied, and a re-run has to be safe.
+drop policy if exists lender_reply_outcomes_service_role on public.lender_reply_outcomes;
 create policy lender_reply_outcomes_service_role on public.lender_reply_outcomes for all to service_role using (true) with check (true);
+drop policy if exists lender_reply_outcomes_tenant on public.lender_reply_outcomes;
 create policy lender_reply_outcomes_tenant on public.lender_reply_outcomes for all
   using (tenant_id in (select tenant_id from public.user_profiles where auth_user_id = auth.uid()));
 
@@ -72,6 +77,8 @@ create index if not exists deal_paper_snapshot_app_idx on public.deal_paper_snap
 alter table public.deal_paper_snapshot enable row level security;
 alter table public.deal_paper_snapshot force row level security;
 revoke all on public.deal_paper_snapshot from anon, authenticated;
+drop policy if exists deal_paper_snapshot_service_role on public.deal_paper_snapshot;
 create policy deal_paper_snapshot_service_role on public.deal_paper_snapshot for all to service_role using (true) with check (true);
+drop policy if exists deal_paper_snapshot_tenant on public.deal_paper_snapshot;
 create policy deal_paper_snapshot_tenant on public.deal_paper_snapshot for all
   using (tenant_id in (select tenant_id from public.user_profiles where auth_user_id = auth.uid()));

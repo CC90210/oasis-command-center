@@ -266,7 +266,12 @@ export async function POST(
         for (const v of vals) if (typeof v === "string" && v.trim()) return v.trim();
         return null;
       };
-      await db.from("deal_paper_snapshot").upsert(
+      // The RESULT is checked, not just the throw. PostgREST returns { error }
+      // instead of raising, so the catch below never fired and the log it
+      // promises ("so a persistently failing snapshot write is visible") could
+      // not happen. With migration 106 unapplied, every shop-out silently
+      // starved lender-intelligence exactly as that comment feared.
+      const snap = await db.from("deal_paper_snapshot").upsert(
         {
           tenant_id: sess.tenantId,
           application_id: applicationId,
@@ -287,6 +292,9 @@ export async function POST(
         },
         { onConflict: "tenant_id,shop_run_id" },
       );
+      if (snap.error) {
+        console.error("[shop-out] deal_paper_snapshot write failed:", snap.error.message);
+      }
     } catch (e) {
       // Best-effort — never fail a completed shop — but log so a persistently
       // failing snapshot write (which silently starves lender-intelligence) is visible.
