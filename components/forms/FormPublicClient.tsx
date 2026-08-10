@@ -393,7 +393,12 @@ export function FormPublicClient({
             idempotencyKey: consentIdemKey.current,
             formUrl: typeof window !== "undefined" ? window.location.href : undefined,
           });
-          if (consent.ok || isLastStep) consentDone.current = true;
+          // Done ONLY on success. Capture now runs exclusively on the last step,
+          // so `|| isLastStep` was always true and a transient timeout became
+          // permanent: the retry would replay captured:false without ever asking
+          // the vault again. The idempotency key is stable, so retrying is safe
+          // and cannot duplicate the record.
+          if (consent.ok) consentDone.current = true;
           const receipt = consent.ok
             ? {
                 captured: true,
