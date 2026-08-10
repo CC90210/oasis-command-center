@@ -45,6 +45,8 @@ type Props = {
   /** HMAC form token — required by file_upload_multi fields to mint signed
    *  upload URLs. Null in builder preview / before an anonymous token is minted. */
   uploadToken?: string | null;
+  /** Lazily initializes an anonymous upload session when step 0 is an upload. */
+  ensureUploadToken?: () => Promise<string | null>;
 };
 
 export function FormRenderer({
@@ -60,6 +62,7 @@ export function FormRenderer({
   onBack,
   ctaLabelOverride,
   uploadToken,
+  ensureUploadToken,
 }: Props) {
   const primary = branding?.primary_color || DEFAULT_PRIMARY_COLOR;
   const accent = branding?.accent_color || DEFAULT_ACCENT_COLOR;
@@ -92,6 +95,7 @@ export function FormRenderer({
               error={errors[field.name]}
               onChange={(v) => onFieldChange(field.name, v)}
               uploadToken={uploadToken}
+              ensureUploadToken={ensureUploadToken}
             />
           ))}
       </div>
@@ -147,12 +151,14 @@ function FieldRow({
   error,
   onChange,
   uploadToken,
+  ensureUploadToken,
 }: {
   field: FormField;
   value: unknown;
   error: string | undefined;
   onChange: (v: unknown) => void;
   uploadToken?: string | null;
+  ensureUploadToken?: () => Promise<string | null>;
 }) {
   const inputId = useId();
 
@@ -169,7 +175,7 @@ function FieldRow({
         {field.required && <span className="text-rose-400 ml-1">*</span>}
       </label>
 
-      {renderInput(field, inputId, value, onChange, uploadToken)}
+      {renderInput(field, inputId, value, onChange, uploadToken, ensureUploadToken)}
 
       {field.help && <p className="text-[11px] text-fg-dim">{field.help}</p>}
       {error && <p className="text-[11px] text-rose-400">{error}</p>}
@@ -183,6 +189,7 @@ function renderInput(
   value: unknown,
   onChange: (v: unknown) => void,
   uploadToken?: string | null,
+  ensureUploadToken?: () => Promise<string | null>,
 ): React.ReactNode {
   const base =
     "w-full rounded-md border border-bg-border bg-bg-elev px-3 py-2 text-sm text-fg focus:outline-none focus:ring-2 focus:ring-accent/40 focus:border-accent transition-colors placeholder-fg-dim";
@@ -307,6 +314,7 @@ function renderInput(
           value={value}
           onChange={(v: UploadedDescriptor[]) => onChange(v)}
           uploadToken={uploadToken ?? null}
+          ensureUploadToken={ensureUploadToken}
         />
       );
 

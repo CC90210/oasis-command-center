@@ -262,6 +262,13 @@ export const SUNBIZ_FORM_TEMPLATES: Record<SunBizStep, SunBizFormTemplate> = {
             prefill_from: "phone",
           },
           {
+            name: "email",
+            label: "Email address",
+            type: "email",
+            required: true,
+            prefill_from: "email",
+          },
+          {
             name: "owner_ownership_pct",
             label: "Ownership percentage",
             type: "number",
