@@ -85,6 +85,23 @@ type SubmitBody = {
   // submit the client sends anonymous_init {tenant_slug, form_slug} and
   // no token. The server creates a fresh lead, signs a token tied to it,
   // and returns it for the rest of the multi-step funnel.
+  // Consent evidence sealed BY THE BROWSER against Opt-in Vault on step 0.
+  // Captured client-side on purpose: the evidence must carry the merchant's own
+  // IP, and a call from this route would carry ours.
+  //
+  // Treated as a RECEIPT, never as the consent itself. The authoritative record
+  // lives in the vault, immutably; this is a pointer so a lead can be traced to
+  // it. `captured:false` is stored verbatim — a failed capture must never be
+  // laundered into an implied consent.
+  consent?: {
+    captured?: boolean;
+    consent_id?: string;
+    certificate_code?: string;
+    payload_sha256?: string;
+    disclosure_version?: string;
+    retention_expires_at?: string | null;
+    reason?: string;
+  };
   anonymous_init?: {
     tenant_slug?: string;
     form_slug?: string;
@@ -1057,6 +1074,43 @@ export async function POST(req: NextRequest) {
    *
    * tests/underwriting-manual-only.test.ts is the enforcement, not this comment.
    */
+
+  // Record the consent receipt on the lead. Best-effort and never fatal: a
+  // merchant's enquiry must not be rejected because our bookkeeping failed. But
+  // a failure is written down AS a failure, so nothing downstream can read
+  // silence as consent.
+  if (body.consent && link.lead_id) {
+    try {
+      const cur = await db
+        .from("tenant_records")
+        .select("data")
+        .eq("id", link.lead_id)
+        .eq("tenant_id", form.tenant_id)
+        .maybeSingle();
+      const curData = (cur.data as { data?: Record<string, unknown> } | null)?.data || {};
+      const receipt = {
+        captured: body.consent.captured === true,
+        consent_id: body.consent.consent_id ?? null,
+        certificate_code: body.consent.certificate_code ?? null,
+        payload_sha256: body.consent.payload_sha256 ?? null,
+        disclosure_version: body.consent.disclosure_version ?? null,
+        retention_expires_at: body.consent.retention_expires_at ?? null,
+        failure_reason: body.consent.captured === true ? null : (body.consent.reason ?? "unknown"),
+        recorded_at: new Date().toISOString(),
+        source: "optinvault",
+      };
+      await db
+        .from("tenant_records")
+        .update({ data: { ...curData, consent_receipt: receipt } })
+        .eq("id", link.lead_id)
+        .eq("tenant_id", form.tenant_id);
+    } catch (err) {
+      console.error("[forms.submit.consent_receipt.failed]", {
+        lead_id: link.lead_id,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
 
   // OASIS personal-brand funnel (CC): final step. Gated to CC's EXACT tenant +
   // form so no other tenant can fire CC's Telegram/Gmail notifications. (Codex

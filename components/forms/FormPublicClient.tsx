@@ -24,6 +24,7 @@ import { FormRenderer } from "./FormRenderer";
 import type { FormStep, FormBranding } from "@/lib/forms/types";
 import { isFieldVisible } from "@/lib/forms/visibility";
 import { DEFAULT_PRIMARY_COLOR, getContrastingTextColor } from "@/lib/forms/themes";
+import { captureConsent, type ConsentBrand } from "@/lib/consent/optinvault";
 
 // Submit-side route (api/forms/submit) now decodes the base64 and uploads
 // to Supabase Storage instead of holding the bytes in form_submissions.
@@ -71,6 +72,19 @@ type SubmitResponse = {
   next_forms?: Array<{ slug: string; label: string; url: string }> | null;
 };
 
+/** One key per form session. A retried submit is the SAME affirmative action and
+ *  must resolve to the same evidence row, not a duplicate. */
+function useConsentIdempotencyKey() {
+  const ref = useRef<string>("");
+  if (!ref.current) {
+    ref.current =
+      typeof crypto !== "undefined" && "randomUUID" in crypto
+        ? `oasis-form-${crypto.randomUUID()}`
+        : `oasis-form-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+  }
+  return ref;
+}
+
 export function FormPublicClient({
   formName,
   branding,
@@ -80,6 +94,11 @@ export function FormPublicClient({
   anonymousInit,
   prefill,
 }: Props) {
+  const consentIdemKey = useConsentIdempotencyKey();
+  // Safe default mirrors lib/drips/brand-routing: unknown resolves to SunBiz,
+  // the established brand that can absorb a mis-send.
+  const consentBrand: ConsentBrand =
+    process.env.NEXT_PUBLIC_OPTINVAULT_DEFAULT_BRAND === "bluerise" ? "bluerise" : "sunbiz";
   // The token starts as whatever the page passed in. For anonymous flows
   // it's null; the first /api/forms/submit response carries minted_token,
   // which we capture and use for the rest of the steps.
@@ -303,6 +322,35 @@ export function FormPublicClient({
         payload: built.payload,
         file_attachments: built.file_attachments,
       };
+
+      // CONSENT EVIDENCE. Sealed from the BROWSER on the first step, because the
+      // evidence is only worth having if it records the merchant's own IP — a
+      // call from our API would record our Vercel IP, which the vault correctly
+      // refuses to treat as the subject's.
+      //
+      // Never blocks the submission. A merchant's enquiry must not be refused
+      // because our bookkeeping failed. But a failure is recorded as EXACTLY
+      // that: we carry no evidence, and nothing downstream may claim we do.
+      if (currentStep === 0) {
+        const p = built.payload as Record<string, unknown>;
+        const consent = await captureConsent({
+          brand: consentBrand,
+          email: (p.email ?? p.business_email ?? p.contact_email) as string | undefined,
+          phone: (p.phone ?? p.mobile ?? p.cell_phone) as string | undefined,
+          idempotencyKey: consentIdemKey.current,
+          formUrl: typeof window !== "undefined" ? window.location.href : undefined,
+        });
+        submitBody.consent = consent.ok
+          ? {
+              captured: true,
+              consent_id: consent.consentId,
+              certificate_code: consent.certificateCode,
+              payload_sha256: consent.payloadSha256,
+              disclosure_version: consent.disclosureVersion,
+              retention_expires_at: consent.retentionExpiresAt,
+            }
+          : { captured: false, reason: consent.reason };
+      }
       if (token) {
         submitBody.token = token;
       } else if (anonymousInit) {
