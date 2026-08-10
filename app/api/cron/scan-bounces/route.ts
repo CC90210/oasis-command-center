@@ -37,6 +37,7 @@ import { ImapFlow } from "imapflow";
 import { checkCronAuth } from "@/lib/cron-auth";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { getSubmissionsCreds } from "@/lib/integrations/submissions-gmail";
+import { describeImapError } from "@/lib/integrations/imap-error";
 import { sendTelegram, escapeTelegramHtml } from "@/lib/notify/telegram";
 
 export const runtime = "nodejs";
@@ -160,9 +161,27 @@ export async function GET(req: NextRequest) {
   try {
     await client.connect();
   } catch (e) {
-    const msg = e instanceof Error ? e.message : "unknown";
-    await watchdogAlert(`🔴 <b>Bounce reader DOWN</b> — IMAP connect to submissions@ failed: ${escapeTelegramHtml(msg)}. Bounce suppression is NOT running until fixed.`);
-    return NextResponse.json({ ok: false, error: "imap_connect_" + msg, error_class: "imap" }, { status: 502 });
+    // Same blind-error problem as scan-lender-replies: ImapFlow says "Command
+    // failed" and the alert repeated that verbatim, so the page told nobody
+    // whether to rotate a password or switch IMAP on. Bounce suppression is a
+    // compliance control, so the alert has to be actionable on first read.
+    const f = describeImapError(e);
+    await watchdogAlert(
+      `🔴 <b>Bounce reader DOWN</b> — IMAP connect to submissions@ failed: ` +
+        `${escapeTelegramHtml(f.summary)}\n<b>Likely fix:</b> ${escapeTelegramHtml(f.hint)}\n` +
+        `Bounce suppression is NOT running until fixed.`,
+    );
+    return NextResponse.json(
+      {
+        ok: false,
+        error: "imap_connect_" + f.summary,
+        error_class: "imap",
+        auth_failed: f.authFailed,
+        server_said: f.serverSaid,
+        hint: f.hint,
+      },
+      { status: 502 },
+    );
   }
 
   const results: Array<Record<string, unknown>> = [];
