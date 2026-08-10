@@ -800,6 +800,45 @@ async function processSmsStep(
   const clean = await sanitizeBlastMessage(row.tenant_id, rendered, { checkPositioning: true });
   if (!clean.ok) return handleGuardBlock(db, row, steps, clean, "sms");
 
+  // ALLOCATION GATE — deliberately BEFORE sender-identity resolution.
+  //
+  // Resolving a TextTorrent identity first meant a Bluerise lead, which must
+  // HOLD because it has no numbers, would instead fail sender resolution and
+  // burn an attempt through markRetryOrFail. The policy promises a reschedule
+  // and was delivering a consumed retry. Same for any tenant whose TextTorrent
+  // provider is switched off.
+  //
+  // What it prevents: brand used to be an email-only concept, so a
+  // Bluerise-branded merchant would be emailed as Bluerise and texted as SunBiz
+  // from a rep's number — two company names in one conversation, the confusing
+  // first impression the split exists to avoid, and a carrier problem too, since
+  // 10DLC registration is per brand.
+  //
+  // Skipped on a dry run, which is contracted to render, log and ADVANCE every
+  // row without consulting a provider.
+  if (dripSendEnabled()) {
+    const availability =
+      run.availabilityByTenant.get(row.tenant_id) ?? (await loadProviderAvailability(row.tenant_id));
+    const route = routeOutbound({ channel: "sms", purpose: "drip", brand: smsBrand, available: availability });
+    if (!route.send) {
+      return markRescheduled(
+        db, row, new Date(Date.now() + 6 * 3_600_000).toISOString(),
+        `sms_channel_unavailable: ${route.reason}`,
+      );
+    }
+    // Everything below is TextTorrent-specific: the breaker, the act-as
+    // identity, sendDripSms. Any other provider HOLDS rather than quietly going
+    // out through the wrong account — otherwise enabling Twilio for Bluerise
+    // would push Bluerise copy from SunBiz's TextTorrent account, reintroducing
+    // the exact mismatch this gate exists to prevent.
+    if (route.provider !== "texttorrent") {
+      return markRescheduled(
+        db, row, new Date(Date.now() + 6 * 3_600_000).toISOString(),
+        `sms_provider_not_wired: ${route.provider} has no sender in the drip executor yet`,
+      );
+    }
+  }
+
   // Sender routing. Default: this lead's SMS goes out AS its rep's TT
   // sub-account (Alex/Jordan) or the admin/parent account (Matt/owner/
   // unattributed), from that rep's own number. Resolved here (before the send
@@ -827,45 +866,6 @@ async function processSmsStep(
 
   let fromIdentity = `dry:${identity.repKey}:${identity.senderId}`;
   if (shouldSend) {
-    // ALLOCATION GATE. Brand used to be an email-only concept, so a
-    // Bluerise-branded merchant would be emailed as Bluerise and texted as
-    // SunBiz from a rep's number: two company names in one conversation, which
-    // is the confusing first impression the brand split exists to prevent and
-    // the thing that earns spam complaints. It is also a carrier problem, since
-    // 10DLC registration is per brand and Bluerise copy on SunBiz's registered
-    // numbers is a campaign/content mismatch.
-    //
-    // INSIDE shouldSend on purpose. A dry run is contracted to render, log and
-    // ADVANCE every row without touching a provider; gating it on live
-    // credentials would reschedule rows forever on any tenant without keys, and
-    // would stop the emergency dry-run switch from draining scheduled work.
-    //
-    // HOLD, never fail: the merchant is fine, we are the ones not ready. A held
-    // step reschedules so nobody is dropped from a sequence over provisioning.
-    const availability =
-      run.availabilityByTenant.get(row.tenant_id) ?? (await loadProviderAvailability(row.tenant_id));
-    const route = routeOutbound({ channel: "sms", purpose: "drip", brand: smsBrand, available: availability });
-    if (!route.send) {
-      return markRescheduled(
-        db, row, new Date(Date.now() + 6 * 3_600_000).toISOString(),
-        `sms_channel_unavailable: ${route.reason}`,
-      );
-    }
-    // The route names a provider and everything below this point is
-    // TextTorrent-specific: the breaker, the act-as identity, sendDripSms. If
-    // the route picks anything else we must HOLD, not carry on.
-    //
-    // Without this, the gate is a decoration that happens to work only because
-    // Twilio is switched off. The day Twilio is enabled for Bluerise, route.send
-    // flips true and the code below would push Bluerise copy out of SunBiz's
-    // TextTorrent account — the precise mismatch this gate exists to prevent,
-    // reintroduced by the act of provisioning the fix for it.
-    if (route.provider !== "texttorrent") {
-      return markRescheduled(
-        db, row, new Date(Date.now() + 6 * 3_600_000).toISOString(),
-        `sms_provider_not_wired: ${route.provider} has no sender in the drip executor yet`,
-      );
-    }
 
     // DELIVERY BREAKER. TextTorrent's send endpoint returns 201 for messages the
     // carrier then refuses; between 2026-07-27 and 2026-08-07 it returned 201 to
