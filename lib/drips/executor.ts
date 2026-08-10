@@ -44,6 +44,7 @@ import { sendDripSms, sendDripEmail } from "@/lib/drips/send";
 import { brandIsSendable, type BrandKey } from "@/lib/email/brands";
 import { brandFooter } from "@/lib/email/brand-shell";
 import { isWithinSendWindow } from "@/lib/sms/compliance";
+import { contactabilityOf, resolveChannel } from "@/lib/drips/channel-fallback";
 import { smsSendAllowed, resetBreakerCache, claimBreakerProbe } from "@/lib/sms/send-breaker";
 import { routeOutbound, type ProviderAvailability } from "@/lib/routing/outbound-routing";
 import { loadProviderAvailability } from "@/lib/routing/provider-availability";
@@ -1387,7 +1388,39 @@ async function processRow(
     return markCancelled(db, row, "accelerated_chase_active: stage drip stands down");
   }
 
-  if (step.channel === "sms") return processSmsStep(db, row, data, step, steps, run);
+  // CHANNEL FALLBACK — reach them on whatever we actually have.
+  //
+  // Adon, 2026-08-10: "The ones that have emails will answer an email. The ones
+  // that don't, if we have their number, we have to write a text to them."
+  //
+  // Previously the step's channel was fixed, so an email step for a phone-only
+  // lead was skipped and the sequence walked on. 420 of 1,197 leads are
+  // phone-only and 68 rows had already been skipped as no_email_for_email_step:
+  // the run reported healthy and those merchants heard nothing.
+  //
+  // A step may opt out with `channel_locked` when it cannot survive translation
+  // — a statement request carrying an attachment is not the same thing as a
+  // text — in which case the miss is reported rather than rewritten.
+  const contact = contactabilityOf(data);
+  const locked = isTruthyFlag((step as unknown as Record<string, unknown>).channel_locked);
+  const decision = resolveChannel(step.channel, contact, { channelLocked: locked });
+
+  if (!decision.send) {
+    // Unreachable is a DATA problem, not a delivery one, and it must land in the
+    // record as such. Advancing silently is what let 23 of the 84 live subs sit
+    // in a sequence with no contact method at all.
+    return skipStep(db, row, steps, `unreachable: ${decision.detail}`);
+  }
+  if (decision.substituted) {
+    console.warn("[dispatch-drips] channel substituted", {
+      leadId: row.lead_id,
+      authored: step.channel,
+      using: decision.channel,
+      reason: decision.reason,
+    });
+  }
+
+  if (decision.channel === "sms") return processSmsStep(db, row, data, step, steps, run);
   return processEmailStep(db, row, data, step, steps, seq.emailClass || "commercial", run);
 }
 
