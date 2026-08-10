@@ -23,6 +23,7 @@ export function LeadDocumentDownloadButton({
       const body = (await r.json()) as {
         ok?: boolean;
         url?: string;
+        download_url?: string;
         error?: string;
       };
       if (!r.ok || !body.ok || !body.url) {
