@@ -17,7 +17,7 @@ import { EnrichmentTab } from "./EnrichmentTab";
 import { DefaultsCheckControl } from "./DefaultsCheckControl";
 import { useRouter, usePathname } from "next/navigation";
 import Link from "next/link";
-import { X, FileText, ImageIcon, Phone, Mail, ShoppingBag, Loader2, Trash2, CheckCircle2, AlertCircle, UploadCloud, RefreshCw, ArrowRightLeft, ChevronLeft, Eye, GripHorizontal, ChevronUp, ChevronDown, Pencil } from "lucide-react";
+import { X, FileText, ImageIcon, Phone, Mail, ShoppingBag, Loader2, Trash2, CheckCircle2, AlertCircle, UploadCloud, RefreshCw, ArrowRightLeft, ChevronLeft, Eye, Download, GripHorizontal, ChevronUp, ChevronDown, Pencil } from "lucide-react";
 import { LeadTimelinePanel } from "./LeadTimelinePanel";
 import { DocumentsViewer } from "./DocumentsViewer";
 import { AssignmentControl } from "./AssignmentControl";
@@ -1508,7 +1508,7 @@ function DocumentsTab({
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [generating, setGenerating] = useState(false);
   const [generatingFundmate, setGeneratingFundmate] = useState(false);
-  const [showViewer, setShowViewer] = useState(false);
+  const [viewerIndex, setViewerIndex] = useState<number | null>(null);
   const [showWorklist, setShowWorklist] = useState(false);
   // Set when a toggle hits a legacy baked file (no clean original) — surfaces
   // a re-upload prompt by the upload box.
@@ -1694,7 +1694,10 @@ function DocumentsTab({
         </div>
         {appDoc ? (
           <div className="flex items-center gap-2 shrink-0">
-            <DocDownloadButton id={appDoc.id} filename={appDoc.filename} />
+            <DocActions
+              doc={appDoc}
+              onView={() => setViewerIndex(docs.findIndex((d) => d.id === appDoc.id))}
+            />
             {canGenerateApp && (
               <button
                 type="button"
@@ -1768,7 +1771,12 @@ function DocumentsTab({
             </div>
           </div>
           <div className="flex items-center gap-2 shrink-0">
-            {fundmateDoc && <DocDownloadButton id={fundmateDoc.id} filename={fundmateDoc.filename} />}
+            {fundmateDoc && (
+              <DocActions
+                doc={fundmateDoc}
+                onView={() => setViewerIndex(docs.findIndex((d) => d.id === fundmateDoc.id))}
+              />
+            )}
             <button
               type="button"
               onClick={() => generateFundmate(true)}
@@ -1858,7 +1866,7 @@ function DocumentsTab({
             )}
             <button
               type="button"
-              onClick={() => setShowViewer(true)}
+              onClick={() => setViewerIndex(0)}
               title="Open all documents in a viewer and swipe through them"
               className="inline-flex items-center gap-1.5 text-[11px] font-semibold px-2.5 py-1 rounded-md border border-bg-border bg-bg-elev text-fg-muted hover:text-fg"
             >
@@ -1873,7 +1881,7 @@ function DocumentsTab({
         </div>
       ) : (
         <ul className="divide-y divide-bg-border">
-          {docs.map((d) => {
+          {docs.map((d, docIndex) => {
             const isImage = (d.mime_type || "").startsWith("image/");
             return (
               <li key={d.id} className="flex items-center gap-3 py-2.5 text-sm">
@@ -1909,7 +1917,7 @@ function DocumentsTab({
                   ) : (
                     <VariantToggle id={d.id} variant={d.active_variant === "watermarked" ? "watermarked" : "clean"} onChanged={refresh} onLegacy={setLegacyNotice} />
                   ))}
-                <DocDownloadButton id={d.id} filename={d.filename} />
+                <DocActions doc={d} onView={() => setViewerIndex(docIndex)} />
                 <button
                   type="button"
                   onClick={() => remove(d.id)}
@@ -1930,8 +1938,12 @@ function DocumentsTab({
         </ul>
       )}
 
-      {showViewer && (
-        <DocumentsViewer docs={docs} onClose={() => setShowViewer(false)} />
+      {viewerIndex !== null && (
+        <DocumentsViewer
+          docs={docs}
+          startIndex={viewerIndex}
+          onClose={() => setViewerIndex(null)}
+        />
       )}
       {showWorklist && <LegacyWorklist onClose={() => setShowWorklist(false)} />}
     </div>
@@ -2082,44 +2094,35 @@ function computeMissingDocCount(docs: DocRow[]): number {
   return REQUIRED.filter((r) => !present.has(r)).length;
 }
 
-function DocDownloadButton({ id, filename }: { id: string; filename: string }) {
-  const [pending, setPending] = useState(false);
-  return (
-    <button
-      type="button"
-      disabled={pending}
-      onClick={async () => {
-        setPending(true);
-        try {
-          const r = await fetch(`/api/lead-documents/${id}`, { credentials: "include" });
-          const j = await r.json();
-          if (j.ok && j.url) {
-            const a = document.createElement("a");
-            a.href = j.url;
-            a.download = filename;
-            a.target = "_blank";
-            a.rel = "noopener";
-            document.body.appendChild(a);
-            a.click();
-            a.remove();
-          }
-        } finally {
-          setPending(false);
-        }
-      }}
-      className="text-[11px] uppercase tracking-wider px-2 py-1 rounded-md border border-bg-border text-fg-muted hover:text-fg disabled:opacity-50"
-    >
-      {pending ? "…" : "View"}
-    </button>
-  );
-}
-
 /**
  * VariantToggle — segmented Clean | WM switch for a bank statement (2026-06-29).
  * Both copies are kept, so flipping is instant + reversible. Clicking the
  * inactive segment POSTs /watermark-variant with that target; the clean original
  * and the watermarked duplicate are both always available.
  */
+function DocActions({ doc, onView }: { doc: DocRow; onView: () => void }) {
+  return (
+    <div className="shrink-0 flex items-center gap-1.5">
+      <button
+        type="button"
+        onClick={onView}
+        title={`View ${doc.filename}`}
+        className="inline-flex items-center gap-1 rounded-md border border-bg-border bg-bg-elev px-2 py-1 text-[11px] font-semibold text-fg-muted hover:text-fg"
+      >
+        <Eye className="w-3 h-3" /> View
+      </button>
+      <a
+        href={`/api/lead-documents/${encodeURIComponent(doc.id)}/content?download=1`}
+        download={doc.filename}
+        title={`Download ${doc.filename}`}
+        className="inline-flex items-center gap-1 rounded-md border border-bg-border bg-bg-elev px-2 py-1 text-[11px] font-semibold text-fg-muted hover:text-fg"
+      >
+        <Download className="w-3 h-3" /> Download
+      </a>
+    </div>
+  );
+}
+
 function VariantToggle({
   id,
   variant,

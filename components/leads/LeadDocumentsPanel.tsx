@@ -90,6 +90,8 @@ export async function LeadDocumentsPanel({
                 <LeadDocumentDownloadButton
                   documentId={doc.id}
                   filename={doc.filename}
+                  mimeType={doc.mime_type}
+                  docType={doc.doc_type}
                 />
               </li>
             );
