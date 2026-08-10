@@ -22,6 +22,14 @@
  *  required. Verified against the live vault 2026-08-09. */
 export type ConsentBrand = "sunbiz" | "bluerise";
 
+/** Which identifiers this brand's capture site demands. Exported so the caller
+ *  can wait until it actually has them, rather than firing a request the vault
+ *  is certain to refuse and recording a permanent capture failure for a lead
+ *  whose details simply arrive on a later step. */
+export function requiredIdentifiers(brand: ConsentBrand): Array<"email" | "phone"> {
+  return brand === "bluerise" ? ["email"] : ["email", "phone"];
+}
+
 export type ConsentCaptureResult =
   | {
       ok: true;
@@ -123,12 +131,28 @@ export async function captureConsent(args: CaptureArgs): Promise<ConsentCaptureR
     if (!res.ok) {
       return { ok: false, reason: String(json?.error ?? `http_${res.status}`), status: res.status };
     }
+    // A 2xx carrying a malformed body is NOT a capture. Without this check, a
+    // proxy or a future API change returning 200-and-nothing would be stored as
+    // captured:true with empty hashes — a receipt pointing at no evidence, which
+    // is worse than an honest failure because it reads as proof.
+    const consentId = String(json?.consent_id ?? "");
+    const certificateCode = String(json?.certificate_code ?? "");
+    const payloadSha256 = String(json?.payload_sha256 ?? "");
+    const signatureHmac = String(json?.signature_hmac ?? "");
+    const wellFormed =
+      consentId.length > 0 &&
+      certificateCode.length > 0 &&
+      /^[a-f0-9]{64}$/.test(payloadSha256) &&
+      /^[a-f0-9]{64}$/.test(signatureHmac);
+    if (!wellFormed) {
+      return { ok: false, reason: "malformed_receipt", status: res.status };
+    }
     return {
       ok: true,
-      consentId: String(json?.consent_id ?? ""),
-      certificateCode: String(json?.certificate_code ?? ""),
-      payloadSha256: String(json?.payload_sha256 ?? ""),
-      signatureHmac: String(json?.signature_hmac ?? ""),
+      consentId,
+      certificateCode,
+      payloadSha256,
+      signatureHmac,
       disclosureVersion: cfg.disclosureVersion,
       retentionExpiresAt: json?.retention_expires_at ? String(json.retention_expires_at) : null,
     };

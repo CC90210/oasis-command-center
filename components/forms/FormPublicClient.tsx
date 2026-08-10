@@ -24,7 +24,7 @@ import { FormRenderer } from "./FormRenderer";
 import type { FormStep, FormBranding } from "@/lib/forms/types";
 import { isFieldVisible } from "@/lib/forms/visibility";
 import { DEFAULT_PRIMARY_COLOR, getContrastingTextColor } from "@/lib/forms/themes";
-import { captureConsent, type ConsentBrand } from "@/lib/consent/optinvault";
+import { captureConsent, requiredIdentifiers, toE164, type ConsentBrand } from "@/lib/consent/optinvault";
 
 // Submit-side route (api/forms/submit) now decodes the base64 and uploads
 // to Supabase Storage instead of holding the bytes in form_submissions.
@@ -33,6 +33,9 @@ import { captureConsent, type ConsentBrand } from "@/lib/consent/optinvault";
 const INLINE_FILE_MAX_BYTES = 15 * 1024 * 1024;
 
 type Props = {
+  /** Sending brand this form belongs to, resolved server-side. Drives which
+   *  capture site and disclosure the consent evidence is sealed under. */
+  brand?: string | null;
   formId: string;
   formName: string;
   branding: FormBranding;
@@ -93,12 +96,17 @@ export function FormPublicClient({
   token: initialToken,
   anonymousInit,
   prefill,
+  brand,
 }: Props) {
   const consentIdemKey = useConsentIdempotencyKey();
-  // Safe default mirrors lib/drips/brand-routing: unknown resolves to SunBiz,
-  // the established brand that can absorb a mis-send.
-  const consentBrand: ConsentBrand =
-    process.env.NEXT_PUBLIC_OPTINVAULT_DEFAULT_BRAND === "bluerise" ? "bluerise" : "sunbiz";
+  const consentDone = useRef(false);
+  // Brand comes from the FORM, never from a process-wide default. A global would
+  // seal every tenant's and every brand's visitors under one site key and one
+  // disclosure — so a Bluerise form would produce evidence claiming the person
+  // was shown SunBiz's wording, which is exactly the kind of untruthful record
+  // that makes the whole vault worthless. Unknown resolves to SunBiz, matching
+  // lib/drips/brand-routing's safe default.
+  const consentBrand: ConsentBrand = brand === "bluerise" ? "bluerise" : "sunbiz";
   // The token starts as whatever the page passed in. For anonymous flows
   // it's null; the first /api/forms/submit response carries minted_token,
   // which we capture and use for the rest of the steps.
@@ -323,33 +331,58 @@ export function FormPublicClient({
         file_attachments: built.file_attachments,
       };
 
-      // CONSENT EVIDENCE. Sealed from the BROWSER on the first step, because the
-      // evidence is only worth having if it records the merchant's own IP — a
-      // call from our API would record our Vercel IP, which the vault correctly
-      // refuses to treat as the subject's.
+      // CONSENT EVIDENCE. Sealed from the BROWSER, because the evidence is only
+      // worth having if it records the merchant's own IP — a call from our API
+      // would record our Vercel IP, which the vault correctly refuses to treat
+      // as the subject's.
+      //
+      // Fired on the step where the required identifiers ACTUALLY EXIST, not on
+      // step 0. These funnels collect contact details on the last step, so a
+      // step-0-only attempt would report missing_identifier every single time
+      // and never retry — the feature would have been a permanent no-op that
+      // looked wired up.
+      //
+      // Accumulated across steps, and attempted at most once per session: the
+      // idempotency key is stable, so a retry of the same action resolves to the
+      // same evidence row rather than minting a duplicate.
       //
       // Never blocks the submission. A merchant's enquiry must not be refused
       // because our bookkeeping failed. But a failure is recorded as EXACTLY
       // that: we carry no evidence, and nothing downstream may claim we do.
-      if (currentStep === 0) {
-        const p = built.payload as Record<string, unknown>;
-        const consent = await captureConsent({
-          brand: consentBrand,
-          email: (p.email ?? p.business_email ?? p.contact_email) as string | undefined,
-          phone: (p.phone ?? p.mobile ?? p.cell_phone) as string | undefined,
-          idempotencyKey: consentIdemKey.current,
-          formUrl: typeof window !== "undefined" ? window.location.href : undefined,
-        });
-        submitBody.consent = consent.ok
-          ? {
-              captured: true,
-              consent_id: consent.consentId,
-              certificate_code: consent.certificateCode,
-              payload_sha256: consent.payloadSha256,
-              disclosure_version: consent.disclosureVersion,
-              retention_expires_at: consent.retentionExpiresAt,
-            }
-          : { captured: false, reason: consent.reason };
+      const isLastStep = currentStep === steps.length - 1;
+      if (!consentDone.current) {
+        const all: Record<string, unknown> = Object.assign(
+          {},
+          ...Object.values(stepValues),
+          built.payload as Record<string, unknown>,
+        );
+        const email = (all.email ?? all.business_email ?? all.contact_email) as string | undefined;
+        const phone = (all.phone ?? all.mobile ?? all.cell_phone) as string | undefined;
+        const need = requiredIdentifiers(consentBrand);
+        const haveAll = need.every((c) => (c === "email" ? Boolean(email) : Boolean(toE164(phone))));
+        // On the final step, record the outcome even when identifiers are still
+        // missing: "we never got a phone number" is itself the honest answer,
+        // and leaving no receipt at all would look like the capture never ran.
+        if (haveAll || isLastStep) {
+          const consent = await captureConsent({
+            brand: consentBrand,
+            email,
+            phone,
+            idempotencyKey: consentIdemKey.current,
+            formUrl: typeof window !== "undefined" ? window.location.href : undefined,
+          });
+          if (consent.ok || isLastStep) consentDone.current = true;
+          submitBody.consent = consent.ok
+            ? {
+                captured: true,
+                consent_id: consent.consentId,
+                certificate_code: consent.certificateCode,
+                payload_sha256: consent.payloadSha256,
+                disclosure_version: consent.disclosureVersion,
+                retention_expires_at: consent.retentionExpiresAt,
+              }
+            : { captured: false, reason: consent.reason };
+        }
       }
       if (token) {
         submitBody.token = token;

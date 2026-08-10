@@ -157,6 +157,10 @@ export default async function AnonymousFormPage({
       steps={result.form.steps}
       redirectUrl={result.form.redirect_url}
       token={null}
+      // Sealed consent must name the brand whose disclosure the visitor was
+      // actually shown. No Bluerise-hosted form exists yet, so this resolves to
+      // SunBiz today; the slug check means standing one up needs no code change.
+      brand={result.form.slug.includes("bluerise") ? "bluerise" : "sunbiz"}
       anonymousInit={{
         tenant_slug: result.tenant_slug,
         form_slug: result.form.slug,
