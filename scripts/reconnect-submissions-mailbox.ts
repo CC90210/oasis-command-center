@@ -64,10 +64,15 @@ async function main(): Promise<void> {
   // Google displays app passwords in four spaced groups. The spaces are
   // presentation only; SMTP wants the bare 16 characters, and a pasted value
   // that keeps them is the most common reason a correct password "fails".
-  const raw = process.env.GWS_APP_PASSWORD_NEW ?? "";
+  // Accept either name: SUNBIZ_EMAIL_APP_PASSWORD is what the credential was
+  // actually filed under, GWS_APP_PASSWORD_NEW is what this script first asked
+  // for. Guessing one and failing would look like a bad password.
+  const KEYS = ["GWS_APP_PASSWORD_NEW", "SUNBIZ_EMAIL_APP_PASSWORD"] as const;
+  const usedKey = KEYS.find((k) => (process.env[k] ?? "").trim().length > 0);
+  const raw = usedKey ? (process.env[usedKey] ?? "") : "";
   const pass = raw.replace(/\s+/g, "");
   if (!pass) {
-    console.log("No GWS_APP_PASSWORD_NEW found in .env.agents.");
+    console.log(`No app password found in the agent credential file (looked for: ${KEYS.join(", ")}).`);
     console.log("Add the line, save the file, then re-run. The value is never printed or logged.");
     process.exit(2);
   }
@@ -76,14 +81,18 @@ async function main(): Promise<void> {
     console.log("Check for a partial copy or a stray character.");
     process.exit(2);
   }
-  console.log("read a 16-character app password from .env.agents");
+  console.log(`read a 16-character app password (key: ${usedKey})`);
 
   // 1) PROVE IT BEFORE STORING IT.
-  console.log("\n1) authenticating against smtp.gmail.com …");
+  //
+  // Port 587 STARTTLS, because that is the transport every production call site
+  // uses. Verifying on 465 would prove a path the app never takes.
+  console.log("\n1) authenticating against smtp.gmail.com:587 STARTTLS (production's transport) …");
   const transport = nodemailer.createTransport({
     host: "smtp.gmail.com",
-    port: 465,
-    secure: true,
+    port: 587,
+    secure: false,
+    requireTLS: true,
     auth: { user: FROM, pass },
   });
   try {
@@ -151,8 +160,9 @@ async function main(): Promise<void> {
 
   const t2 = nodemailer.createTransport({
     host: "smtp.gmail.com",
-    port: 465,
-    secure: true,
+    port: 587,
+    secure: false,
+    requireTLS: true,
     auth: { user: FROM, pass: roundTripped },
   });
   await t2.verify();
