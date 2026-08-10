@@ -100,6 +100,8 @@ export function FormPublicClient({
 }: Props) {
   const consentIdemKey = useConsentIdempotencyKey();
   const consentDone = useRef(false);
+  /** The receipt we already earned, replayed on any submit retry. */
+  const consentReceipt = useRef<Record<string, unknown> | null>(null);
   // Brand comes from the FORM, never from a process-wide default. A global would
   // seal every tenant's and every brand's visitors under one site key and one
   // disclosure — so a Bluerise form would produce evidence claiming the person
@@ -350,6 +352,13 @@ export function FormPublicClient({
       // because our bookkeeping failed. But a failure is recorded as EXACTLY
       // that: we carry no evidence, and nothing downstream may claim we do.
       const isLastStep = currentStep === steps.length - 1;
+      // A receipt already earned must survive a failed submit. Capture can
+      // succeed and then /api/forms/submit fail; without replaying the stored
+      // receipt, the merchant's retry would send none and the evidence we hold
+      // would never be linked to the lead it belongs to.
+      if (consentDone.current && consentReceipt.current) {
+        submitBody.consent = consentReceipt.current;
+      }
       if (!consentDone.current) {
         const all: Record<string, unknown> = Object.assign(
           {},
@@ -372,7 +381,7 @@ export function FormPublicClient({
             formUrl: typeof window !== "undefined" ? window.location.href : undefined,
           });
           if (consent.ok || isLastStep) consentDone.current = true;
-          submitBody.consent = consent.ok
+          const receipt = consent.ok
             ? {
                 captured: true,
                 consent_id: consent.consentId,
@@ -382,6 +391,9 @@ export function FormPublicClient({
                 retention_expires_at: consent.retentionExpiresAt,
               }
             : { captured: false, reason: consent.reason };
+          // Remember it so a retry after a failed submit still carries it.
+          if (consent.ok) consentReceipt.current = receipt;
+          submitBody.consent = receipt;
         }
       }
       if (token) {

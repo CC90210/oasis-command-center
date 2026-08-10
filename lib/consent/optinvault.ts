@@ -116,6 +116,12 @@ export async function captureConsent(args: CaptureArgs): Promise<ConsentCaptureR
   try {
     const res = await fetch(`${base.replace(/\/$/, "")}/api/v1/consent/log`, {
       method: "POST",
+      // Bounded, because this sits in front of a merchant pressing Submit. A
+      // vault that REJECTS is handled; a vault that merely STALLS would hang the
+      // enquiry until the browser gave up, which would make "never blocks the
+      // submission" false in the one case that matters. Eight seconds is far
+      // beyond a healthy round trip and far below a merchant's patience.
+      signal: AbortSignal.timeout(8_000),
       // The vault refuses redirects and wants no credentials; matching that here
       // keeps a misconfiguration loud instead of silently following somewhere.
       redirect: "error",

@@ -44,7 +44,10 @@ const REQUIRED_FIELDS: Record<ProviderId, string[][]> = {
   // api_key doubles as SID and public key in the legacy shape, so either bundle
   // is genuinely sendable.
   texttorrent: [["api_sid", "api_public_key"], ["api_key"]],
-  twilio: [["account_sid", "auth_token"]],
+  // from_number too: sendSmsDirectTwilio returns missing_twilio_credentials
+  // without it, so advertising the lane on sid+token alone would offer an
+  // SMS route that cannot send.
+  twilio: [["account_sid", "auth_token", "from_number"]],
 };
 
 /** Per-provider kill switch. Set to "0" to stop using a provider without
@@ -144,7 +147,11 @@ export async function loadProviderAvailability(tenantId: string): Promise<Provid
       (process.env.TEXTTORRENT_API_SID && process.env.TEXTTORRENT_PUBLIC_KEY) ||
         process.env.TEXTTORRENT_API_KEY,
     ),
-    twilio: Boolean(process.env.TWILIO_ACCOUNT_SID && process.env.TWILIO_AUTH_TOKEN),
+    twilio: Boolean(
+      process.env.TWILIO_ACCOUNT_SID &&
+        process.env.TWILIO_AUTH_TOKEN &&
+        process.env.TWILIO_FROM_NUMBER,
+    ),
     gws: Boolean(process.env.GMAIL_APP_PASSWORD && process.env.GMAIL_FROM_ADDRESS),
   };
 
