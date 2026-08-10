@@ -45,6 +45,7 @@ import { brandIsSendable, type BrandKey } from "@/lib/email/brands";
 import { brandFooter } from "@/lib/email/brand-shell";
 import { isWithinSendWindow } from "@/lib/sms/compliance";
 import { contactabilityOf, resolveChannel } from "@/lib/drips/channel-fallback";
+import { mayTextFor } from "@/lib/sms/lawful-basis";
 import { smsSendAllowed, resetBreakerCache, claimBreakerProbe } from "@/lib/sms/send-breaker";
 import { routeOutbound, type ProviderAvailability } from "@/lib/routing/outbound-routing";
 import { loadProviderAvailability } from "@/lib/routing/provider-availability";
@@ -719,6 +720,9 @@ async function processSmsStep(
   step: DripStep,
   steps: DripStep[],
   run: RunState,
+  /** Sequence class. Transactional chases on a live deal are not solicitations
+   *  and are exempt from the marketing consent bar — see mayTextFor. */
+  emailClass: string,
 ): Promise<StepOutcome> {
   const phone = typeof data.phone === "string" ? data.phone.trim() : "";
   // No phone for an SMS step: SKIP + advance (the sequence may have email steps
@@ -728,6 +732,29 @@ async function processSmsStep(
   const supp = await checkPhoneOptOut(row.tenant_id, phone);
   if (supp.optedOut) return markPermanentFail(db, row, "opted_out (replied STOP)");
   if (supp.checkFailed) return markRetryOrFail(db, row, "suppression_check_failed");
+
+  // LAWFUL BASIS TO TEXT. Email and SMS are not interchangeable in law: email
+  // needs no prior permission, a marketing text does. $500 a message, $1,500 if
+  // wilful, no cap, private right of action, and Florida has its own statute —
+  // which matters because these are Florida merchants.
+  //
+  // This became load-bearing the moment the channel fallback landed. Without it,
+  // "we have their number so text them" routes 240 purchased and 119 cold-called
+  // leads — all phone-only, none with a consent record — straight into SMS.
+  //
+  // Transactional chases on a deal already in motion are exempt: asking for a
+  // signature or a document is not a solicitation, and blocking those would
+  // stall live deals for no compliance gain.
+  {
+    const purpose = emailClass === "transactional" ? "transactional" : "marketing";
+    const basis = mayTextFor(data, purpose);
+    if (!basis.mayText) {
+      // NOT a failure and NOT a retry: nothing about this lead will change on
+      // its own. Skip the step and advance so the sequence's email steps still
+      // run, and record the basis so the decision is reconstructable.
+      return skipStep(db, row, steps, `sms_no_lawful_basis: ${basis.reason}`);
+    }
+  }
 
   // TCPA quiet-hours: only send SMS within the recipient's local ~8am-9pm.
   const tcpa = checkTcpaWindow(phone);
@@ -1420,8 +1447,9 @@ async function processRow(
     });
   }
 
-  if (decision.channel === "sms") return processSmsStep(db, row, data, step, steps, run);
-  return processEmailStep(db, row, data, step, steps, seq.emailClass || "commercial", run);
+  const emailClass = seq.emailClass || "commercial";
+  if (decision.channel === "sms") return processSmsStep(db, row, data, step, steps, run, emailClass);
+  return processEmailStep(db, row, data, step, steps, emailClass, run);
 }
 
 export async function runDispatchDrips(): Promise<DispatchDripsResult> {
