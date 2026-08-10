@@ -47,22 +47,47 @@ function bad(status: number, message: string) {
   return NextResponse.json({ message, code: String(status) }, { status });
 }
 
-/** Constant-time bearer check against the shared bridge secret. */
+/**
+ * Constant-time bearer check against any accepted bridge secret.
+ *
+ * Two credentials rather than one, added 2026-08-09 for the APEX/JARVIS fleet.
+ * The obvious move was to hand JARVIS the existing TT_PG_BRIDGE_TOKEN, but its
+ * value cannot be read back out of Vercel (sensitive type), and rotating it to
+ * a value we DO know would silently lock out any holder we cannot see from this
+ * repo — there is no client for this route anywhere in the tree, so the caller
+ * it was built for lives somewhere else. Issuing a second, independently
+ * revocable credential breaks nobody and lets each fleet be cut off on its own.
+ *
+ * Both are compared; the check still fails closed when neither is configured.
+ */
 function authorised(req: NextRequest): boolean {
-  const expected = process.env.TT_PG_BRIDGE_TOKEN || "";
-  if (!expected) return false; // fail closed when unconfigured
+  const accepted = [
+    process.env.TT_PG_BRIDGE_TOKEN || "",
+    process.env.APEX_PG_BRIDGE_TOKEN || "",
+  ].filter(Boolean);
+  if (!accepted.length) return false; // fail closed when unconfigured
+
   const header = req.headers.get("authorization") || "";
   const apikey = req.headers.get("apikey") || "";
   const presented = header.toLowerCase().startsWith("bearer ")
     ? header.slice(7).trim()
     : apikey.trim();
   if (!presented) return false;
+
   // Hash both sides so timingSafeEqual gets equal-length buffers regardless of
   // the presented value's length (it throws on a length mismatch, which would
   // itself leak length).
+  //
+  // Every candidate is compared even after a match, so the work done does not
+  // depend on WHICH credential was presented — a short-circuit would leak, by
+  // timing, which fleet a caller belongs to.
   const a = createHash("sha256").update(presented).digest();
-  const b = createHash("sha256").update(expected).digest();
-  return timingSafeEqual(a, b);
+  let ok = false;
+  for (const candidate of accepted) {
+    const b = createHash("sha256").update(candidate).digest();
+    if (timingSafeEqual(a, b)) ok = true;
+  }
+  return ok;
 }
 
 type Filter = { col: string; op: "eq" | "in" | "is"; value: string | string[] };
