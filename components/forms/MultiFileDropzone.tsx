@@ -91,6 +91,7 @@ export function MultiFileDropzone({
   value,
   onChange,
   uploadToken,
+  ensureUploadToken,
 }: {
   inputId: string;
   accept?: string[];
@@ -99,6 +100,7 @@ export function MultiFileDropzone({
   value: unknown;
   onChange: (v: UploadedDescriptor[]) => void;
   uploadToken: string | null;
+  ensureUploadToken?: () => Promise<string | null>;
 }) {
   const acceptList = accept && accept.length > 0 ? accept : DEFAULT_ACCEPT;
   const maxBytes = maxFileMb * 1024 * 1024;
@@ -145,11 +147,16 @@ export function MultiFileDropzone({
   const uploadOne = useCallback(
     async (file: File, id: string) => {
       try {
+        const activeToken = uploadToken || (await ensureUploadToken?.()) || null;
+        if (!activeToken) {
+          patchRow(id, { status: "error", error: "Couldn't start upload. Try again." });
+          return;
+        }
         const signRes = await fetch("/api/forms/upload-url", {
           method: "POST",
           headers: { "content-type": "application/json" },
           body: JSON.stringify({
-            token: uploadToken,
+            token: activeToken,
             filename: file.name,
             mime_type: file.type || "application/octet-stream",
             size_bytes: file.size,
@@ -178,16 +185,13 @@ export function MultiFileDropzone({
         patchRow(id, { status: "error", error: "Network error. Try again." });
       }
     },
-    [uploadToken, maxFileMb, patchRow],
+    [uploadToken, ensureUploadToken, maxFileMb, patchRow],
   );
 
   const addFiles = useCallback(
     (files: FileList | File[]) => {
       setNotice(null);
-      if (!uploadToken) {
-        // No HMAC token yet. The real flow (a personalized link we send the
-        // merchant) always carries one; this only fires on the anonymous/preview
-        // route, or a multi-step form before its first step is submitted.
+      if (!uploadToken && !ensureUploadToken) {
         setNotice(
           "Open this form from the personalized link we sent you to upload — or complete the earlier steps first.",
         );
@@ -242,7 +246,7 @@ export function MultiFileDropzone({
         return [...prev, ...newRows];
       });
     },
-    [uploadToken, maxFiles, maxBytes, maxFileMb, acceptList, uploadOne],
+    [uploadToken, ensureUploadToken, maxFiles, maxBytes, maxFileMb, acceptList, uploadOne],
   );
 
   const removeRow = useCallback((id: string) => {

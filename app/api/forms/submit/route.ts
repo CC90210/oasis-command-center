@@ -109,6 +109,10 @@ type SubmitBody = {
     // assigned_to so the lead lands under that agent.
     rep?: string;
   };
+  /** Mint the anonymous lead/token without recording a form step. Used only
+   * when step 0 itself is a direct-to-storage upload and therefore needs the
+   * token before the file can be selected. */
+  initialize_only?: boolean;
 };
 
 // The public client embeds files as `inline_base64` inside payload[field].
@@ -199,6 +203,7 @@ export async function POST(req: NextRequest) {
       ip,
       rep: body.anonymous_init.rep,
       origin: req.nextUrl.origin,
+      initializeOnly: body.initialize_only === true,
     });
     if (!anonResult.ok) {
       return NextResponse.json(
@@ -208,6 +213,14 @@ export async function POST(req: NextRequest) {
     }
     link = anonResult.link;
     mintedTokenForResponse = anonResult.token;
+    if (body.initialize_only === true) {
+      return NextResponse.json({
+        ok: true,
+        initialized: true,
+        minted_token: mintedTokenForResponse,
+        next_step: 0,
+      });
+    }
   } else {
     return NextResponse.json(
       { ok: false, error: "no_auth_provided" },
@@ -1345,6 +1358,8 @@ async function initAnonymousLead(input: {
   rep?: string;
   /** Request origin, for minting the absolute full-application link. */
   origin: string;
+  /** Restricted bootstrap for forms whose first step cannot upload without a token. */
+  initializeOnly?: boolean;
 }): Promise<
   | { ok: true; link: FormLinkPayload; token: string }
   | { ok: false; error: string; status: number }
@@ -1356,6 +1371,19 @@ async function initAnonymousLead(input: {
   }
   const tenantSlug = resolved.tenant_slug;
   const form = resolved.form;
+
+  if (input.initializeOnly) {
+    let firstStepNeedsToken = false;
+    try {
+      const steps = parseFormSteps(form.steps);
+      firstStepNeedsToken = steps[0]?.fields.some((field) => field.type === "file_upload_multi") === true;
+    } catch {
+      return { ok: false, error: "form_corrupt", status: 400 };
+    }
+    if (!firstStepNeedsToken) {
+      return { ok: false, error: "initialization_not_required", status: 400 };
+    }
+  }
 
   // Seed the lead with whatever common contact fields the operator
   // already collected on this step. Falls back gracefully when the

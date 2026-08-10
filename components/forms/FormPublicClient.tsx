@@ -118,6 +118,8 @@ export function FormPublicClient({
   // it's null; the first /api/forms/submit response carries minted_token,
   // which we capture and use for the rest of the steps.
   const [token, setToken] = useState<string | null>(initialToken);
+  const tokenRef = useRef<string | null>(initialToken);
+  const tokenInitPromiseRef = useRef<Promise<string | null> | null>(null);
   // Per-step values keyed by step index so going back doesn't lose data.
   const [stepValues, setStepValues] = useState<Record<number, Record<string, unknown>>>(
     () =>
@@ -144,6 +146,41 @@ export function FormPublicClient({
   const [nextForms, setNextForms] = useState<
     Array<{ slug: string; label: string; url: string }>
   >([]);
+
+  /** A first-step direct upload needs its signed lead token before it can PUT
+   * bytes. Initialize on the visitor's file-selection action (not page load),
+   * so crawlers still cannot create empty leads. Concurrent files share the
+   * same promise and therefore the same lead. */
+  const ensureUploadToken = useCallback(async (): Promise<string | null> => {
+    if (tokenRef.current) return tokenRef.current;
+    if (!anonymousInit) return null;
+    if (tokenInitPromiseRef.current) return tokenInitPromiseRef.current;
+    const pending = (async () => {
+      try {
+        const res = await fetch("/api/forms/submit", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            step_index: 0,
+            payload: {},
+            anonymous_init: anonymousInit,
+            initialize_only: true,
+          }),
+        });
+        const data = (await res.json().catch(() => ({}))) as SubmitResponse;
+        if (!res.ok || !data.ok || !data.minted_token) return null;
+        tokenRef.current = data.minted_token;
+        setToken(data.minted_token);
+        return data.minted_token;
+      } catch {
+        return null;
+      } finally {
+        tokenInitPromiseRef.current = null;
+      }
+    })();
+    tokenInitPromiseRef.current = pending;
+    return pending;
+  }, [anonymousInit]);
 
   // Fire view-ping exactly once on mount. Anonymous flows can't ping
   // /api/forms/view yet — there's no lead until the first submit — so
@@ -367,11 +404,12 @@ export function FormPublicClient({
       if (consentBrand && !consentDone.current) {
         const all: Record<string, unknown> = Object.assign(
           {},
+          prefill || {},
           ...Object.values(stepValues),
           built.payload as Record<string, unknown>,
         );
         const email = (all.email ?? all.business_email ?? all.contact_email) as string | undefined;
-        const phone = (all.phone ?? all.mobile ?? all.cell_phone) as string | undefined;
+        const phone = (all.phone ?? all.owner_cell ?? all.mobile ?? all.cell_phone) as string | undefined;
         const need = requiredIdentifiers(consentBrand);
         const haveAll = need.every((c) => (c === "email" ? Boolean(email) : Boolean(toE164(phone))));
         void haveAll;
@@ -440,6 +478,7 @@ export function FormPublicClient({
       // Capture the freshly-signed token from an anonymous step 0 so
       // step 1+ uses it like any other personalized submit.
       if (!token && data.minted_token) {
+        tokenRef.current = data.minted_token;
         setToken(data.minted_token);
       }
 
@@ -590,6 +629,7 @@ export function FormPublicClient({
                   currentStep === steps.length - 1 ? step.cta_label || "Submit" : undefined
                 }
                 uploadToken={token}
+                ensureUploadToken={ensureUploadToken}
               />
               {/* THE DISCLOSURE THE EVIDENCE ATTESTS TO.
                   Rendered on the final step, immediately by the submit control,
