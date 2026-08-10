@@ -14,7 +14,7 @@
  * DELIBERATELY NOT A GENERAL POSTGREST. It implements exactly the shapes
  * services/texttorrent-runtime/repository.js actually issues:
  *
- *   GET    <table>?col=eq.X&col=in.(a,b)&select=...&limit=N
+ *   GET    <table>?col=eq.X&col=in.(a,b)&col=gte.X&select=...&order=...&limit=N
  *   POST   <table>                       (insert, Prefer: return=representation)
  *   PATCH  <table>?col=eq.X&col=in.(a,b) (update, Prefer: return=representation)
  *   POST   rpc/<name>                    (dispatched to the ported RPCs)
@@ -90,7 +90,24 @@ function authorised(req: NextRequest): boolean {
   return ok;
 }
 
-type Filter = { col: string; op: "eq" | "in" | "is"; value: string | string[] };
+/**
+ * Range and inequality operators added 2026-08-09 for the APEX/JARVIS fleet.
+ *
+ * The bridge previously accepted only eq/is/in and 501'd on everything else.
+ * That refusal is the right default and it did its job — it rejected APEX's
+ * cursor read loudly instead of quietly returning the wrong rows. But a
+ * cursor-based reader fundamentally needs `created_at=gte.<cursor>`, and
+ * without it the agent coordination channel cannot page at all.
+ *
+ * These are not new capabilities: lib/turso-postgrest.ts already implements
+ * every one of them. Only this route's parser was narrower than the adapter
+ * behind it, so this widens the parser to match rather than adding surface.
+ */
+type FilterOp = "eq" | "in" | "is" | "neq" | "gt" | "gte" | "lt" | "lte";
+type Filter = { col: string; op: FilterOp; value: string | string[] };
+
+/** Operators that take a single scalar and map 1:1 onto the adapter. */
+const SCALAR_OPS = new Set<FilterOp>(["eq", "is", "neq", "gt", "gte", "lt", "lte"]);
 
 /** Parse PostgREST query params into filters + modifiers, refusing the unknown. */
 function parseQuery(sp: URLSearchParams):
@@ -113,8 +130,10 @@ function parseQuery(sp: URLSearchParams):
     const op = raw.slice(0, dot);
     const val = raw.slice(dot + 1);
 
-    if (op === "eq") { filters.push({ col: key, op: "eq", value: val }); continue; }
-    if (op === "is") { filters.push({ col: key, op: "is", value: val }); continue; }
+    if (SCALAR_OPS.has(op as FilterOp)) {
+      filters.push({ col: key, op: op as FilterOp, value: val });
+      continue;
+    }
     if (op === "in") {
       const inner = val.replace(/^\(/, "").replace(/\)$/, "");
       const parts = inner.split(",").map((s) => s.trim().replace(/^"|"$/g, ""));
@@ -137,9 +156,19 @@ function coerce(v: string): string | number | boolean | null {
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function applyFilters(q: any, filters: Filter[]) {
   for (const f of filters) {
-    if (f.op === "eq") q = q.eq(f.col, coerce(f.value as string));
-    else if (f.op === "is") q = q.is(f.col, coerce(f.value as string));
-    else q = q.in(f.col, (f.value as string[]).map(coerce));
+    if (f.op === "in") {
+      q = q.in(f.col, (f.value as string[]).map(coerce));
+      continue;
+    }
+    // Dispatch by name rather than an if-chain, so adding an operator to
+    // SCALAR_OPS cannot silently fall through to the wrong comparison — the
+    // previous shape ended in a bare `else q.in(...)`, which would have turned
+    // any newly-accepted operator into an IN against a string.
+    const fn = (q as Record<string, unknown>)[f.op];
+    if (typeof fn !== "function") {
+      throw new Error(`adapter has no "${f.op}" filter`);
+    }
+    q = (fn as (c: string, v: unknown) => unknown).call(q, f.col, coerce(f.value as string));
   }
   return q;
 }
