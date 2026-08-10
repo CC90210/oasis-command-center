@@ -48,6 +48,40 @@ function bad(status: number, message: string) {
 }
 
 /**
+ * Tables no bridge caller may touch, whatever credential it presents.
+ *
+ * Found 2026-08-09 while auditing the Turso cutover for data leakage: a single
+ * bearer token reached EVERY table in bravo-empire. Postgres had RLS; SQLite
+ * has none, so behind this route there is no per-row boundary at all and the
+ * only thing standing between a leaked token and the whole database was the
+ * token itself. Measured at the time: 15 tenant_integration_credentials, 17
+ * user_integration_credentials, 59 _supabase_auth_users, 3,406 lead_documents,
+ * and bridge_pairings — the table holding the hashes of these very tokens.
+ *
+ * This is a data plane for SMS and lead work. Nothing legitimate on it reads
+ * OAuth tokens, auth users, or its own credential store, so denying them costs
+ * no caller anything and turns one leaked bearer from "the entire estate" into
+ * "the operational tables".
+ *
+ * A denylist rather than a per-credential allowlist deliberately: the caller
+ * this route was built for lives outside this repo, and an allowlist would have
+ * silently broken it. Narrowing further to per-credential allowlists is the
+ * right next step, once every caller is known.
+ */
+const FORBIDDEN_TABLES = new Set([
+  // Auth + identity
+  "_supabase_auth_users",
+  "_supabase_auth_identities",
+  "_auth_tokens",
+  "signing_otp_codes",
+  // Credential stores — reading these is lateral movement, not data access
+  "tenant_integration_credentials",
+  "user_integration_credentials",
+  "bridge_pairings",
+  "bridge_pair_codes",
+]);
+
+/**
  * Constant-time bearer check against any accepted bridge secret.
  *
  * Two credentials rather than one, added 2026-08-09 for the APEX/JARVIS fleet.
@@ -201,6 +235,10 @@ async function handle(req: NextRequest, segments: string[], method: "GET" | "POS
 
   const table = segments[0];
   if (!table || segments.length > 1) return bad(404, "unknown path");
+  if (FORBIDDEN_TABLES.has(table.toLowerCase())) {
+    // 404, not 403: this endpoint should not confirm which tables exist.
+    return bad(404, "unknown path");
+  }
 
   const parsed = parseQuery(req.nextUrl.searchParams);
   if (!parsed.ok) {
