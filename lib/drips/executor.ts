@@ -45,7 +45,7 @@ import { brandIsSendable, type BrandKey } from "@/lib/email/brands";
 import { brandFooter } from "@/lib/email/brand-shell";
 import { isWithinSendWindow } from "@/lib/sms/compliance";
 import { smsSendAllowed, resetBreakerCache, claimBreakerProbe } from "@/lib/sms/send-breaker";
-import { routeOutbound } from "@/lib/routing/outbound-routing";
+import { routeOutbound, type ProviderAvailability } from "@/lib/routing/outbound-routing";
 import { loadProviderAvailability } from "@/lib/routing/provider-availability";
 import { openReceipt } from "@/lib/sms/delivery-receipts";
 import { loadBrandsForLeads } from "@/lib/drips/brand-store";
@@ -265,6 +265,11 @@ type RunState = {
    *  property: one flat pool would let tenant A's templates render for
    *  tenant B's merchants. */
   templatePoolByTenant: Map<string, PoolTemplate[]>;
+  /** Provider availability per tenant, loaded once per run. Resolving it per
+   *  ROW meant one service-role credential query per SMS in the batch, which
+   *  on an SMS-heavy run is dozens of extra round trips against a soft time
+   *  budget — and rows left 'sending' until stale recovery. */
+  availabilityByTenant: Map<string, ProviderAvailability>;
 };
 
 /** Best-effort lead_interactions log — never throws; a logging failure must
@@ -837,7 +842,8 @@ async function processSmsStep(
     //
     // HOLD, never fail: the merchant is fine, we are the ones not ready. A held
     // step reschedules so nobody is dropped from a sequence over provisioning.
-    const availability = await loadProviderAvailability(row.tenant_id);
+    const availability =
+      run.availabilityByTenant.get(row.tenant_id) ?? (await loadProviderAvailability(row.tenant_id));
     const route = routeOutbound({ channel: "sms", purpose: "drip", brand: smsBrand, available: availability });
     if (!route.send) {
       return markRescheduled(
@@ -1560,8 +1566,13 @@ export async function runDispatchDrips(): Promise<DispatchDripsResult> {
   // would have rendered every tenant's merchants from the first tenant's
   // approved copy.
   const templatePoolByTenant = new Map<string, PoolTemplate[]>();
+  const availabilityByTenant = new Map<string, ProviderAvailability>();
   for (const tid of leadIdsByTenant.keys()) {
     templatePoolByTenant.set(tid, await loadApprovedPool(db, tid));
+    // Only when real sends are possible: a dry run never consults a provider.
+    if (dripSendEnabled()) {
+      availabilityByTenant.set(tid, await loadProviderAvailability(tid));
+    }
   }
 
   const run: RunState = {
@@ -1570,6 +1581,7 @@ export async function runDispatchDrips(): Promise<DispatchDripsResult> {
       dripSendEnabled() && emailLeadIds.length > 0 ? await loadEmailBudget(db, emailLeadIds) : null,
     brandByLead,
     templatePoolByTenant,
+    availabilityByTenant,
   };
   if (run.emailBudget?.degraded) {
     // The global counts are best-effort this run; the per-lead cap still holds
