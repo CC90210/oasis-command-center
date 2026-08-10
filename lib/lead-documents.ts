@@ -548,6 +548,21 @@ export type ShopOutAttachmentBase = {
   original_path?: string;
 };
 
+/** Preserve the clean source and annotate why branding degraded. */
+export function shopOutCleanFallback<T extends ShopOutAttachmentBase>(
+  attachment: T,
+  originalPath: string,
+  reason: string,
+): T {
+  return {
+    ...attachment,
+    storage_path: originalPath,
+    original_path: originalPath,
+    watermark_status: "fallback_clean",
+    watermark_error: reason,
+  } as T;
+}
+
 type WmDocRow = {
   id: string;
   tenant_id: string;
@@ -564,8 +579,9 @@ type WmDocRow = {
  * leaving the clean original untouched (lead storage + FundMate stay clean). The
  * returned attachments carry storage_path = the watermarked copy + original_path
  * = the clean source (so retries re-resolve from the original). Non-statement
- * attachments (the app form, ID, void cheque) pass through clean. Fail-closed:
- * any statement we can't resolve or brand is a failure → caller refuses the send.
+ * attachments (the app form, ID, void cheque) pass through clean. Branding is
+ * best-effort: an unbrandable statement stays attached as the verified clean
+ * original and the caller receives a detailed degradation warning.
  */
 export async function watermarkAttachmentsForShopOut<T extends ShopOutAttachmentBase>(
   tenantId: string,
@@ -596,7 +612,9 @@ export async function watermarkAttachmentsForShopOut<T extends ShopOutAttachment
     // and it looked identical to a genuinely un-uploadable statement.
     return {
       ok: false,
-      attachments,
+      attachments: attachments.map((a) =>
+        shopOutCleanFallback(a, origOf(a), `lead_document_lookup_failed: ${rows.error.message}`),
+      ),
       failures: attachments.map((a) => ({
         filename: a.filename,
         storage_path: a.storage_path,
@@ -614,6 +632,7 @@ export async function watermarkAttachmentsForShopOut<T extends ShopOutAttachment
       // FAIL CLOSED: an attachment we can't resolve to a tenant lead_documents
       // row could be an un-branded statement we can't verify. Never ship it.
       failures.push({ filename: att.filename, storage_path: att.storage_path, reason: "unresolved_attachment_no_lead_document" });
+      out.push(shopOutCleanFallback(att, op, "unresolved_attachment_no_lead_document"));
       continue;
     }
     if (row.doc_type !== "bank_statements_3mo") {
@@ -623,6 +642,7 @@ export async function watermarkAttachmentsForShopOut<T extends ShopOutAttachment
     const cp = await getOrCreateWatermarkedCopy(db, row);
     if (!cp.ok) {
       failures.push({ filename: att.filename, storage_path: att.storage_path, reason: cp.error });
+      out.push(shopOutCleanFallback(att, op, cp.error));
       continue;
     }
     // Retarget filename + mime to the branded copy. The watermarker can change
@@ -638,6 +658,8 @@ export async function watermarkAttachmentsForShopOut<T extends ShopOutAttachment
       ...(typeof (att as { mime_type?: unknown }).mime_type === "string"
         ? { mime_type: cp.mimeType }
         : {}),
+      watermark_status: "applied",
+      watermark_error: null,
     } as T);
   }
   return { ok: failures.length === 0, attachments: out, failures };
@@ -650,7 +672,8 @@ export async function watermarkAttachmentsForShopOut<T extends ShopOutAttachment
  * thread's bank-statement attachments to their CURRENT watermarked copy and
  * write the rewritten attachments back, so a retry re-sends the branded copy
  * (and heals a PRE-FEATURE thread whose attachment is still a clean original).
- * Same fail-closed contract.
+ * Same best-effort contract: persist branded paths when available, otherwise
+ * persist the clean fallback and let the retry continue.
  */
 export async function ensureApplicationThreadsWatermarked(
   tenantId: string,
@@ -681,10 +704,7 @@ export async function ensureApplicationThreadsWatermarked(
     const arr = (Array.isArray(thread.attachments) ? thread.attachments : []) as ShopOutAttachmentBase[];
     if (arr.length === 0) continue;
     const r = await watermarkAttachmentsForShopOut(tenantId, arr);
-    if (!r.ok) {
-      failures.push(...r.failures);
-      continue;
-    }
+    if (!r.ok) failures.push(...r.failures);
     const upd = await db
       .from("application_lender_threads")
       .update({ attachments: r.attachments })

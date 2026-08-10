@@ -2,11 +2,9 @@
 /**
  * shopout_watermark_doctor.ts — say exactly WHY shop-out refuses to watermark.
  *
- * The shop-out door guard fails closed: if any bank statement can't be branded,
- * the whole send is refused with `bank_statement_watermark_failed`. That is the
- * correct behaviour, but the reason lived only in the API response body, so the
- * operator-visible symptom collapsed to "it can't watermark it" with no way to
- * tell an un-uploaded file from an encrypted PDF from a broken deploy.
+ * Shop-out prefers branded statements but falls back to verified clean originals
+ * when branding fails. This doctor explains why a document degraded so an
+ * operator can distinguish a bad upload from an encrypted PDF or broken deploy.
  *
  * This runs the SAME resolution the guard runs — same lookup, same doc_type
  * filter, same renderer — and prints a per-document verdict.

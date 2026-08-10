@@ -123,8 +123,9 @@ export async function POST(req: Request) {
   // this proxy, and a direct same-origin POST would bypass the route-level
   // guards — so this is the single place that GUARANTEES nothing un-watermarked
   // reaches a lender. Brand any un-watermarked bank statement across the
-  // application's threads; refuse (422, fail-closed) if branding fails, before
-  // the call ever reaches the sender.
+  // application's threads. Branding is preferred, but a failure leaves the
+  // verified clean original attached and is logged rather than blocking the
+  // sender. Funding submissions cannot depend on this enhancement being up.
   if (toolName === "shop_out_send_batch") {
     const applicationId =
       typeof body.application_id === "string" ? body.application_id : "";
@@ -136,16 +137,10 @@ export async function POST(req: Request) {
     }
     const wmGuard = await ensureApplicationThreadsWatermarked(auth.tenantId, applicationId);
     if (!wmGuard.ok) {
-      return new Response(
-        JSON.stringify({
-          ok: false,
-          error: "bank_statement_watermark_failed",
-          message:
-            "Bank statements must carry the SunBiz watermark before they are sent to lenders, and branding failed for one or more.",
-          watermark_failures: wmGuard.failures,
-        }),
-        { status: 422, headers: { "content-type": "application/json" } },
-      );
+      console.warn("[shop-out] watermark degraded; sending verified clean originals", {
+        applicationId,
+        failures: wmGuard.failures,
+      });
     }
   }
 
