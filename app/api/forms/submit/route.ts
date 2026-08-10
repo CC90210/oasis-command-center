@@ -1100,14 +1100,29 @@ export async function POST(req: NextRequest) {
         throw new Error(`consent receipt read failed: ${cur.error.message}`);
       }
       const curData = (cur.data as { data?: Record<string, unknown> } | null)?.data || {};
+      // CLIENT-ASSERTED, NOT VERIFIED — and the field names say so.
+      //
+      // This endpoint is public, so anyone can POST captured:true with invented
+      // identifiers. Storing that under a bare `captured` flag would let a
+      // forged request make a lead appear to carry consent evidence that does
+      // not exist — the same manufacture-a-record failure this whole subsystem
+      // is built to prevent, just from the outside.
+      //
+      // So nothing here claims verification. The authoritative record is the
+      // immutable row in the vault; this is a POINTER to it, and the pointer is
+      // only as trustworthy as its origin until something checks it.
+      // `vault_verified: false` is the honest state, and resolving the id
+      // against the vault server-side is the follow-up that can flip it.
+      const claimed = body.consent.captured === true;
       const receipt = {
-        captured: body.consent.captured === true,
+        claimed_captured: claimed,
+        vault_verified: false,
         consent_id: body.consent.consent_id ?? null,
         certificate_code: body.consent.certificate_code ?? null,
         payload_sha256: body.consent.payload_sha256 ?? null,
         disclosure_version: body.consent.disclosure_version ?? null,
         retention_expires_at: body.consent.retention_expires_at ?? null,
-        failure_reason: body.consent.captured === true ? null : (body.consent.reason ?? "unknown"),
+        failure_reason: claimed ? null : (body.consent.reason ?? "unknown"),
         recorded_at: new Date().toISOString(),
         source: "optinvault",
       };
