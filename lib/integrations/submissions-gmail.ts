@@ -86,7 +86,17 @@ export async function getSubmissionsCreds(
   }
   const bundle = await getTenantIntegrationBundle(tenantId, service);
   const fromAddress = bundle.from_address?.trim();
-  const appPassword = bundle.app_password?.trim();
+  // Strip ALL whitespace, not just the ends. Google displays app passwords as
+  // four spaced groups, and the value stored on 2026-07-02 was saved that way —
+  // 19 characters for a 16-character secret.
+  //
+  // That matters because the two IMAP crons already stripped interior spaces
+  // while all five SMTP call sites passed the value straight through. A spaced
+  // password therefore let inbox reading work while every send returned 535:
+  // the channel looks half-alive and the failure reads as a credential problem
+  // that is really a formatting one. Normalising here means all consumers
+  // inherit it instead of each remembering.
+  const appPassword = bundle.app_password?.replace(/\s+/g, "");
   if (!fromAddress) throw new Error(`missing_creds:${service}.from_address`);
   if (!appPassword) throw new Error(`missing_creds:${service}.app_password`);
   _credCache.set(cacheKey, { from: fromAddress, appPassword, cachedAt: now });

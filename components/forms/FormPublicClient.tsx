@@ -24,6 +24,7 @@ import { FormRenderer } from "./FormRenderer";
 import type { FormStep, FormBranding } from "@/lib/forms/types";
 import { isFieldVisible } from "@/lib/forms/visibility";
 import { DEFAULT_PRIMARY_COLOR, getContrastingTextColor } from "@/lib/forms/themes";
+import { captureConsent, disclosureFor, requiredIdentifiers, toE164, type ConsentBrand } from "@/lib/consent/optinvault";
 
 // Submit-side route (api/forms/submit) now decodes the base64 and uploads
 // to Supabase Storage instead of holding the bytes in form_submissions.
@@ -32,6 +33,9 @@ import { DEFAULT_PRIMARY_COLOR, getContrastingTextColor } from "@/lib/forms/them
 const INLINE_FILE_MAX_BYTES = 15 * 1024 * 1024;
 
 type Props = {
+  /** Sending brand this form belongs to, resolved server-side. Drives which
+   *  capture site and disclosure the consent evidence is sealed under. */
+  brand?: string | null;
   formId: string;
   formName: string;
   branding: FormBranding;
@@ -71,6 +75,19 @@ type SubmitResponse = {
   next_forms?: Array<{ slug: string; label: string; url: string }> | null;
 };
 
+/** One key per form session. A retried submit is the SAME affirmative action and
+ *  must resolve to the same evidence row, not a duplicate. */
+function useConsentIdempotencyKey() {
+  const ref = useRef<string>("");
+  if (!ref.current) {
+    ref.current =
+      typeof crypto !== "undefined" && "randomUUID" in crypto
+        ? `oasis-form-${crypto.randomUUID()}`
+        : `oasis-form-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+  }
+  return ref;
+}
+
 export function FormPublicClient({
   formName,
   branding,
@@ -79,7 +96,24 @@ export function FormPublicClient({
   token: initialToken,
   anonymousInit,
   prefill,
+  brand,
 }: Props) {
+  const consentIdemKey = useConsentIdempotencyKey();
+  const consentDone = useRef(false);
+  /** The receipt we already earned, replayed on any submit retry. */
+  const consentReceipt = useRef<Record<string, unknown> | null>(null);
+  // Brand comes from the FORM, never from a process-wide default. A global would
+  // seal every tenant's and every brand's visitors under one site key and one
+  // disclosure — so a Bluerise form would produce evidence claiming the person
+  // was shown SunBiz's wording, which is exactly the kind of untruthful record
+  // that makes the whole vault worthless. Unknown resolves to SunBiz, matching
+  // lib/drips/brand-routing's safe default.
+  // NULL disables capture entirely. This is a MULTI-TENANT public route: a
+  // tenant with no consent site of its own must not have its visitors' details
+  // sent to SunBiz's vault and sealed under SunBiz's disclosure, which the
+  // visitor never saw. Only a brand the server explicitly resolved is honoured.
+  const consentBrand: ConsentBrand | null =
+    brand === "bluerise" ? "bluerise" : brand === "sunbiz" ? "sunbiz" : null;
   // The token starts as whatever the page passed in. For anonymous flows
   // it's null; the first /api/forms/submit response carries minted_token,
   // which we capture and use for the rest of the steps.
@@ -303,6 +337,87 @@ export function FormPublicClient({
         payload: built.payload,
         file_attachments: built.file_attachments,
       };
+
+      // CONSENT EVIDENCE. Sealed from the BROWSER, because the evidence is only
+      // worth having if it records the merchant's own IP — a call from our API
+      // would record our Vercel IP, which the vault correctly refuses to treat
+      // as the subject's.
+      //
+      // Fired on the step where the required identifiers ACTUALLY EXIST, not on
+      // step 0. These funnels collect contact details on the last step, so a
+      // step-0-only attempt would report missing_identifier every single time
+      // and never retry — the feature would have been a permanent no-op that
+      // looked wired up.
+      //
+      // Accumulated across steps, and attempted at most once per session: the
+      // idempotency key is stable, so a retry of the same action resolves to the
+      // same evidence row rather than minting a duplicate.
+      //
+      // Never blocks the submission. A merchant's enquiry must not be refused
+      // because our bookkeeping failed. But a failure is recorded as EXACTLY
+      // that: we carry no evidence, and nothing downstream may claim we do.
+      const isLastStep = currentStep === steps.length - 1;
+      // A receipt already earned must survive a failed submit. Capture can
+      // succeed and then /api/forms/submit fail; without replaying the stored
+      // receipt, the merchant's retry would send none and the evidence we hold
+      // would never be linked to the lead it belongs to.
+      if (consentDone.current && consentReceipt.current) {
+        submitBody.consent = consentReceipt.current;
+      }
+      if (consentBrand && !consentDone.current) {
+        const all: Record<string, unknown> = Object.assign(
+          {},
+          ...Object.values(stepValues),
+          built.payload as Record<string, unknown>,
+        );
+        const email = (all.email ?? all.business_email ?? all.contact_email) as string | undefined;
+        const phone = (all.phone ?? all.mobile ?? all.cell_phone) as string | undefined;
+        const need = requiredIdentifiers(consentBrand);
+        const haveAll = need.every((c) => (c === "email" ? Boolean(email) : Boolean(toE164(phone))));
+        void haveAll;
+        // ONLY on the final step. The evidence asserts
+        // affirmative_action:"form_submit", so sealing it when a visitor merely
+        // clicks Next would record a submission that has not happened — and may
+        // never happen if they abandon the form. Manufacturing evidence for an
+        // action nobody took is far worse than holding none, because the whole
+        // value of this record is that it is true.
+        //
+        // The outcome is recorded even when identifiers are still missing:
+        // "we never got a phone number" is the honest answer, and no receipt at
+        // all would look like the capture never ran.
+        if (isLastStep) {
+          const consent = await captureConsent({
+            brand: consentBrand,
+            email,
+            phone,
+            idempotencyKey: consentIdemKey.current,
+            formUrl: typeof window !== "undefined" ? window.location.href : undefined,
+          });
+          // Done ONLY on success. Capture now runs exclusively on the last step,
+          // so `|| isLastStep` was always true and a transient timeout became
+          // permanent: the retry would replay captured:false without ever asking
+          // the vault again. The idempotency key is stable, so retrying is safe
+          // and cannot duplicate the record.
+          if (consent.ok) consentDone.current = true;
+          const receipt = consent.ok
+            ? {
+                captured: true,
+                consent_id: consent.consentId,
+                certificate_code: consent.certificateCode,
+                payload_sha256: consent.payloadSha256,
+                disclosure_version: consent.disclosureVersion,
+                retention_expires_at: consent.retentionExpiresAt,
+              }
+            : { captured: false, reason: consent.reason };
+          // Remember it so a retry after a failed submit still carries it —
+          // FAILURES included. On the final step a failed capture also closes
+          // this block, so storing only successes would mean a retry sent no
+          // receipt at all, and "we tried and could not" would be lost as
+          // silence. That is the outcome this whole path exists to avoid.
+          consentReceipt.current = receipt;
+          submitBody.consent = receipt;
+        }
+      }
       if (token) {
         submitBody.token = token;
       } else if (anonymousInit) {
@@ -476,6 +591,21 @@ export function FormPublicClient({
                 }
                 uploadToken={token}
               />
+              {/* THE DISCLOSURE THE EVIDENCE ATTESTS TO.
+                  Rendered on the final step, immediately by the submit control,
+                  because that submit is the affirmative action we seal against
+                  this exact wording. An earlier build recorded
+                  "shown disclosure sunbiz-v1-2026-08, clicked submit" while the
+                  form displayed no disclosure at all — a record asserting
+                  something that never happened, which is worse than holding no
+                  record, because it would be produced as if it were true.
+                  Same constant the capture reads, so text and version cannot
+                  drift apart. */}
+              {consentBrand && currentStep === steps.length - 1 && (
+                <p className="mt-4 text-[11px] leading-relaxed text-fg-dim">
+                  {disclosureFor(consentBrand).text}
+                </p>
+              )}
             </>
           )}
         </div>

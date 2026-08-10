@@ -85,6 +85,23 @@ type SubmitBody = {
   // submit the client sends anonymous_init {tenant_slug, form_slug} and
   // no token. The server creates a fresh lead, signs a token tied to it,
   // and returns it for the rest of the multi-step funnel.
+  // Consent evidence sealed BY THE BROWSER against Opt-in Vault on step 0.
+  // Captured client-side on purpose: the evidence must carry the merchant's own
+  // IP, and a call from this route would carry ours.
+  //
+  // Treated as a RECEIPT, never as the consent itself. The authoritative record
+  // lives in the vault, immutably; this is a pointer so a lead can be traced to
+  // it. `captured:false` is stored verbatim — a failed capture must never be
+  // laundered into an implied consent.
+  consent?: {
+    captured?: boolean;
+    consent_id?: string;
+    certificate_code?: string;
+    payload_sha256?: string;
+    disclosure_version?: string;
+    retention_expires_at?: string | null;
+    reason?: string;
+  };
   anonymous_init?: {
     tenant_slug?: string;
     form_slug?: string;
@@ -1058,6 +1075,76 @@ export async function POST(req: NextRequest) {
    * tests/underwriting-manual-only.test.ts is the enforcement, not this comment.
    */
 
+  // Record the consent receipt on the lead. Best-effort and never fatal: a
+  // merchant's enquiry must not be rejected because our bookkeeping failed. But
+  // a failure is written down AS a failure, so nothing downstream can read
+  // silence as consent.
+  if (body.consent && link.lead_id) {
+    try {
+      const cur = await db
+        .from("tenant_records")
+        .select("data")
+        .eq("id", link.lead_id)
+        .eq("tenant_id", form.tenant_id)
+        .maybeSingle();
+      // maybeSingle() resolves { data: null, error } instead of throwing. Reading
+      // that as "no existing data" and then writing { ...{}, consent_receipt }
+      // would REPLACE the lead's entire data object with just the receipt —
+      // silent destruction of a live lead during a transient database blip.
+      // A receipt is not worth losing a merchant's record over.
+      if (cur.error) {
+        console.error("[forms.submit.consent_receipt.read_failed]", {
+          lead_id: link.lead_id,
+          error: cur.error.message,
+        });
+        throw new Error(`consent receipt read failed: ${cur.error.message}`);
+      }
+      const curData = (cur.data as { data?: Record<string, unknown> } | null)?.data || {};
+      // CLIENT-ASSERTED, NOT VERIFIED — and the field names say so.
+      //
+      // This endpoint is public, so anyone can POST captured:true with invented
+      // identifiers. Storing that under a bare `captured` flag would let a
+      // forged request make a lead appear to carry consent evidence that does
+      // not exist — the same manufacture-a-record failure this whole subsystem
+      // is built to prevent, just from the outside.
+      //
+      // So nothing here claims verification. The authoritative record is the
+      // immutable row in the vault; this is a POINTER to it, and the pointer is
+      // only as trustworthy as its origin until something checks it.
+      // `vault_verified: false` is the honest state, and resolving the id
+      // against the vault server-side is the follow-up that can flip it.
+      const claimed = body.consent.captured === true;
+      const receipt = {
+        claimed_captured: claimed,
+        vault_verified: false,
+        consent_id: body.consent.consent_id ?? null,
+        certificate_code: body.consent.certificate_code ?? null,
+        payload_sha256: body.consent.payload_sha256 ?? null,
+        disclosure_version: body.consent.disclosure_version ?? null,
+        retention_expires_at: body.consent.retention_expires_at ?? null,
+        failure_reason: claimed ? null : (body.consent.reason ?? "unknown"),
+        recorded_at: new Date().toISOString(),
+        source: "optinvault",
+      };
+      // Supabase returns { error } rather than throwing, so an unchecked update
+      // reports success while the lead silently carries no receipt — evidence
+      // sealed in the vault with nothing pointing at it.
+      const upd = await db
+        .from("tenant_records")
+        .update({ data: { ...curData, consent_receipt: receipt } })
+        .eq("id", link.lead_id)
+        .eq("tenant_id", form.tenant_id);
+      if (upd.error) {
+        throw new Error(`consent receipt write failed: ${upd.error.message}`);
+      }
+    } catch (err) {
+      console.error("[forms.submit.consent_receipt.failed]", {
+        lead_id: link.lead_id,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
   // OASIS personal-brand funnel (CC): final step. Gated to CC's EXACT tenant +
   // form so no other tenant can fire CC's Telegram/Gmail notifications. (Codex
   // audit 2026-06-18 [high]: a startsWith("oasis") gate matched other tenants.)
@@ -1081,6 +1168,13 @@ export async function POST(req: NextRequest) {
           .eq("id", link.lead_id)
           .eq("tenant_id", form.tenant_id)
           .maybeSingle();
+        // Same hazard as the consent receipt above: on a read error maybeSingle()
+        // yields data:null, and spreading {} would wipe every existing field off
+        // the lead. Pre-existing; fixed here because it is the same one-line
+        // destruction of production data.
+        if (cur.error) {
+          throw new Error(`oasis enrich read failed: ${cur.error.message}`);
+        }
         const curData =
           (cur.data as { data?: Record<string, unknown> } | null)?.data || {};
         await db
