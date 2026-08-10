@@ -210,9 +210,9 @@ export function DocumentsViewer({
             target="_blank"
             rel="noopener"
             title="Download this document"
-            className="shrink-0 p-1 rounded-md text-fg-muted hover:text-fg hover:bg-bg-deep"
+            className="shrink-0 inline-flex items-center gap-1 rounded-md border border-bg-border px-2 py-1 text-[11px] font-semibold text-fg-muted hover:text-fg hover:bg-bg-deep"
           >
-            <Download className="w-4 h-4" />
+            <Download className="w-3.5 h-3.5" /> Download
           </a>
         )}
         <button

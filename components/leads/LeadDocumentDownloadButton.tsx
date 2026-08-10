@@ -1,31 +1,48 @@
-import { ExternalLink } from "lucide-react";
+"use client";
+
+import { useState } from "react";
+import { Download, Eye } from "lucide-react";
+import { DocumentsViewer } from "./DocumentsViewer";
 
 export function LeadDocumentDownloadButton({
   documentId,
   filename,
+  mimeType,
+  docType,
 }: {
   documentId: string;
   filename: string;
+  mimeType: string | null;
+  docType: string;
 }) {
-  // Use a real link so the browser opens the tab during the user's click.
-  // The old implementation awaited a metadata fetch and called window.open()
-  // afterwards, which popup blockers silently reject. The content route repeats
-  // tenant/lead authorization before streaming, so linking to it directly keeps
-  // the same security boundary without the fragile asynchronous popup.
-  const href = `/api/lead-documents/${encodeURIComponent(documentId)}/content`;
+  const [viewing, setViewing] = useState(false);
+  const contentUrl = `/api/lead-documents/${encodeURIComponent(documentId)}/content`;
 
   return (
     <div className="flex items-center gap-2">
-      <a
-        href={href}
-        target="_blank"
-        rel="noopener noreferrer"
-        title={`Open ${filename}`}
+      <button
+        type="button"
+        onClick={() => setViewing(true)}
+        title={`View ${filename}`}
         className="inline-flex items-center gap-1 rounded-md border border-bg-border bg-bg-elev px-2 py-1 text-[11px] font-bold text-fg hover:border-accent/40"
       >
-        <ExternalLink className="w-3 h-3" />
+        <Eye className="w-3 h-3" />
         View
+      </button>
+      <a
+        href={`${contentUrl}?download=1`}
+        download={filename}
+        title={`Download ${filename}`}
+        className="inline-flex items-center gap-1 rounded-md border border-bg-border bg-bg-elev px-2 py-1 text-[11px] font-bold text-fg hover:border-accent/40"
+      >
+        <Download className="w-3 h-3" /> Download
       </a>
+      {viewing && (
+        <DocumentsViewer
+          docs={[{ id: documentId, filename, mime_type: mimeType, doc_type: docType }]}
+          onClose={() => setViewing(false)}
+        />
+      )}
     </div>
   );
 }
