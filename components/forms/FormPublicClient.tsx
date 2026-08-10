@@ -24,7 +24,7 @@ import { FormRenderer } from "./FormRenderer";
 import type { FormStep, FormBranding } from "@/lib/forms/types";
 import { isFieldVisible } from "@/lib/forms/visibility";
 import { DEFAULT_PRIMARY_COLOR, getContrastingTextColor } from "@/lib/forms/themes";
-import { captureConsent, requiredIdentifiers, toE164, type ConsentBrand } from "@/lib/consent/optinvault";
+import { captureConsent, disclosureFor, requiredIdentifiers, toE164, type ConsentBrand } from "@/lib/consent/optinvault";
 
 // Submit-side route (api/forms/submit) now decodes the base64 and uploads
 // to Supabase Storage instead of holding the bytes in form_submissions.
@@ -591,6 +591,21 @@ export function FormPublicClient({
                 }
                 uploadToken={token}
               />
+              {/* THE DISCLOSURE THE EVIDENCE ATTESTS TO.
+                  Rendered on the final step, immediately by the submit control,
+                  because that submit is the affirmative action we seal against
+                  this exact wording. An earlier build recorded
+                  "shown disclosure sunbiz-v1-2026-08, clicked submit" while the
+                  form displayed no disclosure at all — a record asserting
+                  something that never happened, which is worse than holding no
+                  record, because it would be produced as if it were true.
+                  Same constant the capture reads, so text and version cannot
+                  drift apart. */}
+              {consentBrand && currentStep === steps.length - 1 && (
+                <p className="mt-4 text-[11px] leading-relaxed text-fg-dim">
+                  {disclosureFor(consentBrand).text}
+                </p>
+              )}
             </>
           )}
         </div>

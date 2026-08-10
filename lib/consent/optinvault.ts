@@ -22,6 +22,37 @@
  *  required. Verified against the live vault 2026-08-09. */
 export type ConsentBrand = "sunbiz" | "bluerise";
 
+/**
+ * The disclosure a visitor must actually SEE, and the version it is filed under.
+ *
+ * Deliberately in code rather than env: this text and the registered
+ * `disclosure_version` in the vault must match exactly, and the evidence asserts
+ * the person read it. Keeping the rendered copy and the sealed version in ONE
+ * place is what stops them drifting — an earlier build sealed
+ * `sunbiz-v1-2026-08` while the form displayed no disclosure at all, which is a
+ * record claiming something that never happened.
+ *
+ * Changing the wording REQUIRES a new version string. Editing text under an
+ * existing version silently rewrites what past signers are recorded as having
+ * seen, and the whole point of the vault is that this cannot happen.
+ */
+export const DISCLOSURES: Record<ConsentBrand, { version: string; text: string }> = {
+  sunbiz: {
+    version: "sunbiz-v1-2026-08",
+    text:
+      "By submitting this form I agree that SunBiz Funding may contact me at the email address and phone number I provided, including by automated email and text message, about business funding options. Consent is not a condition of any purchase or of receiving funding. Message and data rates may apply. I can opt out at any time by replying STOP to a text or using the unsubscribe link in any email.",
+  },
+  bluerise: {
+    version: "bluerise-v1-2026-08",
+    text:
+      "By submitting this form I agree that Bluerise Business Capital may contact me by email at the address I provided, including automated messages, about business funding options. Consent is not a condition of any purchase or of receiving funding. I can unsubscribe at any time using the link in any email.",
+  },
+};
+
+export function disclosureFor(brand: ConsentBrand): { version: string; text: string } {
+  return DISCLOSURES[brand];
+}
+
 /** Which identifiers this brand's capture site demands. Exported so the caller
  *  can wait until it actually has them, rather than firing a request the vault
  *  is certain to refuse and recording a permanent capture failure for a lead
@@ -53,12 +84,12 @@ function config(brand: ConsentBrand): BrandConfig {
   return brand === "bluerise"
     ? {
         siteKey: process.env.NEXT_PUBLIC_OPTINVAULT_SITE_KEY_BLUERISE,
-        disclosureVersion: process.env.NEXT_PUBLIC_OPTINVAULT_DISCLOSURE_BLUERISE || "bluerise-v1-2026-08",
+        disclosureVersion: DISCLOSURES.bluerise.version,
         requires: ["email"],
       }
     : {
         siteKey: process.env.NEXT_PUBLIC_OPTINVAULT_SITE_KEY_SUNBIZ,
-        disclosureVersion: process.env.NEXT_PUBLIC_OPTINVAULT_DISCLOSURE_SUNBIZ || "sunbiz-v1-2026-08",
+        disclosureVersion: DISCLOSURES.sunbiz.version,
         requires: ["email", "phone"],
       };
 }

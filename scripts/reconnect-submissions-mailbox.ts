@@ -22,7 +22,9 @@ import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { createCipheriv, createDecipheriv, randomBytes, scryptSync } from "node:crypto";
 
-const require_ = createRequire("C:/Users/echel/oasis-drip-fix/package.json");
+// Anchored to THIS file, not an absolute path, so the documented command works
+// from any checkout or CI workspace rather than failing at module resolution.
+const require_ = createRequire(import.meta.url);
 const nodemailer = require_("nodemailer");
 
 function loadEnvFile(path: string): void {

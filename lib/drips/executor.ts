@@ -1157,6 +1157,22 @@ async function processEmailStep(
   // longer what older mail carried.
   let sentBrand: BrandKey = "sunbiz";
   if (shouldSend) {
+    // ALLOCATION GATE for email, mirroring the SMS path. Without it the routing
+    // policy only ever governed half the fleet: PROVIDER_GWS_ENABLED had no
+    // effect on email at all, and a Bluerise lead with missing mailbox
+    // credentials burned retries instead of holding as the policy promises.
+    //
+    // HOLD, never fail — the merchant is fine, we are the ones not ready.
+    const availability =
+      run.availabilityByTenant.get(row.tenant_id) ?? (await loadProviderAvailability(row.tenant_id));
+    const route = routeOutbound({ channel: "email", purpose: "drip", brand, available: availability });
+    if (!route.send) {
+      return markRescheduled(
+        db, row, new Date(Date.now() + 6 * 3_600_000).toISOString(),
+        `email_channel_unavailable: ${route.reason}`,
+      );
+    }
+
     // Transactional/relationship email (application nudges, statements, etc.) is
     // CAN-SPAM opt-out-exempt → NO visible unsubscribe footer. The invisible
     // List-Unsubscribe header stays for BOTH classes (cuts spam complaints +
