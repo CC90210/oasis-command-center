@@ -1111,11 +1111,17 @@ export async function POST(req: NextRequest) {
         recorded_at: new Date().toISOString(),
         source: "optinvault",
       };
-      await db
+      // Supabase returns { error } rather than throwing, so an unchecked update
+      // reports success while the lead silently carries no receipt — evidence
+      // sealed in the vault with nothing pointing at it.
+      const upd = await db
         .from("tenant_records")
         .update({ data: { ...curData, consent_receipt: receipt } })
         .eq("id", link.lead_id)
         .eq("tenant_id", form.tenant_id);
+      if (upd.error) {
+        throw new Error(`consent receipt write failed: ${upd.error.message}`);
+      }
     } catch (err) {
       console.error("[forms.submit.consent_receipt.failed]", {
         lead_id: link.lead_id,

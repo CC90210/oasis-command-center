@@ -391,8 +391,12 @@ export function FormPublicClient({
                 retention_expires_at: consent.retentionExpiresAt,
               }
             : { captured: false, reason: consent.reason };
-          // Remember it so a retry after a failed submit still carries it.
-          if (consent.ok) consentReceipt.current = receipt;
+          // Remember it so a retry after a failed submit still carries it —
+          // FAILURES included. On the final step a failed capture also closes
+          // this block, so storing only successes would mean a retry sent no
+          // receipt at all, and "we tried and could not" would be lost as
+          // silence. That is the outcome this whole path exists to avoid.
+          consentReceipt.current = receipt;
           submitBody.consent = receipt;
         }
       }
