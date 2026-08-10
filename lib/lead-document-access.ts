@@ -3,6 +3,7 @@ import "server-only";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { canViewLead, leadScopingEnabled } from "@/lib/lead-scope";
 import { resolveActiveStoragePath } from "@/lib/lead-documents";
+import { normalizeLeadDocumentStoragePath } from "@/lib/lead-document-path";
 
 export type DocumentSession = {
   tenantId: string;
@@ -58,12 +59,21 @@ export async function getAuthorizedLeadDocument(
     }
   }
 
-  const expectedPrefix = `${doc.tenant_id}/`;
-  if (!doc.storage_path.startsWith(expectedPrefix)) {
+  const storagePath = normalizeLeadDocumentStoragePath(
+    doc.storage_path,
+    doc.tenant_id,
+    process.env.R2_PUBLIC_BASE_URL,
+  );
+  if (!storagePath) {
     return { ok: false, status: 403, error: "storage_path_mismatch" };
   }
-  const active = resolveActiveStoragePath({ storage_path: doc.storage_path, metadata: doc.metadata });
-  if (!active.path.startsWith(expectedPrefix)) {
+  const active = resolveActiveStoragePath({ storage_path: storagePath, metadata: doc.metadata });
+  const activePath = normalizeLeadDocumentStoragePath(
+    active.path,
+    doc.tenant_id,
+    process.env.R2_PUBLIC_BASE_URL,
+  );
+  if (!activePath) {
     return { ok: false, status: 403, error: "storage_path_mismatch" };
   }
 
@@ -71,7 +81,8 @@ export async function getAuthorizedLeadDocument(
     ok: true,
     document: {
       ...doc,
-      activePath: active.path,
+      storage_path: storagePath,
+      activePath,
       activeVariant: active.variant,
       isWatermarked: active.is_watermarked,
       raster: active.raster,
