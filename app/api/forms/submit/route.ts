@@ -1087,6 +1087,18 @@ export async function POST(req: NextRequest) {
         .eq("id", link.lead_id)
         .eq("tenant_id", form.tenant_id)
         .maybeSingle();
+      // maybeSingle() resolves { data: null, error } instead of throwing. Reading
+      // that as "no existing data" and then writing { ...{}, consent_receipt }
+      // would REPLACE the lead's entire data object with just the receipt —
+      // silent destruction of a live lead during a transient database blip.
+      // A receipt is not worth losing a merchant's record over.
+      if (cur.error) {
+        console.error("[forms.submit.consent_receipt.read_failed]", {
+          lead_id: link.lead_id,
+          error: cur.error.message,
+        });
+        throw new Error(`consent receipt read failed: ${cur.error.message}`);
+      }
       const curData = (cur.data as { data?: Record<string, unknown> } | null)?.data || {};
       const receipt = {
         captured: body.consent.captured === true,
@@ -1135,6 +1147,13 @@ export async function POST(req: NextRequest) {
           .eq("id", link.lead_id)
           .eq("tenant_id", form.tenant_id)
           .maybeSingle();
+        // Same hazard as the consent receipt above: on a read error maybeSingle()
+        // yields data:null, and spreading {} would wipe every existing field off
+        // the lead. Pre-existing; fixed here because it is the same one-line
+        // destruction of production data.
+        if (cur.error) {
+          throw new Error(`oasis enrich read failed: ${cur.error.message}`);
+        }
         const curData =
           (cur.data as { data?: Record<string, unknown> } | null)?.data || {};
         await db

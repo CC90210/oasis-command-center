@@ -133,10 +133,19 @@ export async function loadProviderAvailability(tenantId: string): Promise<Provid
   //
   // gws_bluerise is deliberately absent: it has no ENV_FALLBACKS entry and is
   // DB-only, so there is no env path to check.
+  //
+  // COMPLETE bundles here too. A lone TEXTTORRENT_API_SID or GMAIL_APP_PASSWORD
+  // would mark the provider configured while its resolver still lacks the public
+  // key or the sender address, so the gate would admit the send and the resolver
+  // would then fail it — burning an attempt instead of holding cleanly, which is
+  // the exact inversion of what this gate is for.
   const envConfigured: Partial<Record<ProviderId, boolean>> = {
-    texttorrent: Boolean(process.env.TEXTTORRENT_API_SID),
+    texttorrent: Boolean(
+      (process.env.TEXTTORRENT_API_SID && process.env.TEXTTORRENT_PUBLIC_KEY) ||
+        process.env.TEXTTORRENT_API_KEY,
+    ),
     twilio: Boolean(process.env.TWILIO_ACCOUNT_SID && process.env.TWILIO_AUTH_TOKEN),
-    gws: Boolean(process.env.GMAIL_APP_PASSWORD),
+    gws: Boolean(process.env.GMAIL_APP_PASSWORD && process.env.GMAIL_FROM_ADDRESS),
   };
 
   return Object.fromEntries(
