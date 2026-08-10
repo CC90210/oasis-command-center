@@ -79,6 +79,32 @@ const FORBIDDEN_TABLES = new Set([
   "user_integration_credentials",
   "bridge_pairings",
   "bridge_pair_codes",
+
+  // Round 2, 2026-08-10. The list above was written by guessing at table NAMES,
+  // which catches the obvious ones and misses anything named unhelpfully. A
+  // scan of every COLUMN in all 173 tables (scripts/turso_sensitivity_scan.mjs
+  // in JARVIS) found nine more tables holding token, secret or key material and
+  // still served by this route. Names are a convention; columns are what is
+  // actually stored.
+  //
+  // All nine were checked for live callers first — zero JARVIS services and no
+  // TextTorrent runtime table among them — so denying them breaks nobody.
+  "agent_model_config",            // encrypted_api_key
+  "tenant_invites",                // token_hash
+  "esign_signers",                 // token_sha256
+  "n8n_webhook_secrets",           // secret_hash
+  "channel_accounts",              // credential_ref
+  "contracts",                     // sign_token
+  "application_signing_requests",  // token_sha256
+  "cold_sending_mailboxes",        // app_password_enc
+  "personalized_form_links",       // token
+
+  // DELIBERATELY NOT DENIED: merchant_background_checks. It carries ein_last4
+  // and ssn_last4, but those are tokenised at ingest (last4 + salted hash, never
+  // the full number) and the LIVE apex-bg-check worker reads and writes this
+  // table through this route. Denying it would break a running production
+  // service to hide data that is already truncated. Revisit if that worker moves
+  // to a direct connection.
 ]);
 
 /**
