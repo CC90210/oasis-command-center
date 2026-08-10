@@ -108,7 +108,12 @@ export function FormPublicClient({
   // was shown SunBiz's wording, which is exactly the kind of untruthful record
   // that makes the whole vault worthless. Unknown resolves to SunBiz, matching
   // lib/drips/brand-routing's safe default.
-  const consentBrand: ConsentBrand = brand === "bluerise" ? "bluerise" : "sunbiz";
+  // NULL disables capture entirely. This is a MULTI-TENANT public route: a
+  // tenant with no consent site of its own must not have its visitors' details
+  // sent to SunBiz's vault and sealed under SunBiz's disclosure, which the
+  // visitor never saw. Only a brand the server explicitly resolved is honoured.
+  const consentBrand: ConsentBrand | null =
+    brand === "bluerise" ? "bluerise" : brand === "sunbiz" ? "sunbiz" : null;
   // The token starts as whatever the page passed in. For anonymous flows
   // it's null; the first /api/forms/submit response carries minted_token,
   // which we capture and use for the rest of the steps.
@@ -359,7 +364,7 @@ export function FormPublicClient({
       if (consentDone.current && consentReceipt.current) {
         submitBody.consent = consentReceipt.current;
       }
-      if (!consentDone.current) {
+      if (consentBrand && !consentDone.current) {
         const all: Record<string, unknown> = Object.assign(
           {},
           ...Object.values(stepValues),
@@ -369,10 +374,18 @@ export function FormPublicClient({
         const phone = (all.phone ?? all.mobile ?? all.cell_phone) as string | undefined;
         const need = requiredIdentifiers(consentBrand);
         const haveAll = need.every((c) => (c === "email" ? Boolean(email) : Boolean(toE164(phone))));
-        // On the final step, record the outcome even when identifiers are still
-        // missing: "we never got a phone number" is itself the honest answer,
-        // and leaving no receipt at all would look like the capture never ran.
-        if (haveAll || isLastStep) {
+        void haveAll;
+        // ONLY on the final step. The evidence asserts
+        // affirmative_action:"form_submit", so sealing it when a visitor merely
+        // clicks Next would record a submission that has not happened — and may
+        // never happen if they abandon the form. Manufacturing evidence for an
+        // action nobody took is far worse than holding none, because the whole
+        // value of this record is that it is true.
+        //
+        // The outcome is recorded even when identifiers are still missing:
+        // "we never got a phone number" is the honest answer, and no receipt at
+        // all would look like the capture never ran.
+        if (isLastStep) {
           const consent = await captureConsent({
             brand: consentBrand,
             email,

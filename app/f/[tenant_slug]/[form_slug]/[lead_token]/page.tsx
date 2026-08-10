@@ -17,6 +17,7 @@ import { notFound } from "next/navigation";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { verifyFormLink } from "@/lib/form-links";
 import { FormPublicClient } from "@/components/forms/FormPublicClient";
+import { consentBrandForTenant } from "@/lib/consent/brand-for-tenant";
 import {
   parseFormSteps,
   parseFormBranding,
@@ -258,7 +259,7 @@ export default async function PublicFormPage({
       // Same brand resolution as the anonymous page. Omitting it here would seal
       // a Bluerise merchant's consent under SunBiz's site key and disclosure —
       // an evidence record stating they were shown wording they never saw.
-      brand={result.form.slug.includes("bluerise") ? "bluerise" : "sunbiz"}
+      brand={consentBrandForTenant(result.tenant_slug, result.form.slug)}
     />
   );
 }

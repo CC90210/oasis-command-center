@@ -20,6 +20,7 @@ import type { Metadata } from "next";
 import { notFound } from "next/navigation";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { FormPublicClient } from "@/components/forms/FormPublicClient";
+import { consentBrandForTenant } from "@/lib/consent/brand-for-tenant";
 import {
   parseFormSteps,
   parseFormBranding,
@@ -160,7 +161,7 @@ export default async function AnonymousFormPage({
       // Sealed consent must name the brand whose disclosure the visitor was
       // actually shown. No Bluerise-hosted form exists yet, so this resolves to
       // SunBiz today; the slug check means standing one up needs no code change.
-      brand={result.form.slug.includes("bluerise") ? "bluerise" : "sunbiz"}
+      brand={consentBrandForTenant(result.tenant_slug, result.form.slug)}
       anonymousInit={{
         tenant_slug: result.tenant_slug,
         form_slug: result.form.slug,
