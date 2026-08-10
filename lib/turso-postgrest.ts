@@ -476,6 +476,75 @@ export class TursoQueryBuilder implements PromiseLike<PgResponse<any>> {
     return rows;
   }
 
+  /**
+   * Find the real ON CONFLICT target for a requested set of columns.
+   *
+   * Returns the index's exact column/expression list when a unique index on
+   * this table covers precisely those columns, or null to fall back to the
+   * caller's bare column list (the correct behaviour when the index really is
+   * plain columns, which is the common case).
+   *
+   * Matching is on the SET of column names mentioned, so
+   * `onConflict: "email,tenant_id,brand"` finds
+   * `(email, COALESCE(tenant_id,'…'), COALESCE(brand,'…'))` — same columns,
+   * different spelling. Column ORDER is deliberately ignored: PostgREST callers
+   * write them in whatever order reads well, while the index has its own.
+   *
+   * Cached per table+target because it costs a sqlite_master read, and upserts
+   * run on hot paths like bounce processing.
+   */
+  private static conflictTargetCache = new Map<string, string | null>();
+
+  private async resolveConflictTarget(targetCols: string[]): Promise<string | null> {
+    if (!targetCols.length) return null;
+    const key = `${this.table}::${[...targetCols].sort().join(",")}`;
+    const cached = TursoQueryBuilder.conflictTargetCache.get(key);
+    if (cached !== undefined) return cached;
+
+    let resolved: string | null = null;
+    try {
+      const res = await this.client.execute({
+        sql: `SELECT sql FROM sqlite_master
+               WHERE type='index' AND tbl_name=? AND sql IS NOT NULL`,
+        args: [this.table],
+      });
+      const wanted = [...targetCols].map((c) => c.toLowerCase()).sort().join(",");
+      for (const row of res.rows as any[]) {
+        const ddl: string = String(row.sql ?? "");
+        if (!/CREATE\s+UNIQUE\s+INDEX/i.test(ddl)) continue;
+        const open = ddl.indexOf("(");
+        const close = ddl.lastIndexOf(")");
+        if (open < 0 || close <= open) continue;
+        const inner = ddl.slice(open + 1, close);
+        // Only expression indexes need rewriting; a plain column index already
+        // matches the caller's bare list, and leaving it alone keeps the
+        // generated SQL identical to before for every ordinary table.
+        if (!/COALESCE|\(/i.test(inner)) continue;
+        // Column names mentioned anywhere in the expression list.
+        //
+        // String literals MUST be stripped first. The transpiler's sentinel is
+        // the literal text '__null__', and an identifier regex happily
+        // matches `u001f__null__` inside it — which makes the column set look
+        // like {email, tenant_id, brand, u001f__null__} and never match the
+        // caller's {email, tenant_id, brand}. That silently defeated this whole
+        // lookup on the first attempt; the probe caught it.
+        const withoutLiterals = inner.replace(/'(?:[^']|'')*'/g, "''");
+        const mentioned = [...withoutLiterals.matchAll(/[A-Za-z_][A-Za-z0-9_]*/g)]
+          .map((m) => m[0].toLowerCase())
+          .filter((w) => !["coalesce", "lower", "upper", "nullif", "ifnull"].includes(w));
+        const uniq = [...new Set(mentioned)].sort().join(",");
+        if (uniq === wanted) {
+          resolved = inner.trim();
+          break;
+        }
+      }
+    } catch {
+      resolved = null; // never let target resolution break the write path
+    }
+    TursoQueryBuilder.conflictTargetCache.set(key, resolved);
+    return resolved;
+  }
+
   private async runWrite(): Promise<PgResponse<any>> {
     const rows = this.payload!;
     if (!rows.length)
@@ -488,7 +557,26 @@ export class TursoQueryBuilder implements PromiseLike<PgResponse<any>> {
       const ignore = this.onConflictCols?.startsWith("IGNORE:");
       const target = (ignore ? this.onConflictCols!.slice(7) : this.onConflictCols) || "";
       const targetCols = target ? target.split(",").map((c) => c.trim()) : [];
-      const targetSql = targetCols.length ? `(${targetCols.map(q).join(", ")})` : "";
+      // SQLite matches an ON CONFLICT target against an index's columns AND
+      // EXPRESSIONS, exactly. Postgres `UNIQUE ... NULLS NOT DISTINCT` was
+      // transpiled into an EXPRESSION index —
+      //   UNIQUE (email, COALESCE(tenant_id,'…'), COALESCE(brand,'…'))
+      // — which a bare column list does not match, so the whole statement is
+      // rejected with "ON CONFLICT clause does not match any PRIMARY KEY or
+      // UNIQUE constraint".
+      //
+      // That is not theoretical: it silently disabled the CASL unsubscribe
+      // endpoint. Nothing was written to email_suppressions between the Turso
+      // cutover and this fix, and two of the four write paths do not read
+      // `.error`, so they returned {ok:true} while persisting nothing.
+      //
+      // The sentinel cannot be reconstructed by hand (the transpiler emitted
+      // the literal text "__null__", not the 0x1F character), so the
+      // expression is read back from the index that actually exists.
+      const resolved = await this.resolveConflictTarget(targetCols);
+      const targetSql = resolved
+        ? `(${resolved})`
+        : targetCols.length ? `(${targetCols.map(q).join(", ")})` : "";
       // The conflict-target columns are excluded from SET: they are equal by
       // definition, and updating them is at best a no-op write.
       const setCols = cols.filter((c) => !targetCols.includes(c));
