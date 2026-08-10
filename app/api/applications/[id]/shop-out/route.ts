@@ -414,21 +414,10 @@ export async function POST(
   // ONLY here, into a SEPARATE derived copy. The returned attachments point at the
   // watermarked copies (the clean originals are untouched, so lead storage +
   // FundMate stay watermark-free); the lender threads carry those copies so the
-  // Python sender ships the branded bytes. Fail-closed: if any statement can't be
-  // branded we refuse the whole send rather than ship it unmarked.
+  // Python sender ships branded bytes whenever available. If branding fails,
+  // retain the verified clean original and surface an audit warning; funding
+  // submissions must not be coupled to watermark service availability.
   const wmGuard = await watermarkAttachmentsForShopOut(tenantId, attachments);
-  if (!wmGuard.ok) {
-    return NextResponse.json(
-      {
-        ok: false,
-        error: "bank_statement_watermark_failed",
-        message:
-          "Bank statements must carry the SunBiz watermark before shop-out, and branding failed for one or more. Retry, or re-upload the statement.",
-        watermark_failures: wmGuard.failures,
-      },
-      { status: 422 },
-    );
-  }
   const lenderAttachments = wmGuard.attachments;
 
   // ---------------------------------------------------------------------------
@@ -564,6 +553,8 @@ export async function POST(
     // silently dropping foreign-tenant paths before, which gave
     // operators a false-positive "package complete" signal.
     rejected_attachments: rejectedAttachments,
+    watermark_degraded: wmGuard.failures.length > 0,
+    watermark_failures: wmGuard.failures,
     // Real result from the bridge tool (or error message if the
     // auto-trigger failed). UI uses this to decide whether to render
     // "5 lenders contacted" vs. "queued, retry the send" vs. partial.

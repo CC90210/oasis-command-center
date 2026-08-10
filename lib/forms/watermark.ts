@@ -37,7 +37,11 @@ const WORDMARK = "SUNBIZ FUNDING";
 const PDF_RENDER_SCALE = 2.0; // ~144 DPI from the 72 DPI PDF user space — legible, bounded
 const MAX_PDF_DIM = 3500; // px on the long side after scaling
 const MAX_PDF_PIXELS = 24_000_000; // ~24 MP per-page / per-image ceiling
-const MAX_PAGES = 50; // statements above this FAIL (never truncate) — see watermarkPdf
+// Resource ceiling, not a business rule. Consolidated bank exports routinely
+// exceed 50 pages; the production incident that exposed this was 53 pages.
+// Shop-out separately falls back to the clean original if this generous safety
+// bound or any renderer limit is reached.
+const MAX_PAGES = 250;
 const PAGE_JPEG_QUALITY = 80; // raster page encode — bounds output PDF size
 const IMAGE_JPEG_QUALITY = 85;
 

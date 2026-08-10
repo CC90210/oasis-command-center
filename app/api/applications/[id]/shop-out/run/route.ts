@@ -203,13 +203,15 @@ export async function POST(
   const initiatedBy = initiatedByAgent?.name || sess.email || sess.userId;
 
   let runAttachments = Array.isArray(body.attachments) ? body.attachments : [];
+  let watermarkFailures: Array<{ filename: string; storage_path: string; reason: string }> = [];
 
   // Watermark guard (CC 2026-06-28). NOTE: today this direct-Gmail path does NOT
   // attach statements (executeShopOutRun → sendGmail sends to/cc/subject/body
   // only; the bytes that reach lenders go via the Python send_gateway behind the
   // exec-tool chokepoint, which IS guarded). We still brand the operator's
   // selected statement objects here so storage is consistent AND so this path is
-  // already fail-closed if attachments ever get plumbed into the Gmail send.
+  // already carries the branded-or-clean-fallback attachment list if attachments
+  // ever get plumbed into the Gmail send.
   // Skipped on dry_run (read-only preview).
   //
   // 2026-08-03: the guard's REWRITTEN attachments are now what flows onward.
@@ -220,13 +222,7 @@ export async function POST(
   // passed. A guard whose output is thrown away is not a guard.
   if (body.dry_run !== true && runAttachments.length > 0) {
     const wmGuard = await watermarkAttachmentsForShopOut(sess.tenantId, runAttachments);
-    if (!wmGuard.ok) {
-      return jsonError(422, "bank_statement_watermark_failed", {
-        message:
-          "Bank statements must carry the SunBiz watermark before shop-out, and branding failed for one or more. Retry, or re-upload the statement.",
-        watermark_failures: wmGuard.failures,
-      });
-    }
+    watermarkFailures = wmGuard.failures;
     runAttachments = wmGuard.attachments;
   }
 
@@ -294,5 +290,9 @@ export async function POST(
     }
   }
 
-  return NextResponse.json(result);
+  return NextResponse.json({
+    ...result,
+    watermark_degraded: watermarkFailures.length > 0,
+    watermark_failures: watermarkFailures,
+  });
 }
