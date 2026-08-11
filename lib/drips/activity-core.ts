@@ -115,3 +115,25 @@ export function isHeldForPolicy(lastError: unknown): boolean {
     String(lastError ?? ""),
   );
 }
+
+/**
+ * The activity window, expressed on OUTCOME time rather than schedule time.
+ *
+ * `scheduled_for` is when a step became DUE; it says nothing about when the
+ * merchant heard from us. A step queued four days ago and retried until it sent
+ * this morning IS this morning's activity, and a 24h window keyed on
+ * `scheduled_for` drops it, so a burst of sends after a backlog cleared would be
+ * invisible on the very tab built to show sends.
+ *
+ * But `sent_at` alone is worse. The executor stamps it only on the success path
+ * (executor.ts, markSent), so a `sent_at`-only filter reports ZERO failures no
+ * matter how many there were, and failures are what this tab exists to catch.
+ *
+ * So the filter is an OR: terminal sends measured by when they SENT, everything
+ * still open (pending, retrying, failed) measured by when it was DUE. Returned
+ * as a PostgREST `or=` string. It lives here, out of the server-only query
+ * module, so the rule itself is directly testable.
+ */
+export function outcomeWindow(sinceIso: string): string {
+  return `sent_at.gte.${sinceIso},and(sent_at.is.null,scheduled_for.gte.${sinceIso})`;
+}

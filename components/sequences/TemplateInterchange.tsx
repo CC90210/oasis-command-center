@@ -67,15 +67,23 @@ export function TemplateInterchange({
     try {
       // Replace only THIS step; every other step is sent back unchanged so the
       // PATCH cannot silently drop a sibling.
-      const next = steps.map((s, i) =>
-        i === stepIndex
-          ? {
-              ...s,
-              ...(s.channel === "email" && candidate.subject ? { subject: candidate.subject } : {}),
-              body: candidate.bodyText,
-            }
-          : s,
-      );
+      const next = steps.map((s, i) => {
+        if (i !== stepIndex) return s;
+        // Strip body_html rather than carrying it over. It belongs to the
+        // PREVIOUS template, and leaving it would send HTML-capable recipients
+        // the old copy while the plain-text fallback carried the new one.
+        const { body_html: _dropped, ...rest } = s as typeof s & { body_html?: string };
+        return {
+          ...rest,
+          ...(s.channel === "email" && candidate.subject ? { subject: candidate.subject } : {}),
+          body: candidate.bodyText,
+          // The PIN is what actually changes what merchants receive. Copying the
+          // text alone is a no-op whenever an approved pool exists, because
+          // resolveCopy samples the pool before it ever reads the step body —
+          // the swap would report success and change nothing.
+          template_id: candidate.id,
+        };
+      });
       const res = await fetch(`/api/sequences/${sequenceId}`, {
         method: "PATCH",
         headers: { "content-type": "application/json" },

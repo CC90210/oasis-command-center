@@ -11,6 +11,7 @@ import {
   classifyRunStatus,
   summarizeFailures,
   isHeldForPolicy,
+  outcomeWindow,
   type ActivityStatus,
   type FailureSummary,
 } from "./activity-core";
@@ -67,7 +68,11 @@ export async function recentDripActivity(
       "id, lead_id, sequence_name, step_index, channel, status, from_identity, last_error, sent_at, scheduled_for",
     )
     .eq("tenant_id", tenantId)
-    .gte("scheduled_for", since)
+    .or(outcomeWindow(since))
+    // Anything still open sorts first (null sent_at), because a failure or a
+    // stuck retry is what an operator opened this tab for; completed sends
+    // follow, newest first.
+    .order("sent_at", { ascending: false, nullsFirst: true })
     .order("scheduled_for", { ascending: false })
     .limit(limit);
   if (filters.channel) q = q.eq("channel", filters.channel);
@@ -133,7 +138,7 @@ export async function dripFailureSummary(
     .from("drip_runs")
     .select("status, from_identity, last_error")
     .eq("tenant_id", tenantId)
-    .gte("scheduled_for", new Date(sinceMs).toISOString())
+    .or(outcomeWindow(new Date(sinceMs).toISOString()))
     .limit(5000);
   if (res.error) throw new Error(`drip summary read failed: ${res.error.message}`);
   const rows = res.data || [];

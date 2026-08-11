@@ -12,7 +12,7 @@
  */
 
 import assert from "node:assert/strict";
-import { classifyRunStatus, summarizeFailures, isHeldForPolicy } from "../lib/drips/activity-core";
+import { classifyRunStatus, summarizeFailures, isHeldForPolicy, outcomeWindow } from "../lib/drips/activity-core";
 
 // ── from_identity is the discriminator, not status ────────────────────────
 assert.equal(classifyRunStatus({ status: "sent", from_identity: "alex:+13055550147" }), "sent");
@@ -81,5 +81,26 @@ assert.equal(isHeldForPolicy("sms_provider_not_wired: twilio has no sender"), tr
 assert.equal(isHeldForPolicy("delivery_failed: 535 auth"), false);
 assert.equal(isHeldForPolicy(null), false);
 assert.equal(isHeldForPolicy(""), false);
+
+// -- The window is measured on OUTCOME time -------------------------------
+// Codex review 2026-08-11: the summary filtered on scheduled_for, so a step
+// queued four days ago and retried until it sent this morning fell outside a
+// 24h window -- sends invisible on the tab built to show sends.
+//
+// The naive fix is worse. markSent is the ONLY writer of sent_at, so filtering
+// on sent_at alone reports zero failures however many there were. Both halves
+// have to be present or the number is a lie in one direction or the other.
+{
+  const w = outcomeWindow("2026-08-10T00:00:00.000Z");
+  assert.ok(w.includes("sent_at.gte.2026-08-10T00:00:00.000Z"), "sends must be counted by when they SENT");
+  assert.ok(
+    w.includes("and(sent_at.is.null,scheduled_for.gte.2026-08-10T00:00:00.000Z)"),
+    "rows with no sent_at -- every failure, and everything still pending -- must still fall in the window",
+  );
+  // No stray whitespace: PostgREST parses this string positionally and a space
+  // inside the or= list is a 400, which the page would surface as a read error.
+  assert.equal(w.trim(), w);
+  assert.ok(!/\s/.test(w), "a space anywhere in the or= filter makes PostgREST reject the query");
+}
 
 console.log("drip-activity.test.ts — all assertions passed");

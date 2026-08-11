@@ -11,6 +11,7 @@
  */
 
 import assert from "node:assert/strict";
+import { parseDripSteps } from "../lib/drips/types";
 import {
   selectableTemplates,
   validateInterchange,
@@ -109,5 +110,26 @@ assert.deepEqual(
 // A first assignment has no prior template, and null must survive as null
 // rather than becoming an empty string that reads like a real id.
 assert.equal(buildInterchangeAudit({ from: null, to: "x", actor: "u" }).from, null);
+
+// ── The pin must survive validation ──────────────────────────────────────
+// The interchange saves through PATCH /api/sequences/[id], which re-parses every
+// step with parseDripSteps. If the parser dropped template_id the swap would be
+// stripped on the very save that applied it — silently, and only in production,
+// because the UI would still have reported success.
+{
+  const [parsed] = parseDripSteps([
+    { channel: "email", delay_minutes: 0, subject: "s", body: "b", template_id: "tpl-42" },
+  ]);
+  assert.equal(parsed.template_id, "tpl-42", "the pin must round-trip through step validation");
+
+  // Absent stays absent — an unpinned step must not gain an empty pin that
+  // resolveCopy would then try to look up.
+  const [plain] = parseDripSteps([{ channel: "email", delay_minutes: 0, subject: "s", body: "b" }]);
+  assert.equal(plain.template_id, undefined);
+  const [blank] = parseDripSteps([
+    { channel: "email", delay_minutes: 0, subject: "s", body: "b", template_id: "" },
+  ]);
+  assert.equal(blank.template_id, undefined, "an empty string is not a pin");
+}
 
 console.log("template-interchange.test.ts — all assertions passed");
