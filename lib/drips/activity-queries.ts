@@ -109,21 +109,28 @@ export async function recentDripActivity(
   if (doneRes.error) throw new Error(`drip activity read failed: ${doneRes.error.message}`);
   const runs = [...(openRes.data || []), ...(doneRes.data || [])];
 
-  // Lead names and brands in ONE batched read rather than per row.
-  const leadIds = [...new Set(runs.map((r) => String(r.lead_id)).filter(Boolean))].slice(0, 500);
+  // Lead names and brands, batched — NOT truncated.
+  //
+  // This used to `.slice(0, 500)`, which was survivable while one query
+  // returned at most `limit` rows and became wrong the moment there were two:
+  // `runs` can now hold up to 2x. A truncated map does not lose rows, it
+  // MISLABELS them — every lead past the cutoff falls through to the "sunbiz"
+  // default, so Bluerise sends would be reported as SunBiz on the one surface
+  // built to say what actually went out. Silent, plausible, and wrong in the
+  // direction that matters.
+  const leadIds = [...new Set(runs.map((r) => String(r.lead_id)).filter(Boolean))];
   const names = new Map<string, string>();
   const brands = new Map<string, string>();
-  if (leadIds.length > 0) {
+  const CHUNK = 500;
+  for (let i = 0; i < leadIds.length; i += CHUNK) {
     const leads = await db
       .from("tenant_records")
       .select("id, data")
       .eq("tenant_id", tenantId)
-      .in("id", leadIds);
-    // Throwing here, not degrading. If this read fails the brand map stays
-    // empty and EVERY row falls back to "sunbiz" — so a screenful of Bluerise
-    // sends would be labelled SunBiz on the one surface built to report what
-    // actually went out. A wrong brand is worse than no screen: it is the same
-    // wrong answer the drip engine would give, echoed back as confirmation.
+      .in("id", leadIds.slice(i, i + CHUNK));
+    // Throwing, not degrading. If this read fails the brand map stays empty and
+    // EVERY row falls back to "sunbiz" — the same wrong answer, echoed back as
+    // confirmation. A wrong brand is worse than no screen.
     if (leads.error) throw new Error(`drip activity lead read failed: ${leads.error.message}`);
     for (const l of leads.data || []) {
       const d = (l.data || {}) as Record<string, unknown>;
