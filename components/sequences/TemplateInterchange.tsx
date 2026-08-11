@@ -97,7 +97,11 @@ export function TemplateInterchange({
       const res = await fetch(`/api/sequences/${sequenceId}`, {
         method: "PATCH",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ steps: next, interchange: { step_index: stepIndex, to_template_id: candidate.id } }),
+        // Just the steps. The server derives the swap from the pins it is about
+        // to persist and validates and audits from those, so a separate
+        // "here is what I'm doing" field would be a second story it has no
+        // reason to believe.
+        body: JSON.stringify({ steps: next }),
       });
       const json = (await res.json().catch(() => null)) as { ok?: boolean; error?: string; reason?: string } | null;
       if (!res.ok || json?.ok === false) {

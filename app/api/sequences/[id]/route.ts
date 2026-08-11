@@ -122,6 +122,10 @@ export async function PATCH(
   }
   const prior = priorRes.data as { steps: unknown; name: string; trigger_filter?: unknown };
 
+  // Every template pin this request changes, hoisted so the audit below records
+  // what was actually written rather than what the client said it was doing.
+  let pinChanges: Array<{ index: number; from: string | null; to: string }> = [];
+
   if ("steps" in body) {
     let steps;
     try {
@@ -155,35 +159,45 @@ export async function PATCH(
     }
     patch.steps = guarded.steps;
 
-    // A template interchange is validated HERE, against the pool as it is right
-    // now, before anything is written.
+    // Template pins are validated HERE, against the pool as it is right now,
+    // before anything is written.
     //
-    // The client filters the dropdown by (brand, stage, role), but the client
-    // is not the gate: a request can arrive directly, or from a tab opened
-    // before someone retired a template or changed the step's role. The
-    // executor scopes the pool with poolFor(brand, stage, role) before it
-    // resolves the pin, so a pin outside that scope is not an error at send
-    // time — it is silence. The save would return ok, the tab would show the
-    // chosen copy, and sampling would keep sending something else.
+    // WHAT IS CHECKED IS WHAT PERSISTS. Not the `interchange` field the client
+    // sends — that is advisory, it names the actor for the audit, and a request
+    // that omits it or disagrees with its own steps would sail straight past a
+    // gate that trusted it. The check runs over `steps[i].template_id`, the
+    // thing the executor will actually read.
     //
-    // Refusing the write is the only outcome that cannot lie. Fail closed: if
-    // the pool cannot be read, the swap does not go through.
-    const interchangeReq = (body as { interchange?: { step_index?: unknown; to_template_id?: unknown } }).interchange;
-    if (interchangeReq && interchangeReq.to_template_id) {
-      const stepIndex = Number(interchangeReq.step_index);
-      const step = Number.isInteger(stepIndex) ? guarded.steps[stepIndex] : undefined;
-      if (!step) {
-        return NextResponse.json(
-          { ok: false, error: "invalid_interchange", reason: `no step at index ${interchangeReq.step_index}` },
-          { status: 400 },
-        );
-      }
+    // WHY IT MATTERS. The executor scopes the pool with
+    // poolFor(brand, stage, role) before resolveCopy sees the pin, so a pin
+    // outside that scope is not an error at send time — it is silence. The save
+    // returns ok, the tab shows the chosen copy, and sampling keeps deciding
+    // what merchants actually get. Refusing the write is the only outcome that
+    // cannot lie.
+    //
+    // ONLY CHANGED PINS. A pin that was already there and has since gone
+    // unreachable (its template retired) must not block an unrelated edit to
+    // another step; the Drips tab flags that case on the step instead.
+    const changedPins = guarded.steps
+      .map((s, i) => ({ step: s, index: i }))
+      .filter(({ step, index }) => step.template_id && step.template_id !== priorSteps?.[index]?.template_id);
+
+    pinChanges = changedPins.map(({ step, index }) => ({
+      index,
+      from: priorSteps?.[index]?.template_id ?? null,
+      to: String(step.template_id),
+    }));
+
+    if (changedPins.length > 0) {
       // The filter being saved wins over the persisted one, so a swap made in
       // the same edit as a stage change is judged against the stage it will
       // actually run under.
       const filter = "trigger_filter" in patch ? patch.trigger_filter : prior.trigger_filter;
       let pool;
       try {
+        // Fail closed, and say WHICH failure it was: an empty pool from a
+        // broken read would otherwise be reported as "template not found",
+        // sending an operator to fix a template that was never the problem.
         pool = await loadApprovedPoolOrThrow(db, tenantId);
       } catch (err) {
         return NextResponse.json(
@@ -197,20 +211,25 @@ export async function PATCH(
           { status: 503 },
         );
       }
-      const verdict = validateInterchange(pool, {
-        sequenceId: id,
-        stepIndex,
-        fromTemplateId: null,
-        toTemplateId: String(interchangeReq.to_template_id),
-        actorUserId: session.authUserId ?? "",
-        brand: brandFromTriggerFilter(filter),
-        stage: stageFromTriggerFilter(filter),
-        role: step.role,
-      });
-      if (!verdict.ok) {
-        // The validator's own words. "Rejected" alone is not something an
-        // operator can act on.
-        return NextResponse.json({ ok: false, error: "invalid_interchange", reason: verdict.reason }, { status: 400 });
+      for (const { step, index } of changedPins) {
+        const verdict = validateInterchange(pool, {
+          sequenceId: id,
+          stepIndex: index,
+          fromTemplateId: priorSteps?.[index]?.template_id ?? null,
+          toTemplateId: String(step.template_id),
+          actorUserId: session.authUserId ?? "",
+          brand: brandFromTriggerFilter(filter),
+          stage: stageFromTriggerFilter(filter),
+          role: step.role,
+        });
+        if (!verdict.ok) {
+          // The validator's own words, and which step. "Rejected" alone is not
+          // something an operator can act on.
+          return NextResponse.json(
+            { ok: false, error: "invalid_interchange", step: index + 1, reason: verdict.reason },
+            { status: 400 },
+          );
+        }
       }
     }
   }
@@ -259,38 +278,40 @@ export async function PATCH(
   // "steps changed" version. The version snapshot says WHAT the copy was; this
   // says WHO swapped which template into which step, which is the question
   // asked after a merchant complains about wording.
-  const interchange = (body as { interchange?: { step_index?: unknown; to_template_id?: unknown } }).interchange;
-  if (interchange && "steps" in patch) {
-    const stepIndex = Number(interchange.step_index);
-    const toTemplateId = String(interchange.to_template_id ?? "");
-    if (Number.isInteger(stepIndex) && stepIndex >= 0 && toTemplateId) {
-      // Best-effort, exactly like the version write above: the save already
-      // happened and failing the request now would misreport it as rejected.
-      await db
-        .from("agent_events")
-        .insert({
-          tenant_id: tenantId,
-          source: "sequences",
-          level: "info",
-          event: "template_interchange",
-          detail: JSON.stringify({
-            action: "template_interchange",
+  // Driven by pinChanges — the pins that were actually persisted — not by the
+  // client's `interchange` field. An audit built from request metadata records
+  // what the caller SAID it did, which is the one thing not worth keeping: a
+  // direct API swap would leave no trace at all, and that is exactly the swap
+  // worth being able to reconstruct.
+  for (const change of pinChanges) {
+    // Best-effort, exactly like the version write above: the save already
+    // happened and failing the request now would misreport it as rejected.
+    await db
+      .from("agent_events")
+      .insert({
+        tenant_id: tenantId,
+        source: "sequences",
+        level: "info",
+        event: "template_interchange",
+        detail: JSON.stringify({
+          action: "template_interchange",
+          sequence_id: id,
+          step_index: change.index,
+          from: change.from,
+          to: change.to,
+          actor: session.authUserId ?? null,
+        }),
+      })
+      .then(
+        () => undefined,
+        (err: unknown) => {
+          console.error("[sequences.interchange_audit.failed]", {
             sequence_id: id,
-            step_index: stepIndex,
-            to: toTemplateId,
-            actor: session.authUserId ?? null,
-          }),
-        })
-        .then(
-          () => undefined,
-          (err: unknown) => {
-            console.error("[sequences.interchange_audit.failed]", {
-              sequence_id: id,
-              error: err instanceof Error ? err.message : String(err),
-            });
-          },
-        );
-    }
+            step_index: change.index,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        },
+      );
   }
 
   return NextResponse.json({ ok: true, sequence: data, ...(historySaved === undefined ? {} : { historySaved }) });
