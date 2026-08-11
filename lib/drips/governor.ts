@@ -44,6 +44,7 @@ import "server-only";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import type { EmailBudget } from "./drip-rules-core";
 import { ALL_BRAND_KEYS, resolveBrandKey, type BrandKey } from "@/lib/email/brands";
+import { sequenceSentToday, sequenceDailyCaps } from "./sequence-volume";
 
 type Db = ReturnType<typeof getServiceSupabase>;
 
@@ -144,11 +145,23 @@ async function countDripEmailByBrand(
 /** Compute the email budget ONCE per dispatch run (2 aggregate queries + one
  *  batched per-lead query), so per-row gating is O(1). `emailLeadIds` are the
  *  leads whose claimed step this run is an email step. */
-export async function loadEmailBudget(db: Db, emailLeadIds: string[]): Promise<EmailBudget> {
+export async function loadEmailBudget(
+  db: Db,
+  emailLeadIds: string[],
+  /** Tenants for the per-SEQUENCE caps. A dispatch batch can span tenants, so
+   *  this is a LIST — passing only claimed[0].tenant_id is the exact mistake
+   *  this file's brand map and template pool each had to be fixed for. Empty
+   *  means no per-sequence gating this run, which is the pre-2026-08-11
+   *  behaviour. */
+  tenantIds: string[] = [],
+): Promise<EmailBudget> {
   const cap = perLeadWeeklyEmailCap();
   const perLeadSent7d = new Map<string, number>();
   let degraded = false;
   let perLeadDegraded = false;
+  const perSequenceSentToday = new Map<string, number>();
+  const perSequenceCap = new Map<string, number>();
+  const perSequenceDegraded = new Set<string>();
 
   const [today, thisHour] = await Promise.all([
     countDripEmailByBrand(db, ISO(DAY)),
@@ -192,7 +205,44 @@ export async function loadEmailBudget(db: Db, emailLeadIds: string[]): Promise<E
     }
   }
 
-  return { dailyRemaining, hourlyRemaining, perLeadSent7d, perLeadCap: cap, degraded, perLeadDegraded };
+  // Per-SEQUENCE caps and today's counts. Loaded only when a tenant is known.
+  //
+  // BOTH READS OR NEITHER. Counts without caps gate nothing; caps without
+  // counts would read every sequence as having sent zero today and let an
+  // already-exhausted one carry on. Either half missing means degraded, and
+  // emailGateReason then holds only the sequences that actually HAVE a cap set
+  // — failing closed where a human asked for a limit, without stalling the
+  // engine for everyone else.
+  for (const tenantId of new Set(tenantIds.filter(Boolean))) {
+    try {
+      const [sent, caps] = await Promise.all([sequenceSentToday(tenantId), sequenceDailyCaps(tenantId)]);
+      if (sent === null || caps === null) perSequenceDegraded.add(tenantId);
+      // Keys are namespaced by tenant (sequenceBudgetKeys). A sequence id is a
+      // uuid and would survive a shared map, but a NAME is not unique across
+      // tenants, and two tenants with a "Cold Outreach" would otherwise share
+      // one counter — one silently eating the other's daily allowance.
+      //
+      // Whichever half succeeded is kept: the caps map is what decides whether
+      // a sequence is gated at all, so a degraded run still knows WHICH
+      // sequences to hold.
+      for (const [k, v] of caps || []) perSequenceCap.set(`${tenantId}|${k}`, v);
+      for (const [k, v] of sent || []) perSequenceSentToday.set(`${tenantId}|${k}`, v);
+    } catch {
+      perSequenceDegraded.add(tenantId);
+    }
+  }
+
+  return {
+    dailyRemaining,
+    hourlyRemaining,
+    perLeadSent7d,
+    perLeadCap: cap,
+    perSequenceSentToday,
+    perSequenceCap,
+    perSequenceDegraded,
+    degraded,
+    perLeadDegraded,
+  };
 }
 
 // The pure rules (pause, cap gating, hold windows, the stage-entry edge) live in
