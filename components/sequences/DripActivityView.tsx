@@ -118,6 +118,7 @@ export function DripActivityView({
   rows,
   summary,
   readError = null,
+  summaryError = null,
 }: {
   rows: ActivityRow[];
   summary: ActivitySummary;
@@ -125,6 +126,9 @@ export function DripActivityView({
    *  never render alike: one says nothing was sent, the other says we do not
    *  know what was sent. */
   readError?: string | null;
+  /** Independent of readError. The tiles and the table come from two different
+   *  queries; marking both unknown because one failed hides data that is fine. */
+  summaryError?: string | null;
 }) {
   const [channel, setChannel] = useState<"all" | "email" | "sms">("all");
   const [status, setStatus] = useState<"all" | ActivityStatus>("all");
@@ -153,11 +157,17 @@ export function DripActivityView({
           nothing was sent when the truth is that we could not find out. Zero
           failures is also the most reassuring number here, which makes a
           silently-zeroed summary the worst possible way to fail. */}
-      {readError && (
+      {(readError || summaryError) && (
         <div className="flex items-start gap-2 rounded-lg border border-rose-500/40 bg-rose-500/10 p-3 text-xs text-rose-400">
           <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
           <span>
-            {readError}. The numbers and the table below are UNKNOWN, not zero — do not read this as a quiet window.
+            {[readError, summaryError].filter(Boolean).join("; ")}.{" "}
+            {readError && summaryError
+              ? "The numbers and the table below are UNKNOWN, not zero"
+              : readError
+                ? "The table below is UNKNOWN, not empty. The numbers above are still good"
+                : "The numbers above are UNKNOWN, not zero. The table below is still good"}
+            . Do not read this as a quiet window.
           </span>
         </div>
       )}
@@ -174,7 +184,7 @@ export function DripActivityView({
 
       {/* Basic numbers only. Opens, clicks and per-variant performance live in
           /metrics; a second copy here would just disagree with the first. */}
-      <div className={`grid grid-cols-2 gap-3 md:grid-cols-5 ${readError ? "opacity-40" : ""}`}>
+      <div className={`grid grid-cols-2 gap-3 md:grid-cols-5 ${summaryError ? "opacity-40" : ""}`}>
         <Tile label="Sent (24h)" value={String(summary.realSends)} hint="reached a provider" tone="good" />
         <Tile label="Failed (24h)" value={String(summary.failed)} tone={summary.failed > 0 ? "bad" : "neutral"} />
         <Tile

@@ -17,6 +17,7 @@
 
 import { useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
+import { useInterchangeLock } from "./interchange-lock";
 import { ArrowLeftRight, Check, Loader2, AlertTriangle } from "lucide-react";
 import { selectableTemplates, effectiveRole } from "@/lib/drips/template-interchange";
 import type { PoolTemplate } from "@/lib/drips/template-pool";
@@ -46,6 +47,7 @@ export function TemplateInterchange({
   const [error, setError] = useState<string | null>(null);
   const [done, setDone] = useState(false);
   const router = useRouter();
+  const { locked, markSaved } = useInterchangeLock();
 
   // Scope by the step's ROLE as well as brand and stage. The executor narrows
   // the pool with poolFor(brand, stage, role) before it resolves the pin, so a
@@ -114,6 +116,10 @@ export function TemplateInterchange({
       }
       setDone(true);
       setOpen(false);
+      // Lock EVERY interchange on the page, not just this one. The component
+      // that would be reverted is a sibling holding the same stale array, so a
+      // guard local to this one cannot stop it.
+      markSaved();
       // Re-render the server component so `steps` is the PERSISTED array again.
       //
       // Without this, a second swap in the same session silently reverts the
@@ -212,15 +218,20 @@ export function TemplateInterchange({
           <div className="flex items-center gap-2">
             <button
               type="button"
-              disabled={!candidate || busy}
+              disabled={!candidate || busy || locked}
               onClick={apply}
               className="inline-flex items-center gap-1.5 rounded-md bg-accent px-3 py-1.5 text-[11px] font-bold text-bg-deep disabled:opacity-40"
             >
-              {busy ? <Loader2 className="h-3 w-3 animate-spin" /> : <Check className="h-3 w-3" />}
+              {busy || locked ? <Loader2 className="h-3 w-3 animate-spin" /> : <Check className="h-3 w-3" />}
               Apply to step {stepIndex + 1}
             </button>
+            {/* Say WHY it is disabled. A greyed button with no reason reads as
+                broken, and the operator's next move is to reload and lose the
+                context of what they were doing. */}
             <span className="text-[10px] text-fg-dim">
-              This changes what merchants receive. The edit is versioned and attributed.
+              {locked
+                ? "Loading the saved copy back in. One swap at a time, or the next save would overwrite the last."
+                : "This changes what merchants receive. The edit is versioned and attributed."}
             </span>
           </div>
         </div>

@@ -196,7 +196,11 @@ export default async function SequencesPage() {
           rows={result.rows}
           activity={activityRes.rows}
           activitySummary={summaryRes}
-          activityError={activityRes.error || summaryRes.error}
+          // Two reads, two verdicts. Merging them would mark the table unknown
+          // because the summary query failed, hiding rows that are perfectly
+          // good -- and the reverse.
+          activityError={activityRes.error}
+          summaryError={summaryRes.error}
           pool={pool}
         />
       )}
