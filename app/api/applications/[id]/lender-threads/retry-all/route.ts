@@ -26,6 +26,7 @@ import {
   dispatchFailureReason,
   recordDispatchFailure,
 } from "@/lib/lenders/shop-out-outcome";
+import { dispatchPendingSunbizThreads } from "@/lib/lenders/shop-out-dispatch";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -194,8 +195,9 @@ export async function POST(
     });
   }
 
-  // Fire the batch once. shop_out_send_batch loops every pending thread on the
-  // application, so a single trigger covers all the rows we just recovered.
+  // Send in-process, the same path the initial shop-out now uses. Retry must
+  // never take a different route to the lender than Send did: when they differ,
+  // "Retry worked" stops being evidence that Send is fixed.
   const signer = resolveSignerForOperator(sess.email);
   let physicalSend: {
     status: "sent" | "partial" | "error" | "skipped";
@@ -205,44 +207,15 @@ export async function POST(
   } = { status: "skipped" };
 
   try {
-    const execUrl = new URL("/api/bridge/exec-tool", req.url);
-    const cookie = req.headers.get("cookie") || "";
-    const sendRes = await fetch(execUrl, {
-      method: "POST",
-      headers: { "content-type": "application/json", cookie },
-      body: JSON.stringify({
-        tool_name: "shop_out_send_batch",
-        application_id: applicationId,
-        signer_name: signer.name,
-        signer_email: signer.email,
-        signer_phone: signer.phone,
-      }),
-      signal: AbortSignal.timeout(110_000),
+    physicalSend = await dispatchPendingSunbizThreads({
+      tenantId,
+      applicationId,
+      signerName: signer.name,
     });
-    const sendData = await sendRes.json();
-    if (!sendRes.ok || sendData?.is_error) {
-      physicalSend = {
-        status: "error",
-        message: String(sendData?.error || sendData?.output || `exec-tool HTTP ${sendRes.status}`).slice(0, 240),
-      };
-    } else {
-      try {
-        const parsed = JSON.parse(sendData?.output || "{}");
-        const sent = typeof parsed.sent === "number" ? parsed.sent : 0;
-        const failed = typeof parsed.failed === "number" ? parsed.failed : 0;
-        physicalSend = {
-          status: sent > 0 && failed === 0 ? "sent" : sent > 0 ? "partial" : "error",
-          sent_count: sent,
-          failed_count: failed,
-        };
-      } catch {
-        physicalSend = { status: "error", message: "bridge tool returned non-JSON output" };
-      }
-    }
   } catch (e) {
     physicalSend = {
       status: "error",
-      message: e instanceof Error ? e.message : "retry-all auto-trigger threw",
+      message: e instanceof Error ? e.message : "retry-all dispatch threw",
     };
   }
 
