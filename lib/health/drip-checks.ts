@@ -262,7 +262,13 @@ export const DRIP_CHECKS: DripCheck[] = [
     // exists is identity-agnostic, needs no branch on email_identity, and stays
     // correct if a third sender arrives — provided it records something.
     //
-    // Bounded to a trailing week so one bad historical row cannot pin it red.
+    // Bounded to a trailing week so one bad historical row cannot pin it red —
+    // measured on sent_at, the moment the claim was made, NOT created_at. A
+    // thread queued three weeks ago and retried into 'sent' today is exactly
+    // the unsupported claim this check exists to find, and a created_at window
+    // would exclude it permanently. Same mistake as the one fixed in
+    // threads_stuck_pending two entries up: a row's age is not the age of the
+    // state it is in. (Codex review, 2026-08-11.)
     id: "shopout.sent_without_proof",
     severity: "critical",
     rule: { kind: "must_be_zero" },
@@ -272,7 +278,7 @@ export const DRIP_CHECKS: DripCheck[] = [
           .eq("tenant_id", tenantId).eq("status", "sent")
           .is("send_interaction_id", null)
           .is("gmail_thread_id", null)
-          .gte("created_at", iso(endMs - 7 * DAY)).lt("created_at", iso(endMs)),
+          .gte("sent_at", iso(endMs - 7 * DAY)).lt("sent_at", iso(endMs)),
       ),
     describe: (r) =>
       `${r.observed} lender thread(s) marked sent with no receipt of any kind — neither a ` +
