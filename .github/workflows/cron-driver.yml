@@ -22,16 +22,55 @@
 
 name: cron-driver
 
+# One workflow schedule per DISTINCT cron expression in vercel.json, and the
+# routes are selected by which schedule fired (github.event.schedule) rather
+# than by reading the wall clock.
+#
+# The wall-clock version of this was wrong. GitHub's scheduler is best-effort
+# and routinely starts a run late; a 13:00 tick that lands at 13:06 failed a
+# `minute < 5` window, so sweep-stale-sent-app simply did not run that day. The
+# job silently skipped fixed-time work and reported success, which is the same
+# class of quiet nothing this whole file exists to fix. (Codex review,
+# 2026-08-11.)
+#
+# Keyed on the schedule, lateness is harmless: whenever the run lands, it knows
+# which tick it is. tests/cron-driver-coverage.test.ts asserts every expression
+# in vercel.json appears here, so the two lists cannot drift.
 on:
   schedule:
-    - cron: "*/5 * * * *"
+    - cron: "*/5 * * * *"    # dispatch-drips, dispatch-scheduled-sends, dispatch-scheduled-calls
+    - cron: "*/10 * * * *"   # operator-email-agent, tps-enroll
+    - cron: "*/15 * * * *"   # enroll-drips, enroll-accelerated, reconcile-sms, health-check
+    - cron: "*/30 * * * *"   # scan-bounces, scan-funmate-replies, sync-tt-inbox
+    - cron: "0 * * * *"      # collect-outreach-intel
+    - cron: "15 * * * *"     # collect-cc-metrics
+    - cron: "17 * * * *"     # reconcile-drip-telemetry
+    - cron: "0 */6 * * *"    # tps-backlog-watch
+    - cron: "0 3 * * *"      # materialize-plans
+    - cron: "0 6,18 * * *"   # sync-sms-numbers
+    - cron: "0 13 * * *"     # sweep-stale-sent-app
+    - cron: "10 13 * * *"    # kixie-compliance-scan
+    - cron: "15 13 * * *"    # renewal-thresholds
+    - cron: "40 13 * * 1"    # kixie-compliance-scan?mode=weekly
   workflow_dispatch:
 
 concurrency:
-  # Never overlap ticks. The dispatcher leases the rows it claims so a double
-  # run is survivable, but overlapping ticks waste the shared TextTorrent rate
-  # budget and make the logs hard to read.
-  group: cron-driver
+  # Keyed PER SCHEDULE, not one group for the whole workflow.
+  #
+  # A single shared group looked right and would have silently dropped work:
+  # GitHub keeps at most one running and one pending run per group, and a newly
+  # queued run REPLACES the pending one. Several of these schedules fire at the
+  # same instant — at minute 0 of every hour, */5, */10, */15, */30 and the
+  # hourly entry all land together — so under one group the later arrivals
+  # would evict each other and those routes would never execute. No error, no
+  # log, just absence: the exact shape of the outage this file addresses.
+  # (Codex review, 2026-08-11.)
+  #
+  # Per-schedule groups still prevent a schedule from overlapping ITSELF, which
+  # is the property actually wanted: the dispatcher leases the rows it claims so
+  # a double run is survivable, but overlapping ticks waste the shared
+  # TextTorrent rate budget and make the logs hard to read.
+  group: cron-driver-${{ github.event.schedule || github.event_name }}
   cancel-in-progress: false
 
 jobs:
@@ -50,22 +89,84 @@ jobs:
             exit 1
           fi
 
-          # dispatch-drips is the one that actually moves merchant mail.
-          FAST="/api/cron/dispatch-drips"
-          # Enrolment feeds the dispatcher, reconcile-sms closes carrier
-          # receipts, health-check is the outcome watchdog.
-          SLOW="/api/cron/enroll-drips /api/cron/reconcile-sms /api/cron/health-check"
+          # 2026-08-11: this drove 4 of the 22 routes registered in vercel.json.
+          # The other 18 had been dead since Vercel's scheduler stopped on
+          # 2026-08-06 and nobody noticed, because a cron that never runs
+          # produces no error — it produces nothing at all. Among the missing
+          # were scan-bounces and scan-funmate-replies, the reply side of
+          # shopping out.
+          #
+          # Routes are keyed by the SCHEDULE THAT FIRED, mirroring vercel.json
+          # expression for expression, query strings included. Two earlier
+          # versions of this block got that wrong in ways CI could not see:
+          # bucketing by rough cadence dropped ?mode=weekly and moved
+          # materialize-plans by ten hours, and reading the wall clock meant a
+          # late GitHub run missed fixed-time jobs entirely.
+          #
+          # tests/cron-driver-coverage.test.ts pins both lists together.
+          SCHEDULE="${{ github.event.schedule }}"
 
-          MIN=$(date -u +%M)
-          ROUTES="${FAST}"
-          if [ $((10#${MIN} % 15)) -lt 5 ]; then
-            ROUTES="${FAST} ${SLOW}"
-          fi
+          case "${SCHEDULE}" in
+            "*/5 * * * *")
+              ROUTES="/api/cron/dispatch-drips
+                      /api/cron/dispatch-scheduled-sends
+                      /api/cron/dispatch-scheduled-calls" ;;
+            "*/10 * * * *")
+              ROUTES="/api/cron/operator-email-agent?write=1
+                      /api/cron/tps-enroll?write=1" ;;
+            "*/15 * * * *")
+              # health-check is the outcome watchdog, and now covers shop-out.
+              ROUTES="/api/cron/enroll-drips
+                      /api/cron/enroll-accelerated
+                      /api/cron/reconcile-sms
+                      /api/cron/health-check" ;;
+            "*/30 * * * *")
+              # Inbound scanning. Without these an approval sits unread, which
+              # is what happened for six days in August.
+              ROUTES="/api/cron/scan-bounces?write=1
+                      /api/cron/scan-funmate-replies?write=1
+                      /api/cron/sync-tt-inbox" ;;
+            "0 * * * *")     ROUTES="/api/cron/collect-outreach-intel?write=1" ;;
+            "15 * * * *")    ROUTES="/api/cron/collect-cc-metrics?write=1" ;;
+            "17 * * * *")    ROUTES="/api/cron/reconcile-drip-telemetry" ;;
+            "0 */6 * * *")   ROUTES="/api/cron/tps-backlog-watch" ;;
+            "0 3 * * *")     ROUTES="/api/cron/materialize-plans" ;;
+            "0 6,18 * * *")  ROUTES="/api/cron/sync-sms-numbers" ;;
+            "0 13 * * *")    ROUTES="/api/cron/sweep-stale-sent-app" ;;
+            "10 13 * * *")   ROUTES="/api/cron/kixie-compliance-scan" ;;
+            "15 13 * * *")   ROUTES="/api/cron/renewal-thresholds" ;;
+            # A distinct registration, not a duplicate of the daily scan —
+            # dropping the query string skips the weekly code path entirely.
+            "40 13 * * 1")   ROUTES="/api/cron/kixie-compliance-scan?mode=weekly" ;;
+            "")
+              # Manual workflow_dispatch: drive the paths that move mail plus
+              # the watchdog. Deliberately not everything — a hand-run should
+              # not fire daily sweeps out of band.
+              echo "manual run: driving the fast paths + health-check"
+              ROUTES="/api/cron/dispatch-drips
+                      /api/cron/dispatch-scheduled-sends
+                      /api/cron/dispatch-scheduled-calls
+                      /api/cron/health-check" ;;
+            *)
+              # A schedule with no mapping means someone added a cron entry and
+              # not its routes. Silence here is how the last outage happened.
+              echo "::error::no routes mapped for schedule '${SCHEDULE}'"
+              exit 1 ;;
+          esac
 
+          # GET, not POST. Four of the routes this driver now covers
+          # (collect-cc-metrics, reconcile-drip-telemetry, tps-backlog-watch,
+          # tps-enroll) export GET only, so a POST returns 405 and does no work
+          # — a "driven" cron that never runs, which is the failure this file
+          # exists to end. Every cron route exports GET; only some export POST.
+          # GET is also what Vercel's own scheduler used. Method mismatch is
+          # gone as a class rather than patched per route.
+          # tests/cron-driver-coverage.test.ts asserts every driven route
+          # exports GET. (Codex review, 2026-08-11.)
           FAILED=0
           for path in ${ROUTES}; do
             code=$(curl -sS -o /tmp/out.json -w '%{http_code}' -m 120 \
-                     -X POST "${BASE}${path}" \
+                     "${BASE}${path}" \
                      -H "Authorization: Bearer ${SECRET}") || code="000"
             body=$(head -c 400 /tmp/out.json 2>/dev/null | tr -d '\n')
             echo "${path} -> ${code} ${body}"
