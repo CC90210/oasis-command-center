@@ -303,13 +303,27 @@ const APPLICATION_RECEIVED_SUBJECT_PREFIX = "application received";
  * let a re-submit re-send. channel='email' + the distinctive subject prefix is
  * enough.
  */
+/**
+ * Three outcomes, deliberately NOT a boolean.
+ *
+ * `skipped_already_sent` and `skipped_check_failed` both stop the send, but they
+ * are not the same event and must not look the same to an operator. The first is
+ * the system working (one email per lead per variant). The second is a merchant
+ * who will never receive their receipt, and for a COMPLETED application there is
+ * no later submit to retry on — so if it is not recorded, it is simply lost.
+ * Collapsing them into `true` made a dropped receipt indistinguishable from a
+ * correctly-suppressed duplicate, visible only in a console line nobody reads.
+ * See [[feedback_redundancy_hides_failure]].
+ */
+type SendGate = "send" | "skipped_already_sent" | "skipped_check_failed";
+
 async function alreadySent(
   db: SupabaseClient,
   tenantId: string,
   leadId: string,
   source: string,
   subjectPrefix: string,
-): Promise<boolean> {
+): Promise<SendGate> {
   const res = await db
     .from("lead_interactions")
     .select("agent_source, subject")
@@ -323,15 +337,66 @@ async function alreadySent(
       source,
       error: res.error.message,
     });
-    return true;
+    return "skipped_check_failed";
   }
-  return (res.data ?? []).some(
+  const hit = (res.data ?? []).some(
     (r) =>
       r.agent_source !== "form_send_reservation" &&
       (r.agent_source === source ||
         (typeof r.subject === "string" &&
           r.subject.trim().toLowerCase().startsWith(subjectPrefix))),
   );
+  return hit ? "skipped_already_sent" : "send";
+}
+
+/**
+ * Record a receipt that was suppressed because we could not PROVE it had not
+ * already gone out. Best-effort by necessity: the read that failed and this
+ * write share a backend, so this can fail too — but a row that lands turns an
+ * invisible drop into a `status: "failed"` entry on the lead's timeline, in the
+ * same place every other send failure appears.
+ *
+ * Stamped with `agent_source: source` like every other failure marker here, so
+ * it also suppresses a duplicate on any subsequent attempt. The subject is
+ * deliberately NOT the variant's real subject — it must never satisfy the
+ * subject-prefix arm of the idempotency check for a DIFFERENT variant.
+ */
+async function logIdempotencyCheckFailure(
+  db: SupabaseClient,
+  form: { tenant_id: string },
+  leadId: string,
+  source: string,
+  toEmail: string,
+  ccEmail: string | null,
+): Promise<void> {
+  try {
+    await db.from("lead_interactions").insert({
+      tenant_id: form.tenant_id,
+      lead_id: leadId,
+      type: "email_queued",
+      channel: "email",
+      direction: "outbound",
+      agent_source: source,
+      subject: `(not sent) ${source} - could not verify prior send`,
+      content: "",
+      content_preview: "",
+      to_email: toEmail,
+      metadata: {
+        status: "failed",
+        sent_at: null,
+        send_error: "idempotency_check_failed",
+        cc_email: ccEmail,
+        intent: "transactional",
+        needs_operator_review: true,
+      },
+    });
+  } catch (err) {
+    console.error("[forms.handoff] could not record the suppressed send", {
+      lead_id: leadId,
+      source,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
 }
 
 /** Resolved recipient + tenant + signer context shared by both senders. */
@@ -479,7 +544,16 @@ export async function maybeSendNextStepsEmail(input: MaybeSendNextStepsInput): P
     const { db, form, link, payload, origin } = input;
     const ctx = await loadHandoffContext(db, form, link, payload);
     if (!ctx) return;
-    if (await alreadySent(db, form.tenant_id, link.lead_id, NEXT_STEPS_SOURCE, NEXT_STEPS_SUBJECT_PREFIX)) return;
+    const nextStepsGate = await alreadySent(
+      db, form.tenant_id, link.lead_id, NEXT_STEPS_SOURCE, NEXT_STEPS_SUBJECT_PREFIX,
+    );
+    if (nextStepsGate === "skipped_check_failed") {
+      await logIdempotencyCheckFailure(
+        db, form, link.lead_id, NEXT_STEPS_SOURCE, ctx.toEmail, ctx.ccEmail,
+      );
+      return;
+    }
+    if (nextStepsGate === "skipped_already_sent") return;
 
     // CC 2026-06-22: form 1 points to form 2 ONLY (sequential funnel). The
     // bank-statement link is sent later, by maybeSendApplicationCompleteEmail.
@@ -540,7 +614,16 @@ export async function maybeSendApplicationCompleteEmail(input: MaybeSendNextStep
     const { db, form, link, payload, origin } = input;
     const ctx = await loadHandoffContext(db, form, link, payload);
     if (!ctx) return;
-    if (await alreadySent(db, form.tenant_id, link.lead_id, APP_COMPLETE_SOURCE, APP_COMPLETE_SUBJECT_PREFIX)) return;
+    const appCompleteGate = await alreadySent(
+      db, form.tenant_id, link.lead_id, APP_COMPLETE_SOURCE, APP_COMPLETE_SUBJECT_PREFIX,
+    );
+    if (appCompleteGate === "skipped_check_failed") {
+      await logIdempotencyCheckFailure(
+        db, form, link.lead_id, APP_COMPLETE_SOURCE, ctx.toEmail, ctx.ccEmail,
+      );
+      return;
+    }
+    if (appCompleteGate === "skipped_already_sent") return;
 
     const bankUrl = await mintFormLinkBySlug(
       origin, form.tenant_id, link.tenant, link.lead_id, "bank-statement-upload",
@@ -598,13 +681,22 @@ export async function maybeSendApplicationReceivedEmail(input: MaybeSendNextStep
     const { db, form, link, payload } = input;
     const ctx = await loadHandoffContext(db, form, link, payload);
     if (!ctx) return;
-    if (await alreadySent(
+    // This is the variant with no second chance: the application is COMPLETE, so
+    // there is no later submit to retry on. A drop here is permanent.
+    const receivedGate = await alreadySent(
       db,
       form.tenant_id,
       link.lead_id,
       APPLICATION_RECEIVED_SOURCE,
       APPLICATION_RECEIVED_SUBJECT_PREFIX,
-    )) return;
+    );
+    if (receivedGate === "skipped_check_failed") {
+      await logIdempotencyCheckFailure(
+        db, form, link.lead_id, APPLICATION_RECEIVED_SOURCE, ctx.toEmail, ctx.ccEmail,
+      );
+      return;
+    }
+    if (receivedGate === "skipped_already_sent") return;
 
     const greeting = ctx.toName && ctx.toName.trim()
       ? `Hi ${ctx.toName.trim().split(/\s+/)[0]},`
