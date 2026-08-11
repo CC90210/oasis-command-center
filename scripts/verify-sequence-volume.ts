@@ -131,9 +131,25 @@ async function main(): Promise<void> {
 
   // Dry runs must not be counted: a rehearsal moves no bytes and must not
   // consume a real allowance.
-  const dry = rows.filter((r) => r.dryRun).length;
-  console.log(`\ndry-run rows excluded: ${dry}`);
-  check("dry runs are excluded from every bucket", bucketed + dry <= rows.length);
+  //
+  // Asserted by DIFFERENCE, not by an inequality. The previous check was
+  // `bucketed + dry <= rows.length`, which holds whether or not dry runs are
+  // counted — `bucketed` already excludes every out-of-window row, and the
+  // query deliberately pulls DAYS+1, so those rows supply all the slack the
+  // inequality needs. It passed regardless of the property it named, which is
+  // the same worthless reassurance this whole feature exists to remove.
+  const dryInWindow = rows.filter((r) => r.dryRun && (r.sequenceId || r.sequenceName) && inWindow.has(dayKey(r.at, TZ)));
+  console.log(`\ndry-run rows in window: ${dryInWindow.length} (of ${rows.filter((r) => r.dryRun).length} pulled)`);
+  const withDry = bucketBySequenceDay(
+    rows.map((r) => ({ ...r, dryRun: false })),
+    { days: DAYS, timeZone: TZ, nowMs },
+  ).reduce((s, v) => s + v.total, 0);
+  check(
+    "counting dry runs would change the total (so excluding them is doing work)",
+    dryInWindow.length === 0 || withDry === bucketed + dryInWindow.length,
+    `${withDry} with vs ${bucketed} without, ${dryInWindow.length} dry`,
+  );
+  check("no dry run reached a bucket", withDry - bucketed === dryInWindow.length);
 
   // ── The configured caps, and whether any sequence is over one ────────────
   const caps = sql<{ id: string; name: string; daily_email_cap: number | null }>(

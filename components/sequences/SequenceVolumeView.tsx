@@ -20,7 +20,7 @@
  * mean the cap line is exactly where the cap is.
  */
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { AlertTriangle, Check, Loader2, Infinity as InfinityIcon } from "lucide-react";
 import { sequenceRemaining, MAX_SEQUENCE_DAILY_CAP, type SequenceVolume } from "@/lib/drips/sequence-volume-core";
@@ -52,7 +52,22 @@ function Bars({ volume, cap }: { volume: SequenceVolume | null; cap: number | nu
   const capY = cap === null ? null : H - (cap / ceiling) * H;
 
   return (
-    <svg width={width} height={H + 2} className="overflow-visible" role="img" aria-label={`Daily sends, last ${days.length} days`}>
+    // role="img" collapses the SVG to a single node, so a screen reader never
+    // descends into the per-bar <title> elements. The whole series therefore
+    // has to live in the label, or the chart is simply unavailable rather than
+    // merely awkward.
+    <svg
+      width={width}
+      height={H + 2}
+      className="overflow-visible"
+      role="img"
+      aria-label={
+        `Daily sends over ${days.length} days` +
+        (cap === null ? "" : `, cap ${cap}`) +
+        ": " +
+        days.map((d) => `${d.day} ${d.count}`).join(", ")
+      }
+    >
       {days.map((d, i) => {
         const h = ceiling === 0 ? 0 : (d.count / ceiling) * H;
         const over = cap !== null && d.count > cap;
@@ -82,12 +97,32 @@ function Bars({ volume, cap }: { volume: SequenceVolume | null; cap: number | nu
 }
 
 function CapEditor({ row, onSaved }: { row: VolumeRow; onSaved: () => void }) {
-  const [value, setValue] = useState(row.cap === null ? "" : String(row.cap));
+  const asText = (c: number | null) => (c === null ? "" : String(c));
+  const [value, setValue] = useState(asText(row.cap));
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
 
-  const dirty = (row.cap === null ? "" : String(row.cap)) !== value.trim();
+  // Adopt a cap that changed ON THE SERVER.
+  //
+  // useState seeds only on mount, and React reuses this instance across a
+  // router.refresh() because the row keeps its key and position. So a cap
+  // changed by anything other than this box -- another operator, another tab,
+  // a direct API call -- left the old number on screen while `dirty` flipped
+  // true, presenting a stale value as the operator's own unsaved edit.
+  //
+  // Keyed on the SERVER value, not on the input, so this never interrupts
+  // someone mid-type: it fires only when row.cap itself moves.
+  const lastServer = useRef(asText(row.cap));
+  useEffect(() => {
+    const next = asText(row.cap);
+    if (next === lastServer.current) return;
+    lastServer.current = next;
+    setValue(next);
+    setSaved(false);
+  }, [row.cap]);
+
+  const dirty = asText(row.cap) !== value.trim();
 
   async function save() {
     if (!row.sequenceId || busy) return;

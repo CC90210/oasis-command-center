@@ -62,6 +62,16 @@ export async function sequenceDailyVolume(
   // oldest day for anyone west of UTC. Rows outside the window are dropped by
   // the bucketer anyway.
   const sinceIso = new Date(nowMs - (days + 1) * 86_400_000).toISOString();
+  // UPPER bound too, pinned to this call's clock.
+  //
+  // Offset pagination is a sequence of separate requests against a table that
+  // is actively being written. Without a ceiling, a row inserted between page 1
+  // and page 2 shifts every later page down by one — so a row is counted twice
+  // or skipped entirely. On a chart that would be noise; on `sequenceSentToday`
+  // it is the number the cap gates on, and a drip run is exactly when new rows
+  // are arriving. A tiny slice of the current second is dropped instead, which
+  // the next run picks up.
+  const untilIso = new Date(nowMs).toISOString();
 
   const rows: VolumeInteraction[] = [];
   let truncated = false;
@@ -69,13 +79,18 @@ export async function sequenceDailyVolume(
   for (let page = 0; page < MAX_PAGES; page++) {
     const r = await db
       .from("lead_interactions")
-      .select("agent_source, created_at, metadata")
+      .select("id, agent_source, created_at, metadata")
       .eq("tenant_id", tenantId)
       .eq("type", "email_sent")
       .eq("direction", "outbound")
       .like("agent_source", "sequence:%")
       .gte("created_at", sinceIso)
+      .lte("created_at", untilIso)
+      // created_at is not unique — a burst writes several rows in the same
+      // millisecond — so it cannot order pages on its own. `id` breaks the tie
+      // and makes the sequence of pages a stable, total order.
       .order("created_at", { ascending: false })
+      .order("id", { ascending: false })
       .range(page * PAGE, page * PAGE + PAGE - 1);
 
     // Fail LOUD. An empty chart from a broken read looks exactly like a quiet
@@ -84,6 +99,7 @@ export async function sequenceDailyVolume(
     if (r.error) return { ...base, error: `volume read failed: ${r.error.message}` };
 
     const page_rows = (r.data || []) as Array<{
+      id?: string;
       agent_source: string | null;
       created_at: string | null;
       metadata: Record<string, unknown> | null;
@@ -156,7 +172,18 @@ export async function sequenceDailyCaps(tenantId: string): Promise<Map<string, n
     // Mirrored under the name key so the cap still applies to sends attributed
     // by name alone. Without this, a capped sequence whose rows lack an id
     // would be counted but never limited.
-    if (row.name) out.set(`name:${row.name}`, row.daily_email_cap);
+    //
+    // On a name COLLISION the LOWEST cap wins, not the last row read. Two
+    // sequences can share a name, the query has no total order, so
+    // last-write-wins would gate a name-attributed send by an arbitrary cap
+    // that could change between dispatch runs. The low side is the safe
+    // direction and matches the rule the rest of this feature follows: an
+    // ambiguous attribution makes the cap bite sooner, never later.
+    if (row.name) {
+      const k = `name:${row.name}`;
+      const prev = out.get(k);
+      out.set(k, prev === undefined ? row.daily_email_cap : Math.min(prev, row.daily_email_cap));
+    }
   }
   return out;
 }

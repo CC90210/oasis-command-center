@@ -170,7 +170,10 @@ export async function recentDripActivity(
     const openB = b.sentAt ? 1 : 0;
     if (openA !== openB) return openA - openB;
     const key = (r: DripActivityRow) => r.sentAt || r.scheduledFor || "";
-    return key(b).localeCompare(key(a));
+    // id breaks the tie. Neither query defines a secondary order, so equal
+    // timestamps would otherwise shuffle between reads and the table would
+    // reorder itself under an operator for no reason.
+    return key(b).localeCompare(key(a)) || a.id.localeCompare(b.id);
   });
 
   return filters.status ? rows.filter((r) => r.status === filters.status) : rows;

@@ -121,11 +121,31 @@ export function dayKey(iso: unknown, timeZone: string, nowMs?: number): string |
  *  zero rather than a missing bar. A gap the chart does not draw reads as "no
  *  data"; a zero reads as "nothing sent", and those are different findings. */
 export function dayWindow(days: number, timeZone: string, nowMs: number): string[] {
-  const out: string[] = [];
   const n = Math.max(1, Math.min(90, Math.floor(days)));
+  const today = dayKey(new Date(nowMs).toISOString(), timeZone);
+  if (!today) return [];
+
+  // Stepped from UTC NOON of the current local day, not from `nowMs`.
+  //
+  // A local day is 23 or 25 hours long across a DST transition, so stepping
+  // back a fixed 86,400,000 ms from an arbitrary instant can format the same
+  // calendar day twice, or skip one. A duplicate produces duplicate React keys
+  // in the chart; a skip silently drops a real day of sends. Anchoring at noon
+  // leaves ~12 hours of slack on either side, which no DST shift comes close
+  // to consuming.
+  const anchor = Date.parse(`${today}T12:00:00Z`);
+  if (Number.isNaN(anchor)) return [today];
+
+  const out: string[] = [];
+  const seen = new Set<string>();
   for (let i = n - 1; i >= 0; i--) {
-    const k = dayKey(new Date(nowMs - i * 86_400_000).toISOString(), timeZone);
-    if (k) out.push(k);
+    const k = dayKey(new Date(anchor - i * 86_400_000).toISOString(), timeZone);
+    // Belt and braces: the anchor makes a collision unreachable, and a window
+    // with a repeated day would still be wrong if it ever happened.
+    if (k && !seen.has(k)) {
+      seen.add(k);
+      out.push(k);
+    }
   }
   return out;
 }
@@ -214,6 +234,25 @@ export function bucketBySequenceDay(
 
 // ── The cap itself ──────────────────────────────────────────────────────────
 
+/**
+ * WHAT THIS CAP IS NOT: a distributed reservation.
+ *
+ * It is read-then-send. The count is loaded once per dispatch run and spent
+ * against a process-local map, so two OVERLAPPING runs can each read a count
+ * below the cap and each send. The overshoot is bounded, not unbounded — the
+ * row claim is already a compare-and-swap, so no row is ever sent twice, and
+ * the brand ceilings in governor.ts still bound the absolute total — but the
+ * per-sequence number can be exceeded by up to one run's worth of claimed rows
+ * when runs overlap.
+ *
+ * Left as-is deliberately, and stated rather than papered over. The existing
+ * brand daily and hourly caps have always had exactly this property; making
+ * this one atomic while those stay advisory would buy precision on the smaller
+ * limit and none on the larger. If a hard guarantee is ever needed, all three
+ * want the same treatment: an atomic conditional reserve before send, released
+ * on failure. See [[feedback_prove_the_guard_fires]] — the point of writing
+ * this down is that no later reader assumes a guarantee the code does not make.
+ */
 /** Ceiling on a per-sequence daily cap an operator may set through the UI.
  *  Not a safety limit — the brand ceilings in governor.ts are that — but a
  *  typo guard: 4000 in this box would be a slip, and the brand cap would stop
@@ -234,7 +273,12 @@ export type CapVerdict = { ok: true; value: number | null } | { ok: false; reaso
  * into "unlimited" — the single worst misreading available here.
  */
 export function parseSequenceDailyCap(input: unknown): CapVerdict {
-  if (input === null || input === undefined || input === "") return { ok: true, value: null };
+  // TRIM BEFORE the empty check. Checking `=== ""` first let a whitespace-only
+  // value fall through to Number(" ".trim()) — which is 0, i.e. "send nothing
+  // from this sequence". A box that looks blank turning into a full stop is the
+  // precise inversion this function exists to prevent.
+  if (input === null || input === undefined) return { ok: true, value: null };
+  if (typeof input === "string" && input.trim() === "") return { ok: true, value: null };
   const n = typeof input === "number" ? input : Number(String(input).trim());
   if (!Number.isFinite(n)) return { ok: false, reason: "daily cap must be a number, or empty for no cap" };
   if (!Number.isInteger(n)) return { ok: false, reason: "daily cap must be a whole number of emails" };

@@ -69,6 +69,37 @@ assert.equal(sequenceNameFromSource(undefined), null);
   assert.deepEqual([...w].sort(), w);
 }
 
+// ── DST must not duplicate or skip a day ──────────────────────────────────
+// A local day is 23 or 25 hours across a transition, so stepping back a fixed
+// 86,400,000 ms from an arbitrary instant can format the same calendar day
+// twice or skip one. A duplicate produces duplicate React keys in the chart; a
+// skip silently drops a real day of sends.
+{
+  // Around both 2026 transitions in Toronto (spring forward Mar 8, fall back
+  // Nov 1), sampled at several times of day including close to local midnight.
+  for (const iso of [
+    "2026-03-08T04:30:00Z",
+    "2026-03-08T12:00:00Z",
+    "2026-03-09T03:30:00Z",
+    "2026-11-01T05:30:00Z",
+    "2026-11-01T12:00:00Z",
+    "2026-11-02T04:30:00Z",
+  ]) {
+    const w = dayWindow(14, TZ, Date.parse(iso));
+    assert.equal(w.length, 14, `window must be 14 days at ${iso}, got ${w.length}`);
+    assert.equal(new Set(w).size, 14, `no duplicate day at ${iso}: ${w.join(",")}`);
+    assert.deepEqual([...w].sort(), w, `still chronological at ${iso}`);
+    // The last bucket is TODAY — the one the cap reads.
+    assert.equal(w[w.length - 1], dayKey(iso, TZ), `today must be the last bucket at ${iso}`);
+  }
+
+  // A zone far from UTC, where a noon anchor matters most.
+  for (const tz of ["Pacific/Auckland", "America/Los_Angeles", "Asia/Kolkata"]) {
+    const w = dayWindow(30, tz, Date.parse("2026-11-01T05:30:00Z"));
+    assert.equal(new Set(w).size, 30, `no duplicate day in ${tz}`);
+  }
+}
+
 // ── Bucketing ─────────────────────────────────────────────────────────────
 {
   const now = Date.parse("2026-08-11T15:00:00Z");
@@ -193,6 +224,12 @@ assert.deepEqual(parseSequenceDailyCap("40"), { ok: true, value: 40 });
 assert.deepEqual(parseSequenceDailyCap(0), { ok: true, value: 0 });
 assert.deepEqual(parseSequenceDailyCap("0"), { ok: true, value: 0 });
 assert.notEqual(parseSequenceDailyCap(0).ok && parseSequenceDailyCap(0).value, null);
+
+// Whitespace is EMPTY, not zero. Checking `=== ""` before trimming let " "
+// fall through to Number(" ".trim()) === 0 — a box that looks blank becoming
+// "send nothing from this sequence", the exact inversion this guards against.
+assert.deepEqual(parseSequenceDailyCap(" "), { ok: true, value: null });
+assert.deepEqual(parseSequenceDailyCap("   \t "), { ok: true, value: null });
 
 assert.equal(parseSequenceDailyCap(-1).ok, false);
 assert.equal(parseSequenceDailyCap(2.5).ok, false, "half an email is not a thing");

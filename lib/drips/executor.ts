@@ -1611,11 +1611,18 @@ export async function runDispatchDrips(): Promise<DispatchDripsResult> {
   let cancelled = 0;
   // Email volume budget, computed once for the whole run (2 aggregate queries +
   // one batched per-lead query) so per-row gating costs nothing. Only loaded
-  // when this run actually claimed email rows AND real sends are enabled: a dry
-  // run moves no bytes, so there is no volume to govern.
-  const emailLeadIds = Array.from(
-    new Set(claimed.filter((r) => r.channel === "email").map((r) => r.lead_id)),
-  );
+  // when real sends are enabled: a dry run moves no bytes, so there is no
+  // volume to govern.
+  //
+  // EVERY claimed lead, not just the rows AUTHORED as email. An SMS step can be
+  // substituted to email at send time (resolveChannel, when there is no lawful
+  // basis to text but there is an address) and land in processEmailStep. Keying
+  // this on `channel === "email"` meant a batch of only SMS-authored steps
+  // loaded NO budget at all — so those substituted emails bypassed the brand
+  // daily and hourly ceilings, the per-lead weekly cap and the per-sequence cap
+  // together. Every email guard, off, silently, on the path least likely to be
+  // watched.
+  const emailLeadIds = Array.from(new Set(claimed.map((r) => r.lead_id)));
   // Sending brand per lead, resolved ONCE for the run alongside the budget.
   // Read-only: the brand is stamped at enrolment, never derived here, so a lead
   // cannot flip brand mid-sequence. Fails safe to sunbiz.
