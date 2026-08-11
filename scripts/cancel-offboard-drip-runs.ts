@@ -167,6 +167,11 @@ async function main(): Promise<void> {
       .from("drip_runs")
       .update({ status: "cancelled", last_error: REASON })
       .in("id", ids)
+      // Tenant boundary on the WRITE, not only on the read that produced these
+      // ids. A service-role write carries no RLS, so "the ids came from a scoped
+      // query" is a property of this code today rather than a constraint — one
+      // refactor of the read and the write reaches every tenant.
+      .eq("tenant_id", TENANT)
       // CAS: a row the dispatcher claimed between our read and this write stays
       // 'sending' and is handled by the dispatcher's own off-board recheck.
       .eq("status", "scheduled")
