@@ -52,8 +52,8 @@ export async function POST(
       ? "funmate"
       : "sunbiz";
 
-  // Watermark door guard (CC 2026-06-28): a retry re-fires shop_out_send_batch
-  // over every pending thread, so brand any un-watermarked bank statement across
+  // Watermark door guard (CC 2026-06-28): a retry re-dispatches every pending
+  // thread, so brand any un-watermarked bank statement across
   // this application's threads BEFORE flipping/firing. Refuse (422) if a
   // statement can't be branded — never re-send one un-watermarked. Done first so
   // a failure leaves thread state untouched.
