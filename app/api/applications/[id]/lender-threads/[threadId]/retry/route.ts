@@ -212,18 +212,31 @@ export async function POST(
       .eq("tenant_id", tenantId)
       .eq("email_identity", "funmate");
 
-    return NextResponse.json({
-      ok: sent.ok,
-      thread_id: thread.id,
-      previous_status: thread.status,
-      new_status: sent.ok ? "sent" : "error",
-      physical_send: {
-        status: sent.ok ? "sent" : "error",
-        sent_count: sent.ok ? 1 : 0,
-        failed_count: sent.ok ? 0 : 1,
-        message: sent.ok ? undefined : sent.error,
+    // FunMate sends direct over SMTP and returns here, before the shared
+    // outcome handler below. It therefore needs the same contract applied
+    // explicitly: a failed send is a non-2xx, not a 200 carrying ok:false.
+    // Without this the identity silently opts out of the dispatch-failure
+    // contract and any status-only caller reads a dead send as a success —
+    // the exact defect this change exists to remove, reintroduced one branch
+    // over. (Codex review, 2026-08-11.) The row is already stamped
+    // status='error' + last_error by the update above, so only the HTTP
+    // status was wrong.
+    return NextResponse.json(
+      {
+        ok: sent.ok,
+        ...(sent.ok ? {} : { error: "physical_send_failed" }),
+        thread_id: thread.id,
+        previous_status: thread.status,
+        new_status: sent.ok ? "sent" : "error",
+        physical_send: {
+          status: sent.ok ? "sent" : "error",
+          sent_count: sent.ok ? 1 : 0,
+          failed_count: sent.ok ? 0 : 1,
+          message: sent.ok ? undefined : sent.error,
+        },
       },
-    });
+      { status: sent.ok ? 200 : 502 },
+    );
   }
 
   // Watermark door guard (CC 2026-06-28): retry re-fires shop_out_send_batch,

@@ -127,18 +127,28 @@ export async function POST(
       }
     }
     const sentCount = results.filter((result) => result.ok).length;
-    return NextResponse.json({
-      ok: sentCount === results.length,
-      identity: "funmate",
-      recovered: sentCount,
-      physical_send: {
-        status:
-          sentCount === results.length ? "sent" : sentCount > 0 ? "partial" : "error",
-        sent_count: sentCount,
-        failed_count: results.length - sentCount,
+    const fmStatus =
+      sentCount === results.length ? "sent" : sentCount > 0 ? "partial" : "error";
+    // The FunMate batch returns here, before the shared outcome handler, so it
+    // needs the contract applied explicitly or the identity silently opts out
+    // of it. 502 ONLY when nothing sent: a partial batch put real packages in
+    // front of real lenders, and the per-thread `results` carry the rest.
+    // (Codex review, 2026-08-11.)
+    return NextResponse.json(
+      {
+        ok: sentCount === results.length,
+        ...(fmStatus === "error" ? { error: "physical_send_failed" } : {}),
+        identity: "funmate",
+        recovered: sentCount,
+        physical_send: {
+          status: fmStatus,
+          sent_count: sentCount,
+          failed_count: results.length - sentCount,
+        },
+        results,
       },
-      results,
-    });
+      { status: fmStatus === "error" && results.length > 0 ? 502 : 200 },
+    );
   }
 
   // Flip every 'error' thread on this application+tenant back to 'pending'.

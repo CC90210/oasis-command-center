@@ -82,7 +82,40 @@ for (const cron of crons) {
   });
 }
 
-// ── 3. The watchdog itself must be driven ──────────────────────────────────
+// ── 3. Every registered SCHEDULE has a workflow trigger and a route branch ─
+//
+// Presence of a path is not enough: it must be driven at the right time. The
+// driver keys off github.event.schedule, so each distinct expression in
+// vercel.json needs both an `on.schedule` entry and a matching `case` arm.
+// Without this, a route can appear in the file under the wrong cadence and
+// still pass — which is how materialize-plans silently moved from 03:00 to
+// 13:00 and tps-backlog-watch dropped from 6-hourly to daily.
+const schedules = [...new Set(crons.map((c) => c.schedule.trim()))];
+for (const s of schedules) {
+  assert.ok(
+    driver.includes(`- cron: "${s}"`),
+    `vercel.json registers the schedule "${s}" but the workflow has no matching trigger, ` +
+      `so nothing fires at that time`,
+  );
+  assert.ok(
+    driver.includes(`"${s}")`),
+    `the workflow triggers on "${s}" but has no case arm naming its routes`,
+  );
+}
+
+// Each cron's path must be reachable from its OWN schedule's branch, not merely
+// present somewhere in the file.
+for (const cron of crons) {
+  const arm = driver.indexOf(`"${cron.schedule.trim()}")`);
+  const next = driver.indexOf(";;", arm);
+  assert.ok(
+    arm >= 0 && next > arm && driver.slice(arm, next).includes(cron.path),
+    `${cron.path} is not driven by its own schedule "${cron.schedule}" — it may be running ` +
+      `at the wrong cadence`,
+  );
+}
+
+// ── 4. The watchdog itself must be driven ──────────────────────────────────
 // If health-check stops running, every other check in the system goes quiet
 // while reporting nothing wrong. It is the one route whose absence hides all
 // the others.

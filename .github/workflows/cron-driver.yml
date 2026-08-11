@@ -22,9 +22,36 @@
 
 name: cron-driver
 
+# One workflow schedule per DISTINCT cron expression in vercel.json, and the
+# routes are selected by which schedule fired (github.event.schedule) rather
+# than by reading the wall clock.
+#
+# The wall-clock version of this was wrong. GitHub's scheduler is best-effort
+# and routinely starts a run late; a 13:00 tick that lands at 13:06 failed a
+# `minute < 5` window, so sweep-stale-sent-app simply did not run that day. The
+# job silently skipped fixed-time work and reported success, which is the same
+# class of quiet nothing this whole file exists to fix. (Codex review,
+# 2026-08-11.)
+#
+# Keyed on the schedule, lateness is harmless: whenever the run lands, it knows
+# which tick it is. tests/cron-driver-coverage.test.ts asserts every expression
+# in vercel.json appears here, so the two lists cannot drift.
 on:
   schedule:
-    - cron: "*/5 * * * *"
+    - cron: "*/5 * * * *"    # dispatch-drips, dispatch-scheduled-sends, dispatch-scheduled-calls
+    - cron: "*/10 * * * *"   # operator-email-agent, tps-enroll
+    - cron: "*/15 * * * *"   # enroll-drips, enroll-accelerated, reconcile-sms, health-check
+    - cron: "*/30 * * * *"   # scan-bounces, scan-funmate-replies, sync-tt-inbox
+    - cron: "0 * * * *"      # collect-outreach-intel
+    - cron: "15 * * * *"     # collect-cc-metrics
+    - cron: "17 * * * *"     # reconcile-drip-telemetry
+    - cron: "0 */6 * * *"    # tps-backlog-watch
+    - cron: "0 3 * * *"      # materialize-plans
+    - cron: "0 6,18 * * *"   # sync-sms-numbers
+    - cron: "0 13 * * *"     # sweep-stale-sent-app
+    - cron: "10 13 * * *"    # kixie-compliance-scan
+    - cron: "15 13 * * *"    # renewal-thresholds
+    - cron: "40 13 * * 1"    # kixie-compliance-scan?mode=weekly
   workflow_dispatch:
 
 concurrency:
@@ -54,87 +81,66 @@ jobs:
           # The other 18 had been dead since Vercel's scheduler stopped on
           # 2026-08-06 and nobody noticed, because a cron that never runs
           # produces no error — it produces nothing at all. Among the missing
-          # were scan-bounces and scan-funmate-replies, i.e. the reply side of
-          # shopping out. tests/cron-driver-coverage.test.ts now fails when a
-          # registered route has no entry here, so this cannot silently drift
-          # again.
-
-          # Each bucket below mirrors a registered schedule in vercel.json,
-          # INCLUDING its query string. A first pass here bucketed routes by
-          # rough cadence and dropped the ?mode=weekly Kixie variant entirely,
-          # moved materialize-plans from 03:00 to 13:00, and demoted
-          # tps-backlog-watch from 6-hourly to daily — a "replacement" scheduler
-          # that quietly ran different work. The coverage test now compares full
-          # paths with query strings, so a dropped variant fails CI.
+          # were scan-bounces and scan-funmate-replies, the reply side of
+          # shopping out.
           #
-          # This job ticks every 5 minutes, so a schedule's minute is matched as
-          # the 5-minute window containing it (e.g. "17 * * * *" fires in the
-          # 15-19 window).
+          # Routes are keyed by the SCHEDULE THAT FIRED, mirroring vercel.json
+          # expression for expression, query strings included. Two earlier
+          # versions of this block got that wrong in ways CI could not see:
+          # bucketing by rough cadence dropped ?mode=weekly and moved
+          # materialize-plans by ten hours, and reading the wall clock meant a
+          # late GitHub run missed fixed-time jobs entirely.
+          #
+          # tests/cron-driver-coverage.test.ts pins both lists together.
+          SCHEDULE="${{ github.event.schedule }}"
 
-          # */5 — the paths that move mail and calls.
-          FAST="/api/cron/dispatch-drips
-                /api/cron/dispatch-scheduled-sends
-                /api/cron/dispatch-scheduled-calls"
-
-          # */10
-          Q10="/api/cron/operator-email-agent?write=1
-               /api/cron/tps-enroll?write=1"
-
-          # */15 — enrolment feeds the dispatcher, reconcile-sms closes carrier
-          # receipts, health-check is the outcome watchdog that now covers
-          # shopping out too.
-          Q15="/api/cron/enroll-drips
-               /api/cron/enroll-accelerated
-               /api/cron/reconcile-sms
-               /api/cron/health-check"
-
-          # */30 — inbound scanning. These read the mailboxes carrying lender
-          # replies and bounces; without them an approval sits unread, which is
-          # what happened for six days in August.
-          Q30="/api/cron/scan-bounces?write=1
-               /api/cron/scan-funmate-replies?write=1
-               /api/cron/sync-tt-inbox"
-
-          MIN=$(date -u +%M)
-          HOUR=$(date -u +%H)
-          DOW=$(date -u +%u)   # 1 = Monday
-          M=$((10#${MIN})); H=$((10#${HOUR}))
-
-          ROUTES="${FAST}"
-          [ $((M % 10)) -lt 5 ] && ROUTES="${ROUTES} ${Q10}"
-          [ $((M % 15)) -lt 5 ] && ROUTES="${ROUTES} ${Q15}"
-          [ $((M % 30)) -lt 5 ] && ROUTES="${ROUTES} ${Q30}"
-
-          # Hourly, at their registered minutes.
-          [ "${M}" -lt 5 ]                        && ROUTES="${ROUTES} /api/cron/collect-outreach-intel?write=1"
-          [ "${M}" -ge 15 ] && [ "${M}" -lt 20 ]  && ROUTES="${ROUTES} /api/cron/collect-cc-metrics?write=1 /api/cron/reconcile-drip-telemetry"
-
-          if [ "${M}" -lt 5 ]; then
-            # 0 */6 * * *
-            [ $((H % 6)) -eq 0 ]                    && ROUTES="${ROUTES} /api/cron/tps-backlog-watch"
-            # 0 3 * * *
-            [ "${H}" -eq 3 ]                        && ROUTES="${ROUTES} /api/cron/materialize-plans"
-            # 0 6,18 * * *  — reconciles the TextTorrent number roster. Running
-            # it hourly would spend shared vendor rate budget for no new data.
-            { [ "${H}" -eq 6 ] || [ "${H}" -eq 18 ]; } && ROUTES="${ROUTES} /api/cron/sync-sms-numbers"
-            # 0 13 * * *
-            [ "${H}" -eq 13 ]                       && ROUTES="${ROUTES} /api/cron/sweep-stale-sent-app"
-          fi
-
-          if [ "${H}" -eq 13 ]; then
-            # 10 13 * * *
-            [ "${M}" -ge 10 ] && [ "${M}" -lt 15 ] && ROUTES="${ROUTES} /api/cron/kixie-compliance-scan"
-            # 15 13 * * *
-            [ "${M}" -ge 15 ] && [ "${M}" -lt 20 ] && ROUTES="${ROUTES} /api/cron/renewal-thresholds"
-            # 40 13 * * 1 — the weekly scorecard. A distinct registration, not a
-            # duplicate of the daily scan: dropping the query string skips the
-            # weekly code path entirely.
-            [ "${DOW}" -eq 1 ] && [ "${M}" -ge 40 ] && [ "${M}" -lt 45 ] && ROUTES="${ROUTES} /api/cron/kixie-compliance-scan?mode=weekly"
-          fi
-          # `set -e` is deliberately NOT in effect for these tests: a false
-          # condition on the last line of the block would exit the step with a
-          # non-zero status and skip the dispatch entirely.
-          true
+          case "${SCHEDULE}" in
+            "*/5 * * * *")
+              ROUTES="/api/cron/dispatch-drips
+                      /api/cron/dispatch-scheduled-sends
+                      /api/cron/dispatch-scheduled-calls" ;;
+            "*/10 * * * *")
+              ROUTES="/api/cron/operator-email-agent?write=1
+                      /api/cron/tps-enroll?write=1" ;;
+            "*/15 * * * *")
+              # health-check is the outcome watchdog, and now covers shop-out.
+              ROUTES="/api/cron/enroll-drips
+                      /api/cron/enroll-accelerated
+                      /api/cron/reconcile-sms
+                      /api/cron/health-check" ;;
+            "*/30 * * * *")
+              # Inbound scanning. Without these an approval sits unread, which
+              # is what happened for six days in August.
+              ROUTES="/api/cron/scan-bounces?write=1
+                      /api/cron/scan-funmate-replies?write=1
+                      /api/cron/sync-tt-inbox" ;;
+            "0 * * * *")     ROUTES="/api/cron/collect-outreach-intel?write=1" ;;
+            "15 * * * *")    ROUTES="/api/cron/collect-cc-metrics?write=1" ;;
+            "17 * * * *")    ROUTES="/api/cron/reconcile-drip-telemetry" ;;
+            "0 */6 * * *")   ROUTES="/api/cron/tps-backlog-watch" ;;
+            "0 3 * * *")     ROUTES="/api/cron/materialize-plans" ;;
+            "0 6,18 * * *")  ROUTES="/api/cron/sync-sms-numbers" ;;
+            "0 13 * * *")    ROUTES="/api/cron/sweep-stale-sent-app" ;;
+            "10 13 * * *")   ROUTES="/api/cron/kixie-compliance-scan" ;;
+            "15 13 * * *")   ROUTES="/api/cron/renewal-thresholds" ;;
+            # A distinct registration, not a duplicate of the daily scan —
+            # dropping the query string skips the weekly code path entirely.
+            "40 13 * * 1")   ROUTES="/api/cron/kixie-compliance-scan?mode=weekly" ;;
+            "")
+              # Manual workflow_dispatch: drive the paths that move mail plus
+              # the watchdog. Deliberately not everything — a hand-run should
+              # not fire daily sweeps out of band.
+              echo "manual run: driving the fast paths + health-check"
+              ROUTES="/api/cron/dispatch-drips
+                      /api/cron/dispatch-scheduled-sends
+                      /api/cron/dispatch-scheduled-calls
+                      /api/cron/health-check" ;;
+            *)
+              # A schedule with no mapping means someone added a cron entry and
+              # not its routes. Silence here is how the last outage happened.
+              echo "::error::no routes mapped for schedule '${SCHEDULE}'"
+              exit 1 ;;
+          esac
 
           FAILED=0
           for path in ${ROUTES}; do
