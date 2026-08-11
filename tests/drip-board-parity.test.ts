@@ -178,7 +178,14 @@ assert.equal(
 {
   const read = (p: string) => readFileSync(p, "utf8");
   const LITERAL = "data->>transferred_at.is.null";
-  for (const path of ["lib/manifest/data.ts", "lib/drips/enroller.ts", "lib/drips/executor.ts"]) {
+  for (const path of [
+    "lib/manifest/data.ts",
+    "lib/drips/enroller.ts",
+    "lib/drips/executor.ts",
+    // The client-side guard. Held a third copy until 2026-08-11, complete with
+    // its own blank-string divergence.
+    "lib/lead-list-visibility.ts",
+  ]) {
     assert.ok(
       !read(path).includes(LITERAL),
       `${path} must import the rule from lib/leads/board-visibility.ts, not restate it`,
