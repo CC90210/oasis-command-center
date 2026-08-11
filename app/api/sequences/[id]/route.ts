@@ -124,7 +124,9 @@ export async function PATCH(
 
   // Every template pin this request changes, hoisted so the audit below records
   // what was actually written rather than what the client said it was doing.
-  let pinChanges: Array<{ index: number; from: string | null; to: string }> = [];
+  // `to: null` is an UNPIN — the step goes back to pool sampling, which is a
+  // change to live copy and gets recorded like any other.
+  let pinChanges: Array<{ index: number; from: string | null; to: string | null }> = [];
 
   if ("steps" in body) {
     let steps;
@@ -178,15 +180,25 @@ export async function PATCH(
     // ONLY CHANGED PINS. A pin that was already there and has since gone
     // unreachable (its template retired) must not block an unrelated edit to
     // another step; the Drips tab flags that case on the step instead.
-    const changedPins = guarded.steps
-      .map((s, i) => ({ step: s, index: i }))
-      .filter(({ step, index }) => step.template_id && step.template_id !== priorSteps?.[index]?.template_id);
+    //
+    // UNPINNING IS A CHANGE TOO. Removing a pin hands the step back to pool
+    // sampling, which changes what merchants receive just as much as adding
+    // one. There is nothing to VALIDATE about it — sampling is always in
+    // scope — but it must still be recorded, or an edit that silently altered
+    // live copy leaves no trace.
+    const pinDiff = guarded.steps
+      .map((s, i) => ({
+        index: i,
+        from: priorSteps?.[i]?.template_id ?? null,
+        to: s.template_id ?? null,
+        role: s.role,
+      }))
+      .filter((c) => c.from !== c.to);
 
-    pinChanges = changedPins.map(({ step, index }) => ({
-      index,
-      from: priorSteps?.[index]?.template_id ?? null,
-      to: String(step.template_id),
-    }));
+    pinChanges = pinDiff.map(({ index, from, to }) => ({ index, from, to }));
+
+    // Only a NEW pin needs checking against the pool.
+    const changedPins = pinDiff.filter((c): c is typeof c & { to: string } => Boolean(c.to));
 
     if (changedPins.length > 0) {
       // The filter being saved wins over the persisted one, so a swap made in
@@ -211,16 +223,16 @@ export async function PATCH(
           { status: 503 },
         );
       }
-      for (const { step, index } of changedPins) {
+      for (const { index, from, to, role } of changedPins) {
         const verdict = validateInterchange(pool, {
           sequenceId: id,
           stepIndex: index,
-          fromTemplateId: priorSteps?.[index]?.template_id ?? null,
-          toTemplateId: String(step.template_id),
+          fromTemplateId: from,
+          toTemplateId: to,
           actorUserId: session.authUserId ?? "",
           brand: brandFromTriggerFilter(filter),
           stage: stageFromTriggerFilter(filter),
-          role: step.role,
+          role,
         });
         if (!verdict.ok) {
           // The validator's own words, and which step. "Rejected" alone is not
