@@ -76,21 +76,35 @@ async function main(): Promise<void> {
 
   // Sequence names, so the printed list is readable by a human deciding whether
   // to approve it. A run id tells nobody anything.
-  const seqRes = await db.from("drip_sequences").select("id, name").eq("tenant_id", TENANT);
-  const seqName = new Map(
-    ((seqRes.data || []) as Array<{ id: string; name: string }>).map((s) => [s.id, s.name]),
-  );
+  //
+  // BOTH reads below are error-checked, and that is load-bearing rather than
+  // tidy. `stageTriggered` is a NARROWING filter: if its query fails and the
+  // error is swallowed, the set is empty, every run is classified as
+  // not-stage-triggered, and the script prints "0 to cancel" and exits 0 having
+  // done nothing — a cleanup that reports success while the stale runs stay
+  // queued (Codex review P2, 2026-08-11). One read, one fetch, one classifier.
+  const seqRes = await db
+    .from("drip_sequences")
+    .select("id, name, trigger_filter")
+    .eq("tenant_id", TENANT);
+  if (seqRes.error) throw new Error(`drip_sequences read failed: ${seqRes.error.message}`);
+  const sequences = (seqRes.data || []) as Array<{
+    id: string;
+    name: string;
+    trigger_filter: unknown;
+  }>;
+  if (sequences.length === 0) {
+    throw new Error("drip_sequences returned zero rows — refusing to classify runs against nothing");
+  }
+  const seqName = new Map(sequences.map((s) => [s.id, s.name]));
 
   // Only stage-triggered sequences are governed by the board rule; a
   // flag-triggered chase owns its own lifecycle.
   const stageTriggered = new Set<string>();
-  {
-    const r = await db.from("drip_sequences").select("id, trigger_filter").eq("tenant_id", TENANT);
-    for (const s of (r.data || []) as Array<{ id: string; trigger_filter: unknown }>) {
-      const f = (s.trigger_filter || {}) as Record<string, unknown>;
-      const isStage = (!f.field || f.field === "stage") && (!f.entity || f.entity === "lead");
-      if (isStage && typeof f.to === "string" && f.to.trim()) stageTriggered.add(s.id);
-    }
+  for (const s of sequences) {
+    const f = (s.trigger_filter || {}) as Record<string, unknown>;
+    const isStage = (!f.field || f.field === "stage") && (!f.entity || f.entity === "lead");
+    if (isStage && typeof f.to === "string" && f.to.trim()) stageTriggered.add(s.id);
   }
 
   const leadIds = [...new Set(runs.map((r) => r.lead_id))];
