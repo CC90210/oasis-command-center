@@ -188,6 +188,46 @@ export async function PATCH(
     });
     historySaved = !hist.error;
   }
+
+  // A template interchange is a deliberate swap of what merchants receive, so
+  // it gets its own attributable record rather than hiding inside a generic
+  // "steps changed" version. The version snapshot says WHAT the copy was; this
+  // says WHO swapped which template into which step, which is the question
+  // asked after a merchant complains about wording.
+  const interchange = (body as { interchange?: { step_index?: unknown; to_template_id?: unknown } }).interchange;
+  if (interchange && "steps" in patch) {
+    const stepIndex = Number(interchange.step_index);
+    const toTemplateId = String(interchange.to_template_id ?? "");
+    if (Number.isInteger(stepIndex) && stepIndex >= 0 && toTemplateId) {
+      // Best-effort, exactly like the version write above: the save already
+      // happened and failing the request now would misreport it as rejected.
+      await db
+        .from("agent_events")
+        .insert({
+          tenant_id: tenantId,
+          source: "sequences",
+          level: "info",
+          event: "template_interchange",
+          detail: JSON.stringify({
+            action: "template_interchange",
+            sequence_id: id,
+            step_index: stepIndex,
+            to: toTemplateId,
+            actor: session.authUserId ?? null,
+          }),
+        })
+        .then(
+          () => undefined,
+          (err: unknown) => {
+            console.error("[sequences.interchange_audit.failed]", {
+              sequence_id: id,
+              error: err instanceof Error ? err.message : String(err),
+            });
+          },
+        );
+    }
+  }
+
   return NextResponse.json({ ok: true, sequence: data, ...(historySaved === undefined ? {} : { historySaved }) });
 }
 

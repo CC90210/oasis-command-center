@@ -32,6 +32,7 @@
  */
 
 import { PageHeader, Card, Tag } from "@/components/Card";
+import { OutcomeChecksPanel } from "@/components/health/OutcomeChecksPanel";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { resolveTenantId } from "@/lib/api-auth";
 import { getTenantEnabledAgents } from "@/lib/manifest/tenant-scope";
@@ -263,6 +264,14 @@ export default async function HealthPage() {
       </div>
 
       {/* ── Error events ────────────────────────────────────────── */}
+
+      {/* Outcome checks first. They answer "did a merchant actually receive
+          anything", which outranks "were there errors": during the ten-day SMS
+          outage there were no errors to show, and every tile below was green. */}
+      <Card title="Are merchants actually being reached?">
+        <OutcomeChecksPanel tenantId={tenantId} />
+      </Card>
+
       <Card
         title="Recent errors / warnings"
         subtitle="Anything that broke or threw a warning in the last 24 hours. Daemons, APIs, classifiers — they all report here when they fail."

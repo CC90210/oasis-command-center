@@ -8,10 +8,12 @@
  */
 
 import { useState } from "react";
-import { LayoutList, FileText } from "lucide-react";
+import { LayoutList, FileText, Activity } from "lucide-react";
 import { SequencesListClient } from "./SequencesListClient";
 import { SequenceTemplatesView, type TemplatesViewRow } from "./SequenceTemplatesView";
+import { DripActivityView, type ActivityRow, type ActivitySummary } from "./DripActivityView";
 import type { DripStep } from "@/lib/drips/types";
+import type { PoolTemplate } from "@/lib/drips/template-pool";
 
 type Row = TemplatesViewRow & {
   trigger_event: string;
@@ -19,16 +21,39 @@ type Row = TemplatesViewRow & {
   steps: DripStep[];
 };
 
-export function SequencesTabs({ rows }: { rows: Row[] }) {
-  const [tab, setTab] = useState<"templates" | "manage">("templates");
+export function SequencesTabs({
+  rows,
+  activity,
+  activitySummary,
+  pool,
+}: {
+  rows: Row[];
+  activity: ActivityRow[];
+  activitySummary: ActivitySummary;
+  pool: PoolTemplate[];
+}) {
+  // Activity first. The first question an operator has is "what went out",
+  // not "how is it configured" — and for four days in August the honest answer
+  // was "nothing", which no surface was able to say.
+  const [tab, setTab] = useState<"activity" | "templates" | "manage">("activity");
 
   return (
     <div className="space-y-4">
       <div className="flex w-fit overflow-hidden rounded-lg border border-bg-border">
         <button
           type="button"
-          onClick={() => setTab("templates")}
+          onClick={() => setTab("activity")}
           className={`inline-flex items-center gap-1.5 px-4 py-2 text-xs font-bold transition-colors ${
+            tab === "activity" ? "bg-accent/15 text-accent" : "bg-bg-elev text-fg-muted hover:text-fg"
+          }`}
+        >
+          <Activity className="h-3.5 w-3.5" />
+          Activity
+        </button>
+        <button
+          type="button"
+          onClick={() => setTab("templates")}
+          className={`inline-flex items-center gap-1.5 border-l border-bg-border px-4 py-2 text-xs font-bold transition-colors ${
             tab === "templates" ? "bg-accent/15 text-accent" : "bg-bg-elev text-fg-muted hover:text-fg"
           }`}
         >
@@ -47,8 +72,10 @@ export function SequencesTabs({ rows }: { rows: Row[] }) {
         </button>
       </div>
 
-      {tab === "templates" ? (
-        <SequenceTemplatesView rows={rows} />
+      {tab === "activity" ? (
+        <DripActivityView rows={activity} summary={activitySummary} />
+      ) : tab === "templates" ? (
+        <SequenceTemplatesView rows={rows} pool={pool} />
       ) : (
         <SequencesListClient initialRows={rows} />
       )}

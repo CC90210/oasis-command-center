@@ -10,6 +10,8 @@ import { getActiveProfile, getBridgeOnline } from "@/lib/queries";
 import { getSessionUser, getServiceSupabase } from "@/lib/supabase-server";
 import { safe, isMissingTableError } from "@/lib/api-helpers";
 import { SequencesTabs } from "@/components/sequences/SequencesTabs";
+import { recentDripActivity, dripFailureSummary } from "@/lib/drips/activity-queries";
+import { loadApprovedPool } from "@/lib/drips/template-pool-store";
 import { AlertCircle, Cpu, Cloud, Download } from "lucide-react";
 import Link from "next/link";
 import { redirect } from "next/navigation";
@@ -57,20 +59,37 @@ export default async function SequencesPage() {
   if (!user) redirect("/login");
 
   const profile = await safe("sequences.profile", getActiveProfile(), null);
-  const [result, bridgeOnline] = await Promise.all([
-    loadSequences(profile?.tenant_id || null),
+  const tenantId = profile?.tenant_id || null;
+  // Activity loads alongside the sequences. `safe` degrades each read
+  // independently so a slow activity query cannot take the whole page down —
+  // an empty table with the sequences still rendered beats a 500.
+  const [result, bridgeOnline, activity, pool, activitySummary] = await Promise.all([
+    loadSequences(tenantId),
+    safe("sequences.bridge_online", getBridgeOnline(tenantId), false),
     safe(
-      "sequences.bridge_online",
-      getBridgeOnline(profile?.tenant_id || null),
-      false,
+      "sequences.activity",
+      tenantId ? recentDripActivity(tenantId, { limit: 300 }) : Promise.resolve([]),
+      [],
+    ),
+    safe(
+      "sequences.template_pool",
+      tenantId ? loadApprovedPool(getServiceSupabase(), tenantId) : Promise.resolve([]),
+      [],
+    ),
+    safe(
+      "sequences.activity_summary",
+      tenantId
+        ? dripFailureSummary(tenantId)
+        : Promise.resolve({ realSends: 0, failed: 0, skipped: 0, dryRun: 0, failureRatePct: null, heldForPolicy: 0 }),
+      { realSends: 0, failed: 0, skipped: 0, dryRun: 0, failureRatePct: null, heldForPolicy: 0 },
     ),
   ]);
 
   return (
     <div className="space-y-6 animate-fade-in">
       <PageHeader
-        title="Drip sequences"
-        subtitle="Automated SMS + email follow-up triggered by status changes (viewed application, submitted, declined, etc.). Runs on your machine via the local sequence-runner daemon."
+        title="Drips"
+        subtitle="Activity shows what actually went out. Templates is every step's copy, with template interchange per step. Manage toggles sequences on and off. Deep email performance stays in Metrics."
       />
 
       {/* Bridge-online banner — drip sequences are run by the
@@ -146,7 +165,14 @@ export default async function SequencesPage() {
         </div>
       )}
 
-      {result.ok && <SequencesTabs rows={result.rows} />}
+      {result.ok && (
+        <SequencesTabs
+          rows={result.rows}
+          activity={activity}
+          activitySummary={activitySummary}
+          pool={pool}
+        />
+      )}
     </div>
   );
 }

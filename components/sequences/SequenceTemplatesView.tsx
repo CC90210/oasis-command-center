@@ -23,6 +23,9 @@ import {
   WandSparkles,
 } from "lucide-react";
 import type { DripStep } from "@/lib/drips/types";
+import type { PoolTemplate } from "@/lib/drips/template-pool";
+import type { BrandKey } from "@/lib/email/brands";
+import { TemplateInterchange } from "./TemplateInterchange";
 import {
   cumulativeSchedule,
   formatDelayMinutes,
@@ -45,6 +48,16 @@ function triggerStage(row: TemplatesViewRow): string {
   return typeof f.to === "string" && f.to ? f.to : "—";
 }
 
+
+/** Which brand this sequence speaks as. An absent marker resolves to SunBiz,
+ *  matching lib/drips/brand-routing's safe default: a cold lead mis-sent as
+ *  SunBiz costs reputation on a domain that can absorb it, the reverse is a
+ *  confusing first impression on one that cannot. */
+function rowBrand(row: TemplatesViewRow): BrandKey {
+  const f = (row.trigger_filter || {}) as { brand?: unknown };
+  return String(f.brand ?? "").toLowerCase() === "bluerise" ? "bluerise" : "sunbiz";
+}
+
 function CopyBlock({ label, text, sample }: { label?: string; text: string; sample: boolean }) {
   return (
     <div>
@@ -58,7 +71,23 @@ function CopyBlock({ label, text, sample }: { label?: string; text: string; samp
   );
 }
 
-function StepCard({ scheduled, sample }: { scheduled: { step: DripStep; index: number; cumulativeMinutes: number }; sample: boolean }) {
+function StepCard({
+  scheduled,
+  sample,
+  sequenceId,
+  steps,
+  brand,
+  stage,
+  pool,
+}: {
+  scheduled: { step: DripStep; index: number; cumulativeMinutes: number };
+  sample: boolean;
+  sequenceId: string;
+  steps: DripStep[];
+  brand: BrandKey;
+  stage: string;
+  pool: PoolTemplate[];
+}) {
   const { step, index, cumulativeMinutes } = scheduled;
   const isEmail = step.channel === "email";
   const bodyVariants = step.body_variants || [];
@@ -94,6 +123,16 @@ function StepCard({ scheduled, sample }: { scheduled: { step: DripStep; index: n
         <CopyBlock label={isEmail ? "Body" : undefined} text={step.body} sample={sample} />
       </div>
 
+      <TemplateInterchange
+        sequenceId={sequenceId}
+        stepIndex={index}
+        step={step}
+        steps={steps}
+        brand={brand}
+        stage={stage}
+        pool={pool}
+      />
+
       {(bodyVariants.length > 0 || subjectVariants.length > 0) && (
         <div className="mt-2">
           <button
@@ -124,7 +163,7 @@ function StepCard({ scheduled, sample }: { scheduled: { step: DripStep; index: n
   );
 }
 
-function SequenceCard({ row, sample, query }: { row: TemplatesViewRow; sample: boolean; query: string }) {
+function SequenceCard({ row, sample, query, pool }: { row: TemplatesViewRow; sample: boolean; query: string; pool: PoolTemplate[] }) {
   const schedule = useMemo(() => cumulativeSchedule(row.steps || []), [row.steps]);
   const big = schedule.length > 6;
   const [open, setOpen] = useState(!big);
@@ -174,7 +213,16 @@ function SequenceCard({ row, sample, query }: { row: TemplatesViewRow; sample: b
               return hay.includes(query);
             })
             .map((s) => (
-              <StepCard key={s.index} scheduled={s} sample={sample} />
+              <StepCard
+                key={s.index}
+                scheduled={s}
+                sample={sample}
+                sequenceId={row.id}
+                steps={row.steps}
+                brand={rowBrand(row)}
+                stage={triggerStage(row)}
+                pool={pool}
+              />
             ))}
         </div>
       )}
@@ -182,7 +230,7 @@ function SequenceCard({ row, sample, query }: { row: TemplatesViewRow; sample: b
   );
 }
 
-export function SequenceTemplatesView({ rows }: { rows: TemplatesViewRow[] }) {
+export function SequenceTemplatesView({ rows, pool = [] }: { rows: TemplatesViewRow[]; pool?: PoolTemplate[] }) {
   const [searchQuery, setSearchQuery] = useState("");
   const [sample, setSample] = useState(false);
   const query = searchQuery.trim().toLowerCase();
@@ -236,7 +284,9 @@ export function SequenceTemplatesView({ rows }: { rows: TemplatesViewRow[] }) {
           No templates match that search.
         </div>
       ) : (
-        filtered.map((row) => <SequenceCard key={row.id} row={row} sample={sample} query={query} />)
+        filtered.map((row) => (
+          <SequenceCard key={row.id} row={row} sample={sample} query={query} pool={pool} />
+        ))
       )}
     </div>
   );

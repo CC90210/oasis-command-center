@@ -372,7 +372,7 @@ export const SUN_SEED: TenantManifest = {
     { href: "/forms", label: "Forms", icon: "FileCode2", group: "System" },
     // /sequences is the drip-campaign control panel — same Outreach
     // lane as SMS / Email Blast but for status-triggered automation.
-    { href: "/sequences", label: "Sequences", icon: "Sparkles", group: "System" },
+    { href: "/sequences", label: "Drips", icon: "Sparkles", group: "System" },
     // Top-level /team — admins mint invite URLs that drop a teammate
     // straight into this tenant's onboarding wizard. Owner/admin sees
     // the mint UI; non-admins see the member roster. Without this entry
