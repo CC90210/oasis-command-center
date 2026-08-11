@@ -42,6 +42,10 @@ import { resolveBridgeTarget, callBridgeExecTool } from "@/lib/bridge-proxy";
 import { getAgents } from "@/lib/config/agents";
 import { getTenantMembers } from "@/lib/team";
 import { mintFormLinkBySlug } from "@/lib/forms/agent-routing";
+import { sendGmail } from "@/lib/integrations/submissions-gmail-send";
+import type { BrandKey } from "@/lib/email/brands";
+import { SUNBIZ_LEGAL_FOOTER } from "@/lib/config/email-signature";
+import { listUnsubscribeHeader } from "@/lib/email/tracked-html";
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
@@ -49,6 +53,7 @@ const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
  *  idempotency check are clean and don't collide across the two emails. */
 const NEXT_STEPS_SOURCE = "form_intake_next_steps";
 const APP_COMPLETE_SOURCE = "form_intake_app_complete";
+const APPLICATION_RECEIVED_SOURCE = "form_intake_application_received";
 
 export type MaybeSendNextStepsInput = {
   db: SupabaseClient;
@@ -71,16 +76,127 @@ type SignerCtx = { name: string; email: string; phone: string };
  * recoverable interaction the operator can see.
  */
 async function sendViaBridge(input: {
+  db: SupabaseClient;
+  source: string;
+  tenantId: string;
   tenant: { slug: string; custom_fields: Record<string, unknown> | null };
   to: string;
   subject: string;
   body: string;
-  brand?: string;
+  brand?: BrandKey;
   leadId: string;
   signer: SignerCtx;
   /** Assigned-agent email to CC (so the rep whose form it was gets a copy). */
   cc?: string | null;
+  recoveryAttempt?: boolean;
 }): Promise<{ sent: boolean; reason?: string }> {
+  // Primary path: send directly from the tenant's encrypted Gmail App Password.
+  // This keeps public-form confirmations on the same mailbox used by shop-out
+  // and avoids depending on the separate bridge/daemon being online.
+  // This direct footer is deliberately SunBiz-only. Other brands retain the
+  // bridge path until their own legal/footer renderer is wired here.
+  if (input.brand === "sunbiz") {
+    // Atomic reservation on the existing provider/message unique index. This
+    // closes the race where two simultaneous final-step posts both pass the
+    // read-based alreadySent check before either reaches SMTP.
+    const reservationKey = `${input.leadId}:${input.source}`;
+    const reservation = await input.db.from("lead_interactions").insert({
+      tenant_id: input.tenantId,
+      lead_id: input.leadId,
+      type: "email_queued",
+      channel: "email",
+      direction: "outbound",
+      agent_source: "form_send_reservation",
+      provider: "form_transactional",
+      provider_message_id: reservationKey,
+      subject: input.subject.slice(0, 200),
+      content: input.body,
+      content_preview: input.body.slice(0, 1024),
+      to_email: input.to,
+      metadata: { status: "sending", intended_source: input.source },
+    }).select("id").single();
+
+    if (reservation.error?.code === "23505") {
+      const existing = await input.db.from("lead_interactions")
+        .select("id, created_at, metadata")
+        .eq("provider", "form_transactional")
+        .eq("provider_message_id", reservationKey)
+        .eq("tenant_id", input.tenantId)
+        .maybeSingle();
+      const row = existing.data as {
+        id?: string;
+        created_at?: string;
+        metadata?: { status?: string } | null;
+      } | null;
+      const ageMs = row?.created_at ? Date.now() - new Date(row.created_at).getTime() : 0;
+      if (
+        !input.recoveryAttempt &&
+        row?.id &&
+        row.metadata?.status === "sending" &&
+        ageMs > 5 * 60 * 1000
+      ) {
+        const released = await input.db.from("lead_interactions")
+          .delete()
+          .eq("id", row.id)
+          .eq("tenant_id", input.tenantId)
+          .contains("metadata", { status: "sending" })
+          .select("id");
+        if (!released.error && (released.data?.length ?? 0) === 1) {
+          return sendViaBridge({ ...input, recoveryAttempt: true });
+        }
+      }
+      return { sent: true };
+    }
+    if (!reservation.error && reservation.data?.id) {
+      const direct = await sendGmail({
+        tenantId: input.tenantId,
+        brand: "sunbiz",
+        to: input.to,
+        cc: input.cc ? [input.cc] : undefined,
+        subject: input.subject,
+        body: input.body.replace(/\s+$/, "") + SUNBIZ_LEGAL_FOOTER,
+        listUnsubscribe: listUnsubscribeHeader(input.to, "SunBiz"),
+        retryTransient: false,
+      });
+      if (direct.ok) {
+    // The bridge normally writes this canonical audit/idempotency row. Direct
+        // SMTP must turn its reservation into that same audit/idempotency row.
+        const recorded = await input.db.from("lead_interactions").update({
+          type: "email_sent",
+          agent_source: input.source,
+          metadata: {
+            status: "sent",
+            sent_at: new Date().toISOString(),
+            sent_via: "submissions_gmail_apppassword",
+            cc_email: input.cc || null,
+            gmail_message_id: direct.message_id,
+            intent: "transactional",
+          },
+        }).eq("id", reservation.data.id).eq("tenant_id", input.tenantId);
+        if (recorded.error) {
+          console.error("[forms.handoff] direct send audit write failed", {
+            lead_id: input.leadId,
+            source: input.source,
+            error: recorded.error.message,
+          });
+        }
+        return { sent: true };
+      }
+      // Release only this unsent temporary reservation so the established
+      // bridge fallback can make its own idempotent attempt.
+      await input.db.from("lead_interactions")
+        .delete()
+        .eq("id", reservation.data.id)
+        .eq("tenant_id", input.tenantId);
+    } else if (reservation.error) {
+      console.error("[forms.handoff] direct send reservation failed", {
+        lead_id: input.leadId,
+        source: input.source,
+        error: reservation.error.message,
+      });
+    }
+  }
+
   const target = resolveBridgeTarget(input.tenant);
   if (!target) return { sent: false, reason: "bridge_not_configured" };
 
@@ -172,6 +288,7 @@ async function resolveAssignedAgent(
  *  lowercase + distinct; an inbound reply ("Re: …") never starts with them. */
 const NEXT_STEPS_SUBJECT_PREFIX = "your next steps with ";
 const APP_COMPLETE_SUBJECT_PREFIX = "we've received your application";
+const APPLICATION_RECEIVED_SUBJECT_PREFIX = "application received";
 
 /**
  * Has an email of THIS variant already been recorded for this lead? One per lead
@@ -186,13 +303,27 @@ const APP_COMPLETE_SUBJECT_PREFIX = "we've received your application";
  * let a re-submit re-send. channel='email' + the distinctive subject prefix is
  * enough.
  */
+/**
+ * Three outcomes, deliberately NOT a boolean.
+ *
+ * `skipped_already_sent` and `skipped_check_failed` both stop the send, but they
+ * are not the same event and must not look the same to an operator. The first is
+ * the system working (one email per lead per variant). The second is a merchant
+ * who will never receive their receipt, and for a COMPLETED application there is
+ * no later submit to retry on — so if it is not recorded, it is simply lost.
+ * Collapsing them into `true` made a dropped receipt indistinguishable from a
+ * correctly-suppressed duplicate, visible only in a console line nobody reads.
+ * See [[feedback_redundancy_hides_failure]].
+ */
+type SendGate = "send" | "skipped_already_sent" | "skipped_check_failed";
+
 async function alreadySent(
   db: SupabaseClient,
   tenantId: string,
   leadId: string,
   source: string,
   subjectPrefix: string,
-): Promise<boolean> {
+): Promise<SendGate> {
   const res = await db
     .from("lead_interactions")
     .select("agent_source, subject")
@@ -200,13 +331,72 @@ async function alreadySent(
     .eq("lead_id", leadId)
     .eq("channel", "email")
     .limit(50);
-  if (res.error) return false; // can't prove a prior send — let it through (send_gateway's own reservation dedup is the backstop)
-  return (res.data ?? []).some(
+  if (res.error) {
+    console.error("[forms.handoff] idempotency check failed - skipping send (fail-closed)", {
+      lead_id: leadId,
+      source,
+      error: res.error.message,
+    });
+    return "skipped_check_failed";
+  }
+  const hit = (res.data ?? []).some(
     (r) =>
-      r.agent_source === source ||
-      (typeof r.subject === "string" &&
-        r.subject.trim().toLowerCase().startsWith(subjectPrefix)),
+      r.agent_source !== "form_send_reservation" &&
+      (r.agent_source === source ||
+        (typeof r.subject === "string" &&
+          r.subject.trim().toLowerCase().startsWith(subjectPrefix))),
   );
+  return hit ? "skipped_already_sent" : "send";
+}
+
+/**
+ * Record a receipt that was suppressed because we could not PROVE it had not
+ * already gone out. Best-effort by necessity: the read that failed and this
+ * write share a backend, so this can fail too — but a row that lands turns an
+ * invisible drop into a `status: "failed"` entry on the lead's timeline, in the
+ * same place every other send failure appears.
+ *
+ * Stamped with `agent_source: source` like every other failure marker here, so
+ * it also suppresses a duplicate on any subsequent attempt. The subject is
+ * deliberately NOT the variant's real subject — it must never satisfy the
+ * subject-prefix arm of the idempotency check for a DIFFERENT variant.
+ */
+async function logIdempotencyCheckFailure(
+  db: SupabaseClient,
+  form: { tenant_id: string },
+  leadId: string,
+  source: string,
+  toEmail: string,
+  ccEmail: string | null,
+): Promise<void> {
+  try {
+    await db.from("lead_interactions").insert({
+      tenant_id: form.tenant_id,
+      lead_id: leadId,
+      type: "email_queued",
+      channel: "email",
+      direction: "outbound",
+      agent_source: source,
+      subject: `(not sent) ${source} - could not verify prior send`,
+      content: "",
+      content_preview: "",
+      to_email: toEmail,
+      metadata: {
+        status: "failed",
+        sent_at: null,
+        send_error: "idempotency_check_failed",
+        cc_email: ccEmail,
+        intent: "transactional",
+        needs_operator_review: true,
+      },
+    });
+  } catch (err) {
+    console.error("[forms.handoff] could not record the suppressed send", {
+      lead_id: leadId,
+      source,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
 }
 
 /** Resolved recipient + tenant + signer context shared by both senders. */
@@ -215,7 +405,7 @@ type HandoffContext = {
   toName: string | null;
   tenant: { slug: string; custom_fields: Record<string, unknown> | null };
   brandLabel: string;
-  brandSlug: string | undefined;
+  brandSlug: BrandKey | undefined;
   signer: SignerCtx;
   ccEmail: string | null;
 };
@@ -286,7 +476,11 @@ async function loadHandoffContext(
     typeof tenant.custom_fields?.brand === "string" ? (tenant.custom_fields.brand as string) : null;
   const brandLabel = brandFromCustom || tenant.name || "SunBiz Funding";
   // send_gateway's `brand` key is the routing slug (sunbiz / oasis), not the label.
-  const brandSlug = tenant.slug === "submissions" ? "sunbiz" : tenant.slug || undefined;
+  const brandSlug: BrandKey | undefined = tenant.slug === "submissions"
+    ? "sunbiz"
+    : tenant.slug === "bluerise"
+      ? "bluerise"
+      : undefined;
 
   const toName =
     (typeof leadData.contact_name === "string" && leadData.contact_name) ||
@@ -350,7 +544,16 @@ export async function maybeSendNextStepsEmail(input: MaybeSendNextStepsInput): P
     const { db, form, link, payload, origin } = input;
     const ctx = await loadHandoffContext(db, form, link, payload);
     if (!ctx) return;
-    if (await alreadySent(db, form.tenant_id, link.lead_id, NEXT_STEPS_SOURCE, NEXT_STEPS_SUBJECT_PREFIX)) return;
+    const nextStepsGate = await alreadySent(
+      db, form.tenant_id, link.lead_id, NEXT_STEPS_SOURCE, NEXT_STEPS_SUBJECT_PREFIX,
+    );
+    if (nextStepsGate === "skipped_check_failed") {
+      await logIdempotencyCheckFailure(
+        db, form, link.lead_id, NEXT_STEPS_SOURCE, ctx.toEmail, ctx.ccEmail,
+      );
+      return;
+    }
+    if (nextStepsGate === "skipped_already_sent") return;
 
     // CC 2026-06-22: form 1 points to form 2 ONLY (sequential funnel). The
     // bank-statement link is sent later, by maybeSendApplicationCompleteEmail.
@@ -381,6 +584,9 @@ export async function maybeSendNextStepsEmail(input: MaybeSendNextStepsInput): P
     ].join("\n");
 
     const result = await sendViaBridge({
+      db,
+      source: NEXT_STEPS_SOURCE,
+      tenantId: form.tenant_id,
       tenant: ctx.tenant, to: ctx.toEmail, subject, body, brand: ctx.brandSlug,
       leadId: link.lead_id, signer: ctx.signer, cc: ctx.ccEmail,
     });
@@ -408,7 +614,16 @@ export async function maybeSendApplicationCompleteEmail(input: MaybeSendNextStep
     const { db, form, link, payload, origin } = input;
     const ctx = await loadHandoffContext(db, form, link, payload);
     if (!ctx) return;
-    if (await alreadySent(db, form.tenant_id, link.lead_id, APP_COMPLETE_SOURCE, APP_COMPLETE_SUBJECT_PREFIX)) return;
+    const appCompleteGate = await alreadySent(
+      db, form.tenant_id, link.lead_id, APP_COMPLETE_SOURCE, APP_COMPLETE_SUBJECT_PREFIX,
+    );
+    if (appCompleteGate === "skipped_check_failed") {
+      await logIdempotencyCheckFailure(
+        db, form, link.lead_id, APP_COMPLETE_SOURCE, ctx.toEmail, ctx.ccEmail,
+      );
+      return;
+    }
+    if (appCompleteGate === "skipped_already_sent") return;
 
     const bankUrl = await mintFormLinkBySlug(
       origin, form.tenant_id, link.tenant, link.lead_id, "bank-statement-upload",
@@ -437,6 +652,9 @@ export async function maybeSendApplicationCompleteEmail(input: MaybeSendNextStep
     ].join("\n");
 
     const result = await sendViaBridge({
+      db,
+      source: APP_COMPLETE_SOURCE,
+      tenantId: form.tenant_id,
       tenant: ctx.tenant, to: ctx.toEmail, subject, body, brand: ctx.brandSlug,
       leadId: link.lead_id, signer: ctx.signer, cc: ctx.ccEmail,
     });
@@ -449,6 +667,89 @@ export async function maybeSendApplicationCompleteEmail(input: MaybeSendNextStep
   } catch (err) {
     console.error("[forms.app_complete] threw", {
       lead_id: input.link.lead_id, error: err instanceof Error ? err.message : String(err),
+    });
+  }
+}
+
+/**
+ * Final full-application receipt. Unlike the legacy app-complete handoff above,
+ * this fires for the current form that already collects bank statements in-flow.
+ * It confirms receipt to the merchant and CCs the authoritatively assigned rep.
+ */
+export async function maybeSendApplicationReceivedEmail(input: MaybeSendNextStepsInput): Promise<void> {
+  try {
+    const { db, form, link, payload } = input;
+    const ctx = await loadHandoffContext(db, form, link, payload);
+    if (!ctx) return;
+    // This is the variant with no second chance: the application is COMPLETE, so
+    // there is no later submit to retry on. A drop here is permanent.
+    const receivedGate = await alreadySent(
+      db,
+      form.tenant_id,
+      link.lead_id,
+      APPLICATION_RECEIVED_SOURCE,
+      APPLICATION_RECEIVED_SUBJECT_PREFIX,
+    );
+    if (receivedGate === "skipped_check_failed") {
+      await logIdempotencyCheckFailure(
+        db, form, link.lead_id, APPLICATION_RECEIVED_SOURCE, ctx.toEmail, ctx.ccEmail,
+      );
+      return;
+    }
+    if (receivedGate === "skipped_already_sent") return;
+
+    const greeting = ctx.toName && ctx.toName.trim()
+      ? `Hi ${ctx.toName.trim().split(/\s+/)[0]},`
+      : "Hi there,";
+    const subject = `Application received - ${ctx.brandLabel}`;
+    const body = [
+      greeting,
+      "",
+      `We've received your completed application with ${ctx.brandLabel}.`,
+      "",
+      "Our team will review the information and bank statements you submitted. We'll contact you if anything else is needed and will keep you updated on next steps.",
+      "",
+      "Reply to this email if you have any questions.",
+      "",
+      `- ${ctx.signer.name}`,
+      ctx.brandLabel,
+    ].join("\n");
+
+    const result = await sendViaBridge({
+      db,
+      source: APPLICATION_RECEIVED_SOURCE,
+      tenantId: form.tenant_id,
+      tenant: ctx.tenant,
+      to: ctx.toEmail,
+      subject,
+      body,
+      brand: ctx.brandSlug,
+      leadId: link.lead_id,
+      signer: ctx.signer,
+      cc: ctx.ccEmail,
+    });
+    if (!result.sent) {
+      await logFailureMarker(
+        db,
+        form,
+        link.lead_id,
+        APPLICATION_RECEIVED_SOURCE,
+        subject,
+        body,
+        ctx.toEmail,
+        ctx.ccEmail,
+        result.reason,
+        { application_received: true },
+      );
+      console.error("[forms.application_received] send did not fire", {
+        lead_id: link.lead_id,
+        reason: result.reason,
+      });
+    }
+  } catch (err) {
+    console.error("[forms.application_received] threw", {
+      lead_id: input.link.lead_id,
+      error: err instanceof Error ? err.message : String(err),
     });
   }
 }

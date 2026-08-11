@@ -21,6 +21,11 @@ import { getServiceSupabase } from "@/lib/supabase-server";
 import { resolveSessionContext } from "@/lib/api-auth";
 import { resolveSignerForOperator } from "@/lib/config/agents";
 import { ensureApplicationThreadsWatermarked } from "@/lib/lead-documents";
+import {
+  physicalSendFailed,
+  dispatchFailureReason,
+  recordDispatchFailure,
+} from "@/lib/lenders/shop-out-outcome";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -122,18 +127,28 @@ export async function POST(
       }
     }
     const sentCount = results.filter((result) => result.ok).length;
-    return NextResponse.json({
-      ok: sentCount === results.length,
-      identity: "funmate",
-      recovered: sentCount,
-      physical_send: {
-        status:
-          sentCount === results.length ? "sent" : sentCount > 0 ? "partial" : "error",
-        sent_count: sentCount,
-        failed_count: results.length - sentCount,
+    const fmStatus =
+      sentCount === results.length ? "sent" : sentCount > 0 ? "partial" : "error";
+    // The FunMate batch returns here, before the shared outcome handler, so it
+    // needs the contract applied explicitly or the identity silently opts out
+    // of it. 502 ONLY when nothing sent: a partial batch put real packages in
+    // front of real lenders, and the per-thread `results` carry the rest.
+    // (Codex review, 2026-08-11.)
+    return NextResponse.json(
+      {
+        ok: sentCount === results.length,
+        ...(fmStatus === "error" ? { error: "physical_send_failed" } : {}),
+        identity: "funmate",
+        recovered: sentCount,
+        physical_send: {
+          status: fmStatus,
+          sent_count: sentCount,
+          failed_count: results.length - sentCount,
+        },
+        results,
       },
-      results,
-    });
+      { status: fmStatus === "error" && results.length > 0 ? 502 : 200 },
+    );
   }
 
   // Flip every 'error' thread on this application+tenant back to 'pending'.
@@ -229,6 +244,47 @@ export async function POST(
       status: "error",
       message: e instanceof Error ? e.message : "retry-all auto-trigger threw",
     };
+  }
+
+  // Retry is where an operator goes AFTER a failure, so reporting a second
+  // failure as {ok:true} is worse here than on the initial send: it converts
+  // "the fix did not work" into "it worked this time", and the deal stops
+  // being chased. Same contract as the shop-out route — stamp the row, then
+  // 502. See lib/lenders/shop-out-outcome.ts.
+  if (physicalSendFailed(physicalSend)) {
+    const reason = dispatchFailureReason(physicalSend);
+    const stamp = await recordDispatchFailure({
+      tenant_id: tenantId,
+      application_id: applicationId,
+      reason,
+      // Always "sunbiz" here: the FunMate batch returns above, and tsc proves
+      // it — narrowing emailIdentity to "sunbiz" at this point made a ternary
+      // on "funmate" a type error. Stated rather than left to the default,
+      // because this scope is what keeps a SunBiz failure from marking
+      // unattempted FunMate work as failed.
+      email_identity: "sunbiz",
+    });
+    if (!stamp.ok) {
+      console.error("[retry-all] could not record dispatch failure on threads", {
+        applicationId,
+        reason,
+        error: stamp.error,
+      });
+    }
+    return NextResponse.json(
+      {
+        ok: false,
+        error: "physical_send_failed",
+        message:
+          "Retry did not go out. Nothing reached a lender — the send path is still failing.",
+        recovered,
+        threads_marked: stamp.stamped,
+        physical_send: physicalSend,
+        watermark_degraded: wmGuard.failures.length > 0,
+        watermark_failures: wmGuard.failures,
+      },
+      { status: 502 },
+    );
   }
 
   return NextResponse.json({

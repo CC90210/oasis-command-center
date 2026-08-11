@@ -79,6 +79,89 @@ assert.equal(evaluate("x", drop, 0, [0, 0, 0, 0, 0, 0]).verdict, "ok");
   assert.equal(r.verdict, "failing");
 }
 
+// ── Shopping out, 2026-08-06 → 2026-08-11 ──────────────────────────────────
+// Physically dead for five days while every monitor read green, because not one
+// check watched the lender side. The numbers below are the REAL production
+// counts measured on 2026-08-11 during the audit, so these assertions record an
+// outage that happened rather than one that seemed plausible.
+{
+  // Six lender packages queued at 14:38Z, the dispatch failed, and the rows sat
+  // at pending with last_error NULL. Measured: 6.
+  const r = evaluate("shopout.threads_stuck_pending", { kind: "must_be_zero" }, 6, []);
+  assert.equal(r.verdict, "failing", "six deals stuck unsent MUST page");
+}
+{
+  // The same check on a healthy system: a queue that drains is not an alert.
+  const r = evaluate("shopout.threads_stuck_pending", { kind: "must_be_zero" }, 0, []);
+  assert.equal(r.verdict, "ok", "an empty pending queue must not alert");
+}
+{
+  // The reply side. Note what is NOT asserted here: "threads at 'sent' with no
+  // movement for 3 days". That was the first draft and it was wrong — a lender
+  // that has not replied leaves its thread at 'sent' by design, and 898 rows
+  // sit at 'no_response' because that is the normal end state. A 3-day window
+  // pages on every quiet lender. The invariant that cannot be produced by
+  // lender behaviour is the 10-day SLA sweep failing to retire a thread.
+  // Measured on 2026-08-11: 0, i.e. green, no false alarm on arrival.
+  const r = evaluate("shopout.sla_sweep_stalled", { kind: "must_be_zero" }, 0, []);
+  assert.equal(r.verdict, "ok", "quiet lenders must not page");
+}
+{
+  // And it fires when the sweep genuinely stalls.
+  const r = evaluate("shopout.sla_sweep_stalled", { kind: "must_be_zero" }, 12, []);
+  assert.equal(r.verdict, "failing", "a stalled SLA sweep MUST page");
+}
+{
+  // sent_without_proof must be GREEN on the current fleet. This is the
+  // false-alarm guard, and it took two rounds to get right because the two
+  // send paths write inverse receipts:
+  //
+  //   keyed on gmail_thread_id alone      -> 55 false alarms (every sunbiz send)
+  //   keyed on send_interaction_id alone  -> false alarms on every funmate send
+  //   requiring that SOME receipt exists  -> 0
+  //
+  // All three numbers measured against production on 2026-08-11. A monitor
+  // whose first act is a false alarm is one people learn to ignore.
+  const r = evaluate("shopout.sent_without_proof", { kind: "must_be_zero" }, 0, []);
+  assert.equal(r.verdict, "ok", "the receipt check must be green on today's data");
+}
+{
+  // And it must still fire when a status is moved with no send behind it.
+  const r = evaluate("shopout.sent_without_proof", { kind: "must_be_zero" }, 3, []);
+  assert.equal(r.verdict, "failing");
+}
+{
+  // The checks must be registered, or they cannot run. Guards a merge that
+  // keeps these tests and drops the checks.
+  const src = readFileSync("lib/health/drip-checks.ts", "utf8");
+  for (const id of [
+    "shopout.threads_stuck_pending",
+    "shopout.sent_without_proof",
+    "shopout.sla_sweep_stalled",
+  ]) {
+    assert.ok(src.includes(`id: "${id}"`), `${id} must be registered in DRIP_CHECKS`);
+  }
+  // Three column choices are load-bearing, and all three are exactly the kind a
+  // later pass "corrects" back to the obvious-looking wrong one.
+  // The receipt check must require that BOTH receipt columns are absent.
+  // Either one alone false-alarms on 100% of the other send path's traffic:
+  // sunbiz writes send_interaction_id and never gmail_thread_id, funmate does
+  // the exact inverse.
+  assert.ok(
+    /\.is\("send_interaction_id", null\)\s*[\r\n]+\s*\.is\("gmail_thread_id", null\)/.test(src),
+    "sent_without_proof must require BOTH receipts absent — either alone breaks one send path",
+  );
+  assert.ok(
+    !/eq\("status", "pending"\)\s*\n?\s*\.lt\("created_at"/.test(src),
+    "stuck_pending must measure from updated_at — retry resets status but not created_at",
+  );
+  assert.ok(
+    /\.lt\("sent_at", iso\(endMs - 14 \* DAY\)\)/.test(src),
+    "the reply-side check must key on the SLA sweep invariant (sent_at past the 14-day grace), " +
+      "not on how long a lender has been quiet",
+  );
+}
+
 // ── worstVerdict ───────────────────────────────────────────────────────────
 assert.equal(worstVerdict([]), "ok");
 assert.equal(worstVerdict([{ verdict: "ok" }, { verdict: "degraded" }] as never), "degraded");

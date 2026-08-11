@@ -79,6 +79,8 @@ export type SendPayload = {
    * by tests/shopout-brand-lock.test.ts, not by convention.
    */
   brand?: BrandKey;
+  /** Disable the built-in 60s retry for request-bound callers with a queue fallback. */
+  retryTransient?: boolean;
 };
 
 export type SendResult =
@@ -222,7 +224,7 @@ export async function sendGmail(payload: SendPayload): Promise<SendResult> {
 
   // Transient failure → wait 60s + retry once (mirrors Adon spec's 429
   // semantics; Gmail SMTP returns 4.x.x rather than HTTP 429).
-  if (!attempt.ok && attempt.transient) {
+  if (!attempt.ok && attempt.transient && payload.retryTransient !== false) {
     await new Promise((resolve) => setTimeout(resolve, 60_000));
     attempt = await sendOnce(payload, generatedMessageId);
     if (!attempt.ok) {

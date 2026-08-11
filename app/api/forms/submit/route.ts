@@ -47,7 +47,11 @@ import { uploadLeadDocument, registerLeadDocument, classifyDocTypeByFilename } f
 import { dispatchLeadStageEvent } from "@/lib/lead-stage-dispatcher";
 import { resolvePublicForm } from "@/lib/forms/public-resolver";
 import { maybeQueueResumeEmail } from "@/lib/forms/maybe-queue-resume";
-import { maybeSendNextStepsEmail, maybeSendApplicationCompleteEmail } from "@/lib/forms/next-steps-email";
+import {
+  maybeSendNextStepsEmail,
+  maybeSendApplicationCompleteEmail,
+  maybeSendApplicationReceivedEmail,
+} from "@/lib/forms/next-steps-email";
 import { notifyOasisFunnelSubmission } from "@/lib/forms/oasis-funnel-notify";
 import { buildOasisLeadPatch } from "@/lib/forms/oasis-funnel-format";
 import { OASIS_FUNNEL_SLUG, OASIS_FUNNEL_TENANT_ID } from "@/lib/forms/oasis-funnel-seed";
@@ -1045,6 +1049,20 @@ export async function POST(req: NextRequest) {
   // is fully soft-fail. Gated to the full application's last step so the
   // interest + bank-statement forms don't trigger it.
   if (isLastStep && form.slug === "full-application") {
+    // Merchant receipt uses the submissions mailbox's encrypted Gmail App
+    // Password and CCs the assigned rep. This fires for the canonical modern
+    // form regardless of whether bank statements were collected in-flow.
+    if (fullApplicationCollectsDocuments) {
+      after(() =>
+        maybeSendApplicationReceivedEmail({
+          db,
+          form: { id: form.id, tenant_id: form.tenant_id, slug: form.slug },
+          link: { tenant: link.tenant, lead_id: link.lead_id },
+          payload,
+          origin: req.nextUrl.origin,
+        }),
+      );
+    }
     after(() =>
       maybeGenerateApplicationDocument({
         db,
