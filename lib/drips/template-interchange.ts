@@ -70,6 +70,28 @@ export function selectableTemplates(pool: PoolTemplate[], scope: InterchangeScop
     .sort((a, b) => b.weight - a.weight || a.id.localeCompare(b.id));
 }
 
+/**
+ * Which brand and stage a sequence speaks for, read off its trigger_filter.
+ *
+ * Here rather than in the view because the PATCH route has to reach the SAME
+ * verdict the UI did. Two copies of this derivation is how a server-side check
+ * ends up validating against a different scope than the operator was shown, and
+ * then refusing a swap that looked fine (or worse, allowing one that did not).
+ *
+ * An absent brand marker resolves to SunBiz, matching lib/drips/brand-routing's
+ * default: a cold lead mis-sent as SunBiz costs reputation on a domain that can
+ * absorb it, the reverse is a confusing first impression on one that cannot.
+ */
+export function brandFromTriggerFilter(filter: unknown): BrandKey {
+  const f = (filter || {}) as { brand?: unknown };
+  return String(f.brand ?? "").toLowerCase() === "bluerise" ? "bluerise" : "sunbiz";
+}
+
+export function stageFromTriggerFilter(filter: unknown): string {
+  const f = (filter || {}) as { to?: unknown };
+  return typeof f.to === "string" && f.to ? f.to : "";
+}
+
 export type InterchangeRequest = {
   sequenceId: string;
   stepIndex: number;

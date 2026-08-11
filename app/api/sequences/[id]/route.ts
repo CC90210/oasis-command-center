@@ -24,6 +24,12 @@ import {
   type DripStep,
 } from "@/lib/drips/types";
 import { guardSequenceSteps } from "@/lib/drips/edit-guard";
+import {
+  validateInterchange,
+  brandFromTriggerFilter,
+  stageFromTriggerFilter,
+} from "@/lib/drips/template-interchange";
+import { loadApprovedPoolOrThrow } from "@/lib/drips/template-pool-store";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -114,7 +120,7 @@ export async function PATCH(
   if (!priorRes.data) {
     return NextResponse.json({ ok: false, error: "not_found" }, { status: 404 });
   }
-  const prior = priorRes.data as { steps: unknown; name: string };
+  const prior = priorRes.data as { steps: unknown; name: string; trigger_filter?: unknown };
 
   if ("steps" in body) {
     let steps;
@@ -148,6 +154,65 @@ export async function PATCH(
       );
     }
     patch.steps = guarded.steps;
+
+    // A template interchange is validated HERE, against the pool as it is right
+    // now, before anything is written.
+    //
+    // The client filters the dropdown by (brand, stage, role), but the client
+    // is not the gate: a request can arrive directly, or from a tab opened
+    // before someone retired a template or changed the step's role. The
+    // executor scopes the pool with poolFor(brand, stage, role) before it
+    // resolves the pin, so a pin outside that scope is not an error at send
+    // time — it is silence. The save would return ok, the tab would show the
+    // chosen copy, and sampling would keep sending something else.
+    //
+    // Refusing the write is the only outcome that cannot lie. Fail closed: if
+    // the pool cannot be read, the swap does not go through.
+    const interchangeReq = (body as { interchange?: { step_index?: unknown; to_template_id?: unknown } }).interchange;
+    if (interchangeReq && interchangeReq.to_template_id) {
+      const stepIndex = Number(interchangeReq.step_index);
+      const step = Number.isInteger(stepIndex) ? guarded.steps[stepIndex] : undefined;
+      if (!step) {
+        return NextResponse.json(
+          { ok: false, error: "invalid_interchange", reason: `no step at index ${interchangeReq.step_index}` },
+          { status: 400 },
+        );
+      }
+      // The filter being saved wins over the persisted one, so a swap made in
+      // the same edit as a stage change is judged against the stage it will
+      // actually run under.
+      const filter = "trigger_filter" in patch ? patch.trigger_filter : prior.trigger_filter;
+      let pool;
+      try {
+        pool = await loadApprovedPoolOrThrow(db, tenantId);
+      } catch (err) {
+        return NextResponse.json(
+          {
+            ok: false,
+            error: "interchange_unverifiable",
+            reason: `could not read the template pool, so the swap cannot be confirmed: ${
+              err instanceof Error ? err.message : String(err)
+            }`,
+          },
+          { status: 503 },
+        );
+      }
+      const verdict = validateInterchange(pool, {
+        sequenceId: id,
+        stepIndex,
+        fromTemplateId: null,
+        toTemplateId: String(interchangeReq.to_template_id),
+        actorUserId: session.authUserId ?? "",
+        brand: brandFromTriggerFilter(filter),
+        stage: stageFromTriggerFilter(filter),
+        role: step.role,
+      });
+      if (!verdict.ok) {
+        // The validator's own words. "Rejected" alone is not something an
+        // operator can act on.
+        return NextResponse.json({ ok: false, error: "invalid_interchange", reason: verdict.reason }, { status: 400 });
+      }
+    }
   }
   if ("enabled" in body) patch.enabled = Boolean(body.enabled);
   if ("one_per_lead" in body) patch.one_per_lead = Boolean(body.one_per_lead);
