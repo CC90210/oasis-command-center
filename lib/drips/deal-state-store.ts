@@ -42,17 +42,32 @@ const LEAD_CHUNK = 100;
 export async function loadDealGates(
   db: Db,
   tenantId: string,
-  leadIds: string[],
-  /** lead id -> that lead's current `data.stage`. Required for the
-   *  "does the deal contradict the lead" test — without it a lead parked at
-   *  `declined` looks identical to one parked at `signed_application`, and the
-   *  gate would cancel the deliberate re-engagement drips. */
-  stageByLead?: Map<string, unknown>,
+  /**
+   * The leads themselves, not just their ids.
+   *
+   * `data.stage` is required for the "does the deal contradict the lead" test —
+   * without it a lead parked at `declined` looks identical to one parked at
+   * `signed_application`, and the gate would cancel the deliberate
+   * re-engagement drips.
+   *
+   * `data.application_id` is the OTHER half of the link. See below.
+   */
+  leads: Array<{ id: string; data: Record<string, unknown> | null }>,
 ): Promise<DealGateResult> {
   const gates = new Map<string, DealGate>();
-  if (leadIds.length === 0) return { ok: true, gates };
+  if (leads.length === 0) return { ok: true, gates };
 
   const byLead = new Map<string, DealRow[]>();
+  const push = (leadId: string, data: Record<string, unknown>, createdAt: string | null) => {
+    const list = byLead.get(leadId) || [];
+    list.push({ lead_id: leadId, status: data.status, stage: data.stage, created_at: createdAt });
+    byLead.set(leadId, list);
+  };
+
+  // ── Link direction 1: the application points at the lead (`data.lead_id`).
+  // What `promote-lead-to-application` writes, and how 589 of 1,053
+  // applications are linked today.
+  const leadIds = leads.map((l) => l.id);
   for (let i = 0; i < leadIds.length; i += LEAD_CHUNK) {
     const chunk = leadIds.slice(i, i + LEAD_CHUNK);
     const res = await db
@@ -71,13 +86,49 @@ export async function loadDealGates(
       const data = row.data || {};
       const leadId = typeof data.lead_id === "string" ? data.lead_id : "";
       if (!leadId) continue;
-      const list = byLead.get(leadId) || [];
-      list.push({ lead_id: leadId, status: data.status, stage: data.stage, created_at: row.created_at ?? null });
-      byLead.set(leadId, list);
+      push(leadId, data, row.created_at ?? null);
     }
   }
 
-  for (const [leadId, rows] of byLead) gates.set(leadId, dealGateFor(rows, stageByLead?.get(leadId)));
+  // ── Link direction 2: the LEAD points at the application
+  // (`data.application_id`), with no backlink on the application.
+  //
+  // A supported one-way shape — see app/api/leads/[id]/application-signature.
+  // Relying only on the backlink would let a legacy record read as "no
+  // application" and therefore OPEN, which for a suppression guard means
+  // emailing a funded merchant (Codex review P1, 2026-08-11). Measured that
+  // day: 506 leads carry application_id and all 506 of those applications DO
+  // carry the backlink, so this resolves nothing today — it closes the path
+  // before a legacy or hand-made row walks through it.
+  const reverse = new Map<string, string>(); // application id -> lead id
+  for (const lead of leads) {
+    const appId = (lead.data || {}).application_id;
+    if (typeof appId === "string" && appId.trim() && !byLead.has(lead.id)) {
+      reverse.set(appId.trim(), lead.id);
+    }
+  }
+  const appIds = [...reverse.keys()];
+  for (let i = 0; i < appIds.length; i += LEAD_CHUNK) {
+    const res = await db
+      .from("tenant_records")
+      .select("id, data, created_at")
+      .eq("tenant_id", tenantId)
+      .eq("entity_type", "application")
+      .in("id", appIds.slice(i, i + LEAD_CHUNK));
+    if (res.error) return { ok: false, error: res.error.message };
+    for (const row of (res.data || []) as Array<{
+      id: string;
+      data: Record<string, unknown> | null;
+      created_at?: string | null;
+    }>) {
+      const leadId = reverse.get(row.id);
+      if (!leadId) continue;
+      push(leadId, row.data || {}, row.created_at ?? null);
+    }
+  }
+
+  const stageByLead = new Map(leads.map((l) => [l.id, (l.data || {}).stage]));
+  for (const [leadId, rows] of byLead) gates.set(leadId, dealGateFor(rows, stageByLead.get(leadId)));
   return { ok: true, gates };
 }
 
@@ -86,9 +137,9 @@ export async function loadDealGate(
   db: Db,
   tenantId: string,
   leadId: string,
-  leadStage?: unknown,
+  leadData: Record<string, unknown> | null,
 ): Promise<{ ok: true; gate: DealGate } | { ok: false; error: string }> {
-  const res = await loadDealGates(db, tenantId, [leadId], new Map([[leadId, leadStage]]));
+  const res = await loadDealGates(db, tenantId, [{ id: leadId, data: leadData }]);
   if (!res.ok) return res;
   return { ok: true, gate: res.gates.get(leadId) ?? { open: true, reason: "no_application" } };
 }

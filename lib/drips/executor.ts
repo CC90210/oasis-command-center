@@ -1442,7 +1442,7 @@ async function processRow(
   // own lifecycle (it clears its flag on `funded`), and double-gating it here
   // would cancel rows its own manager intends to keep.
   if (seq.triggerStage) {
-    const gateRes = await loadDealGate(db, row.tenant_id, row.lead_id, data.stage);
+    const gateRes = await loadDealGate(db, row.tenant_id, row.lead_id, data);
     if (!gateRes.ok) {
       // RESCHEDULE, never cancel. A transient read failure must not be able to
       // permanently kill a live sequence — that would convert a database hiccup

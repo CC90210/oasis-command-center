@@ -82,6 +82,16 @@ assert.ok(
 assert.ok(enroller.includes("loadDealGates("), "the enroller must gate NEW enrolments on the deal's state");
 assert.ok(enroller.includes('noteSkip("deal_closed")'), "and record why a lead was skipped");
 assert.ok(executor.includes("loadDealGate("), "dispatch must re-check: a deal can close mid-sequence");
+// BOTH link directions. An application normally backlinks to its lead
+// (`data.lead_id`), but the lead may instead point forward
+// (`data.application_id`) with no backlink — a supported one-way shape. Reading
+// only the backlink lets such a record report "no application", which for a
+// suppression guard means OPEN, which means mailing a funded merchant.
+{
+  const store = read("lib/drips/deal-state-store.ts");
+  assert.ok(store.includes('.in("data->>lead_id"'), "must resolve applications that backlink the lead");
+  assert.ok(store.includes("application_id"), "and applications the LEAD points at");
+}
 assert.ok(executor.includes("deal_closed: application is"),
   "a cancelled row must name the status that closed it, or nobody can audit a silent stop");
 // The dispatch-time read must never CANCEL on a read failure — that would turn

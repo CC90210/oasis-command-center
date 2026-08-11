@@ -404,12 +404,7 @@ async function collectCandidates(
     // Every lead on this page is at `stage` by construction (the query filters
     // on it), so the gate's "does the deal contradict the lead" test compares
     // against the sequence's own trigger stage.
-    const gatesRes = await loadDealGates(
-      db,
-      seq.tenant_id,
-      pageIds,
-      new Map(pageIds.map((id) => [id, stage])),
-    );
+    const gatesRes = await loadDealGates(db, seq.tenant_id, pageLeads);
     if (!gatesRes.ok) {
       return { leads: out, skippedAlreadyRan, staticSkips, truncated: false, error: gatesRes.error };
     }
