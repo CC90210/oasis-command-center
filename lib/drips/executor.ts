@@ -51,6 +51,8 @@ import { routeOutbound, type ProviderAvailability } from "@/lib/routing/outbound
 import { loadProviderAvailability } from "@/lib/routing/provider-availability";
 import { openReceipt } from "@/lib/sms/delivery-receipts";
 import { loadBrandsForLeads } from "@/lib/drips/brand-store";
+import { loadDealGate } from "@/lib/drips/deal-state-store";
+import { brandForStage } from "@/lib/drips/brand-routing";
 import { poolFor, resolveCopy, type PoolTemplate } from "@/lib/drips/template-pool";
 import { loadApprovedPool } from "@/lib/drips/template-pool-store";
 import { wasShoppedRecently } from "@/lib/drips/enroller";
@@ -817,7 +819,13 @@ async function processSmsStep(
   // SMS copy comes from the same approved pool, scoped to this lead's brand and
   // stage. The brand map is email-keyed for the volume gate, so resolve it here
   // directly; absent means sunbiz, the pre-existing behaviour.
-  const smsBrand: BrandKey = run.brandByLead.get(row.lead_id) ?? "sunbiz";
+  // Stage decides the desk, and only falls back to the lead's stamped brand
+  // when the stage has no rule (see brandForStage). Applied to SMS as well as
+  // email so a merchant is never emailed by one company and texted by another —
+  // 10DLC registration is per brand and the mismatch is what gets numbers
+  // filtered.
+  const smsBrand: BrandKey =
+    brandForStage(data.stage) ?? run.brandByLead.get(row.lead_id) ?? "sunbiz";
 
   const copy = resolveStepCopy(step, row.lead_id, row.step_index, {
     brand: smsBrand,
@@ -1046,16 +1054,24 @@ async function processEmailStep(
     return markRescheduled(db, row, emailWait.toISOString(), `email_window (outside ${EMAIL_WIN_START}:00-${EMAIL_WIN_END}:00 ${EMAIL_WIN_TZ})`);
   }
 
-  // Which company is speaking to this merchant. Stamped on the lead at
-  // enrolment and read here, never derived at send time, so a lead cannot flip
-  // brand mid-sequence. Absent => sunbiz, the pre-existing behaviour.
+  // Which company is speaking to this merchant. The lead's STAGE decides first
+  // (Adon 2026-08-11: submissions@ carries viewed + signed, Bluerise carries
+  // the follow-ups tab); the brand stamped on the lead at enrolment is the
+  // fallback for stages that carry no rule. Absent both => sunbiz, the
+  // pre-existing behaviour.
+  //
+  // A lead therefore CAN change voice mid-lifecycle, where it changes desk.
+  // Within one sequence it cannot: a stage-triggered run is cancelled the
+  // moment the lead leaves its stage (the stage-recheck in processRow), so no
+  // merchant ever receives two steps of the same sequence from two companies.
   //
   // Resolved here, before BOTH the copy lookup and the volume gate: the copy
   // pool is scoped per brand, and the daily/hourly ceilings are per-brand
   // because each brand carries its own domain reputation. Gating both against
   // one shared pool would mean splitting across two domains bought no extra
   // throughput.
-  const brand: BrandKey = run.brandByLead.get(row.lead_id) ?? "sunbiz";
+  const brand: BrandKey =
+    brandForStage(data.stage) ?? run.brandByLead.get(row.lead_id) ?? "sunbiz";
 
   // Resolve the copy first so the app-link pre-flight can inspect it.
   // Drawn from the APPROVED pool for this brand+stage+role when one exists;
@@ -1396,6 +1412,37 @@ async function processRow(
   // applied at dispatch time.
   if (await wasShoppedRecently(db, row.tenant_id, row.lead_id, data)) {
     return markCancelled(db, row, "shopped_recently");
+  }
+
+  // DEAL-CLOSED recheck (Adon 2026-08-11: "it's sending it to funded deals").
+  // The same blind spot the shopped-out recheck above names, in its general
+  // form: the deal's real state lives on the APPLICATION's `status`, the drip
+  // triggers on the LEAD's `stage`, and nothing syncs them — so a merchant who
+  // funded, declined or died is still parked at `signed_application` and the
+  // stage-recheck above sees nothing wrong. Measured 2026-08-11: 291 of the 311
+  // leads in that stage were already-closed deals, and 4 emails had reached 3
+  // funded merchants.
+  //
+  // Only stage-triggered sequences are gated. A flag-triggered chase owns its
+  // own lifecycle (it clears its flag on `funded`), and double-gating it here
+  // would cancel rows its own manager intends to keep.
+  if (seq.triggerStage) {
+    const gateRes = await loadDealGate(db, row.tenant_id, row.lead_id, data.stage);
+    if (!gateRes.ok) {
+      // RESCHEDULE, never cancel. A transient read failure must not be able to
+      // permanently kill a live sequence — that would convert a database hiccup
+      // into silent lead loss, which is the failure mode this whole engine has
+      // been bitten by before.
+      return markRescheduled(
+        db,
+        row,
+        new Date(Date.now() + PAUSE_HOLD_MS).toISOString(),
+        `deal_state_unavailable: ${gateRes.error}`,
+      );
+    }
+    if (!gateRes.gate.open) {
+      return markCancelled(db, row, `deal_closed: application is ${gateRes.gate.status}`);
+    }
   }
 
   // Overlap suppression, the mirror of the flag-cancel above (Adon 2026-07-22):

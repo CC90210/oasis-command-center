@@ -101,6 +101,59 @@ export function otherBrand(b: BrandKey): BrandKey {
 }
 
 // ---------------------------------------------------------------------------
+// Stage → mailbox (Adon, 2026-08-11)
+//
+// "For the submissions email you will be sending out the viewed AND signed.
+//  The Bluerise email will be used for the follow-ups tab."
+//
+// This is a DIFFERENT question from the source-based assignment below, and it
+// wins. Source classification answers "which company does this merchant already
+// know"; this answers "which desk is speaking right now". A merchant in the
+// application funnel is mid-transaction with SunBiz submissions@ — the mailbox
+// their application, their signature request and their document links already
+// came from — and hearing the bank-statement chase from a second company would
+// read as a phishing attempt. Follow-ups are the re-engagement desk, and that
+// is Bluerise's job.
+//
+// CONSEQUENCE WORTH NAMING: because this keys on the CURRENT stage rather than
+// on a sticky per-lead stamp, a lead that moves follow_up -> viewed_application
+// changes voice. That is intended here (the desks are genuinely different) but
+// it does relax the "at most one switch per lead" guard below for these stages.
+// The guard still governs the source-based handoff for every other stage.
+//
+// Env-overridable so a stage can be moved between mailboxes without a deploy —
+// the Leads board's columns are operator-editable and a new one must not
+// require a release to route.
+// ---------------------------------------------------------------------------
+
+const BUILTIN_STAGE_BRAND: Record<string, BrandKey> = {
+  // The application funnel. One continuous transaction, one mailbox.
+  sent_application: "sunbiz",
+  viewed_application: "sunbiz",
+  signed_application: "sunbiz",
+  // The follow-ups desk.
+  follow_up: "bluerise",
+};
+
+/**
+ * The mailbox this stage speaks from, or null when the stage has no rule and
+ * the source-based assignment should decide.
+ *
+ * Returns null rather than a default on purpose: "no opinion" and "SunBiz" are
+ * different answers, and collapsing them here would silently override the
+ * stamped brand for every stage that is not listed.
+ */
+export function brandForStage(stage: unknown): BrandKey | null {
+  const s = normalize(stage);
+  if (!s) return null;
+  // Operator overrides win, and are checked before the built-ins so a stage can
+  // be MOVED rather than only added.
+  if (envList("DRIP_BLUERISE_STAGES").includes(s)) return "bluerise";
+  if (envList("DRIP_SUNBIZ_STAGES").includes(s)) return "sunbiz";
+  return BUILTIN_STAGE_BRAND[s] ?? null;
+}
+
+// ---------------------------------------------------------------------------
 // Initial assignment
 // ---------------------------------------------------------------------------
 

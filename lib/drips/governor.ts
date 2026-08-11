@@ -56,11 +56,32 @@ function intEnv(name: string, def: number): number {
  *  6-week warm-up these are raised via env: 25 -> 40 -> 60 -> 90 -> 120 -> 150. */
 /** Per-brand ceilings. Each brand carries its own domain reputation, so each
  *  gets its own ceiling, and a per-brand override wins over the shared one.
- *  Unset resolves to the shared value, which is today's behaviour exactly. */
+ *
+ *  A BRAND THAT HAS NEVER SENT DOES NOT INHERIT A WARMED BRAND'S CEILING.
+ *  bluerisebusinesscapital.com has no sending history, and the shared default
+ *  of 150/day is the END of SunBiz's six-week warm-up, not its start. Routing
+ *  the follow-ups desk to Bluerise (brand-routing.ts, 2026-08-11) points 512
+ *  leads at that domain, so falling through to the shared value would open a
+ *  cold domain at full throttle — the single most reliable way to land the new
+ *  brand in spam and take the shared IP reputation down with it.
+ *
+ *  So Bluerise carries its OWN default at the start of the ramp, and is raised
+ *  through DRIPS_EMAIL_DAILY_CAP_BLUERISE (25 -> 40 -> 60 -> 90 -> 120 -> 150)
+ *  on the same schedule SunBiz already walked. An explicit env override still
+ *  wins, so this delays nothing that an operator has decided. */
+const WARMUP_START_DAILY = 25;
+const WARMUP_START_HOURLY = 10;
+
 export const emailDailyCap = (brand: BrandKey = "sunbiz") =>
-  intEnv(`DRIPS_EMAIL_DAILY_CAP_${brand.toUpperCase()}`, intEnv("DRIPS_EMAIL_DAILY_CAP", 150));
+  intEnv(
+    `DRIPS_EMAIL_DAILY_CAP_${brand.toUpperCase()}`,
+    brand === "bluerise" ? WARMUP_START_DAILY : intEnv("DRIPS_EMAIL_DAILY_CAP", 150),
+  );
 export const emailHourlyCap = (brand: BrandKey = "sunbiz") =>
-  intEnv(`DRIPS_EMAIL_HOURLY_CAP_${brand.toUpperCase()}`, intEnv("DRIPS_EMAIL_HOURLY_CAP", 25));
+  intEnv(
+    `DRIPS_EMAIL_HOURLY_CAP_${brand.toUpperCase()}`,
+    brand === "bluerise" ? WARMUP_START_HOURLY : intEnv("DRIPS_EMAIL_HOURLY_CAP", 25),
+  );
 /** Brand-BLIND on purpose: this cap is about how mail feels to one human, and
  *  two emails in a week is two emails whichever company sent them. */
 export const perLeadWeeklyEmailCap = () => intEnv("DRIPS_PER_LEAD_WEEKLY_EMAIL_CAP", 2);
