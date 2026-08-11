@@ -24,6 +24,13 @@ import {
   type DripStep,
 } from "@/lib/drips/types";
 import { guardSequenceSteps } from "@/lib/drips/edit-guard";
+import {
+  validateInterchange,
+  brandFromTriggerFilter,
+  stageFromTriggerFilter,
+  diffPins,
+} from "@/lib/drips/template-interchange";
+import { loadApprovedPoolOrThrow } from "@/lib/drips/template-pool-store";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -114,7 +121,13 @@ export async function PATCH(
   if (!priorRes.data) {
     return NextResponse.json({ ok: false, error: "not_found" }, { status: 404 });
   }
-  const prior = priorRes.data as { steps: unknown; name: string };
+  const prior = priorRes.data as { steps: unknown; name: string; trigger_filter?: unknown };
+
+  // Every template pin this request changes, hoisted so the audit below records
+  // what was actually written rather than what the client said it was doing.
+  // `to: null` is an UNPIN — the step goes back to pool sampling, which is a
+  // change to live copy and gets recorded like any other.
+  let pinChanges: Array<{ index: number; from: string | null; to: string | null; role?: string }> = [];
 
   if ("steps" in body) {
     let steps;
@@ -148,6 +161,86 @@ export async function PATCH(
       );
     }
     patch.steps = guarded.steps;
+
+    // Template pins are validated HERE, against the pool as it is right now,
+    // before anything is written.
+    //
+    // WHAT IS CHECKED IS WHAT PERSISTS. Not the `interchange` field the client
+    // sends — that is advisory, it names the actor for the audit, and a request
+    // that omits it or disagrees with its own steps would sail straight past a
+    // gate that trusted it. The check runs over `steps[i].template_id`, the
+    // thing the executor will actually read.
+    //
+    // WHY IT MATTERS. The executor scopes the pool with
+    // poolFor(brand, stage, role) before resolveCopy sees the pin, so a pin
+    // outside that scope is not an error at send time — it is silence. The save
+    // returns ok, the tab shows the chosen copy, and sampling keeps deciding
+    // what merchants actually get. Refusing the write is the only outcome that
+    // cannot lie.
+    //
+    // ONLY CHANGED PINS. A pin that was already there and has since gone
+    // unreachable (its template retired) must not block an unrelated edit to
+    // another step; the Drips tab flags that case on the step instead.
+    //
+    // UNPINNING IS A CHANGE TOO. Removing a pin hands the step back to pool
+    // sampling, which changes what merchants receive just as much as adding
+    // one. There is nothing to VALIDATE about it — sampling is always in
+    // scope — but it must still be recorded, or an edit that silently altered
+    // live copy leaves no trace.
+    //
+    // diffPins compares at sequence level, not index by index, because the
+    // editor supports reordering: position is not identity, and an index-wise
+    // diff would invent unpins every time a step moved.
+    const pinDiff = diffPins(priorSteps, guarded.steps);
+    pinChanges = pinDiff.map(({ index, from, to, role }) => ({ index, from, to, role }));
+
+    // Only a NEW pin needs checking against the pool.
+    const changedPins = pinDiff.filter((c): c is typeof c & { to: string } => Boolean(c.to));
+
+    if (changedPins.length > 0) {
+      // The filter being saved wins over the persisted one, so a swap made in
+      // the same edit as a stage change is judged against the stage it will
+      // actually run under.
+      const filter = "trigger_filter" in patch ? patch.trigger_filter : prior.trigger_filter;
+      let pool;
+      try {
+        // Fail closed, and say WHICH failure it was: an empty pool from a
+        // broken read would otherwise be reported as "template not found",
+        // sending an operator to fix a template that was never the problem.
+        pool = await loadApprovedPoolOrThrow(db, tenantId);
+      } catch (err) {
+        return NextResponse.json(
+          {
+            ok: false,
+            error: "interchange_unverifiable",
+            reason: `could not read the template pool, so the swap cannot be confirmed: ${
+              err instanceof Error ? err.message : String(err)
+            }`,
+          },
+          { status: 503 },
+        );
+      }
+      for (const { index, from, to, role } of changedPins) {
+        const verdict = validateInterchange(pool, {
+          sequenceId: id,
+          stepIndex: index,
+          fromTemplateId: from,
+          toTemplateId: to,
+          actorUserId: session.authUserId ?? "",
+          brand: brandFromTriggerFilter(filter),
+          stage: stageFromTriggerFilter(filter),
+          role,
+        });
+        if (!verdict.ok) {
+          // The validator's own words, and which step. "Rejected" alone is not
+          // something an operator can act on.
+          return NextResponse.json(
+            { ok: false, error: "invalid_interchange", step: index + 1, reason: verdict.reason },
+            { status: 400 },
+          );
+        }
+      }
+    }
   }
   if ("enabled" in body) patch.enabled = Boolean(body.enabled);
   if ("one_per_lead" in body) patch.one_per_lead = Boolean(body.one_per_lead);
@@ -188,6 +281,56 @@ export async function PATCH(
     });
     historySaved = !hist.error;
   }
+
+  // A template interchange is a deliberate swap of what merchants receive, so
+  // it gets its own attributable record rather than hiding inside a generic
+  // "steps changed" version. The version snapshot says WHAT the copy was; this
+  // says WHO swapped which template into which step, which is the question
+  // asked after a merchant complains about wording.
+  // Driven by pinChanges — the pins that were actually persisted — not by the
+  // client's `interchange` field. An audit built from request metadata records
+  // what the caller SAID it did, which is the one thing not worth keeping: a
+  // direct API swap would leave no trace at all, and that is exactly the swap
+  // worth being able to reconstruct.
+  for (const change of pinChanges) {
+    // Best-effort, exactly like the version write above: the save already
+    // happened and failing the request now would misreport it as rejected.
+    //
+    // THE SCHEMA IS event_type / publisher_agent / severity / payload /
+    // correlation_id (see lib/action-log.ts). The columns this used to write —
+    // tenant_id, source, level, event, detail — do not exist on agent_events,
+    // so every audit write failed. Silently, twice over: PostgREST RESOLVES with
+    // { error } on a failed insert, and a rejection-only handler never sees it.
+    // An audit trail that reports success and stores nothing is worse than
+    // none, because it is the one you go looking for after a merchant complains.
+    const ev = await db.from("agent_events").insert({
+      event_type: "template_interchange",
+      publisher_agent: "sequences",
+      severity: "info",
+      payload: {
+        action: "template_interchange",
+        tenant_id: tenantId,
+        sequence_id: id,
+        step_index: change.index,
+        from: change.from,
+        to: change.to,
+        // Present when the pin still points at the same template but the step's
+        // role moved, which changes which templates may substitute for it.
+        // Without this an unchanged from/to reads as a no-op record.
+        role: change.role ?? null,
+        actor: session.authUserId ?? null,
+      },
+      correlation_id: tenantId,
+    });
+    if (ev.error) {
+      console.error("[sequences.interchange_audit.failed]", {
+        sequence_id: id,
+        step_index: change.index,
+        error: ev.error.message,
+      });
+    }
+  }
+
   return NextResponse.json({ ok: true, sequence: data, ...(historySaved === undefined ? {} : { historySaved }) });
 }
 

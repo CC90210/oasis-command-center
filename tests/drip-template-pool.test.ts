@@ -191,4 +191,70 @@ assert.equal(
   );
 }
 
+// ---------------------------------------------------------------------------
+// A PIN beats sampling — the Drips tab interchange
+// ---------------------------------------------------------------------------
+// Codex review 2026-08-11 caught this: the tab wrote the chosen template's text
+// onto the step, but resolveCopy samples the pool BEFORE it ever reads step
+// copy, so with any approved pool present the swap changed nothing while the UI
+// reported success. A swap that silently does not swap is worse than no feature.
+{
+  const step = { subject: "step subj", body: "step body", body_html: "<p>OLD TEMPLATE HTML</p>" };
+  const wide = [
+    mk({ id: "p1", subject: "one", bodyText: "body one" }),
+    mk({ id: "p2", subject: "two", bodyText: "body two" }),
+    mk({ id: "p3", subject: "three", bodyText: "body three" }),
+  ];
+
+  // For each lead, pin to a template the hash would NOT have chosen, so every
+  // case is a genuine override rather than one that agrees by luck. Pinning to
+  // whatever sampling already picked would pass against the old broken code.
+  for (const lead of ["lead-1", "lead-2", "lead-3", "lead-77"]) {
+    const natural = resolveCopy(step, lead, 0, wide).templateId;
+    const other = wide.find((t) => t.id !== natural);
+    assert.ok(other, "fixture must offer an alternative to sampling");
+    const got = resolveCopy({ ...step, template_id: other.id }, lead, 0, wide);
+    assert.notEqual(other.id, natural, `${lead} must be pinned AWAY from the sampled pick`);
+    assert.equal(got.templateId, other.id, `pin must win for ${lead}`);
+    assert.equal(got.body, other.bodyText);
+    assert.equal(got.subject, other.subject);
+  }
+
+  // Stale HTML from the PREVIOUS template must be dropped. Keeping it sends
+  // HTML-capable recipients the old copy while the text part carries the new —
+  // the one outcome worse than not swapping at all.
+  assert.equal(resolveCopy({ ...step, template_id: "p1" }, "lead-1", 0, wide).bodyHtml, undefined);
+
+  // A pin to something no longer sendable must NOT send it, and must not
+  // dead-end either: retiring a template is how copy gets withdrawn.
+  const retired = resolveCopy({ ...step, template_id: "gone" }, "lead-1", 0, [
+    mk({ id: "gone", status: "retired", bodyText: "withdrawn copy" }),
+    mk({ id: "live", bodyText: "live copy" }),
+  ]);
+  assert.equal(retired.body, "live copy", "a pin to retired copy falls back to sampling");
+  assert.notEqual(retired.templateId, "gone");
+
+  // Soft retire (weight 0) is a retire.
+  const zeroed = resolveCopy({ ...step, template_id: "z" }, "lead-1", 0, [
+    mk({ id: "z", weight: 0, bodyText: "zeroed copy" }),
+    mk({ id: "live", bodyText: "live copy" }),
+  ]);
+  assert.notEqual(zeroed.templateId, "z", "weight 0 is a soft retire; a pin cannot resurrect it");
+
+  // An APPROVED template with no copy is not sendable either. Sampling has
+  // always rejected it; the pin path re-implemented the check and left this one
+  // condition out, so a pin would have sent a merchant a blank message.
+  const empty = resolveCopy({ ...step, template_id: "blank" }, "lead-1", 0, [
+    mk({ id: "blank", bodyText: "   " }),
+    mk({ id: "live", bodyText: "live copy" }),
+  ]);
+  assert.equal(empty.body, "live copy", "a pin to empty approved copy must not send an empty message");
+  assert.notEqual(empty.templateId, "blank");
+
+  // And a pin can never smuggle a draft past the approval gate.
+  const drafted = resolveCopy({ ...step, template_id: "d" }, "lead-1", 0, [mk({ id: "d", status: "draft", bodyText: "unreviewed" })]);
+  assert.notEqual(drafted.body, "unreviewed", "approval is a gate, pin or no pin");
+  assert.equal(drafted.source, "step_body");
+}
+
 console.log("drip-template-pool.test.ts — all assertions passed ✓");

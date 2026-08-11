@@ -1,0 +1,319 @@
+/**
+ * tests/template-interchange.test.ts — which templates may go behind a live step.
+ *
+ * This surface writes to merchant mail with no send-time review after it, so
+ * these filters ARE the review. The two failures they prevent:
+ *
+ *   an unapproved or retired template reaching a real merchant, and
+ *   a Bluerise step sending SunBiz's wording, which puts two company names in
+ *   one conversation and pushes one brand's copy through the other's carrier
+ *   registration.
+ */
+
+import assert from "node:assert/strict";
+import { parseDripSteps } from "../lib/drips/types";
+import {
+  selectableTemplates,
+  validateInterchange,
+  buildInterchangeAudit,
+  effectiveRole,
+  diffPins,
+} from "../lib/drips/template-interchange";
+import type { PoolTemplate } from "../lib/drips/template-pool";
+
+const tpl = (over: Partial<PoolTemplate>): PoolTemplate => ({
+  id: "t1",
+  brand: "sunbiz",
+  stage: "follow_up",
+  role: "nudge",
+  subject: "s",
+  bodyText: "b",
+  status: "approved",
+  weight: 1,
+  ...over,
+});
+
+const pool: PoolTemplate[] = [
+  tpl({ id: "sun_ok_a", weight: 3 }),
+  tpl({ id: "sun_ok_b", weight: 1 }),
+  tpl({ id: "sun_draft", status: "draft" }),
+  tpl({ id: "sun_retired", status: "retired" }),
+  tpl({ id: "sun_zero", weight: 0 }),
+  tpl({ id: "blue_ok", brand: "bluerise" }),
+  tpl({ id: "sun_other_stage", stage: "declined" }),
+];
+
+// ── Only approved, in-brand, in-stage, non-retired copy is selectable ─────
+{
+  const got = selectableTemplates(pool, { brand: "sunbiz", stage: "follow_up" });
+  assert.deepEqual(got.map((t) => t.id), ["sun_ok_a", "sun_ok_b"], "heaviest first");
+  assert.equal(got.every((t) => t.status === "approved"), true);
+}
+
+// Brand isolation, in both directions.
+assert.deepEqual(
+  selectableTemplates(pool, { brand: "bluerise", stage: "follow_up" }).map((t) => t.id),
+  ["blue_ok"],
+);
+assert.equal(
+  selectableTemplates(pool, { brand: "bluerise", stage: "follow_up" }).some((t) => t.brand === "sunbiz"),
+  false,
+  "a Bluerise step must never be offered SunBiz copy",
+);
+
+// Stage matching is case and whitespace tolerant, because operator-entered
+// stage strings are not reliably normalised.
+assert.equal(selectableTemplates(pool, { brand: "sunbiz", stage: "  Follow_Up " }).length, 2);
+// An unknown stage offers NOTHING rather than falling back to some default.
+assert.equal(selectableTemplates(pool, { brand: "sunbiz", stage: "made_up" }).length, 0);
+
+// ── Validation fails closed, and says which rule refused ─────────────────
+const base = {
+  sequenceId: "seq1",
+  stepIndex: 0,
+  fromTemplateId: "sun_ok_a",
+  actorUserId: "user-1",
+  brand: "sunbiz" as const,
+  stage: "follow_up",
+};
+
+assert.equal(validateInterchange(pool, { ...base, toTemplateId: "sun_ok_b" }).ok, true);
+
+for (const [id, pattern] of [
+  ["sun_draft", /draft, not approved/],
+  ["sun_retired", /retired, not approved/],
+  ["sun_zero", /soft-retired/],
+  ["blue_ok", /belongs to bluerise/],
+  ["sun_other_stage", /stage "declined"/],
+  ["does_not_exist", /not found/],
+] as const) {
+  const v = validateInterchange(pool, { ...base, toTemplateId: id });
+  assert.equal(v.ok, false, `${id} must be refused`);
+  assert.match(v.ok === false ? v.reason : "", pattern);
+}
+
+// An unattributable change to live merchant mail is not acceptable.
+assert.equal(validateInterchange(pool, { ...base, toTemplateId: "sun_ok_b", actorUserId: "" }).ok, false);
+assert.equal(validateInterchange(pool, { ...base, toTemplateId: "" }).ok, false);
+assert.equal(validateInterchange(pool, { ...base, toTemplateId: "sun_ok_b", stepIndex: -1 }).ok, false);
+
+// ── The audit names who changed what ─────────────────────────────────────
+assert.deepEqual(
+  buildInterchangeAudit({ from: "sun_ok_a", to: "sun_ok_b", actor: "user-1", sequenceId: "seq1", stepIndex: 2 }),
+  {
+    action: "template_interchange",
+    from: "sun_ok_a",
+    to: "sun_ok_b",
+    actor: "user-1",
+    sequence_id: "seq1",
+    step_index: 2,
+  },
+);
+// A first assignment has no prior template, and null must survive as null
+// rather than becoming an empty string that reads like a real id.
+assert.equal(buildInterchangeAudit({ from: null, to: "x", actor: "u" }).from, null);
+
+// ── The pin must survive validation ──────────────────────────────────────
+// The interchange saves through PATCH /api/sequences/[id], which re-parses every
+// step with parseDripSteps. If the parser dropped template_id the swap would be
+// stripped on the very save that applied it — silently, and only in production,
+// because the UI would still have reported success.
+{
+  const [parsed] = parseDripSteps([
+    { channel: "email", delay_minutes: 0, subject: "s", body: "b", template_id: "tpl-42" },
+  ]);
+  assert.equal(parsed.template_id, "tpl-42", "the pin must round-trip through step validation");
+
+  // Absent stays absent — an unpinned step must not gain an empty pin that
+  // resolveCopy would then try to look up.
+  const [plain] = parseDripSteps([{ channel: "email", delay_minutes: 0, subject: "s", body: "b" }]);
+  assert.equal(plain.template_id, undefined);
+  const [blank] = parseDripSteps([
+    { channel: "email", delay_minutes: 0, subject: "s", body: "b", template_id: "" },
+  ]);
+  assert.equal(blank.template_id, undefined, "an empty string is not a pin");
+}
+
+// -- ROLE scoping: only offer what the engine can actually reach ----------
+// Codex review round 2. The executor narrows the pool with
+// poolFor(brand, stage, role) BEFORE resolveCopy sees the pin, so a template
+// playing another role is out of scope at send time. Offering one produced a
+// swap that saved cleanly, reported success, and changed nothing -- the exact
+// silent no-op the pin was added to fix, one layer along.
+{
+  const mixed: PoolTemplate[] = [
+    tpl({ id: "nudge_a", role: "nudge" }),
+    tpl({ id: "opener_a", role: "opener" }),
+    tpl({ id: "lastcall_a", role: "last_call" }),
+    tpl({ id: "roleless", role: "" }),
+  ];
+
+  assert.deepEqual(
+    selectableTemplates(mixed, { brand: "sunbiz", stage: "follow_up", role: "opener" }).map((t) => t.id),
+    ["opener_a"],
+    "an opener step is offered openers and nothing else",
+  );
+  assert.deepEqual(
+    selectableTemplates(mixed, { brand: "sunbiz", stage: "follow_up", role: "last_call" }).map((t) => t.id),
+    ["lastcall_a"],
+    "an opener must never stand in for a last call",
+  );
+
+  // Unset role means "nudge" on BOTH sides, matching executor.ts's
+  // `String(step.role || "nudge")`. If these two defaults ever drift, a
+  // roleless step silently stops being able to pin anything.
+  assert.equal(effectiveRole(undefined), "nudge");
+  assert.equal(effectiveRole(""), "nudge");
+  assert.equal(effectiveRole("  "), "nudge");
+  assert.deepEqual(
+    selectableTemplates(mixed, { brand: "sunbiz", stage: "follow_up" }).map((t) => t.id).sort(),
+    ["nudge_a", "roleless"],
+    "a step with no role gets the nudge bucket, and so does a template with no role",
+  );
+
+  // The validator refuses a cross-role pin rather than accepting one the send
+  // path would ignore, and names the rule that refused.
+  const req = {
+    sequenceId: "seq1",
+    stepIndex: 0,
+    fromTemplateId: null,
+    toTemplateId: "opener_a",
+    actorUserId: "user-1",
+    brand: "sunbiz" as const,
+    stage: "follow_up",
+    role: "last_call",
+  };
+  const verdict = validateInterchange(mixed, req);
+  assert.equal(verdict.ok, false, "a cross-role pin must be refused, not silently ignored later");
+  if (!verdict.ok) {
+    assert.match(verdict.reason, /role/, "the refusal must name the rule so an operator can act on it");
+    assert.match(verdict.reason, /opener/);
+    assert.match(verdict.reason, /last_call/);
+  }
+  // ...and accepts the same swap once the roles line up.
+  assert.equal(validateInterchange(mixed, { ...req, role: "opener" }).ok, true);
+}
+
+// -- diffPins: position is not identity -----------------------------------
+// Codex review round 6. The sequence editor supports reordering and deleting
+// steps, so an index-by-index pin diff invents changes: move an unpinned step
+// above a pinned one and every index below shifts, which reads as "unpinned A
+// here, pinned A there". Two fabricated edits to live merchant copy, in the one
+// record whose entire worth is that it contains only real ones.
+{
+  const pin = (id?: string, role?: string) => ({ ...(id ? { template_id: id } : {}), ...(role ? { role } : {}) });
+
+  // A pure reorder changes nothing about what merchants receive.
+  assert.deepEqual(
+    diffPins([pin(), pin("A"), pin("B")], [pin("A"), pin("B"), pin()]),
+    [],
+    "moving steps around is not a change to any pin",
+  );
+
+  // Deleting an UNPINNED step shifts every index below it, and must still be
+  // silent.
+  assert.deepEqual(diffPins([pin(), pin("A")], [pin("A")]), []);
+
+  // Real changes still register, and a same-index replacement stays ONE record
+  // that names what it replaced -- "A was swapped for B" is the answer wanted
+  // after a merchant complains, and two disconnected events do not give it.
+  assert.deepEqual(diffPins([pin("A")], [pin("B")]), [{ index: 0, from: "A", to: "B", role: undefined }]);
+  assert.deepEqual(diffPins([pin()], [pin("A")]), [{ index: 0, from: null, to: "A", role: undefined }]);
+
+  // Unpinning hands the step back to sampling. That IS a change to live copy.
+  assert.deepEqual(diffPins([pin("A")], [pin()]), [{ index: 0, from: "A", to: null }]);
+
+  // Deleting a pinned step entirely is a removal, not a silent shrink.
+  assert.deepEqual(diffPins([pin("A"), pin("B")], [pin("B")]), [{ index: 0, from: "A", to: null }]);
+
+  // The SAME template under a different role is a different decision: the
+  // executor scopes the pool by role before it resolves the pin, so a pin that
+  // was reachable as a nudge is invisible on an opener step. It has to come
+  // back through validation, which means it has to show up here.
+  assert.deepEqual(
+    diffPins([pin("A", "nudge")], [pin("A", "opener")]),
+    [{ index: 0, from: "A", to: "A", role: "opener" }],
+  );
+
+  // No prior steps at all (a legacy row that would not parse) must not throw.
+  assert.deepEqual(diffPins(null, [pin("A")]), [{ index: 0, from: null, to: "A", role: undefined }]);
+
+  // The same template pinned on TWO steps, then removed from one: exactly one
+  // removal, not zero and not two -- and at the RIGHT index. Counting alone
+  // would assume the earliest occurrence survived and name the wrong step,
+  // which for a duplicate pin is the only detail distinguishing them.
+  assert.deepEqual(diffPins([pin("A"), pin("A")], [pin("A"), pin()]), [{ index: 1, from: "A", to: null }]);
+  assert.deepEqual(
+    diffPins([pin("A"), pin("A")], [pin(), pin("A")]),
+    [{ index: 0, from: "A", to: null }],
+    "the step that actually lost its pin is the one reported",
+  );
+  // ...and adding a third occurrence names the new index, not index 0.
+  assert.deepEqual(
+    diffPins([pin("A"), pin("A")], [pin("A"), pin("A"), pin("A")]),
+    [{ index: 2, from: null, to: "A", role: undefined }],
+  );
+
+  // Swapping two pinned steps with each other is a reorder, not four events.
+  assert.deepEqual(diffPins([pin("A"), pin("B")], [pin("B"), pin("A")]), []);
+
+  // Deleting the FIRST of two identically-pinned steps. Index equality alone
+  // would call index 0 "unchanged" and blame index 1, which is the step that
+  // survived. Steps have no ids -- drip_sequences.steps is a positional JSON
+  // array -- so the survivor is recognised by its own copy.
+  const body = (id: string, text: string) => ({ template_id: id, body: text, channel: "email" });
+  assert.deepEqual(
+    diffPins([body("A", "first"), body("A", "second")], [body("A", "second")]),
+    [{ index: 0, from: "A", to: null }],
+    "the deleted step is the one whose copy is gone, wherever the survivor landed",
+  );
+  // ...and the mirror case, deleting the second.
+  assert.deepEqual(
+    diffPins([body("A", "first"), body("A", "second")], [body("A", "first")]),
+    [{ index: 1, from: "A", to: null }],
+  );
+
+  // Editing a pinned step's copy is not a pin change. The version snapshot
+  // records copy; this record is about which template is pinned.
+  assert.deepEqual(diffPins([body("A", "before")], [body("A", "after")]), []);
+
+  // Identity is the WHOLE step, not a hand-picked subset. Two steps identical
+  // except for delay_minutes must still be told apart, or deleting the first
+  // blames the second.
+  assert.deepEqual(
+    diffPins(
+      [
+        { template_id: "A", body: "same", channel: "email", delay_minutes: 0 },
+        { template_id: "A", body: "same", channel: "email", delay_minutes: 4320 },
+      ],
+      [{ template_id: "A", body: "same", channel: "email", delay_minutes: 4320 }],
+    ),
+    [{ index: 0, from: "A", to: null }],
+  );
+  // Same for a field the earlier subset ignored entirely.
+  assert.deepEqual(
+    diffPins(
+      [
+        { template_id: "A", body: "x", body_html: "<p>one</p>" },
+        { template_id: "A", body: "x", body_html: "<p>two</p>" },
+      ],
+      [{ template_id: "A", body: "x", body_html: "<p>two</p>" }],
+    ),
+    [{ index: 0, from: "A", to: null }],
+  );
+  // Key ORDER is not a difference: the same step written differently is the
+  // same step, or a harmless re-serialisation upstream would forge an audit
+  // record.
+  assert.deepEqual(
+    diffPins([{ template_id: "A", body: "x", channel: "email" }], [{ channel: "email", body: "x", template_id: "A" }]),
+    [],
+  );
+
+  // Reordering a pinned step past an unpinned one, with real bodies.
+  assert.deepEqual(
+    diffPins([{ body: "plain" }, body("A", "pinned")], [body("A", "pinned"), { body: "plain" }]),
+    [],
+  );
+}
+
+console.log("template-interchange.test.ts — all assertions passed");

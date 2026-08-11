@@ -41,6 +41,10 @@ export type DripStep = {
    * here so an editor save doesn't strip the HTML part.
    */
   body_html?: string;
+  /** Pins this step to one approved pool template (Drips tab, interchange).
+   *  resolveCopy honours it ahead of sampling, and ignores it once the template
+   *  stops being approved so a stale pin cannot keep sending withdrawn copy. */
+  template_id?: string;
   /** Optional sender label — agent name, e.g. "Solara" or "Helios". */
   from_label?: string;
   /**
@@ -169,6 +173,10 @@ function parseStep(v: unknown, path: string): DripStep {
   };
   const bodyHtml = optionalString(v, "body_html");
   if (bodyHtml) step.body_html = bodyHtml;
+  // Must survive the parse round trip, or an interchange would be silently
+  // stripped on the very next save of the sequence.
+  const templateId = optionalString(v, "template_id");
+  if (templateId) step.template_id = templateId;
   if (channel === "email") {
     step.subject = requireString(v, "subject", path);
   } else if (typeof v.subject === "string" && v.subject.length > 0) {

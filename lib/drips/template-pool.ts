@@ -140,6 +140,16 @@ type StepLike = {
   body_html?: string;
   subject_variants?: string[];
   body_variants?: string[];
+  /**
+   * An operator PINNED this step to one approved template, via the Drips tab's
+   * template interchange.
+   *
+   * Without this the interchange was a lie: the pool is sampled before the
+   * step's own copy is ever consulted, so writing the chosen text onto the step
+   * changed nothing while the UI reported the swap had worked. A swap that
+   * silently does not swap is worse than no feature at all.
+   */
+  template_id?: string;
 };
 
 export function resolveCopy(
@@ -148,6 +158,35 @@ export function resolveCopy(
   stepIndex: number,
   pool: PoolTemplate[],
 ): ResolvedCopy {
+  // 0. An explicit pin beats sampling. The operator chose this template for
+  //    this step, so honour it — but only while it is still approved and not
+  //    soft-retired, so an old pin cannot keep pushing withdrawn copy at
+  //    merchants after someone retires it.
+  if (step.template_id) {
+    // isSendable, not a re-implementation of it. An inline status/weight check
+    // drifted from the real rule and let through an approved template with an
+    // EMPTY body — which sampling has always rejected, and which would have sent
+    // a merchant a blank message. One predicate, one place.
+    const pinned = pool.find((t) => t.id === step.template_id && isSendable(t));
+    if (pinned) {
+      return {
+        subject: pinned.subject || step.subject || "",
+        body: pinned.bodyText,
+        // The pinned template carries plain text, so any HTML still on the step
+        // belongs to the PREVIOUS template. Returning it would send
+        // HTML-capable recipients the old copy while everyone else got the new,
+        // which is the worst of both. Drop it and let the renderer build from
+        // this body.
+        bodyHtml: undefined,
+        variantIndex: 0,
+        source: "pool",
+        templateId: pinned.id,
+      };
+    }
+    // Pinned to something no longer sendable: fall through to sampling rather
+    // than sending retired copy.
+  }
+
   // 1. Approved pool wins.
   const picked = selectFromPool(pool, leadId, stepIndex);
   if (picked) {
