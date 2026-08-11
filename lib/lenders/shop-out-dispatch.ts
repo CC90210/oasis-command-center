@@ -36,6 +36,22 @@ type ThreadRow = {
   attachments: unknown;
 };
 
+/**
+ * The conversation anchor every lender email on this deal shares.
+ *
+ * Derived from the application id rather than minted per run, deliberately: a
+ * retry, a second wave of lenders next week, and the original send all produce
+ * the SAME value, so they all land in the one existing inbox thread. A random
+ * per-batch id would start a fresh conversation every time Retry was pressed,
+ * which is the flooding this exists to prevent.
+ *
+ * It is a synthetic id — no message with this id is ever sent. It appears only
+ * in References, which is a grouping hint, not a claim that it exists.
+ */
+function dealThreadRootId(applicationId: string): string {
+  return `<shopout-${applicationId}@sunbizfunding.com>`;
+}
+
 /** Pick the submission address the SOP specifies, else the primary contact. */
 function resolveRecipient(data: Record<string, unknown>): string | null {
   const submission = Array.isArray(data.submission_emails)
@@ -131,6 +147,8 @@ export async function dispatchPendingSunbizThreads(input: {
         ? thread.attachments
         : []) as ShopOutAttachment[],
       signerName: input.signerName,
+      // Same anchor for every lender on this deal -> one inbox conversation.
+      threadRootId: dealThreadRootId(input.applicationId),
     });
 
     if (!result.ok) {
