@@ -98,14 +98,30 @@ export function openDealStatuses(): Set<string> {
  *   lead=declined            app=funded     -> CLOSED. Also a contradiction, and
  *                                              funded is never a drip audience.
  *
- * Statuses with no Leads-board equivalent (funded, approved, docs_out, login,
- * shopping, follow_ups) are absent on purpose: no lead stage can agree with
- * them, so they always close the gate.
+ * THE TWO BOARDS SPELL SHARED STATES DIFFERENTLY, so this table is also a
+ * naming bridge and not only a semantic one. The Applications board says
+ * `follow_ups`; the Leads board says `follow_up`. Missing that single letter
+ * would have silenced the follow-up programme this same change routes to
+ * Bluerise — the gate would have called every one of those leads a closed deal
+ * (Codex review, 2026-08-11, P1). Zero leads sat in that intersection on the
+ * day it was found, which is exactly why it needed a reviewer rather than a
+ * production count: it would have started biting the first time an operator
+ * moved a follow-ups deal onto the follow-up stage.
+ *
+ * Statuses with no Leads-board equivalent (funded, approved, requested_docs,
+ * docs_out, login, shopping) are absent on purpose: no lead stage can agree
+ * with them, so they always close the gate.
  */
 const STATUS_MEANS_STAGE: Record<string, string> = {
   declined: "declined",
   dead_file: "dead_file",
   default: "default",
+  // Spelled differently on each board. See above.
+  follow_ups: "follow_up",
+  // Same name on both, and there is a live "Missing info - chase + book call"
+  // sequence aimed at it. Without this the chase would gate itself closed on
+  // precisely the deals it exists to chase.
+  missing_info: "missing_info",
 };
 
 export type DealRow = {

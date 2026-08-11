@@ -62,6 +62,21 @@ assert.deepEqual(
 assert.equal(dealGateFor([app("dead_file", "2026-08-01T00:00:00Z")], "dead_file").open, true);
 assert.equal(dealGateFor([app("default", "2026-08-01T00:00:00Z")], "default").open, true);
 
+// THE BOARDS SPELL SHARED STATES DIFFERENTLY. Applications says `follow_ups`,
+// Leads says `follow_up`. Missing that letter would have had the gate call
+// every follow-up lead a closed deal — silencing the exact programme this
+// change routes to Bluerise (Codex review 2026-08-11, P1). No lead sat in that
+// intersection the day it was found, so only a test can hold it.
+assert.equal(
+  dealGateFor([app("follow_ups", "2026-08-01T00:00:00Z")], "follow_up").open,
+  true,
+  "follow_ups (application) and follow_up (lead) are the same state",
+);
+// Same name on both boards, and a live sequence aimed at it.
+assert.equal(dealGateFor([app("missing_info", "2026-08-01T00:00:00Z")], "missing_info").open, true);
+// The bridge must not leak: a follow-ups deal on a FUNNEL stage is still stale.
+assert.equal(dealGateFor([app("follow_ups", "2026-08-01T00:00:00Z")], "signed_application").open, false);
+
 // ...but agreement is the ONLY thing that reopens it. A funded deal has no
 // Leads-board equivalent, so no stage can agree with it.
 assert.equal(
