@@ -94,6 +94,34 @@ assert.ok(executor.includes("deal_closed: application is"),
     "a failed deal-state read must RESCHEDULE, never cancel");
 }
 
+// ── The drip audience is the BOARD's audience (2026-08-11) ─────────────────
+// The defect: the Leads board hides leads stamped `transferred_at`, the
+// enroller queried `data->>stage` directly, and 64% of all drip mail ever sent
+// went to merchants Adon could not see on the board. Three places have to hold
+// for that to stay fixed, so all three are asserted rather than trusted.
+assert.ok(enroller.includes("applyLeadsBoardFilter("),
+  "the enroller must filter candidates to what the Leads board actually shows");
+assert.ok(enroller.includes('return "off_board"'),
+  "and keep the in-memory guard, so dropping the query filter reports instead of mailing");
+assert.ok(executor.includes("isOnLeadsBoard(data)"),
+  "dispatch must re-check: a lead is usually transferred AFTER its steps are queued");
+assert.ok(executor.includes("off_board: lead transferred"),
+  "a cancelled row must say why, or a silent stop is indistinguishable from a bug");
+assert.ok(read("lib/manifest/data.ts").includes("applyLeadsBoardFilter("),
+  "the BOARD must read the same rule, or the two drift apart again");
+// The board-exit edge has no status change at all — transferred_at is stamped
+// while stage stays put — so the eager cancel needs its own signal.
+assert.ok(read("lib/manifest/data.ts").includes("detectBoardExit("),
+  "updateRecord must detect the board exit; detectStatusTransitions cannot see it");
+assert.ok(read("lib/portals/stage-hooks.ts").includes("BOARD_EXIT_FIELD"),
+  "and the portal hook must act on it");
+// Order matters: off-board must be decided BEFORE the stage recheck, because it
+// is the stronger statement — no stage sequence may speak to a transferred lead.
+assert.ok(
+  executor.indexOf("isOnLeadsBoard(data)") < executor.indexOf("stage_changed: lead now at"),
+  "the off-board check must precede the stage recheck",
+);
+
 // ── A cold sending domain does not inherit a warmed one's ceiling ──────────
 // Routing the follow-ups desk to Bluerise points 512 leads at a domain with no
 // sending history. Falling through to the shared 150/day default would open it

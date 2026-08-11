@@ -33,6 +33,10 @@ import { detectStatusTransitions, publishStatusChange } from "./events";
 // executor.ts imports THIS file.)
 import { runStageTransitionHooks } from "@/lib/portals/stage-hooks";
 import { signFormLink } from "@/lib/form-links";
+// The Leads-board visibility rule. Was two duplicated string literals in this
+// file until 2026-08-11, which is exactly how the drip engine came to be
+// selecting an audience the board does not show. See lib/leads/board-visibility.ts.
+import { applyLeadsBoardFilter, detectBoardExit } from "@/lib/leads/board-visibility";
 
 export class RecordsError extends Error {
   constructor(
@@ -111,7 +115,7 @@ export async function listRecords(input: ListRecordsInput): Promise<ListRecordsR
   // legacy rows that were incorrectly stamped transferred_at by auto-promotion.
   // Keep that exception in every list surface and in the client-side guard.
   if (input.entity === "lead") {
-    q = q.or("data->>transferred_at.is.null,data->>stage.eq.uw_sheet");
+    q = applyLeadsBoardFilter(q);
   } else if (input.entity === "application") {
     // Mirror of the lead filter: only deals EXPLICITLY transferred from a lead
     // (or standalone apps) belong on the Applications board. "Run underwriting"
@@ -194,7 +198,7 @@ export async function listRecordsForViewer(input: {
     .contains("data->collaborators", JSON.stringify([id]))
     .limit(MAX_RECORD_LIST_LIMIT);
   if (input.entity === "lead") {
-    sq = sq.or("data->>transferred_at.is.null,data->>stage.eq.uw_sheet");
+    sq = applyLeadsBoardFilter(sq);
   }
 
   // Owned + shared are independent reads (merged by id below, order-independent)
@@ -575,13 +579,24 @@ export async function updateRecord(input: UpdateRecordInput): Promise<TenantReco
   //
   // Fail-soft, per hook: a drip hiccup must not fail the stage write, and the
   // dispatcher's stage/shopped rechecks remain the backstop.
+  //
+  // BOARD-EXIT is passed to the hooks but deliberately NOT published as a
+  // status change (2026-08-11). A lead leaves the Leads board when it is
+  // stamped `transferred_at`, and that happens WITHOUT the stage moving — so
+  // `detectStatusTransitions` reports nothing, the hooks returned early, and
+  // the lead's queued drips survived a transfer they should not have. That is
+  // the mechanism behind 64% of drip mail reaching people not on the board.
+  //
+  // Widening STATUS_FIELDS instead would have been the smaller diff and the
+  // wrong change: it feeds BRAVO_RECORD_STATUS_CHANGED, which every tenant and
+  // every /feed subscriber consumes, and `transferred_at` is not a status.
   await runStageTransitionHooks({
     db,
     tenantId: input.tenant_id,
     entity: input.entity,
     recordId: row.id,
     data: row.data as Record<string, unknown>,
-    transitions,
+    transitions: [...transitions, ...detectBoardExit(existing.data, row.data as Record<string, unknown>)],
   });
 
   return row;

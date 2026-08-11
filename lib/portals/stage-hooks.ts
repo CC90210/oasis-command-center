@@ -29,6 +29,7 @@
 
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { cancelStaleDripRunsForLead } from "@/lib/drips/stage-cancel";
+import { BOARD_EXIT_FIELD } from "@/lib/leads/board-visibility";
 import type { PortalId } from "./registry";
 
 type Db = SupabaseClient;
@@ -77,6 +78,22 @@ export function planDripCancellations(input: {
   if (!transitions || transitions.length === 0) return [];
 
   if (entity === "lead") {
+    // A board exit outranks a stage move. Once a lead is transferred to the
+    // Applications board NO stage-triggered sequence may speak to it, so this
+    // cancels ALL of them (newStage: null) rather than the "keep the new
+    // stage's runs" semantics a stage move gets. Checked first because a
+    // transfer can arrive in the same write as a stage change, and the
+    // narrower stage rule would leave the new stage's runs alive on a lead
+    // that is no longer on the board.
+    if (transitions.some((t) => t.field === BOARD_EXIT_FIELD)) {
+      return [
+        {
+          leadId: recordId,
+          newStage: null,
+          reason: "off_board_eager: lead transferred to the Applications board",
+        },
+      ];
+    }
     const stageT = transitions.find(
       (t) => t.field === "stage" && typeof (t as { to: unknown }).to === "string",
     );
