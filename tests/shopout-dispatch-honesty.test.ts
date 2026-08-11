@@ -66,7 +66,17 @@ assert.ok(
 // it can rewrite a thread that already sent, or cross a tenant boundary.
 // pending-only is also the double-send guard: the sender moves a row to
 // 'sending' before it transmits, so anything still pending was never picked up.
-for (const scope of ['.eq("tenant_id"', '.eq("application_id"', '.eq("status", "pending")']) {
+// email_identity is in this list because the two networks dispatch separately:
+// shop_out_send_batch carries SunBiz threads only, FundMate has its own SMTP
+// path. Without that scope a failed SunBiz dispatch marked every pending
+// FundMate thread on the application as failed, reporting a failure that never
+// happened. (Codex review, 2026-08-11.)
+for (const scope of [
+  '.eq("tenant_id"',
+  '.eq("application_id"',
+  '.eq("email_identity"',
+  '.eq("status", "pending")',
+]) {
   assert.ok(
     helper.includes(scope),
     `recordDispatchFailure must scope its update by ${scope} — an unscoped update can overwrite a successful send`,

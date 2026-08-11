@@ -77,11 +77,21 @@ export function dispatchFailureReason(ps: PhysicalSendResult): string {
  * failure as telling them a dead send succeeded, one screen later.
  * (Codex review, 2026-08-11.)
  *
- * Scoped by tenant AND application AND status='pending', which is also what
- * makes it safe against a double-send: the sender moves a row to 'sending'
- * before it transmits and to 'sent' after, so anything still at 'pending' was
- * never picked up. A dispatch that timed out mid-flight leaves its in-progress
- * rows at 'sending', and those are deliberately not touched here.
+ * Scoped by tenant AND application AND email_identity AND status='pending'.
+ *
+ * The identity scope matters because the two networks are dispatched
+ * separately: shop_out_send_batch carries SunBiz threads only, and FundMate
+ * goes over its own SMTP path. Without it, a failed SunBiz dispatch marked
+ * every pending FundMate thread on the same application as failed too —
+ * removing unattempted work from the queue and reporting a failure that never
+ * happened. Wrong in the same direction as the bug this file exists to fix,
+ * just inverted: claiming a failure rather than a success.
+ * (Codex review, 2026-08-11.)
+ *
+ * status='pending' is what makes it safe against a double-send: the sender
+ * moves a row to 'sending' before it transmits and to 'sent' after, so
+ * anything still at 'pending' was never picked up. A dispatch that timed out
+ * mid-flight leaves its in-progress rows at 'sending', deliberately untouched.
  *
  * Best-effort by design — this runs on a path that has ALREADY failed, and
  * throwing here would replace a useful error message with a stack trace. But
@@ -92,6 +102,9 @@ export async function recordDispatchFailure(input: {
   tenant_id: string;
   application_id: string;
   reason: string;
+  /** The network that was actually dispatched. Defaults to the SunBiz path,
+   *  which is the one shop_out_send_batch drives. */
+  email_identity?: string;
 }): Promise<{ ok: boolean; stamped: number; error?: string }> {
   try {
     const db = getServiceSupabase();
@@ -104,6 +117,7 @@ export async function recordDispatchFailure(input: {
       })
       .eq("tenant_id", input.tenant_id)
       .eq("application_id", input.application_id)
+      .eq("email_identity", input.email_identity ?? "sunbiz")
       .eq("status", "pending")
       .select("id");
 

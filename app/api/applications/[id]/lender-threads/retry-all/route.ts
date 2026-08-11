@@ -257,6 +257,12 @@ export async function POST(
       tenant_id: tenantId,
       application_id: applicationId,
       reason,
+      // Always "sunbiz" here: the FunMate batch returns above, and tsc proves
+      // it — narrowing emailIdentity to "sunbiz" at this point made a ternary
+      // on "funmate" a type error. Stated rather than left to the default,
+      // because this scope is what keeps a SunBiz failure from marking
+      // unattempted FunMate work as failed.
+      email_identity: "sunbiz",
     });
     if (!stamp.ok) {
       console.error("[retry-all] could not record dispatch failure on threads", {

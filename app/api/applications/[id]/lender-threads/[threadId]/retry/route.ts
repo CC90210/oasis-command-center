@@ -346,6 +346,10 @@ export async function POST(
       tenant_id: tenantId,
       application_id: applicationId,
       reason,
+      // Only reachable on the SunBiz path — the FunMate thread returns above.
+      // Stated rather than left to the default, because this scope is what
+      // keeps a SunBiz failure from marking unattempted FunMate work as failed.
+      email_identity: "sunbiz",
     });
     if (!stamp.ok) {
       console.error("[retry] could not record dispatch failure on threads", {
