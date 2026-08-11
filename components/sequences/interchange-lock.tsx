@@ -14,7 +14,13 @@
  * `router.refresh()` alone does not close this: it returns immediately, the
  * button re-enables, and the components keep the stale snapshot until new props
  * land. A per-component guard cannot close it either, because the component
- * being reverted is not the one that saved. The lock lives above all of them.
+ * being reverted is not the one that saved. The lock lives above all of them,
+ * and above the tab switch too — unmounting it on a tab change would recreate it
+ * unlocked while the same stale rows are still in memory.
+ *
+ * TAKEN AT THE START, NOT ON SUCCESS. Locking when a save COMPLETES leaves the
+ * entire request in flight unguarded, so two Apply clicks in quick succession
+ * both pass and both send the same stale array. It is released only on failure.
  *
  * It clears on the identity of the `rows` prop, which is a NEW object each time
  * the server component re-renders. That is the actual signal "fresh data is
@@ -24,15 +30,21 @@
 import { createContext, useContext, useEffect, useState, type ReactNode } from "react";
 
 type LockValue = {
-  /** A save has landed and fresh props have not arrived yet. */
+  /** A save is in flight, or has landed and fresh props have not arrived yet. */
   locked: boolean;
-  markSaved: () => void;
+  /** Taken SYNCHRONOUSLY when a swap starts, not when it succeeds. Two Apply
+   *  buttons clicked before the first response lands would otherwise both pass
+   *  the check and both PATCH the same stale array. */
+  acquire: () => void;
+  /** Only on FAILURE. A successful save stays locked until fresh props arrive,
+   *  because that is when the snapshot every sibling holds becomes current. */
+  release: () => void;
 };
 
 // Default is UNLOCKED so a TemplateInterchange rendered outside a provider
 // still works. It degrades to the old behaviour rather than becoming inert,
 // which is the right failure for a UI affordance.
-const Ctx = createContext<LockValue>({ locked: false, markSaved: () => {} });
+const Ctx = createContext<LockValue>({ locked: false, acquire: () => {}, release: () => {} });
 
 export function useInterchangeLock(): LockValue {
   return useContext(Ctx);
@@ -47,5 +59,9 @@ export function InterchangeLockProvider({ resetKey, children }: { resetKey: unkn
     setLocked(false);
   }, [resetKey]);
 
-  return <Ctx.Provider value={{ locked, markSaved: () => setLocked(true) }}>{children}</Ctx.Provider>;
+  return (
+    <Ctx.Provider value={{ locked, acquire: () => setLocked(true), release: () => setLocked(false) }}>
+      {children}
+    </Ctx.Provider>
+  );
 }

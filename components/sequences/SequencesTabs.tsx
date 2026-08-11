@@ -8,6 +8,7 @@
  */
 
 import { useState } from "react";
+import { InterchangeLockProvider } from "./interchange-lock";
 import { LayoutList, FileText, Activity } from "lucide-react";
 import { SequencesListClient } from "./SequencesListClient";
 import { SequenceTemplatesView, type TemplatesViewRow } from "./SequenceTemplatesView";
@@ -42,6 +43,12 @@ export function SequencesTabs({
   const [tab, setTab] = useState<"activity" | "templates" | "manage">("activity");
 
   return (
+    // ABOVE the tab switch. Inside the Templates view it unmounts the moment an
+    // operator changes tab, and remounts unlocked while the same stale rows are
+    // still in memory — so leaving and returning after a save would re-enable
+    // the swap that reverts it. resetKey={rows} is a NEW object on every server
+    // re-render, which is the real signal that fresh data landed.
+    <InterchangeLockProvider resetKey={rows}>
     <div className="space-y-4">
       <div className="flex w-fit overflow-hidden rounded-lg border border-bg-border">
         <button
@@ -89,5 +96,6 @@ export function SequencesTabs({
         <SequencesListClient initialRows={rows} />
       )}
     </div>
+    </InterchangeLockProvider>
   );
 }

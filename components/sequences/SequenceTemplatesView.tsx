@@ -12,7 +12,6 @@
  */
 
 import { useMemo, useState } from "react";
-import { InterchangeLockProvider } from "./interchange-lock";
 import Link from "next/link";
 import {
   ChevronDown,
@@ -253,11 +252,6 @@ export function SequenceTemplatesView({ rows, pool = [] }: { rows: TemplatesView
   }, [rows]);
 
   return (
-    // resetKey={rows} — a NEW object on every server re-render, which is the
-    // real signal that a saved swap is now reflected in props. Until it lands,
-    // every interchange on the page stays locked so a second swap cannot PATCH
-    // the stale array and revert the first.
-    <InterchangeLockProvider resetKey={rows}>
     <div className="space-y-3">
       <div className="flex flex-wrap items-center gap-3">
         <div className="relative min-w-[240px] flex-1">
@@ -295,6 +289,5 @@ export function SequenceTemplatesView({ rows, pool = [] }: { rows: TemplatesView
         ))
       )}
     </div>
-    </InterchangeLockProvider>
   );
 }

@@ -47,7 +47,7 @@ export function TemplateInterchange({
   const [error, setError] = useState<string | null>(null);
   const [done, setDone] = useState(false);
   const router = useRouter();
-  const { locked, markSaved } = useInterchangeLock();
+  const { locked, acquire, release } = useInterchangeLock();
 
   // Scope by the step's ROLE as well as brand and stage. The executor narrows
   // the pool with poolFor(brand, stage, role) before it resolves the pin, so a
@@ -75,7 +75,11 @@ export function TemplateInterchange({
   }
 
   async function apply() {
-    if (!candidate) return;
+    if (!candidate || locked) return;
+    // Synchronously, BEFORE the request goes out. Every sibling Apply is
+    // disabled from this instant, so two quick clicks cannot both pass the check
+    // and both send the same stale array.
+    acquire();
     setBusy(true);
     setError(null);
     try {
@@ -112,14 +116,14 @@ export function TemplateInterchange({
         // Surface the guard's own words. A rejected edit that says only
         // "failed" is one an operator cannot act on.
         setError(json?.reason || json?.error || `save failed (http_${res.status})`);
+        // The server refused, so nothing was written and nothing is stale.
+        // Hand the page back.
+        release();
         return;
       }
       setDone(true);
       setOpen(false);
-      // Lock EVERY interchange on the page, not just this one. The component
-      // that would be reverted is a sibling holding the same stale array, so a
-      // guard local to this one cannot stop it.
-      markSaved();
+      // Stays LOCKED. The lock lifts when fresh props arrive, not here.
       // Re-render the server component so `steps` is the PERSISTED array again.
       //
       // Without this, a second swap in the same session silently reverts the
@@ -132,6 +136,11 @@ export function TemplateInterchange({
       router.refresh();
     } catch (err) {
       setError(err instanceof Error ? err.message.slice(0, 140) : "network error");
+      // A network error is AMBIGUOUS — the PATCH may well have landed. So the
+      // page reloads rather than guessing, and the lock holds until it does.
+      // Releasing here would re-enable a swap against an array we can no longer
+      // vouch for, which is the revert this lock exists to prevent.
+      router.refresh();
     } finally {
       setBusy(false);
     }
