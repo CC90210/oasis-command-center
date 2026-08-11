@@ -50,17 +50,71 @@ jobs:
             exit 1
           fi
 
-          # dispatch-drips is the one that actually moves merchant mail.
-          FAST="/api/cron/dispatch-drips"
-          # Enrolment feeds the dispatcher, reconcile-sms closes carrier
-          # receipts, health-check is the outcome watchdog.
-          SLOW="/api/cron/enroll-drips /api/cron/reconcile-sms /api/cron/health-check"
+          # 2026-08-11: this drove 4 of the 22 routes registered in vercel.json.
+          # The other 18 had been dead since Vercel's scheduler stopped on
+          # 2026-08-06 and nobody noticed, because a cron that never runs
+          # produces no error — it produces nothing at all. Among the missing
+          # were scan-bounces and scan-funmate-replies, i.e. the reply side of
+          # shopping out. tests/cron-driver-coverage.test.ts now fails when a
+          # registered route has no entry here, so this cannot silently drift
+          # again.
+
+          # Every 5 minutes — the paths that move mail and calls.
+          FAST="/api/cron/dispatch-drips
+                /api/cron/dispatch-scheduled-sends
+                /api/cron/dispatch-scheduled-calls"
+
+          # Every 15 minutes — enrolment feeds the dispatcher, reconcile-sms
+          # closes carrier receipts, health-check is the outcome watchdog that
+          # now covers shopping out too.
+          Q15="/api/cron/enroll-drips
+               /api/cron/enroll-accelerated
+               /api/cron/reconcile-sms
+               /api/cron/health-check
+               /api/cron/tps-enroll?write=1
+               /api/cron/operator-email-agent?write=1"
+
+          # Every 30 minutes — inbound scanning. These read the mailboxes that
+          # carry lender replies and bounces; without them an approval can sit
+          # unread indefinitely, which is what happened for six days in August.
+          Q30="/api/cron/scan-bounces?write=1
+               /api/cron/scan-funmate-replies?write=1
+               /api/cron/sync-tt-inbox"
+
+          # Hourly — telemetry and intel. Late is fine; absent is not.
+          HOURLY="/api/cron/collect-outreach-intel?write=1
+                  /api/cron/collect-cc-metrics?write=1
+                  /api/cron/reconcile-drip-telemetry"
+
+          # 06:00 and 18:00 UTC, matching this route's own registered schedule.
+          # Kept out of HOURLY deliberately: it reconciles the TextTorrent number
+          # roster, and running it 24x instead of 2x spends shared vendor rate
+          # budget for no new information.
+          TWICE_DAILY="/api/cron/sync-sms-numbers"
+
+          # Daily at 13:00 UTC — sweeps and thresholds.
+          DAILY="/api/cron/materialize-plans
+                 /api/cron/sweep-stale-sent-app
+                 /api/cron/renewal-thresholds
+                 /api/cron/kixie-compliance-scan
+                 /api/cron/tps-backlog-watch"
 
           MIN=$(date -u +%M)
+          HOUR=$(date -u +%H)
           ROUTES="${FAST}"
-          if [ $((10#${MIN} % 15)) -lt 5 ]; then
-            ROUTES="${FAST} ${SLOW}"
+          [ $((10#${MIN} % 15)) -lt 5 ] && ROUTES="${ROUTES} ${Q15}"
+          [ $((10#${MIN} % 30)) -lt 5 ] && ROUTES="${ROUTES} ${Q30}"
+          [ "$((10#${MIN}))" -lt 5 ]    && ROUTES="${ROUTES} ${HOURLY}"
+          if [ "$((10#${MIN}))" -lt 5 ]; then
+            case "$((10#${HOUR}))" in
+              6|18) ROUTES="${ROUTES} ${TWICE_DAILY}" ;;
+            esac
+            [ "$((10#${HOUR}))" -eq 13 ] && ROUTES="${ROUTES} ${DAILY}"
           fi
+          # `set -e` is deliberately NOT in effect for these tests: a false
+          # condition on the last line of the block would exit the step with a
+          # non-zero status and skip the dispatch entirely.
+          true
 
           FAILED=0
           for path in ${ROUTES}; do

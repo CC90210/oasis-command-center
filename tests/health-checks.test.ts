@@ -79,6 +79,63 @@ assert.equal(evaluate("x", drop, 0, [0, 0, 0, 0, 0, 0]).verdict, "ok");
   assert.equal(r.verdict, "failing");
 }
 
+// ── Shopping out, 2026-08-06 → 2026-08-11 ──────────────────────────────────
+// Physically dead for five days while every monitor read green, because not one
+// check watched the lender side. The numbers below are the REAL production
+// counts measured on 2026-08-11 during the audit, so these assertions record an
+// outage that happened rather than one that seemed plausible.
+{
+  // Six lender packages queued at 14:38Z, the dispatch failed, and the rows sat
+  // at pending with last_error NULL. Measured: 6.
+  const r = evaluate("shopout.threads_stuck_pending", { kind: "must_be_zero" }, 6, []);
+  assert.equal(r.verdict, "failing", "six deals stuck unsent MUST page");
+}
+{
+  // The same check on a healthy system: a queue that drains is not an alert.
+  const r = evaluate("shopout.threads_stuck_pending", { kind: "must_be_zero" }, 0, []);
+  assert.equal(r.verdict, "ok", "an empty pending queue must not alert");
+}
+{
+  // 55 threads sat at 'sent' untouched since 2026-08-05 because
+  // scan-lender-replies was never added to the GitHub Actions cron driver.
+  // Lender approvals were arriving and nothing was reading them. Measured: 55.
+  const r = evaluate("shopout.replies_unclassified", { kind: "must_be_zero" }, 55, []);
+  assert.equal(r.verdict, "failing", "55 unread lender replies MUST page");
+}
+{
+  // sent_without_proof must be GREEN on the current fleet. This is the
+  // false-alarm guard: the first draft keyed on gmail_thread_id, which the SMTP
+  // sender never populates (null on 55 of 55 sent threads), so it would have
+  // gone red on 100% of history the moment it deployed. The receipt that IS
+  // written is send_interaction_id (55 of 55). A monitor whose first act is a
+  // false alarm is one people learn to ignore.
+  const r = evaluate("shopout.sent_without_proof", { kind: "must_be_zero" }, 0, []);
+  assert.equal(r.verdict, "ok", "the receipt check must be green on today's data");
+}
+{
+  // And it must still fire when a status is moved with no send behind it.
+  const r = evaluate("shopout.sent_without_proof", { kind: "must_be_zero" }, 3, []);
+  assert.equal(r.verdict, "failing");
+}
+{
+  // The checks must be registered, or they cannot run. Guards a merge that
+  // keeps these tests and drops the checks.
+  const src = readFileSync("lib/health/drip-checks.ts", "utf8");
+  for (const id of [
+    "shopout.threads_stuck_pending",
+    "shopout.sent_without_proof",
+    "shopout.replies_unclassified",
+  ]) {
+    assert.ok(src.includes(`id: "${id}"`), `${id} must be registered in DRIP_CHECKS`);
+  }
+  // The receipt column is load-bearing and exactly the kind of thing a later
+  // pass "corrects" back to the obvious-looking wrong one.
+  assert.ok(
+    !/is\("gmail_thread_id", null\)/.test(src),
+    "sent_without_proof must not key on gmail_thread_id — the SMTP path never sets it",
+  );
+}
+
 // ── worstVerdict ───────────────────────────────────────────────────────────
 assert.equal(worstVerdict([]), "ok");
 assert.equal(worstVerdict([{ verdict: "ok" }, { verdict: "degraded" }] as never), "degraded");
