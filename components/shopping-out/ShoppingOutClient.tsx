@@ -1199,9 +1199,18 @@ export function ShoppingOutClient({
                   const errish =
                     t.status === "error" || t.status === "sending" || t.status === "suppressed";
                   const rawDetail = t.last_error || t.last_response_summary;
+                  // A reply summary is only shown when a reply actually
+                  // arrived. Without this gate the row prints whatever happens
+                  // to be in last_response_summary and labels it the lender's
+                  // response — which is how six freshly SENT threads displayed
+                  // a send_gateway stack trace left there by the old VPS
+                  // sender. last_response_at is the evidence that a reply
+                  // exists; the summary alone is not.
                   const detailMsg = errish
                     ? friendlyThreadError(rawDetail)
-                    : t.last_response_summary;
+                    : t.last_response_at
+                      ? t.last_response_summary
+                      : null;
                   const detailTone = errish
                     ? t.status === "suppressed"
                       ? "text-fg-muted"
