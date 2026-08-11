@@ -239,8 +239,23 @@ assert.equal(buildInterchangeAudit({ from: null, to: "x", actor: "u" }).from, nu
   assert.deepEqual(diffPins(null, [pin("A")]), [{ index: 0, from: null, to: "A", role: undefined }]);
 
   // The same template pinned on TWO steps, then removed from one: exactly one
-  // removal, not zero and not two.
+  // removal, not zero and not two -- and at the RIGHT index. Counting alone
+  // would assume the earliest occurrence survived and name the wrong step,
+  // which for a duplicate pin is the only detail distinguishing them.
   assert.deepEqual(diffPins([pin("A"), pin("A")], [pin("A"), pin()]), [{ index: 1, from: "A", to: null }]);
+  assert.deepEqual(
+    diffPins([pin("A"), pin("A")], [pin(), pin("A")]),
+    [{ index: 0, from: "A", to: null }],
+    "the step that actually lost its pin is the one reported",
+  );
+  // ...and adding a third occurrence names the new index, not index 0.
+  assert.deepEqual(
+    diffPins([pin("A"), pin("A")], [pin("A"), pin("A"), pin("A")]),
+    [{ index: 2, from: null, to: "A", role: undefined }],
+  );
+
+  // Swapping two pinned steps with each other is a reorder, not four events.
+  assert.deepEqual(diffPins([pin("A"), pin("B")], [pin("B"), pin("A")]), []);
 }
 
 console.log("template-interchange.test.ts — all assertions passed");
