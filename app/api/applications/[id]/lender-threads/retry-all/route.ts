@@ -21,6 +21,11 @@ import { getServiceSupabase } from "@/lib/supabase-server";
 import { resolveSessionContext } from "@/lib/api-auth";
 import { resolveSignerForOperator } from "@/lib/config/agents";
 import { ensureApplicationThreadsWatermarked } from "@/lib/lead-documents";
+import {
+  physicalSendFailed,
+  dispatchFailureReason,
+  recordDispatchFailure,
+} from "@/lib/lenders/shop-out-outcome";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -229,6 +234,41 @@ export async function POST(
       status: "error",
       message: e instanceof Error ? e.message : "retry-all auto-trigger threw",
     };
+  }
+
+  // Retry is where an operator goes AFTER a failure, so reporting a second
+  // failure as {ok:true} is worse here than on the initial send: it converts
+  // "the fix did not work" into "it worked this time", and the deal stops
+  // being chased. Same contract as the shop-out route — stamp the row, then
+  // 502. See lib/lenders/shop-out-outcome.ts.
+  if (physicalSendFailed(physicalSend)) {
+    const reason = dispatchFailureReason(physicalSend);
+    const stamp = await recordDispatchFailure({
+      tenant_id: tenantId,
+      application_id: applicationId,
+      reason,
+    });
+    if (!stamp.ok) {
+      console.error("[retry-all] could not record dispatch failure on threads", {
+        applicationId,
+        reason,
+        error: stamp.error,
+      });
+    }
+    return NextResponse.json(
+      {
+        ok: false,
+        error: "physical_send_failed",
+        message:
+          "Retry did not go out. Nothing reached a lender — the send path is still failing.",
+        recovered,
+        threads_marked: stamp.stamped,
+        physical_send: physicalSend,
+        watermark_degraded: wmGuard.failures.length > 0,
+        watermark_failures: wmGuard.failures,
+      },
+      { status: 502 },
+    );
   }
 
   return NextResponse.json({

@@ -606,8 +606,23 @@ export function ShoppingOutClient({
       // report nothing, and leave every thread red.
       if (!j?.ok) setSendResult({ tone: "error", message: describeSendError(j || {}) });
       else {
+        // Say what happened. Reporting nothing on success is the quieter
+        // half of the same problem this whole change is about: the operator
+        // clicks Retry, sees no message, and has to guess from the chips
+        // whether anything moved.
+        const ps = j.physical_send as { sent_count?: number } | undefined;
+        const recovered = typeof j.recovered === "number" ? j.recovered : 0;
         const warning = describeWatermarkWarning(j || {});
-        if (warning) setSendResult({ tone: "warning", message: warning });
+        const base =
+          recovered === 0
+            ? "Nothing to retry — no threads were in a recoverable state."
+            : `Retried ${recovered} thread${recovered === 1 ? "" : "s"}${
+                typeof ps?.sent_count === "number" ? ` · ${ps.sent_count} sent` : ""
+              }.`;
+        setSendResult({
+          tone: warning ? "warning" : "success",
+          message: warning ? `${base}\n${warning}` : base,
+        });
       }
       await refreshThreads();
     } catch (err) {

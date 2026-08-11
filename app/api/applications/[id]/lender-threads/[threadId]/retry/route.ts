@@ -31,6 +31,11 @@ import { ensureApplicationThreadsWatermarked } from "@/lib/lead-documents";
 import { sendFunmateMail } from "@/lib/integrations/funmate-mail-send";
 import { verifyFunmateSmtp } from "@/lib/integrations/funmate-mail";
 import type { ShopOutAttachment } from "@/lib/lenders/shop-out";
+import {
+  physicalSendFailed,
+  dispatchFailureReason,
+  recordDispatchFailure,
+} from "@/lib/lenders/shop-out-outcome";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -308,8 +313,7 @@ export async function POST(
     }
   }
 
-  return NextResponse.json({
-    ok: true,
+  const body_ = {
     thread_id: thread.id,
     previous_status: fromStatus,
     new_status: updatedCount > 0 ? "pending" : thread.status,
@@ -317,5 +321,39 @@ export async function POST(
     physical_send: physicalSend,
     watermark_degraded: wmGuard.failures.length > 0,
     watermark_failures: wmGuard.failures,
-  });
+  };
+
+  // Same contract as the shop-out and retry-all routes: a dispatch that
+  // delivered nothing is a failure, said out loud and written to the row.
+  // See lib/lenders/shop-out-outcome.ts for why the row is the load-bearing
+  // half.
+  if (physicalSendFailed(physicalSend)) {
+    const reason = dispatchFailureReason(physicalSend);
+    const stamp = await recordDispatchFailure({
+      tenant_id: tenantId,
+      application_id: applicationId,
+      reason,
+    });
+    if (!stamp.ok) {
+      console.error("[retry] could not record dispatch failure on threads", {
+        applicationId,
+        threadId,
+        reason,
+        error: stamp.error,
+      });
+    }
+    return NextResponse.json(
+      {
+        ok: false,
+        error: "physical_send_failed",
+        message:
+          "Retry did not go out. Nothing reached this lender — the send path is still failing.",
+        threads_marked: stamp.stamped,
+        ...body_,
+      },
+      { status: 502 },
+    );
+  }
+
+  return NextResponse.json({ ok: true, ...body_ });
 }
