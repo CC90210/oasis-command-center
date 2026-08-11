@@ -44,6 +44,8 @@ import { sendDripSms, sendDripEmail } from "@/lib/drips/send";
 import { brandIsSendable, type BrandKey } from "@/lib/email/brands";
 import { brandFooter } from "@/lib/email/brand-shell";
 import { isWithinSendWindow } from "@/lib/sms/compliance";
+import { contactabilityOf, resolveChannel } from "@/lib/drips/channel-fallback";
+import { mayTextFor } from "@/lib/sms/lawful-basis";
 import { smsSendAllowed, resetBreakerCache, claimBreakerProbe } from "@/lib/sms/send-breaker";
 import { routeOutbound, type ProviderAvailability } from "@/lib/routing/outbound-routing";
 import { loadProviderAvailability } from "@/lib/routing/provider-availability";
@@ -718,6 +720,9 @@ async function processSmsStep(
   step: DripStep,
   steps: DripStep[],
   run: RunState,
+  /** Sequence class. Transactional chases on a live deal are not solicitations
+   *  and are exempt from the marketing consent bar — see mayTextFor. */
+  emailClass: string,
 ): Promise<StepOutcome> {
   const phone = typeof data.phone === "string" ? data.phone.trim() : "";
   // No phone for an SMS step: SKIP + advance (the sequence may have email steps
@@ -727,6 +732,29 @@ async function processSmsStep(
   const supp = await checkPhoneOptOut(row.tenant_id, phone);
   if (supp.optedOut) return markPermanentFail(db, row, "opted_out (replied STOP)");
   if (supp.checkFailed) return markRetryOrFail(db, row, "suppression_check_failed");
+
+  // LAWFUL BASIS TO TEXT. Email and SMS are not interchangeable in law: email
+  // needs no prior permission, a marketing text does. $500 a message, $1,500 if
+  // wilful, no cap, private right of action, and Florida has its own statute —
+  // which matters because these are Florida merchants.
+  //
+  // This became load-bearing the moment the channel fallback landed. Without it,
+  // "we have their number so text them" routes 240 purchased and 119 cold-called
+  // leads — all phone-only, none with a consent record — straight into SMS.
+  //
+  // Transactional chases on a deal already in motion are exempt: asking for a
+  // signature or a document is not a solicitation, and blocking those would
+  // stall live deals for no compliance gain.
+  {
+    const purpose = emailClass === "transactional" ? "transactional" : "marketing";
+    const basis = mayTextFor(data, purpose);
+    if (!basis.mayText) {
+      // NOT a failure and NOT a retry: nothing about this lead will change on
+      // its own. Skip the step and advance so the sequence's email steps still
+      // run, and record the basis so the decision is reconstructable.
+      return skipStep(db, row, steps, `sms_no_lawful_basis: ${basis.reason}`);
+    }
+  }
 
   // TCPA quiet-hours: only send SMS within the recipient's local ~8am-9pm.
   const tcpa = checkTcpaWindow(phone);
@@ -1387,8 +1415,41 @@ async function processRow(
     return markCancelled(db, row, "accelerated_chase_active: stage drip stands down");
   }
 
-  if (step.channel === "sms") return processSmsStep(db, row, data, step, steps, run);
-  return processEmailStep(db, row, data, step, steps, seq.emailClass || "commercial", run);
+  // CHANNEL FALLBACK — reach them on whatever we actually have.
+  //
+  // Adon, 2026-08-10: "The ones that have emails will answer an email. The ones
+  // that don't, if we have their number, we have to write a text to them."
+  //
+  // Previously the step's channel was fixed, so an email step for a phone-only
+  // lead was skipped and the sequence walked on. 420 of 1,197 leads are
+  // phone-only and 68 rows had already been skipped as no_email_for_email_step:
+  // the run reported healthy and those merchants heard nothing.
+  //
+  // A step may opt out with `channel_locked` when it cannot survive translation
+  // — a statement request carrying an attachment is not the same thing as a
+  // text — in which case the miss is reported rather than rewritten.
+  const contact = contactabilityOf(data);
+  const locked = isTruthyFlag((step as unknown as Record<string, unknown>).channel_locked);
+  const decision = resolveChannel(step.channel, contact, { channelLocked: locked });
+
+  if (!decision.send) {
+    // Unreachable is a DATA problem, not a delivery one, and it must land in the
+    // record as such. Advancing silently is what let 23 of the 84 live subs sit
+    // in a sequence with no contact method at all.
+    return skipStep(db, row, steps, `unreachable: ${decision.detail}`);
+  }
+  if (decision.substituted) {
+    console.warn("[dispatch-drips] channel substituted", {
+      leadId: row.lead_id,
+      authored: step.channel,
+      using: decision.channel,
+      reason: decision.reason,
+    });
+  }
+
+  const emailClass = seq.emailClass || "commercial";
+  if (decision.channel === "sms") return processSmsStep(db, row, data, step, steps, run, emailClass);
+  return processEmailStep(db, row, data, step, steps, emailClass, run);
 }
 
 export async function runDispatchDrips(): Promise<DispatchDripsResult> {

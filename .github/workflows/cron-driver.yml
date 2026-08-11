@@ -1,0 +1,79 @@
+# Drives the Vercel cron routes from GitHub Actions.
+#
+# WHY THIS EXISTS. Vercel's own scheduler stopped executing for this project on
+# 2026-08-06. Everything that could explain it was checked and ruled out: the
+# crons are registered in the deployment, enabled with disabledAt null, pinned
+# to the CURRENT production deployment, CRON_SECRET is present on production,
+# the routes are reachable and correctly reject unauthenticated callers, there
+# is no deployment protection, and the team is on an active Pro plan with no
+# billing block. The engine itself is fine — driven by hand it claimed and
+# processed 12 rows in 3 seconds.
+#
+# So the fault is the scheduler alone, and this replaces it. CRON_ALLOW_LOCAL=1
+# is set on production, which lets an external caller holding the bearer through
+# the same auth the platform uses.
+#
+# The cost of the outage: the dispatcher had not claimed a row in four days and
+# 230 steps sat overdue while everything reported healthy.
+#
+# CAVEAT: GitHub's scheduler is best-effort and can lag under load, so treat
+# these as "at least every N minutes". That is the same guarantee Vercel gave,
+# and considerably better than the zero we have now.
+
+name: cron-driver
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+concurrency:
+  # Never overlap ticks. The dispatcher leases the rows it claims so a double
+  # run is survivable, but overlapping ticks waste the shared TextTorrent rate
+  # budget and make the logs hard to read.
+  group: cron-driver
+  cancel-in-progress: false
+
+jobs:
+  tick:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Drive the due cron routes
+        env:
+          BASE: https://agent-dashboard-cc90210.vercel.app
+          SECRET: ${{ secrets.OASIS_CRON_SECRET }}
+        run: |
+          set -uo pipefail
+          if [ -z "${SECRET}" ]; then
+            echo "::error::OASIS_CRON_SECRET is not set; refusing to run blind"
+            exit 1
+          fi
+
+          # dispatch-drips is the one that actually moves merchant mail.
+          FAST="/api/cron/dispatch-drips"
+          # Enrolment feeds the dispatcher, reconcile-sms closes carrier
+          # receipts, health-check is the outcome watchdog.
+          SLOW="/api/cron/enroll-drips /api/cron/reconcile-sms /api/cron/health-check"
+
+          MIN=$(date -u +%M)
+          ROUTES="${FAST}"
+          if [ $((10#${MIN} % 15)) -lt 5 ]; then
+            ROUTES="${FAST} ${SLOW}"
+          fi
+
+          FAILED=0
+          for path in ${ROUTES}; do
+            code=$(curl -sS -o /tmp/out.json -w '%{http_code}' -m 120 \
+                     -X POST "${BASE}${path}" \
+                     -H "Authorization: Bearer ${SECRET}") || code="000"
+            body=$(head -c 400 /tmp/out.json 2>/dev/null | tr -d '\n')
+            echo "${path} -> ${code} ${body}"
+            case "${code}" in
+              2*) ;;
+              # A cron that silently 401s or 500s is exactly how the last outage
+              # stayed invisible for four days. Fail loudly here instead.
+              *) echo "::error::${path} returned ${code}"; FAILED=1 ;;
+            esac
+          done
+          exit ${FAILED}
