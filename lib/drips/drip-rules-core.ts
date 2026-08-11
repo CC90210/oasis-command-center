@@ -43,10 +43,16 @@ export type EmailBudget = {
    */
   perSequenceSentToday: Map<string, number>;
   perSequenceCap: Map<string, number>;
-  /** The per-sequence count or cap read failed. Like perLeadDegraded this is
-   *  ENFORCED rather than shrugged off, but only for sequences that HAVE a cap
-   *  set — see emailGateReason. */
-  perSequenceDegraded: boolean;
+  /**
+   * Tenants whose per-sequence count or cap read FAILED.
+   *
+   * A set, not a flag, because a dispatch batch spans tenants: one boolean
+   * would let a single tenant's failed query halt every capped sequence
+   * belonging to tenants whose reads were perfectly fine. Enforced rather than
+   * shrugged off, but only for sequences that actually HAVE a cap set — see
+   * emailGateReason.
+   */
+  perSequenceDegraded: Set<string>;
   /** A GLOBAL count query failed; the two global caps are best-effort this run. */
   degraded: boolean;
   /** The PER-LEAD count query failed. Unlike `degraded`, this one is enforced. */
@@ -182,7 +188,10 @@ export function emailGateReason(
       // every sequence would stall the whole engine over a feature almost
       // nothing uses yet; failing closed where a human has actually asked for a
       // limit is the point of having asked.
-      if (budget.perSequenceDegraded) return "sequence_budget_unavailable";
+      // This tenant's read, not anyone else's.
+      if (sequence?.tenantId && budget.perSequenceDegraded.has(String(sequence.tenantId))) {
+        return "sequence_budget_unavailable";
+      }
       const sent = firstDefined(seqKeys.map((k) => budget.perSequenceSentToday.get(k))) ?? 0;
       if (sent >= cap) return "sequence_daily_cap";
     }

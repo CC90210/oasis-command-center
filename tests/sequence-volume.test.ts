@@ -289,7 +289,7 @@ function budget(over: Partial<EmailBudget> = {}): EmailBudget {
     perLeadCap: 99,
     perSequenceSentToday: new Map(),
     perSequenceCap: new Map(),
-    perSequenceDegraded: false,
+    perSequenceDegraded: new Set<string>(),
     degraded: false,
     perLeadDegraded: false,
     ...over,
@@ -367,14 +367,30 @@ const seq = { tenantId: TENANT, id: "s1", name: "Cold" };
 // almost nothing uses yet. Failing closed where a human actually asked for a
 // limit is the entire point of them having asked.
 {
-  const degraded = budget({ perSequenceDegraded: true, perSequenceCap: new Map([[`${TENANT}|s1`, 40]]) });
+  const degraded = budget({
+    perSequenceDegraded: new Set([TENANT]),
+    perSequenceCap: new Map([[`${TENANT}|s1`, 40]]),
+  });
   assert.equal(emailGateReason(degraded, "lead-1", "sunbiz", "follow_up", seq), "sequence_budget_unavailable");
 
-  const uncappedDegraded = budget({ perSequenceDegraded: true });
+  const uncappedDegraded = budget({ perSequenceDegraded: new Set([TENANT]) });
   assert.equal(
     emailGateReason(uncappedDegraded, "lead-1", "sunbiz", "follow_up", seq),
     null,
     "an uncapped sequence must not be held because a cap read failed",
+  );
+
+  // ...and ONE tenant's failed read must not halt another's. A batch spans
+  // tenants, so a single boolean here would let one broken query stop email for
+  // every capped sequence in the estate.
+  const otherTenantBroken = budget({
+    perSequenceDegraded: new Set(["t2"]),
+    perSequenceCap: new Map([[`${TENANT}|s1`, 40]]),
+  });
+  assert.equal(
+    emailGateReason(otherTenantBroken, "lead-1", "sunbiz", "follow_up", seq),
+    null,
+    "a healthy tenant keeps sending when a different tenant's read fails",
   );
 }
 

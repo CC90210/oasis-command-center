@@ -62,33 +62,52 @@ export async function recentDripActivity(
   const limit = Math.min(filters.limit ?? 200, 500);
   const since = new Date(filters.sinceMs ?? Date.now() - 7 * 24 * 3_600_000).toISOString();
 
-  let q = db
-    .from("drip_runs")
-    .select(
-      "id, lead_id, sequence_name, step_index, channel, status, from_identity, last_error, sent_at, scheduled_for",
-    )
-    .eq("tenant_id", tenantId)
-    .or(outcomeWindow(since))
-    // Ordered on scheduled_for HERE and re-sorted in JS below.
-    //
-    // The previous `.order("sent_at", { nullsFirst: true })` was a comment
-    // asserting something that never happened: the live plane is Turso, and
-    // lib/turso-postgrest.ts accepts only `{ ascending }` — nullsFirst is
-    // silently dropped, and SQLite puts NULLs LAST on a DESC sort. So the rows
-    // an operator opens this tab for (failed, still pending — the ones with no
-    // sent_at) were sorting to the BOTTOM, and past the 500-row limit they
-    // could fall off entirely. Exactly backwards, and invisible.
-    //
-    // This bound is only about which rows come back. The order that gets shown
-    // is decided below, where it cannot depend on a dialect.
-    .order("scheduled_for", { ascending: false })
-    .limit(limit);
-  if (filters.channel) q = q.eq("channel", filters.channel);
-  if (filters.sequenceName) q = q.eq("sequence_name", filters.sequenceName);
+  const COLS =
+    "id, lead_id, sequence_name, step_index, channel, status, from_identity, last_error, sent_at, scheduled_for";
 
-  const res = await q;
-  if (res.error) throw new Error(`drip activity read failed: ${res.error.message}`);
-  const runs = res.data || [];
+  /**
+   * TWO QUERIES, EACH WITH ITS OWN LIMIT, and that is the point.
+   *
+   * A single query has to pick one ORDER BY, and whichever it picks decides
+   * which rows survive the limit — a later JS sort cannot recover a row the
+   * database already discarded. Ordering by scheduled_for drops the open
+   * failures once a tenant has more than `limit` runs in the window; ordering
+   * by sent_at drops recently-sent rows that were scheduled long ago, which is
+   * exactly the backlog case outcomeWindow exists for. Both losses are silent.
+   *
+   * So: OPEN rows (nothing sent yet — every failure and everything pending) are
+   * fetched separately from COMPLETED ones. Each is capped, so a flood of
+   * either cannot crowd out the other.
+   *
+   * The previous single query also carried `.order("sent_at", { nullsFirst })`,
+   * which was a comment asserting something that never happened: the live plane
+   * is Turso, lib/turso-postgrest.ts accepts only `{ ascending }`, and SQLite
+   * puts NULLs LAST on a DESC sort. The rows an operator opens this tab FOR
+   * were sorting to the bottom.
+   */
+  const base = (kind: "open" | "done") => {
+    let q = db
+      .from("drip_runs")
+      .select(COLS)
+      .eq("tenant_id", tenantId);
+    q =
+      kind === "open"
+        ? // Open: no sent_at at all, due inside the window.
+          q.is("sent_at", null).gte("scheduled_for", since)
+        : // Completed: measured by when it actually SENT, not when it was due.
+          q.not("sent_at", "is", null).gte("sent_at", since);
+    q = q.order(kind === "open" ? "scheduled_for" : "sent_at", { ascending: false }).limit(limit);
+    if (filters.channel) q = q.eq("channel", filters.channel);
+    if (filters.sequenceName) q = q.eq("sequence_name", filters.sequenceName);
+    return q;
+  };
+
+  const [openRes, doneRes] = await Promise.all([base("open"), base("done")]);
+  // Either failing is a failure. Returning half the picture as if it were the
+  // whole one is the silent-truncation shape this module exists to refuse.
+  if (openRes.error) throw new Error(`drip activity read failed: ${openRes.error.message}`);
+  if (doneRes.error) throw new Error(`drip activity read failed: ${doneRes.error.message}`);
+  const runs = [...(openRes.data || []), ...(doneRes.data || [])];
 
   // Lead names and brands in ONE batched read rather than per row.
   const leadIds = [...new Set(runs.map((r) => String(r.lead_id)).filter(Boolean))].slice(0, 500);

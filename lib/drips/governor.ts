@@ -161,7 +161,7 @@ export async function loadEmailBudget(
   let perLeadDegraded = false;
   const perSequenceSentToday = new Map<string, number>();
   const perSequenceCap = new Map<string, number>();
-  let perSequenceDegraded = false;
+  const perSequenceDegraded = new Set<string>();
 
   const [today, thisHour] = await Promise.all([
     countDripEmailByBrand(db, ISO(DAY)),
@@ -216,7 +216,7 @@ export async function loadEmailBudget(
   for (const tenantId of new Set(tenantIds.filter(Boolean))) {
     try {
       const [sent, caps] = await Promise.all([sequenceSentToday(tenantId), sequenceDailyCaps(tenantId)]);
-      if (sent === null || caps === null) perSequenceDegraded = true;
+      if (sent === null || caps === null) perSequenceDegraded.add(tenantId);
       // Keys are namespaced by tenant (sequenceBudgetKeys). A sequence id is a
       // uuid and would survive a shared map, but a NAME is not unique across
       // tenants, and two tenants with a "Cold Outreach" would otherwise share
@@ -228,7 +228,7 @@ export async function loadEmailBudget(
       for (const [k, v] of caps || []) perSequenceCap.set(`${tenantId}|${k}`, v);
       for (const [k, v] of sent || []) perSequenceSentToday.set(`${tenantId}|${k}`, v);
     } catch {
-      perSequenceDegraded = true;
+      perSequenceDegraded.add(tenantId);
     }
   }
 
