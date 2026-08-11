@@ -69,10 +69,18 @@ export async function recentDripActivity(
     )
     .eq("tenant_id", tenantId)
     .or(outcomeWindow(since))
-    // Anything still open sorts first (null sent_at), because a failure or a
-    // stuck retry is what an operator opened this tab for; completed sends
-    // follow, newest first.
-    .order("sent_at", { ascending: false, nullsFirst: true })
+    // Ordered on scheduled_for HERE and re-sorted in JS below.
+    //
+    // The previous `.order("sent_at", { nullsFirst: true })` was a comment
+    // asserting something that never happened: the live plane is Turso, and
+    // lib/turso-postgrest.ts accepts only `{ ascending }` — nullsFirst is
+    // silently dropped, and SQLite puts NULLs LAST on a DESC sort. So the rows
+    // an operator opens this tab for (failed, still pending — the ones with no
+    // sent_at) were sorting to the BOTTOM, and past the 500-row limit they
+    // could fall off entirely. Exactly backwards, and invisible.
+    //
+    // This bound is only about which rows come back. The order that gets shown
+    // is decided below, where it cannot depend on a dialect.
     .order("scheduled_for", { ascending: false })
     .limit(limit);
   if (filters.channel) q = q.eq("channel", filters.channel);
@@ -124,6 +132,20 @@ export async function recentDripActivity(
     sentAt: r.sent_at ?? null,
     scheduledFor: r.scheduled_for ?? null,
   }));
+
+  // Sorted HERE, not in SQL, so the order does not depend on which dialect is
+  // behind getServiceSupabase(). Postgres and SQLite disagree about where NULLs
+  // land, and the compat shim does not carry nullsFirst at all.
+  //
+  // Open rows first — a failure or a stuck retry is what an operator opened
+  // this tab for — then completed sends, newest first.
+  rows.sort((a, b) => {
+    const openA = a.sentAt ? 1 : 0;
+    const openB = b.sentAt ? 1 : 0;
+    if (openA !== openB) return openA - openB;
+    const key = (r: DripActivityRow) => r.sentAt || r.scheduledFor || "";
+    return key(b).localeCompare(key(a));
+  });
 
   return filters.status ? rows.filter((r) => r.status === filters.status) : rows;
 }

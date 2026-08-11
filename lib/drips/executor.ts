@@ -1156,7 +1156,10 @@ async function processEmailStep(
     // expects contact, a lead six weeks into follow-up does not. Passing the
     // stage raises the cap only where engagement justifies it.
     const gateStage = typeof data.stage === "string" ? data.stage : undefined;
-    const gated = emailGateReason(run.emailBudget, row.lead_id, brand, gateStage);
+    // Tenant + sequence, so an operator's own per-sequence daily cap is honoured
+    // and the hold reason names THEIR setting rather than a system rule.
+    const seqRef = { tenantId: row.tenant_id, id: row.sequence_id, name: row.sequence_name };
+    const gated = emailGateReason(run.emailBudget, row.lead_id, brand, gateStage, seqRef);
     if (gated) {
       return markRescheduled(
         db,
@@ -1254,7 +1257,13 @@ async function processEmailStep(
     // Spend the budget only on a send that actually left, so later rows in this
     // same run see the decremented remainder without re-querying. A failed send
     // deliberately does not consume: nothing reached the recipient.
-    if (run.emailBudget) consumeEmail(run.emailBudget, row.lead_id, brand);
+    if (run.emailBudget) {
+      consumeEmail(run.emailBudget, row.lead_id, brand, {
+        tenantId: row.tenant_id,
+        id: row.sequence_id,
+        name: row.sequence_name,
+      });
+    }
   }
 
   const interactionLog = logInteraction(db, {
@@ -1655,7 +1664,11 @@ export async function runDispatchDrips(): Promise<DispatchDripsResult> {
   const run: RunState = {
     creditExhausted: false,
     emailBudget:
-      dripSendEnabled() && emailLeadIds.length > 0 ? await loadEmailBudget(db, emailLeadIds) : null,
+      dripSendEnabled() && emailLeadIds.length > 0
+        // EVERY tenant in the batch, not claimed[0] — the same correction the
+        // brand map and the template pool each needed.
+        ? await loadEmailBudget(db, emailLeadIds, Array.from(leadIdsByTenant.keys()))
+        : null,
     brandByLead,
     templatePoolByTenant,
     availabilityByTenant,

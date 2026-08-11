@@ -28,6 +28,25 @@ export type EmailBudget = {
    *  them. This is the cap that decides how mail FEELS to one human. */
   perLeadSent7d: Map<string, number>;
   perLeadCap: number;
+  /**
+   * Per-SEQUENCE sends in the current calendar day, and the operator-set cap
+   * for each. Keyed by sequence id, and mirrored under `name:<name>` so a send
+   * attributable only by name is still counted and still limited.
+   *
+   * Between "the whole domain may send 150 today" and "this merchant may get 2
+   * this week" there was nothing: one sequence could consume the entire brand
+   * allowance before another sent a single email, and no operator could see it
+   * happen or stop it without an env change and a deploy. This is that gap.
+   *
+   * An ABSENT cap means uncapped, which is every sequence until an operator
+   * sets one — so this ships changing nothing.
+   */
+  perSequenceSentToday: Map<string, number>;
+  perSequenceCap: Map<string, number>;
+  /** The per-sequence count or cap read failed. Like perLeadDegraded this is
+   *  ENFORCED rather than shrugged off, but only for sequences that HAVE a cap
+   *  set — see emailGateReason. */
+  perSequenceDegraded: boolean;
   /** A GLOBAL count query failed; the two global caps are best-effort this run. */
   degraded: boolean;
   /** The PER-LEAD count query failed. Unlike `degraded`, this one is enforced. */
@@ -38,7 +57,9 @@ export type EmailGateReason =
   | "daily_cap"
   | "hourly_cap"
   | "per_lead_weekly_cap"
-  | "per_lead_budget_unavailable";
+  | "per_lead_budget_unavailable"
+  | "sequence_daily_cap"
+  | "sequence_budget_unavailable";
 
 /**
  * Would a real email to this lead breach a cap right now? Returns the breached
@@ -102,15 +123,71 @@ export function perLeadCapForStage(stage: unknown): number {
   return builtin === undefined ? CONSERVATIVE_DEFAULT : builtin;
 }
 
+/**
+ * The keys a sequence's volume may be filed under, most durable first.
+ *
+ * The id is the real key. The `name:` mirror exists because agent_source has
+ * always been `sequence:<name>` and rows written before id stamping carry no
+ * id — without the mirror, a capped sequence whose sends are attributable only
+ * by name would be counted on the chart and never actually limited.
+ *
+ * NAMESPACED BY TENANT, because a dispatch batch can span tenants — a lesson
+ * executor.ts has already learned twice, both times by loading one tenant's
+ * data under another's id. A sequence id is a uuid and would survive a shared
+ * map, but a NAME is not unique across tenants: two tenants with a "Cold
+ * Outreach" would share one counter, and one would silently consume the other's
+ * daily allowance.
+ */
+export function sequenceBudgetKeys(sequence?: {
+  tenantId?: string | null;
+  id?: string | null;
+  name?: string | null;
+}): string[] {
+  const tenant = sequence?.tenantId ? String(sequence.tenantId) : "";
+  if (!tenant) return []; // unattributable to a tenant is unattributable, full stop
+  const keys: string[] = [];
+  if (sequence?.id) keys.push(`${tenant}|${sequence.id}`);
+  if (sequence?.name) keys.push(`${tenant}|name:${sequence.name}`);
+  return keys;
+}
+
+/** First non-undefined, so the id's answer wins over the name mirror's. */
+function firstDefined<T>(values: Array<T | undefined>): T | undefined {
+  for (const v of values) if (v !== undefined) return v;
+  return undefined;
+}
+
 export function emailGateReason(
   budget: EmailBudget,
   leadId: string,
   brand: BudgetBrand = "sunbiz",
   stage?: unknown,
+  /** Tenant, sequence id and name for the row being sent. Omitting it preserves
+   *  the pre-2026-08-11 behaviour exactly, so this landed safely ahead of every
+   *  call site passing it. */
+  sequence?: { tenantId?: string | null; id?: string | null; name?: string | null },
 ): EmailGateReason | null {
   if (budget.perLeadDegraded) return "per_lead_budget_unavailable";
   if ((budget.dailyRemaining[brand] ?? 0) <= 0) return "daily_cap";
   if ((budget.hourlyRemaining[brand] ?? 0) <= 0) return "hourly_cap";
+
+  // Per-sequence, checked BEFORE the per-lead cap so the hold reason names the
+  // operator's own setting rather than a system rule. When someone has typed 40
+  // into a box and the engine stops at 40, the log should say so.
+  const seqKeys = sequenceBudgetKeys(sequence);
+  if (seqKeys.length > 0) {
+    const cap = firstDefined(seqKeys.map((k) => budget.perSequenceCap.get(k)));
+    if (cap !== undefined) {
+      // Only a CAPPED sequence is blocked by a failed read. Failing closed for
+      // every sequence would stall the whole engine over a feature almost
+      // nothing uses yet; failing closed where a human has actually asked for a
+      // limit is the point of having asked.
+      if (budget.perSequenceDegraded) return "sequence_budget_unavailable";
+      const sent = firstDefined(seqKeys.map((k) => budget.perSequenceSentToday.get(k))) ?? 0;
+      if (sent >= cap) return "sequence_daily_cap";
+    }
+  }
+
   const sent = budget.perLeadSent7d.get(leadId) || 0;
   // A supplied stage takes precedence over the budget's flat cap; omitting the
   // stage preserves the pre-2026-08-06 behaviour for any caller not yet passing
@@ -126,10 +203,18 @@ export function consumeEmail(
   budget: EmailBudget,
   leadId: string,
   brand: BudgetBrand = "sunbiz",
+  sequence?: { tenantId?: string | null; id?: string | null; name?: string | null },
 ): void {
   budget.dailyRemaining[brand] = (budget.dailyRemaining[brand] ?? 0) - 1;
   budget.hourlyRemaining[brand] = (budget.hourlyRemaining[brand] ?? 0) - 1;
   budget.perLeadSent7d.set(leadId, (budget.perLeadSent7d.get(leadId) || 0) + 1);
+  // EVERY key this sequence could be gated under, not just the first. The gate
+  // reads the id's count when there is one and the name mirror otherwise;
+  // incrementing only one of them would let a run of sends in a single batch
+  // sail past a cap that the next run then reports as already exceeded.
+  for (const k of sequenceBudgetKeys(sequence)) {
+    budget.perSequenceSentToday.set(k, (budget.perSequenceSentToday.get(k) || 0) + 1);
+  }
 }
 
 const HOUR = 3_600_000;
@@ -141,12 +226,54 @@ const DAY = 24 * HOUR;
  *  transient infrastructure problem, not a decision about this lead). */
 export function holdUntilIso(reason: EmailGateReason): string {
   const ms =
-    reason === "hourly_cap" || reason === "per_lead_budget_unavailable"
+    reason === "hourly_cap" ||
+    reason === "per_lead_budget_unavailable" ||
+    // A failed read is an infrastructure problem, not a decision about this
+    // sequence. Retry within the hour.
+    reason === "sequence_budget_unavailable"
       ? HOUR
       : reason === "daily_cap"
         ? DAY
-        : 3 * DAY;
+        : // A per-sequence cap is a CALENDAR day, so the hold runs to the start
+          // of the next one rather than a flat 24h. A flat day would push each
+          // send later than the last and slowly drift the sequence out of
+          // business hours — 9am becomes 11am becomes 2pm, until it is mailing
+          // merchants at night.
+          reason === "sequence_daily_cap"
+          ? msUntilNextLocalDay()
+          : 3 * DAY;
   return new Date(Date.now() + ms).toISOString();
+}
+
+/**
+ * Milliseconds until the next calendar day begins in the operator's timezone.
+ *
+ * Kept here rather than imported so this module stays dependency-free and
+ * directly testable; the zone name is read from the same env var lib/dates.ts
+ * uses, with the same default.
+ */
+export function msUntilNextLocalDay(nowMs: number = Date.now(), timeZone?: string): number {
+  const tz = timeZone || process.env.OPERATOR_TIMEZONE || "America/Toronto";
+  try {
+    const parts = new Intl.DateTimeFormat("en-GB", {
+      timeZone: tz,
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      hour12: false,
+    }).formatToParts(new Date(nowMs));
+    const get = (t: string) => Number(parts.find((p) => p.type === t)?.value ?? "0");
+    // "24" appears at local midnight in some ICU builds; fold it to 0 so the
+    // hold is a full day rather than a negative that clamps to the floor.
+    const h = get("hour") % 24;
+    const elapsed = (h * 3600 + get("minute") * 60 + get("second")) * 1000;
+    const remaining = DAY - elapsed;
+    // Never shorter than a minute: a hold that expires instantly would spin the
+    // row through the dispatcher repeatedly for no benefit.
+    return Math.max(60_000, Math.min(DAY, remaining));
+  } catch {
+    return DAY;
+  }
 }
 
 // ── Per-lead pause ──────────────────────────────────────────────────────────
