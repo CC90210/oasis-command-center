@@ -233,20 +233,27 @@ export const DRIP_CHECKS: DripCheck[] = [
   },
   {
     // The un-fakeable one, mirroring sms.sent_without_proof. A thread at 'sent'
-    // is a claim; the receipt is send_interaction_id — the lead_interactions row
-    // that send_gateway wrote when it actually handed the message to SMTP.
-    // _mark_sent() in shop_out_sender.py writes both in a single update, so a
-    // row carrying the claim without the receipt means something moved the
-    // status with no send behind it.
+    // is a claim; a receipt is the evidence. A row carrying the claim with NO
+    // receipt of any kind means something moved the status with no send behind
+    // it.
     //
-    // NOT gmail_thread_id, which was the obvious choice and is wrong: the
-    // sender only sets it when a provider returns a real Gmail threadId, and
-    // the SMTP path never does. It is null on 55 of 55 sent threads. A check
-    // written against it would have gone red on 100% of history the moment it
-    // deployed — the false-alarm-on-arrival failure this file warns about two
-    // checks up. send_interaction_id is populated on 55 of 55. Verified against
-    // production before shipping, which is the only reason the difference
-    // surfaced.
+    // The two send paths write DIFFERENT receipts, and this check has been
+    // wrong about it twice:
+    //
+    //   sunbiz  — send_gateway via the VPS sender. _mark_sent() writes
+    //             send_interaction_id (the lead_interactions row). It sets
+    //             gmail_thread_id only when a provider returns a real Gmail
+    //             threadId, which the SMTP path never does: null on 55 of 55.
+    //   funmate — direct SMTP in the retry route. Writes gmail_thread_id and
+    //             last_message_id from the RFC822 message id, and never
+    //             send_interaction_id. Exactly inverse.
+    //
+    // So keying on either column ALONE false-alarms on 100% of the other
+    // path's traffic. The first draft used gmail_thread_id (red on every
+    // sunbiz send); the second used send_interaction_id (red on every funmate
+    // send, caught by Codex review 2026-08-11). Requiring that SOME receipt
+    // exists is identity-agnostic, needs no branch on email_identity, and stays
+    // correct if a third sender arrives — provided it records something.
     //
     // Bounded to a trailing week so one bad historical row cannot pin it red.
     id: "shopout.sent_without_proof",
@@ -257,11 +264,13 @@ export const DRIP_CHECKS: DripCheck[] = [
         db.from("application_lender_threads").select("id", { count: "exact", head: true })
           .eq("tenant_id", tenantId).eq("status", "sent")
           .is("send_interaction_id", null)
+          .is("gmail_thread_id", null)
           .gte("created_at", iso(endMs - 7 * DAY)).lt("created_at", iso(endMs)),
       ),
     describe: (r) =>
-      `${r.observed} lender thread(s) marked sent with no send_interaction_id. ` +
-      `The status claims a send that left no receipt behind it.`,
+      `${r.observed} lender thread(s) marked sent with no receipt of any kind — neither a ` +
+      `send_interaction_id (SunBiz) nor a message id (FundMate). The status claims a send that ` +
+      `left no evidence behind it.`,
   },
   {
     // The reply side, which is worth as much as the send side: an approval that

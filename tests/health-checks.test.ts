@@ -113,11 +113,15 @@ assert.equal(evaluate("x", drop, 0, [0, 0, 0, 0, 0, 0]).verdict, "ok");
 }
 {
   // sent_without_proof must be GREEN on the current fleet. This is the
-  // false-alarm guard: the first draft keyed on gmail_thread_id, which the SMTP
-  // sender never populates (null on 55 of 55 sent threads), so it would have
-  // gone red on 100% of history the moment it deployed. The receipt that IS
-  // written is send_interaction_id (55 of 55). A monitor whose first act is a
-  // false alarm is one people learn to ignore.
+  // false-alarm guard, and it took two rounds to get right because the two
+  // send paths write inverse receipts:
+  //
+  //   keyed on gmail_thread_id alone      -> 55 false alarms (every sunbiz send)
+  //   keyed on send_interaction_id alone  -> false alarms on every funmate send
+  //   requiring that SOME receipt exists  -> 0
+  //
+  // All three numbers measured against production on 2026-08-11. A monitor
+  // whose first act is a false alarm is one people learn to ignore.
   const r = evaluate("shopout.sent_without_proof", { kind: "must_be_zero" }, 0, []);
   assert.equal(r.verdict, "ok", "the receipt check must be green on today's data");
 }
@@ -139,9 +143,13 @@ assert.equal(evaluate("x", drop, 0, [0, 0, 0, 0, 0, 0]).verdict, "ok");
   }
   // Three column choices are load-bearing, and all three are exactly the kind a
   // later pass "corrects" back to the obvious-looking wrong one.
+  // The receipt check must require that BOTH receipt columns are absent.
+  // Either one alone false-alarms on 100% of the other send path's traffic:
+  // sunbiz writes send_interaction_id and never gmail_thread_id, funmate does
+  // the exact inverse.
   assert.ok(
-    !/is\("gmail_thread_id", null\)/.test(src),
-    "sent_without_proof must not key on gmail_thread_id — the SMTP path never sets it",
+    /\.is\("send_interaction_id", null\)\s*[\r\n]+\s*\.is\("gmail_thread_id", null\)/.test(src),
+    "sent_without_proof must require BOTH receipts absent — either alone breaks one send path",
   );
   assert.ok(
     !/eq\("status", "pending"\)\s*\n?\s*\.lt\("created_at"/.test(src),
