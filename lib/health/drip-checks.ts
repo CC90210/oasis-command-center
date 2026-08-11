@@ -210,6 +210,13 @@ export const DRIP_CHECKS: DripCheck[] = [
     // was that nothing wrote one. Age in the pending state is the signal that
     // cannot be suppressed by a caller forgetting to record something.
     //
+    // This remains the backstop even now that recordDispatchFailure moves a
+    // failed dispatch to 'error'. That handler only runs if the route lives
+    // long enough to run it; a serverless function killed at its maxDuration,
+    // or a deploy mid-request, leaves rows at pending with nothing recorded.
+    // That is precisely the case with no other witness, so the check that
+    // needs no cooperation from the failing code path is the one worth having.
+    //
     // Age is measured from updated_at, NOT created_at. Both retry routes move a
     // thread back to pending and stamp updated_at while leaving created_at at
     // the original queue time, so a created_at window reports every retried

@@ -64,13 +64,24 @@ export function dispatchFailureReason(ps: PhysicalSendResult): string {
 }
 
 /**
- * Stamp a dispatch failure onto the threads that are still sitting at pending.
+ * Record a dispatch failure on the threads that are still sitting at pending,
+ * and move them to 'error' so the recovery path actually exists.
  *
- * Scoped by tenant AND application AND status='pending' so it can never touch
- * a thread that already sent, and never crosses a tenant boundary. Threads
- * stay at 'pending' rather than moving to 'error': the operator's Retry and
- * Retry-all actions both select pending rows, and moving them out of that
- * state would strand the deal in a status nothing re-drives.
+ * The status change is load-bearing, not cosmetic. Both retry endpoints
+ * recover only 'error' rows (plus 'sending' rows stale past STALE_SENDING_MS),
+ * and the UI computes `canRetry = status === "error" || status === "sending"`.
+ * A first version of this left the rows at 'pending' on the reasoning that
+ * they were still queued — which meant the 502 told the operator to press
+ * Retry while rendering no Retry button, and a direct retry would have been a
+ * no-op. Telling someone to take an action that does not exist is the same
+ * failure as telling them a dead send succeeded, one screen later.
+ * (Codex review, 2026-08-11.)
+ *
+ * Scoped by tenant AND application AND status='pending', which is also what
+ * makes it safe against a double-send: the sender moves a row to 'sending'
+ * before it transmits and to 'sent' after, so anything still at 'pending' was
+ * never picked up. A dispatch that timed out mid-flight leaves its in-progress
+ * rows at 'sending', and those are deliberately not touched here.
  *
  * Best-effort by design — this runs on a path that has ALREADY failed, and
  * throwing here would replace a useful error message with a stack trace. But
@@ -87,6 +98,7 @@ export async function recordDispatchFailure(input: {
     const res = await db
       .from("application_lender_threads")
       .update({
+        status: "error",
         last_error: input.reason,
         updated_at: new Date().toISOString(),
       })

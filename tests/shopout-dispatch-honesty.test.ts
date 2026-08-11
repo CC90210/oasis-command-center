@@ -64,10 +64,31 @@ assert.ok(
 
 // The stamp must be tenant-scoped AND application-scoped AND pending-only, or
 // it can rewrite a thread that already sent, or cross a tenant boundary.
+// pending-only is also the double-send guard: the sender moves a row to
+// 'sending' before it transmits, so anything still pending was never picked up.
 for (const scope of ['.eq("tenant_id"', '.eq("application_id"', '.eq("status", "pending")']) {
   assert.ok(
     helper.includes(scope),
     `recordDispatchFailure must scope its update by ${scope} — an unscoped update can overwrite a successful send`,
+  );
+}
+
+// THE recovery-path regression. Both retry endpoints recover only 'error' rows
+// (plus stale 'sending'), and the UI computes canRetry from the same two. A
+// failed dispatch left at 'pending' therefore gets a 502 saying "use Retry"
+// with no Retry button rendered and a retry request that no-ops. Telling the
+// operator to take an action that does not exist is the same defect as telling
+// them a dead send worked. (Codex review, 2026-08-11.)
+assert.ok(
+  /status: "error"/.test(helper),
+  "recordDispatchFailure must move failed threads to 'error' — 'pending' is not retryable by " +
+    "either retry endpoint and renders no Retry button",
+);
+{
+  const ui = readFileSync("components/shopping-out/ShoppingOutClient.tsx", "utf8");
+  assert.ok(
+    /canRetry = t\.status === "error"/.test(ui),
+    "the UI's retryable set must still include 'error' — recordDispatchFailure depends on it",
   );
 }
 
