@@ -61,15 +61,25 @@ export const LEADS_BOARD_OR_FILTER =
  * board when it is stamped `transferred_at`; from that moment the Leads tab
  * does not show it, so no lead-stage drip may speak to it.
  *
- * Absent/blank `transferred_at` counts as NOT transferred, matching the SQL
- * `IS NULL` test: PostgREST returns the key as absent rather than null, and
- * treating an absent stamp as "transferred" would empty the whole board.
+ * ONLY null/absent counts as not-transferred, because that is exactly what
+ * `is.null` matches in the SQL above. PostgREST returns an unset key as absent
+ * rather than null, so both must read as on-board — treating an absent stamp as
+ * a transfer would empty the whole board.
+ *
+ * A BLANK STRING IS OFF THE BOARD, and that is not a detail. `is.null` does not
+ * match `''`, so a blank-stamped lead is hidden from the Leads tab; had this
+ * predicate called it visible, dispatch would have kept sending to a lead
+ * nobody can see and `detectBoardExit` would have missed the crossing — a
+ * smaller copy of the exact bug this module exists to close (Codex review P2,
+ * 2026-08-11). No lead carries a blank stamp today (measured: 797 null/absent,
+ * 423 with a real timestamp, 0 blank), so this is closing the gap before it
+ * opens rather than repairing live data.
  */
 export function isOnLeadsBoard(data: Record<string, unknown> | null | undefined): boolean {
   const d = data || {};
   if (String(d.stage ?? "").trim() === LEADS_BOARD_EXEMPT_STAGE) return true;
   const transferred = d.transferred_at;
-  return transferred === null || transferred === undefined || String(transferred).trim() === "";
+  return transferred === null || transferred === undefined;
 }
 
 /**

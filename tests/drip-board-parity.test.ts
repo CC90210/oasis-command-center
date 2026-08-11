@@ -67,10 +67,22 @@ assert.equal(
   "Live Subs stay on the board even when stamped transferred_at",
 );
 
-// A blank string is not a transfer. PostgREST returns an absent key rather than
-// null, and treating either as "transferred" would empty the entire board.
-assert.equal(isOnLeadsBoard({ stage: "follow_up", transferred_at: "" }), true);
-assert.equal(isOnLeadsBoard({ stage: "follow_up", transferred_at: "   " }), true);
+// A BLANK STRING IS OFF THE BOARD, because `is.null` in the SQL does not match
+// `''`. The predicate originally called it visible, which would have let
+// dispatch keep sending to a lead the board hides and made detectBoardExit miss
+// the crossing — a smaller copy of the bug this whole file exists to close
+// (Codex review P2, 2026-08-11). No lead carries a blank stamp today, so only a
+// test can hold this.
+assert.equal(isOnLeadsBoard({ stage: "follow_up", transferred_at: "" }), false);
+assert.equal(isOnLeadsBoard({ stage: "follow_up", transferred_at: "   " }), false);
+// ...and a blank stamp is still overridden by the Live Subs exception, so the
+// two rules compose the same way in both representations.
+assert.equal(isOnLeadsBoard({ stage: LEADS_BOARD_EXEMPT_STAGE, transferred_at: "" }), true);
+// The crossing to blank is therefore a real board exit.
+assert.equal(
+  detectBoardExit({ stage: "follow_up" }, { stage: "follow_up", transferred_at: "" }).length,
+  1,
+);
 
 // ---------------------------------------------------------------------------
 // The predicate and the SQL must express the SAME rule. They are written twice
