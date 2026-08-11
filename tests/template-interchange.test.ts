@@ -256,6 +256,32 @@ assert.equal(buildInterchangeAudit({ from: null, to: "x", actor: "u" }).from, nu
 
   // Swapping two pinned steps with each other is a reorder, not four events.
   assert.deepEqual(diffPins([pin("A"), pin("B")], [pin("B"), pin("A")]), []);
+
+  // Deleting the FIRST of two identically-pinned steps. Index equality alone
+  // would call index 0 "unchanged" and blame index 1, which is the step that
+  // survived. Steps have no ids -- drip_sequences.steps is a positional JSON
+  // array -- so the survivor is recognised by its own copy.
+  const body = (id: string, text: string) => ({ template_id: id, body: text, channel: "email" });
+  assert.deepEqual(
+    diffPins([body("A", "first"), body("A", "second")], [body("A", "second")]),
+    [{ index: 0, from: "A", to: null }],
+    "the deleted step is the one whose copy is gone, wherever the survivor landed",
+  );
+  // ...and the mirror case, deleting the second.
+  assert.deepEqual(
+    diffPins([body("A", "first"), body("A", "second")], [body("A", "first")]),
+    [{ index: 1, from: "A", to: null }],
+  );
+
+  // Editing a pinned step's copy is not a pin change. The version snapshot
+  // records copy; this record is about which template is pinned.
+  assert.deepEqual(diffPins([body("A", "before")], [body("A", "after")]), []);
+
+  // Reordering a pinned step past an unpinned one, with real bodies.
+  assert.deepEqual(
+    diffPins([{ body: "plain" }, body("A", "pinned")], [body("A", "pinned"), { body: "plain" }]),
+    [],
+  );
 }
 
 console.log("template-interchange.test.ts — all assertions passed");
