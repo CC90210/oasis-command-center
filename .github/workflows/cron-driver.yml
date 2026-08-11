@@ -59,57 +59,77 @@ jobs:
           # registered route has no entry here, so this cannot silently drift
           # again.
 
-          # Every 5 minutes — the paths that move mail and calls.
+          # Each bucket below mirrors a registered schedule in vercel.json,
+          # INCLUDING its query string. A first pass here bucketed routes by
+          # rough cadence and dropped the ?mode=weekly Kixie variant entirely,
+          # moved materialize-plans from 03:00 to 13:00, and demoted
+          # tps-backlog-watch from 6-hourly to daily — a "replacement" scheduler
+          # that quietly ran different work. The coverage test now compares full
+          # paths with query strings, so a dropped variant fails CI.
+          #
+          # This job ticks every 5 minutes, so a schedule's minute is matched as
+          # the 5-minute window containing it (e.g. "17 * * * *" fires in the
+          # 15-19 window).
+
+          # */5 — the paths that move mail and calls.
           FAST="/api/cron/dispatch-drips
                 /api/cron/dispatch-scheduled-sends
                 /api/cron/dispatch-scheduled-calls"
 
-          # Every 15 minutes — enrolment feeds the dispatcher, reconcile-sms
-          # closes carrier receipts, health-check is the outcome watchdog that
-          # now covers shopping out too.
+          # */10
+          Q10="/api/cron/operator-email-agent?write=1
+               /api/cron/tps-enroll?write=1"
+
+          # */15 — enrolment feeds the dispatcher, reconcile-sms closes carrier
+          # receipts, health-check is the outcome watchdog that now covers
+          # shopping out too.
           Q15="/api/cron/enroll-drips
                /api/cron/enroll-accelerated
                /api/cron/reconcile-sms
-               /api/cron/health-check
-               /api/cron/tps-enroll?write=1
-               /api/cron/operator-email-agent?write=1"
+               /api/cron/health-check"
 
-          # Every 30 minutes — inbound scanning. These read the mailboxes that
-          # carry lender replies and bounces; without them an approval can sit
-          # unread indefinitely, which is what happened for six days in August.
+          # */30 — inbound scanning. These read the mailboxes carrying lender
+          # replies and bounces; without them an approval sits unread, which is
+          # what happened for six days in August.
           Q30="/api/cron/scan-bounces?write=1
                /api/cron/scan-funmate-replies?write=1
                /api/cron/sync-tt-inbox"
 
-          # Hourly — telemetry and intel. Late is fine; absent is not.
-          HOURLY="/api/cron/collect-outreach-intel?write=1
-                  /api/cron/collect-cc-metrics?write=1
-                  /api/cron/reconcile-drip-telemetry"
-
-          # 06:00 and 18:00 UTC, matching this route's own registered schedule.
-          # Kept out of HOURLY deliberately: it reconciles the TextTorrent number
-          # roster, and running it 24x instead of 2x spends shared vendor rate
-          # budget for no new information.
-          TWICE_DAILY="/api/cron/sync-sms-numbers"
-
-          # Daily at 13:00 UTC — sweeps and thresholds.
-          DAILY="/api/cron/materialize-plans
-                 /api/cron/sweep-stale-sent-app
-                 /api/cron/renewal-thresholds
-                 /api/cron/kixie-compliance-scan
-                 /api/cron/tps-backlog-watch"
-
           MIN=$(date -u +%M)
           HOUR=$(date -u +%H)
+          DOW=$(date -u +%u)   # 1 = Monday
+          M=$((10#${MIN})); H=$((10#${HOUR}))
+
           ROUTES="${FAST}"
-          [ $((10#${MIN} % 15)) -lt 5 ] && ROUTES="${ROUTES} ${Q15}"
-          [ $((10#${MIN} % 30)) -lt 5 ] && ROUTES="${ROUTES} ${Q30}"
-          [ "$((10#${MIN}))" -lt 5 ]    && ROUTES="${ROUTES} ${HOURLY}"
-          if [ "$((10#${MIN}))" -lt 5 ]; then
-            case "$((10#${HOUR}))" in
-              6|18) ROUTES="${ROUTES} ${TWICE_DAILY}" ;;
-            esac
-            [ "$((10#${HOUR}))" -eq 13 ] && ROUTES="${ROUTES} ${DAILY}"
+          [ $((M % 10)) -lt 5 ] && ROUTES="${ROUTES} ${Q10}"
+          [ $((M % 15)) -lt 5 ] && ROUTES="${ROUTES} ${Q15}"
+          [ $((M % 30)) -lt 5 ] && ROUTES="${ROUTES} ${Q30}"
+
+          # Hourly, at their registered minutes.
+          [ "${M}" -lt 5 ]                        && ROUTES="${ROUTES} /api/cron/collect-outreach-intel?write=1"
+          [ "${M}" -ge 15 ] && [ "${M}" -lt 20 ]  && ROUTES="${ROUTES} /api/cron/collect-cc-metrics?write=1 /api/cron/reconcile-drip-telemetry"
+
+          if [ "${M}" -lt 5 ]; then
+            # 0 */6 * * *
+            [ $((H % 6)) -eq 0 ]                    && ROUTES="${ROUTES} /api/cron/tps-backlog-watch"
+            # 0 3 * * *
+            [ "${H}" -eq 3 ]                        && ROUTES="${ROUTES} /api/cron/materialize-plans"
+            # 0 6,18 * * *  — reconciles the TextTorrent number roster. Running
+            # it hourly would spend shared vendor rate budget for no new data.
+            { [ "${H}" -eq 6 ] || [ "${H}" -eq 18 ]; } && ROUTES="${ROUTES} /api/cron/sync-sms-numbers"
+            # 0 13 * * *
+            [ "${H}" -eq 13 ]                       && ROUTES="${ROUTES} /api/cron/sweep-stale-sent-app"
+          fi
+
+          if [ "${H}" -eq 13 ]; then
+            # 10 13 * * *
+            [ "${M}" -ge 10 ] && [ "${M}" -lt 15 ] && ROUTES="${ROUTES} /api/cron/kixie-compliance-scan"
+            # 15 13 * * *
+            [ "${M}" -ge 15 ] && [ "${M}" -lt 20 ] && ROUTES="${ROUTES} /api/cron/renewal-thresholds"
+            # 40 13 * * 1 — the weekly scorecard. A distinct registration, not a
+            # duplicate of the daily scan: dropping the query string skips the
+            # weekly code path entirely.
+            [ "${DOW}" -eq 1 ] && [ "${M}" -ge 40 ] && [ "${M}" -lt 45 ] && ROUTES="${ROUTES} /api/cron/kixie-compliance-scan?mode=weekly"
           fi
           # `set -e` is deliberately NOT in effect for these tests: a false
           # condition on the last line of the block would exit the step with a

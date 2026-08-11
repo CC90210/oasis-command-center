@@ -209,6 +209,14 @@ export const DRIP_CHECKS: DripCheck[] = [
     // Deliberately NOT keyed on last_error being set: the whole failure mode
     // was that nothing wrote one. Age in the pending state is the signal that
     // cannot be suppressed by a caller forgetting to record something.
+    //
+    // Age is measured from updated_at, NOT created_at. Both retry routes move a
+    // thread back to pending and stamp updated_at while leaving created_at at
+    // the original queue time, so a created_at window reports every retried
+    // thread as critically stuck the instant the operator clicks Retry — on a
+    // deal that is legitimately in flight. updated_at is the time it entered
+    // its CURRENT state, which is the thing being measured. On a first send the
+    // two are equal, so nothing is lost. (Codex review, 2026-08-11.)
     id: "shopout.threads_stuck_pending",
     severity: "critical",
     rule: { kind: "must_be_zero" },
@@ -216,7 +224,7 @@ export const DRIP_CHECKS: DripCheck[] = [
       countOrNull(
         db.from("application_lender_threads").select("id", { count: "exact", head: true })
           .eq("tenant_id", tenantId).eq("status", "pending")
-          .lt("created_at", iso(endMs - 30 * 60_000)),
+          .lt("updated_at", iso(endMs - 30 * 60_000)),
       ),
     describe: (r) =>
       `${r.observed} lender thread(s) queued more than 30 minutes ago and still not sent. ` +
@@ -257,27 +265,39 @@ export const DRIP_CHECKS: DripCheck[] = [
   },
   {
     // The reply side, which is worth as much as the send side: an approval that
-    // nobody reads is a dead deal. The classifier reads submissions@ and moves
-    // threads off 'sent' — so a pile of threads sitting at 'sent' for days with
-    // no movement means the classifier is not doing its job, whether it is down,
-    // orphaned by a scheduler, or locked out of the mailbox.
+    // nobody reads is a dead deal.
     //
-    // On 2026-08-11 this stood at 55 threads untouched since 2026-08-05, because
-    // scan-lender-replies was left out of the GitHub Actions cron driver when
-    // Vercel's scheduler died.
-    id: "shopout.replies_unclassified",
+    // The obvious check — "threads at 'sent' with no movement for N days" — is
+    // WRONG, and the first draft of this shipped it at N=3. A lender that
+    // simply has not replied leaves its thread at 'sent' by design; 898 rows
+    // sit at 'no_response' precisely because that is normal and the SLA sweep
+    // eventually retires them. A 3-day window therefore alerts on every quiet
+    // lender, which is routine business, not an outage. (Codex review,
+    // 2026-08-11.)
+    //
+    // What IS an invariant: the sweep retires a thread at 10 days with
+    // "SLA 10d exceeded". A thread still sitting at 'sent' well past that
+    // window means the sweep itself did not run — a real fault, and one that
+    // cannot be produced by lender behaviour no matter how quiet they are.
+    // 14 days gives the sweep four days of grace before this speaks.
+    //
+    // Honest limitation: this lags. It would not have caught the 2026-08-06
+    // classifier stall until 2026-08-17. The right instrument for that is a
+    // run-heartbeat on the classifier itself, which does not exist yet and is
+    // tracked as follow-up. A late true signal beats a prompt false one.
+    id: "shopout.sla_sweep_stalled",
     severity: "high",
     rule: { kind: "must_be_zero" },
     observe: (db, tenantId, endMs) =>
       countOrNull(
         db.from("application_lender_threads").select("id", { count: "exact", head: true })
           .eq("tenant_id", tenantId).eq("status", "sent")
-          .lt("updated_at", iso(endMs - 3 * DAY)),
+          .lt("sent_at", iso(endMs - 14 * DAY)),
       ),
     describe: (r) =>
-      `${r.observed} lender thread(s) have sat at 'sent' for over 3 days with no reply classified. ` +
-      `Lender approvals and declines may be piling up unread in submissions@. ` +
-      `Check that scan-lender-replies is running and that the mailbox credential is live.`,
+      `${r.observed} lender thread(s) are still 'sent' more than 14 days after dispatch, past the ` +
+      `10-day SLA sweep that should have retired them. The sweep or the reply classifier is not ` +
+      `running — check scan-lender-replies and the submissions@ mailbox credential.`,
   },
 ];
 

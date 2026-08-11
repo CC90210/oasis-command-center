@@ -96,11 +96,20 @@ assert.equal(evaluate("x", drop, 0, [0, 0, 0, 0, 0, 0]).verdict, "ok");
   assert.equal(r.verdict, "ok", "an empty pending queue must not alert");
 }
 {
-  // 55 threads sat at 'sent' untouched since 2026-08-05 because
-  // scan-lender-replies was never added to the GitHub Actions cron driver.
-  // Lender approvals were arriving and nothing was reading them. Measured: 55.
-  const r = evaluate("shopout.replies_unclassified", { kind: "must_be_zero" }, 55, []);
-  assert.equal(r.verdict, "failing", "55 unread lender replies MUST page");
+  // The reply side. Note what is NOT asserted here: "threads at 'sent' with no
+  // movement for 3 days". That was the first draft and it was wrong — a lender
+  // that has not replied leaves its thread at 'sent' by design, and 898 rows
+  // sit at 'no_response' because that is the normal end state. A 3-day window
+  // pages on every quiet lender. The invariant that cannot be produced by
+  // lender behaviour is the 10-day SLA sweep failing to retire a thread.
+  // Measured on 2026-08-11: 0, i.e. green, no false alarm on arrival.
+  const r = evaluate("shopout.sla_sweep_stalled", { kind: "must_be_zero" }, 0, []);
+  assert.equal(r.verdict, "ok", "quiet lenders must not page");
+}
+{
+  // And it fires when the sweep genuinely stalls.
+  const r = evaluate("shopout.sla_sweep_stalled", { kind: "must_be_zero" }, 12, []);
+  assert.equal(r.verdict, "failing", "a stalled SLA sweep MUST page");
 }
 {
   // sent_without_proof must be GREEN on the current fleet. This is the
@@ -124,15 +133,24 @@ assert.equal(evaluate("x", drop, 0, [0, 0, 0, 0, 0, 0]).verdict, "ok");
   for (const id of [
     "shopout.threads_stuck_pending",
     "shopout.sent_without_proof",
-    "shopout.replies_unclassified",
+    "shopout.sla_sweep_stalled",
   ]) {
     assert.ok(src.includes(`id: "${id}"`), `${id} must be registered in DRIP_CHECKS`);
   }
-  // The receipt column is load-bearing and exactly the kind of thing a later
-  // pass "corrects" back to the obvious-looking wrong one.
+  // Three column choices are load-bearing, and all three are exactly the kind a
+  // later pass "corrects" back to the obvious-looking wrong one.
   assert.ok(
     !/is\("gmail_thread_id", null\)/.test(src),
     "sent_without_proof must not key on gmail_thread_id — the SMTP path never sets it",
+  );
+  assert.ok(
+    !/eq\("status", "pending"\)\s*\n?\s*\.lt\("created_at"/.test(src),
+    "stuck_pending must measure from updated_at — retry resets status but not created_at",
+  );
+  assert.ok(
+    /\.lt\("sent_at", iso\(endMs - 14 \* DAY\)\)/.test(src),
+    "the reply-side check must key on the SLA sweep invariant (sent_at past the 14-day grace), " +
+      "not on how long a lender has been quiet",
   );
 }
 

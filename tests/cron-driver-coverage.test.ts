@@ -31,13 +31,18 @@ const driver = readFileSync(".github/workflows/cron-driver.yml", "utf8");
 const crons = vercelJson.crons ?? [];
 assert.ok(crons.length > 0, "vercel.json must register at least one cron");
 
-/** "/api/cron/scan-bounces?write=1" -> "/api/cron/scan-bounces" */
-const basePath = (p: string) => p.split("?")[0];
-
-// ── 1. Every registered cron is driven ─────────────────────────────────────
+// ── 1. Every registered cron is driven, query string included ──────────────
+//
+// The FULL path is compared, not the base path. An earlier version of this
+// test stripped the query string, which made it pass while
+// /api/cron/kixie-compliance-scan?mode=weekly was not driven at all: the
+// daily scan shares its base path, so the weekly scorecard silently never
+// ran. A query string is not decoration — it selects a different code path,
+// and two registrations that differ only by query are two different jobs.
+// (Codex review, 2026-08-11.)
 const undriven: string[] = [];
 for (const cron of crons) {
-  if (!driver.includes(basePath(cron.path))) undriven.push(cron.path);
+  if (!driver.includes(cron.path)) undriven.push(cron.path);
 }
 assert.deepEqual(
   undriven,
