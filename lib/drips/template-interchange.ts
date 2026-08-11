@@ -155,8 +155,15 @@ export function validateInterchange(
   return { ok: true, template: target };
 }
 
-/** Enough of a step to tell it apart from its neighbours. `drip_sequences.steps`
- *  is a positional JSON array with no step ids, so content IS the identity. */
+/**
+ * Enough of a step to tell it apart from its neighbours. `drip_sequences.steps`
+ * is a positional JSON array with no step ids, so content IS the identity.
+ *
+ * Only the fields this module reasons about are named. Identity is computed
+ * over every key actually present at runtime, so passing a full DripStep — which
+ * is what the PATCH route does — distinguishes steps that differ in delay,
+ * body_html, variants or sender as well.
+ */
 export type PinnedStep = {
   template_id?: string;
   role?: string;
@@ -237,9 +244,18 @@ export function diffPins(prior: PinnedStep[] | null, next: PinnedStep[]): PinCha
   const removed: Array<{ index: number; id: string }> = [];
   const added: Array<{ index: number; id: string; role?: string }> = [];
   const priorSteps = prior || [];
-  // Content identity: the pin plus everything about the step a merchant would
-  // notice. Two steps differing in any of it are distinguishable.
-  const ident = (s: PinnedStep) => `${key(s)} ${s.channel ?? ""} ${s.subject ?? ""} ${s.body ?? ""}`;
+  // Content identity: the WHOLE step, canonically serialised. A hand-picked
+  // subset only distinguishes duplicates that happen to differ in the fields
+  // that were picked — two steps identical except for delay_minutes, body_html
+  // or a pinned sender would collide and the audit would name the wrong one.
+  // Key order is normalised so an equivalent object written in a different
+  // order is still recognised as the same step.
+  const ident = (s: PinnedStep) =>
+    JSON.stringify(
+      Object.keys(s)
+        .sort()
+        .map((k) => [k, (s as Record<string, unknown>)[k]]),
+    );
 
   for (const k of new Set([...before.keys(), ...after.keys()])) {
     const b = before.get(k) || [];

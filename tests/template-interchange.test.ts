@@ -277,6 +277,38 @@ assert.equal(buildInterchangeAudit({ from: null, to: "x", actor: "u" }).from, nu
   // records copy; this record is about which template is pinned.
   assert.deepEqual(diffPins([body("A", "before")], [body("A", "after")]), []);
 
+  // Identity is the WHOLE step, not a hand-picked subset. Two steps identical
+  // except for delay_minutes must still be told apart, or deleting the first
+  // blames the second.
+  assert.deepEqual(
+    diffPins(
+      [
+        { template_id: "A", body: "same", channel: "email", delay_minutes: 0 },
+        { template_id: "A", body: "same", channel: "email", delay_minutes: 4320 },
+      ],
+      [{ template_id: "A", body: "same", channel: "email", delay_minutes: 4320 }],
+    ),
+    [{ index: 0, from: "A", to: null }],
+  );
+  // Same for a field the earlier subset ignored entirely.
+  assert.deepEqual(
+    diffPins(
+      [
+        { template_id: "A", body: "x", body_html: "<p>one</p>" },
+        { template_id: "A", body: "x", body_html: "<p>two</p>" },
+      ],
+      [{ template_id: "A", body: "x", body_html: "<p>two</p>" }],
+    ),
+    [{ index: 0, from: "A", to: null }],
+  );
+  // Key ORDER is not a difference: the same step written differently is the
+  // same step, or a harmless re-serialisation upstream would forge an audit
+  // record.
+  assert.deepEqual(
+    diffPins([{ template_id: "A", body: "x", channel: "email" }], [{ channel: "email", body: "x", template_id: "A" }]),
+    [],
+  );
+
   // Reordering a pinned step past an unpinned one, with real bodies.
   assert.deepEqual(
     diffPins([{ body: "plain" }, body("A", "pinned")], [body("A", "pinned"), { body: "plain" }]),
