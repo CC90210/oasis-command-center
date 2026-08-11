@@ -2,7 +2,7 @@
  * LeadDocumentsPanel — operator-facing list of files prospects uploaded
  * against this lead. Server component: reads lead_documents directly with
  * the service-role client after verifying tenant scope, then renders a
- * client island for the "View" button which mints a signed URL on click.
+ * client island for the "View" button which opens the authenticated stream.
  *
  * Lives on /pipeline/[id] (and any future lead detail surface) so the
  * operator can see + download bank statements / ID / proof-of-ownership
@@ -90,6 +90,8 @@ export async function LeadDocumentsPanel({
                 <LeadDocumentDownloadButton
                   documentId={doc.id}
                   filename={doc.filename}
+                  mimeType={doc.mime_type}
+                  docType={doc.doc_type}
                 />
               </li>
             );

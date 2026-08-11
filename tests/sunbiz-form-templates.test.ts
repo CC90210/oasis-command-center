@@ -47,6 +47,13 @@ function run() {
   assert.equal(ficoField.min, 300, "FICO has lower credit-score bound");
   assert.equal(ficoField.max, 850, "FICO has upper credit-score bound");
 
+  const owner = steps.find((step) => step.key === "owner");
+  assert.ok(owner, "owner step exists");
+  const emailField = owner.fields.find((field) => field.name === "email");
+  assert.ok(emailField, "full application always collects a contact email");
+  assert.equal(emailField.type, "email", "contact email uses browser email validation");
+  assert.equal(emailField.required, true, "contact email is required for application follow-up");
+
   assert.equal(
     full.step_outcomes[String(steps.length - 1)],
     "signed_application",

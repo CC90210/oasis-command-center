@@ -552,6 +552,56 @@ export async function getThread(
   };
 }
 
+/**
+ * Pull a chat's messages WITHOUT normalising away the carrier fields.
+ *
+ * getThread() above flattens each message for the Conversations UI and drops
+ * `msg_sid`, `segment`, `credit` and `platform`. Delivery reconciliation needs
+ * all of them: msg_sid identifies the message at the carrier, and credits are
+ * how we account for spend on mail that never arrived. Note that msg_sid is
+ * NOT a delivery signal — refused messages are observed both with and without
+ * one, so api_send_status is the only field that decides. Returning the raw rows
+ * keeps that decision in one place instead of widening the UI shape.
+ */
+export async function getThreadRaw(
+  creds: TextTorrentCredentials,
+  chatId: string,
+  opts: { limit?: number; maxPages?: number; priority?: number } = {},
+): Promise<Array<Record<string, unknown>>> {
+  const limit = opts.limit ?? 100;
+  // LOW priority by default. This is a backfill read, and the shared 60/min
+  // parent-SID budget is the same one merchant sends draw on. Reconciliation
+  // can issue hundreds of reads per run; at the default tier (50) it would hold
+  // 50 of 60 tokens and leave real sends, which run at 80, fighting for the
+  // remainder. Tier <50 caps this at 40 and reserves twenty for higher-priority
+  // work, which is exactly what the limiter's own comment reserves it for.
+  const priority = opts.priority ?? 20;
+  // Threads are paginated and the envelope reports last_page, so we can follow
+  // it exactly instead of hoping one page is enough. A receipt whose message
+  // falls off the end is never matched, and after enough attempts it retires as
+  // 'unknown' — a real carrier failure that never reaches the breaker. Measured
+  // 2026-08-07, live merchant threads hold 0-3 messages, so this is a single
+  // request in practice and correct in the tail.
+  const maxPages = opts.maxPages ?? 5;
+  const out: Array<Record<string, unknown>> = [];
+  for (let page = 1; page <= maxPages; page++) {
+    const resp = await ttFetch<{
+      data?: {
+        messages?:
+          | { data?: Array<Record<string, unknown>>; current_page?: number; last_page?: number }
+          | Array<Record<string, unknown>>;
+      };
+    }>(creds, `/inbox/${encodeURIComponent(chatId)}`, { query: { limit, page }, priority });
+    const msgsRaw = resp?.data?.messages;
+    if (Array.isArray(msgsRaw)) return msgsRaw; // unpaginated shape
+    const rows = msgsRaw?.data || [];
+    out.push(...rows);
+    const lastPage = Number(msgsRaw?.last_page ?? 1);
+    if (rows.length === 0 || page >= lastPage) break;
+  }
+  return out;
+}
+
 export function replyToThread(
   creds: TextTorrentCredentials,
   args: { number: string; message: string; sender_id?: string },

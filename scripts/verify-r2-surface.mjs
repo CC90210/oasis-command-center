@@ -94,6 +94,9 @@ const mine = createHash("sha256").update(src).digest("hex");
 for (const other of [
     "C:/Users/User/APPS/nostalgic-requests/lib/r2-storage.ts",
     "C:/Users/User/realestate-App/src/lib/supabase/r2-storage.ts",
+    // breeze-portal has a copy too and was missing from this list — a drift
+    // check that omits one of the copies is the same as not having one.
+    "C:/Users/User/APPS/breeze-portal/lib/r2-storage.ts",
 ]) {
     const label = other.split("/").slice(-3).join("/");
     let theirs = null;

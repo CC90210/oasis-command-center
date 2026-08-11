@@ -37,9 +37,52 @@ import { createHash, createHmac } from "node:crypto";
 const REGION = "auto";
 const SERVICE = "s3";
 
+/**
+ * The account id goes by two names across this fleet: this adapter was written
+ * against R2_ACCOUNT_ID, while etl_storage_to_r2.py and the Vercel cutover set
+ * CLOUDFLARE_ACCOUNT_ID. Reading only one of them made r2Configured() return
+ * false with R2 fully provisioned — so `.storage` kept falling through to
+ * Supabase and looked healthy right up until the day Supabase went away.
+ * Accept either; a silent false here is invisible in exactly the wrong way.
+ */
+function accountId(): string | undefined {
+  return process.env.R2_ACCOUNT_ID || process.env.CLOUDFLARE_ACCOUNT_ID;
+}
+
+/**
+ * Buckets that were `public: true` in Supabase.
+ *
+ * This is a SECURITY BOUNDARY, not a convenience list. The /api/media route
+ * signs whatever object key it is handed, so this set is the only thing
+ * standing between a request for
+ * `/api/media/lead-documents/<tenant>/<lead>/statement.pdf` and a working link
+ * to a merchant bank statement. 4,088 of those live in the private bucket.
+ *
+ * It lives HERE because this file is byte-identical across four repos with a
+ * drift check that fails the build (scripts/verify-r2-surface.mjs). A copy of
+ * this list in each app's route would drift silently, and the failure mode of
+ * drift is "one app starts serving a private bucket" — the copies would not
+ * even disagree visibly, they would just diverge.
+ *
+ * Read from storage.buckets.public on 2026-08-07, not assumed. Anything absent
+ * is PRIVATE: deny-by-default, so a bucket added later is refused until someone
+ * makes an explicit decision to list it.
+ */
+export const PUBLIC_BUCKET_PREFIXES: ReadonlySet<string> = new Set([
+  "tenant-assets",                  // bravo
+  "avatars",                        // nostalgic
+  "application-documents",          // propflow
+  "application-screening-reports",  // propflow
+  "documents",                      // propflow
+  "logos",                          // propflow
+  "media",                          // propflow
+  "properties",                     // propflow
+  "property-photos",                // propflow
+]);
+
 export function r2Configured(): boolean {
   return Boolean(
-    process.env.R2_ACCOUNT_ID &&
+    accountId() &&
       process.env.R2_ACCESS_KEY_ID &&
       process.env.R2_SECRET_ACCESS_KEY &&
       process.env.R2_BUCKET,
@@ -48,7 +91,7 @@ export function r2Configured(): boolean {
 
 function cfg() {
   return {
-    account: process.env.R2_ACCOUNT_ID!,
+    account: accountId()!,
     key: process.env.R2_ACCESS_KEY_ID!,
     secret: process.env.R2_SECRET_ACCESS_KEY!,
     bucket: process.env.R2_BUCKET!,
@@ -95,7 +138,20 @@ function objectKey(bucket: string, path: string): string {
   return `${bucket}/${path.replace(/^\/+/, "")}`;
 }
 
-function presignGet(bucket: string, path: string, expiresInSec: number): string {
+/**
+ * Query-signed URL for one object.
+ *
+ * PUT is not a variation for completeness: the browser upload paths hand a
+ * signed URL straight to the client and never proxy the bytes through the
+ * server, so without a signed PUT there is no way to upload at all once
+ * `.storage` points at R2.
+ */
+function presign(
+  method: "GET" | "PUT",
+  bucket: string,
+  path: string,
+  expiresInSec: number,
+): string {
   const { key, secret, bucket: r2Bucket } = cfg();
   const { amz, date } = stamps();
   const canonicalUri = `/${r2Bucket}/${encodePath(objectKey(bucket, path))}`;
@@ -111,7 +167,7 @@ function presignGet(bucket: string, path: string, expiresInSec: number): string 
     .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`)
     .join("&");
   const canonicalRequest = [
-    "GET", canonicalUri, canonicalQuery, `host:${host()}\n`, "host", "UNSIGNED-PAYLOAD",
+    method, canonicalUri, canonicalQuery, `host:${host()}\n`, "host", "UNSIGNED-PAYLOAD",
   ].join("\n");
   const stringToSign = [
     "AWS4-HMAC-SHA256", amz, `${date}/${REGION}/${SERVICE}/aws4_request`,
@@ -122,8 +178,19 @@ function presignGet(bucket: string, path: string, expiresInSec: number): string 
   return `https://${host()}${canonicalUri}?${canonicalQuery}&X-Amz-Signature=${sig}`;
 }
 
+function presignGet(bucket: string, path: string, expiresInSec: number): string {
+  return presign("GET", bucket, path, expiresInSec);
+}
+
+/**
+ * How long a direct-upload URL stays valid. Long enough for a prospect on a
+ * phone to finish a multi-megabyte bank statement, short enough that a URL
+ * leaked from a browser history is not a standing write grant.
+ */
+const SIGNED_UPLOAD_TTL_SEC = 900;
+
 async function signedFetch(
-  method: "PUT" | "GET" | "DELETE",
+  method: "PUT" | "GET" | "DELETE" | "HEAD",
   bucket: string,
   path: string,
   body?: Uint8Array,
@@ -283,6 +350,63 @@ function bucketApi(bucket: string) {
         })));
       } catch (e) {
         return fail(e instanceof Error ? e.message : "presign failed");
+      }
+    },
+
+    /**
+     * Direct-to-storage upload URL.
+     *
+     * Two live paths need this and neither proxies bytes through the server:
+     * the PUBLIC SunBiz lead form (a prospect uploading bank statements) and
+     * chat attachments. Without it, swapping `.storage` to R2 makes
+     * `createSignedUploadUrl` undefined and the upload dies as a TypeError.
+     *
+     * `token` mirrors supabase-js, which returns an opaque handle for
+     * uploadToSignedUrl(). There is no equivalent server-side handle in S3 —
+     * the signature IS the authorization — so the query string is handed back
+     * as the token. Callers that only forward it (both of ours do) work
+     * unchanged.
+     *
+     * `upsert` is accepted and ignored: R2 overwrites by default and there is
+     * no single-request "fail if exists". Rejecting the option outright would
+     * break the chat path, which passes `{upsert: false}` merely to express a
+     * preference, and its storage keys already carry a timestamp and a UUID.
+     */
+    async createSignedUploadUrl(path: string, _options?: { upsert?: boolean }) {
+      try {
+        const signedUrl = presign("PUT", bucket, path, SIGNED_UPLOAD_TTL_SEC);
+        const token = signedUrl.slice(signedUrl.indexOf("?") + 1);
+        return ok({ path, signedUrl, token });
+      } catch (e) {
+        return fail(e instanceof Error ? e.message : "presign upload failed");
+      }
+    },
+
+    /**
+     * Object metadata, used to confirm a direct upload actually landed before
+     * a row is written for it. HEAD rather than GET so a large statement is not
+     * pulled back through the server just to read its size.
+     */
+    async info(path: string) {
+      try {
+        const res = await signedFetch("HEAD", bucket, path);
+        if (res.status === 404) return fail("object not found", 404);
+        if (!res.ok) return fail(`R2 head failed (${res.status})`, res.status);
+        const size = Number(res.headers.get("content-length") ?? 0);
+        return ok({
+          name: path.split("/").pop() ?? path,
+          id: res.headers.get("etag")?.replace(/"/g, "") ?? null,
+          size,
+          contentLength: size,
+          contentType: res.headers.get("content-type") ?? "application/octet-stream",
+          mimetype: res.headers.get("content-type") ?? "application/octet-stream",
+          lastModified: res.headers.get("last-modified") ?? null,
+          etag: res.headers.get("etag") ?? null,
+          cacheControl: res.headers.get("cache-control") ?? null,
+          metadata: {},
+        });
+      } catch (e) {
+        return fail(e instanceof Error ? e.message : "R2 head failed");
       }
     },
 

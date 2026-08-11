@@ -4,7 +4,7 @@ import { useState } from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { getBrowserSupabase } from "@/lib/supabase-browser";
-import { getCurrentUser, signInWithPassword } from "@/lib/auth-client";
+import { authMode } from "@/lib/auth-client";
 import { OasisLogo } from "@/components/brand/OasisLogo";
 
 export function LoginForm() {
@@ -46,7 +46,16 @@ export function LoginForm() {
       // Turso auth mode: same credentials, verified server-side against the
       // migrated hash store. Invite redemption below still works — the redeem
       // route resolves the user from the session either way.
-      if (process.env.NEXT_PUBLIC_EMPIRE_AUTH_BACKEND === "turso") {
+      //
+      // Gate reads the SERVER's answer, not NEXT_PUBLIC_EMPIRE_AUTH_BACKEND.
+      // That mirror is a separate flag: with EMPIRE_AUTH_BACKEND=turso but the
+      // NEXT_PUBLIC_ copy unset, this branch was skipped and login fell through
+      // to Supabase — half-migrated auth that looks healthy until the day
+      // Supabase is cancelled.
+      //
+      // Full-page assign (not router.push) is deliberate: the session is an
+      // httpOnly cookie, and server components must re-render with it.
+      if ((await authMode()) === "turso") {
         const r = await fetch("/api/auth/turso-login", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -76,19 +85,18 @@ export function LoginForm() {
         window.location.assign(`/auth/land?next=${encodeURIComponent(next)}`);
         return;
       }
-      // Routes to /api/auth/turso-login under Turso auth, Supabase otherwise.
-      // Supabase is still the rollback path, so both stay wired until the
+      // Supabase path — still the rollback, so it stays wired until the
       // subscription is actually cancelled.
-      const signIn = await signInWithPassword(email, password);
-      if (!signIn.ok) {
-        setErr(signIn.error);
+      const supa = getBrowserSupabase();
+      const { data, error } = await supa.auth.signInWithPassword({ email, password });
+      if (error) {
+        setErr(error.message);
         return;
       }
-      const signedIn = await getCurrentUser();
       // If the user followed an invite link, redeem it against their
       // existing account before routing. The redeem RPC is atomic so a
       // second submit (network retry / refresh) is safe.
-      if (inviteToken && signedIn) {
+      if (inviteToken && data.user) {
         const r = await fetch("/api/auth/redeem-invite", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -136,7 +144,13 @@ export function LoginForm() {
     try {
       // Turso auth mode: our own OAuth flow with the same Google client —
       // users see the identical consent screen; Supabase is not in the loop.
-      if (process.env.NEXT_PUBLIC_EMPIRE_AUTH_BACKEND === "turso") {
+      //
+      // Asks the SERVER rather than reading NEXT_PUBLIC_EMPIRE_AUTH_BACKEND.
+      // That mirror was a fourth flag nobody would remember to set: with
+      // EMPIRE_AUTH_BACKEND=turso but the NEXT_PUBLIC_ copy unset, password
+      // login went to Turso while Google silently kept going to Supabase —
+      // half-migrated auth that looks fine until an OAuth user signs in.
+      if ((await authMode()) === "turso") {
         const start = new URL("/api/auth/google/start", window.location.origin);
         start.searchParams.set("next", next);
         window.location.assign(start.toString());

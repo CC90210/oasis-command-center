@@ -53,6 +53,13 @@ const MAX_PDF_PIXELS = 24_000_000; // ~24 MP per-page / per-image ceiling
 // statement fails to brand, so each blocked an entire deal on every retry.
 //
 // Both remain FAIL-CLOSED: over the cap is an error, never a truncation.
+//
+// This SUPERSEDES the interim single `MAX_PAGES = 250` (d95fccb, 2026-08-10),
+// which unblocked the 53-page incident by raising the shared cap. That value
+// was still one number for two very different costs: at 165ms/page a 250-page
+// encrypted statement would rasterize for ~41s and blow the 120s route budget
+// on the path that cannot be made faster. Splitting the cap keeps the overlay
+// generous where pages are nearly free and keeps raster inside its time budget.
 const MAX_PAGES_OVERLAY = 400; // measured 858ms — bounded by memory, not time
 const MAX_PAGES_RASTER = 120; // ~20s at 165ms/page — inside the 120s floor of
 // every route that watermarks (shop-out 120s, shop-out/run 300s, thread retries

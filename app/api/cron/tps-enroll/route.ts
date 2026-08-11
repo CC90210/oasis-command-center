@@ -32,6 +32,48 @@ const ENROLL_BATCH = Number(process.env.TPS_ENROLL_BATCH || 25);
 const MAX_AUTO_ATTEMPTS = Number(process.env.TPS_MAX_AUTO_ATTEMPTS || 3);
 const DEDUPE_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
 
+/**
+ * Only auto-enrol Live Subs approved AT OR AFTER this instant. Everything
+ * approved before it is manual-button only.
+ *
+ * Adon, 2026-08-07: "For every single live sub that comes in starting now, it
+ * should have automatic people search... the leads we want to get now are done
+ * manually and all the new leads that are coming in are done automatically."
+ *
+ * This sweep was written to enrol on END STATE — approved + has a lead + has no
+ * phone — deliberately, so a Live Sub could not be missed because of the route
+ * it arrived through, and so the first run doubled as the backfill. That is
+ * exactly the behaviour to stop now: without a cutoff the sweep re-queues the
+ * entire approved history on every run, which is the automatic spend on old
+ * leads Adon is cutting. The end-state design still holds for anything AFTER
+ * the cutoff.
+ *
+ * THE DEFAULT IS COMMITTED, NOT ENV-ONLY, AND THAT IS THE WHOLE POINT.
+ *
+ * The first cut made an unset variable mean "no cutoff — enrol everything",
+ * reasoning that a missing var should not silently switch enrolment off. That
+ * is backwards: the harm being prevented is SPEND on historical leads, so
+ * "enrol everything" is the expensive failure, and a preview deploy, a typo, or
+ * a deleted variable would quietly restore exactly the behaviour this removes.
+ * Fail closed. (Codex review 2026-08-07.)
+ *
+ * So the cutoff lives in git and works with no configuration at all. The env
+ * var only MOVES it, which lets Adon change the line without a deploy. A
+ * malformed value falls back to this constant and is reported as misconfigured
+ * — never read as epoch-0 (enrol everything) and never as "now" (enrol nothing).
+ */
+const DEFAULT_AUTO_ENROLL_SINCE = "2026-08-07T18:14:30Z";
+
+const AUTO_ENROLL_SINCE_RAW = (process.env.TPS_AUTO_ENROLL_SINCE || "").trim();
+const AUTO_ENROLL_SINCE_OVERRIDE: string | null = (() => {
+  if (!AUTO_ENROLL_SINCE_RAW) return null;
+  const t = Date.parse(AUTO_ENROLL_SINCE_RAW);
+  return Number.isFinite(t) ? new Date(t).toISOString() : null;
+})();
+/** Always a real instant. There is no "no cutoff" mode any more. */
+const AUTO_ENROLL_SINCE: string =
+  AUTO_ENROLL_SINCE_OVERRIDE ?? new Date(DEFAULT_AUTO_ENROLL_SINCE).toISOString();
+
 function checkAuth(req: NextRequest): boolean {
   const auth = req.headers.get("authorization") || "";
   const bearer = auth.startsWith("Bearer ") ? auth.slice(7) : "";
@@ -99,6 +141,16 @@ export async function GET(req: NextRequest) {
   const summary = {
     ok: true,
     write,
+    // Stated on every run. A cutoff that quietly stops enrolling looks exactly
+    // like a healthy sweep finding nothing to do, so the mode is reported
+    // rather than inferred. `misconfigured` means the env var was set to
+    // something unparseable and was IGNORED — surfaced, never guessed at.
+    autoEnrollMode:
+      AUTO_ENROLL_SINCE_RAW && !AUTO_ENROLL_SINCE_OVERRIDE
+        ? `live_subs_approved_since:${AUTO_ENROLL_SINCE} (committed default — TPS_AUTO_ENROLL_SINCE=${AUTO_ENROLL_SINCE_RAW.slice(0, 40)} is unparseable and was IGNORED)`
+        : AUTO_ENROLL_SINCE_OVERRIDE
+          ? `live_subs_approved_since:${AUTO_ENROLL_SINCE} (env override)`
+          : `live_subs_approved_since:${AUTO_ENROLL_SINCE} (committed default)`,
     reclaimed: 0,
     scanned: 0,
     needPhone: 0,
@@ -153,17 +205,34 @@ export async function GET(req: NextRequest) {
   while (!done) {
     let q = db
       .from(CANDIDATE_TABLE)
-      .select("id, tenant_id, created_lead_id")
+      .select("id, tenant_id, created_lead_id, reviewed_at, created_at")
       .eq("status", "approved")
       .not("created_lead_id", "is", null)
       .order("id", { ascending: true })
       .limit(PAGE);
     if (cursor) q = q.gt("id", cursor);
+    /*
+     * `reviewed_at` is when a candidate BECAME a Live Sub (an operator approved
+     * it), which is the event Adon means by "comes in". created_at is when the
+     * scrubber first wrote the row, which can predate approval by days.
+     *
+     * `or(...)` rather than a plain gte so a row with a NULL reviewed_at falls
+     * back to created_at instead of vanishing: PostgREST drops NULLs on a gte,
+     * and silently never enrolling a whole class of Live Sub is the failure
+     * mode this codebase keeps having. The page filter runs server-side so the
+     * cutoff cannot be defeated by pagination.
+     */
+    // Unconditional: AUTO_ENROLL_SINCE is always a real instant, so there is no
+    // code path in which the cutoff is skipped.
+    q = q.or(`reviewed_at.gte.${AUTO_ENROLL_SINCE},and(reviewed_at.is.null,created_at.gte.${AUTO_ENROLL_SINCE})`);
     const { data, error } = await q;
     if (error) {
       return NextResponse.json({ ok: false, error: error.message }, { status: 500 });
     }
-    const rows = (data ?? []) as { id: string; tenant_id: string; created_lead_id: string }[];
+    const rows = (data ?? []) as {
+      id: string; tenant_id: string; created_lead_id: string;
+      reviewed_at: string | null; created_at: string | null;
+    }[];
     if (!rows.length) break;
 
     // Batch job history for this page.

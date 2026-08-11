@@ -29,6 +29,8 @@ import "server-only";
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { resolveTrackingBase } from "./tracking-base";
 import { unsubscribeMailto } from "./sending-identity";
+import { brandFooter } from "./brand-shell";
+import type { BrandKey } from "./brands";
 
 // The brand string MUST resolve to the SunBiz tenant in /api/unsubscribe's
 // resolveTenantId (matches tenants.name ILIKE 'SunBiz') or the recorded
@@ -231,7 +233,21 @@ export type UnsubMode = "footer" | "none";
  */
 export function buildTrackedHtml(
   plain: string,
-  opts: { sendId: string; email: string; brand?: string; unsub?: UnsubMode; trackingBase?: string },
+  opts: {
+    sendId: string;
+    email: string;
+    /** SUPPRESSION brand — resolves a tenant on the opt-out WRITE path. */
+    brand?: string;
+    /**
+     * SENDING brand — whose legal entity and postal address appear in the
+     * footer. A DIFFERENT axis from `brand` above: both brands share one tenant
+     * so a single opt-out stops both, and passing a sending brand into the
+     * suppression slot would file opt-outs against a tenant that may not exist.
+     */
+    sendingBrand?: BrandKey;
+    unsub?: UnsubMode;
+    trackingBase?: string;
+  },
 ): string {
   const { sendId, email } = opts;
   const brand = opts.brand || SUNBIZ_BRAND;
@@ -252,13 +268,15 @@ export function buildTrackedHtml(
   const bodyHtml = out.replace(/\n/g, "<br />\n");
 
   const pixel = `<img src="${escapeHtml(pixelUrl(sendId, trackingBase))}" width="1" height="1" alt="" style="display:none;max-height:0;overflow:hidden;" />`;
-  const footer =
-    unsub === "none"
-      ? ""
-      : `<div style="margin-top:24px;color:#8a94a6;font-size:12px;line-height:1.5;">` +
-        `If you would prefer not to receive these, you can ` +
-        `<a href="${escapeHtml(unsubscribeUrl(email, brand, trackingBase))}" style="color:#8a94a6;">unsubscribe here</a>.` +
-        `</div>`;
+  // The footer identifies the SENDER and carries its physical postal address.
+  // Emitted on EVERY message, including transactional (unsub:'none'), which only
+  // drops the unsubscribe line. CAN-SPAM requires the address on commercial mail
+  // and misclassifying commercial mail as transactional is a likelier mistake
+  // than the reverse, so identifying the sender is the safe default.
+  const footer = brandFooter(
+    opts.sendingBrand,
+    unsub === "none" ? null : unsubscribeUrl(email, brand, trackingBase),
+  );
 
   return (
     `<!doctype html><html><body style="margin:0;padding:0;background:#ffffff;">` +
@@ -268,6 +286,6 @@ export function buildTrackedHtml(
 }
 
 /** Back-compat alias for the drip executor's original call shape. */
-export function buildDripHtml(plain: string, opts: { sendId: string; email: string; brand?: string; unsub?: UnsubMode; trackingBase?: string }): string {
+export function buildDripHtml(plain: string, opts: { sendId: string; email: string; brand?: string; sendingBrand?: BrandKey; unsub?: UnsubMode; trackingBase?: string }): string {
   return buildTrackedHtml(plain, opts);
 }

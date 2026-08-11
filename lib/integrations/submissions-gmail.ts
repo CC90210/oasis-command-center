@@ -33,6 +33,7 @@
 
 import "server-only";
 import { getTenantIntegrationBundle } from "@/lib/tenant-integration-store";
+import { getBrand, resolveBrandKey, type BrandKey } from "@/lib/email/brands";
 
 /** Cached per-tenant credentials so a burst of N sends does N=1 decrypts. */
 const _credCache = new Map<
@@ -50,24 +51,55 @@ export type SubmissionsCreds = {
 };
 
 /**
- * Resolve the SunBiz tenant's submissions credentials. Throws with a
+ * Resolve a tenant's submissions credentials for one BRAND. Throws with a
  * machine-readable error code when either field is missing so the
  * caller can map it to the spec's testConnection() failure path.
+ *
+ * THE BRAND ARGUMENT IS WHAT ACTUALLY MOVES THE MAIL (2026-08-05).
+ * The From header and the SMTP auth user both come from here, not from
+ * DRIP_FROM_ADDRESS. Before this, setting a brand env var relabelled the
+ * unsubscribe mailto and Message-Id while the message was still authenticated
+ * and DKIM-signed by the SunBiz mailbox, so the visible sender disagreed with
+ * the signature. To a receiver that is the shape of forgery, and it is a worse
+ * position than never cutting over.
+ *
+ * Omitting `brand` resolves to SunBiz — the pre-existing behaviour, and what
+ * every lender shop-out caller does. Lender mail is SunBiz always, whatever
+ * brand the merchant sits on, so it simply never passes this argument.
+ *
+ * FAILS CLOSED. A missing Bluerise credential throws rather than falling back
+ * to the SunBiz mailbox, because that fallback would send Bluerise copy from
+ * the SunBiz mailbox: exactly the misalignment this exists to prevent.
  */
 export async function getSubmissionsCreds(
   tenantId: string,
+  brand?: BrandKey,
 ): Promise<SubmissionsCreds> {
-  const cached = _credCache.get(tenantId);
+  const service = getBrand(resolveBrandKey(brand)).credentialService;
+  // The cache key MUST include the service, or the first brand to send in a
+  // 5-minute window pins its mailbox for the other one.
+  const cacheKey = `${tenantId}:${service}`;
+  const cached = _credCache.get(cacheKey);
   const now = Date.now();
   if (cached && now - cached.cachedAt < CACHE_TTL_MS) {
     return { fromAddress: cached.from, appPassword: cached.appPassword };
   }
-  const bundle = await getTenantIntegrationBundle(tenantId, "gws");
+  const bundle = await getTenantIntegrationBundle(tenantId, service);
   const fromAddress = bundle.from_address?.trim();
-  const appPassword = bundle.app_password?.trim();
-  if (!fromAddress) throw new Error("missing_creds:gws.from_address");
-  if (!appPassword) throw new Error("missing_creds:gws.app_password");
-  _credCache.set(tenantId, { from: fromAddress, appPassword, cachedAt: now });
+  // Strip ALL whitespace, not just the ends. Google displays app passwords as
+  // four spaced groups, and the value stored on 2026-07-02 was saved that way —
+  // 19 characters for a 16-character secret.
+  //
+  // That matters because the two IMAP crons already stripped interior spaces
+  // while all five SMTP call sites passed the value straight through. A spaced
+  // password therefore let inbox reading work while every send returned 535:
+  // the channel looks half-alive and the failure reads as a credential problem
+  // that is really a formatting one. Normalising here means all consumers
+  // inherit it instead of each remembering.
+  const appPassword = bundle.app_password?.replace(/\s+/g, "");
+  if (!fromAddress) throw new Error(`missing_creds:${service}.from_address`);
+  if (!appPassword) throw new Error(`missing_creds:${service}.app_password`);
+  _credCache.set(cacheKey, { from: fromAddress, appPassword, cachedAt: now });
   return { fromAddress, appPassword };
 }
 
@@ -75,8 +107,17 @@ export async function getSubmissionsCreds(
  * Drop the cached credentials for one tenant — used when the operator
  * rotates the app password and the next send should re-fetch.
  */
-export function invalidateSubmissionsCreds(tenantId: string): void {
-  _credCache.delete(tenantId);
+export function invalidateSubmissionsCreds(tenantId: string, brand?: BrandKey): void {
+  if (brand !== undefined) {
+    _credCache.delete(`${tenantId}:${getBrand(resolveBrandKey(brand)).credentialService}`);
+    return;
+  }
+  // No brand given: clear EVERY brand for this tenant. A rotation that only
+  // cleared one brand would leave the other serving a stale password until the
+  // TTL expired, which presents as intermittent auth failures.
+  for (const key of Array.from(_credCache.keys())) {
+    if (key.startsWith(`${tenantId}:`)) _credCache.delete(key);
+  }
 }
 
 /**
@@ -87,9 +128,10 @@ export function invalidateSubmissionsCreds(tenantId: string): void {
  */
 export async function testConnection(
   tenantId: string,
+  brand?: BrandKey,
 ): Promise<{ ok: true; email: string } | { ok: false; error: string }> {
   try {
-    const creds = await getSubmissionsCreds(tenantId);
+    const creds = await getSubmissionsCreds(tenantId, brand);
     const nodemailer = await import("nodemailer");
     const transporter = nodemailer.createTransport({
       host: "smtp.gmail.com",
@@ -112,7 +154,15 @@ export async function testConnection(
  * Build the From: header. Cached per-tenant for the same lifecycle as
  * the credentials.
  */
-export async function getSubmissionsFrom(tenantId: string): Promise<string> {
-  const creds = await getSubmissionsCreds(tenantId);
-  return `SunBiz Submissions <${creds.fromAddress}>`;
+export async function getSubmissionsFrom(
+  tenantId: string,
+  brand?: BrandKey,
+): Promise<string> {
+  const key = resolveBrandKey(brand);
+  const creds = await getSubmissionsCreds(tenantId, key);
+  // The display name follows the brand. With no brand this stays the literal
+  // "SunBiz Submissions" it has always been, which is what lender shop-out mail
+  // relies on — that mail is SunBiz whatever brand the merchant sits on.
+  const label = key === "sunbiz" ? "SunBiz Submissions" : getBrand(key).displayName;
+  return `${label} <${creds.fromAddress}>`;
 }

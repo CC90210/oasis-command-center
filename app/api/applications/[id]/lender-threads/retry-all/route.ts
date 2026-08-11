@@ -52,18 +52,6 @@ export async function POST(
   // statement can't be branded — never re-send one un-watermarked. Done first so
   // a failure leaves thread state untouched.
   const wmGuard = await ensureApplicationThreadsWatermarked(tenantId, applicationId);
-  if (!wmGuard.ok) {
-    return NextResponse.json(
-      {
-        ok: false,
-        error: "bank_statement_watermark_failed",
-        message:
-          "Bank statements must carry the SunBiz watermark before re-sending, and branding failed for one or more. Retry, or re-upload the statement.",
-        watermark_failures: wmGuard.failures,
-      },
-      { status: 422 },
-    );
-  }
 
   if (emailIdentity === "funmate") {
     const staleCutoff = new Date(Date.now() - STALE_SENDING_MS).toISOString();
@@ -182,7 +170,13 @@ export async function POST(
 
   // Nothing to do — honest no-op so the UI can say "nothing to retry".
   if (recovered === 0) {
-    return NextResponse.json({ ok: true, recovered: 0, physical_send: { status: "skipped" } });
+    return NextResponse.json({
+      ok: true,
+      recovered: 0,
+      physical_send: { status: "skipped" },
+      watermark_degraded: wmGuard.failures.length > 0,
+      watermark_failures: wmGuard.failures,
+    });
   }
 
   // Fire the batch once. shop_out_send_batch loops every pending thread on the
@@ -237,5 +231,11 @@ export async function POST(
     };
   }
 
-  return NextResponse.json({ ok: true, recovered, physical_send: physicalSend });
+  return NextResponse.json({
+    ok: true,
+    recovered,
+    physical_send: physicalSend,
+    watermark_degraded: wmGuard.failures.length > 0,
+    watermark_failures: wmGuard.failures,
+  });
 }

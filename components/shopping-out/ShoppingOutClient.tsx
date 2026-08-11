@@ -197,9 +197,9 @@ function describeSendError(json: Record<string, unknown>): string {
       (f) =>
         `• ${f.filename || "(unnamed file)"} — ${friendlyWatermarkReason(f.reason || "")} [${f.reason || "no reason given"}]`,
     );
-    return `Could not watermark ${failures.length} bank statement${
+    return `The request failed while watermarking ${failures.length} bank statement${
       failures.length === 1 ? "" : "s"
-    }, so nothing was sent:\n${lines.join("\n")}`;
+    }:\n${lines.join("\n")}`;
   }
   if (typeof json.message === "string" && json.message.trim()) {
     return typeof json.error === "string" ? `${json.message} (${json.error})` : json.message;
@@ -207,6 +207,17 @@ function describeSendError(json: Record<string, unknown>): string {
   if (typeof json.hint === "string" && json.hint.trim()) return json.hint;
   if (typeof json.error === "string" && json.error.trim()) return json.error;
   return "Send failed.";
+}
+
+function describeWatermarkWarning(json: Record<string, unknown>): string | null {
+  const failures = Array.isArray(json.watermark_failures)
+    ? (json.watermark_failures as Array<{ filename?: string; reason?: string }>)
+    : [];
+  if (failures.length === 0) return null;
+  const lines = failures.map(
+    (f) => `• ${f.filename || "(unnamed file)"} — sent clean because ${friendlyWatermarkReason(f.reason || "")}`,
+  );
+  return `Shop-out continued, but ${failures.length} statement${failures.length === 1 ? "" : "s"} could not be watermarked:\n${lines.join("\n")}`;
 }
 
 export function ShoppingOutClient({
@@ -269,7 +280,10 @@ export function ShoppingOutClient({
   const [docs, setDocs] = useState<DocRow[]>([]);
   const [selectedDocIds, setSelectedDocIds] = useState<Set<string>>(new Set());
   const [sending, setSending] = useState(false);
-  const [sendResult, setSendResult] = useState<{ ok: boolean; message: string } | null>(null);
+  const [sendResult, setSendResult] = useState<{
+    tone: "success" | "warning" | "error";
+    message: string;
+  } | null>(null);
 
   // 2026-05-25 expansion — Proceed Anyway dialog. When the operator hits
   // Send and any selected lender has a high_risk warning, this state pops
@@ -525,15 +539,14 @@ export function ShoppingOutClient({
                 : t,
             ),
           );
+          const warning = describeWatermarkWarning(j);
+          if (warning) setSendResult({ tone: "warning", message: warning });
         } else {
-          // Retry runs the SAME watermark door guard as the send, so an
-          // unbrandable statement makes this 422 every time. Silently ignoring
-          // it (the behaviour until 2026-08-03) meant the operator clicked
-          // Retry, saw the row stay red, and had no way to learn why.
-          setSendResult({ ok: false, message: describeSendError(j) });
+          // Non-watermark retry failures still need an actionable explanation.
+          setSendResult({ tone: "error", message: describeSendError(j) });
         }
       } catch (err) {
-        setSendResult({ ok: false, message: `Retry failed: ${String((err as Error).message || err)}` });
+        setSendResult({ tone: "error", message: `Retry failed: ${String((err as Error).message || err)}` });
       } finally {
         setRetrying((prev) => {
           const next = new Set(prev);
@@ -560,10 +573,14 @@ export function ShoppingOutClient({
       }).then((r) => r.json().catch(() => ({})));
       // Same guard, same silence as the per-row retry: "Retry all" would run,
       // report nothing, and leave every thread red.
-      if (!j?.ok) setSendResult({ ok: false, message: describeSendError(j || {}) });
+      if (!j?.ok) setSendResult({ tone: "error", message: describeSendError(j || {}) });
+      else {
+        const warning = describeWatermarkWarning(j || {});
+        if (warning) setSendResult({ tone: "warning", message: warning });
+      }
       await refreshThreads();
     } catch (err) {
-      setSendResult({ ok: false, message: `Retry all failed: ${String((err as Error).message || err)}` });
+      setSendResult({ tone: "error", message: `Retry all failed: ${String((err as Error).message || err)}` });
     } finally {
       setRetryingAll(false);
     }
@@ -667,7 +684,7 @@ export function ShoppingOutClient({
       if (json.ok) {
         if (lenderNetwork === "funmate") {
           setSendResult({
-            ok: true,
+            tone: "success",
             message: `FundMate sent ${json.sent || 0} lender package${json.sent === 1 ? "" : "s"}${json.failed ? ` · ${json.failed} failed` : ""}.`,
           });
           await refreshPlanAndThreads();
@@ -688,13 +705,17 @@ export function ShoppingOutClient({
                 ps.failed_count ? ` · ${ps.failed_count} need retry (use Retry below)` : ""
               }.`
             : " Sending now — watch the thread statuses below.";
-        setSendResult({ ok: true, message: queuedMsg + sendMsg });
+        const watermarkWarning = describeWatermarkWarning(json);
+        setSendResult({
+          tone: watermarkWarning ? "warning" : "success",
+          message: queuedMsg + sendMsg + (watermarkWarning ? `\n${watermarkWarning}` : ""),
+        });
         await refreshPlanAndThreads();
       } else {
-        setSendResult({ ok: false, message: describeSendError(json) });
+        setSendResult({ tone: "error", message: describeSendError(json) });
       }
     } catch (err) {
-      setSendResult({ ok: false, message: String((err as Error).message || err) });
+      setSendResult({ tone: "error", message: String((err as Error).message || err) });
     } finally {
       setSending(false);
       setPendingConfirmation(false);
@@ -1051,9 +1072,11 @@ export function ShoppingOutClient({
             {sendResult && (
               <div
                 className={`rounded-md border p-2.5 text-[12px] whitespace-pre-line ${
-                  sendResult.ok
+                  sendResult.tone === "success"
                     ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-100"
-                    : "border-rose-500/30 bg-rose-500/10 text-rose-100"
+                    : sendResult.tone === "warning"
+                      ? "border-amber-500/30 bg-amber-500/10 text-amber-100"
+                      : "border-rose-500/30 bg-rose-500/10 text-rose-100"
                 }`}
               >
                 {sendResult.message}

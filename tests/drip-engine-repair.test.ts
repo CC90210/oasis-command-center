@@ -92,10 +92,13 @@ assert.equal(isPaused({}), false, "absent flag is not paused");
 
 // ── D4: per-recipient and global email caps ─────────────────────────────────
 
+// The daily/hourly ceilings became PER BRAND on 2026-08-05: each brand carries
+// its own domain reputation, so gating both against one shared pool would mean
+// splitting across two domains bought no extra throughput.
 function budget(over: Partial<EmailBudget> = {}): EmailBudget {
   return {
-    dailyRemaining: 100,
-    hourlyRemaining: 20,
+    dailyRemaining: { sunbiz: 100, bluerise: 100 },
+    hourlyRemaining: { sunbiz: 20, bluerise: 20 },
     perLeadSent7d: new Map(),
     perLeadCap: 2,
     degraded: false,
@@ -117,8 +120,37 @@ assert.equal(
   "one lead hitting its cap must not block a different lead",
 );
 
-assert.equal(emailGateReason(budget({ dailyRemaining: 0 }), "lead-a"), "daily_cap", "daily cap holds");
-assert.equal(emailGateReason(budget({ hourlyRemaining: 0 }), "lead-a"), "hourly_cap", "hourly cap holds");
+assert.equal(
+  emailGateReason(budget({ dailyRemaining: { sunbiz: 0, bluerise: 100 } }), "lead-a", "sunbiz"),
+  "daily_cap",
+  "daily cap holds",
+);
+assert.equal(
+  emailGateReason(budget({ hourlyRemaining: { sunbiz: 0, bluerise: 20 } }), "lead-a", "sunbiz"),
+  "hourly_cap",
+  "hourly cap holds",
+);
+
+// THE POINT OF PER-BRAND CAPS: one brand exhausting its ceiling must not stop
+// the other. A shared pool would make running two domains pointless.
+assert.equal(
+  emailGateReason(budget({ dailyRemaining: { sunbiz: 0, bluerise: 100 } }), "lead-a", "bluerise"),
+  null,
+  "SunBiz at its daily cap must not block Bluerise",
+);
+assert.equal(
+  emailGateReason(budget({ hourlyRemaining: { sunbiz: 20, bluerise: 0 } }), "lead-a", "sunbiz"),
+  null,
+  "Bluerise at its hourly cap must not block SunBiz",
+);
+
+// The per-lead cap stays BRAND-BLIND: two emails in a week is two emails
+// whichever company sent them. This is the cap that decides how mail FEELS.
+assert.equal(
+  emailGateReason(budget({ perLeadSent7d: new Map([["lead-a", 2]]) }), "lead-a", "bluerise"),
+  "per_lead_weekly_cap",
+  "switching brand must NOT reset a recipient's weekly allowance",
+);
 
 // Fail-closed: an unreadable per-lead count must HOLD, never send. This is the
 // deliberate 2026-07-29 change from the original governor, which returned full
@@ -138,9 +170,10 @@ assert.equal(
 // see the spend without re-querying.
 {
   const b = budget();
-  consumeEmail(b, "lead-a");
-  assert.equal(b.dailyRemaining, 99, "daily decremented");
-  assert.equal(b.hourlyRemaining, 19, "hourly decremented");
+  consumeEmail(b, "lead-a", "sunbiz");
+  assert.equal(b.dailyRemaining.sunbiz, 99, "daily decremented");
+  assert.equal(b.hourlyRemaining.sunbiz, 19, "hourly decremented");
+  assert.equal(b.dailyRemaining.bluerise, 100, "the other brand's budget is untouched");
   assert.equal(b.perLeadSent7d.get("lead-a"), 1, "per-lead recorded");
   consumeEmail(b, "lead-a");
   assert.equal(

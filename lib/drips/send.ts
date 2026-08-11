@@ -41,6 +41,7 @@ import {
   fromAddress as configuredFromAddress,
   fromDisplayName,
 } from "@/lib/email/sending-identity";
+import { getBrand, resolveBrandKey, type BrandKey } from "@/lib/email/brands";
 
 export type DripSmsResult =
   | {
@@ -117,8 +118,9 @@ export async function sendDripEmail(
   toEmail: string,
   subject: string,
   body: string,
-  opts?: { html?: string; listUnsubscribe?: string },
+  opts?: { html?: string; listUnsubscribe?: string; brand?: BrandKey },
 ): Promise<DripEmailResult> {
+  const brand = resolveBrandKey(opts?.brand);
   const result = await sendGmail({
     tenantId,
     to: toEmail,
@@ -126,9 +128,13 @@ export async function sendDripEmail(
     body,
     html: opts?.html,
     listUnsubscribe: opts?.listUnsubscribe,
-    // Drip-only display name. Undefined unless DRIP_FROM_NAME is set, so lender
-    // shop-out mail through the same mailbox keeps the shared default.
-    fromName: fromDisplayName(),
+    // The brand picks the credential, so the visible sender and the DKIM
+    // signature agree. Absent = SunBiz = today's behaviour.
+    brand,
+    // Drip-only display name. DRIP_FROM_NAME still wins when set (it exists so a
+    // rebrand could move drips without dragging lender mail along); otherwise the
+    // brand supplies its own name, and SunBiz's resolves to the shared default.
+    fromName: fromDisplayName() ?? (brand === "sunbiz" ? undefined : getBrand(brand).displayName),
   });
   if (!result.ok) return { ok: false, error: result.error };
   // Report the From header the message was ACTUALLY sent with. The executor
@@ -141,9 +147,9 @@ export async function sendDripEmail(
   // literal so they do not keep saying SunBiz after the cutover either.
   let fromAddress = result.from_identity;
   if (!fromAddress) {
-    fromAddress = configuredFromAddress();
+    fromAddress = configuredFromAddress(brand);
     try {
-      fromAddress = await getSubmissionsFrom(tenantId);
+      fromAddress = await getSubmissionsFrom(tenantId, brand);
     } catch {
       /* best-effort label only — the send already succeeded */
     }

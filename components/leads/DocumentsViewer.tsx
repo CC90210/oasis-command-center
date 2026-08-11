@@ -3,10 +3,10 @@
 /**
  * DocumentsViewer — full-screen lightbox to swipe through ALL of a lead's
  * documents at once (2026-06-29, Adon ask: "click View all and swift through
- * them all"). Mounts over the LeadDetailDrawer; mints a signed URL per doc on
- * demand (reusing GET /api/lead-documents/[id]) and caches it for the session.
+ * them all"). Mounts over the LeadDetailDrawer; resolves an authenticated,
+ * same-origin stream per doc on demand and caches that stable route.
  *
- * PDFs render inline via <iframe> (Supabase signed URLs serve inline by default),
+ * PDFs render inline via <iframe>,
  * images via <img>; anything else falls back to a download link. Navigate with
  * the on-screen arrows, ←/→ keys, the thumbnail strip, or a touch swipe.
  */
@@ -14,6 +14,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ChevronLeft, ChevronRight, FileText, ImageIcon, Loader2, Download } from "lucide-react";
 import { leadDocTypeLabel } from "@/lib/lead-doc-display";
+import { documentPreviewKind } from "@/lib/document-preview";
 
 export type ViewerDoc = {
   id: string;
@@ -24,7 +25,10 @@ export type ViewerDoc = {
   legacy_baked?: boolean;
 };
 
-type Entry = { status: "loading" } | { status: "ready"; url: string } | { status: "error" };
+type Entry =
+  | { status: "loading" }
+  | { status: "ready"; url: string; downloadUrl: string }
+  | { status: "error" };
 
 export function DocumentsViewer({
   docs,
@@ -38,7 +42,7 @@ export function DocumentsViewer({
   const [index, setIndex] = useState(
     Math.min(Math.max(0, startIndex), Math.max(0, docs.length - 1)),
   );
-  // Cache signed URLs in a ref (avoids stale-closure refetches); a tick state
+  // Cache stable content routes in a ref (avoids stale-closure refetches); a tick state
   // forces re-render when an entry changes.
   const cacheRef = useRef<Record<string, Entry>>({});
   const [, setTick] = useState(0);
@@ -56,7 +60,13 @@ export function DocumentsViewer({
       try {
         const r = await fetch(`/api/lead-documents/${doc.id}`, { credentials: "include" });
         const j = await r.json().catch(() => ({}));
-        if (j.ok && j.url) setEntry(doc.id, { status: "ready", url: j.url });
+        if (j.ok && j.url) {
+          setEntry(doc.id, {
+            status: "ready",
+            url: j.url,
+            downloadUrl: j.download_url || `${j.url}?download=1`,
+          });
+        }
         else setEntry(doc.id, { status: "error" });
       } catch {
         setEntry(doc.id, { status: "error" });
@@ -68,8 +78,11 @@ export function DocumentsViewer({
   // Per-doc active variant (seeded from props, updated on toggle).
   const [variants, setVariants] = useState<Record<string, "clean" | "watermarked">>({});
   const [toggling, setToggling] = useState<null | "clean" | "watermarked">(null);
-  const variantOf = (d?: ViewerDoc) =>
-    d ? variants[d.id] || (d.active_variant === "watermarked" ? "watermarked" : "clean") : "clean";
+  const variantOf = useCallback(
+    (d?: ViewerDoc) =>
+      d ? variants[d.id] || (d.active_variant === "watermarked" ? "watermarked" : "clean") : "clean",
+    [variants],
+  );
   // Why a WM toggle refused. Until 2026-08-03 a failed toggle did NOTHING
   // visible — the switch snapped back and the operator had no idea whether the
   // statement was branded, which is the same blindness that made "it says it
@@ -90,7 +103,7 @@ export function DocumentsViewer({
         const j = await r.json().catch(() => ({}));
         if (j.ok && j.active) {
           setVariants((p) => ({ ...p, [d.id]: j.active }));
-          delete cacheRef.current[d.id]; // invalidate the signed URL → re-fetch the new variant
+          delete cacheRef.current[d.id]; // invalidate the stream route → re-fetch the new variant
           await load(d);
         } else if (j.ok && j.state === "legacy_baked") {
           setVariantError(j.message || "No clean original — re-upload to get a clean version.");
@@ -105,7 +118,7 @@ export function DocumentsViewer({
         setToggling(null);
       }
     },
-    [toggling, load, variants],
+    [toggling, load, variantOf],
   );
 
   // Load the current doc + prefetch its neighbours for snappy navigation.
@@ -134,9 +147,10 @@ export function DocumentsViewer({
 
   const doc = docs[index];
   const entry = doc ? cacheRef.current[doc.id] : undefined;
-  const mime = (doc?.mime_type || "").toLowerCase();
-  const isPdf = mime === "application/pdf";
-  const isImage = mime.startsWith("image/");
+  const previewKind = documentPreviewKind(doc?.filename, doc?.mime_type);
+  const isPdf = previewKind === "pdf";
+  const isImage = previewKind === "image";
+  const isText = previewKind === "text";
 
   return (
     <div
@@ -191,14 +205,14 @@ export function DocumentsViewer({
         )}
         {doc && entry?.status === "ready" && (
           <a
-            href={entry.url}
+            href={entry.downloadUrl}
             download={doc.filename}
             target="_blank"
             rel="noopener"
             title="Download this document"
-            className="shrink-0 p-1 rounded-md text-fg-muted hover:text-fg hover:bg-bg-deep"
+            className="shrink-0 inline-flex items-center gap-1 rounded-md border border-bg-border px-2 py-1 text-[11px] font-semibold text-fg-muted hover:text-fg hover:bg-bg-deep"
           >
-            <Download className="w-4 h-4" />
+            <Download className="w-3.5 h-3.5" /> Download
           </a>
         )}
         <button
@@ -248,7 +262,7 @@ export function DocumentsViewer({
               Retry
             </button>
           </div>
-        ) : isPdf ? (
+        ) : isPdf || isText ? (
           <iframe
             src={entry.url}
             title={doc.filename}
@@ -260,6 +274,7 @@ export function DocumentsViewer({
             <img
               src={entry.url}
               alt={doc.filename}
+              onError={() => setEntry(doc.id, { status: "error" })}
               className="max-w-full max-h-full object-contain"
             />
           </div>
@@ -268,7 +283,7 @@ export function DocumentsViewer({
             <FileText className="w-6 h-6" />
             <span>Preview not supported for this file type.</span>
             <a
-              href={entry.url}
+              href={entry.downloadUrl}
               download={doc.filename}
               target="_blank"
               rel="noopener"
@@ -315,7 +330,7 @@ export function DocumentsViewer({
                   : "border-transparent text-fg-dim hover:text-fg hover:bg-bg-elev"
               }`}
             >
-              {(dd.mime_type || "").startsWith("image/") ? (
+              {documentPreviewKind(dd.filename, dd.mime_type) === "image" ? (
                 <ImageIcon className="w-3 h-3" />
               ) : (
                 <FileText className="w-3 h-3" />

@@ -226,18 +226,6 @@ export async function POST(
   // un-watermarked bank statement across the application's threads before
   // flipping/firing. Refuse (422) if branding fails; never re-send unmarked.
   const wmGuard = await ensureApplicationThreadsWatermarked(tenantId, applicationId);
-  if (!wmGuard.ok) {
-    return NextResponse.json(
-      {
-        ok: false,
-        error: "bank_statement_watermark_failed",
-        message:
-          "Bank statements must carry the SunBiz watermark before re-sending, and branding failed for one or more. Retry, or re-upload the statement.",
-        watermark_failures: wmGuard.failures,
-      },
-      { status: 422 },
-    );
-  }
 
   const fromStatus = thread.status; // "error" or stale "sending"
   const updateRes = await db
@@ -327,5 +315,7 @@ export async function POST(
     new_status: updatedCount > 0 ? "pending" : thread.status,
     noop: updatedCount === 0,
     physical_send: physicalSend,
+    watermark_degraded: wmGuard.failures.length > 0,
+    watermark_failures: wmGuard.failures,
   });
 }

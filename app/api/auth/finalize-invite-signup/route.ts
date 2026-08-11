@@ -35,6 +35,7 @@ import { NextResponse, type NextRequest } from "next/server";
 import { redeemInvite } from "@/lib/team";
 import { resolveClientProfileSlug } from "@/lib/client-profiles";
 import { getServiceSupabase } from "@/lib/supabase-server";
+import { adminConfirmEmail } from "@/lib/turso-auth-admin";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -69,12 +70,16 @@ export async function POST(req: NextRequest) {
 
   // 1. Auto-confirm the email. The invitee clicked a personalized link
   //    sent to this address — that's already proof of possession.
-  const { error: confirmErr } = await db.auth.admin.updateUserById(userId, {
-    email_confirm: true,
-  });
-  if (confirmErr) {
+  //
+  //    adminConfirmEmail replaces auth.admin.updateUserById: under Turso it
+  //    stamps _supabase_auth_users.email_confirmed_at, under Supabase it still
+  //    calls GoTrue. It fails — rather than reporting a no-op success — when
+  //    the user id does not resolve to a live account, which is the guard that
+  //    keeps step 2 from redeeming an invite onto a phantom user.
+  const confirmed = await adminConfirmEmail(db, userId);
+  if (!confirmed.ok) {
     return NextResponse.json(
-      { ok: false, error: "email_confirm_failed", message: confirmErr.message },
+      { ok: false, error: "email_confirm_failed", message: confirmed.error },
       { status: 500 },
     );
   }

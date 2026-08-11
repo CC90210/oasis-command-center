@@ -64,6 +64,16 @@ export type DripStep = {
    */
   body_variants?: string[];
   subject_variants?: string[];
+  /**
+   * Which job this step's copy does in the arc: opener, nudge, value, question,
+   * last_call, revive. Keys the approved template pool
+   * (drip_template_pool.role) so rotation only ever substitutes templates doing
+   * the SAME job — an opener never stands in for a last call.
+   *
+   * Absent means "nudge", the neutral middle. Every existing step therefore
+   * keeps working without edit, and an unseeded pool changes nothing.
+   */
+  role?: string;
 };
 
 export type DripTriggerFilter = {
@@ -179,6 +189,13 @@ function parseStep(v: unknown, path: string): DripStep {
   if (bodyVariants) step.body_variants = bodyVariants;
   const subjectVariants = optionalStringArray(v, "subject_variants");
   if (subjectVariants) step.subject_variants = subjectVariants;
+  // Template-pool role. Validated against the same set the DB check constraint
+  // enforces, so a typo degrades to the neutral "nudge" bucket rather than
+  // silently matching no pool and falling back for reasons nobody can see.
+  const role = optionalString(v, "role");
+  if (role && ["opener", "nudge", "value", "question", "last_call", "revive"].includes(role.trim())) {
+    step.role = role.trim();
+  }
   return step;
 }
 

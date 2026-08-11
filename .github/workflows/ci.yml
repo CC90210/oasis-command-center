@@ -42,29 +42,36 @@ jobs:
         # public-route prefixes, cross-tenant scoping, lifecycle, form PDF,
         # streamed-secret redaction). A green build with a broken role gate or a
         # leaking redactor must NOT auto-deploy via Vercel.
-        #
-        # `--conditions=react-server` is what makes `import "server-only"`
-        # resolve to its no-op build instead of the variant that throws. Without
-        # it this whole step died on the FIRST suite, and because `run: |` is one
-        # shell script under `set -e`, everything after it was skipped —
-        # including `npm run test:watermark` below. CI had been red on main since
-        # `89a6cbd` (R2 storage) put `import "server-only"` into
-        # lib/r2-storage.ts, which lib/supabase-server.ts imports, which most of
-        # the suite reaches transitively. So the watermark gate added on
-        # 2026-08-04 to stop watermarking from silently breaking had not actually
-        # run since. Setting the condition for the whole step fixes the cause
-        # rather than reordering around it, and it is the same flag
-        # test:watermark already passes explicitly.
         env:
+          # `server-only` throws on import unless the "react-server" export
+          # condition is active. It is a MODULE-GRAPH hazard, not a product bug:
+          # lib/supabase-server.ts (deliberately importable from plain Node —
+          # 37 pure-logic tests reach it via lib/team, lib/*) statically imports
+          # lib/r2-storage.ts, and r2-storage carries `import "server-only"` to
+          # keep the AWS S3 client out of client bundles. Both are correct; the
+          # edge between them poisons every test that transitively touches
+          # supabase-server.
+          #
+          # Adding r2-storage on 2026-08-07 (89a6cbd) therefore killed the
+          # Tests step at tests/team-invites.test.ts — the 12th of 48 in
+          # test:sunbiz. The 37 tests after it NEVER RAN for a full day while
+          # CI reported a single generic failure, and every push emailed the
+          # operator about it.
+          #
+          # Setting the condition here fixes the whole step at once instead of
+          # rewriting 48 invocations, and it is what test:watermark already
+          # does inline. Verified on node v20.20.2 (the version this job pins)
+          # that --conditions IS honoured via NODE_OPTIONS.
           NODE_OPTIONS: --conditions=react-server
-        # NOTE: test:chat-modes is still excluded — its assertions pass but the
-        # process exits 1 on a transitive server-only import under tsx (harness
-        # issue, not a product bug); re-add once that import chain is decoupled.
         run: |
           npm run test:sunbiz
           npm run test:event-bus
           npm run test:streaming-redactor
           npm run test:marketing
+          # Re-enabled 2026-08-08. This was excluded for exactly the
+          # server-only import chain that NODE_OPTIONS above now resolves;
+          # 41 assertions came back with it.
+          npm run test:chat-modes
           # Watermarking had NO CI coverage until 2026-08-04, which is how the
           # shop-out outage reached production: the operator's Clean|WM route
           # shipped without its watermark assets bundled, and nothing failed.
