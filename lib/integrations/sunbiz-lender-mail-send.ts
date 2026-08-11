@@ -60,10 +60,14 @@ export async function sendSunbizLenderMail(input: {
 }): Promise<SunbizLenderSendResult> {
   let creds: SubmissionsCreds;
   try {
-    // Brand is passed EXPLICITLY. submissions-gmail's own header warns that
-    // letting it fall back sends one brand's copy from another brand's mailbox;
-    // lender submissions are SunBiz by definition, so name it.
-    creds = await getSubmissionsCreds(input.tenantId, "sunbiz");
+    // NO brand argument, deliberately, and tests/shopout-brand-lock.test.ts
+    // enforces it. My first version passed "sunbiz" explicitly, reasoning that
+    // naming it beat defaulting. The guard rejected that and is right: a brand
+    // PARAMETER on a lender sender is a seam, and a seam is how Bluerise or
+    // FundMate copy eventually leaves the SunBiz mailbox. Lender submissions are
+    // SunBiz by definition, so the correct number of brands this function can
+    // express is one, and the way to express one is to take no argument.
+    creds = await getSubmissionsCreds(input.tenantId);
   } catch (error) {
     // A missing or rotated app password is a BLOCKED state a human must clear,
     // not a transient fault to retry into. Name it so the operator sees the

@@ -177,7 +177,9 @@ export const SUN_NAV: NavItem[] = [
   { group: "Deals", href: "/renewals", label: "Renewals", icon: "RefreshCcw" },
   { group: "Deals", href: "/commissions", label: "Commissions", icon: "DollarSign" },
   // Outreach — drip + blast cadence surfaces.
-  { group: "Outreach", href: "/sequences", label: "Sequences", icon: "Sparkles" },
+  // Labelled "Drips" because that is what Adon and the team call it. The route
+  // stays /sequences so existing links, bookmarks and docs keep resolving.
+  { group: "Outreach", href: "/sequences", label: "Drips", icon: "Sparkles" },
   { group: "Outreach", href: "/sms", label: "SMS", icon: "MessageSquare", expandable: true },
   { group: "Outreach", href: "/email-blast", label: "Email Blast", icon: "Mail" },
   // Network — lender book + templates.

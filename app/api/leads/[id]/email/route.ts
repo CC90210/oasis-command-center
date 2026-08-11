@@ -30,6 +30,8 @@ import { operatorHasGmailOAuth, sendGmailAsOperator } from "@/lib/integrations/g
 import { operatorHasAppPassword, sendGmailAppPasswordAsOperator } from "@/lib/integrations/gmail-apppassword-send";
 import { checkEmailSuppressed } from "@/lib/lead-interactions-queries";
 import { nudgeConversations } from "@/lib/realtime/conversations-nudge";
+import { sendGmail } from "@/lib/integrations/submissions-gmail-send";
+import { appendSignatureAndFooter } from "@/lib/config/email-signature";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -286,8 +288,41 @@ export async function POST(
   // Send preference: operator app-password (our OAuth-free working path — sends
   // FROM the operator's own address) → operator OAuth → submissions@ queue. Each
   // path falls through to the next on any failure so the email still goes out.
-  const queueFallback = () =>
-    triggerImmediateSend(req, { to: toEmail, subject: truncatedSubject, body: truncatedBody, leadId, brand, signer });
+  const queueFallback = async (): Promise<SendOutcome> => {
+    // SunBiz's shared submissions mailbox is provisioned in encrypted tenant
+    // integrations. Use that App Password directly before relying on the
+    // bridge/daemon, so dashboard merchant emails work from Vercel itself.
+    if (brand === "sunbiz") {
+      const signedBody = appendSignatureAndFooter(truncatedBody, {
+        signer,
+        fromAddress: "submissions@sunbizfunding.com",
+      });
+      const shared = await sendGmail({
+        tenantId: sess.tenantId,
+        brand: "sunbiz",
+        to: toEmail,
+        subject: truncatedSubject,
+        body: signedBody,
+        retryTransient: false,
+      });
+      if (shared.ok) {
+        return {
+          status: "sent",
+          agent_source: "submissions_gmail_apppassword",
+          via: "submissions_gmail_apppassword",
+          from_address: shared.from_identity,
+        };
+      }
+    }
+    return triggerImmediateSend(req, {
+      to: toEmail,
+      subject: truncatedSubject,
+      body: truncatedBody,
+      leadId,
+      brand,
+      signer,
+    });
+  };
 
   if (await operatorHasAppPassword(sess.tenantId, sess.userId)) {
     const g = await sendGmailAppPasswordAsOperator({
