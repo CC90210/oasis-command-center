@@ -48,17 +48,22 @@ function check(label: string, ok: boolean, detail = ""): void {
 async function main(): Promise<void> {
   const { getServiceSupabase } = await import("@/lib/supabase-server");
   const { recentDripActivity, dripFailureSummary } = await import("@/lib/drips/activity-queries");
-  const { classifyRunStatus } = await import("@/lib/drips/activity-core");
+  const { classifyRunStatus, outcomeWindow } = await import("@/lib/drips/activity-core");
   const db = getServiceSupabase();
 
   const since = Date.now() - 60 * 24 * 3_600_000;
 
-  // Raw truth, straight from the table.
+  // Raw truth, straight from the table — through the SAME window the summary
+  // uses. A harness that measures a different window than the code it is
+  // checking reports a disagreement that is its own, and the reflex is then to
+  // "fix" working code until the harness agrees. Here the divergence is exactly
+  // the backlog case the window was changed for: a run scheduled before the
+  // cutoff but sent inside it.
   const raw = await db
     .from("drip_runs")
     .select("status, from_identity")
     .eq("tenant_id", TENANT)
-    .gte("scheduled_for", new Date(since).toISOString())
+    .or(outcomeWindow(new Date(since).toISOString()))
     .limit(5000);
   if (raw.error) throw new Error(raw.error.message);
   const rows = raw.data || [];

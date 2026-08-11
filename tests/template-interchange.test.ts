@@ -16,6 +16,7 @@ import {
   selectableTemplates,
   validateInterchange,
   buildInterchangeAudit,
+  effectiveRole,
 } from "../lib/drips/template-interchange";
 import type { PoolTemplate } from "../lib/drips/template-pool";
 
@@ -130,6 +131,66 @@ assert.equal(buildInterchangeAudit({ from: null, to: "x", actor: "u" }).from, nu
     { channel: "email", delay_minutes: 0, subject: "s", body: "b", template_id: "" },
   ]);
   assert.equal(blank.template_id, undefined, "an empty string is not a pin");
+}
+
+// -- ROLE scoping: only offer what the engine can actually reach ----------
+// Codex review round 2. The executor narrows the pool with
+// poolFor(brand, stage, role) BEFORE resolveCopy sees the pin, so a template
+// playing another role is out of scope at send time. Offering one produced a
+// swap that saved cleanly, reported success, and changed nothing -- the exact
+// silent no-op the pin was added to fix, one layer along.
+{
+  const mixed: PoolTemplate[] = [
+    tpl({ id: "nudge_a", role: "nudge" }),
+    tpl({ id: "opener_a", role: "opener" }),
+    tpl({ id: "lastcall_a", role: "last_call" }),
+    tpl({ id: "roleless", role: "" }),
+  ];
+
+  assert.deepEqual(
+    selectableTemplates(mixed, { brand: "sunbiz", stage: "follow_up", role: "opener" }).map((t) => t.id),
+    ["opener_a"],
+    "an opener step is offered openers and nothing else",
+  );
+  assert.deepEqual(
+    selectableTemplates(mixed, { brand: "sunbiz", stage: "follow_up", role: "last_call" }).map((t) => t.id),
+    ["lastcall_a"],
+    "an opener must never stand in for a last call",
+  );
+
+  // Unset role means "nudge" on BOTH sides, matching executor.ts's
+  // `String(step.role || "nudge")`. If these two defaults ever drift, a
+  // roleless step silently stops being able to pin anything.
+  assert.equal(effectiveRole(undefined), "nudge");
+  assert.equal(effectiveRole(""), "nudge");
+  assert.equal(effectiveRole("  "), "nudge");
+  assert.deepEqual(
+    selectableTemplates(mixed, { brand: "sunbiz", stage: "follow_up" }).map((t) => t.id).sort(),
+    ["nudge_a", "roleless"],
+    "a step with no role gets the nudge bucket, and so does a template with no role",
+  );
+
+  // The validator refuses a cross-role pin rather than accepting one the send
+  // path would ignore, and names the rule that refused.
+  const req = {
+    sequenceId: "seq1",
+    stepIndex: 0,
+    fromTemplateId: null,
+    toTemplateId: "opener_a",
+    actorUserId: "user-1",
+    brand: "sunbiz" as const,
+    stage: "follow_up",
+    role: "last_call",
+  };
+  const verdict = validateInterchange(mixed, req);
+  assert.equal(verdict.ok, false, "a cross-role pin must be refused, not silently ignored later");
+  if (!verdict.ok) {
+    assert.match(verdict.reason, /role/, "the refusal must name the rule so an operator can act on it");
+    assert.match(verdict.reason, /opener/);
+    assert.match(verdict.reason, /last_call/);
+  }
+  // ...and accepts the same swap once the roles line up.
+  assert.equal(validateInterchange(mixed, { ...req, role: "opener" }).ok, true);
 }
 
 console.log("template-interchange.test.ts — all assertions passed");

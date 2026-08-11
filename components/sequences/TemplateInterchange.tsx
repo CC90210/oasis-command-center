@@ -17,7 +17,7 @@
 
 import { useMemo, useState } from "react";
 import { ArrowLeftRight, Check, Loader2, AlertTriangle } from "lucide-react";
-import { selectableTemplates } from "@/lib/drips/template-interchange";
+import { selectableTemplates, effectiveRole } from "@/lib/drips/template-interchange";
 import type { PoolTemplate } from "@/lib/drips/template-pool";
 import type { BrandKey } from "@/lib/email/brands";
 import type { DripStep } from "@/lib/drips/types";
@@ -45,17 +45,27 @@ export function TemplateInterchange({
   const [error, setError] = useState<string | null>(null);
   const [done, setDone] = useState(false);
 
-  const options = useMemo(() => selectableTemplates(pool, { brand, stage }), [pool, brand, stage]);
+  // Scope by the step's ROLE as well as brand and stage. The executor narrows
+  // the pool with poolFor(brand, stage, role) before it resolves the pin, so a
+  // template from another role is invisible at send time — offering it would
+  // save cleanly, report success, and change nothing. Same default the executor
+  // uses for an unset role.
+  const role = effectiveRole(step.role);
+  const options = useMemo(
+    () => selectableTemplates(pool, { brand, stage, role }),
+    [pool, brand, stage, role],
+  );
   const candidate = options.find((t) => t.id === choice) || null;
 
-  // Nothing approved for this brand and stage means there is nothing to
+  // Nothing approved for this brand, stage and role means there is nothing to
   // interchange. Say that rather than rendering an empty dropdown that looks
   // broken.
   if (options.length === 0) {
     return (
       <p className="mt-2 text-[10px] text-fg-dim">
-        No approved templates for {brand === "bluerise" ? "Bluerise" : "SunBiz"} · {stage}. Approve copy in the template
-        pool before it can be swapped in here.
+        No approved <b>{role}</b> templates for {brand === "bluerise" ? "Bluerise" : "SunBiz"} · {stage}. Approve copy in
+        the template pool before it can be swapped in here. Rotation only ever substitutes within one role, so an opener
+        never stands in for a last call.
       </p>
     );
   }
@@ -121,6 +131,21 @@ export function TemplateInterchange({
         <span className="ml-2 inline-flex items-center gap-1 text-[11px] font-bold text-emerald-400">
           <Check className="h-3 w-3" /> swapped — reload to see it
         </span>
+      )}
+
+      {/* A pin the engine can no longer reach — the template was retired, or the
+          step's role was changed after the swap — stops applying SILENTLY: the
+          step keeps showing the pinned copy while sampling decides what actually
+          goes out. Saying so is the whole point of this tab. */}
+      {step.template_id && !options.some((t) => t.id === step.template_id) && (
+        <div className="mt-2 flex items-start gap-1.5 rounded border border-amber-500/40 bg-amber-500/10 p-2 text-[11px] text-amber-400">
+          <AlertTriangle className="mt-0.5 h-3 w-3 shrink-0" />
+          <span>
+            This step is pinned to a template that is no longer approved for {brand === "bluerise" ? "Bluerise" : "SunBiz"}{" "}
+            · {stage} · {role}, so the engine is ignoring the pin and sampling the pool instead. Pick a template below to
+            make the copy shown here the copy that sends.
+          </span>
+        </div>
       )}
 
       {open && (
