@@ -28,6 +28,7 @@ import {
   validateInterchange,
   brandFromTriggerFilter,
   stageFromTriggerFilter,
+  diffPins,
 } from "@/lib/drips/template-interchange";
 import { loadApprovedPoolOrThrow } from "@/lib/drips/template-pool-store";
 
@@ -126,7 +127,7 @@ export async function PATCH(
   // what was actually written rather than what the client said it was doing.
   // `to: null` is an UNPIN — the step goes back to pool sampling, which is a
   // change to live copy and gets recorded like any other.
-  let pinChanges: Array<{ index: number; from: string | null; to: string | null }> = [];
+  let pinChanges: Array<{ index: number; from: string | null; to: string | null; role?: string }> = [];
 
   if ("steps" in body) {
     let steps;
@@ -186,16 +187,12 @@ export async function PATCH(
     // one. There is nothing to VALIDATE about it — sampling is always in
     // scope — but it must still be recorded, or an edit that silently altered
     // live copy leaves no trace.
-    const pinDiff = guarded.steps
-      .map((s, i) => ({
-        index: i,
-        from: priorSteps?.[i]?.template_id ?? null,
-        to: s.template_id ?? null,
-        role: s.role,
-      }))
-      .filter((c) => c.from !== c.to);
-
-    pinChanges = pinDiff.map(({ index, from, to }) => ({ index, from, to }));
+    //
+    // diffPins compares at sequence level, not index by index, because the
+    // editor supports reordering: position is not identity, and an index-wise
+    // diff would invent unpins every time a step moved.
+    const pinDiff = diffPins(priorSteps, guarded.steps);
+    pinChanges = pinDiff.map(({ index, from, to, role }) => ({ index, from, to, role }));
 
     // Only a NEW pin needs checking against the pool.
     const changedPins = pinDiff.filter((c): c is typeof c & { to: string } => Boolean(c.to));
@@ -311,6 +308,10 @@ export async function PATCH(
           step_index: change.index,
           from: change.from,
           to: change.to,
+          // Present when the pin still points at the same template but the
+          // step's role moved, which changes which templates may substitute
+          // for it. Without this an unchanged from/to reads as a no-op record.
+          role: change.role ?? null,
           actor: session.authUserId ?? null,
         }),
       })

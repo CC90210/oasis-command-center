@@ -17,6 +17,7 @@ import {
   validateInterchange,
   buildInterchangeAudit,
   effectiveRole,
+  diffPins,
 } from "../lib/drips/template-interchange";
 import type { PoolTemplate } from "../lib/drips/template-pool";
 
@@ -191,6 +192,55 @@ assert.equal(buildInterchangeAudit({ from: null, to: "x", actor: "u" }).from, nu
   }
   // ...and accepts the same swap once the roles line up.
   assert.equal(validateInterchange(mixed, { ...req, role: "opener" }).ok, true);
+}
+
+// -- diffPins: position is not identity -----------------------------------
+// Codex review round 6. The sequence editor supports reordering and deleting
+// steps, so an index-by-index pin diff invents changes: move an unpinned step
+// above a pinned one and every index below shifts, which reads as "unpinned A
+// here, pinned A there". Two fabricated edits to live merchant copy, in the one
+// record whose entire worth is that it contains only real ones.
+{
+  const pin = (id?: string, role?: string) => ({ ...(id ? { template_id: id } : {}), ...(role ? { role } : {}) });
+
+  // A pure reorder changes nothing about what merchants receive.
+  assert.deepEqual(
+    diffPins([pin(), pin("A"), pin("B")], [pin("A"), pin("B"), pin()]),
+    [],
+    "moving steps around is not a change to any pin",
+  );
+
+  // Deleting an UNPINNED step shifts every index below it, and must still be
+  // silent.
+  assert.deepEqual(diffPins([pin(), pin("A")], [pin("A")]), []);
+
+  // Real changes still register, and a same-index replacement stays ONE record
+  // that names what it replaced -- "A was swapped for B" is the answer wanted
+  // after a merchant complains, and two disconnected events do not give it.
+  assert.deepEqual(diffPins([pin("A")], [pin("B")]), [{ index: 0, from: "A", to: "B", role: undefined }]);
+  assert.deepEqual(diffPins([pin()], [pin("A")]), [{ index: 0, from: null, to: "A", role: undefined }]);
+
+  // Unpinning hands the step back to sampling. That IS a change to live copy.
+  assert.deepEqual(diffPins([pin("A")], [pin()]), [{ index: 0, from: "A", to: null }]);
+
+  // Deleting a pinned step entirely is a removal, not a silent shrink.
+  assert.deepEqual(diffPins([pin("A"), pin("B")], [pin("B")]), [{ index: 0, from: "A", to: null }]);
+
+  // The SAME template under a different role is a different decision: the
+  // executor scopes the pool by role before it resolves the pin, so a pin that
+  // was reachable as a nudge is invisible on an opener step. It has to come
+  // back through validation, which means it has to show up here.
+  assert.deepEqual(
+    diffPins([pin("A", "nudge")], [pin("A", "opener")]),
+    [{ index: 0, from: "A", to: "A", role: "opener" }],
+  );
+
+  // No prior steps at all (a legacy row that would not parse) must not throw.
+  assert.deepEqual(diffPins(null, [pin("A")]), [{ index: 0, from: null, to: "A", role: undefined }]);
+
+  // The same template pinned on TWO steps, then removed from one: exactly one
+  // removal, not zero and not two.
+  assert.deepEqual(diffPins([pin("A"), pin("A")], [pin("A"), pin()]), [{ index: 1, from: "A", to: null }]);
 }
 
 console.log("template-interchange.test.ts — all assertions passed");
