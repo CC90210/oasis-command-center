@@ -58,6 +58,7 @@ export async function loadDealGates(
   if (leads.length === 0) return { ok: true, gates };
 
   const byLead = new Map<string, DealRow[]>();
+  const alreadyLoaded = new Set<string>(); // application ids seen in the forward pass
   const push = (leadId: string, data: Record<string, unknown>, createdAt: string | null) => {
     const list = byLead.get(leadId) || [];
     list.push({ lead_id: leadId, status: data.status, stage: data.stage, created_at: createdAt });
@@ -86,6 +87,7 @@ export async function loadDealGates(
       const data = row.data || {};
       const leadId = typeof data.lead_id === "string" ? data.lead_id : "";
       if (!leadId) continue;
+      alreadyLoaded.add(row.id);
       push(leadId, data, row.created_at ?? null);
     }
   }
@@ -100,14 +102,23 @@ export async function loadDealGates(
   // day: 506 leads carry application_id and all 506 of those applications DO
   // carry the backlink, so this resolves nothing today — it closes the path
   // before a legacy or hand-made row walks through it.
+  // ALWAYS resolved, never skipped when the forward query already found
+  // something for this lead. Skipping it as an optimisation was itself a bug
+  // (Codex review P1, round 4): a re-applying lead has `application_id` on the
+  // CURRENT deal while an OLD application still carries the backlink, so the
+  // shortcut fed dealGateFor only the stale row — and that inverts the exact
+  // re-application rule dealGateFor exists to enforce. An old decline would
+  // then mute a live deal, or an old open status would permit mail after the
+  // current one closed. Load both and let the newest-row reduction decide.
   const reverse = new Map<string, string>(); // application id -> lead id
   for (const lead of leads) {
     const appId = (lead.data || {}).application_id;
-    if (typeof appId === "string" && appId.trim() && !byLead.has(lead.id)) {
-      reverse.set(appId.trim(), lead.id);
-    }
+    if (typeof appId === "string" && appId.trim()) reverse.set(appId.trim(), lead.id);
   }
-  const appIds = [...reverse.keys()];
+  // The only rows worth skipping are ones the forward pass ALREADY pushed —
+  // a doubly-linked application would otherwise be counted twice. Skipping by
+  // application id is safe; skipping by lead id is what caused the bug above.
+  const appIds = [...reverse.keys()].filter((id) => !alreadyLoaded.has(id));
   for (let i = 0; i < appIds.length; i += LEAD_CHUNK) {
     const res = await db
       .from("tenant_records")
