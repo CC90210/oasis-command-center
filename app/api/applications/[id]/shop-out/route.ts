@@ -52,15 +52,15 @@ import { deriveDealSigner, resolveSignerForOperator } from "@/lib/config/agents"
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
-// Generous bound for the synchronous auto-dispatch below. Each lender
-// SMTP send takes 1-3s through send_gateway; with the 20-lender cap
-// (Codex 2026-05-24) plus the 65s exec-tool proxy ceiling, 120s gives
-// comfortable headroom for the full batch + the network round trip.
+// Generous bound for the synchronous dispatch below. Each lender send is a
+// real SMTP round trip with the statements attached (~3s observed against
+// production), and the SOP caps a shop-out at 12 lenders, so 120s covers a
+// full batch with headroom.
 export const maxDuration = 120;
 
 /**
  * NOTE: the old triggerPhysicalSend() lived here. It POSTed to
- * /api/bridge/exec-tool, which relayed to a Python daemon on the Hostinger
+ * the bridge proxy, which relayed to a Python daemon on the Hostinger
  * VPS. It is gone rather than merely unused, because leaving it would leave a
  * working-looking second way to send that is in fact broken: that machine has
  * no R2 credentials and cannot download the bank statements it would attach.
@@ -340,13 +340,13 @@ export async function POST(
   //      pattern (CASL + cooldown + daily-cap) lives there
   //
   // The full flow Phase 6.3-bis will ship is:
-  //   route here (queues at 'pending') -> bridge /exec-tool with
-  //   tool_name='shop_out_send_batch' -> Python loops through lender
-  //   threads at 'pending', fires each via send_gateway.send(channel=
-  //   'email', attachments=[bank statements]) -> writes gmail_thread_id
-  //   + flips status='sent'. The response classifier daemon (Phase 6.4
-  //   already shipped) picks up replies from there.
+  //   route here (queues at 'pending') -> dispatchPendingSunbizThreads
+  //   claims each row, downloads its watermarked statements from R2 and
+  //   sends over SMTP in THIS process, then stamps sent_at + the receipt.
   //
+  //   This used to hand off to a Python daemon on the VPS. That machine had
+  //   no R2 credentials, so it could not download the statements it existed
+  //   to attach, and shop-out was dead 2026-08-06 to 2026-08-11.
   // Until 6.3-bis: operator sees `queued: N` (NOT `sent: N`) so the
   // UI is honest about what happened. They can manually run the send
   // by triggering the bridge tool, or wait for 6.3-bis. No silent gap.

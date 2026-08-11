@@ -57,6 +57,18 @@ export async function sendSunbizLenderMail(input: {
   attachments: ShopOutAttachment[];
   /** Rep whose name signs the mail. The shared inbox is always the From. */
   signerName?: string;
+  /**
+   * Shared conversation anchor for every lender on this DEAL. All sends carry it
+   * in References, so Gmail collapses them into one thread in the submissions@
+   * inbox instead of N separate conversations.
+   *
+   * This is header-only grouping, and that distinction is load-bearing: the
+   * lenders are NOT on one email together. Each still receives a private message
+   * addressed only to them. Putting six funders on one To/CC would tell CFG that
+   * the deal is also with UFS, BizFund and LG — which is how a deal gets declined
+   * or lowballed on sight. One inbox thread, six separate sends.
+   */
+  threadRootId: string;
 }): Promise<SunbizLenderSendResult> {
   let creds: SubmissionsCreds;
   try {
@@ -144,7 +156,17 @@ export async function sendSunbizLenderMail(input: {
       subject: input.subject,
       text: input.text,
       attachments: files,
-      headers: { "Message-Id": rfc822, "X-SunBiz-Route": "sunbiz-direct" },
+      headers: {
+        // Unique per send: this is the receipt stored on the thread row AND the
+        // key the reply classifier correlates the lender's answer against.
+        "Message-Id": rfc822,
+        // Shared per deal: what makes all six land in ONE inbox conversation.
+        // References only — deliberately NOT In-Reply-To, which would assert
+        // this message is a reply to something that was never delivered.
+        // References is what Gmail groups on and claims nothing untrue.
+        References: input.threadRootId,
+        "X-SunBiz-Route": "sunbiz-direct",
+      },
     });
 
     return {
