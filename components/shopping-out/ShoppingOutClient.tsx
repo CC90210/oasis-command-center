@@ -192,7 +192,16 @@ function describeSendError(json: Record<string, unknown>): string {
   const failures = Array.isArray(json.watermark_failures)
     ? (json.watermark_failures as Array<{ filename?: string; reason?: string }>)
     : [];
-  if (failures.length > 0) {
+
+  // Watermark framing ONLY when watermarking is what actually failed.
+  //
+  // This used to be the first branch unconditionally, which was safe while a
+  // branding failure was the only way to get a non-ok response. It stopped
+  // being safe the moment a dispatch failure started returning the (degraded,
+  // non-fatal) watermark list alongside it: a send that died at the bridge
+  // would be reported to the operator as a watermarking problem, sending them
+  // to re-upload a statement that was never the issue.
+  if (json.error === "bank_statement_watermark_failed" && failures.length > 0) {
     const lines = failures.map(
       (f) =>
         `• ${f.filename || "(unnamed file)"} — ${friendlyWatermarkReason(f.reason || "")} [${f.reason || "no reason given"}]`,
@@ -201,6 +210,28 @@ function describeSendError(json: Record<string, unknown>): string {
       failures.length === 1 ? "" : "s"
     }:\n${lines.join("\n")}`;
   }
+
+  // The dispatch chain broke: queued, but nothing left the building. Name the
+  // stage that failed so the operator is not left guessing which of route →
+  // bridge → sender → SMTP gave out.
+  if (json.error === "physical_send_failed") {
+    const ps = json.physical_send as { message?: string } | undefined;
+    const detail = ps?.message?.trim();
+    const marked =
+      typeof json.threads_marked === "number" && json.threads_marked > 0
+        ? ` The ${json.threads_marked} queued thread${json.threads_marked === 1 ? " is" : "s are"} marked with this reason.`
+        : "";
+    const wm =
+      failures.length > 0
+        ? `\nSeparately, ${failures.length} statement${failures.length === 1 ? "" : "s"} could not be watermarked.`
+        : "";
+    return (
+      `Nothing reached a lender. The packages were queued but the send failed` +
+      (detail ? `: ${detail}` : ".") +
+      `${marked} Use Retry below once the cause is cleared.${wm}`
+    );
+  }
+
   if (typeof json.message === "string" && json.message.trim()) {
     return typeof json.error === "string" ? `${json.message} (${json.error})` : json.message;
   }
@@ -575,8 +606,23 @@ export function ShoppingOutClient({
       // report nothing, and leave every thread red.
       if (!j?.ok) setSendResult({ tone: "error", message: describeSendError(j || {}) });
       else {
+        // Say what happened. Reporting nothing on success is the quieter
+        // half of the same problem this whole change is about: the operator
+        // clicks Retry, sees no message, and has to guess from the chips
+        // whether anything moved.
+        const ps = j.physical_send as { sent_count?: number } | undefined;
+        const recovered = typeof j.recovered === "number" ? j.recovered : 0;
         const warning = describeWatermarkWarning(j || {});
-        if (warning) setSendResult({ tone: "warning", message: warning });
+        const base =
+          recovered === 0
+            ? "Nothing to retry — no threads were in a recoverable state."
+            : `Retried ${recovered} thread${recovered === 1 ? "" : "s"}${
+                typeof ps?.sent_count === "number" ? ` · ${ps.sent_count} sent` : ""
+              }.`;
+        setSendResult({
+          tone: warning ? "warning" : "success",
+          message: warning ? `${base}\n${warning}` : base,
+        });
       }
       await refreshThreads();
     } catch (err) {
@@ -699,15 +745,36 @@ export function ShoppingOutClient({
         const queuedMsg = `Queued ${json.queued} lender thread${json.queued === 1 ? "" : "s"}${
           json.blocked ? ` · ${json.blocked} blocked` : ""
         }.`;
-        const sendMsg =
-          ps && typeof ps.sent_count === "number"
-            ? ` ${ps.sent_count} sent${
-                ps.failed_count ? ` · ${ps.failed_count} need retry (use Retry below)` : ""
-              }.`
-            : " Sending now — watch the thread statuses below.";
+        // Decide the tone from what the dispatch actually did, not from
+        // whether a count happened to be present.
+        //
+        // The old logic keyed off `typeof ps.sent_count === "number"` and fell
+        // through to a GREEN "Sending now — watch the thread statuses below."
+        // whenever it was absent. A failed dispatch has no sent_count, so every
+        // total failure rendered as success. That is what hid the 2026-08-06
+        // outage for five days.
+        let sendMsg: string;
+        let tone: "success" | "warning" | "error";
+        if (ps?.status === "sent" || ps?.status === "partial") {
+          const sent = ps.sent_count ?? 0;
+          sendMsg = ` ${sent} sent${
+            ps.failed_count ? ` · ${ps.failed_count} need retry (use Retry below)` : ""
+          }.`;
+          tone = ps.failed_count ? "warning" : "success";
+        } else if (ps?.status === "skipped") {
+          sendMsg = " Nothing was dispatched — every lender was blocked.";
+          tone = "warning";
+        } else {
+          // No dispatch result at all. Not a success: we do not know that
+          // anything sent. Say exactly that rather than implying progress.
+          sendMsg =
+            " The send result did not come back, so it is NOT confirmed that anything reached a lender." +
+            " Check the thread statuses below before assuming this went out.";
+          tone = "warning";
+        }
         const watermarkWarning = describeWatermarkWarning(json);
         setSendResult({
-          tone: watermarkWarning ? "warning" : "success",
+          tone: watermarkWarning && tone === "success" ? "warning" : tone,
           message: queuedMsg + sendMsg + (watermarkWarning ? `\n${watermarkWarning}` : ""),
         });
         await refreshPlanAndThreads();

@@ -40,6 +40,11 @@ import { getServiceSupabase } from "@/lib/supabase-server";
 import { resolveSessionContext } from "@/lib/api-auth";
 import { canViewLead, leadScopingEnabled } from "@/lib/lead-scope";
 import { buildShopOutPlan, recordShopOutThreads, autoAdvanceToShopping } from "@/lib/lenders/shop-out";
+import {
+  physicalSendFailed,
+  dispatchFailureReason,
+  recordDispatchFailure,
+} from "@/lib/lenders/shop-out-outcome";
 import { watermarkAttachmentsForShopOut } from "@/lib/lead-documents";
 import { complianceProfileInputs } from "@/lib/lenders/match-fitness";
 import { deriveDealSigner, resolveSignerForOperator } from "@/lib/config/agents";
@@ -543,8 +548,16 @@ export async function POST(
       ? await triggerPhysicalSend(req, applicationId, effectiveSigner)
       : { status: "skipped" as const, message: "no threads queued (all blocked)" };
 
-  return NextResponse.json({
-    ok: true,
+  // A dispatch that delivered nothing is a FAILED shop-out, and must be
+  // reported as one — in the database first, then in the HTTP status.
+  //
+  // Until 2026-08-11 this returned {ok:true} regardless, which is how the
+  // outage stayed invisible for five days: the operator saw a green toast,
+  // the rows sat at pending with last_error NULL, and there was no artifact
+  // anywhere that said the send had failed. Recording it on the row is the
+  // load-bearing half — the toast is seen once, the row is what a health
+  // check reads at 3am.
+  const body_ = {
     plan: planResult.plan,
     queued,
     blocked,
@@ -559,5 +572,37 @@ export async function POST(
     // auto-trigger failed). UI uses this to decide whether to render
     // "5 lenders contacted" vs. "queued, retry the send" vs. partial.
     physical_send: physicalSend,
-  });
+  };
+
+  if (physicalSendFailed(physicalSend)) {
+    const reason = dispatchFailureReason(physicalSend);
+    const stamp = await recordDispatchFailure({
+      tenant_id: tenantId,
+      application_id: applicationId,
+      reason,
+    });
+    if (!stamp.ok) {
+      // The stamp is the durable record. Losing it is itself a finding, not a
+      // detail — say so in the logs rather than letting the miss pass as done.
+      console.error("[shop-out] could not record dispatch failure on threads", {
+        applicationId,
+        reason,
+        error: stamp.error,
+      });
+    }
+    return NextResponse.json(
+      {
+        ok: false,
+        error: "physical_send_failed",
+        message:
+          "The lender packages were queued but the send did not go out. " +
+          "Nothing reached a lender. Use Retry below once the cause is cleared.",
+        threads_marked: stamp.stamped,
+        ...body_,
+      },
+      { status: 502 },
+    );
+  }
+
+  return NextResponse.json({ ok: true, ...body_ });
 }

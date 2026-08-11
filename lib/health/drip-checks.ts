@@ -189,6 +189,138 @@ export const DRIP_CHECKS: DripCheck[] = [
       ),
     describe: (r) => `${r.observed} drip row(s) are past their scheduled time.`,
   },
+
+  // ---------------------------------------------------------------------------
+  // Shopping out.
+  //
+  // Every check above watches merchant outreach. Until 2026-08-11 not one of
+  // them watched the lender side, so shop-out was physically dead from
+  // 2026-08-06 and the monitoring reported green the whole time. These are the
+  // checks that would have caught it, written against the conditions that
+  // actually occurred rather than the ones that seemed likely.
+  // ---------------------------------------------------------------------------
+  {
+    // THE check for the 2026-08-11 outage. Six lender packages were queued at
+    // 14:38Z, the dispatch failed, and the rows sat at pending with last_error
+    // NULL — indistinguishable from "still sending" to anything that only
+    // looked at status. A pending thread is a deal that is not in front of a
+    // lender; after 30 minutes that is never in-flight, it is stuck.
+    //
+    // Deliberately NOT keyed on last_error being set: the whole failure mode
+    // was that nothing wrote one. Age in the pending state is the signal that
+    // cannot be suppressed by a caller forgetting to record something.
+    //
+    // This remains the backstop even now that recordDispatchFailure moves a
+    // failed dispatch to 'error'. That handler only runs if the route lives
+    // long enough to run it; a serverless function killed at its maxDuration,
+    // or a deploy mid-request, leaves rows at pending with nothing recorded.
+    // That is precisely the case with no other witness, so the check that
+    // needs no cooperation from the failing code path is the one worth having.
+    //
+    // Age is measured from updated_at, NOT created_at. Both retry routes move a
+    // thread back to pending and stamp updated_at while leaving created_at at
+    // the original queue time, so a created_at window reports every retried
+    // thread as critically stuck the instant the operator clicks Retry — on a
+    // deal that is legitimately in flight. updated_at is the time it entered
+    // its CURRENT state, which is the thing being measured. On a first send the
+    // two are equal, so nothing is lost. (Codex review, 2026-08-11.)
+    id: "shopout.threads_stuck_pending",
+    severity: "critical",
+    rule: { kind: "must_be_zero" },
+    observe: (db, tenantId, endMs) =>
+      countOrNull(
+        db.from("application_lender_threads").select("id", { count: "exact", head: true })
+          .eq("tenant_id", tenantId).eq("status", "pending")
+          .lt("updated_at", iso(endMs - 30 * 60_000)),
+      ),
+    describe: (r) =>
+      `${r.observed} lender thread(s) queued more than 30 minutes ago and still not sent. ` +
+      `These deals are NOT in front of a lender. Open Shopping Out and use Retry, ` +
+      `or check the bridge — this is the exact state that hid the 2026-08-06 outage for five days.`,
+  },
+  {
+    // The un-fakeable one, mirroring sms.sent_without_proof. A thread at 'sent'
+    // is a claim; a receipt is the evidence. A row carrying the claim with NO
+    // receipt of any kind means something moved the status with no send behind
+    // it.
+    //
+    // The two send paths write DIFFERENT receipts, and this check has been
+    // wrong about it twice:
+    //
+    //   sunbiz  — send_gateway via the VPS sender. _mark_sent() writes
+    //             send_interaction_id (the lead_interactions row). It sets
+    //             gmail_thread_id only when a provider returns a real Gmail
+    //             threadId, which the SMTP path never does: null on 55 of 55.
+    //   funmate — direct SMTP in the retry route. Writes gmail_thread_id and
+    //             last_message_id from the RFC822 message id, and never
+    //             send_interaction_id. Exactly inverse.
+    //
+    // So keying on either column ALONE false-alarms on 100% of the other
+    // path's traffic. The first draft used gmail_thread_id (red on every
+    // sunbiz send); the second used send_interaction_id (red on every funmate
+    // send, caught by Codex review 2026-08-11). Requiring that SOME receipt
+    // exists is identity-agnostic, needs no branch on email_identity, and stays
+    // correct if a third sender arrives — provided it records something.
+    //
+    // Bounded to a trailing week so one bad historical row cannot pin it red —
+    // measured on sent_at, the moment the claim was made, NOT created_at. A
+    // thread queued three weeks ago and retried into 'sent' today is exactly
+    // the unsupported claim this check exists to find, and a created_at window
+    // would exclude it permanently. Same mistake as the one fixed in
+    // threads_stuck_pending two entries up: a row's age is not the age of the
+    // state it is in. (Codex review, 2026-08-11.)
+    id: "shopout.sent_without_proof",
+    severity: "critical",
+    rule: { kind: "must_be_zero" },
+    observe: (db, tenantId, endMs) =>
+      countOrNull(
+        db.from("application_lender_threads").select("id", { count: "exact", head: true })
+          .eq("tenant_id", tenantId).eq("status", "sent")
+          .is("send_interaction_id", null)
+          .is("gmail_thread_id", null)
+          .gte("sent_at", iso(endMs - 7 * DAY)).lt("sent_at", iso(endMs)),
+      ),
+    describe: (r) =>
+      `${r.observed} lender thread(s) marked sent with no receipt of any kind — neither a ` +
+      `send_interaction_id (SunBiz) nor a message id (FundMate). The status claims a send that ` +
+      `left no evidence behind it.`,
+  },
+  {
+    // The reply side, which is worth as much as the send side: an approval that
+    // nobody reads is a dead deal.
+    //
+    // The obvious check — "threads at 'sent' with no movement for N days" — is
+    // WRONG, and the first draft of this shipped it at N=3. A lender that
+    // simply has not replied leaves its thread at 'sent' by design; 898 rows
+    // sit at 'no_response' precisely because that is normal and the SLA sweep
+    // eventually retires them. A 3-day window therefore alerts on every quiet
+    // lender, which is routine business, not an outage. (Codex review,
+    // 2026-08-11.)
+    //
+    // What IS an invariant: the sweep retires a thread at 10 days with
+    // "SLA 10d exceeded". A thread still sitting at 'sent' well past that
+    // window means the sweep itself did not run — a real fault, and one that
+    // cannot be produced by lender behaviour no matter how quiet they are.
+    // 14 days gives the sweep four days of grace before this speaks.
+    //
+    // Honest limitation: this lags. It would not have caught the 2026-08-06
+    // classifier stall until 2026-08-17. The right instrument for that is a
+    // run-heartbeat on the classifier itself, which does not exist yet and is
+    // tracked as follow-up. A late true signal beats a prompt false one.
+    id: "shopout.sla_sweep_stalled",
+    severity: "high",
+    rule: { kind: "must_be_zero" },
+    observe: (db, tenantId, endMs) =>
+      countOrNull(
+        db.from("application_lender_threads").select("id", { count: "exact", head: true })
+          .eq("tenant_id", tenantId).eq("status", "sent")
+          .lt("sent_at", iso(endMs - 14 * DAY)),
+      ),
+    describe: (r) =>
+      `${r.observed} lender thread(s) are still 'sent' more than 14 days after dispatch, past the ` +
+      `10-day SLA sweep that should have retired them. The sweep or the reply classifier is not ` +
+      `running — check scan-lender-replies and the submissions@ mailbox credential.`,
+  },
 ];
 
 /**
