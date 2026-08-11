@@ -35,9 +35,24 @@ function loadEnvFile(path: string): void {
     if (!process.env[m[1]]) process.env[m[1]] = v;
   }
 }
-loadEnvFile("C:/Users/echel/JARVIS/.env.agents");
+// Env file path comes from the environment. It used to be one developer's
+// absolute Windows path, which on any other machine failed SILENTLY (loadEnvFile
+// swallows a missing file) and left the script running against whatever
+// credentials the shell happened to hold.
+const ENV_FILE = process.env.DRIP_VERIFY_ENV_FILE || process.env.APEX_ENV_FILE || "";
+if (ENV_FILE) loadEnvFile(ENV_FILE);
 
-const TENANT = process.env.SUNBIZ_TENANT_ID || "aa04fa1f-ad6a-44b0-ac4b-2ff5d1067110";
+// No default. A tenant id is customer data and does not belong in source, and a
+// hardcoded one means a run with no arguments quietly targets a specific
+// production tenant that nobody chose.
+const TENANT = process.env.SUNBIZ_TENANT_ID || "";
+if (!TENANT) {
+  console.error(
+    "SUNBIZ_TENANT_ID is not set. Refusing to guess a tenant: this reads production drip rows, " +
+      "and the wrong id would report another tenant's numbers as this one's.",
+  );
+  process.exit(2);
+}
 
 let failures = 0;
 function check(label: string, ok: boolean, detail = ""): void {
@@ -83,7 +98,17 @@ async function main(): Promise<void> {
     rawSentColumn >= realSends,
     `${rawSentColumn} >= ${realSends}`,
   );
-  check("the parts add up", realSends + skipped <= rawSentColumn + 1, "sent + skipped should be within sent/done");
+  // The EXACT identity, not an inequality that holds by construction.
+  // `realSends + skipped <= rawSentColumn + 1` is true for every possible input
+  // because both counters are subsets of the sent/done rows, so it printed "ok"
+  // whatever the classifier did. A harness that cannot fail gives exactly the
+  // false confidence this tab was built to remove.
+  const dryRun = classified.filter((c) => c === "dry_run").length;
+  check(
+    "every sent/done row lands in exactly one bucket",
+    realSends + skipped + dryRun === rawSentColumn,
+    `${realSends} + ${skipped} + ${dryRun} = ${realSends + skipped + dryRun} vs ${rawSentColumn}`,
+  );
 
   // The summary must agree with a hand count over the same window.
   const summary = await dripFailureSummary(TENANT, since);
@@ -103,12 +128,30 @@ async function main(): Promise<void> {
   // The row feed must render and never leak another tenant's leads.
   const activity = await recentDripActivity(TENANT, { limit: 50 });
   console.log(`\nactivity rows returned: ${activity.length}`);
-  check("activity returns rows", activity.length >= 0);
+  // `activity.length >= 0` is true for every array. Assert the limit is
+  // actually honoured, which is a property that CAN be wrong.
+  check("the row feed honours its limit", activity.length <= 50, `${activity.length} <= 50`);
   check(
     "every row carries a resolved outcome",
     activity.every((r) => typeof r.status === "string" && r.status.length > 0),
   );
-  check("no row renders the raw status as its outcome", activity.every((r) => r.status !== r.rawStatus || r.status === "failed"));
+  // State the invariant, not a proxy for it. The old assertion required
+  // status !== rawStatus, which is FALSE for every healthy row: a genuine send
+  // classifies to "sent" from a raw "sent", so the check failed against correct
+  // production data. A harness that fails on healthy input teaches its operator
+  // to ignore it, and the next real failure goes unread.
+  //
+  // What actually matters: nothing whose raw status claims it went out may be
+  // presented as a send without a provider identity behind it.
+  check(
+    "no row claims to have sent without a provider identity",
+    activity.every(
+      (r) =>
+        !(r.rawStatus === "sent" || r.rawStatus === "done") ||
+        r.status !== "sent" ||
+        Boolean(r.fromIdentity && !String(r.fromIdentity).startsWith("dry:")),
+    ),
+  );
   for (const r of activity.slice(0, 5)) {
     console.log(`  ${String(r.scheduledFor).slice(0, 16)}  ${String(r.channel).padEnd(5)} ${r.status.padEnd(9)} ${r.brand.padEnd(8)} ${(r.error || r.fromIdentity || "").slice(0, 54)}`);
   }

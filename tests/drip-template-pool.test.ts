@@ -241,6 +241,16 @@ assert.equal(
   ]);
   assert.notEqual(zeroed.templateId, "z", "weight 0 is a soft retire; a pin cannot resurrect it");
 
+  // An APPROVED template with no copy is not sendable either. Sampling has
+  // always rejected it; the pin path re-implemented the check and left this one
+  // condition out, so a pin would have sent a merchant a blank message.
+  const empty = resolveCopy({ ...step, template_id: "blank" }, "lead-1", 0, [
+    mk({ id: "blank", bodyText: "   " }),
+    mk({ id: "live", bodyText: "live copy" }),
+  ]);
+  assert.equal(empty.body, "live copy", "a pin to empty approved copy must not send an empty message");
+  assert.notEqual(empty.templateId, "blank");
+
   // And a pin can never smuggle a draft past the approval gate.
   const drafted = resolveCopy({ ...step, template_id: "d" }, "lead-1", 0, [mk({ id: "d", status: "draft", bodyText: "unreviewed" })]);
   assert.notEqual(drafted.body, "unreviewed", "approval is a gate, pin or no pin");

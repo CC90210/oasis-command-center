@@ -16,6 +16,7 @@
  */
 
 import { useMemo, useState } from "react";
+import { useRouter } from "next/navigation";
 import { ArrowLeftRight, Check, Loader2, AlertTriangle } from "lucide-react";
 import { selectableTemplates, effectiveRole } from "@/lib/drips/template-interchange";
 import type { PoolTemplate } from "@/lib/drips/template-pool";
@@ -44,6 +45,7 @@ export function TemplateInterchange({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [done, setDone] = useState(false);
+  const router = useRouter();
 
   // Scope by the step's ROLE as well as brand and stage. The executor narrows
   // the pool with poolFor(brand, stage, role) before it resolves the pin, so a
@@ -112,6 +114,16 @@ export function TemplateInterchange({
       }
       setDone(true);
       setOpen(false);
+      // Re-render the server component so `steps` is the PERSISTED array again.
+      //
+      // Without this, a second swap in the same session silently reverts the
+      // first: every TemplateInterchange on the page builds its PATCH from the
+      // same server-rendered `steps` snapshot and sends the WHOLE array, so
+      // step 2's save rewrites step 1 back to the copy it had before the page
+      // loaded. The audit then records that revert as a deliberate unpin by the
+      // operator. A note telling them to reload is not a fix; nothing enforced
+      // it.
+      router.refresh();
     } catch (err) {
       setError(err instanceof Error ? err.message.slice(0, 140) : "network error");
     } finally {
@@ -133,7 +145,7 @@ export function TemplateInterchange({
 
       {done && (
         <span className="ml-2 inline-flex items-center gap-1 text-[11px] font-bold text-emerald-400">
-          <Check className="h-3 w-3" /> swapped — reload to see it
+          <Check className="h-3 w-3" /> swapped
         </span>
       )}
 

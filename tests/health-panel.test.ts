@@ -76,4 +76,36 @@ assert.equal(freshness({ ranAt: Number.NaN, nowMs: 0 }), "never_run");
   assert.equal(at("2026-08-09T12:00:00Z"), "daily");
 }
 
+// -- An UNKNOWN verdict outranks a healthy one ---------------------------
+// A verdict nobody recognises is not a passing verdict. Ranking it level with a
+// fresh green filed the one row worth looking at underneath the rows that are
+// fine.
+{
+  const now = Date.parse("2026-08-11T12:00:00Z");
+  const fresh = "2026-08-11T11:55:00Z";
+  const rows = toPanelRows(
+    [
+      { checkId: "z.ok", verdict: "ok", observed: 1, baseline: 1, reason: null, ranAt: fresh },
+      { checkId: "a.unknown", verdict: "who_knows", observed: null, baseline: null, reason: null, ranAt: fresh },
+      { checkId: "m.warn", verdict: "degraded", observed: 1, baseline: 4, reason: null, ranAt: fresh },
+    ],
+    now,
+  );
+  const order = rows.map((r) => r.checkId);
+  assert.ok(order.indexOf("a.unknown") < order.indexOf("z.ok"), "an unknown verdict must not sort below a green one");
+  assert.ok(order.indexOf("a.unknown") < order.indexOf("m.warn"), "unknown outranks a known partial degradation");
+}
+
+// -- Unknown alert age says so ------------------------------------------
+// A genuinely new alert returns "hourly". Rendering an unparseable or missing
+// first_failed_at as "new" would tell an operator this just started, when the
+// truth is that nothing is known about how long it has been failing.
+{
+  const now = Date.parse("2026-08-11T12:00:00Z");
+  const lbl = (iso: string | null) => ladderLabel({ alertKey: "k", firstFailedAt: iso, lastAlertedAt: null, repeatN: 0 }, now);
+  assert.equal(lbl(null), "age unknown");
+  assert.equal(lbl("not-a-date"), "age unknown");
+  assert.notEqual(lbl(null), lbl("2026-08-11T11:59:00Z"), "unknown age and just-started must not read alike");
+}
+
 console.log("health-panel.test.ts — all assertions passed");

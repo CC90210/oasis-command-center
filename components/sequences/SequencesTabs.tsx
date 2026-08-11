@@ -25,11 +25,13 @@ export function SequencesTabs({
   rows,
   activity,
   activitySummary,
+  activityError,
   pool,
 }: {
   rows: Row[];
   activity: ActivityRow[];
   activitySummary: ActivitySummary;
+  activityError?: string | null;
   pool: PoolTemplate[];
 }) {
   // Activity first. The first question an operator has is "what went out",
@@ -73,7 +75,7 @@ export function SequencesTabs({
       </div>
 
       {tab === "activity" ? (
-        <DripActivityView rows={activity} summary={activitySummary} />
+        <DripActivityView rows={activity} summary={activitySummary} readError={activityError ?? null} />
       ) : tab === "templates" ? (
         <SequenceTemplatesView rows={rows} pool={pool} />
       ) : (

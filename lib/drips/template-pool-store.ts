@@ -55,6 +55,11 @@ export async function loadApprovedPoolOrThrow(db: Db, tenantId: string): Promise
     .eq("tenant_id", tenantId)
     .eq("status", "approved")
     .gt("weight", 0)
+    // PostgREST guarantees NO order without an explicit clause, so a capped read
+    // could return a different 2000 rows each time -- and a valid pin would be
+    // absent from the pool on one request and present on the next, producing the
+    // "template not found" refusal this module exists to prevent.
+    .order("id", { ascending: true })
     .limit(2000);
   if (r.error) throw new Error(`template pool read failed: ${r.error.message}`);
   return ((r.data || []) as Array<Record<string, unknown>>).map((row) => ({

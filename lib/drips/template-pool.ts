@@ -163,7 +163,11 @@ export function resolveCopy(
   //    soft-retired, so an old pin cannot keep pushing withdrawn copy at
   //    merchants after someone retires it.
   if (step.template_id) {
-    const pinned = pool.find((t) => t.id === step.template_id && t.status === "approved" && t.weight > 0);
+    // isSendable, not a re-implementation of it. An inline status/weight check
+    // drifted from the real rule and let through an approved template with an
+    // EMPTY body — which sampling has always rejected, and which would have sent
+    // a merchant a blank message. One predicate, one place.
+    const pinned = pool.find((t) => t.id === step.template_id && isSendable(t));
     if (pinned) {
       return {
         subject: pinned.subject || step.subject || "",

@@ -100,8 +100,13 @@ export function toPanelRows(checks: PanelCheck[], nowMs: number): PanelRow[] {
       };
     })
     .sort((a, b) => {
-      // Problems first, then staleness, then alphabetical so the order is stable.
-      const rank = (r: PanelRow) => (r.tone === "bad" ? 0 : r.freshness !== "fresh" ? 1 : r.tone === "warn" ? 2 : 3);
+      // Problems first, then staleness, then alphabetical so the order is
+      // stable. UNKNOWN sits above warn and below stale: a verdict nobody
+      // recognises is not a healthy one, and giving it the same rank as a fresh
+      // green let it sort below passing checks -- the one row you need to look
+      // at, filed under the ones you do not.
+      const rank = (r: PanelRow) =>
+        r.tone === "bad" ? 0 : r.freshness !== "fresh" ? 1 : r.tone === "unknown" ? 2 : r.tone === "warn" ? 3 : 4;
       return rank(a) - rank(b) || a.checkId.localeCompare(b.checkId);
     });
 }
@@ -131,7 +136,11 @@ export function failingForHours(alert: OpenAlert, nowMs: number): number | null 
  */
 export function ladderLabel(alert: OpenAlert, nowMs: number): string {
   const hours = failingForHours(alert, nowMs);
-  if (hours === null) return "new";
+  // Unknown age is UNKNOWN, not "new". A genuinely new alert returns "hourly";
+  // rendering a missing or unparseable first_failed_at as "new" tells an
+  // operator this just started when the truth is that nothing is known about
+  // how long it has been failing.
+  if (hours === null) return "age unknown";
   if (hours < 6) return "hourly";
   if (hours < 24) return "every 6h";
   return "daily";

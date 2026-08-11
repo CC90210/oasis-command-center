@@ -5,21 +5,15 @@
  * `health_check_runs`, and until now nothing read that table. The checks built
  * to catch silent failure were themselves invisible.
  *
- * Server component: it reads directly and renders. No client state is needed
- * for a status board, and shipping it as a server component means an operator
- * cannot be shown a cached verdict from a previous session.
+ * PURE PRESENTER. The reads live in lib/health/outcome-panel-data.ts because
+ * the PAGE has to count the same signals into its header verdict — otherwise
+ * "All clear" renders directly above a card reporting a failing check. One read
+ * feeds both, so the two halves of the page cannot disagree about the same
+ * moment.
  */
 
 import { AlertTriangle, CheckCircle2, CircleHelp, Clock, ShieldAlert } from "lucide-react";
-import { getServiceSupabase } from "@/lib/supabase-server";
-import {
-  toPanelRows,
-  failingForHours,
-  ladderLabel,
-  type PanelCheck,
-  type OpenAlert,
-  type Tone,
-} from "@/lib/health/panel-core";
+import { failingForHours, ladderLabel, type OpenAlert, type PanelRow, type Tone } from "@/lib/health/panel-core";
 
 const TONE_CLS: Record<Tone, string> = {
   good: "bg-emerald-500/15 text-emerald-400",
@@ -35,51 +29,19 @@ function ToneIcon({ tone }: { tone: Tone }) {
   return <CircleHelp className="h-3.5 w-3.5" />;
 }
 
-export async function OutcomeChecksPanel({ tenantId }: { tenantId: string | null }) {
-  if (!tenantId) return null;
-  const db = getServiceSupabase();
-  const now = Date.now();
-
-  // Latest run per check. Pull a bounded recent window and reduce, rather than
-  // a per-check query: the table is small and one read is cheaper than twelve.
-  const runsRes = await db
-    .from("health_check_runs")
-    .select("check_id, verdict, observed, baseline, reason, ran_at")
-    .eq("tenant_id", tenantId)
-    .order("ran_at", { ascending: false })
-    .limit(400);
-
-  const latest = new Map<string, PanelCheck>();
-  for (const r of runsRes.data || []) {
-    const id = String(r.check_id);
-    if (latest.has(id)) continue; // already have the newest, list is desc
-    latest.set(id, {
-      checkId: id,
-      verdict: String(r.verdict),
-      observed: typeof r.observed === "number" ? r.observed : null,
-      baseline: typeof r.baseline === "number" ? r.baseline : null,
-      reason: r.reason ?? null,
-      ranAt: r.ran_at ?? null,
-    });
-  }
-  const rows = toPanelRows([...latest.values()], now);
-
-  const alertsRes = await db
-    .from("health_alert_state")
-    .select("alert_key, first_failed_at, last_alerted_at, repeat_n")
-    .eq("tenant_id", tenantId)
-    .not("first_failed_at", "is", null)
-    .order("first_failed_at", { ascending: true })
-    .limit(50);
-  const openAlerts: OpenAlert[] = (alertsRes.data || []).map((a) => ({
-    alertKey: String(a.alert_key),
-    firstFailedAt: a.first_failed_at ?? null,
-    lastAlertedAt: a.last_alerted_at ?? null,
-    repeatN: Number(a.repeat_n ?? 0),
-  }));
-
-  const readFailed = Boolean(runsRes.error);
-
+export function OutcomeChecksPanel({
+  rows,
+  openAlerts,
+  readFailed,
+  readError,
+  now,
+}: {
+  rows: PanelRow[];
+  openAlerts: OpenAlert[];
+  readFailed: boolean;
+  readError: string | null;
+  now: number;
+}) {
   return (
     <div className="space-y-3">
       <div className="flex items-center justify-between">
@@ -95,8 +57,8 @@ export async function OutcomeChecksPanel({ tenantId }: { tenantId: string | null
         <div className="flex items-start gap-2 rounded-lg border border-rose-500/40 bg-rose-500/10 p-3 text-xs text-rose-400">
           <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
           <span>
-            Could not read health results: {runsRes.error?.message}. This panel is blind right now — treat it as
-            unknown, not healthy.
+            Could not read health results ({readError}). This panel is blind right now — treat it as unknown, not
+            healthy.
           </span>
         </div>
       )}

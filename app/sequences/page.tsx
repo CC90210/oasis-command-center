@@ -11,6 +11,18 @@ import { getSessionUser, getServiceSupabase } from "@/lib/supabase-server";
 import { safe, isMissingTableError } from "@/lib/api-helpers";
 import { SequencesTabs } from "@/components/sequences/SequencesTabs";
 import { recentDripActivity, dripFailureSummary } from "@/lib/drips/activity-queries";
+
+/** The all-zero summary. Named so the "no tenant" case and the "read failed"
+ *  case cannot drift into two subtly different sets of zeros. */
+const EMPTY_SUMMARY = {
+  realSends: 0,
+  failed: 0,
+  skipped: 0,
+  dryRun: 0,
+  failureRatePct: null as number | null,
+  heldForPolicy: 0,
+  truncated: false,
+};
 import { loadApprovedPool } from "@/lib/drips/template-pool-store";
 import { AlertCircle, Cpu, Cloud, Download } from "lucide-react";
 import Link from "next/link";
@@ -60,28 +72,42 @@ export default async function SequencesPage() {
 
   const profile = await safe("sequences.profile", getActiveProfile(), null);
   const tenantId = profile?.tenant_id || null;
-  // Activity loads alongside the sequences. `safe` degrades each read
-  // independently so a slow activity query cannot take the whole page down —
-  // an empty table with the sequences still rendered beats a 500.
-  const [result, bridgeOnline, activity, pool, activitySummary] = await Promise.all([
+  // Activity loads alongside the sequences. `safe` catches a REJECTION per read,
+  // so one failing query degrades to its fallback instead of 500-ing the page.
+  // It is not a timeout: Promise.all still waits for the slowest read, so a slow
+  // activity query does hold the whole page. Saying "cannot take the page down"
+  // would be claiming a protection that is not here.
+  const [result, bridgeOnline, activityRes, pool, summaryRes] = await Promise.all([
     loadSequences(tenantId),
     safe("sequences.bridge_online", getBridgeOnline(tenantId), false),
+    // Wrapped so a read FAILURE is distinguishable from an empty window. `safe`
+    // swallows the rejection and hands back [], which DripActivityView would
+    // render as "no drip steps in this window - that is a finding, not a
+    // blank". So a broken query would tell the operator nothing was sent, which
+    // is the exact false signal this tab was built to remove.
     safe(
       "sequences.activity",
-      tenantId ? recentDripActivity(tenantId, { limit: 300 }) : Promise.resolve([]),
-      [],
+      tenantId
+        ? recentDripActivity(tenantId, { limit: 300 }).then(
+            (rows) => ({ rows, error: null as string | null }),
+          )
+        : Promise.resolve({ rows: [], error: null as string | null }),
+      { rows: [], error: "could not read drip activity" },
     ),
     safe(
       "sequences.template_pool",
       tenantId ? loadApprovedPool(getServiceSupabase(), tenantId) : Promise.resolve([]),
       [],
     ),
+    // Same reasoning: a zeroed summary from a failed read is indistinguishable
+    // from a genuinely quiet day, and zero failures is the most reassuring
+    // number on the page.
     safe(
       "sequences.activity_summary",
       tenantId
-        ? dripFailureSummary(tenantId)
-        : Promise.resolve({ realSends: 0, failed: 0, skipped: 0, dryRun: 0, failureRatePct: null, heldForPolicy: 0 }),
-      { realSends: 0, failed: 0, skipped: 0, dryRun: 0, failureRatePct: null, heldForPolicy: 0 },
+        ? dripFailureSummary(tenantId).then((s) => ({ ...s, error: null as string | null }))
+        : Promise.resolve({ ...EMPTY_SUMMARY, error: null as string | null }),
+      { ...EMPTY_SUMMARY, error: "could not read the drip summary" },
     ),
   ]);
 
@@ -168,8 +194,9 @@ export default async function SequencesPage() {
       {result.ok && (
         <SequencesTabs
           rows={result.rows}
-          activity={activity}
-          activitySummary={activitySummary}
+          activity={activityRes.rows}
+          activitySummary={summaryRes}
+          activityError={activityRes.error || summaryRes.error}
           pool={pool}
         />
       )}

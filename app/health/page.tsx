@@ -33,6 +33,7 @@
 
 import { PageHeader, Card, Tag } from "@/components/Card";
 import { OutcomeChecksPanel } from "@/components/health/OutcomeChecksPanel";
+import { loadOutcomeChecks } from "@/lib/health/outcome-panel-data";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { resolveTenantId } from "@/lib/api-auth";
 import { getTenantEnabledAgents } from "@/lib/manifest/tenant-scope";
@@ -208,8 +209,18 @@ export default async function HealthPage() {
     enabledAgents,
   );
 
+  // The outcome checks count toward the HEADER, not just their own card.
+  // Otherwise the page renders "All clear" directly above a failing check, a
+  // stale one, an open alert, or a blind read — and the header is the part
+  // people actually read.
+  const outcome = await loadOutcomeChecks(tenantId, Date.now());
+
   const totalSignals =
-    recentErrors.length + failedCrons.length + stuckThreads.length + stuckLeads.length;
+    recentErrors.length +
+    failedCrons.length +
+    stuckThreads.length +
+    stuckLeads.length +
+    outcome.signalCount;
   const overallHealthy = totalSignals === 0;
 
   return (
@@ -269,7 +280,13 @@ export default async function HealthPage() {
           anything", which outranks "were there errors": during the ten-day SMS
           outage there were no errors to show, and every tile below was green. */}
       <Card title="Are merchants actually being reached?">
-        <OutcomeChecksPanel tenantId={tenantId} />
+        <OutcomeChecksPanel
+          rows={outcome.rows}
+          openAlerts={outcome.openAlerts}
+          readFailed={outcome.readFailed}
+          readError={outcome.readError}
+          now={Date.now()}
+        />
       </Card>
 
       <Card

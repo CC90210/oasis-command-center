@@ -295,36 +295,40 @@ export async function PATCH(
   for (const change of pinChanges) {
     // Best-effort, exactly like the version write above: the save already
     // happened and failing the request now would misreport it as rejected.
-    await db
-      .from("agent_events")
-      .insert({
+    //
+    // THE SCHEMA IS event_type / publisher_agent / severity / payload /
+    // correlation_id (see lib/action-log.ts). The columns this used to write —
+    // tenant_id, source, level, event, detail — do not exist on agent_events,
+    // so every audit write failed. Silently, twice over: PostgREST RESOLVES with
+    // { error } on a failed insert, and a rejection-only handler never sees it.
+    // An audit trail that reports success and stores nothing is worse than
+    // none, because it is the one you go looking for after a merchant complains.
+    const ev = await db.from("agent_events").insert({
+      event_type: "template_interchange",
+      publisher_agent: "sequences",
+      severity: "info",
+      payload: {
+        action: "template_interchange",
         tenant_id: tenantId,
-        source: "sequences",
-        level: "info",
-        event: "template_interchange",
-        detail: JSON.stringify({
-          action: "template_interchange",
-          sequence_id: id,
-          step_index: change.index,
-          from: change.from,
-          to: change.to,
-          // Present when the pin still points at the same template but the
-          // step's role moved, which changes which templates may substitute
-          // for it. Without this an unchanged from/to reads as a no-op record.
-          role: change.role ?? null,
-          actor: session.authUserId ?? null,
-        }),
-      })
-      .then(
-        () => undefined,
-        (err: unknown) => {
-          console.error("[sequences.interchange_audit.failed]", {
-            sequence_id: id,
-            step_index: change.index,
-            error: err instanceof Error ? err.message : String(err),
-          });
-        },
-      );
+        sequence_id: id,
+        step_index: change.index,
+        from: change.from,
+        to: change.to,
+        // Present when the pin still points at the same template but the step's
+        // role moved, which changes which templates may substitute for it.
+        // Without this an unchanged from/to reads as a no-op record.
+        role: change.role ?? null,
+        actor: session.authUserId ?? null,
+      },
+      correlation_id: tenantId,
+    });
+    if (ev.error) {
+      console.error("[sequences.interchange_audit.failed]", {
+        sequence_id: id,
+        step_index: change.index,
+        error: ev.error.message,
+      });
+    }
   }
 
   return NextResponse.json({ ok: true, sequence: data, ...(historySaved === undefined ? {} : { historySaved }) });

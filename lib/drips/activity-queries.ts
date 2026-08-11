@@ -92,6 +92,12 @@ export async function recentDripActivity(
       .select("id, data")
       .eq("tenant_id", tenantId)
       .in("id", leadIds);
+    // Throwing here, not degrading. If this read fails the brand map stays
+    // empty and EVERY row falls back to "sunbiz" — so a screenful of Bluerise
+    // sends would be labelled SunBiz on the one surface built to report what
+    // actually went out. A wrong brand is worse than no screen: it is the same
+    // wrong answer the drip engine would give, echoed back as confirmation.
+    if (leads.error) throw new Error(`drip activity lead read failed: ${leads.error.message}`);
     for (const l of leads.data || []) {
       const d = (l.data || {}) as Record<string, unknown>;
       const name = String(d.business_name || d.contact_name || "").trim();
@@ -129,21 +135,31 @@ export async function recentDripActivity(
  * performance stay in /metrics; duplicating them here would create a second
  * set of numbers to disagree with the first.
  */
+const SUMMARY_ROW_CAP = 5000;
+
 export async function dripFailureSummary(
   tenantId: string,
   sinceMs: number = Date.now() - 24 * 3_600_000,
-): Promise<FailureSummary & { heldForPolicy: number }> {
+): Promise<FailureSummary & { heldForPolicy: number; truncated: boolean }> {
   const db: Db = getServiceSupabase();
   const res = await db
     .from("drip_runs")
     .select("status, from_identity, last_error")
     .eq("tenant_id", tenantId)
     .or(outcomeWindow(new Date(sinceMs).toISOString()))
-    .limit(5000);
+    // One more than the cap, purely so hitting the cap is DETECTABLE. Reading
+    // exactly the cap cannot distinguish "5000 rows" from "at least 5000".
+    .limit(SUMMARY_ROW_CAP + 1);
   if (res.error) throw new Error(`drip summary read failed: ${res.error.message}`);
-  const rows = res.data || [];
+  const all = res.data || [];
+  // A capped read produces real numbers over a partial sample. Rendering those
+  // as fact is the same false denominator this module exists to prevent, one
+  // level up, so the cap is REPORTED rather than absorbed.
+  const truncated = all.length > SUMMARY_ROW_CAP;
+  const rows = truncated ? all.slice(0, SUMMARY_ROW_CAP) : all;
   return {
     ...summarizeFailures(rows),
     heldForPolicy: rows.filter((r) => isHeldForPolicy(r.last_error)).length,
+    truncated,
   };
 }
