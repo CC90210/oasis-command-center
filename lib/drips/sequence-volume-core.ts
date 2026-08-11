@@ -117,6 +117,34 @@ export function dayKey(iso: unknown, timeZone: string, nowMs?: number): string |
   }
 }
 
+/**
+ * A zone's UTC offset in milliseconds at a given instant, DST included.
+ *
+ * Formats the instant in the zone, reads the wall-clock fields back as if they
+ * were UTC, and takes the difference. Positive east of Greenwich.
+ */
+function zoneOffsetMs(atMs: number, timeZone: string): number {
+  try {
+    const parts = new Intl.DateTimeFormat("en-CA", {
+      timeZone,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      hour12: false,
+    }).formatToParts(new Date(atMs));
+    const get = (t: string) => Number(parts.find((p) => p.type === t)?.value ?? "0");
+    const asIfUtc = Date.UTC(get("year"), get("month") - 1, get("day"), get("hour") % 24, get("minute"), get("second"));
+    // Seconds resolution: the formatter has no milliseconds, so compare on the
+    // same footing rather than picking up a spurious sub-second offset.
+    return asIfUtc - Math.floor(atMs / 1000) * 1000;
+  } catch {
+    return 0;
+  }
+}
+
 /** Every day in the window, oldest first, so a day with NO sends is a visible
  *  zero rather than a missing bar. A gap the chart does not draw reads as "no
  *  data"; a zero reads as "nothing sent", and those are different findings. */
@@ -125,16 +153,21 @@ export function dayWindow(days: number, timeZone: string, nowMs: number): string
   const today = dayKey(new Date(nowMs).toISOString(), timeZone);
   if (!today) return [];
 
-  // Stepped from UTC NOON of the current local day, not from `nowMs`.
+  // Stepped from LOCAL noon of the current local day, not from `nowMs`.
   //
   // A local day is 23 or 25 hours long across a DST transition, so stepping
   // back a fixed 86,400,000 ms from an arbitrary instant can format the same
   // calendar day twice, or skip one. A duplicate produces duplicate React keys
-  // in the chart; a skip silently drops a real day of sends. Anchoring at noon
-  // leaves ~12 hours of slack on either side, which no DST shift comes close
-  // to consuming.
-  const anchor = Date.parse(`${today}T12:00:00Z`);
-  if (Number.isNaN(anchor)) return [today];
+  // in the chart; a skip silently drops a real day of sends. Noon leaves ~12
+  // hours of slack either side, which no DST shift comes close to consuming.
+  //
+  // LOCAL noon, not noon UTC. `${today}T12:00:00Z` is 1am TOMORROW in
+  // Pacific/Auckland during DST (UTC+13), so the window would end on tomorrow
+  // and today's bucket would read zero — and today's bucket is the number the
+  // cap gates on, so the sequence would send its whole allowance again.
+  const utcNoon = Date.parse(`${today}T12:00:00Z`);
+  if (Number.isNaN(utcNoon)) return [today];
+  const anchor = utcNoon - zoneOffsetMs(nowMs, timeZone);
 
   const out: string[] = [];
   const seen = new Set<string>();

@@ -93,10 +93,29 @@ assert.equal(sequenceNameFromSource(undefined), null);
     assert.equal(w[w.length - 1], dayKey(iso, TZ), `today must be the last bucket at ${iso}`);
   }
 
-  // A zone far from UTC, where a noon anchor matters most.
-  for (const tz of ["Pacific/Auckland", "America/Los_Angeles", "Asia/Kolkata"]) {
-    const w = dayWindow(30, tz, Date.parse("2026-11-01T05:30:00Z"));
-    assert.equal(new Set(w).size, 30, `no duplicate day in ${tz}`);
+  // Zones far from UTC, where the anchor matters most. `${today}T12:00:00Z` is
+  // 1am TOMORROW in Auckland during DST (UTC+13), which would end the window on
+  // tomorrow and read today as zero — and today is the bucket the cap gates on,
+  // so the sequence would send its whole allowance a second time.
+  for (const tz of [
+    "Pacific/Auckland",
+    "Pacific/Kiritimati", // UTC+14, the furthest ahead there is
+    "America/Los_Angeles",
+    "Asia/Kolkata", // a half-hour offset
+    "Pacific/Chatham", // +12:45, both far ahead AND off the hour
+    "UTC",
+  ]) {
+    for (const iso of ["2026-11-01T05:30:00Z", "2026-03-08T04:30:00Z", "2026-06-15T23:45:00Z", "2026-06-16T00:15:00Z"]) {
+      const w = dayWindow(30, tz, Date.parse(iso));
+      assert.equal(w.length, 30, `${tz} @ ${iso}: window must be 30 days`);
+      assert.equal(new Set(w).size, 30, `${tz} @ ${iso}: no duplicate day`);
+      assert.deepEqual([...w].sort(), w, `${tz} @ ${iso}: chronological`);
+      assert.equal(
+        w[w.length - 1],
+        dayKey(iso, tz),
+        `${tz} @ ${iso}: the window must END on today — the bucket the cap reads`,
+      );
+    }
   }
 }
 
