@@ -21,12 +21,24 @@ import pathlib
 
 from pypdf import PdfWriter
 
-OUT = pathlib.Path(__file__).resolve().parent.parent / "tests" / "fixtures" / "encrypted-statement.pdf"
+FIXTURES = pathlib.Path(__file__).resolve().parent.parent / "tests" / "fixtures"
+OUT = FIXTURES / "encrypted-statement.pdf"
+
+# Over the RASTER page cap (MAX_PAGES_RASTER = 120 in lib/forms/watermark.ts).
+#
+# Why a SECOND fixture: the raster cap is only reachable by a source the overlay
+# cannot read, and encryption is the realistic one. An unencrypted over-cap PDF
+# is refused by the overlay's own (much higher) cap and never reaches raster, so
+# without this the raster cap would ship with zero coverage — a guard asserting a
+# timing guarantee that nothing proves. Pages are blank, so 121 pages costs only
+# a few KB.
+OUT_OVER_CAP = FIXTURES / "encrypted-statement-over-cap.pdf"
+OVER_CAP_PAGES = 121
 
 
-def main() -> None:
+def _write(out: pathlib.Path, pages: int) -> None:
     writer = PdfWriter()
-    for _ in range(2):
+    for _ in range(pages):
         # US Letter at 72 dpi, matching the synthetic statements in
         # scripts/test-watermark.ts.
         writer.add_blank_page(width=612, height=792)
@@ -35,10 +47,15 @@ def main() -> None:
     # pdf-lib refuses it and pdfjs must decrypt.
     writer.encrypt(user_password="", owner_password="ownerpw", use_128bit=True)
 
-    OUT.parent.mkdir(parents=True, exist_ok=True)
-    with OUT.open("wb") as fh:
+    out.parent.mkdir(parents=True, exist_ok=True)
+    with out.open("wb") as fh:
         writer.write(fh)
-    print(f"wrote {OUT} ({OUT.stat().st_size} bytes)")
+    print(f"wrote {out} ({out.stat().st_size} bytes)")
+
+
+def main() -> None:
+    _write(OUT, 2)
+    _write(OUT_OVER_CAP, OVER_CAP_PAGES)
 
 
 if __name__ == "__main__":

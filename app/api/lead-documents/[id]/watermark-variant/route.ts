@@ -21,6 +21,13 @@ import { setLeadDocumentVariant } from "@/lib/lead-documents";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
+// This route RENDERS — toggling to "watermarked" runs the full watermark path,
+// and for an encrypted source that means rasterizing every page at ~165ms/page.
+// It was the only watermarking entry point with no declared budget, so it
+// inherited the platform default while shop-out (120s), shop-out/run (300s) and
+// the thread retries (120s) all declare one. Match the 120s floor the raster
+// page cap is sized against (lib/forms/watermark.ts, MAX_PAGES_RASTER).
+export const maxDuration = 120;
 
 export async function POST(
   req: NextRequest,
