@@ -410,10 +410,17 @@ async function main(): Promise<void> {
 
     check("fixture starts UNCAPPED (the shipped default)", readCap() === null);
 
-    // The values the UI can send, through the REAL validator.
-    check("empty means no cap", parseSequenceDailyCap("").ok && parseSequenceDailyCap("").value === null);
-    check("whitespace means no cap, NOT zero", parseSequenceDailyCap("  ").value === null);
-    check("0 is a real value (send nothing), not null", parseSequenceDailyCap("0").value === 0);
+    // The values the UI can send, through the REAL validator. `capOf` narrows
+    // the discriminated union rather than reaching for `.value` on a verdict
+    // that may not carry one — tsx strips the types, tsc does not, and CI runs
+    // tsc.
+    const capOf = (input: unknown): number | null | "REFUSED" => {
+      const v = parseSequenceDailyCap(input);
+      return v.ok ? v.value : "REFUSED";
+    };
+    check("empty means no cap", capOf("") === null);
+    check("whitespace means no cap, NOT zero", capOf("  ") === null);
+    check("0 is a real value (send nothing), not null", capOf("0") === 0);
     check("a negative cap is refused", !parseSequenceDailyCap("-5").ok);
     check("a fractional cap is refused", !parseSequenceDailyCap("2.5").ok);
     check("an absurd cap is refused", !parseSequenceDailyCap("999999").ok);
