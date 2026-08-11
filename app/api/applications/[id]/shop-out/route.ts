@@ -45,6 +45,7 @@ import {
   dispatchFailureReason,
   recordDispatchFailure,
 } from "@/lib/lenders/shop-out-outcome";
+import { dispatchPendingSunbizThreads } from "@/lib/lenders/shop-out-dispatch";
 import { watermarkAttachmentsForShopOut } from "@/lib/lead-documents";
 import { complianceProfileInputs } from "@/lib/lenders/match-fitness";
 import { deriveDealSigner, resolveSignerForOperator } from "@/lib/config/agents";
@@ -58,112 +59,13 @@ export const dynamic = "force-dynamic";
 export const maxDuration = 120;
 
 /**
- * Auto-trigger the physical SMTP dispatch for every pending thread on
- * this application by calling the bridge tool `shop_out_send_batch`
- * through the existing /api/bridge/exec-tool proxy (which enforces the
- * role gate — owner/admin only — and forwards to the operator's bridge).
- *
- * Closes Phase 6.3-bis: shop-out used to insert threads at status=pending
- * and require the operator to manually fire the send via Solara chat.
- * The bridge tool was wired (bravo_cli/bridge_tools.py::_tool_shop_out_send_batch)
- * but never auto-triggered from here. 2026-06-10: CC clicked Send and
- * nothing left the VPS. Wiring it up.
- *
- * Best-effort: any failure (timeout, role gate, bridge down) leaves the
- * threads at pending so the operator can retry. Never blocks the queue
- * confirmation.
+ * NOTE: the old triggerPhysicalSend() lived here. It POSTed to
+ * /api/bridge/exec-tool, which relayed to a Python daemon on the Hostinger
+ * VPS. It is gone rather than merely unused, because leaving it would leave a
+ * working-looking second way to send that is in fact broken: that machine has
+ * no R2 credentials and cannot download the bank statements it would attach.
+ * The send now happens in-process (lib/lenders/shop-out-dispatch.ts).
  */
-async function triggerPhysicalSend(
-  req: NextRequest,
-  applicationId: string,
-  signer: { name: string; email: string; phone: string },
-): Promise<{
-  status: "sent" | "partial" | "error" | "skipped";
-  sent_count?: number;
-  failed_count?: number;
-  total_pending?: number;
-  message?: string;
-}> {
-  try {
-    const url = new URL("/api/bridge/exec-tool", req.url);
-    const cookie = req.headers.get("cookie") || "";
-    const sendRes = await fetch(url, {
-      method: "POST",
-      headers: { "content-type": "application/json", cookie },
-      body: JSON.stringify({
-        tool_name: "shop_out_send_batch",
-        application_id: applicationId,
-        // 2026-06-10 per-user signing: dashboard resolves the operator
-        // who clicked Send → looks up their agent entry in
-        // agents.config.json → passes signer name/email/phone. Bridge
-        // tool sets BRAVO_FROM_DISPLAY/BRAVO_FROM_EMAIL env vars when
-        // spawning send_gateway, so each rep's email signs with THEIR
-        // name (Jordan signs Jordan, Alex signs Alex, Matt signs Matt).
-        // When the operator isn't in agents.config.json, the
-        // signer is the shared "SunBiz Submissions" identity.
-        signer_name: signer.name,
-        signer_email: signer.email,
-        signer_phone: signer.phone,
-      }),
-      // 110s — comfortably under the route's maxDuration (120s) and the
-      // /api/bridge/exec-tool proxy's PROXY_TIMEOUT_MS (65s) governs the
-      // upstream wait, so this is mostly the network buffer.
-      signal: AbortSignal.timeout(110_000),
-    });
-    const sendData = await sendRes.json();
-    if (!sendRes.ok) {
-      return {
-        status: "error",
-        message: sendData?.error || `exec-tool HTTP ${sendRes.status}`,
-      };
-    }
-    // /api/bridge/exec-tool returns the bridge's response verbatim. The
-    // shop_out_send_batch tool wraps its result in the standard exec-tool
-    // envelope: { output: "<json string>", is_error: false }.
-    if (sendData?.is_error) {
-      return {
-        status: "error",
-        message: String(sendData?.output || "bridge tool returned is_error=true"),
-      };
-    }
-    let parsed: {
-      sent?: number;
-      failed?: number;
-      total_pending?: number;
-      failures?: unknown[];
-    };
-    try {
-      parsed = JSON.parse(sendData?.output || "{}");
-    } catch {
-      return { status: "error", message: "bridge tool returned non-JSON output" };
-    }
-    const sent = typeof parsed.sent === "number" ? parsed.sent : 0;
-    const failed = typeof parsed.failed === "number" ? parsed.failed : 0;
-    const totalPending = typeof parsed.total_pending === "number" ? parsed.total_pending : 0;
-    let status: "sent" | "partial" | "error";
-    if (totalPending === 0) {
-      // No pending threads (e.g. operator double-fired) → not an error.
-      status = "sent";
-    } else if (sent > 0 && failed === 0) {
-      status = "sent";
-    } else if (sent > 0 && failed > 0) {
-      status = "partial";
-    } else {
-      status = "error";
-    }
-    return {
-      status,
-      sent_count: sent,
-      failed_count: failed,
-      total_pending: totalPending,
-    };
-  } catch (e) {
-    return {
-      status: "error",
-      message: e instanceof Error ? e.message : "auto-trigger threw unknown error",
-    };
-  }
-}
 
 export async function POST(
   req: NextRequest,
@@ -543,9 +445,19 @@ export async function POST(
   // we just queued at status='pending'. Synchronous so the response
   // carries the real sent/failed counts. Best-effort: any failure
   // leaves threads at pending so the operator can retry.
+  // Send in-process. The bridge -> VPS -> send_gateway chain this replaced broke
+  // in three independent places during the Turso cutover, and the third could
+  // not be patched at all: that machine has no R2 credentials, so it could not
+  // download the very bank statements it existed to attach. The bytes, the SMTP
+  // credential and the watermarked copies all live here. See
+  // lib/lenders/shop-out-dispatch.ts.
   const physicalSend =
     queued > 0
-      ? await triggerPhysicalSend(req, applicationId, effectiveSigner)
+      ? await dispatchPendingSunbizThreads({
+          tenantId,
+          applicationId,
+          signerName: effectiveSigner.name,
+        })
       : { status: "skipped" as const, message: "no threads queued (all blocked)" };
 
   // A dispatch that delivered nothing is a FAILED shop-out, and must be
