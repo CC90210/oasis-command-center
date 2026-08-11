@@ -31,6 +31,9 @@ const driver = readFileSync(".github/workflows/cron-driver.yml", "utf8");
 const crons = vercelJson.crons ?? [];
 assert.ok(crons.length > 0, "vercel.json must register at least one cron");
 
+/** "/api/cron/scan-bounces?write=1" -> "/api/cron/scan-bounces" */
+const basePathOf = (p: string) => p.split("?")[0];
+
 // ── 1. Every registered cron is driven, query string included ──────────────
 //
 // The FULL path is compared, not the base path. An earlier version of this
@@ -115,7 +118,45 @@ for (const cron of crons) {
   );
 }
 
-// ── 4. The watchdog itself must be driven ──────────────────────────────────
+// ── 4. Every driven route must export the method the driver uses ───────────
+//
+// The driver sent POST to every route. Four of them export GET only, so those
+// scheduled runs returned 405 and did no work — "driven" in the workflow,
+// dead in production, and green in this test until it started checking.
+// Every cron route exports GET; only some export POST. (Codex review,
+// 2026-08-11.)
+const usesGet = /curl -sS -o \/tmp\/out\.json[^\n]*\n\s*"\$\{BASE\}\$\{path\}"/.test(driver);
+assert.ok(
+  usesGet && !/-X POST "\$\{BASE\}/.test(driver),
+  "the driver must call cron routes with GET — four of them export GET only and 405 on POST",
+);
+
+for (const cron of crons) {
+  const route = `app${basePathOf(cron.path)}/route.ts`;
+  let src: string;
+  try {
+    src = readFileSync(route, "utf8");
+  } catch {
+    assert.fail(`${cron.path} is registered but ${route} does not exist`);
+  }
+  assert.ok(
+    /export\s+(async\s+function|const)\s+GET\b/.test(src),
+    `${cron.path} is driven with GET but ${route} does not export GET — it will 405 and do nothing`,
+  );
+}
+
+// ── 5. Concurrency must be keyed per schedule ──────────────────────────────
+//
+// GitHub keeps one running and one pending run per concurrency group, and a
+// new run evicts the pending one. Many of these schedules fire simultaneously
+// (minute 0 of each hour lands */5, */10, */15, */30 and the hourly entry at
+// once), so a single shared group would silently drop most of them.
+assert.ok(
+  /group:\s*cron-driver-\$\{\{\s*github\.event\.schedule/.test(driver),
+  "concurrency must be keyed by github.event.schedule, or simultaneous schedules evict each other",
+);
+
+// ── 6. The watchdog itself must be driven ──────────────────────────────────
 // If health-check stops running, every other check in the system goes quiet
 // while reporting nothing wrong. It is the one route whose absence hides all
 // the others.

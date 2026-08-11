@@ -55,10 +55,22 @@ on:
   workflow_dispatch:
 
 concurrency:
-  # Never overlap ticks. The dispatcher leases the rows it claims so a double
-  # run is survivable, but overlapping ticks waste the shared TextTorrent rate
-  # budget and make the logs hard to read.
-  group: cron-driver
+  # Keyed PER SCHEDULE, not one group for the whole workflow.
+  #
+  # A single shared group looked right and would have silently dropped work:
+  # GitHub keeps at most one running and one pending run per group, and a newly
+  # queued run REPLACES the pending one. Several of these schedules fire at the
+  # same instant — at minute 0 of every hour, */5, */10, */15, */30 and the
+  # hourly entry all land together — so under one group the later arrivals
+  # would evict each other and those routes would never execute. No error, no
+  # log, just absence: the exact shape of the outage this file addresses.
+  # (Codex review, 2026-08-11.)
+  #
+  # Per-schedule groups still prevent a schedule from overlapping ITSELF, which
+  # is the property actually wanted: the dispatcher leases the rows it claims so
+  # a double run is survivable, but overlapping ticks waste the shared
+  # TextTorrent rate budget and make the logs hard to read.
+  group: cron-driver-${{ github.event.schedule || github.event_name }}
   cancel-in-progress: false
 
 jobs:
@@ -142,10 +154,19 @@ jobs:
               exit 1 ;;
           esac
 
+          # GET, not POST. Four of the routes this driver now covers
+          # (collect-cc-metrics, reconcile-drip-telemetry, tps-backlog-watch,
+          # tps-enroll) export GET only, so a POST returns 405 and does no work
+          # — a "driven" cron that never runs, which is the failure this file
+          # exists to end. Every cron route exports GET; only some export POST.
+          # GET is also what Vercel's own scheduler used. Method mismatch is
+          # gone as a class rather than patched per route.
+          # tests/cron-driver-coverage.test.ts asserts every driven route
+          # exports GET. (Codex review, 2026-08-11.)
           FAILED=0
           for path in ${ROUTES}; do
             code=$(curl -sS -o /tmp/out.json -w '%{http_code}' -m 120 \
-                     -X POST "${BASE}${path}" \
+                     "${BASE}${path}" \
                      -H "Authorization: Bearer ${SECRET}") || code="000"
             body=$(head -c 400 /tmp/out.json 2>/dev/null | tr -d '\n')
             echo "${path} -> ${code} ${body}"
