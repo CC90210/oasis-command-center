@@ -342,6 +342,13 @@ assert.equal(
     /c\.thread\.lender_id === c\.lenderId/.test(route),
     "routing provenance must require the thread to match the sending lender",
   );
+  // ...and an unambiguous DEAL. Phase 1 matches business names by substring
+  // both ways, first-match-wins — "ABC" matches "ABC Holdings" and vice versa.
+  // Loose enough for a pill, not for moving someone's funding.
+  assert.ok(
+    /appMatchUnambiguous/.test(route),
+    "routing must require an exact or unique application match, not a substring hit",
+  );
   assert.ok(
     !/\.from\("tenant_records"\)[\s\S]{0,200}\.update\(\{ updated_at/.test(route),
     "a separate claim-then-write does not close the race and must not come back",

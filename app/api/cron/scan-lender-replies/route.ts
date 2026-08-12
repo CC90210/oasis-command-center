@@ -161,7 +161,7 @@ export async function GET(req: NextRequest) {
   type Candidate = {
     subject: string; from: string; date: Date | null; bizName: string;
     appId: string; lenderId: string | null; lenderName: string | null;
-    thread: Thread | null; body: string; already: boolean;
+    thread: Thread | null; body: string; already: boolean; appMatchUnambiguous: boolean;
   };
   const candidates: Candidate[] = [];
   const results: Array<Record<string, unknown>> = [];
@@ -212,7 +212,20 @@ export async function GET(req: NextRequest) {
       }
 
       const bn = bizName.toLowerCase();
-      const app = apps.find((a) => a.name === bn || a.name.includes(bn) || bn.includes(a.name));
+      // Substring matching BOTH ways, first-match-wins. Deliberately loose, and
+      // fine for what it was built for: updating a thread pill and filing an
+      // offer, where a near-miss is a cosmetic error someone notices.
+      //
+      // It is NOT good enough to move a deal. "ABC" matches "ABC Holdings" and
+      // vice versa, so with two similarly-named merchants a confident approval
+      // could route the wrong file (Codex review P1, 2026-08-12). The routing
+      // path therefore demands certainty, computed here and carried on the
+      // candidate: an exact name, or a single candidate overall. Everything
+      // else keeps the existing loose behaviour.
+      const appMatches = apps.filter((a) => a.name === bn || a.name.includes(bn) || bn.includes(a.name));
+      const exactMatches = appMatches.filter((a) => a.name === bn);
+      const app = exactMatches[0] || appMatches[0];
+      const appMatchUnambiguous = exactMatches.length === 1 || (exactMatches.length === 0 && appMatches.length === 1);
       if (!app) {
         results.push({ subject, from, bizName, match: "no_application" });
         continue;
@@ -227,7 +240,7 @@ export async function GET(req: NextRequest) {
       candidates.push({
         subject, from, date, bizName,
         appId: app.id, lenderId: lender?.id || null, lenderName: lender?.name || null,
-        thread, body, already,
+        thread, body, already, appMatchUnambiguous,
       });
     }
   } finally {
@@ -446,7 +459,13 @@ export async function GET(req: NextRequest) {
           // no thread of its own, which is fine for pill display but not for
           // routing: it would let lender B's approval move a deal shopped only
           // to lender A (Codex review P1, 2026-08-12).
-          hasMatchedThread: Boolean(c.thread && c.lenderId && c.thread.lender_id === c.lenderId),
+          // Three independent facts, all required: the deal was identified
+          // unambiguously, the sender is a known lender, and that lender's own
+          // thread is on this deal. Any one missing and the reply gets a flag
+          // rather than a decision.
+          hasMatchedThread: Boolean(
+            c.appMatchUnambiguous && c.thread && c.lenderId && c.thread.lender_id === c.lenderId,
+          ),
           currentStatus: statusAtDecision,
         });
 
