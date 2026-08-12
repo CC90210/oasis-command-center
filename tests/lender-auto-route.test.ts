@@ -375,6 +375,18 @@ assert.equal(
     /newestPerThread/.test(route),
     "an older reply must never decide the deal over a newer one in the same batch",
   );
+  // ...and it is SKIPPED, not flagged. Folding staleness into the provenance
+  // check treats a merely superseded reply as an untrusted one, so an older
+  // decline behind a newer approval stamps needs_review — which the newer
+  // approval, reporting would_route while disarmed, never clears.
+  assert.ok(
+    /skipped: superseded_by_newer_reply/.test(route),
+    "a superseded reply must skip deal handling, not be flagged as untrusted",
+  );
+  assert.ok(
+    !/newestPerThread[\s\S]{0,200}hasMatchedThread/.test(route),
+    "staleness must not be conflated with provenance",
+  );
   // A failed thread-status write must stop this candidate. Continuing would
   // route the deal while the cursor stayed put, so the same approval is
   // reprocessed next tick and lands as not_routable_from: approved.

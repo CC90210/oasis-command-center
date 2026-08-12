@@ -464,6 +464,22 @@ export async function GET(req: NextRequest) {
     // classifier never saw; it stays for the next tick.
     if (write && cls && !cls.unavailable && !c.already) {
       const replyAt = c.date ? c.date.toISOString() : new Date().toISOString();
+
+      // SUPERSEDED replies skip deal-level handling entirely. When a thread
+      // has several unread messages in one batch they all arrive here in fetch
+      // order, and only the lender's latest word may speak for the deal.
+      //
+      // SKIPPED, not flagged. Folding this into the provenance check treated a
+      // merely stale reply as an untrusted one, so an older decline sitting
+      // behind a newer approval stamped `needs_review` — which the newer
+      // approval, reporting `would_route` while disarmed, never cleared. The
+      // deal ended up marked for review because its lender had sent two emails
+      // (Codex review P1, 2026-08-12).
+      if (c.thread && c.date && newestPerThread.get(c.thread.id) !== c.date.getTime()) {
+        row.route = "skipped: superseded_by_newer_reply";
+        results.push(row);
+        continue;
+      }
       //
       // Everything above describes the LENDER's answer. This is the only step
       // that touches the DEAL. The rule (lib/lenders/auto-route.ts) is
@@ -527,15 +543,7 @@ export async function GET(req: NextRequest) {
           // unambiguously, the sender is a known lender, and that lender's own
           // thread is on this deal. Any one missing and the reply gets a flag
           // rather than a decision.
-          hasMatchedThread: Boolean(
-            c.appMatchUnambiguous &&
-              c.senderOwnsThread &&
-              // ...and this is the lender's LATEST word in this batch. An
-              // older message must never decide over a newer one.
-              c.thread &&
-              c.date &&
-              newestPerThread.get(c.thread.id) === c.date.getTime(),
-          ),
+          hasMatchedThread: Boolean(c.appMatchUnambiguous && c.senderOwnsThread),
           currentStatus: statusAtDecision,
         });
 
