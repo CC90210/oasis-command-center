@@ -143,6 +143,39 @@ assert.equal(
 );
 
 // ---------------------------------------------------------------------------
+// THE RE-APPLICATION CASE THE LOADER MUST NOT BREAK (Codex review P1, round 4).
+//
+// A re-applying lead points at its CURRENT deal through `data.application_id`
+// while an OLD application still carries the `data.lead_id` backlink. The
+// loader originally skipped the reverse lookup whenever the forward query had
+// already found something, so only the stale row reached this function — which
+// inverts the newest-wins rule below. Asserted here as the SHAPE the loader
+// must deliver: both rows, newest deciding.
+// ---------------------------------------------------------------------------
+assert.equal(
+  dealGateFor(
+    [
+      app("declined", "2026-03-01T00:00:00Z"), // old, found via the backlink
+      app("application_in", "2026-08-01T00:00:00Z"), // current, found via application_id
+    ],
+    "signed_application",
+  ).open,
+  true,
+  "an old decline must not mute the live re-application the lead points at",
+);
+assert.equal(
+  dealGateFor(
+    [
+      app("application_in", "2026-03-01T00:00:00Z"), // old and still open
+      app("funded", "2026-08-01T00:00:00Z"), // current, and closed
+    ],
+    "signed_application",
+  ).open,
+  false,
+  "and a stale open row must not permit mail after the current deal closed",
+);
+
+// ---------------------------------------------------------------------------
 // Operator override, so a newly added "still open" column on the Applications
 // board does not need a deploy to stop muting the funnel.
 // ---------------------------------------------------------------------------

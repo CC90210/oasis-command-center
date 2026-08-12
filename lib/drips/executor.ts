@@ -53,6 +53,7 @@ import { openReceipt } from "@/lib/sms/delivery-receipts";
 import { loadBrandsForLeads } from "@/lib/drips/brand-store";
 import { loadDealGate } from "@/lib/drips/deal-state-store";
 import { brandForStage } from "@/lib/drips/brand-routing";
+import { isOnLeadsBoard } from "@/lib/leads/board-visibility";
 import { poolFor, resolveCopy, type PoolTemplate } from "@/lib/drips/template-pool";
 import { loadApprovedPool } from "@/lib/drips/template-pool-store";
 import { wasShoppedRecently } from "@/lib/drips/enroller";
@@ -1395,6 +1396,20 @@ async function processRow(
     );
   }
 
+  // OFF THE LEADS BOARD (Adon, 2026-08-11). The single most common shape of the
+  // "who is it even mailing" problem: a merchant signs, an operator transfers
+  // them to the Applications board, and a step queued days earlier fires anyway.
+  // The stage-recheck below cannot see it — `transferred_at` is stamped without
+  // the stage changing at all, so from the lead's side nothing moved.
+  //
+  // Checked BEFORE the stage recheck because it is the stronger statement: off
+  // the board means no lead-stage sequence may speak, whatever the stage says.
+  // Cancelled rather than rescheduled — a transfer is not a timing problem, and
+  // a lead that legitimately returns to the board re-enrolls cleanly.
+  if (seq.triggerStage && !isOnLeadsBoard(data)) {
+    return markCancelled(db, row, "off_board: lead transferred to the Applications board");
+  }
+
   // Cancel-old-start-new (2026-07-20): if the lead has moved to a different
   // stage than the one this sequence targets, this sequence is stale for them —
   // cancel it (no send, no advance) instead of continuing to nag about an old
@@ -1436,7 +1451,7 @@ async function processRow(
   // own lifecycle (it clears its flag on `funded`), and double-gating it here
   // would cancel rows its own manager intends to keep.
   if (seq.triggerStage) {
-    const gateRes = await loadDealGate(db, row.tenant_id, row.lead_id, data.stage);
+    const gateRes = await loadDealGate(db, row.tenant_id, row.lead_id, data);
     if (!gateRes.ok) {
       // RESCHEDULE, never cancel. A transient read failure must not be able to
       // permanently kill a live sequence — that would convert a database hiccup

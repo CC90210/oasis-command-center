@@ -42,6 +42,7 @@ import { computeStep0DelayMinutes, enrollmentBufferForStage } from "./stage-buff
 import { isPaused, isReEntryEligible } from "./drip-rules-core";
 import { ensureInitialBrand } from "./brand-store";
 import { loadDealGates } from "./deal-state-store";
+import { applyLeadsBoardFilter, isOnLeadsBoard } from "@/lib/leads/board-visibility";
 
 type Db = ReturnType<typeof getServiceSupabase>;
 
@@ -110,6 +111,7 @@ export type SkipReason =
   | "accelerated_chase"
   | "docs_on_file"
   | "deal_closed"
+  | "off_board"
   | "daily_enroll_cap"
   | "invalid_sequence_steps";
 
@@ -153,6 +155,7 @@ function emptySkipCounts(): Record<SkipReason, number> {
     accelerated_chase: 0,
     docs_on_file: 0,
     deal_closed: 0,
+    off_board: 0,
     daily_enroll_cap: 0,
     invalid_sequence_steps: 0,
   };
@@ -246,6 +249,12 @@ function staticSkipReason(
   firstChannel: "sms" | "email",
 ): SkipReason | null {
   if (DEAD_STAGES.has(String(data.stage))) return "dead_or_declined";
+  // Belt to the query's braces. The board filter above already excludes these,
+  // so in normal operation this counter stays 0 — and that is the point: if a
+  // refactor ever drops the filter from the query, this fires, the run report
+  // shows a non-zero `off_board`, and nobody gets mailed in the meantime. A
+  // guard that only exists in a query is a guard one edit away from gone.
+  if (!isOnLeadsBoard(data)) return "off_board";
   if (isOptedOut(data)) return "opted_out";
   if (isPaused(data)) return "paused";
   // Docs-on-file suppression is scoped to the uw_sheet first-touch cadence only
@@ -327,17 +336,30 @@ async function collectCandidates(
 
   for (let page = 0; page < CANDIDATE_MAX_PAGES; page++) {
     const from = page * CANDIDATE_PAGE_SIZE;
-    const leadsRes = await db
-      .from("tenant_records")
-      // created_at comes from the ROW, not from data: measured 2026-08-05, zero
-      // of 1,194 leads carry a created_at inside their jsonb. Brand assignment
-      // needs it to tell a pre-Bluerise lead from a genuinely new one.
-      .select("id, data, created_at")
-      .eq("tenant_id", seq.tenant_id)
-      .eq("entity_type", "lead")
-      .filter("data->>stage", "eq", stage)
-      .order("created_at", { ascending: true })
-      .range(from, from + CANDIDATE_PAGE_SIZE - 1);
+    // THE AUDIENCE IS THE BOARD'S AUDIENCE (Adon, 2026-08-11). Matching on
+    // `stage` alone selected merchants the Leads tab does not show: a lead
+    // stamped `transferred_at` has graduated to the Applications board and
+    // disappears from every lead list surface, but this query kept mailing it.
+    // Measured that day the board showed 6 leads in Signed Application while
+    // this query returned 312, and 64% of all drip mail ever sent had gone to
+    // people not on the board.
+    //
+    // Applied at the QUERY rather than as a post-filter so an off-board lead
+    // never occupies a slot in the candidate page — the same reason the
+    // permanent guards below sit where they do.
+    const leadsRes = await applyLeadsBoardFilter(
+      db
+        .from("tenant_records")
+        // created_at comes from the ROW, not from data: measured 2026-08-05, zero
+        // of 1,194 leads carry a created_at inside their jsonb. Brand assignment
+        // needs it to tell a pre-Bluerise lead from a genuinely new one.
+        .select("id, data, created_at")
+        .eq("tenant_id", seq.tenant_id)
+        .eq("entity_type", "lead")
+        .filter("data->>stage", "eq", stage)
+        .order("created_at", { ascending: true })
+        .range(from, from + CANDIDATE_PAGE_SIZE - 1),
+    );
     if (leadsRes.error) {
       return { leads: out, skippedAlreadyRan, staticSkips, truncated: false, error: leadsRes.error.message };
     }
@@ -382,12 +404,7 @@ async function collectCandidates(
     // Every lead on this page is at `stage` by construction (the query filters
     // on it), so the gate's "does the deal contradict the lead" test compares
     // against the sequence's own trigger stage.
-    const gatesRes = await loadDealGates(
-      db,
-      seq.tenant_id,
-      pageIds,
-      new Map(pageIds.map((id) => [id, stage])),
-    );
+    const gatesRes = await loadDealGates(db, seq.tenant_id, pageLeads);
     if (!gatesRes.ok) {
       return { leads: out, skippedAlreadyRan, staticSkips, truncated: false, error: gatesRes.error };
     }
