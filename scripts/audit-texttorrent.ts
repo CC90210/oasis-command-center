@@ -142,38 +142,75 @@ async function main(): Promise<void> {
 
   // ── 3. Sender numbers ────────────────────────────────────────────────────
   say("\n=== 3. Sender numbers TT knows about ===");
+  // Read the numbers off recent OUTBOUND traffic rather than a directory
+  // endpoint: what matters is which lines we are actually sending from.
   try {
-    const { listSenderNumbers } = await import("../lib/sms/sender-sync");
-    const nums = await listSenderNumbers(TENANT).catch(() => null);
-    if (nums) say(`  ${JSON.stringify(nums).slice(0, 400)}`);
-    else say("  (no sender-sync helper result)");
-  } catch {
-    // Fall back to whatever the DB holds.
-    say("  (sender-sync module not available here; reading the DB instead)");
+    const inbox = await tt.getInbox(creds);
+    const rows = (Array.isArray(inbox) ? inbox : ((inbox as { data?: unknown[] })?.data ?? [])) as Array<
+      Record<string, unknown>
+    >;
+    const froms = new Set<string>();
+    for (const r of rows) {
+      const f = String(r.to ?? r.from_number ?? "").trim();
+      if (f) froms.add(f);
+    }
+    say(`  sending lines seen in the last ${rows.length} threads: ${[...froms].join(", ") || "(none)"}`);
+  } catch (err) {
+    say(`  could not enumerate: ${(err as Error).message.slice(0, 100)}`);
   }
 
   // ── 4. What TT says about our recent messages ────────────────────────────
-  say("\n=== 4. TT's own verdict on recent threads (api_send_status) ===");
+  //
+  // getThreadRaw, NOT getThread. The normalized shape drops api_send_status,
+  // which is the only field that carries the CARRIER's verdict — TT returns
+  // HTTP 201 for a message SignalHouse then refuses, so our own 201 proves
+  // nothing. This tallies platform against that verdict, because the whole
+  // question is whether the API path behaves differently from the web UI on
+  // the same lines.
+  say("\n=== 4. TT's own verdict on recent messages (api_send_status) ===");
   try {
-    const inbox = await tt.getInbox(creds, { limit: 8 } as never);
-    const rows = Array.isArray(inbox) ? inbox : ((inbox as { data?: unknown[] })?.data ?? []);
-    say(`  inbox threads returned: ${Array.isArray(rows) ? rows.length : 0}`);
-    const list = (Array.isArray(rows) ? rows : []).slice(0, 4) as Array<Record<string, unknown>>;
-    for (const t of list) {
+    const inbox = await tt.getInbox(creds);
+    const threads = (Array.isArray(inbox) ? inbox : ((inbox as { data?: unknown[] })?.data ?? [])) as Array<
+      Record<string, unknown>
+    >;
+    const tally = new Map<string, number>();
+    let outbound = 0;
+    let noReason = 0;
+    for (const t of threads.slice(0, 30)) {
       const chatId = String(t.chat_id ?? t.id ?? "");
       if (!chatId) continue;
+      let msgs: Array<Record<string, unknown>> = [];
       try {
-        const thread = (await tt.getThread(creds, chatId, { limit: 5 } as never)) as unknown;
-        const msgs = (Array.isArray(thread) ? thread : ((thread as { data?: unknown[] })?.data ?? [])) as Array<
+        const raw = await tt.getThreadRaw(creds, chatId);
+        msgs = (Array.isArray(raw) ? raw : ((raw as { data?: unknown[] })?.data ?? [])) as Array<
           Record<string, unknown>
         >;
-        const statuses = msgs
-          .map((m) => String(m.api_send_status ?? m.status ?? ""))
-          .filter(Boolean);
-        say(`  chat ${chatId}: ${statuses.length ? statuses.join(", ") : "(no per-message status)"}`);
-      } catch (err) {
-        say(`  chat ${chatId}: thread read failed — ${(err as Error).message.slice(0, 80)}`);
+      } catch {
+        continue;
       }
+      for (const m of msgs) {
+        if (String(m.direction) !== "outbound") continue;
+        outbound++;
+        const platform = String(m.platform ?? "?");
+        const status = String(m.api_send_status ?? "?").toLowerCase();
+        const seg = String(m.segment ?? "?");
+        tally.set(`${platform} seg${seg} -> ${status}`, (tally.get(`${platform} seg${seg} -> ${status}`) || 0) + 1);
+        if (status === "failed" && !m.api_receive_response) noReason++;
+      }
+    }
+    say(`  outbound messages examined: ${outbound}`);
+    for (const [k, v] of [...tally.entries()].sort((a, b) => b[1] - a[1])) say(`    ${String(v).padStart(4)}  ${k}`);
+
+    const apiFailed = [...tally.entries()].filter(([k]) => k.startsWith("api") && k.endsWith("failed")).reduce((s2, [, v]) => s2 + v, 0);
+    const apiOk = [...tally.entries()].filter(([k]) => k.startsWith("api") && /delivered|success/.test(k)).reduce((s2, [, v]) => s2 + v, 0);
+    const webOk = [...tally.entries()].filter(([k]) => !k.startsWith("api") && /delivered|success/.test(k)).reduce((s2, [, v]) => s2 + v, 0);
+    if (apiFailed > 0 && apiOk > 0) {
+      finding(`the API path is NOT uniformly broken — ${apiOk} delivered against ${apiFailed} failed in this sample. Something distinguishes the failing sends from the succeeding ones; it is not simply "the API route".`);
+    } else if (apiFailed > 0 && apiOk === 0 && webOk > 0) {
+      finding(`every API send failed (${apiFailed}) while ${webOk} web/app sends delivered on the same account — the difference is the submission path, not the numbers or their registration.`);
+    }
+    if (noReason > 0) {
+      finding(`${noReason} failed message(s) carry NO api_receive_response, so TT is not surfacing SignalHouse's rejection reason. That reason has to come from TT support — we cannot derive it.`);
     }
   } catch (err) {
     const e = err as { code?: string; message?: string; status?: number };
