@@ -412,10 +412,13 @@ assert.equal(
   // already advanced the cursor by the time either runs, so a transient error
   // in either one permanently consumes the reply while the tick reports it as
   // merely "deferred".
+  // THREE paths can fail after step 1 has already advanced the cursor: the
+  // pre-decision reads, the flag write, and the routing write. Every one must
+  // rewind, or that reply is consumed while the tick reports it as deferred.
   assert.equal(
     (route.match(/last_response_at: c\.thread\.last_response_at/g) || []).length,
-    2,
-    "both the flag path and the routing path must rewind the cursor on failure",
+    3,
+    "the read, flag and routing paths must each rewind the cursor on failure",
   );
   // ...but a LOST RACE must not rewind. An operator moved the deal on purpose;
   // retrying would lose the same race every tick, forever.

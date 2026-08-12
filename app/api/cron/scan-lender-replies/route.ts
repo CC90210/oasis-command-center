@@ -442,6 +442,17 @@ export async function GET(req: NextRequest) {
         // decline from a partial view, and a wrong move here kills a live deal.
         row.route = `deferred: threads_unreadable`;
         routeDeferred++;
+        // ...and REWIND, for the same reason the write paths below do. Step 1
+        // has already advanced the cursor, so a transient read failure would
+        // otherwise consume a valid approval permanently while reporting it as
+        // deferred (Codex review P1, 2026-08-12).
+        if (c.thread) {
+          await db
+            .from("application_lender_threads")
+            .update({ last_response_at: c.thread.last_response_at })
+            .eq("id", c.thread.id)
+            .eq("tenant_id", SUNBIZ_TENANT_ID);
+        }
       } else {
         // The status the decision is made against. Held so the write below can
         // compare-and-set on exactly this value and refuse if it moved.
@@ -475,6 +486,23 @@ export async function GET(req: NextRequest) {
           // reply that lands outside the clear cases cannot go unnoticed.
           row.route = `flagged: ${decision.reason}`;
           flagged++;
+          // NO THREAD MEANS NO CURSOR, so a flag here would be re-stamped on
+          // every tick for as long as the message stays in the lookback
+          // window — up to `days` (default 5) of repeated writes and inflated
+          // counters (Codex review P2, 2026-08-12).
+          //
+          // Such a reply can never be routed anyway: provenance requires the
+          // sending lender's own thread. Reported instead, so it is visible
+          // without being re-written. NOTE the repeated CLASSIFY for these is
+          // pre-existing — `already` has always been driven by the thread
+          // cursor — and closing that needs a message-level cursor this change
+          // does not introduce.
+          if (!c.thread) {
+            row.route = `${String(row.route)} (no_thread_no_cursor)`;
+            results.push(row);
+            continue;
+          }
+
           let flagStamped = false;
           try {
             await updateRecord({
