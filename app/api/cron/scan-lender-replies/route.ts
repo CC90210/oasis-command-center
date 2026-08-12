@@ -387,7 +387,16 @@ export async function GET(req: NextRequest) {
     // to look at, and leaving it in that block meant the one category most in
     // need of "flag the rest" was the one category that got no flag at all —
     // silently reclassified every tick, forever (Codex review P2, 2026-08-12).
-    if (write && cls && !c.already) {
+    //
+    // `!cls.unavailable` is load-bearing. When inference times out or is down,
+    // classify-reply returns a REAL object with category "unknown" and
+    // unavailable:true — the shape of an answer without being one. Treating it
+    // as an unclassifiable reply would flag the deal and advance the cursor,
+    // permanently consuming a message that was never actually read, and the
+    // outage would present as a pile of "needs review" instead of as an outage
+    // (Codex review P1, 2026-08-12). Nothing here may touch a reply the
+    // classifier never saw; it stays for the next tick.
+    if (write && cls && !cls.unavailable && !c.already) {
       const replyAt = c.date ? c.date.toISOString() : new Date().toISOString();
       //
       // Everything above describes the LENDER's answer. This is the only step

@@ -353,6 +353,16 @@ assert.equal(
     assert.ok(/\.is\(`data->>\$\{input\.ifMatch\.field\}`, null\)/.test(data),
       "an absent field must be guarded with is-null, not eq-empty-string");
   }
+  // AN OUTAGE IS NOT AN ANSWER. classify-reply returns a real object with
+  // category "unknown" and unavailable:true when inference is down — the shape
+  // of a verdict without being one. Routing on it would flag the deal and
+  // advance the cursor, permanently consuming a reply nothing ever read, and
+  // the outage would present as a pile of "needs review" rather than as an
+  // outage.
+  assert.ok(
+    /if \(write && cls && !cls\.unavailable && !c\.already\)/.test(route),
+    "the routing block must skip replies the classifier never actually saw",
+  );
   // `unknown` must advance the thread cursor, or the same reply is re-fetched
   // and re-classified every ten minutes forever.
   assert.ok(
