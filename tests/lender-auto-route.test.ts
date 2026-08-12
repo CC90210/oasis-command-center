@@ -381,9 +381,20 @@ assert.equal(
   // ...and must stay RETRYABLE. Step 1 already advanced the cursor, so a
   // failed flag with no rewind is a reply needing a human that is invisible
   // forever.
+  // BOTH write paths rewind — the flag path and the routing path. Step 1 has
+  // already advanced the cursor by the time either runs, so a transient error
+  // in either one permanently consumes the reply while the tick reports it as
+  // merely "deferred".
+  assert.equal(
+    (route.match(/last_response_at: c\.thread\.last_response_at/g) || []).length,
+    2,
+    "both the flag path and the routing path must rewind the cursor on failure",
+  );
+  // ...but a LOST RACE must not rewind. An operator moved the deal on purpose;
+  // retrying would lose the same race every tick, forever.
   assert.ok(
-    /last_response_at: c\.thread\.last_response_at/.test(route),
-    "a failed flag must rewind the cursor so the reply is retried",
+    /if \(!lostRace && c\.thread\)/.test(route),
+    "a lost compare-and-set must NOT be retried — that reply is genuinely done",
   );
   assert.ok(
     /&& flagStamped\)/.test(route),

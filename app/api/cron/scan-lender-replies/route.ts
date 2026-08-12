@@ -580,10 +580,26 @@ export async function GET(req: NextRequest) {
             // Named separately so a real write error stays visible instead of
             // being buried under normal contention.
             const msg = e instanceof Error ? e.message : "unknown";
-            row.route = /precondition failed/.test(msg)
-              ? "deferred: status_changed_under_us"
-              : `route_failed: ${msg}`;
+            const lostRace = /precondition failed/.test(msg);
+            row.route = lostRace ? "deferred: status_changed_under_us" : `route_failed: ${msg}`;
             routeDeferred++;
+
+            // REWIND on a genuine failure, for the same reason the flag path
+            // does: step 1 already advanced the cursor, so without this a
+            // transient database error permanently consumes a clean approval
+            // or a unanimous decline while the tick politely reports it as
+            // "deferred" (Codex review P1, 2026-08-12).
+            //
+            // NOT on a lost race. An operator moved the deal deliberately;
+            // re-processing would only lose the same race again next tick,
+            // forever. That reply is genuinely finished with.
+            if (!lostRace && c.thread) {
+              await db
+                .from("application_lender_threads")
+                .update({ last_response_at: c.thread.last_response_at })
+                .eq("id", c.thread.id)
+                .eq("tenant_id", SUNBIZ_TENANT_ID);
+            }
           }
         }
       }
