@@ -338,9 +338,17 @@ assert.equal(
   // Provenance requires the thread to belong to the SENDING lender. Phase 1
   // falls back to "the only thread on this deal", which would let lender B's
   // approval move a deal shopped only to lender A.
+  // Ownership is computed ONCE and consulted everywhere. It was added to three
+  // places across three review rounds and then missed in a fourth (the
+  // unknown-cursor advance), which is the signature of a check that should not
+  // have been a repeated expression in the first place.
   assert.ok(
-    /c\.thread\.lender_id === c\.lenderId/.test(route),
-    "routing provenance must require the thread to match the sending lender",
+    /const senderOwnsThread = Boolean\(thread && lender && thread\.lender_id === lender\.id\)/.test(route),
+    "thread ownership must be computed once on the candidate",
+  );
+  assert.ok(
+    !/c\.thread\.lender_id === c\.lenderId/.test(route),
+    "and never re-derived at a call site, where it can be forgotten",
   );
   // ...and an unambiguous DEAL. Phase 1 matches business names by substring
   // both ways, first-match-wins — "ABC" matches "ABC Holdings" and vice versa.
@@ -353,10 +361,11 @@ assert.equal(
   // this route with write=1 every ten minutes turns Phase 1's sole-thread
   // fallback into a standing hazard: an unknown sender would overwrite lender
   // A's status and cursor, and the autoroute switch does not gate that write.
-  assert.equal(
-    (route.match(/c\.thread\.lender_id === c\.lenderId/g) || []).length,
-    2,
-    "the thread-status write must be sender-gated as well as the routing decision",
+  // Every WRITE consults ownership: the thread-status write, routing
+  // provenance, the unknown-cursor advance, and the no-cursor bail-out.
+  assert.ok(
+    (route.match(/c\.senderOwnsThread/g) || []).length >= 4,
+    "every write path must be gated on the sender actually owning the thread",
   );
   assert.ok(
     !/\.from\("tenant_records"\)[\s\S]{0,200}\.update\(\{ updated_at/.test(route),
@@ -402,8 +411,8 @@ assert.equal(
   // `unknown` must advance the thread cursor, or the same reply is re-fetched
   // and re-classified every ten minutes forever.
   assert.ok(
-    /cls\.category === "unknown" && c\.thread/.test(route),
-    "an unknown reply must advance the cursor so it is not reclassified forever",
+    /cls\.category === "unknown" && c\.senderOwnsThread && c\.thread && flagStamped/.test(route),
+    "an unknown reply must advance the cursor — but only its own sender's thread, and only once flagged",
   );
   // `unknown` is the category most in need of a human, so it must reach the
   // flag path rather than being excluded with the write block.

@@ -161,7 +161,7 @@ export async function GET(req: NextRequest) {
   type Candidate = {
     subject: string; from: string; date: Date | null; bizName: string;
     appId: string; lenderId: string | null; lenderName: string | null;
-    thread: Thread | null; body: string; already: boolean; appMatchUnambiguous: boolean;
+    thread: Thread | null; body: string; already: boolean; appMatchUnambiguous: boolean; senderOwnsThread: boolean;
   };
   const candidates: Candidate[] = [];
   const results: Array<Record<string, unknown>> = [];
@@ -234,13 +234,21 @@ export async function GET(req: NextRequest) {
       const appThreads = threads.filter((t) => t.application_id === app.id);
       const thread = (lender ? appThreads.find((t) => t.lender_id === lender.id) : null) || (appThreads.length === 1 ? appThreads[0] : null);
 
+      // Does this thread belong to the lender the email actually came FROM?
+      // Phase 1's sole-thread fallback above assigns a thread even when the
+      // sender matched no lender, so every WRITE must consult this rather than
+      // the mere existence of `thread`. Computed once, here, because the check
+      // was missed in a fourth place after being added in three (Codex reviews
+      // P1 x3, 2026-08-12).
+      const senderOwnsThread = Boolean(thread && lender && thread.lender_id === lender.id);
+
       const cursor = thread?.last_response_at ? Date.parse(thread.last_response_at) : 0;
       const already = !!(date && cursor && date.getTime() <= cursor);
 
       candidates.push({
         subject, from, date, bizName,
         appId: app.id, lenderId: lender?.id || null, lenderName: lender?.name || null,
-        thread, body, already, appMatchUnambiguous,
+        thread, body, already, appMatchUnambiguous, senderOwnsThread,
       });
     }
   } finally {
@@ -359,7 +367,7 @@ export async function GET(req: NextRequest) {
       // Steps 2 and 3 were already sender-gated on c.lenderId; this brings the
       // thread write to the same standard. A reply we cannot attribute now
       // writes nothing and is reported instead.
-      if (c.thread && c.lenderId && c.thread.lender_id === c.lenderId) {
+      if (c.senderOwnsThread && c.thread) {
         const upd = await db.from("application_lender_threads")
           .update({ status: statusFor(cls.category), last_response_at: replyAt, last_response_summary: summary, updated_at: new Date().toISOString() })
           .eq("id", c.thread.id).eq("tenant_id", SUNBIZ_TENANT_ID);
@@ -489,7 +497,7 @@ export async function GET(req: NextRequest) {
           // thread is on this deal. Any one missing and the reply gets a flag
           // rather than a decision.
           hasMatchedThread: Boolean(
-            c.appMatchUnambiguous && c.thread && c.lenderId && c.thread.lender_id === c.lenderId,
+            c.appMatchUnambiguous && c.senderOwnsThread,
           ),
           currentStatus: statusAtDecision,
         });
@@ -511,7 +519,7 @@ export async function GET(req: NextRequest) {
           // pre-existing — `already` has always been driven by the thread
           // cursor — and closing that needs a message-level cursor this change
           // does not introduce.
-          if (!c.thread) {
+          if (!c.senderOwnsThread) {
             row.route = `${String(row.route)} (no_thread_no_cursor)`;
             results.push(row);
             continue;
@@ -589,7 +597,7 @@ export async function GET(req: NextRequest) {
           // a reply whose review request failed to stamp would make it
           // `already` next tick and lose it for good — the same defect as the
           // rewind above, from the other direction.
-          if (cls.category === "unknown" && c.thread && flagStamped) {
+          if (cls.category === "unknown" && c.senderOwnsThread && c.thread && flagStamped) {
             const cur = await db
               .from("application_lender_threads")
               .update({
