@@ -368,6 +368,23 @@ assert.equal(
   // A flag that fails to stamp is a review request nobody ever sees, because
   // the IMAP cursor has already moved past the message.
   assert.ok(/flag_failed:/.test(route), "a failed review flag must be reported, not swallowed");
+  // ...and must stay RETRYABLE. Step 1 already advanced the cursor, so a
+  // failed flag with no rewind is a reply needing a human that is invisible
+  // forever.
+  assert.ok(
+    /last_response_at: c\.thread\.last_response_at/.test(route),
+    "a failed flag must rewind the cursor so the reply is retried",
+  );
+  assert.ok(
+    /&& flagStamped\)/.test(route),
+    "and the unknown-cursor advance must be gated on the flag actually landing",
+  );
+  // An explicitly stored "" is a real value; `is null` does not match it, so
+  // collapsing it would report contention forever and never route the deal.
+  assert.ok(
+    /statusAtDecision === undefined \|\| statusAtDecision === null\n?\s*\? null/.test(route),
+    'only undefined/null may map to a null precondition — "" must be preserved',
+  );
   assert.ok(
     !/if \(req\.headers\.get\("x-vercel-cron"\)\)/.test(route),
     "and must NOT be gated behind the x-vercel-cron header — the driver never sends it",

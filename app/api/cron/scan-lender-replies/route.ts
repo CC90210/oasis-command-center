@@ -442,6 +442,7 @@ export async function GET(req: NextRequest) {
           // reply that lands outside the clear cases cannot go unnoticed.
           row.route = `flagged: ${decision.reason}`;
           flagged++;
+          let flagStamped = false;
           try {
             await updateRecord({
               tenant_id: SUNBIZ_TENANT_ID,
@@ -452,6 +453,7 @@ export async function GET(req: NextRequest) {
                 lender_reply_review_reason: decision.reason.slice(0, 200),
               },
             });
+            flagStamped = true;
           } catch (e) {
             // NOT swallowed. The IMAP cursor has already moved past this
             // message, so a flag that fails here is a review request the deal
@@ -461,6 +463,23 @@ export async function GET(req: NextRequest) {
             row.route = `flag_failed: ${e instanceof Error ? e.message : "unknown"}`;
             flagged--;
             routeDeferred++;
+
+            // REWIND THE CURSOR so this reply is retried. Step 1 above already
+            // advanced last_response_at for every non-unknown category, so
+            // without this the next tick sees `already` and the review request
+            // is lost permanently — a reply that needs a human, invisible
+            // forever (Codex review P1, 2026-08-12).
+            //
+            // Retrying is safe: the thread-status write, the offer upsert and
+            // the outcome-ledger upsert are all idempotent, so re-processing
+            // this message costs one classify and changes nothing else.
+            if (c.thread) {
+              await db
+                .from("application_lender_threads")
+                .update({ last_response_at: c.thread.last_response_at })
+                .eq("id", c.thread.id)
+                .eq("tenant_id", SUNBIZ_TENANT_ID);
+            }
           }
 
           // ADVANCE THE CURSOR FOR `unknown`, which nothing else does.
@@ -474,7 +493,11 @@ export async function GET(req: NextRequest) {
           // The STATUS is deliberately left alone: an unknown is not a
           // `responded` verdict, and the pill must not claim one. Only the
           // cursor moves, which is what makes the reply idempotent.
-          if (cls.category === "unknown" && c.thread) {
+          // Gated on the flag having actually landed. Advancing the cursor for
+          // a reply whose review request failed to stamp would make it
+          // `already` next tick and lose it for good — the same defect as the
+          // rewind above, from the other direction.
+          if (cls.category === "unknown" && c.thread && flagStamped) {
             const cur = await db
               .from("application_lender_threads")
               .update({
@@ -520,8 +543,13 @@ export async function GET(req: NextRequest) {
             await updateRecord({
               ifMatch: {
                 field: "status",
+                // ONLY undefined/null map to a null precondition. An
+                // explicitly stored "" is a real value that `is null` does not
+                // match, so collapsing it here would report contention on
+                // every attempt and the deal could never route (Codex review
+                // P2, 2026-08-12).
                 value:
-                  statusAtDecision === undefined || statusAtDecision === null || statusAtDecision === ""
+                  statusAtDecision === undefined || statusAtDecision === null
                     ? null
                     : String(statusAtDecision),
               },
