@@ -344,8 +344,22 @@ export async function GET(req: NextRequest) {
       const replyAt = c.date ? c.date.toISOString() : new Date().toISOString();
       const summary = `${cls.category}${cls.amount ? ` $${cls.amount}` : ""}${cls.term_months ? ` / ${cls.term_months}mo` : ""}${cls.factor_rate ? ` / ${cls.factor_rate}` : ""}${cls.decline_reason_code ? ` · ${cls.decline_reason_code}` : ""}`.slice(0, 480);
 
-      // 1) thread status (drives the pill) — only when a thread row exists.
-      if (c.thread) {
+      // 1) thread status (drives the pill) — only when the thread is THIS
+      // SENDER'S.
+      //
+      // Phase 1 falls back to "the only thread on this deal" when the sender
+      // matches no lender. That was tolerable while this route ran by hand: an
+      // occasional mis-attributed pill someone would notice. Scheduling it
+      // every ten minutes with write=1 turns it into a standing hazard — an
+      // unknown sender, or lender B replying about a deal shopped only to
+      // lender A, would overwrite lender A's thread status and cursor, and
+      // LENDER_AUTOROUTE_LIVE does not gate this write (Codex review P1,
+      // 2026-08-12).
+      //
+      // Steps 2 and 3 were already sender-gated on c.lenderId; this brings the
+      // thread write to the same standard. A reply we cannot attribute now
+      // writes nothing and is reported instead.
+      if (c.thread && c.lenderId && c.thread.lender_id === c.lenderId) {
         const upd = await db.from("application_lender_threads")
           .update({ status: statusFor(cls.category), last_response_at: replyAt, last_response_summary: summary, updated_at: new Date().toISOString() })
           .eq("id", c.thread.id).eq("tenant_id", SUNBIZ_TENANT_ID);

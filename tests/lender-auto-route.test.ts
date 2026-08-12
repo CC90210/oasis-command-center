@@ -349,6 +349,15 @@ assert.equal(
     /appMatchUnambiguous/.test(route),
     "routing must require an exact or unique application match, not a substring hit",
   );
+  // The THREAD-STATUS write is sender-gated too, not just routing. Scheduling
+  // this route with write=1 every ten minutes turns Phase 1's sole-thread
+  // fallback into a standing hazard: an unknown sender would overwrite lender
+  // A's status and cursor, and the autoroute switch does not gate that write.
+  assert.equal(
+    (route.match(/c\.thread\.lender_id === c\.lenderId/g) || []).length,
+    2,
+    "the thread-status write must be sender-gated as well as the routing decision",
+  );
   assert.ok(
     !/\.from\("tenant_records"\)[\s\S]{0,200}\.update\(\{ updated_at/.test(route),
     "a separate claim-then-write does not close the race and must not come back",
