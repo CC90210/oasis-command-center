@@ -396,7 +396,17 @@ export async function GET(req: NextRequest) {
         .eq("tenant_id", SUNBIZ_TENANT_ID)
         .eq("application_id", c.appId);
 
-      if (routeThreads.error) {
+      // The application's CURRENT status, so a reply arriving after the deal
+      // closed cannot drag it backwards.
+      const appNow = await db
+        .from("tenant_records")
+        .select("data")
+        .eq("tenant_id", SUNBIZ_TENANT_ID)
+        .eq("entity_type", "application")
+        .eq("id", c.appId)
+        .maybeSingle();
+
+      if (routeThreads.error || appNow.error) {
         // Fail CLOSED: without the full picture we cannot tell a unanimous
         // decline from a partial view, and a wrong move here kills a live deal.
         row.route = `deferred: threads_unreadable`;
@@ -406,6 +416,12 @@ export async function GET(req: NextRequest) {
           threads: (routeThreads.data || []) as Array<{ status: string }>,
           reply: { category: cls.category, confidence: cls.confidence },
           minConfidence: minConfidenceFromEnv(),
+          // Provenance: this email matched one of THIS deal's lender threads.
+          // Without it an inbound stranger replying "Re: New Deal (X)" could
+          // move a live file, because an approval does not consult the thread
+          // list.
+          hasMatchedThread: Boolean(c.thread && c.lenderId),
+          currentStatus: (appNow.data?.data as Record<string, unknown> | undefined)?.status,
         });
 
         if (!decision.move) {

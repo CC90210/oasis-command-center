@@ -57,6 +57,22 @@ const OUTSTANDING = new Set(["sent", "no_response", "queued", "pending", "error"
 /** Statuses that mean this funder said no. */
 const DECLINED = new Set(["declined"]);
 
+/**
+ * The ONLY application statuses the router may move a deal AWAY from.
+ *
+ * An allowlist, not a list of terminal states to block. A deal that an operator
+ * has taken somewhere — requested_docs, docs_out, login — or that has closed —
+ * funded, declined, dead_file, default — is not the router's to move, and a
+ * late-arriving reply must never regress it. A funder's approval landing a week
+ * after the deal FUNDED would otherwise drag it back to `approved`, and since
+ * 2026-08-12 that also restarts the merchant's drip email (Codex review P1,
+ * 2026-08-12).
+ *
+ * Blank is included because an application this app creates carries no status
+ * until someone moves it, and that is the ordinary shopping-phase state.
+ */
+const ROUTABLE_FROM = new Set(["", "application_in", "shopping"]);
+
 export const DEFAULT_MIN_CONFIDENCE = 0.8;
 
 export function minConfidenceFromEnv(): number {
@@ -84,10 +100,35 @@ export function planApplicationRoute(input: {
   threads: ThreadLike[];
   reply: { category: RoutableCategory; confidence?: number | null };
   minConfidence?: number;
+  /**
+   * Did this email match one of THIS application's lender threads?
+   *
+   * LOAD-BEARING, not bookkeeping. Replies are matched to a deal by the
+   * business name in the subject, and the sender is matched to a lender
+   * separately. An approval moves the deal without consulting the thread list
+   * at all (one yes is enough), so without this an inbound stranger sending
+   * `Re: New Deal (Some Business)` with approving words would move a live file
+   * to Approved — untrusted email driving a side effect, which is exactly what
+   * the LLM-input boundary rule forbids (Codex review P1, 2026-08-12).
+   */
+  hasMatchedThread: boolean;
+  /** The application's CURRENT status, so a late reply cannot regress a deal. */
+  currentStatus?: unknown;
 }): RouteDecision {
   const min = input.minConfidence ?? DEFAULT_MIN_CONFIDENCE;
   const category = String(input.reply?.category ?? "").trim().toLowerCase();
   const confidence = typeof input.reply?.confidence === "number" ? input.reply.confidence : 0;
+
+  // Provenance before content. An unmatched sender gets no say in a deal's
+  // state, whatever its message says or however confidently it says it.
+  if (!input.hasMatchedThread) {
+    return { move: false, reason: "no_matched_lender_thread" };
+  }
+
+  const current = String(input.currentStatus ?? "").trim().toLowerCase();
+  if (!ROUTABLE_FROM.has(current)) {
+    return { move: false, reason: `not_routable_from: ${current}` };
+  }
 
   if (category !== "approved" && category !== "declined") {
     // Counter-offers, info requests, "submitted" acknowledgements, unknowns.

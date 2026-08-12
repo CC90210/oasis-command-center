@@ -29,6 +29,9 @@ import {
 } from "../lib/lenders/auto-route";
 
 const HIGH = 0.95;
+/** Every call needs provenance + a routable current status; the two guards
+ *  below own those dimensions and the rest of the file holds them fixed. */
+const OK = { hasMatchedThread: true, currentStatus: "application_in" };
 const sent = { status: "sent" };
 const noResp = { status: "no_response" };
 const declined = { status: "declined" };
@@ -42,6 +45,7 @@ const errored = { status: "error" };
   const d = planApplicationRoute({
     threads: [sent, noResp, declined],
     reply: { category: "approved", confidence: HIGH },
+    ...OK,
   });
   assert.equal(d.move, true, "one clean approval moves the deal even with others still out");
   assert.equal(d.move === true && d.to, "approved");
@@ -54,6 +58,7 @@ const errored = { status: "error" };
   const d = planApplicationRoute({
     threads: [declined, sent, noResp],
     reply: { category: "declined", confidence: HIGH },
+    ...OK,
   });
   assert.equal(d.move, false, "ONE decline out of three must never kill a live deal");
   assert.match(d.move === false ? d.reason : "", /still_out/);
@@ -64,6 +69,7 @@ const errored = { status: "error" };
   const d = planApplicationRoute({
     threads: [declined, declined, declined],
     reply: { category: "declined", confidence: HIGH },
+    ...OK,
   });
   assert.equal(d.move, true);
   assert.equal(d.move === true && d.to, "declined");
@@ -75,6 +81,7 @@ assert.equal(
   planApplicationRoute({
     threads: [declined, declined, approved],
     reply: { category: "declined", confidence: HIGH },
+    ...OK,
   }).move,
   false,
   "a live approval elsewhere outranks a decline",
@@ -87,6 +94,7 @@ assert.equal(
   const d = planApplicationRoute({
     threads: [declined, declined, errored],
     reply: { category: "declined", confidence: HIGH },
+    ...OK,
   });
   assert.equal(d.move, false, "a thread that errored was never actually asked");
   assert.match(d.move === false ? d.reason : "", /still_out/);
@@ -95,7 +103,7 @@ assert.equal(
 // No visible threads is not unanimity. It is a partial view, and refusing here
 // is the difference between "every funder passed" and "we know of one funder".
 assert.equal(
-  planApplicationRoute({ threads: [], reply: { category: "declined", confidence: HIGH } }).move,
+  planApplicationRoute({ threads: [], reply: { category: "declined", confidence: HIGH }, ...OK }).move,
   false,
 );
 
@@ -108,6 +116,7 @@ for (const category of ["approved", "declined"]) {
   const d = planApplicationRoute({
     threads: [declined, declined],
     reply: { category, confidence: 0.6 },
+    ...OK,
     minConfidence: 0.8,
   });
   assert.equal(d.move, false, `a 0.6-confidence ${category} must not move the deal`);
@@ -115,7 +124,7 @@ for (const category of ["approved", "declined"]) {
 }
 // A missing confidence is not a high one.
 assert.equal(
-  planApplicationRoute({ threads: [declined], reply: { category: "approved" } }).move,
+  planApplicationRoute({ threads: [declined], reply: { category: "approved" }, ...OK }).move,
   false,
   "absent confidence must read as zero, never as certain",
 );
@@ -129,6 +138,7 @@ for (const category of ["counter_offer", "info_needed", "submitted", "unknown", 
   const d = planApplicationRoute({
     threads: [declined],
     reply: { category, confidence: 1 },
+    ...OK,
   });
   assert.equal(d.move, false, `${category || "(empty)"} must never auto-route`);
   assert.match(d.move === false ? d.reason : "", /not_a_decision/);
@@ -136,13 +146,80 @@ for (const category of ["counter_offer", "info_needed", "submitted", "unknown", 
 
 // Hand-entered casing must not change a funding decision.
 assert.equal(
-  planApplicationRoute({ threads: [declined], reply: { category: "  APPROVED ", confidence: HIGH } }).move,
+  planApplicationRoute({ threads: [declined], reply: { category: "  APPROVED ", confidence: HIGH }, ...OK }).move,
   true,
 );
 assert.equal(
   planApplicationRoute({
     threads: [{ status: " DECLINED " }, { status: "Declined" }],
     reply: { category: "declined", confidence: HIGH },
+    ...OK,
+  }).move,
+  true,
+);
+
+// ---------------------------------------------------------------------------
+// PROVENANCE BEFORE CONTENT (Codex review P1, 2026-08-12).
+//
+// Replies are matched to a deal by the business name in the SUBJECT, and to a
+// lender by the SENDER, separately. An approval moves the deal without
+// consulting the thread list at all — one yes is enough — so without this
+// guard anyone emailing submissions@ with `Re: New Deal (Some Business)` and
+// approving-sounding text could move a live file to Approved.
+//
+// That is untrusted inbound email driving a side effect, which the LLM-input
+// boundary rule forbids outright. An unmatched sender gets no say in a deal's
+// state, however confidently its message reads.
+// ---------------------------------------------------------------------------
+for (const category of ["approved", "declined"]) {
+  const d = planApplicationRoute({
+    threads: [declined, declined],
+    reply: { category, confidence: 1 },
+    hasMatchedThread: false,
+    currentStatus: "application_in",
+  });
+  assert.equal(d.move, false, `an unmatched sender must not route a deal (${category})`);
+  assert.equal(d.move === false && d.reason, "no_matched_lender_thread");
+}
+
+// ---------------------------------------------------------------------------
+// A LATE REPLY MUST NOT REGRESS A CLOSED DEAL (Codex review P1, 2026-08-12).
+//
+// A funder's approval landing a week after the deal FUNDED would otherwise drag
+// it back to `approved` — and since 2026-08-12 that also restarts the
+// merchant's drip email. Same for a late unanimous decline overwriting a funded
+// file. The router only ever moves a deal that is still in the shopping phase.
+// ---------------------------------------------------------------------------
+for (const closed of ["funded", "declined", "dead_file", "default", "docs_out", "login", "requested_docs", "approved"]) {
+  const d = planApplicationRoute({
+    threads: [declined, declined],
+    reply: { category: "approved", confidence: HIGH },
+    hasMatchedThread: true,
+    currentStatus: closed,
+  });
+  assert.equal(d.move, false, `a deal at ${closed} is not the router's to move`);
+  assert.match(d.move === false ? d.reason : "", /not_routable_from/);
+}
+// The shopping-phase states it MAY move, including the blank one every
+// app-created application carries until someone touches it.
+for (const open of ["", "application_in", "shopping", "  Application_In  "]) {
+  assert.equal(
+    planApplicationRoute({
+      threads: [sent],
+      reply: { category: "approved", confidence: HIGH },
+      hasMatchedThread: true,
+      currentStatus: open,
+    }).move,
+    true,
+    `a deal at "${open}" is still in play`,
+  );
+}
+// An absent status is the blank case, not an unknown one.
+assert.equal(
+  planApplicationRoute({
+    threads: [sent],
+    reply: { category: "approved", confidence: HIGH },
+    hasMatchedThread: true,
   }).move,
   true,
 );
