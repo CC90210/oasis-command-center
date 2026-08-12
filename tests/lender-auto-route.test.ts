@@ -366,6 +366,12 @@ assert.equal(
     // missing key, so an empty-string guard would refuse forever.
     assert.ok(/\.is\(`data->>\$\{input\.ifMatch\.field\}`, null\)/.test(data),
       "an absent field must be guarded with is-null, not eq-empty-string");
+    // AND the row version. updateRecord replaces the whole data document, so a
+    // single-field guard still lets a concurrent edit to any OTHER field be
+    // overwritten by the stale merge — a field check wearing the name of
+    // concurrency control.
+    assert.ok(/writeQ\.eq\("updated_at", existing\.updated_at\)/.test(data),
+      "a guarded update must pin the row version, not just the one field");
   }
   // AN OUTAGE IS NOT AN ANSWER. classify-reply returns a real object with
   // category "unknown" and unavailable:true when inference is down — the shape

@@ -494,6 +494,11 @@ export type UpdateRecordInput = {
    * `value: null` matches an absent or null field. That distinction is
    * load-bearing: `data->>x = ''` never matches a missing key, so guarding on
    * an empty string would make every unset-field CAS fail forever.
+   *
+   * Setting this ALSO pins the row version (`updated_at`), because this
+   * function replaces the whole data document — see the write below. So a
+   * guarded update is genuine optimistic concurrency, and callers must be
+   * ready to catch RecordsError("conflict") and re-read.
    */
   ifMatch?: { field: string; value: string | null };
 };
@@ -547,6 +552,19 @@ export async function updateRecord(input: UpdateRecordInput): Promise<TenantReco
       input.ifMatch.value === null
         ? writeQ.is(`data->>${input.ifMatch.field}`, null)
         : writeQ.eq(`data->>${input.ifMatch.field}`, input.ifMatch.value);
+    // ROW VERSION, in addition to the field guard.
+    //
+    // `merged` is built from the row read at the top of this function, and
+    // this write replaces the WHOLE data document. Guarding one field is
+    // therefore not enough: a concurrent edit to any OTHER field, made without
+    // touching the guarded one, still passes the field check and is silently
+    // overwritten by the stale document (Codex review P1, 2026-08-12).
+    //
+    // updated_at is the version. Pinning it makes the guarded path genuine
+    // optimistic concurrency rather than a single-field check wearing its
+    // name. Unguarded callers are untouched — they keep last-write-wins, which
+    // is what every existing call site already assumes.
+    writeQ = writeQ.eq("updated_at", existing.updated_at);
   }
   const result = input.ifMatch
     ? await writeQ.select("id, tenant_id, entity_type, data, created_at, updated_at").maybeSingle()
