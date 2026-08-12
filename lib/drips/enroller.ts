@@ -41,6 +41,7 @@ import type { DripStep } from "./types";
 import { computeStep0DelayMinutes, enrollmentBufferForStage } from "./stage-buffer";
 import { isPaused, isReEntryEligible } from "./drip-rules-core";
 import { ensureInitialBrand } from "./brand-store";
+import { loadDealGates } from "./deal-state-store";
 
 type Db = ReturnType<typeof getServiceSupabase>;
 
@@ -108,6 +109,7 @@ export type SkipReason =
   | "shopped_recently"
   | "accelerated_chase"
   | "docs_on_file"
+  | "deal_closed"
   | "daily_enroll_cap"
   | "invalid_sequence_steps";
 
@@ -150,6 +152,7 @@ function emptySkipCounts(): Record<SkipReason, number> {
     shopped_recently: 0,
     accelerated_chase: 0,
     docs_on_file: 0,
+    deal_closed: 0,
     daily_enroll_cap: 0,
     invalid_sequence_steps: 0,
   };
@@ -369,6 +372,26 @@ async function collectCandidates(
       }
     }
 
+    // Has this lead's DEAL already left the funnel? The lead's stage does not
+    // know: nothing moves a lead off `signed_application` when its application
+    // is funded, declined or dead, so the stage alone would keep nagging a
+    // closed deal forever (see deal-state.ts for the production measurement).
+    // Fail CLOSED on the whole page, exactly like the prior-run read above —
+    // without this answer we cannot tell a live deal from a funded one, and
+    // guessing wrong emails a merchant we already paid out.
+    // Every lead on this page is at `stage` by construction (the query filters
+    // on it), so the gate's "does the deal contradict the lead" test compares
+    // against the sequence's own trigger stage.
+    const gatesRes = await loadDealGates(
+      db,
+      seq.tenant_id,
+      pageIds,
+      new Map(pageIds.map((id) => [id, stage])),
+    );
+    if (!gatesRes.ok) {
+      return { leads: out, skippedAlreadyRan, staticSkips, truncated: false, error: gatesRes.error };
+    }
+
     for (const lead of pageLeads) {
       const prior = lastRunAt.get(lead.id);
       const eligibleByRunHistory =
@@ -388,6 +411,14 @@ async function collectCandidates(
       const staticSkip = staticSkipReason(lead.data || {}, stage, firstChannel);
       if (staticSkip) {
         noteSkip(staticSkip);
+        continue;
+      }
+      // Permanent for as long as the deal stays closed, so it belongs with the
+      // other permanent guards: a closed deal must not occupy a slot under
+      // `want` and block the live leads queued behind it.
+      const gate = gatesRes.gates.get(lead.id);
+      if (gate && !gate.open) {
+        noteSkip("deal_closed");
         continue;
       }
       out.push(lead);
