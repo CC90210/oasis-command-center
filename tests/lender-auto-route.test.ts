@@ -1,0 +1,235 @@
+/**
+ * tests/lender-auto-route.test.ts — when a lender's reply may move the deal.
+ *
+ * Adon, 2026-08-12: "move the clear ones, flag the rest."
+ *
+ * THE ASYMMETRY IS THE WHOLE TEST. A deal is shopped to several funders at
+ * once, so an approval and a decline do not carry the same weight:
+ *
+ *   an APPROVAL is a fact about the DEAL   -> the first clean one moves it
+ *   a DECLINE is a fact about that FUNDER  -> needs unanimity, and silence from
+ *                                             anyone still out is not a decline
+ *
+ * Reading a single decline as "the deal is dead" would kill live files every
+ * time the first funder passed, which is the ordinary case in this business.
+ *
+ * This rule decides what happens to a real merchant's live funding, and since
+ * 2026-08-12 the application's status ALSO decides whether that merchant keeps
+ * receiving drip email (lib/drips/deal-state.ts). Both consequences ride on
+ * these assertions.
+ */
+
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import {
+  planApplicationRoute,
+  minConfidenceFromEnv,
+  autoRouteLive,
+  DEFAULT_MIN_CONFIDENCE,
+} from "../lib/lenders/auto-route";
+
+const HIGH = 0.95;
+const sent = { status: "sent" };
+const noResp = { status: "no_response" };
+const declined = { status: "declined" };
+const approved = { status: "approved" };
+const errored = { status: "error" };
+
+// ---------------------------------------------------------------------------
+// APPROVAL — one funder saying yes is a fact about the deal.
+// ---------------------------------------------------------------------------
+{
+  const d = planApplicationRoute({
+    threads: [sent, noResp, declined],
+    reply: { category: "approved", confidence: HIGH },
+  });
+  assert.equal(d.move, true, "one clean approval moves the deal even with others still out");
+  assert.equal(d.move === true && d.to, "approved");
+}
+
+// ---------------------------------------------------------------------------
+// DECLINE — the case that must NOT move, and the reason this file exists.
+// ---------------------------------------------------------------------------
+{
+  const d = planApplicationRoute({
+    threads: [declined, sent, noResp],
+    reply: { category: "declined", confidence: HIGH },
+  });
+  assert.equal(d.move, false, "ONE decline out of three must never kill a live deal");
+  assert.match(d.move === false ? d.reason : "", /still_out/);
+}
+
+// Unanimous, nobody outstanding — the deal really is dead.
+{
+  const d = planApplicationRoute({
+    threads: [declined, declined, declined],
+    reply: { category: "declined", confidence: HIGH },
+  });
+  assert.equal(d.move, true);
+  assert.equal(d.move === true && d.to, "declined");
+}
+
+// An approval sitting on another thread means the deal is alive, whatever this
+// funder just said.
+assert.equal(
+  planApplicationRoute({
+    threads: [declined, declined, approved],
+    reply: { category: "declined", confidence: HIGH },
+  }).move,
+  false,
+  "a live approval elsewhere outranks a decline",
+);
+
+// A FAILED SEND IS AN UNASKED FUNDER, not a silent decline. Treating `error` as
+// answered would let a delivery bug read as unanimous rejection — the same
+// "failure becomes a plausible answer" shape this estate has been bitten by.
+{
+  const d = planApplicationRoute({
+    threads: [declined, declined, errored],
+    reply: { category: "declined", confidence: HIGH },
+  });
+  assert.equal(d.move, false, "a thread that errored was never actually asked");
+  assert.match(d.move === false ? d.reason : "", /still_out/);
+}
+
+// No visible threads is not unanimity. It is a partial view, and refusing here
+// is the difference between "every funder passed" and "we know of one funder".
+assert.equal(
+  planApplicationRoute({ threads: [], reply: { category: "declined", confidence: HIGH } }).move,
+  false,
+);
+
+// ---------------------------------------------------------------------------
+// CONFIDENCE — a guess is not a decision, and it is checked for approvals too.
+// An uncertain "approved" is exactly the reading that would move a deal to
+// Approved on a funder's polite maybe.
+// ---------------------------------------------------------------------------
+for (const category of ["approved", "declined"]) {
+  const d = planApplicationRoute({
+    threads: [declined, declined],
+    reply: { category, confidence: 0.6 },
+    minConfidence: 0.8,
+  });
+  assert.equal(d.move, false, `a 0.6-confidence ${category} must not move the deal`);
+  assert.match(d.move === false ? d.reason : "", /low_confidence/);
+}
+// A missing confidence is not a high one.
+assert.equal(
+  planApplicationRoute({ threads: [declined], reply: { category: "approved" } }).move,
+  false,
+  "absent confidence must read as zero, never as certain",
+);
+
+// ---------------------------------------------------------------------------
+// EVERYTHING ELSE IS FLAGGED, NOT ROUTED. A counter-offer is a negotiation, an
+// info request is a task, an unknown is an unknown. None are decisions a
+// classifier gets to make about someone's funding.
+// ---------------------------------------------------------------------------
+for (const category of ["counter_offer", "info_needed", "submitted", "unknown", ""]) {
+  const d = planApplicationRoute({
+    threads: [declined],
+    reply: { category, confidence: 1 },
+  });
+  assert.equal(d.move, false, `${category || "(empty)"} must never auto-route`);
+  assert.match(d.move === false ? d.reason : "", /not_a_decision/);
+}
+
+// Hand-entered casing must not change a funding decision.
+assert.equal(
+  planApplicationRoute({ threads: [declined], reply: { category: "  APPROVED ", confidence: HIGH } }).move,
+  true,
+);
+assert.equal(
+  planApplicationRoute({
+    threads: [{ status: " DECLINED " }, { status: "Declined" }],
+    reply: { category: "declined", confidence: HIGH },
+  }).move,
+  true,
+);
+
+// ---------------------------------------------------------------------------
+// The env gates fail SAFE. A blank or nonsense threshold must not read as 0,
+// which would auto-route every guess the classifier makes.
+// ---------------------------------------------------------------------------
+{
+  const prev = process.env.LENDER_AUTOROUTE_MIN_CONFIDENCE;
+  for (const bad of ["", "   ", "abc", "0", "-1", "2"]) {
+    process.env.LENDER_AUTOROUTE_MIN_CONFIDENCE = bad;
+    assert.equal(minConfidenceFromEnv(), DEFAULT_MIN_CONFIDENCE, `"${bad}" must fall back to the default`);
+  }
+  process.env.LENDER_AUTOROUTE_MIN_CONFIDENCE = "0.9";
+  assert.equal(minConfidenceFromEnv(), 0.9, "a real value is honoured");
+  if (prev === undefined) delete process.env.LENDER_AUTOROUTE_MIN_CONFIDENCE;
+  else process.env.LENDER_AUTOROUTE_MIN_CONFIDENCE = prev;
+}
+
+// The master switch is OFF unless explicitly "1". Everything ships inert.
+{
+  const prev = process.env.LENDER_AUTOROUTE_LIVE;
+  for (const off of [undefined, "", "0", "true", "yes", "TRUE"]) {
+    if (off === undefined) delete process.env.LENDER_AUTOROUTE_LIVE;
+    else process.env.LENDER_AUTOROUTE_LIVE = off;
+    assert.equal(autoRouteLive(), false, `LENDER_AUTOROUTE_LIVE=${String(off)} must not arm it`);
+  }
+  process.env.LENDER_AUTOROUTE_LIVE = "1";
+  assert.equal(autoRouteLive(), true);
+  if (prev === undefined) delete process.env.LENDER_AUTOROUTE_LIVE;
+  else process.env.LENDER_AUTOROUTE_LIVE = prev;
+}
+
+// ---------------------------------------------------------------------------
+// THE WRITE MUST GO THROUGH updateRecord. A raw
+// db.from("tenant_records").update() sits directly above the new call in the
+// same function (the offer write), so copying it is the easy mistake — and it
+// would move the deal on the board while leaving the drip engine, the timeline
+// and stage_entered_at blind to it. That is the two-fields-out-of-sync defect
+// this session just spent a day closing, re-entering from a new direction.
+// ---------------------------------------------------------------------------
+{
+  const route = readFileSync("app/api/cron/scan-lender-replies/route.ts", "utf8");
+  assert.ok(route.includes("planApplicationRoute("), "the scanner must consult the rule");
+  assert.ok(route.includes("updateRecord("), "and move the application through updateRecord");
+  const at = route.indexOf("planApplicationRoute(");
+  const after = route.slice(at, at + 2500);
+  assert.ok(
+    !/from\("tenant_records"\)[\s\S]{0,120}\.update\(/.test(after),
+    "the routing write must NOT be a raw tenant_records update",
+  );
+}
+
+// ---------------------------------------------------------------------------
+// IT MUST ACTUALLY RUN. The whole reason this build exists is that the scanner
+// was never registered anywhere, so it had not written since 2026-08-06 while
+// 898 lender threads sat unread. A rule nothing calls is worth nothing.
+//
+// Registration is TWO facts in this repo: vercel.json declares it, and
+// .github/workflows/cron-driver.yml is what actually fires it (Vercel's own
+// scheduler was found unreliable — see that file's header). Both are asserted;
+// cron-driver-coverage.test.ts enforces the pairing generally, this names the
+// route so its removal fails by name.
+// ---------------------------------------------------------------------------
+{
+  const read = (p: string) => readFileSync(p, "utf8");
+  assert.ok(
+    read("vercel.json").includes("/api/cron/scan-lender-replies"),
+    "the scanner must be registered in vercel.json",
+  );
+  const driver = read(".github/workflows/cron-driver.yml");
+  assert.ok(driver.includes("/api/cron/scan-lender-replies"), "and driven by the workflow");
+  assert.ok(
+    /scan-lender-replies\?write=1/.test(driver),
+    "driven with write=1, or it reads the inbox every tick and stores nothing",
+  );
+}
+
+// The staged go-live must be OFF in the shipped config. Arming it is a
+// deliberate act after a day of `would_route` output has been read, not
+// something that rides along with the deploy.
+{
+  const route = readFileSync("app/api/cron/scan-lender-replies/route.ts", "utf8");
+  assert.ok(route.includes("autoRouteLive()"), "the route must consult the master switch");
+  assert.ok(route.includes("would_route"), "and report what it WOULD have done while disarmed");
+  assert.ok(route.includes("routing:"), "the response must carry the routing counters for health checks");
+}
+
+console.log("lender-auto-route.test.ts — one lender is not the deal ✓");

@@ -26,6 +26,9 @@ import { simpleParser } from "mailparser";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { getSubmissionsCreds } from "@/lib/integrations/submissions-gmail";
 import { classifyLenderReply, type LenderReplyCategory, type LenderReplyClass } from "@/lib/lenders/classify-reply";
+import { checkCronAuth } from "@/lib/cron-auth";
+import { updateRecord } from "@/lib/manifest/data";
+import { planApplicationRoute, minConfidenceFromEnv, autoRouteLive } from "@/lib/lenders/auto-route";
 import { timingSafeEqual } from "crypto";
 
 export const runtime = "nodejs";
@@ -68,7 +71,24 @@ const MIN_CLASSIFY_MS = 8_000;
 /** Ceiling for any single classify, so one wedged job can't eat the whole budget. */
 const MAX_PER_CLASSIFY_MS = 22_000;
 
+/**
+ * EITHER auth is sufficient, and both are still constant-time and fail-closed.
+ *
+ * This route was manual-trigger only (SCAN_TRIGGER_SECRET bearer) and was
+ * therefore never registered in vercel.json — which is why it had not written
+ * anything since 2026-08-06 while 898 lender threads sat unread. Scheduling it
+ * needs Vercel's own cron auth (checkCronAuth: CRON_SECRET bearer AND the
+ * platform-injected `x-vercel-cron` header, neither forgeable alone).
+ *
+ * The existing manual path is kept working unchanged rather than migrated,
+ * because it is the only way to run this on demand while diagnosing the inbox,
+ * and taking it away would trade one outage for another.
+ */
 function checkTrigger(req: NextRequest): NextResponse | null {
+  // Vercel cron first: when the platform header is present this is a scheduled
+  // invocation and SCAN_TRIGGER_SECRET may legitimately not be involved.
+  if (req.headers.get("x-vercel-cron")) return checkCronAuth(req);
+
   const secret = process.env.SCAN_TRIGGER_SECRET;
   if (!secret) return NextResponse.json({ ok: false, error: "trigger_not_configured" }, { status: 500 });
   const auth = req.headers.get("authorization") || "";
@@ -281,6 +301,13 @@ export async function GET(req: NextRequest) {
 
   // ── Phase 3: writes (gated) ─────────────────────────────────────────────────
   let applied = 0;
+  // Routing counters, reported whether or not routing is armed. A scanner that
+  // reads mail every 8 minutes and routes nothing forever is the silent-failure
+  // shape this repo keeps being bitten by; these are what a health check reads.
+  let routed = 0;
+  let flagged = 0;
+  let wouldRoute = 0;
+  let routeDeferred = 0;
   for (const c of candidates) {
     const cls = classBy.get(c);
     const row: Record<string, unknown> = {
@@ -344,6 +371,90 @@ export async function GET(req: NextRequest) {
         }, { onConflict: "tenant_id,application_id,lender_id,reply_at" });
         row.outcome_logged = true;
       }
+
+      // 4) ROUTE THE DEAL — move the clear ones, flag the rest (Adon 2026-08-12)
+      //
+      // Everything above describes the LENDER's answer. This is the only step
+      // that touches the DEAL. The rule (lib/lenders/auto-route.ts) is
+      // deliberately asymmetric: one approval moves the file, one decline does
+      // not, because a decline is a fact about that funder and not about the
+      // deal.
+      //
+      // Re-reads the threads instead of reusing the Phase-1 snapshot: step 1
+      // just wrote this reply's own thread status, and unanimity computed from
+      // a stale read would miss the decline that completes the set.
+      const routeThreads = await db
+        .from("application_lender_threads")
+        .select("status")
+        .eq("tenant_id", SUNBIZ_TENANT_ID)
+        .eq("application_id", c.appId);
+
+      if (routeThreads.error) {
+        // Fail CLOSED: without the full picture we cannot tell a unanimous
+        // decline from a partial view, and a wrong move here kills a live deal.
+        row.route = `deferred: threads_unreadable`;
+        routeDeferred++;
+      } else {
+        const decision = planApplicationRoute({
+          threads: (routeThreads.data || []) as Array<{ status: string }>,
+          reply: { category: cls.category, confidence: cls.confidence },
+          minConfidence: minConfidenceFromEnv(),
+        });
+
+        if (!decision.move) {
+          // FLAGGED, not silently skipped. The thread pill already changed
+          // above; this makes the DEAL itself say a human needs to look, so a
+          // reply that lands outside the clear cases cannot go unnoticed.
+          row.route = `flagged: ${decision.reason}`;
+          flagged++;
+          if (autoRouteLive()) {
+            try {
+              await updateRecord({
+                tenant_id: SUNBIZ_TENANT_ID,
+                entity: "application",
+                id: c.appId,
+                patch: {
+                  lender_reply_needs_review: true,
+                  lender_reply_review_reason: decision.reason.slice(0, 200),
+                },
+              });
+            } catch {
+              /* a flag that fails to stamp must not fail the scan */
+            }
+          }
+        } else if (!autoRouteLive()) {
+          // Staged go-live: report what it WOULD have done so a day of real
+          // replies can be read before anything moves.
+          row.route = `would_route: ${decision.to} (${decision.reason})`;
+          wouldRoute++;
+        } else {
+          // updateRecord, NOT a raw tenant_records write. It is what stamps
+          // stage_entered_at, publishes BRAVO_RECORD_STATUS_CHANGED and fires
+          // runStageTransitionHooks. A raw write would move the deal on the
+          // board while leaving the drip engine and the timeline blind to it —
+          // the two-fields-out-of-sync defect closed earlier today, re-entering
+          // from a new direction.
+          try {
+            await updateRecord({
+              tenant_id: SUNBIZ_TENANT_ID,
+              entity: "application",
+              id: c.appId,
+              patch: {
+                status: decision.to,
+                lender_reply_needs_review: false,
+                lender_reply_review_reason: null,
+                routed_by: "lender_reply_scan",
+                routed_at: replyAt,
+              },
+            });
+            row.route = `routed: ${decision.to} (${decision.reason})`;
+            routed++;
+          } catch (e) {
+            row.route = `route_failed: ${e instanceof Error ? e.message : "unknown"}`;
+            routeDeferred++;
+          }
+        }
+      }
     }
 
     results.push(row);
@@ -354,6 +465,18 @@ export async function GET(req: NextRequest) {
     mode: write ? "write" : "dry",
     inbox: creds.fromAddress,
     scanned: results.length,
+    /** Deal routing. `armed` false means every clear decision is reported as
+     *  `would_route` and nothing moved — the staged go-live state. */
+    routing: {
+      armed: autoRouteLive(),
+      min_confidence: minConfidenceFromEnv(),
+      routed,
+      would_route: wouldRoute,
+      flagged,
+      /** Could not decide safely (threads unreadable / write failed). Retried
+       *  next tick — never counted as a decision. */
+      deferred: routeDeferred,
+    },
     /** Candidates eligible for classification this tick. */
     candidates: toClassify.length,
     /** ACTUALLY classified. Previously reported the candidate count, which

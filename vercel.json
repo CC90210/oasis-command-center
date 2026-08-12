@@ -26,6 +26,10 @@
       "schedule": "*/15 * * * *"
     },
     {
+      "path": "/api/cron/scan-lender-replies",
+      "schedule": "*/10 * * * *"
+    },
+    {
       "path": "/api/cron/dispatch-drips",
       "schedule": "*/5 * * * *"
     },
