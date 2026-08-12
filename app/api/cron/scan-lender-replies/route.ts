@@ -378,8 +378,17 @@ export async function GET(req: NextRequest) {
         }, { onConflict: "tenant_id,application_id,lender_id,reply_at" });
         row.outcome_logged = true;
       }
+    }
 
-      // 4) ROUTE THE DEAL — move the clear ones, flag the rest (Adon 2026-08-12)
+    // 4) ROUTE THE DEAL — move the clear ones, flag the rest (Adon 2026-08-12)
+    //
+    // DELIBERATELY OUTSIDE the write block above, which excludes
+    // `category === "unknown"`. An unknown is precisely a reply a human needs
+    // to look at, and leaving it in that block meant the one category most in
+    // need of "flag the rest" was the one category that got no flag at all —
+    // silently reclassified every tick, forever (Codex review P2, 2026-08-12).
+    if (write && cls && !c.already) {
+      const replyAt = c.date ? c.date.toISOString() : new Date().toISOString();
       //
       // Everything above describes the LENDER's answer. This is the only step
       // that touches the DEAL. The rule (lib/lenders/auto-route.ts) is
@@ -412,6 +421,9 @@ export async function GET(req: NextRequest) {
         row.route = `deferred: threads_unreadable`;
         routeDeferred++;
       } else {
+        // The status the decision is made against. Held so the write below can
+        // compare-and-set on exactly this value and refuse if it moved.
+        const statusAtDecision = (appNow.data?.data as Record<string, unknown> | undefined)?.status;
         const decision = planApplicationRoute({
           threads: (routeThreads.data || []) as Array<{ status: string }>,
           reply: { category: cls.category, confidence: cls.confidence },
@@ -421,7 +433,7 @@ export async function GET(req: NextRequest) {
           // move a live file, because an approval does not consult the thread
           // list.
           hasMatchedThread: Boolean(c.thread && c.lenderId),
-          currentStatus: (appNow.data?.data as Record<string, unknown> | undefined)?.status,
+          currentStatus: statusAtDecision,
         });
 
         if (!decision.move) {
@@ -430,20 +442,25 @@ export async function GET(req: NextRequest) {
           // reply that lands outside the clear cases cannot go unnoticed.
           row.route = `flagged: ${decision.reason}`;
           flagged++;
-          if (autoRouteLive()) {
-            try {
-              await updateRecord({
-                tenant_id: SUNBIZ_TENANT_ID,
-                entity: "application",
-                id: c.appId,
-                patch: {
-                  lender_reply_needs_review: true,
-                  lender_reply_review_reason: decision.reason.slice(0, 200),
-                },
-              });
-            } catch {
-              /* a flag that fails to stamp must not fail the scan */
-            }
+          try {
+            await updateRecord({
+              tenant_id: SUNBIZ_TENANT_ID,
+              entity: "application",
+              id: c.appId,
+              patch: {
+                lender_reply_needs_review: true,
+                lender_reply_review_reason: decision.reason.slice(0, 200),
+              },
+            });
+          } catch (e) {
+            // NOT swallowed. The IMAP cursor has already moved past this
+            // message, so a flag that fails here is a review request the deal
+            // never receives and nothing ever retries. Reported as deferred so
+            // it shows in the counters rather than being counted as a
+            // successful flag (Codex review P2, 2026-08-12).
+            row.route = `flag_failed: ${e instanceof Error ? e.message : "unknown"}`;
+            flagged--;
+            routeDeferred++;
           }
         } else if (!autoRouteLive()) {
           // Staged go-live: report what it WOULD have done so a day of real
@@ -458,6 +475,43 @@ export async function GET(req: NextRequest) {
           // the two-fields-out-of-sync defect closed earlier today, re-entering
           // from a new direction.
           try {
+            // COMPARE-AND-SET the status BEFORE updateRecord, because
+            // updateRecord has no conditional form: it re-reads the row and
+            // merges, so an operator advancing the deal between the status
+            // check above and this write would be silently overwritten — a
+            // funded deal dragged back to `approved` by a race (Codex review
+            // P1, 2026-08-12).
+            //
+            // This claim is the gate. It only matches while the status is
+            // still the one the decision was made against, so a deal that
+            // moved under us fails the claim and is left alone. updateRecord
+            // then runs for its side effects — stage_entered_at, the status
+            // event, the portal hooks — which a raw write would skip.
+            //
+            // An ABSENT status must be claimed with `is null`, not `eq ""`.
+            // That is the ordinary shopping-phase state for an application
+            // this app created, and `data->>status = ''` never matches a
+            // missing key — the claim would fail every time and the router
+            // would defer forever on exactly the deals it exists to move.
+            let claimQ = db
+              .from("tenant_records")
+              .update({ updated_at: new Date().toISOString() })
+              .eq("tenant_id", SUNBIZ_TENANT_ID)
+              .eq("entity_type", "application")
+              .eq("id", c.appId);
+            claimQ =
+              statusAtDecision === undefined || statusAtDecision === null || statusAtDecision === ""
+                ? claimQ.is("data->>status", null)
+                : claimQ.eq("data->>status", String(statusAtDecision));
+            const claim = await claimQ.select("id");
+            if (claim.error) throw new Error(`claim_failed: ${claim.error.message}`);
+            if ((claim.data || []).length === 0) {
+              row.route = `deferred: status_changed_under_us`;
+              routeDeferred++;
+              results.push(row);
+              continue;
+            }
+
             await updateRecord({
               tenant_id: SUNBIZ_TENANT_ID,
               entity: "application",

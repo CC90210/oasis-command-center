@@ -315,6 +315,31 @@ assert.equal(
     /if \(checkCronAuth\(req\) === null\) return null;/.test(route),
     "checkCronAuth must be TRIED first, unconditionally",
   );
+
+  // COMPARE-AND-SET on the status. updateRecord has no conditional form — it
+  // re-reads and merges — so without a claim an operator advancing the deal
+  // between the status check and the write is silently overwritten, dragging a
+  // funded file back to `approved` on a race.
+  assert.ok(
+    /status_changed_under_us/.test(route),
+    "the routing write must claim the status it decided against, and defer if it moved",
+  );
+  // An absent status is claimed with `is null`; `eq ""` never matches a missing
+  // key, so the router would defer forever on exactly the shopping-phase deals
+  // it exists to move.
+  assert.ok(
+    /\.is\("data->>status", null\)/.test(route),
+    "a blank status must be claimed with is-null, not eq-empty-string",
+  );
+  // `unknown` is the category most in need of a human, so it must reach the
+  // flag path rather than being excluded with the write block.
+  assert.ok(
+    !/if \(write && cls && !c\.already && cls\.category !== "unknown"\) \{[\s\S]{0,4000}planApplicationRoute\(/.test(route),
+    "the routing block must NOT sit inside the write block that excludes unknown",
+  );
+  // A flag that fails to stamp is a review request nobody ever sees, because
+  // the IMAP cursor has already moved past the message.
+  assert.ok(/flag_failed:/.test(route), "a failed review flag must be reported, not swallowed");
   assert.ok(
     !/if \(req\.headers\.get\("x-vercel-cron"\)\)/.test(route),
     "and must NOT be gated behind the x-vercel-cron header — the driver never sends it",
