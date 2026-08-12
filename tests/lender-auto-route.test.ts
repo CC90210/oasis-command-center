@@ -367,6 +367,21 @@ assert.equal(
     (route.match(/c\.senderOwnsThread/g) || []).length >= 4,
     "every write path must be gated on the sender actually owning the thread",
   );
+  // ONLY THE NEWEST reply per thread may decide the deal. Several unread
+  // messages on one thread all reach the routing block in fetch order, so an
+  // older decline could move the deal to `declined` and the newer approval
+  // behind it would be refused as not-routable.
+  assert.ok(
+    /newestPerThread/.test(route),
+    "an older reply must never decide the deal over a newer one in the same batch",
+  );
+  // A failed thread-status write must stop this candidate. Continuing would
+  // route the deal while the cursor stayed put, so the same approval is
+  // reprocessed next tick and lands as not_routable_from: approved.
+  assert.ok(
+    /thread_status_write_failed/.test(route),
+    "a failed thread-status write must defer the candidate, not fall through to the later writes",
+  );
   assert.ok(
     !/\.from\("tenant_records"\)[\s\S]{0,200}\.update\(\{ updated_at/.test(route),
     "a separate claim-then-write does not close the race and must not come back",

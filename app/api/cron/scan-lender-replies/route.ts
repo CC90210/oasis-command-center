@@ -327,6 +327,24 @@ export async function GET(req: NextRequest) {
   // Kept under the original key so an un-updated trigger still alerts.
   const deadKeySuspected = classifierDown || allUnknown;
 
+  // ONLY THE NEWEST REPLY PER THREAD MAY DECIDE THE DEAL.
+  //
+  // `already` is computed once from the pre-scan cursor, so when a thread has
+  // several unread messages in one batch they ALL reach the routing block, in
+  // fetch order. An older decline would then move the deal to `declined`, and
+  // the newer approval that followed it would be refused as not-routable —
+  // the deal ending up in the state its lender had already superseded (Codex
+  // review P1, 2026-08-12).
+  //
+  // The earlier writes still process every message: the ledger is keyed on
+  // reply_at and wants each one. Only the DEAL-level decision is narrowed.
+  const newestPerThread = new Map<string, number>();
+  for (const c of candidates) {
+    if (!c.thread || !c.date) continue;
+    const t = c.date.getTime();
+    if (t > (newestPerThread.get(c.thread.id) ?? -1)) newestPerThread.set(c.thread.id, t);
+  }
+
   // ── Phase 3: writes (gated) ─────────────────────────────────────────────────
   let applied = 0;
   // Routing counters, reported whether or not routing is armed. A scanner that
@@ -371,7 +389,20 @@ export async function GET(req: NextRequest) {
         const upd = await db.from("application_lender_threads")
           .update({ status: statusFor(cls.category), last_response_at: replyAt, last_response_summary: summary, updated_at: new Date().toISOString() })
           .eq("id", c.thread.id).eq("tenant_id", SUNBIZ_TENANT_ID);
-        if (!upd.error) { applied++; row.wrote = statusFor(cls.category); }
+        if (upd.error) {
+          // STOP for this candidate. Continuing would write the offer, the
+          // ledger and possibly ROUTE the deal while the thread status and
+          // cursor stayed put — so a clean approval could route and then be
+          // reprocessed next tick, this time landing as
+          // `not_routable_from: approved` and stamping the deal for review it
+          // does not need (Codex review P1, 2026-08-12).
+          row.route = `deferred: thread_status_write_failed`;
+          routeDeferred++;
+          results.push(row);
+          continue;
+        }
+        applied++;
+        row.wrote = statusFor(cls.category);
       }
 
       // 2) offer record (Offers tab) — approval/counter with usable terms + a lender.
@@ -497,7 +528,13 @@ export async function GET(req: NextRequest) {
           // thread is on this deal. Any one missing and the reply gets a flag
           // rather than a decision.
           hasMatchedThread: Boolean(
-            c.appMatchUnambiguous && c.senderOwnsThread,
+            c.appMatchUnambiguous &&
+              c.senderOwnsThread &&
+              // ...and this is the lender's LATEST word in this batch. An
+              // older message must never decide over a newer one.
+              c.thread &&
+              c.date &&
+              newestPerThread.get(c.thread.id) === c.date.getTime(),
           ),
           currentStatus: statusAtDecision,
         });
