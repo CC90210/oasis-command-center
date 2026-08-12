@@ -9,10 +9,23 @@
 
 import { useState } from "react";
 import { InterchangeLockProvider } from "./interchange-lock";
-import { LayoutList, FileText, Activity } from "lucide-react";
+import { LayoutList, FileText, Activity, BarChart3 } from "lucide-react";
 import { SequencesListClient } from "./SequencesListClient";
 import { SequenceTemplatesView, type TemplatesViewRow } from "./SequenceTemplatesView";
 import { DripActivityView, type ActivityRow, type ActivitySummary } from "./DripActivityView";
+import { SequenceVolumeView, type VolumeRow } from "./SequenceVolumeView";
+
+/** Everything the Volume tab needs, resolved server-side. `error` is carried
+ *  explicitly so a failed read renders as UNKNOWN rather than as an empty
+ *  chart — the most reassuring picture available and, when the read broke, the
+ *  least true one. */
+export type VolumeTabData = {
+  rows: VolumeRow[];
+  days: number;
+  timeZone: string;
+  error: string | null;
+  truncated: boolean;
+};
 import type { DripStep } from "@/lib/drips/types";
 import type { PoolTemplate } from "@/lib/drips/template-pool";
 
@@ -28,6 +41,7 @@ export function SequencesTabs({
   activitySummary,
   activityError,
   summaryError,
+  volume,
   pool,
 }: {
   rows: Row[];
@@ -35,12 +49,13 @@ export function SequencesTabs({
   activitySummary: ActivitySummary;
   activityError?: string | null;
   summaryError?: string | null;
+  volume: VolumeTabData;
   pool: PoolTemplate[];
 }) {
   // Activity first. The first question an operator has is "what went out",
   // not "how is it configured" — and for four days in August the honest answer
   // was "nothing", which no surface was able to say.
-  const [tab, setTab] = useState<"activity" | "templates" | "manage">("activity");
+  const [tab, setTab] = useState<"activity" | "volume" | "templates" | "manage">("activity");
 
   return (
     // ABOVE the tab switch. Inside the Templates view it unmounts the moment an
@@ -60,6 +75,16 @@ export function SequencesTabs({
         >
           <Activity className="h-3.5 w-3.5" />
           Activity
+        </button>
+        <button
+          type="button"
+          onClick={() => setTab("volume")}
+          className={`inline-flex items-center gap-1.5 border-l border-bg-border px-4 py-2 text-xs font-bold transition-colors ${
+            tab === "volume" ? "bg-accent/15 text-accent" : "bg-bg-elev text-fg-muted hover:text-fg"
+          }`}
+        >
+          <BarChart3 className="h-3.5 w-3.5" />
+          Volume
         </button>
         <button
           type="button"
@@ -89,6 +114,14 @@ export function SequencesTabs({
           summary={activitySummary}
           readError={activityError ?? null}
           summaryError={summaryError ?? null}
+        />
+      ) : tab === "volume" ? (
+        <SequenceVolumeView
+          rows={volume.rows}
+          days={volume.days}
+          timeZone={volume.timeZone}
+          readError={volume.error}
+          truncated={volume.truncated}
         />
       ) : tab === "templates" ? (
         <SequenceTemplatesView rows={rows} pool={pool} />

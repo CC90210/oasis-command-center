@@ -11,6 +11,8 @@ import { getSessionUser, getServiceSupabase } from "@/lib/supabase-server";
 import { safe, isMissingTableError } from "@/lib/api-helpers";
 import { SequencesTabs } from "@/components/sequences/SequencesTabs";
 import { recentDripActivity, dripFailureSummary } from "@/lib/drips/activity-queries";
+import { sequenceDailyVolume } from "@/lib/drips/sequence-volume";
+import { joinVolumeToSequences } from "@/lib/drips/sequence-volume-core";
 
 /** The all-zero summary. Named so the "no tenant" case and the "read failed"
  *  case cannot drift into two subtly different sets of zeros. */
@@ -42,6 +44,7 @@ type SequenceRow = {
   enabled: boolean;
   one_per_lead: boolean;
   email_class?: string;
+  daily_email_cap?: number | null;
 };
 
 async function loadSequences(tenantId: string | null): Promise<
@@ -53,7 +56,7 @@ async function loadSequences(tenantId: string | null): Promise<
   const { data, error } = await db
     .from("drip_sequences")
     .select(
-      "id, name, description, trigger_event, trigger_filter, steps, enabled, one_per_lead, email_class",
+      "id, name, description, trigger_event, trigger_filter, steps, enabled, one_per_lead, email_class, daily_email_cap",
     )
     .eq("tenant_id", tenantId)
     .order("created_at", { ascending: false });
@@ -77,7 +80,7 @@ export default async function SequencesPage() {
   // It is not a timeout: Promise.all still waits for the slowest read, so a slow
   // activity query does hold the whole page. Saying "cannot take the page down"
   // would be claiming a protection that is not here.
-  const [result, bridgeOnline, activityRes, pool, summaryRes] = await Promise.all([
+  const [result, bridgeOnline, activityRes, volumeRes, pool, summaryRes] = await Promise.all([
     loadSequences(tenantId),
     safe("sequences.bridge_online", getBridgeOnline(tenantId), false),
     // Wrapped so a read FAILURE is distinguishable from an empty window. `safe`
@@ -93,6 +96,16 @@ export default async function SequencesPage() {
           )
         : Promise.resolve({ rows: [], error: null as string | null }),
       { rows: [], error: "could not read drip activity" },
+    ),
+    // Per-sequence daily volume. Read failures are carried, never flattened to
+    // an empty chart: a blank picture is the most reassuring thing this tab can
+    // show, and an operator would set a cap against it.
+    safe(
+      "sequences.volume",
+      tenantId
+        ? sequenceDailyVolume(tenantId, { days: 14 })
+        : Promise.resolve({ volumes: [], timeZone: "UTC", days: 14, error: null, truncated: false }),
+      { volumes: [], timeZone: "UTC", days: 14, error: "could not read sequence volume", truncated: false },
     ),
     safe(
       "sequences.template_pool",
@@ -201,6 +214,16 @@ export default async function SequencesPage() {
           // good -- and the reverse.
           activityError={activityRes.error}
           summaryError={summaryRes.error}
+          volume={{
+            // Joined here, on the server, so the client renders a decided list
+            // rather than re-deriving the match and risking a different answer
+            // from the one the cap editor writes against.
+            rows: joinVolumeToSequences(result.rows, volumeRes.volumes),
+            days: volumeRes.days,
+            timeZone: volumeRes.timeZone,
+            error: volumeRes.error,
+            truncated: volumeRes.truncated,
+          }}
           pool={pool}
         />
       )}

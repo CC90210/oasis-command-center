@@ -24,6 +24,7 @@ import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { Card, Tag } from "@/components/Card";
 import { ShoppingBag, Send, RefreshCcw, Loader2 } from "lucide-react";
 import { fuzzyScore } from "@/lib/fuzzy-match";
+import { composeShopOutBody, SHOP_OUT_EMAIL_TEMPLATES } from "@/lib/lenders/shop-out-email-templates";
 
 type AppRow = {
   id: string;
@@ -71,6 +72,7 @@ type PlanRow = {
   /** Severity-tiered warnings (2026-05-25 expansion). */
   warnings: PlanWarning[];
   rendered_subject: string;
+  rendered_body: string;
   /**
    * 2026-05-25 — plain-English narrative explaining why this lender
    * ranked where it did. Populated by buildLenderNarrative() on the
@@ -112,6 +114,18 @@ const STATUS_TONE: Record<string, string> = {
   suppressed: "bg-slate-500/15 text-slate-300 border-slate-500/30",
   error: "bg-rose-500/15 text-rose-300 border-rose-500/30",
 };
+
+function formatEmailMoney(value: unknown): string {
+  const amount = typeof value === "number" ? value : Number(String(value ?? "").replace(/[^0-9.]/g, ""));
+  return Number.isFinite(amount) && amount > 0
+    ? `$${Math.round(amount).toLocaleString("en-US")}`
+    : "Not provided";
+}
+
+function previewAgentName(renderedBody: string | undefined): string {
+  const match = renderedBody?.match(/\n([^\n]+)\nSunBiz Funding\s*$/);
+  return match?.[1]?.trim() || "SunBiz Submissions";
+}
 
 // Human-readable label for a thread in a needs-attention state. Operators
 // (Matt, Jordan, Alex, Emily) are not engineers — a raw
@@ -298,6 +312,7 @@ export function ShoppingOutClient({
   const [selectedLenderIds, setSelectedLenderIds] = useState<Set<string>>(new Set());
   const [lenderNetwork, setLenderNetwork] = useState<"sunbiz" | "funmate">("sunbiz");
   const [notes, setNotes] = useState("");
+  const [emailTemplateId, setEmailTemplateId] = useState("classic");
   // Per-deal CC: agent preset checkboxes (Jordan / Alex) + free-text
   // custom email. The shop-out POST forwards the resolved cc_emails to
   // the bridge tool, which passes them to send_gateway via --cc. SOP §3
@@ -485,6 +500,7 @@ export function ShoppingOutClient({
                   }))
               : [],
             rendered_subject: String(p.rendered_subject || ""),
+            rendered_body: String(p.rendered_body || ""),
             narrative: typeof p.narrative === "string" ? p.narrative : "",
           }))
           .sort((a: PlanRow, b: PlanRow) => b.match_score - a.match_score);
@@ -722,7 +738,13 @@ export function ShoppingOutClient({
           attachments,
           ...(lenderNetwork === "funmate"
             ? { notes: notes.trim() || undefined }
-            : { body_template: notes.trim() || undefined }),
+            : {
+                body_template: composeShopOutBody(
+                  SHOP_OUT_EMAIL_TEMPLATES.find((template) => template.id === emailTemplateId)?.body ||
+                    SHOP_OUT_EMAIL_TEMPLATES[0].body,
+                  notes,
+                ),
+              }),
           acknowledged_warnings: acknowledged.length > 0 ? acknowledged : undefined,
         }),
       });
@@ -1106,17 +1128,62 @@ export function ShoppingOutClient({
               )}
             </div>
 
+            <div className="space-y-2">
+              <div className="text-[11px] uppercase tracking-wider text-fg-dim font-semibold">
+                5 · Lender email template
+              </div>
+              <div className="grid gap-2 md:grid-cols-3">
+                {SHOP_OUT_EMAIL_TEMPLATES.map((template) => (
+                  <button
+                    key={template.id}
+                    type="button"
+                    onClick={() => setEmailTemplateId(template.id)}
+                    className={`rounded-md border p-3 text-left transition-colors ${
+                      emailTemplateId === template.id
+                        ? "border-accent bg-accent/10"
+                        : "border-bg-border bg-bg-deep hover:bg-bg-elev"
+                    }`}
+                  >
+                    <div className="text-[12.5px] font-semibold text-fg">{template.name}</div>
+                    <div className="mt-1 text-[10.5px] leading-snug text-fg-dim">{template.description}</div>
+                  </button>
+                ))}
+              </div>
+            </div>
+
             <div className="text-[11px] uppercase tracking-wider text-fg-dim font-semibold">
-              5 · Notes (optional — injected into email body)
+              6 · Additional notes (optional)
             </div>
             <textarea
               value={notes}
               onChange={(e) => setNotes(e.target.value)}
-              placeholder="Any context for the lenders — e.g. 'Owner is finalist for SBA but needs short-term bridge'…"
+              placeholder="Add deal-specific context. This is appended without replacing the file details above."
               rows={4}
               maxLength={2000}
               className="w-full text-sm px-3 py-2 rounded-md bg-bg-deep border border-bg-border text-fg resize-none"
             />
+            <div className="space-y-1.5">
+              <div className="text-[11px] uppercase tracking-wider text-fg-dim font-semibold">Email preview</div>
+              <div className="rounded-md border border-bg-border bg-bg-deep p-3">
+                <div className="text-[11px] text-fg-dim">Subject</div>
+                <div className="mt-0.5 text-[12.5px] font-semibold text-fg">
+                  {plan.find((row) => selectedLenderIds.has(row.lender_id))?.rendered_subject || plan[0]?.rendered_subject}
+                </div>
+                <div className="my-3 border-t border-bg-border" />
+                <pre className="whitespace-pre-wrap font-sans text-[12px] leading-relaxed text-fg-muted">
+                  {composeShopOutBody(
+                    SHOP_OUT_EMAIL_TEMPLATES.find((template) => template.id === emailTemplateId)?.body || SHOP_OUT_EMAIL_TEMPLATES[0].body,
+                    notes,
+                  )
+                    .replaceAll("{{application.business_name}}", String(selectedApp?.data.business_name || selectedApp?.data.dba || "Not provided"))
+                    .replaceAll("{{application.monthly_revenue_display}}", formatEmailMoney(selectedApp?.data.monthly_revenue))
+                    .replaceAll("{{application.position_count_display}}", String(selectedApp?.data.position_count ?? "Not provided"))
+                    .replaceAll("{{application.requested_amount_display}}", formatEmailMoney(selectedApp?.data.requested_amount))
+                    .replaceAll("{{lender.name}}", plan.find((row) => selectedLenderIds.has(row.lender_id))?.lender_name || plan[0]?.lender_name || "Lender")
+                    .replaceAll("{{agent.first_name}}", previewAgentName(plan[0]?.rendered_body))}
+                </pre>
+              </div>
+            </div>
             <div className="flex items-center justify-between gap-3">
               <div className="text-[11px] text-fg-dim">
                 {selectedLenderIds.size} lender{selectedLenderIds.size === 1 ? "" : "s"} ·{" "}
@@ -1199,9 +1266,18 @@ export function ShoppingOutClient({
                   const errish =
                     t.status === "error" || t.status === "sending" || t.status === "suppressed";
                   const rawDetail = t.last_error || t.last_response_summary;
+                  // A reply summary is only shown when a reply actually
+                  // arrived. Without this gate the row prints whatever happens
+                  // to be in last_response_summary and labels it the lender's
+                  // response — which is how six freshly SENT threads displayed
+                  // a send_gateway stack trace left there by the old VPS
+                  // sender. last_response_at is the evidence that a reply
+                  // exists; the summary alone is not.
                   const detailMsg = errish
                     ? friendlyThreadError(rawDetail)
-                    : t.last_response_summary;
+                    : t.last_response_at
+                      ? t.last_response_summary
+                      : null;
                   const detailTone = errish
                     ? t.status === "suppressed"
                       ? "text-fg-muted"

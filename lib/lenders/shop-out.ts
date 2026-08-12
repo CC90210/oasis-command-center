@@ -26,6 +26,7 @@ import { scoreLenderMatch } from "./match-fitness";
 import { buildLenderNarrative } from "./match-narrative";
 import { findAgentByEmail } from "@/lib/config/agents";
 import { updateRecord } from "@/lib/manifest/data";
+import { DEFAULT_SHOP_OUT_BODY } from "./shop-out-email-templates";
 
 // Stages at or past "shopping" — a (re-)shop-out must never downgrade these.
 const SHOPPING_OR_LATER = new Set([
@@ -108,19 +109,6 @@ const DEFAULT_SUBJECT = "New Deal ({{application.business_name}})";
 // currency renders "$42,000" not "42000". Closing line carries an explicit
 // ask (the draft critic flagged the old "let me know what you can do" as
 // having "no clear ask"). Operator can still edit per send.
-const DEFAULT_BODY = `New submission attached.
-
-Business:        {{application.business_name}}
-Monthly Revenue: {{application.monthly_revenue_display}}
-Positions:       {{application.position_count_display}}
-Requested:       {{application.requested_amount_display}}
-
-Application + 3 months of bank statements are attached. Please review and advise on approval.
-
-{{agent.first_name}}
-SunBiz Funding
-`;
-
 /** Format a currency-ish value for the lender email. Returns "Not provided"
  *  for empty/zero/non-numeric so the body never shows a bare "$" or "$0". */
 function moneyDisplay(v: unknown): string {
@@ -207,7 +195,7 @@ export async function buildShopOutPlan(input: ShopOutPlanInput): Promise<{
   }
 
   const subjectTemplate = input.subject_template || DEFAULT_SUBJECT;
-  const bodyTemplate = input.body_template || DEFAULT_BODY;
+  const bodyTemplate = input.body_template || DEFAULT_SHOP_OUT_BODY;
   const plan: ShopOutPlanRow[] = [];
   const missing_recipients: string[] = [];
 

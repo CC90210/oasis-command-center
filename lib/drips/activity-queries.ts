@@ -62,41 +62,75 @@ export async function recentDripActivity(
   const limit = Math.min(filters.limit ?? 200, 500);
   const since = new Date(filters.sinceMs ?? Date.now() - 7 * 24 * 3_600_000).toISOString();
 
-  let q = db
-    .from("drip_runs")
-    .select(
-      "id, lead_id, sequence_name, step_index, channel, status, from_identity, last_error, sent_at, scheduled_for",
-    )
-    .eq("tenant_id", tenantId)
-    .or(outcomeWindow(since))
-    // Anything still open sorts first (null sent_at), because a failure or a
-    // stuck retry is what an operator opened this tab for; completed sends
-    // follow, newest first.
-    .order("sent_at", { ascending: false, nullsFirst: true })
-    .order("scheduled_for", { ascending: false })
-    .limit(limit);
-  if (filters.channel) q = q.eq("channel", filters.channel);
-  if (filters.sequenceName) q = q.eq("sequence_name", filters.sequenceName);
+  const COLS =
+    "id, lead_id, sequence_name, step_index, channel, status, from_identity, last_error, sent_at, scheduled_for";
 
-  const res = await q;
-  if (res.error) throw new Error(`drip activity read failed: ${res.error.message}`);
-  const runs = res.data || [];
+  /**
+   * TWO QUERIES, EACH WITH ITS OWN LIMIT, and that is the point.
+   *
+   * A single query has to pick one ORDER BY, and whichever it picks decides
+   * which rows survive the limit — a later JS sort cannot recover a row the
+   * database already discarded. Ordering by scheduled_for drops the open
+   * failures once a tenant has more than `limit` runs in the window; ordering
+   * by sent_at drops recently-sent rows that were scheduled long ago, which is
+   * exactly the backlog case outcomeWindow exists for. Both losses are silent.
+   *
+   * So: OPEN rows (nothing sent yet — every failure and everything pending) are
+   * fetched separately from COMPLETED ones. Each is capped, so a flood of
+   * either cannot crowd out the other.
+   *
+   * The previous single query also carried `.order("sent_at", { nullsFirst })`,
+   * which was a comment asserting something that never happened: the live plane
+   * is Turso, lib/turso-postgrest.ts accepts only `{ ascending }`, and SQLite
+   * puts NULLs LAST on a DESC sort. The rows an operator opens this tab FOR
+   * were sorting to the bottom.
+   */
+  const base = (kind: "open" | "done") => {
+    let q = db
+      .from("drip_runs")
+      .select(COLS)
+      .eq("tenant_id", tenantId);
+    q =
+      kind === "open"
+        ? // Open: no sent_at at all, due inside the window.
+          q.is("sent_at", null).gte("scheduled_for", since)
+        : // Completed: measured by when it actually SENT, not when it was due.
+          q.not("sent_at", "is", null).gte("sent_at", since);
+    q = q.order(kind === "open" ? "scheduled_for" : "sent_at", { ascending: false }).limit(limit);
+    if (filters.channel) q = q.eq("channel", filters.channel);
+    if (filters.sequenceName) q = q.eq("sequence_name", filters.sequenceName);
+    return q;
+  };
 
-  // Lead names and brands in ONE batched read rather than per row.
-  const leadIds = [...new Set(runs.map((r) => String(r.lead_id)).filter(Boolean))].slice(0, 500);
+  const [openRes, doneRes] = await Promise.all([base("open"), base("done")]);
+  // Either failing is a failure. Returning half the picture as if it were the
+  // whole one is the silent-truncation shape this module exists to refuse.
+  if (openRes.error) throw new Error(`drip activity read failed: ${openRes.error.message}`);
+  if (doneRes.error) throw new Error(`drip activity read failed: ${doneRes.error.message}`);
+  const runs = [...(openRes.data || []), ...(doneRes.data || [])];
+
+  // Lead names and brands, batched — NOT truncated.
+  //
+  // This used to `.slice(0, 500)`, which was survivable while one query
+  // returned at most `limit` rows and became wrong the moment there were two:
+  // `runs` can now hold up to 2x. A truncated map does not lose rows, it
+  // MISLABELS them — every lead past the cutoff falls through to the "sunbiz"
+  // default, so Bluerise sends would be reported as SunBiz on the one surface
+  // built to say what actually went out. Silent, plausible, and wrong in the
+  // direction that matters.
+  const leadIds = [...new Set(runs.map((r) => String(r.lead_id)).filter(Boolean))];
   const names = new Map<string, string>();
   const brands = new Map<string, string>();
-  if (leadIds.length > 0) {
+  const CHUNK = 500;
+  for (let i = 0; i < leadIds.length; i += CHUNK) {
     const leads = await db
       .from("tenant_records")
       .select("id, data")
       .eq("tenant_id", tenantId)
-      .in("id", leadIds);
-    // Throwing here, not degrading. If this read fails the brand map stays
-    // empty and EVERY row falls back to "sunbiz" — so a screenful of Bluerise
-    // sends would be labelled SunBiz on the one surface built to report what
-    // actually went out. A wrong brand is worse than no screen: it is the same
-    // wrong answer the drip engine would give, echoed back as confirmation.
+      .in("id", leadIds.slice(i, i + CHUNK));
+    // Throwing, not degrading. If this read fails the brand map stays empty and
+    // EVERY row falls back to "sunbiz" — the same wrong answer, echoed back as
+    // confirmation. A wrong brand is worse than no screen.
     if (leads.error) throw new Error(`drip activity lead read failed: ${leads.error.message}`);
     for (const l of leads.data || []) {
       const d = (l.data || {}) as Record<string, unknown>;
@@ -124,6 +158,23 @@ export async function recentDripActivity(
     sentAt: r.sent_at ?? null,
     scheduledFor: r.scheduled_for ?? null,
   }));
+
+  // Sorted HERE, not in SQL, so the order does not depend on which dialect is
+  // behind getServiceSupabase(). Postgres and SQLite disagree about where NULLs
+  // land, and the compat shim does not carry nullsFirst at all.
+  //
+  // Open rows first — a failure or a stuck retry is what an operator opened
+  // this tab for — then completed sends, newest first.
+  rows.sort((a, b) => {
+    const openA = a.sentAt ? 1 : 0;
+    const openB = b.sentAt ? 1 : 0;
+    if (openA !== openB) return openA - openB;
+    const key = (r: DripActivityRow) => r.sentAt || r.scheduledFor || "";
+    // id breaks the tie. Neither query defines a secondary order, so equal
+    // timestamps would otherwise shuffle between reads and the table would
+    // reorder itself under an operator for no reason.
+    return key(b).localeCompare(key(a)) || a.id.localeCompare(b.id);
+  });
 
   return filters.status ? rows.filter((r) => r.status === filters.status) : rows;
 }

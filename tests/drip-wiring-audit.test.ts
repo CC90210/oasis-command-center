@@ -60,9 +60,23 @@ assert.ok(!governor.includes('.eq("metadata->>dry_run", "false")'),
 assert.ok(governor.includes('String(md.dry_run) === "true"'),
   "only an EXPLICIT dry run may be excluded from the count");
 assert.ok(governor.includes("countDripEmailByBrand"), "counts must be per-brand");
-assert.ok(executor.includes("emailGateReason(run.emailBudget, row.lead_id, brand, gateStage)"),
+assert.ok(executor.includes("emailGateReason(run.emailBudget, row.lead_id, brand, gateStage"),
   "the volume gate must be evaluated per-brand AND per-stage — a flat cap either " +
   "starves the hot stages or over-mails the cold ones");
+
+// ── The per-sequence daily cap is actually consulted, and actually spent ───
+// An operator can type a number into the Drips > Volume tab. If the gate is not
+// passed the sequence, that number is decoration: the UI would report a cap the
+// engine never reads, which is worse than having no cap at all.
+assert.ok(executor.includes("emailGateReason(run.emailBudget, row.lead_id, brand, gateStage, seqRef)"),
+  "the gate must receive the sequence, or a per-sequence cap set in the UI does nothing");
+assert.ok(/consumeEmail\(run\.emailBudget, row\.lead_id, brand, \{/.test(executor),
+  "a real send must SPEND the sequence's allowance, or the cap only bites on the next run");
+assert.ok(executor.includes("loadEmailBudget(db, emailLeadIds, Array.from(leadIdsByTenant.keys()))"),
+  "per-sequence caps must load for EVERY tenant in the batch — claimed[0].tenant_id is the " +
+  "mistake the brand map and the template pool each had to be fixed for");
+assert.ok(read("lib/drips/drip-rules-core.ts").includes("sequenceBudgetKeys"),
+  "sequence budget keys must be namespaced by tenant; a sequence NAME is not unique across tenants");
 assert.ok(read("lib/drips/drip-rules-core.ts").includes("perLeadCapForStage"),
   "the per-stage cap must exist");
 
