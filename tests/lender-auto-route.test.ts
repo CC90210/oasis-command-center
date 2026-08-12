@@ -363,8 +363,12 @@ assert.equal(
   // A's status and cursor, and the autoroute switch does not gate that write.
   // Every WRITE consults ownership: the thread-status write, routing
   // provenance, the unknown-cursor advance, and the no-cursor bail-out.
+  // EVERY write consults ownership: thread status, the offer record, the
+  // outcome ledger, routing provenance, the unknown-cursor advance, the
+  // no-cursor bail-out, and both rewinds. Scheduling this route with write=1
+  // turns each ungated one into an automatic mis-attribution path.
   assert.ok(
-    (route.match(/c\.senderOwnsThread/g) || []).length >= 4,
+    (route.match(/c\.senderOwnsThread/g) || []).length >= 7,
     "every write path must be gated on the sender actually owning the thread",
   );
   // ONLY THE NEWEST reply per thread may decide the deal. Several unread

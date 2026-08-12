@@ -406,7 +406,7 @@ export async function GET(req: NextRequest) {
       }
 
       // 2) offer record (Offers tab) — approval/counter with usable terms + a lender.
-      if ((cls.category === "approved" || cls.category === "counter_offer") && (cls.amount || cls.term_months || cls.factor_rate) && c.lenderId) {
+      if ((cls.category === "approved" || cls.category === "counter_offer") && (cls.amount || cls.term_months || cls.factor_rate) && c.lenderId && c.senderOwnsThread) {
         const existing = await db.from("tenant_records").select("id, data")
           .eq("tenant_id", SUNBIZ_TENANT_ID).eq("entity_type", "offer")
           .eq("data->>application_id", c.appId).eq("data->>lender_id", c.lenderId).limit(1);
@@ -427,7 +427,7 @@ export async function GET(req: NextRequest) {
 
       // 3) lender-intelligence ledger — every matched-lender outcome, with the
       // structured reason. Idempotent on (tenant, app, lender, reply_at).
-      if (c.lenderId) {
+      if (c.lenderId && c.senderOwnsThread) {
         await db.from("lender_reply_outcomes").upsert({
           tenant_id: SUNBIZ_TENANT_ID,
           application_id: c.appId,
