@@ -322,14 +322,42 @@ assert.equal(
   // funded file back to `approved` on a race.
   assert.ok(
     /status_changed_under_us/.test(route),
-    "the routing write must claim the status it decided against, and defer if it moved",
+    "the routing write must defer when the status moved under it",
   );
-  // An absent status is claimed with `is null`; `eq ""` never matches a missing
-  // key, so the router would defer forever on exactly the shopping-phase deals
-  // it exists to move.
+  // ATOMIC, not merely narrowed. The guard must ride on the statement that
+  // WRITES (updateRecord's ifMatch). A separate claim-then-write leaves the
+  // race open, because updateRecord re-reads and merges.
+  assert.ok(/ifMatch:/.test(route), "the routing write must use the compare-and-set form");
   assert.ok(
-    /\.is\("data->>status", null\)/.test(route),
-    "a blank status must be claimed with is-null, not eq-empty-string",
+    !/\.from\("tenant_records"\)[\s\S]{0,200}\.update\(\{ updated_at/.test(route),
+    "a separate claim-then-write does not close the race and must not come back",
+  );
+  {
+    const data = read("lib/manifest/data.ts");
+    assert.ok(data.includes("ifMatch"), "updateRecord must support the guard");
+    // The guard on the same statement is the whole point; asserting it sits
+    // before the write's .select keeps a refactor from splitting it back out.
+    // Scoped to updateRecord's own body — publishStatusChange also appears in
+    // this file's imports and in createRecord, so an unscoped indexOf compares
+    // against the wrong occurrence.
+    const body = data.slice(data.indexOf("export async function updateRecord"));
+    const guardAt = body.indexOf("input.ifMatch.value === null");
+    const hooksAt = body.indexOf("runStageTransitionHooks(");
+    assert.ok(guardAt > 0, "updateRecord must apply the guard");
+    assert.ok(
+      guardAt < hooksAt,
+      "the guard must be applied before the transition side effects are emitted",
+    );
+    // An absent field is guarded with null; `data->>x = ''` never matches a
+    // missing key, so an empty-string guard would refuse forever.
+    assert.ok(/\.is\(`data->>\$\{input\.ifMatch\.field\}`, null\)/.test(data),
+      "an absent field must be guarded with is-null, not eq-empty-string");
+  }
+  // `unknown` must advance the thread cursor, or the same reply is re-fetched
+  // and re-classified every ten minutes forever.
+  assert.ok(
+    /cls\.category === "unknown" && c\.thread/.test(route),
+    "an unknown reply must advance the cursor so it is not reclassified forever",
   );
   // `unknown` is the category most in need of a human, so it must reach the
   // flag path rather than being excluded with the write block.

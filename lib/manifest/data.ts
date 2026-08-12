@@ -40,7 +40,7 @@ import { applyLeadsBoardFilter, detectBoardExit } from "@/lib/leads/board-visibi
 
 export class RecordsError extends Error {
   constructor(
-    public code: "validation" | "not_found" | "forbidden" | "db",
+    public code: "validation" | "not_found" | "forbidden" | "db" | "conflict",
     message: string
   ) {
     super(message);
@@ -478,6 +478,24 @@ export type UpdateRecordInput = {
   entity: string;
   id: string;
   patch: Record<string, unknown>;
+  /**
+   * COMPARE-AND-SET. Apply the patch only while `data->>field` still equals
+   * `value`; otherwise throw RecordsError("conflict") and write nothing.
+   *
+   * Added 2026-08-12 for the lender reply auto-router. A caller that reads a
+   * record, decides something from it, and then calls updateRecord has a race:
+   * this function re-reads and merges, so anything a human changed in between
+   * is silently overwritten. For that router the overwrite was a FUNDED deal
+   * dragged back to `approved` by a late reply, which also restarts the
+   * merchant's drip email. A separate "claim" update beforehand does not fix
+   * it — only putting the condition on the same statement that writes does
+   * (Codex review P1, 2026-08-12).
+   *
+   * `value: null` matches an absent or null field. That distinction is
+   * load-bearing: `data->>x = ''` never matches a missing key, so guarding on
+   * an empty string would make every unset-field CAS fail forever.
+   */
+  ifMatch?: { field: string; value: string | null };
 };
 
 export async function updateRecord(input: UpdateRecordInput): Promise<TenantRecord> {
@@ -515,15 +533,34 @@ export async function updateRecord(input: UpdateRecordInput): Promise<TenantReco
   }
 
   const db = getServiceSupabase();
-  const result = await db
+  let writeQ = db
     .from("tenant_records")
     .update({ data: merged, updated_at: new Date().toISOString() })
     .eq("id", input.id)
     .eq("tenant_id", input.tenant_id)
-    .eq("entity_type", input.entity)
-    .select("id, tenant_id, entity_type, data, created_at, updated_at")
-    .single();
+    .eq("entity_type", input.entity);
+  // The guard rides on the SAME statement as the write, which is what makes it
+  // atomic. Everything below — the status event, the portal hooks — therefore
+  // only runs for a transition that actually happened.
+  if (input.ifMatch) {
+    writeQ =
+      input.ifMatch.value === null
+        ? writeQ.is(`data->>${input.ifMatch.field}`, null)
+        : writeQ.eq(`data->>${input.ifMatch.field}`, input.ifMatch.value);
+  }
+  const result = input.ifMatch
+    ? await writeQ.select("id, tenant_id, entity_type, data, created_at, updated_at").maybeSingle()
+    : await writeQ.select("id, tenant_id, entity_type, data, created_at, updated_at").single();
   if (result.error) throw new RecordsError("db", result.error.message);
+  // Only reachable with ifMatch (the unguarded path uses .single(), which
+  // errors on a miss) — so a null row here means the precondition failed, not
+  // that the record vanished.
+  if (!result.data) {
+    throw new RecordsError(
+      "conflict",
+      `precondition failed: ${input.ifMatch?.field} is no longer ${String(input.ifMatch?.value)}`,
+    );
+  }
   let row = result.data as TenantRecord;
 
   // Adon Phase 2: stamp data.application_url on every transition into a

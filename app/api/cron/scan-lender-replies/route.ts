@@ -462,6 +462,35 @@ export async function GET(req: NextRequest) {
             flagged--;
             routeDeferred++;
           }
+
+          // ADVANCE THE CURSOR FOR `unknown`, which nothing else does.
+          //
+          // `already` is computed from the thread's last_response_at, and step
+          // 1 — the only writer of that column — is skipped for unknown. So an
+          // unclassifiable reply was re-fetched, re-classified and re-flagged
+          // every ten minutes forever, burning inference on the same message
+          // indefinitely (Codex review P2, 2026-08-12).
+          //
+          // The STATUS is deliberately left alone: an unknown is not a
+          // `responded` verdict, and the pill must not claim one. Only the
+          // cursor moves, which is what makes the reply idempotent.
+          if (cls.category === "unknown" && c.thread) {
+            const cur = await db
+              .from("application_lender_threads")
+              .update({
+                last_response_at: replyAt,
+                last_response_summary: "unclassifiable reply — flagged for review",
+                updated_at: new Date().toISOString(),
+              })
+              .eq("id", c.thread.id)
+              .eq("tenant_id", SUNBIZ_TENANT_ID);
+            if (cur.error) {
+              // Left retryable on purpose: without the cursor this repeats, so
+              // the honest report is that it is not yet settled.
+              row.route = `${String(row.route)} (cursor_not_advanced)`;
+              routeDeferred++;
+            }
+          }
         } else if (!autoRouteLive()) {
           // Staged go-live: report what it WOULD have done so a day of real
           // replies can be read before anything moves.
@@ -475,44 +504,27 @@ export async function GET(req: NextRequest) {
           // the two-fields-out-of-sync defect closed earlier today, re-entering
           // from a new direction.
           try {
-            // COMPARE-AND-SET the status BEFORE updateRecord, because
-            // updateRecord has no conditional form: it re-reads the row and
-            // merges, so an operator advancing the deal between the status
-            // check above and this write would be silently overwritten — a
-            // funded deal dragged back to `approved` by a race (Codex review
-            // P1, 2026-08-12).
+            // ATOMIC. The guard rides on the same statement that writes
+            // (updateRecord's ifMatch), so an operator advancing the deal
+            // between the read above and this write loses the race instead of
+            // being silently overwritten — a funded deal dragged back to
+            // `approved`, which since this morning also restarts the
+            // merchant's drip email. A separate "claim" update beforehand does
+            // NOT close this; only the condition being on the writing
+            // statement does (Codex review P1, 2026-08-12).
             //
-            // This claim is the gate. It only matches while the status is
-            // still the one the decision was made against, so a deal that
-            // moved under us fails the claim and is left alone. updateRecord
-            // then runs for its side effects — stage_entered_at, the status
-            // event, the portal hooks — which a raw write would skip.
-            //
-            // An ABSENT status must be claimed with `is null`, not `eq ""`.
-            // That is the ordinary shopping-phase state for an application
-            // this app created, and `data->>status = ''` never matches a
-            // missing key — the claim would fail every time and the router
-            // would defer forever on exactly the deals it exists to move.
-            let claimQ = db
-              .from("tenant_records")
-              .update({ updated_at: new Date().toISOString() })
-              .eq("tenant_id", SUNBIZ_TENANT_ID)
-              .eq("entity_type", "application")
-              .eq("id", c.appId);
-            claimQ =
-              statusAtDecision === undefined || statusAtDecision === null || statusAtDecision === ""
-                ? claimQ.is("data->>status", null)
-                : claimQ.eq("data->>status", String(statusAtDecision));
-            const claim = await claimQ.select("id");
-            if (claim.error) throw new Error(`claim_failed: ${claim.error.message}`);
-            if ((claim.data || []).length === 0) {
-              row.route = `deferred: status_changed_under_us`;
-              routeDeferred++;
-              results.push(row);
-              continue;
-            }
-
+            // An ABSENT status is guarded with null, not "". That is the
+            // ordinary shopping-phase state, and `data->>status = ''` never
+            // matches a missing key, so the naive form would refuse forever on
+            // exactly the deals this exists to move.
             await updateRecord({
+              ifMatch: {
+                field: "status",
+                value:
+                  statusAtDecision === undefined || statusAtDecision === null || statusAtDecision === ""
+                    ? null
+                    : String(statusAtDecision),
+              },
               tenant_id: SUNBIZ_TENANT_ID,
               entity: "application",
               id: c.appId,
@@ -527,7 +539,13 @@ export async function GET(req: NextRequest) {
             row.route = `routed: ${decision.to} (${decision.reason})`;
             routed++;
           } catch (e) {
-            row.route = `route_failed: ${e instanceof Error ? e.message : "unknown"}`;
+            // A lost CAS is not a failure, it is a human who got there first.
+            // Named separately so a real write error stays visible instead of
+            // being buried under normal contention.
+            const msg = e instanceof Error ? e.message : "unknown";
+            row.route = /precondition failed/.test(msg)
+              ? "deferred: status_changed_under_us"
+              : `route_failed: ${msg}`;
             routeDeferred++;
           }
         }
