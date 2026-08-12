@@ -385,7 +385,18 @@ export async function GET(req: NextRequest) {
       // Steps 2 and 3 were already sender-gated on c.lenderId; this brings the
       // thread write to the same standard. A reply we cannot attribute now
       // writes nothing and is reported instead.
-      if (c.senderOwnsThread && c.thread) {
+      // Newest-gated as well as sender-gated. IMAP does not guarantee date
+      // order, so an older message processed after a newer one would overwrite
+      // the newer status AND regress last_response_at — after which the real
+      // newest reply is re-fetched and re-classified on every scan forever
+      // (Codex review P1, 2026-08-12). The ledger below still records every
+      // message; only the thread's CURRENT state is reserved for the latest.
+      if (
+        c.senderOwnsThread &&
+        c.thread &&
+        c.date &&
+        newestPerThread.get(c.thread.id) === c.date.getTime()
+      ) {
         const upd = await db.from("application_lender_threads")
           .update({ status: statusFor(cls.category), last_response_at: replyAt, last_response_summary: summary, updated_at: new Date().toISOString() })
           .eq("id", c.thread.id).eq("tenant_id", SUNBIZ_TENANT_ID);
@@ -612,7 +623,15 @@ export async function GET(req: NextRequest) {
             // never receives and nothing ever retries. Reported as deferred so
             // it shows in the counters rather than being counted as a
             // successful flag (Codex review P2, 2026-08-12).
-            row.route = `flag_failed: ${e instanceof Error ? e.message : "unknown"}`;
+            // A LOST CAS IS NOT A FAILED FLAG. The GitHub and Vercel schedules
+            // can overlap, so two invocations may handle the same reply; one
+            // loses the updated_at compare-and-set precisely BECAUSE the other
+            // already stamped it. Rewinding then would re-fetch and re-classify
+            // a reply that is already handled, every time the schedules
+            // collide (Codex review P2, 2026-08-12).
+            const msg = e instanceof Error ? e.message : "unknown";
+            const lostFlagRace = /precondition failed/.test(msg);
+            row.route = lostFlagRace ? "flag_already_stamped_by_concurrent_run" : `flag_failed: ${msg}`;
 
             routeDeferred++;
 
@@ -625,7 +644,7 @@ export async function GET(req: NextRequest) {
             // Retrying is safe: the thread-status write, the offer upsert and
             // the outcome-ledger upsert are all idempotent, so re-processing
             // this message costs one classify and changes nothing else.
-            if (c.senderOwnsThread && c.thread) {
+            if (!lostFlagRace && c.senderOwnsThread && c.thread) {
               await db
                 .from("application_lender_threads")
                 .update({ last_response_at: c.thread.last_response_at })
