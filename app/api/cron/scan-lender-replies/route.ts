@@ -468,7 +468,7 @@ export async function GET(req: NextRequest) {
         // has already advanced the cursor, so a transient read failure would
         // otherwise consume a valid approval permanently while reporting it as
         // deferred (Codex review P1, 2026-08-12).
-        if (c.thread) {
+        if (c.senderOwnsThread && c.thread) {
           await db
             .from("application_lender_threads")
             .update({ last_response_at: c.thread.last_response_at })
@@ -507,7 +507,13 @@ export async function GET(req: NextRequest) {
           // above; this makes the DEAL itself say a human needs to look, so a
           // reply that lands outside the clear cases cannot go unnoticed.
           row.route = `flagged: ${decision.reason}`;
-          flagged++;
+          // `flagged` is incremented only where the stamp actually lands (see
+          // below). Counting the intent here overstated it twice: for the
+          // no-cursor branch that returns without writing, and for a failed
+          // write that then had to decrement. A health counter that reports
+          // work nobody did is worse than no counter (Codex review P2,
+          // 2026-08-12).
+          //
           // NO THREAD MEANS NO CURSOR, so a flag here would be re-stamped on
           // every tick for as long as the message stays in the lookback
           // window — up to `days` (default 5) of repeated writes and inflated
@@ -554,6 +560,7 @@ export async function GET(req: NextRequest) {
               },
             });
             flagStamped = true;
+            flagged++;
           } catch (e) {
             // NOT swallowed. The IMAP cursor has already moved past this
             // message, so a flag that fails here is a review request the deal
@@ -561,7 +568,7 @@ export async function GET(req: NextRequest) {
             // it shows in the counters rather than being counted as a
             // successful flag (Codex review P2, 2026-08-12).
             row.route = `flag_failed: ${e instanceof Error ? e.message : "unknown"}`;
-            flagged--;
+
             routeDeferred++;
 
             // REWIND THE CURSOR so this reply is retried. Step 1 above already
@@ -573,7 +580,7 @@ export async function GET(req: NextRequest) {
             // Retrying is safe: the thread-status write, the offer upsert and
             // the outcome-ledger upsert are all idempotent, so re-processing
             // this message costs one classify and changes nothing else.
-            if (c.thread) {
+            if (c.senderOwnsThread && c.thread) {
               await db
                 .from("application_lender_threads")
                 .update({ last_response_at: c.thread.last_response_at })
