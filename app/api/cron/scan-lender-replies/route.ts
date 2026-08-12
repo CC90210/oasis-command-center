@@ -441,7 +441,12 @@ export async function GET(req: NextRequest) {
           // Without it an inbound stranger replying "Re: New Deal (X)" could
           // move a live file, because an approval does not consult the thread
           // list.
-          hasMatchedThread: Boolean(c.thread && c.lenderId),
+          // The thread must belong to the lender this email came FROM. Phase 1
+          // falls back to "the only thread on this deal" when the sender has
+          // no thread of its own, which is fine for pill display but not for
+          // routing: it would let lender B's approval move a deal shopped only
+          // to lender A (Codex review P1, 2026-08-12).
+          hasMatchedThread: Boolean(c.thread && c.lenderId && c.thread.lender_id === c.lenderId),
           currentStatus: statusAtDecision,
         });
 
@@ -454,6 +459,23 @@ export async function GET(req: NextRequest) {
           let flagStamped = false;
           try {
             await updateRecord({
+              // GUARDED like the routing write, and for a subtler reason:
+              // updateRecord re-reads and merges the WHOLE data document, so
+              // an unguarded flag write silently rewrites every other field as
+              // it found them — including a status an operator changed a
+              // moment ago. A flag is a small patch with a full-document
+              // blast radius (Codex review P1, 2026-08-12).
+              //
+              // Losing this precondition is the right outcome: the deal moved,
+              // so the rewind below retries and the next tick re-decides
+              // against the status that actually holds.
+              ifMatch: {
+                field: "status",
+                value:
+                  statusAtDecision === undefined || statusAtDecision === null
+                    ? null
+                    : String(statusAtDecision),
+              },
               tenant_id: SUNBIZ_TENANT_ID,
               entity: "application",
               id: c.appId,

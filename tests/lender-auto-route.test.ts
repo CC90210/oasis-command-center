@@ -327,7 +327,21 @@ assert.equal(
   // ATOMIC, not merely narrowed. The guard must ride on the statement that
   // WRITES (updateRecord's ifMatch). A separate claim-then-write leaves the
   // race open, because updateRecord re-reads and merges.
-  assert.ok(/ifMatch:/.test(route), "the routing write must use the compare-and-set form");
+  // BOTH writes are guarded. updateRecord re-reads and merges the WHOLE data
+  // document, so even the small flag patch can rewrite an operator's newer
+  // status as a side effect.
+  assert.equal(
+    (route.match(/ifMatch:/g) || []).length,
+    2,
+    "the routing write AND the flag write must both compare-and-set on status",
+  );
+  // Provenance requires the thread to belong to the SENDING lender. Phase 1
+  // falls back to "the only thread on this deal", which would let lender B's
+  // approval move a deal shopped only to lender A.
+  assert.ok(
+    /c\.thread\.lender_id === c\.lenderId/.test(route),
+    "routing provenance must require the thread to match the sending lender",
+  );
   assert.ok(
     !/\.from\("tenant_records"\)[\s\S]{0,200}\.update\(\{ updated_at/.test(route),
     "a separate claim-then-write does not close the race and must not come back",
