@@ -85,9 +85,16 @@ const MAX_PER_CLASSIFY_MS = 22_000;
  * and taking it away would trade one outage for another.
  */
 function checkTrigger(req: NextRequest): NextResponse | null {
-  // Vercel cron first: when the platform header is present this is a scheduled
-  // invocation and SCAN_TRIGGER_SECRET may legitimately not be involved.
-  if (req.headers.get("x-vercel-cron")) return checkCronAuth(req);
+  // TRY THE CRON GATE FIRST, and do NOT branch on the x-vercel-cron header to
+  // decide whether to try it. The GitHub Actions driver is what actually fires
+  // the crons in this repo (Vercel's own scheduler stopped on 2026-08-06), and
+  // it sends the CRON_SECRET bearer with NO x-vercel-cron header — production
+  // carries CRON_ALLOW_LOCAL=1 for exactly that path. Gating on the header
+  // meant every scheduled call fell through to the SCAN_TRIGGER_SECRET
+  // comparison, failed it, and 401'd: the scanner would have stayed exactly as
+  // dead as it was, which is the one thing this change exists to fix (Codex
+  // review P1, 2026-08-12).
+  if (checkCronAuth(req) === null) return null;
 
   const secret = process.env.SCAN_TRIGGER_SECRET;
   if (!secret) return NextResponse.json({ ok: false, error: "trigger_not_configured" }, { status: 500 });

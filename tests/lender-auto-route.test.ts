@@ -216,9 +216,31 @@ assert.equal(
   );
   const driver = read(".github/workflows/cron-driver.yml");
   assert.ok(driver.includes("/api/cron/scan-lender-replies"), "and driven by the workflow");
+  // BOTH registrations need write=1, not just the driver's. Dry-run is the
+  // default, so a scheduled call without it reads the whole inbox, classifies
+  // every reply, and stores none of it.
+  for (const [name, text] of [["driver", driver], ["vercel.json", read("vercel.json")]] as const) {
+    assert.ok(
+      /scan-lender-replies\?write=1/.test(text),
+      `${name} must drive the scanner with write=1, or it reads and stores nothing`,
+    );
+  }
+
+  // THE AUTH SHAPE THAT MADE THE FIRST ATTEMPT A NO-OP (Codex review P1).
+  //
+  // The GitHub driver is what actually fires crons here; it sends the
+  // CRON_SECRET bearer and NO x-vercel-cron header. Gating checkCronAuth
+  // behind that header meant every scheduled call fell through to the
+  // manual-trigger secret, failed it, and 401'd — leaving the scanner exactly
+  // as dead as before, which is the one thing this change exists to fix.
+  const route = read("app/api/cron/scan-lender-replies/route.ts");
   assert.ok(
-    /scan-lender-replies\?write=1/.test(driver),
-    "driven with write=1, or it reads the inbox every tick and stores nothing",
+    /if \(checkCronAuth\(req\) === null\) return null;/.test(route),
+    "checkCronAuth must be TRIED first, unconditionally",
+  );
+  assert.ok(
+    !/if \(req\.headers\.get\("x-vercel-cron"\)\)/.test(route),
+    "and must NOT be gated behind the x-vercel-cron header — the driver never sends it",
   );
 }
 
