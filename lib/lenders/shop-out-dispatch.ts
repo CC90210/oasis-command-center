@@ -168,6 +168,18 @@ export async function dispatchPendingSunbizThreads(input: {
         last_message_id: result.rfc822MessageId,
         send_interaction_id: result.rfc822MessageId,
         last_error: null,
+        // Clear the REPLY fields too. A successful send means this thread is
+        // awaiting an answer to THIS message, so anything left in them
+        // describes a previous attempt and is now false.
+        //
+        // Not hypothetical: the old VPS sender wrote its 500-char failure
+        // traceback into last_response_summary, a column meant for the
+        // LENDER's answer. Clearing last_error alone left that behind, and the
+        // row renders `last_error || last_response_summary` — so six
+        // successfully sent threads displayed a dead send_gateway stack trace
+        // styled as the funder's response.
+        last_response_summary: null,
+        last_response_at: null,
         updated_at: new Date().toISOString(),
       })
       .eq("id", thread.id);

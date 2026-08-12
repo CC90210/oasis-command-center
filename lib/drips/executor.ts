@@ -1172,7 +1172,10 @@ async function processEmailStep(
     // expects contact, a lead six weeks into follow-up does not. Passing the
     // stage raises the cap only where engagement justifies it.
     const gateStage = typeof data.stage === "string" ? data.stage : undefined;
-    const gated = emailGateReason(run.emailBudget, row.lead_id, brand, gateStage);
+    // Tenant + sequence, so an operator's own per-sequence daily cap is honoured
+    // and the hold reason names THEIR setting rather than a system rule.
+    const seqRef = { tenantId: row.tenant_id, id: row.sequence_id, name: row.sequence_name };
+    const gated = emailGateReason(run.emailBudget, row.lead_id, brand, gateStage, seqRef);
     if (gated) {
       return markRescheduled(
         db,
@@ -1270,7 +1273,13 @@ async function processEmailStep(
     // Spend the budget only on a send that actually left, so later rows in this
     // same run see the decremented remainder without re-querying. A failed send
     // deliberately does not consume: nothing reached the recipient.
-    if (run.emailBudget) consumeEmail(run.emailBudget, row.lead_id, brand);
+    if (run.emailBudget) {
+      consumeEmail(run.emailBudget, row.lead_id, brand, {
+        tenantId: row.tenant_id,
+        id: row.sequence_id,
+        name: row.sequence_name,
+      });
+    }
   }
 
   const interactionLog = logInteraction(db, {
@@ -1649,11 +1658,18 @@ export async function runDispatchDrips(): Promise<DispatchDripsResult> {
   let cancelled = 0;
   // Email volume budget, computed once for the whole run (2 aggregate queries +
   // one batched per-lead query) so per-row gating costs nothing. Only loaded
-  // when this run actually claimed email rows AND real sends are enabled: a dry
-  // run moves no bytes, so there is no volume to govern.
-  const emailLeadIds = Array.from(
-    new Set(claimed.filter((r) => r.channel === "email").map((r) => r.lead_id)),
-  );
+  // when real sends are enabled: a dry run moves no bytes, so there is no
+  // volume to govern.
+  //
+  // EVERY claimed lead, not just the rows AUTHORED as email. An SMS step can be
+  // substituted to email at send time (resolveChannel, when there is no lawful
+  // basis to text but there is an address) and land in processEmailStep. Keying
+  // this on `channel === "email"` meant a batch of only SMS-authored steps
+  // loaded NO budget at all — so those substituted emails bypassed the brand
+  // daily and hourly ceilings, the per-lead weekly cap and the per-sequence cap
+  // together. Every email guard, off, silently, on the path least likely to be
+  // watched.
+  const emailLeadIds = Array.from(new Set(claimed.map((r) => r.lead_id)));
   // Sending brand per lead, resolved ONCE for the run alongside the budget.
   // Read-only: the brand is stamped at enrolment, never derived here, so a lead
   // cannot flip brand mid-sequence. Fails safe to sunbiz.
@@ -1702,7 +1718,11 @@ export async function runDispatchDrips(): Promise<DispatchDripsResult> {
   const run: RunState = {
     creditExhausted: false,
     emailBudget:
-      dripSendEnabled() && emailLeadIds.length > 0 ? await loadEmailBudget(db, emailLeadIds) : null,
+      dripSendEnabled() && emailLeadIds.length > 0
+        // EVERY tenant in the batch, not claimed[0] — the same correction the
+        // brand map and the template pool each needed.
+        ? await loadEmailBudget(db, emailLeadIds, Array.from(leadIdsByTenant.keys()))
+        : null,
     brandByLead,
     templatePoolByTenant,
     availabilityByTenant,

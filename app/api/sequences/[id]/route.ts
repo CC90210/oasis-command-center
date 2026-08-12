@@ -31,6 +31,7 @@ import {
   diffPins,
 } from "@/lib/drips/template-interchange";
 import { loadApprovedPoolOrThrow } from "@/lib/drips/template-pool-store";
+import { parseSequenceDailyCap } from "@/lib/drips/sequence-volume-core";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -244,6 +245,17 @@ export async function PATCH(
   }
   if ("enabled" in body) patch.enabled = Boolean(body.enabled);
   if ("one_per_lead" in body) patch.one_per_lead = Boolean(body.one_per_lead);
+  if ("daily_email_cap" in body) {
+    // Validated through the same pure rule the UI uses, so the box and the
+    // server cannot disagree about what a valid cap is — and so 0 survives as
+    // 0. Coercing it to null would turn "send nothing from this sequence" into
+    // "send without limit", the worst available misreading of this field.
+    const verdict = parseSequenceDailyCap(body.daily_email_cap);
+    if (!verdict.ok) {
+      return NextResponse.json({ ok: false, error: "invalid_daily_email_cap", reason: verdict.reason }, { status: 400 });
+    }
+    patch.daily_email_cap = verdict.value;
+  }
   if ("email_class" in body) {
     const v = String(body.email_class || "");
     if (v !== "transactional" && v !== "commercial") {
