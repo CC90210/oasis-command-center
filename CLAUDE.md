@@ -44,6 +44,7 @@ Agent-authored commits MUST use a GitHub-associated email or Vercel silently **b
 <!-- LOCKSTEP block inserted below by empire-harness adoption -->
 
 ## Rules
+- **Ten-check acceptance is the definition of done.** Before reporting an outward-facing build complete, apply `docs/BUILD_ACCEPTANCE_STANDARD.md`: use permanent synthetic fixtures, run ten explicit checks including a safe production-shaped canary when applicable, verify the provider receipt/state transition, and report only after all ten pass. Unit tests and compilation alone are not completion.
 - **Surgical changes**; **evidence before claims** (run it, read it, then speak); **plain English to CC**.
 - New tenant-scoped query → add the `.eq('tenant_id', …)` filter in the same change. Reviewer must enforce.
 - Lockstep sibling: [AGENTS.md](AGENTS.md).

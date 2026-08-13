@@ -5,6 +5,7 @@
 > In lockstep with CLAUDE.md — edit one, sync the other.
 
 Key reminders (see CLAUDE.md for detail):
+- Ten-check acceptance is the definition of done. Apply `docs/BUILD_ACCEPTANCE_STANDARD.md` with permanent synthetic fixtures and a safe production-shaped canary before reporting outward-facing work complete.
 - Production dashboard, paying tenants. Deploys to Vercel on push to `main`.
 - Secrets in Vercel env only; redaction libs (`lib/secret-redaction.ts`) wrap model-visible strings.
 - Service-role queries bypass RLS → always filter by resolved `tenant_id`. See `docs/SECURITY_POSTURE.md`.
