@@ -167,6 +167,7 @@ function safeIdent(name: string): string | null {
 async function observeSqlCount(
   db: SupabaseClient,
   cfg: Record<string, unknown>,
+  tenantId: string | null,
 ): Promise<Observation> {
   const table = safeIdent(cfgString(cfg, "table"));
   const timeColumn = safeIdent(cfgString(cfg, "timeColumn", "created_at"));
@@ -175,10 +176,15 @@ async function observeSqlCount(
   const windowMinutes = cfgNumber(cfg, "windowMinutes", 1440);
   const since = new Date(Date.now() - windowMinutes * 60_000).toISOString();
 
-  const { count, error } = await db
-    .from(table)
-    .select("*", { count: "exact", head: true })
-    .gte(timeColumn, since);
+  // Tenant-scoped checks MUST filter, or the service role counts every
+  // tenant's rows and one tenant's score reflects another tenant's traffic
+  // (Codex review 2026-08-13, P1). A table without a tenant_id column errors
+  // here, which surfaces as 'unknown' — loud, and correct: declaring a check
+  // tenant-scoped against an unscoped table is a config bug, not a pass.
+  let q = db.from(table).select("*", { count: "exact", head: true }).gte(timeColumn, since);
+  if (tenantId) q = q.eq("tenant_id", tenantId);
+
+  const { count, error } = await q;
 
   if (error) return { error: `query_failed: ${error.message}`.slice(0, 200) };
   return { outcomeValue: count ?? 0 };
@@ -187,6 +193,7 @@ async function observeSqlCount(
 async function observeSqlRatio(
   db: SupabaseClient,
   cfg: Record<string, unknown>,
+  tenantId: string | null,
 ): Promise<Observation> {
   const table = safeIdent(cfgString(cfg, "table"));
   const timeColumn = safeIdent(cfgString(cfg, "timeColumn", "created_at"));
@@ -202,13 +209,17 @@ async function observeSqlRatio(
   const column = safeIdent(String(filter.column || ""));
   if (!column) return { error: "invalid_error_filter" };
 
-  const total = await db
-    .from(table)
-    .select("*", { count: "exact", head: true })
-    .gte(timeColumn, since);
+  // Same tenant-isolation rule as observeSqlCount: scoped checks filter, and
+  // BOTH the numerator and denominator get the filter or the ratio is
+  // cross-tenant garbage.
+  let totalQuery = db.from(table).select("*", { count: "exact", head: true }).gte(timeColumn, since);
+  if (tenantId) totalQuery = totalQuery.eq("tenant_id", tenantId);
+
+  const total = await totalQuery;
   if (total.error) return { error: `query_failed: ${total.error.message}`.slice(0, 200) };
 
   let errQuery = db.from(table).select("*", { count: "exact", head: true }).gte(timeColumn, since);
+  if (tenantId) errQuery = errQuery.eq("tenant_id", tenantId);
   errQuery =
     filter.operator === "in" && Array.isArray(filter.value)
       ? errQuery.in(column, filter.value as string[])
@@ -229,17 +240,16 @@ async function observeFreshness(
   db: SupabaseClient,
   cfg: Record<string, unknown>,
   thresholds: HealthThresholds,
+  tenantId: string | null,
 ): Promise<Observation> {
   const table = safeIdent(cfgString(cfg, "table"));
   const timeColumn = safeIdent(cfgString(cfg, "timeColumn", "updated_at"));
   if (!table || !timeColumn) return { error: "invalid_observer_cfg" };
 
-  const { data, error } = await db
-    .from(table)
-    .select(timeColumn)
-    .order(timeColumn, { ascending: false })
-    .limit(1)
-    .maybeSingle<Record<string, string>>();
+  let q = db.from(table).select(timeColumn).order(timeColumn, { ascending: false }).limit(1);
+  if (tenantId) q = q.eq("tenant_id", tenantId);
+
+  const { data, error } = await q.maybeSingle<Record<string, string>>();
 
   if (error) return { error: `query_failed: ${error.message}`.slice(0, 200) };
   const newest = data?.[timeColumn];
@@ -297,13 +307,13 @@ export async function observe(db: SupabaseClient, check: ResolvedCheck): Promise
     let obs: Observation;
     switch (check.observerKind) {
       case "sql_count":
-        obs = await observeSqlCount(db, check.observerCfg);
+        obs = await observeSqlCount(db, check.observerCfg, check.tenantId);
         break;
       case "sql_ratio":
-        obs = await observeSqlRatio(db, check.observerCfg);
+        obs = await observeSqlRatio(db, check.observerCfg, check.tenantId);
         break;
       case "freshness":
-        obs = await observeFreshness(db, check.observerCfg, check.thresholds);
+        obs = await observeFreshness(db, check.observerCfg, check.thresholds, check.tenantId);
         break;
       case "http_probe":
         obs = await observeHttpProbe(check.observerCfg);
@@ -367,10 +377,22 @@ async function pool<T, R>(items: T[], limit: number, fn: (item: T) => Promise<R>
 export async function runScan(
   db: SupabaseClient,
   opts: { write?: boolean; now?: Date } = {},
-): Promise<{ outcomes: CheckOutcome[]; alerted: string[]; cleared: string[] }> {
+): Promise<{
+  outcomes: CheckOutcome[];
+  alerted: string[];
+  cleared: string[];
+  /**
+   * Persistence failures during the scan (sample insert / status upsert).
+   * Non-empty means the dashboard may be serving STALE status rows — the
+   * caller must NOT advance the scan heartbeat, or "monitoring is current"
+   * becomes a lie layered over old data (Codex review 2026-08-13, P1).
+   */
+  persistFailures: string[];
+}> {
   const now = opts.now ?? new Date();
   const write = opts.write !== false;
   const checks = await loadChecks(db);
+  const persistFailures: string[] = [];
 
   const outcomes = await pool(checks, OBSERVER_CONCURRENCY, async (check) => {
     const obs = await observe(db, check);
@@ -384,7 +406,7 @@ export async function runScan(
 
     let consecutiveBad = 0;
     if (write) {
-      await db.from("feature_health_samples").insert({
+      const sampleWrite = await db.from("feature_health_samples").insert({
         check_key: check.checkKey,
         observed_at: now.toISOString(),
         uptime: obs.uptime ?? null,
@@ -398,12 +420,20 @@ export async function runScan(
         error: obs.error ?? null,
         duration_ms: obs.durationMs ?? null,
       });
+      if (sampleWrite.error) {
+        persistFailures.push(`${check.checkKey}: sample_insert: ${sampleWrite.error.message}`);
+      }
 
-      const { data: prev } = await db
+      const { data: prev, error: prevErr } = await db
         .from("feature_health_status")
         .select("consecutive_bad, consecutive_ok")
         .eq("check_key", check.checkKey)
         .maybeSingle<{ consecutive_bad: number; consecutive_ok: number }>();
+      if (prevErr) {
+        // A failed streak read silently resets consecutive counters, which can
+        // delay or double an alert — record it as a persistence failure too.
+        persistFailures.push(`${check.checkKey}: status_read: ${prevErr.message}`);
+      }
 
       const isBad = result.status === "down" || result.status === "degraded";
       // 'unknown' breaks neither streak: the monitor failed to look, which is
@@ -420,7 +450,7 @@ export async function runScan(
           ? 0
           : (prev?.consecutive_ok ?? 0) + 1;
 
-      await db.from("feature_health_status").upsert(
+      const statusWrite = await db.from("feature_health_status").upsert(
         {
           check_key: check.checkKey,
           score: result.score,
@@ -436,6 +466,9 @@ export async function runScan(
         },
         { onConflict: "check_key" },
       );
+      if (statusWrite.error) {
+        persistFailures.push(`${check.checkKey}: status_upsert: ${statusWrite.error.message}`);
+      }
     }
 
     return {
@@ -503,5 +536,6 @@ export async function runScan(
     }),
     alerted,
     cleared,
+    persistFailures,
   };
 }

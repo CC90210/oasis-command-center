@@ -41,9 +41,14 @@ export async function GET(req: NextRequest) {
     // so operator tuning in the UI survives every deploy.
     const { synced } = write ? await syncRegistry(db) : { synced: 0 };
 
-    const { outcomes, alerted, cleared } = await runScan(db, { write });
+    const { outcomes, alerted, cleared, persistFailures } = await runScan(db, { write });
 
-    if (write) {
+    // The heartbeat is advanced ONLY on a fully-persisted scan. If any status
+    // write failed, the dashboard may be serving stale rows — stamping the
+    // heartbeat anyway would make it claim "monitoring is current" over old
+    // data. Withholding it makes the staleness banner fire, which is the
+    // honest signal (Codex review 2026-08-13, P1).
+    if (write && persistFailures.length === 0) {
       // Heartbeat for the external dead-man watcher. Keyed on the condition, so
       // it dedups; the value is the timestamp, which is what the watcher reads.
       await db.from("health_alert_state").upsert(
@@ -58,6 +63,23 @@ export async function GET(req: NextRequest) {
           updated_at: new Date().toISOString(),
         },
         { onConflict: "condition_key" },
+      );
+    }
+
+    if (write && persistFailures.length > 0) {
+      // A partially-persisted scan is a MONITOR failure: say so with a 500 so
+      // Vercel's cron dashboard shows red, and name what failed.
+      console.error("[health-scan] persistence failures:", persistFailures);
+      return NextResponse.json(
+        {
+          ok: false,
+          error: "monitor_persist_failed",
+          persist_failures: persistFailures,
+          duration_ms: Date.now() - started,
+          checks: outcomes.length,
+          alerted,
+        },
+        { status: 500 },
       );
     }
 
