@@ -161,6 +161,107 @@ export async function listActiveInvites(tenantId: string): Promise<InviteRow[]> 
   return (data ?? []) as InviteRow[];
 }
 
+/** Invite lifetime. Was the Postgres column default; now set by the app. */
+export const INVITE_TTL_DAYS = 7;
+
+export function inviteExpiryFrom(now: Date = new Date()): string {
+  return new Date(now.getTime() + INVITE_TTL_DAYS * 24 * 60 * 60 * 1000).toISOString();
+}
+
+/**
+ * Supersede every live invite for the same (tenant, email, role).
+ *
+ * Idempotency for "Add team member": the raw token exists only in the response
+ * body of the POST that minted it (we store sha256 only), so a retry CANNOT
+ * resend the original link — it can only issue a new one. Left unchecked, an
+ * operator double-clicking, or a client retrying a request whose response was
+ * lost, accumulates N simultaneously-valid links that each grant a permanent
+ * seat. For an `admin` invite that is N live privilege grants outstanding.
+ *
+ * So the invariant is: at most ONE live invite per (tenant, email, role).
+ * The newest link wins and every earlier one is revoked in the same request.
+ * Open (unpinned) invites are excluded — they have no email to key on, and are
+ * deliberately reusable hand-out links.
+ *
+ * Returns how many were superseded so the caller can tell the operator that an
+ * earlier link they may have already sent has just been invalidated.
+ */
+export async function supersedeActiveInvites(args: {
+  tenantId: string;
+  role: Exclude<TeamRole, "owner">;
+  email: string;
+}): Promise<number> {
+  const supa = getServiceSupabase();
+  const target = normalizeEmail(args.email);
+  if (!target) return 0;
+
+  // Deliberately NOT `.ilike("email", target)`. The Turso adapter compiles ilike
+  // to SQL LIKE, where `_` and `%` are WILDCARDS — and `_` is a legal email
+  // character. Inviting `a_b@corp.com` would then match, and revoke, the live
+  // invite belonging to `axb@corp.com`. On a path whose whole job is retiring
+  // someone's access grant, a fuzzy match is a cross-account defect, so the
+  // address is compared exactly in code after normalisation.
+  const { data: candidates, error: selectErr } = await supa
+    .from("tenant_invites")
+    .select("id, email")
+    .eq("tenant_id", args.tenantId)
+    .eq("team_role", args.role)
+    .is("redeemed_at", null)
+    .is("revoked_at", null)
+    .gt("expires_at", new Date().toISOString());
+  if (selectErr) throw selectErr;
+
+  const ids = (candidates ?? [])
+    .filter((r) => normalizeEmail(r.email as string | null) === target)
+    .map((r) => r.id as string);
+  if (!ids.length) return 0;
+
+  // tenant_id is re-asserted on the write even though `ids` came from a
+  // tenant-scoped read. This is a service-role client, so it bypasses RLS and
+  // nothing downstream would catch a cross-tenant id if the read above were
+  // ever widened or its filters reordered. The constraint costs nothing and
+  // keeps the mutation correct on its own terms.
+  const { error: updateErr } = await supa
+    .from("tenant_invites")
+    .update({ revoked_at: new Date().toISOString() })
+    .eq("tenant_id", args.tenantId)
+    .in("id", ids);
+  if (updateErr) throw updateErr;
+  return ids.length;
+}
+
+/**
+ * The exact row written by createInvite.
+ *
+ * Pure and exported so the regression test can assert the payload satisfies
+ * every NOT NULL column WITHOUT needing a database — which is precisely the
+ * check that was missing when the Turso port dropped the expires_at default.
+ */
+export function buildInviteInsert(args: {
+  tenantId: string;
+  role: Exclude<TeamRole, "owner">;
+  createdBy: string;
+  email?: string | null;
+  tokenHash: string;
+  now?: Date;
+}): {
+  tenant_id: string;
+  email: string | null;
+  team_role: string;
+  token_hash: string;
+  created_by: string;
+  expires_at: string;
+} {
+  return {
+    tenant_id: args.tenantId,
+    email: args.email ?? null,
+    team_role: args.role,
+    token_hash: args.tokenHash,
+    created_by: args.createdBy,
+    expires_at: inviteExpiryFrom(args.now ?? new Date()),
+  };
+}
+
 export async function createInvite(args: {
   tenantId: string;
   role: Exclude<TeamRole, "owner">;
@@ -169,15 +270,22 @@ export async function createInvite(args: {
 }): Promise<{ id: string; rawToken: string; expiresAt: string }> {
   const supa = getServiceSupabase();
   const { raw, hash } = generateInviteToken();
+  // expires_at is written EXPLICITLY, not left to a column default.
+  //
+  // Postgres had DEFAULT now() + interval '7 days' on this column. That default
+  // did not survive the Turso port — the ported DDL is `"expires_at" TEXT NOT
+  // NULL` with no default — so this insert, which omitted the column, failed
+  // with `NOT NULL constraint failed: tenant_invites.expires_at` on EVERY call.
+  // The route caught it and returned 500, and the UI said "Failed to create
+  // invite", so the whole Add-team-member flow was dead from the 2026-08-09
+  // cutover (last successful invite: 2026-08-09T23:19Z) until this fix.
+  //
+  // Owning the value in app code rather than restoring the DB default is
+  // deliberate: it is testable without a database, it is identical across both
+  // backends, and it cannot silently regress the next time the schema is ported.
   const { data, error } = await supa
     .from("tenant_invites")
-    .insert({
-      tenant_id: args.tenantId,
-      email: args.email ?? null,
-      team_role: args.role,
-      token_hash: hash,
-      created_by: args.createdBy,
-    })
+    .insert(buildInviteInsert({ ...args, tokenHash: hash }))
     .select("id, expires_at")
     .single();
   if (error || !data) throw error ?? new Error("invite_create_failed");
