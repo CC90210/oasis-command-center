@@ -291,7 +291,10 @@ export default async function RootLayout({
     pathOverrideSlug,
     tenantProfileSlug,
   })
-    ? [{ group: "Founders", href: "/founders/marketing", label: "Marketing", icon: "Megaphone" }]
+    ? [
+        { group: "Founders", href: "/founders/marketing", label: "Content", icon: "Megaphone" },
+        { group: "Founders", href: "/founders/growth", label: "Marketing", icon: "BarChart3" },
+      ]
     : [];
   // The chat-shell-vs-constrained <main> decision lives in MainShell (a CLIENT
   // component using usePathname) — NOT here. This root layout is a Server
