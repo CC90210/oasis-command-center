@@ -35,12 +35,20 @@ assert.equal(
 const html = renderShopOutHtml(
   "New submission attached.\n\nBusiness: A&B <Holdings>\n\nSunBiz Submissions\nSunBiz Funding",
   "desk@sunbizfunding.com",
+  2,
 );
 assert.match(html, /SUN<span[^>]*>BIZ<\/span> FUNDING/);
 assert.match(html, /Lender Submissions/);
+assert.match(html, /Submission ready for review/);
+assert.match(html, /Deal snapshot/);
+assert.match(html, /2 supporting documents are securely attached/);
+assert.match(html, /Lender Relations/);
+assert.match(html, /CONFIDENTIAL LENDER COMMUNICATION/);
 assert.match(html, /SunBiz Submissions/);
 assert.match(html, /desk@sunbizfunding\.com/);
 assert.equal((html.match(/SunBiz Submissions/g) || []).length, 1, "HTML must not duplicate the signature");
 assert.match(html, /A&amp;B &lt;Holdings&gt;/, "operator copy must be HTML escaped");
+assert.match(html, /Monthly Revenue[\s\S]*Not provided/, "missing structured details must degrade safely");
 assert.doesNotMatch(html, /A&B <Holdings>/);
+assert.doesNotMatch(renderShopOutHtml("No files.\n\nSunBiz Submissions\nSunBiz Funding", "desk@sunbizfunding.com"), /Submission package included/);
 console.log("shop-out-email-templates.test.ts: all assertions passed");

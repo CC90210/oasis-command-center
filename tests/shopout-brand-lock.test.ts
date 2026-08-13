@@ -98,7 +98,7 @@ assert.match(
 );
 assert.match(
   lenderSender,
-  /html:\s*renderShopOutHtml\(lenderText,\s*creds\.fromAddress\)/,
+  /html:\s*renderShopOutHtml\(lenderText,\s*creds\.fromAddress,\s*files\.length\)/,
   "lender mail must always include the branded HTML alternative",
 );
 
