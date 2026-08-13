@@ -40,16 +40,35 @@ const TESTS_DIR = join(ROOT, "tests");
 
 const filters = process.argv.slice(2).filter((a) => !a.startsWith("-"));
 
+/**
+ * Two test dialects live in tests/, and matching only one is how a suite ends up
+ * reporting success while silently skipping work:
+ *
+ *   *.test.ts   standalone scripts with top-level assertions, run under tsx
+ *   *.test.mjs  node:test suites, which need the --test runner to execute at all
+ *
+ * Discovering only .test.ts hid tests/turso-rpc-texttorrent.test.mjs and its 21
+ * lease / duplicate-SMS / suppression checks (Codex review, 2026-08-13).
+ *
+ * NOTE: tests/test_harness_canonical.py is a Python harness. It is referenced by
+ * no npm script and no CI step, and a Node runner cannot execute it. It is left
+ * alone here deliberately rather than silently counted as covered.
+ */
+const argvFor = (file) =>
+  file.endsWith(".test.mjs")
+    ? ["--conditions=react-server", "--test", join("tests", file)]
+    : ["--conditions=react-server", "--import", "tsx", join("tests", file)];
+
 const files = readdirSync(TESTS_DIR)
-  .filter((f) => f.endsWith(".test.ts"))
+  .filter((f) => f.endsWith(".test.ts") || f.endsWith(".test.mjs"))
   .filter((f) => filters.length === 0 || filters.some((p) => f.includes(p)))
   .sort();
 
 if (files.length === 0) {
   console.error(
     filters.length
-      ? `no tests/*.test.ts matched: ${filters.join(", ")}`
-      : "no tests/*.test.ts found"
+      ? `no tests/*.test.{ts,mjs} matched: ${filters.join(", ")}`
+      : "no tests/*.test.{ts,mjs} found"
   );
   process.exit(1);
 }
@@ -59,11 +78,11 @@ const failed = [];
 
 for (const file of files) {
   // argv array, never a shell string: no interpolation, nothing to quote.
-  const res = spawnSync(
-    process.execPath,
-    ["--conditions=react-server", "--import", "tsx", join("tests", file)],
-    { cwd: ROOT, encoding: "utf8", windowsHide: true }
-  );
+  const res = spawnSync(process.execPath, argvFor(file), {
+    cwd: ROOT,
+    encoding: "utf8",
+    windowsHide: true,
+  });
   const ok = res.status === 0;
   if (ok) {
     console.log(`  ok    ${file}`);
