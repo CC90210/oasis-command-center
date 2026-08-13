@@ -176,6 +176,9 @@ export const SUN_NAV: NavItem[] = [
   { group: "System", href: "/team", label: "Team", icon: "UsersRound" },
   { group: "System", href: "/automations", label: "Automations", icon: "RefreshCcw" },
   { group: "System", href: "/health", label: "Health", icon: "ShieldCheck" },
+  // Admin-only in practice: the page itself redirects non-admins. Nav-level
+  // hiding would need the session here, which this static config does not have.
+  { group: "System", href: "/fleet-health", label: "Fleet Health", icon: "Activity" },
   { group: "System", href: "/embed", label: "Embed", icon: "Code2" },
   { group: "System", href: "/settings", label: "Settings", icon: "Settings" },
 ];
