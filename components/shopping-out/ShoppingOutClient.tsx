@@ -24,7 +24,7 @@ import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { Card, Tag } from "@/components/Card";
 import { ShoppingBag, Send, RefreshCcw, Loader2 } from "lucide-react";
 import { fuzzyScore } from "@/lib/fuzzy-match";
-import { composeShopOutBody, SHOP_OUT_EMAIL_TEMPLATES } from "@/lib/lenders/shop-out-email-templates";
+import { composeShopOutBody, resolveShopOutPresentation, SHOP_OUT_EMAIL_TEMPLATES } from "@/lib/lenders/shop-out-email-templates";
 
 type AppRow = {
   id: string;
@@ -1132,7 +1132,7 @@ export function ShoppingOutClient({
               <div className="text-[11px] uppercase tracking-wider text-fg-dim font-semibold">
                 5 · Lender email template
               </div>
-              <div className="grid gap-2 md:grid-cols-3">
+              <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-4">
                 {SHOP_OUT_EMAIL_TEMPLATES.map((template) => (
                   <button
                     key={template.id}
@@ -1171,10 +1171,10 @@ export function ShoppingOutClient({
                 </div>
                 <div className="my-3 border-t border-bg-border" />
                 <pre className="whitespace-pre-wrap font-sans text-[12px] leading-relaxed text-fg-muted">
-                  {composeShopOutBody(
+                  {resolveShopOutPresentation(composeShopOutBody(
                     SHOP_OUT_EMAIL_TEMPLATES.find((template) => template.id === emailTemplateId)?.body || SHOP_OUT_EMAIL_TEMPLATES[0].body,
                     notes,
-                  )
+                  )).text
                     .replaceAll("{{application.business_name}}", String(selectedApp?.data.business_name || selectedApp?.data.dba || "Not provided"))
                     .replaceAll("{{application.monthly_revenue_display}}", formatEmailMoney(selectedApp?.data.monthly_revenue))
                     .replaceAll("{{application.position_count_display}}", String(selectedApp?.data.position_count ?? "Not provided"))

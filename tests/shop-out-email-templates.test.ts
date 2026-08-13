@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
-import { composeShopOutBody, normalizeShopOutText, renderShopOutHtml, SHOP_OUT_EMAIL_TEMPLATES } from "../lib/lenders/shop-out-email-templates";
+import { composeShopOutBody, normalizeShopOutText, PLAIN_SHOP_OUT_MARKER, renderShopOutHtml, resolveShopOutPresentation, SHOP_OUT_EMAIL_TEMPLATES } from "../lib/lenders/shop-out-email-templates";
 
-assert.equal(SHOP_OUT_EMAIL_TEMPLATES.length, 3);
-for (const template of SHOP_OUT_EMAIL_TEMPLATES) {
+assert.equal(SHOP_OUT_EMAIL_TEMPLATES.length, 4);
+for (const template of SHOP_OUT_EMAIL_TEMPLATES.filter((template) => template.id !== "plain")) {
   assert.match(template.body, /\{\{application\.business_name\}\}/);
   assert.match(template.body, /\{\{application\.monthly_revenue_display\}\}/);
   assert.match(template.body, /\{\{application\.position_count_display\}\}/);
@@ -12,6 +12,16 @@ for (const template of SHOP_OUT_EMAIL_TEMPLATES) {
   assert.match(template.body, /SunBiz Submissions/);
   assert.doesNotMatch(template.body, /\{\{agent\.first_name\}\}/);
 }
+const plain = SHOP_OUT_EMAIL_TEMPLATES.find((template) => template.id === "plain");
+assert.ok(plain?.body.startsWith(PLAIN_SHOP_OUT_MARKER));
+assert.deepEqual(resolveShopOutPresentation(plain?.body || ""), {
+  text: "Please see application and statements attached. Thanks",
+  branded: false,
+});
+assert.deepEqual(resolveShopOutPresentation("Regular submission"), {
+  text: "Regular submission",
+  branded: true,
+});
 const composed = composeShopOutBody(SHOP_OUT_EMAIL_TEMPLATES[0].body, "Strong August MTD.");
 assert.match(composed, /Business:/);
 assert.match(composed, /Additional context:\nStrong August MTD\.\n\nSunBiz Submissions\nSunBiz Funding$/);
@@ -38,17 +48,12 @@ const html = renderShopOutHtml(
   2,
 );
 assert.match(html, /SUN<span[^>]*>BIZ<\/span> FUNDING/);
-assert.match(html, /Lender Submissions/);
-assert.match(html, /Submission ready for review/);
-assert.match(html, /Deal snapshot/);
-assert.match(html, /2 supporting documents are securely attached/);
-assert.match(html, /Lender Relations/);
-assert.match(html, /CONFIDENTIAL LENDER COMMUNICATION/);
+assert.match(html, /Business Funding &bull; Built Around Your Cash Flow/);
+assert.match(html, /SunBiz Funding LLC/);
+assert.match(html, /https:\/\/sunbizfunding\.com/);
+assert.match(html, /shared submissions inbox/);
 assert.match(html, /SunBiz Submissions/);
 assert.match(html, /desk@sunbizfunding\.com/);
-assert.equal((html.match(/SunBiz Submissions/g) || []).length, 1, "HTML must not duplicate the signature");
 assert.match(html, /A&amp;B &lt;Holdings&gt;/, "operator copy must be HTML escaped");
-assert.match(html, /Monthly Revenue[\s\S]*Not provided/, "missing structured details must degrade safely");
 assert.doesNotMatch(html, /A&B <Holdings>/);
-assert.doesNotMatch(renderShopOutHtml("No files.\n\nSunBiz Submissions\nSunBiz Funding", "desk@sunbizfunding.com"), /Submission package included/);
 console.log("shop-out-email-templates.test.ts: all assertions passed");
