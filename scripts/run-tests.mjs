@@ -54,10 +54,18 @@ const filters = process.argv.slice(2).filter((a) => !a.startsWith("-"));
  * no npm script and no CI step, and a Node runner cannot execute it. It is left
  * alone here deliberately rather than silently counted as covered.
  */
-const argvFor = (file) =>
-  file.endsWith(".test.mjs")
-    ? ["--conditions=react-server", "--test", join("tests", file)]
-    : ["--conditions=react-server", "--import", "tsx", join("tests", file)];
+// tsx is loaded for BOTH dialects. The .mjs suite imports lib/*.ts, and Node
+// only resolves that natively from v22.6 (type stripping); CI pins v20.20.2, so
+// omitting it passes on a modern local Node and fails in CI with
+// ERR_UNKNOWN_FILE_EXTENSION — the same local/CI divergence this runner exists
+// to eliminate, which is how it slipped through first time round.
+const argvFor = (file) => [
+  "--conditions=react-server",
+  "--import",
+  "tsx",
+  ...(file.endsWith(".test.mjs") ? ["--test"] : []),
+  join("tests", file),
+];
 
 const files = readdirSync(TESTS_DIR)
   .filter((f) => f.endsWith(".test.ts") || f.endsWith(".test.mjs"))
