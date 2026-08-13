@@ -880,7 +880,22 @@ async function processSmsStep(
     identity = { actAsEmail: null, senderId: pinned, repKey: "accel" };
   } else {
     const resolved = await resolveDripSmsIdentity(row.tenant_id, row.lead_id, data);
-    if ("error" in resolved) return markRetryOrFail(db, row, `sms_identity: ${resolved.error}`);
+    if ("error" in resolved) {
+      // "This rep owns no usable number" is BLOCKED, not FAILED. Retrying
+      // cannot buy a number, so burning the attempt budget only converts a
+      // fixable operational gap into a dead row. Hold it, name the rep, and let
+      // the health check page someone to buy a line.
+      // See [[feedback_blocking_not_error]].
+      if (resolved.error.startsWith("rep_has_no_line")) {
+        return markRescheduled(
+          db,
+          row,
+          new Date(Date.now() + 4 * 3_600_000).toISOString(),
+          `sms_no_sender_line (${resolved.error}) — buy a number for this rep in TextTorrent`,
+        );
+      }
+      return markRetryOrFail(db, row, `sms_identity: ${resolved.error}`);
+    }
     identity = resolved;
   }
 
