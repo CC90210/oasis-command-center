@@ -62,6 +62,14 @@ jobs:
           # rewriting 48 invocations, and it is what test:watermark already
           # does inline. Verified on node v20.20.2 (the version this job pins)
           # that --conditions IS honoured via NODE_OPTIONS.
+          #
+          # 2026-08-13: now belt-and-braces. scripts/run-tests.mjs sets the
+          # condition per test process, so every npm test script carries it on
+          # its own and a LOCAL run behaves identically to CI. Fixing it only
+          # here is what let the suite stay broken on developer machines while
+          # CI stayed green, which is how the tenant_invites.expires_at
+          # regression reached production unnoticed. Kept because it costs
+          # nothing and protects any future step that shells out to tsx directly.
           NODE_OPTIONS: --conditions=react-server
         run: |
           npm run test:sunbiz

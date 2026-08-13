@@ -39,6 +39,19 @@ assert.match(contentRoute, /content-range/);
 assert.match(contentRoute, /import\("sharp"\)/);
 assert.match(contentRoute, /searchParams\.get\("download"\)/);
 assert.match(access, /canViewLead/);
-assert.match(access, /startsWith\(expectedPrefix\)/);
+// The tenant-prefix containment check used to be inline here as
+// `startsWith(expectedPrefix)`. It was extracted to lib/lead-document-path.ts,
+// so asserting on that literal was testing where the code lives rather than
+// that it runs, and it broke on the move while the guard itself was untouched.
+// Assert the access path still DELEGATES to the guard, and assert the guard's
+// own content where it actually lives.
+assert.match(access, /normalizeLeadDocumentStoragePath/);
+assert.match(access, /storage_path_mismatch/);
+const documentPath = fs.readFileSync(
+  path.join(root, "lib/lead-document-path.ts"),
+  "utf8",
+);
+assert.match(documentPath, /startsWith\(expectedPrefix\)/);
+assert.match(documentPath, /\.\./, "path traversal rejection must survive refactors");
 
 console.log("ok document MIME recovery, preview fallbacks, authenticated streaming, and access guards");
