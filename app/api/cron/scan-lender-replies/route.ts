@@ -26,6 +26,9 @@ import { simpleParser } from "mailparser";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { getSubmissionsCreds } from "@/lib/integrations/submissions-gmail";
 import { classifyLenderReply, type LenderReplyCategory, type LenderReplyClass } from "@/lib/lenders/classify-reply";
+import { checkCronAuth } from "@/lib/cron-auth";
+import { updateRecord } from "@/lib/manifest/data";
+import { planApplicationRoute, minConfidenceFromEnv, autoRouteLive } from "@/lib/lenders/auto-route";
 import { timingSafeEqual } from "crypto";
 
 export const runtime = "nodejs";
@@ -68,7 +71,31 @@ const MIN_CLASSIFY_MS = 8_000;
 /** Ceiling for any single classify, so one wedged job can't eat the whole budget. */
 const MAX_PER_CLASSIFY_MS = 22_000;
 
+/**
+ * EITHER auth is sufficient, and both are still constant-time and fail-closed.
+ *
+ * This route was manual-trigger only (SCAN_TRIGGER_SECRET bearer) and was
+ * therefore never registered in vercel.json — which is why it had not written
+ * anything since 2026-08-06 while 898 lender threads sat unread. Scheduling it
+ * needs Vercel's own cron auth (checkCronAuth: CRON_SECRET bearer AND the
+ * platform-injected `x-vercel-cron` header, neither forgeable alone).
+ *
+ * The existing manual path is kept working unchanged rather than migrated,
+ * because it is the only way to run this on demand while diagnosing the inbox,
+ * and taking it away would trade one outage for another.
+ */
 function checkTrigger(req: NextRequest): NextResponse | null {
+  // TRY THE CRON GATE FIRST, and do NOT branch on the x-vercel-cron header to
+  // decide whether to try it. The GitHub Actions driver is what actually fires
+  // the crons in this repo (Vercel's own scheduler stopped on 2026-08-06), and
+  // it sends the CRON_SECRET bearer with NO x-vercel-cron header — production
+  // carries CRON_ALLOW_LOCAL=1 for exactly that path. Gating on the header
+  // meant every scheduled call fell through to the SCAN_TRIGGER_SECRET
+  // comparison, failed it, and 401'd: the scanner would have stayed exactly as
+  // dead as it was, which is the one thing this change exists to fix (Codex
+  // review P1, 2026-08-12).
+  if (checkCronAuth(req) === null) return null;
+
   const secret = process.env.SCAN_TRIGGER_SECRET;
   if (!secret) return NextResponse.json({ ok: false, error: "trigger_not_configured" }, { status: 500 });
   const auth = req.headers.get("authorization") || "";
@@ -134,7 +161,7 @@ export async function GET(req: NextRequest) {
   type Candidate = {
     subject: string; from: string; date: Date | null; bizName: string;
     appId: string; lenderId: string | null; lenderName: string | null;
-    thread: Thread | null; body: string; already: boolean;
+    thread: Thread | null; body: string; already: boolean; appMatchUnambiguous: boolean; senderOwnsThread: boolean;
   };
   const candidates: Candidate[] = [];
   const results: Array<Record<string, unknown>> = [];
@@ -185,7 +212,20 @@ export async function GET(req: NextRequest) {
       }
 
       const bn = bizName.toLowerCase();
-      const app = apps.find((a) => a.name === bn || a.name.includes(bn) || bn.includes(a.name));
+      // Substring matching BOTH ways, first-match-wins. Deliberately loose, and
+      // fine for what it was built for: updating a thread pill and filing an
+      // offer, where a near-miss is a cosmetic error someone notices.
+      //
+      // It is NOT good enough to move a deal. "ABC" matches "ABC Holdings" and
+      // vice versa, so with two similarly-named merchants a confident approval
+      // could route the wrong file (Codex review P1, 2026-08-12). The routing
+      // path therefore demands certainty, computed here and carried on the
+      // candidate: an exact name, or a single candidate overall. Everything
+      // else keeps the existing loose behaviour.
+      const appMatches = apps.filter((a) => a.name === bn || a.name.includes(bn) || bn.includes(a.name));
+      const exactMatches = appMatches.filter((a) => a.name === bn);
+      const app = exactMatches[0] || appMatches[0];
+      const appMatchUnambiguous = exactMatches.length === 1 || (exactMatches.length === 0 && appMatches.length === 1);
       if (!app) {
         results.push({ subject, from, bizName, match: "no_application" });
         continue;
@@ -194,13 +234,21 @@ export async function GET(req: NextRequest) {
       const appThreads = threads.filter((t) => t.application_id === app.id);
       const thread = (lender ? appThreads.find((t) => t.lender_id === lender.id) : null) || (appThreads.length === 1 ? appThreads[0] : null);
 
+      // Does this thread belong to the lender the email actually came FROM?
+      // Phase 1's sole-thread fallback above assigns a thread even when the
+      // sender matched no lender, so every WRITE must consult this rather than
+      // the mere existence of `thread`. Computed once, here, because the check
+      // was missed in a fourth place after being added in three (Codex reviews
+      // P1 x3, 2026-08-12).
+      const senderOwnsThread = Boolean(thread && lender && thread.lender_id === lender.id);
+
       const cursor = thread?.last_response_at ? Date.parse(thread.last_response_at) : 0;
       const already = !!(date && cursor && date.getTime() <= cursor);
 
       candidates.push({
         subject, from, date, bizName,
         appId: app.id, lenderId: lender?.id || null, lenderName: lender?.name || null,
-        thread, body, already,
+        thread, body, already, appMatchUnambiguous, senderOwnsThread,
       });
     }
   } finally {
@@ -279,8 +327,33 @@ export async function GET(req: NextRequest) {
   // Kept under the original key so an un-updated trigger still alerts.
   const deadKeySuspected = classifierDown || allUnknown;
 
+  // ONLY THE NEWEST REPLY PER THREAD MAY DECIDE THE DEAL.
+  //
+  // `already` is computed once from the pre-scan cursor, so when a thread has
+  // several unread messages in one batch they ALL reach the routing block, in
+  // fetch order. An older decline would then move the deal to `declined`, and
+  // the newer approval that followed it would be refused as not-routable —
+  // the deal ending up in the state its lender had already superseded (Codex
+  // review P1, 2026-08-12).
+  //
+  // The earlier writes still process every message: the ledger is keyed on
+  // reply_at and wants each one. Only the DEAL-level decision is narrowed.
+  const newestPerThread = new Map<string, number>();
+  for (const c of candidates) {
+    if (!c.thread || !c.date) continue;
+    const t = c.date.getTime();
+    if (t > (newestPerThread.get(c.thread.id) ?? -1)) newestPerThread.set(c.thread.id, t);
+  }
+
   // ── Phase 3: writes (gated) ─────────────────────────────────────────────────
   let applied = 0;
+  // Routing counters, reported whether or not routing is armed. A scanner that
+  // reads mail every 8 minutes and routes nothing forever is the silent-failure
+  // shape this repo keeps being bitten by; these are what a health check reads.
+  let routed = 0;
+  let flagged = 0;
+  let wouldRoute = 0;
+  let routeDeferred = 0;
   for (const c of candidates) {
     const cls = classBy.get(c);
     const row: Record<string, unknown> = {
@@ -297,16 +370,54 @@ export async function GET(req: NextRequest) {
       const replyAt = c.date ? c.date.toISOString() : new Date().toISOString();
       const summary = `${cls.category}${cls.amount ? ` $${cls.amount}` : ""}${cls.term_months ? ` / ${cls.term_months}mo` : ""}${cls.factor_rate ? ` / ${cls.factor_rate}` : ""}${cls.decline_reason_code ? ` · ${cls.decline_reason_code}` : ""}`.slice(0, 480);
 
-      // 1) thread status (drives the pill) — only when a thread row exists.
-      if (c.thread) {
+      // 1) thread status (drives the pill) — only when the thread is THIS
+      // SENDER'S.
+      //
+      // Phase 1 falls back to "the only thread on this deal" when the sender
+      // matches no lender. That was tolerable while this route ran by hand: an
+      // occasional mis-attributed pill someone would notice. Scheduling it
+      // every ten minutes with write=1 turns it into a standing hazard — an
+      // unknown sender, or lender B replying about a deal shopped only to
+      // lender A, would overwrite lender A's thread status and cursor, and
+      // LENDER_AUTOROUTE_LIVE does not gate this write (Codex review P1,
+      // 2026-08-12).
+      //
+      // Steps 2 and 3 were already sender-gated on c.lenderId; this brings the
+      // thread write to the same standard. A reply we cannot attribute now
+      // writes nothing and is reported instead.
+      // Newest-gated as well as sender-gated. IMAP does not guarantee date
+      // order, so an older message processed after a newer one would overwrite
+      // the newer status AND regress last_response_at — after which the real
+      // newest reply is re-fetched and re-classified on every scan forever
+      // (Codex review P1, 2026-08-12). The ledger below still records every
+      // message; only the thread's CURRENT state is reserved for the latest.
+      if (
+        c.senderOwnsThread &&
+        c.thread &&
+        c.date &&
+        newestPerThread.get(c.thread.id) === c.date.getTime()
+      ) {
         const upd = await db.from("application_lender_threads")
           .update({ status: statusFor(cls.category), last_response_at: replyAt, last_response_summary: summary, updated_at: new Date().toISOString() })
           .eq("id", c.thread.id).eq("tenant_id", SUNBIZ_TENANT_ID);
-        if (!upd.error) { applied++; row.wrote = statusFor(cls.category); }
+        if (upd.error) {
+          // STOP for this candidate. Continuing would write the offer, the
+          // ledger and possibly ROUTE the deal while the thread status and
+          // cursor stayed put — so a clean approval could route and then be
+          // reprocessed next tick, this time landing as
+          // `not_routable_from: approved` and stamping the deal for review it
+          // does not need (Codex review P1, 2026-08-12).
+          row.route = `deferred: thread_status_write_failed`;
+          routeDeferred++;
+          results.push(row);
+          continue;
+        }
+        applied++;
+        row.wrote = statusFor(cls.category);
       }
 
       // 2) offer record (Offers tab) — approval/counter with usable terms + a lender.
-      if ((cls.category === "approved" || cls.category === "counter_offer") && (cls.amount || cls.term_months || cls.factor_rate) && c.lenderId) {
+      if ((cls.category === "approved" || cls.category === "counter_offer") && (cls.amount || cls.term_months || cls.factor_rate) && c.lenderId && c.senderOwnsThread) {
         const existing = await db.from("tenant_records").select("id, data")
           .eq("tenant_id", SUNBIZ_TENANT_ID).eq("entity_type", "offer")
           .eq("data->>application_id", c.appId).eq("data->>lender_id", c.lenderId).limit(1);
@@ -327,7 +438,7 @@ export async function GET(req: NextRequest) {
 
       // 3) lender-intelligence ledger — every matched-lender outcome, with the
       // structured reason. Idempotent on (tenant, app, lender, reply_at).
-      if (c.lenderId) {
+      if (c.lenderId && c.senderOwnsThread) {
         await db.from("lender_reply_outcomes").upsert({
           tenant_id: SUNBIZ_TENANT_ID,
           application_id: c.appId,
@@ -346,6 +457,316 @@ export async function GET(req: NextRequest) {
       }
     }
 
+    // 4) ROUTE THE DEAL — move the clear ones, flag the rest (Adon 2026-08-12)
+    //
+    // DELIBERATELY OUTSIDE the write block above, which excludes
+    // `category === "unknown"`. An unknown is precisely a reply a human needs
+    // to look at, and leaving it in that block meant the one category most in
+    // need of "flag the rest" was the one category that got no flag at all —
+    // silently reclassified every tick, forever (Codex review P2, 2026-08-12).
+    //
+    // `!cls.unavailable` is load-bearing. When inference times out or is down,
+    // classify-reply returns a REAL object with category "unknown" and
+    // unavailable:true — the shape of an answer without being one. Treating it
+    // as an unclassifiable reply would flag the deal and advance the cursor,
+    // permanently consuming a message that was never actually read, and the
+    // outage would present as a pile of "needs review" instead of as an outage
+    // (Codex review P1, 2026-08-12). Nothing here may touch a reply the
+    // classifier never saw; it stays for the next tick.
+    if (write && cls && !cls.unavailable && !c.already) {
+      const replyAt = c.date ? c.date.toISOString() : new Date().toISOString();
+
+      // SUPERSEDED replies skip deal-level handling entirely. When a thread
+      // has several unread messages in one batch they all arrive here in fetch
+      // order, and only the lender's latest word may speak for the deal.
+      //
+      // SKIPPED, not flagged. Folding this into the provenance check treated a
+      // merely stale reply as an untrusted one, so an older decline sitting
+      // behind a newer approval stamped `needs_review` — which the newer
+      // approval, reporting `would_route` while disarmed, never cleared. The
+      // deal ended up marked for review because its lender had sent two emails
+      // (Codex review P1, 2026-08-12).
+      if (c.thread && c.date && newestPerThread.get(c.thread.id) !== c.date.getTime()) {
+        row.route = "skipped: superseded_by_newer_reply";
+        results.push(row);
+        continue;
+      }
+      //
+      // Everything above describes the LENDER's answer. This is the only step
+      // that touches the DEAL. The rule (lib/lenders/auto-route.ts) is
+      // deliberately asymmetric: one approval moves the file, one decline does
+      // not, because a decline is a fact about that funder and not about the
+      // deal.
+      //
+      // Re-reads the threads instead of reusing the Phase-1 snapshot: step 1
+      // just wrote this reply's own thread status, and unanimity computed from
+      // a stale read would miss the decline that completes the set.
+      const routeThreads = await db
+        .from("application_lender_threads")
+        .select("status")
+        .eq("tenant_id", SUNBIZ_TENANT_ID)
+        .eq("application_id", c.appId);
+
+      // The application's CURRENT status, so a reply arriving after the deal
+      // closed cannot drag it backwards.
+      const appNow = await db
+        .from("tenant_records")
+        .select("data")
+        .eq("tenant_id", SUNBIZ_TENANT_ID)
+        .eq("entity_type", "application")
+        .eq("id", c.appId)
+        .maybeSingle();
+
+      if (routeThreads.error || appNow.error) {
+        // Fail CLOSED: without the full picture we cannot tell a unanimous
+        // decline from a partial view, and a wrong move here kills a live deal.
+        row.route = `deferred: threads_unreadable`;
+        routeDeferred++;
+        // ...and REWIND, for the same reason the write paths below do. Step 1
+        // has already advanced the cursor, so a transient read failure would
+        // otherwise consume a valid approval permanently while reporting it as
+        // deferred (Codex review P1, 2026-08-12).
+        if (c.senderOwnsThread && c.thread) {
+          await db
+            .from("application_lender_threads")
+            .update({ last_response_at: c.thread.last_response_at })
+            .eq("id", c.thread.id)
+            .eq("tenant_id", SUNBIZ_TENANT_ID);
+        }
+      } else {
+        // The status the decision is made against. Held so the write below can
+        // compare-and-set on exactly this value and refuse if it moved.
+        const statusAtDecision = (appNow.data?.data as Record<string, unknown> | undefined)?.status;
+        const decision = planApplicationRoute({
+          threads: (routeThreads.data || []) as Array<{ status: string }>,
+          reply: { category: cls.category, confidence: cls.confidence },
+          minConfidence: minConfidenceFromEnv(),
+          // Provenance: this email matched one of THIS deal's lender threads.
+          // Without it an inbound stranger replying "Re: New Deal (X)" could
+          // move a live file, because an approval does not consult the thread
+          // list.
+          // The thread must belong to the lender this email came FROM. Phase 1
+          // falls back to "the only thread on this deal" when the sender has
+          // no thread of its own, which is fine for pill display but not for
+          // routing: it would let lender B's approval move a deal shopped only
+          // to lender A (Codex review P1, 2026-08-12).
+          // Three independent facts, all required: the deal was identified
+          // unambiguously, the sender is a known lender, and that lender's own
+          // thread is on this deal. Any one missing and the reply gets a flag
+          // rather than a decision.
+          hasMatchedThread: Boolean(c.appMatchUnambiguous && c.senderOwnsThread),
+          currentStatus: statusAtDecision,
+        });
+
+        if (!decision.move) {
+          // FLAGGED, not silently skipped. The thread pill already changed
+          // above; this makes the DEAL itself say a human needs to look, so a
+          // reply that lands outside the clear cases cannot go unnoticed.
+          row.route = `flagged: ${decision.reason}`;
+          // `flagged` is incremented only where the stamp actually lands (see
+          // below). Counting the intent here overstated it twice: for the
+          // no-cursor branch that returns without writing, and for a failed
+          // write that then had to decrement. A health counter that reports
+          // work nobody did is worse than no counter (Codex review P2,
+          // 2026-08-12).
+          //
+          // NO THREAD MEANS NO CURSOR, so a flag here would be re-stamped on
+          // every tick for as long as the message stays in the lookback
+          // window — up to `days` (default 5) of repeated writes and inflated
+          // counters (Codex review P2, 2026-08-12).
+          //
+          // Such a reply can never be routed anyway: provenance requires the
+          // sending lender's own thread. Reported instead, so it is visible
+          // without being re-written. NOTE the repeated CLASSIFY for these is
+          // pre-existing — `already` has always been driven by the thread
+          // cursor — and closing that needs a message-level cursor this change
+          // does not introduce.
+          if (!c.senderOwnsThread) {
+            row.route = `${String(row.route)} (no_thread_no_cursor)`;
+            results.push(row);
+            continue;
+          }
+
+          let flagStamped = false;
+          try {
+            await updateRecord({
+              // GUARDED like the routing write, and for a subtler reason:
+              // updateRecord re-reads and merges the WHOLE data document, so
+              // an unguarded flag write silently rewrites every other field as
+              // it found them — including a status an operator changed a
+              // moment ago. A flag is a small patch with a full-document
+              // blast radius (Codex review P1, 2026-08-12).
+              //
+              // Losing this precondition is the right outcome: the deal moved,
+              // so the rewind below retries and the next tick re-decides
+              // against the status that actually holds.
+              ifMatch: {
+                field: "status",
+                value:
+                  statusAtDecision === undefined || statusAtDecision === null
+                    ? null
+                    : String(statusAtDecision),
+              },
+              tenant_id: SUNBIZ_TENANT_ID,
+              entity: "application",
+              id: c.appId,
+              patch: {
+                lender_reply_needs_review: true,
+                lender_reply_review_reason: decision.reason.slice(0, 200),
+              },
+            });
+            flagStamped = true;
+            flagged++;
+          } catch (e) {
+            // NOT swallowed. The IMAP cursor has already moved past this
+            // message, so a flag that fails here is a review request the deal
+            // never receives and nothing ever retries. Reported as deferred so
+            // it shows in the counters rather than being counted as a
+            // successful flag (Codex review P2, 2026-08-12).
+            // A LOST CAS IS NOT A FAILED FLAG. The GitHub and Vercel schedules
+            // can overlap, so two invocations may handle the same reply; one
+            // loses the updated_at compare-and-set precisely BECAUSE the other
+            // already stamped it. Rewinding then would re-fetch and re-classify
+            // a reply that is already handled, every time the schedules
+            // collide (Codex review P2, 2026-08-12).
+            const msg = e instanceof Error ? e.message : "unknown";
+            const lostFlagRace = /precondition failed/.test(msg);
+            row.route = lostFlagRace ? "flag_already_stamped_by_concurrent_run" : `flag_failed: ${msg}`;
+
+            routeDeferred++;
+
+            // REWIND THE CURSOR so this reply is retried. Step 1 above already
+            // advanced last_response_at for every non-unknown category, so
+            // without this the next tick sees `already` and the review request
+            // is lost permanently — a reply that needs a human, invisible
+            // forever (Codex review P1, 2026-08-12).
+            //
+            // Retrying is safe: the thread-status write, the offer upsert and
+            // the outcome-ledger upsert are all idempotent, so re-processing
+            // this message costs one classify and changes nothing else.
+            if (!lostFlagRace && c.senderOwnsThread && c.thread) {
+              await db
+                .from("application_lender_threads")
+                .update({ last_response_at: c.thread.last_response_at })
+                .eq("id", c.thread.id)
+                .eq("tenant_id", SUNBIZ_TENANT_ID);
+            }
+          }
+
+          // ADVANCE THE CURSOR FOR `unknown`, which nothing else does.
+          //
+          // `already` is computed from the thread's last_response_at, and step
+          // 1 — the only writer of that column — is skipped for unknown. So an
+          // unclassifiable reply was re-fetched, re-classified and re-flagged
+          // every ten minutes forever, burning inference on the same message
+          // indefinitely (Codex review P2, 2026-08-12).
+          //
+          // The STATUS is deliberately left alone: an unknown is not a
+          // `responded` verdict, and the pill must not claim one. Only the
+          // cursor moves, which is what makes the reply idempotent.
+          // Gated on the flag having actually landed. Advancing the cursor for
+          // a reply whose review request failed to stamp would make it
+          // `already` next tick and lose it for good — the same defect as the
+          // rewind above, from the other direction.
+          if (cls.category === "unknown" && c.senderOwnsThread && c.thread && flagStamped) {
+            const cur = await db
+              .from("application_lender_threads")
+              .update({
+                last_response_at: replyAt,
+                last_response_summary: "unclassifiable reply — flagged for review",
+                updated_at: new Date().toISOString(),
+              })
+              .eq("id", c.thread.id)
+              .eq("tenant_id", SUNBIZ_TENANT_ID);
+            if (cur.error) {
+              // Left retryable on purpose: without the cursor this repeats, so
+              // the honest report is that it is not yet settled.
+              row.route = `${String(row.route)} (cursor_not_advanced)`;
+              routeDeferred++;
+            }
+          }
+        } else if (!autoRouteLive()) {
+          // Staged go-live: report what it WOULD have done so a day of real
+          // replies can be read before anything moves.
+          row.route = `would_route: ${decision.to} (${decision.reason})`;
+          wouldRoute++;
+        } else {
+          // updateRecord, NOT a raw tenant_records write. It is what stamps
+          // stage_entered_at, publishes BRAVO_RECORD_STATUS_CHANGED and fires
+          // runStageTransitionHooks. A raw write would move the deal on the
+          // board while leaving the drip engine and the timeline blind to it —
+          // the two-fields-out-of-sync defect closed earlier today, re-entering
+          // from a new direction.
+          try {
+            // ATOMIC. The guard rides on the same statement that writes
+            // (updateRecord's ifMatch), so an operator advancing the deal
+            // between the read above and this write loses the race instead of
+            // being silently overwritten — a funded deal dragged back to
+            // `approved`, which since this morning also restarts the
+            // merchant's drip email. A separate "claim" update beforehand does
+            // NOT close this; only the condition being on the writing
+            // statement does (Codex review P1, 2026-08-12).
+            //
+            // An ABSENT status is guarded with null, not "". That is the
+            // ordinary shopping-phase state, and `data->>status = ''` never
+            // matches a missing key, so the naive form would refuse forever on
+            // exactly the deals this exists to move.
+            await updateRecord({
+              ifMatch: {
+                field: "status",
+                // ONLY undefined/null map to a null precondition. An
+                // explicitly stored "" is a real value that `is null` does not
+                // match, so collapsing it here would report contention on
+                // every attempt and the deal could never route (Codex review
+                // P2, 2026-08-12).
+                value:
+                  statusAtDecision === undefined || statusAtDecision === null
+                    ? null
+                    : String(statusAtDecision),
+              },
+              tenant_id: SUNBIZ_TENANT_ID,
+              entity: "application",
+              id: c.appId,
+              patch: {
+                status: decision.to,
+                lender_reply_needs_review: false,
+                lender_reply_review_reason: null,
+                routed_by: "lender_reply_scan",
+                routed_at: replyAt,
+              },
+            });
+            row.route = `routed: ${decision.to} (${decision.reason})`;
+            routed++;
+          } catch (e) {
+            // A lost CAS is not a failure, it is a human who got there first.
+            // Named separately so a real write error stays visible instead of
+            // being buried under normal contention.
+            const msg = e instanceof Error ? e.message : "unknown";
+            const lostRace = /precondition failed/.test(msg);
+            row.route = lostRace ? "deferred: status_changed_under_us" : `route_failed: ${msg}`;
+            routeDeferred++;
+
+            // REWIND on a genuine failure, for the same reason the flag path
+            // does: step 1 already advanced the cursor, so without this a
+            // transient database error permanently consumes a clean approval
+            // or a unanimous decline while the tick politely reports it as
+            // "deferred" (Codex review P1, 2026-08-12).
+            //
+            // NOT on a lost race. An operator moved the deal deliberately;
+            // re-processing would only lose the same race again next tick,
+            // forever. That reply is genuinely finished with.
+            if (!lostRace && c.thread) {
+              await db
+                .from("application_lender_threads")
+                .update({ last_response_at: c.thread.last_response_at })
+                .eq("id", c.thread.id)
+                .eq("tenant_id", SUNBIZ_TENANT_ID);
+            }
+          }
+        }
+      }
+    }
+
     results.push(row);
   }
 
@@ -354,6 +775,18 @@ export async function GET(req: NextRequest) {
     mode: write ? "write" : "dry",
     inbox: creds.fromAddress,
     scanned: results.length,
+    /** Deal routing. `armed` false means every clear decision is reported as
+     *  `would_route` and nothing moved — the staged go-live state. */
+    routing: {
+      armed: autoRouteLive(),
+      min_confidence: minConfidenceFromEnv(),
+      routed,
+      would_route: wouldRoute,
+      flagged,
+      /** Could not decide safely (threads unreadable / write failed). Retried
+       *  next tick — never counted as a decision. */
+      deferred: routeDeferred,
+    },
     /** Candidates eligible for classification this tick. */
     candidates: toClassify.length,
     /** ACTUALLY classified. Previously reported the candidate count, which
