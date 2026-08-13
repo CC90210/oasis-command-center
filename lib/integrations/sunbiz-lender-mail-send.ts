@@ -156,7 +156,7 @@ export async function sendSunbizLenderMail(input: {
       cc: input.cc?.length ? input.cc.join(", ") : undefined,
       subject: input.subject,
       text: lenderText,
-      html: renderShopOutHtml(lenderText, creds.fromAddress),
+      html: renderShopOutHtml(lenderText, creds.fromAddress, files.length),
       attachments: files,
       headers: {
         // Unique per send: this is the receipt stored on the thread row AND the
