@@ -87,11 +87,26 @@ export async function POST(req: NextRequest) {
     return bad(400, "enter a valid email address");
   }
 
+  let superseded = 0;
   try {
     // Idempotency: one live invite per (tenant, email, role). A double-click or a
     // retried request supersedes its predecessor rather than leaving two valid
     // seat grants outstanding. See supersedeActiveInvites.
-    const superseded = email
+    //
+    // Revoke BEFORE create, deliberately. The two steps are not atomic (the
+    // adapter exposes no transaction), so one of them has to fail first, and the
+    // orders are not equally safe:
+    //   revoke-then-create, create fails -> zero live invites. Nobody gains
+    //     access, the operator gets a legible error, and clicking again fixes it.
+    //   create-then-revoke, revoke fails -> TWO live invites, and the request
+    //     returns success. For an `admin` invite that is a second standing
+    //     privilege grant that nothing reports.
+    // Fail-closed doctrine picks the first. The residual concurrent-double-POST
+    // race (two requests interleaving to leave two live invites) is bounded by
+    // the client submit guard and is not closed here; closing it needs a partial
+    // unique index on (tenant_id, lower(email), team_role) WHERE redeemed_at IS
+    // NULL AND revoked_at IS NULL, which is a schema change worth its own review.
+    superseded = email
       ? await supersedeActiveInvites({
           tenantId: ctx.tenantId,
           role: role as Exclude<TeamRole, "owner">,
@@ -172,6 +187,14 @@ export async function POST(req: NextRequest) {
     });
   } catch (err) {
     const msg = err instanceof Error ? err.message : "invite_create_failed";
-    return bad(500, msg);
+    // If the revoke landed and the create did not, the earlier link is already
+    // dead. Say so, otherwise the operator assumes nothing changed and leaves a
+    // teammate holding a token that silently stopped working.
+    return bad(
+      500,
+      superseded > 0
+        ? `${msg}. The previous invite for this address was already revoked, so issue a new one.`
+        : msg
+    );
   }
 }

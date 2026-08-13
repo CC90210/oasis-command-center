@@ -216,9 +216,15 @@ export async function supersedeActiveInvites(args: {
     .map((r) => r.id as string);
   if (!ids.length) return 0;
 
+  // tenant_id is re-asserted on the write even though `ids` came from a
+  // tenant-scoped read. This is a service-role client, so it bypasses RLS and
+  // nothing downstream would catch a cross-tenant id if the read above were
+  // ever widened or its filters reordered. The constraint costs nothing and
+  // keeps the mutation correct on its own terms.
   const { error: updateErr } = await supa
     .from("tenant_invites")
     .update({ revoked_at: new Date().toISOString() })
+    .eq("tenant_id", args.tenantId)
     .in("id", ids);
   if (updateErr) throw updateErr;
   return ids.length;
