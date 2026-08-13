@@ -4,7 +4,7 @@ import { getServiceSupabase } from "@/lib/supabase-server";
 import { LEAD_DOC_BUCKET } from "@/lib/lead-documents";
 import { getSubmissionsCreds, type SubmissionsCreds } from "./submissions-gmail";
 import type { ShopOutAttachment } from "@/lib/lenders/shop-out";
-import { normalizeShopOutText, renderShopOutHtml } from "@/lib/lenders/shop-out-email-templates";
+import { normalizeShopOutText, renderShopOutHtml, resolveShopOutPresentation } from "@/lib/lenders/shop-out-email-templates";
 
 /**
  * Send one lender package from the web app, over SMTP, with the branded bank
@@ -147,7 +147,10 @@ export async function sendSunbizLenderMail(input: {
     const senderDomain = creds.fromAddress.split("@")[1] || "sunbizfunding.com";
     const rfc822 = `<${randomUUID()}@${senderDomain}>`;
 
-    const lenderText = normalizeShopOutText(input.text, input.signerName);
+    const presentation = resolveShopOutPresentation(input.text);
+    const lenderText = presentation.branded
+      ? normalizeShopOutText(presentation.text, input.signerName)
+      : presentation.text.trim();
     const result = await transport.sendMail({
       // Lenders always see the shared submissions desk, never the operator who
       // happened to click Send. The rep stays on the private thread via CC.
@@ -156,7 +159,9 @@ export async function sendSunbizLenderMail(input: {
       cc: input.cc?.length ? input.cc.join(", ") : undefined,
       subject: input.subject,
       text: lenderText,
-      html: renderShopOutHtml(lenderText, creds.fromAddress, files.length),
+      html: presentation.branded
+        ? renderShopOutHtml(lenderText, creds.fromAddress, files.length)
+        : undefined,
       attachments: files,
       headers: {
         // Unique per send: this is the receipt stored on the thread row AND the

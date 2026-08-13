@@ -98,8 +98,8 @@ assert.match(
 );
 assert.match(
   lenderSender,
-  /html:\s*renderShopOutHtml\(lenderText,\s*creds\.fromAddress,\s*files\.length\)/,
-  "lender mail must always include the branded HTML alternative",
+  /presentation\.branded[\s\S]*renderShopOutHtml\(lenderText,\s*creds\.fromAddress,\s*files\.length\)[\s\S]*:\s*undefined/,
+  "lender mail must include branded HTML unless the operator explicitly chooses no template",
 );
 
 console.log(
