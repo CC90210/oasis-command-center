@@ -30,7 +30,7 @@ import "server-only";
 import { resolveTextTorrentSenderId } from "@/lib/integrations/texttorrent-sender";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { liveNumbersFor } from "@/lib/drips/sender-sync";
-import { classifyRep } from "./rep-keys";
+import { classifyRep, actAsEmailForRep } from "./rep-keys";
 import { chooseLine } from "./rep-line-core";
 export { classifyRep };
 
@@ -202,7 +202,11 @@ export async function resolveDripSmsIdentity(
       const sticky = await stickyLineFor(db, tenantId, leadId, live);
       const chosen = chooseLine({ pool: live, leadId, sticky });
       if (chosen.line) {
-        return { actAsEmail: reg[repKey]?.actAs ?? null, senderId: chosen.line, repKey };
+        // actAsEmailForRep, not the static registry. The registry is a snapshot
+        // and its number lists have already rotted twice; the account a rep
+        // sends under is derived from the same place the sync stamps it, so the
+        // wire and the line can never disagree.
+        return { actAsEmail: actAsEmailForRep(repKey), senderId: chosen.line, repKey };
       }
     }
   } catch {
