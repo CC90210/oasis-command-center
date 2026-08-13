@@ -28,19 +28,33 @@ export function TeamInviteActions({
   const [email, setEmail] = useState("");
   const [pending, startTransition] = useTransition();
   const [issuedToken, setIssuedToken] = useState<string | null>(null);
+  const [issuedUrl, setIssuedUrl] = useState<string | null>(null);
   const [issuedExpiry, setIssuedExpiry] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  // null = no email was requested for this invite, so delivery is not in question.
+  const [emailSent, setEmailSent] = useState<boolean | null>(null);
+  const [sentTo, setSentTo] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
 
   async function generate() {
+    if (busy) return; // double-submit guard; the API supersedes, but do not race it
     setError(null);
+    setNotice(null);
     setIssuedToken(null);
+    // Must clear too, or a failed retry keeps rendering the PREVIOUS invite's
+    // link (inviteLink prefers issuedUrl) and the operator sends a dead token.
+    setIssuedUrl(null);
+    setEmailSent(null);
     setCopied(false);
+    setBusy(true);
+    const requestedEmail = email.trim();
     try {
       const res = await fetch("/api/team/invites", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ role, email: email.trim() || null }),
+        body: JSON.stringify({ role, email: requestedEmail || null }),
       });
       const data = await res.json();
       if (!res.ok || !data.ok) {
@@ -48,11 +62,21 @@ export function TeamInviteActions({
         return;
       }
       setIssuedToken(data.invite.raw_token);
+      setIssuedUrl(data.invite.invite_url ?? null);
       setIssuedExpiry(data.invite.expires_at);
+      setEmailSent(requestedEmail ? data.invite.email_sent === true : null);
+      setSentTo(requestedEmail || null);
+      if (data.invite.superseded > 0) {
+        setNotice(
+          `An earlier invite for this address was revoked. Only the link below works now.`
+        );
+      }
       setEmail("");
       startTransition(() => router.refresh());
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to create invite.");
+    } finally {
+      setBusy(false);
     }
   }
 
@@ -67,9 +91,11 @@ export function TeamInviteActions({
     startTransition(() => router.refresh());
   }
 
-  const inviteLink = issuedToken
-    ? `${typeof window !== "undefined" ? window.location.origin : ""}/invite/${issuedToken}`
-    : null;
+  const inviteLink =
+    issuedUrl ??
+    (issuedToken
+      ? `${typeof window !== "undefined" ? window.location.origin : ""}/invite/${issuedToken}`
+      : null);
 
   return (
     <div className="space-y-4">
@@ -103,16 +129,37 @@ export function TeamInviteActions({
         <button
           type="button"
           onClick={generate}
-          disabled={pending}
+          disabled={pending || busy}
           className="bg-accent text-bg font-semibold py-2 px-3 rounded text-sm hover:opacity-90 disabled:opacity-50"
         >
-          {pending ? "..." : "Generate link"}
+          {busy ? "Adding..." : email.trim() ? "Add + email" : "Generate link"}
         </button>
       </div>
 
       {error && (
         <div className="text-sm text-status-attention bg-bg-elevated border border-bg-border rounded px-3 py-2">
           {error}
+        </div>
+      )}
+
+      {notice && (
+        <div className="text-sm text-fg-muted bg-bg-elevated border border-bg-border rounded px-3 py-2">
+          {notice}
+        </div>
+      )}
+
+      {/* Delivery outcome. Shown ONLY when an email was actually requested, and
+          it states the failure plainly — a silent failure here means the new
+          teammate simply never hears anything and nobody knows why. */}
+      {emailSent === false && (
+        <div className="text-sm text-status-attention bg-bg-elevated border border-status-attention/40 rounded px-3 py-2">
+          <strong>Email delivery failed.</strong> The invite is valid, so send the
+          link below to {sentTo} yourself.
+        </div>
+      )}
+      {emailSent === true && (
+        <div className="text-sm text-fg-muted bg-bg-elevated border border-bg-border rounded px-3 py-2">
+          Invite emailed to {sentTo}. Keep the link below as a backup.
         </div>
       )}
 
