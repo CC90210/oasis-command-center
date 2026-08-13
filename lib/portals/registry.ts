@@ -70,7 +70,8 @@ export const FOUNDERS_PORTAL: Portal = {
   tenantSlugs: [],
   owns: ["app/founders/", "lib/founders/", "lib/founders-marketing-core.ts", "components/founders/"],
   sections: [
-    { href: "/founders/marketing", label: "Studio", enabled: true },
+    { href: "/founders/marketing", label: "Content", enabled: true },
+    { href: "/founders/growth", label: "Marketing", enabled: true },
     { href: "/founders/marketing/library", label: "Library", enabled: true },
     { href: "/founders/marketing/train", label: "Train", enabled: true },
     { href: "/founders/marketing/performance", label: "Performance", enabled: false },
