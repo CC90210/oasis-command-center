@@ -107,3 +107,64 @@ export function resolveChannel(
     detail: "lead has neither an email address nor a phone number",
   };
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+
+export type ProviderGapDecision =
+  | { action: "fallback"; channel: DripChannel; reason: string }
+  | { action: "hold"; reason: string };
+
+/**
+ * What to do when the channel we CAN reach the lead on is unavailable at the
+ * PROVIDER, not at the contact record.
+ *
+ * These are different failures and the engine was conflating them. resolveChannel
+ * above answers "can we reach this person at all"; this answers "the way we chose
+ * is blocked upstream — now what". Measured 2026-08-14, the second question was
+ * always answered "wait", and that produced the outage:
+ *
+ *   220 rows  Follow-up sequence        sms_channel_unavailable: Bluerise has no
+ *                                       SMS numbers yet          → held 6h, forever
+ *    54 rows  Viewed application nudge  sms_carrier_halt: 19 consecutive carrier
+ *                                       failures                 → held 2h, repeatedly
+ *
+ * Nothing was overdue, nothing was failed, every send-side check read green —
+ * and total drip volume was ONE email in 24 hours. A hold loop is invisible to
+ * a monitor that only knows about overdue rows and failures.
+ *
+ * Bluerise will never have SMS numbers; it is a cold EMAIL brand. Holding an
+ * emailable lead for a channel that is never coming back is not patience, it is
+ * silence with extra steps.
+ *
+ * So: if the blocked channel has a usable alternate for THIS lead, take it. That
+ * is not a new policy — it is exactly Adon's 2026-08-10 rule ("the ones that
+ * have emails will answer an email") applied one layer further down, where the
+ * obstacle is the provider rather than a missing field.
+ *
+ * HOLD is still right when:
+ *   - the step is channel_locked (a statement request with an attachment is not
+ *     a text, and must not be silently rewritten), or
+ *   - there is no alternate we can reach them on, in which case waiting for the
+ *     provider really is the only option.
+ */
+export function onProviderGap(args: {
+  blocked: DripChannel;
+  contact: Contactability;
+  channelLocked?: boolean;
+  gap: string;
+}): ProviderGapDecision {
+  const alternate: DripChannel = args.blocked === "email" ? "sms" : "email";
+  const canDo = alternate === "email" ? args.contact.hasEmail : args.contact.hasPhone;
+
+  if (args.channelLocked) {
+    return { action: "hold", reason: `${args.gap} (step is locked to ${args.blocked}, not substituting)` };
+  }
+  if (!canDo) {
+    return { action: "hold", reason: `${args.gap} (no ${alternate} for this lead either)` };
+  }
+  return {
+    action: "fallback",
+    channel: alternate,
+    reason: `${args.gap} — reaching them by ${alternate} instead of holding`,
+  };
+}

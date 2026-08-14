@@ -44,7 +44,7 @@ import { sendDripSms, sendDripEmail } from "@/lib/drips/send";
 import { brandIsSendable, type BrandKey } from "@/lib/email/brands";
 import { brandFooter } from "@/lib/email/brand-shell";
 import { isWithinSendWindow } from "@/lib/sms/compliance";
-import { contactabilityOf, resolveChannel } from "@/lib/drips/channel-fallback";
+import { contactabilityOf, resolveChannel, onProviderGap } from "@/lib/drips/channel-fallback";
 import { mayTextFor } from "@/lib/sms/lawful-basis";
 import { smsSendAllowed, resetBreakerCache, claimBreakerProbe } from "@/lib/sms/send-breaker";
 import { routeOutbound, type ProviderAvailability } from "@/lib/routing/outbound-routing";
@@ -716,6 +716,61 @@ function resolveStepCopy(
   return resolveCopy(step, leadId, stepIndex, scoped);
 }
 
+/**
+ * SMS is blocked upstream. Email them instead of sitting on the row.
+ *
+ * WHY THIS EXISTS — measured in production 2026-08-14, and it is the whole
+ * reason drip volume was ONE email in 24 hours while every check read green:
+ *
+ *   220 rows  Follow-up sequence        sms_channel_unavailable: Bluerise has no
+ *                                       SMS numbers yet        → +6h, forever
+ *    54 rows  Viewed application nudge  sms_carrier_halt: 19 consecutive
+ *                                       carrier failures       → +2h, repeatedly
+ *
+ * Every one of those rescheduled cleanly. Nothing was overdue, nothing failed,
+ * no attempt was burned — the engine was behaving exactly as written, and the
+ * merchants heard nothing for days. Bluerise is a cold EMAIL brand and is never
+ * getting SMS numbers, so "wait for the provider" there is silence with extra
+ * steps.
+ *
+ * The hold is still correct where it is the only honest option, and
+ * onProviderGap decides which case this is. When we do fall back, the row is
+ * handed to processEmailStep and COMPLETES as an email step — it is not left
+ * scheduled, so there is no second send later.
+ */
+async function holdOrEmailInstead(
+  db: Db,
+  row: ClaimedRow,
+  data: LeadData,
+  step: DripStep,
+  steps: DripStep[],
+  run: RunState,
+  emailClass: string,
+  holdHours: number,
+  gap: string,
+): Promise<StepOutcome> {
+  const decision = onProviderGap({
+    blocked: "sms",
+    contact: contactabilityOf(data),
+    channelLocked: isTruthyFlag((step as unknown as Record<string, unknown>).channel_locked),
+    gap,
+  });
+
+  if (decision.action === "hold") {
+    return markRescheduled(
+      db, row, new Date(Date.now() + holdHours * 3_600_000).toISOString(), decision.reason,
+    );
+  }
+
+  console.warn("[dispatch-drips] sms blocked upstream, sending email instead", {
+    leadId: row.lead_id,
+    sequence: row.sequence_name,
+    step: row.step_index,
+    gap,
+  });
+  return processEmailStep(db, row, data, step, steps, emailClass, run);
+}
+
 async function processSmsStep(
   db: Db,
   row: ClaimedRow,
@@ -858,9 +913,9 @@ async function processSmsStep(
       run.availabilityByTenant.get(row.tenant_id) ?? (await loadProviderAvailability(row.tenant_id));
     const route = routeOutbound({ channel: "sms", purpose: "drip", brand: smsBrand, available: availability });
     if (!route.send) {
-      return markRescheduled(
-        db, row, new Date(Date.now() + 6 * 3_600_000).toISOString(),
-        `sms_channel_unavailable: ${route.reason}`,
+      return holdOrEmailInstead(
+        db, row, data, step, steps, run, emailClass,
+        6, `sms_channel_unavailable: ${route.reason}`,
       );
     }
     // Everything below is TextTorrent-specific: the breaker, the act-as
@@ -869,9 +924,9 @@ async function processSmsStep(
     // would push Bluerise copy from SunBiz's TextTorrent account, reintroducing
     // the exact mismatch this gate exists to prevent.
     if (route.provider !== "texttorrent") {
-      return markRescheduled(
-        db, row, new Date(Date.now() + 6 * 3_600_000).toISOString(),
-        `sms_provider_not_wired: ${route.provider} has no sender in the drip executor yet`,
+      return holdOrEmailInstead(
+        db, row, data, step, steps, run, emailClass,
+        6, `sms_provider_not_wired: ${route.provider} has no sender in the drip executor yet`,
       );
     }
   }
@@ -952,9 +1007,9 @@ async function processSmsStep(
           `so nothing else would have caught it.`,
         telegramOncePerOpen: true, // one page per outage, not one per row
       }).catch(() => {});
-      return markRescheduled(
-        db, row, new Date(Date.now() + 2 * 3_600_000).toISOString(),
-        `sms_carrier_halt: ${breaker.reason}`,
+      return holdOrEmailInstead(
+        db, row, data, step, steps, run, emailClass,
+        2, `sms_carrier_halt: ${breaker.reason}`,
       );
     }
 
