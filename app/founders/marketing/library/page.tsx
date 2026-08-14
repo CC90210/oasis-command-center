@@ -123,9 +123,17 @@ export default async function MarketingLibraryPage({
       posterUrl: poster ? (urls.get(mediaKey(poster.storage_bucket, poster.storage_path)) ?? null) : null,
       mediaW: shape?.width ?? null,
       mediaH: shape?.height ?? null,
-      slideUrls: slidePaths(a)
-        .map((path: string) => urls.get(mediaKey("marketing-media", path)))
-        .filter((u): u is string => Boolean(u)),
+      // ALL SLIDES OR NONE. Mapping then filtering silently renumbers a carousel
+      // when one slide fails to sign — 1,2,4,5 rendered as "1/4..4/4" — and a
+      // carousel read out of order is a different post. If we cannot show the
+      // whole thing we show the cover instead, which is honest rather than
+      // confidently wrong.
+      slideUrls: (() => {
+        const paths = slidePaths(a);
+        const signedSlides = paths.map((path: string) =>
+          urls.get(mediaKey("marketing-media", path)));
+        return signedSlides.every(Boolean) ? (signedSlides as string[]) : [];
+      })(),
     };
   });
 

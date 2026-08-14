@@ -94,9 +94,23 @@ export default async function AssetDetailPage({
       .map((m) => ({ bucket: m!.storage_bucket, path: m!.storage_path })),
     ...slidePaths.map((path) => ({ bucket: "marketing-media", path })),
   ]);
-  const slideUrls = slidePaths
-    .map((path) => signed.get(mediaKey("marketing-media", path)))
-    .filter((u): u is string => Boolean(u));
+  // PATHS AND URLS MUST STAY INDEX-ALIGNED. Mapping then filtering breaks that
+  // the moment one slide fails to sign: every later URL shifts down a position,
+  // so slide 4's image renders as slide 3. On a re-order screen that is not a
+  // cosmetic bug — the operator would rearrange based on a picture that is not
+  // the order, and submit it.
+  //
+  // So they travel as pairs, and a partial signing failure is visible rather
+  // than silently absorbed.
+  const slidePairs = slidePaths
+    .map((path) => ({ path, url: signed.get(mediaKey("marketing-media", path)) }))
+    .filter((s): s is { path: string; url: string } => Boolean(s.url));
+  const slideUrls = slidePairs.map((s) => s.url);
+  const signedSlidePaths = slidePairs.map((s) => s.path);
+  // Re-ordering submits the WHOLE list and the server requires a permutation of
+  // what is stored, so a partial view cannot be reordered safely — offering the
+  // control would produce a 400 the operator could not act on.
+  const slidesFullySigned = slidePairs.length === slidePaths.length && slidePaths.length > 1;
   const url = (m?: typeof video) =>
     m ? signed.get(mediaKey(m.storage_bucket, m.storage_path)) || null : null;
 
@@ -197,11 +211,19 @@ export default async function AssetDetailPage({
 
           {isRenderableCarousel(asset.asset_type, slideUrls) && (
             <Card title="Slide order" subtitle="What the audience reads, and what publishes">
-              <SlideReorder
-                assetId={asset.id}
-                slidePaths={slidePaths}
-                slideUrls={slideUrls}
-              />
+              {slidesFullySigned ? (
+                <SlideReorder
+                  assetId={asset.id}
+                  slidePaths={signedSlidePaths}
+                  slideUrls={slideUrls}
+                />
+              ) : (
+                <p className="text-xs text-fg-dim">
+                  {slidePaths.length - slidePairs.length} of {slidePaths.length} slides could not
+                  be loaded, so the order cannot be changed safely from a partial view. Refresh —
+                  if it persists, the missing objects are named in the server log.
+                </p>
+              )}
             </Card>
           )}
 
