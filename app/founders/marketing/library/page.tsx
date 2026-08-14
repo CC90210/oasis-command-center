@@ -17,7 +17,13 @@ import Link from "next/link";
 import { Card, PageHeader } from "@/components/Card";
 import { safe } from "@/lib/api-helpers";
 import { resolveFounder } from "@/lib/founders/gate";
-import { getMarketingAssets, getMarketingBrands, mediaKey, signMediaUrls } from "@/lib/founders/marketing-queries";
+import {
+  getMarketingAssets,
+  getMarketingBrands,
+  mediaKey,
+  signMediaUrls,
+  type MarketingAssetRow,
+} from "@/lib/founders/marketing-queries";
 import {
   TRACKS,
   channelLabel,
@@ -60,10 +66,20 @@ export default async function MarketingLibraryPage({
   // canonical list so an arbitrary string never reaches the query.
   const status = isAssetStatus(sp.status) ? sp.status : undefined;
 
-  const [assets, brands] = await Promise.all([
-    safe("marketing.library", getMarketingAssets(founder.tenantId, { track, channel, brand, status }), []),
+  // `null` rather than `[]` as the fallback: an empty array cannot say whether
+  // the library is empty or the query failed, and the page renders very
+  // different copy for those two. getMarketingAssets throws on a broken read and
+  // returns [] only when the table genuinely is not there yet.
+  const [assetsOrNull, brands] = await Promise.all([
+    safe<MarketingAssetRow[] | null>(
+      "marketing.library",
+      getMarketingAssets(founder.tenantId, { track, channel, brand, status }),
+      null,
+    ),
     safe("marketing.library.brands", getMarketingBrands(founder.tenantId), []),
   ]);
+  const libraryDegraded = assetsOrNull === null;
+  const assets = assetsOrNull ?? [];
 
   // Pick the objects each tile needs, then sign them ALL in one batched call per
   // bucket. Signing per object was one Storage round-trip each — 400 sequential
@@ -222,16 +238,21 @@ export default async function MarketingLibraryPage({
             // `status` counts as a filter. Arriving from a Studio pipeline tile
             // with zero matches used to say "The library is empty" — flatly false
             // when the library is full and only that stage is empty, and it made
-            // the stage row above look broken.
+            // the stage row above look broken. `libraryDegraded` outranks both:
+            // when the read FAILED we know nothing about what is in here.
             headline={
-              status
+              libraryDegraded
+                ? "Couldn't load the library"
+                : status
                 ? "Nothing at this stage"
                 : track || channel
                   ? "Nothing in this channel yet"
                   : "The library is empty"
             }
             detail={
-              status
+              libraryDegraded
+                ? "The query failed, so this is not a statement about what the library holds. Nothing has been lost — refresh, and if it persists the server log carries the reason under [marketing:assets]."
+                : status
                 ? "No assets are sitting at this stage right now. Clear the stage to see the rest of the library."
                 : track || channel
                   ? "No assets are registered for this channel. Produce something, or clear the filter to see everything."

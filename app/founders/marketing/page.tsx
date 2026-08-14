@@ -24,7 +24,7 @@ import { Library, GraduationCap, Inbox, BarChart3 } from "lucide-react";
 import { safe } from "@/lib/api-helpers";
 import { resolveFounder } from "@/lib/founders/gate";
 import {
-  EMPTY_MARKETING_SUMMARY,
+  DEGRADED_MARKETING_SUMMARY,
   getMarketingSummary,
 } from "@/lib/founders/marketing-queries";
 import { MarketingEmpty } from "@/components/founders/marketing-shared";
@@ -39,10 +39,14 @@ export default async function MarketingPage() {
   const founder = await resolveFounder();
   if (!founder) notFound();
 
+  // DEGRADED_, not EMPTY_. safe() returns this fallback when the promise THROWS,
+  // and a throw is a failure, not an absence — handing it the empty summary put
+  // "Nothing waiting on you" back on the screen for every unexpected error, which
+  // is precisely what MarketingSummary.degraded was added to stop.
   const summary = await safe(
     "marketing.summary",
     getMarketingSummary(founder.tenantId),
-    EMPTY_MARKETING_SUMMARY,
+    DEGRADED_MARKETING_SUMMARY,
   );
 
   // An asset sitting at status `in_review` IS waiting on a verdict. The page
