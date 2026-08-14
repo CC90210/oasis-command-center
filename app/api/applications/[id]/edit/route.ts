@@ -30,6 +30,7 @@ import { resolveSessionContext } from "@/lib/api-auth";
 import { canWriteCrm } from "@/lib/role-gates";
 import { APPLICATION_FIELD_KEYS } from "@/lib/forms/application-upsert";
 import { generateApplicationDocumentFromRecord } from "@/lib/forms/application-document";
+import { isAcceptableCaptureAddress } from "@/lib/address/us-address";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -196,7 +197,9 @@ export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: strin
   // Existence + entity gate: this route edits APPLICATIONS only.
   const existing = await db
     .from("tenant_records")
-    .select("id")
+    // `data` is read so the address gate below can see the STORED business_state
+    // when the patch doesn't carry one.
+    .select("id, data")
     .eq("tenant_id", tenantId)
     .eq("entity_type", "application")
     .eq("id", applicationId)
@@ -206,6 +209,38 @@ export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: strin
   }
   if (!existing.data) {
     return NextResponse.json({ ok: false, error: "application_not_found" }, { status: 404 });
+  }
+
+  // ADDRESS COMPLETENESS — the server-side boundary for operator edits.
+  //
+  // ApplicationEditForm validates this too, but a client check is a courtesy,
+  // not a guarantee: this route accepts a raw PATCH, so a rep hitting the API
+  // directly could save a bare street line and regenerate the lender-facing PDF
+  // from it, defeating the invariant the merchant form enforces. (Codex P1.)
+  //
+  // Only keys PRESENT IN THE PATCH are checked. ~1,000 existing applications
+  // carry a partial address, and re-validating stored values would block an
+  // operator from editing an unrelated field on a record they did not break.
+  {
+    const storedData = (existing.data as { data?: Record<string, unknown> }).data ?? {};
+    const effectiveState =
+      typeof patch.business_state === "string" ? patch.business_state : storedData.business_state;
+    for (const key of ["business_address", "owner_home_address", "partner_home_address"]) {
+      const value = patch[key];
+      // null clears the field, which stays legal — an owner may genuinely remove
+      // an optional partner's address.
+      if (typeof value !== "string" || !value) continue;
+      const gate = isAcceptableCaptureAddress(
+        value,
+        key === "business_address" ? effectiveState : undefined,
+      );
+      if (!gate.ok) {
+        return NextResponse.json(
+          { ok: false, error: "incomplete_address", field: key, message: gate.message },
+          { status: 400 },
+        );
+      }
+    }
   }
 
   // Atomic multi-key merge — same RPC set-field uses, one call for the batch.

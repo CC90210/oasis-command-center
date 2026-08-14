@@ -193,7 +193,7 @@ function toIsoDate(raw: string): string | null {
 type NormResult = { ok: true; value: string | number | null } | { ok: false; error: string };
 
 /** Normalize a CHANGED field for the PATCH. Empty string clears (→ null). */
-function normalizeField(def: FieldDef, raw: string): NormResult {
+function normalizeField(def: FieldDef, raw: string, businessState = ""): NormResult {
   const v = raw.trim();
   if (!v) return { ok: true, value: null };
   switch (def.kind) {
@@ -209,7 +209,10 @@ function normalizeField(def: FieldDef, raw: string): NormResult {
       // did not break. An address the operator actually TOUCHES must come out
       // complete, so editing can only improve the data, never add a new bare
       // street line. Same rule as the merchant form (lib/address/us-address.ts).
-      const gate = isAcceptableCaptureAddress(v);
+      const gate = isAcceptableCaptureAddress(
+        v,
+        def.key === "business_address" ? businessState : undefined,
+      );
       if (!gate.ok) return { ok: false, error: gate.message };
       return { ok: true, value: v };
     }
@@ -322,7 +325,12 @@ export function ApplicationEditForm({
     const nextErrors: Record<string, string> = {};
     const patch: Record<string, string | number | null> = {};
     for (const f of dirtyKeys) {
-      const res = normalizeField(f, draft[f.key] ?? "");
+      // The business address holds its state in a SEPARATE field, so the gate
+      // needs it or a legitimate "123 Biscayne Blvd, Miami, 33101" + state=FL —
+      // which the merchant form and the renderer both accept — would be
+      // rejected here as stateless. Read the draft so an unsaved state edit in
+      // the same session counts. (Codex P2.)
+      const res = normalizeField(f, draft[f.key] ?? "", draft.business_state ?? "");
       if (res.ok) patch[f.key] = res.value;
       else nextErrors[f.key] = res.error;
     }
