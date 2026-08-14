@@ -115,6 +115,38 @@ export function isChannel(v: unknown): v is Channel {
   return typeof v === "string" && (CHANNELS as readonly string[]).includes(v);
 }
 
+/**
+ * An operator verdict, translated into a value `marketing_review.decision` will
+ * actually accept.
+ *
+ * These are two different vocabularies and they do not overlap. The asset STATUS
+ * is where the work now sits ("approved", "archived"); the review DECISION is
+ * what the human did, and database/133_marketing_hub.sql constrains it:
+ *
+ *   check (decision in ('approve','approve_with_changes','request_changes','reject','comment'))
+ *
+ * Writing a status into that column violates the check, so every verdict insert
+ * failed. It was invisible because the insert is deliberately best-effort — the
+ * status change still landed, and only the audit trail silently went missing,
+ * which is the half you do not notice until you need it.
+ *
+ * Returns null when a status has no meaningful verdict (moving something back to
+ * in_review is a retraction, not a decision), and the caller then records nothing
+ * rather than inventing one.
+ */
+export function reviewDecisionFor(status: AssetStatus): string | null {
+  switch (status) {
+    case "approved":
+      return "approve";
+    case "rejected":
+      return "reject";
+    case "archived":
+      return "comment";   // shelved, not judged — the only honest fit in the enum
+    default:
+      return null;        // in_review, draft, scheduled, published: no verdict
+  }
+}
+
 export function isAssetStatus(v: unknown): v is AssetStatus {
   return typeof v === "string" && (STATUSES as readonly string[]).includes(v);
 }
