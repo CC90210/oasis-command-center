@@ -41,6 +41,7 @@ import {
   FormDefinitionError,
 } from "@/lib/forms/types";
 import { isFieldVisible, buildAnswerContext } from "@/lib/forms/visibility";
+import { isAcceptableCaptureAddress } from "@/lib/address/us-address";
 import { rateLimit } from "@/lib/rate-limit";
 import { createRecord, updateRecord, RecordsError } from "@/lib/manifest/data";
 import { uploadLeadDocument, registerLeadDocument, classifyDocTypeByFilename } from "@/lib/lead-documents";
@@ -368,10 +369,49 @@ export async function POST(req: NextRequest) {
   const currentStep = steps[stepIndex];
   const inlineFileNames = new Set(inlineFiles.map((f) => f.fieldName));
   for (const field of currentStep.fields) {
-    if (!field.required) continue;
     // Hidden-by-condition fields are not required (mirrors the renderer + the
     // client validator). Evaluated against mergedAnswers, never client-trusted.
     if (!isFieldVisible(field, mergedAnswers)) continue;
+
+    // ADDRESS COMPLETENESS — the fail-closed boundary, and the reason this
+    // whole change exists. Ezra, 2026-08-13, relayed by Adon: "to include the
+    // address, it doesn't make them have to put in the city, state, and ZIP
+    // Code. Some people literally just put their street name and I'm like,
+    // 'Where the fuck do you live bro?'" Measured on production at the time:
+    // 514 of 1,051 business addresses had no ZIP at all.
+    //
+    // Checked BEFORE the `required` guard on purpose — an OPTIONAL address
+    // (the partner's) may be left blank, but if it is filled in it must still
+    // be a real address. The client validator mirrors this; this is the
+    // authoritative copy, because the client can be bypassed.
+    if (field.type === "address") {
+      const rawAddr = payload[field.name];
+      const provided = typeof rawAddr === "string" ? rawAddr.trim() : "";
+      if (provided) {
+        const gate = isAcceptableCaptureAddress(
+          provided,
+          // The business address holds its state in a separate dropdown, which
+          // may have been answered on an earlier step.
+          field.name === "business_address"
+            ? payload.business_state ?? mergedAnswers.business_state
+            : undefined,
+        );
+        if (!gate.ok) {
+          // Log the SHAPE of the failure, never the address itself — this is
+          // merchant PII and the log is not a PII sink.
+          console.warn("[forms/submit] incomplete address rejected", {
+            form: form.slug,
+            field: field.name,
+          });
+          return NextResponse.json(
+            { ok: false, error: "incomplete_address", field: field.name, message: gate.message },
+            { status: 400 },
+          );
+        }
+      }
+    }
+
+    if (!field.required) continue;
     const v = payload[field.name];
     if (field.type === "file_upload") {
       // Either an inline file in THIS request OR a previously-uploaded

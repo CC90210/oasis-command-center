@@ -22,7 +22,10 @@ import "server-only";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { createRecord } from "@/lib/manifest/data";
 import { extractAppFields } from "@/lib/forms/application-upsert";
-import { GENERATED_APPLICATION_OWNERSHIP_PCT } from "@/lib/applications/live-sub-mapping";
+import {
+  GENERATED_APPLICATION_OWNERSHIP_PCT,
+  mapLeadDataToApplicationFields,
+} from "@/lib/applications/live-sub-mapping";
 
 export type CreateAppFromLeadResult =
   | { ok: true; applicationId: string; created: boolean }
@@ -70,7 +73,24 @@ export async function createApplicationFromLead(input: {
   // use (aliases + normalization included). Previously a local 12-key allowlist
   // dropped ~20 fields, so the generated application PDF rendered blank for EIN /
   // address / owner even though the lead/underwriting-sheet had them.
-  const copied: Record<string, unknown> = extractAppFields(leadData);
+  //
+  // Run the lead through mapLeadDataToApplicationFields FIRST. A CSV-imported
+  // lead carries its address as discrete `business_address` (street only) +
+  // `business_city` + `business_zip` columns, and the application entity has a
+  // single free-text address field with no home for the other two. Calling
+  // extractAppFields on the raw lead therefore copied the bare street line and
+  // dropped the city and ZIP permanently — one of the ways a lender ended up
+  // reading "7930 Snow View Drive" as a business address.
+  //
+  // composeBusinessAddress() inside that mapper assembles "street, city zip"
+  // and deliberately leaves the state out, because the renderer splices
+  // `business_state` back in. This is the same call the live-subs promote path
+  // already makes (promote-lead-to-application.ts) — this path was simply
+  // missed.
+  const copied: Record<string, unknown> = extractAppFields({
+    ...leadData,
+    ...mapLeadDataToApplicationFields(leadData),
+  });
   // Ownership % is stamped, not inherited, on every application GENERATED from a
   // lead — see GENERATED_APPLICATION_OWNERSHIP_PCT. (Merchant-filled web-form
   // applications don't come through here and keep whatever they typed.)

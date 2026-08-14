@@ -25,6 +25,13 @@ import type { PDFFont, PDFPage } from "pdf-lib";
 import { SUNBIZ_LOGO_PNG_BASE64 } from "./sunbiz-logo";
 import type { FormField, FormStep } from "./types";
 import { getAgents } from "@/lib/config/agents";
+// Only the compose rule is used here. Completeness is surfaced to the OPERATOR
+// (lead drawer, edit form, shop-out pre-flight), never annotated onto the
+// document itself: printing "[ZIP not provided]" tells a funder that SunBiz
+// failed to collect basic data, which is worse for the deal than the partial
+// line it replaces. The PDF prints the most complete line we honestly have.
+import { composeCompleteAddress } from "@/lib/address/us-address";
+import { applyDisclosureToSections, isRedactedField } from "./application-disclosure";
 
 export type PdfFieldRow = { label: string; value: string };
 export type PdfSection = { heading: string; rows: PdfFieldRow[] };
@@ -123,26 +130,18 @@ function titleCaseSlug(v: unknown): string {
 }
 
 /**
- * Compose a COMPLETE one-line address. The "address" autocomplete field usually
- * stores "street, city, ZIP" with NO state — the state lives in the separate
- * business_state dropdown (for lender matching), so the lender-facing PDF was
- * showing an address line missing the state. Merge the state back in so the
- * line reads "street, city, ST ZIP". Idempotent: if the address already carries
- * the 2-letter state (adjacent to a ZIP or trailing), it's left untouched.
+ * Compose a COMPLETE one-line address.
+ *
+ * The implementation moved to lib/address/us-address.ts so ONE rule serves every
+ * address on the document. It used to live here as a private helper with a
+ * single call site — the legacy mapper's business address — which meant the
+ * live form-driven mapper never ran it and the shipped PDF never merged the
+ * state, while the test suite asserted against the unused path and stayed green.
+ * Behaviour is unchanged; `mergeStateIntoAddress` is byte-for-byte the old
+ * function and tests/us-address.test.ts pins its exact output.
  */
 function composeAddress(addr: unknown, state: unknown): string {
-  const a = str(addr);
-  const st = str(state).toUpperCase();
-  if (!a) return "";
-  if (!/^[A-Z]{2}$/.test(st)) return a; // no usable 2-letter state → leave as-is
-  const up = a.toUpperCase();
-  // Already in state position (before a ZIP, or trailing ", ST")? Leave it.
-  if (new RegExp(`\\b${st}\\b\\s*\\d{5}`).test(up) || new RegExp(`,\\s*${st}\\s*$`).test(up)) return a;
-  // Insert before a trailing ZIP: "..., Miami, 33101" -> "..., Miami, FL 33101".
-  const zip = a.match(/^(.*?)[,\s]*(\d{5}(?:-\d{4})?)\s*$/);
-  if (zip) return `${zip[1].replace(/[,\s]+$/, "")}, ${st} ${zip[2]}`;
-  // No ZIP — append the state.
-  return `${a.replace(/[,\s]+$/, "")}, ${st}`;
+  return composeCompleteAddress(addr, state);
 }
 
 /**
@@ -186,7 +185,10 @@ export function mapApplicationFields(
         { label: "Name", value: str(merged.owner_full_name) || str(merged.owner_name) || str(merged.contact_name) },
         { label: "Title", value: "" },
         { label: "Ownership %", value: pct(merged.owner_ownership_pct) },
-        { label: "Home Address", value: str(merged.owner_home_address) },
+        // Same completeness rule as the business address. There is no owner
+        // home-state field to fall back on, so this only normalises what the
+        // string already carries — it never invents a state.
+        { label: "Home Address", value: composeCompleteAddress(merged.owner_home_address) },
         { label: "SSN", value: str(merged.owner_ssn) },
         { label: "Date of Birth", value: usDate(merged.owner_dob) },
         { label: "Home Phone", value: "" },
@@ -199,7 +201,7 @@ export function mapApplicationFields(
         { label: "Name", value: str(merged.partner_full_name) },
         { label: "Title", value: "" },
         { label: "Ownership %", value: pct(merged.partner_ownership_pct) },
-        { label: "Home Address", value: str(merged.partner_home_address) },
+        { label: "Home Address", value: composeCompleteAddress(merged.partner_home_address) },
         { label: "SSN", value: str(merged.partner_ssn) },
         { label: "Date of Birth", value: usDate(merged.partner_dob) },
         { label: "Home Phone", value: "" },
@@ -221,7 +223,14 @@ export function mapApplicationFields(
     },
   ];
 
-  return { sections, signatureName: merchantSignerName(merged) };
+  // Enforce the disclosure registry on the way out. The blanked contact rows
+  // above are already correct by hand; this makes them redundant rather than
+  // load-bearing, and means a row added later cannot leak a declared-private
+  // field just because whoever added it did not know the rule existed.
+  return {
+    sections: applyDisclosureToSections(sections),
+    signatureName: merchantSignerName(merged),
+  };
 }
 
 /**
@@ -344,19 +353,42 @@ export function mapApplicationFieldsFromSteps(
       ) {
         continue;
       }
-      // Ezra 2026-06-24: never expose the merchant's phone on the generated
-      // application PDF (it is lender-facing once shopped out) — keep the
-      // labelled field but blank the value so funders can't contact the
-      // merchant directly. Covers phone / owner_cell / partner_cell (all type=phone).
-      rows.push({
-        label: f.label,
-        value: f.type === "phone" ? "" : formatFieldValue(f, resolveAnswer(merged, f.name)),
-      });
+      // Contact fields the merchant gave us are never printed on this document
+      // — it is lender-facing once shopped out. The labelled cell is kept and
+      // only the value is blanked, so the form keeps its shape. Which fields
+      // those are is declared in ./application-disclosure, NOT decided here:
+      // this used to be an inline `f.type === "phone"` check, and adding email
+      // to it meant finding five other hardcoded sites first.
+      if (isRedactedField(f)) {
+        rows.push({ label: f.label, value: "" });
+        continue;
+      }
+      // Addresses go through the same completeness rule as the legacy mapper's
+      // business address. This is the line whose absence was the actual
+      // regression: composeAddress lived on the legacy path only, so the PDF
+      // production really ships never merged the state back in.
+      if (f.type === "address") {
+        rows.push({
+          label: f.label,
+          value: composeCompleteAddress(
+            resolveAnswer(merged, f.name),
+            f.name === "business_address" ? resolveAnswer(merged, "business_state") : undefined,
+          ),
+        });
+        continue;
+      }
+      rows.push({ label: f.label, value: formatFieldValue(f, resolveAnswer(merged, f.name)) });
     }
     if (rows.length) sections.push({ heading: step.title.toUpperCase(), rows });
   }
 
-  return { sections, signatureName: merchantSignerName(merged) };
+  // Belt and braces: the loop above already withholds declared fields by type,
+  // and this catches one declared by LABEL that arrived with an unexpected type
+  // (a contact field mistyped as plain text in the form builder).
+  return {
+    sections: applyDisclosureToSections(sections),
+    signatureName: merchantSignerName(merged),
+  };
 }
 
 // Code points pdf-lib's WinAnsi encoding maps beyond ASCII + Latin-1: the
