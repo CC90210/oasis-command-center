@@ -1,5 +1,5 @@
 import type { Metadata } from "next";
-import { Space_Grotesk, Inter_Tight, JetBrains_Mono } from "next/font/google";
+import localFont from "next/font/local";
 import { Ambient } from "@/components/marketing/Ambient";
 import { MarketingNav } from "@/components/marketing/MarketingNav";
 import { MarketingFooter } from "@/components/marketing/MarketingFooter";
@@ -21,27 +21,65 @@ import "./marketing.css";
  * dashboard renders on a system-font stack and has no webfont in its
  * critical path; loading three faces globally would put a network fetch in
  * front of every operator's first paint to style pages they never see.
- * next/font self-hosts them, so there is no runtime request to Google and
- * no third-party added to the subprocessor list.
+ * The files are vendored into app/fonts/ and loaded with next/font/local —
+ * still self-hosted at runtime, and no longer fetched from Google at BUILD
+ * time either, which is what kept breaking deploys. See the note below.
  */
 
-const display = Space_Grotesk({
-  subsets: ["latin"],
-  weight: ["500", "600", "700"],
+/**
+ * SELF-HOSTED, NOT next/font/google — because the build kept failing.
+ *
+ * `next/font/google` fetches the font binaries from fonts.gstatic.com AT BUILD
+ * TIME. When that fetch fails the whole build fails, and it fails for reasons
+ * that have nothing to do with the change being built:
+ *
+ *   2026-08-14  GitHub Actions  Failed to fetch `Space Grotesk` from Google Fonts
+ *   2026-08-13  Vercel 104cd22  same, 3 retries, then `next build` exited 1
+ *                               (Vercel labels it "lint_or_type_error", which
+ *                                sent the first diagnosis in the wrong direction)
+ *
+ * Two failed deploys in two days from an unrelated third party, on a build that
+ * is otherwise deterministic. CC, 2026-08-14: "make sure that all functionality
+ * throughout the software is built and then correctly maintained so that, down
+ * the line, when things get changed, it doesn't affect it in any way that causes
+ * it to break for some random reason." A network call in a build step is exactly
+ * that class of thing.
+ *
+ * The .woff2 files now live in app/fonts/ (latin subset, the same files Google
+ * was serving — 146 KB total). Nothing about the rendered output changes: the
+ * same faces, the same weights, the same --font-* variable names. next/font
+ * still self-hosts and still emits no runtime request to Google, so the privacy
+ * and subprocessor position is unchanged; the build simply no longer needs the
+ * internet.
+ *
+ * Licensing: Space Grotesk, Inter Tight and JetBrains Mono are all SIL Open Font
+ * License 1.1, which explicitly permits redistribution. See app/fonts/OFL.md.
+ */
+const display = localFont({
+  src: [
+    { path: "../fonts/SpaceGrotesk-500.woff2", weight: "500", style: "normal" },
+    { path: "../fonts/SpaceGrotesk-600.woff2", weight: "600", style: "normal" },
+    { path: "../fonts/SpaceGrotesk-700.woff2", weight: "700", style: "normal" },
+  ],
   variable: "--font-display",
   display: "swap",
 });
 
-const body = Inter_Tight({
-  subsets: ["latin"],
-  weight: ["400", "500", "600"],
+const body = localFont({
+  src: [
+    { path: "../fonts/InterTight-400.woff2", weight: "400", style: "normal" },
+    { path: "../fonts/InterTight-500.woff2", weight: "500", style: "normal" },
+    { path: "../fonts/InterTight-600.woff2", weight: "600", style: "normal" },
+  ],
   variable: "--font-body",
   display: "swap",
 });
 
-const data = JetBrains_Mono({
-  subsets: ["latin"],
-  weight: ["400", "500"],
+const data = localFont({
+  src: [
+    { path: "../fonts/JetBrainsMono-400.woff2", weight: "400", style: "normal" },
+    { path: "../fonts/JetBrainsMono-500.woff2", weight: "500", style: "normal" },
+  ],
   variable: "--font-data",
   display: "swap",
 });
