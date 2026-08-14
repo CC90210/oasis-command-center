@@ -22,6 +22,7 @@ import {
   TRACKS,
   channelLabel,
   channelsForTrack,
+  isAssetStatus,
   isChannel,
   trackForChannel,
   trackLabel,
@@ -43,7 +44,7 @@ function isTrack(v: string | undefined): v is Track {
 export default async function MarketingLibraryPage({
   searchParams,
 }: {
-  searchParams: Promise<{ track?: string; channel?: string; brand?: string }>;
+  searchParams: Promise<{ track?: string; channel?: string; brand?: string; status?: string }>;
 }) {
   const founder = await resolveFounder();
   if (!founder) notFound();
@@ -54,9 +55,12 @@ export default async function MarketingLibraryPage({
   const brand = typeof sp.brand === "string" && /^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(sp.brand)
     ? sp.brand
     : undefined;
+  // Studio's pipeline tiles link here with ?status=; validated against the
+  // canonical list so an arbitrary string never reaches the query.
+  const status = isAssetStatus(sp.status) ? sp.status : undefined;
 
   const [assets, brands] = await Promise.all([
-    safe("marketing.library", getMarketingAssets(founder.tenantId, { track, channel, brand }), []),
+    safe("marketing.library", getMarketingAssets(founder.tenantId, { track, channel, brand, status }), []),
     safe("marketing.library.brands", getMarketingBrands(founder.tenantId), []),
   ]);
 

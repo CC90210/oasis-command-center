@@ -3,9 +3,12 @@
  * Run: npx tsx tests/marketing-core.test.ts
  */
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import {
   CHANNELS,
   DECISIONS,
+  FOUNDERS_OWN_BRAND,
   buildMediaPath,
   channelBreadcrumb,
   channelsForTrack,
@@ -16,6 +19,7 @@ import {
   fmtDuration,
   freshnessLabel,
   isChannel,
+  isOwnBrand,
   isDecision,
   isProvisional,
   sanitizeStorageFilename,
@@ -196,5 +200,39 @@ assert.ok(
 // breadcrumb assertion above, so this cast is the only place the union is widened
 const sample: Channel = "paid-google";
 assert.equal(trackForChannel(sample), "paid");
+
+// ── the founders portal shows OUR OWN work ───────────────────────────
+// docs/PORTALS.md: founders is "OASIS's own tooling. Not a tenant surface."
+// The library was rendering every brand on the founders tenant, so four client
+// deliverables (Warner x2, Arthrisil, blyss) sat beside OASIS's own nine and CC
+// read it as a leak. It was not one — every row is on the founders tenant and
+// each reader carries .eq("tenant_id", ...) — but client work is not our own
+// marketing, and the portal that promises "not a tenant surface" is the wrong
+// place to review a client's ad.
+assert.equal(FOUNDERS_OWN_BRAND, "oasis-ai");
+assert.ok(isOwnBrand("oasis-ai"), "OASIS AI is our own work");
+assert.ok(!isOwnBrand("warner"), "a client brand is not our own work");
+assert.ok(!isOwnBrand("arthrisil"), "a client brand is not our own work");
+assert.ok(!isOwnBrand("blyss"), "a client brand is not our own work");
+assert.ok(!isOwnBrand(null) && !isOwnBrand(undefined) && !isOwnBrand(""),
+  "an unbranded row is not assumed to be ours");
+
+// The readers scope on this constant, so a rename that misses marketing-queries
+// would silently empty the library rather than fail loudly. Pin the literal.
+{
+  const queries = readFileSync(
+    join(process.cwd(), "lib/founders/marketing-queries.ts"), "utf8");
+  assert.ok(queries.includes("FOUNDERS_OWN_BRAND"),
+    "marketing-queries must scope to FOUNDERS_OWN_BRAND");
+  const scoped = queries.split("from(\"marketing_asset\")").length - 1;
+  const guards = queries.split("FOUNDERS_OWN_BRAND").length - 1;
+  assert.ok(guards >= scoped - 1,
+    `every marketing_asset read should be brand-scoped or explicitly widened ` +
+    `(${scoped} reads, ${guards} guards)`);
+  // The brand filter must NOT be honoured outside the widened scope, or
+  // ?brand=warner walks straight past the boundary.
+  assert.ok(queries.includes('if (opts.scope === "all")'),
+    "a caller must opt in explicitly to see anything but our own work");
+}
 
 console.log("marketing-core: all assertions passed");

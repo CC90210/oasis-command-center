@@ -13,7 +13,21 @@
 
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { isMissingTableError } from "@/lib/api-helpers";
-import type { AssetFormat, AssetStatus, Channel, Track } from "@/lib/founders-marketing-core";
+import {
+  FOUNDERS_OWN_BRAND,
+  type AssetFormat,
+  type AssetStatus,
+  type Channel,
+  type Track,
+} from "@/lib/founders-marketing-core";
+
+/**
+ * Founders readers show OASIS's OWN work by default. `scope: "all"` is the
+ * explicit opt-out for a future client-deliverables surface; nothing in the
+ * founders portal passes it today. Scoping here rather than in each page means
+ * a new founders page cannot forget and re-introduce the mix.
+ */
+export type BrandScope = "own" | "all";
 
 export type MarketingMediaRow = {
   id: string;
@@ -89,7 +103,8 @@ export async function getMarketingSummary(tenantId: string): Promise<MarketingSu
     const assets = await db
       .from("marketing_asset")
       .select("track, status")
-      .eq("tenant_id", tenantId);
+      .eq("tenant_id", tenantId)
+      .eq("brand_slug", FOUNDERS_OWN_BRAND);
     if (assets.error) {
       if (quiet("summary.assets", assets.error)) return EMPTY_MARKETING_SUMMARY;
     }
@@ -139,7 +154,14 @@ export async function getMarketingSummary(tenantId: string): Promise<MarketingSu
  */
 export async function getMarketingAssets(
   tenantId: string,
-  opts: { track?: Track; channel?: Channel; status?: AssetStatus; brand?: string; limit?: number } = {},
+  opts: {
+    track?: Track;
+    channel?: Channel;
+    status?: AssetStatus;
+    brand?: string;
+    limit?: number;
+    scope?: BrandScope;
+  } = {},
 ): Promise<MarketingAssetRow[]> {
   if (!tenantId) return [];
   const db = getServiceSupabase();
@@ -153,7 +175,14 @@ export async function getMarketingAssets(
     if (opts.track) q = q.eq("track", opts.track);
     if (opts.channel) q = q.eq("channel", opts.channel);
     if (opts.status) q = q.eq("status", opts.status);
-    if (opts.brand) q = q.eq("brand_slug", opts.brand);
+    // Own-work-only unless a caller deliberately widens the scope. A `brand`
+    // filter is only honoured inside the wider scope — otherwise a crafted
+    // ?brand=warner query string would walk straight past the boundary.
+    if (opts.scope === "all") {
+      if (opts.brand) q = q.eq("brand_slug", opts.brand);
+    } else {
+      q = q.eq("brand_slug", FOUNDERS_OWN_BRAND);
+    }
 
     const r = await q;
     if (r.error) {
@@ -270,6 +299,7 @@ export const mediaKey = (bucket: string, path: string) => `${bucket}\n${path}`;
 /** Brand choices for the library filter, deduped from tenant-scoped assets. */
 export async function getMarketingBrands(
   tenantId: string,
+  scope: BrandScope = "own",
 ): Promise<Array<{ slug: string; name: string }>> {
   if (!tenantId) return [];
   try {
@@ -277,12 +307,12 @@ export async function getMarketingBrands(
     const unique = new Map<string, string>();
     const pageSize = 1000;
     for (let from = 0; ; from += pageSize) {
-      const r = await db
+      let bq = db
         .from("marketing_asset")
         .select("brand_slug, brand_name")
-        .eq("tenant_id", tenantId)
-        .order("brand_name")
-        .range(from, from + pageSize - 1);
+        .eq("tenant_id", tenantId);
+      if (scope !== "all") bq = bq.eq("brand_slug", FOUNDERS_OWN_BRAND);
+      const r = await bq.order("brand_name").range(from, from + pageSize - 1);
       if (r.error) return [];
       const rows = (r.data || []) as Array<{ brand_slug: string; brand_name: string }>;
       for (const row of rows) {
