@@ -151,6 +151,18 @@ function registry(): Record<string, RepEntry> {
 
 
 /**
+ * Every number in the STATIC registry, flattened.
+ *
+ * The floor beneath the per-wire breaker scope. An empty allow-list there does
+ * not mean "no failures", it means "no sample" — and a breaker with no sample
+ * permits sending, straight into the route it is guarding. So a cold or
+ * unreadable sms_sender_numbers falls back to this rather than to nothing.
+ */
+export function staticRegistryNumbers(): string[] {
+  return Object.values(registry()).flatMap((e) => e.numbers);
+}
+
+/**
  * The line we ALREADY texted this lead from, if it is still usable.
  *
  * WHY A LOOKUP AND NOT A HASH. pickNumber hashes the lead against the CURRENT

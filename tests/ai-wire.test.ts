@@ -113,18 +113,41 @@ assert.deepEqual(aiWireStages({ DRIP_AI_WIRE_STAGES: ",,," }), ["uw_sheet", "liv
 // observe it from a pure unit test, and "we fixed it once" is not a guarantee.
 {
   const exec = readFileSync(new URL("../lib/drips/executor.ts", import.meta.url), "utf8");
-  const call = exec.slice(exec.indexOf("const breaker = await smsSendAllowed"), exec.indexOf("const probing"));
-  assert.ok(call.length > 40, "the breaker call must still be there");
-  assert.ok(!/smsSendAllowed\(\s*row\.tenant_id\s*\)/.test(call),
-    "a tenant-only breaker call halts the AI wire for the main account's failures");
-  assert.ok(call.includes("wire:"), "the verdict must be keyed per wire");
-  assert.ok(call.includes("onlyLines") && call.includes("excludeLines"),
-    "each wire is judged on its OWN lines' receipts, and only its own");
+  assert.ok(
+    !/smsSendAllowed\(\s*row\.tenant_id\s*\)/.test(exec),
+    "a tenant-only breaker call halts the AI wire for the main account's failures",
+  );
+  assert.ok(
+    exec.includes("smsSendAllowed(row.tenant_id, { wire, onlyLines: wireLines })"),
+    "the verdict is keyed per wire and scoped to that wire's own lines",
+  );
+  // The probe lease too, or whichever wire dispatch reaches first takes the
+  // only probe every interval and the other route never tests recovery.
+  assert.ok(
+    /claimBreakerProbe\(row\.tenant_id,\s*Date\.now\(\),\s*wire\)/.test(exec),
+    "the half-open probe lease must be per wire",
+  );
 
   const breaker = readFileSync(new URL("../lib/sms/send-breaker.ts", import.meta.url), "utf8");
   assert.ok(breaker.includes("`${tenantId}::${opts.wire}`"), "the cache key must include the wire");
   assert.ok(/for \(const k of cache\.keys\(\)\)/.test(breaker),
     "resetBreakerCache must clear every wire for the tenant, or a recovered wire stays halted");
+  assert.ok(
+    breaker.includes("newestOpenReceiptAt(tenantId, { onlyLines: opts.onlyLines })"),
+    "an unresolved probe on one wire must not suppress the other wire's probe",
+  );
+
+  // THE DANGEROUS ONE. Scoping in memory AFTER a LIMIT silently truncates: a
+  // busy wire's newer receipts fill the page, the quiet wire comes back empty,
+  // and the breaker reads "no failures" for a route that is dead. The filter
+  // has to be in the query.
+  const receipts = readFileSync(new URL("../lib/sms/delivery-receipts.ts", import.meta.url), "utf8");
+  assert.ok(receipts.includes('q.in("from_number", opts.onlyLines)'), "scope in the query, not after the limit");
+  assert.ok(!receipts.includes("excludeLines"), "an allow-list only — exclusion cannot be expressed in the query");
+  assert.ok(
+    receipts.includes("if (opts.onlyLines && opts.onlyLines.length === 0) return [];"),
+    "an empty scope is a real empty sample, not an instruction to read every line",
+  );
 }
 
 // ── A missing second account must not freeze the FIRST one's cleanup ──────
