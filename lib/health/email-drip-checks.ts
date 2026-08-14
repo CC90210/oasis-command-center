@@ -141,11 +141,19 @@ async function countDripEmails(
 const SCAN_PAGE = 200;
 const SCAN_MAX_PAGES = 5;
 
-async function hoursSinceLastEmail(db: Db, tenantId: string, endMs: number): Promise<number | null> {
+async function hoursSinceLastEmail(
+  db: Db,
+  tenantId: string,
+  endMs: number,
+  ceilingH: number,
+): Promise<number | null> {
+  const ageH = (stamp: string): number => {
+    const t = Date.parse(stamp);
+    return Number.isFinite(t) ? Math.max(0, Math.round(((endMs - t) / HOUR) * 10) / 10) : 999;
+  };
   try {
-    let last: string | undefined;
-    let oldestSeen: string | undefined;
-    for (let page = 0; page < SCAN_MAX_PAGES && !last; page++) {
+    let exhausted = false;
+    for (let page = 0; page < SCAN_MAX_PAGES; page++) {
       const r = await db
         .from("lead_interactions")
         .select("created_at, metadata")
@@ -157,20 +165,33 @@ async function hoursSinceLastEmail(db: Db, tenantId: string, endMs: number): Pro
         .range(page * SCAN_PAGE, page * SCAN_PAGE + SCAN_PAGE - 1);
       if (r.error) return null;
       const rows = (r.data || []) as Array<{ created_at: string; metadata: Record<string, unknown> | null }>;
-      if (rows.length === 0) break;
-      oldestSeen = rows[rows.length - 1]?.created_at ?? oldestSeen;
-      last = rows.find((row) => String((row.metadata || {}).dry_run) !== "true")?.created_at;
+      if (rows.length === 0) { exhausted = true; break; }
+
+      const real = rows.find((row) => String((row.metadata || {}).dry_run) !== "true");
+      if (real) return ageH(real.created_at);
+
+      // Every row scanned so far is a dry run, so the last real send is older
+      // than this page's oldest row. Once THAT boundary is itself past the
+      // ceiling, silence already exceeds the limit and the exact age no longer
+      // changes the verdict — stop paging and report the provable bound.
+      const boundary = ageH(rows[rows.length - 1].created_at);
+      if (boundary > ceilingH) return boundary;
+
+      if (rows.length < SCAN_PAGE) { exhausted = true; break; }
     }
-    // Nothing real found, but rows exist: the last real send is at least as old
-    // as the oldest row scanned. A provable floor beats a fabricated 999.
-    if (!last && oldestSeen) last = oldestSeen;
-    // Never sent at all is maximal silence, not "unknown". Returning null here
-    // would render as check_broken and hide a genuinely dead engine behind an
-    // infrastructure-looking amber.
-    if (!last) return 999;
-    const t = Date.parse(last);
-    if (!Number.isFinite(t)) return 999;
-    return Math.max(0, Math.round(((endMs - t) / HOUR) * 10) / 10);
+
+    // Scanned the entire history and found no real send: never sent at all,
+    // which is maximal silence rather than "unknown".
+    if (exhausted) return 999;
+
+    // The cap was hit while still inside the ceiling window. Every row seen is
+    // a dry run and the last real send could be minutes or months old — we do
+    // not know. Returning the oldest dry run's age would read as ok and mute a
+    // genuine outage; the volume check does not reliably cover it either, since
+    // earlier real sends can still satisfy a 24h total after live sending
+    // stops. So: no answer, which evaluates to check_broken and alerts. A check
+    // that cannot conclude is never a pass.
+    return null;
   } catch {
     return null;
   }
@@ -235,9 +256,12 @@ const CHECKS: DripCheck[] = [
     id: "drips.email_silence_hours",
     severity: "critical",
     rule: { kind: "must_be_zero" }, // replaced at runtime with a ceiling rule
-    observe: (db, tenantId, endMs) => hoursSinceLastEmail(db, tenantId, endMs),
+    observe: (db, tenantId, endMs) => hoursSinceLastEmail(db, tenantId, endMs, maxSilentHours()),
     describe: (r) =>
-      `${r.observed}h since the last drip email (limit ${maxSilentHours()}h). ${r.reason}`,
+      Number.isFinite(r.observed)
+        ? `${r.observed}h since the last drip email (limit ${maxSilentHours()}h). ${r.reason}`
+        : `could not establish when the last REAL drip email was sent — the recent history is ` +
+          `all dry runs, so live sending may be off. Treated as a fault, not a pass.`,
   },
   {
     // STARVATION, which is what actually happened in August: sending was fine,

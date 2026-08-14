@@ -172,14 +172,21 @@ import { isBenignSendFailure } from "../lib/health/email-drip-checks";
   // send, and the old fallback then fabricated 999h — a false outage out of a
   // busy rehearsal. Paged scan, and the give-up value is a row we actually saw.
   assert.ok(silenceFn.includes(".range("), "the scan must paginate, not read one fixed page");
-  assert.ok(silenceFn.includes("oldestSeen"), "on hitting the cap, report the provable lower bound");
-  // 999 stays for the genuine never-sent-at-all case, which IS maximal silence.
-  // What must not happen is reaching it while rows exist, so the lower-bound
-  // assignment has to come first.
-  const bound = silenceFn.indexOf("if (!last && oldestSeen) last = oldestSeen;");
-  const giveUp = silenceFn.indexOf("if (!last) return 999;");
-  assert.ok(bound > 0 && giveUp > 0, "both the lower bound and the never-sent fallback must be present");
-  assert.ok(bound < giveUp, "999 is only reachable after the lower bound has been tried — never while rows exist");
+  // 999 stays for the genuine never-sent-at-all case, which IS maximal silence,
+  // and is reachable ONLY after the whole history has been scanned.
+  assert.ok(silenceFn.includes("if (exhausted) return 999;"), "999 requires an exhausted scan");
+  // The cap path must fail closed. An earlier draft returned the oldest dry
+  // run's age, which reads as ok and mutes a real outage; the volume check does
+  // not cover it, because earlier real sends can still satisfy a 24h total
+  // after live sending stops.
+  assert.ok(
+    /cap was hit[\s\S]*?return null;/.test(silenceFn),
+    "hitting the scan cap inside the ceiling window must return null (check_broken), never a dry run's age",
+  );
+  assert.ok(
+    silenceFn.includes("if (boundary > ceilingH) return boundary;"),
+    "a provable bound past the ceiling still reports the fault rather than going inconclusive",
+  );
   assert.equal(
     (src.match(/dry_run/g) || []).length >= 2,
     true,
