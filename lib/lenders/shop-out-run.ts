@@ -217,24 +217,8 @@ export async function executeShopOutRun(
     const nowIso = new Date().toISOString();
     const funderName = planRow.lender_name;
 
-    // Skip lenders with hard match blockers — operator should have
-    // unchecked them upstream, but defense-in-depth.
-    if (planRow.blockers.length > 0) {
-      const entry: ShopOutResultEntry = {
-        funder: funderName,
-        lender_id: planRow.lender_id,
-        status: "failed",
-        gmail_thread_id: null,
-        gmail_message_id: null,
-        rfc822_message_id: null,
-        cc_emails: planRow.recipient_cc_emails,
-        error: `match_blocker: ${planRow.blockers.join("; ")}`,
-        ts: nowIso,
-      };
-      results.push(entry);
-      failedCount += 1;
-      continue;
-    }
+    // High-risk match warnings are advisory. Interactive callers confirm them
+    // before reaching this engine, so the selected lender remains sendable.
 
     // No recipient → skip with explicit error so the audit shows why.
     if (!planRow.recipient_email) {

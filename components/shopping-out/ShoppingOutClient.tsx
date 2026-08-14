@@ -505,10 +505,11 @@ export function ShoppingOutClient({
           }))
           .sort((a: PlanRow, b: PlanRow) => b.match_score - a.match_score);
         setPlan(ranked);
-        // Default selection: top 5 contactable lenders with zero blockers.
+        // Default selection: top 5 contactable lenders. High-risk matches stay
+        // selectable and route through the confirmation dialog at send time.
         const defaults = new Set<string>(
           ranked
-            .filter((r) => r.recipient_email && r.blockers.length === 0)
+            .filter((r) => r.recipient_email)
             .slice(0, 5)
             .map((r) => r.lender_id),
         );
@@ -1385,12 +1386,12 @@ export function ShoppingOutClient({
 
             <div>
               <label className="block text-[11px] uppercase tracking-wider text-fg-dim font-semibold mb-1.5">
-                Override note (required)
+                Override note (optional)
               </label>
               <textarea
                 value={overrideNote}
                 onChange={(e) => setOverrideNote(e.target.value)}
-                placeholder="Why are you sending despite the risk? e.g. operator has spoken to lender directly, revenue update incoming, etc."
+                placeholder="Add context if useful, e.g. operator spoke to the lender or updated figures are coming."
                 rows={3}
                 className="w-full text-sm px-3 py-2 rounded-md bg-bg-deep border border-bg-border text-fg placeholder:text-fg-dim resize-none"
               />
@@ -1414,7 +1415,7 @@ export function ShoppingOutClient({
               <button
                 type="button"
                 onClick={performSend}
-                disabled={sending || overrideNote.trim().length < 5}
+                disabled={sending}
                 className="text-xs px-3 py-1.5 rounded-md bg-rose-500/20 border border-rose-500/40 text-rose-200 hover:bg-rose-500/30 disabled:opacity-50 inline-flex items-center gap-1.5"
               >
                 {sending ? <Loader2 className="w-3 h-3 animate-spin" /> : null}
