@@ -20,6 +20,29 @@
  */
 
 /** Map a TextTorrent "purchased by" display name onto our rep key. */
+/**
+ * The X-ACT-AS-USER a rep key sends under. null = the parent/admin account,
+ * which authenticates as itself.
+ *
+ * Kept here beside repKeyForOwner so the two cannot disagree about who a rep
+ * is. Each TextTorrent account is separately registered with the carrier, so
+ * sending a rep's line under the wrong account is not cosmetic: it breaks the
+ * sender identity the merchant already knows and lands the reply in an inbox
+ * that rep cannot see.
+ */
+export function actAsEmailForRep(repKey: string): string | null {
+  switch (repKey) {
+    case "jordan":
+      return "jordan@sunbizfunding.com";
+    case "alex":
+      return "alex@sunbizfunding.com";
+    case "joe":
+      return "joe@sunbizfunding.com";
+    default:
+      return null; // admin / parent authenticates as itself
+  }
+}
+
 export function repKeyForOwner(owner: string | null | undefined): string {
   const o = String(owner || "").toLowerCase();
   if (o.includes("jordan")) return "jordan";

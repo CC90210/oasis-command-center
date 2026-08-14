@@ -111,7 +111,7 @@ export function summarizeFailures(rows: RunShape[]): FailureSummary {
  * look like an outage — which would train an operator to ignore the number.
  */
 export function isHeldForPolicy(lastError: unknown): boolean {
-  return /sms_no_lawful_basis|unreachable:|sms_channel_unavailable|email_channel_unavailable|sms_provider_not_wired/.test(
+  return /sms_no_lawful_basis|unreachable:|sms_channel_unavailable|email_channel_unavailable|sms_provider_not_wired|sms_no_sender_line/.test(
     String(lastError ?? ""),
   );
 }
