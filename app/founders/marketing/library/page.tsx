@@ -91,7 +91,8 @@ export default async function MarketingLibraryPage({
       poster:
         media.find((m) => m.kind === "poster") ||
         media.find((m) => m.kind === "thumb") ||
-        media.find((m) => m.kind === "preview"),
+        media.find((m) => m.kind === "preview") ||
+        media.find((m) => m.kind === "image"),
     };
   };
 
@@ -105,10 +106,13 @@ export default async function MarketingLibraryPage({
 
   const signed = assets.map((a) => {
     const { video, poster } = pick(a);
+    const shape = video ?? poster;
     return {
       asset: a,
       playbackUrl: video ? (urls.get(mediaKey(video.storage_bucket, video.storage_path)) ?? null) : null,
       posterUrl: poster ? (urls.get(mediaKey(poster.storage_bucket, poster.storage_path)) ?? null) : null,
+      mediaW: shape?.width ?? null,
+      mediaH: shape?.height ?? null,
     };
   });
 
@@ -262,8 +266,12 @@ export default async function MarketingLibraryPage({
           />
         </Card>
       ) : (
-        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
-          {signed.map(({ asset, playbackUrl, posterUrl }) => (
+        <div className="grid grid-cols-1 items-start gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+          {/* items-start: tiles now differ in height because each takes its asset's own
+              shape. Without it the grid stretches every tile to the tallest in its row,
+              leaving a 9:16 tile's worth of empty panel beside every 16:9 one — dead
+              space created BY the fix. */}
+          {signed.map(({ asset, playbackUrl, posterUrl, mediaW, mediaH }) => (
             <AssetTile
               key={asset.id}
               id={asset.id}
@@ -277,6 +285,8 @@ export default async function MarketingLibraryPage({
               format={asset.format}
               playbackUrl={playbackUrl}
               posterUrl={posterUrl}
+              mediaW={mediaW}
+              mediaH={mediaH}
               openReviews={asset.open_reviews}
             />
           ))}

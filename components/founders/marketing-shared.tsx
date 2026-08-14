@@ -6,7 +6,6 @@
  * crashes at render (same lesson as components/renewals/renewals-shared.tsx).
  */
 
-import Link from "next/link";
 import { Tag } from "@/components/Card";
 import {
   channelLabel,
@@ -46,10 +45,17 @@ export function StatusTag({ status }: { status: AssetStatus }) {
  * (Not the same defect as e4f0e17, which was the marketing shell freezing across a soft
  * nav. That one made a PAGE look zoomed. This one crops the VIDEO.)
  *
- * Two rules now:
- *   - the box takes the asset's aspect, so a vertical film gets a vertical box;
+ * Three rules now:
+ *   - the box takes the MEASURED shape of the media (width/height, probed off the file)
+ *     and falls back to the `aspect` label only when the pixels are missing or absurd.
+ *     The label is what someone wrote down; the pixels are what the file is. An audit of
+ *     this surface found the label had already drifted once — a 1080x1350 card stored as
+ *     "9:16" — and a drifted label renders a vertical film as a ~92px sliver;
  *   - `object-contain`, always. A library exists to show you what you made; cropping a
- *     deliverable to keep a grid tidy is the tail wagging the dog.
+ *     deliverable to keep a grid tidy is the tail wagging the dog;
+ *   - the ratio goes in an INLINE STYLE, never `aspect-[${w}/${h}]`. Tailwind emits only
+ *     classes it can find as literal text, so an interpolated one is never generated, the
+ *     div loses its only height source and EVERY tile collapses to nothing.
  */
 const FRAME: Record<string, string> = {
   "9:16": "aspect-[9/16]",
@@ -73,6 +79,8 @@ export function AssetTile({
   durationS,
   playbackUrl,
   posterUrl,
+  mediaW,
+  mediaH,
   format,
   openReviews = 0,
 }: {
@@ -86,14 +94,22 @@ export function AssetTile({
   durationS?: number | null;
   playbackUrl?: string | null;
   posterUrl?: string | null;
+  mediaW?: number | null;
+  mediaH?: number | null;
   format: string;
   openReviews?: number;
 }) {
   const duration = fmtDuration(durationS);
-  const frame = FRAME[aspect || ""] || "aspect-video";
+  // Sanity band: anything outside 1:5..5:1 is a corrupt row, not a shape we should honour.
+  const r = mediaW && mediaH && mediaW > 0 && mediaH > 0 ? mediaW / mediaH : null;
+  const measured = r && r >= 0.2 && r <= 5 ? `${mediaW} / ${mediaH}` : null;
+  const frame = measured ? "" : FRAME[aspect || ""] || "aspect-video";
   return (
     <article className="rounded-xl border border-bg-border bg-bg-panel shadow-card overflow-hidden transition-all hover:border-accent/40 hover:shadow-ironman group">
-      <div className={`relative ${frame} bg-bg-deep flex items-center justify-center overflow-hidden`}>
+      <div
+        className={`relative ${frame} bg-bg-deep flex items-center justify-center overflow-hidden`}
+        style={measured ? { aspectRatio: measured } : undefined}
+      >
         {playbackUrl && format === "video" ? (
           // preload="metadata" so a 200-tile library does not pull 200 videos.
           <video
@@ -102,7 +118,7 @@ export function AssetTile({
             controls
             playsInline
             preload="metadata"
-            className="h-full w-full object-contain bg-black"
+            className="h-full w-full object-contain"
           />
         ) : posterUrl ? (
           // Plain <img> on purpose. next/image would need a matching
@@ -145,12 +161,11 @@ export function AssetTile({
         <span className="text-[9px] font-bold uppercase tracking-[0.14em] text-accent">
           {brandName}
         </span>
-        <Link
-          href={`/founders/marketing/asset/${id}`}
-          className="text-sm font-medium text-fg hover:text-accent transition-colors line-clamp-2"
-        >
-          {title}
-        </Link>
+        {/* Not a <Link>: /founders/marketing/asset/[id] was specified and never built, so
+            every title in this grid was a 404. Plain text until the detail route exists —
+            and when it does, it must IMPORT this frame logic rather than restate it, or
+            the crop comes back on one page only. */}
+        <span className="text-sm font-medium text-fg line-clamp-2">{title}</span>
         {hook && <p className="text-xs text-fg-muted line-clamp-2 italic">{hook}</p>}
         <div className="mt-auto flex items-center justify-between gap-2 pt-1">
           <span className="text-[10px] uppercase tracking-[0.12em] text-fg-dim font-bold">
