@@ -32,6 +32,15 @@ export type CheckRule =
    *  expressed as a floor on some inverted quantity, which reads backwards at
    *  3am and is exactly the sort of thing misread under pressure. */
   | { kind: "must_be_below"; ceiling: number }
+  /** Absolute TARGET with a degraded band beneath it. Reaching the target is
+   *  ok; short of it is degraded; below `failingBelow` is an outage.
+   *
+   *  must_be_above cannot express this — it has no degraded verdict — so a
+   *  floor set at a third of target reported 30-against-40 as ok and said
+   *  nothing. "Below the number we agreed" and "the pipe is broken" are
+   *  different events needing different reactions, and a monitor asked to
+   *  report the first cannot only be able to say the second. */
+  | { kind: "must_reach"; target: number; failingBelow: number }
   /** Relative to this check's own trailing median. No thresholds to maintain,
    *  and it adapts as volume grows. */
   | { kind: "baseline_drop"; failingBelowPct: number; degradedBelowPct: number };
@@ -88,6 +97,21 @@ export function evaluate(
           baseline: rule.ceiling,
           reason: `${observed} exceeds the limit of ${rule.ceiling}`,
         };
+  }
+
+  if (rule.kind === "must_reach") {
+    // No grace band. A 10% tolerance here would be the same "grading on a
+    // curve" this rule exists to remove, just smaller: the target is the number
+    // that was agreed, and missing it is worth saying out loud. Repetition is
+    // the decay ladder's job, not the threshold's.
+    if (observed >= rule.target) {
+      return { id, verdict: "ok", observed, baseline: rule.target, reason: `at or above the target of ${rule.target}` };
+    }
+    return observed >= rule.failingBelow
+      ? { id, verdict: "degraded", observed, baseline: rule.target,
+          reason: `${observed} is short of the target of ${rule.target}` }
+      : { id, verdict: "failing", observed, baseline: rule.target,
+          reason: `${observed} is far below the target of ${rule.target} (outage threshold ${rule.failingBelow})` };
   }
 
   // baseline_drop

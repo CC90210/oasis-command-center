@@ -50,18 +50,38 @@ import { isBenignSendFailure } from "../lib/health/email-drip-checks";
   );
   assert.equal(relative.verdict, "ok", "this is the trap: 10 looks fine once 10 is normal");
 
-  const absolute = evaluate("drips.email_volume_vs_target", { kind: "must_be_above", floor: 13 }, 10, weekOfTen);
+  const absolute = evaluate(
+    "drips.email_volume_vs_target",
+    { kind: "must_reach", target: 40, failingBelow: 13 },
+    10,
+    weekOfTen,
+  );
   assert.equal(absolute.verdict, "failing", "against the agreed number, 10 is a failure whatever the history");
-  assert.match(absolute.reason, /at or below the floor/);
+  assert.match(absolute.reason, /far below the target of 40/);
 }
 
-// ── The floor is a third of target, so a ramp behind schedule is not an outage ──
+// ── must_reach: short of target and dead pipe are DIFFERENT events ────────
+// The first draft used must_be_above with a floor of target/3. That rule has
+// no degraded verdict, so 30 against a target of 40 read as plain ok and the
+// monitor said nothing — while the literal ask was to be told when volume is
+// below what was agreed. Codex caught it in review.
 {
   const target = 40;
-  const floor = Math.max(1, Math.floor(target / 3)); // 13
-  assert.equal(evaluate("v", { kind: "must_be_above", floor }, 30, []).verdict, "ok", "behind target but clearly working");
-  assert.equal(evaluate("v", { kind: "must_be_above", floor }, 10, []).verdict, "failing", "a fifth of target is a fault");
-  assert.equal(evaluate("v", { kind: "must_be_above", floor }, 0, []).verdict, "failing", "zero is always a fault");
+  const rule = { kind: "must_reach", target, failingBelow: Math.max(1, Math.floor(target / 3)) } as const;
+
+  assert.equal(evaluate("v", rule, 40, []).verdict, "ok", "hitting the target is ok");
+  assert.equal(evaluate("v", rule, 120, []).verdict, "ok", "over target is ok");
+
+  // THE regression: this is the case the old rule got wrong.
+  const behind = evaluate("v", rule, 30, []);
+  assert.equal(behind.verdict, "degraded", "behind target must be reported, not swallowed");
+  assert.match(behind.reason, /short of the target of 40/);
+
+  assert.equal(evaluate("v", rule, 39, []).verdict, "degraded", "no silent grace band — that is grading on a curve again");
+  assert.equal(evaluate("v", rule, 13, []).verdict, "degraded", "at the outage threshold is still merely behind");
+  assert.equal(evaluate("v", rule, 12, []).verdict, "failing", "below it is an outage");
+  assert.equal(evaluate("v", rule, 0, []).verdict, "failing", "zero is always an outage");
+  assert.equal(evaluate("v", rule, null, []).verdict, "check_broken");
 }
 
 // ── Starvation is its own signal ──────────────────────────────────────────
@@ -138,6 +158,20 @@ import { isBenignSendFailure } from "../lib/health/email-drip-checks";
   assert.ok(
     !src.includes('from("sequence_state")'),
     "sequence_state belongs to the legacy Python daemon — these checks watch the oasis drip engine",
+  );
+
+  // Dry runs must not count as sends ANYWHERE. With DRIPS_LIVE off the executor
+  // still writes email_sent interactions stamped dry_run, so a check that reads
+  // them as real stays green forever while nothing leaves the building. The
+  // silence check originally took the newest row of any kind; both read paths
+  // now filter, and both must keep filtering.
+  const silenceFn = src.slice(src.indexOf("async function hoursSinceLastEmail"), src.indexOf("const CHECKS"));
+  assert.ok(silenceFn.length > 100, "hoursSinceLastEmail must exist");
+  assert.ok(silenceFn.includes("dry_run"), "the silence check must exclude dry runs, not just the volume check");
+  assert.equal(
+    (src.match(/dry_run/g) || []).length >= 2,
+    true,
+    "both the volume count and the silence timestamp exclude dry runs",
   );
   assert.ok(failureFn.includes('.gte("claimed_at"'), "failed rows are windowed by claimed_at");
   // The explanatory comment names sent_at on purpose, so match the QUERY form

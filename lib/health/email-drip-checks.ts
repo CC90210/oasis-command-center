@@ -117,20 +117,32 @@ async function countDripEmails(
   }
 }
 
-/** Hours since the most recent drip email. Large number = silence. */
+/** Hours since the most recent REAL drip email. Large number = silence.
+ *
+ *  Dry runs are excluded, matching countDripEmails and the governor. With
+ *  DRIPS_LIVE off the executor still writes email_sent interactions stamped
+ *  dry_run — so taking the newest row of any kind would hold this check green
+ *  forever while nothing left the building, which is precisely the silent
+ *  failure it was written to catch. Codex caught it in review.
+ *
+ *  A page of rows rather than one, so a burst of dry runs cannot mask the last
+ *  real send. If every row in that page is a dry run then there has been no
+ *  real send across at least that span, and maximal silence is the honest
+ *  answer rather than a guess. */
 async function hoursSinceLastEmail(db: Db, tenantId: string, endMs: number): Promise<number | null> {
   try {
     const r = await db
       .from("lead_interactions")
-      .select("created_at")
+      .select("created_at, metadata")
       .eq("tenant_id", tenantId)
       .eq("type", "email_sent")
       .eq("direction", "outbound")
       .like("agent_source", "sequence:%")
       .order("created_at", { ascending: false })
-      .limit(1);
+      .limit(200);
     if (r.error) return null;
-    const last = (r.data || [])[0]?.created_at as string | undefined;
+    const rows = (r.data || []) as Array<{ created_at: string; metadata: Record<string, unknown> | null }>;
+    const last = rows.find((row) => String((row.metadata || {}).dry_run) !== "true")?.created_at;
     // Never sent at all is maximal silence, not "unknown". Returning null here
     // would render as check_broken and hide a genuinely dead engine behind an
     // infrastructure-looking amber.
@@ -303,10 +315,18 @@ const CHECKS: DripCheck[] = [
  */
 function ruleFor(check: DripCheck): CheckRule {
   switch (check.id) {
-    case "drips.email_volume_vs_target":
-      // Below target is degraded; below a third of target is failing. A ramp
-      // that is merely behind should not page like an outage.
-      return { kind: "must_be_above", floor: Math.max(1, Math.floor(targetEmailsPerDay() / 3)) };
+    case "drips.email_volume_vs_target": {
+      // Below target is degraded; below a third of target is an outage. A ramp
+      // that is merely behind should not page like a dead pipe — but it must
+      // still be reported, which is the whole ask.
+      //
+      // This was must_be_above with a floor of target/3, which has no degraded
+      // verdict: 30 against a target of 40 read as plain ok and said nothing.
+      // Codex caught it in review. The rule that only knows "broken" cannot
+      // answer "are we sending the volume we want".
+      const target = targetEmailsPerDay();
+      return { kind: "must_reach", target, failingBelow: Math.max(1, Math.floor(target / 3)) };
+    }
     case "drips.email_silence_hours":
       return { kind: "must_be_below", ceiling: maxSilentHours() };
     case "drips.bluerise_sent_24h":
