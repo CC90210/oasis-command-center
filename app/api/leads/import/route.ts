@@ -10,6 +10,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getSessionUser, getServiceSupabase } from "@/lib/supabase-server";
 import { routeSunBizImportStage } from "@/lib/sunbiz-stage-routing";
+import { resolveHomeAddress } from "@/lib/address/split-us-address";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -97,6 +98,10 @@ type IncomingRow = {
   business_address?: string | null;
   business_city?: string | null;
   business_zip?: string | null;
+  home_address?: string | null;
+  home_city?: string | null;
+  home_state?: string | null;
+  home_zip?: string | null;
   website?: string | null;
   entity_type?: string | null;
   record_type?: string | null;
@@ -227,6 +232,12 @@ export async function POST(req: NextRequest) {
     const businessAddress = cleanString(raw.business_address, 240);
     const businessCity = cleanString(raw.business_city, 120);
     const businessZip = cleanString(raw.business_zip, 32);
+    const home = resolveHomeAddress({
+      address: cleanString(raw.home_address, 240),
+      city: cleanString(raw.home_city, 120),
+      state: cleanString(raw.home_state, 80),
+      zip: cleanString(raw.home_zip, 32),
+    });
     const website = cleanString(raw.website, 240);
     const entityType = cleanString(raw.entity_type, 80);
     const industry = cleanString(raw.industry, 180);
@@ -311,6 +322,7 @@ export async function POST(req: NextRequest) {
         ...(businessAddress ? { business_address: businessAddress } : {}),
         ...(businessCity ? { business_city: businessCity } : {}),
         ...(businessZip ? { business_zip: businessZip } : {}),
+        ...home.data,
         ...(website ? { website } : {}),
         ...(entityType ? { entity_type: entityType } : {}),
         ...(industry ? { industry } : {}),

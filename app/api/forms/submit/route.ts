@@ -33,6 +33,7 @@
 import { NextRequest, NextResponse, after } from "next/server";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { enqueueBackgroundCheck } from "@/lib/background-check/enqueue";
+import { splitUsAddress } from "@/lib/address/split-us-address";
 import { getClientIp } from "@/lib/api-helpers";
 import { verifyFormLink, signFormLink, type FormLinkPayload } from "@/lib/form-links";
 import {
@@ -1580,6 +1581,14 @@ function mapOwnerFields(payload: Record<string, unknown>): Record<string, unknow
   if (typeof pct === "number" || (typeof pct === "string" && pct.trim()))
     out.ownership_pct = pct;
   const addr = s("owner_home_address");
-  if (addr) out.owner_address_line1 = addr;
+  if (addr) {
+    // Split the whole home address so the Owner tab's structured
+    // "city, ST zip" line (LeadFileBody) is populated, not just line1.
+    const parts = splitUsAddress(addr);
+    out.owner_address_line1 = parts.line1 || addr;
+    if (parts.city) out.owner_address_city = parts.city;
+    if (parts.state) out.owner_address_state = parts.state;
+    if (parts.zip) out.owner_address_zip = parts.zip;
+  }
   return out;
 }

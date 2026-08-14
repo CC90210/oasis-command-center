@@ -1,5 +1,6 @@
 import { routeSunBizImportStage } from "./sunbiz-stage-routing";
 import { getServiceSupabase } from "./supabase-server";
+import { resolveHomeAddress } from "./address/split-us-address";
 
 const MAX_ROWS = 5_000;
 const DEDUP_LOOKBACK = 20_000;
@@ -26,6 +27,10 @@ export type IncomingLeadImportRow = {
   business_address?: string | null;
   business_city?: string | null;
   business_zip?: string | null;
+  home_address?: string | null;
+  home_city?: string | null;
+  home_state?: string | null;
+  home_zip?: string | null;
   website?: string | null;
   entity_type?: string | null;
   record_type?: string | null;
@@ -160,6 +165,12 @@ export async function importLeadsForTenant(input: {
     const businessAddress = cleanString(raw.business_address, 240);
     const businessCity = cleanString(raw.business_city, 120);
     const businessZip = cleanString(raw.business_zip, 32);
+    const home = resolveHomeAddress({
+      address: cleanString(raw.home_address, 240),
+      city: cleanString(raw.home_city, 120),
+      state: cleanString(raw.home_state, 80),
+      zip: cleanString(raw.home_zip, 32),
+    });
     const website = cleanString(raw.website, 240);
     const entityType = cleanString(raw.entity_type, 80);
     const industry = cleanString(raw.industry, 180);
@@ -244,6 +255,7 @@ export async function importLeadsForTenant(input: {
         ...(businessAddress ? { business_address: businessAddress } : {}),
         ...(businessCity ? { business_city: businessCity } : {}),
         ...(businessZip ? { business_zip: businessZip } : {}),
+        ...home.data,
         ...(website ? { website } : {}),
         ...(entityType ? { entity_type: entityType } : {}),
         ...(industry ? { industry } : {}),

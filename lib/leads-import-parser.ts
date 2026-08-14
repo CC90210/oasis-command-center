@@ -19,6 +19,10 @@ export type ParsedLeadImportRow = {
   business_address: string | null;
   business_city: string | null;
   business_zip: string | null;
+  home_address: string | null;
+  home_city: string | null;
+  home_state: string | null;
+  home_zip: string | null;
   website: string | null;
   entity_type: string | null;
   record_type: string | null;
@@ -168,6 +172,32 @@ export function mapLeadImportHeader(header: string): LeadImportField | null {
     case "businesszipcode":
     case "businesspostalcode":
       return "business_zip";
+    case "homeaddress":
+    case "homestreetaddress":
+    case "homestreet":
+    case "residentialaddress":
+    case "residenceaddress":
+    case "owneraddress":
+    case "ownerhomeaddress":
+    case "ownerstreetaddress":
+      return "home_address";
+    case "homecity":
+    case "residentialcity":
+    case "ownercity":
+    case "ownerhomecity":
+      return "home_city";
+    case "homestate":
+    case "residentialstate":
+    case "ownerstate":
+    case "ownerhomestate":
+      return "home_state";
+    case "homezip":
+    case "homezipcode":
+    case "homepostalcode":
+    case "residentialzip":
+    case "ownerzip":
+    case "ownerhomezip":
+      return "home_zip";
     case "website":
     case "url":
     case "businesswebsite":
@@ -236,6 +266,10 @@ function emptyRow(): ParsedLeadImportRow {
     business_address: null,
     business_city: null,
     business_zip: null,
+    home_address: null,
+    home_city: null,
+    home_state: null,
+    home_zip: null,
     website: null,
     entity_type: null,
     record_type: null,
