@@ -117,7 +117,30 @@ export type InitialBrandArgs = {
   source?: unknown;
   /** Leads created before this instant predate Bluerise and know SunBiz. */
   blueriseLaunchAtMs: number;
+  /** The lead's pipeline stage at enrolment (`data.stage`). */
+  stage?: unknown;
 };
+
+/**
+ * Stages that belong to Bluerise outright, whatever the lead's age or source.
+ *
+ * Adon, 2026-08-12: "we're starting off with the follow-up section being purely
+ * Bluerise because a lot of our cold leads will just end up being funneled into
+ * the follow-up section either way."
+ *
+ * This deliberately overrides the pre-launch guard below, and that is the whole
+ * point of it. That guard sends every lead created before 2026-08-05 to SunBiz
+ * regardless of source — which is nearly the entire book — so Bluerise could
+ * only ever receive NEW COLD leads and had therefore sent exactly zero emails
+ * in its lifetime. The domain was warmed and then left idle.
+ *
+ * Overriding is safe precisely HERE and would not be elsewhere: a follow-up
+ * lead has gone quiet on SunBiz, so Bluerise is the second act the brand split
+ * was designed around rather than a confusing first impression. Volume is still
+ * bounded by the per-brand daily ceiling, which is what keeps the ramp
+ * reputation-safe.
+ */
+const BLUERISE_STAGES = new Set(["follow_up", "follow_ups"]);
 
 export function resolveInitialBrand(args: InitialBrandArgs): BrandKey {
   // 1. Sticky. Re-deriving on every dispatch run would let a lead flip brand
@@ -125,7 +148,11 @@ export function resolveInitialBrand(args: InitialBrandArgs): BrandKey {
   const existing = normalize(args.existingBrand);
   if (existing === "sunbiz" || existing === "bluerise") return existing as BrandKey;
 
-  // 2. Everything that predates Bluerise knows SunBiz, whatever its source says.
+  // 2. An owner-assigned stage wins over age and source. Checked BEFORE the
+  //    pre-launch guard, since that guard is what was keeping Bluerise empty.
+  if (BLUERISE_STAGES.has(normalize(args.stage))) return "bluerise";
+
+  // 3. Everything that predates Bluerise knows SunBiz, whatever its source says.
   //    An absent or unparseable timestamp is treated as pre-launch: reading
   //    absence as "just arrived" would push the entire back catalogue onto a
   //    domain with no reputation the first time this deploys.
@@ -134,7 +161,7 @@ export function resolveInitialBrand(args: InitialBrandArgs): BrandKey {
     return "sunbiz";
   }
 
-  // 3. New lead: the source decides. Unknown falls back to the established brand.
+  // 4. New lead: the source decides. Unknown falls back to the established brand.
   return classifyLeadSource(args.source) === "cold" ? "bluerise" : "sunbiz";
 }
 

@@ -129,6 +129,9 @@ export async function ensureInitialBrand(
   const brand = resolveInitialBrand({
     createdAtMs: Number.isFinite(createdMs) ? createdMs : undefined,
     source: data.source,
+    // The stage is what routes follow-up leads to Bluerise. Without it every
+    // pre-2026-08-05 lead resolves to SunBiz and Bluerise stays empty.
+    stage: data.stage,
     blueriseLaunchAtMs: blueriseLaunchAtMs(),
   });
 

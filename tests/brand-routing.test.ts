@@ -178,4 +178,52 @@ assert.deepEqual(shouldSwitchBrand({ ...base, currentBrand: "bluerise" }), { swi
 assert.equal(shouldSwitchBrand({ ...base, silenceDays: 0, brandAssignedAtMs: NOW - 1000 }).switch, false);
 assert.equal(shouldSwitchBrand({ ...base, silenceDays: -5, brandAssignedAtMs: NOW - 1000 }).switch, false);
 
+// ── Follow-up belongs to Bluerise ─────────────────────────────────────────
+// Adon, 2026-08-12: the follow-up section is purely Bluerise to start.
+//
+// This is the rule that made Bluerise real. The pre-launch guard below sends
+// every lead created before 2026-08-05 to SunBiz whatever its source — which is
+// nearly the whole book — so Bluerise could only ever receive NEW COLD leads and
+// had sent exactly ZERO emails in its lifetime. The domain was warmed and then
+// left idle. The stage check has to sit BEFORE that guard or it changes nothing.
+{
+  const LAUNCH = Date.parse("2026-08-05T00:00:00Z");
+  const old = Date.parse("2026-05-01T00:00:00Z"); // predates Bluerise
+
+  assert.equal(
+    resolveInitialBrand({ stage: "follow_up", createdAtMs: old, source: "public_form", blueriseLaunchAtMs: LAUNCH }),
+    "bluerise",
+    "a follow-up lead goes to Bluerise even though it predates launch AND came from a warm source",
+  );
+  // The plural stage key exists in production too (39 leads) and must not be
+  // silently missed.
+  assert.equal(
+    resolveInitialBrand({ stage: "follow_ups", createdAtMs: old, source: "public_form", blueriseLaunchAtMs: LAUNCH }),
+    "bluerise",
+  );
+  assert.equal(
+    resolveInitialBrand({ stage: "FOLLOW_UP", createdAtMs: old, blueriseLaunchAtMs: LAUNCH }),
+    "bluerise",
+    "case is not a routing decision",
+  );
+
+  // Everything else is UNCHANGED — the override is scoped to follow-up only.
+  for (const stage of ["declined", "signed_application", "viewed_application", "missing_info", undefined]) {
+    assert.equal(
+      resolveInitialBrand({ stage, createdAtMs: old, source: "public_form", blueriseLaunchAtMs: LAUNCH }),
+      "sunbiz",
+      `stage ${String(stage)} must still resolve to SunBiz`,
+    );
+  }
+
+  // Stickiness still beats the stage. A lead already talking to SunBiz does not
+  // get moved onto Bluerise mid-conversation just because it lands in
+  // follow-up — that is the alternating behaviour guard 1 forbids.
+  assert.equal(
+    resolveInitialBrand({ existingBrand: "sunbiz", stage: "follow_up", createdAtMs: old, blueriseLaunchAtMs: LAUNCH }),
+    "sunbiz",
+    "an already-stamped brand wins over the stage override",
+  );
+}
+
 console.log("brand-routing.test.ts — all assertions passed ✓");
