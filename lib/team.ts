@@ -1,6 +1,7 @@
 import { createHash, randomBytes } from "node:crypto";
 import { getServiceSupabase, getSessionUser } from "@/lib/supabase-server";
 import { adminGetUser } from "@/lib/turso-auth-admin";
+import { dbError } from "@/lib/db-error";
 
 export type TeamRole =
   | "owner"
@@ -169,7 +170,7 @@ export async function getTenantMembers(tenantId: string): Promise<MemberRow[]> {
     .eq("tenant_id", tenantId)
     .order("is_owner", { ascending: false })
     .order("joined_at", { ascending: true });
-  if (error) throw error;
+  if (error) throw dbError("getTenantMembers", error);
   return (data ?? []) as MemberRow[];
 }
 
@@ -185,7 +186,7 @@ export async function listActiveInvites(tenantId: string): Promise<InviteRow[]> 
     .is("revoked_at", null)
     .gt("expires_at", new Date().toISOString())
     .order("created_at", { ascending: false });
-  if (error) throw error;
+  if (error) throw dbError("listActiveInvites", error);
   return (data ?? []) as InviteRow[];
 }
 
@@ -224,18 +225,11 @@ export async function createInvite(
     })
     .select("id, expires_at")
     .single();
-  if (error || !data) {
-    // A PostgREST/libSQL error is a PLAIN OBJECT, not an Error. Throwing it raw
-    // meant the route's `err instanceof Error ? err.message : "..."` fell through
-    // to the generic string, so the screen said "invite_create_failed" while the
-    // actual cause ("NOT NULL constraint failed: tenant_invites.expires_at") was
-    // never shown to anyone. Wrap it, keep the detail.
-    const detail =
-      (error as { message?: string; code?: string } | null)?.message ??
-      "insert returned no row";
-    const code = (error as { code?: string } | null)?.code;
-    throw new Error(`invite_create_failed: ${detail}${code ? ` [${code}]` : ""}`);
-  }
+  // dbError, not `throw error`: a PostgREST/libSQL error is a PLAIN OBJECT, so
+  // the route's `err instanceof Error ? err.message : "..."` fell through to the
+  // generic string and hid "NOT NULL constraint failed: tenant_invites.expires_at"
+  // for months. See lib/db-error.ts.
+  if (error || !data) throw dbError("invite_create_failed", error);
   return { id: data.id, rawToken: raw, expiresAt: data.expires_at as string };
 }
 
@@ -257,7 +251,7 @@ export async function revokeInvite(inviteId: string, tenantId: string): Promise<
     .update({ revoked_at: new Date().toISOString() })
     .eq("id", inviteId)
     .eq("tenant_id", tenantId);
-  if (error) throw error;
+  if (error) throw dbError("revokeInvite", error);
 }
 
 export async function redeemInvite(
@@ -358,7 +352,7 @@ export async function setMemberRole(args: {
     .from("user_profiles")
     .update({ team_role: args.newRole })
     .eq("id", args.targetProfileId);
-  if (error) throw error;
+  if (error) throw dbError("setMemberRole", error);
 }
 
 export async function removeMember(args: {
@@ -388,5 +382,5 @@ export async function removeMember(args: {
     .from("user_profiles")
     .update({ tenant_id: null, team_role: "member" })
     .eq("id", args.targetProfileId);
-  if (error) throw error;
+  if (error) throw dbError("removeMember", error);
 }

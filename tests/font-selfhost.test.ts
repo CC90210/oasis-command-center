@@ -20,34 +20,12 @@
  * next/font/google again, and that reintroduces the outage.
  */
 import assert from "node:assert/strict";
-import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
-import { join, sep } from "node:path";
+import { existsSync, readFileSync, statSync } from "node:fs";
+import { join } from "node:path";
 
-const ROOT = join(__dirname, "..");
-const SKIP = new Set(["node_modules", ".next", ".git", "__pycache__"]);
+import { REPO_ROOT as ROOT, repoRelative as rel, sourceTree } from "./_tree";
 
-function walk(dir: string, out: string[] = []): string[] {
-  let entries: string[];
-  try {
-    entries = readdirSync(dir);
-  } catch {
-    return out;
-  }
-  for (const name of entries) {
-    if (SKIP.has(name)) continue;
-    const full = join(dir, name);
-    if (statSync(full).isDirectory()) walk(full, out);
-    else if (/\.tsx?$/.test(name)) out.push(full);
-  }
-  return out;
-}
-
-const rel = (f: string) => f.slice(ROOT.length + 1).split(sep).join("/");
-const files = [
-  ...walk(join(ROOT, "app")),
-  ...walk(join(ROOT, "components")),
-  ...walk(join(ROOT, "lib")),
-];
+const files = sourceTree("app", "components", "lib");
 
 // ── anti-vacuity ─────────────────────────────────────────────────────
 assert.ok(files.length > 200, `only ${files.length} files walked — the scan is broken`);
