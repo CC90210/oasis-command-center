@@ -679,11 +679,22 @@ function safeFallbackSendTime(): Date {
  *  UTC-N reads H-N locally, and the TCPA window is [8, 21):
  *    HST (UTC-10) needs H >= 18   →  18:00 UTC is 08:00, the floor
  *    EDT (UTC-4)  needs H  < 25   →  never binds
- *  So [18, 22) is inside the window for EVERY US zone, DST included: EDT sees
- *  14:00-18:00 and Hawaii sees 08:00-12:00. Four hours is enough for the
- *  5-minute dispatch tick to drain a backlog without reaching for the edges. */
+ *  So [18, 21) is inside the window for every US STATE, DST included: EDT sees
+ *  14:00-17:00 and Hawaii sees 08:00-11:00.
+ *
+ *  ENDS AT 21, NOT 22. The unmapped path falls through to `tcpa.withinWindow`
+ *  below, which on this fallback is evaluated against the SERVER timezone —
+ *  UTC on Vercel — and [8, 21) excludes hour 21. So a declared 22 would have
+ *  advertised four hours and delivered three, with the last hour silently
+ *  rescheduling. Codex caught the mismatch; the honest boundary is the real
+ *  one.
+ *
+ *  US TERRITORIES ARE NOT COVERED BY THIS REASONING and cannot be: Guam
+ *  (UTC+10) and American Samoa (UTC-11) are 21 hours apart, so no single UTC
+ *  hour is inside 8am-9pm for both. They are handled by being MAPPED in
+ *  lib/tcpa-window.ts instead, which keeps them off this path entirely. */
 const SAFE_FALLBACK_UTC_START = 18;
-const SAFE_FALLBACK_UTC_END = 22;
+const SAFE_FALLBACK_UTC_END = 21;
 
 function insideSafeFallbackWindow(at: Date = new Date()): boolean {
   const h = at.getUTCHours();

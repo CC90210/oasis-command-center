@@ -21,11 +21,47 @@
 
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import { checkTcpaWindow } from "../lib/tcpa-window";
+
+// ── US TERRITORIES MUST RESOLVE, not fall through to the safe hour ────────
+// The 18:00 UTC anchor was justified as "inside 8am-9pm for every US zone",
+// and that reasoning quietly meant every US STATE. It breaks in both
+// directions for the territories: 18:00 UTC is 04:00 the next day in Guam and
+// 07:00 in American Samoa, each on the wrong side of the 8am floor.
+//
+// Widening the window cannot fix it — Guam (UTC+10) and American Samoa
+// (UTC-11) are 21 hours apart, so NO single UTC hour is inside the window for
+// both. Mapping them does: a resolved zone never reaches the fallback and gets
+// its own correct quiet hours. Codex caught this.
+{
+  const territories: Array<[string, string]> = [
+    ["671", "Pacific/Guam"],
+    ["670", "Pacific/Saipan"],
+    ["684", "Pacific/Pago_Pago"],
+    ["787", "America/Puerto_Rico"],
+    ["939", "America/Puerto_Rico"],
+    ["340", "America/St_Thomas"],
+  ];
+  for (const [areaCode, zone] of territories) {
+    const c = checkTcpaWindow(`+1${areaCode}5550147`);
+    assert.equal(c.usedFallback, false, `${areaCode} must resolve, not fall back to the safe hour`);
+    assert.equal(c.timeZone, zone, `${areaCode} → ${zone}`);
+  }
+
+  // The arithmetic that makes a shared window impossible, asserted so nobody
+  // "simplifies" the map away and reinstates the fallback for these.
+  const at18Utc = new Date(Date.UTC(2026, 7, 14, 18, 0, 0));
+  const localHour = (tz: string) =>
+    parseInt(new Intl.DateTimeFormat("en-US", { timeZone: tz, hour: "numeric", hour12: false }).format(at18Utc), 10);
+  assert.ok(localHour("Pacific/Guam") < 8, "18:00 UTC is pre-dawn in Guam");
+  assert.ok(localHour("Pacific/Pago_Pago") < 8, "18:00 UTC is before 8am in American Samoa");
+  assert.ok(localHour("America/Puerto_Rico") >= 8, "Puerto Rico would have been fine either way");
+}
 
 // The window as the executor defines it. Mirrored rather than imported because
 // the executor is "server-only" and pulls the whole send stack with it.
 const START = 18;
-const END = 22;
+const END = 21;
 const inside = (h: number) => h >= START && h < END;
 
 // ── Every US zone must read as daytime across the whole window ────────────
@@ -53,21 +89,21 @@ for (let h = START; h < END; h++) {
   assert.ok(!inside(17), "17:00 UTC must be OUTSIDE the window");
   assert.equal(hawaiiAt(START), 8, "the window opens exactly at the Hawaii floor");
   assert.ok(inside(START), "18:00 UTC is the first sendable hour");
-  assert.ok(inside(END - 1), "21:00 UTC is still sendable");
-  assert.ok(!inside(END), "22:00 UTC is past the window");
+  assert.ok(inside(END - 1), "20:00 UTC is still sendable");
+  assert.ok(!inside(END), "21:00 UTC is past the window — the server-tz check downstream rejects it anyway");
 }
 
 // ── Outside the window we still wait ──────────────────────────────────────
 // The fix must not become "send whenever". Overnight and morning UTC hours are
 // the ones where an unmapped number could be pre-dawn somewhere.
-for (const h of [0, 3, 6, 9, 12, 15, 17, 22, 23]) {
+for (const h of [0, 3, 6, 9, 12, 15, 17, 21, 22, 23]) {
   assert.equal(inside(h), false, `${h}:00 UTC must still reschedule`);
 }
 
 // ── The window is non-empty and long enough to drain a backlog ────────────
 // A one-hour window plus a 5-minute tick and a per-run row cap would take days
-// to clear 106 rows; four hours clears them in one afternoon.
-assert.ok(END - START >= 4, "the window must be wide enough to drain a backlog in a day");
+// to clear 106 rows; three hours clears them in one afternoon.
+assert.ok(END - START >= 3, "the window must be wide enough to drain a backlog in a day");
 
 // ── The executor actually consults it ─────────────────────────────────────
 // The arithmetic above is worthless if the branch still reschedules
