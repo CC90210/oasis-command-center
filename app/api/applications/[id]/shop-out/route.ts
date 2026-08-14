@@ -364,11 +364,9 @@ export async function POST(
     // merge already; we just pass it through here so each row carries
     // its own list to application_lender_threads.cc_emails.
     cc_emails: row.recipient_cc_emails,
-    error: !row.recipient_email
-      ? "missing lender contact email"
-      : row.blockers.length > 0
-        ? `match blocker(s): ${row.blockers.join("; ")}`
-        : undefined,
+    // Match risk is advisory. The operator has already seen the warning and
+    // confirmed the send; only an actually undeliverable lender is blocked.
+    error: !row.recipient_email ? "missing lender contact email" : undefined,
   }));
 
   // 2026-05-25 (migration 069) — resolve assigned-rep phone at queue

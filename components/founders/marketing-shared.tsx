@@ -7,7 +7,9 @@
  */
 
 import Link from "next/link";
+
 import { Tag } from "@/components/Card";
+import { AssetActions } from "@/components/founders/AssetActions";
 import {
   channelLabel,
   fmtDuration,
@@ -26,6 +28,42 @@ const STATUS_TONE: Record<AssetStatus, Tone> = {
   rejected: "hot",
   archived: "neutral",
 };
+
+/**
+ * The box an asset is shown in — ONE definition, used by the tile and the detail
+ * page.
+ *
+ * Every asset used to sit in an `aspect-video` box with `object-cover`. Cover
+ * means fill AND CROP, so a 1080x1920 film rendered as a magnified middle band —
+ * CC: *"it is collapsed for some reason… It's super zoomed in, and I'm not able
+ * to see anything."*
+ *
+ * MEASURED PIXELS BEAT THE LABEL. `aspect` is a declared string and can be wrong
+ * or missing; width/height come from the stored media. The label is the fallback,
+ * not the source of truth.
+ *
+ * Exported because the detail page needs exactly this and a second copy would
+ * drift — Maven's note on the tile said it plainly: "when the detail route
+ * exists, it must IMPORT this frame logic rather than restate it, or the crop
+ * comes back on one page only." It had already been restated once.
+ */
+export function mediaFrame(
+  mediaW?: number | null,
+  mediaH?: number | null,
+  aspect?: string | null,
+): { className: string; style: React.CSSProperties | undefined } {
+  // Sanity band: anything outside 1:5..5:1 is a corrupt row, not a shape to honour.
+  const r = mediaW && mediaH && mediaW > 0 && mediaH > 0 ? mediaW / mediaH : null;
+  const measured = r && r >= 0.2 && r <= 5 ? `${mediaW} / ${mediaH}` : null;
+  return measured
+    ? { className: "", style: { aspectRatio: measured } }
+    : { className: FRAME[aspect || ""] || "aspect-video", style: undefined };
+}
+
+/** True when the asset is taller than it is wide — the detail page lays out around this. */
+export function isPortrait(mediaW?: number | null, mediaH?: number | null): boolean {
+  return Boolean(mediaW && mediaH && mediaH > mediaW);
+}
 
 export function StatusTag({ status }: { status: AssetStatus }) {
   return <Tag tone={STATUS_TONE[status] ?? "neutral"}>{status.replace("_", " ")}</Tag>;
@@ -46,10 +84,17 @@ export function StatusTag({ status }: { status: AssetStatus }) {
  * (Not the same defect as e4f0e17, which was the marketing shell freezing across a soft
  * nav. That one made a PAGE look zoomed. This one crops the VIDEO.)
  *
- * Two rules now:
- *   - the box takes the asset's aspect, so a vertical film gets a vertical box;
+ * Three rules now:
+ *   - the box takes the MEASURED shape of the media (width/height, probed off the file)
+ *     and falls back to the `aspect` label only when the pixels are missing or absurd.
+ *     The label is what someone wrote down; the pixels are what the file is. An audit of
+ *     this surface found the label had already drifted once — a 1080x1350 card stored as
+ *     "9:16" — and a drifted label renders a vertical film as a ~92px sliver;
  *   - `object-contain`, always. A library exists to show you what you made; cropping a
- *     deliverable to keep a grid tidy is the tail wagging the dog.
+ *     deliverable to keep a grid tidy is the tail wagging the dog;
+ *   - the ratio goes in an INLINE STYLE, never `aspect-[${w}/${h}]`. Tailwind emits only
+ *     classes it can find as literal text, so an interpolated one is never generated, the
+ *     div loses its only height source and EVERY tile collapses to nothing.
  */
 const FRAME: Record<string, string> = {
   "9:16": "aspect-[9/16]",
@@ -73,6 +118,8 @@ export function AssetTile({
   durationS,
   playbackUrl,
   posterUrl,
+  mediaW,
+  mediaH,
   format,
   openReviews = 0,
 }: {
@@ -86,14 +133,19 @@ export function AssetTile({
   durationS?: number | null;
   playbackUrl?: string | null;
   posterUrl?: string | null;
+  mediaW?: number | null;
+  mediaH?: number | null;
   format: string;
   openReviews?: number;
 }) {
   const duration = fmtDuration(durationS);
-  const frame = FRAME[aspect || ""] || "aspect-video";
+  const { className: frame, style: frameStyle } = mediaFrame(mediaW, mediaH, aspect);
   return (
     <article className="rounded-xl border border-bg-border bg-bg-panel shadow-card overflow-hidden transition-all hover:border-accent/40 hover:shadow-ironman group">
-      <div className={`relative ${frame} bg-bg-deep flex items-center justify-center overflow-hidden`}>
+      <div
+        className={`relative ${frame} bg-bg-deep flex items-center justify-center overflow-hidden`}
+        style={frameStyle}
+      >
         {playbackUrl && format === "video" ? (
           // preload="metadata" so a 200-tile library does not pull 200 videos.
           <video
@@ -102,7 +154,7 @@ export function AssetTile({
             controls
             playsInline
             preload="metadata"
-            className="h-full w-full object-contain bg-black"
+            className="h-full w-full object-contain"
           />
         ) : posterUrl ? (
           // Plain <img> on purpose. next/image would need a matching
@@ -145,9 +197,14 @@ export function AssetTile({
         <span className="text-[9px] font-bold uppercase tracking-[0.14em] text-accent">
           {brandName}
         </span>
+        {/* A link again: /founders/marketing/asset/[id] now EXISTS. It was
+            specified, linked, and never built, so every title in this grid was a
+            404 — the link was removed to stop it lying. The page imports
+            mediaFrame() from this file rather than restating it, which was the
+            condition attached to restoring this. */}
         <Link
           href={`/founders/marketing/asset/${id}`}
-          className="text-sm font-medium text-fg hover:text-accent transition-colors line-clamp-2"
+          className="text-sm font-medium text-fg line-clamp-2 hover:text-accent transition-colors"
         >
           {title}
         </Link>
@@ -158,6 +215,10 @@ export function AssetTile({
           </span>
           <StatusTag status={status} />
         </div>
+        {/* The verdict lives on the tile. Sending the operator somewhere else to approve
+            something they are already looking at is how 39 assets ended up sitting in
+            review with no way to clear them. */}
+        <AssetActions id={id} status={status} title={title} />
       </div>
     </article>
   );

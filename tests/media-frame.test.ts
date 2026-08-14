@@ -109,9 +109,18 @@ const BRIDGE = join(
 );
 if (existsSync(BRIDGE)) {
   const bridge = readFileSync(BRIDGE, "utf8");
+  // Assert the PROPERTY, not one implementation. The first version of this pinned the
+  // literal `"9:16" if h > w` and went red the moment that was improved into a
+  // nearest-ratio match — which was the correct change (h > w called a 1080x1350 card
+  // 9:16). A guard that fights improvements gets deleted; a guard that states the
+  // invariant survives them.
   assert.ok(
-    /"aspect":\s*"9:16"\s*if\s*h\s*>\s*w/.test(bridge),
-    "publish_to_library.py: aspect must be derived from probed height/width, never declared.",
+    /def nearest_aspect\(/.test(bridge) && /"aspect":\s*nearest_aspect\(w, h\)/.test(bridge),
+    "publish_to_library.py: aspect must be derived from probed pixels (nearest_aspect), never declared.",
+  );
+  assert.ok(
+    /"4:5":\s*4 \/ 5/.test(bridge),
+    "publish_to_library.py: 4:5 must be a candidate ratio — a 1080x1350 card is not 9:16.",
   );
 }
 
