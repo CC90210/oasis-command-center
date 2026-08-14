@@ -21,7 +21,22 @@ import { sendTelegram } from "@/lib/notify/telegram";
 import { shouldAlert } from "@/lib/notify/alert-decay";
 import { alertSignature, worstVerdict, type CheckResult } from "./checks-core";
 import { DRIP_CHECKS, runCheck } from "./drip-checks";
+import { emailDripChecks } from "./email-drip-checks";
+
 import { computeCoverage } from "./coverage";
+
+/**
+ * Every check this run evaluates.
+ *
+ * Built PER RUN rather than once at module load: the email-drip thresholds are
+ * read from env at call time so the six-week ramp can move without a deploy,
+ * and a list captured at process start would keep grading against a stale
+ * target while reporting green.
+ */
+export function allChecks() {
+  return [...DRIP_CHECKS, ...emailDripChecks()];
+}
+
 
 type Db = ReturnType<typeof getServiceSupabase>;
 
@@ -62,7 +77,8 @@ export async function runHealthChecks(
   const recovered: string[] = [];
   let telegramFailures = 0;
 
-  for (const check of DRIP_CHECKS) {
+  const checks = allChecks();
+  for (const check of checks) {
     let result: CheckResult;
     try {
       result = await runCheck(db, tenantId, check, nowMs);
@@ -182,7 +198,7 @@ export async function runHealthChecks(
     surface: "oasis",
     verdict: telegramFailures > 0 ? "degraded" : "ok",
     observed: results.length,
-    baseline: DRIP_CHECKS.length,
+    baseline: checks.length,
     reason: `${results.length} checks ran; ${alerted.length} alerted; ${telegramFailures} undeliverable`,
     ran_at: new Date(nowMs).toISOString(),
   }).then(() => undefined, () => undefined);
@@ -205,7 +221,7 @@ export async function reportCoverageGap(
 ): Promise<{ uncovered: string[]; crons: number }> {
   const cov = computeCoverage({
     vercelConfig,
-    knownCheckIds: DRIP_CHECKS.map((c) => c.id),
+    knownCheckIds: allChecks().map((c) => c.id),
   });
   if (opts.notify && cov.uncovered.length > 0) {
     const shown = cov.uncovered.slice(0, 15);

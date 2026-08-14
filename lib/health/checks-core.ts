@@ -26,6 +26,12 @@ export type CheckRule =
   | { kind: "must_be_above"; floor: number }
   /** Anything above zero is a failure. For invariants that must never occur. */
   | { kind: "must_be_zero" }
+  /** Absolute CEILING. Above it is a failure. The mirror of must_be_above, for
+   *  observations where bigger is worse: hours of silence, age of the oldest
+   *  overdue row, minutes since the last heartbeat. Without it those have to be
+   *  expressed as a floor on some inverted quantity, which reads backwards at
+   *  3am and is exactly the sort of thing misread under pressure. */
+  | { kind: "must_be_below"; ceiling: number }
   /** Relative to this check's own trailing median. No thresholds to maintain,
    *  and it adapts as volume grows. */
   | { kind: "baseline_drop"; failingBelowPct: number; degradedBelowPct: number };
@@ -70,6 +76,18 @@ export function evaluate(
     return observed > rule.floor
       ? { id, verdict: "ok", observed, baseline: rule.floor, reason: `above floor ${rule.floor}` }
       : { id, verdict: "failing", observed, baseline: rule.floor, reason: `${observed} is at or below the floor of ${rule.floor}` };
+  }
+
+  if (rule.kind === "must_be_below") {
+    return observed <= rule.ceiling
+      ? { id, verdict: "ok", observed, baseline: rule.ceiling, reason: `within the limit of ${rule.ceiling}` }
+      : {
+          id,
+          verdict: "failing",
+          observed,
+          baseline: rule.ceiling,
+          reason: `${observed} exceeds the limit of ${rule.ceiling}`,
+        };
   }
 
   // baseline_drop
