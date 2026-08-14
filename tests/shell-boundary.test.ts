@@ -19,37 +19,16 @@
  * comment in the file cannot fail a build. This can.
  */
 import assert from "node:assert/strict";
-import { readFileSync, readdirSync, statSync } from "node:fs";
-import { join, sep } from "node:path";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+
+import { REPO_ROOT as ROOT, repoRelative as rel, sourceTree } from "./_tree";
 
 import { ALL_MARKETING_PATHS, SHELL_AMBIGUOUS_PATHS } from "../lib/marketing/routes";
 
-const ROOT = join(__dirname, "..");
-const SKIP = new Set(["node_modules", ".next", ".git", "__pycache__"]);
-
-function walk(dir: string, out: string[] = []): string[] {
-  let entries: string[];
-  try {
-    entries = readdirSync(dir);
-  } catch {
-    return out;
-  }
-  for (const name of entries) {
-    if (SKIP.has(name)) continue;
-    const full = join(dir, name);
-    if (statSync(full).isDirectory()) walk(full, out);
-    else if (/\.tsx?$/.test(name)) out.push(full);
-  }
-  return out;
-}
-
-const rel = (f: string) => f.slice(ROOT.length + 1).split(sep).join("/");
 
 // Marketing surfaces: the public route group and its components.
-const files = [
-  ...walk(join(ROOT, "components", "marketing")),
-  ...walk(join(ROOT, "app", "(marketing)")),
-];
+const files = sourceTree("components/marketing", "app/(marketing)");
 
 // ── anti-vacuity ─────────────────────────────────────────────────────
 // A scan that finds nothing would pass and prove nothing.
