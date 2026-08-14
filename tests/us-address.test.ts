@@ -71,6 +71,15 @@ function run() {
   assert.equal(a.line1, "123 Main St, Apt 4");
   assert.equal(a.city, "Miami");
 
+  // A two-word state must not be shadowed by the one-word state inside it.
+  // Real production record: this resolved to VA and orphaned "West" in line1.
+  a = splitUsAddress("Davis Street, Lewisburg, West Virginia, 24901");
+  assert.equal(a.state, "WV", "West Virginia must not parse as Virginia");
+  assert.equal(a.city, "Lewisburg");
+  assert.equal(a.line1, "Davis Street");
+  a = splitUsAddress("100 Main St, Norfolk, Virginia, 23510");
+  assert.equal(a.state, "VA", "plain Virginia still resolves");
+
   assert.equal(normalizeState("fl"), "FL");
   assert.equal(normalizeState("Florida"), "FL");
   assert.equal(normalizeState("New York"), "NY");
@@ -119,6 +128,36 @@ function run() {
     "123 Biscayne Blvd, Miami, FL",
     "idempotent when the state already trails",
   );
+  // A state already SPELLED OUT must not get a second, abbreviated copy.
+  // These six are real production strings; before this, 284 stored addresses
+  // rendered "Florida, FL 34104" / "New York, New York, NY 10175".
+  for (const [addr, state] of [
+    ["521 5th Avenue, New York, New York, 10175", "NY"],
+    ["3811 Enterprise Avenue, Naples, Florida, 34104", "FL"],
+    ["1111 North Russell Avenue, Minneapolis, Minnesota, 55411", "MN"],
+    ["655 West Street, Rockport, Maine, 04856", "ME"],
+    ["1401 Highpoint Circle, Gilpin, Colorado, 80422", "CO"],
+    ["Phillips Circle, Columbiana, Alabama, 35051", "AL"],
+  ] as const) {
+    assert.equal(
+      mergeStateIntoAddress(addr, state),
+      addr,
+      `state already spelled out must not be duplicated: ${addr}`,
+    );
+  }
+  assert.equal(
+    mergeStateIntoAddress("100 Main St, Portland, Maine", "ME"),
+    "100 Main St, Portland, Maine",
+    "trailing spelled-out state, no ZIP, also left alone",
+  );
+  // ...but a street NAMED after a state is not a state. End-anchoring is what
+  // keeps this merge working instead of being skipped.
+  assert.equal(
+    mergeStateIntoAddress("123 Florida Ave, Miami, 33101", "FL"),
+    "123 Florida Ave, Miami, FL 33101",
+    "a street called Florida Ave must still get the state merged in",
+  );
+
   assert.equal(mergeStateIntoAddress("", "FL"), "", "empty address stays empty");
   assert.equal(
     mergeStateIntoAddress("123 Main St", "Fla."),
