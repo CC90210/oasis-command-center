@@ -229,7 +229,12 @@ export default async function MarketingPage() {
             <GraduationCap size={18} className="text-accent" aria-hidden />
             <div className="text-sm text-fg-muted">
               {summary.corpus_indexed === 0 && summary.corpus_pending === 0 ? (
-                <>Empty. Ingestion lands in Phase 2.</>
+                // Ingestion HAS landed — the route enqueues and
+                // scripts/ingest_training_link.py drains it every five minutes.
+                // The old copy said Phase 2 long after both halves existed,
+                // which reads as "this tab does nothing" to the person whose
+                // links are sitting there.
+                <>Nothing yet. Drop links in Train and they land here.</>
               ) : (
                 <>
                   {summary.corpus_indexed} indexed

@@ -32,13 +32,16 @@ import {
 } from "@/lib/founders/marketing-queries";
 import {
   channelLabel,
+  isRenderableCarousel,
   parsePlatforms,
+  parseSlideUrls,
   platformLabel,
   trackLabel,
   type Channel,
   type Track,
 } from "@/lib/founders-marketing-core";
 import { StatusTag, isPortrait, mediaFrame } from "@/components/founders/marketing-shared";
+import { CarouselFrame } from "@/components/founders/CarouselFrame";
 import { AssetActions } from "@/components/founders/AssetActions";
 import { AssetPublishPanel } from "@/components/founders/AssetPublishPanel";
 
@@ -79,11 +82,20 @@ export default async function AssetDetailPage({
     media.find((m) => m.kind === "preview");
   const image = media.find((m) => m.kind === "image");
 
-  const signed = await signMediaUrls(
-    [video, poster, image]
+  // Slides in the order `media_urls` recorded at migration time — never
+  // re-derived from the media rows, whose row order means nothing. A carousel
+  // read out of order is a different post.
+  const slidePaths = parseSlideUrls(asset.media_urls);
+
+  const signed = await signMediaUrls([
+    ...[video, poster, image]
       .filter(Boolean)
       .map((m) => ({ bucket: m!.storage_bucket, path: m!.storage_path })),
-  );
+    ...slidePaths.map((path) => ({ bucket: "marketing-media", path })),
+  ]);
+  const slideUrls = slidePaths
+    .map((path) => signed.get(mediaKey("marketing-media", path)))
+    .filter((u): u is string => Boolean(u));
   const url = (m?: typeof video) =>
     m ? signed.get(mediaKey(m.storage_bucket, m.storage_path)) || null : null;
 
@@ -110,6 +122,8 @@ export default async function AssetDetailPage({
     // Where it actually went, when we know. `channel` is one value; an asset
     // goes to as many as six places.
     ["Posted to", parsePlatforms(asset.platforms).map(platformLabel).join(" · ") || null],
+    ["Slides", asset.asset_type === "carousel" ? `${slideUrls.length} of ${asset.slide_count}` : null],
+    ["Added by", asset.author_email],
     ["Format", asset.format],
     ["Aspect", asset.aspect],
     ["Duration", fmtDuration(asset.duration_s as unknown as number)],
@@ -141,7 +155,9 @@ export default async function AssetDetailPage({
             className={`relative flex items-center justify-center overflow-hidden rounded-xl bg-bg-deep ${frame.className}`}
             style={frame.style}
           >
-            {videoUrl ? (
+            {isRenderableCarousel(asset.asset_type, slideUrls) ? (
+              <CarouselFrame slides={slideUrls} title={asset.title} className="h-full w-full" />
+            ) : videoUrl ? (
               <video
                 src={videoUrl}
                 poster={posterUrl || undefined}

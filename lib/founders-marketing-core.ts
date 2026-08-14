@@ -156,7 +156,7 @@ export function reviewDecisionFor(status: AssetStatus): string | null {
  * the caller the whole asset, which is the same lesson as the publish-intent
  * reader.
  */
-export function parsePlatforms(raw: unknown): string[] {
+export function parseStringArray(raw: unknown): string[] {
   if (Array.isArray(raw)) return raw.filter((x): x is string => typeof x === "string");
   if (typeof raw === "string" && raw.trim()) {
     try {
@@ -168,6 +168,18 @@ export function parsePlatforms(raw: unknown): string[] {
   }
   return [];
 }
+
+/** Where the asset went. */
+export const parsePlatforms = parseStringArray;
+
+/**
+ * Ordered slide storage paths.
+ *
+ * Same tolerant reader, named for what it is at the call site — one
+ * implementation, so a fix to the parsing reaches both. ORDER IS PRESERVED
+ * exactly as stored: a carousel read out of order is a different post.
+ */
+export const parseSlideUrls = parseStringArray;
 
 /** Display label for a platform key. Falls back to the key rather than hiding it. */
 export function platformLabel(key: string): string {
@@ -184,6 +196,23 @@ export function platformLabel(key: string): string {
     google: "Google",
   };
   return NAMES[key] || key;
+}
+
+/** The asset shapes the Library knows how to render. */
+export const ASSET_TYPES = ["video", "single_image", "carousel"] as const;
+export type AssetType = (typeof ASSET_TYPES)[number];
+
+/**
+ * Is this asset a carousel WE CAN ACTUALLY RENDER?
+ *
+ * Deliberately not `asset_type === "carousel"` alone. A row can claim to be a
+ * carousel and have one slide registered — that is exactly the state the Library
+ * was in before the backfill, six rows printed "01/05 · swipe →" on the cover
+ * while the database held a single image. Claiming is not having, so the slide
+ * list has to actually be there.
+ */
+export function isRenderableCarousel(assetType: unknown, slides: readonly unknown[]): boolean {
+  return assetType === "carousel" && slides.length > 1;
 }
 
 export function isAssetStatus(v: unknown): v is AssetStatus {

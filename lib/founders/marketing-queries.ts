@@ -59,6 +59,16 @@ export type MarketingAssetRow = {
    * accepted the post — a refusal is not a distribution.
    */
   platforms: string[] | string | null;
+  /**
+   * 'video' | 'single_image' | 'carousel'. Not a database CHECK on purpose —
+   * SQLite cannot widen one without a full table rebuild, and this vocabulary
+   * will grow. Validated in founders-marketing-core instead.
+   */
+  asset_type: string;
+  /** Ordered storage paths, one per slide. ORDER IS THE PAYLOAD. */
+  media_urls: string[] | string | null;
+  slide_count: number;
+  author_email: string;
   track: Track;
   format: AssetFormat;
   aspect: string | null;

@@ -10,8 +10,10 @@ import Link from "next/link";
 
 import { Tag } from "@/components/Card";
 import { AssetActions } from "@/components/founders/AssetActions";
+import { CarouselFrame } from "@/components/founders/CarouselFrame";
 import {
   channelLabel,
+  isRenderableCarousel,
   parsePlatforms,
   platformLabel,
   fmtDuration,
@@ -124,6 +126,8 @@ export function AssetTile({
   mediaH,
   format,
   platforms: platformsRaw,
+  assetType,
+  slideUrls,
   openReviews = 0,
 }: {
   id: string;
@@ -140,18 +144,26 @@ export function AssetTile({
   mediaH?: number | null;
   format: string;
   platforms?: string[] | string | null;
+  assetType?: string | null;
+  /** Signed URLs, already in slide order. */
+  slideUrls?: string[];
   openReviews?: number;
 }) {
   const duration = fmtDuration(durationS);
   const { className: frame, style: frameStyle } = mediaFrame(mediaW, mediaH, aspect);
   const platforms = parsePlatforms(platformsRaw);
+  const slides = slideUrls ?? [];
   return (
     <article className="rounded-xl border border-bg-border bg-bg-panel shadow-card overflow-hidden transition-all hover:border-accent/40 hover:shadow-ironman group">
       <div
         className={`relative ${frame} bg-bg-deep flex items-center justify-center overflow-hidden`}
         style={frameStyle}
       >
-        {playbackUrl && format === "video" ? (
+        {isRenderableCarousel(assetType, slides) ? (
+          // One card, N slides. Before the slides were registered this row
+          // rendered as an isolated image whose artwork said "01/05 · swipe →".
+          <CarouselFrame slides={slides} title={title} className="h-full w-full" />
+        ) : playbackUrl && format === "video" ? (
           // preload="metadata" so a 200-tile library does not pull 200 videos.
           <video
             src={playbackUrl}
