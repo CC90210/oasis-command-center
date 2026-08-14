@@ -483,6 +483,96 @@ export async function signMediaUrls(
   return out;
 }
 
+/**
+ * One asset by id, with its media — for the detail page.
+ *
+ * TENANT-SCOPED AND BRAND-SCOPED, both deliberately. The id alone is not proof
+ * of anything: a uuid pasted into the URL must not reach another tenant's row,
+ * and the founders portal shows OASIS's own work, so a client deliverable is a
+ * 404 here rather than a page. `scope: "all"` is the explicit opt-out, matching
+ * getMarketingAssets.
+ *
+ * Returns null for "no such asset you may see" — the caller renders notFound(),
+ * never a 403, so the route does not confirm what exists.
+ */
+export async function getMarketingAsset(
+  tenantId: string,
+  id: string,
+  opts: { scope?: BrandScope } = {},
+): Promise<MarketingAssetRow | null> {
+  if (!tenantId || !id) return null;
+  const db = getServiceSupabase();
+  try {
+    let q = db.from("marketing_asset").select("*").eq("tenant_id", tenantId).eq("id", id);
+    if (opts.scope !== "all") q = q.eq("brand_slug", FOUNDERS_OWN_BRAND);
+    const r = await q.maybeSingle();
+    const verdict = classify("asset", r.error);
+    if (verdict === "absent") return null;
+    if (verdict === "broken") throw new Error(`marketing_asset read failed: ${r.error?.message}`);
+    const asset = (r.data || null) as MarketingAssetRow | null;
+    if (!asset) return null;
+
+    const [media, reviews] = await Promise.all([
+      db
+        .from("marketing_asset_media")
+        .select("id, asset_id, kind, storage_bucket, storage_path, mime, bytes, width, height, label")
+        .eq("tenant_id", tenantId)
+        .eq("asset_id", id),
+      db
+        .from("marketing_review")
+        .select("asset_id")
+        .eq("tenant_id", tenantId)
+        .is("acted_on_at", null)
+        .eq("asset_id", id),
+    ]);
+    asset.media = (media.data || []) as MarketingMediaRow[];
+    asset.open_reviews = ((reviews.data || []) as unknown[]).length;
+    return asset;
+  } catch (e) {
+    console.warn("[marketing:asset] unexpected", e);
+    throw e;
+  }
+}
+
+/**
+ * The most recent publish request for one asset.
+ *
+ * The detail page shows it so the operator can see that a publish is already
+ * queued or running before firing a second one. There is no unsending, so
+ * "did I already click this" has to be answerable on the page.
+ */
+export async function getLatestPublishIntent(
+  tenantId: string,
+  assetId: string,
+): Promise<{ state: string; platforms: string[]; created_at: string } | null> {
+  if (!tenantId || !assetId) return null;
+  const db = getServiceSupabase();
+  try {
+    const r = await db
+      .from("marketing_publish_intent")
+      .select("state, platforms, created_at")
+      .eq("tenant_id", tenantId)
+      .eq("asset_id", assetId)
+      .order("created_at", { ascending: false })
+      .limit(1);
+    // Absent table = the migration has not been applied yet; that is a normal
+    // pre-migration state and the panel simply shows no history.
+    if (classify("publish_intent", r.error) !== "ok") return null;
+    const row = (r.data || [])[0] as
+      | { state: string; platforms: unknown; created_at: string }
+      | undefined;
+    if (!row) return null;
+    const platforms = Array.isArray(row.platforms)
+      ? (row.platforms as string[])
+      : typeof row.platforms === "string"
+        ? (JSON.parse(row.platforms || "[]") as string[])
+        : [];
+    return { state: row.state, platforms, created_at: row.created_at };
+  } catch {
+    return null;
+  }
+}
+
 export const mediaKey = (bucket: string, path: string) => `${bucket}\n${path}`;
 
 /** Brand choices for the library filter, deduped from tenant-scoped assets. */

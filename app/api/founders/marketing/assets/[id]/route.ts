@@ -27,7 +27,7 @@
 import { NextResponse } from "next/server";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { resolveFounder } from "@/lib/founders/gate";
-import { isAssetStatus, type AssetStatus } from "@/lib/founders-marketing-core";
+import { isAssetStatus, reviewDecisionFor, type AssetStatus } from "@/lib/founders-marketing-core";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -102,22 +102,43 @@ export async function PATCH(req: Request, ctx: Ctx) {
    * A dashboard that refuses to record a decision because it could not also record a
    * note about the decision is worse than one that does the important half.
    */
+  // `decision` is NOT the status. marketing_review.decision has a CHECK
+  // constraint listing approve / approve_with_changes / request_changes / reject
+  // / comment, so inserting "approved" or "archived" violated it and every
+  // verdict silently failed to record — invisible, because this insert is
+  // best-effort by design and only the audit trail went missing.
+  const decision = reviewDecisionFor(next);
   const decided = new Date().toISOString();
-  const review = await db.from("marketing_review").insert({
-    tenant_id: founder.tenantId,
-    asset_id: id,
-    decision: next,
-    note: typeof body.note === "string" && body.note.trim() ? body.note.trim().slice(0, 2000) : null,
-    reviewer: founder.displayName || "founder",
-    reviewer_agent: null,
-    acted_on_at: decided,
-  });
+  const note =
+    typeof body.note === "string" && body.note.trim() ? body.note.trim().slice(0, 2000) : null;
+
+  // The same table also requires a reason for anything that is not an approval
+  // or a comment, so a bare rejection would be refused. Say why on the
+  // operator's behalf rather than losing the row.
+  const reason =
+    note ?? (decision && !["approve", "comment"].includes(decision)
+      ? `Marked ${next} from the founders library.`
+      : null);
+
+  const review = decision
+    ? await db.from("marketing_review").insert({
+        tenant_id: founder.tenantId,
+        asset_id: id,
+        decision,
+        note: reason,
+        reviewer: founder.displayName || "founder",
+        reviewer_agent: null,
+        acted_on_at: decided,
+      })
+    : null;
 
   return NextResponse.json({
     ok: true,
     asset: updated.data,
     from: existing.data.status,
-    review_recorded: !review.error,
+    // null decision = nothing to record (a move back to in_review retracts a
+    // verdict, it is not one), which is different from "the write failed".
+    review_recorded: review ? !review.error : null,
   });
 }
 
