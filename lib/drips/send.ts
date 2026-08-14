@@ -66,7 +66,15 @@ export type DripEmailResult =
  * chat into that rep's sub-account inbox (so replies thread to the right rep);
  * the sender number is that rep's own DID. `actAsEmail: null` means the parent/
  * admin account (Matt / owner / unattributed leads). Always on the LIVE-VERIFIED
- * 2-step /inbox/chat path, on the MAIN account (act-as requires it).
+ * 2-step /inbox/chat path.
+ *
+ * The ACCOUNT comes from the identity, not from here. It used to be hardcoded to
+ * "texttorrent" with the note that act-as only works on the main SID — true of
+ * the accounts that existed then, and false since 2026-08-14, when the Legacy
+ * parent arrived carrying its own "AI Follow-Up" sub-account. A sub-account
+ * email only authenticates against the parent that owns it, so the pair travels
+ * together: send Legacy's act-as against the SunBiz SID and TT returns 401.
+ * Absent means "texttorrent", so every pre-existing caller is unchanged.
  */
 export async function sendDripSms(
   tenantId: string,
@@ -76,7 +84,7 @@ export async function sendDripSms(
 ): Promise<DripSmsResult> {
   try {
     const creds = await getTextTorrentCredentials(tenantId, {
-      service: "texttorrent", // per-rep act-as only works on the parent/main account
+      service: identity.service || "texttorrent",
       actAsEmail: identity.actAsEmail, // string = sub-account, null = parent/admin
     });
     const sent = await ttSendSms(creds, {

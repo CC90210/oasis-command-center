@@ -21,6 +21,7 @@ import "server-only";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { getTextTorrentCredentials } from "@/lib/integrations/texttorrent";
 import { repKeyForOwner, actAsEmailForRep } from "./rep-keys";
+import { AI_WIRE_SERVICE } from "./ai-wire-core";
 
 type Db = ReturnType<typeof getServiceSupabase>;
 
@@ -103,6 +104,41 @@ export async function syncSenderNumbers(tenantId: string): Promise<SyncResult> {
     result.errors.push(`parent enumeration failed: ${live.error}`);
     return result; // fail closed — deactivate nothing
   }
+
+  // THE SECOND ACCOUNT. As of 2026-08-14 the AI Follow-Up wire lives on a
+  // DIFFERENT TextTorrent parent (Legacy Funding), so the main account's list
+  // does not contain its numbers — it cannot, they belong to another org.
+  //
+  // This is load-bearing for the deactivation sweep below, not just for
+  // discovery: that sweep marks dead anything stored-and-active which is absent
+  // from the live list. Enumerating only the main account would therefore
+  // DEACTIVATE both AI numbers on the very first run, emptying the one wire the
+  // carrier is not refusing. So if this second call fails we still refresh the
+  // main account, but we refuse to deactivate anything at all.
+  let canDeactivate = true;
+  try {
+    const fu = await getTextTorrentCredentials(tenantId, {
+      service: AI_WIRE_SERVICE,
+      actAsEmail: null, // enumerate as the Legacy parent; it reports every sub-account's DIDs
+    });
+    const fuLive = await fetchActive(fu.apiSid, fu.publicKey, null);
+    if ("error" in fuLive) {
+      result.errors.push(`follow-up account enumeration failed: ${fuLive.error} — deactivation suppressed`);
+      canDeactivate = false;
+    } else {
+      live.numbers.push(...fuLive.numbers);
+    }
+  } catch (err) {
+    // Not wired yet is a legitimate state (the credentials landed 2026-08-14);
+    // it must not take the main sync down. But it still suppresses deactivation,
+    // because "I could not look" and "they are gone" must never be the same
+    // observable — that equivalence is what this whole file exists to prevent.
+    result.errors.push(
+      `follow-up account unavailable: ${err instanceof Error ? err.message : String(err)} — deactivation suppressed`,
+    );
+    canDeactivate = false;
+  }
+
   result.scanned = live.numbers.length;
   if (live.numbers.length === 0) {
     // An empty list from a 200 response is not proof there are no numbers; it is
@@ -151,7 +187,8 @@ export async function syncSenderNumbers(tenantId: string): Promise<SyncResult> {
   }
 
   // Anything stored-and-active that is no longer live has rotated away.
-  for (const [number, row] of stored) {
+  // Skipped entirely when an account could not be enumerated — see above.
+  for (const [number, row] of canDeactivate ? stored : []) {
     if (liveSet.has(number) || !row.active) continue;
     await db.from("sms_sender_numbers")
       .update({ active: false, deactivated_at: now })
