@@ -16,6 +16,8 @@ import {
   recordIntegrationTest,
 } from "@/lib/tenant-integration-store";
 import { findIntegrationSchema } from "@/lib/tenant-integration-schemas";
+import { canManageTenantIntegrations } from "@/lib/integrations/credential-auth";
+import { probeMarketingCredential } from "@/lib/integrations/credential-probes";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -24,6 +26,9 @@ export async function POST(req: NextRequest) {
   const sess = await resolveSessionContext();
   if (!sess.ok) {
     return NextResponse.json({ ok: false, error: sess.reason }, { status: 401 });
+  }
+  if (!(await canManageTenantIntegrations(sess.tenantId, sess.userId))) {
+    return NextResponse.json({ ok: false, error: "forbidden" }, { status: 403 });
   }
 
   let body: { service?: unknown };
@@ -72,6 +77,24 @@ async function runProbe(
   service: string,
   bundle: Record<string, string>,
 ): Promise<{ ok: boolean; error?: string; detail?: string }> {
+  const marketingProbe = await probeMarketingCredential(service, bundle, {
+    fetch,
+    verifySmtp: async (config) => {
+      const nodemailer = await import("nodemailer");
+      const transport = nodemailer.createTransport({
+        host: config.host,
+        port: config.port,
+        secure: config.secure,
+        auth: { user: config.user, pass: config.password },
+        connectionTimeout: 10_000,
+        greetingTimeout: 10_000,
+        socketTimeout: 10_000,
+      });
+      return Boolean(await transport.verify());
+    },
+  });
+  if (marketingProbe) return marketingProbe;
+
   switch (service) {
     case "twilio":
       return probeTwilio(bundle);
@@ -83,9 +106,6 @@ async function runProbe(
       return probeN8n(bundle);
     case "texttorrent":
     case "kixie":
-    case "gws":
-    case "smtp":
-    case "late":
       // Side-effect-free verifications for these aren't trivial:
       //   - TextTorrent: no public "account" endpoint
       //   - Kixie: no read-only credential endpoint; a live probe would
@@ -114,7 +134,7 @@ async function probePresence(
   const schema = findIntegrationSchema(service);
   if (!schema) return { ok: false, error: "unknown_service" };
   const missing = schema.fields
-    .filter((f) => !f.label.toLowerCase().includes("(optional)"))
+    .filter((f) => !f.optional)
     .filter((f) => !bundle[f.key])
     .map((f) => f.key);
   if (missing.length > 0) {

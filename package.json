@@ -16,7 +16,7 @@
     "test:streaming-redactor": "tsx tests/streaming-redactor.test.ts",
     "test:legal": "tsx tests/legal-compliance-drift.test.ts",
     "test:funnels": "tsx tests/oasis-funnel.test.ts && tsx tests/ai-audit-ingest.test.ts && tsx tests/ai-audit-notify.test.ts",
-    "test:marketing": "tsx tests/car-geometry.test.ts && tsx tests/marketing-shell.test.ts",
+    "test:marketing": "tsx tests/car-geometry.test.ts && tsx tests/marketing-shell.test.ts && tsx tests/marketing-connections.test.ts",
     "test:watermark": "node --conditions=react-server --import tsx scripts/test-watermark.ts"
   },
   "dependencies": {

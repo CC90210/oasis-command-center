@@ -12,8 +12,7 @@
 
 import { NextResponse, type NextRequest } from "next/server";
 import { resolveSessionContext } from "@/lib/api-auth";
-import { getServiceSupabase } from "@/lib/supabase-server";
-import { canManageTeam, type TeamRole } from "@/lib/team";
+import { canManageTenantIntegrations } from "@/lib/integrations/credential-auth";
 import {
   setTenantIntegrationValue,
   deleteTenantIntegrationValue,
@@ -26,25 +25,6 @@ import {
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
-
-// Re-uses the canonical `canManageTeam` helper from lib/team so the
-// owner+admin gate stays in lockstep with the rest of the dashboard
-// (Team management, Plan templates, Branding all use the same shape).
-async function canManageTenant(tenantId: string, userId: string): Promise<boolean> {
-  const db = getServiceSupabase();
-  const r = await db
-    .from("user_profiles")
-    .select("team_role, is_owner, admin_access")
-    .eq("auth_user_id", userId)
-    .eq("tenant_id", tenantId)
-    .maybeSingle();
-  const row = r.data as
-    | { team_role: TeamRole | null; is_owner: boolean | null; admin_access: boolean | null }
-    | null;
-  if (!row) return false;
-  if (row.is_owner) return true;
-  return canManageTeam(row.team_role || "member", row.admin_access === true);
-}
 
 export async function GET() {
   const sess = await resolveSessionContext();
@@ -60,7 +40,7 @@ export async function POST(req: NextRequest) {
   if (!sess.ok) {
     return NextResponse.json({ ok: false, error: sess.reason }, { status: 401 });
   }
-  if (!(await canManageTenant(sess.tenantId, sess.userId))) {
+  if (!(await canManageTenantIntegrations(sess.tenantId, sess.userId))) {
     return NextResponse.json({ ok: false, error: "forbidden" }, { status: 403 });
   }
 
@@ -106,7 +86,7 @@ export async function DELETE(req: NextRequest) {
   if (!sess.ok) {
     return NextResponse.json({ ok: false, error: sess.reason }, { status: 401 });
   }
-  if (!(await canManageTenant(sess.tenantId, sess.userId))) {
+  if (!(await canManageTenantIntegrations(sess.tenantId, sess.userId))) {
     return NextResponse.json({ ok: false, error: "forbidden" }, { status: 403 });
   }
 

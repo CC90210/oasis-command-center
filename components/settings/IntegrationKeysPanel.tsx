@@ -41,8 +41,16 @@ function k(service: string, fieldKey: string): string {
 
 export function IntegrationKeysPanel({
   canManage,
+  serviceFilter,
+  title = "Business app keys",
+  description,
+  includeAdvanced = false,
 }: {
   canManage: boolean;
+  serviceFilter?: readonly string[];
+  title?: string;
+  description?: string;
+  includeAdvanced?: boolean;
 }) {
   const [status, setStatus] = useState<StatusRow[]>([]);
   const [drafts, setDrafts] = useState<Drafts>({});
@@ -56,6 +64,12 @@ export function IntegrationKeysPanel({
   const [showAdvanced, setShowAdvanced] = useState(false);
 
   const [loadError, setLoadError] = useState<string | null>(null);
+  const visibleSchemas = INTEGRATION_SCHEMAS.filter(
+    (schema) =>
+      schema.scope !== "user_only" &&
+      (!serviceFilter || serviceFilter.includes(schema.service)) &&
+      (includeAdvanced || !schema.advanced || showAdvanced),
+  );
 
   const reload = useCallback(async () => {
     try {
@@ -151,9 +165,9 @@ export function IntegrationKeysPanel({
         <div>
           <h3 className="text-sm font-bold text-fg flex items-center gap-2">
             <KeyRound className="w-4 h-4" />
-            Business app keys
+            {title}
           </h3>
-          <p className="text-[11.5px] text-fg-muted leading-relaxed mt-1">
+          <p className={description ? "hidden" : "text-[11.5px] text-fg-muted leading-relaxed mt-1"}>
             Outbound channels your agents use to reach leads — Twilio (SMS),
             Gmail / SMTP (email), TextTorrent, n8n, Stripe, Telegram. Distinct
             from AI provider keys above (those power the agents&apos; reasoning;
@@ -162,6 +176,9 @@ export function IntegrationKeysPanel({
             never returned to the browser. The Integration health card lower
             on this page is status-only; this is where credentials are saved.
           </p>
+          {description && (
+            <p className="text-[11.5px] text-fg-muted leading-relaxed mt-1">{description}</p>
+          )}
         </div>
       </div>
 
@@ -188,7 +205,7 @@ export function IntegrationKeysPanel({
         </div>
       ) : (
         <div className="space-y-5">
-          {INTEGRATION_SCHEMAS.filter((s) => !s.advanced || showAdvanced).map((schema) => {
+          {visibleSchemas.map((schema) => {
             const fieldStatuses = schema.fields.map((f) => ({
               field: f,
               status: statusFor(schema.service, f.key),
@@ -222,7 +239,7 @@ export function IntegrationKeysPanel({
                       {schema.description}
                     </div>
                   </div>
-                  {allSet && (
+                  {allSet && canManage && (
                     <button
                       type="button"
                       disabled={testing[schema.service]}
@@ -314,7 +331,7 @@ export function IntegrationKeysPanel({
               integrations that most operators don't need. Keeps the
               default view clean while still letting power users find
               the option. */}
-          {INTEGRATION_SCHEMAS.some((s) => s.advanced) && (
+          {!includeAdvanced && !serviceFilter && INTEGRATION_SCHEMAS.some((s) => s.advanced) && (
             <button
               type="button"
               onClick={() => setShowAdvanced((v) => !v)}

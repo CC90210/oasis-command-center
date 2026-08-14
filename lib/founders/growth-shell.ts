@@ -10,3 +10,13 @@ export const GROWTH_SECTIONS = [
 export type GrowthSection = (typeof GROWTH_SECTIONS)[number];
 
 export const MARKETING_SHELL_ACTIVE = false as const;
+
+export const MARKETING_CONNECTION_SERVICES = [
+  "gws",
+  "smtp",
+  "twilio",
+  "texttorrent",
+  "late",
+  "meta_ads",
+  "google_ads",
+] as const;

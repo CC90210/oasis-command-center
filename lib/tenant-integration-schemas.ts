@@ -17,6 +17,8 @@ export type IntegrationFieldDef = {
   sensitive: boolean;
   /** Server-side pattern check applied at upsert. */
   validation?: "phone_e164" | "url" | "email" | "alphanum_uppercase";
+  /** Optional fields do not block the service connection test. */
+  optional?: boolean;
 };
 
 export type IntegrationSchema = {
@@ -132,6 +134,28 @@ export const INTEGRATION_SCHEMAS: IntegrationSchema[] = [
     label: "Late / Zernio",
     description: "Multi-platform social media scheduling.",
     fields: [{ key: "api_key", label: "API Key", sensitive: true }],
+  },
+  {
+    service: "meta_ads",
+    label: "Meta Ads",
+    description: "Read account state and manage approved Meta campaigns for OASIS.",
+    fields: [
+      { key: "access_token", label: "System User Access Token", sensitive: true },
+      { key: "ad_account_id", label: "Ad Account ID", sensitive: false, hint: "Format: act_1234567890" },
+    ],
+  },
+  {
+    service: "google_ads",
+    label: "Google Ads",
+    description: "Read account state and manage approved Google Ads campaigns for OASIS.",
+    fields: [
+      { key: "developer_token", label: "Developer Token", sensitive: true },
+      { key: "customer_id", label: "Customer ID", sensitive: false, hint: "10 digits, without dashes" },
+      { key: "client_id", label: "OAuth Client ID", sensitive: true },
+      { key: "client_secret", label: "OAuth Client Secret", sensitive: true },
+      { key: "refresh_token", label: "OAuth Refresh Token", sensitive: true },
+      { key: "login_customer_id", label: "Manager Customer ID (optional)", sensitive: false, optional: true, hint: "Required only when authenticating through a manager account." },
+    ],
   },
   {
     service: "telegram",
