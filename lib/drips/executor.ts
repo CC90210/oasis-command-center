@@ -673,6 +673,23 @@ function safeFallbackSendTime(): Date {
   return t;
 }
 
+/** UTC hours during which an unmapped-area-code lead may be texted.
+ *
+ *  Derived the same way as the 18:00 anchor above. At UTC hour H a zone at
+ *  UTC-N reads H-N locally, and the TCPA window is [8, 21):
+ *    HST (UTC-10) needs H >= 18   →  18:00 UTC is 08:00, the floor
+ *    EDT (UTC-4)  needs H  < 25   →  never binds
+ *  So [18, 22) is inside the window for EVERY US zone, DST included: EDT sees
+ *  14:00-18:00 and Hawaii sees 08:00-12:00. Four hours is enough for the
+ *  5-minute dispatch tick to drain a backlog without reaching for the edges. */
+const SAFE_FALLBACK_UTC_START = 18;
+const SAFE_FALLBACK_UTC_END = 22;
+
+function insideSafeFallbackWindow(at: Date = new Date()): boolean {
+  const h = at.getUTCHours();
+  return h >= SAFE_FALLBACK_UTC_START && h < SAFE_FALLBACK_UTC_END;
+}
+
 /** Fail-closed-ADJACENT re-check at fire time (defense in depth on top of the
  *  enroller's own guardrails, which only run at enrollment time — a lead can
  *  opt out or go dead in the window between enroll and fire). The load-
@@ -866,7 +883,18 @@ async function processSmsStep(
   // which would happily "pass" the window at the recipient's pre-dawn local
   // time. We can't prove it's daytime for them, so we don't send — reschedule
   // to a conservative all-US-timezones-safe hour instead.
-  if (tcpa.usedFallback) {
+  if (tcpa.usedFallback && !insideSafeFallbackWindow()) {
+    // Outside the safe hours — wait for them. Inside, fall through and SEND.
+    //
+    // THIS BRANCH USED TO RESCHEDULE UNCONDITIONALLY, and that made it a
+    // permanent loop: the row came due at 18:00 UTC, the area code was still
+    // unmapped, `usedFallback` was still true, and it was pushed to the next
+    // 18:00 UTC. Forever. Measured 2026-08-14: 106 rows stuck, 98 of them
+    // created on 2026-07-20 — twenty-five days, attempts still 0, not one
+    // message ever sent. No error, no overdue row, nothing to see.
+    //
+    // The window below is exactly what the reschedule target was always for.
+    // Refusing to send AT the safe hour makes computing a safe hour pointless.
     return markRescheduled(db, row, safeFallbackSendTime().toISOString(), "tcpa_unresolved_tz (area code unmapped)");
   }
   if (!tcpa.withinWindow) {
