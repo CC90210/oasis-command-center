@@ -35,17 +35,29 @@ function loadEnvFile(path: string): void {
 }
 loadEnvFile("C:/Users/echel/JARVIS/.env.agents");
 
+// Production is Turso (cutover 2026-08-09) and the Supabase project this app
+// was built against no longer exists. Without this the factory demands
+// BRAVO_SUPABASE_* and throws before a single check runs — which would read as
+// "the script is broken" rather than "you are pointed at a dead database".
+// Set explicitly rather than defaulted, so a local run cannot silently read a
+// different backend than the one the cron reads.
+if (!process.env.EMPIRE_DATA_BACKEND) process.env.EMPIRE_DATA_BACKEND = "turso_cloud";
+
 const TENANT = process.env.SUNBIZ_TENANT_ID || "aa04fa1f-ad6a-44b0-ac4b-2ff5d1067110";
 
 async function main(): Promise<void> {
   const { getServiceSupabase } = await import("@/lib/supabase-server");
-  const { DRIP_CHECKS, runCheck } = await import("@/lib/health/drip-checks");
+  const { runCheck } = await import("@/lib/health/drip-checks");
+  // The runner's own list, not a copy. A second hand-maintained list here would
+  // let a check ship unverified while this script reported a clean sweep.
+  const { allChecks } = await import("@/lib/health/runner");
+  const CHECKS = allChecks();
   const db = getServiceSupabase();
   const now = Date.now();
 
-  console.log(`running ${DRIP_CHECKS.length} checks against production\n`);
+  console.log(`running ${CHECKS.length} checks against production\n`);
   let broken = 0;
-  for (const check of DRIP_CHECKS) {
+  for (const check of CHECKS) {
     // Short history: this is a deploy-time sanity read, not the nightly digest.
     const r = await runCheck(db, TENANT, check, now, 3);
     const mark =
