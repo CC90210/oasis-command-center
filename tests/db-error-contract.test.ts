@@ -63,16 +63,21 @@ import { repoRelative as rel, sourceTree } from "./_tree";
 // Sites that predate the rule. Every entry is a real throw of a driver error
 // object; each needs converting to dbError() when its file is next touched.
 // This list may only shrink — the test fails if an entry no longer exists.
-const KNOWN_BARE_THROWS: readonly string[] = [
-  "app/api/conversations/threads/[key]/route.ts",
-  "app/api/leads/[id]/timeline/route.ts",
-  "lib/agent-resolver.ts",
-  "lib/client-provisioning.ts",
-  "lib/drips/executor.ts",
-  "lib/drips/reconcile-email-telemetry.ts",
-  "lib/lead-interactions-queries.ts",
-  "lib/queries/merchant-summary.ts",
-];
+// COUNTS, not just paths. CodeRabbit on this PR: a path-only allowlist lets a
+// listed file add new bare throws and stay green — the debt could grow silently
+// inside the very files it was meant to freeze. Exact counts make it a ratchet:
+// add one and the test fails, remove one and the test fails until the number
+// comes down with it. The only way it moves is deliberately, and downward.
+const KNOWN_BARE_THROWS: Readonly<Record<string, number>> = {
+  "app/api/conversations/threads/[key]/route.ts": 2,
+  "app/api/leads/[id]/timeline/route.ts": 5,
+  "lib/agent-resolver.ts": 2,
+  "lib/client-provisioning.ts": 4,
+  "lib/drips/executor.ts": 2,
+  "lib/drips/reconcile-email-telemetry.ts": 4,
+  "lib/lead-interactions-queries.ts": 3,
+  "lib/queries/merchant-summary.ts": 2,
+};
 
 // `throw <something>.error` or `throw error;` — the driver-object shapes.
 const BARE_THROW = /throw\s+(?:\w+\.)?error(?:s)?\s*;|throw\s+\w+Res(?:ult)?\.error\s*;/g;
@@ -87,26 +92,49 @@ for (const f of files) {
   if (hits) offenders.set(rel(f), hits);
 }
 
-const unexpected = [...offenders.keys()].filter((f) => !KNOWN_BARE_THROWS.includes(f));
+const problems: string[] = [];
+
+// A file with bare throws that is not declared at all.
+for (const [file, count] of offenders) {
+  if (!(file in KNOWN_BARE_THROWS)) {
+    problems.push(`  ${file} — ${count} bare throw(s), not declared`);
+  }
+}
+
+// A declared file whose count went UP: new debt hiding inside old debt.
+for (const [file, allowed] of Object.entries(KNOWN_BARE_THROWS)) {
+  const actual = offenders.get(file) ?? 0;
+  if (actual > allowed) {
+    problems.push(
+      `  ${file} — ${actual} bare throw(s), ${allowed} declared. New ones were added to a file ` +
+        `that was already on the list; convert them with dbError() rather than raising the number.`,
+    );
+  }
+}
+
+// A declared file whose count went DOWN, or is fixed entirely: good news, but
+// the list has to follow or it silently re-permits what was just fixed.
+for (const [file, allowed] of Object.entries(KNOWN_BARE_THROWS)) {
+  const actual = offenders.get(file) ?? 0;
+  if (actual < allowed) {
+    problems.push(
+      `  ${file} — down to ${actual} from ${allowed}. Fixed some: ` +
+        (actual === 0
+          ? `delete the entry so the rule is enforced there again.`
+          : `lower the number to ${actual} so the ratchet cannot slip back.`),
+    );
+  }
+}
+
 assert.deepEqual(
-  unexpected,
+  problems,
   [],
-  `New bare driver-error throw(s):\n${unexpected.map((f) => `  ${f}`).join("\n")}\n\n` +
+  `Bare driver-error throw contract violated:\n${problems.join("\n")}\n\n` +
     `A PostgREST/libSQL error is a plain object. Thrown raw, every handler that\n` +
     `narrows on \`instanceof Error\` silently replaces it with a generic string —\n` +
     `that is how "invite_create_failed" hid a NOT NULL violation for months.\n` +
     `Use dbError("<label>", error) from lib/db-error.ts.`,
 );
-
-// The debt list must not rot: a fixed entry has to be deleted, or the list
-// quietly re-permits the pattern years later.
-for (const known of KNOWN_BARE_THROWS) {
-  assert.ok(
-    offenders.has(known),
-    `KNOWN_BARE_THROWS lists ${known}, but it has no bare throw any more.\n` +
-      `It was fixed — delete the entry so the rule is enforced there again.`,
-  );
-}
 
 // ── the path that was actually broken stays fixed ────────────────────
 {
@@ -120,5 +148,6 @@ for (const known of KNOWN_BARE_THROWS) {
 
 console.log(
   `db-error-contract: OK — ${files.length} files scanned, ` +
-    `${offenders.size} file(s) with bare throws, all declared (${KNOWN_BARE_THROWS.length} known)`,
+    `${offenders.size} file(s) with bare throws, ` +
+    `${Object.values(KNOWN_BARE_THROWS).reduce((a, b) => a + b, 0)} declared occurrence(s), no drift`,
 );
