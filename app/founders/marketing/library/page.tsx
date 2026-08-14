@@ -29,6 +29,7 @@ import {
   channelLabel,
   channelsForTrack,
   isAssetStatus,
+  parseSlideUrls,
   isChannel,
   trackForChannel,
   trackLabel,
@@ -96,11 +97,20 @@ export default async function MarketingLibraryPage({
     };
   };
 
+  // Slides are signed too, in `media_urls` order. A carousel read out of order
+  // is a different post, so the order recorded at migration time is the order
+  // rendered — never re-derived from the media rows, whose row order means
+  // nothing.
+  const slidePaths = (a: (typeof assets)[number]): string[] =>
+    parseSlideUrls(a.media_urls).filter(Boolean);
+
   const refs = assets.flatMap((a) => {
     const { video, poster } = pick(a);
-    return [video, poster]
+    const base = [video, poster]
       .filter((m): m is NonNullable<typeof m> => !!m)
       .map((m) => ({ bucket: m.storage_bucket, path: m.storage_path }));
+    const slides = slidePaths(a).map((path: string) => ({ bucket: "marketing-media", path }));
+    return [...base, ...slides];
   });
   const urls = await safe("marketing.library.sign", signMediaUrls(refs), new Map<string, string>());
 
@@ -113,6 +123,9 @@ export default async function MarketingLibraryPage({
       posterUrl: poster ? (urls.get(mediaKey(poster.storage_bucket, poster.storage_path)) ?? null) : null,
       mediaW: shape?.width ?? null,
       mediaH: shape?.height ?? null,
+      slideUrls: slidePaths(a)
+        .map((path: string) => urls.get(mediaKey("marketing-media", path)))
+        .filter((u): u is string => Boolean(u)),
     };
   });
 
@@ -262,7 +275,7 @@ export default async function MarketingLibraryPage({
                   ? "No assets are registered for this channel. Produce something, or clear the filter to see everything."
                   : "Assets appear here as Maven produces them. Nothing is registered yet, and nothing is being invented to fill the space."
             }
-            hint="Migration 133 creates the tables. Ingestion lands in Phase 2."
+            hint="Drop links in the Train tab — they are fetched and analysed within a few minutes."
           />
         </Card>
       ) : (
@@ -271,7 +284,7 @@ export default async function MarketingLibraryPage({
               shape. Without it the grid stretches every tile to the tallest in its row,
               leaving a 9:16 tile's worth of empty panel beside every 16:9 one — dead
               space created BY the fix. */}
-          {signed.map(({ asset, playbackUrl, posterUrl, mediaW, mediaH }) => (
+          {signed.map(({ asset, playbackUrl, posterUrl, mediaW, mediaH, slideUrls }) => (
             <AssetTile
               key={asset.id}
               id={asset.id}
@@ -284,6 +297,8 @@ export default async function MarketingLibraryPage({
               durationS={asset.duration_s}
               format={asset.format}
               platforms={asset.platforms}
+              assetType={asset.asset_type}
+              slideUrls={slideUrls}
               playbackUrl={playbackUrl}
               posterUrl={posterUrl}
               mediaW={mediaW}
