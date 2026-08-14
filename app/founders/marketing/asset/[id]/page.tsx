@@ -30,7 +30,14 @@ import {
   mediaKey,
   signMediaUrls,
 } from "@/lib/founders/marketing-queries";
-import { channelLabel, trackLabel, type Channel, type Track } from "@/lib/founders-marketing-core";
+import {
+  channelLabel,
+  parsePlatforms,
+  platformLabel,
+  trackLabel,
+  type Channel,
+  type Track,
+} from "@/lib/founders-marketing-core";
 import { StatusTag, isPortrait, mediaFrame } from "@/components/founders/marketing-shared";
 import { AssetActions } from "@/components/founders/AssetActions";
 import { AssetPublishPanel } from "@/components/founders/AssetPublishPanel";
@@ -100,6 +107,9 @@ export default async function AssetDetailPage({
     ["Brand", asset.brand_name || asset.brand_slug],
     ["Track", trackLabel(asset.track as Track)],
     ["Channel", channelLabel(asset.channel as Channel)],
+    // Where it actually went, when we know. `channel` is one value; an asset
+    // goes to as many as six places.
+    ["Posted to", parsePlatforms(asset.platforms).map(platformLabel).join(" · ") || null],
     ["Format", asset.format],
     ["Aspect", asset.aspect],
     ["Duration", fmtDuration(asset.duration_s as unknown as number)],
