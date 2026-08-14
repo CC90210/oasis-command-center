@@ -62,7 +62,12 @@ export function AssetPublishPanel({
     setPicked((p) => (p.includes(id) ? p.filter((x) => x !== id) : [...p, id]));
 
   async function submit() {
-    if (!picked.length) return;
+    // `busy` is set synchronously here rather than relying on the transition:
+    // `pending` stays false until start() runs AFTER the await, so a fast second
+    // click would fire a second request. The route 409s on a duplicate, but the
+    // button should not have let it happen — and on a slow upload the window is
+    // seconds wide.
+    if (!picked.length || busy) return;
     setBusy(true);
     setMsg(null);
     const res = await fetch(`/api/founders/marketing/assets/${assetId}/publish`, {
@@ -155,9 +160,15 @@ export function AssetPublishPanel({
 
       {lastIntent && (
         <div className="border-t border-bg-border pt-3 text-[11px] text-fg-dim">
-          Last request: <span className="text-fg-muted">{lastIntent.state}</span> ·{" "}
-          {lastIntent.platforms.join(", ")} ·{" "}
-          {new Date(lastIntent.created_at).toLocaleString()}
+          Last request: <span className="text-fg-muted">{lastIntent.state}</span>
+          {lastIntent.platforms.length > 0 && <> · {lastIntent.platforms.join(", ")}</>} ·{" "}
+          {/* <time> with the raw ISO value, not toLocaleString(). This component is
+              pre-rendered on the server, and locale/timezone differ there, so the
+              formatted string would not match on hydration. The browser renders the
+              title on hover in the reader's own zone. */}
+          <time dateTime={lastIntent.created_at} title={lastIntent.created_at}>
+            {lastIntent.created_at.replace("T", " ").slice(0, 16)} UTC
+          </time>
         </div>
       )}
     </div>

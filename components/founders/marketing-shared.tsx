@@ -6,6 +6,8 @@
  * crashes at render (same lesson as components/renewals/renewals-shared.tsx).
  */
 
+import Link from "next/link";
+
 import { Tag } from "@/components/Card";
 import { AssetActions } from "@/components/founders/AssetActions";
 import {
@@ -26,6 +28,42 @@ const STATUS_TONE: Record<AssetStatus, Tone> = {
   rejected: "hot",
   archived: "neutral",
 };
+
+/**
+ * The box an asset is shown in — ONE definition, used by the tile and the detail
+ * page.
+ *
+ * Every asset used to sit in an `aspect-video` box with `object-cover`. Cover
+ * means fill AND CROP, so a 1080x1920 film rendered as a magnified middle band —
+ * CC: *"it is collapsed for some reason… It's super zoomed in, and I'm not able
+ * to see anything."*
+ *
+ * MEASURED PIXELS BEAT THE LABEL. `aspect` is a declared string and can be wrong
+ * or missing; width/height come from the stored media. The label is the fallback,
+ * not the source of truth.
+ *
+ * Exported because the detail page needs exactly this and a second copy would
+ * drift — Maven's note on the tile said it plainly: "when the detail route
+ * exists, it must IMPORT this frame logic rather than restate it, or the crop
+ * comes back on one page only." It had already been restated once.
+ */
+export function mediaFrame(
+  mediaW?: number | null,
+  mediaH?: number | null,
+  aspect?: string | null,
+): { className: string; style: React.CSSProperties | undefined } {
+  // Sanity band: anything outside 1:5..5:1 is a corrupt row, not a shape to honour.
+  const r = mediaW && mediaH && mediaW > 0 && mediaH > 0 ? mediaW / mediaH : null;
+  const measured = r && r >= 0.2 && r <= 5 ? `${mediaW} / ${mediaH}` : null;
+  return measured
+    ? { className: "", style: { aspectRatio: measured } }
+    : { className: FRAME[aspect || ""] || "aspect-video", style: undefined };
+}
+
+/** True when the asset is taller than it is wide — the detail page lays out around this. */
+export function isPortrait(mediaW?: number | null, mediaH?: number | null): boolean {
+  return Boolean(mediaW && mediaH && mediaH > mediaW);
+}
 
 export function StatusTag({ status }: { status: AssetStatus }) {
   return <Tag tone={STATUS_TONE[status] ?? "neutral"}>{status.replace("_", " ")}</Tag>;
@@ -101,15 +139,12 @@ export function AssetTile({
   openReviews?: number;
 }) {
   const duration = fmtDuration(durationS);
-  // Sanity band: anything outside 1:5..5:1 is a corrupt row, not a shape we should honour.
-  const r = mediaW && mediaH && mediaW > 0 && mediaH > 0 ? mediaW / mediaH : null;
-  const measured = r && r >= 0.2 && r <= 5 ? `${mediaW} / ${mediaH}` : null;
-  const frame = measured ? "" : FRAME[aspect || ""] || "aspect-video";
+  const { className: frame, style: frameStyle } = mediaFrame(mediaW, mediaH, aspect);
   return (
     <article className="rounded-xl border border-bg-border bg-bg-panel shadow-card overflow-hidden transition-all hover:border-accent/40 hover:shadow-ironman group">
       <div
         className={`relative ${frame} bg-bg-deep flex items-center justify-center overflow-hidden`}
-        style={measured ? { aspectRatio: measured } : undefined}
+        style={frameStyle}
       >
         {playbackUrl && format === "video" ? (
           // preload="metadata" so a 200-tile library does not pull 200 videos.
@@ -162,11 +197,17 @@ export function AssetTile({
         <span className="text-[9px] font-bold uppercase tracking-[0.14em] text-accent">
           {brandName}
         </span>
-        {/* Not a <Link>: /founders/marketing/asset/[id] was specified and never built, so
-            every title in this grid was a 404. Plain text until the detail route exists —
-            and when it does, it must IMPORT this frame logic rather than restate it, or
-            the crop comes back on one page only. */}
-        <span className="text-sm font-medium text-fg line-clamp-2">{title}</span>
+        {/* A link again: /founders/marketing/asset/[id] now EXISTS. It was
+            specified, linked, and never built, so every title in this grid was a
+            404 — the link was removed to stop it lying. The page imports
+            mediaFrame() from this file rather than restating it, which was the
+            condition attached to restoring this. */}
+        <Link
+          href={`/founders/marketing/asset/${id}`}
+          className="text-sm font-medium text-fg line-clamp-2 hover:text-accent transition-colors"
+        >
+          {title}
+        </Link>
         {hook && <p className="text-xs text-fg-muted line-clamp-2 italic">{hook}</p>}
         <div className="mt-auto flex items-center justify-between gap-2 pt-1">
           <span className="text-[10px] uppercase tracking-[0.12em] text-fg-dim font-bold">

@@ -562,11 +562,22 @@ export async function getLatestPublishIntent(
       | { state: string; platforms: unknown; created_at: string }
       | undefined;
     if (!row) return null;
-    const platforms = Array.isArray(row.platforms)
-      ? (row.platforms as string[])
-      : typeof row.platforms === "string"
-        ? (JSON.parse(row.platforms || "[]") as string[])
-        : [];
+    // A malformed `platforms` string must not cost the operator the whole row.
+    // JSON.parse throws, the outer catch returns null, and the panel then shows
+    // NO publish history at all — including a "running" they need to see before
+    // deciding whether to press publish again. The state is the important half;
+    // an unreadable platform list degrades to empty, loudly in the log.
+    let platforms: string[] = [];
+    if (Array.isArray(row.platforms)) {
+      platforms = row.platforms as string[];
+    } else if (typeof row.platforms === "string") {
+      try {
+        const parsed = JSON.parse(row.platforms || "[]");
+        platforms = Array.isArray(parsed) ? parsed : [];
+      } catch {
+        console.warn("[marketing:publish_intent] unparseable platforms", row.platforms);
+      }
+    }
     return { state: row.state, platforms, created_at: row.created_at };
   } catch {
     return null;

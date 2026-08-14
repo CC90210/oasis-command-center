@@ -31,7 +31,7 @@ import {
   signMediaUrls,
 } from "@/lib/founders/marketing-queries";
 import { channelLabel, trackLabel, type Channel, type Track } from "@/lib/founders-marketing-core";
-import { StatusTag } from "@/components/founders/marketing-shared";
+import { StatusTag, isPortrait, mediaFrame } from "@/components/founders/marketing-shared";
 import { AssetActions } from "@/components/founders/AssetActions";
 import { AssetPublishPanel } from "@/components/founders/AssetPublishPanel";
 
@@ -84,13 +84,13 @@ export default async function AssetDetailPage({
   const posterUrl = url(poster);
   const imageUrl = url(image);
 
-  // Frame from the asset's OWN pixels. A 9:16 film in a 16:9 box is the
-  // "collapsed and super zoomed in" complaint, and cropping a deliverable to
-  // tidy a layout is the tail wagging the dog.
-  const w = video?.width || image?.width || poster?.width || 0;
-  const h = video?.height || image?.height || poster?.height || 0;
-  const ratio = w && h ? `${w} / ${h}` : "16 / 9";
-  const vertical = h > w;
+  // Frame from the asset's OWN pixels, via the SAME helper the tile uses. I had
+  // restated the rule here; Maven's note on the tile is right that a second copy
+  // means the crop comes back on one page only.
+  const w = video?.width || image?.width || poster?.width || null;
+  const h = video?.height || image?.height || poster?.height || null;
+  const frame = mediaFrame(w, h, asset.aspect);
+  const vertical = isPortrait(w, h);
 
   // Most recent publish request, so the panel can say what already happened
   // rather than inviting the operator to fire a second one blind.
@@ -128,8 +128,8 @@ export default async function AssetDetailPage({
       <div className={`grid gap-6 ${vertical ? "lg:grid-cols-[minmax(0,380px)_1fr]" : "lg:grid-cols-2"}`}>
         <Card noPadding>
           <div
-            className="relative flex items-center justify-center overflow-hidden rounded-xl bg-bg-deep"
-            style={{ aspectRatio: ratio }}
+            className={`relative flex items-center justify-center overflow-hidden rounded-xl bg-bg-deep ${frame.className}`}
+            style={frame.style}
           >
             {videoUrl ? (
               <video

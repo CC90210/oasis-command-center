@@ -44,9 +44,15 @@ export function AssetActions({
   const [confirming, setConfirming] = useState(false);
   const [gone, setGone] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const busy = pending;
+  const [inflight, setInflight] = useState(false);
+  const busy = pending || inflight;
 
   async function verdict(next: Verdict) {
+    // Guard synchronously. `pending` only flips inside start(), which runs AFTER
+    // the await, so until then both verdict buttons and Delete stay live and a
+    // fast second click fires a second mutation.
+    if (inflight) return;
+    setInflight(true);
     setError(null);
     const previous = shown;
     setShown(next); // optimistic
@@ -59,12 +65,16 @@ export function AssetActions({
     if (!res?.ok || !body?.ok) {
       setShown(previous);
       setError(body?.error ? String(body.error) : `Could not mark ${next}.`);
+      setInflight(false);
       return;
     }
+    setInflight(false);
     start(() => router.refresh());
   }
 
   async function remove() {
+    if (inflight) return;
+    setInflight(true);
     setError(null);
     const res = await fetch(`/api/founders/marketing/assets/${id}`, { method: "DELETE" }).catch(
       () => null,
@@ -73,8 +83,10 @@ export function AssetActions({
     if (!res?.ok || !body?.ok) {
       setError(body?.error ? String(body.error) : "Could not delete.");
       setConfirming(false);
+      setInflight(false);
       return;
     }
+    setInflight(false);
     setGone(true);
     start(() => router.refresh());
   }
