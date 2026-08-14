@@ -184,6 +184,14 @@ export async function getMarketingSummary(
         .select("id, track, status")
         .eq("tenant_id", tenantId)
         .eq("brand_slug", FOUNDERS_OWN_BRAND)
+        // ORDER BEFORE RANGE, always. `.range()` on an unordered query has no
+        // stable row order, so page 2 can repeat or skip rows from page 1 — the
+        // count would then be wrong in either direction, and ownAssetIds (the
+        // allowlist for the review/request counts) wrong with it. `id` because it
+        // is the primary key: unique, so the ordering is total, with no ties to
+        // break. getMarketingBrands below does the same thing with .order() —
+        // I copied its paging loop and dropped this line, which CodeRabbit caught.
+        .order("id", { ascending: true })
         .range(from, from + PAGE_SIZE - 1);
       const verdict = classify("summary.assets", page.error);
       // Absent table = pre-migration = genuinely empty, and quiet.

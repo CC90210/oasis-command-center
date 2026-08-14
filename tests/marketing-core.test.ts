@@ -288,6 +288,7 @@ async function brandBoundaryChecks() {
       eq(col: string, v: unknown) { call.filters.push([`eq:${col}`, v]); return api; },
       is(col: string, v: unknown) { call.filters.push([`is:${col}`, v]); return api; },
       in(col: string, v: unknown) { call.filters.push([`in:${col}`, v]); return api; },
+      order(col: string) { call.filters.push(["order", col]); return api; },
       range(from: number, to: number) { call.filters.push(["range", [from, to]]); return api; },
       then(resolve: (v: unknown) => void) {
         let rows: unknown[] = [];
@@ -378,6 +379,23 @@ async function brandBoundaryChecks() {
     "the own-brand asset read must page with .range(), like getMarketingBrands",
   );
 
+  // ORDER BEFORE RANGE. `.range()` on an unordered query has no stable row order,
+  // so page 2 may repeat or skip rows from page 1 — silently, and in either
+  // direction. ownAssetIds is built from these pages and scopes the counts, so a
+  // wobbly order corrupts those too. Caught by CodeRabbit: the paging loop was
+  // copied from getMarketingBrands without its .order().
+  assert.ok(
+    assetCall!.filters.some(([f, v]) => f === "order" && v === "id"),
+    "the paged asset read must .order() by a unique key before .range(), or pages can overlap or skip",
+  );
+  {
+    const fs = assetCall!.filters.map(([f]) => f);
+    assert.ok(
+      fs.indexOf("order") < fs.indexOf("range"),
+      "the order must be applied before the range",
+    );
+  }
+
   // Exercised past the page boundary, so paging is proven rather than assumed.
   {
     const PAGE = 1000;
@@ -403,6 +421,7 @@ async function brandBoundaryChecks() {
             if (col === "asset_id") { ids = v; inChunks.push(v.length); }
             return api;
           },
+          order: () => api,
           range(a: number, b: number) { range = [a, b]; return api; },
           then(resolve: (v: unknown) => void) {
             if (table === "marketing_asset") {
@@ -447,6 +466,7 @@ async function brandBoundaryChecks() {
         eq: () => api,
         is: () => api,
         in: () => api,
+        order: () => api,
         range: () => api,
         then: (resolve: (v: unknown) => void) =>
           resolve({ error: null, data: [], count: table === "marketing_request" ? 7 : 99 }),
@@ -498,6 +518,7 @@ async function degradedChecks() {
           eq: () => api,
           is: () => api,
           in: () => api,
+          order: () => api,
           range(a: number, b: number) { range = [a, b]; return api; },
           then(resolve: (v: unknown) => void) {
             if (table === opts.table && nth === opts.onCall) {

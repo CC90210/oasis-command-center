@@ -74,6 +74,8 @@ export default async function MarketingPage() {
   // either table), and correct the moment Phase 3 starts writing. They are still
   // shown, as their own counts, just not summed into his queue.
   const needsYou = awaitingVerdict;
+  /** Queued FOR Maven, not waiting on CC — shown, never summed into his queue. */
+  const withMaven = summary.open_reviews + summary.open_requests;
 
   // The funnel, from the counts the reader already computes. `by_status` has
   // been fetched and thrown away since Phase 1 — this is the pipeline CC asked
@@ -107,12 +109,16 @@ export default async function MarketingPage() {
           <span className="text-[10px] uppercase tracking-[0.14em] font-bold text-fg-muted">
             Needs you
           </span>
-          {needsYou > 0 && (
+          {/* NOT nested under `needsYou > 0`. It was, which made the comment above
+              ("they are still shown, as their own counts") false: with nothing
+              awaiting a verdict, open_reviews had no surface anywhere on the page
+              — open_requests at least still has the Requests card. Each half now
+              appears whenever it is non-zero, independently. */}
+          {(needsYou > 0 || withMaven > 0) && (
             <span className="text-xs text-fg-dim">
-              {awaitingVerdict} awaiting your verdict
-              {summary.open_reviews + summary.open_requests > 0 && (
-                <> · {summary.open_reviews + summary.open_requests} with Maven</>
-              )}
+              {needsYou > 0 && <>{awaitingVerdict} awaiting your verdict</>}
+              {needsYou > 0 && withMaven > 0 && <> · </>}
+              {withMaven > 0 && <>{withMaven} with Maven</>}
             </span>
           )}
         </div>

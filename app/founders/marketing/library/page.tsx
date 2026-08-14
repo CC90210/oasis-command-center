@@ -219,13 +219,23 @@ export default async function MarketingLibraryPage({
       {assets.length === 0 ? (
         <Card>
           <MarketingEmpty
+            // `status` counts as a filter. Arriving from a Studio pipeline tile
+            // with zero matches used to say "The library is empty" — flatly false
+            // when the library is full and only that stage is empty, and it made
+            // the stage row above look broken.
             headline={
-              track || channel ? "Nothing in this channel yet" : "The library is empty"
+              status
+                ? "Nothing at this stage"
+                : track || channel
+                  ? "Nothing in this channel yet"
+                  : "The library is empty"
             }
             detail={
-              track || channel
-                ? "No assets are registered for this channel. Produce something, or clear the filter to see everything."
-                : "Assets appear here as Maven produces them. Nothing is registered yet, and nothing is being invented to fill the space."
+              status
+                ? "No assets are sitting at this stage right now. Clear the stage to see the rest of the library."
+                : track || channel
+                  ? "No assets are registered for this channel. Produce something, or clear the filter to see everything."
+                  : "Assets appear here as Maven produces them. Nothing is registered yet, and nothing is being invented to fill the space."
             }
             hint="Migration 133 creates the tables. Ingestion lands in Phase 2."
           />
