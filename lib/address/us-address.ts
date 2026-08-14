@@ -36,6 +36,17 @@
  * It answers "does this string carry a street, city, state and ZIP" — nothing
  * about deliverability.
  *
+ * KNOWN LIMITATION — a city NAMED after a state parses as that state, so
+ * mergeStateIntoAddress leaves it alone and the separately-stored state is not
+ * added. "PO BOX 94, WYOMING 14591" is Wyoming, NEW YORK, and reads as WY.
+ * Measured on production: 19 of 593 addresses parse a state that differs from
+ * the stored dropdown, and all but roughly one of those are cases where the
+ * DROPDOWN is the wrong one ("Newington, Connecticut" stored as NY, "Mebane,
+ * North Carolina" stored as AR). Trusting the address is therefore right far
+ * more often than not, and a heuristic to catch the remainder would risk the
+ * 284 records the spelled-out-state fix repaired. Left as a known edge rather
+ * than papered over. (Codex P2, 2026-08-14.)
+ *
  * ADDING A RULE
  *   1. Extend the pure functions here, never in a renderer or a route.
  *   2. `tests/us-address.test.ts` is the contract; add the case there first.
@@ -84,6 +95,9 @@ const STATE_NAMES: Record<string, string> = {
 };
 
 
+/** State names longest-first, so "west virginia" is tested before "virginia". */
+const STATE_NAMES_LONGEST_FIRST = Object.keys(STATE_NAMES).sort((a, b) => b.length - a.length);
+
 function trimSep(s: string): string {
   return s.replace(/[,\s]+$/, "").replace(/^[,\s]+/, "").trim();
 }
@@ -110,7 +124,11 @@ export function splitUsAddress(raw: string | null | undefined): SplitAddress {
     out.state = codeM[1].toUpperCase();
     s = trimSep(s.replace(/(?:^|[,\s])[A-Za-z]{2}\s*$/, ""));
   } else {
-    for (const name of Object.keys(STATE_NAMES)) {
+    // LONGEST NAME FIRST. "virginia" also matches the tail of "West Virginia"
+    // (the preceding space satisfies the `[,\s]` boundary), so plain insertion
+    // order resolved "Davis Street, Lewisburg, West Virginia, 24901" to VA and
+    // left the orphaned word "West" in the street line. Real production record.
+    for (const name of STATE_NAMES_LONGEST_FIRST) {
       const re = new RegExp(`(?:^|[,\\s])${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*$`, "i");
       if (re.test(s)) {
         out.state = STATE_NAMES[name];

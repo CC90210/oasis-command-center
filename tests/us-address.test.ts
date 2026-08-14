@@ -71,6 +71,15 @@ function run() {
   assert.equal(a.line1, "123 Main St, Apt 4");
   assert.equal(a.city, "Miami");
 
+  // A two-word state must not be shadowed by the one-word state inside it.
+  // Real production record: this resolved to VA and orphaned "West" in line1.
+  a = splitUsAddress("Davis Street, Lewisburg, West Virginia, 24901");
+  assert.equal(a.state, "WV", "West Virginia must not parse as Virginia");
+  assert.equal(a.city, "Lewisburg");
+  assert.equal(a.line1, "Davis Street");
+  a = splitUsAddress("100 Main St, Norfolk, Virginia, 23510");
+  assert.equal(a.state, "VA", "plain Virginia still resolves");
+
   assert.equal(normalizeState("fl"), "FL");
   assert.equal(normalizeState("Florida"), "FL");
   assert.equal(normalizeState("New York"), "NY");
