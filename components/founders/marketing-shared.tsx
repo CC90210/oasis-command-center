@@ -35,6 +35,29 @@ export function StatusTag({ status }: { status: AssetStatus }) {
  * One library tile. `playbackUrl` is a short-lived signed Storage URL resolved
  * server-side — the browser never receives a service key.
  */
+/**
+ * The frame an asset is shown in, derived from the asset's OWN aspect.
+ *
+ * CC, 2026-08-14, on a 9:16 film in this grid: *"it is collapsed for some reason… It's
+ * super zoomed in, and I'm not able to see anything. This is exactly what I didn't want!"*
+ *
+ * He was right and it was this component. Every tile was `aspect-video` (16:9) and every
+ * video was `object-cover`. Cover means FILL AND CROP, so a 1080x1920 film rendered as a
+ * zoomed middle sliver — in the grid and, because object-fit still applies there, in
+ * fullscreen too. The bytes were never wrong; the frame around them was.
+ *
+ * Two rules now:
+ *   - the box takes the asset's aspect, so a vertical film gets a vertical box;
+ *   - `object-contain`, always. A library exists to show you what you made. Cropping a
+ *     deliverable to make a grid tidy is the tail wagging the dog.
+ */
+const FRAME: Record<string, string> = {
+  "9:16": "aspect-[9/16]",
+  "4:5": "aspect-[4/5]",
+  "1:1": "aspect-square",
+  "16:9": "aspect-video",
+};
+
 export function AssetTile({
   id,
   title,
@@ -63,9 +86,10 @@ export function AssetTile({
   openReviews?: number;
 }) {
   const duration = fmtDuration(durationS);
+  const frame = FRAME[aspect || ""] || "aspect-video";
   return (
     <article className="rounded-xl border border-bg-border bg-bg-panel shadow-card overflow-hidden transition-all hover:border-accent/40 hover:shadow-ironman group">
-      <div className="relative aspect-video bg-bg-deep flex items-center justify-center overflow-hidden">
+      <div className={`relative ${frame} bg-bg-deep flex items-center justify-center overflow-hidden`}>
         {playbackUrl && format === "video" ? (
           // preload="metadata" so a 200-tile library does not pull 200 videos.
           <video
@@ -74,7 +98,7 @@ export function AssetTile({
             controls
             playsInline
             preload="metadata"
-            className="h-full w-full object-cover"
+            className="h-full w-full object-contain bg-black"
           />
         ) : posterUrl ? (
           // Plain <img> on purpose. next/image would need a matching
@@ -85,7 +109,7 @@ export function AssetTile({
           // derivative outlives the signature, so a re-optimize after expiry
           // fails while the tile still looks cached. Not worth it for a poster.
           // eslint-disable-next-line @next/next/no-img-element
-          <img src={posterUrl} alt="" className="h-full w-full object-cover" />
+          <img src={posterUrl} alt="" className="h-full w-full object-contain" />
         ) : (
           <div className="px-4 text-center text-xs text-fg-dim">
             {format === "html"
