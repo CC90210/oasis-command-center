@@ -83,6 +83,7 @@ const STATE_NAMES: Record<string, string> = {
   wyoming: "WY", "district of columbia": "DC", "puerto rico": "PR",
 };
 
+
 function trimSep(s: string): string {
   return s.replace(/[,\s]+$/, "").replace(/^[,\s]+/, "").trim();
 }
@@ -188,9 +189,24 @@ export function mergeStateIntoAddress(addr: unknown, state: unknown): string {
   const st = (typeof state === "string" ? state : state == null ? "" : String(state)).trim().toUpperCase();
   if (!a) return "";
   if (!/^[A-Z]{2}$/.test(st)) return a; // no usable 2-letter state → leave as-is
-  const up = a.toUpperCase();
-  // Already in state position (before a ZIP, or trailing ", ST")? Leave it.
-  if (new RegExp(`\\b${st}\\b\\s*\\d{5}`).test(up) || new RegExp(`,\\s*${st}\\s*$`).test(up)) return a;
+  // If the address already carries a state OF ITS OWN, leave it completely
+  // alone — whether written as "FL" or spelled out "Florida", and even when it
+  // DISAGREES with the separately-stored one.
+  //
+  // Measured on production, both failure modes were real. Matching only the
+  // 2-letter code appended a duplicate to 284 stored addresses ("…, Naples,
+  // Florida, FL 34104", "…, New York, New York, NY 10175"). And 28 records have
+  // a dropdown state that contradicts the address outright — "East 1175th
+  // Avenue, Crawford, Illinois, 62449" stored with business_state = "CA" —
+  // where appending produced the nonsense "Illinois, CA 62449". The address the
+  // merchant actually typed is the better evidence of where they are, so it
+  // wins; the dropdown only ever FILLS a gap, never overrides.
+  //
+  // Delegating to splitUsAddress instead of hand-rolling more regexes also
+  // means the state-position rules live in exactly one place. The original
+  // composeAddress had both bugs; they were invisible because it only ever ran
+  // on the dead legacy mapper.
+  if (splitUsAddress(a).state) return a;
   // Insert before a trailing ZIP: "..., Miami, 33101" -> "..., Miami, FL 33101".
   const zip = a.match(/^(.*?)[,\s]*(\d{5}(?:-\d{4})?)\s*$/);
   if (zip) return `${zip[1].replace(/[,\s]+$/, "")}, ${st} ${zip[2]}`;
