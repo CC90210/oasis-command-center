@@ -70,8 +70,20 @@ check(val("BUSINESS INFORMATION", "Date Started") === "12/20/2020", "ISO date �
 check(val("BUSINESS INFORMATION", "Type of Entity") === "LLC", "entity value → label");
 check(val("BUSINESS INFORMATION", "State") === "TX", "state uppercased");
 check(val("BUSINESS INFORMATION", "Industry") === "Residential Construction", "industry slug title-cased");
-check(val("BUSINESS INFORMATION", "Email") === "owner@example.com", "email from lead record");
+// Contact suppression. Both of these are enforced by lib/forms/application-disclosure.ts,
+// not by a hardcoded "" — the mapper reads the real value and the registry blanks it,
+// so these assertions fail if the registry is bypassed or deleted.
+check(val("BUSINESS INFORMATION", "Email") === "", "merchant email suppressed on the app PDF (Ezra 2026-08-13, lender-facing)");
 check(val("BUSINESS INFORMATION", "Phone") === "", "merchant phone suppressed on the app PDF (Ezra 2026-06-24, lender-facing)");
+// The labelled cell must SURVIVE — Ezra asked for the value to go, not the row.
+// Dropping the row would reflow the two-column grid and change the document.
+check(
+  sections.find((s) => s.heading === "BUSINESS INFORMATION")!.rows.some((r) => r.label === "Email"),
+  "Email row still rendered (label kept, value blanked — layout unchanged)",
+);
+// Redaction is a RENDER concern. The email must still be in the source record,
+// because "the emails need to stay" (Adon 2026-08-13) — we hide it, never delete it.
+check(lead.email === "owner@example.com", "email still present on the source record (redacted at render, not deleted)");
 check(val("BUSINESS INFORMATION", "Product / Service") === "Residential construction", "product/service mapped");
 
 // Address completeness (2026-06-25): the "address" autocomplete usually stores
