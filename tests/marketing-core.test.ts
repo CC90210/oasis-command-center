@@ -4,6 +4,7 @@
  */
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import { getMarketingSummary } from "../lib/founders/marketing-queries";
 import { join } from "node:path";
 import {
   CHANNELS,
@@ -235,4 +236,144 @@ assert.ok(!isOwnBrand(null) && !isOwnBrand(undefined) && !isOwnBrand(""),
     "a caller must opt in explicitly to see anything but our own work");
 }
 
-console.log("marketing-core: all assertions passed");
+// ── the brand boundary, exercised against DATA rather than source text ────────
+// The token-counting checks above cannot see WHICH ROWS a count includes, and
+// that is exactly where the boundary was half-applied: `total` was scoped to
+// oasis-ai while open_reviews / open_requests were scoped only by tenant. The
+// founders Studio would have said "9 assets, 3 waiting on you" with the 3 being
+// Warner's — worse than unscoped, because it looks right.
+//
+// getMarketingSummary takes an injectable client for exactly this. The fake below
+// records the filter chain and replays fixtures, so these assertions describe
+// behaviour rather than spelling.
+//
+// Wrapped in an async fn, not top-level await: these run as CJS under tsx.
+type FakeCall = { table: string; filters: Array<[string, unknown]> };
+
+async function brandBoundaryChecks() {
+  const OWN = ["own-1", "own-2"];
+  const CLIENT = "warner-1";
+  const calls: FakeCall[] = [];
+
+  const fixtures = {
+    assets: [
+      { id: OWN[0], track: "organic", status: "in_review", brand_slug: "oasis-ai" },
+      { id: OWN[1], track: "paid", status: "draft", brand_slug: "oasis-ai" },
+      { id: CLIENT, track: "paid", status: "in_review", brand_slug: "warner" },
+    ],
+    reviews: [
+      { asset_id: OWN[0], acted_on_at: null as string | null },
+      { asset_id: CLIENT, acted_on_at: null as string | null },      // a client's — not ours
+      { asset_id: OWN[1], acted_on_at: "2026-08-01" as string | null }, // already acted on
+    ],
+    requests: [
+      { asset_id: OWN[0] as string | null, status: "open" },
+      { asset_id: CLIENT as string | null, status: "open" },   // a client's — not ours
+      { asset_id: null as string | null, status: "claimed" },  // unbound: typed into OUR portal
+      { asset_id: OWN[1] as string | null, status: "done" },   // closed
+    ],
+  };
+
+  const makeTable = (table: string) => {
+    const call: FakeCall = { table, filters: [] };
+    calls.push(call);
+    let head = false;
+    const has = (k: string) => call.filters.some(([f]) => f === k);
+    const val = (k: string) => call.filters.find(([f]) => f === k)?.[1];
+    const api: Record<string, unknown> = {
+      select(_cols: string, opts?: { count?: string; head?: boolean }) {
+        head = Boolean(opts?.head);
+        return api;
+      },
+      eq(col: string, v: unknown) { call.filters.push([`eq:${col}`, v]); return api; },
+      is(col: string, v: unknown) { call.filters.push([`is:${col}`, v]); return api; },
+      in(col: string, v: unknown) { call.filters.push([`in:${col}`, v]); return api; },
+      then(resolve: (v: unknown) => void) {
+        let rows: unknown[] = [];
+        if (table === "marketing_asset") {
+          rows = fixtures.assets.filter((a) => a.brand_slug === val("eq:brand_slug"));
+        } else if (table === "marketing_review") {
+          rows = fixtures.reviews.filter(
+            (r) =>
+              r.acted_on_at === null &&
+              (!has("in:asset_id") || (val("in:asset_id") as string[]).includes(r.asset_id)),
+          );
+        } else if (table === "marketing_request") {
+          rows = fixtures.requests.filter(
+            (r) =>
+              ["open", "claimed"].includes(r.status) &&
+              (!has("is:asset_id") || r.asset_id === null) &&
+              (!has("in:asset_id") ||
+                (r.asset_id !== null && (val("in:asset_id") as string[]).includes(r.asset_id))),
+          );
+        }
+        resolve(head ? { error: null, count: rows.length } : { error: null, data: rows });
+      },
+    };
+    return api;
+  };
+
+  const db = { from: makeTable } as unknown as Parameters<typeof getMarketingSummary>[1];
+  const summary = await getMarketingSummary("tenant-founders", db);
+
+  assert.equal(summary.total, 2, "only OASIS's own assets are counted");
+  assert.equal(
+    summary.open_reviews,
+    1,
+    "an open review on a CLIENT asset must not appear in the founders count — " +
+      "this is the assertion the source-text checks could not make",
+  );
+  assert.equal(
+    summary.open_requests,
+    2,
+    "own-asset request + unbound request; a client-asset request is excluded",
+  );
+
+  // The scoping must reach the DB, not be applied in JS after an unscoped read.
+  const reviewCall = calls.find((c) => c.table === "marketing_review");
+  assert.ok(reviewCall, "the summary must query marketing_review");
+  assert.ok(
+    reviewCall!.filters.some(([f]) => f === "in:asset_id"),
+    "the review count must be pushed down as .in(asset_id, ownAssetIds)",
+  );
+  assert.ok(
+    reviewCall!.filters.some(([f, v]) => f === "eq:tenant_id" && v === "tenant-founders"),
+    "and must still be tenant-scoped",
+  );
+
+  // A tenant with no own-brand assets must not fall back to counting everything.
+  // The empty set is a real answer, and an empty `.in()` list is the trap: the
+  // guard has to skip the query, not send `.in(asset_id, [])` and hope.
+  const emptyDb = {
+    from(table: string) {
+      const api: Record<string, unknown> = {
+        select: () => api,
+        eq: () => api,
+        is: () => api,
+        in: () => api,
+        then: (resolve: (v: unknown) => void) =>
+          resolve({ error: null, data: [], count: table === "marketing_request" ? 7 : 99 }),
+      };
+      return api;
+    },
+  } as unknown as Parameters<typeof getMarketingSummary>[1];
+
+  const empty = await getMarketingSummary("tenant-empty", emptyDb);
+  assert.equal(empty.total, 0);
+  assert.equal(empty.open_reviews, 0, "no own assets means no own reviews, not every review");
+  assert.equal(
+    empty.open_requests,
+    7,
+    "with no own assets only UNBOUND requests remain ours (7 from the stub), " +
+      "not the tenant-wide total",
+  );
+}
+
+brandBoundaryChecks().then(
+  () => console.log("marketing-core: all assertions passed"),
+  (err) => {
+    console.error(err);
+    process.exit(1);
+  },
+);
+

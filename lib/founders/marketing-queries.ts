@@ -95,21 +95,36 @@ function quiet(label: string, err: { code?: string; message?: string } | null): 
   return true;
 }
 
-/** Headline counts for the Studio landing. */
-export async function getMarketingSummary(tenantId: string): Promise<MarketingSummary> {
+/**
+ * Headline counts for the Studio landing.
+ *
+ * `db` is injectable for tests ONLY. Every caller in the app omits it and gets
+ * the service client. It exists because the brand boundary here is a property of
+ * the QUERIES — which rows each count includes — and the previous tests could
+ * only read this file as text and count tokens, which is why the half-applied
+ * boundary below (assets scoped, reviews and requests not) survived review.
+ * See tests/marketing-core.test.ts.
+ */
+export async function getMarketingSummary(
+  tenantId: string,
+  db: ReturnType<typeof getServiceSupabase> = getServiceSupabase(),
+): Promise<MarketingSummary> {
   if (!tenantId) return EMPTY_MARKETING_SUMMARY;
-  const db = getServiceSupabase();
   try {
     const assets = await db
       .from("marketing_asset")
-      .select("track, status")
+      // `id` is selected so the review/request counts below can be scoped to the
+      // SAME set of assets this count describes. Without it those counts silently
+      // spanned every brand on the tenant.
+      .select("id, track, status")
       .eq("tenant_id", tenantId)
       .eq("brand_slug", FOUNDERS_OWN_BRAND);
     if (assets.error) {
       if (quiet("summary.assets", assets.error)) return EMPTY_MARKETING_SUMMARY;
     }
 
-    const rows = (assets.data || []) as Array<{ track: Track; status: string }>;
+    const rows = (assets.data || []) as Array<{ id: string; track: Track; status: string }>;
+    const ownAssetIds = rows.map((r) => r.id);
     const by_track: Record<Track, number> = { organic: 0, paid: 0, seo: 0, email: 0 };
     const by_status: Record<string, number> = {};
     for (const r of rows) {
@@ -117,17 +132,53 @@ export async function getMarketingSummary(tenantId: string): Promise<MarketingSu
       by_status[r.status] = (by_status[r.status] || 0) + 1;
     }
 
-    const [reviews, requests, corpus] = await Promise.all([
-      db
-        .from("marketing_review")
-        .select("id", { count: "exact", head: true })
-        .eq("tenant_id", tenantId)
-        .is("acted_on_at", null),
+    // BRAND SCOPE APPLIES TO THE ACTION COUNTS TOO, which is the half that was
+    // missing: `total` was scoped to OASIS's own brand while `open_reviews` and
+    // `open_requests` were scoped only by tenant. A founders surface that says
+    // "9 assets" and "3 waiting on you" where the 3 are Warner's is worse than
+    // the unscoped version — it looks correct. marketing_review.asset_id is NOT
+    // NULL (database/133_marketing_hub.sql), so every review has a brand.
+    //
+    // `.in()` rather than an embedded `marketing_asset!inner(brand_slug)` filter:
+    // the Turso PostgREST bridge resolves embeds with a second query and attaches
+    // them (lib/turso-postgrest.ts attachEmbeds), so a filter on an embedded
+    // column is not pushed down. `.in()` behaves identically on both backends.
+    // The founders library is OASIS's own output and stays small by definition.
+    const scopedReviews =
+      ownAssetIds.length > 0
+        ? db
+            .from("marketing_review")
+            .select("id", { count: "exact", head: true })
+            .eq("tenant_id", tenantId)
+            .is("acted_on_at", null)
+            .in("asset_id", ownAssetIds)
+        : Promise.resolve({ error: null, count: 0 } as const);
+
+    // marketing_request.asset_id IS nullable — "a request not tied to an asset"
+    // is the intended case (see the MATCH SIMPLE note on marketing_request_asset_fk).
+    // An unbound request was typed into THIS portal and names no client asset, so
+    // it belongs to the founders' own queue and is counted. Bound requests follow
+    // their asset's brand. Two counts rather than one `.or()` because the bridge's
+    // `.or()` support is not something this reader should depend on.
+    const scopedRequestsBound =
+      ownAssetIds.length > 0
+        ? db
+            .from("marketing_request")
+            .select("id", { count: "exact", head: true })
+            .eq("tenant_id", tenantId)
+            .in("status", ["open", "claimed"])
+            .in("asset_id", ownAssetIds)
+        : Promise.resolve({ error: null, count: 0 } as const);
+
+    const [reviews, requestsBound, requestsUnbound, corpus] = await Promise.all([
+      scopedReviews,
+      scopedRequestsBound,
       db
         .from("marketing_request")
         .select("id", { count: "exact", head: true })
         .eq("tenant_id", tenantId)
-        .in("status", ["open", "claimed"]),
+        .in("status", ["open", "claimed"])
+        .is("asset_id", null),
       db.from("marketing_corpus").select("state").eq("tenant_id", tenantId),
     ]);
 
@@ -137,7 +188,9 @@ export async function getMarketingSummary(tenantId: string): Promise<MarketingSu
       by_track,
       by_status,
       open_reviews: reviews.error ? 0 : reviews.count || 0,
-      open_requests: requests.error ? 0 : requests.count || 0,
+      open_requests:
+        (requestsBound.error ? 0 : requestsBound.count || 0) +
+        (requestsUnbound.error ? 0 : requestsUnbound.count || 0),
       corpus_indexed: corpusRows.filter((c) => c.state === "indexed").length,
       corpus_pending: corpusRows.filter((c) => c.state === "queued" || c.state === "extracting")
         .length,

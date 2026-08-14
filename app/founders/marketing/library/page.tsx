@@ -26,6 +26,7 @@ import {
   isChannel,
   trackForChannel,
   trackLabel,
+  type AssetStatus,
   type Channel,
   type Track,
 } from "@/lib/founders-marketing-core";
@@ -104,14 +105,26 @@ export default async function MarketingLibraryPage({
   // uses the real mapping and cannot drift.
   const activeTrack: Track | undefined = track ?? (channel ? trackForChannel(channel) : undefined);
   const channelOptions: Channel[] = activeTrack ? channelsForTrack(activeTrack) : [];
-  const filterHref = (next: { track?: Track | null; channel?: Channel | null; brand?: string | null }) => {
+  // `status` is preserved like every other dimension. It was omitted here while
+  // Studio's pipeline tiles link in WITH it, so arriving on "In review" and then
+  // touching any pill — including "All" — silently widened the view to every
+  // status while the page gave no sign it had. You were reviewing, then you were
+  // not, and nothing said so.
+  const filterHref = (next: {
+    track?: Track | null;
+    channel?: Channel | null;
+    brand?: string | null;
+    status?: AssetStatus | null;
+  }) => {
     const params = new URLSearchParams();
     const nextTrack = next.track === undefined ? track : next.track || undefined;
     const nextChannel = next.channel === undefined ? channel : next.channel || undefined;
     const nextBrand = next.brand === undefined ? brand : next.brand || undefined;
+    const nextStatus = next.status === undefined ? status : next.status || undefined;
     if (nextTrack) params.set("track", nextTrack);
     if (nextChannel) params.set("channel", nextChannel);
     if (nextBrand) params.set("brand", nextBrand);
+    if (nextStatus) params.set("status", nextStatus);
     const query = params.toString();
     return `/founders/marketing/library${query ? `?${query}` : ""}`;
   };
@@ -136,6 +149,22 @@ export default async function MarketingLibraryPage({
 
       {/* Filters. Plain links so the page stays a server component and every
           view is a shareable URL. */}
+      {/* A status filter arrives from Studio's pipeline tiles, never from a pill
+          here, so without this row the page silently showed a subset with no
+          indication of why — and no way back. */}
+      {status && (
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="mr-1 text-[10px] font-bold uppercase tracking-[0.14em] text-fg-dim">Stage</span>
+          <FilterPill href={filterHref({})} label={status.replace(/_/g, " ").replace(/^./, (c) => c.toUpperCase())} active />
+          <Link
+            href={filterHref({ status: null })}
+            className="text-[11px] font-semibold text-fg-dim transition-colors hover:text-fg"
+          >
+            Clear stage
+          </Link>
+        </div>
+      )}
+
       <div className="flex flex-wrap items-center gap-2">
         <FilterPill href={filterHref({ track: null, channel: null })} label="All" active={!track && !channel} />
         {TRACKS.map((t) => (
