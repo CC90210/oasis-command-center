@@ -63,7 +63,26 @@ export type TelegramLane =
   /** Adon / APEX — SunBiz operational alerts (scrapers, bounces, dialer). */
   | "sunbiz-ops";
 
-type LaneSpec = { tokenKeys: string[]; chatKeys: string[]; audience: string };
+type LaneSpec = {
+  tokenKeys: string[];
+  chatKeys: string[];
+  audience: string;
+  /**
+   * A SECOND chat in the SAME lane, tried only when the primary send fails.
+   *
+   * NOT a cross-lane fallback — that is the exact leak this module exists to
+   * prevent. This is another address for the SAME audience: for sunbiz-ops the
+   * primary is the ops GROUP and the fallback is Adon's own DM, and Adon is the
+   * sunbiz-ops audience either way.
+   *
+   * WHY IT EXISTS. On 2026-08-12 @KnutRPEbot's membership of the ops group read
+   * `status: "left"` — it had been removed. Telegram gives a bot no way to
+   * re-add itself, so every sunbiz-ops alert was undeliverable until a human
+   * acted, and the SMS outage alerted into a void for five days. One delivery
+   * address means one removed bot equals total silence.
+   */
+  fallbackChatKeys?: string[];
+};
 
 /**
  * Credential resolution per lane, in order. Fallback chains stay WITHIN a lane —
@@ -80,6 +99,8 @@ const LANES: Record<TelegramLane, LaneSpec> = {
     // unset the send fails loudly instead of quietly becoming CC's problem.
     tokenKeys: ["SUNBIZ_OPS_TELEGRAM_BOT_TOKEN", "SUNBIZ_TELEGRAM_BOT_TOKEN"],
     chatKeys: ["SUNBIZ_OPS_TELEGRAM_CHAT_ID"],
+    // Adon's own DM. Same audience as the ops group, different address.
+    fallbackChatKeys: ["SUNBIZ_OPS_TELEGRAM_FALLBACK_CHAT_ID"],
     audience: "SunBiz operations (Adon / APEX)",
   },
 };
@@ -134,12 +155,15 @@ export function laneCredentials(
 }
 
 function resolve(target: TelegramTarget):
-  | { ok: true; token: string; chatId: string }
+  | { ok: true; token: string; chatId: string; fallbackChatId?: string }
   | { ok: false; reason: string } {
   if ("token" in target) {
     if (!target.token || !target.chatId) {
       return { ok: false, reason: "telegram_explicit_target_incomplete" };
     }
+    // An explicit target is the caller naming one address deliberately (a
+    // per-user send). It gets no fallback: silently widening the audience of a
+    // message addressed to one person is the leak, not the cure.
     return { ok: true, token: target.token, chatId: target.chatId };
   }
   const spec = LANES[target.lane];
@@ -156,21 +180,60 @@ function resolve(target: TelegramTarget):
         `(set ${spec.tokenKeys[0]} + ${spec.chatKeys[0]} for ${spec.audience})`,
     };
   }
-  return { ok: true, token: token.trim(), chatId: chatId.trim() };
+  const fallbackChatId = (spec.fallbackChatKeys ?? [])
+    .map((k) => process.env[k])
+    .find((v) => v && v.trim())
+    ?.trim();
+  // A fallback pointing at the primary is not a second address. Dropping it
+  // keeps "delivered to the fallback" meaning something.
+  const usableFallback = fallbackChatId && fallbackChatId !== chatId.trim() ? fallbackChatId : undefined;
+  return { ok: true, token: token.trim(), chatId: chatId.trim(), fallbackChatId: usableFallback };
 }
 
 export async function sendTelegram(
   text: string,
   target: TelegramTarget,
-): Promise<{ ok: boolean; reason?: string }> {
+): Promise<{ ok: boolean; reason?: string; degraded?: boolean }> {
   const r = resolve(target);
   if (!r.ok) return { ok: false, reason: r.reason };
+
+  const primary = await postMessage(r.token, r.chatId, text);
+  if (primary.ok) return { ok: true };
+
+  // The primary address refused. Before giving up, try the lane's SECOND
+  // address — same audience, different chat. Silence is the failure mode that
+  // cost five days on the SMS outage; a message landing in the other of Adon's
+  // two chats is not a failure at all.
+  if (!r.fallbackChatId) return { ok: false, reason: primary.reason };
+
+  const note =
+    `⚠️ Primary alert channel unreachable (${primary.reason}). ` +
+    `Delivered here instead — the ops group needs the bot re-added.\n\n`;
+  const second = await postMessage(r.token, r.fallbackChatId, note + text);
+  if (second.ok) {
+    // ok:true because a human WAS reached; degraded:true because the channel
+    // they are supposed to use is broken. Collapsing the two into a bare
+    // ok:true is how a dead group stays dead — nothing would ever report it.
+    return { ok: true, degraded: true, reason: primary.reason };
+  }
+  return { ok: false, reason: `${primary.reason}; fallback also failed: ${second.reason}` };
+}
+
+/**
+ * One send attempt to one chat. Split out so the primary and the fallback go
+ * through identical error handling rather than two near-copies that drift.
+ */
+async function postMessage(
+  token: string,
+  chatId: string,
+  text: string,
+): Promise<{ ok: true } | { ok: false; reason: string }> {
   try {
-    const res = await fetch(`https://api.telegram.org/bot${r.token}/sendMessage`, {
+    const res = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
-        chat_id: r.chatId,
+        chat_id: chatId,
         text: text.slice(0, 4096), // Telegram hard caps messages at 4096 chars
         parse_mode: "HTML",
       }),

@@ -324,9 +324,19 @@ export type TtInboxMessage = {
   sendStatus?: string;
 };
 
-/** Account info + credit balance — useful for the readiness card. */
+/**
+ * Account info + credit balance — the readiness card and the Campaigns balance
+ * tile.
+ *
+ * POST, not GET. ttFetch defaults to GET when there is no body, and TT answers
+ * `/user/auth/me` with 405 "The GET method is not supported for route
+ * api/v1/user/auth/me. Supported methods: POST." So this call has NEVER
+ * succeeded — every balance surface has been silently empty since it was
+ * written, which is why a drained or healthy account looked identical from the
+ * dashboard. Found by the 2026-08-12 integration audit.
+ */
 export function meAccountInfo(creds: TextTorrentCredentials): Promise<TtMe> {
-  return ttFetch<TtMe>(creds, "/user/auth/me");
+  return ttFetch<TtMe>(creds, "/user/auth/me", { method: "POST" });
 }
 
 // --- Lists & contacts ------------------------------------------------------

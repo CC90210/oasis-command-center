@@ -20,7 +20,7 @@
 import "server-only";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { getTextTorrentCredentials } from "@/lib/integrations/texttorrent";
-import { repKeyForOwner } from "./rep-keys";
+import { repKeyForOwner, actAsEmailForRep } from "./rep-keys";
 
 type Db = ReturnType<typeof getServiceSupabase>;
 
@@ -128,14 +128,23 @@ export async function syncSenderNumbers(tenantId: string): Promise<SyncResult> {
     const prev = stored.get(n.number);
     if (!prev) {
       const ins = await db.from("sms_sender_numbers").insert({
-        tenant_id: tenantId, rep_key: repKey, act_as_email: null,
+        // The owning ACCOUNT, not null. Without it the table says which rep a
+        // line belongs to but not which wire it must be sent on, and every
+        // reader has to re-derive that from a static registry that drifts.
+        tenant_id: tenantId, rep_key: repKey, act_as_email: actAsEmailForRep(repKey),
         number: n.number, active: true, first_seen_at: now, last_seen_at: now,
       });
       if (ins.error) result.errors.push(`insert ${n.number}: ${ins.error.message}`);
       else result.added.push(`${n.number} (${repKey})`);
     } else {
       await db.from("sms_sender_numbers")
-        .update({ last_seen_at: now, active: true, deactivated_at: null, rep_key: repKey })
+        .update({
+          last_seen_at: now,
+          active: true,
+          deactivated_at: null,
+          rep_key: repKey,
+          act_as_email: actAsEmailForRep(repKey),
+        })
         .eq("id", prev.id);
       result.unchanged += 1;
     }
