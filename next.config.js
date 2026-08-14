@@ -28,6 +28,23 @@ const nextConfig = {
   // bindings now get traced — they must stay external or the build fails
   // (seen on nostalgic-requests' first Turso deploy).
   serverExternalPackages: ["@napi-rs/canvas", "pdfjs-dist", "@libsql/client", "libsql"],
+  // 2026-08-14: preview builds started dying with SIGKILL / out_of_memory on
+  // Vercel's 8 GB build container while the same commit built fine locally and
+  // in production. Nothing was leaking — the app has simply grown to sit right
+  // at the ceiling, so which side of it a given build lands on is luck. Two
+  // preview builds OOM'd, one production build of the identical tree passed.
+  //
+  // webpackMemoryOptimizations trades a little build time for a materially
+  // lower peak: webpack stops retaining module sources and caches it only
+  // needs for incremental rebuilds, which a one-shot CI build never does.
+  // Verified present in the installed Next's config schema (15.5.18) rather
+  // than assumed from the docs.
+  //
+  // If this stops being enough, the next lever is Vercel's Enhanced Builds
+  // (bigger machine, costs money — CC's call, not an agent's).
+  experimental: {
+    webpackMemoryOptimizations: true,
+  },
   outputFileTracingRoot: path.join(__dirname),
   // lib/prompts/index.ts reads the .txt + .json prompt files at module init
   // via fs.readFileSync. Next.js's static tracer doesn't follow runtime paths,
