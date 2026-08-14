@@ -223,8 +223,14 @@ export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: strin
   // operator from editing an unrelated field on a record they did not break.
   {
     const storedData = (existing.data as { data?: Record<string, unknown> }).data ?? {};
-    const effectiveState =
-      typeof patch.business_state === "string" ? patch.business_state : storedData.business_state;
+    // Fall back to the STORED state only when the patch does not touch it at all.
+    // Testing the value's type instead of the key's PRESENCE was a bypass: a
+    // patch carrying `business_state: null` alongside a stateless address
+    // validated against the old state, passed, and then cleared it in the same
+    // atomic write — saving precisely the incomplete address this gate exists
+    // to stop. An explicit clear must count as "no state". (Codex P1, round 2.)
+    const patchTouchesState = Object.prototype.hasOwnProperty.call(patch, "business_state");
+    const effectiveState = patchTouchesState ? patch.business_state : storedData.business_state;
     for (const key of ["business_address", "owner_home_address", "partner_home_address"]) {
       const value = patch[key];
       // null clears the field, which stays legal — an owner may genuinely remove

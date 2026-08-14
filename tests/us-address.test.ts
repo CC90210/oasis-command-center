@@ -205,6 +205,19 @@ function run() {
   assert.equal(isAcceptableCaptureAddress("123 Biscayne Blvd, Miami", "FL").ok, false,
     "a dropdown state does not excuse a missing ZIP");
 
+  // An ABSENT or explicitly CLEARED state must never be treated as satisfied.
+  // The operator edit route can receive `business_state: null` in the same patch
+  // as a stateless address; if a cleared state fell back to the stored one, that
+  // patch would validate and then erase the state in the same write, saving the
+  // exact incomplete address this gate exists to stop. (Codex P1, round 2.)
+  for (const emptyState of [undefined, null, "", "   "]) {
+    assert.equal(
+      isAcceptableCaptureAddress("123 Biscayne Blvd, Miami, 33101", emptyState).ok,
+      false,
+      `a stateless address must be refused when the state is ${JSON.stringify(emptyState)}`,
+    );
+  }
+
   // The gate is deliberately WEAKER than completeness: it never demands a city,
   // because the city is the one part that cannot be parsed reliably.
   const noCityButAcceptable = "123 Main Street Miami Florida 33101";
