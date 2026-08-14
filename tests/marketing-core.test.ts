@@ -3,9 +3,13 @@
  * Run: npx tsx tests/marketing-core.test.ts
  */
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { getMarketingSummary } from "../lib/founders/marketing-queries";
+import { join } from "node:path";
 import {
   CHANNELS,
   DECISIONS,
+  FOUNDERS_OWN_BRAND,
   buildMediaPath,
   channelBreadcrumb,
   channelsForTrack,
@@ -16,6 +20,7 @@ import {
   fmtDuration,
   freshnessLabel,
   isChannel,
+  isOwnBrand,
   isDecision,
   isProvisional,
   sanitizeStorageFilename,
@@ -197,4 +202,414 @@ assert.ok(
 const sample: Channel = "paid-google";
 assert.equal(trackForChannel(sample), "paid");
 
-console.log("marketing-core: all assertions passed");
+// ── the founders portal shows OUR OWN work ───────────────────────────
+// docs/PORTALS.md: founders is "OASIS's own tooling. Not a tenant surface."
+// The library was rendering every brand on the founders tenant, so four client
+// deliverables (Warner x2, Arthrisil, blyss) sat beside OASIS's own nine and CC
+// read it as a leak. It was not one — every row is on the founders tenant and
+// each reader carries .eq("tenant_id", ...) — but client work is not our own
+// marketing, and the portal that promises "not a tenant surface" is the wrong
+// place to review a client's ad.
+assert.equal(FOUNDERS_OWN_BRAND, "oasis-ai");
+assert.ok(isOwnBrand("oasis-ai"), "OASIS AI is our own work");
+assert.ok(!isOwnBrand("warner"), "a client brand is not our own work");
+assert.ok(!isOwnBrand("arthrisil"), "a client brand is not our own work");
+assert.ok(!isOwnBrand("blyss"), "a client brand is not our own work");
+assert.ok(!isOwnBrand(null) && !isOwnBrand(undefined) && !isOwnBrand(""),
+  "an unbranded row is not assumed to be ours");
+
+// The readers scope on this constant, so a rename that misses marketing-queries
+// would silently empty the library rather than fail loudly. Pin the literal.
+{
+  const queries = readFileSync(
+    join(process.cwd(), "lib/founders/marketing-queries.ts"), "utf8");
+  assert.ok(queries.includes("FOUNDERS_OWN_BRAND"),
+    "marketing-queries must scope to FOUNDERS_OWN_BRAND");
+  const scoped = queries.split("from(\"marketing_asset\")").length - 1;
+  const guards = queries.split("FOUNDERS_OWN_BRAND").length - 1;
+  assert.ok(guards >= scoped - 1,
+    `every marketing_asset read should be brand-scoped or explicitly widened ` +
+    `(${scoped} reads, ${guards} guards)`);
+  // The brand filter must NOT be honoured outside the widened scope, or
+  // ?brand=warner walks straight past the boundary.
+  assert.ok(queries.includes('if (opts.scope === "all")'),
+    "a caller must opt in explicitly to see anything but our own work");
+}
+
+// ── the brand boundary, exercised against DATA rather than source text ────────
+// The token-counting checks above cannot see WHICH ROWS a count includes, and
+// that is exactly where the boundary was half-applied: `total` was scoped to
+// oasis-ai while open_reviews / open_requests were scoped only by tenant. The
+// founders Studio would have said "9 assets, 3 waiting on you" with the 3 being
+// Warner's — worse than unscoped, because it looks right.
+//
+// getMarketingSummary takes an injectable client for exactly this. The fake below
+// records the filter chain and replays fixtures, so these assertions describe
+// behaviour rather than spelling.
+//
+// Wrapped in an async fn, not top-level await: these run as CJS under tsx.
+type FakeCall = { table: string; filters: Array<[string, unknown]> };
+
+async function brandBoundaryChecks() {
+  const OWN = ["own-1", "own-2"];
+  const CLIENT = "warner-1";
+  const calls: FakeCall[] = [];
+
+  const fixtures = {
+    assets: [
+      { id: OWN[0], track: "organic", status: "in_review", brand_slug: "oasis-ai" },
+      { id: OWN[1], track: "paid", status: "draft", brand_slug: "oasis-ai" },
+      { id: CLIENT, track: "paid", status: "in_review", brand_slug: "warner" },
+    ],
+    reviews: [
+      { asset_id: OWN[0], acted_on_at: null as string | null },
+      { asset_id: CLIENT, acted_on_at: null as string | null },      // a client's — not ours
+      { asset_id: OWN[1], acted_on_at: "2026-08-01" as string | null }, // already acted on
+    ],
+    requests: [
+      { asset_id: OWN[0] as string | null, status: "open" },
+      { asset_id: CLIENT as string | null, status: "open" },   // a client's — not ours
+      { asset_id: null as string | null, status: "claimed" },  // unbound: typed into OUR portal
+      { asset_id: OWN[1] as string | null, status: "done" },   // closed
+    ],
+  };
+
+  const makeTable = (table: string) => {
+    const call: FakeCall = { table, filters: [] };
+    calls.push(call);
+    let head = false;
+    const has = (k: string) => call.filters.some(([f]) => f === k);
+    const val = (k: string) => call.filters.find(([f]) => f === k)?.[1];
+    const api: Record<string, unknown> = {
+      select(_cols: string, opts?: { count?: string; head?: boolean }) {
+        head = Boolean(opts?.head);
+        return api;
+      },
+      eq(col: string, v: unknown) { call.filters.push([`eq:${col}`, v]); return api; },
+      is(col: string, v: unknown) { call.filters.push([`is:${col}`, v]); return api; },
+      in(col: string, v: unknown) { call.filters.push([`in:${col}`, v]); return api; },
+      order(col: string) { call.filters.push(["order", col]); return api; },
+      range(from: number, to: number) { call.filters.push(["range", [from, to]]); return api; },
+      then(resolve: (v: unknown) => void) {
+        let rows: unknown[] = [];
+        if (table === "marketing_asset") {
+          rows = fixtures.assets.filter((a) => a.brand_slug === val("eq:brand_slug"));
+        } else if (table === "marketing_review") {
+          rows = fixtures.reviews.filter(
+            (r) =>
+              r.acted_on_at === null &&
+              (!has("in:asset_id") || (val("in:asset_id") as string[]).includes(r.asset_id)),
+          );
+        } else if (table === "marketing_request") {
+          rows = fixtures.requests.filter(
+            (r) =>
+              ["open", "claimed"].includes(r.status) &&
+              (!has("is:asset_id") || r.asset_id === null) &&
+              (!has("in:asset_id") ||
+                (r.asset_id !== null && (val("in:asset_id") as string[]).includes(r.asset_id))),
+          );
+        }
+        const range = call.filters.find(([f]) => f === "range")?.[1] as [number, number] | undefined;
+        if (range) rows = rows.slice(range[0], range[1] + 1);
+        resolve(head ? { error: null, count: rows.length } : { error: null, data: rows });
+      },
+    };
+    return api;
+  };
+
+  const db = { from: makeTable } as unknown as Parameters<typeof getMarketingSummary>[1];
+  const summary = await getMarketingSummary("tenant-founders", db);
+
+  assert.equal(summary.total, 2, "only OASIS's own assets are counted");
+  assert.equal(
+    summary.open_reviews,
+    1,
+    "an open review on a CLIENT asset must not appear in the founders count — " +
+      "this is the assertion the source-text checks could not make",
+  );
+  assert.equal(
+    summary.open_requests,
+    2,
+    "own-asset request + unbound request; a client-asset request is excluded",
+  );
+
+  // The scoping must reach the DB, not be applied in JS after an unscoped read.
+  const reviewCall = calls.find((c) => c.table === "marketing_review");
+  assert.ok(reviewCall, "the summary must query marketing_review");
+  assert.ok(
+    reviewCall!.filters.some(([f]) => f === "in:asset_id"),
+    "the review count must be pushed down as .in(asset_id, ownAssetIds)",
+  );
+  assert.ok(
+    reviewCall!.filters.some(([f, v]) => f === "eq:tenant_id" && v === "tenant-founders"),
+    "and must still be tenant-scoped",
+  );
+
+  // THE TRAINING CORPUS IS DELIBERATELY *NOT* BRAND-SCOPED, and this pins that so
+  // the next person tidying for consistency has to read the reason first.
+  // marketing_corpus is what Maven LEARNS FROM, not what OASIS has shipped — a
+  // client ad that performed is training signal exactly like our own. The brand
+  // boundary governs the founders LIBRARY, not the training set.
+  // marketing_corpus.asset_id IS nullable, so scoping it would be possible; that
+  // is why an explicit assertion is worth more than the absence of one.
+  const corpusCall = calls.find((c) => c.table === "marketing_corpus");
+  assert.ok(corpusCall, "the summary must read marketing_corpus");
+  assert.ok(
+    corpusCall!.filters.some(([f]) => f === "eq:tenant_id"),
+    "the corpus read is still tenant-scoped",
+  );
+  assert.equal(
+    corpusCall!.filters.some(([f]) => f === "in:asset_id" || f === "eq:brand_slug"),
+    false,
+    "marketing_corpus must NOT be brand-scoped — Maven learns from every asset we have " +
+      "produced, including client work. If you are here because you scoped it for " +
+      "consistency with open_reviews/open_requests, that is the bug this catches.",
+  );
+
+  // The asset read must PAGE, not issue one unbounded select. PostgREST returns a
+  // short page at max-rows (1,000 on Supabase) with NO error, while the Turso
+  // bridge applies no cap — so an unpaginated read gives two different answers for
+  // the same tenant and the Supabase one is silently low. Worse, ownAssetIds is the
+  // allowlist for the counts above, so a short read also drops real work off
+  // "waiting on you". getMarketingBrands in the same file already pages this way.
+  const assetCall = calls.find((c) => c.table === "marketing_asset");
+  assert.ok(assetCall, "the summary must read marketing_asset");
+  assert.ok(
+    assetCall!.filters.some(([f]) => f === "range"),
+    "the own-brand asset read must page with .range(), like getMarketingBrands",
+  );
+
+  // ORDER BEFORE RANGE. `.range()` on an unordered query has no stable row order,
+  // so page 2 may repeat or skip rows from page 1 — silently, and in either
+  // direction. ownAssetIds is built from these pages and scopes the counts, so a
+  // wobbly order corrupts those too. Caught by CodeRabbit: the paging loop was
+  // copied from getMarketingBrands without its .order().
+  assert.ok(
+    assetCall!.filters.some(([f, v]) => f === "order" && v === "id"),
+    "the paged asset read must .order() by a unique key before .range(), or pages can overlap or skip",
+  );
+  {
+    const fs = assetCall!.filters.map(([f]) => f);
+    assert.ok(
+      fs.indexOf("order") < fs.indexOf("range"),
+      "the order must be applied before the range",
+    );
+  }
+
+  // Exercised past the page boundary, so paging is proven rather than assumed.
+  {
+    const PAGE = 1000;
+    const many = Array.from({ length: PAGE + 7 }, (_, i) => ({
+      id: `own-${i}`,
+      track: "organic",
+      status: "draft",
+      brand_slug: "oasis-ai",
+    }));
+    const reviewsForAll = many.map((a) => ({ asset_id: a.id, acted_on_at: null as string | null }));
+    const inChunks: number[] = [];
+
+    const pagedDb = {
+      from(table: string) {
+        let head = false;
+        let range: [number, number] | undefined;
+        let ids: string[] | undefined;
+        const api: Record<string, unknown> = {
+          select(_c: string, opts?: { head?: boolean }) { head = Boolean(opts?.head); return api; },
+          eq: () => api,
+          is: () => api,
+          in(col: string, v: string[]) {
+            if (col === "asset_id") { ids = v; inChunks.push(v.length); }
+            return api;
+          },
+          order: () => api,
+          range(a: number, b: number) { range = [a, b]; return api; },
+          then(resolve: (v: unknown) => void) {
+            if (table === "marketing_asset") {
+              const page = range ? many.slice(range[0], range[1] + 1) : many;
+              return resolve({ error: null, data: page });
+            }
+            if (table === "marketing_review") {
+              const n = reviewsForAll.filter((r) => !ids || ids.includes(r.asset_id)).length;
+              return resolve({ error: null, count: n });
+            }
+            return resolve(head ? { error: null, count: 0 } : { error: null, data: [] });
+          },
+        };
+        return api;
+      },
+    } as unknown as Parameters<typeof getMarketingSummary>[1];
+
+    const big = await getMarketingSummary("tenant-big", pagedDb);
+    assert.equal(
+      big.total,
+      PAGE + 7,
+      "assets past the first page must still be counted — an unpaginated read would report exactly 1000",
+    );
+    assert.equal(
+      big.open_reviews,
+      PAGE + 7,
+      "reviews for assets past the first page must be counted too; ownAssetIds is the allowlist",
+    );
+    assert.ok(
+      inChunks.length > 1 && inChunks.every((n) => n <= 500),
+      `the id-scoped counts must be chunked to keep the URL bounded (saw chunks: ${inChunks.join(",")})`,
+    );
+  }
+
+  // A tenant with no own-brand assets must not fall back to counting everything.
+  // The empty set is a real answer, and an empty `.in()` list is the trap: the
+  // guard has to skip the query, not send `.in(asset_id, [])` and hope.
+  const emptyDb = {
+    from(table: string) {
+      const api: Record<string, unknown> = {
+        select: () => api,
+        eq: () => api,
+        is: () => api,
+        in: () => api,
+        order: () => api,
+        range: () => api,
+        then: (resolve: (v: unknown) => void) =>
+          resolve({ error: null, data: [], count: table === "marketing_request" ? 7 : 99 }),
+      };
+      return api;
+    },
+  } as unknown as Parameters<typeof getMarketingSummary>[1];
+
+  const empty = await getMarketingSummary("tenant-empty", emptyDb);
+  assert.equal(empty.total, 0);
+  assert.equal(empty.open_reviews, 0, "no own assets means no own reviews, not every review");
+  assert.equal(
+    empty.open_requests,
+    7,
+    "with no own assets only UNBOUND requests remain ours (7 from the stub), " +
+      "not the tenant-wide total",
+  );
+}
+
+// ── failure paths: a broken query must never render as an empty dashboard ─────
+// Codex, reviewing this PR: "the current hand-written fake only returns successful
+// responses." Correct, and it hid the worst defect in the file — every error path
+// collapsed into EMPTY_MARKETING_SUMMARY, so a timeout on page two of the asset
+// read painted "nothing registered yet" and "Nothing waiting on you" over a
+// library with real work in it. Zero and "I could not find out" are different
+// facts; these pin that they render differently.
+async function degradedChecks() {
+  const BROKEN = { code: "57014", message: "canceling statement due to statement timeout" };
+  const ABSENT = { code: "42P01", message: 'relation "marketing_asset" does not exist' };
+
+  /** Fails the Nth call to `table`, succeeds otherwise. */
+  function dbFailing(opts: { table: string; onCall: number; err: Record<string, string>; assets?: number }) {
+    const assetCount = opts.assets ?? 3;
+    const assets = Array.from({ length: assetCount }, (_, i) => ({
+      id: `own-${i}`,
+      track: "organic",
+      status: "in_review",
+      brand_slug: "oasis-ai",
+    }));
+    const seen: Record<string, number> = {};
+    return {
+      from(table: string) {
+        seen[table] = (seen[table] || 0) + 1;
+        const nth = seen[table];
+        let head = false;
+        let range: [number, number] | undefined;
+        const api: Record<string, unknown> = {
+          select(_c: string, o?: { head?: boolean }) { head = Boolean(o?.head); return api; },
+          eq: () => api,
+          is: () => api,
+          in: () => api,
+          order: () => api,
+          range(a: number, b: number) { range = [a, b]; return api; },
+          then(resolve: (v: unknown) => void) {
+            if (table === opts.table && nth === opts.onCall) {
+              return resolve({ error: opts.err, data: null, count: null });
+            }
+            if (table === "marketing_asset") {
+              const page = range ? assets.slice(range[0], range[1] + 1) : assets;
+              return resolve({ error: null, data: page });
+            }
+            return resolve(head ? { error: null, count: 2 } : { error: null, data: [] });
+          },
+        };
+        return api;
+      },
+    } as unknown as Parameters<typeof getMarketingSummary>[1];
+  }
+
+  // A MISSING TABLE is pre-migration: empty is the honest answer, and quiet.
+  const absent = await getMarketingSummary(
+    "t", dbFailing({ table: "marketing_asset", onCall: 1, err: ABSENT }),
+  );
+  assert.equal(absent.degraded, false, "a missing table is not a degraded read — it is genuinely empty");
+  assert.equal(absent.total, 0);
+
+  // A BROKEN asset read must NOT come back as a confident empty dashboard.
+  const broken = await getMarketingSummary(
+    "t", dbFailing({ table: "marketing_asset", onCall: 1, err: BROKEN }),
+  );
+  assert.equal(
+    broken.degraded,
+    true,
+    "a query TIMEOUT must be reported as degraded, not rendered as 'nothing registered yet'",
+  );
+
+  // A broken REVIEW count must degrade rather than silently read zero — this is
+  // the one that would have printed "Nothing waiting on you" over real work.
+  const brokenReviews = await getMarketingSummary(
+    "t", dbFailing({ table: "marketing_review", onCall: 1, err: BROKEN }),
+  );
+  assert.equal(brokenReviews.degraded, true, "a failed review count degrades the summary");
+  assert.equal(
+    brokenReviews.total,
+    3,
+    "the assets that DID load are still reported — degrading is not blanking the screen",
+  );
+
+  // Same for the unbound-request count and the corpus read.
+  for (const table of ["marketing_request", "marketing_corpus"]) {
+    const r = await getMarketingSummary("t", dbFailing({ table, onCall: 1, err: BROKEN }));
+    assert.equal(r.degraded, true, `a failed ${table} read must degrade the summary`);
+  }
+
+  // A healthy read is NOT degraded — otherwise the flag is just always-on noise
+  // and the honest empty state becomes unreachable.
+  const healthy = await getMarketingSummary(
+    "t", dbFailing({ table: "nothing-fails", onCall: 99, err: BROKEN }),
+  );
+  assert.equal(healthy.degraded, false, "a clean read must not be flagged degraded");
+  assert.equal(healthy.total, 3);
+}
+
+// ── "needs you" means needs CC ────────────────────────────────────────────────
+// The headline was open_reviews + open_requests + awaitingVerdict, which
+// double-counted an in_review asset that also had an open review row, and folded
+// in two queues that 133_marketing_hub.sql says are waiting on the AGENT, not the
+// operator. Pinned as source text because the sum lives in the page component.
+{
+  const page = readFileSync(join(process.cwd(), "app/founders/marketing/page.tsx"), "utf8");
+  assert.ok(
+    /const needsYou = awaitingVerdict;/.test(page),
+    "needsYou must be the assets awaiting CC's verdict — not a sum that double-counts an " +
+      "in_review asset carrying an open review, and not one that folds in Maven's own queues",
+  );
+  assert.ok(
+    page.includes("summary.degraded ?"),
+    "the page must render the degraded state BEFORE the 'Nothing waiting on you' empty state, " +
+      "or a broken query still reads as good news",
+  );
+  assert.ok(
+    page.indexOf("summary.degraded ?") < page.indexOf("Nothing waiting on you"),
+    "the degraded branch must come first — otherwise needsYou === 0 wins and says 'nothing'",
+  );
+}
+
+brandBoundaryChecks()
+  .then(degradedChecks)
+  .then(
+  () => console.log("marketing-core: all assertions passed"),
+  (err) => {
+    console.error(err);
+    process.exit(1);
+  },
+);
+

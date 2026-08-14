@@ -29,6 +29,7 @@ import { ALL_MARKETING_PATHS } from "@/lib/marketing/routes";
 // similar words — keep them apart.
 import { foundersAllowlist } from "@/lib/founders/gate";
 import { isFounderTenant, shouldShowFoundersNav } from "@/lib/founders-marketing-core";
+import { FOUNDERS_NAV } from "@/lib/portals/registry";
 import type { NavItem } from "@/lib/nav-config";
 
 // Default metadata — tenant-neutral. Individual pages override via
@@ -291,10 +292,12 @@ export default async function RootLayout({
     pathOverrideSlug,
     tenantProfileSlug,
   })
-    ? [
-        { group: "Founders", href: "/founders/marketing", label: "Content", icon: "Megaphone" },
-        { group: "Founders", href: "/founders/growth", label: "Marketing", icon: "BarChart3" },
-      ]
+    // Labels and hrefs come from FOUNDERS_NAV, NOT from a second hardcoded list
+    // here. Hardcoding them is what let the sidebar and the header chips in
+    // app/founders/layout.tsx disagree in PR #175, and what put an inactive
+    // shell into CC's primary nav labelled "Marketing" while the live hub was
+    // relabelled "Content". One list, both navs.
+    ? FOUNDERS_NAV.map((n) => ({ group: "Founders", ...n }))
     : [];
   // The chat-shell-vs-constrained <main> decision lives in MainShell (a CLIENT
   // component using usePathname) — NOT here. This root layout is a Server
