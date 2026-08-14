@@ -21,7 +21,7 @@ import "server-only";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { getTextTorrentCredentials } from "@/lib/integrations/texttorrent";
 import { repKeyForOwner, actAsEmailForRep } from "./rep-keys";
-import { AI_WIRE_SERVICE } from "./ai-wire-core";
+import { AI_WIRE_SERVICE, AI_WIRE_REP_KEY } from "./ai-wire-core";
 
 type Db = ReturnType<typeof getServiceSupabase>;
 
@@ -113,9 +113,14 @@ export async function syncSenderNumbers(tenantId: string): Promise<SyncResult> {
   // discovery: that sweep marks dead anything stored-and-active which is absent
   // from the live list. Enumerating only the main account would therefore
   // DEACTIVATE both AI numbers on the very first run, emptying the one wire the
-  // carrier is not refusing. So if this second call fails we still refresh the
-  // main account, but we refuse to deactivate anything at all.
-  let canDeactivate = true;
+  // carrier is not refusing.
+  //
+  // When it cannot be read, suppression is SCOPED to the AI wire, not global. Most tenants have no
+  // follow-up account at all, and a blanket suppression would mean their
+  // rotated-away main numbers are never deactivated — leaving dead lines
+  // eligible to send forever, which is the original 1,070-failure outage
+  // reintroduced through the back door. Codex caught that in review.
+  let canDeactivateAiWire = true;
   try {
     const fu = await getTextTorrentCredentials(tenantId, {
       service: AI_WIRE_SERVICE,
@@ -123,20 +128,23 @@ export async function syncSenderNumbers(tenantId: string): Promise<SyncResult> {
     });
     const fuLive = await fetchActive(fu.apiSid, fu.publicKey, null);
     if ("error" in fuLive) {
-      result.errors.push(`follow-up account enumeration failed: ${fuLive.error} — deactivation suppressed`);
-      canDeactivate = false;
+      // Credentials exist but the API would not answer. We cannot tell a
+      // rotation from an outage, so this wire's numbers stay put.
+      result.errors.push(`follow-up account enumeration failed: ${fuLive.error} — AI-wire deactivation suppressed`);
+      canDeactivateAiWire = false;
     } else {
       live.numbers.push(...fuLive.numbers);
     }
   } catch (err) {
-    // Not wired yet is a legitimate state (the credentials landed 2026-08-14);
-    // it must not take the main sync down. But it still suppresses deactivation,
-    // because "I could not look" and "they are gone" must never be the same
-    // observable — that equivalence is what this whole file exists to prevent.
-    result.errors.push(
-      `follow-up account unavailable: ${err instanceof Error ? err.message : String(err)} — deactivation suppressed`,
-    );
-    canDeactivate = false;
+    // NOT WIRED AT ALL is a legitimate, permanent state for most tenants — the
+    // credentials only exist for SunBiz, from 2026-08-14. It is not an error and
+    // it must not suppress anything: there are no AI-wire numbers to protect.
+    const msg = err instanceof Error ? err.message : String(err);
+    const notConfigured = /missing_credentials|not on file/i.test(msg);
+    if (!notConfigured) {
+      result.errors.push(`follow-up account unavailable: ${msg} — AI-wire deactivation suppressed`);
+      canDeactivateAiWire = false;
+    }
   }
 
   result.scanned = live.numbers.length;
@@ -187,9 +195,11 @@ export async function syncSenderNumbers(tenantId: string): Promise<SyncResult> {
   }
 
   // Anything stored-and-active that is no longer live has rotated away.
-  // Skipped entirely when an account could not be enumerated — see above.
-  for (const [number, row] of canDeactivate ? stored : []) {
+  for (const [number, row] of stored) {
     if (liveSet.has(number) || !row.active) continue;
+    // The one account we could not read this run keeps its numbers. Every other
+    // wire is swept as normal.
+    if (!canDeactivateAiWire && row.rep_key === AI_WIRE_REP_KEY) continue;
     await db.from("sms_sender_numbers")
       .update({ active: false, deactivated_at: now })
       .eq("id", row.id);

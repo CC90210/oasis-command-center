@@ -42,7 +42,27 @@ function disabled(): boolean {
  */
 export async function smsSendAllowed(
   tenantId: string,
-  opts: { nowMs?: number; force?: boolean } = {},
+  opts: {
+    nowMs?: number;
+    force?: boolean;
+    /**
+     * Which WIRE is being judged.
+     *
+     * The breaker was tenant-wide, and that broke the moment a tenant had two
+     * independent TextTorrent accounts (2026-08-14). The main SunBiz SID is
+     * sitting on 19 consecutive carrier failures; the new Legacy/AI account has
+     * two unburned numbers and has never sent. A tenant-wide verdict halts the
+     * second because of the first — so Live Subs would fall back to email
+     * without either good number ever being tried, defeating the entire point
+     * of standing the wire up. Caught by Codex in review.
+     *
+     * `wire` keys the cache. `onlyLines` / `excludeLines` scope the receipts.
+     * Omit all three for the original tenant-wide behaviour.
+     */
+    wire?: string;
+    onlyLines?: string[];
+    excludeLines?: string[];
+  } = {},
 ): Promise<BreakerVerdict> {
   if (disabled()) {
     return {
@@ -55,21 +75,31 @@ export async function smsSendAllowed(
     };
   }
   const nowMs = opts.nowMs ?? Date.now();
-  const hit = cache.get(tenantId);
+  const key = opts.wire ? `${tenantId}::${opts.wire}` : tenantId;
+  const hit = cache.get(key);
   if (!opts.force && hit && nowMs - hit.at < CACHE_MS) return hit.verdict;
 
-  const recent = await readRecentReceipts(tenantId, { sinceMs: nowMs - 24 * 3_600_000, limit: 100 });
+  const recent = await readRecentReceipts(tenantId, {
+    sinceMs: nowMs - 24 * 3_600_000,
+    onlyLines: opts.onlyLines,
+    excludeLines: opts.excludeLines,
+  });
   const newestOpenAt = await newestOpenReceiptAt(tenantId);
   const verdict = breakerVerdict(recent, { nowMs, newestOpenAt });
-  cache.set(tenantId, { at: nowMs, verdict });
+  cache.set(key, { at: nowMs, verdict });
   return verdict;
 }
 
 /** Drop the cached verdict — used after a reconcile run so a recovery is picked
- *  up immediately rather than up to a minute later. */
+ *  up immediately rather than up to a minute later.
+ *
+ *  Clears EVERY wire for the tenant, since verdicts are now keyed per wire and
+ *  a reconcile can move any of them. Missing one would leave a recovered wire
+ *  halted for up to a minute for no reason. */
 export function resetBreakerCache(tenantId?: string): void {
-  if (tenantId) cache.delete(tenantId);
-  else cache.clear();
+  if (!tenantId) return cache.clear();
+  cache.delete(tenantId);
+  for (const k of cache.keys()) if (k.startsWith(`${tenantId}::`)) cache.delete(k);
 }
 
 /** How long a claimed probe blocks the next one. Matches the breaker's own

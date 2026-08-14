@@ -45,6 +45,7 @@ import { brandIsSendable, type BrandKey } from "@/lib/email/brands";
 import { brandFooter } from "@/lib/email/brand-shell";
 import { isWithinSendWindow } from "@/lib/sms/compliance";
 import { contactabilityOf, resolveChannel, onProviderGap } from "@/lib/drips/channel-fallback";
+import { AI_WIRE_REP_KEY, aiWireNumbers } from "@/lib/drips/ai-wire-core";
 import { mayTextFor } from "@/lib/sms/lawful-basis";
 import { smsSendAllowed, resetBreakerCache, claimBreakerProbe } from "@/lib/sms/send-breaker";
 import { routeOutbound, type ProviderAvailability } from "@/lib/routing/outbound-routing";
@@ -983,7 +984,16 @@ async function processSmsStep(
     // fault, and burning an attempt (or advancing the sequence past a step the
     // merchant never received) would turn a vendor outage into permanent damage
     // to the sequence.
-    const breaker = await smsSendAllowed(row.tenant_id);
+    // Judged PER WIRE, not per tenant. The two TextTorrent accounts are
+    // independent routes with separate carrier registrations, and the main
+    // SunBiz SID's failures must not halt the Legacy/AI numbers that have never
+    // sent — that would hold back the very wire stood up to escape the outage.
+    const aiWire = identity.repKey === AI_WIRE_REP_KEY;
+    const aiLines = aiWireNumbers();
+    const breaker = await smsSendAllowed(row.tenant_id, {
+      wire: aiWire ? AI_WIRE_REP_KEY : "main",
+      ...(aiWire ? { onlyLines: aiLines } : { excludeLines: aiLines }),
+    });
     // Halted but due for a probe: try to CLAIM it. The claim is a conditional
     // update in Postgres, so exactly one caller wins across every concurrent
     // dispatch instance — an in-process flag would let each instance send its

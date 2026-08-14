@@ -15,6 +15,7 @@
  */
 
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import {
   usesAiWire, aiWireStages, aiWireNumbers,
   AI_WIRE_ACT_AS, AI_WIRE_REP_KEY, AI_WIRE_SERVICE,
@@ -99,6 +100,50 @@ assert.deepEqual(aiWireStages({ DRIP_AI_WIRE_STAGES: ",,," }), ["uw_sheet", "liv
   const onlyFollowUp = { DRIP_AI_WIRE_STAGES: "follow_up" };
   assert.equal(usesAiWire({ stage: "follow_up" }, onlyFollowUp), true);
   assert.equal(usesAiWire({ stage: "uw_sheet" }, onlyFollowUp), false, "an override replaces the defaults, not adds to them");
+}
+
+// ── The breaker must be PER WIRE, or the wire is pointless ────────────────
+// Codex, reviewing the first cut: the SMS circuit breaker read receipts by
+// tenant only. So the main SunBiz SID's 19 consecutive carrier failures would
+// halt the brand-new Legacy/AI account too, and every Live Sub would fall back
+// to email without either unburned number ever being tried — the outage this
+// wire exists to escape, escaping with it.
+//
+// Asserted at the source level: this is I/O-shaped and there is no way to
+// observe it from a pure unit test, and "we fixed it once" is not a guarantee.
+{
+  const exec = readFileSync(new URL("../lib/drips/executor.ts", import.meta.url), "utf8");
+  const call = exec.slice(exec.indexOf("const breaker = await smsSendAllowed"), exec.indexOf("const probing"));
+  assert.ok(call.length > 40, "the breaker call must still be there");
+  assert.ok(!/smsSendAllowed\(\s*row\.tenant_id\s*\)/.test(call),
+    "a tenant-only breaker call halts the AI wire for the main account's failures");
+  assert.ok(call.includes("wire:"), "the verdict must be keyed per wire");
+  assert.ok(call.includes("onlyLines") && call.includes("excludeLines"),
+    "each wire is judged on its OWN lines' receipts, and only its own");
+
+  const breaker = readFileSync(new URL("../lib/sms/send-breaker.ts", import.meta.url), "utf8");
+  assert.ok(breaker.includes("`${tenantId}::${opts.wire}`"), "the cache key must include the wire");
+  assert.ok(/for \(const k of cache\.keys\(\)\)/.test(breaker),
+    "resetBreakerCache must clear every wire for the tenant, or a recovered wire stays halted");
+}
+
+// ── A missing second account must not freeze the FIRST one's cleanup ──────
+// Also Codex. The first cut set a global "do not deactivate" whenever the
+// follow-up account could not be read — and no tenant except SunBiz has one.
+// Every other tenant would then keep rotated-away numbers active forever, which
+// is the original 1,070-sends-from-dead-numbers outage let back in sideways.
+{
+  const sync = readFileSync(new URL("../lib/drips/sender-sync.ts", import.meta.url), "utf8");
+  assert.ok(!sync.includes("canDeactivate ? stored : []"), "the sweep must not be skipped wholesale");
+  assert.ok(sync.includes("canDeactivateAiWire"), "suppression is scoped to the wire that could not be read");
+  assert.ok(
+    sync.includes("row.rep_key === AI_WIRE_REP_KEY"),
+    "only AI-wire rows are spared; every other wire is swept as normal",
+  );
+  assert.ok(
+    /notConfigured/.test(sync),
+    "'this tenant has no follow-up account' is a normal state, not a reason to suppress anything",
+  );
 }
 
 console.log("ai-wire.test.ts — all assertions passed");
