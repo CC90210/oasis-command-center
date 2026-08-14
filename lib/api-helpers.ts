@@ -199,6 +199,30 @@ export function isMissingTableError(
 }
 
 /**
+ * Cross-DB unique-constraint classifier. Postgres-direct and PostgREST
+ * report unique violations as code 23505, but the Turso/libSQL path reports
+ * them as `SQLITE_CONSTRAINT` with the detail only in the message — code is
+ * NOT mapped. Routes that insert-then-rotate on conflict (e.g.
+ * /api/auth/pair bridge_pairings) must accept BOTH shapes or the rotate
+ * branch never fires and a re-pair 500s (seen 2026-08-14: self-pair from a
+ * Windows bridge died on `UNIQUE constraint failed:
+ * bridge_pairings.tenant_id, bridge_pairings.machine_fingerprint`).
+ *
+ * Same pattern already inlined in /api/cron/tps-enroll (`code === "23505"
+ * || /duplicate/i.test(message)`); this helper consolidates it.
+ */
+export function isUniqueViolationError(
+  err: { message?: string; code?: string } | null | undefined,
+): boolean {
+  if (!err) return false;
+  if (err.code === "23505") return true; // Postgres / PostgREST
+  const msg = (err.message || "").toLowerCase();
+  if (msg.includes("unique constraint failed")) return true; // SQLite / libSQL
+  if (msg.includes("duplicate key")) return true; // Postgres message fallback
+  return false;
+}
+
+/**
  * Standard structured 503 payload for the "migration not applied" case.
  * Routes hand this to NextResponse.json with status: 503; UI components
  * branch on `error === "migration_not_applied"` to render the
