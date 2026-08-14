@@ -52,7 +52,28 @@ export default async function MarketingPage() {
   // reading truthfully from different sources, and the screen whose entire job
   // is "what needs you" was the one that was wrong.
   const awaitingVerdict = summary.by_status.in_review || 0;
-  const needsYou = summary.open_reviews + summary.open_requests + awaitingVerdict;
+
+  // "NEEDS YOU" MEANS NEEDS *CC*, and only assets awaiting a verdict do.
+  //
+  // This was `open_reviews + open_requests + awaitingVerdict`, which was wrong
+  // twice over. First it double-counted: an asset at status `in_review` that also
+  // carries an open marketing_review row is ONE piece of work and was counted as
+  // two, inflating the number on the screen whose entire job is to be trusted
+  // about workload. Second, and worse, neither of the other two terms is CC's
+  // work at all — database/133_marketing_hub.sql is explicit about both:
+  //
+  //   marketing_review.acted_on_at  "Set when the agent has read and acted on
+  //                                  this verdict."  -> open = waiting on MAVEN
+  //   marketing_request             "Operator -> agent work queue."
+  //                                                  -> open = waiting on MAVEN
+  //
+  // Both are things CC has already done, queued for Maven to pick up. Counting
+  // them as waiting on CC turns his own outbox into his inbox.
+  //
+  // Identical output today (both are 0 — the Phase 3 loop has never written to
+  // either table), and correct the moment Phase 3 starts writing. They are still
+  // shown, as their own counts, just not summed into his queue.
+  const needsYou = awaitingVerdict;
 
   // The funnel, from the counts the reader already computes. `by_status` has
   // been fetched and thrown away since Phase 1 — this is the pipeline CC asked
@@ -72,9 +93,11 @@ export default async function MarketingPage() {
       <PageHeader
         title="Marketing"
         subtitle={
-          summary.total === 0
-            ? "Founders portal · nothing registered yet"
-            : `OASIS's own work · ${summary.total} ${summary.total === 1 ? "asset" : "assets"} across every channel`
+          summary.degraded
+            ? `OASIS's own work · at least ${summary.total} ${summary.total === 1 ? "asset" : "assets"} — counts incomplete`
+            : summary.total === 0
+              ? "Founders portal · nothing registered yet"
+              : `OASIS's own work · ${summary.total} ${summary.total === 1 ? "asset" : "assets"} across every channel`
         }
       />
 
@@ -86,13 +109,23 @@ export default async function MarketingPage() {
           </span>
           {needsYou > 0 && (
             <span className="text-xs text-fg-dim">
-              {awaitingVerdict} awaiting verdict · {summary.open_reviews} review
-              {summary.open_reviews === 1 ? "" : "s"} · {summary.open_requests} request
-              {summary.open_requests === 1 ? "" : "s"}
+              {awaitingVerdict} awaiting your verdict
+              {summary.open_reviews + summary.open_requests > 0 && (
+                <> · {summary.open_reviews + summary.open_requests} with Maven</>
+              )}
             </span>
           )}
         </div>
-        {needsYou === 0 ? (
+        {summary.degraded ? (
+          // NOT "nothing waiting on you". A query failed, so every number on this
+          // page is a floor rather than a fact, and saying "nothing" would be a
+          // confident lie about CC's own workload. See MarketingSummary.degraded.
+          <MarketingEmpty
+            headline="Couldn't load your queue"
+            detail="A query failed, so these counts are incomplete — treat them as a floor, not a total. Nothing has been lost; this is a read-side failure. Refresh, and if it persists the server log carries the reason under [marketing:summary]."
+            hint="Showing whatever did load, rather than a zero that would look like good news."
+          />
+        ) : needsYou === 0 ? (
           <MarketingEmpty
             headline="Nothing waiting on you"
             detail="When Maven produces something it lands here for a verdict. Approve, request changes, or reject — a change request with a reason is the most useful thing you can give her."

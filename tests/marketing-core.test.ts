@@ -466,7 +466,125 @@ async function brandBoundaryChecks() {
   );
 }
 
-brandBoundaryChecks().then(
+// ── failure paths: a broken query must never render as an empty dashboard ─────
+// Codex, reviewing this PR: "the current hand-written fake only returns successful
+// responses." Correct, and it hid the worst defect in the file — every error path
+// collapsed into EMPTY_MARKETING_SUMMARY, so a timeout on page two of the asset
+// read painted "nothing registered yet" and "Nothing waiting on you" over a
+// library with real work in it. Zero and "I could not find out" are different
+// facts; these pin that they render differently.
+async function degradedChecks() {
+  const BROKEN = { code: "57014", message: "canceling statement due to statement timeout" };
+  const ABSENT = { code: "42P01", message: 'relation "marketing_asset" does not exist' };
+
+  /** Fails the Nth call to `table`, succeeds otherwise. */
+  function dbFailing(opts: { table: string; onCall: number; err: Record<string, string>; assets?: number }) {
+    const assetCount = opts.assets ?? 3;
+    const assets = Array.from({ length: assetCount }, (_, i) => ({
+      id: `own-${i}`,
+      track: "organic",
+      status: "in_review",
+      brand_slug: "oasis-ai",
+    }));
+    const seen: Record<string, number> = {};
+    return {
+      from(table: string) {
+        seen[table] = (seen[table] || 0) + 1;
+        const nth = seen[table];
+        let head = false;
+        let range: [number, number] | undefined;
+        const api: Record<string, unknown> = {
+          select(_c: string, o?: { head?: boolean }) { head = Boolean(o?.head); return api; },
+          eq: () => api,
+          is: () => api,
+          in: () => api,
+          range(a: number, b: number) { range = [a, b]; return api; },
+          then(resolve: (v: unknown) => void) {
+            if (table === opts.table && nth === opts.onCall) {
+              return resolve({ error: opts.err, data: null, count: null });
+            }
+            if (table === "marketing_asset") {
+              const page = range ? assets.slice(range[0], range[1] + 1) : assets;
+              return resolve({ error: null, data: page });
+            }
+            return resolve(head ? { error: null, count: 2 } : { error: null, data: [] });
+          },
+        };
+        return api;
+      },
+    } as unknown as Parameters<typeof getMarketingSummary>[1];
+  }
+
+  // A MISSING TABLE is pre-migration: empty is the honest answer, and quiet.
+  const absent = await getMarketingSummary(
+    "t", dbFailing({ table: "marketing_asset", onCall: 1, err: ABSENT }),
+  );
+  assert.equal(absent.degraded, false, "a missing table is not a degraded read — it is genuinely empty");
+  assert.equal(absent.total, 0);
+
+  // A BROKEN asset read must NOT come back as a confident empty dashboard.
+  const broken = await getMarketingSummary(
+    "t", dbFailing({ table: "marketing_asset", onCall: 1, err: BROKEN }),
+  );
+  assert.equal(
+    broken.degraded,
+    true,
+    "a query TIMEOUT must be reported as degraded, not rendered as 'nothing registered yet'",
+  );
+
+  // A broken REVIEW count must degrade rather than silently read zero — this is
+  // the one that would have printed "Nothing waiting on you" over real work.
+  const brokenReviews = await getMarketingSummary(
+    "t", dbFailing({ table: "marketing_review", onCall: 1, err: BROKEN }),
+  );
+  assert.equal(brokenReviews.degraded, true, "a failed review count degrades the summary");
+  assert.equal(
+    brokenReviews.total,
+    3,
+    "the assets that DID load are still reported — degrading is not blanking the screen",
+  );
+
+  // Same for the unbound-request count and the corpus read.
+  for (const table of ["marketing_request", "marketing_corpus"]) {
+    const r = await getMarketingSummary("t", dbFailing({ table, onCall: 1, err: BROKEN }));
+    assert.equal(r.degraded, true, `a failed ${table} read must degrade the summary`);
+  }
+
+  // A healthy read is NOT degraded — otherwise the flag is just always-on noise
+  // and the honest empty state becomes unreachable.
+  const healthy = await getMarketingSummary(
+    "t", dbFailing({ table: "nothing-fails", onCall: 99, err: BROKEN }),
+  );
+  assert.equal(healthy.degraded, false, "a clean read must not be flagged degraded");
+  assert.equal(healthy.total, 3);
+}
+
+// ── "needs you" means needs CC ────────────────────────────────────────────────
+// The headline was open_reviews + open_requests + awaitingVerdict, which
+// double-counted an in_review asset that also had an open review row, and folded
+// in two queues that 133_marketing_hub.sql says are waiting on the AGENT, not the
+// operator. Pinned as source text because the sum lives in the page component.
+{
+  const page = readFileSync(join(process.cwd(), "app/founders/marketing/page.tsx"), "utf8");
+  assert.ok(
+    /const needsYou = awaitingVerdict;/.test(page),
+    "needsYou must be the assets awaiting CC's verdict — not a sum that double-counts an " +
+      "in_review asset carrying an open review, and not one that folds in Maven's own queues",
+  );
+  assert.ok(
+    page.includes("summary.degraded ?"),
+    "the page must render the degraded state BEFORE the 'Nothing waiting on you' empty state, " +
+      "or a broken query still reads as good news",
+  );
+  assert.ok(
+    page.indexOf("summary.degraded ?") < page.indexOf("Nothing waiting on you"),
+    "the degraded branch must come first — otherwise needsYou === 0 wins and says 'nothing'",
+  );
+}
+
+brandBoundaryChecks()
+  .then(degradedChecks)
+  .then(
   () => console.log("marketing-core: all assertions passed"),
   (err) => {
     console.error(err);

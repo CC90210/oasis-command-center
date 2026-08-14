@@ -76,6 +76,20 @@ export type MarketingSummary = {
   open_requests: number;
   corpus_indexed: number;
   corpus_pending: number;
+  /**
+   * True when a query FAILED, as opposed to returning nothing.
+   *
+   * Zero and "I could not find out" are different facts and this surface used to
+   * render them identically: every error path returned the empty summary, so a
+   * timeout on page two of the asset read painted "nothing registered yet" and
+   * "Nothing waiting on you" over a library with real work in it. On the screen
+   * whose entire job is telling CC what needs him, a made-up zero is the worst
+   * possible answer — worse than an error, because it is actionable and wrong.
+   *
+   * A MISSING TABLE IS NOT DEGRADED. Before migration 133 is applied the tables
+   * genuinely do not exist and empty is the honest answer; that stays quiet.
+   */
+  degraded: boolean;
 };
 
 export const EMPTY_MARKETING_SUMMARY: MarketingSummary = {
@@ -86,13 +100,35 @@ export const EMPTY_MARKETING_SUMMARY: MarketingSummary = {
   open_requests: 0,
   corpus_indexed: 0,
   corpus_pending: 0,
+  degraded: false,
 };
 
-function quiet(label: string, err: { code?: string; message?: string } | null): boolean {
-  if (!err) return false;
-  if (isMissingTableError(err)) return true; // pre-migration, not an incident
+/**
+ * Classify a query error. Returns "absent" when the table has not been created
+ * yet (pre-migration, an honest empty), "broken" for anything else.
+ *
+ * The previous version returned `true` for BOTH, which is why every caller
+ * collapsed a real failure into the empty summary — and why the `break` that
+ * used to follow one of these checks was unreachable dead code.
+ */
+function classify(
+  label: string,
+  err: { code?: string; message?: string } | null,
+): "ok" | "absent" | "broken" {
+  if (!err) return "ok";
+  if (isMissingTableError(err)) return "absent"; // pre-migration, not an incident
   console.warn(`[marketing:${label}]`, err.message);
-  return true;
+  return "broken";
+}
+
+/**
+ * The LIST readers (assets, media, corpus rows) return [] on any error, so
+ * "absent" and "broken" are the same decision to them: stop. They keep this
+ * shim rather than being rewritten — only getMarketingSummary renders COUNTS,
+ * and only a count can lie by saying zero.
+ */
+function quiet(label: string, err: { code?: string; message?: string } | null): boolean {
+  return classify(label, err) !== "ok";
 }
 
 /**
@@ -140,6 +176,7 @@ export async function getMarketingSummary(
     // every brand on the tenant. Paged, because a short read here would not just
     // undercount `total` — ownAssetIds is the allowlist those counts use, so it
     // would quietly drop real work from "waiting on you" too.
+    let degraded = false;
     const rows: Array<{ id: string; track: Track; status: string }> = [];
     for (let from = 0; ; from += PAGE_SIZE) {
       const page = await db
@@ -148,8 +185,14 @@ export async function getMarketingSummary(
         .eq("tenant_id", tenantId)
         .eq("brand_slug", FOUNDERS_OWN_BRAND)
         .range(from, from + PAGE_SIZE - 1);
-      if (page.error) {
-        if (quiet("summary.assets", page.error)) return EMPTY_MARKETING_SUMMARY;
+      const verdict = classify("summary.assets", page.error);
+      // Absent table = pre-migration = genuinely empty, and quiet.
+      if (verdict === "absent") return EMPTY_MARKETING_SUMMARY;
+      // Broken mid-page: keep the pages we DID get so the screen is not blanked,
+      // but mark the whole summary degraded — the counts below are scoped by
+      // these ids, so a short read makes every one of them an undercount.
+      if (verdict === "broken") {
+        degraded = true;
         break;
       }
       const got = (page.data || []) as Array<{ id: string; track: Track; status: string }>;
@@ -180,8 +223,10 @@ export async function getMarketingSummary(
     // Chunked: the id lists are disjoint and every row carries exactly one
     // asset_id, so the parts sum to the whole. No ids means no own-brand assets,
     // which means zero — NOT "fall through and count the tenant".
+    // A failed chunk keeps the chunks that succeeded and marks the summary
+    // degraded. Discarding them and reporting 0 was the same lie as above, at
+    // smaller scale: "nothing waiting on you" when the query simply broke.
     let openReviews = 0;
-    let reviewsFailed = false;
     for (const ids of chunk(ownAssetIds, ID_CHUNK)) {
       const r = await db
         .from("marketing_review")
@@ -189,15 +234,15 @@ export async function getMarketingSummary(
         .eq("tenant_id", tenantId)
         .is("acted_on_at", null)
         .in("asset_id", ids);
-      if (r.error) {
-        reviewsFailed = true;
+      const verdict = classify("summary.reviews", r.error);
+      if (verdict !== "ok") {
+        if (verdict === "broken") degraded = true;
         break;
       }
       openReviews += r.count || 0;
     }
 
     let requestsBound = 0;
-    let requestsBoundFailed = false;
     for (const ids of chunk(ownAssetIds, ID_CHUNK)) {
       const r = await db
         .from("marketing_request")
@@ -205,8 +250,9 @@ export async function getMarketingSummary(
         .eq("tenant_id", tenantId)
         .in("status", ["open", "claimed"])
         .in("asset_id", ids);
-      if (r.error) {
-        requestsBoundFailed = true;
+      const verdict = classify("summary.requests", r.error);
+      if (verdict !== "ok") {
+        if (verdict === "broken") degraded = true;
         break;
       }
       requestsBound += r.count || 0;
@@ -236,18 +282,20 @@ export async function getMarketingSummary(
       db.from("marketing_corpus").select("state").eq("tenant_id", tenantId),
     ]);
 
+    if (classify("summary.requests.unbound", requestsUnbound.error) === "broken") degraded = true;
+    if (classify("summary.corpus", corpus.error) === "broken") degraded = true;
+
     const corpusRows = (corpus.data || []) as Array<{ state: string }>;
     return {
       total: rows.length,
       by_track,
       by_status,
-      open_reviews: reviewsFailed ? 0 : openReviews,
-      open_requests:
-        (requestsBoundFailed ? 0 : requestsBound) +
-        (requestsUnbound.error ? 0 : requestsUnbound.count || 0),
+      open_reviews: openReviews,
+      open_requests: requestsBound + (requestsUnbound.count || 0),
       corpus_indexed: corpusRows.filter((c) => c.state === "indexed").length,
       corpus_pending: corpusRows.filter((c) => c.state === "queued" || c.state === "extracting")
         .length,
+      degraded,
     };
   } catch (e) {
     console.warn("[marketing:summary] unexpected", e);
