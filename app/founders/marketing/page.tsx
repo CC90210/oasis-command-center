@@ -94,6 +94,16 @@ export default async function MarketingPage() {
   ];
   const pipelineTotal = stages.reduce((n, st) => n + (summary.by_status[st.key] || 0), 0);
 
+  // Assets whose status is NOT one of the five stages above — today `rejected`
+  // and `archived`. They are counted in `summary.total` and appear in no tile,
+  // so the header can exceed the pipeline and look like a counting bug.
+  //
+  // The tempting fix is to redefine total as the sum of the tiles. That would be
+  // worse: the header would stop counting assets that genuinely exist, so
+  // archiving something would make the Library appear to lose it. The honest fix
+  // is to say where the difference went.
+  const offPipeline = Math.max(summary.total - pipelineTotal, 0);
+
   return (
     <div className="space-y-6 animate-fade-in">
       <PageHeader
@@ -167,8 +177,15 @@ export default async function MarketingPage() {
       {/* The pipeline. Where every piece of our own work actually is. */}
       {pipelineTotal > 0 && (
         <section>
-          <div className="mb-3 px-1 text-[10px] font-bold uppercase tracking-[0.14em] text-fg-muted">
-            Pipeline
+          <div className="mb-3 flex items-baseline justify-between px-1">
+            <span className="text-[10px] font-bold uppercase tracking-[0.14em] text-fg-muted">
+              Pipeline
+            </span>
+            {offPipeline > 0 && (
+              <span className="text-[11px] text-fg-dim">
+                +{offPipeline} rejected or archived, not shown above
+              </span>
+            )}
           </div>
           <Card noPadding>
             <div className="grid grid-cols-2 divide-y divide-bg-border sm:grid-cols-3 sm:divide-y-0 lg:grid-cols-5">
