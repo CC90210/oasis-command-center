@@ -48,6 +48,17 @@ export type MarketingAssetRow = {
   brand_slug: string;
   brand_name: string;
   channel: Channel;
+  /**
+   * Where the asset ACTUALLY went, as a JSON array of platform keys.
+   *
+   * `channel` holds one value and an asset goes to as many as six places, which
+   * is why the Library read INSTAGRAM for everything (CC: "it's only posting to
+   * Instagram"). `channel` stays the PRIMARY channel and the input to the
+   * generated `track` column the pipeline groups by; this is the distribution.
+   * Stamped by scripts/marketing_publish_drain.py with the platforms that
+   * accepted the post — a refusal is not a distribution.
+   */
+  platforms: string[] | string | null;
   track: Track;
   format: AssetFormat;
   aspect: string | null;

@@ -147,6 +147,45 @@ export function reviewDecisionFor(status: AssetStatus): string | null {
   }
 }
 
+/**
+ * Read the `platforms` column, whatever shape the driver hands back.
+ *
+ * Turso stores it as TEXT holding JSON; a PostgREST/jsonb path would hand back a
+ * real array. Both are normal, so both are accepted. A malformed value degrades
+ * to an empty list rather than throwing — losing the platform list must not cost
+ * the caller the whole asset, which is the same lesson as the publish-intent
+ * reader.
+ */
+export function parsePlatforms(raw: unknown): string[] {
+  if (Array.isArray(raw)) return raw.filter((x): x is string => typeof x === "string");
+  if (typeof raw === "string" && raw.trim()) {
+    try {
+      const parsed = JSON.parse(raw);
+      return Array.isArray(parsed) ? parsed.filter((x): x is string => typeof x === "string") : [];
+    } catch {
+      return [];
+    }
+  }
+  return [];
+}
+
+/** Display label for a platform key. Falls back to the key rather than hiding it. */
+export function platformLabel(key: string): string {
+  const NAMES: Record<string, string> = {
+    instagram: "Instagram",
+    tiktok: "TikTok",
+    youtube: "YouTube",
+    twitter: "X",
+    x: "X",
+    threads: "Threads",
+    linkedin: "LinkedIn",
+    facebook: "Facebook",
+    meta: "Meta",
+    google: "Google",
+  };
+  return NAMES[key] || key;
+}
+
 export function isAssetStatus(v: unknown): v is AssetStatus {
   return typeof v === "string" && (STATUSES as readonly string[]).includes(v);
 }
