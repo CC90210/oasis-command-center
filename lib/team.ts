@@ -1,6 +1,7 @@
 import { createHash, randomBytes } from "node:crypto";
 import { getServiceSupabase, getSessionUser } from "@/lib/supabase-server";
 import { adminGetUser } from "@/lib/turso-auth-admin";
+import { dbError } from "@/lib/db-error";
 
 export type TeamRole =
   | "owner"
@@ -9,6 +10,34 @@ export type TeamRole =
   | "processor"
   | "read_only"
   | "member";
+
+/**
+ * How long a fresh invite stays redeemable.
+ *
+ * THIS LIVED IN THE DATABASE AND THE DATABASE LOST IT. In Postgres the column
+ * was `expires_at timestamptz NOT NULL DEFAULT now() + interval '7 days'`, so
+ * createInvite() never had to supply it. The Turso port could not express that
+ * expression default, dropped it, and kept the NOT NULL — leaving:
+ *
+ *   "expires_at" TEXT NOT NULL          <- no default, and nobody supplies it
+ *
+ * Every invite insert has therefore failed since the cutover with a NOT NULL
+ * constraint violation, surfacing to CC as the opaque string
+ * "invite_create_failed". A policy that only exists as a database default is one
+ * migration away from not existing at all, and its absence is invisible until a
+ * user clicks the button.
+ *
+ * So the policy lives here now: explicit, greppable, identical on both backends,
+ * and unit-testable without a database. `inviteExpiryFrom()` is the only place
+ * that computes it, and app/team/page.tsx renders THIS constant rather than a
+ * hardcoded "7" that could drift away from it.
+ */
+export const INVITE_TTL_DAYS = 7;
+
+/** The expiry timestamp for an invite minted at `from` (default: now). */
+export function inviteExpiryFrom(from: Date = new Date()): string {
+  return new Date(from.getTime() + INVITE_TTL_DAYS * 24 * 60 * 60 * 1000).toISOString();
+}
 
 export const INVITABLE_ROLES: Exclude<TeamRole, "owner">[] = [
   "admin",
@@ -141,7 +170,7 @@ export async function getTenantMembers(tenantId: string): Promise<MemberRow[]> {
     .eq("tenant_id", tenantId)
     .order("is_owner", { ascending: false })
     .order("joined_at", { ascending: true });
-  if (error) throw error;
+  if (error) throw dbError("getTenantMembers", error);
   return (data ?? []) as MemberRow[];
 }
 
@@ -157,17 +186,29 @@ export async function listActiveInvites(tenantId: string): Promise<InviteRow[]> 
     .is("revoked_at", null)
     .gt("expires_at", new Date().toISOString())
     .order("created_at", { ascending: false });
-  if (error) throw error;
+  if (error) throw dbError("listActiveInvites", error);
   return (data ?? []) as InviteRow[];
 }
 
-export async function createInvite(args: {
-  tenantId: string;
-  role: Exclude<TeamRole, "owner">;
-  createdBy: string;
-  email?: string | null;
-}): Promise<{ id: string; rawToken: string; expiresAt: string }> {
-  const supa = getServiceSupabase();
+export async function createInvite(
+  args: {
+    tenantId: string;
+    role: Exclude<TeamRole, "owner">;
+    createdBy: string;
+    email?: string | null;
+  },
+  /**
+   * Injectable for tests ONLY; every caller in the app omits it.
+   *
+   * The bug this exists to prevent was invisible to unit tests: the invite
+   * insert omitted a NOT NULL column, which no pure function could reveal and
+   * which only surfaced when a person clicked the button in production. The test
+   * fake enforces the REAL column contract, so dropping a required field fails
+   * here instead of in front of CC. See tests/team-invites.test.ts.
+   */
+  db: ReturnType<typeof getServiceSupabase> = getServiceSupabase(),
+): Promise<{ id: string; rawToken: string; expiresAt: string }> {
+  const supa = db;
   const { raw, hash } = generateInviteToken();
   const { data, error } = await supa
     .from("tenant_invites")
@@ -177,10 +218,18 @@ export async function createInvite(args: {
       team_role: args.role,
       token_hash: hash,
       created_by: args.createdBy,
+      // Supplied explicitly — see INVITE_TTL_DAYS. Do not remove this on the
+      // assumption the column defaults: on Turso it does not, and the failure is
+      // a NOT NULL violation at the moment a real person clicks Generate link.
+      expires_at: inviteExpiryFrom(),
     })
     .select("id, expires_at")
     .single();
-  if (error || !data) throw error ?? new Error("invite_create_failed");
+  // dbError, not `throw error`: a PostgREST/libSQL error is a PLAIN OBJECT, so
+  // the route's `err instanceof Error ? err.message : "..."` fell through to the
+  // generic string and hid "NOT NULL constraint failed: tenant_invites.expires_at"
+  // for months. See lib/db-error.ts.
+  if (error || !data) throw dbError("invite_create_failed", error);
   return { id: data.id, rawToken: raw, expiresAt: data.expires_at as string };
 }
 
@@ -202,7 +251,7 @@ export async function revokeInvite(inviteId: string, tenantId: string): Promise<
     .update({ revoked_at: new Date().toISOString() })
     .eq("id", inviteId)
     .eq("tenant_id", tenantId);
-  if (error) throw error;
+  if (error) throw dbError("revokeInvite", error);
 }
 
 export async function redeemInvite(
@@ -303,7 +352,7 @@ export async function setMemberRole(args: {
     .from("user_profiles")
     .update({ team_role: args.newRole })
     .eq("id", args.targetProfileId);
-  if (error) throw error;
+  if (error) throw dbError("setMemberRole", error);
 }
 
 export async function removeMember(args: {
@@ -333,5 +382,5 @@ export async function removeMember(args: {
     .from("user_profiles")
     .update({ tenant_id: null, team_role: "member" })
     .eq("id", args.targetProfileId);
-  if (error) throw error;
+  if (error) throw dbError("removeMember", error);
 }
