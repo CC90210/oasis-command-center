@@ -30,6 +30,8 @@
  *   3. Run `npm run test:sunbiz` — the boundary test picks it up automatically.
  */
 
+import type { NavIconKey } from "@/lib/nav-config";
+
 export type PortalId = "founders" | "oasis" | "sunbiz" | "shared";
 
 export type PortalSection = {
@@ -62,6 +64,67 @@ export type Portal = {
  * OASIS's own tooling. Not a tenant, not a product, never sold. Gated by
  * FOUNDERS_TENANT_IDS — see lib/founders/gate.ts.
  */
+/**
+ * FEATURE 1 SWITCH — is the founders Growth module operational yet?
+ *
+ * PR #175 shipped /founders/growth as an inactive preview shell and, in the
+ * same commit, put it in the nav labelled "Marketing" while renaming the live
+ * hub at /founders/marketing to "Content". CC, 2026-08-13: "For some reason,
+ * there's a duplication... There are now two tabs for this: Content and
+ * Marketing."
+ *
+ * He is right, and it is worse than a spare tab: BOTH pages render an <h1> of
+ * "Marketing" (app/founders/marketing/page.tsx and app/founders/growth/page.tsx),
+ * and each nav label contradicted its own route — the URL saying marketing was
+ * labelled Content, the URL saying growth was labelled Marketing. Every future
+ * "fix the marketing page" would inherit that ambiguity.
+ *
+ * So the naming is a FUNCTION of this flag, not a hardcoded pair:
+ *
+ *   false (today) → ONE entry: /founders/marketing, labelled "Marketing".
+ *                   Route, nav label, <h1> and <title> finally agree.
+ *   true          → #175's split returns: "Content" + "Marketing".
+ *
+ * Flipping this one boolean is the entirety of shipping Feature 1's navigation.
+ *
+ * The growth section is OMITTED rather than set `enabled: false`, which is the
+ * tempting one-line version: a disabled section still renders — as a greyed,
+ * unclickable chip (see PortalSection.enabled and app/founders/layout.tsx). That
+ * is still a second visible tab reading "Marketing", so it would not actually
+ * have answered CC's complaint. The route itself stays reachable by direct URL
+ * and still fails closed for non-founders, so APEX keeps their preview surface.
+ *
+ * WHY HERE and not lib/founders/growth-shell.ts, where the constant was born:
+ * this file is SHARED infrastructure, and shared code may not import a portal
+ * (isImportAllowed, enforced by tests/portal-boundaries.test.ts). The nav is the
+ * consumer and the nav lives here, so the switch lives here. growth-shell.ts
+ * re-exports it — founders → shared is legal — so every existing import, and
+ * APEX's own test, keep working unchanged.
+ */
+export const MARKETING_SHELL_ACTIVE = false as const;
+
+/**
+ * The founders portal's TOP-LEVEL destinations — the one declaration both navs
+ * read. app/layout.tsx renders these as sidebar rows; app/founders/layout.tsx
+ * renders them, plus the sub-sections below, as header chips.
+ *
+ * Maven's handover, 2026-08-13: "whoever resolves the naming should take both
+ * nav files in one commit, so the sidebar and the header tabs can never
+ * disagree." One commit is the weak form of that — they could drift apart again
+ * on the next edit. This is the structural form: there is now only one list, so
+ * disagreement is not expressible.
+ */
+export const FOUNDERS_NAV: ReadonlyArray<{
+  href: string;
+  label: string;
+  icon: NavIconKey;
+}> = MARKETING_SHELL_ACTIVE
+  ? [
+      { href: "/founders/marketing", label: "Content", icon: "Megaphone" },
+      { href: "/founders/growth", label: "Marketing", icon: "BarChart3" },
+    ]
+  : [{ href: "/founders/marketing", label: "Marketing", icon: "Megaphone" }];
+
 export const FOUNDERS_PORTAL: Portal = {
   id: "founders",
   label: "OASIS · Founders Portal",
@@ -70,8 +133,7 @@ export const FOUNDERS_PORTAL: Portal = {
   tenantSlugs: [],
   owns: ["app/founders/", "lib/founders/", "lib/founders-marketing-core.ts", "components/founders/"],
   sections: [
-    { href: "/founders/marketing", label: "Content", enabled: true },
-    { href: "/founders/growth", label: "Marketing", enabled: true },
+    ...FOUNDERS_NAV.map((n) => ({ href: n.href, label: n.label, enabled: true })),
     { href: "/founders/marketing/library", label: "Library", enabled: true },
     { href: "/founders/marketing/train", label: "Train", enabled: true },
     { href: "/founders/marketing/performance", label: "Performance", enabled: false },
