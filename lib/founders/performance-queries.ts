@@ -12,12 +12,12 @@ import { EMPTY_PERF, ROW_CAP, summarize, type PerfSummary } from "@/lib/founders
  * lib/founders/gate.ts for the leak that design prevents.
  */
 
+// Re-exported for the page, which should not need to know the read and the
+// arithmetic live in two files. Anything testing the arithmetic imports
+// lib/founders-performance-core directly.
 export {
-  EMPTY_PERF,
-  ROW_CAP,
   engagements,
   retention,
-  summarize,
   type PerfRow,
   type PerfSummary,
 } from "@/lib/founders-performance-core";
@@ -25,7 +25,15 @@ export {
 export async function getPerformance(tenantId: string, days = 30): Promise<PerfSummary> {
   // No tenant is a broken caller, not a quiet tenant. Returning the empty shape
   // here would paint "nothing published yet" over a resolution failure.
-  if (!tenantId) return { ...EMPTY_PERF, degraded: true };
+  //
+  // It has to LOG, too. The page tells the reader the reason is in the server
+  // log under [founders:performance] — a degraded state that writes nothing
+  // sends them looking for an entry that was never written, which is a worse
+  // failure than the silence it replaced.
+  if (!tenantId) {
+    console.warn("[founders:performance] no tenant on the caller — cannot scope the read");
+    return { ...EMPTY_PERF, degraded: true };
+  }
 
   const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
   const result = await getServiceSupabase()
