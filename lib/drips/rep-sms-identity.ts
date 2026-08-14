@@ -32,7 +32,29 @@ import { getServiceSupabase } from "@/lib/supabase-server";
 import { liveNumbersFor } from "@/lib/drips/sender-sync";
 import { classifyRep, actAsEmailForRep } from "./rep-keys";
 import { chooseLine } from "./rep-line-core";
+import {
+  usesAiWire, aiWireNumbers, AI_WIRE_ACT_AS, AI_WIRE_REP_KEY, AI_WIRE_SERVICE,
+} from "./ai-wire-core";
 export { classifyRep };
+
+/**
+ * The AI wire's live numbers: the synced table first, the verified constants
+ * beneath it.
+ *
+ * Same precedence as every other wire and for the same reason — the static list
+ * "VERIFIED live 2026-07-09" had rotted by 07-13, and 1,070 sends went out from
+ * dead numbers while every row read 'sent'. The sync cron is the thing that
+ * notices a rotation; the constants only stop a cold start from blocking.
+ */
+async function aiWirePool(tenantId: string): Promise<string[]> {
+  try {
+    const live = await liveNumbersFor(getServiceSupabase(), tenantId, AI_WIRE_REP_KEY);
+    if (live.length > 0) return live;
+  } catch {
+    // Sync table unreadable — the verified pair below still sends.
+  }
+  return aiWireNumbers();
+}
 
 export type DripSmsIdentity = {
   /** X-ACT-AS-USER sub-account email, or null to send as the parent/admin account. */
@@ -41,6 +63,17 @@ export type DripSmsIdentity = {
   senderId: string;
   /** Short, stable label for from_identity logging + attribution ("alex"/"jordan"/"admin"). */
   repKey: string;
+  /**
+   * Which TextTorrent PARENT ACCOUNT to authenticate against — the credential
+   * bundle name, not the sub-account.
+   *
+   * Absent means "texttorrent", the main SunBiz SID, which is every pre-existing
+   * caller. The AI Follow-Up wire lives on a different parent entirely (Legacy
+   * Funding), so its act-as email is meaningless against the main SID and would
+   * 401. The account and the act-as have to travel together or a Live Sub text
+   * goes out from the wrong company.
+   */
+  service?: string;
 };
 
 type RepEntry = { actAs: string | null; numbers: string[] };
@@ -118,6 +151,18 @@ function registry(): Record<string, RepEntry> {
 
 
 /**
+ * Every number in the STATIC registry, flattened.
+ *
+ * The floor beneath the per-wire breaker scope. An empty allow-list there does
+ * not mean "no failures", it means "no sample" — and a breaker with no sample
+ * permits sending, straight into the route it is guarding. So a cold or
+ * unreadable sms_sender_numbers falls back to this rather than to nothing.
+ */
+export function staticRegistryNumbers(): string[] {
+  return Object.values(registry()).flatMap((e) => e.numbers);
+}
+
+/**
  * The line we ALREADY texted this lead from, if it is still usable.
  *
  * WHY A LOOKUP AND NOT A HASH. pickNumber hashes the lead against the CURRENT
@@ -181,6 +226,43 @@ export async function resolveDripSmsIdentity(
   data: Record<string, unknown>,
 ): Promise<DripSmsIdentity | { error: string }> {
   const reg = registry();
+
+  // ── THE AI FOLLOW-UP WIRE, checked FIRST ──────────────────────────────────
+  //
+  // Live Subs text from the Legacy parent's "AI Follow-Up" sub-account, on its
+  // own two unburned numbers (Adon, 2026-08-14). Ahead of rep classification on
+  // purpose: Live Subs carry whatever rep imported them, so classifying first
+  // would scatter the cohort across the three main-SID wires — which is exactly
+  // where the carrier is refusing 19 consecutive sends.
+  //
+  // Same continuity rule as every other wire: rotate for new conversations,
+  // keep an existing one on its line.
+  if (usesAiWire(data)) {
+    const pool = await aiWirePool(tenantId);
+    if (pool.length > 0) {
+      let sticky: string | null = null;
+      try {
+        sticky = await stickyLineFor(getServiceSupabase(), tenantId, leadId, pool);
+      } catch {
+        // Continuity unproven; a fresh pick is recoverable, silence is not.
+      }
+      const chosen = chooseLine({ pool, leadId, sticky });
+      if (chosen.line) {
+        return {
+          actAsEmail: AI_WIRE_ACT_AS,
+          senderId: chosen.line,
+          repKey: AI_WIRE_REP_KEY,
+          service: AI_WIRE_SERVICE,
+        };
+      }
+    }
+    // No usable AI line. BLOCK rather than falling back to a rep wire: the
+    // whole point of this wire is that the others are carrier-dead, so a
+    // "helpful" fallback would send the text into the exact hole it exists to
+    // avoid, and report success. See [[feedback_blocking_not_error]].
+    return { error: `rep_has_no_line:${AI_WIRE_REP_KEY}` };
+  }
+
   const repKey = classifyRep(data);
 
   // LIVE NUMBERS FIRST (2026-08-07). The static registry below is a snapshot,

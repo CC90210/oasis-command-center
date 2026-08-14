@@ -44,7 +44,8 @@ import { sendDripSms, sendDripEmail } from "@/lib/drips/send";
 import { brandIsSendable, type BrandKey } from "@/lib/email/brands";
 import { brandFooter } from "@/lib/email/brand-shell";
 import { isWithinSendWindow } from "@/lib/sms/compliance";
-import { contactabilityOf, resolveChannel } from "@/lib/drips/channel-fallback";
+import { contactabilityOf, resolveChannel, onProviderGap } from "@/lib/drips/channel-fallback";
+import { AI_WIRE_REP_KEY, aiWireNumbers } from "@/lib/drips/ai-wire-core";
 import { mayTextFor } from "@/lib/sms/lawful-basis";
 import { smsSendAllowed, resetBreakerCache, claimBreakerProbe } from "@/lib/sms/send-breaker";
 import { routeOutbound, type ProviderAvailability } from "@/lib/routing/outbound-routing";
@@ -58,7 +59,7 @@ import { poolFor, resolveCopy, type PoolTemplate } from "@/lib/drips/template-po
 import { loadApprovedPool } from "@/lib/drips/template-pool-store";
 import { wasShoppedRecently } from "@/lib/drips/enroller";
 import { SUNBIZ_BRAND, dripTrackingBase, platformTrackingBase, buildDripHtml, listUnsubscribeHeader, pixelUrl, unsubscribeUrl } from "@/lib/drips/html-email";
-import { resolveDripSmsIdentity, type DripSmsIdentity } from "@/lib/drips/rep-sms-identity";
+import { resolveDripSmsIdentity, staticRegistryNumbers, type DripSmsIdentity } from "@/lib/drips/rep-sms-identity";
 import { ACCELERATED_FLAG, acceleratedSystemLive, hasActiveAcceleratedRun } from "@/lib/drips/accelerated";
 import {
   circuitOpen,
@@ -275,7 +276,51 @@ type RunState = {
    *  on an SMS-heavy run is dozens of extra round trips against a soft time
    *  budget — and rows left 'sending' until stale recovery. */
   availabilityByTenant: Map<string, ProviderAvailability>;
+  /** Sending lines per `${tenantId}::${wire}`, so the per-wire breaker scope is
+   *  resolved once per run rather than once per SMS row. */
+  linesByWire: Map<string, string[]>;
 };
+
+/**
+ * The lines belonging to ONE wire, for scoping the carrier breaker.
+ *
+ * An allow-list, deliberately, rather than "every line except the other wire's":
+ * the scope is applied inside the query so a busy wire cannot push a quiet
+ * wire's receipts out of the LIMIT — and an exclusion cannot be expressed there
+ * without an operator the Turso adapter does not implement.
+ *
+ * The main wire's list therefore has to be enumerated. Cached per run because a
+ * dispatch batch is up to 200 rows and this is one query.
+ */
+async function linesForWire(tenantId: string, wire: string, run: RunState): Promise<string[]> {
+  const key = `${tenantId}::${wire}`;
+  const hit = run.linesByWire.get(key);
+  if (hit) return hit;
+
+  const aiLines = aiWireNumbers();
+  let lines: string[];
+  if (wire === AI_WIRE_REP_KEY) {
+    lines = aiLines;
+  } else {
+    const db = getServiceSupabase();
+    const r = await db
+      .from("sms_sender_numbers")
+      .select("number, rep_key")
+      .eq("tenant_id", tenantId)
+      .eq("active", true);
+    const rows = (r.data || []) as Array<{ number: string; rep_key: string }>;
+    lines = rows.filter((x) => x.rep_key !== AI_WIRE_REP_KEY).map((x) => x.number);
+    // A read failure or a cold table must NOT produce an empty allow-list: an
+    // empty scope means "no sample", the breaker sees no failures, and it would
+    // permit sending straight into the route it is meant to be guarding. The
+    // static registry is the floor.
+    if (lines.length === 0) {
+      lines = staticRegistryNumbers().filter((n) => !aiLines.includes(n));
+    }
+  }
+  run.linesByWire.set(key, lines);
+  return lines;
+}
 
 /** Best-effort lead_interactions log — never throws; a logging failure must
  *  never fail an actual send. agent_source is 'sequence:<name>' per the
@@ -716,6 +761,61 @@ function resolveStepCopy(
   return resolveCopy(step, leadId, stepIndex, scoped);
 }
 
+/**
+ * SMS is blocked upstream. Email them instead of sitting on the row.
+ *
+ * WHY THIS EXISTS — measured in production 2026-08-14, and it is the whole
+ * reason drip volume was ONE email in 24 hours while every check read green:
+ *
+ *   220 rows  Follow-up sequence        sms_channel_unavailable: Bluerise has no
+ *                                       SMS numbers yet        → +6h, forever
+ *    54 rows  Viewed application nudge  sms_carrier_halt: 19 consecutive
+ *                                       carrier failures       → +2h, repeatedly
+ *
+ * Every one of those rescheduled cleanly. Nothing was overdue, nothing failed,
+ * no attempt was burned — the engine was behaving exactly as written, and the
+ * merchants heard nothing for days. Bluerise is a cold EMAIL brand and is never
+ * getting SMS numbers, so "wait for the provider" there is silence with extra
+ * steps.
+ *
+ * The hold is still correct where it is the only honest option, and
+ * onProviderGap decides which case this is. When we do fall back, the row is
+ * handed to processEmailStep and COMPLETES as an email step — it is not left
+ * scheduled, so there is no second send later.
+ */
+async function holdOrEmailInstead(
+  db: Db,
+  row: ClaimedRow,
+  data: LeadData,
+  step: DripStep,
+  steps: DripStep[],
+  run: RunState,
+  emailClass: string,
+  holdHours: number,
+  gap: string,
+): Promise<StepOutcome> {
+  const decision = onProviderGap({
+    blocked: "sms",
+    contact: contactabilityOf(data),
+    channelLocked: isTruthyFlag((step as unknown as Record<string, unknown>).channel_locked),
+    gap,
+  });
+
+  if (decision.action === "hold") {
+    return markRescheduled(
+      db, row, new Date(Date.now() + holdHours * 3_600_000).toISOString(), decision.reason,
+    );
+  }
+
+  console.warn("[dispatch-drips] sms blocked upstream, sending email instead", {
+    leadId: row.lead_id,
+    sequence: row.sequence_name,
+    step: row.step_index,
+    gap,
+  });
+  return processEmailStep(db, row, data, step, steps, emailClass, run);
+}
+
 async function processSmsStep(
   db: Db,
   row: ClaimedRow,
@@ -858,9 +958,9 @@ async function processSmsStep(
       run.availabilityByTenant.get(row.tenant_id) ?? (await loadProviderAvailability(row.tenant_id));
     const route = routeOutbound({ channel: "sms", purpose: "drip", brand: smsBrand, available: availability });
     if (!route.send) {
-      return markRescheduled(
-        db, row, new Date(Date.now() + 6 * 3_600_000).toISOString(),
-        `sms_channel_unavailable: ${route.reason}`,
+      return holdOrEmailInstead(
+        db, row, data, step, steps, run, emailClass,
+        6, `sms_channel_unavailable: ${route.reason}`,
       );
     }
     // Everything below is TextTorrent-specific: the breaker, the act-as
@@ -869,9 +969,9 @@ async function processSmsStep(
     // would push Bluerise copy from SunBiz's TextTorrent account, reintroducing
     // the exact mismatch this gate exists to prevent.
     if (route.provider !== "texttorrent") {
-      return markRescheduled(
-        db, row, new Date(Date.now() + 6 * 3_600_000).toISOString(),
-        `sms_provider_not_wired: ${route.provider} has no sender in the drip executor yet`,
+      return holdOrEmailInstead(
+        db, row, data, step, steps, run, emailClass,
+        6, `sms_provider_not_wired: ${route.provider} has no sender in the drip executor yet`,
       );
     }
   }
@@ -928,13 +1028,24 @@ async function processSmsStep(
     // fault, and burning an attempt (or advancing the sequence past a step the
     // merchant never received) would turn a vendor outage into permanent damage
     // to the sequence.
-    const breaker = await smsSendAllowed(row.tenant_id);
+    // Judged PER WIRE, not per tenant. The two TextTorrent accounts are
+    // independent routes with separate carrier registrations, and the main
+    // SunBiz SID's failures must not halt the Legacy/AI numbers that have never
+    // sent — that would hold back the very wire stood up to escape the outage.
+    const wire = identity.repKey === AI_WIRE_REP_KEY ? AI_WIRE_REP_KEY : "main";
+    // Each wire is judged ONLY on its own lines' receipts, and the scope is an
+    // explicit allow-list rather than "everything except the other wire": the
+    // filter runs in the query, and an exclusion cannot be expressed there
+    // without an operator the Turso adapter does not implement.
+    const wireLines = await linesForWire(row.tenant_id, wire, run);
+    const breaker = await smsSendAllowed(row.tenant_id, { wire, onlyLines: wireLines });
     // Halted but due for a probe: try to CLAIM it. The claim is a conditional
     // update in Postgres, so exactly one caller wins across every concurrent
     // dispatch instance — an in-process flag would let each instance send its
     // own "one" probe into a dead route. Losing the claim means holding, same
     // as any other halted row.
-    const probing = breaker.halt && breaker.halfOpen && (await claimBreakerProbe(row.tenant_id));
+    const probing =
+      breaker.halt && breaker.halfOpen && (await claimBreakerProbe(row.tenant_id, Date.now(), wire));
     if (probing) {
       // Drop the cached verdict so the next row re-reads, sees this send
       // outstanding, and holds rather than riding the 60s cache.
@@ -952,9 +1063,9 @@ async function processSmsStep(
           `so nothing else would have caught it.`,
         telegramOncePerOpen: true, // one page per outage, not one per row
       }).catch(() => {});
-      return markRescheduled(
-        db, row, new Date(Date.now() + 2 * 3_600_000).toISOString(),
-        `sms_carrier_halt: ${breaker.reason}`,
+      return holdOrEmailInstead(
+        db, row, data, step, steps, run, emailClass,
+        2, `sms_carrier_halt: ${breaker.reason}`,
       );
     }
 
@@ -1756,6 +1867,7 @@ export async function runDispatchDrips(): Promise<DispatchDripsResult> {
     brandByLead,
     templatePoolByTenant,
     availabilityByTenant,
+    linesByWire: new Map<string, string[]>(),
   };
   if (run.emailBudget?.degraded) {
     // The global counts are best-effort this run; the per-lead cap still holds

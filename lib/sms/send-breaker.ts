@@ -42,7 +42,26 @@ function disabled(): boolean {
  */
 export async function smsSendAllowed(
   tenantId: string,
-  opts: { nowMs?: number; force?: boolean } = {},
+  opts: {
+    nowMs?: number;
+    force?: boolean;
+    /**
+     * Which WIRE is being judged.
+     *
+     * The breaker was tenant-wide, and that broke the moment a tenant had two
+     * independent TextTorrent accounts (2026-08-14). The main SunBiz SID is
+     * sitting on 19 consecutive carrier failures; the new Legacy/AI account has
+     * two unburned numbers and has never sent. A tenant-wide verdict halts the
+     * second because of the first — so Live Subs would fall back to email
+     * without either good number ever being tried, defeating the entire point
+     * of standing the wire up. Caught by Codex in review.
+     *
+     * `wire` keys the cache. `onlyLines` / `excludeLines` scope the receipts.
+     * Omit all three for the original tenant-wide behaviour.
+     */
+    wire?: string;
+    onlyLines?: string[];
+  } = {},
 ): Promise<BreakerVerdict> {
   if (disabled()) {
     return {
@@ -55,21 +74,30 @@ export async function smsSendAllowed(
     };
   }
   const nowMs = opts.nowMs ?? Date.now();
-  const hit = cache.get(tenantId);
+  const key = opts.wire ? `${tenantId}::${opts.wire}` : tenantId;
+  const hit = cache.get(key);
   if (!opts.force && hit && nowMs - hit.at < CACHE_MS) return hit.verdict;
 
-  const recent = await readRecentReceipts(tenantId, { sinceMs: nowMs - 24 * 3_600_000, limit: 100 });
-  const newestOpenAt = await newestOpenReceiptAt(tenantId);
+  const recent = await readRecentReceipts(tenantId, {
+    sinceMs: nowMs - 24 * 3_600_000,
+    onlyLines: opts.onlyLines,
+  });
+  const newestOpenAt = await newestOpenReceiptAt(tenantId, { onlyLines: opts.onlyLines });
   const verdict = breakerVerdict(recent, { nowMs, newestOpenAt });
-  cache.set(tenantId, { at: nowMs, verdict });
+  cache.set(key, { at: nowMs, verdict });
   return verdict;
 }
 
 /** Drop the cached verdict — used after a reconcile run so a recovery is picked
- *  up immediately rather than up to a minute later. */
+ *  up immediately rather than up to a minute later.
+ *
+ *  Clears EVERY wire for the tenant, since verdicts are now keyed per wire and
+ *  a reconcile can move any of them. Missing one would leave a recovered wire
+ *  halted for up to a minute for no reason. */
 export function resetBreakerCache(tenantId?: string): void {
-  if (tenantId) cache.delete(tenantId);
-  else cache.clear();
+  if (!tenantId) return cache.clear();
+  cache.delete(tenantId);
+  for (const k of cache.keys()) if (k.startsWith(`${tenantId}::`)) cache.delete(k);
 }
 
 /** How long a claimed probe blocks the next one. Matches the breaker's own
@@ -91,7 +119,21 @@ const PROBE_LEASE_MS = 30 * 60_000;
  * FAILS CLOSED. Any error means we did not claim it, so the probe simply does
  * not go out this cycle and the next run tries again.
  */
-export async function claimBreakerProbe(tenantId: string, nowMs = Date.now()): Promise<boolean> {
+export async function claimBreakerProbe(
+  tenantId: string,
+  nowMs = Date.now(),
+  // ONE LEASE PER WIRE, not per tenant.
+  //
+  // The two TextTorrent accounts recover independently, and a shared lease
+  // means whichever wire dispatch happens to reach first takes the only probe
+  // every interval — the other route can be wedged indefinitely, never
+  // permitted to test whether it has come back. Codex flagged it twice.
+  //
+  // The lease row is keyed by `tenant_id`, so the scope is encoded into a
+  // dedicated `wire` column rather than smuggled into the id. Absent means the
+  // tenant-wide lease, which is what every pre-existing caller gets.
+  wire = "main",
+): Promise<boolean> {
   const db = getServiceSupabase();
   const cutoff = new Date(nowMs - PROBE_LEASE_MS).toISOString();
   try {
@@ -99,13 +141,17 @@ export async function claimBreakerProbe(tenantId: string, nowMs = Date.now()): P
     // not overwrite a lease that was just claimed.
     const seed = await db
       .from("sms_breaker_probes")
-      .upsert({ tenant_id: tenantId }, { onConflict: "tenant_id", ignoreDuplicates: true });
+      .upsert({ tenant_id: tenantId, wire }, { onConflict: "tenant_id,wire", ignoreDuplicates: true });
     if (seed.error) return false;
 
+    // Still a conditional UPDATE, so Postgres/libSQL serialises writers on the
+    // row and exactly one caller per wire per interval gets a row back. An
+    // in-process flag could not provide that across concurrent dispatches.
     const claim = await db
       .from("sms_breaker_probes")
       .update({ last_probe_at: new Date(nowMs).toISOString(), updated_at: new Date(nowMs).toISOString() })
       .eq("tenant_id", tenantId)
+      .eq("wire", wire)
       .lt("last_probe_at", cutoff)
       .select("tenant_id");
     if (claim.error) return false;

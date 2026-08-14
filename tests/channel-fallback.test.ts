@@ -11,7 +11,7 @@
  */
 
 import assert from "node:assert/strict";
-import { contactabilityOf, resolveChannel } from "../lib/drips/channel-fallback";
+import { contactabilityOf, resolveChannel, onProviderGap } from "../lib/drips/channel-fallback";
 
 // ── Reading what we can reach them on ─────────────────────────────────────
 assert.deepEqual(contactabilityOf({ email: "a@b.com", phone: "305-555-0147" }), { hasEmail: true, hasPhone: true });
@@ -85,6 +85,56 @@ for (const pref of ["email", "sms"] as const) {
 {
   const d = resolveChannel("email", both, { channelLocked: true });
   assert.equal(d.send && d.channel, "email");
+}
+
+// ── PROVIDER gap ≠ contact gap ────────────────────────────────────────────
+// The outage of 2026-08-14. resolveChannel said "text them, we have a phone",
+// then the provider refused, and the row rescheduled. Forever. Nothing overdue,
+// nothing failed, no attempt burned — and total drip volume was ONE email in 24
+// hours because 274 rows were circling in a hold loop:
+//
+//   220  Follow-up sequence        Bluerise has no SMS numbers yet      +6h
+//    54  Viewed application nudge  19 consecutive carrier failures      +2h
+{
+  // Bluerise will never have SMS numbers. Holding an emailable lead for a
+  // channel that is not coming back is silence with extra steps.
+  const d = onProviderGap({ blocked: "sms", contact: both, gap: "Bluerise has no SMS numbers yet" });
+  assert.equal(d.action, "fallback");
+  assert.equal(d.action === "fallback" && d.channel, "email");
+  assert.match(d.reason, /Bluerise has no SMS numbers yet/, "the original gap stays in the reason");
+}
+{
+  // A transient carrier halt is still better answered by an email than by 2h of
+  // nothing, when we have an address.
+  const d = onProviderGap({ blocked: "sms", contact: both, gap: "19 consecutive carrier failures" });
+  assert.equal(d.action, "fallback");
+}
+{
+  // No alternate: waiting really is the only option, so it must still hold —
+  // and the reason has to say WHY it could not substitute, or the next person
+  // reading the row relearns this from scratch.
+  const d = onProviderGap({ blocked: "sms", contact: phoneOnly, gap: "carrier halt" });
+  assert.equal(d.action, "hold");
+  assert.match(d.reason, /no email for this lead either/);
+}
+{
+  // A locked step is never rewritten, provider gap or not. Same rule as above,
+  // applied one layer down.
+  const d = onProviderGap({ blocked: "sms", contact: both, channelLocked: true, gap: "carrier halt" });
+  assert.equal(d.action, "hold");
+  assert.match(d.reason, /locked to sms/);
+}
+{
+  // Symmetric: an email provider outage falls back to text when we have a
+  // number. Not wired into the executor today, but the rule must not be
+  // one-directional or the next caller gets a surprise.
+  const d = onProviderGap({ blocked: "email", contact: both, gap: "mailbox credential rejected" });
+  assert.equal(d.action, "fallback");
+  assert.equal(d.action === "fallback" && d.channel, "sms");
+}
+{
+  const d = onProviderGap({ blocked: "email", contact: emailOnly, gap: "mailbox credential rejected" });
+  assert.equal(d.action, "hold", "no phone to fall back to");
 }
 
 console.log("channel-fallback.test.ts — all assertions passed");
