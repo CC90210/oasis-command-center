@@ -288,6 +288,7 @@ async function brandBoundaryChecks() {
       eq(col: string, v: unknown) { call.filters.push([`eq:${col}`, v]); return api; },
       is(col: string, v: unknown) { call.filters.push([`is:${col}`, v]); return api; },
       in(col: string, v: unknown) { call.filters.push([`in:${col}`, v]); return api; },
+      limit(n: number) { call.filters.push(["limit", n]); return api; },
       then(resolve: (v: unknown) => void) {
         let rows: unknown[] = [];
         if (table === "marketing_asset") {
@@ -307,6 +308,8 @@ async function brandBoundaryChecks() {
                 (r.asset_id !== null && (val("in:asset_id") as string[]).includes(r.asset_id))),
           );
         }
+        const cap = call.filters.find(([f]) => f === "limit")?.[1] as number | undefined;
+        if (cap !== undefined) rows = rows.slice(0, cap);
         resolve(head ? { error: null, count: rows.length } : { error: null, data: rows });
       },
     };
@@ -341,6 +344,58 @@ async function brandBoundaryChecks() {
     "and must still be tenant-scoped",
   );
 
+  // The asset read must carry an EXPLICIT limit. Left implicit, Supabase applies
+  // max-rows (1,000) and returns a short page with no error while the Turso bridge
+  // returns everything — the same tenant, two different answers, one of them wrong
+  // and silent. ownAssetIds is the allowlist for the review/request counts, so a
+  // short read undercounts "waiting on you" too.
+  const assetCall = calls.find((c) => c.table === "marketing_asset");
+  assert.ok(assetCall, "the summary must read marketing_asset");
+  const cap = assetCall!.filters.find(([f]) => f === "limit")?.[1] as number | undefined;
+  assert.equal(typeof cap, "number", "the own-brand asset read must set an explicit .limit()");
+
+  // And reaching it must be loud, not silent.
+  {
+    const warnings: string[] = [];
+    const realWarn = console.warn;
+    console.warn = (...args: unknown[]) => void warnings.push(args.join(" "));
+    try {
+      const many = Array.from({ length: cap! + 5 }, (_, i) => ({
+        id: `own-${i}`,
+        track: "organic",
+        status: "draft",
+        brand_slug: "oasis-ai",
+      }));
+      const cappedDb = {
+        from(table: string) {
+          let head = false;
+          let limit: number | undefined;
+          const api: Record<string, unknown> = {
+            select(_c: string, opts?: { head?: boolean }) { head = Boolean(opts?.head); return api; },
+            eq: () => api,
+            is: () => api,
+            in: () => api,
+            limit(n: number) { limit = n; return api; },
+            then(resolve: (v: unknown) => void) {
+              const rows = table === "marketing_asset" ? many.slice(0, limit) : [];
+              resolve(head ? { error: null, count: 0 } : { error: null, data: rows });
+            },
+          };
+          return api;
+        },
+      } as unknown as Parameters<typeof getMarketingSummary>[1];
+
+      const capped = await getMarketingSummary("tenant-huge", cappedDb);
+      assert.equal(capped.total, cap, "a capped read reports the page it actually got");
+      assert.ok(
+        warnings.some((w) => w.includes("UNDERCOUNT")),
+        "hitting the row cap must warn that the counts are undercounts, not pass silently",
+      );
+    } finally {
+      console.warn = realWarn;
+    }
+  }
+
   // A tenant with no own-brand assets must not fall back to counting everything.
   // The empty set is a real answer, and an empty `.in()` list is the trap: the
   // guard has to skip the query, not send `.in(asset_id, [])` and hope.
@@ -351,6 +406,7 @@ async function brandBoundaryChecks() {
         eq: () => api,
         is: () => api,
         in: () => api,
+        limit: () => api,
         then: (resolve: (v: unknown) => void) =>
           resolve({ error: null, data: [], count: table === "marketing_request" ? 7 : 99 }),
       };

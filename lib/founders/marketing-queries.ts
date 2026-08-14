@@ -96,6 +96,12 @@ function quiet(label: string, err: { code?: string; message?: string } | null): 
 }
 
 /**
+ * One page of own-brand assets. Matches Supabase's default PostgREST `max-rows`
+ * so the implicit cap becomes an explicit, testable one that both backends share.
+ */
+const SUMMARY_ASSET_CAP = 1000;
+
+/**
  * Headline counts for the Studio landing.
  *
  * `db` is injectable for tests ONLY. Every caller in the app omits it and gets
@@ -118,13 +124,32 @@ export async function getMarketingSummary(
       // spanned every brand on the tenant.
       .select("id, track, status")
       .eq("tenant_id", tenantId)
-      .eq("brand_slug", FOUNDERS_OWN_BRAND);
+      .eq("brand_slug", FOUNDERS_OWN_BRAND)
+      // Explicit, so the two backends agree. PostgREST applies its own `max-rows`
+      // (1,000 on Supabase) and returns the truncated page WITHOUT an error; the
+      // Turso bridge applies no cap at all. Left implicit, the same tenant would
+      // produce different numbers on different backends, and the Supabase one
+      // would be wrong without saying so.
+      .limit(SUMMARY_ASSET_CAP);
     if (assets.error) {
       if (quiet("summary.assets", assets.error)) return EMPTY_MARKETING_SUMMARY;
     }
 
     const rows = (assets.data || []) as Array<{ id: string; track: Track; status: string }>;
     const ownAssetIds = rows.map((r) => r.id);
+
+    // Truncation here does not just undercount `total` — ownAssetIds is the
+    // allowlist the review and request counts are scoped by, so a silent short
+    // read would quietly drop real work from "waiting on you". Fail loud instead:
+    // the founders library is OASIS's own output and is nowhere near this, so if
+    // this ever fires the reader needs pagination, not a bigger number.
+    if (rows.length >= SUMMARY_ASSET_CAP) {
+      console.warn(
+        `[marketing:summary] own-brand assets hit the ${SUMMARY_ASSET_CAP}-row cap for ` +
+          `tenant ${tenantId}. total, open_reviews and open_requests are now UNDERCOUNTS — ` +
+          `paginate this read before trusting them.`,
+      );
+    }
     const by_track: Record<Track, number> = { organic: 0, paid: 0, seo: 0, email: 0 };
     const by_status: Record<string, number> = {};
     for (const r of rows) {
