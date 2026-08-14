@@ -12,6 +12,8 @@ import { Tag } from "@/components/Card";
 import { AssetActions } from "@/components/founders/AssetActions";
 import {
   channelLabel,
+  parsePlatforms,
+  platformLabel,
   fmtDuration,
   type AssetStatus,
   type Channel,
@@ -121,6 +123,7 @@ export function AssetTile({
   mediaW,
   mediaH,
   format,
+  platforms: platformsRaw,
   openReviews = 0,
 }: {
   id: string;
@@ -136,10 +139,12 @@ export function AssetTile({
   mediaW?: number | null;
   mediaH?: number | null;
   format: string;
+  platforms?: string[] | string | null;
   openReviews?: number;
 }) {
   const duration = fmtDuration(durationS);
   const { className: frame, style: frameStyle } = mediaFrame(mediaW, mediaH, aspect);
+  const platforms = parsePlatforms(platformsRaw);
   return (
     <article className="rounded-xl border border-bg-border bg-bg-panel shadow-card overflow-hidden transition-all hover:border-accent/40 hover:shadow-ironman group">
       <div
@@ -211,7 +216,12 @@ export function AssetTile({
         {hook && <p className="text-xs text-fg-muted line-clamp-2 italic">{hook}</p>}
         <div className="mt-auto flex items-center justify-between gap-2 pt-1">
           <span className="text-[10px] uppercase tracking-[0.12em] text-fg-dim font-bold">
-            {channelLabel(channel)}
+            {/* The real distribution when we have it, the primary channel when we
+                do not. Showing `channel` alone is what made every tile read
+                INSTAGRAM regardless of where the piece actually went. */}
+            {platforms.length > 0
+              ? platforms.map(platformLabel).join(" · ")
+              : channelLabel(channel)}
           </span>
           <StatusTag status={status} />
         </div>

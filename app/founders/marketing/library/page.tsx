@@ -283,6 +283,7 @@ export default async function MarketingLibraryPage({
               aspect={asset.aspect}
               durationS={asset.duration_s}
               format={asset.format}
+              platforms={asset.platforms}
               playbackUrl={playbackUrl}
               posterUrl={posterUrl}
               mediaW={mediaW}
