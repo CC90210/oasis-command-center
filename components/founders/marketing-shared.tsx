@@ -7,6 +7,7 @@
  */
 
 import { Tag } from "@/components/Card";
+import { AssetActions } from "@/components/founders/AssetActions";
 import {
   channelLabel,
   fmtDuration,
@@ -173,6 +174,10 @@ export function AssetTile({
           </span>
           <StatusTag status={status} />
         </div>
+        {/* The verdict lives on the tile. Sending the operator elsewhere to approve
+            something they are already looking at is how 39 assets ended up sitting in
+            review with no way to clear them. */}
+        <AssetActions id={id} status={status} title={title} />
       </div>
     </article>
   );
