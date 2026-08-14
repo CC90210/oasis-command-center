@@ -66,7 +66,7 @@ export default async function PerformancePage() {
             ? "Could not read the metrics — the numbers below are not a zero, they are unknown"
             : totals.posts === 0
               ? "Nothing published in the last 30 days"
-              : `${totals.posts} posts · last 30 days · per channel, with provenance`
+              : `${totals.posts}${perf.truncated ? "+" : ""} posts · last 30 days · per channel, with provenance`
         }
         action={
           <Link
@@ -77,6 +77,15 @@ export default async function PerformancePage() {
           </Link>
         }
       />
+
+      {perf.truncated && (
+        <Card>
+          <p className="text-sm text-status-warm">
+            More than {nf.format(rows.length)} posts in this window. The numbers below are the
+            {" "}most recent {nf.format(rows.length)} — a partial sum, not a total.
+          </p>
+        </Card>
+      )}
 
       {perf.degraded && (
         <Card>
@@ -162,7 +171,7 @@ export default async function PerformancePage() {
                       </div>
                       <div className="mt-0.5 text-[11px] text-fg-dim">
                         {platformLabel(r.platform)} · {(ret * 100).toFixed(0)}% watched ·{" "}
-                        {r.avg_watch_s?.toFixed(1)}s of {r.duration_s?.toFixed(1)}s
+                        {Number(r.avg_watch_s).toFixed(1)}s of {Number(r.duration_s).toFixed(1)}s
                       </div>
                     </div>
                   </li>
