@@ -96,10 +96,28 @@ function quiet(label: string, err: { code?: string; message?: string } | null): 
 }
 
 /**
- * One page of own-brand assets. Matches Supabase's default PostgREST `max-rows`
- * so the implicit cap becomes an explicit, testable one that both backends share.
+ * Page size for the own-brand asset read. Same value and same `.range()` loop as
+ * getMarketingBrands further down this file: PostgREST caps a response at
+ * `max-rows` (1,000 on Supabase) and returns the short page WITHOUT an error, so
+ * one unpaginated select is silently wrong past that point — while the Turso
+ * bridge, which applies no cap, returns everything. Paging is what makes the two
+ * backends agree, and it is already this file's idiom.
  */
-const SUMMARY_ASSET_CAP = 1000;
+const PAGE_SIZE = 1000;
+
+/**
+ * `.in()` list size for the id-scoped counts below. Not a correctness limit like
+ * PAGE_SIZE — it keeps the generated URL off the server's request-line ceiling,
+ * where the failure would be a 414 swallowed by `error ? 0` and read on screen as
+ * "nothing waiting on you".
+ */
+const ID_CHUNK = 500;
+
+function chunk<T>(xs: T[], size: number): T[][] {
+  const out: T[][] = [];
+  for (let i = 0; i < xs.length; i += size) out.push(xs.slice(i, i + size));
+  return out;
+}
 
 /**
  * Headline counts for the Studio landing.
@@ -117,39 +135,29 @@ export async function getMarketingSummary(
 ): Promise<MarketingSummary> {
   if (!tenantId) return EMPTY_MARKETING_SUMMARY;
   try {
-    const assets = await db
-      .from("marketing_asset")
-      // `id` is selected so the review/request counts below can be scoped to the
-      // SAME set of assets this count describes. Without it those counts silently
-      // spanned every brand on the tenant.
-      .select("id, track, status")
-      .eq("tenant_id", tenantId)
-      .eq("brand_slug", FOUNDERS_OWN_BRAND)
-      // Explicit, so the two backends agree. PostgREST applies its own `max-rows`
-      // (1,000 on Supabase) and returns the truncated page WITHOUT an error; the
-      // Turso bridge applies no cap at all. Left implicit, the same tenant would
-      // produce different numbers on different backends, and the Supabase one
-      // would be wrong without saying so.
-      .limit(SUMMARY_ASSET_CAP);
-    if (assets.error) {
-      if (quiet("summary.assets", assets.error)) return EMPTY_MARKETING_SUMMARY;
+    // `id` is selected so the review and request counts below can be scoped to
+    // the SAME assets this count describes; without it they silently spanned
+    // every brand on the tenant. Paged, because a short read here would not just
+    // undercount `total` — ownAssetIds is the allowlist those counts use, so it
+    // would quietly drop real work from "waiting on you" too.
+    const rows: Array<{ id: string; track: Track; status: string }> = [];
+    for (let from = 0; ; from += PAGE_SIZE) {
+      const page = await db
+        .from("marketing_asset")
+        .select("id, track, status")
+        .eq("tenant_id", tenantId)
+        .eq("brand_slug", FOUNDERS_OWN_BRAND)
+        .range(from, from + PAGE_SIZE - 1);
+      if (page.error) {
+        if (quiet("summary.assets", page.error)) return EMPTY_MARKETING_SUMMARY;
+        break;
+      }
+      const got = (page.data || []) as Array<{ id: string; track: Track; status: string }>;
+      rows.push(...got);
+      if (got.length < PAGE_SIZE) break;
     }
 
-    const rows = (assets.data || []) as Array<{ id: string; track: Track; status: string }>;
     const ownAssetIds = rows.map((r) => r.id);
-
-    // Truncation here does not just undercount `total` — ownAssetIds is the
-    // allowlist the review and request counts are scoped by, so a silent short
-    // read would quietly drop real work from "waiting on you". Fail loud instead:
-    // the founders library is OASIS's own output and is nowhere near this, so if
-    // this ever fires the reader needs pagination, not a bigger number.
-    if (rows.length >= SUMMARY_ASSET_CAP) {
-      console.warn(
-        `[marketing:summary] own-brand assets hit the ${SUMMARY_ASSET_CAP}-row cap for ` +
-          `tenant ${tenantId}. total, open_reviews and open_requests are now UNDERCOUNTS — ` +
-          `paginate this read before trusting them.`,
-      );
-    }
     const by_track: Record<Track, number> = { organic: 0, paid: 0, seo: 0, email: 0 };
     const by_status: Record<string, number> = {};
     for (const r of rows) {
@@ -169,15 +177,40 @@ export async function getMarketingSummary(
     // them (lib/turso-postgrest.ts attachEmbeds), so a filter on an embedded
     // column is not pushed down. `.in()` behaves identically on both backends.
     // The founders library is OASIS's own output and stays small by definition.
-    const scopedReviews =
-      ownAssetIds.length > 0
-        ? db
-            .from("marketing_review")
-            .select("id", { count: "exact", head: true })
-            .eq("tenant_id", tenantId)
-            .is("acted_on_at", null)
-            .in("asset_id", ownAssetIds)
-        : Promise.resolve({ error: null, count: 0 } as const);
+    // Chunked: the id lists are disjoint and every row carries exactly one
+    // asset_id, so the parts sum to the whole. No ids means no own-brand assets,
+    // which means zero — NOT "fall through and count the tenant".
+    let openReviews = 0;
+    let reviewsFailed = false;
+    for (const ids of chunk(ownAssetIds, ID_CHUNK)) {
+      const r = await db
+        .from("marketing_review")
+        .select("id", { count: "exact", head: true })
+        .eq("tenant_id", tenantId)
+        .is("acted_on_at", null)
+        .in("asset_id", ids);
+      if (r.error) {
+        reviewsFailed = true;
+        break;
+      }
+      openReviews += r.count || 0;
+    }
+
+    let requestsBound = 0;
+    let requestsBoundFailed = false;
+    for (const ids of chunk(ownAssetIds, ID_CHUNK)) {
+      const r = await db
+        .from("marketing_request")
+        .select("id", { count: "exact", head: true })
+        .eq("tenant_id", tenantId)
+        .in("status", ["open", "claimed"])
+        .in("asset_id", ids);
+      if (r.error) {
+        requestsBoundFailed = true;
+        break;
+      }
+      requestsBound += r.count || 0;
+    }
 
     // marketing_request.asset_id IS nullable — "a request not tied to an asset"
     // is the intended case (see the MATCH SIMPLE note on marketing_request_asset_fk).
@@ -185,25 +218,21 @@ export async function getMarketingSummary(
     // it belongs to the founders' own queue and is counted. Bound requests follow
     // their asset's brand. Two counts rather than one `.or()` because the bridge's
     // `.or()` support is not something this reader should depend on.
-    const scopedRequestsBound =
-      ownAssetIds.length > 0
-        ? db
-            .from("marketing_request")
-            .select("id", { count: "exact", head: true })
-            .eq("tenant_id", tenantId)
-            .in("status", ["open", "claimed"])
-            .in("asset_id", ownAssetIds)
-        : Promise.resolve({ error: null, count: 0 } as const);
-
-    const [reviews, requestsBound, requestsUnbound, corpus] = await Promise.all([
-      scopedReviews,
-      scopedRequestsBound,
+    const [requestsUnbound, corpus] = await Promise.all([
       db
         .from("marketing_request")
         .select("id", { count: "exact", head: true })
         .eq("tenant_id", tenantId)
         .in("status", ["open", "claimed"])
         .is("asset_id", null),
+      // TENANT-SCOPED ONLY, ON PURPOSE — do not "fix" this to match the two
+      // counts above. marketing_corpus is what Maven LEARNS FROM, not what OASIS
+      // has shipped, and you learn from everything you have made: a client ad
+      // that performed is training signal exactly like our own. The brand
+      // boundary exists so the founders LIBRARY shows our own deliverables; it is
+      // not a rule about training data. marketing_corpus.asset_id IS nullable, so
+      // scoping it here would be perfectly possible — which is exactly why this
+      // comment exists. Pinned by tests/marketing-core.test.ts.
       db.from("marketing_corpus").select("state").eq("tenant_id", tenantId),
     ]);
 
@@ -212,9 +241,9 @@ export async function getMarketingSummary(
       total: rows.length,
       by_track,
       by_status,
-      open_reviews: reviews.error ? 0 : reviews.count || 0,
+      open_reviews: reviewsFailed ? 0 : openReviews,
       open_requests:
-        (requestsBound.error ? 0 : requestsBound.count || 0) +
+        (requestsBoundFailed ? 0 : requestsBound) +
         (requestsUnbound.error ? 0 : requestsUnbound.count || 0),
       corpus_indexed: corpusRows.filter((c) => c.state === "indexed").length,
       corpus_pending: corpusRows.filter((c) => c.state === "queued" || c.state === "extracting")

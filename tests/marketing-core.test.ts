@@ -288,7 +288,7 @@ async function brandBoundaryChecks() {
       eq(col: string, v: unknown) { call.filters.push([`eq:${col}`, v]); return api; },
       is(col: string, v: unknown) { call.filters.push([`is:${col}`, v]); return api; },
       in(col: string, v: unknown) { call.filters.push([`in:${col}`, v]); return api; },
-      limit(n: number) { call.filters.push(["limit", n]); return api; },
+      range(from: number, to: number) { call.filters.push(["range", [from, to]]); return api; },
       then(resolve: (v: unknown) => void) {
         let rows: unknown[] = [];
         if (table === "marketing_asset") {
@@ -308,8 +308,8 @@ async function brandBoundaryChecks() {
                 (r.asset_id !== null && (val("in:asset_id") as string[]).includes(r.asset_id))),
           );
         }
-        const cap = call.filters.find(([f]) => f === "limit")?.[1] as number | undefined;
-        if (cap !== undefined) rows = rows.slice(0, cap);
+        const range = call.filters.find(([f]) => f === "range")?.[1] as [number, number] | undefined;
+        if (range) rows = rows.slice(range[0], range[1] + 1);
         resolve(head ? { error: null, count: rows.length } : { error: null, data: rows });
       },
     };
@@ -344,56 +344,97 @@ async function brandBoundaryChecks() {
     "and must still be tenant-scoped",
   );
 
-  // The asset read must carry an EXPLICIT limit. Left implicit, Supabase applies
-  // max-rows (1,000) and returns a short page with no error while the Turso bridge
-  // returns everything — the same tenant, two different answers, one of them wrong
-  // and silent. ownAssetIds is the allowlist for the review/request counts, so a
-  // short read undercounts "waiting on you" too.
+  // THE TRAINING CORPUS IS DELIBERATELY *NOT* BRAND-SCOPED, and this pins that so
+  // the next person tidying for consistency has to read the reason first.
+  // marketing_corpus is what Maven LEARNS FROM, not what OASIS has shipped — a
+  // client ad that performed is training signal exactly like our own. The brand
+  // boundary governs the founders LIBRARY, not the training set.
+  // marketing_corpus.asset_id IS nullable, so scoping it would be possible; that
+  // is why an explicit assertion is worth more than the absence of one.
+  const corpusCall = calls.find((c) => c.table === "marketing_corpus");
+  assert.ok(corpusCall, "the summary must read marketing_corpus");
+  assert.ok(
+    corpusCall!.filters.some(([f]) => f === "eq:tenant_id"),
+    "the corpus read is still tenant-scoped",
+  );
+  assert.equal(
+    corpusCall!.filters.some(([f]) => f === "in:asset_id" || f === "eq:brand_slug"),
+    false,
+    "marketing_corpus must NOT be brand-scoped — Maven learns from every asset we have " +
+      "produced, including client work. If you are here because you scoped it for " +
+      "consistency with open_reviews/open_requests, that is the bug this catches.",
+  );
+
+  // The asset read must PAGE, not issue one unbounded select. PostgREST returns a
+  // short page at max-rows (1,000 on Supabase) with NO error, while the Turso
+  // bridge applies no cap — so an unpaginated read gives two different answers for
+  // the same tenant and the Supabase one is silently low. Worse, ownAssetIds is the
+  // allowlist for the counts above, so a short read also drops real work off
+  // "waiting on you". getMarketingBrands in the same file already pages this way.
   const assetCall = calls.find((c) => c.table === "marketing_asset");
   assert.ok(assetCall, "the summary must read marketing_asset");
-  const cap = assetCall!.filters.find(([f]) => f === "limit")?.[1] as number | undefined;
-  assert.equal(typeof cap, "number", "the own-brand asset read must set an explicit .limit()");
+  assert.ok(
+    assetCall!.filters.some(([f]) => f === "range"),
+    "the own-brand asset read must page with .range(), like getMarketingBrands",
+  );
 
-  // And reaching it must be loud, not silent.
+  // Exercised past the page boundary, so paging is proven rather than assumed.
   {
-    const warnings: string[] = [];
-    const realWarn = console.warn;
-    console.warn = (...args: unknown[]) => void warnings.push(args.join(" "));
-    try {
-      const many = Array.from({ length: cap! + 5 }, (_, i) => ({
-        id: `own-${i}`,
-        track: "organic",
-        status: "draft",
-        brand_slug: "oasis-ai",
-      }));
-      const cappedDb = {
-        from(table: string) {
-          let head = false;
-          let limit: number | undefined;
-          const api: Record<string, unknown> = {
-            select(_c: string, opts?: { head?: boolean }) { head = Boolean(opts?.head); return api; },
-            eq: () => api,
-            is: () => api,
-            in: () => api,
-            limit(n: number) { limit = n; return api; },
-            then(resolve: (v: unknown) => void) {
-              const rows = table === "marketing_asset" ? many.slice(0, limit) : [];
-              resolve(head ? { error: null, count: 0 } : { error: null, data: rows });
-            },
-          };
-          return api;
-        },
-      } as unknown as Parameters<typeof getMarketingSummary>[1];
+    const PAGE = 1000;
+    const many = Array.from({ length: PAGE + 7 }, (_, i) => ({
+      id: `own-${i}`,
+      track: "organic",
+      status: "draft",
+      brand_slug: "oasis-ai",
+    }));
+    const reviewsForAll = many.map((a) => ({ asset_id: a.id, acted_on_at: null as string | null }));
+    const inChunks: number[] = [];
 
-      const capped = await getMarketingSummary("tenant-huge", cappedDb);
-      assert.equal(capped.total, cap, "a capped read reports the page it actually got");
-      assert.ok(
-        warnings.some((w) => w.includes("UNDERCOUNT")),
-        "hitting the row cap must warn that the counts are undercounts, not pass silently",
-      );
-    } finally {
-      console.warn = realWarn;
-    }
+    const pagedDb = {
+      from(table: string) {
+        let head = false;
+        let range: [number, number] | undefined;
+        let ids: string[] | undefined;
+        const api: Record<string, unknown> = {
+          select(_c: string, opts?: { head?: boolean }) { head = Boolean(opts?.head); return api; },
+          eq: () => api,
+          is: () => api,
+          in(col: string, v: string[]) {
+            if (col === "asset_id") { ids = v; inChunks.push(v.length); }
+            return api;
+          },
+          range(a: number, b: number) { range = [a, b]; return api; },
+          then(resolve: (v: unknown) => void) {
+            if (table === "marketing_asset") {
+              const page = range ? many.slice(range[0], range[1] + 1) : many;
+              return resolve({ error: null, data: page });
+            }
+            if (table === "marketing_review") {
+              const n = reviewsForAll.filter((r) => !ids || ids.includes(r.asset_id)).length;
+              return resolve({ error: null, count: n });
+            }
+            return resolve(head ? { error: null, count: 0 } : { error: null, data: [] });
+          },
+        };
+        return api;
+      },
+    } as unknown as Parameters<typeof getMarketingSummary>[1];
+
+    const big = await getMarketingSummary("tenant-big", pagedDb);
+    assert.equal(
+      big.total,
+      PAGE + 7,
+      "assets past the first page must still be counted — an unpaginated read would report exactly 1000",
+    );
+    assert.equal(
+      big.open_reviews,
+      PAGE + 7,
+      "reviews for assets past the first page must be counted too; ownAssetIds is the allowlist",
+    );
+    assert.ok(
+      inChunks.length > 1 && inChunks.every((n) => n <= 500),
+      `the id-scoped counts must be chunked to keep the URL bounded (saw chunks: ${inChunks.join(",")})`,
+    );
   }
 
   // A tenant with no own-brand assets must not fall back to counting everything.
@@ -406,7 +447,7 @@ async function brandBoundaryChecks() {
         eq: () => api,
         is: () => api,
         in: () => api,
-        limit: () => api,
+        range: () => api,
         then: (resolve: (v: unknown) => void) =>
           resolve({ error: null, data: [], count: table === "marketing_request" ? 7 : 99 }),
       };
