@@ -10,6 +10,34 @@ export type TeamRole =
   | "read_only"
   | "member";
 
+/**
+ * How long a fresh invite stays redeemable.
+ *
+ * THIS LIVED IN THE DATABASE AND THE DATABASE LOST IT. In Postgres the column
+ * was `expires_at timestamptz NOT NULL DEFAULT now() + interval '7 days'`, so
+ * createInvite() never had to supply it. The Turso port could not express that
+ * expression default, dropped it, and kept the NOT NULL — leaving:
+ *
+ *   "expires_at" TEXT NOT NULL          <- no default, and nobody supplies it
+ *
+ * Every invite insert has therefore failed since the cutover with a NOT NULL
+ * constraint violation, surfacing to CC as the opaque string
+ * "invite_create_failed". A policy that only exists as a database default is one
+ * migration away from not existing at all, and its absence is invisible until a
+ * user clicks the button.
+ *
+ * So the policy lives here now: explicit, greppable, identical on both backends,
+ * and unit-testable without a database. `inviteExpiryFrom()` is the only place
+ * that computes it, and app/team/page.tsx renders THIS constant rather than a
+ * hardcoded "7" that could drift away from it.
+ */
+export const INVITE_TTL_DAYS = 7;
+
+/** The expiry timestamp for an invite minted at `from` (default: now). */
+export function inviteExpiryFrom(from: Date = new Date()): string {
+  return new Date(from.getTime() + INVITE_TTL_DAYS * 24 * 60 * 60 * 1000).toISOString();
+}
+
 export const INVITABLE_ROLES: Exclude<TeamRole, "owner">[] = [
   "admin",
   "loan_officer",
@@ -161,13 +189,25 @@ export async function listActiveInvites(tenantId: string): Promise<InviteRow[]> 
   return (data ?? []) as InviteRow[];
 }
 
-export async function createInvite(args: {
-  tenantId: string;
-  role: Exclude<TeamRole, "owner">;
-  createdBy: string;
-  email?: string | null;
-}): Promise<{ id: string; rawToken: string; expiresAt: string }> {
-  const supa = getServiceSupabase();
+export async function createInvite(
+  args: {
+    tenantId: string;
+    role: Exclude<TeamRole, "owner">;
+    createdBy: string;
+    email?: string | null;
+  },
+  /**
+   * Injectable for tests ONLY; every caller in the app omits it.
+   *
+   * The bug this exists to prevent was invisible to unit tests: the invite
+   * insert omitted a NOT NULL column, which no pure function could reveal and
+   * which only surfaced when a person clicked the button in production. The test
+   * fake enforces the REAL column contract, so dropping a required field fails
+   * here instead of in front of CC. See tests/team-invites.test.ts.
+   */
+  db: ReturnType<typeof getServiceSupabase> = getServiceSupabase(),
+): Promise<{ id: string; rawToken: string; expiresAt: string }> {
+  const supa = db;
   const { raw, hash } = generateInviteToken();
   const { data, error } = await supa
     .from("tenant_invites")
@@ -177,10 +217,25 @@ export async function createInvite(args: {
       team_role: args.role,
       token_hash: hash,
       created_by: args.createdBy,
+      // Supplied explicitly — see INVITE_TTL_DAYS. Do not remove this on the
+      // assumption the column defaults: on Turso it does not, and the failure is
+      // a NOT NULL violation at the moment a real person clicks Generate link.
+      expires_at: inviteExpiryFrom(),
     })
     .select("id, expires_at")
     .single();
-  if (error || !data) throw error ?? new Error("invite_create_failed");
+  if (error || !data) {
+    // A PostgREST/libSQL error is a PLAIN OBJECT, not an Error. Throwing it raw
+    // meant the route's `err instanceof Error ? err.message : "..."` fell through
+    // to the generic string, so the screen said "invite_create_failed" while the
+    // actual cause ("NOT NULL constraint failed: tenant_invites.expires_at") was
+    // never shown to anyone. Wrap it, keep the detail.
+    const detail =
+      (error as { message?: string; code?: string } | null)?.message ??
+      "insert returned no row";
+    const code = (error as { code?: string } | null)?.code;
+    throw new Error(`invite_create_failed: ${detail}${code ? ` [${code}]` : ""}`);
+  }
   return { id: data.id, rawToken: raw, expiresAt: data.expires_at as string };
 }
 

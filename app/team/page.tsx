@@ -4,6 +4,7 @@ import {
   canManageTeam,
   getSessionContext,
   getTenantMembers,
+  INVITE_TTL_DAYS,
   isTrueAdminRole,
   listActiveInvites,
 } from "@/lib/team";
@@ -148,7 +149,8 @@ export default async function TeamPage() {
       <div className="text-xs text-fg-dim flex items-center gap-2">
         <UsersRound className="w-4 h-4" />
         <span>
-          Invites are single-use, hashed at rest, and expire after 7 days.
+          Invites are single-use, hashed at rest, and expire after {INVITE_TTL_DAYS}{" "}
+          days.
         </span>
       </div>
     </div>
