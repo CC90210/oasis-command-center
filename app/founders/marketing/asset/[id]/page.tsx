@@ -42,6 +42,7 @@ import {
 } from "@/lib/founders-marketing-core";
 import { StatusTag, isPortrait, mediaFrame } from "@/components/founders/marketing-shared";
 import { CarouselFrame } from "@/components/founders/CarouselFrame";
+import { SlideReorder } from "@/components/founders/SlideReorder";
 import { AssetActions } from "@/components/founders/AssetActions";
 import { AssetPublishPanel } from "@/components/founders/AssetPublishPanel";
 
@@ -193,6 +194,16 @@ export default async function AssetDetailPage({
                 "approve" does. */}
             <AssetActions id={asset.id} status={asset.status} title={asset.title} />
           </Card>
+
+          {isRenderableCarousel(asset.asset_type, slideUrls) && (
+            <Card title="Slide order" subtitle="What the audience reads, and what publishes">
+              <SlideReorder
+                assetId={asset.id}
+                slidePaths={slidePaths}
+                slideUrls={slideUrls}
+              />
+            </Card>
+          )}
 
           <Card title="Post to channels" subtitle="Goes out through the send gateway">
             <AssetPublishPanel
