@@ -31,6 +31,23 @@ const HAWAII = "Pacific/Honolulu";
 const ATLANTIC = "America/Halifax";
 const NEWFOUNDLAND = "America/St_Johns";
 
+// US TERRITORIES. Added 2026-08-14, and not for completeness — the drip
+// executor sends unmapped area codes at a fixed 18:00 UTC, an hour picked
+// because it is inside 8am-9pm for every zone from Hawaii to Maine. That
+// reasoning silently excluded the territories, and they break it in BOTH
+// directions: 18:00 UTC is 04:00 next day in Guam and 07:00 in American Samoa,
+// each on the wrong side of the 8am floor.
+//
+// No single UTC hour can serve both — Guam (UTC+10) and American Samoa
+// (UTC-11) are 21 hours apart — so widening the fallback window cannot fix
+// this. Mapping them can: a resolved zone never reaches the fallback at all
+// and gets its own correct quiet hours. Codex caught the gap in review.
+const PUERTO_RICO = "America/Puerto_Rico"; // AST, no DST
+const VIRGIN_ISLANDS = "America/St_Thomas"; // AST, no DST
+const GUAM = "Pacific/Guam"; // UTC+10
+const SAIPAN = "Pacific/Saipan"; // UTC+10, CNMI
+const SAMOA = "Pacific/Pago_Pago"; // UTC-11
+
 const ZONE_AREA_CODES: Record<string, string[]> = {
   [EASTERN]: [
     "201", "202", "203", "207", "212", "215", "216", "217", "224", "234", "239",
@@ -82,6 +99,14 @@ ZONE_AREA_CODES[EASTERN].push(
 ZONE_AREA_CODES[CENTRAL].push("204", "431", "807");
 ZONE_AREA_CODES[MOUNTAIN].push("403", "587", "780", "825");
 ZONE_AREA_CODES[PACIFIC].push("236", "250", "604", "672", "778");
+
+// US territories — see the zone constants above for why these are load-bearing
+// rather than cosmetic.
+ZONE_AREA_CODES[PUERTO_RICO] = ["787", "939"];
+ZONE_AREA_CODES[VIRGIN_ISLANDS] = ["340"];
+ZONE_AREA_CODES[GUAM] = ["671"];
+ZONE_AREA_CODES[SAIPAN] = ["670"];
+ZONE_AREA_CODES[SAMOA] = ["684"];
 
 const AREA_CODE_TO_ZONE: Record<string, string> = (() => {
   const out: Record<string, string> = {};

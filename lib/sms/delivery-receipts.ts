@@ -358,19 +358,42 @@ export type RecentReceipt = { status: CarrierStatus; at: number };
  */
 export async function readRecentReceipts(
   tenantId: string,
-  opts: { sinceMs?: number; limit?: number } = {},
+  opts: {
+    sinceMs?: number;
+    limit?: number;
+    /**
+     * Scope to one wire's sending lines.
+     *
+     * Applied IN THE QUERY, not after it. An in-memory filter after a LIMIT
+     * silently truncates: if the other wire produced a full page of newer
+     * receipts inside the window, this wire comes back empty and the breaker
+     * reads "no failures" for a route that is dead. Codex caught that on the
+     * first cut, and it is the worst possible direction for a breaker to fail.
+     *
+     * `in` is one of the operators the Turso adapter implements
+     * (lib/turso-postgrest.ts), and pg-bridge-operators.test.ts pins it.
+     */
+    onlyLines?: string[];
+  } = {},
 ): Promise<RecentReceipt[] | null> {
   const db = getServiceSupabase();
   const since = new Date(opts.sinceMs ?? Date.now() - 24 * 3_600_000).toISOString();
+  // An explicitly EMPTY scope means "this wire has no lines", which is a real
+  // answer — no sample — not an instruction to read every line's receipts.
+  if (opts.onlyLines && opts.onlyLines.length === 0) return [];
   try {
-    const r = await db
+    let q = db
       .from("sms_delivery_receipts")
       .select("carrier_status, sent_at")
       .eq("tenant_id", tenantId)
       .in("carrier_status", ["delivered", "failed"])
-      .gte("sent_at", since)
-      .order("sent_at", { ascending: false })
-      .limit(opts.limit ?? 100);
+      .gte("sent_at", since);
+    // Receipts with a null from_number are dropped by this filter. That is
+    // correct for a per-line breaker: a receipt we cannot attribute to a line
+    // cannot be evidence about one. (36 such rows exist, all before
+    // 2026-08-07, from before the column was populated.)
+    if (opts.onlyLines?.length) q = q.in("from_number", opts.onlyLines);
+    const r = await q.order("sent_at", { ascending: false }).limit(opts.limit ?? 100);
     if (r.error) return null;
     return (r.data || []).map((x) => ({
       status: x.carrier_status as CarrierStatus,
@@ -392,14 +415,23 @@ export async function readRecentReceipts(
  * the safe direction here: it makes the breaker believe no probe is in flight,
  * and the probe path is gated on a 30-minute clock anyway.
  */
-export async function newestOpenReceiptAt(tenantId: string): Promise<number | null> {
+export async function newestOpenReceiptAt(
+  tenantId: string,
+  // Scoped for the same reason as the terminal receipts: an unresolved probe
+  // on the SunBiz wire must not suppress the AI wire's probe. Two independent
+  // routes, two independent recoveries.
+  opts: { onlyLines?: string[] } = {},
+): Promise<number | null> {
   const db = getServiceSupabase();
+  if (opts.onlyLines && opts.onlyLines.length === 0) return null;
   try {
-    const r = await db
+    let q = db
       .from("sms_delivery_receipts")
       .select("sent_at")
       .eq("tenant_id", tenantId)
-      .is("resolved_at", null)
+      .is("resolved_at", null);
+    if (opts.onlyLines?.length) q = q.in("from_number", opts.onlyLines);
+    const r = await q
       .order("sent_at", { ascending: false })
       .limit(1)
       .maybeSingle();

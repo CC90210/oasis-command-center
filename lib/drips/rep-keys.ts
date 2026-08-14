@@ -32,6 +32,11 @@
  */
 export function actAsEmailForRep(repKey: string): string | null {
   switch (repKey) {
+    // The AI Follow-Up wire is a sub-account of the LEGACY parent, not of the
+    // main SunBiz SID. The account it authenticates against travels with it in
+    // DripSmsIdentity.service; this is only the act-as half of that pair.
+    case "ai_followup":
+      return "submissions@sunbizfunding.com";
     case "jordan":
       return "jordan@sunbizfunding.com";
     case "alex":
@@ -45,6 +50,12 @@ export function actAsEmailForRep(repKey: string): string | null {
 
 export function repKeyForOwner(owner: string | null | undefined): string {
   const o = String(owner || "").toLowerCase();
+  // TextTorrent reports these two DIDs as purchased_by "AI Follow-Up"
+  // (user_id 1522, verified 2026-08-14). Checked before the rep names: without
+  // it they fall through to "admin" below and land in the admin pool, which
+  // would text Matt's leads from the Legacy account under an act-as the main
+  // SID does not recognise — a 401 on every send.
+  if (o.includes("ai follow") || o.includes("ai-follow") || o.includes("aifollow")) return "ai_followup";
   if (o.includes("jordan")) return "jordan";
   if (o.includes("alex")) return "alex";
   if (o.includes("joe")) return "joe";
