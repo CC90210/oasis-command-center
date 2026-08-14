@@ -50,7 +50,15 @@ export function MarketingNav() {
   return (
     <header className="sticky top-0 z-50 border-b border-ops-line bg-ops-void/85 backdrop-blur-md">
       <div className="mx-auto flex h-16 w-full max-w-6xl items-center justify-between px-5 sm:px-8">
-        <Link href="/" className="flex items-center gap-3" aria-label="OASIS AI, home">
+        {/* HARD navigation, deliberately — see SHELL_BOUNDARY_NOTE in
+            lib/marketing/routes.ts. "/" is marketing for a visitor and the
+            dashboard for a signed-in operator, so a <Link> here soft-navigates
+            across the shell boundary and the root layout, being a Server
+            Component, never re-renders: CC lands on the dashboard with the
+            marketing chrome still applied and no sidebar. That is the
+            "super zoomed in and warped, fixed by refreshing" report. */}
+        {/* eslint-disable-next-line @next/next/no-html-link-for-pages -- a full load is the POINT here; see the note above. */}
+        <a href="/" className="flex items-center gap-3" aria-label="OASIS AI, home">
           <OasisLogo size={30} priority />
           {/* Wordmark only. The "Montreal" sub-label read as a local
               agency's calling card; the company works internationally and
@@ -60,7 +68,7 @@ export function MarketingNav() {
           <span className="font-display text-[17px] font-bold tracking-[0.01em] text-fg">
             OASIS AI
           </span>
-        </Link>
+        </a>
 
         <nav aria-label="Main" className="hidden items-center gap-1 md:flex">
           {LINKS.map((l) => (

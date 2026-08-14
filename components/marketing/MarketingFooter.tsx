@@ -44,12 +44,20 @@ export function MarketingFooter() {
       <div className="mx-auto w-full max-w-6xl px-5 py-14 sm:px-8">
         <div className="grid gap-10 md:grid-cols-[1.4fr_1fr_1fr_1fr]">
           <div>
-            <Link href="/" className="inline-flex items-center gap-3">
+            {/* HARD navigation, deliberately — see SHELL_BOUNDARY_NOTE in
+            lib/marketing/routes.ts. "/" is marketing for a visitor and the
+            dashboard for a signed-in operator, so a <Link> here soft-navigates
+            across the shell boundary and the root layout, being a Server
+            Component, never re-renders: CC lands on the dashboard with the
+            marketing chrome still applied and no sidebar. That is the
+            "super zoomed in and warped, fixed by refreshing" report. */}
+            {/* eslint-disable-next-line @next/next/no-html-link-for-pages -- a full load is the POINT here; see the note above. */}
+            <a href="/" className="inline-flex items-center gap-3">
               <OasisLogo size={28} />
               <span className="font-display text-[13px] font-bold tracking-[0.14em] text-fg">
                 OASIS AI
               </span>
-            </Link>
+            </a>
             <p className="mt-4 max-w-xs text-sm leading-relaxed text-fg-muted">
               Operational Agentic Systems Increasing Scalability. Agents that
               hold a seat in your business, and the systems they run on.
