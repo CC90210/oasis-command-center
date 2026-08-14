@@ -4,6 +4,7 @@ import { getServiceSupabase } from "@/lib/supabase-server";
 import { LEAD_DOC_BUCKET } from "@/lib/lead-documents";
 import { getSubmissionsCreds, type SubmissionsCreds } from "./submissions-gmail";
 import type { ShopOutAttachment } from "@/lib/lenders/shop-out";
+import { normalizeShopOutText, renderShopOutHtml, resolveShopOutPresentation } from "@/lib/lenders/shop-out-email-templates";
 
 /**
  * Send one lender package from the web app, over SMTP, with the branded bank
@@ -55,7 +56,7 @@ export async function sendSunbizLenderMail(input: {
   tenantId: string;
   /** The WATERMARKED derived copies, as resolved by watermarkAttachmentsForShopOut. */
   attachments: ShopOutAttachment[];
-  /** Rep whose name signs the mail. The shared inbox is always the From. */
+  /** Retained for call-site compatibility; lender identity is always shared. */
   signerName?: string;
   /**
    * Shared conversation anchor for every lender on this DEAL. All sends carry it
@@ -146,15 +147,21 @@ export async function sendSunbizLenderMail(input: {
     const senderDomain = creds.fromAddress.split("@")[1] || "sunbizfunding.com";
     const rfc822 = `<${randomUUID()}@${senderDomain}>`;
 
+    const presentation = resolveShopOutPresentation(input.text);
+    const lenderText = presentation.branded
+      ? normalizeShopOutText(presentation.text, input.signerName)
+      : presentation.text.trim();
     const result = await transport.sendMail({
-      // Shared-inbox model: the From is always the tenant address, and the rep
-      // stays on the thread by being CC'd. The display name carries the rep so a
-      // funder still sees who they are dealing with.
-      from: `${input.signerName || "SunBiz Funding"} <${creds.fromAddress}>`,
+      // Lenders always see the shared submissions desk, never the operator who
+      // happened to click Send. The rep stays on the private thread via CC.
+      from: `SunBiz Submissions <${creds.fromAddress}>`,
       to: input.to,
       cc: input.cc?.length ? input.cc.join(", ") : undefined,
       subject: input.subject,
-      text: input.text,
+      text: lenderText,
+      html: presentation.branded
+        ? renderShopOutHtml(lenderText, creds.fromAddress, files.length)
+        : undefined,
       attachments: files,
       headers: {
         // Unique per send: this is the receipt stored on the thread row AND the

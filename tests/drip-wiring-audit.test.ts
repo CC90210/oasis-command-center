@@ -86,6 +86,84 @@ assert.ok(
   "brand resolution must precede the volume gate",
 );
 
+// ── The deal gate is wired at BOTH ends (2026-08-11) ───────────────────────
+// The bug it closes: the drip triggers on the LEAD's stage while the deal's
+// real state lives on the APPLICATION's status, and nothing syncs them — so a
+// funded, declined or dead merchant stays parked in `signed_application` and
+// keeps being chased for bank statements. Enrolment alone is not enough (a deal
+// that closes AFTER enrolment sails through) and dispatch alone is not enough
+// (the run is created, counted and paced first), so both must call it.
+assert.ok(enroller.includes("loadDealGates("), "the enroller must gate NEW enrolments on the deal's state");
+assert.ok(enroller.includes('noteSkip("deal_closed")'), "and record why a lead was skipped");
+assert.ok(executor.includes("loadDealGate("), "dispatch must re-check: a deal can close mid-sequence");
+// BOTH link directions. An application normally backlinks to its lead
+// (`data.lead_id`), but the lead may instead point forward
+// (`data.application_id`) with no backlink — a supported one-way shape. Reading
+// only the backlink lets such a record report "no application", which for a
+// suppression guard means OPEN, which means mailing a funded merchant.
+{
+  const store = read("lib/drips/deal-state-store.ts");
+  assert.ok(store.includes('.in("data->>lead_id"'), "must resolve applications that backlink the lead");
+  assert.ok(store.includes("application_id"), "and applications the LEAD points at");
+}
+assert.ok(executor.includes("deal_closed: application is"),
+  "a cancelled row must name the status that closed it, or nobody can audit a silent stop");
+// The dispatch-time read must never CANCEL on a read failure — that would turn
+// a transient database hiccup into permanent silent lead loss.
+{
+  const at = executor.indexOf("deal_state_unavailable");
+  assert.ok(at > 0, "a failed deal-state read must be reported by name");
+  const block = executor.slice(Math.max(0, at - 400), at);
+  assert.ok(block.includes("markRescheduled"),
+    "a failed deal-state read must RESCHEDULE, never cancel");
+}
+
+// ── The drip audience is the BOARD's audience (2026-08-11) ─────────────────
+// The defect: the Leads board hides leads stamped `transferred_at`, the
+// enroller queried `data->>stage` directly, and 64% of all drip mail ever sent
+// went to merchants Adon could not see on the board. Three places have to hold
+// for that to stay fixed, so all three are asserted rather than trusted.
+assert.ok(enroller.includes("applyLeadsBoardFilter("),
+  "the enroller must filter candidates to what the Leads board actually shows");
+assert.ok(enroller.includes('return "off_board"'),
+  "and keep the in-memory guard, so dropping the query filter reports instead of mailing");
+assert.ok(executor.includes("isOnLeadsBoard(data)"),
+  "dispatch must re-check: a lead is usually transferred AFTER its steps are queued");
+assert.ok(executor.includes("off_board: lead transferred"),
+  "a cancelled row must say why, or a silent stop is indistinguishable from a bug");
+assert.ok(read("lib/manifest/data.ts").includes("applyLeadsBoardFilter("),
+  "the BOARD must read the same rule, or the two drift apart again");
+// The board-exit edge has no status change at all — transferred_at is stamped
+// while stage stays put — so the eager cancel needs its own signal.
+assert.ok(read("lib/manifest/data.ts").includes("detectBoardExit("),
+  "updateRecord must detect the board exit; detectStatusTransitions cannot see it");
+assert.ok(read("lib/portals/stage-hooks.ts").includes("BOARD_EXIT_FIELD"),
+  "and the portal hook must act on it");
+// Order matters: off-board must be decided BEFORE the stage recheck, because it
+// is the stronger statement — no stage sequence may speak to a transferred lead.
+assert.ok(
+  executor.indexOf("isOnLeadsBoard(data)") < executor.indexOf("stage_changed: lead now at"),
+  "the off-board check must precede the stage recheck",
+);
+
+// ── A cold sending domain does not inherit a warmed one's ceiling ──────────
+// Routing the follow-ups desk to Bluerise points 512 leads at a domain with no
+// sending history. Falling through to the shared 150/day default would open it
+// at the END of a six-week warm-up rather than the start.
+assert.ok(governor.includes('brand === "bluerise" ? WARMUP_START_DAILY'),
+  "bluerise must carry its own warm-up daily default, not inherit DRIPS_EMAIL_DAILY_CAP");
+assert.ok(governor.includes('brand === "bluerise" ? WARMUP_START_HOURLY'),
+  "and its own hourly default");
+
+// ── Stage decides the mailbox, and it decides BOTH channels ────────────────
+// Adon 2026-08-11: submissions@ carries viewed + signed, Bluerise carries the
+// follow-ups tab. Email-only routing would email a merchant as one company and
+// text them as the other; 10DLC registration is per brand.
+assert.ok(
+  (executor.match(/brandForStage\(data\.stage\)/g) || []).length >= 2,
+  "BOTH the email and SMS brand resolutions must be stage-first",
+);
+
 // ── Suppression stays brand-blind and fail-closed ──────────────────────────
 assert.ok(executor.includes("supp.checkFailed"), "a failed suppression check must hold, never send");
 assert.ok(!/checkEmailSuppressed\([^)]*brand/.test(executor),

@@ -90,6 +90,18 @@ assert.match(
   "the shared lender-facing display name must remain SunBiz Submissions",
 );
 
+const lenderSender = readFileSync("lib/integrations/sunbiz-lender-mail-send.ts", "utf8");
+assert.match(
+  lenderSender,
+  /from:\s*`SunBiz Submissions <\$\{creds\.fromAddress\}>`/,
+  "lender mail From display name must always be SunBiz Submissions",
+);
+assert.match(
+  lenderSender,
+  /presentation\.branded[\s\S]*renderShopOutHtml\(lenderText,\s*creds\.fromAddress,\s*files\.length\)[\s\S]*:\s*undefined/,
+  "lender mail must include branded HTML unless the operator explicitly chooses no template",
+);
+
 console.log(
   `shopout-brand-lock.test.ts — ${lenderFacing.length} lender-facing sender(s) verified SunBiz-only ✓`,
 );

@@ -163,11 +163,30 @@ function authorised(req: NextRequest): boolean {
  * every one of them. Only this route's parser was narrower than the adapter
  * behind it, so this widens the parser to match rather than adding surface.
  */
-type FilterOp = "eq" | "in" | "is" | "neq" | "gt" | "gte" | "lt" | "lte";
+type FilterOp = "eq" | "in" | "is" | "neq" | "gt" | "gte" | "lt" | "lte" | "like" | "ilike";
 type Filter = { col: string; op: FilterOp; value: string | string[] };
 
 /** Operators that take a single scalar and map 1:1 onto the adapter. */
 const SCALAR_OPS = new Set<FilterOp>(["eq", "is", "neq", "gt", "gte", "lt", "lte"]);
+
+/**
+ * Pattern operators. Separate from SCALAR_OPS because their operand is ALWAYS a
+ * string and must not go through coerce(): a pattern of `true` is the four
+ * characters t-r-u-e, not a boolean, and coercing it would silently change the
+ * query.
+ *
+ * lib/turso-postgrest.ts already implements both, including PostgREST's `*`
+ * wildcard -> SQL `%` translation. Only this parser was narrower than the
+ * adapter behind it.
+ *
+ * WHAT THIS COST (2026-08-12): `like` was the ONE operator the parser did not
+ * accept, so every caller using it got a 501. scripts/drip-watchdog.mjs filters
+ * `agent_source=like.sequence:*` — it had been erroring for 32 days
+ * (lastSuccessfulWork 2026-07-11) and nothing noticed, because the watchdog
+ * recorded its own error as "checked_nothing_to_do". The thing that watches for
+ * duplicate merchant sends and volume spikes was itself dark the whole time.
+ */
+const PATTERN_OPS = new Set<FilterOp>(["like", "ilike"]);
 
 /** Parse PostgREST query params into filters + modifiers, refusing the unknown. */
 function parseQuery(sp: URLSearchParams):
@@ -190,7 +209,7 @@ function parseQuery(sp: URLSearchParams):
     const op = raw.slice(0, dot);
     const val = raw.slice(dot + 1);
 
-    if (SCALAR_OPS.has(op as FilterOp)) {
+    if (SCALAR_OPS.has(op as FilterOp) || PATTERN_OPS.has(op as FilterOp)) {
       filters.push({ col: key, op: op as FilterOp, value: val });
       continue;
     }
@@ -228,7 +247,13 @@ function applyFilters(q: any, filters: Filter[]) {
     if (typeof fn !== "function") {
       throw new Error(`adapter has no "${f.op}" filter`);
     }
-    q = (fn as (c: string, v: unknown) => unknown).call(q, f.col, coerce(f.value as string));
+    // Pattern operands stay verbatim. coerce() would turn a pattern of `true`
+    // into a boolean and `null` into null, quietly changing what was asked for;
+    // a LIKE operand is a string by definition.
+    const operand = PATTERN_OPS.has(f.op)
+      ? (f.value as string)
+      : coerce(f.value as string);
+    q = (fn as (c: string, v: unknown) => unknown).call(q, f.col, operand);
   }
   return q;
 }

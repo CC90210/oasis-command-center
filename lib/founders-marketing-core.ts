@@ -38,6 +38,27 @@ export const STATUSES = [
 ] as const;
 export type AssetStatus = (typeof STATUSES)[number];
 
+/**
+ * The founders portal is OASIS's OWN surface — `docs/PORTALS.md`: "OASIS's own
+ * tooling. Not a tenant surface." It deliberately serves no tenant slug.
+ *
+ * The library was rendering every brand on the founders tenant, so four client
+ * deliverables (Warner x2, Arthrisil, blyss) sat alongside OASIS's own nine.
+ * That is NOT a cross-tenant leak — every row is on the founders tenant and the
+ * readers all carry `.eq("tenant_id", …)` — but it is the same boundary in the
+ * taxonomy: client work is not our own marketing, and the portal that promises
+ * "not a tenant surface" should not be the place you review a client's ad.
+ *
+ * So founders readers scope to this brand unless a caller explicitly opts out
+ * with `scope: "all"`, which exists for a future client/deliverables surface.
+ */
+export const FOUNDERS_OWN_BRAND = "oasis-ai";
+
+/** Is this asset OASIS's own work rather than a client deliverable? */
+export function isOwnBrand(brandSlug: string | null | undefined): boolean {
+  return brandSlug === FOUNDERS_OWN_BRAND;
+}
+
 export const FORMATS = [
   "video",
   "image",

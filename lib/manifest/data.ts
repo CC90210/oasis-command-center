@@ -33,10 +33,14 @@ import { detectStatusTransitions, publishStatusChange } from "./events";
 // executor.ts imports THIS file.)
 import { runStageTransitionHooks } from "@/lib/portals/stage-hooks";
 import { signFormLink } from "@/lib/form-links";
+// The Leads-board visibility rule. Was two duplicated string literals in this
+// file until 2026-08-11, which is exactly how the drip engine came to be
+// selecting an audience the board does not show. See lib/leads/board-visibility.ts.
+import { applyLeadsBoardFilter, detectBoardExit } from "@/lib/leads/board-visibility";
 
 export class RecordsError extends Error {
   constructor(
-    public code: "validation" | "not_found" | "forbidden" | "db",
+    public code: "validation" | "not_found" | "forbidden" | "db" | "conflict",
     message: string
   ) {
     super(message);
@@ -111,7 +115,7 @@ export async function listRecords(input: ListRecordsInput): Promise<ListRecordsR
   // legacy rows that were incorrectly stamped transferred_at by auto-promotion.
   // Keep that exception in every list surface and in the client-side guard.
   if (input.entity === "lead") {
-    q = q.or("data->>transferred_at.is.null,data->>stage.eq.uw_sheet");
+    q = applyLeadsBoardFilter(q);
   } else if (input.entity === "application") {
     // Mirror of the lead filter: only deals EXPLICITLY transferred from a lead
     // (or standalone apps) belong on the Applications board. "Run underwriting"
@@ -194,7 +198,7 @@ export async function listRecordsForViewer(input: {
     .contains("data->collaborators", JSON.stringify([id]))
     .limit(MAX_RECORD_LIST_LIMIT);
   if (input.entity === "lead") {
-    sq = sq.or("data->>transferred_at.is.null,data->>stage.eq.uw_sheet");
+    sq = applyLeadsBoardFilter(sq);
   }
 
   // Owned + shared are independent reads (merged by id below, order-independent)
@@ -474,6 +478,29 @@ export type UpdateRecordInput = {
   entity: string;
   id: string;
   patch: Record<string, unknown>;
+  /**
+   * COMPARE-AND-SET. Apply the patch only while `data->>field` still equals
+   * `value`; otherwise throw RecordsError("conflict") and write nothing.
+   *
+   * Added 2026-08-12 for the lender reply auto-router. A caller that reads a
+   * record, decides something from it, and then calls updateRecord has a race:
+   * this function re-reads and merges, so anything a human changed in between
+   * is silently overwritten. For that router the overwrite was a FUNDED deal
+   * dragged back to `approved` by a late reply, which also restarts the
+   * merchant's drip email. A separate "claim" update beforehand does not fix
+   * it — only putting the condition on the same statement that writes does
+   * (Codex review P1, 2026-08-12).
+   *
+   * `value: null` matches an absent or null field. That distinction is
+   * load-bearing: `data->>x = ''` never matches a missing key, so guarding on
+   * an empty string would make every unset-field CAS fail forever.
+   *
+   * Setting this ALSO pins the row version (`updated_at`), because this
+   * function replaces the whole data document — see the write below. So a
+   * guarded update is genuine optimistic concurrency, and callers must be
+   * ready to catch RecordsError("conflict") and re-read.
+   */
+  ifMatch?: { field: string; value: string | null };
 };
 
 export async function updateRecord(input: UpdateRecordInput): Promise<TenantRecord> {
@@ -511,15 +538,47 @@ export async function updateRecord(input: UpdateRecordInput): Promise<TenantReco
   }
 
   const db = getServiceSupabase();
-  const result = await db
+  let writeQ = db
     .from("tenant_records")
     .update({ data: merged, updated_at: new Date().toISOString() })
     .eq("id", input.id)
     .eq("tenant_id", input.tenant_id)
-    .eq("entity_type", input.entity)
-    .select("id, tenant_id, entity_type, data, created_at, updated_at")
-    .single();
+    .eq("entity_type", input.entity);
+  // The guard rides on the SAME statement as the write, which is what makes it
+  // atomic. Everything below — the status event, the portal hooks — therefore
+  // only runs for a transition that actually happened.
+  if (input.ifMatch) {
+    writeQ =
+      input.ifMatch.value === null
+        ? writeQ.is(`data->>${input.ifMatch.field}`, null)
+        : writeQ.eq(`data->>${input.ifMatch.field}`, input.ifMatch.value);
+    // ROW VERSION, in addition to the field guard.
+    //
+    // `merged` is built from the row read at the top of this function, and
+    // this write replaces the WHOLE data document. Guarding one field is
+    // therefore not enough: a concurrent edit to any OTHER field, made without
+    // touching the guarded one, still passes the field check and is silently
+    // overwritten by the stale document (Codex review P1, 2026-08-12).
+    //
+    // updated_at is the version. Pinning it makes the guarded path genuine
+    // optimistic concurrency rather than a single-field check wearing its
+    // name. Unguarded callers are untouched — they keep last-write-wins, which
+    // is what every existing call site already assumes.
+    writeQ = writeQ.eq("updated_at", existing.updated_at);
+  }
+  const result = input.ifMatch
+    ? await writeQ.select("id, tenant_id, entity_type, data, created_at, updated_at").maybeSingle()
+    : await writeQ.select("id, tenant_id, entity_type, data, created_at, updated_at").single();
   if (result.error) throw new RecordsError("db", result.error.message);
+  // Only reachable with ifMatch (the unguarded path uses .single(), which
+  // errors on a miss) — so a null row here means the precondition failed, not
+  // that the record vanished.
+  if (!result.data) {
+    throw new RecordsError(
+      "conflict",
+      `precondition failed: ${input.ifMatch?.field} is no longer ${String(input.ifMatch?.value)}`,
+    );
+  }
   let row = result.data as TenantRecord;
 
   // Adon Phase 2: stamp data.application_url on every transition into a
@@ -575,13 +634,24 @@ export async function updateRecord(input: UpdateRecordInput): Promise<TenantReco
   //
   // Fail-soft, per hook: a drip hiccup must not fail the stage write, and the
   // dispatcher's stage/shopped rechecks remain the backstop.
+  //
+  // BOARD-EXIT is passed to the hooks but deliberately NOT published as a
+  // status change (2026-08-11). A lead leaves the Leads board when it is
+  // stamped `transferred_at`, and that happens WITHOUT the stage moving — so
+  // `detectStatusTransitions` reports nothing, the hooks returned early, and
+  // the lead's queued drips survived a transfer they should not have. That is
+  // the mechanism behind 64% of drip mail reaching people not on the board.
+  //
+  // Widening STATUS_FIELDS instead would have been the smaller diff and the
+  // wrong change: it feeds BRAVO_RECORD_STATUS_CHANGED, which every tenant and
+  // every /feed subscriber consumes, and `transferred_at` is not a status.
   await runStageTransitionHooks({
     db,
     tenantId: input.tenant_id,
     entity: input.entity,
     recordId: row.id,
     data: row.data as Record<string, unknown>,
-    transitions,
+    transitions: [...transitions, ...detectBoardExit(existing.data, row.data as Record<string, unknown>)],
   });
 
   return row;

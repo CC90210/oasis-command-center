@@ -39,7 +39,7 @@ name: cron-driver
 on:
   schedule:
     - cron: "*/5 * * * *"    # dispatch-drips, dispatch-scheduled-sends, dispatch-scheduled-calls
-    - cron: "*/10 * * * *"   # operator-email-agent, tps-enroll
+    - cron: "*/10 * * * *"   # operator-email-agent, tps-enroll, scan-lender-replies
     - cron: "*/15 * * * *"   # enroll-drips, enroll-accelerated, reconcile-sms, health-check
     - cron: "*/30 * * * *"   # scan-bounces, scan-funmate-replies, sync-tt-inbox
     - cron: "0 * * * *"      # collect-outreach-intel
@@ -112,8 +112,13 @@ jobs:
                       /api/cron/dispatch-scheduled-sends
                       /api/cron/dispatch-scheduled-calls" ;;
             "*/10 * * * *")
+              # scan-lender-replies runs write=1 so lender thread statuses, the
+              # Offers tab and the outcome ledger actually populate. Whether a
+              # DEAL moves is a separate gate (LENDER_AUTOROUTE_LIVE), off by
+              # default — see lib/lenders/auto-route.ts.
               ROUTES="/api/cron/operator-email-agent?write=1
-                      /api/cron/tps-enroll?write=1" ;;
+                      /api/cron/tps-enroll?write=1
+                      /api/cron/scan-lender-replies?write=1" ;;
             "*/15 * * * *")
               # health-check is the outcome watchdog, and now covers shop-out.
               ROUTES="/api/cron/enroll-drips
