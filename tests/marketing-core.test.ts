@@ -4,7 +4,11 @@
  */
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { getMarketingSummary } from "../lib/founders/marketing-queries";
+import {
+  DEGRADED_MARKETING_SUMMARY,
+  EMPTY_MARKETING_SUMMARY,
+  getMarketingSummary,
+} from "../lib/founders/marketing-queries";
 import { join } from "node:path";
 import {
   CHANNELS,
@@ -580,6 +584,60 @@ async function degradedChecks() {
   assert.equal(healthy.total, 3);
 }
 
+// ── the honest fallback must survive a THROW, not just a query error ─────────
+// The degraded flag was half-wired: getMarketingSummary set it correctly, but the
+// page hands safe() a fallback for the throw case and that fallback was
+// EMPTY_MARKETING_SUMMARY (degraded: false). So any unexpected exception —
+// network, malformed response, a client blowing up — landed back on "Nothing
+// waiting on you". A mechanism that is right in the library and wrong at the call
+// site is worse than none: it reads as covered.
+async function fallbackChecks() {
+  assert.equal(
+    DEGRADED_MARKETING_SUMMARY.degraded,
+    true,
+    "the fallback handed to safe() must be flagged degraded",
+  );
+  assert.equal(EMPTY_MARKETING_SUMMARY.degraded, false, "the pre-migration empty is NOT degraded");
+
+  // An exception inside the reader must come back degraded, not empty.
+  const throwingDb = {
+    from() {
+      throw new Error("connection reset by peer");
+    },
+  } as unknown as Parameters<typeof getMarketingSummary>[1];
+  const thrown = await getMarketingSummary("t", throwingDb);
+  assert.equal(
+    thrown.degraded,
+    true,
+    "an unexpected throw must return the DEGRADED summary — a throw is never evidence of absence",
+  );
+
+  // And the page must actually pass that fallback in.
+  const page = readFileSync(join(process.cwd(), "app/founders/marketing/page.tsx"), "utf8");
+  assert.ok(
+    /safe\(\s*\n?\s*"marketing\.summary",[\s\S]{0,140}?DEGRADED_MARKETING_SUMMARY/.test(page),
+    "the Studio page must hand safe() the DEGRADED fallback, not the empty one",
+  );
+
+  // The library reader distinguishes the two the same way, via null.
+  const lib = readFileSync(join(process.cwd(), "app/founders/marketing/library/page.tsx"), "utf8");
+  assert.ok(
+    lib.includes("const libraryDegraded = assetsOrNull === null;"),
+    "the library must tell 'empty' apart from 'could not load' — an [] fallback cannot",
+  );
+  assert.ok(
+    lib.includes('"Couldn\'t load the library"'),
+    "and must render distinct copy when the read failed",
+  );
+
+  const queries = readFileSync(join(process.cwd(), "lib/founders/marketing-queries.ts"), "utf8");
+  assert.ok(
+    /if \(verdict === "broken"\) throw new Error\(`marketing_asset read failed/.test(queries),
+    "getMarketingAssets must THROW on a broken read rather than returning [] — " +
+      "returning [] is how 'the query failed' became 'the library is empty'",
+  );
+}
+
 // ── "needs you" means needs CC ────────────────────────────────────────────────
 // The headline was open_reviews + open_requests + awaitingVerdict, which
 // double-counted an in_review asset that also had an open review row, and folded
@@ -598,13 +656,14 @@ async function degradedChecks() {
       "or a broken query still reads as good news",
   );
   assert.ok(
-    page.indexOf("summary.degraded ?") < page.indexOf("Nothing waiting on you"),
+    page.indexOf("summary.degraded ?") < page.indexOf('headline="Nothing waiting on you"'),
     "the degraded branch must come first — otherwise needsYou === 0 wins and says 'nothing'",
   );
 }
 
 brandBoundaryChecks()
   .then(degradedChecks)
+  .then(fallbackChecks)
   .then(
   () => console.log("marketing-core: all assertions passed"),
   (err) => {

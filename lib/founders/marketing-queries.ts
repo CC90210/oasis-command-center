@@ -92,6 +92,26 @@ export type MarketingSummary = {
   degraded: boolean;
 };
 
+/**
+ * The fallback to hand `safe()` — and what an unexpected throw returns.
+ *
+ * EMPTY_MARKETING_SUMMARY has `degraded: false`, which is correct for "the
+ * tables are not there yet" and WRONG for every other way this can fail. The
+ * page passes its fallback into safe(), so passing the empty one re-created the
+ * exact bug degraded exists to prevent: an exception rendered as a confident
+ * "Nothing waiting on you". An exception is never evidence of absence.
+ */
+export const DEGRADED_MARKETING_SUMMARY: MarketingSummary = {
+  total: 0,
+  by_track: { organic: 0, paid: 0, seo: 0, email: 0 },
+  by_status: {},
+  open_reviews: 0,
+  open_requests: 0,
+  corpus_indexed: 0,
+  corpus_pending: 0,
+  degraded: true,
+};
+
 export const EMPTY_MARKETING_SUMMARY: MarketingSummary = {
   total: 0,
   by_track: { organic: 0, paid: 0, seo: 0, email: 0 },
@@ -307,7 +327,7 @@ export async function getMarketingSummary(
     };
   } catch (e) {
     console.warn("[marketing:summary] unexpected", e);
-    return EMPTY_MARKETING_SUMMARY;
+    return DEGRADED_MARKETING_SUMMARY;
   }
 }
 
@@ -348,10 +368,14 @@ export async function getMarketingAssets(
     }
 
     const r = await q;
-    if (r.error) {
-      quiet("assets", r.error);
-      return [];
-    }
+    // Absent (pre-migration) is an honest empty library. Broken is NOT: returning
+    // [] there makes the page say "The library is empty" about a library that is
+    // full, and the caller cannot tell the difference from a shape that is just
+    // an array. Throwing is how this reader says "I could not find out" — the
+    // caller passes null as its safe() fallback and renders that distinctly.
+    const verdict = classify("assets", r.error);
+    if (verdict === "absent") return [];
+    if (verdict === "broken") throw new Error(`marketing_asset read failed: ${r.error?.message}`);
     const assets = (r.data || []) as MarketingAssetRow[];
     if (!assets.length) return [];
 
@@ -387,8 +411,10 @@ export async function getMarketingAssets(
     }
     return assets;
   } catch (e) {
+    // Deliberately NOT caught into []: the caller distinguishes "empty" from
+    // "could not load" by whether this resolves at all. See the throw above.
     console.warn("[marketing:assets] unexpected", e);
-    return [];
+    throw e;
   }
 }
 
