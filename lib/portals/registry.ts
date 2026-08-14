@@ -136,7 +136,10 @@ export const FOUNDERS_PORTAL: Portal = {
     ...FOUNDERS_NAV.map((n) => ({ href: n.href, label: n.label, enabled: true })),
     { href: "/founders/marketing/library", label: "Library", enabled: true },
     { href: "/founders/marketing/train", label: "Train", enabled: true },
-    { href: "/founders/marketing/performance", label: "Performance", enabled: false },
+    // Enabled: the page exists and reads real numbers now. It was greyed since the
+    // portal shipped, captioned "Phase 5", while Zernio had been collecting the
+    // metrics the whole time — 68 of 79 published posts carry non-zero data.
+    { href: "/founders/marketing/performance", label: "Performance", enabled: true },
   ],
 };
 
