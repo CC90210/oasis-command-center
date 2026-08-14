@@ -168,6 +168,18 @@ import { isBenignSendFailure } from "../lib/health/email-drip-checks";
   const silenceFn = src.slice(src.indexOf("async function hoursSinceLastEmail"), src.indexOf("const CHECKS"));
   assert.ok(silenceFn.length > 100, "hoursSinceLastEmail must exist");
   assert.ok(silenceFn.includes("dry_run"), "the silence check must exclude dry runs, not just the volume check");
+  // A single page lets a dry-run burst longer than the page hide the last real
+  // send, and the old fallback then fabricated 999h — a false outage out of a
+  // busy rehearsal. Paged scan, and the give-up value is a row we actually saw.
+  assert.ok(silenceFn.includes(".range("), "the scan must paginate, not read one fixed page");
+  assert.ok(silenceFn.includes("oldestSeen"), "on hitting the cap, report the provable lower bound");
+  // 999 stays for the genuine never-sent-at-all case, which IS maximal silence.
+  // What must not happen is reaching it while rows exist, so the lower-bound
+  // assignment has to come first.
+  const bound = silenceFn.indexOf("if (!last && oldestSeen) last = oldestSeen;");
+  const giveUp = silenceFn.indexOf("if (!last) return 999;");
+  assert.ok(bound > 0 && giveUp > 0, "both the lower bound and the never-sent fallback must be present");
+  assert.ok(bound < giveUp, "999 is only reachable after the lower bound has been tried — never while rows exist");
   assert.equal(
     (src.match(/dry_run/g) || []).length >= 2,
     true,

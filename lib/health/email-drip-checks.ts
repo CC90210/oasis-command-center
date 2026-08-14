@@ -125,24 +125,45 @@ async function countDripEmails(
  *  forever while nothing left the building, which is precisely the silent
  *  failure it was written to catch. Codex caught it in review.
  *
- *  A page of rows rather than one, so a burst of dry runs cannot mask the last
- *  real send. If every row in that page is a dry run then there has been no
- *  real send across at least that span, and maximal silence is the honest
- *  answer rather than a guess. */
+ *  Paged, because dry_run lives inside a JSON column the Turso adapter cannot
+ *  filter on, so the exclusion has to happen here. A single page would let a
+ *  burst of dry runs longer than the page push the last real send out of view;
+ *  Codex caught that on the first fix. Paginate until a real send is found or
+ *  the scan cap is hit.
+ *
+ *  If the cap is hit the answer is a LOWER BOUND, not a guess: every row newer
+ *  than the oldest one examined is a dry run, so the last real send is at least
+ *  that old. Reporting the bound keeps the check honest — it can still exceed
+ *  the ceiling and page, but it can never invent a 999h outage out of a busy
+ *  rehearsal. The residual blind spot (thousands of dry runs inside a few
+ *  minutes) is covered by the volume check, which reads zero in exactly that
+ *  state. */
+const SCAN_PAGE = 200;
+const SCAN_MAX_PAGES = 5;
+
 async function hoursSinceLastEmail(db: Db, tenantId: string, endMs: number): Promise<number | null> {
   try {
-    const r = await db
-      .from("lead_interactions")
-      .select("created_at, metadata")
-      .eq("tenant_id", tenantId)
-      .eq("type", "email_sent")
-      .eq("direction", "outbound")
-      .like("agent_source", "sequence:%")
-      .order("created_at", { ascending: false })
-      .limit(200);
-    if (r.error) return null;
-    const rows = (r.data || []) as Array<{ created_at: string; metadata: Record<string, unknown> | null }>;
-    const last = rows.find((row) => String((row.metadata || {}).dry_run) !== "true")?.created_at;
+    let last: string | undefined;
+    let oldestSeen: string | undefined;
+    for (let page = 0; page < SCAN_MAX_PAGES && !last; page++) {
+      const r = await db
+        .from("lead_interactions")
+        .select("created_at, metadata")
+        .eq("tenant_id", tenantId)
+        .eq("type", "email_sent")
+        .eq("direction", "outbound")
+        .like("agent_source", "sequence:%")
+        .order("created_at", { ascending: false })
+        .range(page * SCAN_PAGE, page * SCAN_PAGE + SCAN_PAGE - 1);
+      if (r.error) return null;
+      const rows = (r.data || []) as Array<{ created_at: string; metadata: Record<string, unknown> | null }>;
+      if (rows.length === 0) break;
+      oldestSeen = rows[rows.length - 1]?.created_at ?? oldestSeen;
+      last = rows.find((row) => String((row.metadata || {}).dry_run) !== "true")?.created_at;
+    }
+    // Nothing real found, but rows exist: the last real send is at least as old
+    // as the oldest row scanned. A provable floor beats a fabricated 999.
+    if (!last && oldestSeen) last = oldestSeen;
     // Never sent at all is maximal silence, not "unknown". Returning null here
     // would render as check_broken and hide a genuinely dead engine behind an
     // infrastructure-looking amber.
