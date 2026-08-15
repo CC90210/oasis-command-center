@@ -41,6 +41,7 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { redactAll } from "@/lib/secret-redaction";
+import { publishAgentEvent } from "@/lib/manifest/events";
 import { getSessionUser, getServiceSupabase } from "@/lib/supabase-server";
 import { resolveDataTenant } from "@/lib/manifest/tenant-scope";
 import { manifestExists } from "@/lib/manifest/loader";
@@ -305,26 +306,6 @@ export async function POST(
     status: "pending",
   }));
 
-  // Both failure paths below write the same envelope and differ only in
-  // event_type, severity and payload. agent_events has no tenant_id column —
-  // the established shape (app/api/cron/kixie-compliance-scan/route.ts) nests it
-  // in the payload and scopes with correlation_id. Returns the insert error so
-  // a caller can react to the audit row ITSELF failing.
-  const auditEvent = async (
-    eventType: string,
-    severity: "info" | "warn" | "error" | "critical",
-    payload: Record<string, unknown>,
-  ) => {
-    const { error } = await db.from("agent_events").insert({
-      event_type: eventType,
-      publisher_agent: "cold-outreach-campaigns",
-      severity,
-      payload: { tenant_id: context.tenantId, campaign_id: campaignId, ...payload },
-      correlation_id: context.tenantId,
-    });
-    return error;
-  };
-
   // Insert in chunks to avoid request-size limits on large lists.
   //
   // This used to read "Partial failures are tolerated — daemon retries pending
@@ -386,10 +367,22 @@ export async function POST(
     // agent_events has no tenant_id column — the established shape (see
     // app/api/cron/kixie-compliance-scan/route.ts) nests it in the payload and
     // scopes with correlation_id.
-    const evErr = await auditEvent(
-      "outreach_chunk_failed",
-      lostLeadIds.length ? "error" : "warn",
-      {
+    // lib/manifest/events.publishAgentEvent, not a local insert. It already
+    // encodes what this table needs — agent_events has no tenant_id column, so
+    // tenant scope lives in correlation_id and the id is nested in the payload —
+    // and it logs its own insert failures. I had re-derived all of that by hand
+    // before noticing it existed one directory over from this route.
+    //
+    // It is best-effort by design (returns void, never throws) so a failing
+    // event bus cannot take down the caller's primary write path. That is the
+    // right trade here: the recipients are already inserted by this point.
+    await publishAgentEvent({
+      eventType: "outreach_chunk_failed",
+      tenantId: context.tenantId,
+      publisher: "cold-outreach-campaigns",
+      severity: lostLeadIds.length ? "error" : "warn",
+      payload: {
+        campaign_id: campaignId,
         chunk_index: Math.floor(i / CHUNK),
         chunk_size: chunk.length,
         recovered: chunk.length - lostLeadIds.length,
@@ -402,18 +395,7 @@ export async function POST(
         // driver errors can carry the database URL, and this row is persisted.
         error: redactAll(rErr.message),
       },
-    );
-    if (evErr) {
-      // The audit row is the whole point of this branch. If even THAT cannot be
-      // written, say so in the server log rather than returning a clean 200.
-      console.error(
-        "[cold-outreach] chunk failed AND its agent_events row failed:",
-        redactAll(rErr.message),
-        "|",
-        redactAll(evErr.message),
-      );
-      chunkFailures.push(`agent_events_insert_failed: ${redactAll(evErr.message)}`);
-    }
+    });
   }
 
   // UPDATE campaign.total_recipients to the actual count that landed.
@@ -447,10 +429,17 @@ export async function POST(
 
   if (countErr) {
     console.error("[cold-outreach] total_recipients update failed twice:", redactAll(countErr.message));
-    await auditEvent("outreach_count_update_failed", "error", {
-      intended_total: recipientTotal,
-      attempts: 2,
-      error: redactAll(countErr.message),
+    await publishAgentEvent({
+      eventType: "outreach_count_update_failed",
+      tenantId: context.tenantId,
+      publisher: "cold-outreach-campaigns",
+      severity: "error",
+      payload: {
+        campaign_id: campaignId,
+        intended_total: recipientTotal,
+        attempts: 2,
+        error: redactAll(countErr.message),
+      },
     });
   }
 

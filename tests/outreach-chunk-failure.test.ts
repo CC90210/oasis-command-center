@@ -55,15 +55,29 @@ test("a failed chunk is retried row by row rather than discarded", () => {
   assert.match(CODE, /failed_pending_retry/, "salvaged rows must be marked for a human");
 });
 
-test("every chunk failure writes an agent_events row", () => {
-  // Match the event NAME and the table, not the call shape. The first cut
-  // pinned `event_type: "outreach_chunk_failed"` as a literal property, and
-  // extracting the shared auditEvent() envelope — which changed nothing about
-  // what is written — turned it red. A contract test that breaks on a
-  // behaviour-preserving refactor is pinning syntax, and it teaches the next
-  // person to weaken the test rather than trust it.
+test("every chunk failure publishes an agent_events row", () => {
+  // The event NAME and the publisher, not the call shape. This assertion has
+  // now been broken twice by behaviour-preserving refactors — first extracting
+  // a local envelope, then delegating to the shared publisher — because it
+  // pinned `event_type:` as a literal property and then `from("agent_events")`
+  // as a literal call. Both times the row was still written. A contract test
+  // that goes red on a refactor teaches people to weaken tests instead of
+  // trusting them, so it now asserts the thing that actually has to be true.
   assert.match(CODE, /"outreach_chunk_failed"/);
-  assert.match(CODE, /from\("agent_events"\)/);
+  assert.match(CODE, /publishAgentEvent\(/);
+});
+
+test("audit rows go through the shared publisher, not a hand-rolled insert", () => {
+  // lib/manifest/events.publishAgentEvent already knows this table's quirks —
+  // no tenant_id column, correlation_id for scope, payload nesting — and logs
+  // its own insert failures. I re-derived all of it by hand before noticing it
+  // existed one directory over. A second copy is how the two drift apart.
+  assert.doesNotMatch(
+    CODE,
+    /from\("agent_events"\)/,
+    "use publishAgentEvent from @/lib/manifest/events instead of inserting directly",
+  );
+  assert.match(CODE, /from "@\/lib\/manifest\/events"/);
 });
 
 test("the audit row carries what recovery actually needs", () => {
@@ -75,8 +89,22 @@ test("the audit row carries what recovery actually needs", () => {
   }
 });
 
-test("agent_events is scoped by correlation_id, since the table has no tenant_id column", () => {
-  assert.match(CODE, /correlation_id:\s*context\.tenantId/);
+test("EVERY publisher call is tenant-scoped, not just one of them", () => {
+  // Counted, not matched.
+  //
+  // The first version asserted `tenantId: context.tenantId` appears. It does —
+  // twice — so breaking ONE call still left the other for the regex to find,
+  // and a break-probe caught the assertion passing against code it was supposed
+  // to reject. An existence check over a repeated construct tests the first
+  // occurrence and nothing else.
+  //
+  // agent_events has no tenant_id column: the route hands tenantId to
+  // publishAgentEvent and the helper stamps correlation_id. A call that forgets
+  // it writes an unscoped audit row.
+  const calls = (CODE.match(/publishAgentEvent\(\{/g) || []).length;
+  const scoped = (CODE.match(/tenantId:\s*context\.tenantId/g) || []).length;
+  assert.ok(calls > 0, "no publishAgentEvent calls found — the detector is broken");
+  assert.equal(scoped, calls, `${calls} publisher call(s) but only ${scoped} pass tenantId`);
 });
 
 test("severity is one the CHECK constraint allows", () => {
@@ -90,8 +118,12 @@ test("severity is one the CHECK constraint allows", () => {
   }
 });
 
-test("a failure to write the audit row is logged, not swallowed", () => {
-  assert.match(CODE, /console\.error\(/, "if even the audit row fails, it must reach the log");
+test("a failed write reaches the log, not just the response", () => {
+  // The count-update failure logs here. The audit-row failure logs inside
+  // publishAgentEvent, which is the helper's documented guarantee — see its
+  // comment about a failed publish otherwise looking identical to a successful
+  // one. Neither path is silent; they just log from different places now.
+  assert.match(CODE, /console\.error\(/);
 });
 
 test("raw driver messages are redacted before they are persisted or logged", () => {
@@ -99,8 +131,10 @@ test("raw driver messages are redacted before they are persisted or logged", () 
   // strips env-var secret VALUES and URL key params, and this text goes into a
   // persisted agent_events row and the server log.
   assert.match(CODE, /error:\s*redactAll\(rErr\.message\)/);
-  assert.match(CODE, /redactAll\(evErr\.message\)/);
   assert.match(CODE, /redactAll\(countErr\.message\)/);
+  // No evErr assertion any more, and that is correct rather than a gap: the
+  // route no longer inspects the audit insert's own error, because
+  // publishAgentEvent is best-effort by design and logs its failures itself.
 });
 
 test("no raw driver text reaches the HTTP response", () => {
