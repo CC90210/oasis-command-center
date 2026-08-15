@@ -56,7 +56,13 @@ test("a failed chunk is retried row by row rather than discarded", () => {
 });
 
 test("every chunk failure writes an agent_events row", () => {
-  assert.match(CODE, /event_type:\s*"outreach_chunk_failed"/);
+  // Match the event NAME and the table, not the call shape. The first cut
+  // pinned `event_type: "outreach_chunk_failed"` as a literal property, and
+  // extracting the shared auditEvent() envelope — which changed nothing about
+  // what is written — turned it red. A contract test that breaks on a
+  // behaviour-preserving refactor is pinning syntax, and it teaches the next
+  // person to weaken the test rather than trust it.
+  assert.match(CODE, /"outreach_chunk_failed"/);
   assert.match(CODE, /from\("agent_events"\)/);
 });
 
@@ -113,7 +119,7 @@ test("a failed total_recipients update is captured, not awaited bare", () => {
   // It used to be `await db...update(...)` with no error binding, so a failed
   // write left the campaign row on a stale count while the response said ok:true.
   assert.match(CODE, /const \{ error: countErr \} = await db/);
-  assert.match(CODE, /event_type:\s*"outreach_count_update_failed"/);
+  assert.match(CODE, /"outreach_count_update_failed"/);
   assert.match(CODE, /count_persisted:\s*false/);
 });
 

@@ -305,6 +305,26 @@ export async function POST(
     status: "pending",
   }));
 
+  // Both failure paths below write the same envelope and differ only in
+  // event_type, severity and payload. agent_events has no tenant_id column —
+  // the established shape (app/api/cron/kixie-compliance-scan/route.ts) nests it
+  // in the payload and scopes with correlation_id. Returns the insert error so
+  // a caller can react to the audit row ITSELF failing.
+  const auditEvent = async (
+    eventType: string,
+    severity: "info" | "warn" | "error" | "critical",
+    payload: Record<string, unknown>,
+  ) => {
+    const { error } = await db.from("agent_events").insert({
+      event_type: eventType,
+      publisher_agent: "cold-outreach-campaigns",
+      severity,
+      payload: { tenant_id: context.tenantId, campaign_id: campaignId, ...payload },
+      correlation_id: context.tenantId,
+    });
+    return error;
+  };
+
   // Insert in chunks to avoid request-size limits on large lists.
   //
   // This used to read "Partial failures are tolerated — daemon retries pending
@@ -366,13 +386,10 @@ export async function POST(
     // agent_events has no tenant_id column — the established shape (see
     // app/api/cron/kixie-compliance-scan/route.ts) nests it in the payload and
     // scopes with correlation_id.
-    const { error: evErr } = await db.from("agent_events").insert({
-      event_type: "outreach_chunk_failed",
-      publisher_agent: "cold-outreach-campaigns",
-      severity: lostLeadIds.length ? "error" : "warn",
-      payload: {
-        tenant_id: context.tenantId,
-        campaign_id: campaignId,
+    const evErr = await auditEvent(
+      "outreach_chunk_failed",
+      lostLeadIds.length ? "error" : "warn",
+      {
         chunk_index: Math.floor(i / CHUNK),
         chunk_size: chunk.length,
         recovered: chunk.length - lostLeadIds.length,
@@ -385,8 +402,7 @@ export async function POST(
         // driver errors can carry the database URL, and this row is persisted.
         error: redactAll(rErr.message),
       },
-      correlation_id: context.tenantId,
-    });
+    );
     if (evErr) {
       // The audit row is the whole point of this branch. If even THAT cannot be
       // written, say so in the server log rather than returning a clean 200.
@@ -418,17 +434,9 @@ export async function POST(
 
   if (countErr) {
     console.error("[cold-outreach] total_recipients update failed:", redactAll(countErr.message));
-    await db.from("agent_events").insert({
-      event_type: "outreach_count_update_failed",
-      publisher_agent: "cold-outreach-campaigns",
-      severity: "error",
-      payload: {
-        tenant_id: context.tenantId,
-        campaign_id: campaignId,
-        intended_total: recipientTotal,
-        error: redactAll(countErr.message),
-      },
-      correlation_id: context.tenantId,
+    await auditEvent("outreach_count_update_failed", "error", {
+      intended_total: recipientTotal,
+      error: redactAll(countErr.message),
     });
   }
 
