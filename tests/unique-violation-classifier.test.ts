@@ -60,8 +60,8 @@ test("the founders ingest route no longer rolls its own Postgres-only check", ()
     "utf8",
   );
   assert.ok(
-    src.includes("isUniqueViolationError"),
-    "ingest must use the shared cross-DB classifier",
+    src.includes("isUniqueViolationError("),
+    "ingest must CALL the shared classifier, not just import or alias it",
   );
   assert.ok(
     !/const isUniqueViolation\s*=\s*\(err[\s\S]{0,120}?23505/.test(src),
@@ -77,14 +77,14 @@ test("the founders ingest route no longer rolls its own Postgres-only check", ()
  * across code other people own. This test records the ones known to be dead so
  * the number cannot grow silently — if it does, someone added a fresh one.
  */
-const KNOWN_POSTGRES_ONLY = [
-  "app/api/cron/tps-enroll/route.ts",
-  "app/api/forms/route.ts",
-  "app/api/forms/templates/sunbiz/[step]/route.ts",
-  "app/api/leads/[id]/phone-lookup/route.ts",
-  "app/api/manifest/[slug]/cold-lists/upload/route.ts",
-  "app/api/manifest/[slug]/cold-lists/[list_id]/import/route.ts",
-  "app/api/renewals/route.ts",
+const KNOWN_POSTGRES_ONLY: string[] = [
+  // Empty, and that is the point. Seven routes carried this dead check when the
+  // audit found it. I first fixed only my own and listed the other six here as
+  // "someone else's surface" — wrong call: isUniqueViolationError returns true
+  // for everything `code === "23505"` did plus the SQLite form, so the swap is a
+  // strict superset that cannot regress a working path, and the breakage was
+  // client-facing (a duplicate SunBiz form slug fell past its own 409
+  // "slug_taken" into a generic failure). All seven are fixed.
 ];
 
 /**
@@ -111,11 +111,23 @@ function walk(dir: string): string[] {
   return out;
 }
 
-test("no NEW route starts checking only the Postgres code", () => {
+test("nothing under app/ or lib/ checks only the Postgres code", () => {
+  // lib/ matters as much as app/, and I learned that the slow way: the first
+  // sweep covered only app/ and missed lib/forms/next-steps-email.ts, where the
+  // dead check guarded the idempotency CLAIM on a transactional email — the one
+  // place in the sweep where the failure meant sending a real lead the same
+  // message twice.
   const root = process.cwd();
-  const offenders = walk(join(root, "app"))
+  // The classifier itself is where the Postgres arm BELONGS — it is the one file
+  // that should test for 23505, because it is the thing that knows about both
+  // dialects. Exempting it by name rather than loosening the pattern, so the
+  // exemption stays visible.
+  const DEFINES_THE_CLASSIFIER = "lib/api-helpers.ts";
+
+  const offenders = [...walk(join(root, "app")), ...walk(join(root, "lib"))]
     .filter((f) => /===\s*"23505"/.test(code(readFileSync(f, "utf8"))))
-    .map((f) => f.slice(root.length + 1).replace(/\\/g, "/"));
+    .map((f) => f.slice(root.length + 1).replace(/\\/g, "/"))
+    .filter((f) => f !== DEFINES_THE_CLASSIFIER);
 
   const unexpected = offenders.filter((f) => !KNOWN_POSTGRES_ONLY.includes(f));
   assert.deepEqual(

@@ -22,6 +22,7 @@ import { getServiceSupabase } from "@/lib/supabase-server";
 import { resolveSessionContext } from "@/lib/api-auth";
 import { canWriteCrm } from "@/lib/role-gates";
 import { nextRenewalDate, estCommissionUsd, isTermUnit, type TermUnit } from "@/lib/renewals/derive";
+import { isUniqueViolationError } from "@/lib/api-helpers";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -395,7 +396,7 @@ export async function POST(req: NextRequest) {
     // pre-check cannot cover: a concurrent identical submission that got there
     // first. Same confirmable answer, so a racing double-click reads as "already
     // recorded" rather than a 500.
-    if (ins.error?.code === "23505") {
+    if (isUniqueViolationError(ins.error)) {
       return duplicateResponse({ id: null, lender_name: null });
     }
     console.error("[renewals] insert failed:", ins.error?.message);

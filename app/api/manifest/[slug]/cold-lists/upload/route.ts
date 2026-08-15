@@ -28,6 +28,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { getSessionUser, getServiceSupabase } from "@/lib/supabase-server";
 import { resolveDataTenant } from "@/lib/manifest/tenant-scope";
 import { manifestExists } from "@/lib/manifest/loader";
+import { isUniqueViolationError } from "@/lib/api-helpers";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -279,7 +280,7 @@ export async function POST(
         .insert(chunk)
         .select("id");
       if (insertErr) {
-        if (insertErr.code === "23505") {
+        if (isUniqueViolationError(insertErr)) {
           duplicates += chunk.length;
         } else {
           return NextResponse.json(

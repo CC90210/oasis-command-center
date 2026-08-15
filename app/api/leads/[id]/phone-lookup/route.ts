@@ -29,6 +29,7 @@ import { resolveSessionContext } from "@/lib/api-auth";
 import { canWriteCrm } from "@/lib/role-gates";
 import { canViewLead, leadScopingEnabled } from "@/lib/lead-scope";
 import { hasUsablePhone } from "@/lib/clair/eligibility";
+import { isUniqueViolationError } from "@/lib/api-helpers";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -273,7 +274,7 @@ export async function POST(req: Request, ctx: { params: Promise<{ id: string }> 
     // guarantees one unfinished job per lead. The dedupe SELECT above is a
     // read-then-insert and two concurrent POSTs can both clear it, so losing
     // this race is expected rather than exceptional: return the job that won.
-    if (insErr.code === "23505") {
+    if (isUniqueViolationError(insErr)) {
       const { data: winner } = await svc
         .from("phone_lookup_jobs")
         .select(SELECT_COLS)

@@ -46,7 +46,6 @@ type QueuedRow = { id: string; source_url: string; state: string };
 //
 // lib/api-helpers.ts already solved this in 971484a (bridge pairing hit the same
 // wall). Use that rather than a second, divergent copy.
-const isUniqueViolation = isUniqueViolationError;
 
 const notFound = () => NextResponse.json({ ok: false, error: "not_found" }, { status: 404 });
 
@@ -182,7 +181,7 @@ export async function POST(req: Request) {
       queued.push(...((ins.data ?? []) as QueuedRow[]));
     } else if (isMissingTableError(ins.error)) {
       return migrationPending();
-    } else if (isUniqueViolation(ins.error)) {
+    } else if (isUniqueViolationError(ins.error)) {
       // A concurrent paste won the race between the select above and this
       // insert. The index did its job; retry row by row so one collision does
       // not throw away the rest of the batch.
@@ -194,7 +193,7 @@ export async function POST(req: Request) {
           .single();
         if (!one.error) {
           queued.push(one.data as QueuedRow);
-        } else if (!isUniqueViolation(one.error)) {
+        } else if (!isUniqueViolationError(one.error)) {
           console.warn("[founders.ingest]", one.error.message);
           return NextResponse.json({ ok: false, error: "insert_failed" }, { status: 500 });
         }
