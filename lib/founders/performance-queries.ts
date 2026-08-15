@@ -12,16 +12,6 @@ import { EMPTY_PERF, ROW_CAP, summarize, type PerfSummary } from "@/lib/founders
  * lib/founders/gate.ts for the leak that design prevents.
  */
 
-// Re-exported for the page, which should not need to know the read and the
-// arithmetic live in two files. Anything testing the arithmetic imports
-// lib/founders-performance-core directly.
-export {
-  engagements,
-  retention,
-  type PerfRow,
-  type PerfSummary,
-} from "@/lib/founders-performance-core";
-
 export async function getPerformance(tenantId: string, days = 30): Promise<PerfSummary> {
   // No tenant is a broken caller, not a quiet tenant. Returning the empty shape
   // here would paint "nothing published yet" over a resolution failure.
