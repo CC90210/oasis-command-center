@@ -340,6 +340,17 @@ export async function POST(
     }
 
     // Salvage what can land. One bad row must not cost the other 499.
+    //
+    // NOT insertChunkSalvagingDuplicates() from @/lib/api-helpers, though the
+    // shape is the same and the cold-list importers use it. Three differences
+    // make sharing worse than duplicating here: that one retries only on a
+    // UNIQUE violation, leaves the row unchanged, and ABORTS on the first
+    // non-duplicate error. This one retries on any error, stamps the row
+    // `failed_pending_retry`, and keeps going so it can report exactly which
+    // leads were lost. Merging them would need a retry predicate, a row
+    // transform and an abort-vs-continue flag — three knobs for two callers.
+    // If a third caller ever wants this shape, generalise then, with three
+    // real examples to design against.
     const lostLeadIds: string[] = [];
     for (const row of chunk) {
       const { error: oneErr } = await db
