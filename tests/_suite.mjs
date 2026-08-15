@@ -73,6 +73,7 @@ const TESTS = [
   "tests/marketing-degraded-render.test.ts",
   "tests/unique-violation-classifier.test.ts",
   "tests/chunk-salvage.test.ts",
+  "tests/outreach-chunk-failure.test.ts",
   "tests/db-error-contract.test.ts",
   "tests/portal-stage-hooks.test.ts",
   "tests/founders-ingest-core.test.ts",
