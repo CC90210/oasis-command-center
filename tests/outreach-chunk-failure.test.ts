@@ -88,11 +88,42 @@ test("a failure to write the audit row is logged, not swallowed", () => {
   assert.match(CODE, /console\.error\(/, "if even the audit row fails, it must reach the log");
 });
 
+test("raw driver messages are redacted before they are persisted or logged", () => {
+  // Turso driver errors can carry the database URL. redactAll (lib/secret-redaction)
+  // strips env-var secret VALUES and URL key params, and this text goes into a
+  // persisted agent_events row and the server log.
+  assert.match(CODE, /error:\s*redactAll\(rErr\.message\)/);
+  assert.match(CODE, /redactAll\(evErr\.message\)/);
+  assert.match(CODE, /redactAll\(countErr\.message\)/);
+});
+
+test("no raw driver text reaches the HTTP response", () => {
+  // Redaction scrubs secrets, not PII — a UNIQUE violation names the conflicting
+  // VALUE, and here that is contact_address: a lead's email or phone. The client
+  // gets counts; the detail stays server-side in agent_events.
+  assert.doesNotMatch(
+    CODE,
+    /chunk_errors:/,
+    "the response must not carry driver messages, redacted or otherwise",
+  );
+  assert.match(CODE, /chunks_failed:\s*chunkFailures\.length/);
+});
+
+test("a failed total_recipients update is captured, not awaited bare", () => {
+  // It used to be `await db...update(...)` with no error binding, so a failed
+  // write left the campaign row on a stale count while the response said ok:true.
+  assert.match(CODE, /const \{ error: countErr \} = await db/);
+  assert.match(CODE, /event_type:\s*"outreach_count_update_failed"/);
+  assert.match(CODE, /count_persisted:\s*false/);
+});
+
 test("the response distinguishes a partial failure from a clean run", () => {
   assert.match(CODE, /lost_recipients/);
   assert.match(CODE, /flagged_for_retry/);
+  assert.match(CODE, /chunks_failed/);
 });
 
 test("total_recipients counts the rows that exist, including flagged ones", () => {
-  assert.match(CODE, /total_recipients:\s*totalInserted \+ flaggedForRetry/);
+  assert.match(CODE, /const recipientTotal = totalInserted \+ flaggedForRetry;/);
+  assert.match(CODE, /total_recipients: recipientTotal/);
 });

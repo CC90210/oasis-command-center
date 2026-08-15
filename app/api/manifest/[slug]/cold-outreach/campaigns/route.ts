@@ -40,6 +40,7 @@
  */
 
 import { NextRequest, NextResponse } from "next/server";
+import { redactAll } from "@/lib/secret-redaction";
 import { getSessionUser, getServiceSupabase } from "@/lib/supabase-server";
 import { resolveDataTenant } from "@/lib/manifest/tenant-scope";
 import { manifestExists } from "@/lib/manifest/loader";
@@ -360,7 +361,7 @@ export async function POST(
       else flaggedForRetry += 1;
     }
     lostRecipients += lostLeadIds.length;
-    chunkFailures.push(rErr.message);
+    chunkFailures.push(redactAll(rErr.message));
 
     // agent_events has no tenant_id column — the established shape (see
     // app/api/cron/kixie-compliance-scan/route.ts) nests it in the payload and
@@ -380,7 +381,9 @@ export async function POST(
         // whole list into an events row.
         lost_cold_lead_ids: lostLeadIds.slice(0, 50),
         lost_ids_truncated: lostLeadIds.length > 50,
-        error: rErr.message,
+        // redactAll strips env-var secret VALUES and URL key params. Turso
+        // driver errors can carry the database URL, and this row is persisted.
+        error: redactAll(rErr.message),
       },
       correlation_id: context.tenantId,
     });
@@ -389,35 +392,70 @@ export async function POST(
       // written, say so in the server log rather than returning a clean 200.
       console.error(
         "[cold-outreach] chunk failed AND its agent_events row failed:",
-        rErr.message,
+        redactAll(rErr.message),
         "|",
-        evErr.message,
+        redactAll(evErr.message),
       );
-      chunkFailures.push(`agent_events_insert_failed: ${evErr.message}`);
+      chunkFailures.push(`agent_events_insert_failed: ${redactAll(evErr.message)}`);
     }
   }
 
   // UPDATE campaign.total_recipients to the actual count that landed.
-  await db
+  //
+  // The error is CAPTURED. This was a bare `await`, so a failed update left the
+  // campaign row reporting a stale count — usually 0 — while the response
+  // returned ok:true with the real number beside it. The operator would read a
+  // list size on screen that the database did not agree with, and nothing
+  // anywhere would say so.
+  const recipientTotal = totalInserted + flaggedForRetry;
+  const { error: countErr } = await db
     .from("cold_outreach_campaigns")
     // Rows flagged for retry EXIST and are recipients of this campaign; leaving
     // them out would under-report the list the operator is looking at.
-    .update({ total_recipients: totalInserted + flaggedForRetry })
+    .update({ total_recipients: recipientTotal })
     .eq("id", campaignId)
     .eq("tenant_id", context.tenantId);
+
+  if (countErr) {
+    console.error("[cold-outreach] total_recipients update failed:", redactAll(countErr.message));
+    await db.from("agent_events").insert({
+      event_type: "outreach_count_update_failed",
+      publisher_agent: "cold-outreach-campaigns",
+      severity: "error",
+      payload: {
+        tenant_id: context.tenantId,
+        campaign_id: campaignId,
+        intended_total: recipientTotal,
+        error: redactAll(countErr.message),
+      },
+      correlation_id: context.tenantId,
+    });
+  }
 
   // Extra fields only, and only when something went wrong — existing callers
   // read `campaign_id` and are unaffected. A partial failure must not return a
   // response indistinguishable from a clean one.
   return NextResponse.json({
+    // Recipients landed and the campaign exists, so this is not a failed
+    // request — but `count_persisted: false` tells the caller the number below
+    // is what we inserted, not what the campaign row now says.
     ok: true,
     campaign_id: campaignId,
-    total_recipients: totalInserted,
+    total_recipients: recipientTotal,
+    ...(countErr ? { count_persisted: false } : {}),
     ...(flaggedForRetry || lostRecipients || chunkFailures.length
       ? {
           flagged_for_retry: flaggedForRetry,
           lost_recipients: lostRecipients,
-          chunk_errors: chunkFailures.slice(0, 5),
+          // COUNT ONLY — no driver text crosses the wire.
+          //
+          // redactAll scrubs secrets and URL keys, but a UNIQUE violation names
+          // the conflicting VALUE, and for cold_outreach_recipients that value
+          // is contact_address: a lead's email or phone. Redaction does not know
+          // it is PII. The client is told THAT chunks failed and how many
+          // recipients it cost; the detail lives in the agent_events row, which
+          // is server-side and tenant-scoped by correlation_id.
+          chunks_failed: chunkFailures.length,
         }
       : {}),
   });
