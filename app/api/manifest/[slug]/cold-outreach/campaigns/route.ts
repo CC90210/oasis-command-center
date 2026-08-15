@@ -40,6 +40,7 @@
  */
 
 import { NextRequest, NextResponse } from "next/server";
+import { redactAll } from "@/lib/secret-redaction";
 import { getSessionUser, getServiceSupabase } from "@/lib/supabase-server";
 import { resolveDataTenant } from "@/lib/manifest/tenant-scope";
 import { manifestExists } from "@/lib/manifest/loader";
@@ -304,24 +305,185 @@ export async function POST(
     status: "pending",
   }));
 
+  // Both failure paths below write the same envelope and differ only in
+  // event_type, severity and payload. agent_events has no tenant_id column —
+  // the established shape (app/api/cron/kixie-compliance-scan/route.ts) nests it
+  // in the payload and scopes with correlation_id. Returns the insert error so
+  // a caller can react to the audit row ITSELF failing.
+  const auditEvent = async (
+    eventType: string,
+    severity: "info" | "warn" | "error" | "critical",
+    payload: Record<string, unknown>,
+  ) => {
+    const { error } = await db.from("agent_events").insert({
+      event_type: eventType,
+      publisher_agent: "cold-outreach-campaigns",
+      severity,
+      payload: { tenant_id: context.tenantId, campaign_id: campaignId, ...payload },
+      correlation_id: context.tenantId,
+    });
+    return error;
+  };
+
   // Insert in chunks to avoid request-size limits on large lists.
+  //
+  // This used to read "Partial failures are tolerated — daemon retries pending
+  // rows on next tick", and drop the chunk on any error. Both halves were wrong:
+  //
+  //   1. There is no such daemon. `cold_outreach_recipients` is referenced by
+  //      this route, the sibling recipients route, and a backup script that only
+  //      enumerates table names — nothing else, in any repo, and no cron_engine
+  //      job touches cold_outreach at all.
+  //   2. A FAILED insert leaves no row behind. "Retries pending rows" cannot
+  //      recover recipients that were never written; they simply ceased to exist,
+  //      and total_recipients quietly under-reported with nothing logged.
+  //
+  // So a failed chunk now retries row by row, marks what lands as
+  // `failed_pending_retry` rather than promoting it to a clean `pending` (these
+  // came out of a failed batch and an operator should look before anything is
+  // sent to them), and records every failure in agent_events. Nothing is dropped
+  // without a row explaining it.
   const CHUNK = 500;
   let totalInserted = 0;
+  let flaggedForRetry = 0;
+  let lostRecipients = 0;
+  const chunkFailures: string[] = [];
+
   for (let i = 0; i < recipientRows.length; i += CHUNK) {
     const chunk = recipientRows.slice(i, i + CHUNK);
     const { error: rErr } = await db
       .from("cold_outreach_recipients")
       .insert(chunk);
-    // Partial failures are tolerated — daemon retries pending rows on next tick.
-    if (!rErr) totalInserted += chunk.length;
+
+    if (!rErr) {
+      totalInserted += chunk.length;
+      continue;
+    }
+
+    // Salvage what can land. One bad row must not cost the other 499.
+    //
+    // NOT insertChunkSalvagingDuplicates() from @/lib/api-helpers, though the
+    // shape is the same and the cold-list importers use it. Three differences
+    // make sharing worse than duplicating here: that one retries only on a
+    // UNIQUE violation, leaves the row unchanged, and ABORTS on the first
+    // non-duplicate error. This one retries on any error, stamps the row
+    // `failed_pending_retry`, and keeps going so it can report exactly which
+    // leads were lost. Merging them would need a retry predicate, a row
+    // transform and an abort-vs-continue flag — three knobs for two callers.
+    // If a third caller ever wants this shape, generalise then, with three
+    // real examples to design against.
+    const lostLeadIds: string[] = [];
+    for (const row of chunk) {
+      const { error: oneErr } = await db
+        .from("cold_outreach_recipients")
+        .insert({ ...row, status: "failed_pending_retry" });
+      if (oneErr) lostLeadIds.push(String(row.cold_lead_id));
+      else flaggedForRetry += 1;
+    }
+    lostRecipients += lostLeadIds.length;
+    chunkFailures.push(redactAll(rErr.message));
+
+    // agent_events has no tenant_id column — the established shape (see
+    // app/api/cron/kixie-compliance-scan/route.ts) nests it in the payload and
+    // scopes with correlation_id.
+    const evErr = await auditEvent(
+      "outreach_chunk_failed",
+      lostLeadIds.length ? "error" : "warn",
+      {
+        chunk_index: Math.floor(i / CHUNK),
+        chunk_size: chunk.length,
+        recovered: chunk.length - lostLeadIds.length,
+        lost: lostLeadIds.length,
+        // Capped: the point is to make recovery possible, not to mirror the
+        // whole list into an events row.
+        lost_cold_lead_ids: lostLeadIds.slice(0, 50),
+        lost_ids_truncated: lostLeadIds.length > 50,
+        // redactAll strips env-var secret VALUES and URL key params. Turso
+        // driver errors can carry the database URL, and this row is persisted.
+        error: redactAll(rErr.message),
+      },
+    );
+    if (evErr) {
+      // The audit row is the whole point of this branch. If even THAT cannot be
+      // written, say so in the server log rather than returning a clean 200.
+      console.error(
+        "[cold-outreach] chunk failed AND its agent_events row failed:",
+        redactAll(rErr.message),
+        "|",
+        redactAll(evErr.message),
+      );
+      chunkFailures.push(`agent_events_insert_failed: ${redactAll(evErr.message)}`);
+    }
   }
 
   // UPDATE campaign.total_recipients to the actual count that landed.
-  await db
-    .from("cold_outreach_campaigns")
-    .update({ total_recipients: totalInserted })
-    .eq("id", campaignId)
-    .eq("tenant_id", context.tenantId);
+  //
+  // The error is CAPTURED. This was a bare `await`, so a failed update left the
+  // campaign row reporting a stale count — usually 0 — while the response
+  // returned ok:true with the real number beside it. The operator would read a
+  // list size on screen that the database did not agree with, and nothing
+  // anywhere would say so.
+  const recipientTotal = totalInserted + flaggedForRetry;
 
-  return NextResponse.json({ ok: true, campaign_id: campaignId, total_recipients: totalInserted });
+  // Bounded recovery: one retry, then give up loudly.
+  //
+  // The likeliest cause of a failed UPDATE here is a transient blip, and one
+  // retry converts most of those into success for the price of a single round
+  // trip. Unbounded retries would turn a genuinely broken write into a hung
+  // request, so the bound is the point — not the retry.
+  const writeCount = async () =>
+    (
+      await db
+        .from("cold_outreach_campaigns")
+        // Rows flagged for retry EXIST and are recipients of this campaign;
+        // leaving them out would under-report the list the operator sees.
+        .update({ total_recipients: recipientTotal })
+        .eq("id", campaignId)
+        .eq("tenant_id", context.tenantId)
+    ).error;
+
+  let countErr = await writeCount();
+  if (countErr) countErr = await writeCount();
+
+  if (countErr) {
+    console.error("[cold-outreach] total_recipients update failed twice:", redactAll(countErr.message));
+    await auditEvent("outreach_count_update_failed", "error", {
+      intended_total: recipientTotal,
+      attempts: 2,
+      error: redactAll(countErr.message),
+    });
+  }
+
+  // Extra fields only, and only when something went wrong — existing callers
+  // read `campaign_id` and are unaffected. A partial failure must not return a
+  // response indistinguishable from a clean one.
+  return NextResponse.json({
+    // ok:true, deliberately, even when the count write failed.
+    //
+    // A review argued for an explicit failure state here. The recipients DID
+    // land and the campaign DOES exist, and `ok:false` says neither happened —
+    // a caller that retries on it creates a SECOND campaign and sends the list
+    // twice. That is a worse failure than a stale count. `count_persisted:
+    // false` states exactly what went wrong: the number below is what we
+    // inserted and what we tried to store, not what the campaign row now says.
+    ok: true,
+    campaign_id: campaignId,
+    total_recipients: recipientTotal,
+    ...(countErr ? { count_persisted: false } : {}),
+    ...(flaggedForRetry || lostRecipients || chunkFailures.length
+      ? {
+          flagged_for_retry: flaggedForRetry,
+          lost_recipients: lostRecipients,
+          // COUNT ONLY — no driver text crosses the wire.
+          //
+          // redactAll scrubs secrets and URL keys, but a UNIQUE violation names
+          // the conflicting VALUE, and for cold_outreach_recipients that value
+          // is contact_address: a lead's email or phone. Redaction does not know
+          // it is PII. The client is told THAT chunks failed and how many
+          // recipients it cost; the detail lives in the agent_events row, which
+          // is server-side and tenant-scoped by correlation_id.
+          chunks_failed: chunkFailures.length,
+        }
+      : {}),
+  });
 }

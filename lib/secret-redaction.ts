@@ -64,11 +64,28 @@ export function redactSecrets(text: string | null | undefined): string {
   return out;
 }
 
-/** Strip `?key=...` and `&api_key=...` query params from URL-shaped substrings. */
+/**
+ * Strip `?key=...`, `&api_key=...` and friends from URL-shaped substrings.
+ *
+ * `authToken` / `auth_token` added 2026-08-15: that is what libSQL and Turso
+ * use, and this app runs on Turso. A driver error like
+ *
+ *   SQLITE_UNKNOWN: connect to libsql://…turso.io?authToken=eyJhbGciOi… failed
+ *
+ * passed through untouched — verified by executing it, after I had already
+ * claimed in a commit message that redactAll handled it. redactSecrets only
+ * catches the token when it matches an env value verbatim, which is not
+ * guaranteed in every runtime.
+ *
+ * Widening this list is strictly safe: it can only redact more, never less.
+ */
 export function redactUrlKeyParams(text: string | null | undefined): string {
   if (!text) return text ?? "";
   return String(text)
-    .replace(/([?&])(key|api_key|apikey|access_token)=[^&\s"'<>]+/gi, "$1$2=[REDACTED]");
+    .replace(
+      /([?&])(key|api_key|apikey|access_token|authtoken|auth_token|token)=[^&\s"'<>]+/gi,
+      "$1$2=[REDACTED]",
+    );
 }
 
 export function redactAll(text: string | null | undefined): string {
