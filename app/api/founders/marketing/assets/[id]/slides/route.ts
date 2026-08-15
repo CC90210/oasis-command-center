@@ -26,6 +26,7 @@ import { NextResponse } from "next/server";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { resolveFounder } from "@/lib/founders/gate";
 import { parseSlideUrls } from "@/lib/founders-marketing-core";
+import { methodNotHere } from "@/lib/founders/method-guard";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -148,3 +149,11 @@ export async function PUT(req: Request, ctx: Ctx) {
     slide_count: updated.data.slide_count,
   });
 }
+
+// Verbs this route does not implement answer 404, not the framework's 405.
+// A 405 confirms the path is real, which is exactly what lib/founders/gate.ts
+// refuses to tell a tenant that is not ours. See lib/founders/method-guard.ts.
+export const GET = methodNotHere;
+export const POST = methodNotHere;
+export const PATCH = methodNotHere;
+export const DELETE = methodNotHere;
