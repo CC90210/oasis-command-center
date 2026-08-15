@@ -43,26 +43,37 @@ const nextConfig = {
   // If this stops being enough, the next lever is Vercel's Enhanced Builds
   // (bigger machine, costs money — CC's call, not an agent's).
   experimental: {
+    // Vercel builds this on 4 cores / 8 GB and kept OOM-killing a build worker.
+    // Three passes, and the middle one was mine being wrong:
+    //
+    // 1. webpackMemoryOptimizations — real, kept. Webpack stops retaining module
+    //    sources and caches only useful for incremental rebuilds, which a
+    //    one-shot CI build never does. Lowered the peak; not below the ceiling.
+    //
+    // 2. memoryBasedWorkersCount — REMOVED, it was a no-op. A reviewer said it
+    //    enforces a floor of four workers and I checked the installed source
+    //    rather than argue (node_modules/next/dist/build/index.js:307):
+    //
+    //      return Math.max(Math.min(cpus || 1, Math.floor(os.freemem() / 1e9)),
+    //        4);   // enforce a minimum of 4 workers
+    //
+    //    The default with no config is also 4, so on this box it changed
+    //    nothing. I had shipped it as a fix.
+    //
+    // 3. cpus — the actual lever. It is checked FIRST in getNumberOfWorkers and
+    //    returns directly, with no floor applied:
+    //
+    //      if (config.experimental.cpus && cpus !== defaultConfig...cpus)
+    //        return config.experimental.cpus;
+    //
+    //    Two workers instead of four halves the concurrent build memory. It
+    //    costs build time, which is the right thing to spend when the scarce
+    //    resource is RAM and the failure mode is a SIGKILL.
+    //
+    // Next lever if this is still not enough: Vercel Enhanced Builds — a bigger
+    // machine that costs money, so CC's call rather than an agent's.
     webpackMemoryOptimizations: true,
-    // 2026-08-14, second pass. The build OOM'd again WITH the line above
-    // active — the log shows "✓ webpackMemoryOptimizations" and then
-    // "build worker exited with code: null and signal: SIGKILL". So it lowered
-    // the peak but not below the ceiling, and which side of that line a build
-    // lands on is still luck.
-    //
-    // The kill is in a build WORKER, and Vercel gives 4 cores with 8 GB. Next
-    // sizes its worker pool from the CPU count by default, so four workers
-    // divide 8 GB between them and a heavy route tips one over.
-    // memoryBasedWorkersCount sizes the pool from available memory instead,
-    // which is the dimension that is actually scarce here.
-    //
-    // Verified present in the installed Next's config schema (15.5.18) rather
-    // than taken from the docs:
-    //   grep -o memoryBasedWorkersCount node_modules/next/dist/server/config-schema.js
-    //
-    // If this is still not enough, the remaining lever is Vercel's Enhanced
-    // Builds — a bigger machine that costs money, so that is CC's call.
-    memoryBasedWorkersCount: true,
+    cpus: 2,
   },
   outputFileTracingRoot: path.join(__dirname),
   // lib/prompts/index.ts reads the .txt + .json prompt files at module init
