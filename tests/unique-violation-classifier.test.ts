@@ -17,11 +17,15 @@
  * survive the port and failed quietly for months.
  */
 import assert from "node:assert/strict";
-import { readFileSync, readdirSync, statSync } from "node:fs";
-import { join } from "node:path";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import { isUniqueViolationError } from "../lib/api-helpers";
+// tests/_tree.ts is the established walker for whole-tree properties — its own
+// docstring says it exists because someone copied one twice in a sitting. I
+// wrote a third before checking. It also skips node_modules/.next, which mine
+// did not.
+import { REPO_ROOT, repoRelative, sourceTree } from "./_tree";
 
 test("recognises what the Turso adapter actually emits", () => {
   // Verbatim shape from lib/turso-postgrest.ts: code is always TURSO_ADAPTER,
@@ -56,7 +60,7 @@ test("does not fire on unrelated failures", () => {
 
 test("the founders ingest route no longer rolls its own Postgres-only check", () => {
   const src = readFileSync(
-    join(process.cwd(), "app", "api", "founders", "marketing", "ingest", "route.ts"),
+    `${REPO_ROOT}/app/api/founders/marketing/ingest/route.ts`,
     "utf8",
   );
   assert.ok(
@@ -101,23 +105,13 @@ function code(src: string): string {
     .replace(/^\s*\/\/.*$/gm, "");        // line comments
 }
 
-function walk(dir: string): string[] {
-  const out: string[] = [];
-  for (const entry of readdirSync(dir)) {
-    const full = join(dir, entry);
-    if (statSync(full).isDirectory()) out.push(...walk(full));
-    else if (entry.endsWith(".ts") || entry.endsWith(".tsx")) out.push(full);
-  }
-  return out;
-}
-
 test("nothing under app/ or lib/ checks only the Postgres code", () => {
   // lib/ matters as much as app/, and I learned that the slow way: the first
   // sweep covered only app/ and missed lib/forms/next-steps-email.ts, where the
   // dead check guarded the idempotency CLAIM on a transactional email — the one
   // place in the sweep where the failure meant sending a real lead the same
   // message twice.
-  const root = process.cwd();
+
   // The classifier itself is where the Postgres arm BELONGS — it is the one file
   // that should test for 23505, because it is the thing that knows about both
   // dialects. Exempting it by name rather than loosening the pattern, so the
@@ -136,9 +130,9 @@ test("nothing under app/ or lib/ checks only the Postgres code", () => {
   // simpler and stricter than trying to enumerate comparison shapes.
   const MENTIONS_THE_CODE = /["'`]23505["'`]/;
 
-  const offenders = [...walk(join(root, "app")), ...walk(join(root, "lib"))]
+  const offenders = sourceTree("app", "lib")
     .filter((f) => MENTIONS_THE_CODE.test(code(readFileSync(f, "utf8"))))
-    .map((f) => f.slice(root.length + 1).replace(/\\/g, "/"))
+    .map(repoRelative)
     .filter((f) => f !== DEFINES_THE_CLASSIFIER);
 
   const unexpected = offenders.filter((f) => !KNOWN_POSTGRES_ONLY.includes(f));

@@ -28,6 +28,7 @@ import { NextResponse } from "next/server";
 
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { resolveFounder } from "@/lib/founders/gate";
+import { methodNotHere } from "@/lib/founders/method-guard";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -195,3 +196,11 @@ export async function POST(req: Request, ctx: Ctx) {
     asset: { id: asset.data.id, title: asset.data.title },
   });
 }
+
+// Verbs this route does not implement answer 404, not the framework's 405.
+// A 405 confirms the path is real, which is exactly what lib/founders/gate.ts
+// refuses to tell a tenant that is not ours. See lib/founders/method-guard.ts.
+export const GET = methodNotHere;
+export const PUT = methodNotHere;
+export const PATCH = methodNotHere;
+export const DELETE = methodNotHere;
