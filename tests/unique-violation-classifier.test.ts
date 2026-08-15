@@ -124,8 +124,20 @@ test("nothing under app/ or lib/ checks only the Postgres code", () => {
   // exemption stays visible.
   const DEFINES_THE_CLASSIFIER = "lib/api-helpers.ts";
 
+  // Match the LITERAL, not one spelling of one comparison.
+  //
+  // The first cut was /===\s*"23505"/, which a reviewer correctly shot down: it
+  // sees `=== "23505"` and nothing else. `=== '23505'`, `!== "23505"`, a
+  // backtick, a switch case, or `[23505].includes(code)` all sail past — and a
+  // guard with a hole is worse than no guard, because it reads as coverage.
+  //
+  // Outside the one file that legitimately knows both dialects, this string has
+  // no business appearing in code at all, so matching the bare literal is both
+  // simpler and stricter than trying to enumerate comparison shapes.
+  const MENTIONS_THE_CODE = /["'`]23505["'`]/;
+
   const offenders = [...walk(join(root, "app")), ...walk(join(root, "lib"))]
-    .filter((f) => /===\s*"23505"/.test(code(readFileSync(f, "utf8"))))
+    .filter((f) => MENTIONS_THE_CODE.test(code(readFileSync(f, "utf8"))))
     .map((f) => f.slice(root.length + 1).replace(/\\/g, "/"))
     .filter((f) => f !== DEFINES_THE_CLASSIFIER);
 
@@ -133,7 +145,8 @@ test("nothing under app/ or lib/ checks only the Postgres code", () => {
   assert.deepEqual(
     unexpected,
     [],
-    "these check Postgres's 23505 on a Turso backend, so the branch is dead:\n  " +
+    "these reference Postgres's 23505 on a Turso backend, where the adapter " +
+      "reports unique violations as TURSO_ADAPTER — so the branch is dead:\n  " +
       unexpected.join("\n  ") +
       "\nUse isUniqueViolationError from @/lib/api-helpers.",
   );
