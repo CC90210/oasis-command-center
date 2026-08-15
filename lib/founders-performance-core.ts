@@ -73,9 +73,25 @@ export const EMPTY_PERF: PerfSummary = {
   truncated: false,
 };
 
+/**
+ * Coerce a column to a number.
+ *
+ * These arrive from SQLite through a PostgREST-compatible shim, and a REAL or
+ * INTEGER can come back as a STRING. `acc.views + x.views` then CONCATENATES:
+ * 0 + "100" is "0100", and the operator sees a nine-digit view count that is
+ * pure nonsense. Same hazard already guarded in retention() with Number(); the
+ * totals were missed, and a render test caught it.
+ *
+ * NaN and Infinity collapse to 0 — a bad cell must not poison the whole sum.
+ */
+function num(v: unknown): number {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : 0;
+}
+
 /** Engagements a human would count as "someone did something". */
 export function engagements(r: PerfRow): number {
-  return (r.likes || 0) + (r.comments || 0) + (r.shares || 0) + (r.saves || 0);
+  return num(r.likes) + num(r.comments) + num(r.shares) + num(r.saves);
 }
 
 /**
@@ -128,13 +144,13 @@ export function summarize(result: { data?: unknown[] | null; error?: { message?:
   const totals = rows.reduce(
     (acc, x) => ({
       posts: acc.posts + 1,
-      views: acc.views + (x.views || 0),
-      impressions: acc.impressions + (x.impressions || 0),
-      likes: acc.likes + (x.likes || 0),
-      comments: acc.comments + (x.comments || 0),
-      shares: acc.shares + (x.shares || 0),
-      saves: acc.saves + (x.saves || 0),
-      follows: acc.follows + (x.follows || 0),
+      views: acc.views + num(x.views),
+      impressions: acc.impressions + num(x.impressions),
+      likes: acc.likes + num(x.likes),
+      comments: acc.comments + num(x.comments),
+      shares: acc.shares + num(x.shares),
+      saves: acc.saves + num(x.saves),
+      follows: acc.follows + num(x.follows),
     }),
     { ...EMPTY_PERF.totals },
   );
@@ -143,7 +159,7 @@ export function summarize(result: { data?: unknown[] | null; error?: { message?:
   for (const x of rows) {
     const cur = byMap.get(x.platform) || { platform: x.platform, posts: 0, views: 0, engagements: 0 };
     cur.posts += 1;
-    cur.views += x.views || 0;
+    cur.views += num(x.views);
     cur.engagements += engagements(x);
     byMap.set(x.platform, cur);
   }

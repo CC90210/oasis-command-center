@@ -69,6 +69,7 @@ const TESTS = [
   "tests/asset-carousel.test.ts",
   "tests/slide-reorder.test.ts",
   "tests/performance-metrics.test.ts",
+  "tests/performance-page-render.test.ts",
   "tests/marketing-degraded-render.test.ts",
   "tests/unique-violation-classifier.test.ts",
   "tests/chunk-salvage.test.ts",
