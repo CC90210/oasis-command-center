@@ -281,7 +281,31 @@ export async function POST(
         .select("id");
       if (insertErr) {
         if (isUniqueViolationError(insertErr)) {
-          duplicates += chunk.length;
+          // Retry the chunk ROW BY ROW.
+          //
+          // `duplicates += chunk.length` threw away the whole chunk because one
+          // row in it collided: a 500-row chunk with a single repeat lost 499
+          // good leads AND reported them to the operator as duplicates, which
+          // is a plausible number and a false one.
+          //
+          // It was invisible until now because the branch was unreachable — the
+          // check was Postgres's 23505 on a Turso backend, so a collision took
+          // the else and 500'd the whole request. Making the check work exposed
+          // the handler behind it. Same per-row salvage the founders ingest
+          // route already uses.
+          for (const row of chunk) {
+            const one = await db.from("cold_leads").insert(row).select("id");
+            if (!one.error) {
+              inserted += one.data?.length ?? 0;
+            } else if (isUniqueViolationError(one.error)) {
+              duplicates += 1;
+            } else {
+              return NextResponse.json(
+                { ok: false, error: "db_error", detail: one.error.message },
+                { status: 500 },
+              );
+            }
+          }
         } else {
           return NextResponse.json(
             { ok: false, error: "db_error", detail: insertErr.message },
