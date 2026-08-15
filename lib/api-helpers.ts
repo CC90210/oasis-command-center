@@ -208,8 +208,16 @@ export function isMissingTableError(
  * Windows bridge died on `UNIQUE constraint failed:
  * bridge_pairings.tenant_id, bridge_pairings.machine_fingerprint`).
  *
- * Same pattern already inlined in /api/cron/tps-enroll (`code === "23505"
- * || /duplicate/i.test(message)`); this helper consolidates it.
+ * EVERY caller routes through here — routes and lib code alike. Sites across
+ * the repo carried their own Postgres-only check, each one dead on Turso, and
+ * they were swept 2026-08-14. Some used `!== "23505"` to mean "this error is
+ * NOT a benign duplicate", which failed the other way round: the branch fired
+ * on precisely the duplicates it was meant to wave through.
+ *
+ * Do not write a fresh `code === "23505"` — tests/unique-violation-classifier.test.ts
+ * walks app/ and lib/ and fails the build on the bare literal in any quoting
+ * style or comparison, exempting only this file. That test is the live count;
+ * a tally written here would be stale by the next sweep.
  */
 export function isUniqueViolationError(
   err: { message?: string; code?: string } | null | undefined,

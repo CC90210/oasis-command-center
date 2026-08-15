@@ -114,7 +114,24 @@ export async function POST(req: Request, ctx: Ctx) {
     .eq("tenant_id", founder.tenantId)
     .eq("asset_id", id)
     .limit(1);
-  if (!media.error && !(media.data || []).length) {
+  // Same fail-closed rule as the in-flight check below, and for the same reason:
+  // `!media.error && ...` skips the check exactly when the read broke. Queueing
+  // a publish we could not verify has media attached sends the drain to fetch
+  // nothing. It records an honest failure rather than posting a blank, so this
+  // is the cheaper of the two, but "cheaper" is not a reason to leave a guard
+  // that disables itself under load.
+  if (media.error) {
+    console.warn("[founders:publish] media check failed", media.error.message);
+    return NextResponse.json(
+      {
+        ok: false,
+        error: "media_check_failed",
+        detail: "Could not confirm this asset has media attached, so nothing was queued. Try again.",
+      },
+      { status: 503 },
+    );
+  }
+  if (!(media.data || []).length) {
     return NextResponse.json({ ok: false, error: "no_media_attached" }, { status: 400 });
   }
 

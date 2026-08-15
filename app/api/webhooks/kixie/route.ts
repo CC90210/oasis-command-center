@@ -39,6 +39,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createHmac, timingSafeEqual } from "crypto";
 import { getServiceSupabase } from "@/lib/supabase-server";
+import { isUniqueViolationError } from "@/lib/api-helpers";
 import {
   findLeadByPhone,
   merchantNumberFor,
@@ -228,7 +229,11 @@ async function persistLeadInteraction(
     // supabase-js does NOT throw on DB errors — check .error explicitly or the
     // failure is invisible. 23505 (unique violation) means already-stored → ok.
     const { error } = await db.from("lead_interactions").insert(row);
-    if (error && error.code !== "23505") {
+    // !isUniqueViolationError, not `code !== "23505"`. On Turso a unique
+    // violation is code "TURSO_ADAPTER", so the "already-stored -> ok" case the
+    // comment describes never matched and a duplicate webhook delivery — the
+    // ordinary thing a webhook does — was logged as a failure.
+    if (error && !isUniqueViolationError(error)) {
       throw new Error(`sms insert failed: ${error.message}`);
     }
     return;

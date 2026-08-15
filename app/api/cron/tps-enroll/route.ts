@@ -21,6 +21,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { timingSafeEqual } from "crypto";
 import { getServiceSupabase } from "@/lib/supabase-server";
+import { isUniqueViolationError } from "@/lib/api-helpers";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -296,7 +297,7 @@ export async function GET(req: NextRequest) {
           requested_by_email: "auto:live_subs:cron",
         });
         if (!ie) summary.enrolled++;
-        else if (ie.code === "23505" || /duplicate/i.test(ie.message)) bump("already_queued");
+        else if (isUniqueViolationError(ie) || /duplicate/i.test(ie.message)) bump("already_queued");
         else bump(`insert_failed:${ie.code || ie.message}`);
       } else {
         summary.enrolled++;

@@ -16,7 +16,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getSessionUser, getServiceSupabase } from "@/lib/supabase-server";
 import { resolveTenantId } from "@/lib/api-auth";
-import { isMissingTableError, missingTablePayload } from "@/lib/api-helpers";
+import { isMissingTableError, isUniqueViolationError, missingTablePayload } from "@/lib/api-helpers";
 import {
   parseFormSteps,
   parseFormBranding,
@@ -128,7 +128,7 @@ export async function POST(req: NextRequest) {
   if (error) {
     // Slug uniqueness violation — surface as a 409 with a friendly
     // message so the builder UI can prompt for a different slug.
-    if (error.code === "23505") {
+    if (isUniqueViolationError(error)) {
       return NextResponse.json(
         { ok: false, error: "slug_taken", hint: `A form with slug "${slug}" already exists for this tenant.` },
         { status: 409 },

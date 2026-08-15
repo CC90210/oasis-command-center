@@ -19,24 +19,15 @@
  * exports, not of a running server.
  */
 import assert from "node:assert/strict";
-import { readFileSync, readdirSync, statSync } from "node:fs";
-import { join } from "node:path";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 
-const API_ROOT = join(process.cwd(), "app", "api", "founders");
+import { repoRelative, sourceTree } from "./_tree";
+
 const VERBS = ["GET", "POST", "PUT", "PATCH", "DELETE"];
 
-function routeFiles(dir: string): string[] {
-  const out: string[] = [];
-  for (const entry of readdirSync(dir)) {
-    const full = join(dir, entry);
-    if (statSync(full).isDirectory()) out.push(...routeFiles(full));
-    else if (entry === "route.ts") out.push(full);
-  }
-  return out;
-}
-
-const ROUTES = routeFiles(API_ROOT);
+// Same shared walker as the other whole-tree tests — see tests/_tree.ts.
+const ROUTES = sourceTree("app/api/founders").filter((f) => f.endsWith("route.ts"));
 
 test("there are founders API routes to check", () => {
   // Without this, an empty glob would make every assertion below vacuous and
@@ -45,7 +36,7 @@ test("there are founders API routes to check", () => {
 });
 
 for (const file of ROUTES) {
-  const rel = file.slice(file.indexOf("app")).replace(/\\/g, "/");
+  const rel = repoRelative(file);
 
   test(`${rel} handles every verb, implemented or refused`, () => {
     const src = readFileSync(file, "utf8");
