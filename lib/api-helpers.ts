@@ -231,6 +231,47 @@ export function isUniqueViolationError(
 }
 
 /**
+ * Bulk-insert a chunk, and on a unique violation keep the rows that are fine.
+ *
+ * A chunked insert is all-or-nothing: one colliding row fails the statement and
+ * takes its 499 neighbours with it. Both cold-list importers responded by
+ * counting the WHOLE chunk as duplicates — 499 good leads lost, reported to the
+ * operator as a plausible and false number. The founders ingest route had
+ * already solved it by retrying row by row; they just never reached that code,
+ * because the branch was guarded by a Postgres error code that is dead on Turso.
+ *
+ * Extracted after I wrote the same retry loop into two files verbatim. Returns
+ * counts rather than throwing so callers keep their own error shape; `failure`
+ * is set only for an error that is NOT a duplicate, and the caller decides
+ * whether that is fatal.
+ */
+export async function insertChunkSalvagingDuplicates<T>(
+  db: { from: (t: string) => any },
+  table: string,
+  chunk: T[],
+  select = "id",
+): Promise<{ inserted: number; duplicates: number; failure: { message?: string } | null }> {
+  const bulk = await db.from(table).insert(chunk).select(select);
+  if (!bulk.error) {
+    return { inserted: bulk.data?.length ?? 0, duplicates: 0, failure: null };
+  }
+  if (!isUniqueViolationError(bulk.error)) {
+    return { inserted: 0, duplicates: 0, failure: bulk.error };
+  }
+
+  // At least one row collided. Retry individually so the rest still land.
+  let inserted = 0;
+  let duplicates = 0;
+  for (const row of chunk) {
+    const one = await db.from(table).insert(row).select(select);
+    if (!one.error) inserted += one.data?.length ?? 0;
+    else if (isUniqueViolationError(one.error)) duplicates += 1;
+    else return { inserted, duplicates, failure: one.error };
+  }
+  return { inserted, duplicates, failure: null };
+}
+
+/**
  * Standard structured 503 payload for the "migration not applied" case.
  * Routes hand this to NextResponse.json with status: 503; UI components
  * branch on `error === "migration_not_applied"` to render the

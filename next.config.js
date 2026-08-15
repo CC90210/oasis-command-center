@@ -43,7 +43,37 @@ const nextConfig = {
   // If this stops being enough, the next lever is Vercel's Enhanced Builds
   // (bigger machine, costs money — CC's call, not an agent's).
   experimental: {
+    // Vercel builds this on 4 cores / 8 GB and kept OOM-killing a build worker.
+    // Three passes, and the middle one was mine being wrong:
+    //
+    // 1. webpackMemoryOptimizations — real, kept. Webpack stops retaining module
+    //    sources and caches only useful for incremental rebuilds, which a
+    //    one-shot CI build never does. Lowered the peak; not below the ceiling.
+    //
+    // 2. memoryBasedWorkersCount — REMOVED, it was a no-op. A reviewer said it
+    //    enforces a floor of four workers and I checked the installed source
+    //    rather than argue (node_modules/next/dist/build/index.js:307):
+    //
+    //      return Math.max(Math.min(cpus || 1, Math.floor(os.freemem() / 1e9)),
+    //        4);   // enforce a minimum of 4 workers
+    //
+    //    The default with no config is also 4, so on this box it changed
+    //    nothing. I had shipped it as a fix.
+    //
+    // 3. cpus — the actual lever. It is checked FIRST in getNumberOfWorkers and
+    //    returns directly, with no floor applied:
+    //
+    //      if (config.experimental.cpus && cpus !== defaultConfig...cpus)
+    //        return config.experimental.cpus;
+    //
+    //    Two workers instead of four halves the concurrent build memory. It
+    //    costs build time, which is the right thing to spend when the scarce
+    //    resource is RAM and the failure mode is a SIGKILL.
+    //
+    // Next lever if this is still not enough: Vercel Enhanced Builds — a bigger
+    // machine that costs money, so CC's call rather than an agent's.
     webpackMemoryOptimizations: true,
+    cpus: 2,
   },
   outputFileTracingRoot: path.join(__dirname),
   // lib/prompts/index.ts reads the .txt + .json prompt files at module init
