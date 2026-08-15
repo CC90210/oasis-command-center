@@ -118,7 +118,11 @@ test("no raw driver text reaches the HTTP response", () => {
 test("a failed total_recipients update is captured, not awaited bare", () => {
   // It used to be `await db...update(...)` with no error binding, so a failed
   // write left the campaign row on a stale count while the response said ok:true.
-  assert.match(CODE, /const \{ error: countErr \} = await db/);
+  // Bounded recovery: one retry, then a loud give-up. Not unbounded — that
+  // turns a genuinely broken write into a hung request.
+  assert.match(CODE, /let countErr = await writeCount\(\);/);
+  assert.match(CODE, /if \(countErr\) countErr = await writeCount\(\);/);
+  assert.match(CODE, /attempts: 2/);
   assert.match(CODE, /"outreach_count_update_failed"/);
   assert.match(CODE, /count_persisted:\s*false/);
 });

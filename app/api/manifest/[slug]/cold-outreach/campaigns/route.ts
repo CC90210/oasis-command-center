@@ -424,18 +424,32 @@ export async function POST(
   // list size on screen that the database did not agree with, and nothing
   // anywhere would say so.
   const recipientTotal = totalInserted + flaggedForRetry;
-  const { error: countErr } = await db
-    .from("cold_outreach_campaigns")
-    // Rows flagged for retry EXIST and are recipients of this campaign; leaving
-    // them out would under-report the list the operator is looking at.
-    .update({ total_recipients: recipientTotal })
-    .eq("id", campaignId)
-    .eq("tenant_id", context.tenantId);
+
+  // Bounded recovery: one retry, then give up loudly.
+  //
+  // The likeliest cause of a failed UPDATE here is a transient blip, and one
+  // retry converts most of those into success for the price of a single round
+  // trip. Unbounded retries would turn a genuinely broken write into a hung
+  // request, so the bound is the point — not the retry.
+  const writeCount = async () =>
+    (
+      await db
+        .from("cold_outreach_campaigns")
+        // Rows flagged for retry EXIST and are recipients of this campaign;
+        // leaving them out would under-report the list the operator sees.
+        .update({ total_recipients: recipientTotal })
+        .eq("id", campaignId)
+        .eq("tenant_id", context.tenantId)
+    ).error;
+
+  let countErr = await writeCount();
+  if (countErr) countErr = await writeCount();
 
   if (countErr) {
-    console.error("[cold-outreach] total_recipients update failed:", redactAll(countErr.message));
+    console.error("[cold-outreach] total_recipients update failed twice:", redactAll(countErr.message));
     await auditEvent("outreach_count_update_failed", "error", {
       intended_total: recipientTotal,
+      attempts: 2,
       error: redactAll(countErr.message),
     });
   }
@@ -444,9 +458,14 @@ export async function POST(
   // read `campaign_id` and are unaffected. A partial failure must not return a
   // response indistinguishable from a clean one.
   return NextResponse.json({
-    // Recipients landed and the campaign exists, so this is not a failed
-    // request — but `count_persisted: false` tells the caller the number below
-    // is what we inserted, not what the campaign row now says.
+    // ok:true, deliberately, even when the count write failed.
+    //
+    // A review argued for an explicit failure state here. The recipients DID
+    // land and the campaign DOES exist, and `ok:false` says neither happened —
+    // a caller that retries on it creates a SECOND campaign and sends the list
+    // twice. That is a worse failure than a stale count. `count_persisted:
+    // false` states exactly what went wrong: the number below is what we
+    // inserted and what we tried to store, not what the campaign row now says.
     ok: true,
     campaign_id: campaignId,
     total_recipients: recipientTotal,
