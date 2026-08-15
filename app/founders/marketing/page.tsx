@@ -57,6 +57,11 @@ export default async function MarketingPage() {
   // is "what needs you" was the one that was wrong.
   const awaitingVerdict = summary.by_status.in_review || 0;
 
+  // A failed read has no number to show. Returning 0 here would put a measured
+  // zero on screen next to a panel that just said the query failed.
+  const trackCount = (t: "organic" | "paid" | "seo" | "email"): string | number =>
+    summary.degraded ? "—" : summary.by_track[t];
+
   // "NEEDS YOU" MEANS NEEDS *CC*, and only assets awaiting a verdict do.
   //
   // This was `open_reviews + open_requests + awaitingVerdict`, which was wrong
@@ -210,12 +215,17 @@ export default async function MarketingPage() {
         </section>
       )}
 
-      {/* Counts underneath, never above. */}
+      {/* Counts underneath, never above.
+
+          On a degraded read these show an em dash, not a zero. The queue above
+          already says the read failed — printing "0" beside that panel is the
+          same confident lie in a smaller font, and a zero is indistinguishable
+          from a real measurement of nothing. */}
       <section className="grid grid-cols-2 gap-4 lg:grid-cols-4">
-        <Stat label="Organic" value={summary.by_track.organic} hint="IG · FB · TikTok · YT" />
-        <Stat label="Paid" value={summary.by_track.paid} hint="Meta · Google" />
-        <Stat label="SEO" value={summary.by_track.seo} hint="landing · articles" />
-        <Stat label="Email" value={summary.by_track.email} hint="lifecycle" />
+        <Stat label="Organic" value={trackCount("organic")} hint="IG · FB · TikTok · YT" />
+        <Stat label="Paid" value={trackCount("paid")} hint="Meta · Google" />
+        <Stat label="SEO" value={trackCount("seo")} hint="landing · articles" />
+        <Stat label="Email" value={trackCount("email")} hint="lifecycle" />
       </section>
 
       <section className="grid grid-cols-1 gap-4 md:grid-cols-2">
@@ -273,13 +283,27 @@ export default async function MarketingPage() {
           </div>
         </Card>
 
-        <Card title="Performance" subtitle="Per channel, with provenance">
+        {/* This card said "No metrics connected yet. Phase 5." for hours AFTER
+            the Performance tab shipped with 79 posts of real Zernio data behind
+            it. A stale placeholder is worse than an empty state: it tells the
+            operator a working feature does not exist, so nobody opens it. */}
+        <Card
+          title="Performance"
+          subtitle="Per channel, with provenance"
+          action={
+            <Link
+              href="/founders/marketing/performance"
+              className="text-xs font-semibold text-accent hover:underline"
+            >
+              Open
+            </Link>
+          }
+        >
           <div className="flex items-center gap-3">
             <BarChart3 size={18} className="text-accent" aria-hidden />
             <div className="text-sm text-fg-muted">
-              {/* Stated plainly rather than shown as a zero, which would read as
-                  "we measured and got nothing" instead of "not connected yet". */}
-              No metrics connected yet. Phase 5.
+              Views, engagement and retention per channel, pulled from Zernio on a
+              schedule.
             </div>
           </div>
         </Card>
