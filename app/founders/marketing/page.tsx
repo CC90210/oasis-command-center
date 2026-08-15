@@ -12,9 +12,18 @@
  * happen. So "what needs you" is the first thing on the page and the numbers
  * sit underneath it.
  *
- * Phase 1 ships the shell, the gate and the library. The verdict loop lands in
- * Phase 3 — the queue below renders its real (currently zero) counts rather
- * than mock rows, so nothing here overstates what is wired.
+ * NO ROADMAP PHASES IN THIS COMMENT, deliberately. It used to say "the queue
+ * below renders its real (currently zero) counts" — written when the queue was
+ * empty. It is 44. The same rot put "No metrics connected yet. Phase 5." on the
+ * Performance card for hours after that tab shipped with real numbers behind
+ * it, and a stale count in lib/api-helpers' docstring within an hour of my
+ * writing it. A roadmap note describes the day it was written; the code moves
+ * and the note does not, and then it actively misinforms whoever reads it next.
+ *
+ * What is true is checkable from here: "needs you" counts assets at `in_review`,
+ * the tiles and cards all render an em dash rather than a zero when the read is
+ * degraded (tests/marketing-degraded-render.test.ts enforces that), and the
+ * Performance card links to a tab that is live.
  */
 
 import { notFound } from "next/navigation";
@@ -154,7 +163,7 @@ export default async function MarketingPage() {
           <MarketingEmpty
             headline="Nothing waiting on you"
             detail="When Maven produces something it lands here for a verdict. Approve, request changes, or reject — a change request with a reason is the most useful thing you can give her."
-            hint="The review loop ships in Phase 3."
+            hint="Open any asset from the Library to approve or archive it."
           />
         ) : (
           <Card noPadding>
