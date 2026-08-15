@@ -2,7 +2,7 @@
   "name": "oasis-command-center",
   "version": "1.0.0",
   "private": true,
-  "description": "OASIS AI Agent Command Center — the operating system for AI agents. Multi-agent, profile-driven, real-time.",
+  "description": "OASIS AI Agent Command Center \u2014 the operating system for AI agents. Multi-agent, profile-driven, real-time.",
   "scripts": {
     "dev": "next dev --port 3100",
     "build": "next build",
