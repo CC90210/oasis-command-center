@@ -23,10 +23,10 @@ import { resolveFounder } from "@/lib/founders/gate";
 import { platformLabel } from "@/lib/founders-marketing-core";
 import {
   engagements,
-  getPerformance,
   retention,
   type PerfRow,
-} from "@/lib/founders/performance-queries";
+} from "@/lib/founders-performance-core";
+import { getPerformance } from "@/lib/founders/performance-queries";
 
 export const dynamic = "force-dynamic";
 export const metadata = { title: "Performance · OASIS" };

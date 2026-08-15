@@ -127,7 +127,23 @@ export async function POST(req: Request, ctx: Ctx) {
     .eq("asset_id", id)
     .in("state", ["queued", "running"])
     .limit(1);
-  if (!inflight.error && (inflight.data || []).length) {
+  // FAIL CLOSED. `!inflight.error && ...` skipped the guard on exactly the case
+  // it exists for: when the read fails we do not know whether a publish is in
+  // flight, and the sentence three lines up is "there is no unsending". A
+  // duplicate post is unrecoverable; a 503 costs one retry.
+  if (inflight.error) {
+    console.warn("[founders:publish] in-flight check failed", inflight.error.message);
+    return NextResponse.json(
+      {
+        ok: false,
+        error: "inflight_check_failed",
+        detail:
+          "Could not confirm whether a publish is already running for this asset, so nothing was queued. Try again.",
+      },
+      { status: 503 },
+    );
+  }
+  if ((inflight.data || []).length) {
     return NextResponse.json(
       { ok: false, error: "already_queued", detail: "A publish for this asset is already in flight." },
       { status: 409 },
