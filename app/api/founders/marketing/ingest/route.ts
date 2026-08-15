@@ -12,7 +12,7 @@
 
 import { NextResponse } from "next/server";
 import { getServiceSupabase } from "@/lib/supabase-server";
-import { isMissingTableError } from "@/lib/api-helpers";
+import { isMissingTableError, isUniqueViolationError } from "@/lib/api-helpers";
 import { resolveFounder } from "@/lib/founders/gate";
 import {
   CORPUS_LABELS,
@@ -30,9 +30,23 @@ const MAX_PER_REQUEST = 25;
 
 type QueuedRow = { id: string; source_url: string; state: string };
 
-/** Postgres 23505 unique_violation — the in-flight guard fired. A dedup, not a failure. */
-const isUniqueViolation = (err: { code?: string } | null | undefined): boolean =>
-  err?.code === "23505";
+// This route rolled its own `err.code === "23505"` classifier. That code is
+// Postgres's, and this backend is Turso/libSQL: lib/turso-postgrest.ts:53 builds
+// every error as `err(message, code = "TURSO_ADAPTER")`, and the only other code
+// it ever sets is PGRST116. So the check was unconditionally false in
+// production, and the branch it guards had never once run.
+//
+// It matters because the collision is real and live —
+// marketing_corpus_one_in_flight_url_idx (tenant_id, source_url) WHERE
+// source_url IS NOT NULL AND state IN ('queued','extracting') is in the applied
+// schema. Paste a batch where ONE link is already in flight and SQLite raises;
+// the check said "not a duplicate", control fell to the else, and the WHOLE
+// batch died with a 500 — while the per-row retry loop that exists to salvage
+// exactly this case sat unreachable directly above it.
+//
+// lib/api-helpers.ts already solved this in 971484a (bridge pairing hit the same
+// wall). Use that rather than a second, divergent copy.
+const isUniqueViolation = isUniqueViolationError;
 
 const notFound = () => NextResponse.json({ ok: false, error: "not_found" }, { status: 404 });
 
