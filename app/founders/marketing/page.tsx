@@ -244,9 +244,11 @@ export default async function MarketingPage() {
           <div className="flex items-center gap-3">
             <Library size={18} className="text-accent" aria-hidden />
             <div className="text-sm text-fg-muted">
-              {summary.total === 0
-                ? "No assets registered yet."
-                : `${summary.total} asset${summary.total === 1 ? "" : "s"} stored.`}
+              {summary.degraded
+                ? "Couldn't read the library."
+                : summary.total === 0
+                  ? "No assets registered yet."
+                  : `${summary.total} asset${summary.total === 1 ? "" : "s"} stored.`}
             </div>
           </div>
         </Card>
@@ -255,7 +257,9 @@ export default async function MarketingPage() {
           <div className="flex items-center gap-3">
             <GraduationCap size={18} className="text-accent" aria-hidden />
             <div className="text-sm text-fg-muted">
-              {summary.corpus_indexed === 0 && summary.corpus_pending === 0 ? (
+              {summary.degraded ? (
+                "Couldn't read the corpus."
+              ) : summary.corpus_indexed === 0 && summary.corpus_pending === 0 ? (
                 // Ingestion HAS landed — the route enqueues and
                 // scripts/ingest_training_link.py drains it every five minutes.
                 // The old copy said Phase 2 long after both halves existed,
@@ -276,9 +280,11 @@ export default async function MarketingPage() {
           <div className="flex items-center gap-3">
             <Inbox size={18} className="text-accent" aria-hidden />
             <div className="text-sm text-fg-muted">
-              {summary.open_requests === 0
-                ? "Nothing queued."
-                : `${summary.open_requests} open.`}
+              {summary.degraded
+                ? "Couldn't read your requests."
+                : summary.open_requests === 0
+                  ? "Nothing queued."
+                  : `${summary.open_requests} open.`}
             </div>
           </div>
         </Card>
