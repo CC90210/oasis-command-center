@@ -145,6 +145,14 @@ async function countDripEmailByBrand(
         .eq("direction", "outbound")
         .like("agent_source", "sequence:%")
         .gte("created_at", sinceIso)
+        // ORDER BEFORE RANGE. Unordered paging has no defined row order, so page
+        // 2 can repeat page 1's rows and skip others. Here the count feeds a
+        // DAILY SEND CEILING, and the dangerous direction is the undercount: a
+        // skipped row means the governor believes fewer emails went out than did
+        // and lets more through. The comment above already says the paging is
+        // defensive against a backlog — a backlog is exactly when this bites,
+        // because it is the only time a second page is fetched at all.
+        .order("id", { ascending: true })
         .range(page * 1000, page * 1000 + 999);
       if (r.error) return null;
       const rows = (r.data || []) as Array<{ metadata: Record<string, unknown> | null }>;
