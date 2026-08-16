@@ -88,6 +88,18 @@ async function buildStageMap(db: DB): Promise<Map<string, { stage: string; lead_
         .select("id,data")
         .eq("tenant_id", TENANT_ID)
         .eq("entity_type", entity)
+        // ORDER BEFORE RANGE. `.range()` on an unordered query has no defined row
+        // order, so page 2 may repeat rows from page 1 and SKIP others — and a
+        // skipped lead is simply absent from the stage map, which is this
+        // function's entire output. Duplicates here are harmless (the map is
+        // keyed by phone); the misses are the defect.
+        //
+        // Not hypothetical: this tenant holds 1,266 `lead` and 1,096
+        // `application` rows, so both loops genuinely take a second page today.
+        // `id` because it is the primary key — unique, so the ordering is total
+        // with no ties to break. Same fix, same reason, as the founders
+        // marketing readers (lib/founders/marketing-queries.ts pageAll).
+        .order("id", { ascending: true })
         .range(from, from + PAGE - 1);
       const rows = (r.data || []) as Array<{ id: string; data: Record<string, unknown> }>;
       for (const row of rows) {
