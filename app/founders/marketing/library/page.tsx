@@ -72,6 +72,7 @@ import {
   isAssetStatus,
   isBrandGroupKey,
   isLifecycle,
+  lifecycleHint,
   lifecycleLabel,
   parseSlideUrls,
   isChannel,
@@ -502,31 +503,42 @@ export default async function MarketingLibraryPage({
             // narrowest filter that could explain the emptiness, so the copy
             // names the thing to clear rather than declaring the library empty —
             // which was flatly false when only one stage was.
+            // LIFECYCLE NEEDS A RUNG OF ITS OWN. Without one, clicking a pill
+            // with a zero count — "Approved 0" — fell through to
+            // "<brand> is empty", which is flatly false about a library holding
+            // 43 assets, and is the exact lie this ladder exists to prevent. A
+            // new filter added above the grid has to add a rung here in the same
+            // change, or the most prominent control on the page produces the
+            // most misleading empty state.
             headline={
               libraryDegraded
                 ? "Couldn't load the library"
                 : status
                 ? "Nothing at this stage"
-                : track || channel
-                  ? "Nothing in this channel yet"
-                  : author
-                    ? "Nothing from this author"
-                    : brand
-                      ? "Nothing under this brand yet"
-                      : `${activeGroup.label} is empty`
+                : lifecycle
+                  ? `Nothing ${lifecycleLabel(lifecycle).toLowerCase()}`
+                  : track || channel
+                    ? "Nothing in this channel yet"
+                    : author
+                      ? "Nothing from this author"
+                      : brand
+                        ? "Nothing under this brand yet"
+                        : `${activeGroup.label} is empty`
             }
             detail={
               libraryDegraded
                 ? "The query failed, so this is not a statement about what the library holds. Nothing has been lost — refresh, and if it persists the server log carries the reason under [marketing:assets]."
                 : status
                 ? "No assets are sitting at this stage right now. Clear the stage to see the rest of the library."
-                : track || channel
-                  ? "No assets are registered for this channel. Produce something, or clear the filter to see everything."
-                  : author
-                    ? "Nobody has registered an asset under this address in this tab."
-                    : brand
-                      ? "This brand has no assets in the library yet."
-                      : activeGroup.empty
+                : lifecycle
+                  ? `Nothing in this tab is ${lifecycleHint(lifecycle)}. The library is not empty — pick another state above to see the rest.`
+                  : track || channel
+                    ? "No assets are registered for this channel. Produce something, or clear the filter to see everything."
+                    : author
+                      ? "Nobody has registered an asset under this address in this tab."
+                      : brand
+                        ? "This brand has no assets in the library yet."
+                        : activeGroup.empty
             }
             hint="Drop links in the Train tab — they are fetched and analysed within a few minutes."
           />
