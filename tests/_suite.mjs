@@ -47,6 +47,7 @@ const TESTS = [
   "tests/oasis-funnel.test.ts",
   "tests/lead-scope.test.ts",
   "tests/fuzzy-match.test.ts",
+  "tests/infer-result-text.test.ts",
   "tests/csv-combine.test.ts",
   "tests/sunbiz-events-format.test.ts",
   "tests/application-upsert.test.ts",
