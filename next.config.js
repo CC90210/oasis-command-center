@@ -88,9 +88,26 @@ const nextConfig = {
     //
     //    Fixed in vercel.json, not here: Next has no config knob for the heap,
     //    so the cap rides on the buildCommand as
-    //    `NODE_OPTIONS='--max-old-space-size=3072' next build`.
-    //    3072 x 2 workers + the parent stays under 8 GB while leaving >50%
-    //    headroom over measured demand.
+    //    `NODE_OPTIONS='--max-old-space-size=5120' next build`.
+    //
+    // 5. WHY ONE WORKER AND 5 GB RATHER THAN TWO AND 3 GB. The first attempt was
+    //    3072 x 2, sized from the local measurement above. Vercel rejected the
+    //    premise: a worker hit that ceiling and aborted in 36 SECONDS.
+    //
+    //      FATAL ERROR: Reached heap limit Allocation failed
+    //      Next.js build worker exited with code: null and signal: SIGABRT
+    //
+    //    The local number was measured on a build with no cache, because the
+    //    test did `rm -rf .next` first. Vercel restores one — "Restored build
+    //    cache from previous deployment" — and deserializing that cache lives
+    //    in the same heap, so the real ceiling there is higher than anything a
+    //    cold local build can show. Measuring the wrong machine measured the
+    //    wrong number.
+    //
+    //    So: cpus 1 instead of 2, and the freed budget goes to the one worker.
+    //    5 GB + parent + install overhead fits inside 8 GB with room, and there
+    //    is no second worker to race for it. Build time is the cost, and it is
+    //    the right thing to spend when the scarce resource is RAM.
     //
     //    NODE_OPTIONS reaches the workers, which is the half worth checking
     //    rather than assuming — jest-worker children inherit the parent env.
@@ -106,7 +123,9 @@ const nextConfig = {
     // and was the wrong lever to reach for — it would have paid to accommodate
     // an unbounded heap rather than bounding it.
     webpackMemoryOptimizations: true,
-    cpus: 2,
+    // 1, not 2 — see note 5 above. Two workers each entitled to a multi-GB heap
+    // is what exhausted the container; one worker cannot race itself.
+    cpus: 1,
   },
   outputFileTracingRoot: path.join(__dirname),
   // lib/prompts/index.ts reads the .txt + .json prompt files at module init
