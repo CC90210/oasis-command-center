@@ -70,8 +70,41 @@ const nextConfig = {
     //    costs build time, which is the right thing to spend when the scarce
     //    resource is RAM and the failure mode is a SIGKILL.
     //
-    // Next lever if this is still not enough: Vercel Enhanced Builds — a bigger
-    // machine that costs money, so CC's call rather than an agent's.
+    // 4. THE ACTUAL CAUSE, found 2026-08-16 by measuring instead of reasoning.
+    //    The build does not need 8 GB and never did. Capping V8's heap and
+    //    rebuilding from a cold .next:
+    //
+    //      --max-old-space-size=3072  -> Compiled successfully in 39.8s, 40/40
+    //      --max-old-space-size=2048  -> Compiled successfully in 38.8s, 40/40
+    //
+    //    Real per-worker demand is under 2 GB. What kills the Vercel build is
+    //    that V8 with NO cap sizes its heap against the CONTAINER, so each
+    //    worker grows toward 8 GB whether or not it needs to. Two of them do it
+    //    at once, the container runs out, and one gets SIGKILLed. That is why
+    //    the failures burn 38-46 minutes first — a GC death spiral at the
+    //    ceiling, making no progress — and why the identical tree passes as
+    //    often as it fails. It was never a leak or a size problem; it was an
+    //    unbounded heap on a bounded machine.
+    //
+    //    Fixed in vercel.json, not here: Next has no config knob for the heap,
+    //    so the cap rides on the buildCommand as
+    //    `NODE_OPTIONS='--max-old-space-size=3072' next build`.
+    //    3072 x 2 workers + the parent stays under 8 GB while leaving >50%
+    //    headroom over measured demand.
+    //
+    //    NODE_OPTIONS reaches the workers, which is the half worth checking
+    //    rather than assuming — jest-worker children inherit the parent env.
+    //    Verified by setting an absurd 180 MB cap and watching the failure land
+    //    where it should: "Next.js build worker exited with code: 134", V8's own
+    //    heap error inside the WORKER, not a container SIGKILL.
+    //
+    //    Bonus: a capped build that genuinely runs out now fails in seconds with
+    //    "JavaScript heap out of memory" instead of thrashing for 46 minutes and
+    //    dying to an opaque signal.
+    //
+    // Enhanced Builds (a bigger machine, costs money) is therefore NOT needed,
+    // and was the wrong lever to reach for — it would have paid to accommodate
+    // an unbounded heap rather than bounding it.
     webpackMemoryOptimizations: true,
     cpus: 2,
   },
