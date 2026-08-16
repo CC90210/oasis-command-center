@@ -194,6 +194,86 @@ function classify(
 }
 
 /**
+ * Read every row of a counting query, one page at a time.
+ *
+ * THREE READERS HAD THEIR OWN COPY of this loop — summary, facets, lifecycle —
+ * differing only in the columns selected and what they tallied. The loop is short
+ * but every line of it is load-bearing, and this file already records the loop
+ * being copied WRONG once: getMarketingSummary's version was lifted from the
+ * brands reader without its `.order()`, which CodeRabbit caught. Three copies is
+ * three chances to drop the same line, and the failure is silent — pages that
+ * overlap or skip, producing counts wrong in an unpredictable direction.
+ *
+ * The mechanics that have to be right now live in one place:
+ *
+ *   ORDER BEFORE RANGE. `.range()` on an unordered query has no stable row order,
+ *   so page 2 can repeat or skip rows from page 1. `id` because it is the primary
+ *   key — unique, so the ordering is total with no ties to break. Ordering by a
+ *   non-unique column (an early version used `brand_name`, which 43 rows share)
+ *   makes the page boundary arbitrary.
+ *
+ *   PAGING AT ALL. PostgREST caps a response at max-rows (1,000 on Supabase) and
+ *   returns the short page with NO error, while the Turso bridge applies no cap —
+ *   so one unpaginated read gives two different answers per backend and the
+ *   Supabase one is silently low.
+ *
+ * `build()` is called PER PAGE rather than once, because the query builders are
+ * single-use: reapplying `.range()` to a spent builder is not a fresh query.
+ *
+ * Returns what happened rather than throwing, so each caller decides what an
+ * absent table or a broken read means for ITS shape — they differ, and that
+ * difference is the one thing worth keeping per-reader. Rows from pages that DID
+ * load are already consumed when "degraded" comes back: a partial count beats a
+ * blanked screen, as long as the caller flags it.
+ */
+// Deliberately NOT recursive (`order` returning PagedQuery<T> again). Written
+// that way first, it made tsc give up with TS2589 "type instantiation is
+// excessively deep" once the real Supabase builder was assigned to it — its
+// method chain is already deeply generic, and a self-referential wrapper
+// multiplies it. Two flat shapes describe the only chain this helper uses.
+/**
+ * The two filter methods scopeToBrandGroup uses, and nothing else.
+ *
+ * Passing the real Supabase builder straight into that generic makes tsc infer
+ * T as the full builder type and give up with TS2589. Casting to this shallow
+ * shape first keeps the inference one level deep. It is a compile-time narrowing
+ * only — the same object is passed through untouched.
+ */
+type BrandFilterable = {
+  in: (column: string, values: string[]) => BrandFilterable;
+  not: (column: string, op: string, value: string) => BrandFilterable;
+};
+
+type RangeQuery<T> = {
+  range: (from: number, to: number) => PromiseLike<{
+    data: T[] | null;
+    error: { code?: string; message?: string } | null;
+  }>;
+};
+
+type PagedQuery<T> = {
+  order: (column: string, opts: { ascending: boolean }) => RangeQuery<T>;
+};
+
+async function pageAll<T>(
+  label: string,
+  build: () => PagedQuery<T>,
+  consume: (rows: T[]) => void,
+): Promise<"ok" | "absent" | "degraded"> {
+  for (let from = 0; ; from += PAGE_SIZE) {
+    const r = await build()
+      .order("id", { ascending: true })
+      .range(from, from + PAGE_SIZE - 1);
+    const verdict = classify(label, r.error);
+    if (verdict === "absent") return "absent";
+    if (verdict === "broken") return "degraded";
+    const rows = r.data || [];
+    consume(rows);
+    if (rows.length < PAGE_SIZE) return "ok";
+  }
+}
+
+/**
  * The LIST readers (assets, media, corpus rows) return [] on any error, so
  * "absent" and "broken" are the same decision to them: stop. They keep this
  * shim rather than being rewritten — only getMarketingSummary renders COUNTS,
@@ -248,13 +328,14 @@ export async function getMarketingSummary(
     // every brand on the tenant. Paged, because a short read here would not just
     // undercount `total` — ownAssetIds is the allowlist those counts use, so it
     // would quietly drop real work from "waiting on you" too.
-    let degraded = false;
     const rows: Array<{ id: string; track: Track; status: string }> = [];
-    for (let from = 0; ; from += PAGE_SIZE) {
-      const page = await db
-        .from("marketing_asset")
-        .select("id, track, status")
-        .eq("tenant_id", tenantId)
+    const outcome = await pageAll<{ id: string; track: Track; status: string }>(
+      "summary.assets",
+      () =>
+        db
+          .from("marketing_asset")
+          .select("id, track, status")
+          .eq("tenant_id", tenantId)
         // STAYS OASIS-OWN even though the Library now has four brand tabs.
         // This summary drives "Needs you" — CC's own verdict queue — and the
         // publish route is own-brand-only, so a client's ad is not work he can
@@ -262,30 +343,23 @@ export async function getMarketingSummary(
         // dashboard whose entire job is to be trusted about his workload.
         // The per-brand counts CC asked for come from getMarketingFacets, which
         // spans every tab on purpose.
-        .eq("brand_slug", FOUNDERS_OWN_BRAND)
-        // ORDER BEFORE RANGE, always. `.range()` on an unordered query has no
-        // stable row order, so page 2 can repeat or skip rows from page 1 — the
-        // count would then be wrong in either direction, and ownAssetIds (the
-        // allowlist for the review/request counts) wrong with it. `id` because it
-        // is the primary key: unique, so the ordering is total, with no ties to
-        // break. getMarketingBrands below does the same thing with .order() —
-        // I copied its paging loop and dropped this line, which CodeRabbit caught.
-        .order("id", { ascending: true })
-        .range(from, from + PAGE_SIZE - 1);
-      const verdict = classify("summary.assets", page.error);
-      // Absent table = pre-migration = genuinely empty, and quiet.
-      if (verdict === "absent") return EMPTY_MARKETING_SUMMARY;
-      // Broken mid-page: keep the pages we DID get so the screen is not blanked,
-      // but mark the whole summary degraded — the counts below are scoped by
-      // these ids, so a short read makes every one of them an undercount.
-      if (verdict === "broken") {
-        degraded = true;
-        break;
-      }
-      const got = (page.data || []) as Array<{ id: string; track: Track; status: string }>;
-      rows.push(...got);
-      if (got.length < PAGE_SIZE) break;
-    }
+          .eq("brand_slug", FOUNDERS_OWN_BRAND) as unknown as PagedQuery<{
+          id: string;
+          track: Track;
+          status: string;
+        }>,
+      // ORDER BEFORE RANGE lives in pageAll now, along with the paging itself.
+      // This loop was written by copying the brands reader and DROPPING its
+      // .order(), which CodeRabbit caught — the reason one shared implementation
+      // is worth the indirection.
+      (got) => rows.push(...got),
+    );
+    // Absent table = pre-migration = genuinely empty, and quiet.
+    if (outcome === "absent") return EMPTY_MARKETING_SUMMARY;
+    // Broken mid-page keeps the pages we DID get so the screen is not blanked,
+    // but marks the whole summary degraded — the counts below are scoped by
+    // these ids, so a short read makes every one of them an undercount.
+    let degraded = outcome === "degraded";
 
     const ownAssetIds = rows.map((r) => r.id);
     const by_track: Record<Track, number> = { organic: 0, paid: 0, seo: 0, email: 0 };
@@ -775,25 +849,25 @@ export async function getLifecycleCounts(
   try {
     const db = getServiceSupabase();
     const counts = { ...empty };
-    let degraded = false;
-    for (let from = 0; ; from += PAGE_SIZE) {
-      let q = db
-        .from("marketing_asset")
-        .select("status, published_at")
-        .eq("tenant_id", tenantId);
-      q = scopeToBrandGroup(q, group);
-      const r = await q.order("id", { ascending: true }).range(from, from + PAGE_SIZE - 1);
-      const verdict = classify("lifecycle", r.error);
-      if (verdict === "absent") return { counts: empty, degraded: false };
-      if (verdict === "broken") {
-        degraded = true;
-        break;
-      }
-      const rows = (r.data || []) as Array<{ status: string; published_at: string | null }>;
-      for (const row of rows) counts[lifecycleOf(row)] += 1;
-      if (rows.length < PAGE_SIZE) break;
-    }
-    return { counts, degraded };
+    const outcome = await pageAll<{ status: string; published_at: string | null }>(
+      "lifecycle",
+      () =>
+        scopeToBrandGroup(
+          db
+            .from("marketing_asset")
+            .select("status, published_at")
+            .eq("tenant_id", tenantId) as unknown as BrandFilterable,
+          group,
+        ) as unknown as PagedQuery<{ status: string; published_at: string | null }>,
+      (rows) => {
+        for (const row of rows) counts[lifecycleOf(row)] += 1;
+      },
+    );
+    // Absent = pre-migration = genuinely empty, and quiet. Partial counts from a
+    // broken read are kept but flagged, because a floor the operator knows is a
+    // floor beats a blank pill row.
+    if (outcome === "absent") return { counts: empty, degraded: false };
+    return { counts, degraded: outcome === "degraded" };
   } catch {
     return { counts: empty, degraded: true };
   }
@@ -805,33 +879,23 @@ export async function getMarketingFacets(tenantId: string): Promise<MarketingFac
     const db = getServiceSupabase();
     const brands = new Map<string, BrandFacet>();
     const authors = new Map<string, number>();
-    let degraded = false;
 
-    for (let from = 0; ; from += PAGE_SIZE) {
-      const r = await db
-        .from("marketing_asset")
-        .select("brand_slug, brand_name, author_email")
-        .eq("tenant_id", tenantId)
-        // ORDER BEFORE RANGE. `.range()` on an unordered query has no stable row
-        // order, so page 2 can repeat or skip rows from page 1 — and every number
-        // here would then be wrong in an unpredictable direction. `id` is the
-        // primary key: unique, so the ordering is total with no ties to break.
-        // The old version ordered by `brand_name`, which is NOT unique — 43 rows
-        // share one value, so its page boundary was arbitrary.
-        .order("id", { ascending: true })
-        .range(from, from + PAGE_SIZE - 1);
-      const verdict = classify("facets", r.error);
-      // Pre-migration: the table genuinely is not there, and empty is honest.
-      if (verdict === "absent") return EMPTY_MARKETING_FACETS;
-      if (verdict === "broken") {
-        degraded = true;
-        break;
-      }
-      const rows = (r.data || []) as Array<{
-        brand_slug: string;
-        brand_name: string;
-        author_email: string | null;
-      }>;
+    const outcome = await pageAll<{
+      brand_slug: string;
+      brand_name: string;
+      author_email: string | null;
+    }>(
+      "facets",
+      () =>
+        db
+          .from("marketing_asset")
+          .select("brand_slug, brand_name, author_email")
+          .eq("tenant_id", tenantId) as unknown as PagedQuery<{
+          brand_slug: string;
+          brand_name: string;
+          author_email: string | null;
+        }>,
+      (rows) => {
       for (const row of rows) {
         if (row.brand_slug) {
           const prev = brands.get(row.brand_slug);
@@ -848,15 +912,17 @@ export async function getMarketingFacets(tenantId: string): Promise<MarketingFac
           authors.set(row.author_email, (authors.get(row.author_email) || 0) + 1);
         }
       }
-      if (rows.length < PAGE_SIZE) break;
-    }
+      },
+    );
+    // Pre-migration: the table genuinely is not there, and empty is honest.
+    if (outcome === "absent") return EMPTY_MARKETING_FACETS;
 
     return {
       brands: [...brands.values()].sort((a, b) => b.count - a.count || a.name.localeCompare(b.name)),
       authors: [...authors.entries()]
         .map(([email, count]) => ({ email, count }))
         .sort((a, b) => b.count - a.count || a.email.localeCompare(b.email)),
-      degraded,
+      degraded: outcome === "degraded",
     };
   } catch {
     // Never throw from a read path (the file convention), but do not claim the
