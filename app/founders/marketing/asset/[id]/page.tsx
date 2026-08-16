@@ -36,6 +36,7 @@ import {
   isRenderableCarousel,
   parsePlatforms,
   parseSlideUrls,
+  authorName,
   platformLabel,
   stalePublishWarning,
   trackLabel,
@@ -140,7 +141,9 @@ export default async function AssetDetailPage({
     // goes to as many as six places.
     ["Posted to", parsePlatforms(asset.platforms).map(platformLabel).join(" · ") || null],
     ["Slides", asset.asset_type === "carousel" ? `${slideUrls.length} of ${asset.slide_count}` : null],
-    ["Added by", asset.author_email],
+    // Named, not addressed — two founders contribute here and "Adon" is a
+    // person you recognise where adon@oasisai.work is a string you parse.
+    ["Added by", authorName(asset.author_email)],
     ["Format", asset.format],
     ["Aspect", asset.aspect],
     ["Duration", fmtDuration(asset.duration_s as unknown as number)],

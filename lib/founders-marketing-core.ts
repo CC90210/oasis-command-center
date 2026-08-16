@@ -101,10 +101,17 @@ export const BRAND_GROUPS: readonly BrandGroup[] = [
     empty: "Nothing registered for OASIS yet.",
   },
   {
+    // "Personal", not "Conaugh McKenna". CC, 2026-08-16: *"I think you're
+    // confusing the like music and Kona McKenna and Oasis AI ... we should just
+    // do like personal so it should be Oasis AI personal music and then
+    // clients."* Naming a tab after a person reads as "posts about Conaugh"
+    // beside a company tab and a genre tab; naming it after its ROLE puts all
+    // four on one axis — whose brand is this for. The slug stays `conaugh`
+    // because it is a stored value and renaming it would orphan every row.
     key: "conaugh",
-    label: "Conaugh McKenna",
+    label: "Personal",
     slugs: ["conaugh"],
-    empty: "Nothing under CC's personal brand yet — Maven registers here with brand_slug='conaugh'.",
+    empty: "Nothing under the personal brand yet — Maven registers here with brand_slug='conaugh'.",
   },
   {
     key: "music",
@@ -293,6 +300,33 @@ export const parsePlatforms = parseStringArray;
  * exactly as stored: a carousel read out of order is a different post.
  */
 export const parseSlideUrls = parseStringArray;
+
+/**
+ * Who added an asset, as a person rather than a mailbox.
+ *
+ * CC, 2026-08-16: *"When I mentioned Adon, you have to remember he's our
+ * co-founder for OASIS AI, so Adon will contribute to this. We need to make sure
+ * that he's getting listed in the metadata in terms of what it says and whose it
+ * added by."*
+ *
+ * The detail page rendered `author_email` raw, so provenance on a co-founded
+ * library read as an address. Both founders are named here; anything else falls
+ * back to the local part, and an unknown address is still shown rather than
+ * hidden — provenance you cannot read beats provenance you cannot see.
+ *
+ * This is DISPLAY ONLY. The stored value stays the email, because that is the
+ * identity you can still argue with in six months.
+ */
+const FOUNDER_NAMES: Record<string, string> = {
+  "conaugh@oasisai.work": "CC",
+  "adon@oasisai.work": "Adon",
+};
+
+export function authorName(email: string | null | undefined): string {
+  const e = (email || "").trim().toLowerCase();
+  if (!e) return "unknown";
+  return FOUNDER_NAMES[e] || e.split("@")[0] || e;
+}
 
 /** Display label for a platform key. Falls back to the key rather than hiding it. */
 export function platformLabel(key: string): string {
