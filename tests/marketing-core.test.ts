@@ -316,10 +316,11 @@ assert.ok(!isOwnBrand(null) && !isOwnBrand(undefined) && !isOwnBrand(""),
 }
 
 // ── a publish request nothing ever collected ─────────────────────────────────
-// The Post panel claimed "the publisher picks it up within a minute" while the
-// drainer named by database/140 had never been written, so every request landed
-// at state='queued' and stayed there under a green success message. These pin
-// the replacement: the page notices, from the row's own age, that nothing came.
+// The Post panel claimed "the publisher picks it up within a minute". The drain
+// exists and is healthy, but it runs on the OPERATOR'S MACHINE — so whenever
+// that machine is off, the row waits indefinitely under a green success message
+// and the panel cannot tell that state from a publish in flight. These pin the
+// replacement: the page notices, from the row's own age, that nothing came.
 {
   const T0 = new Date("2026-08-16T12:00:00Z");
   const at = (mins: number) =>

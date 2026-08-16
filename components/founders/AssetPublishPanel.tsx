@@ -96,15 +96,16 @@ export function AssetPublishPanel({
       return;
     }
     setPicked([]);
-    // NOT "the publisher picks it up within a minute", which is what this said
-    // and could not keep: the drainer named by database/140 has never been
-    // written, so the row lands at state='queued' and sits there. Claiming a
-    // send that did not happen is the one failure the operator cannot detect
-    // from this screen. It now says exactly what occurred — a request was
-    // recorded — and the panel below reports it if nothing ever collects it.
+    // This said "the publisher picks it up within a minute" — true of the drain's
+    // SCHEDULE (a cron_engine SEED_JOB on `* * * * *`) and not of the outcome.
+    // That drain runs on the operator's machine, so when the machine is off the
+    // row simply waits, and the sentence promised a minute that could be a night.
+    // It now reports what definitely happened (a request was recorded) and names
+    // the condition for the rest; the panel below flags a request nothing has
+    // collected.
     setMsg({
       ok: true,
-      text: `Recorded for ${(body.platforms || picked).join(", ")}. Nothing is sent until the publisher collects it.`,
+      text: `Recorded for ${(body.platforms || picked).join(", ")}. It goes out on the next publisher run.`,
     });
     start(() => router.refresh());
   }
@@ -175,11 +176,11 @@ export function AssetPublishPanel({
         </div>
       )}
 
-      {/* A request that nothing ever collected. Rendered as a warning rather
-          than left to look like normal queue latency — see stalePublishWarning.
-          Computed on each render from the row's own age, so it appears without a
-          deploy while the queue has no consumer, and stops appearing without one
-          the day it gets a working drainer. */}
+      {/* A request nothing has collected yet. Rendered as a warning rather than
+          left to look like normal queue latency — see stalePublishWarning.
+          Computed from the row's own age on each render, so it reports the drain
+          being unreachable (operator machine off, cron paused, process wedged)
+          without this page needing to reach that machine to ask. */}
       {staleWarning && (
         <div
           role="status"

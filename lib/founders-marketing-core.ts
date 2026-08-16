@@ -523,29 +523,35 @@ export function freshnessLabel(capturedAt: string | null | undefined, now = new 
  *
  * How long a `queued` publish intent may sit before the page says so.
  *
- * THE DEFECT THIS EXISTS FOR. The Post panel told the operator *"Queued for
- * instagram, tiktok… The publisher picks it up within a minute"* — a promise
- * about a process that does not exist. `database/140_marketing_publish_intent.sql`
- * defines the queue and names its consumer, `marketing_publish_drain.py`, and
- * that file has never been written: `grep -rl publish_intent CMO-Agent/scripts/`
- * returns nothing (verified 2026-08-16). So the button reports success, the row
- * lands at `state='queued'`, and nothing on earth will ever pick it up.
+ * WHAT THIS IS ACTUALLY FOR. The consumer EXISTS and is healthy:
+ * `Business-Empire-Agent/scripts/marketing_publish_drain.py`, a cron_engine
+ * SEED_JOB on `* * * * *` — 1,320 runs, 0 failures as of 2026-08-16.
  *
- * A queue with no consumer is not a slow queue, it is a hole, and the operator
- * cannot tell the two apart from a green toast. That is the worst failure shape
- * in this system — a confident success message over a total no-op — and it is
- * one CC would only discover by checking the actual social accounts.
+ * The thing it cannot promise is that the drain is REACHABLE. It runs on the
+ * operator's machine, because that is where send_gateway's credentials live and
+ * a Vercel function cannot call it (see database/140). So the queue has a
+ * consumer that is offline whenever CC's machine is — overnight, travelling,
+ * after a PM2 crash — and from this panel that state is indistinguishable from
+ * a publish in flight. The operator gets a green toast either way and finds out
+ * by checking the actual accounts.
  *
- * WHY A TIMER RATHER THAN A FEATURE FLAG. A flag would have to be flipped by
- * hand the day the drainer ships, and would therefore be wrong on both sides of
- * that day. Age is measured, not declared: while nothing drains, every intent
- * ages past the threshold and the page says so; the moment a drainer runs,
- * intents stop being old and the warning disappears on its own. Nobody has to
- * remember anything.
+ * (A correction worth keeping: this was first written asserting the drainer had
+ * never been built, on a peer agent's `grep CMO-Agent/scripts/` returning
+ * nothing. It returns nothing because the drainer was never meant to live
+ * there — it lives where the gateway lives, which is this fleet's own repo. The
+ * grep was real and the conclusion was wrong, and the warning below is worth
+ * having for the real reason rather than the assumed one.)
  *
- * Ten minutes is deliberately generous — a 10 MB reel to five networks takes
- * over a minute, and a drain on a five-minute schedule can legitimately leave a
- * row queued for six.
+ * WHY A TIMER RATHER THAN A HEALTH FLAG. The page would have to reach the
+ * operator's machine to ask whether the drain is up, which is the exact thing it
+ * cannot do. Age needs no such call: an intent that has sat unclaimed past the
+ * threshold IS the evidence, whatever the cause — machine off, cron paused,
+ * process wedged, or a bug in the drain itself. It reports the symptom the
+ * operator cares about rather than a cause it would have to guess.
+ *
+ * Ten minutes against a one-minute schedule is deliberately generous — a 10 MB
+ * reel to five networks legitimately takes minutes, and the drain claims an
+ * intent before working, so anything genuinely in flight has left `queued`.
  */
 export const PUBLISH_STALE_AFTER_MINUTES = 10;
 
@@ -581,8 +587,9 @@ export function stalePublishWarning(
         ? `${Math.floor(mins / 60)} hour${Math.floor(mins / 60) === 1 ? "" : "s"}`
         : `${Math.floor(mins / 1440)} day${Math.floor(mins / 1440) === 1 ? "" : "s"}`;
   return (
-    `Queued ${age} ago and still not picked up — nothing has been posted. ` +
-    `The publisher that drains this queue runs on the operator machine, not here.`
+    `Queued ${age} ago and still not picked up — nothing has been posted yet. ` +
+    `The publisher runs on the operator machine; if it is offline this waits ` +
+    `rather than fails.`
   );
 }
 
