@@ -54,6 +54,119 @@ export type AssetStatus = (typeof STATUSES)[number];
  */
 export const FOUNDERS_OWN_BRAND = "oasis-ai";
 
+/**
+ * ─────────────────────────────────────────────────────────── brand groups
+ *
+ * CC, 2026-08-16: *"We should have personal brands, so it should be like:
+ * Oasis AI / CC / Adon / Music / stuff like that. There need to be separate
+ * tabs for this within the marketing page."*
+ *
+ * The Library was scoped to `oasis-ai` alone, so four client deliverables
+ * (Warner x2, Arthrisil, blyss) had been in the table the whole time and CC had
+ * never seen one of them. The header said "43 assets across every channel",
+ * which was true of one brand only.
+ *
+ * WHY `clients` IS RESIDUAL AND NOT A LIST.
+ * The obvious shape is `slugs: ["warner", "blyss", "arthrisil", "sunbiz-funding"]`.
+ * That reintroduces the exact bug this replaces, one client later: Maven
+ * registers `brand_slug='newco'`, it matches no group, and it renders in no tab
+ * — invisible again, and this time silently, because the row IS in the table and
+ * every total includes it. A residual group cannot orphan a brand: every slug
+ * that no named group claims belongs to Clients by construction.
+ *
+ * So adding a CLIENT is a Maven-side registration that needs no deploy here.
+ * Adding a PERSONAL brand — a new tab — is a deliberate edit to this list.
+ *
+ * ADON IS NOT HERE, deliberately. CC's voice note said "CC Adon", which read as
+ * either two brands or one phrase; his call on 2026-08-16 was that Adon co-works
+ * the Library rather than owning a brand, so he belongs in an author facet and
+ * not a tab. See the author note in lib/founders/marketing-queries.ts.
+ */
+export type BrandGroupKey = "oasis-ai" | "conaugh" | "music" | "clients";
+
+export type BrandGroup = {
+  key: BrandGroupKey;
+  label: string;
+  /** Slugs this group claims. `null` means RESIDUAL — see the note above. */
+  slugs: readonly string[] | null;
+  /** Copy for the group when it holds nothing yet. */
+  empty: string;
+};
+
+export const BRAND_GROUPS: readonly BrandGroup[] = [
+  {
+    key: "oasis-ai",
+    label: "OASIS AI",
+    slugs: [FOUNDERS_OWN_BRAND],
+    empty: "Nothing registered for OASIS yet.",
+  },
+  {
+    key: "conaugh",
+    label: "Conaugh McKenna",
+    slugs: ["conaugh"],
+    empty: "Nothing under CC's personal brand yet — Maven registers here with brand_slug='conaugh'.",
+  },
+  {
+    key: "music",
+    label: "Music",
+    slugs: ["nostalgic-requests"],
+    empty: "Nothing under the music brand yet — Maven registers here with brand_slug='nostalgic-requests'.",
+  },
+  {
+    key: "clients",
+    label: "Clients",
+    slugs: null,
+    empty: "No client deliverables in the library.",
+  },
+];
+
+/**
+ * The tab you land on. OASIS's own work stays the default view, which is what
+ * the founders portal has always shown — widening the taxonomy must not quietly
+ * change what the page opens on.
+ */
+export const DEFAULT_BRAND_GROUP: BrandGroupKey = "oasis-ai";
+
+export function isBrandGroupKey(v: unknown): v is BrandGroupKey {
+  return typeof v === "string" && BRAND_GROUPS.some((g) => g.key === v);
+}
+
+export function brandGroup(key: BrandGroupKey): BrandGroup {
+  const found = BRAND_GROUPS.find((g) => g.key === key);
+  // Unreachable via isBrandGroupKey, but throwing beats returning the WRONG
+  // group: every caller uses the result to decide which rows a founder sees.
+  if (!found) throw new Error(`unknown brand group: ${key}`);
+  return found;
+}
+
+/** Every slug a named group claims — the complement of this is the Clients group. */
+export function claimedBrandSlugs(): string[] {
+  return BRAND_GROUPS.flatMap((g) => (g.slugs ? [...g.slugs] : []));
+}
+
+/**
+ * Which tab a brand belongs in. Unclaimed slugs fall to the residual group
+ * rather than to nothing, so a brand can never be registered into invisibility.
+ */
+export function brandGroupFor(slug: string | null | undefined): BrandGroupKey {
+  if (!slug) return "clients";
+  const named = BRAND_GROUPS.find((g) => g.slugs?.includes(slug));
+  return named ? named.key : "clients";
+}
+
+/**
+ * May a `?brand=` from the URL be applied while viewing this tab?
+ *
+ * The sub-filter narrows WITHIN a group; it must never widen ACROSS one.
+ * Without this, `?group=oasis-ai&brand=warner` typed into the address bar would
+ * put a client's ad on the OASIS tab — the same hole the old `scope !== "all"`
+ * check existed to close, which is why the rule lives in one tested function
+ * rather than being re-derived at each call site.
+ */
+export function brandFilterAllowed(slug: string, group: BrandGroupKey): boolean {
+  return brandGroupFor(slug) === group;
+}
+
 /** Is this asset OASIS's own work rather than a client deliverable? */
 export function isOwnBrand(brandSlug: string | null | undefined): boolean {
   return brandSlug === FOUNDERS_OWN_BRAND;
@@ -403,6 +516,74 @@ export function freshnessLabel(capturedAt: string | null | undefined, now = new 
   if (hours < 24) return `${hours}h ago`;
   const days = Math.floor(hours / 24);
   return `${days}d ago`;
+}
+
+/**
+ * ──────────────────────────────────────────────── publish-queue honesty
+ *
+ * How long a `queued` publish intent may sit before the page says so.
+ *
+ * THE DEFECT THIS EXISTS FOR. The Post panel told the operator *"Queued for
+ * instagram, tiktok… The publisher picks it up within a minute"* — a promise
+ * about a process that does not exist. `database/140_marketing_publish_intent.sql`
+ * defines the queue and names its consumer, `marketing_publish_drain.py`, and
+ * that file has never been written: `grep -rl publish_intent CMO-Agent/scripts/`
+ * returns nothing (verified 2026-08-16). So the button reports success, the row
+ * lands at `state='queued'`, and nothing on earth will ever pick it up.
+ *
+ * A queue with no consumer is not a slow queue, it is a hole, and the operator
+ * cannot tell the two apart from a green toast. That is the worst failure shape
+ * in this system — a confident success message over a total no-op — and it is
+ * one CC would only discover by checking the actual social accounts.
+ *
+ * WHY A TIMER RATHER THAN A FEATURE FLAG. A flag would have to be flipped by
+ * hand the day the drainer ships, and would therefore be wrong on both sides of
+ * that day. Age is measured, not declared: while nothing drains, every intent
+ * ages past the threshold and the page says so; the moment a drainer runs,
+ * intents stop being old and the warning disappears on its own. Nobody has to
+ * remember anything.
+ *
+ * Ten minutes is deliberately generous — a 10 MB reel to five networks takes
+ * over a minute, and a drain on a five-minute schedule can legitimately leave a
+ * row queued for six.
+ */
+export const PUBLISH_STALE_AFTER_MINUTES = 10;
+
+export type PublishIntentLike = {
+  state: string;
+  created_at: string;
+};
+
+/**
+ * The warning to show under a publish request, or null when there is nothing
+ * worth saying.
+ *
+ * Pure and time-injectable so tests can age an intent without waiting; returns
+ * null for every terminal state, because a `done` or `failed` intent has been
+ * seen by a consumer and is no longer evidence of anything.
+ */
+export function stalePublishWarning(
+  intent: PublishIntentLike | null | undefined,
+  now: Date = new Date(),
+): string | null {
+  if (!intent) return null;
+  // `running` is excluded too: something picked it up, which is the fact this
+  // warning exists to establish.
+  if (intent.state !== "queued") return null;
+  const created = new Date(intent.created_at);
+  if (Number.isNaN(created.getTime())) return null;
+  const mins = Math.floor((now.getTime() - created.getTime()) / 60_000);
+  if (mins < PUBLISH_STALE_AFTER_MINUTES) return null;
+  const age =
+    mins < 60
+      ? `${mins} minutes`
+      : mins < 1440
+        ? `${Math.floor(mins / 60)} hour${Math.floor(mins / 60) === 1 ? "" : "s"}`
+        : `${Math.floor(mins / 1440)} day${Math.floor(mins / 1440) === 1 ? "" : "s"}`;
+  return (
+    `Queued ${age} ago and still not picked up — nothing has been posted. ` +
+    `The publisher that drains this queue runs on the operator machine, not here.`
+  );
 }
 
 /**

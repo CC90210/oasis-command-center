@@ -34,8 +34,14 @@ import { safe } from "@/lib/api-helpers";
 import { resolveFounder } from "@/lib/founders/gate";
 import {
   DEGRADED_MARKETING_SUMMARY,
+  getMarketingFacets,
   getMarketingSummary,
 } from "@/lib/founders/marketing-queries";
+import {
+  BRAND_GROUPS,
+  brandGroupFor,
+  type BrandGroupKey,
+} from "@/lib/founders-marketing-core";
 import { MarketingEmpty } from "@/components/founders/marketing-shared";
 
 export const dynamic = "force-dynamic";
@@ -52,11 +58,27 @@ export default async function MarketingPage() {
   // and a throw is a failure, not an absence — handing it the empty summary put
   // "Nothing waiting on you" back on the screen for every unexpected error, which
   // is precisely what MarketingSummary.degraded was added to stop.
-  const summary = await safe(
-    "marketing.summary",
-    getMarketingSummary(founder.tenantId),
-    DEGRADED_MARKETING_SUMMARY,
-  );
+  // Two reads, one round trip. `summary` is CC's own queue and stays scoped to
+  // OASIS's own work; `facets` deliberately spans every brand, because the whole
+  // point of the tab counts is to show what is behind the tabs he is NOT on.
+  const [summary, facets] = await Promise.all([
+    safe("marketing.summary", getMarketingSummary(founder.tenantId), DEGRADED_MARKETING_SUMMARY),
+    safe("marketing.facets", getMarketingFacets(founder.tenantId), {
+      brands: [],
+      authors: [],
+      degraded: true,
+    }),
+  ]);
+
+  // `"—"` on a failed read, never 0. A brand tile reading 0 says "this brand has
+  // nothing"; the em dash says "I could not find out". They are different facts
+  // and only one of them stops CC opening the tab.
+  const brandCount = (key: BrandGroupKey): number | string =>
+    facets.degraded
+      ? "—"
+      : facets.brands
+          .filter((b) => brandGroupFor(b.slug) === key)
+          .reduce((n, b) => n + b.count, 0);
 
   // An asset sitting at status `in_review` IS waiting on a verdict. The page
   // previously counted only rows in the marketing_review TABLE, which the review
@@ -106,7 +128,21 @@ export default async function MarketingPage() {
     { key: "scheduled", label: "Scheduled", hint: "booked" },
     { key: "published", label: "Published", hint: "live" },
   ];
-  const pipelineTotal = stages.reduce((n, st) => n + (summary.by_status[st.key] || 0), 0);
+  // ZERO ON A DEGRADED READ, which hides the whole pipeline section below.
+  //
+  // getMarketingSummary KEEPS the pages it managed to read and flags the result,
+  // so a partial summary yields real-looking per-stage numbers for the pages that
+  // loaded and a fabricated 0 for every stage that lived on the page that failed.
+  // "Approved 0" then sits directly beneath the panel announcing the query broke.
+  //
+  // Em dashes per tile were the first fix and this is the better one: the page
+  // already says "Couldn't load your queue" in that state, and a row of five
+  // dashes underneath adds nothing but a second thing to distrust. A section
+  // that cannot be truthful is not rendered. Codex's audit of this change found
+  // the original; tests/marketing-degraded-render.test.ts now covers it.
+  const pipelineTotal = summary.degraded
+    ? 0
+    : stages.reduce((n, st) => n + (summary.by_status[st.key] || 0), 0);
 
   // Assets whose status is NOT one of the five stages above — today `rejected`
   // and `archived`. They are counted in `summary.total` and appear in no tile,
@@ -116,7 +152,12 @@ export default async function MarketingPage() {
   // worse: the header would stop counting assets that genuinely exist, so
   // archiving something would make the Library appear to lose it. The honest fix
   // is to say where the difference went.
-  const offPipeline = Math.max(summary.total - pipelineTotal, 0);
+  //
+  // Suppressed on a degraded read: both terms are floors there, so the
+  // difference between them is not a quantity of anything. It printed
+  // "+N rejected or archived" where N was really "assets on the pages that
+  // failed to load".
+  const offPipeline = summary.degraded ? 0 : Math.max(summary.total - pipelineTotal, 0);
 
   return (
     <div className="space-y-6 animate-fade-in">
@@ -204,6 +245,10 @@ export default async function MarketingPage() {
           <Card noPadding>
             <div className="grid grid-cols-2 divide-y divide-bg-border sm:grid-cols-3 sm:divide-y-0 lg:grid-cols-5">
               {stages.map((st) => {
+                // Safe to read directly: `pipelineTotal` is 0 whenever the
+                // summary is degraded, so this whole section is unmounted in the
+                // only state where these counts could be fabricated. Guarding
+                // per-tile as well would be a dead branch that looks live.
                 const n = summary.by_status[st.key] || 0;
                 return (
                   <Link
@@ -224,23 +269,67 @@ export default async function MarketingPage() {
         </section>
       )}
 
-      {/* Counts underneath, never above.
+      {/* ── BRAND, where the channel tiles used to be.
 
-          On a degraded read these show an em dash, not a zero. The queue above
-          already says the read failed — printing "0" beside that panel is the
-          same confident lie in a smaller font, and a zero is indistinguishable
-          from a real measurement of nothing. */}
+          CC, 2026-08-16: *"I see that you have the different sections for
+          organic, paid, and SEO lifecycle. That's great, but I'm confused about
+          the lifecycle part as well, and the SEO part is a bit confusing."*
+
+          The wording was not the problem. Two of those four tiles have held a
+          permanent 0 since the day they shipped — `seo: 0`, `email: 0` — and a
+          number that has never moved reads as broken rather than as capacity.
+          The other two under-report by construction: `track` derives from
+          `channel`, `channel` holds ONE value, and a post goes to as many as six
+          places, so 37 of 47 rows claim Instagram.
+
+          So the headline is now the axis he actually thinks in — brand — and the
+          channel split moved to a facet inside the Library, where it can be read
+          as the rough grouping it is. The counts here are per-tab and link
+          straight into that tab. */}
       <section className="grid grid-cols-2 gap-4 lg:grid-cols-4">
-        <Stat label="Organic" value={trackCount("organic")} hint="IG · FB · TikTok · YT" />
-        <Stat label="Paid" value={trackCount("paid")} hint="Meta · Google" />
-        <Stat label="SEO" value={trackCount("seo")} hint="landing · articles" />
-        <Stat label="Email" value={trackCount("email")} hint="lifecycle" />
+        {BRAND_GROUPS.map((g) => {
+          const n = brandCount(g.key);
+          const hint =
+            typeof n !== "number"
+              ? "count unavailable"
+              : n === 0
+                ? "nothing registered yet"
+                : `${n === 1 ? "asset" : "assets"} in the library`;
+          return (
+            <Link key={g.key} href={`/founders/marketing/library?group=${g.key}`} className="block">
+              <Stat label={g.label} value={n} hint={hint} />
+            </Link>
+          );
+        })}
       </section>
 
+      {/* The channel split, kept but demoted to one line. It still answers "how
+          much of our output is paid", which is a real question — it just is not
+          the first one, and it is not trustworthy enough to be four tiles. */}
+      {!summary.degraded && (
+        <div className="px-1 text-[11px] text-fg-dim">
+          OASIS by channel · Organic {trackCount("organic")} · Paid {trackCount("paid")} ·
+          SEO {trackCount("seo")} · Lifecycle {trackCount("email")}
+          <span className="ml-1 opacity-70">
+            — primary channel only; an asset that went to six places counts once here.
+          </span>
+        </div>
+      )}
+
       <section className="grid grid-cols-1 gap-4 md:grid-cols-2">
+        {/* CC, 2026-08-16: "Are the posts in this library just stockpiled, and
+            how do we function with our automations? Are they taking from this
+            library when we post automatically?"
+
+            No — and nothing on this page had ever said which way the arrow
+            points. The daily poster reads data/post_queue/*.json and mirrors the
+            result here as its final step, so this is a record of what already
+            shipped, not a queue anything draws from. A Draft -> Scheduled ->
+            Published pipeline sitting above it invites precisely the opposite
+            reading, which is the reading CC arrived at. */}
         <Card
           title="Library"
-          subtitle="Everything produced, watchable in place"
+          subtitle="A record of what shipped — the poster writes here, never reads from here"
           action={
             <Link
               href="/founders/marketing/library"

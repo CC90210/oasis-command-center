@@ -47,10 +47,21 @@ export function AssetPublishPanel({
   assetId,
   hasVideo,
   lastIntent,
+  staleWarning = null,
 }: {
   assetId: string;
   hasVideo: boolean;
   lastIntent?: { state: string; platforms: string[]; created_at: string } | null;
+  /**
+   * Computed by the SERVER via stalePublishWarning, not here.
+   *
+   * Same reason the timestamp below is a raw `<time dateTime>` rather than
+   * toLocaleString(): this is a client component pre-rendered on the server, and
+   * anything derived from `new Date()` inside it would be evaluated twice, in two
+   * clocks, and mismatch on hydration. The page is force-dynamic, so a
+   * server-computed string is fresh on every request anyway.
+   */
+  staleWarning?: string | null;
 }) {
   const router = useRouter();
   const [pending, start] = useTransition();
@@ -85,9 +96,15 @@ export function AssetPublishPanel({
       return;
     }
     setPicked([]);
+    // NOT "the publisher picks it up within a minute", which is what this said
+    // and could not keep: the drainer named by database/140 has never been
+    // written, so the row lands at state='queued' and sits there. Claiming a
+    // send that did not happen is the one failure the operator cannot detect
+    // from this screen. It now says exactly what occurred — a request was
+    // recorded — and the panel below reports it if nothing ever collects it.
     setMsg({
       ok: true,
-      text: `Queued for ${(body.platforms || picked).join(", ")}. The publisher picks it up within a minute.`,
+      text: `Recorded for ${(body.platforms || picked).join(", ")}. Nothing is sent until the publisher collects it.`,
     });
     start(() => router.refresh());
   }
@@ -155,6 +172,20 @@ export function AssetPublishPanel({
           }
         >
           {msg.text}
+        </div>
+      )}
+
+      {/* A request that nothing ever collected. Rendered as a warning rather
+          than left to look like normal queue latency — see stalePublishWarning.
+          Computed on each render from the row's own age, so it appears without a
+          deploy while the queue has no consumer, and stops appearing without one
+          the day it gets a working drainer. */}
+      {staleWarning && (
+        <div
+          role="status"
+          className="rounded-lg border border-hot/40 bg-hot/10 px-3 py-2 text-[11px] leading-5 text-hot"
+        >
+          {staleWarning}
         </div>
       )}
 

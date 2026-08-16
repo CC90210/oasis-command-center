@@ -68,6 +68,14 @@ jobs:
           npm run test:event-bus
           npm run test:streaming-redactor
           npm run test:marketing
+          # ADDED 2026-08-16. `test:marketing` is the public marketing SITE
+          # (car geometry, nav shell); the founders-portal suites had no CI entry
+          # at all, so tests/marketing-core.test.ts had never gated a deploy —
+          # including its brand-boundary assertions, the ones that catch a
+          # client's asset rendering on an OASIS surface. They were written
+          # against a real half-applied boundary and then never run by anything
+          # but a human on demand. A guard nothing executes is documentation.
+          npm run test:founders-marketing
           # Re-enabled 2026-08-08. This was excluded for exactly the
           # server-only import chain that NODE_OPTIONS above now resolves;
           # 41 assertions came back with it.
