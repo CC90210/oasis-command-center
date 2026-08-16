@@ -14,6 +14,13 @@ import {
   BRAND_GROUPS,
   CHANNELS,
   DECISIONS,
+  LIFECYCLE,
+  distributionOf,
+  isLifecycle,
+  lifecycleHint,
+  lifecycleLabel,
+  lifecycleOf,
+  postPermalink,
   DEFAULT_BRAND_GROUP,
   FOUNDERS_OWN_BRAND,
   PUBLISH_STALE_AFTER_MINUTES,
@@ -313,6 +320,90 @@ assert.ok(!isOwnBrand(null) && !isOwnBrand(undefined) && !isOwnBrand(""),
     assert.ok(g.empty.trim().length > 0, `${g.key} needs empty-state copy`);
     assert.equal(brandGroup(g.key), g, "brandGroup must round-trip its own key");
   }
+}
+
+// ── lifecycle: review state and distribution state are different questions ───
+// CC, 2026-08-16: "Are these videos that we haven't posted yet? ... Have they
+// not been posted at all, ever?" He could not tell, because `status` conflates
+// "has CC ruled on it" with "did it go out".
+{
+  // DISTRIBUTION IS EVIDENCE-ONLY. `platforms` was backfilled from `channel` and
+  // holds single-element copies of it, so it records intent and must never count
+  // as proof of delivery. This is the assertion that stops someone "improving"
+  // lifecycleOf by reading it.
+  assert.equal(distributionOf({ published_at: null }), "never_posted");
+  assert.equal(distributionOf({ published_at: "2026-08-01T00:00:00Z" }), "live");
+  assert.equal(distributionOf({ published_at: null, analytics_posts: 3 }), "live",
+    "a linked analytics row is proof a platform accepted it");
+  assert.equal(distributionOf({ published_at: null, analytics_posts: 0 }), "never_posted");
+
+  // THE WORLD OUTRANKS THE BOOKKEEPING. An asset that demonstrably went out is
+  // Posted even while its status column still says in_review — which is the
+  // exact state library_sync.py leaves rows in.
+  assert.equal(lifecycleOf({ status: "in_review", published_at: "2026-08-01T00:00:00Z" }), "live");
+  assert.equal(lifecycleOf({ status: "draft", published_at: null, analytics_posts: 2 }), "live");
+
+  assert.equal(lifecycleOf({ status: "in_review", published_at: null }), "needs_review");
+  assert.equal(lifecycleOf({ status: "draft", published_at: null }), "needs_review");
+  assert.equal(lifecycleOf({ status: "approved", published_at: null }), "approved");
+
+  // Archived and rejected both mean "shelved", and both must be REACHABLE.
+  // CC archived a video and reported it "completely gone" — it was in the table
+  // the whole time with no bucket that could show it.
+  assert.equal(lifecycleOf({ status: "archived", published_at: null }), "archived");
+  assert.equal(lifecycleOf({ status: "rejected", published_at: null }), "archived");
+  // Archived outranks even a publish: something taken down is not "Posted" work
+  // you are still running.
+  assert.equal(
+    lifecycleOf({ status: "archived", published_at: "2026-08-01T00:00:00Z" }),
+    "archived",
+    "an archived asset stays archived — shelving is a decision, not a metric",
+  );
+
+  // Every bucket must be renderable and reachable from the URL.
+  for (const l of LIFECYCLE) {
+    assert.ok(isLifecycle(l));
+    assert.ok(lifecycleLabel(l).trim().length > 0, `${l} needs a label`);
+    assert.ok(lifecycleHint(l).trim().length > 0, `${l} needs a hint`);
+  }
+  assert.ok(!isLifecycle("published"), "the raw status vocabulary is not the lifecycle vocabulary");
+  assert.ok(!isLifecycle("") && !isLifecycle(null) && !isLifecycle(undefined));
+}
+
+// ── permalinks: click a metric, reach the post ───────────────────────────────
+// CC: "it should be a clickable link that takes me to that Instagram post."
+{
+  assert.equal(
+    postPermalink("youtube", "-5huRgnq-Qk"),
+    "https://www.youtube.com/watch?v=-5huRgnq-Qk",
+  );
+  assert.equal(
+    postPermalink("tiktok", "7665918344775699729", "ccmckennaa"),
+    "https://www.tiktok.com/@ccmckennaa/video/7665918344775699729",
+  );
+  assert.equal(
+    postPermalink("linkedin", "urn:li:ugcPost:7487100000000000000"),
+    "https://www.linkedin.com/feed/update/urn:li:ugcPost:7487100000000000000/",
+  );
+
+  // INSTAGRAM IS THE TRAP. post_analytics stores a NUMERIC media id, and
+  // /p/<id> needs the base64 shortcode — building one from the number yields a
+  // 404 that looks like working accounting. Link the account instead.
+  assert.equal(
+    postPermalink("instagram", "17874750624553086", "oasisaisolutions"),
+    "https://www.instagram.com/oasisaisolutions/",
+    "a numeric IG media id must NOT be pasted into /p/ — it does not resolve",
+  );
+  assert.ok(
+    !postPermalink("instagram", "17874750624553086")?.includes("/p/"),
+    "and with no account to fall back to, no link at all beats a broken one",
+  );
+
+  // Never invent a URL from nothing.
+  assert.equal(postPermalink("instagram", null), null);
+  assert.equal(postPermalink("youtube", ""), null);
+  assert.equal(postPermalink("threads", "123"), null, "no account, no link");
+  assert.equal(postPermalink("some-new-network", "abc"), null);
 }
 
 // ── a publish request nothing ever collected ─────────────────────────────────

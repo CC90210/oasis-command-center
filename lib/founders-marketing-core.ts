@@ -519,6 +519,149 @@ export function freshnessLabel(capturedAt: string | null | undefined, now = new 
 }
 
 /**
+ * ─────────────────────────────────────── review state vs distribution state
+ *
+ * CC, 2026-08-16: *"Are these videos that we haven't posted yet? ... We have 43
+ * assets. Are all of these not posted yet? Have they not been posted at all,
+ * ever?"*
+ *
+ * He could not tell, and the page was the reason. `status` conflates two
+ * unrelated questions into one column:
+ *
+ *   1. Has CC passed a verdict on this?      draft / in_review / approved / rejected
+ *   2. Has it actually gone out?             published / (nothing)
+ *
+ * A grid where all 41 read IN REVIEW answers neither. It looks like a backlog of
+ * work waiting on him, when what it mostly means is "produced, never scheduled".
+ *
+ * WHAT THE DATA ACTUALLY SAYS (live, 2026-08-16). Of 43 OASIS assets: one has a
+ * `published_at`, none have a linked `post_analytics` row. Meanwhile
+ * `post_analytics` holds 100 real posts across five accounts with genuine view
+ * counts. Those are not the same content — the Library is Maven's produced ad
+ * creative, and the 100 live posts come from the daily poster reading
+ * data/post_queue. TWO PIPELINES THAT HAVE NEVER BEEN JOINED, which is why the
+ * Library can honestly say "none of this has been posted" while the accounts are
+ * clearly active.
+ *
+ * So distribution is derived from EVIDENCE, never from `status`:
+ * a publish timestamp, or an analytics row proving the platform accepted it.
+ * `platforms` alone does NOT count — it was backfilled from `channel` and holds
+ * single-element copies of it, so it records intent, not delivery.
+ */
+export type Distribution = "live" | "never_posted";
+
+export function distributionOf(asset: {
+  published_at?: string | null;
+  analytics_posts?: number | null;
+}): Distribution {
+  if (asset.published_at) return "live";
+  if ((asset.analytics_posts ?? 0) > 0) return "live";
+  return "never_posted";
+}
+
+/**
+ * The lifecycle buckets the Library filters on — the "proper organisation" CC
+ * asked for, with review and distribution kept apart.
+ *
+ * `archived` is FIRST-CLASS and reachable, which it was not: archiving removed an
+ * asset from every view with no filter that could show it again and no button to
+ * bring it back. CC archived a video and reported it "completely gone". It was
+ * never gone — the row was intact the whole time and the UI simply had no way to
+ * look at it. A destructive-looking action with no inverse is a bug even when the
+ * data survives.
+ */
+export const LIFECYCLE = ["needs_review", "approved", "live", "archived"] as const;
+export type Lifecycle = (typeof LIFECYCLE)[number];
+
+export function isLifecycle(v: unknown): v is Lifecycle {
+  return typeof v === "string" && (LIFECYCLE as readonly string[]).includes(v);
+}
+
+const LIFECYCLE_LABEL: Record<Lifecycle, string> = {
+  needs_review: "Needs review",
+  approved: "Approved",
+  live: "Posted",
+  archived: "Archived",
+};
+
+const LIFECYCLE_HINT: Record<Lifecycle, string> = {
+  needs_review: "produced, no verdict yet",
+  approved: "cleared to post, not sent",
+  live: "confirmed out on a platform",
+  archived: "shelved — restorable",
+};
+
+export function lifecycleLabel(l: Lifecycle): string {
+  return LIFECYCLE_LABEL[l];
+}
+export function lifecycleHint(l: Lifecycle): string {
+  return LIFECYCLE_HINT[l];
+}
+
+/**
+ * Which bucket an asset sits in. Distribution WINS over review state — something
+ * that has actually gone out is "Posted" regardless of what its status column
+ * says, because the world is the authority, not our bookkeeping.
+ */
+export function lifecycleOf(asset: {
+  status: string;
+  published_at?: string | null;
+  analytics_posts?: number | null;
+}): Lifecycle {
+  if (asset.status === "archived" || asset.status === "rejected") return "archived";
+  if (distributionOf(asset) === "live") return "live";
+  if (asset.status === "approved") return "approved";
+  return "needs_review";
+}
+
+/**
+ * A link to the post as it exists on the platform.
+ *
+ * CC: *"on our performance page, where we can see the most seen, it should be a
+ * clickable link that takes me to that Instagram post."* The Performance tab
+ * listed view counts with no way to reach the thing being measured, so checking
+ * a number meant hunting for the post by hand.
+ *
+ * Returns null rather than a guessed URL when the id shape cannot produce one —
+ * a dead link on a metrics page is worse than plain text, because it looks like
+ * accounting that works.
+ */
+export function postPermalink(
+  platform: string,
+  platformPostId: string | null | undefined,
+  accountUsername?: string | null,
+): string | null {
+  const id = (platformPostId || "").trim();
+  if (!id) return null;
+  switch (platform) {
+    case "instagram":
+      // Numeric media ids are NOT addressable as /p/<id> — that path needs the
+      // base64 shortcode, which the analytics row does not carry. Link the
+      // account instead of inventing a URL that 404s.
+      return /^\d+$/.test(id)
+        ? accountUsername
+          ? `https://www.instagram.com/${accountUsername}/`
+          : null
+        : `https://www.instagram.com/p/${id}/`;
+    case "tiktok":
+      return accountUsername
+        ? `https://www.tiktok.com/@${accountUsername}/video/${id}`
+        : `https://www.tiktok.com/video/${id}`;
+    case "youtube":
+      return `https://www.youtube.com/watch?v=${id}`;
+    case "linkedin":
+      // "urn:li:ugcPost:74871..." — the feed permalink takes the whole urn.
+      return id.startsWith("urn:li:")
+        ? `https://www.linkedin.com/feed/update/${id}/`
+        : null;
+    case "threads":
+      return accountUsername ? `https://www.threads.net/@${accountUsername}` : null;
+    default:
+      return null;
+  }
+}
+
+/**
  * ──────────────────────────────────────────────── publish-queue honesty
  *
  * How long a `queued` publish intent may sit before the page says so.
