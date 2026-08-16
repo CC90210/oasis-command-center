@@ -207,18 +207,29 @@ export default async function MarketingPage() {
           <Card noPadding>
             <div className="divide-y divide-bg-border">
               <div className="px-5 py-4 text-sm text-fg-muted">
+                {/* THIS SAID "the one-click approve/reject loop lands in Phase 3
+                    — until then, review them in the library" while Approve /
+                    Archive / Delete had been live on every tile for two days.
+                    The docstring at the top of this file warns about exactly
+                    this rot and it happened 200 lines below the warning: a
+                    roadmap note describes the day it was written, the code
+                    moves, and then it tells the operator a working feature does
+                    not exist — so nobody uses it.
+
+                    The link also now carries ?lifecycle=needs_review rather than
+                    ?status=in_review, so it lands on the axis the Library is
+                    organised by instead of the raw column. */}
                 {awaitingVerdict > 0 ? (
                   <>
-                    <Link href="/founders/marketing/library?status=in_review"
+                    <Link href="/founders/marketing/library?lifecycle=needs_review"
                           className="font-semibold text-accent hover:underline">
                       {awaitingVerdict} asset{awaitingVerdict === 1 ? "" : "s"}
                     </Link>{" "}
-                    awaiting your verdict. The one-click approve/reject loop lands in Phase 3 —
-                    until then, review them in the library.
+                    awaiting your verdict. Approve, archive or delete each one from its
+                    tile — archived stays restorable.
                   </>
                 ) : (
-                  <>{needsYou} item{needsYou === 1 ? "" : "s"} pending. The review queue UI lands
-                    in Phase 3.</>
+                  <>{needsYou} item{needsYou === 1 ? "" : "s"} pending.</>
                 )}
               </div>
             </div>
