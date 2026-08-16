@@ -677,6 +677,22 @@ export const EMPTY_MARKETING_FACETS: MarketingFacets = {
 };
 
 /**
+ * The fallback to hand `safe()` — what an unexpected throw returns.
+ *
+ * Paired with EMPTY_ above for the same reason DEGRADED_MARKETING_SUMMARY is
+ * paired with EMPTY_MARKETING_SUMMARY: `degraded: false` is correct for "the
+ * table is not there yet" and WRONG for every other failure. Both pages were
+ * inlining this object literal, which is one `degraded: false` typo away from
+ * painting confident zeros across the whole tab bar — the exact bug the
+ * summary constants exist to prevent, re-opened by not following their pattern.
+ */
+export const DEGRADED_MARKETING_FACETS: MarketingFacets = {
+  brands: [],
+  authors: [],
+  degraded: true,
+};
+
+/**
  * The facet counts behind the brand tabs and the author filter.
  *
  * DELIBERATELY SPANS EVERY BRAND. This is the one reader that has to see across

@@ -43,6 +43,7 @@ import { Card, PageHeader } from "@/components/Card";
 import { safe } from "@/lib/api-helpers";
 import { resolveFounder } from "@/lib/founders/gate";
 import {
+  DEGRADED_MARKETING_FACETS,
   getMarketingAssets,
   getMarketingFacets,
   mediaKey,
@@ -118,11 +119,7 @@ export default async function MarketingLibraryPage({
       getMarketingAssets(founder.tenantId, { group, track, channel, brand, author, status }),
       null,
     ),
-    safe("marketing.library.facets", getMarketingFacets(founder.tenantId), {
-      brands: [],
-      authors: [],
-      degraded: true,
-    }),
+    safe("marketing.library.facets", getMarketingFacets(founder.tenantId), DEGRADED_MARKETING_FACETS),
   ]);
   const libraryDegraded = assetsOrNull === null;
   const assets = assetsOrNull ?? [];

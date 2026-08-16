@@ -33,6 +33,7 @@ import { Library, GraduationCap, Inbox, BarChart3 } from "lucide-react";
 import { safe } from "@/lib/api-helpers";
 import { resolveFounder } from "@/lib/founders/gate";
 import {
+  DEGRADED_MARKETING_FACETS,
   DEGRADED_MARKETING_SUMMARY,
   getMarketingFacets,
   getMarketingSummary,
@@ -63,11 +64,7 @@ export default async function MarketingPage() {
   // point of the tab counts is to show what is behind the tabs he is NOT on.
   const [summary, facets] = await Promise.all([
     safe("marketing.summary", getMarketingSummary(founder.tenantId), DEGRADED_MARKETING_SUMMARY),
-    safe("marketing.facets", getMarketingFacets(founder.tenantId), {
-      brands: [],
-      authors: [],
-      degraded: true,
-    }),
+    safe("marketing.facets", getMarketingFacets(founder.tenantId), DEGRADED_MARKETING_FACETS),
   ]);
 
   // `"—"` on a failed read, never 0. A brand tile reading 0 says "this brand has
