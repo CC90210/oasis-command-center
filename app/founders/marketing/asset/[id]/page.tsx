@@ -32,10 +32,12 @@ import {
 } from "@/lib/founders/marketing-queries";
 import {
   channelLabel,
+  isOwnBrand,
   isRenderableCarousel,
   parsePlatforms,
   parseSlideUrls,
   platformLabel,
+  stalePublishWarning,
   trackLabel,
   type Channel,
   type Track,
@@ -227,13 +229,40 @@ export default async function AssetDetailPage({
             </Card>
           )}
 
-          <Card title="Post to channels" subtitle="Goes out through the send gateway">
-            <AssetPublishPanel
-              assetId={asset.id}
-              hasVideo={Boolean(videoUrl)}
-              lastIntent={lastIntent}
-            />
-          </Card>
+          {/* PUBLISHING IS OASIS-OWN ONLY, and the panel now says so instead of
+              offering controls that cannot work.
+
+              This page stopped brand-scoping its read so the four client assets
+              in the Library would have a detail page instead of a dead link. The
+              publish ROUTE kept its own `brand_slug !== "oasis-ai" -> 404`, which
+              is correct — reviewing a client's ad in our library is not licence
+              to broadcast it from CC's accounts. But the panel rendered anyway,
+              so every asset this change made reachable gained a working-looking
+              channel picker whose only possible outcome was `not_found`.
+
+              Making a surface visible is not the same as making every control on
+              it applicable, and shipping the second by accident is how the first
+              becomes a bug report. Caught by Codex's audit of this change. */}
+          {isOwnBrand(asset.brand_slug) ? (
+            <Card title="Post to channels" subtitle="Goes out through the send gateway">
+              <AssetPublishPanel
+                assetId={asset.id}
+                hasVideo={Boolean(videoUrl)}
+                lastIntent={lastIntent}
+                // Server-computed: the panel is a client component and anything
+                // derived from `new Date()` inside it would mismatch on hydration.
+                staleWarning={stalePublishWarning(lastIntent)}
+              />
+            </Card>
+          ) : (
+            <Card title="Post to channels" subtitle="Not available for this brand">
+              <p className="text-xs leading-5 text-fg-dim">
+                {asset.brand_name} is client work. It is here so you can review and reference it,
+                but OASIS&apos;s connected accounts only publish OASIS&apos;s own brand — posting
+                this would put a client&apos;s asset out under our handles.
+              </p>
+            </Card>
+          )}
 
           <Card title="Copy" subtitle="What Maven wrote for this">
             <dl className="space-y-3 text-sm">

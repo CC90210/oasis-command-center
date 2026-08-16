@@ -14,20 +14,49 @@
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { isMissingTableError } from "@/lib/api-helpers";
 import {
+  DEFAULT_BRAND_GROUP,
   FOUNDERS_OWN_BRAND,
+  brandFilterAllowed,
+  brandGroup,
+  claimedBrandSlugs,
   type AssetFormat,
   type AssetStatus,
+  type BrandGroupKey,
   type Channel,
   type Track,
 } from "@/lib/founders-marketing-core";
 
 /**
- * Founders readers show OASIS's OWN work by default. `scope: "all"` is the
- * explicit opt-out for a future client-deliverables surface; nothing in the
- * founders portal passes it today. Scoping here rather than in each page means
- * a new founders page cannot forget and re-introduce the mix.
+ * Restrict a `marketing_asset` query to one brand tab.
+ *
+ * THE WHOLE BOUNDARY IS THIS FUNCTION. It replaced a bare
+ * `.eq("brand_slug", FOUNDERS_OWN_BRAND)` repeated at four call sites, where the
+ * boundary had already been half-applied once — `total` was brand-scoped while
+ * `open_reviews` was not, so Studio could have said "9 assets, 3 waiting on you"
+ * with the 3 belonging to Warner. One function is one thing to get right and one
+ * thing to test.
+ *
+ * A NAMED group filters `IN (its slugs)`. The residual Clients group filters
+ * `NOT IN (every claimed slug)`, which is what makes a brand-new client slug
+ * appear on the Clients tab without a deploy instead of vanishing from the UI.
+ *
+ * `brand_slug` is `not null default 'oasis-ai'` (database/134), so the SQL
+ * three-valued-logic trap does not apply — a NULL would silently fail `NOT IN`
+ * and drop the row from every tab. Asserted in tests rather than assumed.
+ *
+ * The `(a,b,c)` string is PostgREST's canonical `not.in` value and is also what
+ * lib/turso-postgrest.ts `compileOp` parses, so ONE spelling works on both
+ * backends. Slugs are constrained to `^[a-z0-9]+(-[a-z0-9]+)*$` by the CHECK in
+ * 134, so no separator or quote can appear inside one.
  */
-export type BrandScope = "own" | "all";
+function scopeToBrandGroup<T extends {
+  in: (c: string, v: string[]) => T;
+  not: (c: string, op: string, v: string) => T;
+}>(q: T, group: BrandGroupKey): T {
+  const g = brandGroup(group);
+  if (g.slugs) return q.in("brand_slug", [...g.slugs]);
+  return q.not("brand_slug", "in", `(${claimedBrandSlugs().join(",")})`);
+}
 
 export type MarketingMediaRow = {
   id: string;
@@ -224,6 +253,13 @@ export async function getMarketingSummary(
         .from("marketing_asset")
         .select("id, track, status")
         .eq("tenant_id", tenantId)
+        // STAYS OASIS-OWN even though the Library now has four brand tabs.
+        // This summary drives "Needs you" — CC's own verdict queue — and the
+        // publish route is own-brand-only, so a client's ad is not work he can
+        // action from here. Counting it would inflate the one number on the
+        // dashboard whose entire job is to be trusted about his workload.
+        // The per-brand counts CC asked for come from getMarketingFacets, which
+        // spans every tab on purpose.
         .eq("brand_slug", FOUNDERS_OWN_BRAND)
         // ORDER BEFORE RANGE, always. `.range()` on an unordered query has no
         // stable row order, so page 2 can repeat or skip rows from page 1 — the
@@ -362,9 +398,13 @@ export async function getMarketingAssets(
     track?: Track;
     channel?: Channel;
     status?: AssetStatus;
+    /** Which brand TAB. Defaults to OASIS's own work, as this page always has. */
+    group?: BrandGroupKey;
+    /** Sub-filter WITHIN the tab. Ignored if it names a brand from another tab. */
     brand?: string;
+    /** `author_email`, for the by-author facet. */
+    author?: string;
     limit?: number;
-    scope?: BrandScope;
   } = {},
 ): Promise<MarketingAssetRow[]> {
   if (!tenantId) return [];
@@ -379,13 +419,17 @@ export async function getMarketingAssets(
     if (opts.track) q = q.eq("track", opts.track);
     if (opts.channel) q = q.eq("channel", opts.channel);
     if (opts.status) q = q.eq("status", opts.status);
-    // Own-work-only unless a caller deliberately widens the scope. A `brand`
-    // filter is only honoured inside the wider scope — otherwise a crafted
-    // ?brand=warner query string would walk straight past the boundary.
-    if (opts.scope === "all") {
-      if (opts.brand) q = q.eq("brand_slug", opts.brand);
-    } else {
-      q = q.eq("brand_slug", FOUNDERS_OWN_BRAND);
+    if (opts.author) q = q.eq("author_email", opts.author);
+
+    // The brand boundary. The tab is ALWAYS applied — there is no code path
+    // through this reader that returns rows from more than one tab, which is
+    // why the group filter is unconditional and the sub-filter is not.
+    const group = opts.group ?? DEFAULT_BRAND_GROUP;
+    q = scopeToBrandGroup(q, group);
+    // A sub-filter NARROWS the tab and may never widen it. `?brand=warner` on
+    // the OASIS tab is dropped rather than honoured — see brandFilterAllowed.
+    if (opts.brand && brandFilterAllowed(opts.brand, group)) {
+      q = q.eq("brand_slug", opts.brand);
     }
 
     const r = await q;
@@ -507,11 +551,20 @@ export async function signMediaUrls(
 /**
  * One asset by id, with its media — for the detail page.
  *
- * TENANT-SCOPED AND BRAND-SCOPED, both deliberately. The id alone is not proof
- * of anything: a uuid pasted into the URL must not reach another tenant's row,
- * and the founders portal shows OASIS's own work, so a client deliverable is a
- * 404 here rather than a page. `scope: "all"` is the explicit opt-out, matching
- * getMarketingAssets.
+ * TENANT-SCOPED. The id alone is not proof of anything — a uuid pasted into the
+ * URL must not reach another tenant's row.
+ *
+ * NO LONGER BRAND-SCOPED, and that is the point of this change. It was
+ * `.eq("brand_slug", FOUNDERS_OWN_BRAND)`, which was right while the Library
+ * showed one brand and became a bug the moment the Clients tab shipped: every
+ * client tile would link to a page that 404s. That is the "wall of dead links"
+ * this route was created to fix, reintroduced for four rows.
+ *
+ * VIEWING IS NOT PUBLISHING. The publish route keeps its own
+ * `brand_slug !== "oasis-ai" -> notFound()` check, deliberately un-widened:
+ * being able to review a client's ad in our own library is not the same as
+ * being able to broadcast it from CC's accounts, and those two boundaries have
+ * no reason to move together.
  *
  * Returns null for "no such asset you may see" — the caller renders notFound(),
  * never a 403, so the route does not confirm what exists.
@@ -519,13 +572,11 @@ export async function signMediaUrls(
 export async function getMarketingAsset(
   tenantId: string,
   id: string,
-  opts: { scope?: BrandScope } = {},
 ): Promise<MarketingAssetRow | null> {
   if (!tenantId || !id) return null;
   const db = getServiceSupabase();
   try {
-    let q = db.from("marketing_asset").select("*").eq("tenant_id", tenantId).eq("id", id);
-    if (opts.scope !== "all") q = q.eq("brand_slug", FOUNDERS_OWN_BRAND);
+    const q = db.from("marketing_asset").select("*").eq("tenant_id", tenantId).eq("id", id);
     const r = await q.maybeSingle();
     const verdict = classify("asset", r.error);
     if (verdict === "absent") return null;
@@ -607,33 +658,120 @@ export async function getLatestPublishIntent(
 
 export const mediaKey = (bucket: string, path: string) => `${bucket}\n${path}`;
 
-/** Brand choices for the library filter, deduped from tenant-scoped assets. */
-export async function getMarketingBrands(
-  tenantId: string,
-  scope: BrandScope = "own",
-): Promise<Array<{ slug: string; name: string }>> {
-  if (!tenantId) return [];
+export type BrandFacet = { slug: string; name: string; count: number };
+export type AuthorFacet = { email: string; count: number };
+
+export type MarketingFacets = {
+  /** Every brand on the tenant, with its asset count. Spans all tabs by design. */
+  brands: BrandFacet[];
+  /** Distinct `author_email` values, with counts. */
+  authors: AuthorFacet[];
+  /** True when a page failed — counts are then a floor, not a total. */
+  degraded: boolean;
+};
+
+export const EMPTY_MARKETING_FACETS: MarketingFacets = {
+  brands: [],
+  authors: [],
+  degraded: false,
+};
+
+/**
+ * The fallback to hand `safe()` — what an unexpected throw returns.
+ *
+ * Paired with EMPTY_ above for the same reason DEGRADED_MARKETING_SUMMARY is
+ * paired with EMPTY_MARKETING_SUMMARY: `degraded: false` is correct for "the
+ * table is not there yet" and WRONG for every other failure. Both pages were
+ * inlining this object literal, which is one `degraded: false` typo away from
+ * painting confident zeros across the whole tab bar — the exact bug the
+ * summary constants exist to prevent, re-opened by not following their pattern.
+ */
+export const DEGRADED_MARKETING_FACETS: MarketingFacets = {
+  brands: [],
+  authors: [],
+  degraded: true,
+};
+
+/**
+ * The facet counts behind the brand tabs and the author filter.
+ *
+ * DELIBERATELY SPANS EVERY BRAND. This is the one reader that has to see across
+ * the boundary, because a tab bar that cannot count the tabs you are not on is
+ * useless — the Clients tab has to read "Clients 4" before you click it. It
+ * returns COUNTS ONLY; no row content crosses a group here, and the readers that
+ * return rows all go through scopeToBrandGroup.
+ *
+ * Brands and authors come from ONE pass over the same pages rather than two
+ * queries, because they are two groupings of identical rows.
+ *
+ * `degraded` rather than a silent short count: these numbers sit on navigation,
+ * and a tab reading "Clients 0" because page two timed out is the same
+ * confident lie as "Nothing waiting on you" — it tells CC there is nothing
+ * there, and he stops looking.
+ */
+export async function getMarketingFacets(tenantId: string): Promise<MarketingFacets> {
+  if (!tenantId) return EMPTY_MARKETING_FACETS;
   try {
     const db = getServiceSupabase();
-    const unique = new Map<string, string>();
-    const pageSize = 1000;
-    for (let from = 0; ; from += pageSize) {
-      let bq = db
+    const brands = new Map<string, BrandFacet>();
+    const authors = new Map<string, number>();
+    let degraded = false;
+
+    for (let from = 0; ; from += PAGE_SIZE) {
+      const r = await db
         .from("marketing_asset")
-        .select("brand_slug, brand_name")
-        .eq("tenant_id", tenantId);
-      if (scope !== "all") bq = bq.eq("brand_slug", FOUNDERS_OWN_BRAND);
-      const r = await bq.order("brand_name").range(from, from + pageSize - 1);
-      if (r.error) return [];
-      const rows = (r.data || []) as Array<{ brand_slug: string; brand_name: string }>;
-      for (const row of rows) {
-        if (row.brand_slug && !unique.has(row.brand_slug)) unique.set(row.brand_slug, row.brand_name);
+        .select("brand_slug, brand_name, author_email")
+        .eq("tenant_id", tenantId)
+        // ORDER BEFORE RANGE. `.range()` on an unordered query has no stable row
+        // order, so page 2 can repeat or skip rows from page 1 — and every number
+        // here would then be wrong in an unpredictable direction. `id` is the
+        // primary key: unique, so the ordering is total with no ties to break.
+        // The old version ordered by `brand_name`, which is NOT unique — 43 rows
+        // share one value, so its page boundary was arbitrary.
+        .order("id", { ascending: true })
+        .range(from, from + PAGE_SIZE - 1);
+      const verdict = classify("facets", r.error);
+      // Pre-migration: the table genuinely is not there, and empty is honest.
+      if (verdict === "absent") return EMPTY_MARKETING_FACETS;
+      if (verdict === "broken") {
+        degraded = true;
+        break;
       }
-      if (rows.length < pageSize) break;
+      const rows = (r.data || []) as Array<{
+        brand_slug: string;
+        brand_name: string;
+        author_email: string | null;
+      }>;
+      for (const row of rows) {
+        if (row.brand_slug) {
+          const prev = brands.get(row.brand_slug);
+          if (prev) prev.count += 1;
+          // Fall back to the slug rather than rendering an unnamed tab: a brand
+          // with a blank brand_name still has to be reachable.
+          else brands.set(row.brand_slug, {
+            slug: row.brand_slug,
+            name: row.brand_name || row.brand_slug,
+            count: 1,
+          });
+        }
+        if (row.author_email) {
+          authors.set(row.author_email, (authors.get(row.author_email) || 0) + 1);
+        }
+      }
+      if (rows.length < PAGE_SIZE) break;
     }
-    return [...unique].map(([slug, name]) => ({ slug, name }));
+
+    return {
+      brands: [...brands.values()].sort((a, b) => b.count - a.count || a.name.localeCompare(b.name)),
+      authors: [...authors.entries()]
+        .map(([email, count]) => ({ email, count }))
+        .sort((a, b) => b.count - a.count || a.email.localeCompare(b.email)),
+      degraded,
+    };
   } catch {
-    return [];
+    // Never throw from a read path (the file convention), but do not claim the
+    // library has no brands either — that would empty the tab bar.
+    return { brands: [], authors: [], degraded: true };
   }
 }
 

@@ -70,10 +70,62 @@ const nextConfig = {
     //    costs build time, which is the right thing to spend when the scarce
     //    resource is RAM and the failure mode is a SIGKILL.
     //
-    // Next lever if this is still not enough: Vercel Enhanced Builds — a bigger
-    // machine that costs money, so CC's call rather than an agent's.
+    // 4. THE ACTUAL CAUSE, found 2026-08-16 by measuring instead of reasoning.
+    //    The build does not need 8 GB and never did. Capping V8's heap and
+    //    rebuilding from a cold .next:
+    //
+    //      --max-old-space-size=3072  -> Compiled successfully in 39.8s, 40/40
+    //      --max-old-space-size=2048  -> Compiled successfully in 38.8s, 40/40
+    //
+    //    Real per-worker demand is under 2 GB. What kills the Vercel build is
+    //    that V8 with NO cap sizes its heap against the CONTAINER, so each
+    //    worker grows toward 8 GB whether or not it needs to. Two of them do it
+    //    at once, the container runs out, and one gets SIGKILLed. That is why
+    //    the failures burn 38-46 minutes first — a GC death spiral at the
+    //    ceiling, making no progress — and why the identical tree passes as
+    //    often as it fails. It was never a leak or a size problem; it was an
+    //    unbounded heap on a bounded machine.
+    //
+    //    Fixed in vercel.json, not here: Next has no config knob for the heap,
+    //    so the cap rides on the buildCommand as
+    //    `NODE_OPTIONS='--max-old-space-size=5120' next build`.
+    //
+    // 5. WHY ONE WORKER AND 5 GB RATHER THAN TWO AND 3 GB. The first attempt was
+    //    3072 x 2, sized from the local measurement above. Vercel rejected the
+    //    premise: a worker hit that ceiling and aborted in 36 SECONDS.
+    //
+    //      FATAL ERROR: Reached heap limit Allocation failed
+    //      Next.js build worker exited with code: null and signal: SIGABRT
+    //
+    //    The local number was measured on a build with no cache, because the
+    //    test did `rm -rf .next` first. Vercel restores one — "Restored build
+    //    cache from previous deployment" — and deserializing that cache lives
+    //    in the same heap, so the real ceiling there is higher than anything a
+    //    cold local build can show. Measuring the wrong machine measured the
+    //    wrong number.
+    //
+    //    So: cpus 1 instead of 2, and the freed budget goes to the one worker.
+    //    5 GB + parent + install overhead fits inside 8 GB with room, and there
+    //    is no second worker to race for it. Build time is the cost, and it is
+    //    the right thing to spend when the scarce resource is RAM.
+    //
+    //    NODE_OPTIONS reaches the workers, which is the half worth checking
+    //    rather than assuming — jest-worker children inherit the parent env.
+    //    Verified by setting an absurd 180 MB cap and watching the failure land
+    //    where it should: "Next.js build worker exited with code: 134", V8's own
+    //    heap error inside the WORKER, not a container SIGKILL.
+    //
+    //    Bonus: a capped build that genuinely runs out now fails in seconds with
+    //    "JavaScript heap out of memory" instead of thrashing for 46 minutes and
+    //    dying to an opaque signal.
+    //
+    // Enhanced Builds (a bigger machine, costs money) is therefore NOT needed,
+    // and was the wrong lever to reach for — it would have paid to accommodate
+    // an unbounded heap rather than bounding it.
     webpackMemoryOptimizations: true,
-    cpus: 2,
+    // 1, not 2 — see note 5 above. Two workers each entitled to a multi-GB heap
+    // is what exhausted the container; one worker cannot race itself.
+    cpus: 1,
   },
   outputFileTracingRoot: path.join(__dirname),
   // lib/prompts/index.ts reads the .txt + .json prompt files at module init

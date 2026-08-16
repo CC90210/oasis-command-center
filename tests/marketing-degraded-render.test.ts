@@ -61,15 +61,83 @@ test("every ambiguous zero-check is guarded by a degraded branch", () => {
   );
 });
 
-test("the track tiles do not render raw counts", () => {
-  // by_track has no `=== 0` to catch, so it is checked by shape: the tiles must
-  // go through the helper that substitutes an em dash on a degraded read.
-  const tiles = LINES.filter((l) => l.includes("<Stat label=") && l.includes("value="));
-  assert.ok(tiles.length >= 4, `expected the four track tiles, found ${tiles.length}`);
-  const raw = tiles.filter((l) => /value=\{summary\.by_track\./.test(l));
+test("no metric tile renders a raw count", () => {
+  // by_track / facets.brands have no `=== 0` to catch, so this is checked by
+  // shape: every tile must go through a helper that substitutes an em dash on a
+  // degraded read.
+  //
+  // THIS USED TO ASSERT `tiles.length >= 4`, counting the four hardcoded track
+  // tiles. That is a proxy for the property, not the property, and it broke the
+  // moment the tiles became a .map() over BRAND_GROUPS on 2026-08-16 — one
+  // source line, four rendered tiles. A count-based guard fails on a refactor
+  // that preserves the property and, worse, would have PASSED a refactor to six
+  // hardcoded tiles that read the counts raw. So it now asserts the real thing:
+  // no tile may name a count source directly.
+  const tiles = LINES.filter((l) => l.includes("<Stat ") && l.includes("value="));
+  assert.ok(tiles.length >= 1, `expected metric tiles on the Studio page, found ${tiles.length}`);
+
+  // Every source of a count that could be zero-because-broken rather than
+  // zero-because-empty. Reading one of these straight into `value=` is the bug.
+  const RAW_SOURCE = /value=\{\s*(summary\.by_track|summary\.by_status|summary\.total|facets\.brands)/;
+  const raw = tiles.filter((l) => RAW_SOURCE.test(l));
   assert.deepEqual(
     raw.map((l) => l.trim()),
     [],
-    "a track tile reads summary.by_track directly, so a failed read prints 0 as a measurement",
+    "a tile reads a count source directly, so a failed read prints 0 as a measurement",
   );
+
+  // …and the helpers they DO go through must actually have a degraded branch.
+  // Without this, renaming the raw read to `const brandCount = () => facets...`
+  // would satisfy the check above while changing nothing.
+  // THE PIPELINE TILES ARE METRIC TILES TOO. They render `by_status` into plain
+  // <div>s, so every `<Stat>`-shaped check above walked straight past them —
+  // and they carried the exact defect this file exists to prevent, in the one
+  // section that does not use the component the detector keys on. A guard with a
+  // hole reads as coverage. Found by an adversarial audit, not by this suite,
+  // which is the whole reason the assertion is now about the DATA SOURCE rather
+  // than the component name.
+  // THE LINCHPIN. `pipelineTotal` is the aggregate the whole section is gated on,
+  // so its own degraded-guard is what protects every per-stage read inside it. If
+  // this one line loses its guard, the section renders on a partial summary and
+  // the per-tile reads below become fabricated zeros again — which is exactly the
+  // state this was found in.
+  const totalLine = LINES.findIndex((l) => /const pipelineTotal\s*=/.test(l));
+  assert.ok(totalLine >= 0, "expected a pipelineTotal aggregate on the Studio page");
+  assert.ok(
+    /summary\.degraded/.test(LINES.slice(totalLine, totalLine + WINDOW).join("\n")),
+    "pipelineTotal must consult summary.degraded — it is the gate that keeps the " +
+      "pipeline section off the screen when the counts behind it are a floor rather " +
+      "than a total",
+  );
+  const sectionGate = LINES.findIndex((l) => /pipelineTotal > 0 &&/.test(l));
+  assert.ok(sectionGate > totalLine, "the pipeline section must render only when pipelineTotal > 0");
+
+  // Now every by_status read must be covered by EITHER a nearby degraded check or
+  // that section gate. Reads before the gate have no section protecting them.
+  const statusReads = LINES
+    .map((l, i) => [l, i] as const)
+    .filter(([l, i]) => /summary\.by_status\[/.test(l) && i !== totalLine);
+  assert.ok(statusReads.length >= 1, "expected the pipeline to read by_status");
+  for (const [line, i] of statusReads) {
+    const nearby = LINES.slice(Math.max(0, i - WINDOW), i + 1).join("\n");
+    const insideGatedSection = i > sectionGate;
+    assert.ok(
+      /summary\.degraded/.test(nearby) || insideGatedSection,
+      `line ${i + 1} turns by_status into a rendered number without first asking ` +
+        `whether the read succeeded, and sits outside the gated pipeline section:\n  ${line.trim()}\n` +
+        `A partial summary keeps the pages it DID read, so "Approved 0" here can ` +
+        `mean "the page carrying the approved assets failed to load".`,
+    );
+  }
+
+  for (const helper of ["trackCount", "brandCount"]) {
+    const declared = LINES.findIndex((l) => new RegExp(`const ${helper}\\s*=`).test(l));
+    assert.ok(declared >= 0, `${helper} must exist — a tile references it`);
+    const body = LINES.slice(declared, declared + 10).join("\n");
+    assert.ok(
+      /degraded/.test(body),
+      `${helper} must ask whether the read succeeded before returning a number; ` +
+        `otherwise the em dash it exists to render never appears`,
+    );
+  }
 });

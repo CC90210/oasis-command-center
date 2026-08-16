@@ -11,9 +11,18 @@ import {
 } from "../lib/founders/marketing-queries";
 import { join } from "node:path";
 import {
+  BRAND_GROUPS,
   CHANNELS,
   DECISIONS,
+  DEFAULT_BRAND_GROUP,
   FOUNDERS_OWN_BRAND,
+  PUBLISH_STALE_AFTER_MINUTES,
+  brandFilterAllowed,
+  brandGroup,
+  brandGroupFor,
+  claimedBrandSlugs,
+  isBrandGroupKey,
+  stalePublishWarning,
   buildMediaPath,
   channelBreadcrumb,
   channelsForTrack,
@@ -229,15 +238,126 @@ assert.ok(!isOwnBrand(null) && !isOwnBrand(undefined) && !isOwnBrand(""),
     join(process.cwd(), "lib/founders/marketing-queries.ts"), "utf8");
   assert.ok(queries.includes("FOUNDERS_OWN_BRAND"),
     "marketing-queries must scope to FOUNDERS_OWN_BRAND");
-  const scoped = queries.split("from(\"marketing_asset\")").length - 1;
-  const guards = queries.split("FOUNDERS_OWN_BRAND").length - 1;
-  assert.ok(guards >= scoped - 1,
-    `every marketing_asset read should be brand-scoped or explicitly widened ` +
-    `(${scoped} reads, ${guards} guards)`);
-  // The brand filter must NOT be honoured outside the widened scope, or
-  // ?brand=warner walks straight past the boundary.
-  assert.ok(queries.includes('if (opts.scope === "all")'),
-    "a caller must opt in explicitly to see anything but our own work");
+  // Every row-returning read must route through the ONE scoping helper rather
+  // than hand-rolling a `.eq("brand_slug", ...)`. That is what makes the
+  // behavioural assertions further down cover all of them at once.
+  assert.ok(queries.includes("function scopeToBrandGroup"),
+    "the brand boundary must live in one helper, not be re-derived per call site");
+  assert.ok(queries.includes("scopeToBrandGroup(q, group)"),
+    "getMarketingAssets must scope rows through the helper");
+  // The sub-filter must be gated. A bare `if (opts.brand) q = q.eq(...)` is the
+  // hole: ?group=oasis-ai&brand=warner would then put a client's ad on our tab.
+  assert.ok(queries.includes("brandFilterAllowed(opts.brand, group)"),
+    "the ?brand= sub-filter must be checked against the active tab before it is applied");
+}
+
+// ── brand GROUPS: the tab taxonomy CC asked for on 2026-08-16 ────────────────
+{
+  // Every named group's own slugs must resolve back to it, or a tab shows rows
+  // from somewhere else.
+  for (const g of BRAND_GROUPS) {
+    for (const slug of g.slugs || []) {
+      assert.equal(brandGroupFor(slug), g.key, `${slug} must resolve to the ${g.key} tab`);
+    }
+  }
+
+  // Exactly one residual group. Two would make brandGroupFor order-dependent;
+  // none would let an unclaimed slug fall through to no tab at all, which is the
+  // invisible-asset bug this taxonomy exists to prevent.
+  assert.equal(
+    BRAND_GROUPS.filter((g) => g.slugs === null).length,
+    1,
+    "exactly one residual group, or an unclaimed brand renders in zero tabs (or two)",
+  );
+
+  // No slug may be claimed twice — brandGroupFor takes the first match, so a
+  // duplicate would silently hide rows in whichever tab lost the race.
+  const claimed = claimedBrandSlugs();
+  assert.equal(new Set(claimed).size, claimed.length, "no brand slug may be claimed by two groups");
+
+  // THE RESIDUAL PROPERTY, which is the whole reason Clients is not a list.
+  // A client Maven registers tomorrow must land in a tab WITHOUT a deploy here.
+  // If someone later "tidies" this into slugs: ["warner","blyss","arthrisil"],
+  // this is the assertion that stops them.
+  assert.equal(brandGroupFor("warner"), "clients");
+  assert.equal(brandGroupFor("blyss"), "clients");
+  assert.equal(brandGroupFor("arthrisil"), "clients");
+  assert.equal(brandGroupFor("a-client-registered-tomorrow"), "clients",
+    "an unknown brand must fall into the residual tab, never into none");
+  assert.equal(brandGroupFor(null), "clients");
+  assert.equal(brandGroupFor(undefined), "clients");
+  assert.equal(brandGroupFor(""), "clients");
+
+  // The default tab is OASIS's own work — widening the taxonomy must not change
+  // what the page opens on.
+  assert.equal(DEFAULT_BRAND_GROUP, FOUNDERS_OWN_BRAND);
+  assert.ok(isBrandGroupKey("clients") && isBrandGroupKey("oasis-ai"));
+  assert.ok(!isBrandGroupKey("warner"), "a brand slug is not a group key");
+  assert.ok(!isBrandGroupKey("") && !isBrandGroupKey(null) && !isBrandGroupKey(undefined));
+
+  // ── the sub-filter may narrow a tab, never cross one ───────────────────────
+  // This is the security-shaped half. ?brand= arrives from the URL and a founder
+  // can type anything into it.
+  assert.ok(brandFilterAllowed("warner", "clients"), "a client narrows the Clients tab");
+  assert.ok(brandFilterAllowed("oasis-ai", "oasis-ai"));
+  assert.equal(brandFilterAllowed("warner", "oasis-ai"), false,
+    "?group=oasis-ai&brand=warner must NOT put a client's ad on the OASIS tab");
+  assert.equal(brandFilterAllowed("oasis-ai", "clients"), false,
+    "and the reverse must not pull our own work onto the Clients tab");
+  assert.equal(brandFilterAllowed("conaugh", "music"), false);
+
+  // Every group must be renderable: a tab with no label or no empty-state copy
+  // ships a blank string to the screen.
+  for (const g of BRAND_GROUPS) {
+    assert.ok(g.label.trim().length > 0, `${g.key} needs a label`);
+    assert.ok(g.empty.trim().length > 0, `${g.key} needs empty-state copy`);
+    assert.equal(brandGroup(g.key), g, "brandGroup must round-trip its own key");
+  }
+}
+
+// ── a publish request nothing ever collected ─────────────────────────────────
+// The Post panel claimed "the publisher picks it up within a minute". The drain
+// exists and is healthy, but it runs on the OPERATOR'S MACHINE — so whenever
+// that machine is off, the row waits indefinitely under a green success message
+// and the panel cannot tell that state from a publish in flight. These pin the
+// replacement: the page notices, from the row's own age, that nothing came.
+{
+  const T0 = new Date("2026-08-16T12:00:00Z");
+  const at = (mins: number) =>
+    new Date(T0.getTime() + mins * 60_000);
+  const queued = { state: "queued", created_at: T0.toISOString() };
+
+  assert.equal(stalePublishWarning(queued, at(1)), null, "a fresh request is just a fresh request");
+  assert.equal(stalePublishWarning(queued, at(PUBLISH_STALE_AFTER_MINUTES - 1)), null,
+    "inside the window, silence — a real drain can legitimately take minutes");
+
+  const warned = stalePublishWarning(queued, at(PUBLISH_STALE_AFTER_MINUTES));
+  assert.ok(warned, "past the window, the operator must be told nothing collected it");
+  assert.match(warned!, /nothing has been posted/i,
+    "the warning must state the consequence, not just the age");
+
+  // Terminal and in-flight states mean SOMETHING saw the row, which is the fact
+  // this warning exists to establish. Warning about them would cry wolf.
+  for (const state of ["running", "done", "failed"]) {
+    assert.equal(
+      stalePublishWarning({ state, created_at: T0.toISOString() }, at(60 * 24 * 7)),
+      null,
+      `${state} means a consumer picked it up — no warning`,
+    );
+  }
+
+  // Units read correctly at each scale; "Queued 180 minutes ago" is worse copy
+  // than "3 hours ago" and this is where an off-by-60 would hide.
+  assert.match(stalePublishWarning(queued, at(30))!, /30 minutes ago/);
+  assert.match(stalePublishWarning(queued, at(60))!, /1 hour ago/);
+  assert.match(stalePublishWarning(queued, at(180))!, /3 hours ago/);
+  assert.match(stalePublishWarning(queued, at(60 * 24 * 2))!, /2 days ago/);
+
+  // Never throw on bad input: this renders inside a panel, and a crash here
+  // would take the whole detail page with it.
+  assert.equal(stalePublishWarning({ state: "queued", created_at: "not-a-date" }), null);
+  assert.equal(stalePublishWarning(null), null);
+  assert.equal(stalePublishWarning(undefined), null);
 }
 
 // ── the brand boundary, exercised against DATA rather than source text ────────

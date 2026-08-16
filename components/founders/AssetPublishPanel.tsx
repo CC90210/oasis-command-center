@@ -47,10 +47,21 @@ export function AssetPublishPanel({
   assetId,
   hasVideo,
   lastIntent,
+  staleWarning = null,
 }: {
   assetId: string;
   hasVideo: boolean;
   lastIntent?: { state: string; platforms: string[]; created_at: string } | null;
+  /**
+   * Computed by the SERVER via stalePublishWarning, not here.
+   *
+   * Same reason the timestamp below is a raw `<time dateTime>` rather than
+   * toLocaleString(): this is a client component pre-rendered on the server, and
+   * anything derived from `new Date()` inside it would be evaluated twice, in two
+   * clocks, and mismatch on hydration. The page is force-dynamic, so a
+   * server-computed string is fresh on every request anyway.
+   */
+  staleWarning?: string | null;
 }) {
   const router = useRouter();
   const [pending, start] = useTransition();
@@ -85,9 +96,16 @@ export function AssetPublishPanel({
       return;
     }
     setPicked([]);
+    // This said "the publisher picks it up within a minute" — true of the drain's
+    // SCHEDULE (a cron_engine SEED_JOB on `* * * * *`) and not of the outcome.
+    // That drain runs on the operator's machine, so when the machine is off the
+    // row simply waits, and the sentence promised a minute that could be a night.
+    // It now reports what definitely happened (a request was recorded) and names
+    // the condition for the rest; the panel below flags a request nothing has
+    // collected.
     setMsg({
       ok: true,
-      text: `Queued for ${(body.platforms || picked).join(", ")}. The publisher picks it up within a minute.`,
+      text: `Recorded for ${(body.platforms || picked).join(", ")}. It goes out on the next publisher run.`,
     });
     start(() => router.refresh());
   }
@@ -155,6 +173,20 @@ export function AssetPublishPanel({
           }
         >
           {msg.text}
+        </div>
+      )}
+
+      {/* A request nothing has collected yet. Rendered as a warning rather than
+          left to look like normal queue latency — see stalePublishWarning.
+          Computed from the row's own age on each render, so it reports the drain
+          being unreachable (operator machine off, cron paused, process wedged)
+          without this page needing to reach that machine to ask. */}
+      {staleWarning && (
+        <div
+          role="status"
+          className="rounded-lg border border-hot/40 bg-hot/10 px-3 py-2 text-[11px] leading-5 text-hot"
+        >
+          {staleWarning}
         </div>
       )}
 

@@ -10,6 +10,31 @@
  * Bytes live in Supabase Storage, not Postgres, so a 400 MB long-form video
  * never touches the database. Playback URLs are signed server-side per object
  * and expire in an hour; the browser never holds a service key.
+ *
+ * ─────────────────────────────────────────────────────────────────────────────
+ * THREE AXES, IN THE ORDER CC ACTUALLY WORKS (2026-08-16)
+ *
+ * He asked for brand tabs — "Oasis AI / CC / Adon / Music / stuff like that" —
+ * and said the channel tiles read as confusing. Both complaints are the same
+ * complaint: the page led with its least useful axis.
+ *
+ *   1. BRAND   — tabs. The first question asked of any asset. `brand_slug`.
+ *   2. STATE   — which stage it sits at. NOT BUILT YET, deliberately; see below.
+ *   3. CHANNEL — demoted to a facet under "Refine". Still here, no longer the
+ *                headline, because it cannot currently tell the truth: `channel`
+ *                holds one value and a post goes to as many as six places, so 37
+ *                of 47 rows claim Instagram. `platforms` (migration 144) carries
+ *                the real distribution and the tiles render it.
+ *
+ * WHY THERE IS NO STATE FILTER HERE YET.
+ * CC asked for "a category for media that is in review and hasn't been posted
+ * yet". The control is three lines of code and it is deliberately absent,
+ * because `status` is wrong at the source: CMO-Agent/scripts/library_sync.py
+ * stamps `in_review` on every row it registers, including pieces already public.
+ * Live count today is 46 in_review / 1 published — those are not 46 things
+ * awaiting a verdict, most are already on Instagram. Shipping the filter now
+ * would sort a lying column into tidy piles and make the lie look deliberate.
+ * Maven owns the mapping fix; this lands the moment it does.
  */
 
 import { notFound } from "next/navigation";
@@ -18,22 +43,28 @@ import { Card, PageHeader } from "@/components/Card";
 import { safe } from "@/lib/api-helpers";
 import { resolveFounder } from "@/lib/founders/gate";
 import {
+  DEGRADED_MARKETING_FACETS,
   getMarketingAssets,
-  getMarketingBrands,
+  getMarketingFacets,
   mediaKey,
   signMediaUrls,
   type MarketingAssetRow,
 } from "@/lib/founders/marketing-queries";
 import {
+  BRAND_GROUPS,
+  DEFAULT_BRAND_GROUP,
   TRACKS,
+  brandGroupFor,
   channelLabel,
   channelsForTrack,
   isAssetStatus,
+  isBrandGroupKey,
   parseSlideUrls,
   isChannel,
   trackForChannel,
   trackLabel,
   type AssetStatus,
+  type BrandGroupKey,
   type Channel,
   type Track,
 } from "@/lib/founders-marketing-core";
@@ -52,17 +83,28 @@ function isTrack(v: string | undefined): v is Track {
 export default async function MarketingLibraryPage({
   searchParams,
 }: {
-  searchParams: Promise<{ track?: string; channel?: string; brand?: string; status?: string }>;
+  searchParams: Promise<{
+    group?: string;
+    track?: string;
+    channel?: string;
+    brand?: string;
+    author?: string;
+    status?: string;
+  }>;
 }) {
   const founder = await resolveFounder();
   if (!founder) notFound();
 
   const sp = await searchParams;
+  // An unknown ?group= falls back to the default tab rather than 404ing or
+  // showing everything — a bad tab name is a typo, not a request for a wider view.
+  const group: BrandGroupKey = isBrandGroupKey(sp.group) ? sp.group : DEFAULT_BRAND_GROUP;
   const track = isTrack(sp.track) ? sp.track : undefined;
   const channel = isChannel(sp.channel) ? (sp.channel as Channel) : undefined;
   const brand = typeof sp.brand === "string" && /^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(sp.brand)
     ? sp.brand
     : undefined;
+  const author = typeof sp.author === "string" && sp.author.length <= 320 ? sp.author : undefined;
   // Studio's pipeline tiles link here with ?status=; validated against the
   // canonical list so an arbitrary string never reaches the query.
   const status = isAssetStatus(sp.status) ? sp.status : undefined;
@@ -71,16 +113,36 @@ export default async function MarketingLibraryPage({
   // the library is empty or the query failed, and the page renders very
   // different copy for those two. getMarketingAssets throws on a broken read and
   // returns [] only when the table genuinely is not there yet.
-  const [assetsOrNull, brands] = await Promise.all([
+  const [assetsOrNull, facets] = await Promise.all([
     safe<MarketingAssetRow[] | null>(
       "marketing.library",
-      getMarketingAssets(founder.tenantId, { track, channel, brand, status }),
+      getMarketingAssets(founder.tenantId, { group, track, channel, brand, author, status }),
       null,
     ),
-    safe("marketing.library.brands", getMarketingBrands(founder.tenantId), []),
+    safe("marketing.library.facets", getMarketingFacets(founder.tenantId), DEGRADED_MARKETING_FACETS),
   ]);
   const libraryDegraded = assetsOrNull === null;
   const assets = assetsOrNull ?? [];
+
+  // Tab counts, from the one reader that deliberately spans every brand.
+  // A tab with no rows still renders — it is navigation, not a measurement, and
+  // an absent tab is how CC ends up not knowing a brand exists. What it must NOT
+  // do is print a confident 0 when the count simply failed to load.
+  const countFor = (key: BrandGroupKey): number | null =>
+    facets.degraded
+      ? null
+      : facets.brands
+          .filter((b) => brandGroupFor(b.slug) === key)
+          .reduce((n, b) => n + b.count, 0);
+
+  /** Brands inside the current tab — the sub-filter, e.g. Warner within Clients. */
+  const brandsInGroup = facets.brands.filter((b) => brandGroupFor(b.slug) === group);
+
+  // ONE author means no choice to make, so the control is hidden rather than
+  // rendered with a single dead option. Today every row carries the schema
+  // default `conaugh@oasisai.work` — Maven has never stamped a second author —
+  // so this row is invisible and lights up the moment that changes.
+  const showAuthors = facets.authors.length > 1;
 
   // Pick the objects each tile needs, then sign them ALL in one batched call per
   // bucket. Signing per object was one Storage round-trip each — 400 sequential
@@ -146,41 +208,60 @@ export default async function MarketingLibraryPage({
   // uses the real mapping and cannot drift.
   const activeTrack: Track | undefined = track ?? (channel ? trackForChannel(channel) : undefined);
   const channelOptions: Channel[] = activeTrack ? channelsForTrack(activeTrack) : [];
-  // `status` is preserved like every other dimension. It was omitted here while
-  // Studio's pipeline tiles link in WITH it, so arriving on "In review" and then
-  // touching any pill — including "All" — silently widened the view to every
-  // status while the page gave no sign it had. You were reviewing, then you were
-  // not, and nothing said so.
+  // Every dimension is preserved unless explicitly overridden. `status` was
+  // omitted here once while Studio's pipeline tiles link in WITH it, so arriving
+  // on "In review" and then touching any pill — including "All" — silently
+  // widened the view to every status while the page gave no sign it had. You
+  // were reviewing, then you were not, and nothing said so.
   const filterHref = (next: {
+    group?: BrandGroupKey;
     track?: Track | null;
     channel?: Channel | null;
     brand?: string | null;
+    author?: string | null;
     status?: AssetStatus | null;
   }) => {
     const params = new URLSearchParams();
+    const nextGroup = next.group ?? group;
+    // Switching tabs CLEARS the brand sub-filter. `warner` is meaningless on the
+    // OASIS tab — the reader would drop it anyway (brandFilterAllowed), but a URL
+    // that still carries it describes a view the page is not showing, and the
+    // next click would propagate the lie.
+    const groupChanged = next.group !== undefined && next.group !== group;
     const nextTrack = next.track === undefined ? track : next.track || undefined;
     const nextChannel = next.channel === undefined ? channel : next.channel || undefined;
-    const nextBrand = next.brand === undefined ? brand : next.brand || undefined;
+    const nextBrand = groupChanged
+      ? undefined
+      : next.brand === undefined ? brand : next.brand || undefined;
+    const nextAuthor = next.author === undefined ? author : next.author || undefined;
     const nextStatus = next.status === undefined ? status : next.status || undefined;
+    if (nextGroup !== DEFAULT_BRAND_GROUP) params.set("group", nextGroup);
     if (nextTrack) params.set("track", nextTrack);
     if (nextChannel) params.set("channel", nextChannel);
     if (nextBrand) params.set("brand", nextBrand);
+    if (nextAuthor) params.set("author", nextAuthor);
     if (nextStatus) params.set("status", nextStatus);
     const query = params.toString();
     return `/founders/marketing/library${query ? `?${query}` : ""}`;
   };
 
+  const activeGroup = BRAND_GROUPS.find((g) => g.key === group)!;
+  const filtered = !!(track || channel || brand || author || status);
+
   return (
     <div className="space-y-6 animate-fade-in">
       <PageHeader
         title="Library"
-        subtitle={
-          assets.length === 0
-            ? "Everything produced lands here"
-            : `${assets.length} ${assets.length === 1 ? "asset" : "assets"}${
-                channel ? ` · ${channelLabel(channel)}` : track ? ` · ${trackLabel(track)}` : ""
-              }`
-        }
+        // CC, 2026-08-16: "Are the posts in this library just stockpiled, and how
+        // do we function with our automations? Are they taking from this library
+        // when we post automatically?"
+        //
+        // They are not, and the page had never said so. The daily poster reads
+        // data/post_queue/*.json and mirrors the result here as its LAST step —
+        // this table is a record of what already shipped, never a queue anything
+        // draws from. A page showing a Draft -> Scheduled -> Published pipeline
+        // invites exactly the opposite reading, so it now states the direction.
+        subtitle="A record of what has already been produced — the daily poster writes here, it never reads from here."
         action={
           <Link href="/founders/marketing" className="text-xs font-semibold text-accent hover:underline">
             Back to Studio
@@ -188,8 +269,58 @@ export default async function MarketingLibraryPage({
         }
       />
 
-      {/* Filters. Plain links so the page stays a server component and every
-          view is a shareable URL. */}
+      {/* ── Axis 1: BRAND. Tabs, not pills — this is navigation between separate
+          bodies of work, and it should not look like the facets that narrow
+          within one. */}
+      <div className="-mb-px flex flex-wrap items-end gap-1 border-b border-bg-border">
+        {BRAND_GROUPS.map((g) => {
+          const n = countFor(g.key);
+          const active = g.key === group;
+          return (
+            <Link
+              key={g.key}
+              href={filterHref({ group: g.key })}
+              aria-current={active ? "page" : undefined}
+              className={
+                "flex items-center gap-2 border-b-2 px-3 py-2 text-sm transition-colors " +
+                (active
+                  ? "border-accent font-semibold text-fg"
+                  : "border-transparent font-medium text-fg-dim hover:border-bg-border hover:text-fg")
+              }
+            >
+              {g.label}
+              {/* `null` = the facet read failed. An em dash says "unknown"; a 0
+                  would say "this brand has nothing", which is a different fact
+                  and the one that stops CC opening the tab. */}
+              <span className={active ? "text-accent" : "text-fg-dim"}>
+                {n === null ? "—" : n}
+              </span>
+            </Link>
+          );
+        })}
+      </div>
+
+      {/* Sub-filter WITHIN the tab: Warner / Arthrisil / blyss inside Clients.
+          Hidden when the tab holds a single brand, where it would be a control
+          with one option. */}
+      {brandsInGroup.length > 1 && (
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="mr-1 text-[10px] font-bold uppercase tracking-[0.14em] text-fg-dim">
+            {activeGroup.label}
+          </span>
+          <FilterPill href={filterHref({ brand: null })} label="All" active={!brand} subtle />
+          {brandsInGroup.map((item) => (
+            <FilterPill
+              key={item.slug}
+              href={filterHref({ brand: item.slug })}
+              label={`${item.name} ${item.count}`}
+              active={brand === item.slug}
+              subtle
+            />
+          ))}
+        </div>
+      )}
+
       {/* A status filter arrives from Studio's pipeline tiles, never from a pill
           here, so without this row the page silently showed a subset with no
           indication of why — and no way back. */}
@@ -206,65 +337,88 @@ export default async function MarketingLibraryPage({
         </div>
       )}
 
-      <div className="flex flex-wrap items-center gap-2">
-        <FilterPill href={filterHref({ track: null, channel: null })} label="All" active={!track && !channel} />
-        {TRACKS.map((t) => (
-          <FilterPill
-            key={t}
-            href={filterHref({ track: t, channel: null })}
-            label={trackLabel(t)}
-            // Stays lit while drilled into one of its channels, so the view
-            // always shows where you are.
-            active={activeTrack === t}
-          />
-        ))}
-      </div>
+      {/* ── Axis 3: CHANNEL, demoted. Under a "Refine" label and rendered subtle,
+          so it stops reading as the primary way into the library. */}
+      <details className="group/refine" open={!!(track || channel || author)}>
+        <summary className="inline-flex cursor-pointer list-none items-center gap-1.5 text-[10px] font-bold uppercase tracking-[0.14em] text-fg-dim transition-colors hover:text-fg-muted">
+          Refine
+          {filtered && !status && <span className="font-medium normal-case tracking-normal text-accent">· active</span>}
+        </summary>
 
-      {brands.length > 1 && (
-        <div className="flex flex-wrap items-center gap-2">
-          <span className="mr-1 text-[10px] font-bold uppercase tracking-[0.14em] text-fg-dim">Brand</span>
-          <FilterPill href={filterHref({ brand: null })} label="All brands" active={!brand} subtle />
-          {brands.map((item) => (
-            <FilterPill
-              key={item.slug}
-              href={filterHref({ brand: item.slug })}
-              label={item.name}
-              active={brand === item.slug}
-              subtle
-            />
-          ))}
+        <div className="mt-3 space-y-2">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="mr-1 text-[10px] font-bold uppercase tracking-[0.14em] text-fg-dim">Channel</span>
+            <FilterPill href={filterHref({ track: null, channel: null })} label="Any" active={!track && !channel} subtle />
+            {TRACKS.map((t) => (
+              <FilterPill
+                key={t}
+                href={filterHref({ track: t, channel: null })}
+                label={trackLabel(t)}
+                // Stays lit while drilled into one of its channels, so the view
+                // always shows where you are.
+                active={activeTrack === t}
+                subtle
+              />
+            ))}
+          </div>
+
+          {channelOptions.length > 1 && (
+            <div className="flex flex-wrap items-center gap-2 pl-1">
+              <FilterPill
+                href={filterHref({ track: activeTrack as Track, channel: null })}
+                label={`All ${trackLabel(activeTrack as Track)}`}
+                active={!channel}
+                subtle
+              />
+              {channelOptions.map((c) => (
+                <FilterPill
+                  key={c}
+                  href={filterHref({ track: null, channel: c })}
+                  label={channelLabel(c)}
+                  active={channel === c}
+                  subtle
+                />
+              ))}
+            </div>
+          )}
+
+          {showAuthors && (
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="mr-1 text-[10px] font-bold uppercase tracking-[0.14em] text-fg-dim">By</span>
+              <FilterPill href={filterHref({ author: null })} label="Anyone" active={!author} subtle />
+              {facets.authors.map((a) => (
+                <FilterPill
+                  key={a.email}
+                  href={filterHref({ author: a.email })}
+                  // The local part is the readable half; the full address is the
+                  // title, so two people at one domain are still distinguishable.
+                  label={`${a.email.split("@")[0]} ${a.count}`}
+                  active={author === a.email}
+                  subtle
+                />
+              ))}
+            </div>
+          )}
         </div>
-      )}
+      </details>
 
-      {channelOptions.length > 1 && (
-        <div className="flex flex-wrap items-center gap-2">
-          {/* "All <track>" clears the channel filter without losing the track. */}
-          <FilterPill
-            href={filterHref({ track: activeTrack as Track, channel: null })}
-            label={`All ${trackLabel(activeTrack as Track)}`}
-            active={!channel}
-            subtle
-          />
-          {channelOptions.map((c) => (
-            <FilterPill
-              key={c}
-              href={filterHref({ track: null, channel: c })}
-              label={channelLabel(c)}
-              active={channel === c}
-              subtle
-            />
-          ))}
+      {/* The count sits with the grid it describes rather than in the header,
+          which now carries the "what this page IS" line. */}
+      {assets.length > 0 && (
+        <div className="px-1 text-xs text-fg-dim">
+          {assets.length} {assets.length === 1 ? "asset" : "assets"}
+          {channel ? ` · ${channelLabel(channel)}` : track ? ` · ${trackLabel(track)}` : ""}
         </div>
       )}
 
       {assets.length === 0 ? (
         <Card>
           <MarketingEmpty
-            // `status` counts as a filter. Arriving from a Studio pipeline tile
-            // with zero matches used to say "The library is empty" — flatly false
-            // when the library is full and only that stage is empty, and it made
-            // the stage row above look broken. `libraryDegraded` outranks both:
-            // when the read FAILED we know nothing about what is in here.
+            // Order matters: a failed read outranks everything, because when the
+            // query broke we know nothing about what is in here. Then the
+            // narrowest filter that could explain the emptiness, so the copy
+            // names the thing to clear rather than declaring the library empty —
+            // which was flatly false when only one stage was.
             headline={
               libraryDegraded
                 ? "Couldn't load the library"
@@ -272,7 +426,11 @@ export default async function MarketingLibraryPage({
                 ? "Nothing at this stage"
                 : track || channel
                   ? "Nothing in this channel yet"
-                  : "The library is empty"
+                  : author
+                    ? "Nothing from this author"
+                    : brand
+                      ? "Nothing under this brand yet"
+                      : `${activeGroup.label} is empty`
             }
             detail={
               libraryDegraded
@@ -281,7 +439,11 @@ export default async function MarketingLibraryPage({
                 ? "No assets are sitting at this stage right now. Clear the stage to see the rest of the library."
                 : track || channel
                   ? "No assets are registered for this channel. Produce something, or clear the filter to see everything."
-                  : "Assets appear here as Maven produces them. Nothing is registered yet, and nothing is being invented to fill the space."
+                  : author
+                    ? "Nobody has registered an asset under this address in this tab."
+                    : brand
+                      ? "This brand has no assets in the library yet."
+                      : activeGroup.empty
             }
             hint="Drop links in the Train tab — they are fetched and analysed within a few minutes."
           />
