@@ -422,8 +422,22 @@ export async function getMarketingAssets(
       .limit(opts.limit ?? 200);
     if (opts.track) q = q.eq("track", opts.track);
     if (opts.channel) q = q.eq("channel", opts.channel);
-    if (opts.status) q = q.eq("status", opts.status);
     if (opts.author) q = q.eq("author_email", opts.author);
+
+    // `status` and `lifecycle` ARE TWO VOCABULARIES FOR ONE COLUMN, so applying
+    // both ANDs them into a contradiction: ?status=draft&lifecycle=archived
+    // compiles to `status = 'draft' AND status IN ('archived','rejected')`,
+    // which matches nothing. The grid would read "Nothing at this stage" while
+    // the pills above it show real counts — a dead end with no visible cause,
+    // and reachable in two clicks (arrive from a Studio pipeline tile, then
+    // press a lifecycle pill).
+    //
+    // Lifecycle wins because it is the axis the page is organised on; `status`
+    // survives only as a deep-link target for Studio's pipeline tiles, which
+    // address stages lifecycle deliberately merges (scheduled, draft). The UI
+    // also clears one when setting the other, so this guard is the backstop for
+    // a hand-typed URL rather than the primary defence.
+    if (opts.status && !opts.lifecycle) q = q.eq("status", opts.status);
 
     // LIFECYCLE, the axis CC actually asked for: "organise this a lot better so
     // that we can differentiate our pieces of content."

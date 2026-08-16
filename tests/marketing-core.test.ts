@@ -256,6 +256,14 @@ assert.ok(!isOwnBrand(null) && !isOwnBrand(undefined) && !isOwnBrand(""),
   // hole: ?group=oasis-ai&brand=warner would then put a client's ad on our tab.
   assert.ok(queries.includes("brandFilterAllowed(opts.brand, group)"),
     "the ?brand= sub-filter must be checked against the active tab before it is applied");
+
+  // `status` and `lifecycle` filter the SAME column with different vocabularies.
+  // Applying both ANDs them into a contradiction that matches nothing, so the
+  // grid reads "Nothing at this stage" beneath pills showing real counts — and
+  // it is two clicks away (arrive from a Studio pipeline tile, press a pill).
+  assert.ok(queries.includes("if (opts.status && !opts.lifecycle)"),
+    "status must yield to lifecycle — ANDing two vocabularies for one column " +
+    "produces an unreachable-empty grid with no visible cause");
 }
 
 // ── brand GROUPS: the tab taxonomy CC asked for on 2026-08-16 ────────────────

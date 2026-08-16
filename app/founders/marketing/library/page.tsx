@@ -263,8 +263,20 @@ export default async function MarketingLibraryPage({
       ? undefined
       : next.brand === undefined ? brand : next.brand || undefined;
     const nextAuthor = next.author === undefined ? author : next.author || undefined;
-    const nextStatus = next.status === undefined ? status : next.status || undefined;
-    const nextLifecycle = next.lifecycle === undefined ? lifecycle : next.lifecycle || undefined;
+    // ONE OR THE OTHER, NEVER BOTH. They filter the same column with different
+    // vocabularies, so carrying both produces `status = 'draft' AND status IN
+    // ('archived',...)` — an empty grid under pills that promise rows. Setting
+    // either one drops the other, which is also what the operator means: picking
+    // "Archived" is a request to see archived, not to intersect it with the
+    // stage they arrived from.
+    const settingLifecycle = next.lifecycle !== undefined;
+    const settingStatus = next.status !== undefined;
+    const nextStatus = settingLifecycle
+      ? undefined
+      : next.status === undefined ? status : next.status || undefined;
+    const nextLifecycle = settingStatus
+      ? undefined
+      : next.lifecycle === undefined ? lifecycle : next.lifecycle || undefined;
     if (nextGroup !== DEFAULT_BRAND_GROUP) params.set("group", nextGroup);
     if (nextTrack) params.set("track", nextTrack);
     if (nextChannel) params.set("channel", nextChannel);
