@@ -335,21 +335,28 @@ assert.ok(!isOwnBrand(null) && !isOwnBrand(undefined) && !isOwnBrand(""),
 // not been posted at all, ever?" He could not tell, because `status` conflates
 // "has CC ruled on it" with "did it go out".
 {
-  // DISTRIBUTION IS EVIDENCE-ONLY. `platforms` was backfilled from `channel` and
-  // holds single-element copies of it, so it records intent and must never count
-  // as proof of delivery. This is the assertion that stops someone "improving"
-  // lifecycleOf by reading it.
+  // DISTRIBUTION IS EVIDENCE-ONLY, and from ONE column. `platforms` was
+  // backfilled from `channel` and holds single-element copies of it, so it
+  // records intent and must never count as proof of delivery.
   assert.equal(distributionOf({ published_at: null }), "never_posted");
   assert.equal(distributionOf({ published_at: "2026-08-01T00:00:00Z" }), "live");
-  assert.equal(distributionOf({ published_at: null, analytics_posts: 3 }), "live",
-    "a linked analytics row is proof a platform accepted it");
-  assert.equal(distributionOf({ published_at: null, analytics_posts: 0 }), "never_posted");
+
+  // ONE SIGNAL ONLY. A second predicate visible to this function but not to the
+  // SQL in getMarketingAssets makes the pills and the grid disagree — "Posted 3"
+  // over an empty grid. An earlier draft accepted an `analytics_posts` count
+  // here and it was both dead (nothing populated it) and a desync waiting to
+  // happen. Extra keys must not change the answer.
+  assert.equal(
+    distributionOf({ published_at: null, analytics_posts: 3 } as { published_at: null }),
+    "never_posted",
+    "distribution must read published_at ALONE — the SQL filter cannot see anything else, " +
+      "so a second signal here silently splits the counts from the grid",
+  );
 
   // THE WORLD OUTRANKS THE BOOKKEEPING. An asset that demonstrably went out is
   // Posted even while its status column still says in_review — which is the
   // exact state library_sync.py leaves rows in.
   assert.equal(lifecycleOf({ status: "in_review", published_at: "2026-08-01T00:00:00Z" }), "live");
-  assert.equal(lifecycleOf({ status: "draft", published_at: null, analytics_posts: 2 }), "live");
 
   assert.equal(lifecycleOf({ status: "in_review", published_at: null }), "needs_review");
   assert.equal(lifecycleOf({ status: "draft", published_at: null }), "needs_review");

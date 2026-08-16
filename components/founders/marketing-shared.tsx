@@ -14,6 +14,8 @@ import { CarouselFrame } from "@/components/founders/CarouselFrame";
 import {
   channelLabel,
   isRenderableCarousel,
+  lifecycleLabel,
+  lifecycleOf,
   parsePlatforms,
   platformLabel,
   fmtDuration,
@@ -69,8 +71,28 @@ export function isPortrait(mediaW?: number | null, mediaH?: number | null): bool
   return Boolean(mediaW && mediaH && mediaH > mediaW);
 }
 
-export function StatusTag({ status }: { status: AssetStatus }) {
-  return <Tag tone={STATUS_TONE[status] ?? "neutral"}>{status.replace("_", " ")}</Tag>;
+/**
+ * The badge on a tile. Shows the LIFECYCLE bucket, not the raw status column.
+ *
+ * CC's original complaint was a grid of 41 tiles all reading "IN REVIEW", which
+ * told him nothing about whether any of it had gone out. Adding lifecycle pills
+ * above the grid while leaving the badges rendering `status` would have left the
+ * page speaking two vocabularies at once — pills saying "Posted 1" over a tile
+ * still labelled "in review" for the same asset, since library_sync.py stamps
+ * in_review on rows that are already public.
+ *
+ * `published_at` is optional so existing callers keep compiling, and its absence
+ * degrades to the review-state reading rather than falsely claiming "Posted".
+ */
+export function StatusTag({
+  status,
+  publishedAt,
+}: {
+  status: AssetStatus;
+  publishedAt?: string | null;
+}) {
+  const bucket = lifecycleOf({ status, published_at: publishedAt ?? null });
+  return <Tag tone={STATUS_TONE[status] ?? "neutral"}>{lifecycleLabel(bucket)}</Tag>;
 }
 
 /**
@@ -117,6 +139,7 @@ export function AssetTile({
   brandName,
   channel,
   status,
+  publishedAt,
   hook,
   aspect,
   durationS,
@@ -135,6 +158,7 @@ export function AssetTile({
   brandName: string;
   channel: Channel;
   status: AssetStatus;
+  publishedAt?: string | null;
   hook?: string | null;
   aspect?: string | null;
   durationS?: number | null;
@@ -235,7 +259,7 @@ export function AssetTile({
               ? platforms.map(platformLabel).join(" · ")
               : channelLabel(channel)}
           </span>
-          <StatusTag status={status} />
+          <StatusTag status={status} publishedAt={publishedAt} />
         </div>
         {/* The verdict lives on the tile. Sending the operator somewhere else to approve
             something they are already looking at is how 39 assets ended up sitting in
