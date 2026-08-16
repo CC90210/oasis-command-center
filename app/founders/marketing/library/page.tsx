@@ -71,6 +71,7 @@ import {
   channelsForTrack,
   isAssetStatus,
   isBrandGroupKey,
+  authorName,
   isLifecycle,
   lifecycleHint,
   lifecycleLabel,
@@ -476,7 +477,7 @@ export default async function MarketingLibraryPage({
                   href={filterHref({ author: a.email })}
                   // The local part is the readable half; the full address is the
                   // title, so two people at one domain are still distinguishable.
-                  label={`${a.email.split("@")[0]} ${a.count}`}
+                  label={`${authorName(a.email)} ${a.count}`}
                   active={author === a.email}
                   subtle
                 />

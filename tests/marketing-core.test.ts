@@ -24,6 +24,7 @@ import {
   DEFAULT_BRAND_GROUP,
   FOUNDERS_OWN_BRAND,
   PUBLISH_STALE_AFTER_MINUTES,
+  authorName,
   brandFilterAllowed,
   brandGroup,
   brandGroupFor,
@@ -320,6 +321,32 @@ assert.ok(!isOwnBrand(null) && !isOwnBrand(undefined) && !isOwnBrand(""),
   assert.equal(brandFilterAllowed("oasis-ai", "clients"), false,
     "and the reverse must not pull our own work onto the Clients tab");
   assert.equal(brandFilterAllowed("conaugh", "music"), false);
+
+  // TAB LABELS NAME A ROLE, NOT A PERSON. CC: "we should just do like personal
+  // ... so it should be Oasis AI personal music and then clients." A tab named
+  // after a human sits oddly beside a company and a genre; naming the role puts
+  // all four on one axis. The SLUG stays `conaugh` — it is a stored value and
+  // renaming it would orphan every row that carries it.
+  assert.equal(brandGroup("conaugh").label, "Personal");
+  assert.deepEqual(brandGroup("conaugh").slugs, ["conaugh"],
+    "the label may be renamed freely; the slug is data and must not move");
+  assert.deepEqual(
+    BRAND_GROUPS.map((g) => g.label),
+    ["OASIS AI", "Personal", "Music", "Clients"],
+    "the four tabs CC asked for, in order",
+  );
+
+  // ── provenance reads as a person ──────────────────────────────────────────
+  // Adon co-founds OASIS AI and contributes to this library, so "added by" has
+  // to name him rather than print a mailbox.
+  assert.equal(authorName("adon@oasisai.work"), "Adon");
+  assert.equal(authorName("conaugh@oasisai.work"), "CC");
+  assert.equal(authorName("ADON@OasisAI.work"), "Adon", "case and domain casing must not matter");
+  // An unknown contributor is still shown — provenance you cannot read beats
+  // provenance you cannot see.
+  assert.equal(authorName("someone@else.com"), "someone");
+  assert.equal(authorName(null), "unknown");
+  assert.equal(authorName(""), "unknown");
 
   // Every group must be renderable: a tab with no label or no empty-state copy
   // ships a blank string to the screen.
