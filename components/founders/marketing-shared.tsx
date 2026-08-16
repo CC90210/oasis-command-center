@@ -16,6 +16,7 @@ import {
   isRenderableCarousel,
   lifecycleLabel,
   lifecycleOf,
+  type Lifecycle,
   parsePlatforms,
   platformLabel,
   fmtDuration,
@@ -25,14 +26,20 @@ import {
 
 type Tone = "neutral" | "accent" | "hot" | "warm" | "engaged" | "info";
 
-const STATUS_TONE: Record<AssetStatus, Tone> = {
-  draft: "neutral",
-  in_review: "warm",
-  approved: "accent",
-  scheduled: "info",
-  published: "engaged",
-  rejected: "hot",
-  archived: "neutral",
+/**
+ * Badge colour, keyed by LIFECYCLE so it can never contradict the word beside it.
+ *
+ * Replaced a map keyed by the raw `status` column. Once the label came from
+ * lifecycle, that map coloured "Posted" with in_review's amber the moment the two
+ * vocabularies disagreed — and they are built to disagree, since library_sync.py
+ * stamps in_review on rows that are already public. It read as consistent only
+ * because the single published asset also happens to carry status='published'.
+ */
+const LIFECYCLE_TONE: Record<Lifecycle, Tone> = {
+  needs_review: "warm",   // wants something from you
+  approved: "accent",     // cleared, not sent
+  live: "engaged",        // out in the world
+  archived: "neutral",    // shelved, and restorable
 };
 
 /**
@@ -92,7 +99,13 @@ export function StatusTag({
   publishedAt?: string | null;
 }) {
   const bucket = lifecycleOf({ status, published_at: publishedAt ?? null });
-  return <Tag tone={STATUS_TONE[status] ?? "neutral"}>{lifecycleLabel(bucket)}</Tag>;
+  // TONE FOLLOWS THE BUCKET, not the raw column. Taking the label from lifecycle
+  // and the colour from `status` renders "Posted" in the amber that means
+  // "needs a verdict" the moment those two disagree — and they are DESIGNED to
+  // disagree: library_sync.py stamps in_review on rows that are already public,
+  // which is the whole reason lifecycle exists. It looks consistent today only
+  // because the one published asset also happens to carry status='published'.
+  return <Tag tone={LIFECYCLE_TONE[bucket]}>{lifecycleLabel(bucket)}</Tag>;
 }
 
 /**
