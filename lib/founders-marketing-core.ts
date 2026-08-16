@@ -550,13 +550,30 @@ export function freshnessLabel(capturedAt: string | null | undefined, now = new 
  */
 export type Distribution = "live" | "never_posted";
 
-export function distributionOf(asset: {
-  published_at?: string | null;
-  analytics_posts?: number | null;
-}): Distribution {
-  if (asset.published_at) return "live";
-  if ((asset.analytics_posts ?? 0) > 0) return "live";
-  return "never_posted";
+/**
+ * ONE SIGNAL, DELIBERATELY: `published_at`.
+ *
+ * This briefly also accepted an `analytics_posts` count, on the theory that a
+ * linked post_analytics row proves a platform took it. True, and still the wrong
+ * design, for two reasons found in review:
+ *
+ *  1. IT WAS DEAD. No reader ever populated the field, so the branch could not
+ *     fire — code that reads as live logic and is unreachable, which is how a
+ *     future change "fixes" something that was never running.
+ *
+ *  2. IT WOULD HAVE DESYNCED THE PAGE. getLifecycleCounts buckets in JS through
+ *     this function, while getMarketingAssets filters in SQL on `published_at`
+ *     alone. A second signal here that SQL cannot see makes the pills and the
+ *     grid disagree — "Posted 3" over an empty grid — and they agreed only
+ *     because the field was always undefined. Two code paths deciding one
+ *     question have to consult the same column.
+ *
+ * If analytics should ever confer "posted", the fix is to backfill
+ * `published_at` from post_analytics — a DATA correction both paths already
+ * read — never a second predicate in the one path that happens to be JavaScript.
+ */
+export function distributionOf(asset: { published_at?: string | null }): Distribution {
+  return asset.published_at ? "live" : "never_posted";
 }
 
 /**
@@ -606,7 +623,6 @@ export function lifecycleHint(l: Lifecycle): string {
 export function lifecycleOf(asset: {
   status: string;
   published_at?: string | null;
-  analytics_posts?: number | null;
 }): Lifecycle {
   if (asset.status === "archived" || asset.status === "rejected") return "archived";
   if (distributionOf(asset) === "live") return "live";

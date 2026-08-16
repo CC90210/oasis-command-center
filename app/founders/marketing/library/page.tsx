@@ -545,6 +545,7 @@ export default async function MarketingLibraryPage({
               brandName={asset.brand_name}
               channel={asset.channel}
               status={asset.status}
+              publishedAt={asset.published_at}
               hook={asset.hook}
               aspect={asset.aspect}
               durationS={asset.duration_s}

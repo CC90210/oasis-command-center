@@ -197,7 +197,7 @@ export default async function AssetDetailPage({
         <div className="space-y-6">
           <Card title="Status" subtitle="Where this sits, and what you can do about it">
             <div className="mb-4 flex items-center gap-3">
-              <StatusTag status={asset.status} />
+              <StatusTag status={asset.status} publishedAt={asset.published_at} />
               {asset.open_reviews ? (
                 <span className="text-xs text-fg-dim">
                   {asset.open_reviews} open review{asset.open_reviews === 1 ? "" : "s"}
