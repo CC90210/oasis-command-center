@@ -304,12 +304,26 @@ export default async function MarketingPage() {
           much of our output is paid", which is a real question — it just is not
           the first one, and it is not trustworthy enough to be four tiles. */}
       {!summary.degraded && (
-        <div className="px-1 text-[11px] text-fg-dim">
-          OASIS by channel · Organic {trackCount("organic")} · Paid {trackCount("paid")} ·
+        <div className="px-1 text-[11px] leading-5 text-fg-dim">
+          Creative formatted for · Organic {trackCount("organic")} · Paid {trackCount("paid")} ·
           SEO {trackCount("seo")} · Lifecycle {trackCount("email")}
-          <span className="ml-1 opacity-70">
-            — primary channel only; an asset that went to six places counts once here.
-          </span>
+          <div className="mt-0.5 opacity-80">
+            {/* CC, 2026-08-16: "why does it say that we have four paid Meta ads?
+                When did we pay for them, and when is that set up? We did not
+                approve four Meta ads."
+
+                Nothing was running and nothing was spent. `track` is derived from
+                `channel`, which records the FORMAT a piece was cut for — 9:16,
+                Meta ad specs — not a placement anyone bought. All four have
+                published_at NULL, no ad account is wired to this table, and the
+                portal has no path to Meta Ads at all.
+
+                The tile said "PAID 4 · Meta · Google" under a heading of counts,
+                which reads as four live ads on Meta. A label that implies spend
+                has to say otherwise in the same breath. */}
+            Format only — no ad account is connected and nothing here has been
+            bought or run. &ldquo;Paid&rdquo; means cut to that platform&rsquo;s ad specs.
+          </div>
         </div>
       )}
 

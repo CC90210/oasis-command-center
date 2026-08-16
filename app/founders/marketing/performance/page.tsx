@@ -20,7 +20,7 @@ import Link from "next/link";
 
 import { Card, PageHeader } from "@/components/Card";
 import { resolveFounder } from "@/lib/founders/gate";
-import { platformLabel } from "@/lib/founders-marketing-core";
+import { platformLabel, postPermalink } from "@/lib/founders-marketing-core";
 import {
   engagements,
   retention,
@@ -167,7 +167,7 @@ export default async function PerformancePage() {
                     </span>
                     <div className="min-w-0 flex-1">
                       <div className="truncate text-sm text-fg-muted">
-                        {r.content_excerpt || "(no caption)"}
+                        <PostLink r={r}>{r.content_excerpt || "(no caption)"}</PostLink>
                       </div>
                       <div className="mt-0.5 text-[11px] text-fg-dim">
                         {platformLabel(r.platform)} · {(ret * 100).toFixed(0)}% watched ·{" "}
@@ -196,11 +196,23 @@ export default async function PerformancePage() {
                     const ret = retention(r);
                     return (
                       <tr key={r.platform_post_id}>
+                        {/* CC, 2026-08-16: "on our performance page, where we can
+                            see the most seen, it should be a clickable link that
+                            takes me to that Instagram post."
+
+                            A metrics table you cannot click out of makes checking
+                            a number a manual hunt through the app it came from.
+                            postPermalink returns null when the stored id cannot
+                            build a real URL (Instagram hands back a numeric media
+                            id, not the shortcode /p/ needs), and the caption then
+                            renders as plain text — a dead link on an accounting
+                            page is worse than none, because it looks like the
+                            accounting works. */}
                         <td className="max-w-[22rem] truncate py-2 pr-3 text-fg-muted">
                           <span className="mr-2 text-[10px] uppercase tracking-wider text-fg-dim">
                             {platformLabel(r.platform)}
                           </span>
-                          {r.content_excerpt || "(no caption)"}
+                          <PostLink r={r}>{r.content_excerpt || "(no caption)"}</PostLink>
                         </td>
                         <td className="py-2 pr-3 text-right tabular-nums text-fg">
                           {nf.format(r.views)}
@@ -231,5 +243,34 @@ export default async function PerformancePage() {
         </>
       )}
     </div>
+  );
+}
+
+/**
+ * The caption, linked to the post itself where the platform id allows one.
+ *
+ * Falls back to plain text rather than a guessed URL. Instagram's analytics rows
+ * carry a numeric media id and `/p/` needs the base64 shortcode, so those link to
+ * the account instead — honest about what we can actually reach.
+ */
+function PostLink({
+  r,
+  children,
+}: {
+  r: { platform: string; platform_post_id: string; account_username: string | null };
+  children: React.ReactNode;
+}) {
+  const href = postPermalink(r.platform, r.platform_post_id, r.account_username);
+  if (!href) return <>{children}</>;
+  return (
+    <a
+      href={href}
+      target="_blank"
+      rel="noopener noreferrer"
+      className="underline decoration-fg-dim/40 underline-offset-2 transition-colors hover:text-accent hover:decoration-accent"
+      title={`Open on ${r.platform}`}
+    >
+      {children}
+    </a>
   );
 }

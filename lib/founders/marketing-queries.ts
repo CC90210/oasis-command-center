@@ -19,10 +19,12 @@ import {
   brandFilterAllowed,
   brandGroup,
   claimedBrandSlugs,
+  lifecycleOf,
   type AssetFormat,
   type AssetStatus,
   type BrandGroupKey,
   type Channel,
+  type Lifecycle,
   type Track,
 } from "@/lib/founders-marketing-core";
 
@@ -404,6 +406,8 @@ export async function getMarketingAssets(
     brand?: string;
     /** `author_email`, for the by-author facet. */
     author?: string;
+    /** Review + distribution bucket. The default view excludes archived. */
+    lifecycle?: Lifecycle;
     limit?: number;
   } = {},
 ): Promise<MarketingAssetRow[]> {
@@ -418,8 +422,48 @@ export async function getMarketingAssets(
       .limit(opts.limit ?? 200);
     if (opts.track) q = q.eq("track", opts.track);
     if (opts.channel) q = q.eq("channel", opts.channel);
-    if (opts.status) q = q.eq("status", opts.status);
     if (opts.author) q = q.eq("author_email", opts.author);
+
+    // `status` and `lifecycle` ARE TWO VOCABULARIES FOR ONE COLUMN, so applying
+    // both ANDs them into a contradiction: ?status=draft&lifecycle=archived
+    // compiles to `status = 'draft' AND status IN ('archived','rejected')`,
+    // which matches nothing. The grid would read "Nothing at this stage" while
+    // the pills above it show real counts — a dead end with no visible cause,
+    // and reachable in two clicks (arrive from a Studio pipeline tile, then
+    // press a lifecycle pill).
+    //
+    // Lifecycle wins because it is the axis the page is organised on; `status`
+    // survives only as a deep-link target for Studio's pipeline tiles, which
+    // address stages lifecycle deliberately merges (scheduled, draft). The UI
+    // also clears one when setting the other, so this guard is the backstop for
+    // a hand-typed URL rather than the primary defence.
+    if (opts.status && !opts.lifecycle) q = q.eq("status", opts.status);
+
+    // LIFECYCLE, the axis CC actually asked for: "organise this a lot better so
+    // that we can differentiate our pieces of content."
+    //
+    // Pushed into SQL rather than filtered in JS after the fact, because the
+    // reader caps at `limit` — filtering afterwards would silently show fewer
+    // than a page of archived assets while claiming to show them all.
+    //
+    // `published_at` is the evidence of distribution; `status` only carries the
+    // review verdict. See lifecycleOf() for why those are separate questions.
+    if (opts.lifecycle === "archived") {
+      q = q.in("status", ["archived", "rejected"]);
+    } else if (opts.lifecycle === "live") {
+      q = q.not("published_at", "is", null);
+    } else if (opts.lifecycle === "approved") {
+      q = q.eq("status", "approved").is("published_at", null);
+    } else if (opts.lifecycle === "needs_review") {
+      q = q.in("status", ["draft", "in_review"]).is("published_at", null);
+    } else if (!opts.status) {
+      // DEFAULT VIEW HIDES ARCHIVED. Archiving something should remove it from
+      // the working grid — that is the whole point of the verb — but it must
+      // stay reachable, which is what the Archived pill is for. Skipped when an
+      // explicit ?status= is set so Studio's pipeline tiles still deep-link to
+      // any single stage.
+      q = q.not("status", "in", "(archived,rejected)");
+    }
 
     // The brand boundary. The tab is ALWAYS applied — there is no code path
     // through this reader that returns rows from more than one tab, which is
@@ -709,6 +753,52 @@ export const DEGRADED_MARKETING_FACETS: MarketingFacets = {
  * confident lie as "Nothing waiting on you" — it tells CC there is nothing
  * there, and he stops looking.
  */
+/**
+ * How many assets sit in each lifecycle bucket, for the pill row.
+ *
+ * A filter pill that cannot say how much is behind it makes the operator click
+ * every one to find out — and an Archived pill showing nothing is exactly how CC
+ * concluded an archived video was "completely gone". The count is the difference
+ * between a filter and a search.
+ *
+ * One paged pass over (status, published_at), bucketed by lifecycleOf() so the
+ * pills and the grid can never disagree about what "Posted" means.
+ */
+export async function getLifecycleCounts(
+  tenantId: string,
+  group: BrandGroupKey = DEFAULT_BRAND_GROUP,
+): Promise<{ counts: Record<Lifecycle, number>; degraded: boolean }> {
+  const empty: Record<Lifecycle, number> = {
+    needs_review: 0, approved: 0, live: 0, archived: 0,
+  };
+  if (!tenantId) return { counts: empty, degraded: false };
+  try {
+    const db = getServiceSupabase();
+    const counts = { ...empty };
+    let degraded = false;
+    for (let from = 0; ; from += PAGE_SIZE) {
+      let q = db
+        .from("marketing_asset")
+        .select("status, published_at")
+        .eq("tenant_id", tenantId);
+      q = scopeToBrandGroup(q, group);
+      const r = await q.order("id", { ascending: true }).range(from, from + PAGE_SIZE - 1);
+      const verdict = classify("lifecycle", r.error);
+      if (verdict === "absent") return { counts: empty, degraded: false };
+      if (verdict === "broken") {
+        degraded = true;
+        break;
+      }
+      const rows = (r.data || []) as Array<{ status: string; published_at: string | null }>;
+      for (const row of rows) counts[lifecycleOf(row)] += 1;
+      if (rows.length < PAGE_SIZE) break;
+    }
+    return { counts, degraded };
+  } catch {
+    return { counts: empty, degraded: true };
+  }
+}
+
 export async function getMarketingFacets(tenantId: string): Promise<MarketingFacets> {
   if (!tenantId) return EMPTY_MARKETING_FACETS;
   try {

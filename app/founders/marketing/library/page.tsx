@@ -18,23 +18,33 @@
  * and said the channel tiles read as confusing. Both complaints are the same
  * complaint: the page led with its least useful axis.
  *
- *   1. BRAND   — tabs. The first question asked of any asset. `brand_slug`.
- *   2. STATE   — which stage it sits at. NOT BUILT YET, deliberately; see below.
- *   3. CHANNEL — demoted to a facet under "Refine". Still here, no longer the
- *                headline, because it cannot currently tell the truth: `channel`
- *                holds one value and a post goes to as many as six places, so 37
- *                of 47 rows claim Instagram. `platforms` (migration 144) carries
- *                the real distribution and the tiles render it.
+ *   1. BRAND     — tabs. The first question asked of any asset. `brand_slug`.
+ *   2. LIFECYCLE — pills. Needs review / Approved / Posted / Archived.
+ *   3. CHANNEL   — demoted to a facet under "Refine". Still here, no longer the
+ *                  headline, because it cannot tell the truth: `channel` holds
+ *                  one value and a post goes to as many as six places, so 37 of
+ *                  47 rows claim Instagram.
  *
- * WHY THERE IS NO STATE FILTER HERE YET.
- * CC asked for "a category for media that is in review and hasn't been posted
- * yet". The control is three lines of code and it is deliberately absent,
- * because `status` is wrong at the source: CMO-Agent/scripts/library_sync.py
- * stamps `in_review` on every row it registers, including pieces already public.
- * Live count today is 46 in_review / 1 published — those are not 46 things
- * awaiting a verdict, most are already on Instagram. Shipping the filter now
- * would sort a lying column into tidy piles and make the lie look deliberate.
- * Maven owns the mapping fix; this lands the moment it does.
+ * THE LIFECYCLE AXIS, AND WHY IT IS NOT `status`.
+ * CC, 2026-08-16: *"Are these videos that we haven't posted yet? ... Have they
+ * not been posted at all, ever?"* He could not tell, and this page was the
+ * reason: every tile read IN REVIEW, which looks like 41 things waiting on him.
+ *
+ * An earlier pass declined to build this filter at all, on the grounds that
+ * `status` is unreliable — library_sync.py stamps `in_review` on registration.
+ * That was the right diagnosis and the wrong conclusion. Refusing to organise
+ * the page left CC staring at an undifferentiated wall, which is worse than
+ * organising it on evidence.
+ *
+ * So the buckets do not trust `status` for the question it cannot answer.
+ * Distribution comes from `published_at` — proof a platform took it — and
+ * outranks review state, because the world is the authority, not our
+ * bookkeeping. See lifecycleOf() in founders-marketing-core.
+ *
+ * ARCHIVED IS A BUCKET, NOT A HOLE. CC archived a video and reported it
+ * "completely gone". The row was intact the whole time; the page simply had no
+ * filter that could show it and no control that could return it. It is now a
+ * pill with a count, and every archived tile carries Restore.
  */
 
 import { notFound } from "next/navigation";
@@ -45,6 +55,7 @@ import { resolveFounder } from "@/lib/founders/gate";
 import {
   DEGRADED_MARKETING_FACETS,
   getMarketingAssets,
+  getLifecycleCounts,
   getMarketingFacets,
   mediaKey,
   signMediaUrls,
@@ -53,12 +64,15 @@ import {
 import {
   BRAND_GROUPS,
   DEFAULT_BRAND_GROUP,
+  LIFECYCLE,
   TRACKS,
   brandGroupFor,
   channelLabel,
   channelsForTrack,
   isAssetStatus,
   isBrandGroupKey,
+  isLifecycle,
+  lifecycleLabel,
   parseSlideUrls,
   isChannel,
   trackForChannel,
@@ -66,6 +80,7 @@ import {
   type AssetStatus,
   type BrandGroupKey,
   type Channel,
+  type Lifecycle,
   type Track,
 } from "@/lib/founders-marketing-core";
 import { AssetTile, MarketingEmpty } from "@/components/founders/marketing-shared";
@@ -90,6 +105,7 @@ export default async function MarketingLibraryPage({
     brand?: string;
     author?: string;
     status?: string;
+    lifecycle?: string;
   }>;
 }) {
   const founder = await resolveFounder();
@@ -108,19 +124,31 @@ export default async function MarketingLibraryPage({
   // Studio's pipeline tiles link here with ?status=; validated against the
   // canonical list so an arbitrary string never reaches the query.
   const status = isAssetStatus(sp.status) ? sp.status : undefined;
+  // The primary organisation axis. Absent = the default working view, which
+  // shows everything except archived.
+  const lifecycle: Lifecycle | undefined = isLifecycle(sp.lifecycle) ? sp.lifecycle : undefined;
 
   // `null` rather than `[]` as the fallback: an empty array cannot say whether
   // the library is empty or the query failed, and the page renders very
   // different copy for those two. getMarketingAssets throws on a broken read and
   // returns [] only when the table genuinely is not there yet.
-  const [assetsOrNull, facets] = await Promise.all([
+  const [assetsOrNull, facets, lc] = await Promise.all([
     safe<MarketingAssetRow[] | null>(
       "marketing.library",
-      getMarketingAssets(founder.tenantId, { group, track, channel, brand, author, status }),
+      getMarketingAssets(founder.tenantId, {
+        group, track, channel, brand, author, status, lifecycle,
+      }),
       null,
     ),
     safe("marketing.library.facets", getMarketingFacets(founder.tenantId), DEGRADED_MARKETING_FACETS),
+    safe("marketing.library.lifecycle", getLifecycleCounts(founder.tenantId, group), {
+      counts: { needs_review: 0, approved: 0, live: 0, archived: 0 },
+      degraded: true,
+    }),
   ]);
+  const lifecycleTotal = lc.degraded
+    ? 0
+    : LIFECYCLE.reduce((n, l) => n + lc.counts[l], 0);
   const libraryDegraded = assetsOrNull === null;
   const assets = assetsOrNull ?? [];
 
@@ -220,6 +248,7 @@ export default async function MarketingLibraryPage({
     brand?: string | null;
     author?: string | null;
     status?: AssetStatus | null;
+    lifecycle?: Lifecycle | null;
   }) => {
     const params = new URLSearchParams();
     const nextGroup = next.group ?? group;
@@ -234,19 +263,33 @@ export default async function MarketingLibraryPage({
       ? undefined
       : next.brand === undefined ? brand : next.brand || undefined;
     const nextAuthor = next.author === undefined ? author : next.author || undefined;
-    const nextStatus = next.status === undefined ? status : next.status || undefined;
+    // ONE OR THE OTHER, NEVER BOTH. They filter the same column with different
+    // vocabularies, so carrying both produces `status = 'draft' AND status IN
+    // ('archived',...)` — an empty grid under pills that promise rows. Setting
+    // either one drops the other, which is also what the operator means: picking
+    // "Archived" is a request to see archived, not to intersect it with the
+    // stage they arrived from.
+    const settingLifecycle = next.lifecycle !== undefined;
+    const settingStatus = next.status !== undefined;
+    const nextStatus = settingLifecycle
+      ? undefined
+      : next.status === undefined ? status : next.status || undefined;
+    const nextLifecycle = settingStatus
+      ? undefined
+      : next.lifecycle === undefined ? lifecycle : next.lifecycle || undefined;
     if (nextGroup !== DEFAULT_BRAND_GROUP) params.set("group", nextGroup);
     if (nextTrack) params.set("track", nextTrack);
     if (nextChannel) params.set("channel", nextChannel);
     if (nextBrand) params.set("brand", nextBrand);
     if (nextAuthor) params.set("author", nextAuthor);
     if (nextStatus) params.set("status", nextStatus);
+    if (nextLifecycle) params.set("lifecycle", nextLifecycle);
     const query = params.toString();
     return `/founders/marketing/library${query ? `?${query}` : ""}`;
   };
 
   const activeGroup = BRAND_GROUPS.find((g) => g.key === group)!;
-  const filtered = !!(track || channel || brand || author || status);
+  const filtered = !!(track || channel || brand || author || status || lifecycle);
 
   return (
     <div className="space-y-6 animate-fade-in">
@@ -299,6 +342,46 @@ export default async function MarketingLibraryPage({
           );
         })}
       </div>
+
+      {/* ── Axis 2: LIFECYCLE. The organisation CC asked for three times.
+          Review state and distribution state are DIFFERENT questions and the
+          single `status` column answered neither — see lifecycleOf(). */}
+      <div className="flex flex-wrap items-center gap-2">
+        <FilterPill
+          href={filterHref({ lifecycle: null })}
+          label={`All ${lifecycleTotal || ""}`.trim()}
+          active={!lifecycle}
+        />
+        {LIFECYCLE.map((l) => {
+          const n = lc.degraded ? null : lc.counts[l];
+          return (
+            <FilterPill
+              key={l}
+              href={filterHref({ lifecycle: l })}
+              label={`${lifecycleLabel(l)} ${n === null ? "—" : n}`}
+              active={lifecycle === l}
+            />
+          );
+        })}
+      </div>
+
+      {/* The sentence that answers "have these been posted at all, ever?".
+          Rendered from the counts rather than written as a claim, so it cannot
+          go stale the way a hardcoded roadmap note does. */}
+      {!lc.degraded && lc.counts.live === 0 && lifecycleTotal > 0 && (
+        <div className="rounded-lg border border-bg-border bg-bg-deep/40 px-4 py-3 text-xs leading-5 text-fg-muted">
+          <span className="font-semibold text-fg">
+            None of these {lifecycleTotal} have been posted.
+          </span>{" "}
+          This library holds produced creative. Your live posts come from the daily
+          poster reading <code className="text-fg-dim">data/post_queue</code>, are a
+          separate stream, and are counted in{" "}
+          <Link href="/founders/marketing/performance" className="font-semibold text-accent hover:underline">
+            Performance
+          </Link>
+          . Nothing here reaches an account until it is posted from the asset page.
+        </div>
+      )}
 
       {/* Sub-filter WITHIN the tab: Warner / Arthrisil / blyss inside Clients.
           Hidden when the tab holds a single brand, where it would be a control
