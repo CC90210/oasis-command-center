@@ -85,6 +85,11 @@ jobs:
           # once. It used to be a literal in two files synchronised by a
           # comment — desyncing them breaks the runtime picker silently.
           npm run test:cli-runtime
+          # The settings page collapses; these anchors are linked from eight
+          # places, several of them chat failure states. A browser scrolls to
+          # a <details> without opening it, so losing the hash opener would
+          # silently point every one of those links at a closed bar.
+          npm run test:settings
           # ADDED 2026-08-16. Repo-wide invariant, not a feature suite: every
           # paged read must .order() by a unique key before it .range()s. This
           # repo has hit that bug four times (two found only by review), the fix

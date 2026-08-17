@@ -35,6 +35,8 @@ import { safe } from "@/lib/api-helpers";
 import { ChangePasswordForm } from "@/components/ChangePasswordForm";
 import { CustomCredentialsVault } from "@/components/settings/CustomCredentialsVault";
 import { Fold } from "@/components/settings/Fold";
+import { SettingsSection } from "@/components/settings/SettingsSection";
+import { OpenSectionOnHash } from "@/components/settings/OpenSectionOnHash";
 import { ProfileEditor } from "@/components/settings/ProfileEditor";
 import { BrandLogoCard } from "@/components/settings/BrandLogoCard";
 import { QuickInviteCard } from "@/components/settings/QuickInviteCard";
@@ -149,6 +151,12 @@ export async function SettingsContent({
         />
       )}
 
+      {/* Eight links across the app point at /settings#providers and
+          #agents — several from chat FAILURE states. Now that the sections
+          collapse, the browser scrolls to a closed bar and the control the
+          error sent you for stays hidden. This opens it. */}
+      <OpenSectionOnHash />
+
       {/* Batch 4: self-serve Telegram linking for per-lead application alerts. */}
       <TelegramLinkCard />
 
@@ -158,7 +166,7 @@ export async function SettingsContent({
         </Card>
       ) : (
         <>
-          <Card
+          <SettingsSection
             title="Profile"
             subtitle={`Signed in as ${profile.email}`}
             action={
@@ -177,16 +185,16 @@ export async function SettingsContent({
             <SafeBoundary label="Profile editor">
               <ProfileEditor profile={profile} tenantAgents={manifestAgentKeys} />
             </SafeBoundary>
-          </Card>
+          </SettingsSection>
 
-          <Card
+          <SettingsSection
             title="Branding"
             subtitle="Your logo is applied to every new form, public application page, and anywhere else the dashboard shows your brand."
           >
             <SafeBoundary label="Branding">
               <BrandLogoCard initialLogoUrl={tenant?.logo_url ?? null} canManage={canManageTenant} />
             </SafeBoundary>
-          </Card>
+          </SettingsSection>
 
           {/* Credentials — single parent Card with two clearly-labeled
               sub-sections. Was previously two top-level cards
@@ -196,7 +204,8 @@ export async function SettingsContent({
               purposes — structured known integrations with health
               checks vs raw KEY=VALUE for anything else — but the
               parent grouping makes that obvious. */}
-          <Card
+          <SettingsSection
+            defaultOpen
             title="Credentials"
             subtitle="All your API keys, OAuth tokens, and webhook URLs in one place. Known integrations get health-checked; custom KEY=VALUE secrets cover anything else your agents need."
           >
@@ -228,7 +237,7 @@ export async function SettingsContent({
                 </Fold>
               )}
             </div>
-          </Card>
+          </SettingsSection>
 
           {/* Kixie webhook auto-registration — only when the tenant
               actually declares Kixie in its required_services list.
@@ -271,7 +280,7 @@ export async function SettingsContent({
           </SafeBoundary>
 
           {canManageTenant && (
-            <Card
+            <SettingsSection
               title="Team"
               subtitle="Invite teammates so they can sign into this tenant. Each invite is a one-time link — send it via Slack / email / SMS."
               action={
@@ -290,7 +299,7 @@ export async function SettingsContent({
                 Invitees land on /invite/&lt;token&gt;, sign up, and join this tenant automatically.
                 Solara recognizes them by name and respects their role.
               </p>
-            </Card>
+            </SettingsSection>
           )}
 
           {/* "Known facts about you" removed 2026-08-17. It shipped with
@@ -306,14 +315,14 @@ export async function SettingsContent({
               one credentials surface, not two separate top-level cards
               that look redundant. */}
 
-          <Card title="Password" subtitle="Change your sign-in password">
+          <SettingsSection title="Password" subtitle="Change your sign-in password">
             <SafeBoundary label="Password form">
               <ChangePasswordForm />
             </SafeBoundary>
-          </Card>
+          </SettingsSection>
 
           {canManageTenant && (
-            <Card
+            <SettingsSection
               title="Devices (advanced)"
               subtitle="Pair a machine on your network to run the local bridge — gives your agents file-system, bash, and full MCP access. Optional: a connected AI provider account below is enough for chat without ever pairing a machine."
               action={
@@ -328,10 +337,10 @@ export async function SettingsContent({
               <SafeBoundary label="Devices">
                 <DevicesEditor />
               </SafeBoundary>
-            </Card>
+            </SettingsSection>
           )}
 
-          <Card
+          <SettingsSection
             id="providers"
             title="AI setup"
             subtitle={
@@ -347,7 +356,7 @@ export async function SettingsContent({
                 canManageTeam={canManageTenant}
               />
             </SafeBoundary>
-          </Card>
+          </SettingsSection>
 
           {isOperator && (
             <SafeBoundary label="Local CLI providers">
@@ -355,7 +364,7 @@ export async function SettingsContent({
             </SafeBoundary>
           )}
 
-          <Card
+          <SettingsSection
             id="agents"
             title="Override an agent's provider"
             subtitle="Optional. Each agent uses the workspace default from AI setup above unless you set a specific provider here. Edit a row to switch which provider that agent uses."
@@ -388,7 +397,7 @@ export async function SettingsContent({
             ) : (
               <EmptyState message="Team-wide AI setup is managed by an owner or admin. Ask them to connect a provider, or set one per agent in the override table below." />
             )}
-          </Card>
+          </SettingsSection>
 
           {/* "Just-for-me overrides" removed 2026-08-17. It let an individual
               point their own chats at a different AI account — a team feature on
@@ -426,7 +435,7 @@ export async function SettingsContent({
               planner now. Configuring a template for a surface that no longer
               renders is a control with nothing on the other end. */}
 
-          <Card
+          <SettingsSection
             title="Integration health"
             subtitle={
               isOperator
@@ -448,7 +457,7 @@ export async function SettingsContent({
                 </div>
               )}
             </div>
-          </Card>
+          </SettingsSection>
 
           {/* CC ask 2026-06-11: "an overall tracker [hidden in Settings],
               very important feature." Read-only operations view at the
