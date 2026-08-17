@@ -129,13 +129,36 @@ export function usesAiWire(
  */
 export function smsOnlyStages(env: Record<string, string | undefined> = process.env): string[] {
   const raw = (env.DRIP_SMS_ONLY_STAGES || "").trim();
-  if (raw === "none") return [];
-  if (!raw) return aiWireStages(env).filter((s) => s !== "*");
-  const parsed = raw.split(",").map((s) => s.trim().toLowerCase()).filter(Boolean);
+  // Case-insensitive: an operator typing NONE means the same thing, and a
+  // strict compare would fall through and build a stage list literally
+  // containing "none" — no real stage matches it, so the restriction would be
+  // off while looking configured. Switching a compliance rule off must be
+  // explicit, never a side effect of capitalisation.
+  if (raw.toLowerCase() === "none") return [];
+  const parsed = raw ? raw.split(",").map((s) => s.trim().toLowerCase()).filter(Boolean) : [];
   // A typo must not silently drop the restriction and start emailing a cohort
   // that was explicitly declared SMS-only. Clearing it takes the literal word
   // "none", which cannot be typed by accident.
-  return parsed.length > 0 ? parsed : aiWireStages(env).filter((s) => s !== "*");
+  return parsed.length > 0 ? parsed : defaultSmsOnlyStages(env);
+}
+
+/**
+ * The Live Subs stages, resolved WITHOUT going through the wildcard.
+ *
+ * The first cut derived this as `aiWireStages(env).filter(s => s !== "*")`,
+ * which is correct until someone sets `DRIP_AI_WIRE_STAGES=*` — the documented
+ * escape hatch for putting every drip on the AI account. That yields `["*"]`,
+ * the filter empties it, and isSmsOnly() then returns false for EVERYTHING,
+ * including Live Subs. Widening the wire would have quietly removed the
+ * SMS-only protection, which is precisely backwards. Codex caught it.
+ *
+ * So the wildcard case falls back to the literal defaults: putting every stage
+ * on the AI wire says nothing about which stages may be emailed.
+ */
+function defaultSmsOnlyStages(env: Record<string, string | undefined>): string[] {
+  const wire = aiWireStages(env);
+  const explicit = wire.filter((s) => s !== "*");
+  return explicit.length > 0 ? explicit : DEFAULT_AI_WIRE_STAGES;
 }
 
 /** Is this lead in a stage we are forbidden to email? */

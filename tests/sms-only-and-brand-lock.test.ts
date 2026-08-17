@@ -31,6 +31,46 @@ assert.equal(isSmsOnly({}, NO_ENV), false, "no stage is not a claim about the ch
 // Defaults track the AI wire, because they are the same cohort by construction.
 assert.deepEqual(smsOnlyStages(NO_ENV), aiWireStages(NO_ENV).filter((s) => s !== "*"));
 
+// ── Widening the AI wire must not UNDO the SMS-only rule ──────────────────
+// DRIP_AI_WIRE_STAGES=* is the documented switch for putting every drip on the
+// AI account. The first cut derived the SMS-only list by filtering "*" out of
+// the wire list, so the wildcard produced an EMPTY list and isSmsOnly() went
+// false for everything, Live Subs included. Widening the wire would have
+// silently removed the protection. Codex caught it.
+{
+  const wildcard = { DRIP_AI_WIRE_STAGES: "*" };
+  assert.deepEqual(
+    smsOnlyStages(wildcard),
+    ["uw_sheet", "live_sub", "live_subs"],
+    "the wildcard says which stages use the AI WIRE, not which may be emailed",
+  );
+  assert.equal(isSmsOnly({ stage: "uw_sheet" }, wildcard), true, "Live Subs stay SMS-only under the wildcard");
+  assert.equal(isSmsOnly({ stage: "follow_up" }, wildcard), false, "and follow_up is still emailable");
+}
+
+// An explicit wire list still drives the default, as before.
+{
+  const narrowed = { DRIP_AI_WIRE_STAGES: "uw_sheet" };
+  assert.deepEqual(smsOnlyStages(narrowed), ["uw_sheet"]);
+}
+
+// "none" is the only way to switch the restriction off, and it must be typed
+// in full — a typo falls back to the defaults rather than opening the cohort.
+// Case-insensitive, or a strict compare builds a stage list containing the
+// literal "none" — matching no real stage, so the rule is off while looking
+// configured. Switching a compliance rule off is never a capitalisation
+// side effect.
+for (const off of ["none", "NONE", " None "]) {
+  assert.deepEqual(smsOnlyStages({ DRIP_SMS_ONLY_STAGES: off }), [], `"${off}" clears it explicitly`);
+}
+for (const typo of ["", "  ", ",,,"]) {
+  assert.deepEqual(
+    smsOnlyStages({ DRIP_SMS_ONLY_STAGES: typo }),
+    ["uw_sheet", "live_sub", "live_subs"],
+    `"${typo}" must not clear the SMS-only restriction`,
+  );
+}
+
 // ── The two mechanisms that would otherwise email them ────────────────────
 // Both are correct everywhere else, and both already fire in production: 127
 // rows carry channel='sms' with an EMAIL address in from_identity, the oldest
