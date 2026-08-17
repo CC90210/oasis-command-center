@@ -67,10 +67,11 @@ export async function PATCH(req: NextRequest) {
   // 2026-06-06 — custom_fields is a shared JSONB blob (timezone,
   // briefing_channel, photo_url, quick_facts, plan_template_id, etc.).
   // A naked .update({ custom_fields: { quick_facts: "..." } }) replaces
-  // the ENTIRE blob, silently wiping the other keys. KnownFactsEditor
-  // does its own read-modify-write, but other writers may not, and CC
-  // reported having to re-enter Known Facts repeatedly — likely from
-  // a different code path overwriting his blob without RMW. The safest
+  // the ENTIRE blob, silently wiping the other keys. The Known-facts editor
+  // (removed 2026-08-17) did its own read-modify-write, but other writers may
+  // not, and CC reported having to re-enter Known Facts repeatedly — likely from
+  // a different code path overwriting his blob without RMW. The hazard outlives
+  // that editor: `custom_fields` is still a shared blob. The safest
   // fix is server-side merge: when custom_fields is being patched, read
   // the existing value and shallow-merge.
   if (update.custom_fields && typeof update.custom_fields === "object" && !Array.isArray(update.custom_fields)) {

@@ -20,7 +20,8 @@ export const PROFILE_CUSTOM_FIELD_KEYS = {
   /** Operator-editable Markdown scratchpad of evergreen facts (calendar
    *  link, signature, business name, common asks). Injected verbatim
    *  into every cloud chat as the OPERATOR KNOWN FACTS block. Edited
-   *  via Settings → "Known facts about you" (KnownFactsEditor.tsx) and
+   *  via Settings → "Known facts about you" (that editor was removed
+   *  2026-08-17; the column itself is still read) and
    *  read at app/api/chat/route.ts ~line 432. */
   QUICK_FACTS: "quick_facts",
   /** Wizard-saved operator timezone (IANA). */
