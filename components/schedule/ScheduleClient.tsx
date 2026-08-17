@@ -21,6 +21,7 @@ import {
   clampBlock,
   createPlaceholderSchedule,
   createScheduleBlock,
+  ensureSundayWorkday,
   formatTime,
   isEditableBlock,
   isScheduleDocument,
@@ -115,7 +116,7 @@ export function ScheduleClient() {
         window.localStorage.getItem(LEGACY_STORAGE_KEY);
       if (raw) {
         const parsed: unknown = JSON.parse(raw);
-        if (isScheduleDocument(parsed)) setSchedule(parsed);
+        if (isScheduleDocument(parsed)) setSchedule(ensureSundayWorkday(parsed));
       }
     } catch {
       setNotice("Private storage unavailable · changes last for this session");
@@ -319,7 +320,7 @@ export function ScheduleClient() {
       if (raw) {
         const parsed: unknown = JSON.parse(raw);
         if (isScheduleDocument(parsed)) {
-          setSchedule(parsed);
+          setSchedule(ensureSundayWorkday(parsed));
           setNotice("Week loaded");
           return;
         }
