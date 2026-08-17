@@ -131,7 +131,8 @@ jobs:
               ROUTES="/api/cron/scan-bounces?write=1
                       /api/cron/scan-bounces?write=1&brand=bluerise
                       /api/cron/scan-funmate-replies?write=1
-                      /api/cron/sync-tt-inbox" ;;
+                      /api/cron/sync-tt-inbox
+                      /api/cron/sync-tt-inbox?account=followup" ;;
             "0 * * * *")     ROUTES="/api/cron/collect-outreach-intel?write=1" ;;
             "15 * * * *")    ROUTES="/api/cron/collect-cc-metrics?write=1" ;;
             "17 * * * *")    ROUTES="/api/cron/reconcile-drip-telemetry" ;;

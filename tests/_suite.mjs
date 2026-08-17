@@ -126,6 +126,8 @@ const TESTS = [
   "tests/tcpa-fallback-window.test.ts",
   "tests/founders-method-guard.test.ts",
   "tests/sms-only-and-brand-lock.test.ts",
+  "tests/reply-handoff.test.ts",
+  "tests/sms-pacing.test.ts",
 ];
 
 const NODE_ARGS = ["--conditions=react-server", "--import", "tsx"];

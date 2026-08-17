@@ -265,13 +265,24 @@ export async function ingestTtInboxMessages(
  */
 export async function syncTenantInbox(
   tenantId: string,
-  opts: { maxChats?: number; pages?: number } = {},
+  opts: { maxChats?: number; pages?: number; service?: string } = {},
 ): Promise<{ chats: number; scanned: number; inserted: number; skipped: number }> {
   const db = getServiceSupabase();
   // PARENT account (actAsEmail:null) — the full account inbox across all reps.
   // The default (act-as the tenant's sub-account, e.g. jordan@) only sees that
   // sub-account's chats and returns empty threads here, so sync as the parent.
-  const creds = await getTextTorrentCredentials(tenantId, { actAsEmail: null });
+  //
+  // WHICH parent. This defaulted to the main SunBiz SID with no way to say
+  // otherwise, so inbound on the Legacy account — which carries the AI
+  // Follow-Up wire and every Live Subs conversation — was not read AT ALL.
+  // That is not only a missed reply: checkPhoneOptOut reads suppressions that
+  // this ingest populates, so a merchant texting STOP to +19703237557 would
+  // never have been suppressed. Texting 60 people from an account whose STOP
+  // we cannot receive is the compliance problem, not the missed lead.
+  const creds = await getTextTorrentCredentials(tenantId, {
+    actAsEmail: null,
+    service: opts.service,
+  });
   const maxChats = Math.max(1, Math.min(opts.maxChats ?? 40, 200));
   const pages = Math.max(1, Math.min(opts.pages ?? 1, 10));
 

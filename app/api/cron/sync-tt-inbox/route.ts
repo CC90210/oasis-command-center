@@ -13,6 +13,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { timingSafeEqual } from "crypto";
 import { syncTenantInbox } from "@/lib/integrations/texttorrent-ingest";
+import { processReplyHandoffs } from "@/lib/drips/reply-handoff";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -43,8 +44,30 @@ export async function GET(req: NextRequest) {
     // sync is idempotent and 429-safe on the shared 60/min TT budget.
     const maxChats = Number(process.env.TT_SYNC_MAX_CHATS) || 40;
     const pages = Number(process.env.TT_SYNC_PAGES) || 1;
-    const r = await syncTenantInbox(SUNBIZ_TENANT_ID, { maxChats, pages });
-    return NextResponse.json({ ok: true, maxChats, pages, ...r });
+    // ?account=followup reads the LEGACY parent, which owns the AI Follow-Up
+    // wire and every Live Subs conversation. Scheduled as its own invocation
+    // (vercel.json + cron-driver.yml) so one account's credential failure
+    // cannot abort the other account's sync, and so each shows up separately
+    // when it breaks.
+    const service = new URL(req.url).searchParams.get("account") === "followup"
+      ? "texttorrent_followup"
+      : "texttorrent";
+    const r = await syncTenantInbox(SUNBIZ_TENANT_ID, { maxChats, pages, service });
+
+    // Handoffs run straight after the ingest that produces them, so a merchant
+    // who answers is off the drip within one tick rather than one more nudge.
+    // Runs on BOTH accounts: the scan is keyed on lead_interactions, not on
+    // which mailbox the sync just read, and the per-lead marker makes a second
+    // pass a no-op. Never allowed to fail the sync — the messages are already
+    // persisted and the next tick retries the handoff.
+    let handoff: Awaited<ReturnType<typeof processReplyHandoffs>> | { errors: string[] } = { errors: [] };
+    try {
+      handoff = await processReplyHandoffs(SUNBIZ_TENANT_ID);
+    } catch (e) {
+      handoff = { errors: [e instanceof Error ? e.message.slice(0, 200) : "handoff_failed"] };
+    }
+
+    return NextResponse.json({ ok: true, account: service, maxChats, pages, ...r, handoff });
   } catch (e) {
     return NextResponse.json({ ok: false, error: e instanceof Error ? e.message.slice(0, 200) : "sync_failed" }, { status: 500 });
   }

@@ -46,6 +46,10 @@
       "schedule": "*/30 * * * *"
     },
     {
+      "path": "/api/cron/sync-tt-inbox?account=followup",
+      "schedule": "*/30 * * * *"
+    },
+    {
       "path": "/api/cron/operator-email-agent?write=1",
       "schedule": "*/10 * * * *"
     },
