@@ -144,4 +144,39 @@ assert.deepEqual(validateLimits({}).values, {});
   assert.ok(store.includes("if (w.error)"), "a failed save must not report success");
 }
 
+// ── The tab actually SHOWS both channels ──────────────────────────────────
+// "make sure your results are posted on the drips tab for texts and emails so
+// I can keep track of everything." The chart was email-only, so the channel
+// that had just gone live with a 40/day ceiling had no meter at all.
+{
+  const vol = readFileSync(new URL("../lib/drips/sequence-volume.ts", import.meta.url), "utf8");
+  assert.ok(vol.includes('opts.channel === "sms" ? "sms_sent" : "email_sent"'), "the meter must be channel-aware");
+  assert.ok(!vol.includes('.eq("type", "email_sent")'), "the hardcoded email-only filter must be gone");
+
+  const page = readFileSync(new URL("../app/sequences/page.tsx", import.meta.url), "utf8");
+  assert.ok(page.includes('channel: "sms"'), "the page must load the text meter");
+  assert.ok(page.includes("getChannelLimits(tenantId)"), "and the ceilings the editor opens on");
+
+  const view = readFileSync(new URL("../components/sequences/SequenceVolumeView.tsx", import.meta.url), "utf8");
+  assert.ok(view.includes("Text volume per sequence"), "and render it");
+  assert.ok(view.includes("<ChannelLimitsEditor"), "and mount the editor");
+  // A failed read must never render as zero. An empty chart is the most
+  // reassuring picture available and, when the read broke, the least true one —
+  // and an operator would set a ceiling against it.
+  assert.ok(view.includes("These bars are UNKNOWN, not zero."), "a broken SMS read says so");
+}
+
+// ── The editor re-seeds from the SERVER's answer ──────────────────────────
+// If the server clamps a value, the box must show the clamped number. Showing
+// what was typed would leave the screen disagreeing with the engine, which is
+// the specific way a dial lies.
+{
+  const ed = readFileSync(new URL("../components/sequences/ChannelLimitsEditor.tsx", import.meta.url), "utf8");
+  assert.ok(ed.includes("const applied = j.limits ?? saved;"), "re-seed from what was stored");
+  assert.ok(ed.includes("validateLimit"), "the form uses the same rules the server enforces");
+  // Strings, not numbers: a numeric input bound to a number cannot represent a
+  // cleared box, and an empty box read as 0 silently stops the channel.
+  assert.ok(ed.includes("Record<LimitKey, string>"), "draft values are held as strings");
+}
+
 console.log("channel-limits.test.ts — all assertions passed");

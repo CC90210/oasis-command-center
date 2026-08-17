@@ -14,6 +14,7 @@ import { SequencesListClient } from "./SequencesListClient";
 import { SequenceTemplatesView, type TemplatesViewRow } from "./SequenceTemplatesView";
 import { DripActivityView, type ActivityRow, type ActivitySummary } from "./DripActivityView";
 import { SequenceVolumeView, type VolumeRow } from "./SequenceVolumeView";
+import type { ChannelLimits } from "@/lib/drips/channel-limits-core";
 
 /** Everything the Volume tab needs, resolved server-side. `error` is carried
  *  explicitly so a failed read renders as UNKNOWN rather than as an empty
@@ -25,6 +26,13 @@ export type VolumeTabData = {
   timeZone: string;
   error: string | null;
   truncated: boolean;
+  /** The SAME shape for texts. Carried separately rather than merged into
+   *  `rows` because a sequence can send on both channels and a single number
+   *  would hide which one moved — and the two have different ceilings. */
+  sms: { rows: VolumeRow[]; error: string | null; truncated: boolean };
+  /** The per-channel ceilings, resolved server-side so the editor opens on
+   *  what the ENGINE is using rather than on the defaults. */
+  limits: ChannelLimits;
 };
 import type { DripStep } from "@/lib/drips/types";
 import type { PoolTemplate } from "@/lib/drips/template-pool";
@@ -122,6 +130,8 @@ export function SequencesTabs({
           timeZone={volume.timeZone}
           readError={volume.error}
           truncated={volume.truncated}
+          sms={volume.sms}
+          limits={volume.limits}
         />
       ) : tab === "templates" ? (
         <SequenceTemplatesView rows={rows} pool={pool} />
