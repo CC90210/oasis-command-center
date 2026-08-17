@@ -45,7 +45,7 @@ import { brandIsSendable, type BrandKey } from "@/lib/email/brands";
 import { brandFooter } from "@/lib/email/brand-shell";
 import { isWithinSendWindow } from "@/lib/sms/compliance";
 import { contactabilityOf, resolveChannel, onProviderGap } from "@/lib/drips/channel-fallback";
-import { AI_WIRE_REP_KEY, aiWireNumbers } from "@/lib/drips/ai-wire-core";
+import { AI_WIRE_REP_KEY, aiWireNumbers, isSmsOnly } from "@/lib/drips/ai-wire-core";
 import { mayTextFor } from "@/lib/sms/lawful-basis";
 import { smsSendAllowed, resetBreakerCache, claimBreakerProbe } from "@/lib/sms/send-breaker";
 import { routeOutbound, type ProviderAvailability } from "@/lib/routing/outbound-routing";
@@ -53,7 +53,7 @@ import { loadProviderAvailability } from "@/lib/routing/provider-availability";
 import { openReceipt } from "@/lib/sms/delivery-receipts";
 import { loadBrandsForLeads } from "@/lib/drips/brand-store";
 import { loadDealGate } from "@/lib/drips/deal-state-store";
-import { brandForStage } from "@/lib/drips/brand-routing";
+import { brandForStage, brandForSend } from "@/lib/drips/brand-routing";
 import { isOnLeadsBoard } from "@/lib/leads/board-visibility";
 import { poolFor, resolveCopy, type PoolTemplate } from "@/lib/drips/template-pool";
 import { loadApprovedPool } from "@/lib/drips/template-pool-store";
@@ -825,7 +825,12 @@ async function holdOrEmailInstead(
   const decision = onProviderGap({
     blocked: "sms",
     contact: contactabilityOf(data),
-    channelLocked: isTruthyFlag((step as unknown as Record<string, unknown>).channel_locked),
+    // An SMS-only stage is locked for this purpose too. Falling back to email
+    // because TextTorrent is having a bad hour is exactly the substitution
+    // Live Subs was declared SMS-only to prevent, and it would be indefinite:
+    // the AI wire's whole reason to exist is that the main wire is carrier-dead.
+    channelLocked:
+      isTruthyFlag((step as unknown as Record<string, unknown>).channel_locked) || isSmsOnly(data),
     gap,
   });
 
@@ -964,8 +969,10 @@ async function processSmsStep(
   // email so a merchant is never emailed by one company and texted by another —
   // 10DLC registration is per brand and the mismatch is what gets numbers
   // filtered.
-  const smsBrand: BrandKey =
-    brandForStage(data.stage) ?? run.brandByLead.get(row.lead_id) ?? "sunbiz";
+  const smsBrand: BrandKey = brandForSend({
+    stage: data.stage,
+    stampedBrand: run.brandByLead.get(row.lead_id),
+  });
 
   const copy = resolveStepCopy(step, row.lead_id, row.step_index, {
     brand: smsBrand,
@@ -1236,8 +1243,13 @@ async function processEmailStep(
   // because each brand carries its own domain reputation. Gating both against
   // one shared pool would mean splitting across two domains bought no extra
   // throughput.
-  const brand: BrandKey =
-    brandForStage(data.stage) ?? run.brandByLead.get(row.lead_id) ?? "sunbiz";
+  // brandForSend, not the stage-then-stamp chain this used to be: a stamp must
+  // never promote a lead onto the Bluerise domain for a stage nobody assigned
+  // to Bluerise. See brand-routing.ts for why that was reachable.
+  const brand: BrandKey = brandForSend({
+    stage: data.stage,
+    stampedBrand: run.brandByLead.get(row.lead_id),
+  });
 
   // Resolve the copy first so the app-link pre-flight can inspect it.
   // Drawn from the APPROVED pool for this brand+stage+role when one exists;
@@ -1665,7 +1677,12 @@ async function processRow(
   // — a statement request carrying an attachment is not the same thing as a
   // text — in which case the miss is reported rather than rewritten.
   const contact = contactabilityOf(data);
-  const locked = isTruthyFlag((step as unknown as Record<string, unknown>).channel_locked);
+  // SMS-ONLY STAGES (Live Subs). Locking the channel is what stops
+  // resolveChannel from helpfully substituting email — the same substitution
+  // that has already put an email address in the from_identity of 127
+  // channel='sms' rows since 2026-07-20.
+  const smsOnly = isSmsOnly(data);
+  const locked = isTruthyFlag((step as unknown as Record<string, unknown>).channel_locked) || smsOnly;
   const decision = resolveChannel(step.channel, contact, { channelLocked: locked });
 
   if (!decision.send) {
@@ -1681,6 +1698,17 @@ async function processRow(
       using: decision.channel,
       reason: decision.reason,
     });
+  }
+
+  // The channel lock above stops SUBSTITUTION into email, but an email step
+  // authored directly against an SMS-only stage would still send. Locking
+  // cannot express that — a locked email step is locked TO email — so the stage
+  // rule is enforced on its own terms here.
+  //
+  // Skipped rather than held: nothing about this lead will change, so a hold
+  // would be another silent loop, and the sequence's SMS steps must still run.
+  if (smsOnly && decision.channel === "email") {
+    return skipStep(db, row, steps, `sms_only_stage: ${String(data.stage ?? "")} is not emailed`);
   }
 
   const emailClass = seq.emailClass || "commercial";

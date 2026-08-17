@@ -153,6 +153,46 @@ export function brandForStage(stage: unknown): BrandKey | null {
   return BUILTIN_STAGE_BRAND[s] ?? null;
 }
 
+/**
+ * THE brand a drip actually sends as, on either channel. Use this, not the raw
+ * stamp.
+ *
+ * Adon, 2026-08-17: "The Bluerise should only be for follow-ups."
+ *
+ * WHY A SEPARATE FUNCTION rather than trusting the existing resolution. The
+ * call sites read `brandForStage(stage) ?? stampedBrand ?? "sunbiz"`, so a lead
+ * whose stage carries NO rule falls through to whatever brand is stamped on the
+ * record — and initialBrandFor stamps `bluerise` on any cold-sourced lead. That
+ * is Bluerise speaking for a stage nobody assigned it to.
+ *
+ * It has not happened yet: measured 2026-08-17, all 92 stamped leads are
+ * `sunbiz` and zero are `bluerise`, so Bluerise sends today only because
+ * `follow_up` maps to it. The rule holds by accident, not by construction, and
+ * that is precisely the kind of thing that stops being true quietly.
+ *
+ * The rule: **Bluerise sends if and only if the STAGE says Bluerise.** A stamp
+ * can never promote a lead onto the Bluerise domain.
+ *
+ * Applies to SMS as well as email, and there it also removes a stall: Bluerise
+ * owns no SMS numbers, so a stamp-promoted bluerise SMS resolves to a brand
+ * with nothing to send from and holds on sms_channel_unavailable. Same rule,
+ * one less way to sit silent.
+ *
+ * The asymmetry is deliberate. An unassigned stage resolves to SunBiz rather
+ * than being blocked, because SunBiz is the established transactional domain
+ * and the alternative — holding — is the silent-stall failure mode this engine
+ * has already produced three times.
+ *
+ * `stampedBrand` is accepted and intentionally not consulted. It is in the
+ * signature so call sites read as a decision rather than a constant, and so
+ * that demoting a bluerise stamp is visible at the call site instead of looking
+ * like the stamp was simply forgotten. If a third brand is ever added, this is
+ * where the stamp starts mattering again.
+ */
+export function brandForSend(args: { stage: unknown; stampedBrand?: unknown }): BrandKey {
+  return brandForStage(args.stage) ?? "sunbiz";
+}
+
 // ---------------------------------------------------------------------------
 // Initial assignment
 // ---------------------------------------------------------------------------

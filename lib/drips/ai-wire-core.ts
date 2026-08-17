@@ -97,3 +97,53 @@ export function usesAiWire(
   if (!stage) return false;
   return stages.includes(stage);
 }
+
+/**
+ * Stages that may ONLY be reached by SMS.
+ *
+ * Adon, 2026-08-17: "that's why live subs is going to be just SMS only."
+ *
+ * WHY THIS NEEDS ITS OWN RULE rather than relying on the cohort having no email
+ * addresses. Two separate mechanisms will silently turn an SMS step into an
+ * email if you let them:
+ *
+ *   resolveChannel   substitutes the other channel when the authored one has no
+ *                    contact detail — Adon's 2026-08-10 rule, correct
+ *                    everywhere else.
+ *   onProviderGap    falls back to email when SMS is blocked upstream — added
+ *                    2026-08-14 to break the hold loops, also correct
+ *                    everywhere else.
+ *
+ * Both already fire in production: 127 rows carry channel='sms' with an EMAIL
+ * address in from_identity, going back to 2026-07-20. On Live Subs that is not
+ * a helpful fallback, it is a violation of the instruction.
+ *
+ * DELIBERATELY NOT DERIVED from a "does this lead have an email" check. Only 1
+ * of the 86 Live Subs has one today, so a data-driven guard would look like it
+ * worked and then break the first time someone enriches the cohort.
+ *
+ * Defaults to the AI-wire stages because they are the same cohort by
+ * construction — Live Subs text from the AI Follow-Up wire and are not emailed.
+ * Separately overridable so the two can be decoupled without a deploy if that
+ * ever stops being true.
+ */
+export function smsOnlyStages(env: Record<string, string | undefined> = process.env): string[] {
+  const raw = (env.DRIP_SMS_ONLY_STAGES || "").trim();
+  if (raw === "none") return [];
+  if (!raw) return aiWireStages(env).filter((s) => s !== "*");
+  const parsed = raw.split(",").map((s) => s.trim().toLowerCase()).filter(Boolean);
+  // A typo must not silently drop the restriction and start emailing a cohort
+  // that was explicitly declared SMS-only. Clearing it takes the literal word
+  // "none", which cannot be typed by accident.
+  return parsed.length > 0 ? parsed : aiWireStages(env).filter((s) => s !== "*");
+}
+
+/** Is this lead in a stage we are forbidden to email? */
+export function isSmsOnly(
+  data: Record<string, unknown>,
+  env: Record<string, string | undefined> = process.env,
+): boolean {
+  const stage = String(data.stage ?? "").trim().toLowerCase();
+  if (!stage) return false;
+  return smsOnlyStages(env).includes(stage);
+}

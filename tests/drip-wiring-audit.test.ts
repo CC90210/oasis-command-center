@@ -159,9 +159,19 @@ assert.ok(governor.includes('brand === "bluerise" ? WARMUP_START_HOURLY'),
 // Adon 2026-08-11: submissions@ carries viewed + signed, Bluerise carries the
 // follow-ups tab. Email-only routing would email a merchant as one company and
 // text them as the other; 10DLC registration is per brand.
+// Both channels now resolve through brandForSend, which is stage-first BY
+// CONSTRUCTION rather than by each call site remembering to put brandForStage
+// first (2026-08-17). That is strictly stronger: the old `brandForStage(stage)
+// ?? stamp ?? "sunbiz"` chain let a stage with no rule fall through to the
+// stamp, and initialBrandFor stamps bluerise on any cold lead — so Bluerise
+// could speak for a stage nobody assigned it to.
 assert.ok(
-  (executor.match(/brandForStage\(data\.stage\)/g) || []).length >= 2,
-  "BOTH the email and SMS brand resolutions must be stage-first",
+  (executor.match(/brandForSend\(\{/g) || []).length >= 2,
+  "BOTH the email and SMS brand resolutions must go through brandForSend",
+);
+assert.ok(
+  !/brandForStage\(data\.stage\) \?\? run\.brandByLead/.test(executor),
+  "the stage-then-stamp chain must be gone — a stamp cannot promote a lead to Bluerise",
 );
 
 // ── Suppression stays brand-blind and fail-closed ──────────────────────────
