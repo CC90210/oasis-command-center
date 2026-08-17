@@ -25,6 +25,7 @@ import { ImapFlow } from "imapflow";
 import { simpleParser } from "mailparser";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { getSubmissionsCreds } from "@/lib/integrations/submissions-gmail";
+import { describeImapError } from "@/lib/integrations/imap-error";
 import { classifyLenderReply, type LenderReplyCategory, type LenderReplyClass } from "@/lib/lenders/classify-reply";
 import { checkCronAuth } from "@/lib/cron-auth";
 import { updateRecord } from "@/lib/manifest/data";
@@ -177,7 +178,26 @@ export async function GET(req: NextRequest) {
   try {
     await client.connect();
   } catch (e) {
-    return NextResponse.json({ ok: false, error: "imap_connect_" + (e instanceof Error ? e.message : "unknown"), error_class: "imap" }, { status: 502 });
+    // Carry Gmail's OWN response, not just ImapFlow's "Command failed". See
+    // lib/integrations/imap-error.ts — this endpoint logged an identical,
+    // reasonless 502 every 8 minutes for four days.
+    const f = describeImapError(e);
+    console.error(
+      `[scan-lender-replies] IMAP connect failed for ${creds.fromAddress}: ${f.summary}` +
+        ` | authFailed=${f.authFailed} | ${f.hint}`,
+    );
+    return NextResponse.json(
+      {
+        ok: false,
+        error: "imap_connect_" + f.summary,
+        error_class: "imap",
+        auth_failed: f.authFailed,
+        server_said: f.serverSaid,
+        hint: f.hint,
+        mailbox: creds.fromAddress,
+      },
+      { status: 502 },
+    );
   }
 
   const lock = await client.getMailboxLock("INBOX");
