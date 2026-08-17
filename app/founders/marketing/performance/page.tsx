@@ -78,6 +78,21 @@ export default async function PerformancePage() {
         }
       />
 
+      {/* Posts that have shipped but have no numbers yet. Reported rather than
+          hidden: silently omitting a post CC published an hour ago sends him
+          looking for a bug, and counting its schema-default zeros would put a
+          failed-looking post in the totals. Neither — say it. */}
+      {perf.awaitingMetrics > 0 && (
+        <Card>
+          <p className="text-sm text-fg-muted">
+            {perf.awaitingMetrics} post{perf.awaitingMetrics === 1 ? "" : "s"} published
+            recently{perf.awaitingMetrics === 1 ? " has" : " have"} no numbers yet — they are
+            excluded from the totals above rather than counted as zero. Figures are pulled from
+            Zernio on a schedule, not pushed, so they land within the hour.
+          </p>
+        </Card>
+      )}
+
       {perf.truncated && (
         <Card>
           <p className="text-sm text-status-warm">
