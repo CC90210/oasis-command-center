@@ -17,6 +17,7 @@
     "test:legal": "node --conditions=react-server --import tsx tests/legal-compliance-drift.test.ts",
     "test:funnels": "node --conditions=react-server --import tsx tests/oasis-funnel.test.ts && node --conditions=react-server --import tsx tests/ai-audit-ingest.test.ts && node --conditions=react-server --import tsx tests/ai-audit-notify.test.ts",
     "test:marketing": "node --conditions=react-server --import tsx tests/car-geometry.test.ts && node --conditions=react-server --import tsx tests/marketing-shell.test.ts",
+    "test:cli-runtime": "node --conditions=react-server --import tsx tests/cli-runtime-single-source.test.ts",
     "test:isolation": "node --conditions=react-server --import tsx tests/client-surface-isolation.test.ts",
     "test:founders-marketing": "node --conditions=react-server --import tsx tests/marketing-core.test.ts && node --conditions=react-server --import tsx tests/marketing-degraded-render.test.ts && node --conditions=react-server --import tsx tests/marketing-founders-gate.test.ts",
     "test:watermark": "node --conditions=react-server --import tsx scripts/test-watermark.ts",
