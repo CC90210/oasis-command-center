@@ -1343,6 +1343,15 @@ async function processEmailStep(
             alertType: "optout_stamp_unrepairable",
             lane: "sunbiz-ops",
             severity: "warn",
+            // Scoped to the LEAD. writeAgentAlert dedupes on
+            // (tenant, type, subject), so a null subject merges every failing
+            // lead into one open alert: the body is overwritten by whichever
+            // came last and telegramOncePerOpen suppresses the rest. An
+            // operator would fix the one they were paged about and never learn
+            // the others exist. Each is independently actionable, so each gets
+            // its own alert. Codex caught the merge.
+            subjectType: "lead",
+            subjectId: row.lead_id,
             title: "Opt-out timestamp could not be repaired",
             body:
               `Lead ${row.lead_id} has an unreadable sms_opt_out_at and the repair write failed ` +
