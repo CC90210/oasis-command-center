@@ -38,4 +38,30 @@ CREATE POLICY drip_channel_limits_service ON public.drip_channel_limits
 
 REVOKE ALL ON public.drip_channel_limits FROM anon, authenticated;
 
+-- BACKFILL from the blob this replaces.
+--
+-- A migration that abandons the old storage must carry the values across, and
+-- the specific danger is worth naming: a stored 0 meant STOPPED, so reverting
+-- it to a positive default would resume sending on a channel somebody had
+-- deliberately halted.
+--
+-- Verified against bravo-empire before applying: zero tenants had
+-- custom_fields.drip_limits, because the blob-backed code never merged to main.
+-- So this carried nothing here. It stays because the same migration runs
+-- elsewhere, and "it happened to be empty" is not a property of a migration.
+--
+-- Keys are camelCase in the blob (what the old save wrote), snake_case here.
+INSERT INTO "drip_channel_limits"
+  ("tenant_id", "sms_daily", "sms_hourly", "email_daily_sunbiz", "email_daily_bluerise")
+SELECT
+  "id",
+  (custom_fields #>> '{drip_limits,smsDaily}')::int,
+  (custom_fields #>> '{drip_limits,smsHourly}')::int,
+  (custom_fields #>> '{drip_limits,emailDailySunbiz}')::int,
+  (custom_fields #>> '{drip_limits,emailDailyBluerise}')::int
+FROM "tenants"
+WHERE "custom_fields" IS NOT NULL
+    AND custom_fields ? 'drip_limits'
+ON CONFLICT("tenant_id") DO NOTHING;
+
 COMMIT;

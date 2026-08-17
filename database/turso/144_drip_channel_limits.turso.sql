@@ -35,3 +35,30 @@ CREATE TABLE IF NOT EXISTS "drip_channel_limits" (
 
 -- NULL means "not set here", which falls through to env and then to the
 -- built-in default. That is deliberately distinct from 0, which means stopped.
+
+-- BACKFILL from the blob this replaces.
+--
+-- A migration that abandons the old storage must carry the values across, and
+-- the specific danger is worth naming: a stored 0 meant STOPPED, so reverting
+-- it to a positive default would resume sending on a channel somebody had
+-- deliberately halted.
+--
+-- Verified against bravo-empire before applying: zero tenants had
+-- custom_fields.drip_limits, because the blob-backed code never merged to main.
+-- So this carried nothing here. It stays because the same migration runs
+-- elsewhere, and "it happened to be empty" is not a property of a migration.
+--
+-- Keys are camelCase in the blob (what the old save wrote), snake_case here.
+INSERT INTO "drip_channel_limits"
+  ("tenant_id", "sms_daily", "sms_hourly", "email_daily_sunbiz", "email_daily_bluerise")
+SELECT
+  "id",
+  json_extract("custom_fields", '$.drip_limits.smsDaily'),
+  json_extract("custom_fields", '$.drip_limits.smsHourly'),
+  json_extract("custom_fields", '$.drip_limits.emailDailySunbiz'),
+  json_extract("custom_fields", '$.drip_limits.emailDailyBluerise')
+FROM "tenants"
+WHERE "custom_fields" IS NOT NULL
+  AND json_valid("custom_fields")
+  AND json_extract("custom_fields", '$.drip_limits') IS NOT NULL
+ON CONFLICT("tenant_id") DO NOTHING;
