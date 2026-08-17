@@ -34,7 +34,6 @@ export type NavIconKey =
   | "RefreshCcw"
   | "DollarSign"
   | "MessageSquare"
-  | "PhoneCall"
   | "Mail"
   | "Landmark"
   | "FileCode2"
@@ -85,6 +84,7 @@ export const CC_NAV: NavItem[] = [
   // additional sidebar items pointing at the same component was just
   // confusing operators.
   { group: "Operations", href: "/", label: "Today", icon: "LayoutDashboard" },
+  { group: "Operations", href: "/schedule", label: "Schedule", icon: "Activity" },
   { group: "Operations", href: "/pipeline", label: "Pipeline", icon: "GitBranch" },
   // Forms — CC's native lead-capture funnel (replaces the retired standalone
   // cc-funnel Vercel app, 2026-06-18). Submissions ingest straight into the
@@ -97,13 +97,7 @@ export const CC_NAV: NavItem[] = [
   // full-bleed (isChatShellPath matches /agent). The richer /agents dashboard
   // page — agent states, stats, integration health — stays reachable by URL.
   { group: "Operations", href: "/agent", label: "Agents", icon: "Bot" },
-  // /reasoning dropped from CC's nav 2026-08-04 (consolidation audit). It
-  // carried two things: a Quick Actions grid that the Prompts Library now
-  // does better (every prompt has its own "Open in chat" button, plus search
-  // and copy), and the Agent Decisions tape — which moved to /operations,
-  // where the rest of the autonomous-loop observability already lives.
-  // The ROUTE stays alive and tenant-scoped: SUN_NAV + SUGA_NAV below still
-  // link to it, so deleting the page would 404 those client portals.
+  { group: "Operations", href: "/reasoning", label: "Reasoning", icon: "Brain" },
   { group: "Operations", href: "/playbook", label: "Playbook", icon: "BookOpen" },
   // System group — observability + control surfaces.
   { group: "System", href: "/operations", label: "Operations", icon: "Activity" },
@@ -159,10 +153,6 @@ export const SUN_NAV: NavItem[] = [
   { group: "Operations", href: "/agent", label: "Agents", icon: "Bot" },
   { group: "Operations", href: "/reasoning", label: "Reasoning", icon: "Brain" },
   { group: "Operations", href: "/playbook", label: "Playbook", icon: "BookOpen" },
-  // Metrics — one aggregate hub across all deals: conversion, reach/
-  // deliverability, application-form interaction, email open/click-through, and
-  // per-drip performance. The CRM still shows per-lead detail; this is the roll-up.
-  { group: "Metrics", href: "/metrics", label: "Metrics", icon: "BarChart3" },
   // Pipeline — per-entity boards behind the unified /pipeline view.
   // Contacts dropped 2026-05-17 — was a speculative scaffold; the lead
   // record itself carries contact_name + phone + email so a separate
@@ -177,9 +167,7 @@ export const SUN_NAV: NavItem[] = [
   { group: "Deals", href: "/renewals", label: "Renewals", icon: "RefreshCcw" },
   { group: "Deals", href: "/commissions", label: "Commissions", icon: "DollarSign" },
   // Outreach — drip + blast cadence surfaces.
-  // Labelled "Drips" because that is what Adon and the team call it. The route
-  // stays /sequences so existing links, bookmarks and docs keep resolving.
-  { group: "Outreach", href: "/sequences", label: "Drips", icon: "Sparkles" },
+  { group: "Outreach", href: "/sequences", label: "Sequences", icon: "Sparkles" },
   { group: "Outreach", href: "/sms", label: "SMS", icon: "MessageSquare", expandable: true },
   { group: "Outreach", href: "/email-blast", label: "Email Blast", icon: "Mail" },
   // Network — lender book + templates.
@@ -189,6 +177,9 @@ export const SUN_NAV: NavItem[] = [
   { group: "System", href: "/team", label: "Team", icon: "UsersRound" },
   { group: "System", href: "/automations", label: "Automations", icon: "RefreshCcw" },
   { group: "System", href: "/health", label: "Health", icon: "ShieldCheck" },
+  // Admin-only in practice: the page itself redirects non-admins. Nav-level
+  // hiding would need the session here, which this static config does not have.
+  { group: "System", href: "/fleet-health", label: "Fleet Health", icon: "Activity" },
   { group: "System", href: "/embed", label: "Embed", icon: "Code2" },
   { group: "System", href: "/settings", label: "Settings", icon: "Settings" },
 ];
