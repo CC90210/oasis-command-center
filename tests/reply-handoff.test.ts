@@ -58,6 +58,16 @@ assert.equal(decideHandoff({ ...base, body: "yes", inbound: false }).notifyAgent
   const d = decideHandoff({ ...base, body: "STOP", optedOut: true, alreadyHandedOff: true });
   assert.equal(d.action, "opt_out", "a later opt-out must never be swallowed by an earlier handoff");
 }
+// But that bypass must not re-announce the SAME opt-out every scan. Once it is
+// stamped, this one is done — while a genuinely later STOP still lands, because
+// the caller compares timestamps rather than setting a boolean.
+{
+  const again = decideHandoff({
+    ...base, body: "STOP", optedOut: true, optOutAlreadyRecorded: true,
+  });
+  assert.equal(again.action, "ignore", "one announcement per opt-out, not one per 30-minute scan");
+  assert.equal(again.notifyAgent, false);
+}
 
 // ── Our own outbound is not a reply ───────────────────────────────────────
 assert.equal(decideHandoff({ ...base, body: "Hi, it's Matt", inbound: false }).action, "ignore");

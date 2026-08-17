@@ -47,6 +47,7 @@ import { isWithinSendWindow } from "@/lib/sms/compliance";
 import { contactabilityOf, resolveChannel, onProviderGap } from "@/lib/drips/channel-fallback";
 import { AI_WIRE_REP_KEY, aiWireNumbers, isSmsOnly } from "@/lib/drips/ai-wire-core";
 import { smsPacingCaps, pacingDecision, windowStartFor, type PacingCounts } from "@/lib/drips/sms-pacing-core";
+import { emailCooloff, cooloffDays } from "@/lib/drips/optout-cooloff-core";
 import { mayTextFor } from "@/lib/sms/lawful-basis";
 import { smsSendAllowed, resetBreakerCache, claimBreakerProbe } from "@/lib/sms/send-breaker";
 import { routeOutbound, type ProviderAvailability } from "@/lib/routing/outbound-routing";
@@ -1301,6 +1302,68 @@ async function processEmailStep(
   const supp = await checkEmailSuppressed(row.tenant_id, email);
   if (supp.suppressed) return markPermanentFail(db, row, "suppressed (unsubscribed)");
   if (supp.checkFailed) return markRetryOrFail(db, row, "suppression_check_failed");
+
+  // CROSS-CHANNEL COOL-OFF. Adon, 2026-08-17: someone who says stop must not be
+  // contacted again for a couple of weeks.
+  //
+  // The phone suppression list stops TEXTING permanently, but it is keyed by
+  // number and this path reads the EMAIL list — two different lists, so a
+  // merchant could reply STOP to a text at 4pm and receive a Bluerise
+  // follow-up at 9am. Technically two channels, obviously the same company
+  // ignoring them, and exactly the complaint that costs a domain.
+  //
+  // Rescheduled rather than failed: an email opt-out and an SMS opt-out are
+  // genuinely different permissions, so this is a pause, not a deletion. The
+  // SMS suppression itself is untouched and does not expire.
+  {
+    const cool = emailCooloff(data.sms_opt_out_at, new Date(), cooloffDays());
+    if (cool.held) {
+      // An unreadable stamp is REPAIRED to a real date, once. Otherwise the
+      // hold recomputes now+days every dispatch and the deadline slides
+      // forward forever — a fortnight becoming a permanent silence.
+      if (cool.repairTo) {
+        // The adapter RETURNS errors rather than throwing. Swallowing this
+        // would leave the unreadable stamp in place, so the next dispatch
+        // recomputes another now+days deadline and the slide the repair exists
+        // to stop carries on invisibly. The row still HOLDS either way — we
+        // never email on a failed repair — but a repair that keeps failing has
+        // to be audible.
+        const fixed = await db
+          .from("tenant_records")
+          .update({ data: { ...data, sms_opt_out_at: cool.repairTo } })
+          .eq("tenant_id", row.tenant_id)
+          .eq("id", row.lead_id);
+        if (fixed.error) {
+          console.error("[dispatch-drips] opt-out timestamp repair FAILED", {
+            leadId: row.lead_id,
+            error: fixed.error.message,
+          });
+          await writeAgentAlert({
+            tenantId: row.tenant_id,
+            alertType: "optout_stamp_unrepairable",
+            lane: "sunbiz-ops",
+            severity: "warn",
+            // Scoped to the LEAD. writeAgentAlert dedupes on
+            // (tenant, type, subject), so a null subject merges every failing
+            // lead into one open alert: the body is overwritten by whichever
+            // came last and telegramOncePerOpen suppresses the rest. An
+            // operator would fix the one they were paged about and never learn
+            // the others exist. Each is independently actionable, so each gets
+            // its own alert. Codex caught the merge.
+            subjectType: "lead",
+            subjectId: row.lead_id,
+            title: "Opt-out timestamp could not be repaired",
+            body:
+              `Lead ${row.lead_id} has an unreadable sms_opt_out_at and the repair write failed ` +
+              `(${fixed.error.message}). Email stays HELD, so nobody is contacted, but the hold ` +
+              `will keep sliding until the field is fixed by hand.`,
+            telegramOncePerOpen: true,
+          }).catch(() => {});
+        }
+      }
+      return markRescheduled(db, row, cool.until.toISOString(), cool.reason);
+    }
+  }
 
   // Email business-hours gate ("every morning"): reschedule an off-hours email
   // step to the next window-start (no attempt burn) — mirrors the SMS TCPA

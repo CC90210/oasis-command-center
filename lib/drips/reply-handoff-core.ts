@@ -86,6 +86,18 @@ export type ReplyInput = {
    *  regulatory keyword. Honoured either way; this only decides whether a human
    *  is asked to double-check it. */
   optOutAmbiguous?: boolean;
+  /**
+   * True when THIS opt-out has already been recorded and announced.
+   *
+   * Separate from alreadyHandedOff on purpose. Opt-outs deliberately bypass
+   * that flag so a STOP on Friday still suppresses a lead who replied warmly on
+   * Monday — but that bypass meant the same STOP was re-announced on every
+   * 30-minute scan for as long as it stayed in the lookback window. The
+   * sms_opt_out_at stamp is the natural marker: it is written when we act, and
+   * comparing it against this message's timestamp answers "have we already
+   * handled this one" without a second field. Codex caught the repeat.
+   */
+  optOutAlreadyRecorded?: boolean;
   /** True when a handoff has already been recorded for this lead. Assume
    *  duplicate delivery: the provider can and does resend, and the sync is
    *  re-runnable by design, so the second pass must not page again. */
@@ -101,6 +113,9 @@ export function decideHandoff(input: ReplyInput): HandoffDecision {
   // already-handed-off short circuit: a merchant who replied warmly on Monday
   // and STOP on Friday must still be suppressed on Friday.
   if (input.optedOut) {
+    if (input.optOutAlreadyRecorded) {
+      return { action: "ignore", reason: "opt-out already recorded and announced", notifyAgent: false };
+    }
     return {
       action: "opt_out",
       reason: input.optOutAmbiguous ? "opt-out inferred from natural language" : "merchant opted out",
