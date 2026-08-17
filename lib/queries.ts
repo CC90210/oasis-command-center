@@ -583,29 +583,16 @@ export async function priorityInbound(
 export type MomentumMetrics = {
   outboundVelocity7d: number | null;
   contentPublished7d: number | null;
+  /** Platform sends behind those pieces — one post to five networks is 5. */
+  contentSends7d: number | null;
 };
 
-/**
- * The OASIS empire tenant — only this tenant is allowed to surface the
- * empire-wide content_calendar count via momentumMetrics. Any other
- * tenant landing here gets contentPublished7d=null so they never see
- * CC's content metrics rendered as their own.
- *
- * Set OASIS_TENANT_ID in Vercel env to override (e.g., during a
- * migration). Falls back to the live CC tenant uuid.
- *
- * Codex audit 2026-06-06: the previous "rely on /t/sun redirect to
- * prevent cross-tenant leak" was implicit; this is the explicit gate.
- */
-const OASIS_TENANT_ID =
-  process.env.OASIS_TENANT_ID || "ef8d389e-3f15-43f2-ae00-3660f69a1452";
 
 export async function momentumMetrics(
   tenantId: string,
 ): Promise<MomentumMetrics> {
   const db = getServiceSupabase();
   const since = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
-  const isOasis = tenantId === OASIS_TENANT_ID;
   const [outbound, content] = await Promise.all([
     db
       .from("lead_interactions")
@@ -613,23 +600,53 @@ export async function momentumMetrics(
       .eq("tenant_id", tenantId)
       .in("type", ["email_sent", "email_queued", "dm_sent", "linkedin_sent", "call_made"])
       .gte("created_at", since),
-    // content_calendar has no tenant_id column — it's an empire-wide
-    // CMO table. We surface its count ONLY when the active tenant is
-    // OASIS. Every other tenant (including future client tenants) gets
-    // contentPublished7d=null so they don't see CC's content count
-    // rendered as theirs.
-    isOasis
-      ? db
-          .from("content_calendar")
-          .select("id", { count: "exact", head: true })
-          .gte("posted_at", since)
-          .neq("status", "archived")
-      : Promise.resolve({ count: null, error: null } as { count: number | null; error: null }),
+    // POINTED AT post_analytics, NOT content_calendar (2026-08-17).
+    //
+    // This read `content_calendar` and reported "Content (7d): 0 — distribution
+    // dark" on a week with 42 platform sends behind it. The table is not broken;
+    // it is ABANDONED. Live check: 123 rows, newest 2026-03-29 — nothing has
+    // written to it in five months. The publishing pipeline moved to Zernio and
+    // lands in post_analytics, and this metric was never repointed.
+    //
+    // A headline tile reading a dead table is the worst kind of wrong: it does
+    // not error, it reports zero, and zero on a distribution metric reads as "we
+    // stopped posting". CC saw exactly that.
+    //
+    // ONE ROW PER PLATFORM, so counting rows would swing the error the other way
+    // and claim 42 posts for a week with 15 pieces of content. Distinct caption
+    // is the grouping key — zernio_post_id is assigned per platform and does NOT
+    // identify a cross-post (verified: 42 rows, 42 distinct ids, 15 distinct
+    // captions).
+    //
+    // The OASIS special-case is gone with it. content_calendar had no tenant_id,
+    // which is why this needed a hardcoded uuid gate; post_analytics is
+    // tenant-scoped, so every tenant now gets its OWN count instead of one
+    // tenant's count and everyone else's null.
+    db
+      .from("post_analytics")
+      .select("content_excerpt")
+      .eq("tenant_id", tenantId)
+      .gte("published_at", since)
+      .limit(2000),
   ]);
+
+  let contentPublished7d: number | null = null;
+  let contentSends7d: number | null = null;
+  if (!("error" in content && content.error)) {
+    const rows = (content.data || []) as Array<{ content_excerpt: string | null }>;
+    contentSends7d = rows.length;
+    // Trim before comparing: the same caption picks up different trailing
+    // whitespace per network, and the prefix is what identifies the piece.
+    const pieces = new Set(
+      rows.map((r) => (r.content_excerpt || "").trim().slice(0, 60)).filter(Boolean),
+    );
+    contentPublished7d = pieces.size;
+  }
+
   return {
     outboundVelocity7d: outbound.error ? null : outbound.count ?? 0,
-    contentPublished7d:
-      !isOasis || ("error" in content && content.error) ? null : content.count ?? 0,
+    contentPublished7d,
+    contentSends7d,
   };
 }
 

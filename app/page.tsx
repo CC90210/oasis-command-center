@@ -25,7 +25,6 @@ import {
   getTenant,
   momentumMetrics,
 } from "@/lib/queries";
-import { computeStreak } from "@/lib/streak";
 import { safe } from "@/lib/api-helpers";
 import { GoalCountdownCard } from "@/components/GoalCountdownCard";
 import {
@@ -85,7 +84,7 @@ export default async function TodayPage() {
   // every dynamic page so one bad reader can't 500 the whole render. The
   // label tags failures in Vercel logs ([safe:today.counts] ...) so a
   // silently-empty Stat is debuggable. This is the Hermes-toggle bug class.
-  const [counts, pipeline, mrr, history, plan, inbound, concentration, replyRate, activePipe, topLead, streak, momentum] =
+  const [counts, pipeline, mrr, history, plan, inbound, concentration, replyRate, activePipe, topLead, momentum] =
     await Promise.all([
       safe("today.counts", todayCounts(tenantId), { outbound: 0, inbound: 0, decisions: 0, hot: 0 }),
       safe("today.pipeline_breakdown", pipelineBreakdown(tenantId), { stages: {} as Record<string, number>, total: 0, sources: {} as Record<string, number> }),
@@ -100,8 +99,7 @@ export default async function TodayPage() {
       safe("today.outreach_reply_rate", outreachReplyRate(tenantId, 7), { sends: 0, replies: 0, rate_pct: 0 }),
       safe("today.active_pipeline", activePipeline(tenantId), { total_active: 0, qualified: 0, proposal: 0 }),
       safe("today.top_open_lead", topOpenLead(tenantId), null),
-      safe("today.streak", computeStreak(profile.id, 7), { streak: 0, missed: 0, daysWithPlan: 0, byDay: [] }),
-      safe("today.momentum", momentumMetrics(tenantId), { outboundVelocity7d: null, contentPublished7d: null }),
+      safe("today.momentum", momentumMetrics(tenantId), { outboundVelocity7d: null, contentPublished7d: null, contentSends7d: null }),
     ]);
 
   const primaryLead = plan?.primary_lead_id
@@ -116,11 +114,24 @@ export default async function TodayPage() {
 
   const todayKey = operatorDateKey();
   const isWeekend = operatorIsWeekend();
-  const missionLine =
-    plan?.mission ||
-    (isWeekend
-      ? "Weekend mode"
-      : "Set a mission for today in Settings → Plan Templates");
+  // DERIVED FROM THE GOAL, not from the retired plan pipeline.
+  //
+  // This read `plan?.mission`, and on 2026-08-17 it was rendering "The structure
+  // survives the cheat days. $5K MRR by May 30." beside tiles reading $10,000 and
+  // 09-30. The mission text came from a daily_plan row written by the
+  // materialisation cron that fed "The day" — a surface now retired — so it had
+  // been frozen since whenever that last ran, contradicting the live numbers
+  // directly under it.
+  //
+  // The fallback was worse: "Set a mission for today in Settings → Plan
+  // Templates" pointed at an editor deleted the same day.
+  //
+  // A header line that restates the goal cannot go stale, because it is computed
+  // from the same figures as the countdown beside it. An operator-authored
+  // mission is a fine feature; one frozen five months ago is not.
+  const missionLine = isWeekend
+    ? "Weekend mode"
+    : `$${mrr.target.toLocaleString()} by ${targetDate?.toISOString().slice(0, 10) ?? "the target date"}`;
 
   return (
     <div className="space-y-6 animate-fade-in">
@@ -240,19 +251,15 @@ export default async function TodayPage() {
             momentum.contentPublished7d === null
               ? "metric unavailable"
               : momentum.contentPublished7d > 0
-                ? "posts shipped"
-                : "0 vs 22 target — distribution dark"
+                ? `${momentum.contentSends7d ?? 0} sends across the networks`
+                : "nothing published this week"
           }
         />
-        <Stat
-          label="Streak"
-          value={`${streak.streak}d`}
-          hint={
-            streak.streak > 0
-              ? `${streak.daysWithPlan}/${streak.daysWithPlan + streak.missed} days planned`
-              : "kick off today's plan"
-          }
-        />
+        {/* The Streak tile went with "The day" on 2026-08-17. It counted
+            checkboxes on a planner that no longer exists, so it could only ever
+            read 0d — and "kick off today's plan" pointed at a surface that had
+            been deleted. A metric whose input is gone does not degrade to a low
+            number, it degrades to a lie. /schedule is the planner now. */}
       </section>
 
       <section className="grid lg:grid-cols-3 gap-6">
@@ -267,8 +274,13 @@ export default async function TodayPage() {
         <Card
           title="Primary lead"
           subtitle={
+            // "Top open · null" — what this rendered on screen. `company || name`
+            // falls through to `null` when BOTH are absent, and a template
+            // literal stringifies that rather than dropping it. A lead with
+            // neither field is normal (an inbound with only an email), so this
+            // was not an edge case, it was Tuesday.
             primaryLead
-              ? `Top open · ${primaryLead.company || primaryLead.name}`
+              ? `Top open · ${primaryLead.company || primaryLead.name || primaryLead.email || "unnamed lead"}`
               : "No active lead"
           }
         >
