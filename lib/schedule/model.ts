@@ -20,10 +20,17 @@ export type ScheduleBlock = {
   startMinute: number;
   endMinute: number;
   category: ScheduleCategory;
+  description?: string;
   parentId?: string;
   locked?: boolean;
   system?: "shabbat";
 };
+
+export type ScheduleBlockDraft = Pick<
+  ScheduleBlock,
+  "title" | "day" | "startMinute" | "endMinute" | "category"
+> &
+  Partial<Pick<ScheduleBlock, "description" | "parentId">>;
 
 export type ScheduleDocument = {
   schemaVersion: typeof SCHEDULE_SCHEMA_VERSION;
@@ -33,11 +40,41 @@ export type ScheduleDocument = {
   blocks: ScheduleBlock[];
 };
 
-export const isEditableBlock = (block: ScheduleBlock) => !block.locked && !block.system;
+export const isEditableBlock = (block: ScheduleBlock) =>
+  !block.locked && !block.system;
+
+export function overlapsProtectedTime(
+  candidate: Pick<ScheduleBlock, "id" | "day" | "startMinute" | "endMinute">,
+  blocks: ScheduleBlock[],
+) {
+  return blocks.some(
+    (block) =>
+      block.id !== candidate.id &&
+      block.system === "shabbat" &&
+      block.day === candidate.day &&
+      candidate.startMinute < block.endMinute &&
+      candidate.endMinute > block.startMinute,
+  );
+}
+
+export function createScheduleBlock(draft: ScheduleBlockDraft): ScheduleBlock {
+  return clampBlock({
+    ...draft,
+    id: `event-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    title: draft.title.trim() || "Untitled event",
+    description: draft.description?.trim() || undefined,
+  });
+}
 
 export function clampBlock(block: ScheduleBlock): ScheduleBlock {
-  const startMinute = Math.max(0, Math.min(MINUTES_PER_DAY - 15, block.startMinute));
-  const endMinute = Math.max(startMinute + 15, Math.min(MINUTES_PER_DAY, block.endMinute));
+  const startMinute = Math.max(
+    0,
+    Math.min(MINUTES_PER_DAY - 15, block.startMinute),
+  );
+  const endMinute = Math.max(
+    startMinute + 15,
+    Math.min(MINUTES_PER_DAY, block.endMinute),
+  );
   return { ...block, startMinute, endMinute };
 }
 
@@ -54,33 +91,94 @@ export function createPlaceholderSchedule(now = new Date()): ScheduleDocument {
   const monday = new Date(now);
   const mondayOffset = (now.getDay() + 6) % 7;
   monday.setDate(now.getDate() - mondayOffset);
-  const weekStartsOn = monday.toISOString().slice(0, 10);
+  const weekStartsOn = [
+    monday.getFullYear(),
+    String(monday.getMonth() + 1).padStart(2, "0"),
+    String(monday.getDate()).padStart(2, "0"),
+  ].join("-");
   const blocks: ScheduleBlock[] = [];
 
   for (const day of DAYS) {
     if (day === "Saturday" || day === "Sunday") continue;
     for (const [id, title, startMinute, endMinute] of morning) {
-      blocks.push({ id: `${day}-${id}`, title, day, startMinute, endMinute, category: "morning" });
+      blocks.push({
+        id: `${day}-${id}`,
+        title,
+        day,
+        startMinute,
+        endMinute,
+        category: "morning",
+      });
     }
     const parentId = `${day}-work`;
-    blocks.push({ id: parentId, title: "Work", day, startMinute: 600, endMinute: 1020, category: "work" });
+    blocks.push({
+      id: parentId,
+      title: "Work",
+      day,
+      startMinute: 600,
+      endMinute: 1020,
+      category: "work",
+    });
     blocks.push(
-      { id: `${parentId}-clients`, parentId, title: "Client fulfillment", day, startMinute: 600, endMinute: 780, category: "work" },
-      { id: `${parentId}-systems`, parentId, title: "Internal systems", day, startMinute: 810, endMinute: 900, category: "work" },
-      { id: `${parentId}-rnd`, parentId, title: "Agent training / R&D", day, startMinute: 930, endMinute: 1020, category: "work" },
+      {
+        id: `${parentId}-clients`,
+        parentId,
+        title: "Client fulfillment",
+        day,
+        startMinute: 600,
+        endMinute: 780,
+        category: "work",
+      },
+      {
+        id: `${parentId}-systems`,
+        parentId,
+        title: "Internal systems",
+        day,
+        startMinute: 810,
+        endMinute: 900,
+        category: "work",
+      },
+      {
+        id: `${parentId}-rnd`,
+        parentId,
+        title: "Agent training / R&D",
+        day,
+        startMinute: 930,
+        endMinute: 1020,
+        category: "work",
+      },
     );
   }
 
   // Scaffold times until the weekly sundown calculator is connected. These
   // blocks are system-owned and deliberately cannot be moved or resized.
   blocks.push(
-    { id: "shabbat-friday", title: "Shabbat begins · sundown", day: "Friday", startMinute: 1080, endMinute: 1440, category: "observance", locked: true, system: "shabbat" },
-    { id: "shabbat-saturday", title: "Shabbat · until sundown", day: "Saturday", startMinute: 0, endMinute: 1140, category: "observance", locked: true, system: "shabbat" },
+    {
+      id: "shabbat-friday",
+      title: "Shabbat begins · sundown",
+      day: "Friday",
+      startMinute: 1080,
+      endMinute: 1440,
+      category: "observance",
+      locked: true,
+      system: "shabbat",
+    },
+    {
+      id: "shabbat-saturday",
+      title: "Shabbat · until sundown",
+      day: "Saturday",
+      startMinute: 0,
+      endMinute: 1140,
+      category: "observance",
+      locked: true,
+      system: "shabbat",
+    },
   );
 
   return {
     schemaVersion: SCHEDULE_SCHEMA_VERSION,
-    timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || "America/Toronto",
+    timezone:
+      Intl.DateTimeFormat().resolvedOptions().timeZone || "America/Toronto",
     weekStartsOn,
     updatedAt: now.toISOString(),
     blocks,
@@ -90,14 +188,22 @@ export function createPlaceholderSchedule(now = new Date()): ScheduleDocument {
 export function isScheduleDocument(value: unknown): value is ScheduleDocument {
   if (!value || typeof value !== "object") return false;
   const doc = value as Partial<ScheduleDocument>;
-  return doc.schemaVersion === SCHEDULE_SCHEMA_VERSION && Array.isArray(doc.blocks) &&
+  return (
+    doc.schemaVersion === SCHEDULE_SCHEMA_VERSION &&
+    Array.isArray(doc.blocks) &&
     doc.blocks.every((block) => {
       if (!block || typeof block !== "object") return false;
       const item = block as Partial<ScheduleBlock>;
-      return typeof item.id === "string" && typeof item.title === "string" &&
-        DAYS.includes(item.day as ScheduleDay) && typeof item.startMinute === "number" &&
-        typeof item.endMinute === "number" && item.endMinute > item.startMinute;
-    });
+      return (
+        typeof item.id === "string" &&
+        typeof item.title === "string" &&
+        DAYS.includes(item.day as ScheduleDay) &&
+        typeof item.startMinute === "number" &&
+        typeof item.endMinute === "number" &&
+        item.endMinute > item.startMinute
+      );
+    })
+  );
 }
 
 export function formatTime(minutes: number) {
