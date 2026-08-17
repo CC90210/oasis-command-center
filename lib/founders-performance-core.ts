@@ -32,6 +32,20 @@ export type PerfRow = {
   content_excerpt: string | null;
   published_at: string | null;
   last_synced_at: string | null;
+  /**
+   * When real figures last came back from the platform.
+   *
+   * NULL means the row exists because the post was DISPATCHED and no measurement
+   * has arrived yet — which is emphatically not "zero views". Every metric column
+   * is `not null default 0`, so an unmeasured row carries a full set of honest-
+   * looking zeros, and 18 live rows genuinely have views = 0. Without this the
+   * two are indistinguishable and every publish would add a failed-looking post
+   * to the totals seconds after it shipped.
+   *
+   * Optional so rows read before migration 145 still type-check; absent is
+   * treated as measured, matching the backfill.
+   */
+  measured_at?: string | null;
 };
 
 export type PerfSummary = {
@@ -48,6 +62,16 @@ export type PerfSummary = {
   };
   byPlatform: Array<{ platform: string; posts: number; views: number; engagements: number }>;
   lastSynced: string | null;
+  /**
+   * Posts that have shipped but whose numbers have not come back yet.
+   *
+   * Counted and reported, never summed. They are excluded from `totals` and from
+   * `byPlatform` because adding their default zeros would understate every
+   * average on the page — but they are not hidden either: "3 posts awaiting
+   * numbers" is a fact the operator wants, and silently dropping a post he just
+   * published would send him looking for a bug.
+   */
+  awaitingMetrics: number;
   /**
    * True when the read FAILED, as opposed to the table being empty. "Nothing
    * published yet" and "we could not find out" are different facts and a
@@ -69,9 +93,26 @@ export const EMPTY_PERF: PerfSummary = {
   totals: { posts: 0, views: 0, impressions: 0, likes: 0, comments: 0, shares: 0, saves: 0, follows: 0 },
   byPlatform: [],
   lastSynced: null,
+  awaitingMetrics: 0,
   degraded: false,
   truncated: false,
 };
+
+/**
+ * Has this row ever been measured?
+ *
+ * A row is unmeasured ONLY when `measured_at` is explicitly null — the column
+ * exists and nothing has been written to it. `undefined` means the caller
+ * selected a shape without the column, and every row predating migration 145 was
+ * backfilled as measured, so the safe reading there is "measured".
+ *
+ * Treating the unknown case as UNMEASURED would be the more paranoid choice and
+ * the wrong one: it would drop every real row from the totals the moment a query
+ * forgot to select the column, blanking the dashboard rather than over-counting.
+ */
+export function isMeasured(r: { measured_at?: string | null }): boolean {
+  return r.measured_at !== null;
+}
 
 /**
  * Coerce a column to a number.
@@ -141,7 +182,17 @@ export function summarize(result: { data?: unknown[] | null; error?: { message?:
   const truncated = all.length > ROW_CAP;
   const rows = truncated ? all.slice(0, ROW_CAP) : all;
 
-  const totals = rows.reduce(
+  // SPLIT BEFORE SUMMING. Rows written at dispatch time carry the schema's
+  // `not null default 0` metrics, which are indistinguishable from a post nobody
+  // watched — and 18 live rows genuinely have views = 0. Counting them would add
+  // a failed-looking post to the totals seconds after CC published it.
+  //
+  // `rows` keeps everything, because the lists below still want to SHOW a post
+  // that just shipped. Only the arithmetic excludes it.
+  const measured = rows.filter(isMeasured);
+  const awaitingMetrics = rows.length - measured.length;
+
+  const totals = measured.reduce(
     (acc, x) => ({
       posts: acc.posts + 1,
       views: acc.views + num(x.views),
@@ -156,7 +207,9 @@ export function summarize(result: { data?: unknown[] | null; error?: { message?:
   );
 
   const byMap = new Map<string, { platform: string; posts: number; views: number; engagements: number }>();
-  for (const x of rows) {
+  // `measured`, for the same reason as the totals: an unmeasured row would add a
+  // post with zero views to a channel's bar and quietly understate that channel.
+  for (const x of measured) {
     const cur = byMap.get(x.platform) || { platform: x.platform, posts: 0, views: 0, engagements: 0 };
     cur.posts += 1;
     cur.views += num(x.views);
@@ -174,6 +227,7 @@ export function summarize(result: { data?: unknown[] | null; error?: { message?:
     totals,
     byPlatform: [...byMap.values()].sort((a, b) => b.views - a.views),
     lastSynced,
+    awaitingMetrics,
     degraded: false,
     truncated,
   };

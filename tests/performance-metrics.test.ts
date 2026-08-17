@@ -14,6 +14,7 @@ import {
   EMPTY_PERF,
   ROW_CAP,
   retention,
+  isMeasured,
   summarize,
   type PerfRow,
 } from "../lib/founders-performance-core";
@@ -114,4 +115,58 @@ test("EMPTY_PERF is genuinely empty in every field the page reads", () => {
   assert.equal(EMPTY_PERF.rows.length, 0);
   assert.equal(EMPTY_PERF.byPlatform.length, 0);
   assert.equal(EMPTY_PERF.lastSynced, null);
+});
+
+// ── dispatched, but not yet measured ─────────────────────────────────────────
+// Maven writes a post_analytics row at PUBLISH time so the linker can join on a
+// real id instead of reconstructing it from caption text. Every metric column is
+// `not null default 0`, so that row arrives carrying a full set of honest-looking
+// zeros — and 18 live rows genuinely have views = 0. Without measured_at the two
+// are the same row, and every publish would add a failed-looking post to the
+// totals seconds after it shipped.
+
+test("an unmeasured row is not summed as a zero", () => {
+  const r = summarize({
+    data: [
+      row({ platform_post_id: "live", views: 300, measured_at: "2026-08-16T10:00:00Z" }),
+      // Just dispatched. Zeros are the schema default, not a measurement.
+      row({ platform_post_id: "fresh", views: 0, measured_at: null }),
+    ],
+  });
+  assert.equal(r.totals.posts, 1, "only the measured post counts toward posts");
+  assert.equal(r.totals.views, 300);
+  assert.equal(r.awaitingMetrics, 1, "and the fresh one is reported, not discarded");
+});
+
+test("an unmeasured row is still LISTED, just not counted", () => {
+  // Dropping it entirely would send CC hunting for a post he watched go out.
+  const r = summarize({ data: [row({ platform_post_id: "fresh", measured_at: null })] });
+  assert.equal(r.rows.length, 1, "the post he just published still appears");
+  assert.equal(r.totals.posts, 0, "but contributes no arithmetic");
+  assert.equal(r.byPlatform.length, 0, "and no channel bar, which it would understate");
+});
+
+test("a MEASURED zero still counts — that is a real result", () => {
+  // The distinction only earns its keep if a genuine zero survives it. LinkedIn
+  // posts really do return 0 views and belong in the denominator.
+  const r = summarize({
+    data: [row({ platform_post_id: "flop", views: 0, measured_at: "2026-08-16T10:00:00Z" })],
+  });
+  assert.equal(r.totals.posts, 1, "a post nobody watched is still a post");
+  assert.equal(r.awaitingMetrics, 0);
+});
+
+test("a row with no measured_at column at all is treated as measured", () => {
+  // Rows predating migration 145 were backfilled as measured, and a query that
+  // forgets the column must not blank the dashboard. Absent != null.
+  const r = summarize({ data: [row({ platform_post_id: "legacy", views: 42 })] });
+  assert.equal(r.totals.posts, 1);
+  assert.equal(r.totals.views, 42);
+  assert.equal(r.awaitingMetrics, 0);
+});
+
+test("isMeasured distinguishes absent from null", () => {
+  assert.equal(isMeasured({ measured_at: "2026-08-16T10:00:00Z" }), true);
+  assert.equal(isMeasured({}), true, "absent means the column was not selected");
+  assert.equal(isMeasured({ measured_at: null }), false, "null is the dispatched-not-measured signal");
 });
