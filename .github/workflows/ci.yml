@@ -76,6 +76,11 @@ jobs:
           # against a real half-applied boundary and then never run by anything
           # but a human on demand. A guard nothing executes is documentation.
           npm run test:founders-marketing
+          # A client's book must never render on an OASIS surface. Added
+          # 2026-08-17 after the Breeze underwriting queue appeared on
+          # top-level /automations because the gate keyed on operator ROLE
+          # rather than on which tenant's surface was being rendered.
+          npm run test:isolation
           # ADDED 2026-08-16. Repo-wide invariant, not a feature suite: every
           # paged read must .order() by a unique key before it .range()s. This
           # repo has hit that bug four times (two found only by review), the fix
