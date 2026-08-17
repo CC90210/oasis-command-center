@@ -1,18 +1,34 @@
 /**
  * lib/drips/channel-limits.ts — read and write the per-channel send ceilings.
  *
- * Stored on `tenants.custom_fields.drip_limits`. That column is an existing
- * JSON blob, so this needed no migration and no new table for four integers —
- * and the rules that interpret them live in channel-limits-core.ts, which is
- * where the tests point.
+ * Stored in `drip_channel_limits`, one row per tenant, four nullable integers.
+ * The rules that interpret them live in channel-limits-core.ts, which is where
+ * the tests point.
  *
- * FAILS OPEN TO THE ENV, deliberately, and this is the one judgement worth
- * stating. An unreadable tenants row resolves to the env/default ceilings
- * rather than to zero. Zero would be "safer" in the abstract, but it is a
- * silent full stop on every channel triggered by a database blip — the exact
- * shape of the outages this engine has already produced three times. The
- * ceilings are a THROTTLE, not a safety interlock; suppression, consent and the
- * carrier breaker are the interlocks, and every one of those fails closed.
+ * WHY A TABLE AND NOT THE JSON BLOB THIS STARTED IN. The first version kept
+ * these on `tenants.custom_fields.drip_limits` to avoid a migration. That
+ * column is shared with other product features, so every write was a
+ * read-modify-write over data somebody else owns, and three attempts to make it
+ * safe each introduced a subtler bug: a plain write discarded concurrent
+ * changes; write-then-verify detected a race that had already happened without
+ * preventing the next one; and a compare-and-swap could not work at all,
+ * because the adapter parses JSON on read, so the token was a re-serialised
+ * object rather than the stored text and any row whose formatting differed
+ * would never match.
+ *
+ * The problem was never the locking, it was sharing a cell. A row no other
+ * feature writes needs no compare-and-swap: an upsert is atomic on its own
+ * primary key. Verified against the live table before this was written — two
+ * upserts leave one row.
+ *
+ * NULL means "not set here" and falls through to env, then to the built-in
+ * default. Deliberately distinct from 0, which means stopped.
+ *
+ * FAILS OPEN TO THE ENV on a read error, and that is the one judgement worth
+ * stating. Zero would be "safer" in the abstract and is wrong: it is a silent
+ * full stop on every channel from a database blip. These ceilings are a
+ * THROTTLE; suppression, consent and the carrier breaker are the interlocks,
+ * and every one of those fails closed.
  */
 
 import "server-only";
@@ -25,10 +41,19 @@ import {
   type LimitProblem,
 } from "./channel-limits-core";
 
-type Db = ReturnType<typeof getServiceSupabase>;
+/** camelCase in the app, snake_case in the table. Declared once so a rename
+ *  cannot half-apply. */
+const COLUMN: Record<LimitKey, string> = {
+  smsDaily: "sms_daily",
+  smsHourly: "sms_hourly",
+  emailDailySunbiz: "email_daily_sunbiz",
+  emailDailyBluerise: "email_daily_bluerise",
+};
 
-/** Cache for one dispatch run. The engine asks per row; the answer changes when
- *  an operator edits it, not within a batch. */
+const SELECT = "sms_daily, sms_hourly, email_daily_sunbiz, email_daily_bluerise";
+
+/** Cached for one dispatch run. The engine asks per row; the answer changes
+ *  when an operator edits it, not within a batch. */
 const CACHE_MS = 30_000;
 const cache = new Map<string, { at: number; limits: ChannelLimits }>();
 
@@ -37,21 +62,27 @@ export function resetChannelLimitsCache(tenantId?: string): void {
   else cache.clear();
 }
 
+function toStored(row: Record<string, unknown> | null): Record<string, unknown> {
+  if (!row) return {};
+  const out: Record<string, unknown> = {};
+  for (const key of Object.keys(COLUMN) as LimitKey[]) {
+    const v = row[COLUMN[key]];
+    // NULL means unset. Dropping it lets resolveLimits fall through to env
+    // rather than reading it as a value.
+    if (v !== null && v !== undefined) out[key] = v;
+  }
+  return out;
+}
+
 export async function getChannelLimits(tenantId: string): Promise<ChannelLimits> {
   const hit = cache.get(tenantId);
   if (hit && Date.now() - hit.at < CACHE_MS) return hit.limits;
 
-  let stored: unknown = null;
+  let stored: Record<string, unknown> = {};
   try {
     const db = getServiceSupabase();
-    const r = await db.from("tenants").select("custom_fields").eq("id", tenantId).maybeSingle();
-    if (!r.error) {
-      const cf = (r.data as { custom_fields?: unknown } | null)?.custom_fields;
-      // libSQL hands JSON columns back as TEXT, so a string here is normal
-      // rather than a bug. Parsing failure falls through to env, not to zero.
-      const parsed = typeof cf === "string" ? safeParse(cf) : cf;
-      stored = (parsed && typeof parsed === "object" ? (parsed as Record<string, unknown>).drip_limits : null) ?? null;
-    }
+    const r = await db.from("drip_channel_limits").select(SELECT).eq("tenant_id", tenantId).maybeSingle();
+    if (!r.error) stored = toStored(r.data as Record<string, unknown> | null);
   } catch {
     // Fall through to env. See the fail-open note in the file header.
   }
@@ -59,14 +90,6 @@ export async function getChannelLimits(tenantId: string): Promise<ChannelLimits>
   const limits = resolveLimits(stored);
   cache.set(tenantId, { at: Date.now(), limits });
   return limits;
-}
-
-function safeParse(s: string): unknown {
-  try {
-    return JSON.parse(s);
-  } catch {
-    return null;
-  }
 }
 
 export type SaveResult =
@@ -77,10 +100,11 @@ export type SaveResult =
 /**
  * Apply an operator's change.
  *
- * READ-MODIFY-WRITE on the whole custom_fields blob, because it holds other
- * tenants' settings too and a bare update would delete them. Validated in the
- * core first: a number field in a browser is not validation, and a typo of 5000
- * would burn a domain before anyone noticed.
+ * Validated in the core first: a number field in a browser is not validation,
+ * and a typo of 5000 would burn a domain before anyone noticed.
+ *
+ * A partial patch touches only the columns it names, so changing the SMS cap
+ * cannot blank the email ones.
  */
 export async function saveChannelLimits(
   tenantId: string,
@@ -88,50 +112,27 @@ export async function saveChannelLimits(
 ): Promise<SaveResult> {
   const v = validateLimits(patch);
   if (!v.ok) return { ok: false, problems: v.problems };
-  if (Object.keys(v.values).length === 0) return { ok: false, error: "nothing to change" };
+  const keys = Object.keys(v.values) as LimitKey[];
+  if (keys.length === 0) return { ok: false, error: "nothing to change" };
 
-  const db: Db = getServiceSupabase();
+  const db = getServiceSupabase();
+  const row: Record<string, unknown> = { tenant_id: tenantId, updated_at: new Date().toISOString() };
+  for (const k of keys) row[COLUMN[k]] = v.values[k];
 
-  // COMPARE-AND-SWAP. custom_fields is a blob shared with other product
-  // features, so a plain read-modify-write can silently discard a change
-  // another request made in between.
-  //
-  // A previous cut wrote unconditionally and then read back to check. That
-  // detects a race that already happened but does not prevent one: A can write,
-  // read back, and report success, and B can then land its stale copy and erase
-  // A entirely. Codex was right to reject it. The update is now CONDITIONED on
-  // the blob still being exactly what we read, so a losing writer changes no
-  // rows and retries onto the winner's version instead of overwriting it.
-  //
-  // Bounded at three attempts. A control that hangs retrying is worse than one
-  // that says it could not save.
-  for (let attempt = 0; attempt < 3; attempt++) {
-    const cur = await db.from("tenants").select("custom_fields").eq("id", tenantId).maybeSingle();
-    if (cur.error) return { ok: false, error: `could not read settings: ${cur.error.message}` };
+  const w = await db.from("drip_channel_limits").upsert(row, { onConflict: "tenant_id" });
+  // The adapter RETURNS errors rather than throwing. Reporting success on a
+  // failed write is how an operator "changes" a cap that never moved.
+  if (w.error) return { ok: false, error: `could not save: ${w.error.message}` };
 
-    const rawCf = (cur.data as { custom_fields?: unknown } | null)?.custom_fields ?? null;
-    const cf = ((typeof rawCf === "string" ? safeParse(rawCf) : rawCf) ?? {}) as Record<string, unknown>;
-    const existing = (cf.drip_limits && typeof cf.drip_limits === "object" ? cf.drip_limits : {}) as Record<string, unknown>;
+  resetChannelLimitsCache(tenantId);
 
-    const next = { ...cf, drip_limits: { ...existing, ...v.values } };
+  // Read back and return what the DATABASE holds, not what we sent. If a value
+  // was clamped or a column did not take, the caller must show the real number
+  // rather than leaving the screen disagreeing with the engine.
+  const back = await db.from("drip_channel_limits").select(SELECT).eq("tenant_id", tenantId).maybeSingle();
+  if (back.error) return { ok: false, error: `saved but could not confirm: ${back.error.message}` };
 
-    // The guard clause IS the concurrency control: match on the exact prior
-    // value. libSQL hands JSON columns back as TEXT, so this compares the
-    // stored string we actually read rather than a re-serialised guess, which
-    // would differ by key order and never match.
-    let q = db.from("tenants").update({ custom_fields: next }).eq("id", tenantId);
-    q = rawCf === null ? q.is("custom_fields", null) : q.eq("custom_fields", rawCf as string);
-    const w = await q.select("id");
-    // The adapter RETURNS errors rather than throwing. Reporting success on a
-    // failed write is how an operator "changes" a cap that never moved.
-    if (w.error) return { ok: false, error: `could not save: ${w.error.message}` };
-
-    if ((w.data?.length ?? 0) > 0) {
-      resetChannelLimitsCache(tenantId);
-      return { ok: true, limits: resolveLimits(next.drip_limits) };
-    }
-    // Zero rows means the blob moved under us. Loop: re-read and merge onto
-    // whatever the other writer left, rather than clobbering it.
-  }
-  return { ok: false, error: "another change kept overwriting this one; try again" };
+  const limits = resolveLimits(toStored(back.data as Record<string, unknown> | null));
+  cache.set(tenantId, { at: Date.now(), limits });
+  return { ok: true, limits };
 }

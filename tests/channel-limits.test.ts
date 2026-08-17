@@ -150,30 +150,38 @@ assert.deepEqual(validateLimits({}).values, {});
   const store = readFileSync(new URL("../lib/drips/channel-limits.ts", import.meta.url), "utf8");
   assert.ok(store.includes("resolveLimits(stored)"), "an unreadable row still resolves through env");
   assert.ok(!/return\s*\{[^}]*smsDaily:\s*0/.test(store), "never fall back to a silent stop");
-  // The blob holds other settings; a bare write would delete them.
-  assert.ok(store.includes("{ ...cf, drip_limits:"), "must read-modify-write the whole blob");
-  assert.ok(store.includes("if (w.error)"), "a failed save must not report success");
-  // custom_fields is shared with other features, so an unguarded
-  // read-modify-write can discard a change made between the read and the
-  // write. Written, read back, and retried onto the newer blob if we lost.
-  assert.ok(store.includes("attempt < 3"), "bounded retry, not an unguarded write");
 
-  // COMPARE-AND-SWAP, not write-then-verify. Reading back only detects a race
-  // that already happened: A can write, confirm, report success, and B can then
-  // land its stale copy and erase A. The update has to be CONDITIONED on the
-  // prior value so a losing writer changes no rows.
+  // ITS OWN TABLE, not the shared settings blob. Three attempts to make a
+  // read-modify-write over tenants.custom_fields safe each introduced a subtler
+  // bug — the last one could not work at all, because the adapter parses JSON
+  // on read so a compare-and-swap token was a re-serialised object rather than
+  // the stored text. The problem was never the locking, it was sharing a cell.
+  assert.ok(store.includes('from("drip_channel_limits")'), "limits live in their own table");
+  // Checked against CODE, not prose: the file header explains why the blob was
+  // abandoned, so a bare substring match trips on its own documentation.
+  const storeCode = store.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+  assert.ok(!storeCode.includes("custom_fields"), "the shared blob must be gone from the code");
+  assert.ok(!storeCode.includes('from("tenants")'), "and the tenants row is no longer written");
+  assert.ok(!store.includes("attempt < 3"), "no retry loop is needed once nothing else writes the row");
   assert.ok(
-    store.includes('q.is("custom_fields", null) : q.eq("custom_fields", rawCf as string)'),
-    "the update must be guarded on the exact value that was read",
+    store.includes('upsert(row, { onConflict: "tenant_id" })'),
+    "an upsert on the tenant's own primary key is atomic on its own",
   );
-  assert.ok(store.includes('.select("id")'), "and must report which rows it changed");
+
+  // A partial patch must touch only the columns it names, or changing the SMS
+  // cap would blank the email ones.
+  assert.ok(store.includes("for (const k of keys) row[COLUMN[k]]"), "only the named columns are written");
+
+  // NULL is "unset" and falls through to env; 0 is "stopped". Collapsing them
+  // would make an operator's deliberate stop indistinguishable from a blank.
+  assert.ok(store.includes("if (v !== null && v !== undefined) out[key] = v;"), "null is unset, not zero");
+
+  assert.ok(store.includes("if (w.error)"), "a failed save must not report success");
   assert.ok(
-    store.includes("(w.data?.length ?? 0) > 0"),
-    "zero rows changed means we lost the race and must retry, not succeed",
+    store.includes("saved but could not confirm"),
+    "an unconfirmable write must say so rather than claim a value the engine may not have",
   );
-  // Matching on the string we READ, not a re-serialised object: key order would
-  // differ and the guard would never match, retrying three times and failing.
-  assert.ok(store.includes("rawCf as string"), "compare the stored text, not a re-encoded guess");
+  assert.ok(store.includes("toStored(back.data"), "the caller is told what the DATABASE holds, not what we sent");
 }
 
 // ── The tab actually SHOWS both channels ──────────────────────────────────
