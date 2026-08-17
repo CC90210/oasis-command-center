@@ -106,6 +106,7 @@ export const CC_NAV: NavItem[] = [
   // The ROUTE stays alive and tenant-scoped: SUN_NAV + SUGA_NAV below still
   // link to it, so deleting the page would 404 those client portals.
   { group: "Operations", href: "/playbook", label: "Playbook", icon: "BookOpen" },
+  { group: "Marketing", href: "/arthrisil-marketing", label: "Arthrisil Marketing", icon: "Megaphone" },
   // System group — observability + control surfaces.
   { group: "System", href: "/operations", label: "Operations", icon: "Activity" },
   { group: "System", href: "/automations", label: "Automations", icon: "RefreshCcw" },
