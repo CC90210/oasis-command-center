@@ -25,10 +25,16 @@
  * none of the cards can self-detect without it.
  */
 
+import Link from "next/link";
 import { useEffect, useState } from "react";
 import { Loader2, CheckCircle2, AlertCircle, Terminal, RefreshCw } from "lucide-react";
 import { Card, Tag } from "@/components/Card";
 import { BRIDGE_CHAT_BASE } from "@/lib/agent-roots";
+import {
+  readCliRuntime,
+  writeCliRuntime,
+  type CliRuntime,
+} from "@/lib/cli-runtime";
 
 type CliInfo = {
   installed: boolean;
@@ -136,20 +142,10 @@ type Busy =
   | { kind: "installing"; provider: keyof CliStatusResponse }
   | { kind: "authing"; provider: keyof CliStatusResponse };
 
-// Shared storage key with ChatWidget — flipping this radio updates the
-// chat header CLI dropdown on next render, and vice versa. Keep the
-// string in lock-step with components/ChatWidget.tsx CLI_RUNTIME_STORAGE_KEY
-// (it's intentionally not exported from there because it's an internal
-// persistence detail; the value sync is the contract).
-const CLI_RUNTIME_STORAGE_KEY = "oasis.chat.cliRuntime.v1";
-type CliRuntime = "claude" | "codex" | "gemini";
-
-function readActiveCli(): CliRuntime {
-  if (typeof window === "undefined") return "claude";
-  const raw = window.localStorage.getItem(CLI_RUNTIME_STORAGE_KEY);
-  if (raw === "claude" || raw === "codex" || raw === "gemini") return raw;
-  return "claude";
-}
+// Key, type and accessors all come from lib/cli-runtime, which the chat header
+// also imports. This file used to declare its own copy of the literal plus its
+// own reader, synchronised with ChatWidget by a comment — a contract enforced
+// by a comment is not enforced.
 
 export function LocalCliProvidersCard() {
   const [state, setState] = useState<ProbeState>({ kind: "loading" });
@@ -159,17 +155,14 @@ export function LocalCliProvidersCard() {
   // a CLI here flips the chat header dropdown on next render too.
   const [activeCli, setActiveCli] = useState<CliRuntime>("claude");
   useEffect(() => {
-    setActiveCli(readActiveCli());
+    setActiveCli(readCliRuntime());
   }, []);
 
   function chooseCli(next: CliRuntime) {
     setActiveCli(next);
-    try {
-      window.localStorage.setItem(CLI_RUNTIME_STORAGE_KEY, next);
-    } catch {
-      // Storage may be disabled (private mode, quota); the in-memory
-      // state still updates so the radio shows the click as committed.
-    }
+    // Storage failures are swallowed inside writeCliRuntime: the in-memory
+    // state already updated, so the click registers even where storage is off.
+    writeCliRuntime(next);
   }
 
   async function refresh() {
@@ -301,11 +294,27 @@ export function LocalCliProvidersCard() {
           <div>
             <div className="font-bold">Local bridge offline</div>
             <p className="mt-1 text-xs text-fg-muted leading-relaxed">
-              The CLI cards need the local bridge running on this machine to probe installed
-              CLIs. Start the local bridge on this machine (use the <strong className="text-fg">Install Claude Code CLI bridge</strong> button
-              in Devices above) and refresh.
-              Until then the dashboard can&apos;t tell which CLIs are installed.
+              These cards probe your machine for installed CLIs, which needs the bridge
+              running here. Until it is, the dashboard can&apos;t tell which CLIs you have —
+              that&apos;s an unknown, not a &ldquo;none installed&rdquo;.
             </p>
+            {/* A LINK, not a treasure hunt. This used to say "use the Install
+                Claude Code CLI bridge button in Devices above", which asks the
+                operator to scroll and pattern-match for a control that already
+                has its own route. If the next step is known, it should be one
+                click, not a set of directions. */}
+            <div className="mt-2.5 flex flex-wrap items-center gap-2">
+              <Link
+                href="/settings/devices/install"
+                className="btn-primary inline-flex items-center gap-1.5 !text-xs !py-1.5"
+              >
+                <Terminal className="w-3 h-3" />
+                Install the bridge
+              </Link>
+              <span className="text-[11px] text-fg-dim">
+                Already installed? Start it on this machine, then Refresh above.
+              </span>
+            </div>
           </div>
         </div>
       )}

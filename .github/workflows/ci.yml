@@ -81,6 +81,10 @@ jobs:
           # top-level /automations because the gate keyed on operator ROLE
           # rather than on which tenant's surface was being rendered.
           npm run test:isolation
+          # Repo invariant: the chat's CLI-runtime storage key is declared
+          # once. It used to be a literal in two files synchronised by a
+          # comment — desyncing them breaks the runtime picker silently.
+          npm run test:cli-runtime
           # ADDED 2026-08-16. Repo-wide invariant, not a feature suite: every
           # paged read must .order() by a unique key before it .range()s. This
           # repo has hit that bug four times (two found only by review), the fix

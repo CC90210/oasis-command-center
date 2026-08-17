@@ -43,6 +43,10 @@ import Link from "next/link";
 import { useSearchParams, useRouter, usePathname } from "next/navigation";
 import { getAgentInfo } from "@/lib/agents";
 import { useAgentDisplayNames } from "@/lib/use-agent-display-names";
+import {
+  CLI_RUNTIME_STORAGE_KEY,
+  type CliRuntime,
+} from "@/lib/cli-runtime";
 import { BRIDGE_CHAT_BASE } from "@/lib/agent-roots";
 import { computeEffectiveBridgeOnline } from "@/lib/bridge-effective-online";
 import {
@@ -132,8 +136,10 @@ const LEGACY_CHAT_MODE_STORAGE_KEY = "oasis.chat.mode.v2";
 const isChatMode = (s: unknown): s is ChatMode =>
   s === "auto" || s === "cli" || s === "cloud_only" || s === "cloud_bridge_tools";
 
-type CliRuntime = "claude" | "codex" | "gemini";
-const CLI_RUNTIME_STORAGE_KEY = "oasis.chat.cliRuntime.v1";
+// Both the key and the type come from lib/cli-runtime — Settings writes the
+// same storage slot, and until 2026-08-17 the two files each declared their
+// own copy of this literal with a comment asking the next person to keep them
+// matched. A rename now moves both or fails the build.
 /**
  * Compute the human-readable runtime label for an outbound turn given the
  * current picker state. Stamped on the assistant message at send time so
