@@ -125,6 +125,7 @@ const TESTS = [
   "tests/ai-wire.test.ts",
   "tests/tcpa-fallback-window.test.ts",
   "tests/founders-method-guard.test.ts",
+  "tests/sms-only-and-brand-lock.test.ts",
 ];
 
 const NODE_ARGS = ["--conditions=react-server", "--import", "tsx"];

@@ -37,6 +37,7 @@ import { ImapFlow } from "imapflow";
 import { checkCronAuth } from "@/lib/cron-auth";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { getSubmissionsCreds } from "@/lib/integrations/submissions-gmail";
+import { resolveBrandKey, getBrand } from "@/lib/email/brands";
 import { sendTelegram, escapeTelegramHtml } from "@/lib/notify/telegram";
 
 export const runtime = "nodejs";
@@ -126,13 +127,28 @@ export async function GET(req: NextRequest) {
   const limit = Math.min(150, Math.max(1, Number(url.searchParams.get("limit")) || 80));
   const db = getServiceSupabase();
 
+  // WHICH MAILBOX. Until 2026-08-17 this read only the SunBiz inbox, and
+  // Bluerise had been sending for four days with its bounces completely
+  // invisible — a cold domain with no reputation buffer and no feedback loop,
+  // right as its cap went to 50/day. Every hard bounce on file predated
+  // Bluerise's first send and none matched a Bluerise recipient, which read as
+  // "clean" and actually meant "not looked at".
+  //
+  // One mailbox per invocation rather than a loop inside the handler: the body
+  // below is a long linear scan with early error returns, and folding two
+  // mailboxes into it would mean one brand's credential failure aborting the
+  // other brand's scan. Both are scheduled separately (vercel.json +
+  // cron-driver.yml), so they also fail separately.
+  const brand = resolveBrandKey(url.searchParams.get("brand"));
+  const mailboxLabel = getBrand(brand).fromAddress;
+
   let creds: { fromAddress: string; appPassword: string };
   try {
-    creds = await getSubmissionsCreds(SUNBIZ_TENANT_ID);
+    creds = await getSubmissionsCreds(SUNBIZ_TENANT_ID, brand);
   } catch (e) {
     const msg = e instanceof Error ? e.message : "unknown";
-    await watchdogAlert(`🔴 <b>Bounce reader DOWN</b> — submissions@ credentials error: ${escapeTelegramHtml(msg)}. Bounce suppression is NOT running until fixed.`);
-    return NextResponse.json({ ok: false, error: "creds_" + msg, error_class: "creds" }, { status: 500 });
+    await watchdogAlert(`🔴 <b>Bounce reader DOWN</b> — ${escapeTelegramHtml(mailboxLabel)} credentials error: ${escapeTelegramHtml(msg)}. Bounce suppression is NOT running for this mailbox until fixed.`);
+    return NextResponse.json({ ok: false, brand, error: "creds_" + msg, error_class: "creds" }, { status: 500 });
   }
 
   // Known lender contact addresses — NEVER suppress these (would break shop-out).
@@ -263,7 +279,7 @@ export async function GET(req: NextRequest) {
   if (write && newlySuppressed >= SPIKE) {
     const sample = [...toSuppress].slice(0, 8).map((e) => escapeTelegramHtml(e)).join(", ");
     await watchdogAlert(
-      `⚠️ <b>Bounce spike</b> — ${newlySuppressed} NEW hard bounces suppressed from submissions@ this run ` +
+      `⚠️ <b>Bounce spike</b> — ${newlySuppressed} NEW hard bounces suppressed from ${escapeTelegramHtml(mailboxLabel)} this run ` +
       `(threshold ${SPIKE}). Sample: ${sample}. Check drip list hygiene / sending volume before reputation drops.`,
     );
   }
@@ -274,6 +290,7 @@ export async function GET(req: NextRequest) {
 
   return NextResponse.json({
     ok: true,
+    brand,
     mode: write ? "write" : "dry",
     inbox: creds.fromAddress,
     fetched,

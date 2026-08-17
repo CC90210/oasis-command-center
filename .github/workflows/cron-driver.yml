@@ -129,6 +129,7 @@ jobs:
               # Inbound scanning. Without these an approval sits unread, which
               # is what happened for six days in August.
               ROUTES="/api/cron/scan-bounces?write=1
+                      /api/cron/scan-bounces?write=1&brand=bluerise
                       /api/cron/scan-funmate-replies?write=1
                       /api/cron/sync-tt-inbox" ;;
             "0 * * * *")     ROUTES="/api/cron/collect-outreach-intel?write=1" ;;

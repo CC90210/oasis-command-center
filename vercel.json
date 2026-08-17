@@ -54,6 +54,10 @@
       "schedule": "*/30 * * * *"
     },
     {
+      "path": "/api/cron/scan-bounces?write=1&brand=bluerise",
+      "schedule": "*/30 * * * *"
+    },
+    {
       "path": "/api/cron/scan-funmate-replies?write=1",
       "schedule": "*/30 * * * *"
     },
