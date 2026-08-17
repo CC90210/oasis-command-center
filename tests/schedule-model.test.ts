@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import {
   createPlaceholderSchedule,
   createScheduleBlock,
+  ensureSundayWorkday,
   isEditableBlock,
   isScheduleDocument,
   overlapsProtectedTime,
@@ -20,6 +21,39 @@ assert.equal(
   schedule.blocks.filter((block) => block.parentId === work.id).length,
   3,
 );
+
+const sundayWork = schedule.blocks.find(
+  (block) => block.day === "Sunday" && block.title === "Work",
+);
+assert.ok(sundayWork);
+assert.equal(
+  schedule.blocks.filter((block) => block.parentId === sundayWork.id).length,
+  3,
+);
+assert.ok(
+  schedule.blocks.some(
+    (block) => block.day === "Sunday" && block.title === "Wake up",
+  ),
+);
+
+const legacyWithoutSunday = {
+  ...schedule,
+  blocks: schedule.blocks.filter((block) => block.day !== "Sunday"),
+  migrations: undefined,
+};
+const migrated = ensureSundayWorkday(legacyWithoutSunday);
+assert.ok(
+  migrated.blocks.some(
+    (block) => block.day === "Sunday" && block.title === "Work",
+  ),
+);
+assert.equal(migrated.migrations?.sundayWorkdaySeeded, true);
+
+const customizedAfterMigration = {
+  ...migrated,
+  blocks: migrated.blocks.filter((block) => block.day !== "Sunday"),
+};
+assert.equal(ensureSundayWorkday(customizedAfterMigration), customizedAfterMigration);
 
 const shabbat = schedule.blocks.filter((block) => block.system === "shabbat");
 assert.equal(shabbat.length, 2);

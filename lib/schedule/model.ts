@@ -38,6 +38,7 @@ export type ScheduleDocument = {
   weekStartsOn: string;
   updatedAt: string;
   blocks: ScheduleBlock[];
+  migrations?: { sundayWorkdaySeeded?: true };
 };
 
 export const isEditableBlock = (block: ScheduleBlock) =>
@@ -99,7 +100,7 @@ export function createPlaceholderSchedule(now = new Date()): ScheduleDocument {
   const blocks: ScheduleBlock[] = [];
 
   for (const day of DAYS) {
-    if (day === "Saturday" || day === "Sunday") continue;
+    if (day === "Saturday") continue;
     for (const [id, title, startMinute, endMinute] of morning) {
       blocks.push({
         id: `${day}-${id}`,
@@ -182,6 +183,22 @@ export function createPlaceholderSchedule(now = new Date()): ScheduleDocument {
     weekStartsOn,
     updatedAt: now.toISOString(),
     blocks,
+    migrations: { sundayWorkdaySeeded: true },
+  };
+}
+
+/** Adds the Sunday working-day seed to schedules saved before Sunday shipped. */
+export function ensureSundayWorkday(schedule: ScheduleDocument): ScheduleDocument {
+  if (schedule.migrations?.sundayWorkdaySeeded) return schedule;
+
+  const seeded = createPlaceholderSchedule(
+    new Date(`${schedule.weekStartsOn}T12:00:00`),
+  ).blocks.filter((block) => block.day === "Sunday");
+  return {
+    ...schedule,
+    updatedAt: new Date().toISOString(),
+    blocks: [...schedule.blocks, ...seeded],
+    migrations: { ...schedule.migrations, sundayWorkdaySeeded: true },
   };
 }
 
