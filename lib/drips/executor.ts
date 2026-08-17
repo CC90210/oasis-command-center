@@ -1322,12 +1322,35 @@ async function processEmailStep(
       // hold recomputes now+days every dispatch and the deadline slides
       // forward forever — a fortnight becoming a permanent silence.
       if (cool.repairTo) {
-        await db
+        // The adapter RETURNS errors rather than throwing. Swallowing this
+        // would leave the unreadable stamp in place, so the next dispatch
+        // recomputes another now+days deadline and the slide the repair exists
+        // to stop carries on invisibly. The row still HOLDS either way — we
+        // never email on a failed repair — but a repair that keeps failing has
+        // to be audible.
+        const fixed = await db
           .from("tenant_records")
           .update({ data: { ...data, sms_opt_out_at: cool.repairTo } })
           .eq("tenant_id", row.tenant_id)
-          .eq("id", row.lead_id)
-          .then(() => undefined, () => undefined);
+          .eq("id", row.lead_id);
+        if (fixed.error) {
+          console.error("[dispatch-drips] opt-out timestamp repair FAILED", {
+            leadId: row.lead_id,
+            error: fixed.error.message,
+          });
+          await writeAgentAlert({
+            tenantId: row.tenant_id,
+            alertType: "optout_stamp_unrepairable",
+            lane: "sunbiz-ops",
+            severity: "warn",
+            title: "Opt-out timestamp could not be repaired",
+            body:
+              `Lead ${row.lead_id} has an unreadable sms_opt_out_at and the repair write failed ` +
+              `(${fixed.error.message}). Email stays HELD, so nobody is contacted, but the hold ` +
+              `will keep sliding until the field is fixed by hand.`,
+            telegramOncePerOpen: true,
+          }).catch(() => {});
+        }
       }
       return markRescheduled(db, row, cool.until.toISOString(), cool.reason);
     }

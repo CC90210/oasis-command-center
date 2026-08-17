@@ -66,6 +66,24 @@ function handoffRecipients(): string[] {
 }
 
 /**
+ * Have we already recorded an opt-out at or after this message?
+ *
+ * Timestamp comparison rather than a boolean, so a SECOND, later opt-out is
+ * still processed — someone can say stop, be re-engaged by a human, and say
+ * stop again, and the later one must land.
+ *
+ * An unreadable stored stamp is treated as NOT covering this message: we would
+ * rather re-announce once than silently drop a genuine opt-out.
+ */
+function optOutAlreadyRecorded(storedAt: unknown, messageAt: string): boolean {
+  if (!storedAt) return false;
+  const stored = Date.parse(String(storedAt));
+  const msg = Date.parse(messageAt);
+  if (!Number.isFinite(stored) || !Number.isFinite(msg)) return false;
+  return stored >= msg;
+}
+
+/**
  * Cancel a lead's remaining SMS drip steps.
  *
  * Scoped to `scheduled` rows: a row mid-send must not be yanked out from under
@@ -156,6 +174,11 @@ export async function processReplyHandoffs(
         // than matching a regulatory keyword. Honoured either way; this only
         // decides whether a human is asked to confirm.
         optOutAmbiguous: opt.confidence === "likely",
+        // Already stamped at or after this message? Then we acted on it on an
+        // earlier scan. Without this the opt-out's deliberate bypass of
+        // alreadyHandedOff re-announces the same STOP every 30 minutes for the
+        // whole 48h window.
+        optOutAlreadyRecorded: optOutAlreadyRecorded(data.sms_opt_out_at, row.created_at),
         alreadyHandedOff: Boolean(data.drip_handoff_at),
       });
 
