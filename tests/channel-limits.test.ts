@@ -111,6 +111,17 @@ assert.deepEqual(validateLimits({}).values, {});
   const gov = readFileSync(new URL("../lib/drips/governor.ts", import.meta.url), "utf8");
   assert.ok(gov.includes("getChannelLimits("), "the email budget must resolve the stored ceilings");
   assert.ok(gov.includes("dailyCapFor(b)"), "and use them for the per-brand daily remaining");
+  // A MULTI-TENANT batch must not silently revert to the env caps. The first
+  // cut only applied stored limits when the batch held exactly one tenant, so
+  // on any ordinary run the control saved happily and changed nothing — the
+  // exact failure the feature exists to avoid, created by the guard meant to
+  // be careful. Codex caught it.
+  assert.ok(
+    !gov.includes("tenantIds.length === 1"),
+    "the single-tenant guard silently disabled the control on real batches",
+  );
+  assert.ok(gov.includes("tenantIds.map((t) => getChannelLimits(t))"), "resolve for every tenant in the batch");
+  assert.ok(gov.includes("Math.min(...picked)"), "the lowest ceiling wins, so it can only ever send less");
   assert.ok(
     !/dailyRemaining\[b\] = today === null \? emailDailyCap\(b\)/.test(gov),
     "the env-only path must be gone from the daily ceiling",
@@ -142,6 +153,16 @@ assert.deepEqual(validateLimits({}).values, {});
   // The blob holds other settings; a bare write would delete them.
   assert.ok(store.includes("{ ...cf, drip_limits:"), "must read-modify-write the whole blob");
   assert.ok(store.includes("if (w.error)"), "a failed save must not report success");
+  // custom_fields is shared with other features, so an unguarded
+  // read-modify-write can discard a change made between the read and the
+  // write. Written, read back, and retried onto the newer blob if we lost.
+  assert.ok(store.includes("attempt < 3"), "bounded optimistic retry, not an unguarded write");
+  assert.ok(store.includes("allApplied"), "the write is confirmed, not assumed");
+  assert.ok(
+    store.includes("saved but could not confirm"),
+    "an unconfirmable write must say so rather than claim a value the engine may not have",
+  );
+  assert.ok(store.includes("resolveLimits(landed)"), "the caller is told what actually landed");
 }
 
 // ── The tab actually SHOWS both channels ──────────────────────────────────

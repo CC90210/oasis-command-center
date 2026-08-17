@@ -196,10 +196,26 @@ export async function loadEmailBudget(
   // tenant with its own domains would need this keyed per brand-owner, which is
   // a real change rather than a loop, so it is left explicit instead of
   // silently applying one tenant's ceiling to another's mail.
-  const storedLimits = tenantIds.length === 1 ? await getChannelLimits(tenantIds[0]) : null;
+  // Resolved for EVERY tenant in the batch, and the LOWEST wins per brand.
+  //
+  // The first cut only applied the stored ceilings when the batch held exactly
+  // one tenant, and silently fell back to the env caps otherwise — so on any
+  // ordinary multi-tenant run the new control saved happily and did nothing.
+  // That is the precise failure this feature exists to avoid, introduced by the
+  // guard meant to be careful. Codex caught it.
+  //
+  // The minimum, not a per-tenant budget, because the counts below
+  // (countDripEmailByBrand) are already brand-global rather than tenant-scoped:
+  // there is one number per brand for the whole run. Taking the lowest ceiling
+  // can only ever send LESS than someone chose, which is the safe direction for
+  // a throttle. A genuine per-tenant budget means keying the counts by tenant
+  // too, and that is a real change rather than a loop — worth doing the day a
+  // second tenant actually sends.
+  const perTenant = await Promise.all(tenantIds.map((t) => getChannelLimits(t)));
   const dailyCapFor = (b: BrandKey): number => {
-    if (!storedLimits) return emailDailyCap(b);
-    return b === "bluerise" ? storedLimits.emailDailyBluerise : storedLimits.emailDailySunbiz;
+    if (perTenant.length === 0) return emailDailyCap(b);
+    const picked = perTenant.map((l) => (b === "bluerise" ? l.emailDailyBluerise : l.emailDailySunbiz));
+    return Math.min(...picked);
   };
   const cap = perLeadWeeklyEmailCap();
   const perLeadSent7d = new Map<string, number>();
