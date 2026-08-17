@@ -24,8 +24,6 @@ import { DescribeAutomationFlow } from "@/components/automations/DescribeAutomat
 import { AgentsModulesStatusBoard } from "@/components/automations/AgentsModulesStatusBoard";
 import { getActiveProfile, getBridgeOnline, getTenant } from "@/lib/queries";
 import { safe } from "@/lib/api-helpers";
-import { isOperatorEmail } from "@/lib/operator-credentials";
-import { getSessionUser } from "@/lib/supabase-server";
 import { resolveClientProfileSlug } from "@/lib/client-profiles";
 import { getManifest, manifestExists } from "@/lib/manifest/loader";
 import { Clock, Cpu, Cloud, Download } from "lucide-react";
@@ -58,8 +56,6 @@ export async function AutomationsContent({
     getBridgeOnline(profile?.tenant_id || null),
     false,
   );
-  const user = await getSessionUser().catch(() => null);
-  const isOperator = isOperatorEmail(user?.email || undefined);
 
   const tenantIdForSlug = profile?.tenant_id ?? null;
   const tenantSlug = overrideSlug ?? (
@@ -187,15 +183,32 @@ export async function AutomationsContent({
           <DescribeAutomationFlow />
           <AgentsModulesStatusBoard tenantSlug={tenantSlug} />
           <CronJobsManager agentKeys={automationAgentKeys} />
-          {(isOperator || tenantSlug === "sun") && (
-            // B3 (2026-07-23): BreezeDealsPanel (MCA deal intake queue) and
-            // BackgroundWorkersPanel (mixed cc/adon daemons, owner-grouped
-            // internally per B4) previously flowed directly under the
-            // primary SunBiz automations (cron jobs, modules board) with
-            // only a plain border-top — no heading distinguished "your
-            // SunBiz automations" from "the Breeze/MCA underwriting surface
-            // Adon operates." Presentation-only separation — no query
-            // changes; breeze-deals stays tenant-scoped as-is.
+          {tenantSlug === "sun" && (
+            // SURFACE, NOT ROLE. This read `(isOperator || tenantSlug === "sun")`
+            // until 2026-08-17, and the first half of that leaked a client's book
+            // onto OASIS's own operations page.
+            //
+            // `isOperatorEmail` is true for CC. `/automations` at the top level of
+            // oasisai.work is the OASIS surface, tenantSlug is not "sun" — and the
+            // panel rendered anyway. Worse, it worked: GET /api/automations/breeze-deals
+            // deliberately resolves an empire operator to the SunBiz tenant
+            // (`tenants.slug = 'submissions'`), so the request returned REAL deals.
+            // CC opened OASIS's automations and read Kinesioworks' revenue,
+            // Diamond Ridge's leverage, 146 pending submissions.
+            //
+            // Being allowed to see a client's data somewhere is not permission to
+            // render it everywhere. Role answers "may this person"; the surface
+            // answers "is this the place", and only the second one belongs in this
+            // condition. The Breeze queue is Adon's underwriting desk and lives on
+            // the SunBiz surface, where its own heading already says so.
+            //
+            // The route keeps its operator path on purpose — Adon's tooling calls it
+            // directly and /t/sun/automations still renders this section. Nothing
+            // lost, just no longer painted onto the wrong portal.
+            //
+            // B3 (2026-07-23), retained: the heading below separates "your SunBiz
+            // automations" from "the Breeze/MCA underwriting surface Adon operates",
+            // which previously ran together under a plain border-top.
             <section
               aria-labelledby="underwriting-breeze-heading"
               className="border-t-2 border-bg-border pt-6 space-y-6"
