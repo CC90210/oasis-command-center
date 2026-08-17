@@ -34,7 +34,6 @@ import {
 import { safe } from "@/lib/api-helpers";
 import { ChangePasswordForm } from "@/components/ChangePasswordForm";
 import { CustomCredentialsVault } from "@/components/settings/CustomCredentialsVault";
-import { Fold } from "@/components/settings/Fold";
 import { SettingsSection } from "@/components/settings/SettingsSection";
 import { OpenSectionOnHash } from "@/components/settings/OpenSectionOnHash";
 import { ProfileEditor } from "@/components/settings/ProfileEditor";
@@ -216,25 +215,27 @@ export async function SettingsContent({
                 Each header keeps its description while collapsed — a fold that
                 hides what is behind it just makes you open all of them. */}
             <div className="space-y-3">
-              <Fold
+              <SettingsSection
+                tone="nested"
                 title="Known integrations"
-                hint="Pre-configured slots for services your agents already know how to use (Gmail, Stripe, Telegram…). Live health check plus paste-once setup."
+                subtitle="Pre-configured slots for services your agents already know how to use (Gmail, Stripe, Telegram…). Live health check plus paste-once setup."
                 defaultOpen
               >
                 <SafeBoundary label="Integration keys">
                   <IntegrationKeysPanel canManage={canManageTenant} />
                 </SafeBoundary>
-              </Fold>
+              </SettingsSection>
 
               {canManageTenant && (
-                <Fold
+                <SettingsSection
+                  tone="nested"
                   title="Custom secrets"
-                  hint="Anything that doesn't fit a known slot — client tokens, one-off webhook URLs, internal keys. Encrypted at rest; agents read them via get_credential."
+                  subtitle="Anything that doesn't fit a known slot — client tokens, one-off webhook URLs, internal keys. Encrypted at rest; agents read them via get_credential."
                 >
                   <SafeBoundary label="Custom credentials vault">
                     <CustomCredentialsVault />
                   </SafeBoundary>
-                </Fold>
+                </SettingsSection>
               )}
             </div>
           </SettingsSection>

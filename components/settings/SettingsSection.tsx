@@ -14,7 +14,7 @@
  * NATIVE <details>, so this stays a SERVER component: no "use client", no
  * hydration cost for a disclosure the browser has implemented for a decade, and
  * it still opens and closes if JS never arrives. Matches the idiom already in
- * AutomationsContent and components/settings/Fold.
+ * AutomationsContent, and the same one this component's `nested` tone absorbed.
  *
  * WHERE THE `action` GOES, AND WHY IT IS NOT IN THE SUMMARY.
  * Everything inside <summary> is part of the toggle target, so a header button
@@ -35,6 +35,7 @@ export function SettingsSection({
   subtitle,
   action,
   defaultOpen = false,
+  tone = "panel",
   id,
   children,
 }: {
@@ -44,16 +45,27 @@ export function SettingsSection({
   action?: React.ReactNode;
   /** Open on first paint. Reserve for the one or two sections most visits need. */
   defaultOpen?: boolean;
+  /**
+   * `panel` is a top-level settings section and carries Card's chrome.
+   * `nested` is a sub-section INSIDE one — recessed rather than raised, so a
+   * fold within a fold reads as depth instead of as two siblings.
+   *
+   * This absorbed a second component. The collapsing work shipped `Fold` for the
+   * sub-sections first and `SettingsSection` for the top-level ones after — two
+   * files implementing the same details/summary/chevron mechanism, which means
+   * every later fix to the animation, the a11y or the click target has to be
+   * made twice and will eventually be made once.
+   */
+  tone?: "panel" | "nested";
   id?: string;
   children: React.ReactNode;
 }) {
+  const shell =
+    tone === "panel"
+      ? "rounded-xl border border-bg-border bg-bg-panel shadow-card card-glow"
+      : "rounded-xl border border-bg-border bg-bg-deep/30 open:bg-bg-deep/50";
   return (
-    <details
-      id={id}
-      open={defaultOpen}
-      className="group relative rounded-xl border border-bg-border bg-bg-panel shadow-card
-                 card-glow transition-all"
-    >
+    <details id={id} open={defaultOpen} className={`group relative transition-all ${shell}`}>
       <summary
         className="cursor-pointer select-none list-none flex items-start gap-3 px-5 py-3.5
                    pr-44 rounded-xl group-open:rounded-b-none
@@ -82,8 +94,12 @@ export function SettingsSection({
       )}
 
       {/* The divider belongs to the OPEN state. Rendering it always would draw a
-          line under a closed section and make it look like an empty panel. */}
-      <div className="border-t border-bg-border p-5">{children}</div>
+          line under a closed section and make it look like an empty panel.
+          A nested fold skips it — inside an already-bordered panel it reads as
+          clutter rather than as structure. */}
+      <div className={tone === "panel" ? "border-t border-bg-border p-5" : "px-4 pb-4 pt-1"}>
+        {children}
+      </div>
     </details>
   );
 }
