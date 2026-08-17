@@ -13,11 +13,40 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import {
-  smsPacingCaps, pacingDecision, nextWindowStart, nextHourStart,
+  smsPacingCaps, pacingDecision, nextWindowStart, nextHourStart, windowStartFor,
 } from "../lib/drips/sms-pacing-core";
 
-const CAPS = { daily: 40, hourly: 6, windowStartUtcHour: 14 };
 const at = (iso: string) => new Date(iso);
+
+// ── The count window and the resume boundary must AGREE ───────────────────
+// Codex: with a rolling 24h count against a fixed 14:00 resume, reaching the
+// cap at 20:00 means yesterday's 14:00-20:00 sends are still inside the window
+// when the row wakes, so it re-holds for another full day. 40/day quietly
+// becomes 40 every two days. windowStartFor is what keeps the two aligned.
+{
+  // Before today's opening, the current sending day started YESTERDAY.
+  assert.equal(windowStartFor(at("2026-08-17T10:00:00Z"), 14).toISOString(), "2026-08-16T14:00:00.000Z");
+  // At and after it, today.
+  assert.equal(windowStartFor(at("2026-08-17T14:00:00Z"), 14).toISOString(), "2026-08-17T14:00:00.000Z");
+  assert.equal(windowStartFor(at("2026-08-17T20:00:00Z"), 14).toISOString(), "2026-08-17T14:00:00.000Z");
+
+  // The load-bearing property: nothing counted in the current window is still
+  // counted after the resume time, so a capped row actually gets a fresh
+  // allowance instead of re-holding.
+  const cappedAt = at("2026-08-17T20:00:00Z");
+  const resume = nextWindowStart(cappedAt, 14);
+  assert.equal(resume.toISOString(), "2026-08-18T14:00:00.000Z");
+  assert.ok(
+    windowStartFor(resume, 14).getTime() >= resume.getTime() - 1000,
+    "at the resume instant the counting window has rolled over, so the tally is empty",
+  );
+  assert.ok(
+    windowStartFor(resume, 14).getTime() > cappedAt.getTime(),
+    "every send that filled yesterday's cap is OUTSIDE the new window",
+  );
+}
+
+const CAPS = { daily: 40, hourly: 6, windowStartUtcHour: 14 };
 
 // ── Under both ceilings, it sends ─────────────────────────────────────────
 assert.equal(pacingDecision({ sentToday: 0, sentThisHour: 0 }, CAPS, at("2026-08-17T15:00:00Z")).send, true);
@@ -87,16 +116,35 @@ for (const junk of ["", "abc", "-5", " "]) {
 // ── The executor consults it, and counts its own sends ────────────────────
 {
   const exec = readFileSync(new URL("../lib/drips/executor.ts", import.meta.url), "utf8");
-  assert.ok(exec.includes("const pace = pacingDecision(run.smsCounts, caps, new Date());"),
+  assert.ok(exec.includes("const pace = pacingDecision(counts, caps, new Date());"),
     "the gate must run on the SMS send path");
   assert.ok(
     exec.indexOf("pacingDecision") < exec.indexOf("const result = await sendDripSms"),
     "the gate must be a ceiling, not an after-the-fact count",
   );
-  // Counted once per run and incremented locally: a fresh read per row cannot
-  // see this batch's in-flight sends, so 40/day would become 40/tick.
-  assert.ok(exec.includes("run.smsCounts.sentToday += 1;"), "each send must count against the ceiling");
-  assert.ok(exec.includes("run.smsCounts.sentThisHour += 1;"));
+
+  // PER TENANT. A dispatch batch spans tenants, and a single shared counter
+  // governs every later tenant by the FIRST one's history — holding valid
+  // sends or letting a tenant exceed its own cap. Codex caught it.
+  assert.ok(
+    !/run\.smsCounts\b(?!ByTenant)/.test(exec),
+    "a single shared counter must not come back",
+  );
+  assert.ok(exec.includes("run.smsCountsByTenant.get(row.tenant_id)"), "counts are keyed by tenant");
+  assert.ok(exec.includes("run.smsCountsByTenant.set(row.tenant_id, counts)"));
+
+  // Counted once per tenant per run and incremented locally: a fresh read per
+  // row cannot see this batch's in-flight sends, so 40/day would be 40/tick.
+  assert.ok(exec.includes("paced.sentToday += 1;"), "each send must count against the ceiling");
+  assert.ok(exec.includes("paced.sentThisHour += 1;"));
+
+  // The daily tally must be measured from the sending window, not a rolling
+  // 24h, or it disagrees with the resume boundary and yields 40 every two days.
+  assert.ok(
+    exec.includes("windowStartFor(new Date(now), caps.windowStartUtcHour)"),
+    "the daily count must align with the resume boundary",
+  );
+  assert.ok(!exec.includes("now - 24 * 3_600_000"), "the rolling 24h count must be gone");
 
   // Fails closed: an unreadable count returns the cap, which holds.
   const core = readFileSync(new URL("../lib/drips/executor.ts", import.meta.url), "utf8");

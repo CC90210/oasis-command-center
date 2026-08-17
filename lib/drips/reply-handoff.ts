@@ -102,7 +102,7 @@ export async function processReplyHandoffs(
 
   const inbound = await db
     .from("lead_interactions")
-    .select("id, lead_id, body, created_at")
+    .select("id, lead_id, content, created_at")
     .eq("tenant_id", tenantId)
     .eq("type", "sms_received")
     .eq("direction", "inbound")
@@ -117,7 +117,7 @@ export async function processReplyHandoffs(
   // Newest first, one pass per lead. A merchant who sent three messages is one
   // handoff, and the newest is the one worth showing an agent.
   const seen = new Set<string>();
-  const rows = (inbound.data || []) as Array<{ id: string; lead_id: string; body: string | null; created_at: string }>;
+  const rows = (inbound.data || []) as Array<{ id: string; lead_id: string; content: string | null; created_at: string }>;
 
   for (const row of rows) {
     if (!row.lead_id || seen.has(row.lead_id)) continue;
@@ -133,9 +133,9 @@ export async function processReplyHandoffs(
         .maybeSingle();
       const data = ((leadR.data as { data?: Record<string, unknown> } | null)?.data ?? {}) as Record<string, unknown>;
 
-      const opt = detectOptOut(row.body ?? "");
+      const opt = detectOptOut(row.content ?? "");
       const decision = decideHandoff({
-        body: row.body ?? "",
+        body: row.content ?? "",
         inbound: true,
         optedOut: opt.optOut,
         // "likely" means the detector inferred it from natural language rather
@@ -168,11 +168,19 @@ export async function processReplyHandoffs(
       // the marker and stays quiet rather than paging again — an un-notified
       // handoff is recoverable from the record, a duplicate page is noise that
       // trains people to ignore the lane.
-      await db
+      const marked = await db
         .from("tenant_records")
         .update({ data: { ...data, drip_handoff_at: new Date().toISOString(), drip_handoff_reason: decision.reason } })
         .eq("tenant_id", tenantId)
         .eq("id", row.lead_id);
+      // The adapter RETURNS errors rather than throwing them. Ignoring this
+      // would page on every 30-minute scan forever, because the marker that
+      // makes the next pass quiet was never written — the notification would
+      // be the only thing that "worked".
+      if (marked.error) {
+        out.errors.push(`${row.lead_id}: marker not written (${marked.error.message}); not notifying`);
+        continue;
+      }
 
       if (decision.action === "handoff") out.handed.push(row.lead_id);
 
@@ -182,7 +190,7 @@ export async function processReplyHandoffs(
           businessName: typeof data.business_name === "string" ? data.business_name : null,
           contactName: typeof data.contact_name === "string" ? data.contact_name : null,
           phone,
-          body: row.body ?? "",
+          body: row.content ?? "",
         });
         const stopped = `Drip stopped${cancelled ? ` (${cancelled} step${cancelled === 1 ? "" : "s"} cancelled)` : ""}.`;
         const heading = decision.action === "opt_out"

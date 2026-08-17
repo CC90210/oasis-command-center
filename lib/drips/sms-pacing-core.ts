@@ -61,6 +61,23 @@ export function smsPacingCaps(env: Record<string, string | undefined> = process.
   };
 }
 
+/**
+ * Start of the CURRENT sending day: the most recent window opening at or
+ * before `now`.
+ *
+ * The daily count must be measured from here, not over a rolling 24 hours.
+ * With a rolling window the two boundaries disagree: hit the cap at 20:00,
+ * resume at 14:00 tomorrow, and yesterday's 14:00-20:00 sends are still inside
+ * the last 24 hours, so the row is immediately held for another full day. That
+ * turns 40 a day into roughly 40 every two days, quietly. Codex caught it.
+ */
+export function windowStartFor(now: Date, startHour: number): Date {
+  const d = new Date(now);
+  d.setUTCHours(startHour, 0, 0, 0);
+  if (d.getTime() > now.getTime()) d.setUTCDate(d.getUTCDate() - 1);
+  return d;
+}
+
 /** Start of the next sending window, strictly in the future. */
 export function nextWindowStart(now: Date, startHour: number): Date {
   const d = new Date(now);

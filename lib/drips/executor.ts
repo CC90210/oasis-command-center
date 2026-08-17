@@ -46,7 +46,7 @@ import { brandFooter } from "@/lib/email/brand-shell";
 import { isWithinSendWindow } from "@/lib/sms/compliance";
 import { contactabilityOf, resolveChannel, onProviderGap } from "@/lib/drips/channel-fallback";
 import { AI_WIRE_REP_KEY, aiWireNumbers, isSmsOnly } from "@/lib/drips/ai-wire-core";
-import { smsPacingCaps, pacingDecision, type PacingCounts } from "@/lib/drips/sms-pacing-core";
+import { smsPacingCaps, pacingDecision, windowStartFor, type PacingCounts } from "@/lib/drips/sms-pacing-core";
 import { mayTextFor } from "@/lib/sms/lawful-basis";
 import { smsSendAllowed, resetBreakerCache, claimBreakerProbe } from "@/lib/sms/send-breaker";
 import { routeOutbound, type ProviderAvailability } from "@/lib/routing/outbound-routing";
@@ -284,7 +284,7 @@ type RunState = {
    *  locally as the batch sends. Re-reading per row would issue one counting
    *  query per text and, worse, would race itself into overshooting the cap —
    *  none of this batch's in-flight sends are visible to a fresh read yet. */
-  smsCounts: PacingCounts | null;
+  smsCountsByTenant: Map<string, PacingCounts>;
 };
 
 /**
@@ -809,7 +809,12 @@ function resolveStepCopy(
 async function loadSmsCounts(db: Db, tenantId: string): Promise<PacingCounts> {
   const caps = smsPacingCaps();
   const now = Date.now();
-  const dayAgo = new Date(now - 24 * 3_600_000).toISOString();
+  // Counted from the current sending window, NOT a rolling 24 hours. A rolling
+  // count disagrees with the fixed resume boundary: reach the cap at 20:00,
+  // resume at 14:00 tomorrow, and the prior afternoon's sends are still inside
+  // the last 24 hours, so the row re-holds for another full day. 40 a day
+  // silently becomes 40 every two days.
+  const dayAgo = windowStartFor(new Date(now), caps.windowStartUtcHour).toISOString();
   const hourAgo = new Date(now - 3_600_000).toISOString();
   try {
     const r = await db
@@ -1169,8 +1174,16 @@ async function processSmsStep(
     // the cap is a real ceiling rather than an after-the-fact count.
     {
       const caps = smsPacingCaps();
-      if (!run.smsCounts) run.smsCounts = await loadSmsCounts(db, row.tenant_id);
-      const pace = pacingDecision(run.smsCounts, caps, new Date());
+      // Keyed by TENANT. A dispatch batch spans tenants, and one shared counter
+      // would govern every later tenant by the FIRST one's send history, either
+      // holding valid sends or letting a tenant blow past its own cap. Same
+      // per-tenant shape as the rest of the run state.
+      let counts = run.smsCountsByTenant.get(row.tenant_id);
+      if (!counts) {
+        counts = await loadSmsCounts(db, row.tenant_id);
+        run.smsCountsByTenant.set(row.tenant_id, counts);
+      }
+      const pace = pacingDecision(counts, caps, new Date());
       if (!pace.send) {
         return markRescheduled(db, row, pace.resumeAt.toISOString(), pace.reason);
       }
@@ -1237,9 +1250,10 @@ async function processSmsStep(
   // Count it against the pacing ceiling BEFORE the batch moves on. The counts
   // were read once at the top of the run, so without this every row in the
   // batch sees the same stale number and 40/day becomes 40/tick.
-  if (run.smsCounts) {
-    run.smsCounts.sentToday += 1;
-    run.smsCounts.sentThisHour += 1;
+  const paced = run.smsCountsByTenant.get(row.tenant_id);
+  if (paced) {
+    paced.sentToday += 1;
+    paced.sentThisHour += 1;
   }
 
   await logInteraction(db, {
@@ -2004,7 +2018,7 @@ export async function runDispatchDrips(): Promise<DispatchDripsResult> {
     templatePoolByTenant,
     availabilityByTenant,
     linesByWire: new Map<string, string[]>(),
-    smsCounts: null,
+    smsCountsByTenant: new Map<string, PacingCounts>(),
   };
   if (run.emailBudget?.degraded) {
     // The global counts are best-effort this run; the per-lead cap still holds
