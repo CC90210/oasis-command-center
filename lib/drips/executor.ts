@@ -47,6 +47,7 @@ import { isWithinSendWindow } from "@/lib/sms/compliance";
 import { contactabilityOf, resolveChannel, onProviderGap } from "@/lib/drips/channel-fallback";
 import { AI_WIRE_REP_KEY, aiWireNumbers, isSmsOnly } from "@/lib/drips/ai-wire-core";
 import { smsPacingCaps, pacingDecision, windowStartFor, type PacingCounts } from "@/lib/drips/sms-pacing-core";
+import { emailCooloff, cooloffDays } from "@/lib/drips/optout-cooloff-core";
 import { mayTextFor } from "@/lib/sms/lawful-basis";
 import { smsSendAllowed, resetBreakerCache, claimBreakerProbe } from "@/lib/sms/send-breaker";
 import { routeOutbound, type ProviderAvailability } from "@/lib/routing/outbound-routing";
@@ -1301,6 +1302,23 @@ async function processEmailStep(
   const supp = await checkEmailSuppressed(row.tenant_id, email);
   if (supp.suppressed) return markPermanentFail(db, row, "suppressed (unsubscribed)");
   if (supp.checkFailed) return markRetryOrFail(db, row, "suppression_check_failed");
+
+  // CROSS-CHANNEL COOL-OFF. Adon, 2026-08-17: someone who says stop must not be
+  // contacted again for a couple of weeks.
+  //
+  // The phone suppression list stops TEXTING permanently, but it is keyed by
+  // number and this path reads the EMAIL list — two different lists, so a
+  // merchant could reply STOP to a text at 4pm and receive a Bluerise
+  // follow-up at 9am. Technically two channels, obviously the same company
+  // ignoring them, and exactly the complaint that costs a domain.
+  //
+  // Rescheduled rather than failed: an email opt-out and an SMS opt-out are
+  // genuinely different permissions, so this is a pause, not a deletion. The
+  // SMS suppression itself is untouched and does not expire.
+  {
+    const cool = emailCooloff(data.sms_opt_out_at, new Date(), cooloffDays());
+    if (cool.held) return markRescheduled(db, row, cool.until.toISOString(), cool.reason);
+  }
 
   // Email business-hours gate ("every morning"): reschedule an off-hours email
   // step to the next window-start (no attempt burn) — mirrors the SMS TCPA

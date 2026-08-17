@@ -34,6 +34,7 @@ import { sendTelegram, escapeTelegramHtml } from "@/lib/notify/telegram";
 import { detectOptOut } from "@/lib/sms/compliance";
 import { sendGmail } from "@/lib/integrations/submissions-gmail-send";
 import { decideHandoff, handoffSummary } from "./reply-handoff-core";
+import { cooloffDays } from "./optout-cooloff-core";
 
 type Db = ReturnType<typeof getServiceSupabase>;
 
@@ -155,13 +156,24 @@ export async function processReplyHandoffs(
       // are already queued, which suppression alone would not.
       const cancelled = await cancelRemaining(db, tenantId, row.lead_id);
 
+      if (decision.action === "opt_out") out.optedOut.push(row.lead_id);
+
+      // ONE write, not two. Both patches spread `data`, so writing them
+      // separately means the second read-modify-write silently discards the
+      // first — and the field it would discard is the opt-out stamp, whose
+      // whole job is to stop us emailing someone who said stop.
+      const patch: Record<string, unknown> = {
+        ...data,
+        drip_handoff_at: new Date().toISOString(),
+        drip_handoff_reason: decision.reason,
+      };
       if (decision.action === "opt_out") {
-        out.optedOut.push(row.lead_id);
-        // An EXPLICIT "STOP" needs no human: nothing to take over, and paging
-        // on those is how a lane gets muted. A natural-language opt-out is the
-        // ambiguous one and detectOptOut's own contract routes it to review, so
-        // it falls through to the notification below.
-        if (!decision.notifyAgent) continue;
+        // The phone suppression list already stops texting permanently, but it
+        // is keyed by NUMBER and the email drip reads a different list — so
+        // without this stamp a merchant can reply STOP at 4pm and get a
+        // Bluerise follow-up at 9am. emailCooloff reads it.
+        patch.sms_opt_out_at = row.created_at || new Date().toISOString();
+        patch.sms_opt_out_kind = opt.confidence;
       }
 
       // MARK BEFORE NOTIFYING. If the notification throws, the next pass sees
@@ -170,15 +182,15 @@ export async function processReplyHandoffs(
       // trains people to ignore the lane.
       const marked = await db
         .from("tenant_records")
-        .update({ data: { ...data, drip_handoff_at: new Date().toISOString(), drip_handoff_reason: decision.reason } })
+        .update({ data: patch })
         .eq("tenant_id", tenantId)
         .eq("id", row.lead_id);
       // The adapter RETURNS errors rather than throwing them. Ignoring this
-      // would page on every 30-minute scan forever, because the marker that
-      // makes the next pass quiet was never written — the notification would
-      // be the only thing that "worked".
+      // would page every 30 minutes forever because the marker was never
+      // written — and for an opt-out it would also mean the cool-off stamp is
+      // missing, so the email drip would carry on.
       if (marked.error) {
-        out.errors.push(`${row.lead_id}: marker not written (${marked.error.message}); not notifying`);
+        out.errors.push(`${row.lead_id}: record not updated (${marked.error.message}); not notifying`);
         continue;
       }
 
@@ -193,19 +205,28 @@ export async function processReplyHandoffs(
           body: row.content ?? "",
         });
         const stopped = `Drip stopped${cancelled ? ` (${cancelled} step${cancelled === 1 ? "" : "s"} cancelled)` : ""}.`;
-        const heading = decision.action === "opt_out"
-          ? "🚫 <b>Live Sub asked to stop</b>"
-          : "💬 <b>Live Sub replied</b>";
+
+        // THREE audiences, not two. Adon asked to be told about opt-outs too
+        // ("we have to be alerted about this as well"), and then narrowed the
+        // review case: "if it's in natural language... it needs to have human
+        // review." So an explicit STOP is an FYI, an inferred one is a task.
+        const ambiguous = decision.action === "opt_out" && opt.confidence === "likely";
+        const heading = ambiguous
+          ? "\u{26A0}\u{FE0F} <b>Possible opt-out \u2014 needs human review</b>"
+          : decision.action === "opt_out"
+            ? "\u{1F6AB} <b>Live Sub said STOP</b>"
+            : "\u{1F4AC} <b>Live Sub replied</b>";
+        const action = ambiguous
+          ? `Suppressed and the drip is stopped, but this was READ as an opt-out from ordinary words, not the word STOP. Confirm that is what they meant. If it was not, clear the suppression. Email is also on hold for ${cooloffDays()} days.`
+          : decision.action === "opt_out"
+            ? `Texting is suppressed permanently. Email is on hold for ${cooloffDays()} days so we are not seen to switch channels on someone who asked us to stop. No action needed.`
+            : TAKEOVER_HINT;
 
         // Every untrusted field escaped: the body is merchant-authored text
         // going into Telegram HTML mode.
         await sendTelegram(
           `${heading}\n${escapeTelegramHtml(summary)}\n\n` +
-            `<i>${stopped} ${escapeTelegramHtml(
-              decision.action === "opt_out"
-                ? "Suppressed. Worth a human eye — this was read as an opt-out from natural language, not a STOP keyword."
-                : TAKEOVER_HINT,
-            )}</i>`,
+            `<i>${stopped} ${escapeTelegramHtml(action)}</i>`,
           { lane: "sunbiz-ops" },
         ).catch(() => undefined);
 
@@ -216,11 +237,12 @@ export async function processReplyHandoffs(
           await sendGmail({
             tenantId,
             to,
-            subject:
-              decision.action === "opt_out"
-                ? `Live Sub opted out: ${phone}`
+            subject: ambiguous
+              ? `NEEDS REVIEW - possible opt-out: ${phone}`
+              : decision.action === "opt_out"
+                ? `Live Sub said STOP: ${phone}`
                 : `Live Sub replied: ${phone}`,
-            body: `${summary}\n\n${stopped}\n${decision.action === "opt_out" ? "Suppressed automatically. This was inferred from natural language rather than a STOP keyword, so it is worth confirming." : TAKEOVER_HINT}\n`,
+            body: `${summary}\n\n${stopped}\n${action}\n`,
           }).catch((e) => {
             // Never let the email take the run down — Telegram has already
             // fired and the handoff is recorded either way.

@@ -128,6 +128,7 @@ const TESTS = [
   "tests/sms-only-and-brand-lock.test.ts",
   "tests/reply-handoff.test.ts",
   "tests/sms-pacing.test.ts",
+  "tests/optout-cooloff.test.ts",
 ];
 
 const NODE_ARGS = ["--conditions=react-server", "--import", "tsx"];
