@@ -92,12 +92,16 @@ export async function saveChannelLimits(
 
   const db: Db = getServiceSupabase();
 
-  // OPTIMISTIC RETRY. custom_fields is a blob shared with other product
-  // features, so a read-modify-write can silently discard a change another
-  // request made between our read and our write. There is no atomic JSON merge
-  // available through the adapter, so instead: write, read back, and if our
-  // keys did not land the way we set them, someone else won the race — merge
-  // onto their newer blob and try again. Codex flagged the unguarded version.
+  // COMPARE-AND-SWAP. custom_fields is a blob shared with other product
+  // features, so a plain read-modify-write can silently discard a change
+  // another request made in between.
+  //
+  // A previous cut wrote unconditionally and then read back to check. That
+  // detects a race that already happened but does not prevent one: A can write,
+  // read back, and report success, and B can then land its stale copy and erase
+  // A entirely. Codex was right to reject it. The update is now CONDITIONED on
+  // the blob still being exactly what we read, so a losing writer changes no
+  // rows and retries onto the winner's version instead of overwriting it.
   //
   // Bounded at three attempts. A control that hangs retrying is worse than one
   // that says it could not save.
@@ -105,31 +109,29 @@ export async function saveChannelLimits(
     const cur = await db.from("tenants").select("custom_fields").eq("id", tenantId).maybeSingle();
     if (cur.error) return { ok: false, error: `could not read settings: ${cur.error.message}` };
 
-    const rawCf = (cur.data as { custom_fields?: unknown } | null)?.custom_fields;
+    const rawCf = (cur.data as { custom_fields?: unknown } | null)?.custom_fields ?? null;
     const cf = ((typeof rawCf === "string" ? safeParse(rawCf) : rawCf) ?? {}) as Record<string, unknown>;
     const existing = (cf.drip_limits && typeof cf.drip_limits === "object" ? cf.drip_limits : {}) as Record<string, unknown>;
 
     const next = { ...cf, drip_limits: { ...existing, ...v.values } };
-    const w = await db.from("tenants").update({ custom_fields: next }).eq("id", tenantId);
+
+    // The guard clause IS the concurrency control: match on the exact prior
+    // value. libSQL hands JSON columns back as TEXT, so this compares the
+    // stored string we actually read rather than a re-serialised guess, which
+    // would differ by key order and never match.
+    let q = db.from("tenants").update({ custom_fields: next }).eq("id", tenantId);
+    q = rawCf === null ? q.is("custom_fields", null) : q.eq("custom_fields", rawCf as string);
+    const w = await q.select("id");
     // The adapter RETURNS errors rather than throwing. Reporting success on a
     // failed write is how an operator "changes" a cap that never moved.
     if (w.error) return { ok: false, error: `could not save: ${w.error.message}` };
 
-    const back = await db.from("tenants").select("custom_fields").eq("id", tenantId).maybeSingle();
-    if (back.error) {
-      // The write reported success and we cannot confirm it. Say so rather than
-      // claiming a value the engine may not be using.
-      return { ok: false, error: `saved but could not confirm: ${back.error.message}` };
-    }
-    const rawBack = (back.data as { custom_fields?: unknown } | null)?.custom_fields;
-    const cfBack = ((typeof rawBack === "string" ? safeParse(rawBack) : rawBack) ?? {}) as Record<string, unknown>;
-    const landed = (cfBack.drip_limits ?? {}) as Record<string, unknown>;
-    const allApplied = Object.entries(v.values).every(([k, val]) => landed[k] === val);
-    if (allApplied) {
+    if ((w.data?.length ?? 0) > 0) {
       resetChannelLimitsCache(tenantId);
-      return { ok: true, limits: resolveLimits(landed) };
+      return { ok: true, limits: resolveLimits(next.drip_limits) };
     }
-    // Someone else wrote in between. Loop and merge onto their version.
+    // Zero rows means the blob moved under us. Loop: re-read and merge onto
+    // whatever the other writer left, rather than clobbering it.
   }
   return { ok: false, error: "another change kept overwriting this one; try again" };
 }

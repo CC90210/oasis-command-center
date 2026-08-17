@@ -156,13 +156,24 @@ assert.deepEqual(validateLimits({}).values, {});
   // custom_fields is shared with other features, so an unguarded
   // read-modify-write can discard a change made between the read and the
   // write. Written, read back, and retried onto the newer blob if we lost.
-  assert.ok(store.includes("attempt < 3"), "bounded optimistic retry, not an unguarded write");
-  assert.ok(store.includes("allApplied"), "the write is confirmed, not assumed");
+  assert.ok(store.includes("attempt < 3"), "bounded retry, not an unguarded write");
+
+  // COMPARE-AND-SWAP, not write-then-verify. Reading back only detects a race
+  // that already happened: A can write, confirm, report success, and B can then
+  // land its stale copy and erase A. The update has to be CONDITIONED on the
+  // prior value so a losing writer changes no rows.
   assert.ok(
-    store.includes("saved but could not confirm"),
-    "an unconfirmable write must say so rather than claim a value the engine may not have",
+    store.includes('q.is("custom_fields", null) : q.eq("custom_fields", rawCf as string)'),
+    "the update must be guarded on the exact value that was read",
   );
-  assert.ok(store.includes("resolveLimits(landed)"), "the caller is told what actually landed");
+  assert.ok(store.includes('.select("id")'), "and must report which rows it changed");
+  assert.ok(
+    store.includes("(w.data?.length ?? 0) > 0"),
+    "zero rows changed means we lost the race and must retry, not succeed",
+  );
+  // Matching on the string we READ, not a re-serialised object: key order would
+  // differ and the guard would never match, retrying three times and failing.
+  assert.ok(store.includes("rawCf as string"), "compare the stored text, not a re-encoded guess");
 }
 
 // ── The tab actually SHOWS both channels ──────────────────────────────────
