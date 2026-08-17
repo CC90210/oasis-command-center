@@ -63,6 +63,28 @@ const INQUIRY_SOURCES = new Set([
   "inbound_form",
   "referral",
   "website",
+  // Live Subs. These merchants COMPLETED AND SIGNED a SunBiz application; it
+  // reached us through Breeze rather than through our own form, and was then
+  // keyed in by hand, which is the only reason the source string differs.
+  //
+  // Adon, 2026-08-14, asked directly about consent: "We do have consent to
+  // reach them because they agreed upon the application that we have from
+  // them. They were just funneled through breeze when they signed our
+  // application."
+  //
+  // Same basis `dropped_application` already carries — someone who started our
+  // application is an inbound enquiry — and a stronger version of it, since
+  // these finished and signed.
+  //
+  // WHAT WE DO NOT HAVE, stated plainly because this entry rests on it: no
+  // sealed consent receipt exists for any of the 86 (measured 2026-08-17,
+  // sealed_consent=0 across all 60 with phones). The provable tier above is
+  // `consent_receipt.consent_id`, and until a copy of the signed application is
+  // attached to these records the basis here is an asserted relationship, not
+  // an artifact we could produce on demand. Getting those signatures filed
+  // against the leads is the thing that would make this provable rather than
+  // relied upon.
+  "breeze_uw_sheet",
 ]);
 
 function normalise(v: unknown): string {

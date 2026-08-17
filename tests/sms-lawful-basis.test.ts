@@ -47,6 +47,29 @@ for (const source of ["public_form", "dropped_application", "referral", "website
 // Case and padding must not change the answer.
 assert.equal(smsLawfulBasis({ source: "  Public_Form  " }).basis, "inquiry");
 
+// ── Live Subs (2026-08-17) ────────────────────────────────────────────────
+// breeze_uw_sheet merchants COMPLETED AND SIGNED a SunBiz application; it
+// arrived via Breeze and was keyed in by hand, which is the only reason the
+// source string differs from dropped_application. Adon confirmed the consent
+// directly on 2026-08-14.
+//
+// Without this entry all 60 Live Subs with phones resolve to basis "none", and
+// a marketing-class sequence skips every one as sms_no_lawful_basis — sending
+// nothing while the run reports success. That silent-zero is the failure mode
+// worth pinning, not the allowlist membership itself.
+{
+  const v = smsLawfulBasis({ source: "breeze_uw_sheet" });
+  assert.equal(v.basis, "inquiry", "Live Subs signed our application");
+  assert.equal(v.mayText, true);
+  assert.equal(smsLawfulBasis({ source: " Breeze_UW_Sheet " }).basis, "inquiry", "case and padding");
+}
+// The neighbouring live-sub spellings are NOT covered — only the source string
+// that actually exists on the records (all 86 carry breeze_uw_sheet). Adding
+// more would be widening a consent allowlist on a guess.
+for (const near of ["live_subs", "livesubs", "bd_live_subs", "uw_sheet", "breeze"]) {
+  assert.equal(smsLawfulBasis({ source: near }).mayText, false, `${near} was not asserted, so it stays closed`);
+}
+
 // ── Purchased and cold-dialled: we cannot prove anything ──────────────────
 // 240 purchased phone-only leads and 119 cold-called, measured 2026-08-10.
 // Every one is phone-only, which is exactly why the fallback would otherwise
