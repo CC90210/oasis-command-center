@@ -19,7 +19,7 @@ export default async function ArthrisilMarketingPage() {
       />
 
       <div className="grid gap-6 xl:grid-cols-[minmax(0,1.35fr)_minmax(320px,.65fr)]">
-        <Card title="Doctor source video" subtitle="Internal review footage · Dr. Michael Azoulay, DC · 4:07">
+        <Card title="Social-proof edit · V1" subtitle="Internal review cut · 50 seconds · vertical 9:16">
           <div className="overflow-hidden rounded-2xl border border-bg-border bg-black">
             <video
               className="mx-auto block max-h-[72vh] w-full bg-black object-contain"
@@ -28,12 +28,12 @@ export default async function ArthrisilMarketingPage() {
               preload="metadata"
               poster="/media/arthrisil-marketing/end-card-preview.png"
             >
-              <source src="/media/arthrisil-marketing/doctor-source.mp4" type="video/mp4" />
+              <source src="/media/arthrisil-marketing/arthrisil-social-proof-v1.mp4" type="video/mp4" />
               Your browser does not support HTML video.
             </video>
           </div>
           <p className="mt-4 text-sm leading-6 text-fg-muted">
-            This is the supplied source recording, not the finished social-proof cut. The public edit remains gated for clip rights, practitioner-title verification, and licensed-claim review.
+            Four social-proof voices establish the lived impact, then Dr. Michael Azoulay, DC covers symptoms, clinical experience, and the Arthrisil bridge. Internal review only until third-party clip rights are cleared.
           </p>
         </Card>
 

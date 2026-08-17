@@ -17,7 +17,7 @@ assert.equal(existsSync(pagePath), true, "the Arthrisil Marketing page must exis
 const page = readFileSync(pagePath, "utf8");
 assert.match(page, /resolveFounder/, "the Arthrisil page must use the founders gate");
 assert.match(page, /notFound\(\)/, "unauthorized callers must fail closed");
-assert.match(page, /doctor-source\.mp4/, "the page must render the doctor video");
+assert.match(page, /arthrisil-social-proof-v1\.mp4/, "the page must render the edited social-proof video");
 
 const legacy = readFileSync(join(root, "app/arthrisil-marketing/page.tsx"), "utf8");
 assert.match(legacy, /redirect\("\/founders\/marketing\/arthrisil"\)/, "the old URL must redirect into Marketing");
