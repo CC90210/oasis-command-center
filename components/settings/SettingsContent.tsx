@@ -28,25 +28,23 @@ import {
   getActiveProfile,
   integrationsHealth,
   getTenant,
-  getPlanTemplates,
   aiServicesWithKey,
   getBridgeOnline,
 } from "@/lib/queries";
 import { safe } from "@/lib/api-helpers";
 import { ChangePasswordForm } from "@/components/ChangePasswordForm";
-import { KnownFactsEditor } from "@/components/KnownFactsEditor";
 import { CustomCredentialsVault } from "@/components/settings/CustomCredentialsVault";
+import { SettingsSection } from "@/components/settings/SettingsSection";
+import { OpenSectionOnHash } from "@/components/settings/OpenSectionOnHash";
 import { ProfileEditor } from "@/components/settings/ProfileEditor";
 import { BrandLogoCard } from "@/components/settings/BrandLogoCard";
 import { QuickInviteCard } from "@/components/settings/QuickInviteCard";
 import { TelegramLinkCard } from "@/components/settings/TelegramLinkCard";
-import { PlanTemplateEditor } from "@/components/settings/PlanTemplateEditor";
 import { AgentConfigEditor } from "@/components/settings/AgentConfigEditor";
 import { IntegrationKeysPanel } from "@/components/settings/IntegrationKeysPanel";
 import { PersonalIntegrationsPanel } from "@/components/settings/PersonalIntegrationsPanel";
 import { TelegramConnectCard } from "@/components/settings/TelegramConnectCard";
 import { SafeBoundary } from "@/components/SafeBoundary";
-import { MyAgentsCard } from "@/components/settings/MyAgentsCard";
 import { AgentMarketplaceCard } from "@/components/settings/AgentMarketplaceCard";
 import { KixieWebhookSyncCard } from "@/components/settings/KixieWebhookSyncCard";
 import { DevicesEditor } from "@/components/settings/DevicesEditor";
@@ -98,16 +96,13 @@ export async function SettingsContent({
   }
 
   const profile = await safe("settings.profile", getActiveProfile(), null);
-  const [integrations, tenant, templates, connectedAiSet, user, bridgeOnline] = await Promise.all([
+  const [integrations, tenant, connectedAiSet, user, bridgeOnline] = await Promise.all([
     safe("settings.integrations_health", integrationsHealth(profile?.tenant_id || null), []),
     profile?.tenant_id ? safe("settings.tenant", getTenant(profile.tenant_id), null) : Promise.resolve(null),
-    profile ? safe("settings.plan_templates", getPlanTemplates(profile.id), []) : Promise.resolve([]),
     safe("settings.ai_keys", aiServicesWithKey(profile?.tenant_id || null), new Set<string>()),
     getSessionUser().catch(() => null),
     safe("settings.bridge_online", getBridgeOnline(profile?.tenant_id ?? null), false),
   ]);
-  const weekday = templates.find((t) => t.kind === "weekday") || null;
-  const weekend = templates.find((t) => t.kind === "weekend") || null;
 
   const manifestSlug = tenant ? resolveClientProfileSlug(tenant) : null;
   const manifest = manifestSlug
@@ -155,6 +150,12 @@ export async function SettingsContent({
         />
       )}
 
+      {/* Eight links across the app point at /settings#providers and
+          #agents — several from chat FAILURE states. Now that the sections
+          collapse, the browser scrolls to a closed bar and the control the
+          error sent you for stays hidden. This opens it. */}
+      <OpenSectionOnHash />
+
       {/* Batch 4: self-serve Telegram linking for per-lead application alerts. */}
       <TelegramLinkCard />
 
@@ -164,7 +165,7 @@ export async function SettingsContent({
         </Card>
       ) : (
         <>
-          <Card
+          <SettingsSection
             title="Profile"
             subtitle={`Signed in as ${profile.email}`}
             action={
@@ -183,16 +184,16 @@ export async function SettingsContent({
             <SafeBoundary label="Profile editor">
               <ProfileEditor profile={profile} tenantAgents={manifestAgentKeys} />
             </SafeBoundary>
-          </Card>
+          </SettingsSection>
 
-          <Card
+          <SettingsSection
             title="Branding"
             subtitle="Your logo is applied to every new form, public application page, and anywhere else the dashboard shows your brand."
           >
             <SafeBoundary label="Branding">
               <BrandLogoCard initialLogoUrl={tenant?.logo_url ?? null} canManage={canManageTenant} />
             </SafeBoundary>
-          </Card>
+          </SettingsSection>
 
           {/* Credentials — single parent Card with two clearly-labeled
               sub-sections. Was previously two top-level cards
@@ -202,38 +203,42 @@ export async function SettingsContent({
               purposes — structured known integrations with health
               checks vs raw KEY=VALUE for anything else — but the
               parent grouping makes that obvious. */}
-          <Card
+          <SettingsSection
+            defaultOpen
             title="Credentials"
             subtitle="All your API keys, OAuth tokens, and webhook URLs in one place. Known integrations get health-checked; custom KEY=VALUE secrets cover anything else your agents need."
           >
-            <div className="space-y-6">
-              <div>
-                <div className="text-xs font-bold uppercase tracking-wider text-fg-muted mb-2">
-                  Known integrations
-                </div>
-                <div className="text-[11px] text-fg-dim mb-3 leading-relaxed">
-                  Pre-configured slots for the services your agents already know how to use (Gmail, Stripe, Telegram, etc). Includes a live health check + paste-once setup.
-                </div>
+            {/* FOLDED, 2026-08-17. Both panels rendered open, which made this one
+                card the tallest thing on the page and buried everything under it.
+                Known integrations opens by default because it is the one people
+                come here for; custom secrets is the long tail and starts closed.
+                Each header keeps its description while collapsed — a fold that
+                hides what is behind it just makes you open all of them. */}
+            <div className="space-y-3">
+              <SettingsSection
+                tone="nested"
+                title="Known integrations"
+                subtitle="Pre-configured slots for services your agents already know how to use (Gmail, Stripe, Telegram…). Live health check plus paste-once setup."
+                defaultOpen
+              >
                 <SafeBoundary label="Integration keys">
                   <IntegrationKeysPanel canManage={canManageTenant} />
                 </SafeBoundary>
-              </div>
+              </SettingsSection>
 
               {canManageTenant && (
-                <div>
-                  <div className="text-xs font-bold uppercase tracking-wider text-fg-muted mb-2">
-                    Custom secrets
-                  </div>
-                  <div className="text-[11px] text-fg-dim mb-3 leading-relaxed">
-                    Anything that doesn&apos;t fit the known-integration slots above — client-specific tokens, one-off webhook URLs, internal API keys. Encrypted at rest; agents read them via <code className="text-accent">get_credential</code>.
-                  </div>
+                <SettingsSection
+                  tone="nested"
+                  title="Custom secrets"
+                  subtitle="Anything that doesn't fit a known slot — client tokens, one-off webhook URLs, internal keys. Encrypted at rest; agents read them via get_credential."
+                >
                   <SafeBoundary label="Custom credentials vault">
                     <CustomCredentialsVault />
                   </SafeBoundary>
-                </div>
+                </SettingsSection>
               )}
             </div>
-          </Card>
+          </SettingsSection>
 
           {/* Kixie webhook auto-registration — only when the tenant
               actually declares Kixie in its required_services list.
@@ -276,7 +281,7 @@ export async function SettingsContent({
           </SafeBoundary>
 
           {canManageTenant && (
-            <Card
+            <SettingsSection
               title="Team"
               subtitle="Invite teammates so they can sign into this tenant. Each invite is a one-time link — send it via Slack / email / SMS."
               action={
@@ -295,31 +300,30 @@ export async function SettingsContent({
                 Invitees land on /invite/&lt;token&gt;, sign up, and join this tenant automatically.
                 Solara recognizes them by name and respects their role.
               </p>
-            </Card>
+            </SettingsSection>
           )}
 
-          <Card
-            title="Known facts about you"
-            subtitle="Evergreen context every cloud chat injects automatically — calendar link, signature, business name, common asks. Saves you from re-typing the same things every conversation."
-          >
-            <SafeBoundary label="Known facts editor">
-              <KnownFactsEditor />
-            </SafeBoundary>
-          </Card>
+          {/* "Known facts about you" removed 2026-08-17. It shipped with
+              placeholder text still in the box — "Your Name", "Your LLC",
+              "https://cal.com/your-handle" — which every cloud chat was
+              injecting as authoritative operator context. A field nobody filled
+              in is not neutral when its DEFAULT is fed to the model as fact. The
+              same context now lives where it is actually true: brain/USER.md and
+              the agent entry points. */}
 
           {/* Custom Credentials card removed 2026-06-06 — moved into the
               unified "Credentials" parent Card above so the operator sees
               one credentials surface, not two separate top-level cards
               that look redundant. */}
 
-          <Card title="Password" subtitle="Change your sign-in password">
+          <SettingsSection title="Password" subtitle="Change your sign-in password">
             <SafeBoundary label="Password form">
               <ChangePasswordForm />
             </SafeBoundary>
-          </Card>
+          </SettingsSection>
 
           {canManageTenant && (
-            <Card
+            <SettingsSection
               title="Devices (advanced)"
               subtitle="Pair a machine on your network to run the local bridge — gives your agents file-system, bash, and full MCP access. Optional: a connected AI provider account below is enough for chat without ever pairing a machine."
               action={
@@ -334,10 +338,10 @@ export async function SettingsContent({
               <SafeBoundary label="Devices">
                 <DevicesEditor />
               </SafeBoundary>
-            </Card>
+            </SettingsSection>
           )}
 
-          <Card
+          <SettingsSection
             id="providers"
             title="AI setup"
             subtitle={
@@ -353,7 +357,7 @@ export async function SettingsContent({
                 canManageTeam={canManageTenant}
               />
             </SafeBoundary>
-          </Card>
+          </SettingsSection>
 
           {isOperator && (
             <SafeBoundary label="Local CLI providers">
@@ -361,7 +365,7 @@ export async function SettingsContent({
             </SafeBoundary>
           )}
 
-          <Card
+          <SettingsSection
             id="agents"
             title="Override an agent's provider"
             subtitle="Optional. Each agent uses the workspace default from AI setup above unless you set a specific provider here. Edit a row to switch which provider that agent uses."
@@ -392,37 +396,16 @@ export async function SettingsContent({
                 />
               </SafeBoundary>
             ) : (
-              <EmptyState message="Team-wide AI setup is managed by an owner or admin. Expand 'Just-for-me overrides' below if you'd rather plug in your own AI account." />
+              <EmptyState message="Team-wide AI setup is managed by an owner or admin. Ask them to connect a provider, or set one per agent in the override table below." />
             )}
-          </Card>
+          </SettingsSection>
 
-          <details className="rounded-2xl border border-bg-border bg-bg-elev/30 overflow-hidden group">
-            <summary className="cursor-pointer select-none px-5 py-3 flex items-center justify-between gap-3 hover:bg-bg-elev/50">
-              <div>
-                <div className="text-sm font-bold text-fg">
-                  Just-for-me overrides{" "}
-                  <span className="text-fg-dim font-normal text-xs">(rarely needed)</span>
-                </div>
-                <div className="text-[11.5px] text-fg-muted mt-0.5">
-                  Use your own AI account for chats — only affects you, not your team.
-                </div>
-              </div>
-              <span className="text-fg-dim text-xs group-open:rotate-90 transition-transform">▸</span>
-            </summary>
-            <div className="px-5 pb-5">
-              <SafeBoundary label="My agents">
-                <MyAgentsCard
-                  enabledAgentKeys={enabledChatAgentKeys}
-                  agentLabels={Object.fromEntries(
-                    (manifest?.agents || []).map((a) => [
-                      a.slug.toLowerCase(),
-                      a.display_name || a.slug,
-                    ]),
-                  )}
-                />
-              </SafeBoundary>
-            </div>
-          </details>
+          {/* "Just-for-me overrides" removed 2026-08-17. It let an individual
+              point their own chats at a different AI account — a team feature on
+              a single-operator workspace, where it only ever added a second
+              place for the provider to be configured and a second place for it
+              to be wrong. Provider selection lives in AI Setup and, per agent,
+              in the override table below. */}
 
           {/* Workspace agents (Bravo / Atlas / Maven add-on picker).
               Owner-only — non-owners see a read-only view of which
@@ -448,19 +431,12 @@ export async function SettingsContent({
             </Card>
           )}
 
-          <Card title="Weekday template" subtitle="Monday–Friday recurring schedule. Materializes nightly via cron.">
-            <SafeBoundary label="Weekday template">
-              <PlanTemplateEditor kind="weekday" existing={weekday} />
-            </SafeBoundary>
-          </Card>
+          {/* Weekday/Weekend template editors removed 2026-08-17 alongside the
+              "The day" card on /today that consumed them. /schedule is the live
+              planner now. Configuring a template for a surface that no longer
+              renders is a control with nothing on the other end. */}
 
-          <Card title="Weekend template" subtitle="Saturday + Sunday recurring schedule">
-            <SafeBoundary label="Weekend template">
-              <PlanTemplateEditor kind="weekend" existing={weekend} />
-            </SafeBoundary>
-          </Card>
-
-          <Card
+          <SettingsSection
             title="Integration health"
             subtitle={
               isOperator
@@ -482,7 +458,7 @@ export async function SettingsContent({
                 </div>
               )}
             </div>
-          </Card>
+          </SettingsSection>
 
           {/* CC ask 2026-06-11: "an overall tracker [hidden in Settings],
               very important feature." Read-only operations view at the
@@ -505,8 +481,9 @@ export async function SettingsContent({
  *
  * Sections shown (empty): Branding, Team, Devices, AI Setup,
  * Integration health.
- * Sections hidden (user-scoped, no tenant equivalent): Profile,
- * Known facts, Password, Plan templates, Just-for-me overrides.
+ * Sections hidden (user-scoped, no tenant equivalent): Profile, Password.
+ * (Known facts, Plan templates and Just-for-me overrides were removed from the
+ * page entirely on 2026-08-17 — they are not hidden here, they no longer exist.)
  */
 /**
  * Preview-mode scaffold cards — kept as one list so future tenants

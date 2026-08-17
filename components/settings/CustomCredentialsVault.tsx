@@ -3,7 +3,10 @@
 /**
  * CustomCredentialsVault — Settings → Custom credentials editor.
  *
- * The .env-style sibling of KnownFactsEditor. While KnownFacts holds
+ * Formerly the sibling of the "Known facts about you" editor, which was removed
+ * 2026-08-17 (it shipped with its placeholder text still in the box and was
+ * injecting that into every cloud chat as authoritative operator context).
+ * While Known facts held
  * free-form Markdown facts ("my calendar link is X"), this surface
  * holds structured secrets — API keys, webhook URLs, service tokens —
  * that:

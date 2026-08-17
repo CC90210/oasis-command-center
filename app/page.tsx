@@ -3,11 +3,8 @@ import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
 import { Card, Stat, EmptyState, PageHeader, Tag } from "@/components/Card";
 import { MRRProgressChart } from "@/components/charts/MRRProgressChart";
-import { TodayBlockToggle } from "@/components/TodayBlockToggle";
-import { TodayBlockEditableField } from "@/components/TodayBlockEditableField";
-import { FinalizeDayButton } from "@/components/FinalizeDayButton";
 import { LiveClock } from "@/components/LiveClock";
-import { timeAgo, truncate, formatTimeRange } from "@/lib/fmt";
+import { timeAgo, truncate, } from "@/lib/fmt";
 import {
   operatorDateKey,
   operatorIsWeekend,
@@ -28,7 +25,6 @@ import {
   getTenant,
   momentumMetrics,
 } from "@/lib/queries";
-import { computeStreak } from "@/lib/streak";
 import { safe } from "@/lib/api-helpers";
 import { GoalCountdownCard } from "@/components/GoalCountdownCard";
 import {
@@ -88,7 +84,7 @@ export default async function TodayPage() {
   // every dynamic page so one bad reader can't 500 the whole render. The
   // label tags failures in Vercel logs ([safe:today.counts] ...) so a
   // silently-empty Stat is debuggable. This is the Hermes-toggle bug class.
-  const [counts, pipeline, mrr, history, plan, inbound, concentration, replyRate, activePipe, topLead, streak, momentum] =
+  const [counts, pipeline, mrr, history, plan, inbound, concentration, replyRate, activePipe, topLead, momentum] =
     await Promise.all([
       safe("today.counts", todayCounts(tenantId), { outbound: 0, inbound: 0, decisions: 0, hot: 0 }),
       safe("today.pipeline_breakdown", pipelineBreakdown(tenantId), { stages: {} as Record<string, number>, total: 0, sources: {} as Record<string, number> }),
@@ -103,8 +99,7 @@ export default async function TodayPage() {
       safe("today.outreach_reply_rate", outreachReplyRate(tenantId, 7), { sends: 0, replies: 0, rate_pct: 0 }),
       safe("today.active_pipeline", activePipeline(tenantId), { total_active: 0, qualified: 0, proposal: 0 }),
       safe("today.top_open_lead", topOpenLead(tenantId), null),
-      safe("today.streak", computeStreak(profile.id, 7), { streak: 0, missed: 0, daysWithPlan: 0, byDay: [] }),
-      safe("today.momentum", momentumMetrics(tenantId), { outboundVelocity7d: null, contentPublished7d: null }),
+      safe("today.momentum", momentumMetrics(tenantId), { outboundVelocity7d: null, contentPublished7d: null, contentSends7d: null }),
     ]);
 
   const primaryLead = plan?.primary_lead_id
@@ -119,11 +114,24 @@ export default async function TodayPage() {
 
   const todayKey = operatorDateKey();
   const isWeekend = operatorIsWeekend();
-  const missionLine =
-    plan?.mission ||
-    (isWeekend
-      ? "Weekend mode"
-      : "Set a mission for today in Settings → Plan Templates");
+  // DERIVED FROM THE GOAL, not from the retired plan pipeline.
+  //
+  // This read `plan?.mission`, and on 2026-08-17 it was rendering "The structure
+  // survives the cheat days. $5K MRR by May 30." beside tiles reading $10,000 and
+  // 09-30. The mission text came from a daily_plan row written by the
+  // materialisation cron that fed "The day" — a surface now retired — so it had
+  // been frozen since whenever that last ran, contradicting the live numbers
+  // directly under it.
+  //
+  // The fallback was worse: "Set a mission for today in Settings → Plan
+  // Templates" pointed at an editor deleted the same day.
+  //
+  // A header line that restates the goal cannot go stale, because it is computed
+  // from the same figures as the countdown beside it. An operator-authored
+  // mission is a fine feature; one frozen five months ago is not.
+  const missionLine = isWeekend
+    ? "Weekend mode"
+    : `$${mrr.target.toLocaleString()} by ${targetDate?.toISOString().slice(0, 10) ?? "the target date"}`;
 
   return (
     <div className="space-y-6 animate-fade-in">
@@ -243,19 +251,15 @@ export default async function TodayPage() {
             momentum.contentPublished7d === null
               ? "metric unavailable"
               : momentum.contentPublished7d > 0
-                ? "posts shipped"
-                : "0 vs 22 target — distribution dark"
+                ? `${momentum.contentSends7d ?? 0} sends across the networks`
+                : "nothing published this week"
           }
         />
-        <Stat
-          label="Streak"
-          value={`${streak.streak}d`}
-          hint={
-            streak.streak > 0
-              ? `${streak.daysWithPlan}/${streak.daysWithPlan + streak.missed} days planned`
-              : "kick off today's plan"
-          }
-        />
+        {/* The Streak tile went with "The day" on 2026-08-17. It counted
+            checkboxes on a planner that no longer exists, so it could only ever
+            read 0d — and "kick off today's plan" pointed at a surface that had
+            been deleted. A metric whose input is gone does not degrade to a low
+            number, it degrades to a lie. /schedule is the planner now. */}
       </section>
 
       <section className="grid lg:grid-cols-3 gap-6">
@@ -270,8 +274,13 @@ export default async function TodayPage() {
         <Card
           title="Primary lead"
           subtitle={
+            // "Top open · null" — what this rendered on screen. `company || name`
+            // falls through to `null` when BOTH are absent, and a template
+            // literal stringifies that rather than dropping it. A lead with
+            // neither field is normal (an inbound with only an email), so this
+            // was not an edge case, it was Tuesday.
             primaryLead
-              ? `Top open · ${primaryLead.company || primaryLead.name}`
+              ? `Top open · ${primaryLead.company || primaryLead.name || primaryLead.email || "unnamed lead"}`
               : "No active lead"
           }
         >
@@ -306,133 +315,12 @@ export default async function TodayPage() {
         </Card>
       </section>
 
-      {plan?.schedule && plan.schedule.length > 0 ? (
-        (() => {
-          const remaining = plan.schedule.filter((s) => !s.completed);
-          const completed = plan.schedule.filter((s) => s.completed);
-          const allDone = remaining.length === 0 && plan.schedule.length > 0;
-          const finalizedAt = (plan as Record<string, unknown>).finalized_at as
-            | string
-            | null
-            | undefined;
-          return (
-            <Card
-              title="The day"
-              subtitle={`${completed.length} / ${plan.schedule.length} done`}
-              action={
-                streak.daysWithPlan > 0 ? (
-                  streak.streak > 0 ? (
-                    <Tag tone="engaged">{`🔥 ${streak.streak}-day streak`}</Tag>
-                  ) : streak.missed > 0 ? (
-                    <Tag tone="warm">{`${streak.missed} missed day${streak.missed === 1 ? "" : "s"} this week`}</Tag>
-                  ) : null
-                ) : null
-              }
-            >
-              {remaining.length === 0 && !finalizedAt ? (
-                <div className="rounded-lg border border-status-engaged/30 bg-status-engaged/5 p-4 text-sm text-status-engaged text-center mb-4">
-                  Every item checked. Hit <strong>Finalize day</strong> below to wrap.
-                </div>
-              ) : null}
-
-              {/* Unified schedule — items stay in time order; completed are dimmed in place. */}
-              <ul className="divide-y divide-bg-border">
-                {plan.schedule.map((slot, i) => {
-                  const done = !!slot.completed;
-                  const completedAt = (slot as Record<string, unknown>).completed_at as
-                    | string
-                    | null
-                    | undefined;
-                  const rowOpacity = done
-                    ? "opacity-50"
-                    : slot.intensity === "break"
-                      ? "opacity-70"
-                      : "";
-                  return (
-                    <li
-                      key={i}
-                      className={`grid grid-cols-[1.75rem_7rem_1fr] gap-3 py-3.5 transition-opacity ${rowOpacity}`}
-                    >
-                      <TodayBlockToggle index={i} initial={done} schedule={plan.schedule} />
-                      <div
-                        className={`text-xs font-bold tracking-wider self-start mt-0.5 ${done ? "text-fg-dim font-mono" : "text-accent"
-                          }`}
-                      >
-                        {formatTimeRange(slot.time_label)}
-                      </div>
-                      <div>
-                        <div
-                          className={`font-semibold flex items-center gap-2 ${done ? "text-fg-muted line-through" : "text-fg"
-                            }`}
-                        >
-                          {!done && slot.intensity === "intense" && (
-                            <span className="text-accent">▲</span>
-                          )}
-                          {!done && slot.intensity === "break" && (
-                            <span className="text-fg-dim">○</span>
-                          )}
-                          <TodayBlockEditableField
-                            index={i}
-                            field="title"
-                            initial={slot.title || ""}
-                            schedule={plan.schedule}
-                            className="flex-1"
-                          />
-                        </div>
-                        {!done && (
-                          <div className="text-fg-muted text-sm mt-1 leading-relaxed">
-                            <TodayBlockEditableField
-                              index={i}
-                              field="body"
-                              initial={slot.body || ""}
-                              schedule={plan.schedule}
-                              multiline
-                            />
-                          </div>
-                        )}
-                        {done && completedAt && (
-                          <div className="text-[10px] text-status-engaged font-mono mt-0.5">
-                            ✓ {new Date(completedAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}
-                          </div>
-                        )}
-                      </div>
-                    </li>
-                  );
-                })}
-              </ul>
-
-              {/* Finalize day — operator's nightly checkpoint */}
-              <div className="mt-5 pt-4 border-t border-bg-border flex items-center justify-between gap-3 flex-wrap">
-                <div className="text-xs text-fg-muted">
-                  {finalizedAt
-                    ? `Day finalized at ${new Date(finalizedAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}. Tomorrow rebuilds fresh from your template.`
-                    : allDone
-                      ? "Every item checked off — you can finalize the day."
-                      : `${remaining.length} item${remaining.length === 1 ? "" : "s"} left to finalize the day.`}
-                </div>
-                <FinalizeDayButton disabled={!allDone || !!finalizedAt} planId={plan.id || null} />
-              </div>
-            </Card>
-          );
-        })()
-      ) : (
-        <Card
-          title="The day"
-          subtitle={`No ${isWeekend ? "weekend" : "weekday"} template yet`}
-          action={
-            <Link
-              href="/settings"
-              className="btn-primary inline-flex items-center gap-1.5 !text-xs !py-1.5"
-            >
-              Set up in Settings
-            </Link>
-          }
-        >
-          <EmptyState
-            message={`Open Settings → ${isWeekend ? "Weekend" : "Weekday"} Template, click "Load defaults" + Save, and today's plan auto-fills.`}
-          />
-        </Card>
-      )}
+      {/* "The day" planner removed 2026-08-17. /schedule is the live calendar
+          now — a drag-and-drop week with real durations — and this card was the
+          older list-shaped version of the same idea. Two planners disagreeing
+          about the same day is worse than one, and this was the one nobody was
+          editing. The streak and missed-day counters went with it: they measured
+          checkboxes on a surface that no longer exists. */}
 
       <section className="grid lg:grid-cols-3 gap-6">
         <div className="lg:col-span-2">
