@@ -69,6 +69,20 @@ for (const junk of ["not-a-date", "yesterday", {}, []]) {
   // Held for the FULL period from now: the only safe assumption is that it
   // just happened.
   assert.equal(c.held ? c.until.toISOString() : "", "2026-08-31T18:00:00.000Z");
+  // AND it must ask to be repaired. Without persisting a real date the hold
+  // recomputes now+days on every dispatch and the deadline slides forward
+  // forever — a documented fortnight becoming permanent silence. Codex caught
+  // that; the valid-timestamp no-ratchet test above did not cover this branch.
+  assert.equal(c.held ? c.repairTo : "", now.toISOString(), "must hand back a date to persist");
+}
+// Once repaired, the ordinary path applies and it lifts on schedule.
+{
+  const repaired = emailCooloff(now.toISOString(), now, 14);
+  assert.equal(repaired.held, true);
+  assert.equal(repaired.held ? repaired.repairTo : "x", undefined, "a readable date needs no repair");
+  assert.equal(repaired.held ? repaired.until.toISOString() : "", "2026-08-31T18:00:00.000Z");
+  // And a fortnight later it is genuinely released, not held again.
+  assert.equal(emailCooloff(now.toISOString(), new Date("2026-08-31T18:00:00Z"), 14).held, false);
 }
 // Epoch millis are a legitimate shape and must not be read as unreadable.
 {
@@ -104,8 +118,15 @@ for (const junk of ["", "  ", "abc", "-3"]) {
   );
   // Rescheduled, never failed: this is a pause, not a deletion.
   assert.ok(
-    /if \(cool\.held\) return markRescheduled\(db, row, cool\.until\.toISOString\(\), cool\.reason\);/.test(exec),
+    exec.includes("return markRescheduled(db, row, cool.until.toISOString(), cool.reason);"),
     "a cool-off holds the row rather than killing the sequence",
+  );
+  // And the repair is persisted, or the malformed-timestamp hold ratchets
+  // forward on every dispatch and never lifts.
+  assert.ok(exec.includes("if (cool.repairTo)"), "an unreadable stamp must be repaired");
+  assert.ok(
+    exec.includes("sms_opt_out_at: cool.repairTo"),
+    "the repair must write a real date back to the lead",
   );
 }
 
@@ -115,6 +136,19 @@ for (const junk of ["", "  ", "abc", "-3"]) {
 {
   const handoff = readFileSync(new URL("../lib/drips/reply-handoff.ts", import.meta.url), "utf8");
   assert.ok(handoff.includes("patch.sms_opt_out_at ="), "an opt-out must stamp the lead");
+
+  // AN OPT-OUT ANYWHERE IN THE WINDOW WINS. The scan takes one message per
+  // lead, newest first, so "STOP" followed by "actually hold on" used to mean
+  // the STOP row was skipped entirely: never stamped, no cool-off, nobody told.
+  assert.ok(handoff.includes("const optOutRow = new Map<"), "opt-outs are found across all messages");
+  assert.ok(
+    handoff.includes("optOutRow.get(newest.lead_id) ?? newest"),
+    "the opt-out is acted on in preference to the newest message",
+  );
+  assert.ok(
+    handoff.indexOf("const optOutRow") < handoff.indexOf("for (const newest of rows)"),
+    "the opt-out sweep must run BEFORE the per-lead dedupe",
+  );
   assert.ok(handoff.includes("patch.sms_opt_out_kind ="), "and record which kind it was");
   // ONE write. Two sequential read-modify-writes both spreading `data` means
   // the second silently discards the first, and the field discarded would be

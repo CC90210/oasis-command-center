@@ -1317,7 +1317,20 @@ async function processEmailStep(
   // SMS suppression itself is untouched and does not expire.
   {
     const cool = emailCooloff(data.sms_opt_out_at, new Date(), cooloffDays());
-    if (cool.held) return markRescheduled(db, row, cool.until.toISOString(), cool.reason);
+    if (cool.held) {
+      // An unreadable stamp is REPAIRED to a real date, once. Otherwise the
+      // hold recomputes now+days every dispatch and the deadline slides
+      // forward forever — a fortnight becoming a permanent silence.
+      if (cool.repairTo) {
+        await db
+          .from("tenant_records")
+          .update({ data: { ...data, sms_opt_out_at: cool.repairTo } })
+          .eq("tenant_id", row.tenant_id)
+          .eq("id", row.lead_id)
+          .then(() => undefined, () => undefined);
+      }
+      return markRescheduled(db, row, cool.until.toISOString(), cool.reason);
+    }
   }
 
   // Email business-hours gate ("every morning"): reschedule an off-hours email

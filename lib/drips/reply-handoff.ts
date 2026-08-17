@@ -120,10 +120,23 @@ export async function processReplyHandoffs(
   const seen = new Set<string>();
   const rows = (inbound.data || []) as Array<{ id: string; lead_id: string; content: string | null; created_at: string }>;
 
-  for (const row of rows) {
-    if (!row.lead_id || seen.has(row.lead_id)) continue;
-    seen.add(row.lead_id);
+  // An OPT-OUT anywhere in the window wins, even when a newer message follows
+  // it. "STOP" then "actually hold on" used to mean the STOP row was skipped by
+  // the newest-only pass, so the lead was never stamped, the email cool-off
+  // never started and nobody was told. Codex caught it. Scanned per lead before
+  // choosing which single message to act on.
+  const optOutRow = new Map<string, (typeof rows)[number]>();
+  for (const r of rows) {
+    if (!r.lead_id || optOutRow.has(r.lead_id)) continue;
+    if (detectOptOut(r.content ?? "").optOut) optOutRow.set(r.lead_id, r);
+  }
+
+  for (const newest of rows) {
+    if (!newest.lead_id || seen.has(newest.lead_id)) continue;
+    seen.add(newest.lead_id);
     out.scanned += 1;
+    // Act on the opt-out if there is one; otherwise on the newest message.
+    const row = optOutRow.get(newest.lead_id) ?? newest;
 
     try {
       const leadR = await db

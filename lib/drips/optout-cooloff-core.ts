@@ -33,7 +33,23 @@
 
 export type CooloffVerdict =
   | { held: false }
-  | { held: true; reason: string; until: Date };
+  | {
+      held: true;
+      reason: string;
+      until: Date;
+      /**
+       * Set when the stored opt-out timestamp could not be read.
+       *
+       * The caller MUST persist this value to sms_opt_out_at. Without that the
+       * hold recomputes `now + days` on every dispatch and the deadline slides
+       * forward forever, turning a documented fortnight into a permanent
+       * silence for any corrupted or legacy value. Codex caught the ratchet.
+       *
+       * Repairing it once converts an unreadable field into a real date, after
+       * which the ordinary path applies and the hold lifts on schedule.
+       */
+      repairTo?: string;
+    };
 
 /** Days of email silence after a phone opt-out. Two weeks by default — the
  *  longer end of what Adon offered, because the cost of waiting is one delayed
@@ -69,9 +85,15 @@ export function emailCooloff(
   const t = typeof optedOutAt === "number" ? optedOutAt : Date.parse(String(optedOutAt));
   if (!Number.isFinite(t)) {
     // Hold for the full period from NOW: we cannot date the opt-out, so the
-    // only safe assumption is that it just happened.
+    // only safe assumption is that it just happened. `repairTo` is what stops
+    // this from recomputing — and sliding — on every subsequent dispatch.
     const until = new Date(now.getTime() + days * 86_400_000);
-    return { held: true, reason: "optout_cooloff (opt-out recorded, timestamp unreadable)", until };
+    return {
+      held: true,
+      reason: "optout_cooloff (opt-out recorded, timestamp unreadable; repaired to now)",
+      until,
+      repairTo: now.toISOString(),
+    };
   }
 
   const until = new Date(t + days * 86_400_000);
