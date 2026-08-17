@@ -199,6 +199,79 @@ export function isMissingTableError(
 }
 
 /**
+ * Cross-DB unique-constraint classifier. Postgres-direct and PostgREST
+ * report unique violations as code 23505, but the Turso/libSQL path reports
+ * them as `SQLITE_CONSTRAINT` with the detail only in the message — code is
+ * NOT mapped. Routes that insert-then-rotate on conflict (e.g.
+ * /api/auth/pair bridge_pairings) must accept BOTH shapes or the rotate
+ * branch never fires and a re-pair 500s (seen 2026-08-14: self-pair from a
+ * Windows bridge died on `UNIQUE constraint failed:
+ * bridge_pairings.tenant_id, bridge_pairings.machine_fingerprint`).
+ *
+ * EVERY caller routes through here — routes and lib code alike. Sites across
+ * the repo carried their own Postgres-only check, each one dead on Turso, and
+ * they were swept 2026-08-14. Some used `!== "23505"` to mean "this error is
+ * NOT a benign duplicate", which failed the other way round: the branch fired
+ * on precisely the duplicates it was meant to wave through.
+ *
+ * Do not write a fresh `code === "23505"` — tests/unique-violation-classifier.test.ts
+ * walks app/ and lib/ and fails the build on the bare literal in any quoting
+ * style or comparison, exempting only this file. That test is the live count;
+ * a tally written here would be stale by the next sweep.
+ */
+export function isUniqueViolationError(
+  err: { message?: string; code?: string } | null | undefined,
+): boolean {
+  if (!err) return false;
+  if (err.code === "23505") return true; // Postgres / PostgREST
+  const msg = (err.message || "").toLowerCase();
+  if (msg.includes("unique constraint failed")) return true; // SQLite / libSQL
+  if (msg.includes("duplicate key")) return true; // Postgres message fallback
+  return false;
+}
+
+/**
+ * Bulk-insert a chunk, and on a unique violation keep the rows that are fine.
+ *
+ * A chunked insert is all-or-nothing: one colliding row fails the statement and
+ * takes its 499 neighbours with it. Both cold-list importers responded by
+ * counting the WHOLE chunk as duplicates — 499 good leads lost, reported to the
+ * operator as a plausible and false number. The founders ingest route had
+ * already solved it by retrying row by row; they just never reached that code,
+ * because the branch was guarded by a Postgres error code that is dead on Turso.
+ *
+ * Extracted after I wrote the same retry loop into two files verbatim. Returns
+ * counts rather than throwing so callers keep their own error shape; `failure`
+ * is set only for an error that is NOT a duplicate, and the caller decides
+ * whether that is fatal.
+ */
+export async function insertChunkSalvagingDuplicates<T>(
+  db: { from: (t: string) => any },
+  table: string,
+  chunk: T[],
+  select = "id",
+): Promise<{ inserted: number; duplicates: number; failure: { message?: string } | null }> {
+  const bulk = await db.from(table).insert(chunk).select(select);
+  if (!bulk.error) {
+    return { inserted: bulk.data?.length ?? 0, duplicates: 0, failure: null };
+  }
+  if (!isUniqueViolationError(bulk.error)) {
+    return { inserted: 0, duplicates: 0, failure: bulk.error };
+  }
+
+  // At least one row collided. Retry individually so the rest still land.
+  let inserted = 0;
+  let duplicates = 0;
+  for (const row of chunk) {
+    const one = await db.from(table).insert(row).select(select);
+    if (!one.error) inserted += one.data?.length ?? 0;
+    else if (isUniqueViolationError(one.error)) duplicates += 1;
+    else return { inserted, duplicates, failure: one.error };
+  }
+  return { inserted, duplicates, failure: null };
+}
+
+/**
  * Standard structured 503 payload for the "migration not applied" case.
  * Routes hand this to NextResponse.json with status: 503; UI components
  * branch on `error === "migration_not_applied"` to render the

@@ -14,20 +14,51 @@
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { isMissingTableError } from "@/lib/api-helpers";
 import {
+  DEFAULT_BRAND_GROUP,
   FOUNDERS_OWN_BRAND,
+  brandFilterAllowed,
+  brandGroup,
+  claimedBrandSlugs,
+  lifecycleOf,
   type AssetFormat,
   type AssetStatus,
+  type BrandGroupKey,
   type Channel,
+  type Lifecycle,
   type Track,
 } from "@/lib/founders-marketing-core";
 
 /**
- * Founders readers show OASIS's OWN work by default. `scope: "all"` is the
- * explicit opt-out for a future client-deliverables surface; nothing in the
- * founders portal passes it today. Scoping here rather than in each page means
- * a new founders page cannot forget and re-introduce the mix.
+ * Restrict a `marketing_asset` query to one brand tab.
+ *
+ * THE WHOLE BOUNDARY IS THIS FUNCTION. It replaced a bare
+ * `.eq("brand_slug", FOUNDERS_OWN_BRAND)` repeated at four call sites, where the
+ * boundary had already been half-applied once — `total` was brand-scoped while
+ * `open_reviews` was not, so Studio could have said "9 assets, 3 waiting on you"
+ * with the 3 belonging to Warner. One function is one thing to get right and one
+ * thing to test.
+ *
+ * A NAMED group filters `IN (its slugs)`. The residual Clients group filters
+ * `NOT IN (every claimed slug)`, which is what makes a brand-new client slug
+ * appear on the Clients tab without a deploy instead of vanishing from the UI.
+ *
+ * `brand_slug` is `not null default 'oasis-ai'` (database/134), so the SQL
+ * three-valued-logic trap does not apply — a NULL would silently fail `NOT IN`
+ * and drop the row from every tab. Asserted in tests rather than assumed.
+ *
+ * The `(a,b,c)` string is PostgREST's canonical `not.in` value and is also what
+ * lib/turso-postgrest.ts `compileOp` parses, so ONE spelling works on both
+ * backends. Slugs are constrained to `^[a-z0-9]+(-[a-z0-9]+)*$` by the CHECK in
+ * 134, so no separator or quote can appear inside one.
  */
-export type BrandScope = "own" | "all";
+function scopeToBrandGroup<T extends {
+  in: (c: string, v: string[]) => T;
+  not: (c: string, op: string, v: string) => T;
+}>(q: T, group: BrandGroupKey): T {
+  const g = brandGroup(group);
+  if (g.slugs) return q.in("brand_slug", [...g.slugs]);
+  return q.not("brand_slug", "in", `(${claimedBrandSlugs().join(",")})`);
+}
 
 export type MarketingMediaRow = {
   id: string;
@@ -48,6 +79,27 @@ export type MarketingAssetRow = {
   brand_slug: string;
   brand_name: string;
   channel: Channel;
+  /**
+   * Where the asset ACTUALLY went, as a JSON array of platform keys.
+   *
+   * `channel` holds one value and an asset goes to as many as six places, which
+   * is why the Library read INSTAGRAM for everything (CC: "it's only posting to
+   * Instagram"). `channel` stays the PRIMARY channel and the input to the
+   * generated `track` column the pipeline groups by; this is the distribution.
+   * Stamped by scripts/marketing_publish_drain.py with the platforms that
+   * accepted the post — a refusal is not a distribution.
+   */
+  platforms: string[] | string | null;
+  /**
+   * 'video' | 'single_image' | 'carousel'. Not a database CHECK on purpose —
+   * SQLite cannot widen one without a full table rebuild, and this vocabulary
+   * will grow. Validated in founders-marketing-core instead.
+   */
+  asset_type: string;
+  /** Ordered storage paths, one per slide. ORDER IS THE PAYLOAD. */
+  media_urls: string[] | string | null;
+  slide_count: number;
+  author_email: string;
   track: Track;
   format: AssetFormat;
   aspect: string | null;
@@ -142,6 +194,86 @@ function classify(
 }
 
 /**
+ * Read every row of a counting query, one page at a time.
+ *
+ * THREE READERS HAD THEIR OWN COPY of this loop — summary, facets, lifecycle —
+ * differing only in the columns selected and what they tallied. The loop is short
+ * but every line of it is load-bearing, and this file already records the loop
+ * being copied WRONG once: getMarketingSummary's version was lifted from the
+ * brands reader without its `.order()`, which CodeRabbit caught. Three copies is
+ * three chances to drop the same line, and the failure is silent — pages that
+ * overlap or skip, producing counts wrong in an unpredictable direction.
+ *
+ * The mechanics that have to be right now live in one place:
+ *
+ *   ORDER BEFORE RANGE. `.range()` on an unordered query has no stable row order,
+ *   so page 2 can repeat or skip rows from page 1. `id` because it is the primary
+ *   key — unique, so the ordering is total with no ties to break. Ordering by a
+ *   non-unique column (an early version used `brand_name`, which 43 rows share)
+ *   makes the page boundary arbitrary.
+ *
+ *   PAGING AT ALL. PostgREST caps a response at max-rows (1,000 on Supabase) and
+ *   returns the short page with NO error, while the Turso bridge applies no cap —
+ *   so one unpaginated read gives two different answers per backend and the
+ *   Supabase one is silently low.
+ *
+ * `build()` is called PER PAGE rather than once, because the query builders are
+ * single-use: reapplying `.range()` to a spent builder is not a fresh query.
+ *
+ * Returns what happened rather than throwing, so each caller decides what an
+ * absent table or a broken read means for ITS shape — they differ, and that
+ * difference is the one thing worth keeping per-reader. Rows from pages that DID
+ * load are already consumed when "degraded" comes back: a partial count beats a
+ * blanked screen, as long as the caller flags it.
+ */
+// Deliberately NOT recursive (`order` returning PagedQuery<T> again). Written
+// that way first, it made tsc give up with TS2589 "type instantiation is
+// excessively deep" once the real Supabase builder was assigned to it — its
+// method chain is already deeply generic, and a self-referential wrapper
+// multiplies it. Two flat shapes describe the only chain this helper uses.
+/**
+ * The two filter methods scopeToBrandGroup uses, and nothing else.
+ *
+ * Passing the real Supabase builder straight into that generic makes tsc infer
+ * T as the full builder type and give up with TS2589. Casting to this shallow
+ * shape first keeps the inference one level deep. It is a compile-time narrowing
+ * only — the same object is passed through untouched.
+ */
+type BrandFilterable = {
+  in: (column: string, values: string[]) => BrandFilterable;
+  not: (column: string, op: string, value: string) => BrandFilterable;
+};
+
+type RangeQuery<T> = {
+  range: (from: number, to: number) => PromiseLike<{
+    data: T[] | null;
+    error: { code?: string; message?: string } | null;
+  }>;
+};
+
+type PagedQuery<T> = {
+  order: (column: string, opts: { ascending: boolean }) => RangeQuery<T>;
+};
+
+async function pageAll<T>(
+  label: string,
+  build: () => PagedQuery<T>,
+  consume: (rows: T[]) => void,
+): Promise<"ok" | "absent" | "degraded"> {
+  for (let from = 0; ; from += PAGE_SIZE) {
+    const r = await build()
+      .order("id", { ascending: true })
+      .range(from, from + PAGE_SIZE - 1);
+    const verdict = classify(label, r.error);
+    if (verdict === "absent") return "absent";
+    if (verdict === "broken") return "degraded";
+    const rows = r.data || [];
+    consume(rows);
+    if (rows.length < PAGE_SIZE) return "ok";
+  }
+}
+
+/**
  * The LIST readers (assets, media, corpus rows) return [] on any error, so
  * "absent" and "broken" are the same decision to them: stop. They keep this
  * shim rather than being rewritten — only getMarketingSummary renders COUNTS,
@@ -196,37 +328,38 @@ export async function getMarketingSummary(
     // every brand on the tenant. Paged, because a short read here would not just
     // undercount `total` — ownAssetIds is the allowlist those counts use, so it
     // would quietly drop real work from "waiting on you" too.
-    let degraded = false;
     const rows: Array<{ id: string; track: Track; status: string }> = [];
-    for (let from = 0; ; from += PAGE_SIZE) {
-      const page = await db
-        .from("marketing_asset")
-        .select("id, track, status")
-        .eq("tenant_id", tenantId)
-        .eq("brand_slug", FOUNDERS_OWN_BRAND)
-        // ORDER BEFORE RANGE, always. `.range()` on an unordered query has no
-        // stable row order, so page 2 can repeat or skip rows from page 1 — the
-        // count would then be wrong in either direction, and ownAssetIds (the
-        // allowlist for the review/request counts) wrong with it. `id` because it
-        // is the primary key: unique, so the ordering is total, with no ties to
-        // break. getMarketingBrands below does the same thing with .order() —
-        // I copied its paging loop and dropped this line, which CodeRabbit caught.
-        .order("id", { ascending: true })
-        .range(from, from + PAGE_SIZE - 1);
-      const verdict = classify("summary.assets", page.error);
-      // Absent table = pre-migration = genuinely empty, and quiet.
-      if (verdict === "absent") return EMPTY_MARKETING_SUMMARY;
-      // Broken mid-page: keep the pages we DID get so the screen is not blanked,
-      // but mark the whole summary degraded — the counts below are scoped by
-      // these ids, so a short read makes every one of them an undercount.
-      if (verdict === "broken") {
-        degraded = true;
-        break;
-      }
-      const got = (page.data || []) as Array<{ id: string; track: Track; status: string }>;
-      rows.push(...got);
-      if (got.length < PAGE_SIZE) break;
-    }
+    const outcome = await pageAll<{ id: string; track: Track; status: string }>(
+      "summary.assets",
+      () =>
+        db
+          .from("marketing_asset")
+          .select("id, track, status")
+          .eq("tenant_id", tenantId)
+        // STAYS OASIS-OWN even though the Library now has four brand tabs.
+        // This summary drives "Needs you" — CC's own verdict queue — and the
+        // publish route is own-brand-only, so a client's ad is not work he can
+        // action from here. Counting it would inflate the one number on the
+        // dashboard whose entire job is to be trusted about his workload.
+        // The per-brand counts CC asked for come from getMarketingFacets, which
+        // spans every tab on purpose.
+          .eq("brand_slug", FOUNDERS_OWN_BRAND) as unknown as PagedQuery<{
+          id: string;
+          track: Track;
+          status: string;
+        }>,
+      // ORDER BEFORE RANGE lives in pageAll now, along with the paging itself.
+      // This loop was written by copying the brands reader and DROPPING its
+      // .order(), which CodeRabbit caught — the reason one shared implementation
+      // is worth the indirection.
+      (got) => rows.push(...got),
+    );
+    // Absent table = pre-migration = genuinely empty, and quiet.
+    if (outcome === "absent") return EMPTY_MARKETING_SUMMARY;
+    // Broken mid-page keeps the pages we DID get so the screen is not blanked,
+    // but marks the whole summary degraded — the counts below are scoped by
+    // these ids, so a short read makes every one of them an undercount.
+    let degraded = outcome === "degraded";
 
     const ownAssetIds = rows.map((r) => r.id);
     const by_track: Record<Track, number> = { organic: 0, paid: 0, seo: 0, email: 0 };
@@ -341,9 +474,15 @@ export async function getMarketingAssets(
     track?: Track;
     channel?: Channel;
     status?: AssetStatus;
+    /** Which brand TAB. Defaults to OASIS's own work, as this page always has. */
+    group?: BrandGroupKey;
+    /** Sub-filter WITHIN the tab. Ignored if it names a brand from another tab. */
     brand?: string;
+    /** `author_email`, for the by-author facet. */
+    author?: string;
+    /** Review + distribution bucket. The default view excludes archived. */
+    lifecycle?: Lifecycle;
     limit?: number;
-    scope?: BrandScope;
   } = {},
 ): Promise<MarketingAssetRow[]> {
   if (!tenantId) return [];
@@ -357,14 +496,58 @@ export async function getMarketingAssets(
       .limit(opts.limit ?? 200);
     if (opts.track) q = q.eq("track", opts.track);
     if (opts.channel) q = q.eq("channel", opts.channel);
-    if (opts.status) q = q.eq("status", opts.status);
-    // Own-work-only unless a caller deliberately widens the scope. A `brand`
-    // filter is only honoured inside the wider scope — otherwise a crafted
-    // ?brand=warner query string would walk straight past the boundary.
-    if (opts.scope === "all") {
-      if (opts.brand) q = q.eq("brand_slug", opts.brand);
-    } else {
-      q = q.eq("brand_slug", FOUNDERS_OWN_BRAND);
+    if (opts.author) q = q.eq("author_email", opts.author);
+
+    // `status` and `lifecycle` ARE TWO VOCABULARIES FOR ONE COLUMN, so applying
+    // both ANDs them into a contradiction: ?status=draft&lifecycle=archived
+    // compiles to `status = 'draft' AND status IN ('archived','rejected')`,
+    // which matches nothing. The grid would read "Nothing at this stage" while
+    // the pills above it show real counts — a dead end with no visible cause,
+    // and reachable in two clicks (arrive from a Studio pipeline tile, then
+    // press a lifecycle pill).
+    //
+    // Lifecycle wins because it is the axis the page is organised on; `status`
+    // survives only as a deep-link target for Studio's pipeline tiles, which
+    // address stages lifecycle deliberately merges (scheduled, draft). The UI
+    // also clears one when setting the other, so this guard is the backstop for
+    // a hand-typed URL rather than the primary defence.
+    if (opts.status && !opts.lifecycle) q = q.eq("status", opts.status);
+
+    // LIFECYCLE, the axis CC actually asked for: "organise this a lot better so
+    // that we can differentiate our pieces of content."
+    //
+    // Pushed into SQL rather than filtered in JS after the fact, because the
+    // reader caps at `limit` — filtering afterwards would silently show fewer
+    // than a page of archived assets while claiming to show them all.
+    //
+    // `published_at` is the evidence of distribution; `status` only carries the
+    // review verdict. See lifecycleOf() for why those are separate questions.
+    if (opts.lifecycle === "archived") {
+      q = q.in("status", ["archived", "rejected"]);
+    } else if (opts.lifecycle === "live") {
+      q = q.not("published_at", "is", null);
+    } else if (opts.lifecycle === "approved") {
+      q = q.eq("status", "approved").is("published_at", null);
+    } else if (opts.lifecycle === "needs_review") {
+      q = q.in("status", ["draft", "in_review"]).is("published_at", null);
+    } else if (!opts.status) {
+      // DEFAULT VIEW HIDES ARCHIVED. Archiving something should remove it from
+      // the working grid — that is the whole point of the verb — but it must
+      // stay reachable, which is what the Archived pill is for. Skipped when an
+      // explicit ?status= is set so Studio's pipeline tiles still deep-link to
+      // any single stage.
+      q = q.not("status", "in", "(archived,rejected)");
+    }
+
+    // The brand boundary. The tab is ALWAYS applied — there is no code path
+    // through this reader that returns rows from more than one tab, which is
+    // why the group filter is unconditional and the sub-filter is not.
+    const group = opts.group ?? DEFAULT_BRAND_GROUP;
+    q = scopeToBrandGroup(q, group);
+    // A sub-filter NARROWS the tab and may never widen it. `?brand=warner` on
+    // the OASIS tab is dropped rather than honoured — see brandFilterAllowed.
+    if (opts.brand && brandFilterAllowed(opts.brand, group)) {
+      q = q.eq("brand_slug", opts.brand);
     }
 
     const r = await q;
@@ -486,11 +669,20 @@ export async function signMediaUrls(
 /**
  * One asset by id, with its media — for the detail page.
  *
- * TENANT-SCOPED AND BRAND-SCOPED, both deliberately. The id alone is not proof
- * of anything: a uuid pasted into the URL must not reach another tenant's row,
- * and the founders portal shows OASIS's own work, so a client deliverable is a
- * 404 here rather than a page. `scope: "all"` is the explicit opt-out, matching
- * getMarketingAssets.
+ * TENANT-SCOPED. The id alone is not proof of anything — a uuid pasted into the
+ * URL must not reach another tenant's row.
+ *
+ * NO LONGER BRAND-SCOPED, and that is the point of this change. It was
+ * `.eq("brand_slug", FOUNDERS_OWN_BRAND)`, which was right while the Library
+ * showed one brand and became a bug the moment the Clients tab shipped: every
+ * client tile would link to a page that 404s. That is the "wall of dead links"
+ * this route was created to fix, reintroduced for four rows.
+ *
+ * VIEWING IS NOT PUBLISHING. The publish route keeps its own
+ * `brand_slug !== "oasis-ai" -> notFound()` check, deliberately un-widened:
+ * being able to review a client's ad in our own library is not the same as
+ * being able to broadcast it from CC's accounts, and those two boundaries have
+ * no reason to move together.
  *
  * Returns null for "no such asset you may see" — the caller renders notFound(),
  * never a 403, so the route does not confirm what exists.
@@ -498,13 +690,11 @@ export async function signMediaUrls(
 export async function getMarketingAsset(
   tenantId: string,
   id: string,
-  opts: { scope?: BrandScope } = {},
 ): Promise<MarketingAssetRow | null> {
   if (!tenantId || !id) return null;
   const db = getServiceSupabase();
   try {
-    let q = db.from("marketing_asset").select("*").eq("tenant_id", tenantId).eq("id", id);
-    if (opts.scope !== "all") q = q.eq("brand_slug", FOUNDERS_OWN_BRAND);
+    const q = db.from("marketing_asset").select("*").eq("tenant_id", tenantId).eq("id", id);
     const r = await q.maybeSingle();
     const verdict = classify("asset", r.error);
     if (verdict === "absent") return null;
@@ -586,33 +776,158 @@ export async function getLatestPublishIntent(
 
 export const mediaKey = (bucket: string, path: string) => `${bucket}\n${path}`;
 
-/** Brand choices for the library filter, deduped from tenant-scoped assets. */
-export async function getMarketingBrands(
+export type BrandFacet = { slug: string; name: string; count: number };
+export type AuthorFacet = { email: string; count: number };
+
+export type MarketingFacets = {
+  /** Every brand on the tenant, with its asset count. Spans all tabs by design. */
+  brands: BrandFacet[];
+  /** Distinct `author_email` values, with counts. */
+  authors: AuthorFacet[];
+  /** True when a page failed — counts are then a floor, not a total. */
+  degraded: boolean;
+};
+
+export const EMPTY_MARKETING_FACETS: MarketingFacets = {
+  brands: [],
+  authors: [],
+  degraded: false,
+};
+
+/**
+ * The fallback to hand `safe()` — what an unexpected throw returns.
+ *
+ * Paired with EMPTY_ above for the same reason DEGRADED_MARKETING_SUMMARY is
+ * paired with EMPTY_MARKETING_SUMMARY: `degraded: false` is correct for "the
+ * table is not there yet" and WRONG for every other failure. Both pages were
+ * inlining this object literal, which is one `degraded: false` typo away from
+ * painting confident zeros across the whole tab bar — the exact bug the
+ * summary constants exist to prevent, re-opened by not following their pattern.
+ */
+export const DEGRADED_MARKETING_FACETS: MarketingFacets = {
+  brands: [],
+  authors: [],
+  degraded: true,
+};
+
+/**
+ * The facet counts behind the brand tabs and the author filter.
+ *
+ * DELIBERATELY SPANS EVERY BRAND. This is the one reader that has to see across
+ * the boundary, because a tab bar that cannot count the tabs you are not on is
+ * useless — the Clients tab has to read "Clients 4" before you click it. It
+ * returns COUNTS ONLY; no row content crosses a group here, and the readers that
+ * return rows all go through scopeToBrandGroup.
+ *
+ * Brands and authors come from ONE pass over the same pages rather than two
+ * queries, because they are two groupings of identical rows.
+ *
+ * `degraded` rather than a silent short count: these numbers sit on navigation,
+ * and a tab reading "Clients 0" because page two timed out is the same
+ * confident lie as "Nothing waiting on you" — it tells CC there is nothing
+ * there, and he stops looking.
+ */
+/**
+ * How many assets sit in each lifecycle bucket, for the pill row.
+ *
+ * A filter pill that cannot say how much is behind it makes the operator click
+ * every one to find out — and an Archived pill showing nothing is exactly how CC
+ * concluded an archived video was "completely gone". The count is the difference
+ * between a filter and a search.
+ *
+ * One paged pass over (status, published_at), bucketed by lifecycleOf() so the
+ * pills and the grid can never disagree about what "Posted" means.
+ */
+export async function getLifecycleCounts(
   tenantId: string,
-  scope: BrandScope = "own",
-): Promise<Array<{ slug: string; name: string }>> {
-  if (!tenantId) return [];
+  group: BrandGroupKey = DEFAULT_BRAND_GROUP,
+): Promise<{ counts: Record<Lifecycle, number>; degraded: boolean }> {
+  const empty: Record<Lifecycle, number> = {
+    needs_review: 0, approved: 0, live: 0, archived: 0,
+  };
+  if (!tenantId) return { counts: empty, degraded: false };
   try {
     const db = getServiceSupabase();
-    const unique = new Map<string, string>();
-    const pageSize = 1000;
-    for (let from = 0; ; from += pageSize) {
-      let bq = db
-        .from("marketing_asset")
-        .select("brand_slug, brand_name")
-        .eq("tenant_id", tenantId);
-      if (scope !== "all") bq = bq.eq("brand_slug", FOUNDERS_OWN_BRAND);
-      const r = await bq.order("brand_name").range(from, from + pageSize - 1);
-      if (r.error) return [];
-      const rows = (r.data || []) as Array<{ brand_slug: string; brand_name: string }>;
-      for (const row of rows) {
-        if (row.brand_slug && !unique.has(row.brand_slug)) unique.set(row.brand_slug, row.brand_name);
-      }
-      if (rows.length < pageSize) break;
-    }
-    return [...unique].map(([slug, name]) => ({ slug, name }));
+    const counts = { ...empty };
+    const outcome = await pageAll<{ status: string; published_at: string | null }>(
+      "lifecycle",
+      () =>
+        scopeToBrandGroup(
+          db
+            .from("marketing_asset")
+            .select("status, published_at")
+            .eq("tenant_id", tenantId) as unknown as BrandFilterable,
+          group,
+        ) as unknown as PagedQuery<{ status: string; published_at: string | null }>,
+      (rows) => {
+        for (const row of rows) counts[lifecycleOf(row)] += 1;
+      },
+    );
+    // Absent = pre-migration = genuinely empty, and quiet. Partial counts from a
+    // broken read are kept but flagged, because a floor the operator knows is a
+    // floor beats a blank pill row.
+    if (outcome === "absent") return { counts: empty, degraded: false };
+    return { counts, degraded: outcome === "degraded" };
   } catch {
-    return [];
+    return { counts: empty, degraded: true };
+  }
+}
+
+export async function getMarketingFacets(tenantId: string): Promise<MarketingFacets> {
+  if (!tenantId) return EMPTY_MARKETING_FACETS;
+  try {
+    const db = getServiceSupabase();
+    const brands = new Map<string, BrandFacet>();
+    const authors = new Map<string, number>();
+
+    const outcome = await pageAll<{
+      brand_slug: string;
+      brand_name: string;
+      author_email: string | null;
+    }>(
+      "facets",
+      () =>
+        db
+          .from("marketing_asset")
+          .select("brand_slug, brand_name, author_email")
+          .eq("tenant_id", tenantId) as unknown as PagedQuery<{
+          brand_slug: string;
+          brand_name: string;
+          author_email: string | null;
+        }>,
+      (rows) => {
+      for (const row of rows) {
+        if (row.brand_slug) {
+          const prev = brands.get(row.brand_slug);
+          if (prev) prev.count += 1;
+          // Fall back to the slug rather than rendering an unnamed tab: a brand
+          // with a blank brand_name still has to be reachable.
+          else brands.set(row.brand_slug, {
+            slug: row.brand_slug,
+            name: row.brand_name || row.brand_slug,
+            count: 1,
+          });
+        }
+        if (row.author_email) {
+          authors.set(row.author_email, (authors.get(row.author_email) || 0) + 1);
+        }
+      }
+      },
+    );
+    // Pre-migration: the table genuinely is not there, and empty is honest.
+    if (outcome === "absent") return EMPTY_MARKETING_FACETS;
+
+    return {
+      brands: [...brands.values()].sort((a, b) => b.count - a.count || a.name.localeCompare(b.name)),
+      authors: [...authors.entries()]
+        .map(([email, count]) => ({ email, count }))
+        .sort((a, b) => b.count - a.count || a.email.localeCompare(b.email)),
+      degraded: outcome === "degraded",
+    };
+  } catch {
+    // Never throw from a read path (the file convention), but do not claim the
+    // library has no brands either — that would empty the tab bar.
+    return { brands: [], authors: [], degraded: true };
   }
 }
 

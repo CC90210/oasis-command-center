@@ -30,8 +30,22 @@ import {
   mediaKey,
   signMediaUrls,
 } from "@/lib/founders/marketing-queries";
-import { channelLabel, trackLabel, type Channel, type Track } from "@/lib/founders-marketing-core";
+import {
+  channelLabel,
+  isOwnBrand,
+  isRenderableCarousel,
+  parsePlatforms,
+  parseSlideUrls,
+  authorName,
+  platformLabel,
+  stalePublishWarning,
+  trackLabel,
+  type Channel,
+  type Track,
+} from "@/lib/founders-marketing-core";
 import { StatusTag, isPortrait, mediaFrame } from "@/components/founders/marketing-shared";
+import { CarouselFrame } from "@/components/founders/CarouselFrame";
+import { SlideReorder } from "@/components/founders/SlideReorder";
 import { AssetActions } from "@/components/founders/AssetActions";
 import { AssetPublishPanel } from "@/components/founders/AssetPublishPanel";
 
@@ -72,11 +86,34 @@ export default async function AssetDetailPage({
     media.find((m) => m.kind === "preview");
   const image = media.find((m) => m.kind === "image");
 
-  const signed = await signMediaUrls(
-    [video, poster, image]
+  // Slides in the order `media_urls` recorded at migration time — never
+  // re-derived from the media rows, whose row order means nothing. A carousel
+  // read out of order is a different post.
+  const slidePaths = parseSlideUrls(asset.media_urls);
+
+  const signed = await signMediaUrls([
+    ...[video, poster, image]
       .filter(Boolean)
       .map((m) => ({ bucket: m!.storage_bucket, path: m!.storage_path })),
-  );
+    ...slidePaths.map((path) => ({ bucket: "marketing-media", path })),
+  ]);
+  // PATHS AND URLS MUST STAY INDEX-ALIGNED. Mapping then filtering breaks that
+  // the moment one slide fails to sign: every later URL shifts down a position,
+  // so slide 4's image renders as slide 3. On a re-order screen that is not a
+  // cosmetic bug — the operator would rearrange based on a picture that is not
+  // the order, and submit it.
+  //
+  // So they travel as pairs, and a partial signing failure is visible rather
+  // than silently absorbed.
+  const slidePairs = slidePaths
+    .map((path) => ({ path, url: signed.get(mediaKey("marketing-media", path)) }))
+    .filter((s): s is { path: string; url: string } => Boolean(s.url));
+  const slideUrls = slidePairs.map((s) => s.url);
+  const signedSlidePaths = slidePairs.map((s) => s.path);
+  // Re-ordering submits the WHOLE list and the server requires a permutation of
+  // what is stored, so a partial view cannot be reordered safely — offering the
+  // control would produce a 400 the operator could not act on.
+  const slidesFullySigned = slidePairs.length === slidePaths.length && slidePaths.length > 1;
   const url = (m?: typeof video) =>
     m ? signed.get(mediaKey(m.storage_bucket, m.storage_path)) || null : null;
 
@@ -100,6 +137,13 @@ export default async function AssetDetailPage({
     ["Brand", asset.brand_name || asset.brand_slug],
     ["Track", trackLabel(asset.track as Track)],
     ["Channel", channelLabel(asset.channel as Channel)],
+    // Where it actually went, when we know. `channel` is one value; an asset
+    // goes to as many as six places.
+    ["Posted to", parsePlatforms(asset.platforms).map(platformLabel).join(" · ") || null],
+    ["Slides", asset.asset_type === "carousel" ? `${slideUrls.length} of ${asset.slide_count}` : null],
+    // Named, not addressed — two founders contribute here and "Adon" is a
+    // person you recognise where adon@oasisai.work is a string you parse.
+    ["Added by", authorName(asset.author_email)],
     ["Format", asset.format],
     ["Aspect", asset.aspect],
     ["Duration", fmtDuration(asset.duration_s as unknown as number)],
@@ -131,7 +175,9 @@ export default async function AssetDetailPage({
             className={`relative flex items-center justify-center overflow-hidden rounded-xl bg-bg-deep ${frame.className}`}
             style={frame.style}
           >
-            {videoUrl ? (
+            {isRenderableCarousel(asset.asset_type, slideUrls) ? (
+              <CarouselFrame slides={slideUrls} title={asset.title} className="h-full w-full" />
+            ) : videoUrl ? (
               <video
                 src={videoUrl}
                 poster={posterUrl || undefined}
@@ -154,7 +200,7 @@ export default async function AssetDetailPage({
         <div className="space-y-6">
           <Card title="Status" subtitle="Where this sits, and what you can do about it">
             <div className="mb-4 flex items-center gap-3">
-              <StatusTag status={asset.status} />
+              <StatusTag status={asset.status} publishedAt={asset.published_at} />
               {asset.open_reviews ? (
                 <span className="text-xs text-fg-dim">
                   {asset.open_reviews} open review{asset.open_reviews === 1 ? "" : "s"}
@@ -168,13 +214,58 @@ export default async function AssetDetailPage({
             <AssetActions id={asset.id} status={asset.status} title={asset.title} />
           </Card>
 
-          <Card title="Post to channels" subtitle="Goes out through the send gateway">
-            <AssetPublishPanel
-              assetId={asset.id}
-              hasVideo={Boolean(videoUrl)}
-              lastIntent={lastIntent}
-            />
-          </Card>
+          {isRenderableCarousel(asset.asset_type, slideUrls) && (
+            <Card title="Slide order" subtitle="What the audience reads, and what publishes">
+              {slidesFullySigned ? (
+                <SlideReorder
+                  assetId={asset.id}
+                  slidePaths={signedSlidePaths}
+                  slideUrls={slideUrls}
+                />
+              ) : (
+                <p className="text-xs text-fg-dim">
+                  {slidePaths.length - slidePairs.length} of {slidePaths.length} slides could not
+                  be loaded, so the order cannot be changed safely from a partial view. Refresh —
+                  if it persists, the missing objects are named in the server log.
+                </p>
+              )}
+            </Card>
+          )}
+
+          {/* PUBLISHING IS OASIS-OWN ONLY, and the panel now says so instead of
+              offering controls that cannot work.
+
+              This page stopped brand-scoping its read so the four client assets
+              in the Library would have a detail page instead of a dead link. The
+              publish ROUTE kept its own `brand_slug !== "oasis-ai" -> 404`, which
+              is correct — reviewing a client's ad in our library is not licence
+              to broadcast it from CC's accounts. But the panel rendered anyway,
+              so every asset this change made reachable gained a working-looking
+              channel picker whose only possible outcome was `not_found`.
+
+              Making a surface visible is not the same as making every control on
+              it applicable, and shipping the second by accident is how the first
+              becomes a bug report. Caught by Codex's audit of this change. */}
+          {isOwnBrand(asset.brand_slug) ? (
+            <Card title="Post to channels" subtitle="Goes out through the send gateway">
+              <AssetPublishPanel
+                assetId={asset.id}
+                hasVideo={Boolean(videoUrl)}
+                lastIntent={lastIntent}
+                // Server-computed: the panel is a client component and anything
+                // derived from `new Date()` inside it would mismatch on hydration.
+                staleWarning={stalePublishWarning(lastIntent)}
+              />
+            </Card>
+          ) : (
+            <Card title="Post to channels" subtitle="Not available for this brand">
+              <p className="text-xs leading-5 text-fg-dim">
+                {asset.brand_name} is client work. It is here so you can review and reference it,
+                but OASIS&apos;s connected accounts only publish OASIS&apos;s own brand — posting
+                this would put a client&apos;s asset out under our handles.
+              </p>
+            </Card>
+          )}
 
           <Card title="Copy" subtitle="What Maven wrote for this">
             <dl className="space-y-3 text-sm">

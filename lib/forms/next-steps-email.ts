@@ -46,6 +46,7 @@ import { sendGmail } from "@/lib/integrations/submissions-gmail-send";
 import type { BrandKey } from "@/lib/email/brands";
 import { SUNBIZ_LEGAL_FOOTER } from "@/lib/config/email-signature";
 import { listUnsubscribeHeader } from "@/lib/email/tracked-html";
+import { isUniqueViolationError } from "@/lib/api-helpers";
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
@@ -116,7 +117,13 @@ async function sendViaBridge(input: {
       metadata: { status: "sending", intended_source: input.source },
     }).select("id").single();
 
-    if (reservation.error?.code === "23505") {
+    // isUniqueViolationError, not `code === "23505"`. This is the idempotency
+    // CLAIM: a duplicate reservation key means the email already went out, and
+    // this branch returns { sent: true } rather than sending it twice. On Turso
+    // the adapter reports a unique violation as code "TURSO_ADAPTER" with the
+    // detail only in the message, so the Postgres-only check never fired and
+    // the guard against double-sending a transactional email to a lead was dead.
+    if (isUniqueViolationError(reservation.error)) {
       const existing = await input.db.from("lead_interactions")
         .select("id, created_at, metadata")
         .eq("provider", "form_transactional")

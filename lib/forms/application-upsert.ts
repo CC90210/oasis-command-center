@@ -139,8 +139,19 @@ const US_STATE_NAME_TO_CODE: Record<string, string> = {
 function normalize(key: string, value: unknown): unknown {
   if (key === "business_state" && typeof value === "string") {
     const v = value.trim();
+    if (!v) return undefined;
     if (v.length === 2) return v.toUpperCase();
-    return US_STATE_NAME_TO_CODE[v.toLowerCase()] || undefined;
+    const code = US_STATE_NAME_TO_CODE[v.toLowerCase()];
+    if (code) return code;
+    // An unrecognised spelling ("Fla.", "Calif.") used to return undefined,
+    // which this writer treats as "do not write this key" — so a merchant
+    // typing an abbreviation silently ERASED the state instead of storing an
+    // imperfect one. The state is what the renderer splices into the business
+    // address line, so erasing it is how an address loses its state on the
+    // lender-facing PDF. Keep the raw value: a wrong-looking state is visible
+    // and fixable, a deleted one is neither.
+    console.warn("[application-upsert] unrecognised business_state kept as-is", { value: v });
+    return v;
   }
   if (key === "industry" && typeof value === "string") {
     return value.trim().toLowerCase() || undefined;

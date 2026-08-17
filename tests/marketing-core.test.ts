@@ -11,9 +11,26 @@ import {
 } from "../lib/founders/marketing-queries";
 import { join } from "node:path";
 import {
+  BRAND_GROUPS,
   CHANNELS,
   DECISIONS,
+  LIFECYCLE,
+  distributionOf,
+  isLifecycle,
+  lifecycleHint,
+  lifecycleLabel,
+  lifecycleOf,
+  postPermalink,
+  DEFAULT_BRAND_GROUP,
   FOUNDERS_OWN_BRAND,
+  PUBLISH_STALE_AFTER_MINUTES,
+  authorName,
+  brandFilterAllowed,
+  brandGroup,
+  brandGroupFor,
+  claimedBrandSlugs,
+  isBrandGroupKey,
+  stalePublishWarning,
   buildMediaPath,
   channelBreadcrumb,
   channelsForTrack,
@@ -229,15 +246,251 @@ assert.ok(!isOwnBrand(null) && !isOwnBrand(undefined) && !isOwnBrand(""),
     join(process.cwd(), "lib/founders/marketing-queries.ts"), "utf8");
   assert.ok(queries.includes("FOUNDERS_OWN_BRAND"),
     "marketing-queries must scope to FOUNDERS_OWN_BRAND");
-  const scoped = queries.split("from(\"marketing_asset\")").length - 1;
-  const guards = queries.split("FOUNDERS_OWN_BRAND").length - 1;
-  assert.ok(guards >= scoped - 1,
-    `every marketing_asset read should be brand-scoped or explicitly widened ` +
-    `(${scoped} reads, ${guards} guards)`);
-  // The brand filter must NOT be honoured outside the widened scope, or
-  // ?brand=warner walks straight past the boundary.
-  assert.ok(queries.includes('if (opts.scope === "all")'),
-    "a caller must opt in explicitly to see anything but our own work");
+  // Every row-returning read must route through the ONE scoping helper rather
+  // than hand-rolling a `.eq("brand_slug", ...)`. That is what makes the
+  // behavioural assertions further down cover all of them at once.
+  assert.ok(queries.includes("function scopeToBrandGroup"),
+    "the brand boundary must live in one helper, not be re-derived per call site");
+  assert.ok(queries.includes("scopeToBrandGroup(q, group)"),
+    "getMarketingAssets must scope rows through the helper");
+  // The sub-filter must be gated. A bare `if (opts.brand) q = q.eq(...)` is the
+  // hole: ?group=oasis-ai&brand=warner would then put a client's ad on our tab.
+  assert.ok(queries.includes("brandFilterAllowed(opts.brand, group)"),
+    "the ?brand= sub-filter must be checked against the active tab before it is applied");
+
+  // `status` and `lifecycle` filter the SAME column with different vocabularies.
+  // Applying both ANDs them into a contradiction that matches nothing, so the
+  // grid reads "Nothing at this stage" beneath pills showing real counts — and
+  // it is two clicks away (arrive from a Studio pipeline tile, press a pill).
+  assert.ok(queries.includes("if (opts.status && !opts.lifecycle)"),
+    "status must yield to lifecycle — ANDing two vocabularies for one column " +
+    "produces an unreachable-empty grid with no visible cause");
+}
+
+// ── brand GROUPS: the tab taxonomy CC asked for on 2026-08-16 ────────────────
+{
+  // Every named group's own slugs must resolve back to it, or a tab shows rows
+  // from somewhere else.
+  for (const g of BRAND_GROUPS) {
+    for (const slug of g.slugs || []) {
+      assert.equal(brandGroupFor(slug), g.key, `${slug} must resolve to the ${g.key} tab`);
+    }
+  }
+
+  // Exactly one residual group. Two would make brandGroupFor order-dependent;
+  // none would let an unclaimed slug fall through to no tab at all, which is the
+  // invisible-asset bug this taxonomy exists to prevent.
+  assert.equal(
+    BRAND_GROUPS.filter((g) => g.slugs === null).length,
+    1,
+    "exactly one residual group, or an unclaimed brand renders in zero tabs (or two)",
+  );
+
+  // No slug may be claimed twice — brandGroupFor takes the first match, so a
+  // duplicate would silently hide rows in whichever tab lost the race.
+  const claimed = claimedBrandSlugs();
+  assert.equal(new Set(claimed).size, claimed.length, "no brand slug may be claimed by two groups");
+
+  // THE RESIDUAL PROPERTY, which is the whole reason Clients is not a list.
+  // A client Maven registers tomorrow must land in a tab WITHOUT a deploy here.
+  // If someone later "tidies" this into slugs: ["warner","blyss","arthrisil"],
+  // this is the assertion that stops them.
+  assert.equal(brandGroupFor("warner"), "clients");
+  assert.equal(brandGroupFor("blyss"), "clients");
+  assert.equal(brandGroupFor("arthrisil"), "clients");
+  assert.equal(brandGroupFor("a-client-registered-tomorrow"), "clients",
+    "an unknown brand must fall into the residual tab, never into none");
+  assert.equal(brandGroupFor(null), "clients");
+  assert.equal(brandGroupFor(undefined), "clients");
+  assert.equal(brandGroupFor(""), "clients");
+
+  // The default tab is OASIS's own work — widening the taxonomy must not change
+  // what the page opens on.
+  assert.equal(DEFAULT_BRAND_GROUP, FOUNDERS_OWN_BRAND);
+  assert.ok(isBrandGroupKey("clients") && isBrandGroupKey("oasis-ai"));
+  assert.ok(!isBrandGroupKey("warner"), "a brand slug is not a group key");
+  assert.ok(!isBrandGroupKey("") && !isBrandGroupKey(null) && !isBrandGroupKey(undefined));
+
+  // ── the sub-filter may narrow a tab, never cross one ───────────────────────
+  // This is the security-shaped half. ?brand= arrives from the URL and a founder
+  // can type anything into it.
+  assert.ok(brandFilterAllowed("warner", "clients"), "a client narrows the Clients tab");
+  assert.ok(brandFilterAllowed("oasis-ai", "oasis-ai"));
+  assert.equal(brandFilterAllowed("warner", "oasis-ai"), false,
+    "?group=oasis-ai&brand=warner must NOT put a client's ad on the OASIS tab");
+  assert.equal(brandFilterAllowed("oasis-ai", "clients"), false,
+    "and the reverse must not pull our own work onto the Clients tab");
+  assert.equal(brandFilterAllowed("conaugh", "music"), false);
+
+  // TAB LABELS NAME A ROLE, NOT A PERSON. CC: "we should just do like personal
+  // ... so it should be Oasis AI personal music and then clients." A tab named
+  // after a human sits oddly beside a company and a genre; naming the role puts
+  // all four on one axis. The SLUG stays `conaugh` — it is a stored value and
+  // renaming it would orphan every row that carries it.
+  assert.equal(brandGroup("conaugh").label, "Personal");
+  assert.deepEqual(brandGroup("conaugh").slugs, ["conaugh"],
+    "the label may be renamed freely; the slug is data and must not move");
+  assert.deepEqual(
+    BRAND_GROUPS.map((g) => g.label),
+    ["OASIS AI", "Personal", "Music", "Clients"],
+    "the four tabs CC asked for, in order",
+  );
+
+  // ── provenance reads as a person ──────────────────────────────────────────
+  // Adon co-founds OASIS AI and contributes to this library, so "added by" has
+  // to name him rather than print a mailbox.
+  assert.equal(authorName("adon@oasisai.work"), "Adon");
+  assert.equal(authorName("conaugh@oasisai.work"), "CC");
+  assert.equal(authorName("ADON@OasisAI.work"), "Adon", "case and domain casing must not matter");
+  // An unknown contributor is still shown — provenance you cannot read beats
+  // provenance you cannot see.
+  assert.equal(authorName("someone@else.com"), "someone");
+  assert.equal(authorName(null), "unknown");
+  assert.equal(authorName(""), "unknown");
+
+  // Every group must be renderable: a tab with no label or no empty-state copy
+  // ships a blank string to the screen.
+  for (const g of BRAND_GROUPS) {
+    assert.ok(g.label.trim().length > 0, `${g.key} needs a label`);
+    assert.ok(g.empty.trim().length > 0, `${g.key} needs empty-state copy`);
+    assert.equal(brandGroup(g.key), g, "brandGroup must round-trip its own key");
+  }
+}
+
+// ── lifecycle: review state and distribution state are different questions ───
+// CC, 2026-08-16: "Are these videos that we haven't posted yet? ... Have they
+// not been posted at all, ever?" He could not tell, because `status` conflates
+// "has CC ruled on it" with "did it go out".
+{
+  // DISTRIBUTION IS EVIDENCE-ONLY, and from ONE column. `platforms` was
+  // backfilled from `channel` and holds single-element copies of it, so it
+  // records intent and must never count as proof of delivery.
+  assert.equal(distributionOf({ published_at: null }), "never_posted");
+  assert.equal(distributionOf({ published_at: "2026-08-01T00:00:00Z" }), "live");
+
+  // ONE SIGNAL ONLY. A second predicate visible to this function but not to the
+  // SQL in getMarketingAssets makes the pills and the grid disagree — "Posted 3"
+  // over an empty grid. An earlier draft accepted an `analytics_posts` count
+  // here and it was both dead (nothing populated it) and a desync waiting to
+  // happen. Extra keys must not change the answer.
+  assert.equal(
+    distributionOf({ published_at: null, analytics_posts: 3 } as { published_at: null }),
+    "never_posted",
+    "distribution must read published_at ALONE — the SQL filter cannot see anything else, " +
+      "so a second signal here silently splits the counts from the grid",
+  );
+
+  // THE WORLD OUTRANKS THE BOOKKEEPING. An asset that demonstrably went out is
+  // Posted even while its status column still says in_review — which is the
+  // exact state library_sync.py leaves rows in.
+  assert.equal(lifecycleOf({ status: "in_review", published_at: "2026-08-01T00:00:00Z" }), "live");
+
+  assert.equal(lifecycleOf({ status: "in_review", published_at: null }), "needs_review");
+  assert.equal(lifecycleOf({ status: "draft", published_at: null }), "needs_review");
+  assert.equal(lifecycleOf({ status: "approved", published_at: null }), "approved");
+
+  // Archived and rejected both mean "shelved", and both must be REACHABLE.
+  // CC archived a video and reported it "completely gone" — it was in the table
+  // the whole time with no bucket that could show it.
+  assert.equal(lifecycleOf({ status: "archived", published_at: null }), "archived");
+  assert.equal(lifecycleOf({ status: "rejected", published_at: null }), "archived");
+  // Archived outranks even a publish: something taken down is not "Posted" work
+  // you are still running.
+  assert.equal(
+    lifecycleOf({ status: "archived", published_at: "2026-08-01T00:00:00Z" }),
+    "archived",
+    "an archived asset stays archived — shelving is a decision, not a metric",
+  );
+
+  // Every bucket must be renderable and reachable from the URL.
+  for (const l of LIFECYCLE) {
+    assert.ok(isLifecycle(l));
+    assert.ok(lifecycleLabel(l).trim().length > 0, `${l} needs a label`);
+    assert.ok(lifecycleHint(l).trim().length > 0, `${l} needs a hint`);
+  }
+  assert.ok(!isLifecycle("published"), "the raw status vocabulary is not the lifecycle vocabulary");
+  assert.ok(!isLifecycle("") && !isLifecycle(null) && !isLifecycle(undefined));
+}
+
+// ── permalinks: click a metric, reach the post ───────────────────────────────
+// CC: "it should be a clickable link that takes me to that Instagram post."
+{
+  assert.equal(
+    postPermalink("youtube", "-5huRgnq-Qk"),
+    "https://www.youtube.com/watch?v=-5huRgnq-Qk",
+  );
+  assert.equal(
+    postPermalink("tiktok", "7665918344775699729", "ccmckennaa"),
+    "https://www.tiktok.com/@ccmckennaa/video/7665918344775699729",
+  );
+  assert.equal(
+    postPermalink("linkedin", "urn:li:ugcPost:7487100000000000000"),
+    "https://www.linkedin.com/feed/update/urn:li:ugcPost:7487100000000000000/",
+  );
+
+  // INSTAGRAM IS THE TRAP. post_analytics stores a NUMERIC media id, and
+  // /p/<id> needs the base64 shortcode — building one from the number yields a
+  // 404 that looks like working accounting. Link the account instead.
+  assert.equal(
+    postPermalink("instagram", "17874750624553086", "oasisaisolutions"),
+    "https://www.instagram.com/oasisaisolutions/",
+    "a numeric IG media id must NOT be pasted into /p/ — it does not resolve",
+  );
+  assert.ok(
+    !postPermalink("instagram", "17874750624553086")?.includes("/p/"),
+    "and with no account to fall back to, no link at all beats a broken one",
+  );
+
+  // Never invent a URL from nothing.
+  assert.equal(postPermalink("instagram", null), null);
+  assert.equal(postPermalink("youtube", ""), null);
+  assert.equal(postPermalink("threads", "123"), null, "no account, no link");
+  assert.equal(postPermalink("some-new-network", "abc"), null);
+}
+
+// ── a publish request nothing ever collected ─────────────────────────────────
+// The Post panel claimed "the publisher picks it up within a minute". The drain
+// exists and is healthy, but it runs on the OPERATOR'S MACHINE — so whenever
+// that machine is off, the row waits indefinitely under a green success message
+// and the panel cannot tell that state from a publish in flight. These pin the
+// replacement: the page notices, from the row's own age, that nothing came.
+{
+  const T0 = new Date("2026-08-16T12:00:00Z");
+  const at = (mins: number) =>
+    new Date(T0.getTime() + mins * 60_000);
+  const queued = { state: "queued", created_at: T0.toISOString() };
+
+  assert.equal(stalePublishWarning(queued, at(1)), null, "a fresh request is just a fresh request");
+  assert.equal(stalePublishWarning(queued, at(PUBLISH_STALE_AFTER_MINUTES - 1)), null,
+    "inside the window, silence — a real drain can legitimately take minutes");
+
+  const warned = stalePublishWarning(queued, at(PUBLISH_STALE_AFTER_MINUTES));
+  assert.ok(warned, "past the window, the operator must be told nothing collected it");
+  assert.match(warned!, /nothing has been posted/i,
+    "the warning must state the consequence, not just the age");
+
+  // Terminal and in-flight states mean SOMETHING saw the row, which is the fact
+  // this warning exists to establish. Warning about them would cry wolf.
+  for (const state of ["running", "done", "failed"]) {
+    assert.equal(
+      stalePublishWarning({ state, created_at: T0.toISOString() }, at(60 * 24 * 7)),
+      null,
+      `${state} means a consumer picked it up — no warning`,
+    );
+  }
+
+  // Units read correctly at each scale; "Queued 180 minutes ago" is worse copy
+  // than "3 hours ago" and this is where an off-by-60 would hide.
+  assert.match(stalePublishWarning(queued, at(30))!, /30 minutes ago/);
+  assert.match(stalePublishWarning(queued, at(60))!, /1 hour ago/);
+  assert.match(stalePublishWarning(queued, at(180))!, /3 hours ago/);
+  assert.match(stalePublishWarning(queued, at(60 * 24 * 2))!, /2 days ago/);
+
+  // Never throw on bad input: this renders inside a panel, and a crash here
+  // would take the whole detail page with it.
+  assert.equal(stalePublishWarning({ state: "queued", created_at: "not-a-date" }), null);
+  assert.equal(stalePublishWarning(null), null);
+  assert.equal(stalePublishWarning(undefined), null);
 }
 
 // ── the brand boundary, exercised against DATA rather than source text ────────

@@ -22,6 +22,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { getSessionUser, getServiceSupabase } from "@/lib/supabase-server";
 import { resolveDataTenant } from "@/lib/manifest/tenant-scope";
 import { manifestExists } from "@/lib/manifest/loader";
+import { insertChunkSalvagingDuplicates } from "@/lib/api-helpers";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -192,23 +193,14 @@ export async function POST(
     const CHUNK = 500;
     for (let i = 0; i < toInsert.length; i += CHUNK) {
       const chunk = toInsert.slice(i, i + CHUNK);
-      const { data: insertData, error: insertErr } = await db
-        .from("cold_leads")
-        .insert(chunk)
-        .select("id");
-
-      if (insertErr) {
-        // On conflict (race with another concurrent import), count as duplicates.
-        if (insertErr.code === "23505") {
-          duplicates += chunk.length;
-        } else {
-          return NextResponse.json(
-            { ok: false, error: "db_error", detail: insertErr.message },
-            { status: 500 },
-          );
-        }
-      } else {
-        inserted += insertData?.length ?? 0;
+      const outcome = await insertChunkSalvagingDuplicates(db, "cold_leads", chunk);
+      inserted += outcome.inserted;
+      duplicates += outcome.duplicates;
+      if (outcome.failure) {
+        return NextResponse.json(
+          { ok: false, error: "db_error", detail: outcome.failure.message },
+          { status: 500 },
+        );
       }
     }
   }

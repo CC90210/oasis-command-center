@@ -41,6 +41,9 @@
 
 import { useState } from "react";
 import { AlertCircle, CheckCircle2, FileText, Loader2 } from "lucide-react";
+// Pure module, no server-only import — unlike application-upsert.ts, which is
+// why the state map below is duplicated rather than shared.
+import { isAcceptableCaptureAddress } from "@/lib/address/us-address";
 
 type Phase = "idle" | "saving" | "success";
 
@@ -54,7 +57,8 @@ type FieldKind =
   | "date"
   | "ssn"
   | "state"
-  | "industry";
+  | "industry"
+  | "address";
 
 type FieldDef = {
   /** Canonical application data key (lib/forms/application-upsert.ts whitelist). */
@@ -75,7 +79,7 @@ const SECTIONS: { title: string; hint?: string; fields: FieldDef[] }[] = [
       { key: "business_legal_name", label: "Legal business name", kind: "text", wide: true },
       { key: "dba", label: "DBA", kind: "text" },
       { key: "entity_type", label: "Entity type", kind: "text", placeholder: "LLC, Corp, Sole Prop…" },
-      { key: "business_address", label: "Business address", kind: "text", wide: true },
+      { key: "business_address", label: "Business address", kind: "address", wide: true },
       { key: "business_state", label: "State", kind: "state", placeholder: "FL" },
       { key: "tax_id_ein", label: "EIN / Federal Tax ID", kind: "text", placeholder: "12-3456789" },
       { key: "business_start_date", label: "Business start date", kind: "date", placeholder: "YYYY-MM-DD" },
@@ -101,7 +105,7 @@ const SECTIONS: { title: string; hint?: string; fields: FieldDef[] }[] = [
       { key: "owner_ssn", label: "SSN", kind: "ssn", placeholder: "123-45-6789", sensitive: true },
       { key: "owner_dob", label: "Date of birth", kind: "date", placeholder: "YYYY-MM-DD", sensitive: true },
       { key: "owner_cell", label: "Cell", kind: "phone" },
-      { key: "owner_home_address", label: "Home address", kind: "text", wide: true },
+      { key: "owner_home_address", label: "Home address", kind: "address", wide: true },
     ],
   },
   {
@@ -113,7 +117,7 @@ const SECTIONS: { title: string; hint?: string; fields: FieldDef[] }[] = [
       { key: "partner_ssn", label: "SSN", kind: "ssn", placeholder: "123-45-6789", sensitive: true },
       { key: "partner_dob", label: "Date of birth", kind: "date", placeholder: "YYYY-MM-DD", sensitive: true },
       { key: "partner_cell", label: "Cell", kind: "phone" },
-      { key: "partner_home_address", label: "Home address", kind: "text", wide: true },
+      { key: "partner_home_address", label: "Home address", kind: "address", wide: true },
     ],
   },
   {
@@ -189,7 +193,7 @@ function toIsoDate(raw: string): string | null {
 type NormResult = { ok: true; value: string | number | null } | { ok: false; error: string };
 
 /** Normalize a CHANGED field for the PATCH. Empty string clears (→ null). */
-function normalizeField(def: FieldDef, raw: string): NormResult {
+function normalizeField(def: FieldDef, raw: string, businessState = ""): NormResult {
   const v = raw.trim();
   if (!v) return { ok: true, value: null };
   switch (def.kind) {
@@ -197,6 +201,20 @@ function normalizeField(def: FieldDef, raw: string): NormResult {
       const e = v.toLowerCase();
       if (!/\S+@\S+\.\S+/.test(e)) return { ok: false, error: "Enter a valid email address." };
       return { ok: true, value: e };
+    }
+    case "address": {
+      // Only CHANGED fields reach normalizeField, and that is the whole design.
+      // ~1,000 existing applications carry a partial address; re-validating them
+      // would block an operator from editing an unrelated field on a record they
+      // did not break. An address the operator actually TOUCHES must come out
+      // complete, so editing can only improve the data, never add a new bare
+      // street line. Same rule as the merchant form (lib/address/us-address.ts).
+      const gate = isAcceptableCaptureAddress(
+        v,
+        def.key === "business_address" ? businessState : undefined,
+      );
+      if (!gate.ok) return { ok: false, error: gate.message };
+      return { ok: true, value: v };
     }
     case "phone": {
       const digits = normPhoneDigits(v);
@@ -307,7 +325,12 @@ export function ApplicationEditForm({
     const nextErrors: Record<string, string> = {};
     const patch: Record<string, string | number | null> = {};
     for (const f of dirtyKeys) {
-      const res = normalizeField(f, draft[f.key] ?? "");
+      // The business address holds its state in a SEPARATE field, so the gate
+      // needs it or a legitimate "123 Biscayne Blvd, Miami, 33101" + state=FL —
+      // which the merchant form and the renderer both accept — would be
+      // rejected here as stateless. Read the draft so an unsaved state edit in
+      // the same session counts. (Codex P2.)
+      const res = normalizeField(f, draft[f.key] ?? "", draft.business_state ?? "");
       if (res.ok) patch[f.key] = res.value;
       else nextErrors[f.key] = res.error;
     }

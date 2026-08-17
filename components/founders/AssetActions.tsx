@@ -25,9 +25,15 @@ import { useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import type { AssetStatus } from "@/lib/founders-marketing-core";
 
-type Verdict = "approved" | "archived";
+// `in_review` is a verdict target too — it is how Restore undoes an archive.
+// The [id] route has always accepted it (REACHABLE); only the button was absent.
+type Verdict = "approved" | "archived" | "in_review";
 
-const LABEL: Record<Verdict, string> = { approved: "Approve", archived: "Archive" };
+const LABEL: Record<Verdict, string> = {
+  approved: "Approve",
+  archived: "Archive",
+  in_review: "Restore",
+};
 
 export function AssetActions({
   id,
@@ -126,6 +132,35 @@ export function AssetActions({
             className="rounded-md px-2.5 py-1 text-[11px] text-fg-dim transition-colors hover:text-fg"
           >
             Keep
+          </button>
+        </div>
+      ) : shown === "archived" ? (
+        /*
+         * ARCHIVE HAD NO INVERSE. CC, 2026-08-16: "I just archived a video, and
+         * it's completely gone now. I have no idea where it's gone, and I want it
+         * back, but I just don't know how to get it."
+         *
+         * The row was never gone — it was intact in the database the whole time,
+         * and the Library simply had no filter that could show an archived asset
+         * and no control that could return one. The API has accepted `in_review`
+         * as a target since it shipped (REACHABLE in the [id] route), so the
+         * capability existed and only the button was missing.
+         *
+         * An action that looks destructive, is offered one click from Approve,
+         * and has no visible way back is a trapdoor. Restore puts it back where
+         * it was: awaiting a verdict.
+         */
+        <div className="flex items-center gap-2">
+          <span className="flex-1 text-[11px] text-fg-dim">
+            Archived — nothing was deleted.
+          </span>
+          <button
+            type="button"
+            onClick={() => verdict("in_review")}
+            disabled={busy}
+            className="rounded-md bg-accent/15 px-2.5 py-1 text-[11px] font-semibold text-accent transition-colors hover:bg-accent/25 disabled:opacity-40"
+          >
+            Restore
           </button>
         </div>
       ) : (

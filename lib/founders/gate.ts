@@ -31,6 +31,14 @@ export type FounderContext = {
   tenantId: string;
   profileId: string;
   displayName: string | null;
+  /**
+   * The founder's email, for provenance.
+   *
+   * Two people use this portal — CC and Adon — and a display name is not an
+   * identity you can argue with later ("adon" vs "Adon Bousseau" vs null).
+   * Every row either of them creates is stamped with this.
+   */
+  email: string | null;
 };
 
 /**
@@ -45,6 +53,7 @@ export async function resolveFounder(): Promise<FounderContext | null> {
     tenantId: profile.tenant_id,
     profileId: profile.id,
     displayName: profile.display_name || profile.full_name || null,
+    email: profile.email || null,
   };
 }
 

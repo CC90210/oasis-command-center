@@ -28,6 +28,7 @@ import { NextResponse } from "next/server";
 
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { resolveFounder } from "@/lib/founders/gate";
+import { methodNotHere } from "@/lib/founders/method-guard";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -113,7 +114,24 @@ export async function POST(req: Request, ctx: Ctx) {
     .eq("tenant_id", founder.tenantId)
     .eq("asset_id", id)
     .limit(1);
-  if (!media.error && !(media.data || []).length) {
+  // Same fail-closed rule as the in-flight check below, and for the same reason:
+  // `!media.error && ...` skips the check exactly when the read broke. Queueing
+  // a publish we could not verify has media attached sends the drain to fetch
+  // nothing. It records an honest failure rather than posting a blank, so this
+  // is the cheaper of the two, but "cheaper" is not a reason to leave a guard
+  // that disables itself under load.
+  if (media.error) {
+    console.warn("[founders:publish] media check failed", media.error.message);
+    return NextResponse.json(
+      {
+        ok: false,
+        error: "media_check_failed",
+        detail: "Could not confirm this asset has media attached, so nothing was queued. Try again.",
+      },
+      { status: 503 },
+    );
+  }
+  if (!(media.data || []).length) {
     return NextResponse.json({ ok: false, error: "no_media_attached" }, { status: 400 });
   }
 
@@ -127,7 +145,23 @@ export async function POST(req: Request, ctx: Ctx) {
     .eq("asset_id", id)
     .in("state", ["queued", "running"])
     .limit(1);
-  if (!inflight.error && (inflight.data || []).length) {
+  // FAIL CLOSED. `!inflight.error && ...` skipped the guard on exactly the case
+  // it exists for: when the read fails we do not know whether a publish is in
+  // flight, and the sentence three lines up is "there is no unsending". A
+  // duplicate post is unrecoverable; a 503 costs one retry.
+  if (inflight.error) {
+    console.warn("[founders:publish] in-flight check failed", inflight.error.message);
+    return NextResponse.json(
+      {
+        ok: false,
+        error: "inflight_check_failed",
+        detail:
+          "Could not confirm whether a publish is already running for this asset, so nothing was queued. Try again.",
+      },
+      { status: 503 },
+    );
+  }
+  if ((inflight.data || []).length) {
     return NextResponse.json(
       { ok: false, error: "already_queued", detail: "A publish for this asset is already in flight." },
       { status: 409 },
@@ -162,3 +196,11 @@ export async function POST(req: Request, ctx: Ctx) {
     asset: { id: asset.data.id, title: asset.data.title },
   });
 }
+
+// Verbs this route does not implement answer 404, not the framework's 405.
+// A 405 confirms the path is real, which is exactly what lib/founders/gate.ts
+// refuses to tell a tenant that is not ours. See lib/founders/method-guard.ts.
+export const GET = methodNotHere;
+export const PUT = methodNotHere;
+export const PATCH = methodNotHere;
+export const DELETE = methodNotHere;

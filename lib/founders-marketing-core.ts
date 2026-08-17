@@ -54,6 +54,126 @@ export type AssetStatus = (typeof STATUSES)[number];
  */
 export const FOUNDERS_OWN_BRAND = "oasis-ai";
 
+/**
+ * ─────────────────────────────────────────────────────────── brand groups
+ *
+ * CC, 2026-08-16: *"We should have personal brands, so it should be like:
+ * Oasis AI / CC / Adon / Music / stuff like that. There need to be separate
+ * tabs for this within the marketing page."*
+ *
+ * The Library was scoped to `oasis-ai` alone, so four client deliverables
+ * (Warner x2, Arthrisil, blyss) had been in the table the whole time and CC had
+ * never seen one of them. The header said "43 assets across every channel",
+ * which was true of one brand only.
+ *
+ * WHY `clients` IS RESIDUAL AND NOT A LIST.
+ * The obvious shape is `slugs: ["warner", "blyss", "arthrisil", "sunbiz-funding"]`.
+ * That reintroduces the exact bug this replaces, one client later: Maven
+ * registers `brand_slug='newco'`, it matches no group, and it renders in no tab
+ * — invisible again, and this time silently, because the row IS in the table and
+ * every total includes it. A residual group cannot orphan a brand: every slug
+ * that no named group claims belongs to Clients by construction.
+ *
+ * So adding a CLIENT is a Maven-side registration that needs no deploy here.
+ * Adding a PERSONAL brand — a new tab — is a deliberate edit to this list.
+ *
+ * ADON IS NOT HERE, deliberately. CC's voice note said "CC Adon", which read as
+ * either two brands or one phrase; his call on 2026-08-16 was that Adon co-works
+ * the Library rather than owning a brand, so he belongs in an author facet and
+ * not a tab. See the author note in lib/founders/marketing-queries.ts.
+ */
+export type BrandGroupKey = "oasis-ai" | "conaugh" | "music" | "clients";
+
+export type BrandGroup = {
+  key: BrandGroupKey;
+  label: string;
+  /** Slugs this group claims. `null` means RESIDUAL — see the note above. */
+  slugs: readonly string[] | null;
+  /** Copy for the group when it holds nothing yet. */
+  empty: string;
+};
+
+export const BRAND_GROUPS: readonly BrandGroup[] = [
+  {
+    key: "oasis-ai",
+    label: "OASIS AI",
+    slugs: [FOUNDERS_OWN_BRAND],
+    empty: "Nothing registered for OASIS yet.",
+  },
+  {
+    // "Personal", not "Conaugh McKenna". CC, 2026-08-16: *"I think you're
+    // confusing the like music and Kona McKenna and Oasis AI ... we should just
+    // do like personal so it should be Oasis AI personal music and then
+    // clients."* Naming a tab after a person reads as "posts about Conaugh"
+    // beside a company tab and a genre tab; naming it after its ROLE puts all
+    // four on one axis — whose brand is this for. The slug stays `conaugh`
+    // because it is a stored value and renaming it would orphan every row.
+    key: "conaugh",
+    label: "Personal",
+    slugs: ["conaugh"],
+    empty: "Nothing under the personal brand yet — Maven registers here with brand_slug='conaugh'.",
+  },
+  {
+    key: "music",
+    label: "Music",
+    slugs: ["nostalgic-requests"],
+    empty: "Nothing under the music brand yet — Maven registers here with brand_slug='nostalgic-requests'.",
+  },
+  {
+    key: "clients",
+    label: "Clients",
+    slugs: null,
+    empty: "No client deliverables in the library.",
+  },
+];
+
+/**
+ * The tab you land on. OASIS's own work stays the default view, which is what
+ * the founders portal has always shown — widening the taxonomy must not quietly
+ * change what the page opens on.
+ */
+export const DEFAULT_BRAND_GROUP: BrandGroupKey = "oasis-ai";
+
+export function isBrandGroupKey(v: unknown): v is BrandGroupKey {
+  return typeof v === "string" && BRAND_GROUPS.some((g) => g.key === v);
+}
+
+export function brandGroup(key: BrandGroupKey): BrandGroup {
+  const found = BRAND_GROUPS.find((g) => g.key === key);
+  // Unreachable via isBrandGroupKey, but throwing beats returning the WRONG
+  // group: every caller uses the result to decide which rows a founder sees.
+  if (!found) throw new Error(`unknown brand group: ${key}`);
+  return found;
+}
+
+/** Every slug a named group claims — the complement of this is the Clients group. */
+export function claimedBrandSlugs(): string[] {
+  return BRAND_GROUPS.flatMap((g) => (g.slugs ? [...g.slugs] : []));
+}
+
+/**
+ * Which tab a brand belongs in. Unclaimed slugs fall to the residual group
+ * rather than to nothing, so a brand can never be registered into invisibility.
+ */
+export function brandGroupFor(slug: string | null | undefined): BrandGroupKey {
+  if (!slug) return "clients";
+  const named = BRAND_GROUPS.find((g) => g.slugs?.includes(slug));
+  return named ? named.key : "clients";
+}
+
+/**
+ * May a `?brand=` from the URL be applied while viewing this tab?
+ *
+ * The sub-filter narrows WITHIN a group; it must never widen ACROSS one.
+ * Without this, `?group=oasis-ai&brand=warner` typed into the address bar would
+ * put a client's ad on the OASIS tab — the same hole the old `scope !== "all"`
+ * check existed to close, which is why the rule lives in one tested function
+ * rather than being re-derived at each call site.
+ */
+export function brandFilterAllowed(slug: string, group: BrandGroupKey): boolean {
+  return brandGroupFor(slug) === group;
+}
+
 /** Is this asset OASIS's own work rather than a client deliverable? */
 export function isOwnBrand(brandSlug: string | null | undefined): boolean {
   return brandSlug === FOUNDERS_OWN_BRAND;
@@ -145,6 +265,101 @@ export function reviewDecisionFor(status: AssetStatus): string | null {
     default:
       return null;        // in_review, draft, scheduled, published: no verdict
   }
+}
+
+/**
+ * Read the `platforms` column, whatever shape the driver hands back.
+ *
+ * Turso stores it as TEXT holding JSON; a PostgREST/jsonb path would hand back a
+ * real array. Both are normal, so both are accepted. A malformed value degrades
+ * to an empty list rather than throwing — losing the platform list must not cost
+ * the caller the whole asset, which is the same lesson as the publish-intent
+ * reader.
+ */
+export function parseStringArray(raw: unknown): string[] {
+  if (Array.isArray(raw)) return raw.filter((x): x is string => typeof x === "string");
+  if (typeof raw === "string" && raw.trim()) {
+    try {
+      const parsed = JSON.parse(raw);
+      return Array.isArray(parsed) ? parsed.filter((x): x is string => typeof x === "string") : [];
+    } catch {
+      return [];
+    }
+  }
+  return [];
+}
+
+/** Where the asset went. */
+export const parsePlatforms = parseStringArray;
+
+/**
+ * Ordered slide storage paths.
+ *
+ * Same tolerant reader, named for what it is at the call site — one
+ * implementation, so a fix to the parsing reaches both. ORDER IS PRESERVED
+ * exactly as stored: a carousel read out of order is a different post.
+ */
+export const parseSlideUrls = parseStringArray;
+
+/**
+ * Who added an asset, as a person rather than a mailbox.
+ *
+ * CC, 2026-08-16: *"When I mentioned Adon, you have to remember he's our
+ * co-founder for OASIS AI, so Adon will contribute to this. We need to make sure
+ * that he's getting listed in the metadata in terms of what it says and whose it
+ * added by."*
+ *
+ * The detail page rendered `author_email` raw, so provenance on a co-founded
+ * library read as an address. Both founders are named here; anything else falls
+ * back to the local part, and an unknown address is still shown rather than
+ * hidden — provenance you cannot read beats provenance you cannot see.
+ *
+ * This is DISPLAY ONLY. The stored value stays the email, because that is the
+ * identity you can still argue with in six months.
+ */
+const FOUNDER_NAMES: Record<string, string> = {
+  "conaugh@oasisai.work": "CC",
+  "adon@oasisai.work": "Adon",
+};
+
+export function authorName(email: string | null | undefined): string {
+  const e = (email || "").trim().toLowerCase();
+  if (!e) return "unknown";
+  return FOUNDER_NAMES[e] || e.split("@")[0] || e;
+}
+
+/** Display label for a platform key. Falls back to the key rather than hiding it. */
+export function platformLabel(key: string): string {
+  const NAMES: Record<string, string> = {
+    instagram: "Instagram",
+    tiktok: "TikTok",
+    youtube: "YouTube",
+    twitter: "X",
+    x: "X",
+    threads: "Threads",
+    linkedin: "LinkedIn",
+    facebook: "Facebook",
+    meta: "Meta",
+    google: "Google",
+  };
+  return NAMES[key] || key;
+}
+
+/** The asset shapes the Library knows how to render. */
+export const ASSET_TYPES = ["video", "single_image", "carousel"] as const;
+export type AssetType = (typeof ASSET_TYPES)[number];
+
+/**
+ * Is this asset a carousel WE CAN ACTUALLY RENDER?
+ *
+ * Deliberately not `asset_type === "carousel"` alone. A row can claim to be a
+ * carousel and have one slide registered — that is exactly the state the Library
+ * was in before the backfill, six rows printed "01/05 · swipe →" on the cover
+ * while the database held a single image. Claiming is not having, so the slide
+ * list has to actually be there.
+ */
+export function isRenderableCarousel(assetType: unknown, slides: readonly unknown[]): boolean {
+  return assetType === "carousel" && slides.length > 1;
 }
 
 export function isAssetStatus(v: unknown): v is AssetStatus {
@@ -335,6 +550,240 @@ export function freshnessLabel(capturedAt: string | null | undefined, now = new 
   if (hours < 24) return `${hours}h ago`;
   const days = Math.floor(hours / 24);
   return `${days}d ago`;
+}
+
+/**
+ * ─────────────────────────────────────── review state vs distribution state
+ *
+ * CC, 2026-08-16: *"Are these videos that we haven't posted yet? ... We have 43
+ * assets. Are all of these not posted yet? Have they not been posted at all,
+ * ever?"*
+ *
+ * He could not tell, and the page was the reason. `status` conflates two
+ * unrelated questions into one column:
+ *
+ *   1. Has CC passed a verdict on this?      draft / in_review / approved / rejected
+ *   2. Has it actually gone out?             published / (nothing)
+ *
+ * A grid where all 41 read IN REVIEW answers neither. It looks like a backlog of
+ * work waiting on him, when what it mostly means is "produced, never scheduled".
+ *
+ * WHAT THE DATA ACTUALLY SAYS (live, 2026-08-16). Of 43 OASIS assets: one has a
+ * `published_at`, none have a linked `post_analytics` row. Meanwhile
+ * `post_analytics` holds 100 real posts across five accounts with genuine view
+ * counts. Those are not the same content — the Library is Maven's produced ad
+ * creative, and the 100 live posts come from the daily poster reading
+ * data/post_queue. TWO PIPELINES THAT HAVE NEVER BEEN JOINED, which is why the
+ * Library can honestly say "none of this has been posted" while the accounts are
+ * clearly active.
+ *
+ * So distribution is derived from EVIDENCE, never from `status`:
+ * a publish timestamp, or an analytics row proving the platform accepted it.
+ * `platforms` alone does NOT count — it was backfilled from `channel` and holds
+ * single-element copies of it, so it records intent, not delivery.
+ */
+export type Distribution = "live" | "never_posted";
+
+/**
+ * ONE SIGNAL, DELIBERATELY: `published_at`.
+ *
+ * This briefly also accepted an `analytics_posts` count, on the theory that a
+ * linked post_analytics row proves a platform took it. True, and still the wrong
+ * design, for two reasons found in review:
+ *
+ *  1. IT WAS DEAD. No reader ever populated the field, so the branch could not
+ *     fire — code that reads as live logic and is unreachable, which is how a
+ *     future change "fixes" something that was never running.
+ *
+ *  2. IT WOULD HAVE DESYNCED THE PAGE. getLifecycleCounts buckets in JS through
+ *     this function, while getMarketingAssets filters in SQL on `published_at`
+ *     alone. A second signal here that SQL cannot see makes the pills and the
+ *     grid disagree — "Posted 3" over an empty grid — and they agreed only
+ *     because the field was always undefined. Two code paths deciding one
+ *     question have to consult the same column.
+ *
+ * If analytics should ever confer "posted", the fix is to backfill
+ * `published_at` from post_analytics — a DATA correction both paths already
+ * read — never a second predicate in the one path that happens to be JavaScript.
+ */
+export function distributionOf(asset: { published_at?: string | null }): Distribution {
+  return asset.published_at ? "live" : "never_posted";
+}
+
+/**
+ * The lifecycle buckets the Library filters on — the "proper organisation" CC
+ * asked for, with review and distribution kept apart.
+ *
+ * `archived` is FIRST-CLASS and reachable, which it was not: archiving removed an
+ * asset from every view with no filter that could show it again and no button to
+ * bring it back. CC archived a video and reported it "completely gone". It was
+ * never gone — the row was intact the whole time and the UI simply had no way to
+ * look at it. A destructive-looking action with no inverse is a bug even when the
+ * data survives.
+ */
+export const LIFECYCLE = ["needs_review", "approved", "live", "archived"] as const;
+export type Lifecycle = (typeof LIFECYCLE)[number];
+
+export function isLifecycle(v: unknown): v is Lifecycle {
+  return typeof v === "string" && (LIFECYCLE as readonly string[]).includes(v);
+}
+
+const LIFECYCLE_LABEL: Record<Lifecycle, string> = {
+  needs_review: "Needs review",
+  approved: "Approved",
+  live: "Posted",
+  archived: "Archived",
+};
+
+const LIFECYCLE_HINT: Record<Lifecycle, string> = {
+  needs_review: "produced, no verdict yet",
+  approved: "cleared to post, not sent",
+  live: "confirmed out on a platform",
+  archived: "shelved — restorable",
+};
+
+export function lifecycleLabel(l: Lifecycle): string {
+  return LIFECYCLE_LABEL[l];
+}
+export function lifecycleHint(l: Lifecycle): string {
+  return LIFECYCLE_HINT[l];
+}
+
+/**
+ * Which bucket an asset sits in. Distribution WINS over review state — something
+ * that has actually gone out is "Posted" regardless of what its status column
+ * says, because the world is the authority, not our bookkeeping.
+ */
+export function lifecycleOf(asset: {
+  status: string;
+  published_at?: string | null;
+}): Lifecycle {
+  if (asset.status === "archived" || asset.status === "rejected") return "archived";
+  if (distributionOf(asset) === "live") return "live";
+  if (asset.status === "approved") return "approved";
+  return "needs_review";
+}
+
+/**
+ * A link to the post as it exists on the platform.
+ *
+ * CC: *"on our performance page, where we can see the most seen, it should be a
+ * clickable link that takes me to that Instagram post."* The Performance tab
+ * listed view counts with no way to reach the thing being measured, so checking
+ * a number meant hunting for the post by hand.
+ *
+ * Returns null rather than a guessed URL when the id shape cannot produce one —
+ * a dead link on a metrics page is worse than plain text, because it looks like
+ * accounting that works.
+ */
+export function postPermalink(
+  platform: string,
+  platformPostId: string | null | undefined,
+  accountUsername?: string | null,
+): string | null {
+  const id = (platformPostId || "").trim();
+  if (!id) return null;
+  switch (platform) {
+    case "instagram":
+      // Numeric media ids are NOT addressable as /p/<id> — that path needs the
+      // base64 shortcode, which the analytics row does not carry. Link the
+      // account instead of inventing a URL that 404s.
+      return /^\d+$/.test(id)
+        ? accountUsername
+          ? `https://www.instagram.com/${accountUsername}/`
+          : null
+        : `https://www.instagram.com/p/${id}/`;
+    case "tiktok":
+      return accountUsername
+        ? `https://www.tiktok.com/@${accountUsername}/video/${id}`
+        : `https://www.tiktok.com/video/${id}`;
+    case "youtube":
+      return `https://www.youtube.com/watch?v=${id}`;
+    case "linkedin":
+      // "urn:li:ugcPost:74871..." — the feed permalink takes the whole urn.
+      return id.startsWith("urn:li:")
+        ? `https://www.linkedin.com/feed/update/${id}/`
+        : null;
+    case "threads":
+      return accountUsername ? `https://www.threads.net/@${accountUsername}` : null;
+    default:
+      return null;
+  }
+}
+
+/**
+ * ──────────────────────────────────────────────── publish-queue honesty
+ *
+ * How long a `queued` publish intent may sit before the page says so.
+ *
+ * WHAT THIS IS ACTUALLY FOR. The consumer EXISTS and is healthy:
+ * `Business-Empire-Agent/scripts/marketing_publish_drain.py`, a cron_engine
+ * SEED_JOB on `* * * * *` — 1,320 runs, 0 failures as of 2026-08-16.
+ *
+ * The thing it cannot promise is that the drain is REACHABLE. It runs on the
+ * operator's machine, because that is where send_gateway's credentials live and
+ * a Vercel function cannot call it (see database/140). So the queue has a
+ * consumer that is offline whenever CC's machine is — overnight, travelling,
+ * after a PM2 crash — and from this panel that state is indistinguishable from
+ * a publish in flight. The operator gets a green toast either way and finds out
+ * by checking the actual accounts.
+ *
+ * (A correction worth keeping: this was first written asserting the drainer had
+ * never been built, on a peer agent's `grep CMO-Agent/scripts/` returning
+ * nothing. It returns nothing because the drainer was never meant to live
+ * there — it lives where the gateway lives, which is this fleet's own repo. The
+ * grep was real and the conclusion was wrong, and the warning below is worth
+ * having for the real reason rather than the assumed one.)
+ *
+ * WHY A TIMER RATHER THAN A HEALTH FLAG. The page would have to reach the
+ * operator's machine to ask whether the drain is up, which is the exact thing it
+ * cannot do. Age needs no such call: an intent that has sat unclaimed past the
+ * threshold IS the evidence, whatever the cause — machine off, cron paused,
+ * process wedged, or a bug in the drain itself. It reports the symptom the
+ * operator cares about rather than a cause it would have to guess.
+ *
+ * Ten minutes against a one-minute schedule is deliberately generous — a 10 MB
+ * reel to five networks legitimately takes minutes, and the drain claims an
+ * intent before working, so anything genuinely in flight has left `queued`.
+ */
+export const PUBLISH_STALE_AFTER_MINUTES = 10;
+
+export type PublishIntentLike = {
+  state: string;
+  created_at: string;
+};
+
+/**
+ * The warning to show under a publish request, or null when there is nothing
+ * worth saying.
+ *
+ * Pure and time-injectable so tests can age an intent without waiting; returns
+ * null for every terminal state, because a `done` or `failed` intent has been
+ * seen by a consumer and is no longer evidence of anything.
+ */
+export function stalePublishWarning(
+  intent: PublishIntentLike | null | undefined,
+  now: Date = new Date(),
+): string | null {
+  if (!intent) return null;
+  // `running` is excluded too: something picked it up, which is the fact this
+  // warning exists to establish.
+  if (intent.state !== "queued") return null;
+  const created = new Date(intent.created_at);
+  if (Number.isNaN(created.getTime())) return null;
+  const mins = Math.floor((now.getTime() - created.getTime()) / 60_000);
+  if (mins < PUBLISH_STALE_AFTER_MINUTES) return null;
+  const age =
+    mins < 60
+      ? `${mins} minutes`
+      : mins < 1440
+        ? `${Math.floor(mins / 60)} hour${Math.floor(mins / 60) === 1 ? "" : "s"}`
+        : `${Math.floor(mins / 1440)} day${Math.floor(mins / 1440) === 1 ? "" : "s"}`;
+  return (
+    `Queued ${age} ago and still not picked up — nothing has been posted yet. ` +
+    `The publisher runs on the operator machine; if it is offline this waits ` +
+    `rather than fails.`
+  );
 }
 
 /**

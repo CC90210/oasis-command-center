@@ -39,7 +39,7 @@ import {
 } from "@/lib/manifest/persistence";
 import { PROTECTED_SLUGS } from "@/lib/manifest/guards";
 import { buildSunbizSequenceRows } from "@/lib/sunbiz-default-sequences";
-import { isMissingTableError } from "@/lib/api-helpers";
+import { isMissingTableError, isUniqueViolationError } from "@/lib/api-helpers";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -204,7 +204,12 @@ export async function POST(req: NextRequest) {
         .from("user_profiles")
         .update({ is_owner: true, team_role: "owner" })
         .eq("id", profile.id);
-      if (promote.error && promote.error.code !== "23505") {
+      // !isUniqueViolationError, not `code !== "23505"`. The comment above says
+      // we swallow the race because the first user won it — but on Turso a
+      // unique violation carries code "TURSO_ADAPTER", so `!== "23505"` was
+      // TRUE for exactly the case meant to be swallowed, and the benign race
+      // was reported as a hard failure.
+      if (promote.error && !isUniqueViolationError(promote.error)) {
         // Log but don't fail the response — the manifest is already saved.
         console.warn(
           `[onboarding.wizard] owner-promotion failed for profile ${profile.id}: ${promote.error.message}`

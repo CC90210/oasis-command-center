@@ -26,6 +26,7 @@
 import "server-only";
 import { callBridgeExecTool, type BridgeTarget } from "./bridge-proxy";
 import { getServiceSupabase } from "@/lib/supabase-server";
+import { coerceInferResultText } from "@/lib/infer-result-text";
 
 export async function bridgeInfer(
   target: BridgeTarget,
@@ -130,12 +131,16 @@ export async function queueInfer(
       .order("created_at", { ascending: false })
       .limit(1);
     const p = prior.data?.[0] as
-      | { id: string; status?: string; result_text?: string | null; created_at?: string }
+      | { id: string; status?: string; result_text?: unknown; created_at?: string }
       | undefined;
     if (!prior.error && p) {
       // Finished while an earlier caller was not looking — collect it, free.
-      if (p.status === "complete" && (p.result_text || "").trim()) {
-        return { ok: true, text: (p.result_text as string).trim(), reused: true };
+      // coerce: the Turso shim JSON.parses '{'-prefixed TEXT, so result_text
+      // arrives as an OBJECT there and `.trim()` on it throws — which is how
+      // every completed classification was silently discarded 8/09→8/16.
+      const priorText = coerceInferResultText(p.result_text);
+      if (p.status === "complete" && priorText.trim()) {
+        return { ok: true, text: priorText.trim(), reused: true };
       }
       // Still queued or running — adopt it rather than enqueue a duplicate.
       if (p.status === "pending" || p.status === "running") {
@@ -190,9 +195,12 @@ export async function queueInfer(
       .eq("id", jobId)
       .maybeSingle();
     if (row.error) continue; // transient read blip — keep polling until deadline
-    const j = row.data as { status?: string; result_text?: string | null; error_message?: string | null } | null;
-    if (j?.status === "complete" && (j.result_text || "").trim()) {
-      return { ok: true, text: (j.result_text as string).trim() };
+    const j = row.data as { status?: string; result_text?: unknown; error_message?: string | null } | null;
+    // Same coercion as the adoption branch — the poll observes the completion
+    // first on a fresh job, so an un-coerced read here re-opens the outage.
+    const pollText = coerceInferResultText(j?.result_text);
+    if (j?.status === "complete" && pollText.trim()) {
+      return { ok: true, text: pollText.trim() };
     }
     if (j?.status === "error") {
       return { ok: false, error: j.error_message || "infer_job_failed" };

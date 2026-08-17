@@ -48,7 +48,7 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { randomBytes, timingSafeEqual } from "crypto";
 import { getServiceSupabase } from "@/lib/supabase-server";
-import { bad, checkBearerSecret, sha256 } from "@/lib/api-helpers";
+import { bad, checkBearerSecret, sha256, isUniqueViolationError } from "@/lib/api-helpers";
 import { encryptField } from "@/lib/field-encryption";
 import { chatAgentKeys } from "@/lib/agent-personas";
 import { applyClientProvisioningProfile } from "@/lib/client-provisioning";
@@ -352,12 +352,13 @@ export async function POST(req: NextRequest) {
   // — CC saw four Mac rows for the same fingerprint after setup attempts.
   //
   // Strategy: try INSERT first. On unique-constraint violation (Postgres
-  // code 23505), the partial index caught a duplicate live row — switch
-  // to UPDATE keyed by (tenant_id, machine_fingerprint, revoked_at IS NULL)
-  // to rotate the token on the existing row. This is race-safe (DB-level
-  // atomic) AND clean (intent reads as "create a pairing"). PostgREST's
-  // .upsert(onConflict:) can't target partial indexes, so we manage the
-  // conflict path explicitly.
+  // code 23505, or SQLITE_CONSTRAINT on the Turso/libSQL path — see
+  // isUniqueViolationError), the partial index caught a duplicate live row
+  // — switch to UPDATE keyed by (tenant_id, machine_fingerprint,
+  // revoked_at IS NULL) to rotate the token on the existing row. This is
+  // race-safe (DB-level atomic) AND clean (intent reads as "create a
+  // pairing"). PostgREST's .upsert(onConflict:) can't target partial
+  // indexes, so we manage the conflict path explicitly.
   const tokenPlain = `oab_${randomBytes(32).toString("hex")}`;
   const tokenHash = sha256(tokenPlain);
 
@@ -380,7 +381,7 @@ export async function POST(req: NextRequest) {
 
   if (!ins.error && ins.data) {
     pairingId = ins.data.id;
-  } else if (ins.error?.code === "23505" && fingerprint) {
+  } else if (isUniqueViolationError(ins.error) && fingerprint) {
     // Partial unique index fired — a live pairing already exists for this
     // (tenant, machine). Rotate the token + label on the existing row.
     const upd = await db

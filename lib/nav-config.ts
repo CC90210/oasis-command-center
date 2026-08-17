@@ -85,6 +85,7 @@ export const CC_NAV: NavItem[] = [
   // additional sidebar items pointing at the same component was just
   // confusing operators.
   { group: "Operations", href: "/", label: "Today", icon: "LayoutDashboard" },
+  { group: "Operations", href: "/schedule", label: "Schedule", icon: "Activity" },
   { group: "Operations", href: "/pipeline", label: "Pipeline", icon: "GitBranch" },
   // Forms — CC's native lead-capture funnel (replaces the retired standalone
   // cc-funnel Vercel app, 2026-06-18). Submissions ingest straight into the

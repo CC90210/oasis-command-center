@@ -10,8 +10,15 @@ import Link from "next/link";
 
 import { Tag } from "@/components/Card";
 import { AssetActions } from "@/components/founders/AssetActions";
+import { CarouselFrame } from "@/components/founders/CarouselFrame";
 import {
   channelLabel,
+  isRenderableCarousel,
+  lifecycleLabel,
+  lifecycleOf,
+  type Lifecycle,
+  parsePlatforms,
+  platformLabel,
   fmtDuration,
   type AssetStatus,
   type Channel,
@@ -19,14 +26,20 @@ import {
 
 type Tone = "neutral" | "accent" | "hot" | "warm" | "engaged" | "info";
 
-const STATUS_TONE: Record<AssetStatus, Tone> = {
-  draft: "neutral",
-  in_review: "warm",
-  approved: "accent",
-  scheduled: "info",
-  published: "engaged",
-  rejected: "hot",
-  archived: "neutral",
+/**
+ * Badge colour, keyed by LIFECYCLE so it can never contradict the word beside it.
+ *
+ * Replaced a map keyed by the raw `status` column. Once the label came from
+ * lifecycle, that map coloured "Posted" with in_review's amber the moment the two
+ * vocabularies disagreed — and they are built to disagree, since library_sync.py
+ * stamps in_review on rows that are already public. It read as consistent only
+ * because the single published asset also happens to carry status='published'.
+ */
+const LIFECYCLE_TONE: Record<Lifecycle, Tone> = {
+  needs_review: "warm",   // wants something from you
+  approved: "accent",     // cleared, not sent
+  live: "engaged",        // out in the world
+  archived: "neutral",    // shelved, and restorable
 };
 
 /**
@@ -65,8 +78,34 @@ export function isPortrait(mediaW?: number | null, mediaH?: number | null): bool
   return Boolean(mediaW && mediaH && mediaH > mediaW);
 }
 
-export function StatusTag({ status }: { status: AssetStatus }) {
-  return <Tag tone={STATUS_TONE[status] ?? "neutral"}>{status.replace("_", " ")}</Tag>;
+/**
+ * The badge on a tile. Shows the LIFECYCLE bucket, not the raw status column.
+ *
+ * CC's original complaint was a grid of 41 tiles all reading "IN REVIEW", which
+ * told him nothing about whether any of it had gone out. Adding lifecycle pills
+ * above the grid while leaving the badges rendering `status` would have left the
+ * page speaking two vocabularies at once — pills saying "Posted 1" over a tile
+ * still labelled "in review" for the same asset, since library_sync.py stamps
+ * in_review on rows that are already public.
+ *
+ * `published_at` is optional so existing callers keep compiling, and its absence
+ * degrades to the review-state reading rather than falsely claiming "Posted".
+ */
+export function StatusTag({
+  status,
+  publishedAt,
+}: {
+  status: AssetStatus;
+  publishedAt?: string | null;
+}) {
+  const bucket = lifecycleOf({ status, published_at: publishedAt ?? null });
+  // TONE FOLLOWS THE BUCKET, not the raw column. Taking the label from lifecycle
+  // and the colour from `status` renders "Posted" in the amber that means
+  // "needs a verdict" the moment those two disagree — and they are DESIGNED to
+  // disagree: library_sync.py stamps in_review on rows that are already public,
+  // which is the whole reason lifecycle exists. It looks consistent today only
+  // because the one published asset also happens to carry status='published'.
+  return <Tag tone={LIFECYCLE_TONE[bucket]}>{lifecycleLabel(bucket)}</Tag>;
 }
 
 /**
@@ -113,6 +152,7 @@ export function AssetTile({
   brandName,
   channel,
   status,
+  publishedAt,
   hook,
   aspect,
   durationS,
@@ -121,6 +161,9 @@ export function AssetTile({
   mediaW,
   mediaH,
   format,
+  platforms: platformsRaw,
+  assetType,
+  slideUrls,
   openReviews = 0,
 }: {
   id: string;
@@ -128,6 +171,7 @@ export function AssetTile({
   brandName: string;
   channel: Channel;
   status: AssetStatus;
+  publishedAt?: string | null;
   hook?: string | null;
   aspect?: string | null;
   durationS?: number | null;
@@ -136,17 +180,27 @@ export function AssetTile({
   mediaW?: number | null;
   mediaH?: number | null;
   format: string;
+  platforms?: string[] | string | null;
+  assetType?: string | null;
+  /** Signed URLs, already in slide order. */
+  slideUrls?: string[];
   openReviews?: number;
 }) {
   const duration = fmtDuration(durationS);
   const { className: frame, style: frameStyle } = mediaFrame(mediaW, mediaH, aspect);
+  const platforms = parsePlatforms(platformsRaw);
+  const slides = slideUrls ?? [];
   return (
     <article className="rounded-xl border border-bg-border bg-bg-panel shadow-card overflow-hidden transition-all hover:border-accent/40 hover:shadow-ironman group">
       <div
         className={`relative ${frame} bg-bg-deep flex items-center justify-center overflow-hidden`}
         style={frameStyle}
       >
-        {playbackUrl && format === "video" ? (
+        {isRenderableCarousel(assetType, slides) ? (
+          // One card, N slides. Before the slides were registered this row
+          // rendered as an isolated image whose artwork said "01/05 · swipe →".
+          <CarouselFrame slides={slides} title={title} className="h-full w-full" />
+        ) : playbackUrl && format === "video" ? (
           // preload="metadata" so a 200-tile library does not pull 200 videos.
           <video
             src={playbackUrl}
@@ -211,9 +265,14 @@ export function AssetTile({
         {hook && <p className="text-xs text-fg-muted line-clamp-2 italic">{hook}</p>}
         <div className="mt-auto flex items-center justify-between gap-2 pt-1">
           <span className="text-[10px] uppercase tracking-[0.12em] text-fg-dim font-bold">
-            {channelLabel(channel)}
+            {/* The real distribution when we have it, the primary channel when we
+                do not. Showing `channel` alone is what made every tile read
+                INSTAGRAM regardless of where the piece actually went. */}
+            {platforms.length > 0
+              ? platforms.map(platformLabel).join(" · ")
+              : channelLabel(channel)}
           </span>
-          <StatusTag status={status} />
+          <StatusTag status={status} publishedAt={publishedAt} />
         </div>
         {/* The verdict lives on the tile. Sending the operator somewhere else to approve
             something they are already looking at is how 39 assets ended up sitting in

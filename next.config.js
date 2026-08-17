@@ -28,6 +28,105 @@ const nextConfig = {
   // bindings now get traced — they must stay external or the build fails
   // (seen on nostalgic-requests' first Turso deploy).
   serverExternalPackages: ["@napi-rs/canvas", "pdfjs-dist", "@libsql/client", "libsql"],
+  // 2026-08-14: preview builds started dying with SIGKILL / out_of_memory on
+  // Vercel's 8 GB build container while the same commit built fine locally and
+  // in production. Nothing was leaking — the app has simply grown to sit right
+  // at the ceiling, so which side of it a given build lands on is luck. Two
+  // preview builds OOM'd, one production build of the identical tree passed.
+  //
+  // webpackMemoryOptimizations trades a little build time for a materially
+  // lower peak: webpack stops retaining module sources and caches it only
+  // needs for incremental rebuilds, which a one-shot CI build never does.
+  // Verified present in the installed Next's config schema (15.5.18) rather
+  // than assumed from the docs.
+  //
+  // If this stops being enough, the next lever is Vercel's Enhanced Builds
+  // (bigger machine, costs money — CC's call, not an agent's).
+  experimental: {
+    // Vercel builds this on 4 cores / 8 GB and kept OOM-killing a build worker.
+    // Three passes, and the middle one was mine being wrong:
+    //
+    // 1. webpackMemoryOptimizations — real, kept. Webpack stops retaining module
+    //    sources and caches only useful for incremental rebuilds, which a
+    //    one-shot CI build never does. Lowered the peak; not below the ceiling.
+    //
+    // 2. memoryBasedWorkersCount — REMOVED, it was a no-op. A reviewer said it
+    //    enforces a floor of four workers and I checked the installed source
+    //    rather than argue (node_modules/next/dist/build/index.js:307):
+    //
+    //      return Math.max(Math.min(cpus || 1, Math.floor(os.freemem() / 1e9)),
+    //        4);   // enforce a minimum of 4 workers
+    //
+    //    The default with no config is also 4, so on this box it changed
+    //    nothing. I had shipped it as a fix.
+    //
+    // 3. cpus — the actual lever. It is checked FIRST in getNumberOfWorkers and
+    //    returns directly, with no floor applied:
+    //
+    //      if (config.experimental.cpus && cpus !== defaultConfig...cpus)
+    //        return config.experimental.cpus;
+    //
+    //    Two workers instead of four halves the concurrent build memory. It
+    //    costs build time, which is the right thing to spend when the scarce
+    //    resource is RAM and the failure mode is a SIGKILL.
+    //
+    // 4. THE ACTUAL CAUSE, found 2026-08-16 by measuring instead of reasoning.
+    //    The build does not need 8 GB and never did. Capping V8's heap and
+    //    rebuilding from a cold .next:
+    //
+    //      --max-old-space-size=3072  -> Compiled successfully in 39.8s, 40/40
+    //      --max-old-space-size=2048  -> Compiled successfully in 38.8s, 40/40
+    //
+    //    Real per-worker demand is under 2 GB. What kills the Vercel build is
+    //    that V8 with NO cap sizes its heap against the CONTAINER, so each
+    //    worker grows toward 8 GB whether or not it needs to. Two of them do it
+    //    at once, the container runs out, and one gets SIGKILLed. That is why
+    //    the failures burn 38-46 minutes first — a GC death spiral at the
+    //    ceiling, making no progress — and why the identical tree passes as
+    //    often as it fails. It was never a leak or a size problem; it was an
+    //    unbounded heap on a bounded machine.
+    //
+    //    Fixed in vercel.json, not here: Next has no config knob for the heap,
+    //    so the cap rides on the buildCommand as
+    //    `NODE_OPTIONS='--max-old-space-size=5120' next build`.
+    //
+    // 5. WHY ONE WORKER AND 5 GB RATHER THAN TWO AND 3 GB. The first attempt was
+    //    3072 x 2, sized from the local measurement above. Vercel rejected the
+    //    premise: a worker hit that ceiling and aborted in 36 SECONDS.
+    //
+    //      FATAL ERROR: Reached heap limit Allocation failed
+    //      Next.js build worker exited with code: null and signal: SIGABRT
+    //
+    //    The local number was measured on a build with no cache, because the
+    //    test did `rm -rf .next` first. Vercel restores one — "Restored build
+    //    cache from previous deployment" — and deserializing that cache lives
+    //    in the same heap, so the real ceiling there is higher than anything a
+    //    cold local build can show. Measuring the wrong machine measured the
+    //    wrong number.
+    //
+    //    So: cpus 1 instead of 2, and the freed budget goes to the one worker.
+    //    5 GB + parent + install overhead fits inside 8 GB with room, and there
+    //    is no second worker to race for it. Build time is the cost, and it is
+    //    the right thing to spend when the scarce resource is RAM.
+    //
+    //    NODE_OPTIONS reaches the workers, which is the half worth checking
+    //    rather than assuming — jest-worker children inherit the parent env.
+    //    Verified by setting an absurd 180 MB cap and watching the failure land
+    //    where it should: "Next.js build worker exited with code: 134", V8's own
+    //    heap error inside the WORKER, not a container SIGKILL.
+    //
+    //    Bonus: a capped build that genuinely runs out now fails in seconds with
+    //    "JavaScript heap out of memory" instead of thrashing for 46 minutes and
+    //    dying to an opaque signal.
+    //
+    // Enhanced Builds (a bigger machine, costs money) is therefore NOT needed,
+    // and was the wrong lever to reach for — it would have paid to accommodate
+    // an unbounded heap rather than bounding it.
+    webpackMemoryOptimizations: true,
+    // 1, not 2 — see note 5 above. Two workers each entitled to a multi-GB heap
+    // is what exhausted the container; one worker cannot race itself.
+    cpus: 1,
+  },
   outputFileTracingRoot: path.join(__dirname),
   // lib/prompts/index.ts reads the .txt + .json prompt files at module init
   // via fs.readFileSync. Next.js's static tracer doesn't follow runtime paths,

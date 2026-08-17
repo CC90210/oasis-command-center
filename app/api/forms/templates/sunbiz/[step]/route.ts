@@ -24,6 +24,7 @@ import {
   SUNBIZ_FORM_TEMPLATES,
   type SunBizStep,
 } from "@/lib/forms/sunbiz-templates";
+import { isUniqueViolationError } from "@/lib/api-helpers";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -97,7 +98,7 @@ export async function POST(
 
   if (error) {
     // 23505 = unique_violation — slug already exists for this tenant
-    if (error.code === "23505") {
+    if (isUniqueViolationError(error)) {
       const existing = await db
         .from("forms")
         .select("id")

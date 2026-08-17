@@ -23,6 +23,7 @@ import { CheckCircle2, AlertCircle } from "lucide-react";
 import { FormRenderer } from "./FormRenderer";
 import type { FormStep, FormBranding } from "@/lib/forms/types";
 import { isFieldVisible } from "@/lib/forms/visibility";
+import { isAcceptableCaptureAddress } from "@/lib/address/us-address";
 import { DEFAULT_PRIMARY_COLOR, getContrastingTextColor } from "@/lib/forms/themes";
 import { captureConsent, disclosureFor, requiredIdentifiers, toE164, type ConsentBrand } from "@/lib/consent/optinvault";
 
@@ -270,11 +271,30 @@ export function FormPublicClient({
   const validate = useCallback((): boolean => {
     const next: Partial<Record<string, string>> = {};
     for (const field of step.fields) {
-      if (!field.required) continue;
       // A field hidden by show_if is never required (matches the renderer + the
       // server-side validator). An AI-only lead isn't blocked by Music fields.
       if (!isFieldVisible(field, mergedValues)) continue;
       const v = values[field.name];
+
+      // Address completeness, mirroring app/api/forms/submit/route.ts. That
+      // server check is the real boundary; this one exists so the merchant is
+      // told what is wrong INLINE, next to the field, instead of the whole step
+      // failing with a 400 after they hit Continue.
+      //
+      // Runs before the `required` guard because an optional address (the
+      // partner's) may be left blank, but a filled one must still be real.
+      if (field.type === "address" && typeof v === "string" && v.trim()) {
+        const gate = isAcceptableCaptureAddress(
+          v,
+          field.name === "business_address" ? mergedValues.business_state : undefined,
+        );
+        if (!gate.ok) {
+          next[field.name] = gate.message;
+          continue;
+        }
+      }
+
+      if (!field.required) continue;
       if (v === undefined || v === null || v === "" || (Array.isArray(v) && v.length === 0)) {
         next[field.name] = "Required";
       }
