@@ -48,6 +48,7 @@ import { contactabilityOf, resolveChannel, onProviderGap } from "@/lib/drips/cha
 import { AI_WIRE_REP_KEY, aiWireNumbers, isSmsOnly } from "@/lib/drips/ai-wire-core";
 import { smsPacingCaps, pacingDecision, windowStartFor, type PacingCounts } from "@/lib/drips/sms-pacing-core";
 import { emailCooloff, cooloffDays } from "@/lib/drips/optout-cooloff-core";
+import { getChannelLimits } from "@/lib/drips/channel-limits";
 import { mayTextFor } from "@/lib/sms/lawful-basis";
 import { smsSendAllowed, resetBreakerCache, claimBreakerProbe } from "@/lib/sms/send-breaker";
 import { routeOutbound, type ProviderAvailability } from "@/lib/routing/outbound-routing";
@@ -808,7 +809,10 @@ function resolveStepCopy(
  * unbounded burst costs the number.
  */
 async function loadSmsCounts(db: Db, tenantId: string): Promise<PacingCounts> {
-  const caps = smsPacingCaps();
+  // The fail-closed value must be the EFFECTIVE cap, not the env one, or an
+  // unreadable count would hold against a ceiling the operator has since moved.
+  const stored = await getChannelLimits(tenantId);
+  const caps = { ...smsPacingCaps(), daily: stored.smsDaily, hourly: stored.smsHourly };
   const now = Date.now();
   // Counted from the current sending window, NOT a rolling 24 hours. A rolling
   // count disagrees with the fixed resume boundary: reach the cap at 20:00,
@@ -1174,7 +1178,11 @@ async function processSmsStep(
     // already proven it could otherwise have sent, and BEFORE sendDripSms so
     // the cap is a real ceiling rather than an after-the-fact count.
     {
-      const caps = smsPacingCaps();
+      // Operator-set, with the env value as the fallback. The window hour stays
+      // env-only: it is a compliance boundary (nothing may land at 3am local),
+      // not a volume dial, and it does not belong in a throughput control.
+      const stored = await getChannelLimits(row.tenant_id);
+      const caps = { ...smsPacingCaps(), daily: stored.smsDaily, hourly: stored.smsHourly };
       // Keyed by TENANT. A dispatch batch spans tenants, and one shared counter
       // would govern every later tenant by the FIRST one's send history, either
       // holding valid sends or letting a tenant blow past its own cap. Same
