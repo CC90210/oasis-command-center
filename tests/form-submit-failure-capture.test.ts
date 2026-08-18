@@ -12,7 +12,7 @@
 
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { stripFiles, redactForAlert } from "../lib/forms/submit-failure-capture";
+import { stripFiles, redactForAlert, cappedJson } from "../lib/forms/submit-failure-capture";
 import { FORM_CHECKS } from "../lib/health/form-checks";
 import { evaluate } from "../lib/health/checks-core";
 
@@ -30,6 +30,19 @@ import { evaluate } from "../lib/health/checks-core";
   assert.equal(out.payload.statement.filename, "jan.pdf", "file identity survives");
   assert.equal(out.payload.statement.inline_base64, undefined);
   assert.equal(out.payload.nested[0].stripped_file, true, "arrays are walked too");
+}
+
+// ── cappedJson: the snapshot column must stay parseable at ANY size ────────
+// A raw slice of serialized JSON cuts mid-token on exactly the largest
+// submissions — the ones most worth recovering (Codex P2, 2026-08-18).
+{
+  const small = cappedJson({ email: "a.b@c.com" });
+  assert.deepEqual(JSON.parse(small!), { email: "a.b@c.com" }, "small payloads stay plain JSON");
+  const big = cappedJson({ email: "a.b@c.com", note: "x".repeat(200_000) });
+  const parsed = JSON.parse(big!) as { truncated: boolean; head: string };
+  assert.equal(parsed.truncated, true, "oversized payloads carry a truncation marker");
+  assert.ok(parsed.head.includes("a.b@c.com"), "contact fields near the front survive truncation");
+  assert.equal(cappedJson(null), null);
 }
 
 // ── redactForAlert: the page must not leak merchant identifiers ────────────

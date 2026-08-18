@@ -80,13 +80,16 @@ function safeSlug(v: unknown): string | null {
   return typeof v === "string" && SLUG_RE.test(v) ? v : null;
 }
 
-function cappedJson(value: unknown): string | null {
+export function cappedJson(value: unknown): string | null {
   if (value === undefined || value === null) return null;
   try {
     const s = JSON.stringify(stripFiles(value));
-    return s.length > PAYLOAD_CAP_BYTES
-      ? s.slice(0, PAYLOAD_CAP_BYTES)
-      : s;
+    if (s.length <= PAYLOAD_CAP_BYTES) return s;
+    // The column must stay parseable JSON for recovery tooling, and a raw
+    // slice of serialized JSON cuts mid-token on exactly the largest
+    // submissions (Codex P2, 2026-08-18). Wrap the head as an escaped STRING —
+    // valid JSON at any cut point, contact fields live near the front.
+    return JSON.stringify({ truncated: true, head: s.slice(0, PAYLOAD_CAP_BYTES) });
   } catch {
     return null;
   }
