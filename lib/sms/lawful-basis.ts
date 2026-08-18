@@ -85,6 +85,15 @@ const INQUIRY_SOURCES = new Set([
   // against the leads is the thing that would make this provable rather than
   // relied upon.
   "breeze_uw_sheet",
+  // A SunBiz web form, filled in by the merchant. Adon, 2026-08-18: "none of
+  // our leads are purchased. We generate our own leads." The batch name reads
+  // like a vendor drop, which is why our own BUILTIN_COLD list had it flagged
+  // as purchased — that was our mistake, not a property of the lead.
+  //
+  // Same basis as public_form: they approached us. Measured 2026-08-18, this
+  // one string was blocking 239 phone-only merchants from being contacted on
+  // the only channel they have.
+  "mca webforms may 25-29",
 ]);
 
 function normalise(v: unknown): string {

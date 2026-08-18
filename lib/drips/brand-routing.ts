@@ -49,12 +49,31 @@ import { resolveBrandKey, type BrandKey } from "@/lib/email/brands";
 
 export type SourceClass = "warm" | "cold" | "unknown";
 
-const BUILTIN_WARM = ["public_form", "dropped_application", "inbound_form", "referral", "website"];
+const BUILTIN_WARM = [
+  "public_form",
+  "dropped_application",
+  "inbound_form",
+  "referral",
+  "website",
+  // A SunBiz web form. Named like a vendor drop, which is why it sat in the
+  // COLD list until 2026-08-18 — that was our labelling error, not a property
+  // of the lead. Adon: "none of our leads are purchased. We generate our own."
+  "mca webforms may 25-29",
+];
 
+// "mca webforms may 25-29" was in this list and should never have been.
+// Adon, 2026-08-18: "none of our leads are purchased. We generate our own leads
+// ... All of our leads are generated in-house." It is a batch of THEIR OWN web
+// form, so it is an inbound enquiry in exactly the way public_form is — the
+// name merely looks like a vendor drop.
+//
+// This was not a cosmetic mislabel. Membership here drives the cold/warm split,
+// and the same string sat outside INQUIRY_SOURCES in lawful-basis.ts, so 239
+// phone-only merchants who filled in a SunBiz form were treated as a purchased
+// list with no consent record and could not be texted at all.
 const BUILTIN_COLD = [
   "cold_call_tracker",
   "breeze_uw_sheet",
-  "mca webforms may 25-29",
   "live_subs",
   "livesubs",
   "bd_live_subs",

@@ -42,6 +42,7 @@ import { computeStep0DelayMinutes, enrollmentBufferForStage } from "./stage-buff
 import { isPaused, isReEntryEligible } from "./drip-rules-core";
 import { ensureInitialBrand } from "./brand-store";
 import { loadDealGates } from "./deal-state-store";
+import { stageDripsOffBoard } from "./offboard-stages-core";
 import { applyLeadsBoardFilter, isOnLeadsBoard } from "@/lib/leads/board-visibility";
 
 type Db = ReturnType<typeof getServiceSupabase>;
@@ -254,7 +255,11 @@ function staticSkipReason(
   // refactor ever drops the filter from the query, this fires, the run report
   // shows a non-zero `off_board`, and nobody gets mailed in the meantime. A
   // guard that only exists in a query is a guard one edit away from gone.
-  if (!isOnLeadsBoard(data)) return "off_board";
+  // Same exemption as the query above, or this belt would reject exactly the
+  // leads the braces were just loosened for. Keyed on the SEQUENCE's trigger
+  // stage rather than the lead's own, so a declined lead cannot slip into some
+  // other stage's sequence off-board.
+  if (!isOnLeadsBoard(data) && !stageDripsOffBoard(stage)) return "off_board";
   if (isOptedOut(data)) return "opted_out";
   if (isPaused(data)) return "paused";
   // Docs-on-file suppression is scoped to the uw_sheet first-touch cadence only
@@ -347,8 +352,15 @@ async function collectCandidates(
     // Applied at the QUERY rather than as a post-filter so an off-board lead
     // never occupies a slot in the candidate page — the same reason the
     // permanent guards below sit where they do.
-    const leadsRes = await applyLeadsBoardFilter(
-      db
+    // The board filter is skipped for stages that are SUPPOSED to be reached
+    // after the file closes. Declined is the whole case: a declined lead is
+    // stamped transferred_at and leaves the board, which is correct for the
+    // board and wrong for a one-month check-back — measured 2026-08-18, all 57
+    // emailable declined leads were off-board, so that sequence was enabled and
+    // reaching nobody. Every other stage keeps Adon's 2026-08-11 rule.
+    const offBoardOk = stageDripsOffBoard(stage);
+    const boardScoped = (qq: typeof baseQuery) => (offBoardOk ? qq : applyLeadsBoardFilter(qq));
+    const baseQuery = db
         .from("tenant_records")
         // created_at comes from the ROW, not from data: measured 2026-08-05, zero
         // of 1,194 leads carry a created_at inside their jsonb. Brand assignment
@@ -358,8 +370,8 @@ async function collectCandidates(
         .eq("entity_type", "lead")
         .filter("data->>stage", "eq", stage)
         .order("created_at", { ascending: true })
-        .range(from, from + CANDIDATE_PAGE_SIZE - 1),
-    );
+        .range(from, from + CANDIDATE_PAGE_SIZE - 1);
+    const leadsRes = await boardScoped(baseQuery);
     if (leadsRes.error) {
       return { leads: out, skippedAlreadyRan, staticSkips, truncated: false, error: leadsRes.error.message };
     }

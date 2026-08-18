@@ -13,11 +13,11 @@ import { smsLawfulBasis, mayTextFor } from "../lib/sms/lawful-basis";
 // ── A sealed vault record is the only provable tier ───────────────────────
 {
   const v = smsLawfulBasis({
-    source: "MCA WEBFORMS MAY 25-29",
+    source: "cold_call_tracker",
     consent_receipt: { claimed_captured: true, consent_id: "consent_abc123def456" },
   });
   assert.equal(v.basis, "consent_artifact");
-  assert.equal(v.mayText, true, "a sealed record beats even a purchased source");
+  assert.equal(v.mayText, true, "a sealed record beats even a cold-dialled source");
 }
 
 // A client-asserted capture with no id is NOT evidence. /api/forms/submit is a
@@ -47,6 +47,19 @@ for (const source of ["public_form", "dropped_application", "referral", "website
 // Case and padding must not change the answer.
 assert.equal(smsLawfulBasis({ source: "  Public_Form  " }).basis, "inquiry");
 
+// ── Our own web forms are an enquiry, whatever the batch is called ───────
+// This source was treated as a purchased list until 2026-08-18 because OUR
+// code had it in BUILTIN_COLD. It is a SunBiz form the merchant filled in.
+// Adon: "none of our leads are purchased. We generate our own leads."
+// That one string was blocking 239 phone-only merchants from the only channel
+// they have.
+{
+  const v = smsLawfulBasis({ source: "MCA WEBFORMS MAY 25-29" });
+  assert.equal(v.basis, "inquiry", "they came to us through our own form");
+  assert.equal(v.mayText, true);
+  assert.equal(smsLawfulBasis({ source: "  mca webforms may 25-29  " }).basis, "inquiry", "case and padding");
+}
+
 // ── Live Subs (2026-08-17) ────────────────────────────────────────────────
 // breeze_uw_sheet merchants COMPLETED AND SIGNED a SunBiz application; it
 // arrived via Breeze and was keyed in by hand, which is the only reason the
@@ -74,7 +87,7 @@ for (const near of ["live_subs", "livesubs", "bd_live_subs", "uw_sheet", "breeze
 // 240 purchased phone-only leads and 119 cold-called, measured 2026-08-10.
 // Every one is phone-only, which is exactly why the fallback would otherwise
 // route all of them into SMS.
-for (const source of ["MCA WEBFORMS MAY 25-29", "cold_call_tracker", "purchased", "scraped", "vendor"]) {
+for (const source of ["cold_call_tracker", "purchased", "scraped", "vendor"]) {
   const v = smsLawfulBasis({ source });
   assert.equal(v.basis, "none", `${source} must not qualify`);
   assert.equal(v.mayText, false);
@@ -92,7 +105,7 @@ assert.equal(smsLawfulBasis({ source: null }).mayText, false);
 // Chasing a signature or a document on a deal already in motion is not a
 // solicitation, and treating it as one would stall live deals.
 {
-  const cold = { source: "MCA WEBFORMS MAY 25-29" };
+  const cold = { source: "cold_call_tracker" };
   assert.equal(mayTextFor(cold, "marketing").mayText, false);
   assert.equal(mayTextFor(cold, "transactional").mayText, true);
   assert.match(mayTextFor(cold, "transactional").reason, /not a solicitation/);
