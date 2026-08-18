@@ -142,6 +142,24 @@ function isInlineFile(v: unknown): v is InlineFile {
 
 
 export async function POST(req: NextRequest) {
+  // MERCHANT-FACING BOUNDARY. An uncaught throw here does not become a Next
+  // error page — Vercel answers 500 with an EMPTY body, res.json() in the form
+  // client rejects, and Safari renders the merchant the useless "The string did
+  // not match the expected pattern." That exact chain silently ate every
+  // submission whose email had a dotted local part (2026-08-18, or() parser).
+  // Whatever breaks in here, the browser must always receive parseable JSON.
+  try {
+    return await handleSubmit(req);
+  } catch (err) {
+    console.error(
+      "/api/forms/submit crashed:",
+      err instanceof Error ? (err.stack ?? err.message) : String(err),
+    );
+    return NextResponse.json({ ok: false, error: "server_error" }, { status: 500 });
+  }
+}
+
+async function handleSubmit(req: NextRequest) {
   let body: SubmitBody;
   try {
     body = (await req.json()) as SubmitBody;
