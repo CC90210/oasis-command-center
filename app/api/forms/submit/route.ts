@@ -35,6 +35,7 @@ import { getServiceSupabase } from "@/lib/supabase-server";
 import { enqueueBackgroundCheck } from "@/lib/background-check/enqueue";
 import { getClientIp } from "@/lib/api-helpers";
 import { verifyFormLink, signFormLink, type FormLinkPayload } from "@/lib/form-links";
+import { captureSubmitFailure } from "@/lib/forms/submit-failure-capture";
 import {
   parseFormSteps,
   type FormStep,
@@ -148,24 +149,41 @@ export async function POST(req: NextRequest) {
   // not match the expected pattern." That exact chain silently ate every
   // submission whose email had a dotted local part (2026-08-18, or() parser).
   // Whatever breaks in here, the browser must always receive parseable JSON.
+  //
+  // The body is read HERE, before the handler, so the catch still holds the
+  // merchant's submission when the handler crashes: captureSubmitFailure
+  // dead-letters it (recoverable) and pages sunbiz-ops on the decay ladder.
+  let rawBody: unknown;
   try {
-    return await handleSubmit(req);
+    rawBody = await req.json();
+  } catch {
+    return NextResponse.json({ ok: false, error: "invalid_json" }, { status: 400 });
+  }
+  try {
+    return await handleSubmit(req, rawBody as SubmitBody);
   } catch (err) {
     console.error(
       "/api/forms/submit crashed:",
       err instanceof Error ? (err.stack ?? err.message) : String(err),
     );
+    const body = rawBody as SubmitBody;
+    await captureSubmitFailure({
+      source: "server_catch",
+      tenantSlug: body?.anonymous_init?.tenant_slug,
+      formSlug: body?.anonymous_init?.form_slug,
+      stepIndex: typeof body?.step_index === "number" ? body.step_index : null,
+      error: err instanceof Error ? err.message : String(err),
+      errorStack: err instanceof Error ? (err.stack ?? null) : null,
+      // The signed lead token is a credential; the recovery record needs the
+      // merchant's ANSWERS, not the ability to submit as them.
+      payload: { ...(rawBody as Record<string, unknown>), token: body?.token ? "<redacted>" : undefined },
+      userAgent: req.headers.get("user-agent"),
+    });
     return NextResponse.json({ ok: false, error: "server_error" }, { status: 500 });
   }
 }
 
-async function handleSubmit(req: NextRequest) {
-  let body: SubmitBody;
-  try {
-    body = (await req.json()) as SubmitBody;
-  } catch {
-    return NextResponse.json({ ok: false, error: "invalid_json" }, { status: 400 });
-  }
+async function handleSubmit(req: NextRequest, body: SubmitBody) {
 
   // Two auth shapes:
   //   1. Personalized link (Solara's mint): body.token is an HMAC.
