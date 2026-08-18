@@ -407,7 +407,7 @@ export default async function MarketingLibraryPage({
       )}
 
       {group === "clients" && (!brand || brand === "arthrisil") && (
-        <Card title="Arthrisil · Social-proof edit V3" subtitle="Client creative · Internal review · 57s · 9:16">
+        <Card title="Arthrisil · Social-proof edit V4" subtitle="Client creative · Internal review · 59s · 9:16">
           <div className="grid gap-5 lg:grid-cols-[minmax(260px,420px)_1fr]">
             <div className="overflow-hidden rounded-2xl border border-bg-border bg-black">
               <video
@@ -417,7 +417,7 @@ export default async function MarketingLibraryPage({
                 preload="metadata"
                 poster="/media/arthrisil-marketing/end-card-preview.png"
               >
-                <source src="/media/arthrisil-marketing/arthrisil-social-proof-v3.mp4" type="video/mp4" />
+                <source src="/media/arthrisil-marketing/arthrisil-social-proof-v4.mp4" type="video/mp4" />
                 Your browser does not support HTML video.
               </video>
             </div>
@@ -426,8 +426,8 @@ export default async function MarketingLibraryPage({
                 <p className="text-xs font-bold uppercase tracking-[0.16em] text-accent">Client asset</p>
                 <h2 className="mt-2 text-xl font-semibold text-fg">Arthritis impact → Dr. Azoulay → Arthrisil</h2>
                 <p className="mt-2 text-sm leading-6 text-fg-muted">
-                  Three outside voices establish the stakes. A J-cut and gentle visual fade introduce Dr. Michael
-                  Azoulay&apos;s stronger July take, supported by a softly ducked wellness music bed before the Arthrisil reveal.
+                  Three complete outside perspectives establish pain and lost mobility. Motivated J-cuts then move Dr. Michael
+                  Azoulay from recognizable symptoms to quality-of-life impact, a natural solution, and the Arthrisil reveal.
                 </p>
               </div>
               <dl className="grid grid-cols-2 gap-3 text-sm">
