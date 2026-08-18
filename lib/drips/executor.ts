@@ -58,6 +58,7 @@ import { loadBrandsForLeads } from "@/lib/drips/brand-store";
 import { loadDealGate } from "@/lib/drips/deal-state-store";
 import { brandForStage, brandForSend } from "@/lib/drips/brand-routing";
 import { isOnLeadsBoard } from "@/lib/leads/board-visibility";
+import { stageDripsOffBoard } from "@/lib/drips/offboard-stages-core";
 import { poolFor, resolveCopy, type PoolTemplate } from "@/lib/drips/template-pool";
 import { loadApprovedPool } from "@/lib/drips/template-pool-store";
 import { wasShoppedRecently } from "@/lib/drips/enroller";
@@ -1737,7 +1738,15 @@ async function processRow(
   // the board means no lead-stage sequence may speak, whatever the stage says.
   // Cancelled rather than rescheduled — a transfer is not a timing problem, and
   // a lead that legitimately returns to the board re-enrolls cleanly.
-  if (seq.triggerStage && !isOnLeadsBoard(data)) {
+  // THE SAME EXEMPTION AS THE ENROLLER. This is the THIRD place the board rule
+  // is enforced (query, per-lead static skip, and here at dispatch), and
+  // loosening only the first two would let a declined lead enrol and then be
+  // cancelled before it ever sent — the sequence reaching nobody exactly as
+  // before, while the run report blamed off_board. Codex caught it.
+  //
+  // Keyed on the SEQUENCE's trigger stage, matching the enroller, so a lead
+  // cannot carry the exemption into a sequence it does not belong to.
+  if (seq.triggerStage && !isOnLeadsBoard(data) && !stageDripsOffBoard(seq.triggerStage)) {
     return markCancelled(db, row, "off_board: lead transferred to the Applications board");
   }
 

@@ -85,4 +85,21 @@ assert.equal(stageDripsOffBoard("declined", { DRIP_OFFBOARD_STAGES: "dead_file" 
   );
 }
 
+// ── And a THIRD time, at dispatch ─────────────────────────────────────────
+// The board rule is enforced in three places. Loosening the enroller alone
+// lets a declined lead enrol and then be cancelled before it sends — the
+// sequence reaching nobody exactly as before, while the run report blames
+// off_board. Codex caught this one.
+{
+  const exec = readFileSync(new URL("../lib/drips/executor.ts", import.meta.url), "utf8");
+  assert.ok(
+    exec.includes("!isOnLeadsBoard(data) && !stageDripsOffBoard(seq.triggerStage)"),
+    "dispatch must carry the exemption too, or the enrolment is wasted",
+  );
+  assert.ok(
+    !/if \(seq\.triggerStage && !isOnLeadsBoard\(data\)\) \{/.test(exec),
+    "the unconditional off-board cancel must be gone",
+  );
+}
+
 console.log("offboard-stages.test.ts — all assertions passed");
