@@ -50,7 +50,6 @@ import { getAgents } from "@/lib/config/agents";
 import { getTenantMembers } from "@/lib/team";
 import { mintFormLinkBySlug } from "@/lib/forms/agent-routing";
 import { sendGmail } from "@/lib/integrations/submissions-gmail-send";
-import { getSubmissionsCreds } from "@/lib/integrations/submissions-gmail";
 import type { BrandKey } from "@/lib/email/brands";
 import { SUNBIZ_LEGAL_FOOTER } from "@/lib/config/email-signature";
 import { listUnsubscribeHeader } from "@/lib/email/tracked-html";
@@ -575,6 +574,10 @@ async function loadHandoffContext(
   let ccEmail = agent.ccEmail;
   if (!ccEmail && brandSlug === "sunbiz") {
     try {
+      // Lazy import (mirrors sendOnce's nodemailer pattern): loading the
+      // credential store at module scope drags server-only into non-Next
+      // harnesses that stub the -send module but not this one.
+      const { getSubmissionsCreds } = await import("@/lib/integrations/submissions-gmail");
       const creds = await getSubmissionsCreds(form.tenant_id, "sunbiz");
       ccEmail = (creds.fromAddress || "").trim() || null;
     } catch {
