@@ -407,7 +407,7 @@ export default async function MarketingLibraryPage({
       )}
 
       {group === "clients" && (!brand || brand === "arthrisil") && (
-        <Card title="Arthrisil · Social-proof edit V2" subtitle="Client creative · Internal review · 49.8s · 9:16">
+        <Card title="Arthrisil · Social-proof edit V3" subtitle="Client creative · Internal review · 57s · 9:16">
           <div className="grid gap-5 lg:grid-cols-[minmax(260px,420px)_1fr]">
             <div className="overflow-hidden rounded-2xl border border-bg-border bg-black">
               <video
@@ -417,7 +417,7 @@ export default async function MarketingLibraryPage({
                 preload="metadata"
                 poster="/media/arthrisil-marketing/end-card-preview.png"
               >
-                <source src="/media/arthrisil-marketing/arthrisil-social-proof-v2.mp4" type="video/mp4" />
+                <source src="/media/arthrisil-marketing/arthrisil-social-proof-v3.mp4" type="video/mp4" />
                 Your browser does not support HTML video.
               </video>
             </div>
@@ -426,8 +426,8 @@ export default async function MarketingLibraryPage({
                 <p className="text-xs font-bold uppercase tracking-[0.16em] text-accent">Client asset</p>
                 <h2 className="mt-2 text-xl font-semibold text-fg">Arthritis impact → Dr. Azoulay → Arthrisil</h2>
                 <p className="mt-2 text-sm leading-6 text-fg-muted">
-                  Four outside voices establish the lived impact. Dr. Michael Azoulay then names the scale,
-                  symptoms, and product before the ARTHRISIL.COM end card.
+                  Three outside voices establish the stakes. A J-cut and gentle visual fade introduce Dr. Michael
+                  Azoulay&apos;s stronger July take, supported by a softly ducked wellness music bed before the Arthrisil reveal.
                 </p>
               </div>
               <dl className="grid grid-cols-2 gap-3 text-sm">
@@ -437,7 +437,7 @@ export default async function MarketingLibraryPage({
                 <div><dt className="text-fg-dim">Rights</dt><dd className="font-semibold text-amber-300">Internal only</dd></div>
               </dl>
               <div className="flex flex-wrap gap-2" aria-label="Asset tags">
-                {["arthrisil", "client", "doctor", "social-proof", "arthritis", "vertical-video", "internal-review"].map((tag) => (
+                {["arthrisil", "client", "doctor", "social-proof", "arthritis", "vertical-video", "j-cut", "music-bed", "internal-review"].map((tag) => (
                   <span key={tag} className="rounded-full border border-bg-border bg-bg-deep px-2.5 py-1 text-xs text-fg-muted">{tag}</span>
                 ))}
               </div>

@@ -17,7 +17,7 @@ const page = readFileSync(pagePath, "utf8");
 assert.match(page, /redirect\("\/founders\/marketing\/library\?group=clients&brand=arthrisil"\)/, "the former tab must redirect into Library → Clients");
 
 const library = readFileSync(join(root, "app/founders/marketing/library/page.tsx"), "utf8");
-assert.match(library, /arthrisil-social-proof-v2\.mp4/, "Library → Clients must render the V2 edit");
+assert.match(library, /arthrisil-social-proof-v3\.mp4/, "Library → Clients must render the V3 edit");
 assert.match(library, /internal-review/, "the client asset must carry its rights metadata");
 assert.match(library, /group === "clients"/, "the client asset must be scoped to the Clients library tab");
 
