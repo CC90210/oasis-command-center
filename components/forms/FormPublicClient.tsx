@@ -486,12 +486,20 @@ export function FormPublicClient({
         headers: { "content-type": "application/json" },
         body: JSON.stringify(submitBody),
       });
-      const data = (await res.json()) as SubmitResponse;
-      if (!data.ok) {
+      // A crashed function answers non-JSON (often an EMPTY 500). Parsing it
+      // blindly turned that into Safari's "The string did not match the
+      // expected pattern." shown verbatim to merchants. Whatever came back,
+      // the merchant gets a plain sentence and a retry that can succeed.
+      const data = (await res.json().catch(() => null)) as SubmitResponse | null;
+      if (!data || !data.ok) {
+        const friendly: Record<string, string> = {
+          rate_limited: "Too many submissions too fast. Wait a few seconds and try again.",
+          server_error: "Something went wrong on our end. Please try submitting again.",
+        };
         setServerError(
-          data.error === "rate_limited"
-            ? "Too many submissions too fast. Wait a few seconds and try again."
-            : data.error || `Submission failed (http_${res.status}).`,
+          (data?.error && friendly[data.error]) ||
+            data?.error ||
+            "We couldn't process that just now. Please try submitting again in a moment.",
         );
         return;
       }
@@ -517,8 +525,12 @@ export function FormPublicClient({
         }
       }
     } catch (err) {
+      // Browser-internal error text (WebKit's "The string did not match the
+      // expected pattern.", Chrome's "Failed to fetch") means nothing to a
+      // merchant and reads like their data is bad. Log it, show a sentence.
+      console.error("form submit failed:", err);
       setServerError(
-        err instanceof Error ? `Network error: ${err.message}` : "Network error.",
+        "We couldn't submit the form. Please check your connection and try again.",
       );
     } finally {
       setSubmitting(false);

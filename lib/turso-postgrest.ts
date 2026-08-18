@@ -213,13 +213,26 @@ function grammarLiteral(raw: string): unknown {
   return raw;
 }
 
-/** PostgREST .or() grammar: "a.eq.1,b.like.*x*,and(c.gt.2,d.lt.5)" */
+/**
+ * PostgREST .or() grammar: "a.eq.1,b.like.*x*,and(c.gt.2,d.lt.5)"
+ *
+ * The segment parse is anchored on the OPERATOR TOKEN: a lazy column class plus
+ * an explicit operator alternation, longest token first so gt/lt never shadow
+ * gte/lte. A greedy `[a-z]+` in the operator slot let a dotted VALUE donate its
+ * first token as the operator — `data->>email.eq.first.last@gmail.com` parsed
+ * as operator "first" and threw, killing every public-form submission whose
+ * email had a dotted local part (~half of real addresses). The value tail is
+ * everything after the first known operator, dots and all.
+ */
+const OR_SEGMENT =
+  /^([\w$.>-]+?)\.(not\.)?(contains|ilike|like|neq|gte|lte|in|is|cs|eq|gt|lt)\.([\s\S]*)$/;
+
 function compileOrGroup(expr: string, joiner: "OR" | "AND" = "OR"): Cond {
   const parts = splitTop(expr);
   const conds: Cond[] = parts.map((p) => {
     const grp = p.match(/^(and|or)\(([\s\S]*)\)$/);
     if (grp) return compileOrGroup(grp[2], grp[1].toUpperCase() as "OR" | "AND");
-    const m = p.match(/^([\w$.>-]+)\.(not\.)?([a-z]+)\.([\s\S]*)$/);
+    const m = p.match(OR_SEGMENT);
     if (!m) throw new Error(`cannot parse or() segment: ${p}`);
     // like/ilike/in operate on the raw token (wildcards, lists); comparisons
     // get typed literals.
