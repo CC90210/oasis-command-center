@@ -32,7 +32,13 @@ assert.equal(classifyLeadSource("public_form"), "warm", "560 leads: inbound to a
 assert.equal(classifyLeadSource("dropped_application"), "warm", "16 leads: they started an application");
 assert.equal(classifyLeadSource("cold_call_tracker"), "cold", "119 leads");
 assert.equal(classifyLeadSource("breeze_uw_sheet"), "cold", "83 leads: live-sub sourced");
-assert.equal(classifyLeadSource("MCA WEBFORMS MAY 25-29"), "cold", "407 leads: a purchased batch");
+// NOT cold. The name reads like a vendor drop and it sat in BUILTIN_COLD until
+// 2026-08-18, which was our labelling error: it is a SunBiz web form and the
+// merchant filled it in. Adon: "none of our leads are purchased. We generate
+// our own leads." Consequence of the mistake was not cosmetic — the same string
+// sat outside INQUIRY_SOURCES, so 239 phone-only merchants who completed a
+// SunBiz form could not be texted at all.
+assert.equal(classifyLeadSource("MCA WEBFORMS MAY 25-29"), "warm", "407 leads: our own web form");
 
 // Case and whitespace must not change the answer; these strings are hand-entered.
 assert.equal(classifyLeadSource("  COLD_CALL_TRACKER  "), "cold");

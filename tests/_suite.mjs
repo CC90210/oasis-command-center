@@ -129,6 +129,8 @@ const TESTS = [
   "tests/reply-handoff.test.ts",
   "tests/sms-pacing.test.ts",
   "tests/optout-cooloff.test.ts",
+  "tests/channel-limits.test.ts",
+  "tests/offboard-stages.test.ts",
 ];
 
 const NODE_ARGS = ["--conditions=react-server", "--import", "tsx"];

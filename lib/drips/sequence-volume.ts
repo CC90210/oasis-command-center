@@ -49,8 +49,20 @@ const MAX_PAGES = 12;
  */
 export async function sequenceDailyVolume(
   tenantId: string,
-  opts: { days?: number; nowMs?: number } = {},
+  /**
+   * `channel` selects which send this counts. Defaults to email, which is every
+   * pre-existing caller.
+   *
+   * Adon, 2026-08-17: "make sure your results are posted on the drips tab for
+   * texts and emails so I can keep track of everything." The chart was
+   * email-only, so the SMS side of the engine had no meter at all — and SMS is
+   * the channel that just went live with a 40/day ceiling nobody could see.
+   */
+  opts: { days?: number; nowMs?: number; channel?: "email" | "sms" } = {},
 ): Promise<SequenceVolumeReport> {
+  // Counted from lead_interactions, the same rows the pacing gate counts, so
+  // the meter and the throttle can never disagree about what a send is.
+  const interactionType = opts.channel === "sms" ? "sms_sent" : "email_sent";
   const days = Math.max(1, Math.min(60, opts.days ?? 14));
   const nowMs = opts.nowMs ?? Date.now();
   const timeZone = OPERATOR_TIME_ZONE;
@@ -81,7 +93,7 @@ export async function sequenceDailyVolume(
       .from("lead_interactions")
       .select("id, agent_source, created_at, metadata")
       .eq("tenant_id", tenantId)
-      .eq("type", "email_sent")
+      .eq("type", interactionType)
       .eq("direction", "outbound")
       .like("agent_source", "sequence:%")
       .gte("created_at", sinceIso)

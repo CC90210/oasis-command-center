@@ -48,6 +48,7 @@ import { contactabilityOf, resolveChannel, onProviderGap } from "@/lib/drips/cha
 import { AI_WIRE_REP_KEY, aiWireNumbers, isSmsOnly } from "@/lib/drips/ai-wire-core";
 import { smsPacingCaps, pacingDecision, windowStartFor, type PacingCounts } from "@/lib/drips/sms-pacing-core";
 import { emailCooloff, cooloffDays } from "@/lib/drips/optout-cooloff-core";
+import { getChannelLimits } from "@/lib/drips/channel-limits";
 import { mayTextFor } from "@/lib/sms/lawful-basis";
 import { smsSendAllowed, resetBreakerCache, claimBreakerProbe } from "@/lib/sms/send-breaker";
 import { routeOutbound, type ProviderAvailability } from "@/lib/routing/outbound-routing";
@@ -57,6 +58,7 @@ import { loadBrandsForLeads } from "@/lib/drips/brand-store";
 import { loadDealGate } from "@/lib/drips/deal-state-store";
 import { brandForStage, brandForSend } from "@/lib/drips/brand-routing";
 import { isOnLeadsBoard } from "@/lib/leads/board-visibility";
+import { stageDripsOffBoard } from "@/lib/drips/offboard-stages-core";
 import { poolFor, resolveCopy, type PoolTemplate } from "@/lib/drips/template-pool";
 import { loadApprovedPool } from "@/lib/drips/template-pool-store";
 import { wasShoppedRecently } from "@/lib/drips/enroller";
@@ -808,7 +810,10 @@ function resolveStepCopy(
  * unbounded burst costs the number.
  */
 async function loadSmsCounts(db: Db, tenantId: string): Promise<PacingCounts> {
-  const caps = smsPacingCaps();
+  // The fail-closed value must be the EFFECTIVE cap, not the env one, or an
+  // unreadable count would hold against a ceiling the operator has since moved.
+  const stored = await getChannelLimits(tenantId);
+  const caps = { ...smsPacingCaps(), daily: stored.smsDaily, hourly: stored.smsHourly };
   const now = Date.now();
   // Counted from the current sending window, NOT a rolling 24 hours. A rolling
   // count disagrees with the fixed resume boundary: reach the cap at 20:00,
@@ -1174,7 +1179,11 @@ async function processSmsStep(
     // already proven it could otherwise have sent, and BEFORE sendDripSms so
     // the cap is a real ceiling rather than an after-the-fact count.
     {
-      const caps = smsPacingCaps();
+      // Operator-set, with the env value as the fallback. The window hour stays
+      // env-only: it is a compliance boundary (nothing may land at 3am local),
+      // not a volume dial, and it does not belong in a throughput control.
+      const stored = await getChannelLimits(row.tenant_id);
+      const caps = { ...smsPacingCaps(), daily: stored.smsDaily, hourly: stored.smsHourly };
       // Keyed by TENANT. A dispatch batch spans tenants, and one shared counter
       // would govern every later tenant by the FIRST one's send history, either
       // holding valid sends or letting a tenant blow past its own cap. Same
@@ -1729,7 +1738,15 @@ async function processRow(
   // the board means no lead-stage sequence may speak, whatever the stage says.
   // Cancelled rather than rescheduled — a transfer is not a timing problem, and
   // a lead that legitimately returns to the board re-enrolls cleanly.
-  if (seq.triggerStage && !isOnLeadsBoard(data)) {
+  // THE SAME EXEMPTION AS THE ENROLLER. This is the THIRD place the board rule
+  // is enforced (query, per-lead static skip, and here at dispatch), and
+  // loosening only the first two would let a declined lead enrol and then be
+  // cancelled before it ever sent — the sequence reaching nobody exactly as
+  // before, while the run report blamed off_board. Codex caught it.
+  //
+  // Keyed on the SEQUENCE's trigger stage, matching the enroller, so a lead
+  // cannot carry the exemption into a sequence it does not belong to.
+  if (seq.triggerStage && !isOnLeadsBoard(data) && !stageDripsOffBoard(seq.triggerStage)) {
     return markCancelled(db, row, "off_board: lead transferred to the Applications board");
   }
 

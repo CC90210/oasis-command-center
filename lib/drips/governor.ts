@@ -43,6 +43,7 @@
 import "server-only";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import type { EmailBudget } from "./drip-rules-core";
+import { getChannelLimits } from "./channel-limits";
 import { ALL_BRAND_KEYS, resolveBrandKey, type BrandKey } from "@/lib/email/brands";
 import { sequenceSentToday, sequenceDailyCaps } from "./sequence-volume";
 
@@ -184,6 +185,38 @@ export async function loadEmailBudget(
    *  behaviour. */
   tenantIds: string[] = [],
 ): Promise<EmailBudget> {
+  // OPERATOR-SET DAILY CEILINGS. These used to be env-only, so "send more
+  // today" meant a redeploy rather than a control in the product (Adon,
+  // 2026-08-17). Resolved once per run; precedence is stored -> env -> default,
+  // and an unreadable row falls back to env rather than to zero, because this
+  // is a throttle and not one of the interlocks.
+  //
+  // Read for the FIRST tenant in the batch: the per-brand ceiling is a property
+  // of the sending domain, and both brands sit on the SunBiz tenant. A second
+  // tenant with its own domains would need this keyed per brand-owner, which is
+  // a real change rather than a loop, so it is left explicit instead of
+  // silently applying one tenant's ceiling to another's mail.
+  // Resolved for EVERY tenant in the batch, and the LOWEST wins per brand.
+  //
+  // The first cut only applied the stored ceilings when the batch held exactly
+  // one tenant, and silently fell back to the env caps otherwise — so on any
+  // ordinary multi-tenant run the new control saved happily and did nothing.
+  // That is the precise failure this feature exists to avoid, introduced by the
+  // guard meant to be careful. Codex caught it.
+  //
+  // The minimum, not a per-tenant budget, because the counts below
+  // (countDripEmailByBrand) are already brand-global rather than tenant-scoped:
+  // there is one number per brand for the whole run. Taking the lowest ceiling
+  // can only ever send LESS than someone chose, which is the safe direction for
+  // a throttle. A genuine per-tenant budget means keying the counts by tenant
+  // too, and that is a real change rather than a loop — worth doing the day a
+  // second tenant actually sends.
+  const perTenant = await Promise.all(tenantIds.map((t) => getChannelLimits(t)));
+  const dailyCapFor = (b: BrandKey): number => {
+    if (perTenant.length === 0) return emailDailyCap(b);
+    const picked = perTenant.map((l) => (b === "bluerise" ? l.emailDailyBluerise : l.emailDailySunbiz));
+    return Math.min(...picked);
+  };
   const cap = perLeadWeeklyEmailCap();
   const perLeadSent7d = new Map<string, number>();
   let degraded = false;
@@ -204,7 +237,7 @@ export async function loadEmailBudget(
   const dailyRemaining = {} as Record<BrandKey, number>;
   const hourlyRemaining = {} as Record<BrandKey, number>;
   for (const b of ALL_BRAND_KEYS) {
-    dailyRemaining[b] = today === null ? emailDailyCap(b) : Math.max(0, emailDailyCap(b) - today[b]);
+    dailyRemaining[b] = today === null ? dailyCapFor(b) : Math.max(0, dailyCapFor(b) - today[b]);
     hourlyRemaining[b] =
       thisHour === null ? emailHourlyCap(b) : Math.max(0, emailHourlyCap(b) - thisHour[b]);
   }

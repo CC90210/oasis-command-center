@@ -24,6 +24,8 @@ import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { AlertTriangle, Check, Loader2, Infinity as InfinityIcon } from "lucide-react";
 import { sequenceRemaining, MAX_SEQUENCE_DAILY_CAP, type SequenceVolume } from "@/lib/drips/sequence-volume-core";
+import type { ChannelLimits } from "@/lib/drips/channel-limits-core";
+import { ChannelLimitsEditor } from "./ChannelLimitsEditor";
 
 export type VolumeRow = {
   /** Sequence row id, when this volume matched a live sequence. Null means the
@@ -211,10 +213,19 @@ export function SequenceVolumeView({
   timeZone,
   readError = null,
   truncated = false,
+  sms,
+  limits,
 }: {
   rows: VolumeRow[];
   days: number;
   timeZone: string;
+  /** Texts, same shape as email. Adon, 2026-08-17: "make sure your results are
+   *  posted on the drips tab for texts and emails so I can keep track of
+   *  everything." The chart was email-only, so the channel that had just gone
+   *  live with a 40/day ceiling had no meter at all. */
+  sms?: { rows: VolumeRow[]; error: string | null; truncated: boolean };
+  /** The per-channel ceilings, editable. */
+  limits?: ChannelLimits;
   /** Set when the volume READ failed. Must never render as zero volume: an
    *  empty chart is the most reassuring picture available and, when the read
    *  broke, the least true one. */
@@ -224,7 +235,9 @@ export function SequenceVolumeView({
   const router = useRouter();
 
   return (
-    <div className="space-y-3">
+    <div className="space-y-4">
+      {limits && <ChannelLimitsEditor initial={limits} />}
+
       <div className="flex flex-wrap items-baseline justify-between gap-2">
         <h3 className="text-sm font-bold text-fg">Email volume per sequence</h3>
         <span className="text-[11px] text-fg-dim">
@@ -315,6 +328,62 @@ export function SequenceVolumeView({
           </tbody>
         </table>
       </div>
+
+      {sms && (
+        <div className="space-y-2 pt-1">
+          <div className="flex flex-wrap items-baseline justify-between gap-2">
+            <h3 className="text-sm font-bold text-fg">Text volume per sequence</h3>
+            <span className="text-[11px] text-fg-dim">
+              Same window, same counting. Texts have no per-sequence cap; the ceiling above governs them.
+            </span>
+          </div>
+
+          {sms.error && (
+            <div className="flex items-start gap-2 rounded-lg border border-rose-500/40 bg-rose-500/10 p-3 text-xs text-rose-400">
+              <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+              <span>{sms.error}. These bars are UNKNOWN, not zero.</span>
+            </div>
+          )}
+          {sms.truncated && (
+            <div className="flex items-start gap-2 rounded-lg border border-amber-500/40 bg-amber-500/10 p-3 text-xs text-amber-400">
+              <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+              <span>More texts in this window than the chart reads at once. Every bar is a floor.</span>
+            </div>
+          )}
+
+          <div className="overflow-x-auto rounded-lg border border-bg-border">
+            <table className="w-full min-w-[560px] text-left text-xs">
+              <thead className="bg-bg-elev text-[10px] uppercase tracking-wide text-fg-dim">
+                <tr>
+                  <th className="px-3 py-2">Sequence</th>
+                  <th className="px-3 py-2">Last {days} days</th>
+                  <th className="px-3 py-2">Today</th>
+                  <th className="px-3 py-2">Peak</th>
+                </tr>
+              </thead>
+              <tbody>
+                {sms.rows.map((r) => (
+                  <tr key={`sms-${r.sequenceId ?? r.name}`} className="border-t border-bg-border">
+                    <td className="px-3 py-2 font-medium text-fg">{r.name}</td>
+                    <td className="px-3 py-2"><Bars volume={r.volume} cap={null} /></td>
+                    <td className="px-3 py-2 tabular-nums text-fg">{r.volume?.today ?? 0}</td>
+                    <td className="px-3 py-2 tabular-nums text-fg-dim">{r.volume?.peak ?? 0}</td>
+                  </tr>
+                ))}
+                {sms.rows.length === 0 && (
+                  <tr>
+                    <td colSpan={4} className="px-3 py-8 text-center text-fg-muted">
+                      {sms.error
+                        ? "Text volume could not be read. This is not the same as no texts."
+                        : "No drip texts in this window."}
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
 
       <p className="text-[11px] leading-relaxed text-fg-dim">
         A cap here only ever makes a sequence send <b>less</b>. The brand ceilings still apply above it, and a sequence

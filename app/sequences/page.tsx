@@ -13,6 +13,8 @@ import { SequencesTabs } from "@/components/sequences/SequencesTabs";
 import { recentDripActivity, dripFailureSummary } from "@/lib/drips/activity-queries";
 import { sequenceDailyVolume } from "@/lib/drips/sequence-volume";
 import { joinVolumeToSequences } from "@/lib/drips/sequence-volume-core";
+import { getChannelLimits } from "@/lib/drips/channel-limits";
+import { LIMIT_DEFAULT } from "@/lib/drips/channel-limits-core";
 
 /** The all-zero summary. Named so the "no tenant" case and the "read failed"
  *  case cannot drift into two subtly different sets of zeros. */
@@ -80,7 +82,7 @@ export default async function SequencesPage() {
   // It is not a timeout: Promise.all still waits for the slowest read, so a slow
   // activity query does hold the whole page. Saying "cannot take the page down"
   // would be claiming a protection that is not here.
-  const [result, bridgeOnline, activityRes, volumeRes, pool, summaryRes] = await Promise.all([
+  const [result, bridgeOnline, activityRes, volumeRes, smsVolumeRes, limits, pool, summaryRes] = await Promise.all([
     loadSequences(tenantId),
     safe("sequences.bridge_online", getBridgeOnline(tenantId), false),
     // Wrapped so a read FAILURE is distinguishable from an empty window. `safe`
@@ -106,6 +108,23 @@ export default async function SequencesPage() {
         ? sequenceDailyVolume(tenantId, { days: 14 })
         : Promise.resolve({ volumes: [], timeZone: "UTC", days: 14, error: null, truncated: false }),
       { volumes: [], timeZone: "UTC", days: 14, error: "could not read sequence volume", truncated: false },
+    ),
+    // The SMS meter. Same shape, same source, different interaction type — so
+    // the two charts are directly comparable and neither can quietly measure
+    // something the other does not.
+    safe(
+      "sequences.volume.sms",
+      tenantId
+        ? sequenceDailyVolume(tenantId, { days: 14, channel: "sms" })
+        : Promise.resolve({ volumes: [], timeZone: "UTC", days: 14, error: null, truncated: false }),
+      { volumes: [], timeZone: "UTC", days: 14, error: "could not read text volume", truncated: false },
+    ),
+    // The per-channel ceilings the operator can move. Resolved server-side so
+    // the form opens on the values the ENGINE is using, not on the defaults.
+    safe(
+      "sequences.limits",
+      tenantId ? getChannelLimits(tenantId) : Promise.resolve(LIMIT_DEFAULT),
+      LIMIT_DEFAULT,
     ),
     safe(
       "sequences.template_pool",
@@ -223,6 +242,12 @@ export default async function SequencesPage() {
             timeZone: volumeRes.timeZone,
             error: volumeRes.error,
             truncated: volumeRes.truncated,
+            sms: {
+              rows: joinVolumeToSequences(result.rows, smsVolumeRes.volumes),
+              error: smsVolumeRes.error,
+              truncated: smsVolumeRes.truncated,
+            },
+            limits,
           }}
           pool={pool}
         />
