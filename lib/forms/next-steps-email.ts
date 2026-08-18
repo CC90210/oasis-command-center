@@ -183,6 +183,37 @@ async function sendViaBridge(input: {
       return { sent: true };
     }
     if (!reservation.error && reservation.data?.id) {
+      // Deterministic-winner check (Codex review P2, 2026-08-18): two
+      // concurrent submissions can straddle a window-bucket boundary and win
+      // DIFFERENT reservation keys, so the unique index alone can't dedupe
+      // them. Fetch every form_transactional row for this lead+source inside
+      // the window; the earliest (created_at, id) owns the send. Both racers
+      // compute the same winner, so exactly one proceeds and the loser
+      // releases its reservation and defers.
+      const windowStartIso = new Date(Date.now() - RESEND_WINDOW_MS).toISOString();
+      const rivals = await input.db.from("lead_interactions")
+        .select("id, created_at")
+        .eq("tenant_id", input.tenantId)
+        .eq("lead_id", input.leadId)
+        .eq("provider", "form_transactional")
+        .like("provider_message_id", `${input.leadId}:${input.source}:%`)
+        .gte("created_at", windowStartIso)
+        .limit(10);
+      if (rivals.error) {
+        // Can't prove we're the winner — release and fail toward the marker
+        // path rather than risk a duplicate transactional send.
+        await input.db.from("lead_interactions").delete()
+          .eq("id", reservation.data.id).eq("tenant_id", input.tenantId);
+        return { sent: false, reason: "reservation_winner_check_failed" };
+      }
+      const rows = (rivals.data ?? []) as Array<{ id: string; created_at: string | null }>;
+      const winner = rows.slice().sort((a, b) =>
+        (a.created_at || "").localeCompare(b.created_at || "") || a.id.localeCompare(b.id))[0];
+      if (winner && winner.id !== reservation.data.id) {
+        await input.db.from("lead_interactions").delete()
+          .eq("id", reservation.data.id).eq("tenant_id", input.tenantId);
+        return { sent: true }; // the earlier row owns this window's send
+      }
       const direct = await sendGmail({
         tenantId: input.tenantId,
         brand: "sunbiz",

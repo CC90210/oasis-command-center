@@ -34,6 +34,10 @@ assert.match(handoff, /const windowStart = new Date\(Date\.now\(\) - RESEND_WIND
   "the idempotency lookback must be bounded to the resend window — an unbounded lookback suppresses re-engaging merchants forever");
 assert.match(handoff, /const windowBucket = Math\.floor\(Date\.now\(\) \/ RESEND_WINDOW_MS\);[\s\S]*?reservationKey = `\$\{input\.leadId\}:\$\{input\.source\}:\$\{windowBucket\}`/,
   "the atomic reservation key must be bucketed by the same window, so re-sends stay possible and concurrent duplicates still collide");
+assert.match(handoff, /like\("provider_message_id", `\$\{input\.leadId\}:\$\{input\.source\}:%`\)[\s\S]*?winner\.id !== reservation\.data\.id[\s\S]*?return \{ sent: true \}/,
+  "concurrent racers straddling a bucket boundary must resolve to one deterministic winner (Codex P2 2026-08-18)");
+assert.match(handoff, /reservation_winner_check_failed/,
+  "an unverifiable winner check must release and fail toward the marker path, never risk a duplicate send");
 assert.match(handoff, /let ccEmail = agent\.ccEmail;[\s\S]*?getSubmissionsCreds\(form\.tenant_id, "sunbiz"\)[\s\S]*?creds\.fromAddress/,
   "an unassigned lead's funnel email must CC the submissions inbox, resolved from the credential store");
 assert.match(handoff, /r\.agent_source !== "form_send_reservation"/,

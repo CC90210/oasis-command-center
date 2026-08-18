@@ -38,7 +38,7 @@ name: cron-driver
 # in vercel.json appears here, so the two lists cannot drift.
 on:
   schedule:
-    - cron: "*/5 * * * *"    # dispatch-drips, dispatch-scheduled-sends, dispatch-scheduled-calls
+    - cron: "*/5 * * * *"    # dispatch-drips, dispatch-scheduled-sends, dispatch-scheduled-calls, dispatch-bulk-email
     - cron: "*/10 * * * *"   # operator-email-agent, tps-enroll, scan-lender-replies
     - cron: "*/15 * * * *"   # enroll-drips, enroll-accelerated, reconcile-sms, health-check
     - cron: "*/30 * * * *"   # scan-bounces, scan-funmate-replies, sync-tt-inbox
@@ -110,7 +110,8 @@ jobs:
             "*/5 * * * *")
               ROUTES="/api/cron/dispatch-drips
                       /api/cron/dispatch-scheduled-sends
-                      /api/cron/dispatch-scheduled-calls" ;;
+                      /api/cron/dispatch-scheduled-calls
+                      /api/cron/dispatch-bulk-email" ;;
             "*/10 * * * *")
               # scan-lender-replies runs write=1 so lender thread statuses, the
               # Offers tab and the outcome ledger actually populate. Whether a
@@ -153,6 +154,7 @@ jobs:
               ROUTES="/api/cron/dispatch-drips
                       /api/cron/dispatch-scheduled-sends
                       /api/cron/dispatch-scheduled-calls
+                      /api/cron/dispatch-bulk-email
                       /api/cron/health-check" ;;
             *)
               # A schedule with no mapping means someone added a cron entry and

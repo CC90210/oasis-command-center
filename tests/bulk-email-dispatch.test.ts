@@ -144,8 +144,18 @@ assert.match(
 );
 assert.match(
   dispatch,
-  /recoverStuckClaims[\s\S]*?STUCK_CLAIM_MINUTES \* 60_000/,
-  "claims orphaned by a crashed tick must be recovered",
+  /failStuckClaims[\s\S]*?STUCK_CLAIM_MINUTES \* 60_000[\s\S]*?send_error: "uncertain_delivery_after_claim"/,
+  "claims orphaned by a crashed tick must terminal-fail as uncertain delivery — never requeue after a possible delivery (Codex P1 2026-08-18)",
+);
+assert.doesNotMatch(
+  dispatch,
+  /uncertain_delivery_after_claim[\s\S]*?status: "queued"/,
+  "no path may requeue an orphaned claim",
+);
+assert.match(
+  dispatch,
+  /if \(result\.ok\) \{[\s\S]*?\.update\(sentPatch\)[\s\S]*?\.update\(sentPatch\)/,
+  "the success audit must be an unconditional owned-row write with a retry, so a transient write failure cannot strand a delivered message on the resend path",
 );
 
 // ---- cron wiring -------------------------------------------------------------

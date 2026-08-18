@@ -34,6 +34,11 @@
  *   - attempts > MAX_ATTEMPTS → terminal 'failed' so a poison row can't cycle
  *     forever; rows older than FRESHNESS_HOURS expire unsent — a stale blast
  *     resurrecting days later reads as a ghost send to the operator.
+ *   - A claim orphaned by a crashed tick is TERMINAL ('failed',
+ *     uncertain_delivery), never requeued: the crash happened after the claim
+ *     and possibly after Gmail accepted the message, so an automatic retry
+ *     risks a duplicate delivery (Codex review P1, 2026-08-18). The operator
+ *     sees the row flagged for review and decides.
  *
  * Concurrency: every state transition is a CAS on metadata->>status (the
  * Turso shim compiles the JSON path to json_extract), so an overlapping tick
@@ -88,7 +93,8 @@ export type DispatchResult = {
   suppressed: number;
   expired: number;
   requeued: number;
-  recovered: number;
+  /** Orphaned claims terminal-failed as uncertain_delivery (never resent). */
+  uncertain: number;
   capRemaining: number;
   stoppedEarly?: string;
 };
@@ -159,8 +165,14 @@ async function suppressionGate(
   return (supp.data?.length ?? 0) > 0 ? "suppressed" : "clear";
 }
 
-/** Revert claims orphaned by a crashed tick so their rows aren't wedged. */
-async function recoverStuckClaims(db: SupabaseClient): Promise<number> {
+/**
+ * Terminal-fail claims orphaned by a crashed tick so their rows aren't wedged.
+ * NEVER requeue them: a claim is taken immediately before SMTP, so an orphan
+ * may already have been delivered — an automatic retry is a possible duplicate
+ * email to a real merchant. The safe direction for commercial mail is to drop
+ * and flag, not resend (Codex review P1, 2026-08-18).
+ */
+async function failStuckClaims(db: SupabaseClient): Promise<number> {
   const res = await db
     .from("lead_interactions")
     .select("id, tenant_id, metadata")
@@ -168,20 +180,23 @@ async function recoverStuckClaims(db: SupabaseClient): Promise<number> {
     .eq("metadata->>status", "sending")
     .limit(50);
   if (res.error || !res.data) return 0;
-  let recovered = 0;
+  let terminalized = 0;
   const cutoff = Date.now() - STUCK_CLAIM_MINUTES * 60_000;
   for (const r of res.data as Array<{ id: string; tenant_id: string; metadata: Meta | null }>) {
     const meta = r.metadata || {};
     const claimedAt = typeof meta.claimed_at === "string" ? Date.parse(meta.claimed_at) : NaN;
     if (!Number.isFinite(claimedAt) || claimedAt > cutoff) continue;
-    const attempts = num(meta.attempts) + 1;
-    const ok = await casUpdate(db, r, "sending",
-      attempts >= MAX_ATTEMPTS
-        ? { metadata: { ...meta, status: "failed", attempts, send_error: "stuck_claim (max_attempts)" } }
-        : { metadata: { ...meta, status: "queued", attempts, last_error: "stuck_claim_recovered" } });
-    if (ok) recovered += 1;
+    const ok = await casUpdate(db, r, "sending", {
+      metadata: {
+        ...meta,
+        status: "failed",
+        send_error: "uncertain_delivery_after_claim",
+        needs_operator_review: true,
+      },
+    });
+    if (ok) terminalized += 1;
   }
-  return recovered;
+  return terminalized;
 }
 
 /** Sends recorded today (UTC) — the daily ceiling counts actual deliveries. */
@@ -209,10 +224,10 @@ export async function runDispatchBulkEmail(): Promise<DispatchResult> {
   const db = getServiceSupabase();
   const out: DispatchResult = {
     ok: true, sent: 0, failed: 0, suppressed: 0, expired: 0,
-    requeued: 0, recovered: 0, capRemaining: 0,
+    requeued: 0, uncertain: 0, capRemaining: 0,
   };
 
-  out.recovered = await recoverStuckClaims(db);
+  out.uncertain = await failStuckClaims(db);
 
   const cap = DAILY_CAP();
   const used = await sentToday(db, cap);
@@ -318,8 +333,15 @@ export async function runDispatchBulkEmail(): Promise<DispatchResult> {
       });
 
       if (result.ok) {
+        // Plain update, not a CAS: the claim is exclusively ours (won by CAS
+        // above) and nothing else transitions 'sending' rows mid-tick, so a
+        // conditional here adds only a failure mode. Gmail has ACCEPTED the
+        // message at this point — if this write is lost the row would sit in
+        // 'sending' and be terminal-failed as uncertain_delivery, never
+        // resent (Codex review P1, 2026-08-18). One retry pares that down to
+        // a two-consecutive-write-failure event.
         const sentAt = new Date().toISOString();
-        const recorded = await casUpdate(db, row, "sending", {
+        const sentPatch = {
           type: "email_sent",
           sent_at: sentAt,
           metadata: {
@@ -329,10 +351,16 @@ export async function runDispatchBulkEmail(): Promise<DispatchResult> {
             sent_via: "submissions_gmail_apppassword",
             gmail_message_id: result.message_id,
           },
-        });
-        if (!recorded) {
-          console.error("[bulk-email.dispatch] send succeeded but audit write failed", {
-            row_id: row.id, lead_id: row.lead_id,
+        };
+        let recorded = await db.from("lead_interactions").update(sentPatch)
+          .eq("id", row.id).eq("tenant_id", row.tenant_id);
+        if (recorded.error) {
+          recorded = await db.from("lead_interactions").update(sentPatch)
+            .eq("id", row.id).eq("tenant_id", row.tenant_id);
+        }
+        if (recorded.error) {
+          console.error("[bulk-email.dispatch] send succeeded but audit write failed twice — row will terminal-fail as uncertain_delivery, not resend", {
+            row_id: row.id, lead_id: row.lead_id, error: recorded.error.message,
           });
         }
         out.sent += 1;
