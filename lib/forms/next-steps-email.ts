@@ -32,8 +32,15 @@
  * BYPASSES send_gateway's suppression gate, every sender below re-checks
  * email_suppressions FAIL-CLOSED before the address reaches the bridge.
  *
- * Idempotent per lead PER VARIANT: one next-steps email + one application-
- * complete email per lead. A returning merchant who re-submits is not re-mailed.
+ * Idempotent per lead PER VARIANT PER RESEND WINDOW (24h). The original
+ * "one per lead per lifetime" rule silently starved re-engaging merchants:
+ * a lead who got their first next-steps email in June and re-submitted the
+ * interest form in August was suppressed forever (26 such leads found
+ * 2026-08-18 — ~27% of post-cutover Form 1 completions produced no email and
+ * no record of why). A NEW submission outside the window is a merchant asking
+ * to re-enter the funnel and re-sends a fresh personalized link; duplicate
+ * protection within the window still holds, atomically, via the
+ * window-bucketed reservation key below.
  */
 
 import "server-only";
@@ -43,12 +50,22 @@ import { getAgents } from "@/lib/config/agents";
 import { getTenantMembers } from "@/lib/team";
 import { mintFormLinkBySlug } from "@/lib/forms/agent-routing";
 import { sendGmail } from "@/lib/integrations/submissions-gmail-send";
+import { getSubmissionsCreds } from "@/lib/integrations/submissions-gmail";
 import type { BrandKey } from "@/lib/email/brands";
 import { SUNBIZ_LEGAL_FOOTER } from "@/lib/config/email-signature";
 import { listUnsubscribeHeader } from "@/lib/email/tracked-html";
 import { isUniqueViolationError } from "@/lib/api-helpers";
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+/**
+ * How long a prior send (or failure marker) of the same variant suppresses a
+ * re-send. Within the window a duplicate submission is a double-click or a
+ * refresh; outside it, it is a merchant re-entering the funnel who needs the
+ * link again. Also the bucket size of the reservation key, so the atomic
+ * concurrent-duplicate guard and this read-side gate agree.
+ */
+const RESEND_WINDOW_MS = 24 * 60 * 60 * 1000;
 
 /** agent_source tags — distinct per variant so the FAILURE-path marker + the
  *  idempotency check are clean and don't collide across the two emails. */
@@ -99,8 +116,12 @@ async function sendViaBridge(input: {
   if (input.brand === "sunbiz") {
     // Atomic reservation on the existing provider/message unique index. This
     // closes the race where two simultaneous final-step posts both pass the
-    // read-based alreadySent check before either reaches SMTP.
-    const reservationKey = `${input.leadId}:${input.source}`;
+    // read-based alreadySent check before either reaches SMTP. The key is
+    // bucketed by RESEND_WINDOW so a genuinely new submission in a later
+    // window mints a new key and can send again, while concurrent duplicates
+    // inside one window still collide on the index.
+    const windowBucket = Math.floor(Date.now() / RESEND_WINDOW_MS);
+    const reservationKey = `${input.leadId}:${input.source}:${windowBucket}`;
     const reservation = await input.db.from("lead_interactions").insert({
       tenant_id: input.tenantId,
       lead_id: input.leadId,
@@ -142,11 +163,18 @@ async function sendViaBridge(input: {
         row.metadata?.status === "sending" &&
         ageMs > 5 * 60 * 1000
       ) {
+        // Conditional on metadata->>status, NOT the object-containment filter:
+        // on the Turso adapter containment compiles to json_each ARRAY
+        // semantics and never matches an object column (verified live
+        // 2026-08-18), which made this release a silent no-op — a crashed
+        // worker's reservation was permanent and the merchant's email
+        // unrecoverable. The JSON-path filter compiles to json_extract and
+        // actually fires.
         const released = await input.db.from("lead_interactions")
           .delete()
           .eq("id", row.id)
           .eq("tenant_id", input.tenantId)
-          .contains("metadata", { status: "sending" })
+          .eq("metadata->>status", "sending")
           .select("id");
         if (!released.error && (released.data?.length ?? 0) === 1) {
           return sendViaBridge({ ...input, recoveryAttempt: true });
@@ -331,12 +359,19 @@ async function alreadySent(
   source: string,
   subjectPrefix: string,
 ): Promise<SendGate> {
+  // Only rows inside the resend window suppress. An unbounded lookback froze
+  // out every merchant whose FIRST funnel email predated their current
+  // submission (including matches via the subject-prefix arm against old
+  // send_gateway 'manual_cc' rows) — the send became once per lifetime instead
+  // of once per submission burst.
+  const windowStart = new Date(Date.now() - RESEND_WINDOW_MS).toISOString();
   const res = await db
     .from("lead_interactions")
     .select("agent_source, subject")
     .eq("tenant_id", tenantId)
     .eq("lead_id", leadId)
     .eq("channel", "email")
+    .gte("created_at", windowStart)
     .limit(50);
   if (res.error) {
     console.error("[forms.handoff] idempotency check failed - skipping send (fail-closed)", {
@@ -501,6 +536,21 @@ async function loadHandoffContext(
     "the SunBiz team";
   const agent = await resolveAssignedAgent(form.tenant_id, assignedTo, fallbackName);
 
+  // CC routing: the authoritatively-resolved assigned agent, else the
+  // submissions inbox — an unassigned lead's funnel email must still land in
+  // front of a human. The address comes from the same encrypted credential
+  // store the send authenticates with (never a guessed/hardcoded mailbox);
+  // if it can't be resolved the CC stays null and the send proceeds.
+  let ccEmail = agent.ccEmail;
+  if (!ccEmail && brandSlug === "sunbiz") {
+    try {
+      const creds = await getSubmissionsCreds(form.tenant_id, "sunbiz");
+      ccEmail = (creds.fromAddress || "").trim() || null;
+    } catch {
+      ccEmail = null;
+    }
+  }
+
   return {
     toEmail,
     toName,
@@ -508,7 +558,7 @@ async function loadHandoffContext(
     brandLabel,
     brandSlug,
     signer: { name: agent.name, email: agent.email, phone: agent.phone },
-    ccEmail: agent.ccEmail,
+    ccEmail,
   };
 }
 

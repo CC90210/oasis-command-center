@@ -104,6 +104,10 @@
     {
       "path": "/api/cron/reconcile-sms",
       "schedule": "*/15 * * * *"
+    },
+    {
+      "path": "/api/cron/dispatch-bulk-email",
+      "schedule": "*/5 * * * *"
     }
   ]
 }

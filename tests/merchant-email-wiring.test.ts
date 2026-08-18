@@ -21,8 +21,21 @@ assert.match(
   /provider_message_id: reservationKey[\s\S]*?code === "23505"[\s\S]*?if \(direct\.ok\)[\s\S]*?agent_source: input\.source[\s\S]*?sent_via: "submissions_gmail_apppassword"/,
   "successful direct form sends must be recorded for audit and idempotency",
 );
-assert.match(handoff, /ageMs > 5 \* 60 \* 1000[\s\S]*?contains\("metadata", \{ status: "sending" \}\)[\s\S]*?released\.data\?\.length[\s\S]*?recoveryAttempt: true/,
+assert.match(handoff, /ageMs > 5 \* 60 \* 1000[\s\S]*?eq\("metadata->>status", "sending"\)[\s\S]*?released\.data\?\.length[\s\S]*?recoveryAttempt: true/,
   "stale in-progress reservations must be recoverable");
+// .contains(object) compiles to json_each ARRAY semantics on the Turso adapter
+// and never matches an object column — the release above was a silent no-op
+// until 2026-08-18. No conditional in this module may use it.
+assert.doesNotMatch(handoff, /\.contains\(/,
+  "object-containment filters are dead on the Turso adapter — use metadata->>key");
+assert.match(handoff, /RESEND_WINDOW_MS = 24 \* 60 \* 60 \* 1000/,
+  "the resend window must be 24h");
+assert.match(handoff, /const windowStart = new Date\(Date\.now\(\) - RESEND_WINDOW_MS\)[\s\S]*?gte\("created_at", windowStart\)/,
+  "the idempotency lookback must be bounded to the resend window — an unbounded lookback suppresses re-engaging merchants forever");
+assert.match(handoff, /const windowBucket = Math\.floor\(Date\.now\(\) \/ RESEND_WINDOW_MS\);[\s\S]*?reservationKey = `\$\{input\.leadId\}:\$\{input\.source\}:\$\{windowBucket\}`/,
+  "the atomic reservation key must be bucketed by the same window, so re-sends stay possible and concurrent duplicates still collide");
+assert.match(handoff, /let ccEmail = agent\.ccEmail;[\s\S]*?getSubmissionsCreds\(form\.tenant_id, "sunbiz"\)[\s\S]*?creds\.fromAddress/,
+  "an unassigned lead's funnel email must CC the submissions inbox, resolved from the credential store");
 assert.match(handoff, /r\.agent_source !== "form_send_reservation"/,
   "temporary reservations must not bypass stale-reservation recovery");
 assert.match(handoff, /retryTransient: false/,
