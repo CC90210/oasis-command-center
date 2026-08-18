@@ -135,7 +135,6 @@ export const FOUNDERS_PORTAL: Portal = {
   sections: [
     ...FOUNDERS_NAV.map((n) => ({ href: n.href, label: n.label, enabled: true })),
     { href: "/founders/marketing/library", label: "Library", enabled: true },
-    { href: "/founders/marketing/arthrisil", label: "Arthrisil", enabled: true },
     { href: "/founders/marketing/train", label: "Train", enabled: true },
     // Enabled: the page exists and reads real numbers now. It was greyed since the
     // portal shipped, captioned "Phase 5", while Zernio had been collecting the

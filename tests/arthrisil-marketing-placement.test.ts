@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, readFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { FOUNDERS_PORTAL } from "../lib/portals/registry";
 
@@ -7,19 +7,21 @@ const root = join(__dirname, "..");
 const href = "/founders/marketing/arthrisil";
 
 assert.equal(
-  FOUNDERS_PORTAL.sections.some((section) => section.href === href && section.label === "Arthrisil" && section.enabled),
-  true,
-  "Arthrisil must appear as an enabled sub-tab in the founders Marketing portal",
+  FOUNDERS_PORTAL.sections.some((section) => section.href === href),
+  false,
+  "Arthrisil must not remain a standalone Marketing tab",
 );
 
 const pagePath = join(root, "app/founders/marketing/arthrisil/page.tsx");
-assert.equal(existsSync(pagePath), true, "the Arthrisil Marketing page must exist");
 const page = readFileSync(pagePath, "utf8");
-assert.match(page, /resolveFounder/, "the Arthrisil page must use the founders gate");
-assert.match(page, /notFound\(\)/, "unauthorized callers must fail closed");
-assert.match(page, /arthrisil-social-proof-v1\.mp4/, "the page must render the edited social-proof video");
+assert.match(page, /redirect\("\/founders\/marketing\/library\?group=clients&brand=arthrisil"\)/, "the former tab must redirect into Library → Clients");
+
+const library = readFileSync(join(root, "app/founders/marketing/library/page.tsx"), "utf8");
+assert.match(library, /arthrisil-social-proof-v2\.mp4/, "Library → Clients must render the V2 edit");
+assert.match(library, /internal-review/, "the client asset must carry its rights metadata");
+assert.match(library, /group === "clients"/, "the client asset must be scoped to the Clients library tab");
 
 const legacy = readFileSync(join(root, "app/arthrisil-marketing/page.tsx"), "utf8");
-assert.match(legacy, /redirect\("\/founders\/marketing\/arthrisil"\)/, "the old URL must redirect into Marketing");
+assert.match(legacy, /redirect\("\/founders\/marketing\/library\?group=clients&brand=arthrisil"\)/, "the old URL must redirect into Library → Clients");
 
 console.log("arthrisil marketing placement: passed");
