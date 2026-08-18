@@ -110,6 +110,7 @@ const TESTS = [
   "tests/shopout-dispatch-honesty.test.ts",
   "tests/cron-driver-coverage.test.ts",
   "tests/merchant-email-wiring.test.ts",
+  "tests/bulk-email-dispatch.test.ts",
   "tests/email-idempotency-marker.test.ts",
   "tests/watermark-large-pdf.test.ts",
   "tests/drip-activity.test.ts",
