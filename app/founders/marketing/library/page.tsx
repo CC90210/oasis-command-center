@@ -406,6 +406,49 @@ export default async function MarketingLibraryPage({
         </div>
       )}
 
+      {group === "clients" && (!brand || brand === "arthrisil") && (
+        <Card title="Arthrisil · Social-proof edit V4" subtitle="Client creative · Internal review · 59s · 9:16">
+          <div className="grid gap-5 lg:grid-cols-[minmax(260px,420px)_1fr]">
+            <div className="overflow-hidden rounded-2xl border border-bg-border bg-black">
+              <video
+                className="mx-auto block max-h-[70vh] w-full bg-black object-contain"
+                controls
+                playsInline
+                preload="metadata"
+                poster="/media/arthrisil-marketing/end-card-preview.png"
+              >
+                <source src="/media/arthrisil-marketing/arthrisil-social-proof-v4.mp4" type="video/mp4" />
+                Your browser does not support HTML video.
+              </video>
+            </div>
+            <div className="space-y-4">
+              <div>
+                <p className="text-xs font-bold uppercase tracking-[0.16em] text-accent">Client asset</p>
+                <h2 className="mt-2 text-xl font-semibold text-fg">Arthritis impact → Dr. Azoulay → Arthrisil</h2>
+                <p className="mt-2 text-sm leading-6 text-fg-muted">
+                  Three complete outside perspectives establish pain and lost mobility. Motivated J-cuts then move Dr. Michael
+                  Azoulay from recognizable symptoms to quality-of-life impact, a natural solution, and the Arthrisil reveal.
+                </p>
+              </div>
+              <dl className="grid grid-cols-2 gap-3 text-sm">
+                <div><dt className="text-fg-dim">Brand</dt><dd className="font-semibold text-fg">Arthrisil</dd></div>
+                <div><dt className="text-fg-dim">Status</dt><dd className="font-semibold text-fg">In review</dd></div>
+                <div><dt className="text-fg-dim">Channel</dt><dd className="font-semibold text-fg">Organic social</dd></div>
+                <div><dt className="text-fg-dim">Rights</dt><dd className="font-semibold text-amber-300">Internal only</dd></div>
+              </dl>
+              <div className="flex flex-wrap gap-2" aria-label="Asset tags">
+                {["arthrisil", "client", "doctor", "social-proof", "arthritis", "vertical-video", "j-cut", "music-bed", "internal-review"].map((tag) => (
+                  <span key={tag} className="rounded-full border border-bg-border bg-bg-deep px-2.5 py-1 text-xs text-fg-muted">{tag}</span>
+                ))}
+              </div>
+              <p className="rounded-xl border border-amber-400/20 bg-amber-400/5 p-3 text-xs leading-5 text-fg-muted">
+                Public release is blocked until third-party clip permissions are documented. Product copy is limited to licensed claim language; unsupported superlatives from the source footage were excluded.
+              </p>
+            </div>
+          </div>
+        </Card>
+      )}
+
       {/* A status filter arrives from Studio's pipeline tiles, never from a pill
           here, so without this row the page silently showed a subset with no
           indication of why — and no way back. */}
