@@ -1,9 +1,15 @@
 /**
- * tests/ai-wire.test.ts — the AI Follow-Up wire routes Live Subs, and only
- * Live Subs.
+ * tests/ai-wire.test.ts — the AI Follow-Up wire.
  *
  * Adon, 2026-08-14: "There should be a sub-account called AI Follow-Up Account.
  * That's gonna be the sub-account that we use for the Live Subs follow-ups."
+ *
+ * WIDENED 2026-08-19 — "I want you to use that TextTorrent account to be doing
+ * the SMS follow-ups and drips." Production now runs DRIP_AI_WIRE_STAGES="*",
+ * so EVERY SMS drip sends as the AI Follow-Up sub-account. The scope assertions
+ * below still pin the DEFAULTS (what the code does with no env set), because
+ * those are what a fresh environment inherits; the production pairing is
+ * asserted separately at the bottom of this file.
  *
  * WHY THE SCOPE IS THE THING UNDER TEST. On 2026-08-13 he was emphatic in the
  * other direction: "there are three separate wires for three separate
@@ -117,15 +123,61 @@ assert.deepEqual(aiWireStages({ DRIP_AI_WIRE_STAGES: ",,," }), ["uw_sheet", "liv
     "THE TRAP: the AI-wire list alone also makes the stage SMS-only",
   );
 
-  // Production is set to this pair.
-  const live = {
+  const pair = {
     DRIP_AI_WIRE_STAGES: "uw_sheet,live_sub,live_subs,follow_up",
     DRIP_SMS_ONLY_STAGES: "uw_sheet,live_sub,live_subs",
   };
-  assert.equal(usesAiWire({ stage: "follow_up" }, live), true, "follow_up texts go out on the AI wire");
-  assert.equal(isSmsOnly({ stage: "follow_up" }, live), false, "and follow_up EMAIL still sends");
-  assert.equal(usesAiWire({ stage: "uw_sheet" }, live), true, "Live Subs unchanged");
-  assert.equal(isSmsOnly({ stage: "uw_sheet" }, live), true, "and still SMS-only");
+  assert.equal(usesAiWire({ stage: "follow_up" }, pair), true, "follow_up texts go out on the AI wire");
+  assert.equal(isSmsOnly({ stage: "follow_up" }, pair), false, "and follow_up EMAIL still sends");
+  assert.equal(usesAiWire({ stage: "uw_sheet" }, pair), true, "Live Subs unchanged");
+  assert.equal(isSmsOnly({ stage: "uw_sheet" }, pair), true, "and still SMS-only");
+}
+
+// ── WHAT PRODUCTION IS ACTUALLY SET TO, as of 2026-08-19 ─────────────────
+// Adon: "I want you to use that TextTorrent account to be doing the SMS
+// follow-ups and drips." So the wire is "*" — every SMS drip authenticates as
+// the AI Follow-Up sub-account (id 1522, submissions@sunbizfunding.com) under
+// the Legacy parent, rather than only the Live Subs stages.
+//
+// This supersedes the 2026-08-13 three-wire arrangement FOR SENDING: the main
+// SunBiz account's numbers are carrier-dead, which is visible in drip_runs as
+// SMS rows falling back to an email identity. Replies therefore all land in the
+// AI Follow-Up inbox, which is what the reply-handoff notifier is built around.
+//
+// The pin is the load-bearing half. "*" alone would make every stage SMS-only
+// via the coupling above and take the Bluerise email sequences down with it.
+{
+  const prod = {
+    DRIP_AI_WIRE_STAGES: "*",
+    DRIP_SMS_ONLY_STAGES: "uw_sheet,live_sub,live_subs",
+  };
+  // Every SMS drip, including the two that trigger off a flag rather than a
+  // stage ("Accelerated statement chase" fires on accelerated_followup, so the
+  // lead's stage at dispatch is arbitrary — only "*" reliably covers it).
+  for (const stage of ["uw_sheet", "follow_up", "sent_application", "declined", "funded", "anything", ""]) {
+    assert.equal(usesAiWire({ stage }, prod), true, `${stage} must send from the AI Follow-Up account`);
+  }
+  assert.equal(usesAiWire({}, prod), true, "a flag-triggered lead with no stage still uses the AI account");
+
+  // ...and the pin still holds SMS-only to the Live Subs cohort alone.
+  assert.equal(isSmsOnly({ stage: "uw_sheet" }, prod), true, "Live Subs stay SMS-only");
+  for (const stage of ["follow_up", "sent_application", "declined"]) {
+    assert.equal(isSmsOnly({ stage }, prod), false, `${stage} must keep its EMAIL sequence`);
+  }
+
+  // The failure this pin prevents, asserted directly so it cannot regress
+  // silently if someone "tidies up" the unused-looking variable.
+  const unpinned = { DRIP_AI_WIRE_STAGES: "*" };
+  assert.equal(
+    isSmsOnly({ stage: "follow_up" }, unpinned),
+    false,
+    "the wildcard must NOT be read as an SMS-only wildcard — it falls back to the Live Subs defaults",
+  );
+  assert.deepEqual(
+    smsOnlyStages(unpinned),
+    ["uw_sheet", "live_sub", "live_subs"],
+    "an all-stages wire degrades to the safe SMS-only default rather than muting every email",
+  );
 }
 
 // ── A narrowed override really does narrow it ─────────────────────────────
