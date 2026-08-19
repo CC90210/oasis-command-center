@@ -58,6 +58,8 @@ function makeDb(opts: { interactionsSelectErrors: boolean; inserts: Insert[] }) 
       order: chain,
       limit: chain,
       in: chain,
+      gte: chain, // alreadySent's resend-window filter (2026-08-18)
+      like: chain, // reservation deterministic-winner check (2026-08-18)
       insert: (row: Record<string, unknown>) => {
         op = "insert";
         inserts.push({ table, row });

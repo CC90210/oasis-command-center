@@ -89,6 +89,7 @@ export const PUBLIC_PATH_PREFIXES = [
   // application-form flow returns 401 — every inbound SunBiz lead
   // gets a broken form.
   "/api/forms/submit",     // POST per-step → inserts form_submissions row + maybe stage-transitions the lead.
+  "/api/forms/submit-failure", // POST browser beacon when a public submit fails (platform 413s / crashes the server never saw). Dead-letters the merchant's contact fields + pages sunbiz-ops. MUST be its own entry — matchesPathPrefix needs prefix+"/", so "/api/forms/submit" cannot cover the "-failure" suffix (same rule as provision-cli). Rate-limited + size-capped inside the route.
   "/api/forms/upload-url", // POST HMAC-token file upload signer for public form direct-to-Storage uploads.
   "/api/forms/view",       // POST on form-page mount → records form_views + fires viewed_application drip.
   "/api/forms/address-autocomplete", // GET ?q=… → server-side address-autocomplete proxy for the public form. Public (the personalized form isn't session-authed) and IP rate-limited; returns only formatted-address strings, never provider keys (those stay server-side). See app/api/forms/address-autocomplete/route.ts.

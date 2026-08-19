@@ -376,6 +376,41 @@ export function FormPublicClient({
     return { payload, file_attachments };
   }
 
+  /**
+   * Fire-and-forget failure beacon. A submit that dies at the platform edge
+   * (413, error page, network) never reaches our server code, so without this
+   * the merchant's loss is invisible AND unrecoverable. Sends the current
+   * answers minus File objects — contact fields are what recovery needs; file
+   * bytes are what made the request too big in the first place.
+   */
+  function reportSubmitFailure(error: string, payload?: Record<string, unknown>) {
+    try {
+      const source = payload ?? values;
+      const safe: Record<string, unknown> = {};
+      for (const [k, v] of Object.entries(source)) {
+        if (v instanceof File) {
+          safe[k] = { skipped_file: v.name, size_bytes: v.size };
+        } else {
+          safe[k] = v;
+        }
+      }
+      void fetch("/api/forms/submit-failure", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          tenant_slug: anonymousInit?.tenant_slug,
+          form_slug: anonymousInit?.form_slug,
+          step_index: currentStep,
+          error: error.slice(0, 400),
+          payload: safe,
+        }),
+        keepalive: true,
+      }).catch(() => undefined);
+    } catch {
+      // The beacon must never add a second failure on top of the first.
+    }
+  }
+
   async function submit() {
     if (!validate()) return;
     setSubmitting(true);
@@ -486,12 +521,30 @@ export function FormPublicClient({
         headers: { "content-type": "application/json" },
         body: JSON.stringify(submitBody),
       });
-      const data = (await res.json()) as SubmitResponse;
-      if (!data.ok) {
+      // A crashed function answers non-JSON (often an EMPTY 500). Parsing it
+      // blindly turned that into Safari's "The string did not match the
+      // expected pattern." shown verbatim to merchants. Whatever came back,
+      // the merchant gets a plain sentence and a retry that can succeed.
+      const data = (await res.json().catch(() => null)) as SubmitResponse | null;
+      if (!data || !data.ok) {
+        // Beacon only the failures nobody else can see or that mean a crash:
+        // a non-JSON response (platform error page, 413) or an explicit
+        // server_error. Validation and rate-limit responses are the system
+        // working, not a merchant being lost.
+        if (!data || data.error === "server_error") {
+          reportSubmitFailure(
+            data ? "server_error" : `non_json_http_${res.status}`,
+            built.payload,
+          );
+        }
+        const friendly: Record<string, string> = {
+          rate_limited: "Too many submissions too fast. Wait a few seconds and try again.",
+          server_error: "Something went wrong on our end. Please try submitting again.",
+        };
         setServerError(
-          data.error === "rate_limited"
-            ? "Too many submissions too fast. Wait a few seconds and try again."
-            : data.error || `Submission failed (http_${res.status}).`,
+          (data?.error && friendly[data.error]) ||
+            data?.error ||
+            "We couldn't process that just now. Please try submitting again in a moment.",
         );
         return;
       }
@@ -517,8 +570,13 @@ export function FormPublicClient({
         }
       }
     } catch (err) {
+      // Browser-internal error text (WebKit's "The string did not match the
+      // expected pattern.", Chrome's "Failed to fetch") means nothing to a
+      // merchant and reads like their data is bad. Log it, show a sentence.
+      console.error("form submit failed:", err);
+      reportSubmitFailure(err instanceof Error ? err.message : "submit threw");
       setServerError(
-        err instanceof Error ? `Network error: ${err.message}` : "Network error.",
+        "We couldn't submit the form. Please check your connection and try again.",
       );
     } finally {
       setSubmitting(false);
