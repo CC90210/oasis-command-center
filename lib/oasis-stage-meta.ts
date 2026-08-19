@@ -36,17 +36,20 @@ export type { StageMeta };
 // Lowest contrast in the set is now ~4.5:1 (outreach), highest is ~10:1
 // (lost). Recompute with scripts/audit_contrast.py before adjusting.
 export const OASIS_LEAD_STAGES: StageMeta[] = [
-  { key: "new_contact",   label: "New Contact",   bg: "#5E6B82", fg: "#FFFFFF" },
-  { key: "outreach",      label: "Outreach",      bg: "#3978BE", fg: "#FFFFFF" },
-  { key: "discovery",     label: "Discovery",     bg: "#2B7C8A", fg: "#FFFFFF" },
-  { key: "qualified",     label: "Qualified",     bg: "#2C8372", fg: "#FFFFFF" },
-  { key: "proposal",      label: "Proposal",      bg: "#5167B0", fg: "#FFFFFF" },
-  { key: "negotiation",   label: "Negotiation",   bg: "#7057A7", fg: "#FFFFFF" },
-  { key: "onboarding",    label: "Onboarding",    bg: "#996925", fg: "#FFFFFF" },
-  { key: "active_client", label: "Active Client", bg: "#357A55", fg: "#FFFFFF" },
-  { key: "churned",       label: "Churned",       bg: "#9B5566", fg: "#FFFFFF" },
-  { key: "lost",          label: "Lost",          bg: "#6F2D34", fg: "#FFFFFF" },
-  { key: "archived",      label: "Archived",      bg: "#414957", fg: "#E5E7EB" },
+  { key: "researched", label: "Researched", bg: "#5E6B82", fg: "#FFFFFF" },
+  { key: "assigned", label: "Assigned", bg: "#466A99", fg: "#FFFFFF" },
+  { key: "attempting_contact", label: "Attempting Contact", bg: "#3978BE", fg: "#FFFFFF" },
+  { key: "connected", label: "Connected", bg: "#2B7C8A", fg: "#FFFFFF" },
+  { key: "qualified", label: "Qualified", bg: "#2C8372", fg: "#FFFFFF" },
+  { key: "founder_meeting_booked", label: "Founder Meeting", bg: "#5167B0", fg: "#FFFFFF" },
+  { key: "demo_completed", label: "Demo Complete", bg: "#6559A8", fg: "#FFFFFF" },
+  { key: "proposal_sent", label: "Proposal Sent", bg: "#7057A7", fg: "#FFFFFF" },
+  { key: "won", label: "Won", bg: "#357A55", fg: "#FFFFFF" },
+  { key: "lost", label: "Lost", bg: "#6F2D34", fg: "#FFFFFF" },
+  { key: "onboarding", label: "Onboarding", bg: "#996925", fg: "#FFFFFF" },
+  { key: "in_build", label: "In Build", bg: "#8A6A25", fg: "#FFFFFF" },
+  { key: "client_review", label: "Client Review", bg: "#44756B", fg: "#FFFFFF" },
+  { key: "launched", label: "Launched", bg: "#286B48", fg: "#FFFFFF" },
 ];
 
 export const OASIS_LEAD_STAGE_KEYS = OASIS_LEAD_STAGES.map((s) => s.key);
@@ -63,17 +66,20 @@ export const OASIS_LEAD_STAGE_KEYS = OASIS_LEAD_STAGES.map((s) => s.key);
 export type OasisStageTab = { value: string; label: string; tone: string };
 
 const OASIS_STAGE_TONES: Record<string, string> = {
-  new_contact:   "text-fg-dim",
-  outreach:      "text-status-info",
-  discovery:     "text-status-info",
+  researched: "text-fg-dim",
+  assigned: "text-status-info",
+  attempting_contact: "text-status-info",
+  connected: "text-status-info",
   qualified:     "text-status-engaged",
-  proposal:      "text-accent",
-  negotiation:   "text-accent",
+  founder_meeting_booked: "text-accent",
+  demo_completed: "text-accent",
+  proposal_sent: "text-accent",
+  won: "text-status-engaged",
+  lost: "text-status-warm",
   onboarding:    "text-status-warm",
-  active_client: "text-status-engaged",
-  churned:       "text-status-warm",
-  lost:          "text-status-warm",
-  archived:      "text-fg-dim",
+  in_build: "text-status-warm",
+  client_review: "text-status-engaged",
+  launched: "text-status-engaged",
 };
 
 export const OASIS_LEAD_STAGE_TABS: OasisStageTab[] = OASIS_LEAD_STAGES.map((s) => ({

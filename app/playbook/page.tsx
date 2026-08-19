@@ -23,10 +23,24 @@ type PlaybookSection = {
 const SECTIONS: PlaybookSection[] = [
   {
     href: "/playbook/deals",
-    title: "Deal Architecture",
-    subtitle: "Three offers - two partner paths - one decision rule",
+    title: "Website Offer + Deal Architecture",
+    subtitle: "$2K / $3.5K / $5K+ packages - commission - automation upsells",
     body:
-      "Three client offers, two partner paths, and the canonical 50% strategic-partner model. The math is simple enough to defend in any room.",
+      "The canonical website-first offer: Essential, Growth, and Authority packages; approved automation add-ons; founder pricing authority; rep attribution; and tiered commission on collected setup revenue.",
+  },
+  {
+    href: "/playbook/script",
+    title: "Sales Rep Script",
+    subtitle: "Cold call - qualify - automation segue - book CC or Adon",
+    body:
+      "The live call sheet for every rep: track-specific openers, website-problem diagnosis, the $2,000 qualification gate, gatekeeper and voicemail lines, objection handling, booking language, and the founder close sequence.",
+  },
+  {
+    href: "/sales-engine",
+    title: "Sales Engine",
+    subtitle: "Rep queue - founder handoffs - proposals - fulfillment - commissions",
+    body:
+      "Run the operation from researched lead to launched website. Reps work assigned leads, CC and Adon receive qualified handoffs, and the same workspace tracks proposals, onboarding, fulfillment, and commissions.",
   },
   {
     href: "/playbook/business",

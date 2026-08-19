@@ -1,357 +1,40 @@
 "use client";
-
 import { useState } from "react";
 import Link from "next/link";
-import { ArrowLeft, ShieldAlert } from "lucide-react";
-import {
-  STAGE_1_PATTERN_INTERRUPT,
-  STAGE_4_PIVOT,
-  STAGE_5_CLOSE,
-  TRACK_STAGES,
-  TRACK_LABELS,
-  TRACK_DESCRIPTIONS,
-  OBJECTIONS,
-  TRACKS,
-  SECONDARY_DISARM,
-  DISARM_QUESTIONS,
-  type ProspectTrack,
-} from "@/lib/playbook";
+import { ArrowLeft } from "lucide-react";
+import { Card, PageHeader, Tag } from "@/components/Card";
+
+const TRACKS = {
+  trades: ["mobile click-to-call", "service-area trust", "quote follow-up"],
+  professional: ["authority and credibility", "clear service paths", "intake friction"],
+  wellness: ["mobile booking", "reviews", "no-show recovery"],
+  home_services: ["before/after proof", "local SEO", "estimate requests"],
+} as const;
+const OBJECTIONS = [
+  ["Send me information", "I will. Should I focus on the mobile issue, lead capture, or both? Then let's put 15 minutes on the calendar so it is actually relevant."],
+  ["We have a website person", "Good. Are they measured on maintenance, or on calls and bookings? We can complement them if the conversion gap remains."],
+  ["Too expensive", "I have not priced your scope. The starting point is $2,000; CC or Adon recommends it only if the business case supports it."],
+  ["Bad timing", "What would need to change for this to become timely, and when should we revisit it?"],
+  ["We do not need a website", "When a referral checks you online before calling, what do they see? The website owns that trust step."],
+];
 
 export default function ScriptPage() {
-  const [track, setTrack] = useState<ProspectTrack>("service_trades");
-  const trackStages = TRACK_STAGES[track];
-
-  return (
-    <div className="space-y-6 animate-fade-in">
-      <Link
-        href="/playbook"
-        className="inline-flex items-center gap-1.5 text-xs text-fg-muted hover:text-accent transition-colors"
-      >
-        <ArrowLeft size={14} /> Playbook
-      </Link>
-
-      <header className="flex items-start justify-between gap-4">
-        <div>
-          <h1 className="text-2xl font-bold tracking-tight text-fg">
-            Cold Call Script + Objections
-          </h1>
-          <p className="text-sm text-fg-muted mt-1.5">
-            One page. Memorize. Drill. Run it without thinking. Total runtime: 2:50–3:10.
-          </p>
-        </div>
-      </header>
-
-      {/* Track selector */}
-      <div className="bg-bg-panel border border-bg-border rounded-xl p-4">
-        <div className="text-[10px] uppercase tracking-[0.14em] font-bold text-fg-muted mb-2">
-          Prospect track
-        </div>
-        <div className="flex flex-wrap gap-2">
-          {TRACKS.map((t) => (
-            <button
-              key={t}
-              onClick={() => setTrack(t)}
-              className={`px-3 py-1.5 rounded-md text-sm font-medium transition-all ${
-                track === t
-                  ? "bg-accent text-bg shadow-glow"
-                  : "bg-bg-elev text-fg-muted border border-bg-border hover:bg-bg-hover hover:text-fg"
-              }`}
-            >
-              {TRACK_LABELS[t]}
-            </button>
-          ))}
-        </div>
-        <div className="text-xs text-fg-dim mt-3 italic">
-          {TRACK_DESCRIPTIONS[track]}
-        </div>
-      </div>
-
-      {/* The 5 stages */}
-      <div className="bg-bg-panel border border-bg-border rounded-xl p-5 space-y-5">
-        <Stage
-          num={STAGE_1_PATTERN_INTERRUPT.num}
-          title={STAGE_1_PATTERN_INTERRUPT.title}
-          duration={STAGE_1_PATTERN_INTERRUPT.duration}
-          purpose={STAGE_1_PATTERN_INTERRUPT.purpose}
-          line={STAGE_1_PATTERN_INTERRUPT.line}
-          why={STAGE_1_PATTERN_INTERRUPT.why}
-        />
-        <Stage
-          num="02"
-          title="The Reason"
-          duration="~20 sec"
-          purpose="Plant the pain. Don't pitch yet."
-          line={trackStages.stage2_line}
-          why='"I&apos;m not sure if..." is the NEPQ disarm — a question dressed as a statement. Forces the prospect to think. The second they&apos;re thinking, they&apos;re engaged.'
-        />
-        <Stage
-          num="03"
-          title="Diagnose"
-          duration="~90 sec"
-          purpose="Five questions. Listen more than you talk."
-          questions={trackStages.stage3_questions}
-          why="Q5 is the consequence question. It's where they sell themselves. Don't skip. Don't soften. Ask it. Wait. Let silence do the work."
-        />
-        <Stage
-          num={STAGE_4_PIVOT.num}
-          title={STAGE_4_PIVOT.title}
-          duration={STAGE_4_PIVOT.duration}
-          purpose={STAGE_4_PIVOT.purpose}
-          line={STAGE_4_PIVOT.line}
-          why={STAGE_4_PIVOT.why}
-        />
-        <Stage
-          num={STAGE_5_CLOSE.num}
-          title={STAGE_5_CLOSE.title}
-          duration={STAGE_5_CLOSE.duration}
-          purpose={STAGE_5_CLOSE.purpose}
-          line={STAGE_5_CLOSE.line}
-          why={STAGE_5_CLOSE.why}
-        />
-      </div>
-
-      {/* Objection table */}
-      <div className="bg-bg-panel border border-bg-border rounded-xl">
-        <header className="border-b border-bg-border px-5 py-3.5">
-          <h2 className="text-xs font-bold uppercase tracking-[0.14em] text-accent">
-            Objection Handlers
-          </h2>
-          <p className="text-xs text-fg-muted mt-1">
-            Universal rule: question, don&apos;t answer. The objection is rarely the real reason.
-          </p>
-        </header>
-        <table className="w-full">
-          <thead>
-            <tr className="border-b border-bg-border">
-              <th className="text-left text-[10px] uppercase tracking-[0.14em] text-fg-muted font-bold px-5 py-3 w-1/3">
-                What they say
-              </th>
-              <th className="text-left text-[10px] uppercase tracking-[0.14em] text-fg-muted font-bold px-5 py-3">
-                What you say
-              </th>
-            </tr>
-          </thead>
-          <tbody>
-            {OBJECTIONS.map((o, i) => (
-              <tr
-                key={i}
-                className="border-b border-bg-border last:border-0 hover:bg-bg-hover/30 transition-colors"
-              >
-                <td className="px-5 py-4 align-top">
-                  <span className="text-status-hot font-medium text-sm">&ldquo;{o.trigger}&rdquo;</span>
-                </td>
-                <td className="px-5 py-4 text-fg text-sm leading-relaxed">{o.response}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-
-      {/* Secondary Disarm — when they double down */}
-      <SecondaryDisarmSection track={track} />
-
-      <div className="bg-bg-panel border border-bg-border rounded-xl p-5">
-        <h3 className="text-xs uppercase tracking-[0.14em] font-bold text-accent mb-2">
-          The drill
-        </h3>
-        <p className="text-fg text-sm leading-relaxed">
-          Pull this page up at midday for 10 minutes. Say the trigger out loud, pause one second, then deliver the response. Speed up each round.{" "}
-          <strong>Goal:</strong> by Day 14 you respond inside 1.5 seconds. No thinking. Pure muscle memory.
-        </p>
-      </div>
-    </div>
-  );
+  const [track, setTrack] = useState<keyof typeof TRACKS>("trades");
+  return <div className="space-y-6 animate-fade-in">
+    <Link href="/playbook" className="inline-flex items-center gap-1.5 text-xs text-fg-muted hover:text-accent"><ArrowLeft size={14}/> Playbook</Link>
+    <PageHeader title="Website Cold Call + Founder Close" subtitle="Observe. Diagnose. Qualify. Book. Reps never negotiate or promise custom scope." action={<Tag tone="accent">V4</Tag>}/>
+    <Card title="Choose the prospect track"><div className="flex flex-wrap gap-2">{Object.keys(TRACKS).map((key) => <button key={key} onClick={() => setTrack(key as keyof typeof TRACKS)} className={`px-3 py-2 rounded-md text-sm ${track === key ? "bg-accent text-bg" : "bg-bg-elev border border-bg-border text-fg-muted"}`}>{key.replace("_", " ")}</button>)}</div><p className="text-xs text-fg-muted mt-3">Listen for: {TRACKS[track].join(" · ")}</p></Card>
+    <Card title="Rep sequence" subtitle="The target is a qualified Google Meet with CC or Adon.">
+      <ScriptStep n="01" title="Observed opener">Hey [Name], it&apos;s [Rep] with OASIS. We haven&apos;t spoken before—this is a cold call. I noticed [specific website issue] on [Company]. Can I take 30 seconds to explain why I called?</ScriptStep>
+      <ScriptStep n="02" title="Business consequence">When someone checks you out on their phone, [issue] makes it harder to [call/book/request a quote]. How much new business is supposed to come through the website today?</ScriptStep>
+      <ScriptStep n="03" title="Qualify">Confirm the decision-maker, one real website/conversion problem, timing, and openness to a minimum $2,000 investment.</ScriptStep>
+      <ScriptStep n="04" title="Automation segue">Only after a leak appears: “What happens after [form/missed call/quote]? Who owns follow-up?” Match it to one approved automation.</ScriptStep>
+      <ScriptStep n="05" title="Book and hand off">I can put you with [CC/Adon] on [option A] or [option B]. Which works? Record the audit finding and promised demo.</ScriptStep>
+    </Card>
+    <Card title="Gatekeeper and voicemail"><p className="text-sm text-fg"><b>Gatekeeper:</b> I&apos;m calling about a specific issue on the company website that may be costing inquiries. Who owns the website and new-customer flow?</p><p className="text-sm text-fg mt-3"><b>Voicemail:</b> Hi [Name], [Rep] from OASIS. I noticed [issue] on [Company]&apos;s site that affects [calls/bookings]. I&apos;ll send a short note so you can see exactly what I mean.</p></Card>
+    <Card title="Objections"><div className="space-y-3">{OBJECTIONS.map(([trigger,response]) => <div key={trigger} className="rounded-lg border border-bg-border p-3"><div className="font-bold text-sm text-fg">“{trigger}”</div><div className="text-sm text-fg-muted mt-1">{response}</div></div>)}</div></Card>
+    <Card title="Founder close — 30 minutes"><ol className="space-y-2 text-sm text-fg-muted"><li>1. Confirm rep notes and desired outcome.</li><li>2. Quantify trust, conversion, and follow-up gaps.</li><li>3. Show the tailored audit/demo.</li><li>4. Anchor Authority → Growth → Essential and recommend one.</li><li>5. Prescribe only automations tied to admitted leaks.</li><li>6. Confirm scope and request the 50% setup deposit.</li></ol><blockquote className="mt-4 border-l-2 border-accent pl-4 text-sm text-fg">Based on what you showed me, [package] is the right fit at [setup] and [monthly], with [automation]. We start with 50% today and the balance before launch. Is anything stopping us from scheduling onboarding?</blockquote></Card>
+  </div>;
 }
 
-function Stage({
-  num,
-  title,
-  duration,
-  purpose,
-  line,
-  questions,
-  why,
-}: {
-  num: string;
-  title: string;
-  duration: string;
-  purpose: string;
-  line?: string;
-  questions?: string[];
-  why: string;
-}) {
-  return (
-    <div className="border-l-2 border-accent pl-5">
-      <div className="flex items-baseline gap-3 mb-2">
-        <span className="text-accent text-[10px] font-bold tracking-[0.2em] uppercase">
-          Stage {num}
-        </span>
-        <span className="text-fg font-bold text-base">{title}</span>
-        <span className="text-fg-dim text-xs ml-auto">{duration}</span>
-      </div>
-      <div className="text-fg-muted text-sm italic mb-3">{purpose}</div>
-      {line && (
-        <blockquote className="bg-accent-soft border-l-2 border-accent rounded-r-md px-4 py-3 text-fg leading-relaxed">
-          {line}
-        </blockquote>
-      )}
-      {questions && (
-        <ol className="space-y-2">
-          {questions.map((q, i) => (
-            <li
-              key={i}
-              className="bg-accent-soft border-l-2 border-accent rounded-r-md px-4 py-2.5 text-fg text-sm leading-relaxed"
-            >
-              <span className="text-accent font-bold mr-2">{i + 1}.</span>
-              {q}
-            </li>
-          ))}
-        </ol>
-      )}
-      <div className="mt-3 text-xs text-fg-dim italic">
-        <span className="text-fg-muted font-semibold not-italic">Why →</span> {why}
-      </div>
-    </div>
-  );
-}
-
-function SecondaryDisarmSection({ track }: { track: ProspectTrack }) {
-  const categories = DISARM_QUESTIONS[track] ?? [];
-
-  return (
-    <div className="bg-bg-panel border border-bg-border rounded-xl">
-      <header className="border-b border-bg-border px-5 py-3.5 flex items-start gap-3">
-        <ShieldAlert size={18} className="text-status-hot mt-0.5 shrink-0" />
-        <div className="flex-1">
-          <h2 className="text-xs font-bold uppercase tracking-[0.14em] text-status-hot">
-            Secondary Disarm — when they double down
-          </h2>
-          <p className="text-xs text-fg-muted mt-1">
-            Trigger:{" "}
-            <span className="text-status-hot italic">
-              &quot;{SECONDARY_DISARM.trigger}&quot;
-            </span>{" "}
-            — the primary diffuse already failed. Strategy:{" "}
-            <span className="text-fg font-semibold">
-              {SECONDARY_DISARM.strategyName}
-            </span>
-            .
-          </p>
-          <p className="text-xs text-fg-dim mt-1.5 italic">
-            {SECONDARY_DISARM.strategyTagline}
-          </p>
-        </div>
-      </header>
-
-      {/* The 3 beats */}
-      <div className="p-5 space-y-4 border-b border-bg-border">
-        {SECONDARY_DISARM.beats.map((b) => (
-          <div key={b.num} className="border-l-2 border-status-hot pl-5">
-            <div className="flex items-baseline gap-3 mb-2">
-              <span className="text-status-hot text-[10px] font-bold tracking-[0.2em] uppercase">
-                Beat {b.num}
-              </span>
-              <span className="text-fg font-bold text-base">{b.label}</span>
-            </div>
-            <div className="text-fg-muted text-sm italic mb-2">{b.purpose}</div>
-            <blockquote className="bg-accent-soft border-l-2 border-accent rounded-r-md px-4 py-2.5 text-fg text-sm leading-relaxed">
-              {b.example}
-            </blockquote>
-            <div className="mt-2 text-xs text-fg-dim italic">
-              <span className="text-fg-muted font-semibold not-italic">Why →</span>{" "}
-              {b.why}
-            </div>
-          </div>
-        ))}
-      </div>
-
-      {/* Granular question bank */}
-      <div className="p-5 border-b border-bg-border">
-        <div className="flex items-baseline justify-between mb-3">
-          <h3 className="text-xs uppercase tracking-[0.14em] font-bold text-accent">
-            Granular question bank — {TRACK_LABELS[track]}
-          </h3>
-          <span className="text-[10px] uppercase tracking-[0.14em] text-fg-dim">
-            Pick ONE per call
-          </span>
-        </div>
-
-        {categories.length === 0 ? (
-          <div className="text-sm text-fg-dim italic bg-bg-elev border border-dashed border-bg-border rounded-md px-4 py-3">
-            Bank tailored to {TRACK_LABELS[track]} not built yet. Use the
-            universal frame above and isolate one specific operational gap based
-            on what they&apos;ve already shared. Switch to{" "}
-            <span className="text-fg">Service Trades</span> to see the full
-            granular bank.
-          </div>
-        ) : (
-          <div className="space-y-4">
-            {categories.map((cat) => (
-              <div key={cat.domain}>
-                <div className="text-[11px] uppercase tracking-[0.12em] font-bold text-fg mb-2">
-                  {cat.domain}
-                </div>
-                <ul className="space-y-1.5">
-                  {cat.questions.map((q, i) => (
-                    <li
-                      key={i}
-                      className="bg-bg-elev border-l-2 border-accent rounded-r-md px-4 py-2 text-fg text-sm leading-relaxed"
-                    >
-                      {q}
-                    </li>
-                  ))}
-                </ul>
-              </div>
-            ))}
-          </div>
-        )}
-      </div>
-
-      {/* Pivot + Exit */}
-      <div className="p-5 grid md:grid-cols-2 gap-4 border-b border-bg-border">
-        <div>
-          <div className="text-[11px] uppercase tracking-[0.12em] font-bold text-accent mb-2">
-            {SECONDARY_DISARM.pivot.label}
-          </div>
-          <blockquote className="bg-accent-soft border-l-2 border-accent rounded-r-md px-4 py-3 text-fg text-sm leading-relaxed">
-            {SECONDARY_DISARM.pivot.line}
-          </blockquote>
-          <div className="mt-2 text-xs text-fg-dim italic">
-            {SECONDARY_DISARM.pivot.note}
-          </div>
-        </div>
-        <div>
-          <div className="text-[11px] uppercase tracking-[0.12em] font-bold text-fg-muted mb-2">
-            {SECONDARY_DISARM.exit.label}
-          </div>
-          <blockquote className="bg-bg-elev border-l-2 border-bg-border rounded-r-md px-4 py-3 text-fg text-sm leading-relaxed">
-            {SECONDARY_DISARM.exit.line}
-          </blockquote>
-          <div className="mt-2 text-xs text-fg-dim italic">
-            {SECONDARY_DISARM.exit.note}
-          </div>
-        </div>
-      </div>
-
-      {/* Hard rules */}
-      <div className="p-5">
-        <div className="text-[11px] uppercase tracking-[0.12em] font-bold text-status-hot mb-3">
-          Hard rules
-        </div>
-        <ul className="space-y-2">
-          {SECONDARY_DISARM.hardRules.map((rule, i) => (
-            <li
-              key={i}
-              className="flex gap-3 text-sm text-fg leading-relaxed"
-            >
-              <span className="text-status-hot font-bold shrink-0">
-                {String(i + 1).padStart(2, "0")}
-              </span>
-              <span>{rule}</span>
-            </li>
-          ))}
-        </ul>
-      </div>
-    </div>
-  );
-}
+function ScriptStep({n,title,children}:{n:string;title:string;children:React.ReactNode}) { return <div className="grid grid-cols-[2rem_1fr] gap-3 py-3 border-b border-bg-border last:border-0"><div className="text-accent font-mono font-bold">{n}</div><div><div className="font-bold text-fg">{title}</div><div className="text-sm text-fg-muted mt-1 leading-relaxed">{children}</div></div></div>; }
