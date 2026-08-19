@@ -90,6 +90,9 @@ jobs:
           # a <details> without opening it, so losing the hash opener would
           # silently point every one of those links at a closed bar.
           npm run test:settings
+          # OASIS website-sales appointment-setting workflow: role isolation,
+          # lifecycle transitions, idempotent handoffs and production smoke.
+          npm run test:website-sales
           # ADDED 2026-08-16. Repo-wide invariant, not a feature suite: every
           # paged read must .order() by a unique key before it .range()s. This
           # repo has hit that bug four times (two found only by review), the fix

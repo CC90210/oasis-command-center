@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 
 const workflowRoute = readFileSync("app/api/website-sales/[leadId]/route.ts", "utf8");
 const commissionRoute = readFileSync("app/api/website-sales/commissions/route.ts", "utf8");
-const migration = readFileSync("../../Business-Empire-Agent/database/107_website_sales_engine.sql", "utf8");
+const migration = readFileSync("database/146_website_sales_engine.sql", "utf8");
 
 assert(workflowRoute.includes("resolveSessionContext"), "workflow route authenticates through session context");
 assert(workflowRoute.includes('.eq("tenant_id", session.tenantId)') && workflowRoute.includes("p_tenant_id:session.tenantId"), "workflow reads and RPC writes are tenant-filtered");
