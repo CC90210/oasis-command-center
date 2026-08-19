@@ -135,6 +135,7 @@ const TESTS = [
   "tests/optout-cooloff.test.ts",
   "tests/channel-limits.test.ts",
   "tests/offboard-stages.test.ts",
+  "tests/audience-narrowing.test.ts",
 ];
 
 const NODE_ARGS = ["--conditions=react-server", "--import", "tsx"];

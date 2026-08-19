@@ -37,7 +37,7 @@ import "server-only";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { checkTcpaWindow } from "@/lib/tcpa-window";
 import { ACCELERATED_FLAG, acceleratedSystemLive, hasActiveAcceleratedRun } from "@/lib/drips/accelerated";
-import type { DripStep } from "./types";
+import type { DripStep, DripTriggerFilter } from "./types";
 import { computeStep0DelayMinutes, enrollmentBufferForStage } from "./stage-buffer";
 import { isPaused, isReEntryEligible } from "./drip-rules-core";
 import { ensureInitialBrand } from "./brand-store";
@@ -109,6 +109,7 @@ export type SkipReason =
   | "paused"
   | "no_contact_method"
   | "shopped_recently"
+  | "covered_by_other_channel"
   | "accelerated_chase"
   | "docs_on_file"
   | "deal_closed"
@@ -139,7 +140,7 @@ type SequenceRow = {
   tenant_id: string;
   name: string;
   enabled: boolean;
-  trigger_filter: { entity?: string; field?: string; to?: string; from?: string } | null;
+  trigger_filter: DripTriggerFilter | null;
   steps: unknown;
 };
 
@@ -153,6 +154,7 @@ function emptySkipCounts(): Record<SkipReason, number> {
     paused: 0,
     no_contact_method: 0,
     shopped_recently: 0,
+    covered_by_other_channel: 0,
     accelerated_chase: 0,
     docs_on_file: 0,
     deal_closed: 0,
@@ -248,6 +250,7 @@ function staticSkipReason(
   data: Record<string, unknown>,
   stage: string,
   firstChannel: "sms" | "email",
+  requires?: "no_email" | "no_phone",
 ): SkipReason | null {
   if (DEAD_STAGES.has(String(data.stage))) return "dead_or_declined";
   // Belt to the query's braces. The board filter above already excludes these,
@@ -277,6 +280,12 @@ function staticSkipReason(
   // sequence's candidate window on every pass forever (Codex review P1, round 2).
   if (firstChannel === "sms" && !hasPhone) return "no_contact_method";
   if (firstChannel === "email" && !hasEmail) return "no_contact_method";
+  // Audience narrowing, for stages served by more than one sequence. Permanent
+  // for a given lead+sequence, so it belongs with the other permanent guards
+  // rather than downstream — a lead it rejects must not consume a slot under
+  // the enrollment limit and starve the leads behind it.
+  if (requires === "no_email" && hasEmail) return "covered_by_other_channel";
+  if (requires === "no_phone" && hasPhone) return "covered_by_other_channel";
   return null;
 }
 
@@ -437,7 +446,7 @@ async function collectCandidates(
       }
       // Permanent guards are applied HERE so a rejected lead does not occupy a
       // slot under `want` and block the leads behind it forever.
-      const staticSkip = staticSkipReason(lead.data || {}, stage, firstChannel);
+      const staticSkip = staticSkipReason(lead.data || {}, stage, firstChannel, seq.trigger_filter?.requires);
       if (staticSkip) {
         noteSkip(staticSkip);
         continue;
