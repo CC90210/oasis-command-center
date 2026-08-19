@@ -122,6 +122,7 @@ const TESTS = [
   "tests/pg-bridge-operators.test.ts",
   "tests/or-filter-dotted-values.test.ts",
   "tests/form-submit-failure-capture.test.ts",
+  "tests/deploy-serves-main.test.ts",
   "tests/telegram-lane-fallback.test.ts",
   "tests/rep-line-isolation.test.ts",
   "tests/email-drip-health.test.ts",
