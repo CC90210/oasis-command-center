@@ -104,6 +104,7 @@ export const CRM_WRITE_ROLES: ReadonlySet<string> = new Set([
   "owner",
   "admin",
   "member",
+  "agent",
   "loan_officer",
   "processor",
 ]);

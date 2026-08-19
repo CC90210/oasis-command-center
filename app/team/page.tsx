@@ -22,6 +22,7 @@ export const dynamic = "force-dynamic";
 const ROLE_LABEL: Record<string, string> = {
   owner: "Owner",
   admin: "Admin",
+  agent: "Agent",
   loan_officer: "Loan officer",
   processor: "Processor",
   read_only: "Read only",

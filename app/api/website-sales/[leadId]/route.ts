@@ -13,21 +13,38 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ le
   const db = getServiceSupabase();
   const lead = await db.from("tenant_records").select("id,data").eq("tenant_id", session.tenantId).eq("id",leadId).eq("entity_type","lead").maybeSingle();
   if (!lead.data) return NextResponse.json({ok:false,error:"lead_not_found"},{status:404});
+  const current = lead.data as Record<string,unknown>;
+  if (current.sales_program !== "website_sales_v1") return NextResponse.json({ok:false,error:"not_website_sales_lead"},{status:404});
+  if (!session.isAdmin && String(current.assigned_to || "").toLowerCase() !== session.userId.toLowerCase()) {
+    return NextResponse.json({ok:false,error:"lead_not_assigned_to_agent"},{status:403});
+  }
   const body = await req.json().catch(() => null) as Record<string,unknown>|null;
   if (!body || typeof body.action !== "string") return NextResponse.json({ok:false,error:"invalid_body"},{status:400});
   let patch: Record<string,unknown> = {};
-  if (body.action === "qualify") {
+  if (body.action === "disposition") {
+    const disposition = String(body.disposition || "");
+    const allowed = ["attempted", "voicemail", "connected", "lost"];
+    if (!allowed.includes(disposition)) return NextResponse.json({ok:false,error:"invalid_disposition"},{status:400});
+    if (!["assigned","attempting_contact","connected","qualified"].includes(String(current.stage || ""))) return NextResponse.json({ok:false,error:"invalid_stage_transition"},{status:409});
+    const nextStage = disposition === "connected" ? "connected" : disposition === "lost" ? "lost" : "attempting_contact";
+    const nextActionAt = typeof body.nextActionAt === "string" && body.nextActionAt ? body.nextActionAt : null;
+    if ((disposition === "attempted" || disposition === "voicemail") && !nextActionAt) return NextResponse.json({ok:false,error:"next_action_required"},{status:400});
+    patch = { stage:nextStage, last_disposition:disposition, last_contact_at:new Date().toISOString(), next_action_at:nextActionAt, loss_reason:disposition === "lost" ? String(body.lossReason || "") : current.loss_reason };
+  } else if (body.action === "qualify") {
+    if (current.stage !== "connected") return NextResponse.json({ok:false,error:"connect_before_qualifying"},{status:409});
     const q = body.qualification as Record<string,unknown>|undefined;
     if (!q || !["authorityConfirmed","websiteProblemConfirmed","timingConfirmed","minimumInvestmentConfirmed"].every(k => q[k] === true)) return NextResponse.json({ok:false,error:"qualification_incomplete"},{status:400});
     patch = { qualification:q, stage:"qualified", qualified_at:new Date().toISOString() };
   } else if (body.action === "book_founder") {
+    if (current.stage !== "qualified") return NextResponse.json({ok:false,error:"qualify_before_booking"},{status:409});
     if (![body.founderUserId,body.meetingAt,body.promisedDemo].every(v => typeof v === "string" && v.length>0) || !UUID.test(String(body.founderUserId))) return NextResponse.json({ok:false,error:"invalid_handoff"},{status:400});
-    const current = lead.data as Record<string,unknown>;
+    const founder = await db.from("user_profiles").select("id,is_owner,team_role").eq("tenant_id",session.tenantId).eq("auth_user_id",body.founderUserId).maybeSingle();
+    if (!founder.data || (!founder.data.is_owner && !["owner","admin"].includes(String(founder.data.team_role)))) return NextResponse.json({ok:false,error:"founder_not_authorized"},{status:400});
     const existingRep = typeof current.attributed_rep_user_id === "string" && UUID.test(current.attributed_rep_user_id) ? current.attributed_rep_user_id : session.userId;
     patch = { stage:"founder_meeting_booked", booked_founder:body.founderUserId, founder_meeting_at:body.meetingAt, promised_demo:body.promisedDemo, attributed_rep_user_id:existingRep, attribution_frozen_at:current.attribution_frozen_at || new Date().toISOString() };
   } else if (body.action === "set_stage") {
     if (!WEBSITE_SALES_STAGES.includes(body.stage as never)) return NextResponse.json({ok:false,error:"invalid_stage"},{status:400});
-    if (!session.isTrueAdmin && !["researched","assigned","attempting_contact","connected"].includes(String(body.stage))) return NextResponse.json({ok:false,error:"rep_stage_forbidden"},{status:403});
+    if (!session.isAdmin) return NextResponse.json({ok:false,error:"rep_stage_forbidden"},{status:403});
     patch = { stage:body.stage };
   } else if (body.action === "proposal") {
     if (!session.isTrueAdmin) return NextResponse.json({ok:false,error:"founder_only"},{status:403});

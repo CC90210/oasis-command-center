@@ -13,6 +13,8 @@ import { ManifestRecordForm } from "@/components/manifest/ManifestRecordForm";
 import { OASIS_SEED } from "@/lib/manifest/seeds";
 import { getActiveProfile } from "@/lib/queries";
 import { safe } from "@/lib/api-helpers";
+import { resolveSessionContext } from "@/lib/api-auth";
+import { redirect } from "next/navigation";
 
 export const dynamic = "force-dynamic";
 
@@ -20,6 +22,8 @@ export default async function PipelineNewLeadPage() {
   const leadEntity = OASIS_SEED.data_model?.find((e) => e.name === "lead");
   const profile = await safe("pipeline.new.profile", getActiveProfile(), null);
   const tenantId = profile?.tenant_id || null;
+  const session = await resolveSessionContext();
+  if (!session.ok || !session.isAdmin) redirect("/pipeline");
 
   if (!leadEntity) {
     return (
@@ -45,7 +49,7 @@ export default async function PipelineNewLeadPage() {
     <div className="space-y-4 animate-fade-in">
       <PageHeader
         title="New lead"
-        subtitle="Drop the contact into the pipeline. Defaults to the 'new' stage."
+        subtitle="Add a researched website-sales lead. Imported scraper leads use the same queue."
         action={
           <Link
             href="/pipeline"
@@ -61,6 +65,7 @@ export default async function PipelineNewLeadPage() {
         entity={leadEntity}
         backPath="pipeline"
         backHref="/pipeline"
+        initial={{ sales_program: "website_sales_v1", stage: "researched" }}
       />
     </div>
   );

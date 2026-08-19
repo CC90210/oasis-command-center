@@ -11,11 +11,9 @@ type ActiveInvite = {
 };
 
 const INVITABLE_ROLES = [
-  { value: "admin", label: "Admin (everything)" },
-  { value: "loan_officer", label: "Loan officer" },
-  { value: "processor", label: "Processor" },
-  { value: "read_only", label: "Read only" },
   { value: "member", label: "Member" },
+  { value: "admin", label: "Admin" },
+  { value: "agent", label: "Agent (sales rep)" },
 ];
 
 export function TeamInviteActions({

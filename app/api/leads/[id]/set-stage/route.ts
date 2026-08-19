@@ -18,6 +18,7 @@ import { resolveSessionContext } from "@/lib/api-auth";
 import { getWritableLead } from "@/lib/lead-access";
 import { updateRecord, RecordsError } from "@/lib/manifest/data";
 import { LEAD_PIPELINE_STAGES, OPPORTUNITY_PIPELINE_STAGES } from "@/lib/sunbiz-stage-meta";
+import { OASIS_LEAD_STAGES } from "@/lib/oasis-stage-meta";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -42,7 +43,7 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
   }
   const entity = body.entity === "application" ? "application" : "lead";
   const stage = typeof body.stage === "string" ? body.stage.trim() : "";
-  const validStages = entity === "application" ? OPPORTUNITY_PIPELINE_STAGES : LEAD_PIPELINE_STAGES;
+  const validStages = entity === "application" ? OPPORTUNITY_PIPELINE_STAGES : [...LEAD_PIPELINE_STAGES, ...OASIS_LEAD_STAGES];
   if (!stage || !validStages.some((s) => s.key === stage)) {
     return NextResponse.json({ ok: false, error: "invalid_stage" }, { status: 400 });
   }
@@ -63,6 +64,14 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
       : NextResponse.json({ ok: false, error: "not_found" }, { status: 404 });
   }
   const lead = acc.record;
+
+  if (entity === "lead" && lead.data.sales_program === "website_sales_v1") {
+    const assignedTo = typeof lead.data.assigned_to === "string" ? lead.data.assigned_to.toLowerCase() : "";
+    if (!sess.isAdmin && assignedTo !== sess.userId.toLowerCase()) {
+      return NextResponse.json({ ok: false, error: "lead_not_assigned_to_agent" }, { status: 403 });
+    }
+    if (!sess.isAdmin) return NextResponse.json({ ok: false, error: "use_sales_disposition_workflow" }, { status: 409 });
+  }
 
   const field = entity === "application" ? "status" : "stage";
   const from = typeof lead.data[field] === "string" ? (lead.data[field] as string) : null;

@@ -23,5 +23,8 @@ assert(migration.includes("auth.role() is distinct from 'service_role'"), "close
 assert(migration.includes("v_deal.rep_user_id,p_payment_reference"), "commission uses the deal's frozen rep attribution");
 assert(!migration.match(/on conflict \(tenant_id,lead_id\).*rep_user_id=excluded\.rep_user_id/), "re-closing cannot rewrite the rep frozen at founder booking");
 assert(migration.includes("website_sales_commissions.deal_id = excluded.deal_id") && migration.includes("payment_reference_already_used_by_another_deal"), "a reused payment reference cannot attach another deal's commission");
+assert(migration.includes("founder_not_authorized_for_tenant") && migration.includes("rep_not_agent_for_tenant") && migration.includes("rep_does_not_match_frozen_attribution"), "close validates tenant membership, founder authority, and frozen rep attribution inside the RPC");
+assert(migration.includes("deal_already_closed_mismatch"), "re-close cannot rewrite won economics or create a second accrual");
+assert(migration.includes("foreign key (tenant_id, deal_id) references public.website_deals(tenant_id, id)"), "financial and onboarding child rows enforce same-tenant deal parentage");
 
 console.log("website-sales-security ok");

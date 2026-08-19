@@ -6,6 +6,7 @@ import { dbError } from "@/lib/db-error";
 export type TeamRole =
   | "owner"
   | "admin"
+  | "agent"
   | "loan_officer"
   | "processor"
   | "read_only"
@@ -40,11 +41,9 @@ export function inviteExpiryFrom(from: Date = new Date()): string {
 }
 
 export const INVITABLE_ROLES: Exclude<TeamRole, "owner">[] = [
-  "admin",
-  "loan_officer",
-  "processor",
-  "read_only",
   "member",
+  "admin",
+  "agent",
 ];
 
 export type MemberRow = {

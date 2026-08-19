@@ -19,10 +19,8 @@ import { Check, Copy, Loader2, Link as LinkIcon, AlertCircle } from "lucide-reac
 
 const ROLE_OPTIONS: Array<{ value: string; label: string }> = [
   { value: "member", label: "Member" },
-  { value: "loan_officer", label: "Loan officer" },
-  { value: "processor", label: "Processor" },
   { value: "admin", label: "Admin" },
-  { value: "read_only", label: "Read-only" },
+  { value: "agent", label: "Agent" },
 ];
 
 export function QuickInviteCard() {

@@ -469,7 +469,7 @@ export function LeadPipelineView({
           {/* Multi-select is available to every employee. The bulk API
               (/api/leads/bulk) skips any lead a non-admin doesn't own, so a
               member can only bulk-act on their own book — safe to always show. */}
-          {true && (
+          {(variant !== "oasis" || canManage) && (
             <button
               type="button"
               onClick={() => (selectMode ? exitSelectMode() : setSelectMode(true))}
@@ -484,16 +484,16 @@ export function LeadPipelineView({
               {selectMode ? "Done" : "Select"}
             </button>
           )}
-          <Link
+          {(variant !== "oasis" || canManage) && <Link
             href={newHref}
             className="inline-flex items-center gap-1.5 rounded-md bg-accent px-3 py-1.5 text-[11px] font-semibold uppercase tracking-wider text-bg-deep hover:bg-accent/90"
           >
             <Plus className="h-3.5 w-3.5" />
             New {entityLabel.toLowerCase()}
-          </Link>
+          </Link>}
           {/* Drop-in autofill — drop a merchant's existing application (any
               company's PDF) to create a NEW SunBiz lead + application from it. */}
-          {isLeads && (
+          {isLeads && (variant !== "oasis" || canManage) && (
             <AutofillDropzone mode="new" tenantSlug={slug} label="New from application" />
           )}
         </div>
@@ -1443,6 +1443,7 @@ function oasisRowModel(row: Row, cfg: VariantConfig, stage: StageMeta) {
     `Lead ${row.id.slice(0, 6)}`;
   const email = str(d.email) || "";
   const phone = formatPhone(str(d.phone) || "");
+  const assignedRep = str(d.assigned_to_name) || (str(d.assigned_to) ? "Assigned agent" : "Unassigned");
   const aiScoreRaw = typeof d.ai_score === "number" ? d.ai_score : null;
   const scoreRaw = typeof d.score === "number" ? d.score : null;
   const scoreNum = aiScoreRaw ?? scoreRaw;
@@ -1456,6 +1457,7 @@ function oasisRowModel(row: Row, cfg: VariantConfig, stage: StageMeta) {
     company,
     email,
     phone,
+    assignedRep,
     score: scoreNum,
     cold,
     lastTouchLabel,
@@ -1495,6 +1497,7 @@ function OasisDesktopRow({
                 {m.company}
               </span>
             )}
+            <span className="block truncate text-[10px] text-accent/80" title={m.assignedRep}>Assigned: {m.assignedRep}</span>
           </span>
         </div>
       </Cell>
@@ -1541,6 +1544,7 @@ function OasisMobileRow({
             <div className="min-w-0">
               <div className="truncate text-sm font-semibold text-fg">{m.name}</div>
               <div className="truncate text-[11px] text-fg-dim">{m.company || m.email || "-"}</div>
+              <div className="truncate text-[10px] text-accent/80">Assigned: {m.assignedRep}</div>
             </div>
             <StageChip stage={stage} />
           </div>

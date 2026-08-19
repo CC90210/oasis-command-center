@@ -36,8 +36,8 @@ const SECTIONS: PlaybookSection[] = [
       "The live call sheet for every rep: track-specific openers, website-problem diagnosis, the $2,000 qualification gate, gatekeeper and voicemail lines, objection handling, booking language, and the founder close sequence.",
   },
   {
-    href: "/sales-engine",
-    title: "Sales Engine",
+    href: "/playbook/deals",
+    title: "Pipeline Operating Guide",
     subtitle: "Rep queue - founder handoffs - proposals - fulfillment - commissions",
     body:
       "Run the operation from researched lead to launched website. Reps work assigned leads, CC and Adon receive qualified handoffs, and the same workspace tracks proposals, onboarding, fulfillment, and commissions.",
