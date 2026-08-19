@@ -20,6 +20,9 @@ export type ParsedLeadImportRow = {
   business_city: string | null;
   business_zip: string | null;
   website: string | null;
+  website_condition: string | null;
+  audit_findings: string | null;
+  icp_track: string | null;
   entity_type: string | null;
   record_type: string | null;
   industry: string | null;
@@ -172,6 +175,16 @@ export function mapLeadImportHeader(header: string): LeadImportField | null {
     case "url":
     case "businesswebsite":
       return "website";
+    case "websitecondition":
+    case "sitecondition":
+      return "website_condition";
+    case "auditfindings":
+    case "websiteaudit":
+      return "audit_findings";
+    case "icptrack":
+    case "prospecttrack":
+    case "vertical":
+      return "icp_track";
     case "typeofentity":
     case "entitytype":
       return "entity_type";
@@ -237,6 +250,9 @@ function emptyRow(): ParsedLeadImportRow {
     business_city: null,
     business_zip: null,
     website: null,
+    website_condition: null,
+    audit_findings: null,
+    icp_track: null,
     entity_type: null,
     record_type: null,
     industry: null,

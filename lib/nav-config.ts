@@ -87,6 +87,7 @@ export const CC_NAV: NavItem[] = [
   { group: "Operations", href: "/", label: "Today", icon: "LayoutDashboard" },
   { group: "Operations", href: "/schedule", label: "Schedule", icon: "Activity" },
   { group: "Operations", href: "/pipeline", label: "Pipeline", icon: "GitBranch" },
+  { group: "Operations", href: "/sales-engine", label: "Sales Engine", icon: "BadgeDollarSign" },
   // Forms — CC's native lead-capture funnel (replaces the retired standalone
   // cc-funnel Vercel app, 2026-06-18). Submissions ingest straight into the
   // pipeline above as `inbound` leads, with a Telegram ping + personalized

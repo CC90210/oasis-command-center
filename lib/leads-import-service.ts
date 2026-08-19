@@ -27,6 +27,9 @@ export type IncomingLeadImportRow = {
   business_city?: string | null;
   business_zip?: string | null;
   website?: string | null;
+  website_condition?: string | null;
+  audit_findings?: string | null;
+  icp_track?: string | null;
   entity_type?: string | null;
   record_type?: string | null;
   industry?: string | null;
@@ -161,6 +164,9 @@ export async function importLeadsForTenant(input: {
     const businessCity = cleanString(raw.business_city, 120);
     const businessZip = cleanString(raw.business_zip, 32);
     const website = cleanString(raw.website, 240);
+    const websiteCondition = cleanString(raw.website_condition, 80);
+    const auditFindings = cleanString(raw.audit_findings, 2_000);
+    const icpTrack = cleanString(raw.icp_track, 80);
     const entityType = cleanString(raw.entity_type, 80);
     const industry = cleanString(raw.industry, 180);
     const title = cleanString(raw.title, 80);
@@ -245,6 +251,9 @@ export async function importLeadsForTenant(input: {
         ...(businessCity ? { business_city: businessCity } : {}),
         ...(businessZip ? { business_zip: businessZip } : {}),
         ...(website ? { website } : {}),
+        ...(websiteCondition ? { website_condition: websiteCondition } : {}),
+        ...(auditFindings ? { audit_findings: auditFindings } : {}),
+        ...(icpTrack ? { icp_track: icpTrack } : {}),
         ...(entityType ? { entity_type: entityType } : {}),
         ...(industry ? { industry } : {}),
         ...(title ? { title } : {}),
@@ -257,7 +266,7 @@ export async function importLeadsForTenant(input: {
         ...(dlVcUrls ? { dl_vc_urls: dlVcUrls } : {}),
         ...(tags && tags.length > 0 ? { tags } : {}),
         ...(originalStage ? { original_stage: originalStage } : {}),
-        stage,
+        stage: rowEntityType === "lead" && (!originalStage || ["new", "new_contact"].includes(originalStage.toLowerCase())) ? "researched" : stage,
         status: rowEntityType === "application" ? stage : "new",
         score: 0,
       },
