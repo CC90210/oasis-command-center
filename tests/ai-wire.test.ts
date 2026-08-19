@@ -17,7 +17,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import {
-  usesAiWire, aiWireStages, aiWireNumbers,
+  usesAiWire, aiWireStages, aiWireNumbers, smsOnlyStages, isSmsOnly,
   AI_WIRE_ACT_AS, AI_WIRE_REP_KEY, AI_WIRE_SERVICE,
 } from "../lib/drips/ai-wire-core";
 import { repKeyForOwner, actAsEmailForRep } from "../lib/drips/rep-keys";
@@ -93,6 +93,39 @@ assert.deepEqual(aiWireStages({ DRIP_AI_WIRE_STAGES: ",,," }), ["uw_sheet", "liv
     assert.equal(usesAiWire({ stage }, all), true);
   }
   assert.equal(usesAiWire({}, all), true, "even a stageless lead, when the wire is set to everything");
+}
+
+// ── THE COUPLING: setting one of these without the other is a trap ───────
+// smsOnlyStages() DEFAULTS to aiWireStages(). So adding a stage to the AI wire
+// silently makes that stage SMS-ONLY as well.
+//
+// Found live 2026-08-19. The phone-only follow-up SMS sequence targets
+// follow_up, which was NOT on the AI wire, so its 25 enrolled texts were routed
+// by classifyRep onto Alex's, Jordan's and Matt's numbers — the carrier-dead
+// main account. The obvious fix (add follow_up to DRIP_AI_WIRE_STAGES) would
+// have fixed the wire and BROKEN the Bluerise email sequence on the same stage
+// in the same move, because follow_up would have become un-emailable.
+//
+// Both must be set together. This pins that, so the next person who adds a
+// stage sees the pair rather than discovering it in production.
+{
+  const wireOnly = { DRIP_AI_WIRE_STAGES: "uw_sheet,live_sub,live_subs,follow_up" };
+  assert.equal(usesAiWire({ stage: "follow_up" }, wireOnly), true);
+  assert.equal(
+    smsOnlyStages(wireOnly).includes("follow_up"),
+    true,
+    "THE TRAP: the AI-wire list alone also makes the stage SMS-only",
+  );
+
+  // Production is set to this pair.
+  const live = {
+    DRIP_AI_WIRE_STAGES: "uw_sheet,live_sub,live_subs,follow_up",
+    DRIP_SMS_ONLY_STAGES: "uw_sheet,live_sub,live_subs",
+  };
+  assert.equal(usesAiWire({ stage: "follow_up" }, live), true, "follow_up texts go out on the AI wire");
+  assert.equal(isSmsOnly({ stage: "follow_up" }, live), false, "and follow_up EMAIL still sends");
+  assert.equal(usesAiWire({ stage: "uw_sheet" }, live), true, "Live Subs unchanged");
+  assert.equal(isSmsOnly({ stage: "uw_sheet" }, live), true, "and still SMS-only");
 }
 
 // ── A narrowed override really does narrow it ─────────────────────────────
