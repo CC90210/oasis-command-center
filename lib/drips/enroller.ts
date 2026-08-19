@@ -109,6 +109,7 @@ export type SkipReason =
   | "paused"
   | "no_contact_method"
   | "shopped_recently"
+  | "covered_by_other_channel"
   | "accelerated_chase"
   | "docs_on_file"
   | "deal_closed"
@@ -139,7 +140,27 @@ type SequenceRow = {
   tenant_id: string;
   name: string;
   enabled: boolean;
-  trigger_filter: { entity?: string; field?: string; to?: string; from?: string } | null;
+  trigger_filter: {
+    entity?: string;
+    field?: string;
+    to?: string;
+    from?: string;
+    /**
+     * Narrows the audience WITHIN the trigger stage.
+     *
+     * "no_email" means: only leads the email sequence on this same stage cannot
+     * reach. Needed because two sequences can share a stage — follow_up now has
+     * a Bluerise EMAIL sequence and an SMS one — and the enroller only skips on
+     * a MISSING contact method. Measured 2026-08-19, all 164 emailable
+     * follow_up leads also have a phone, so without this every one of them
+     * would enrol in both and be emailed AND texted for the same stage.
+     *
+     * Deliberately not the inverse of the channel check: a Live Sub who happens
+     * to have an email should still be texted, so this is opt-in per sequence
+     * rather than a global rule about SMS sequences.
+     */
+    requires?: "no_email" | "no_phone";
+  } | null;
   steps: unknown;
 };
 
@@ -153,6 +174,7 @@ function emptySkipCounts(): Record<SkipReason, number> {
     paused: 0,
     no_contact_method: 0,
     shopped_recently: 0,
+    covered_by_other_channel: 0,
     accelerated_chase: 0,
     docs_on_file: 0,
     deal_closed: 0,
@@ -248,6 +270,7 @@ function staticSkipReason(
   data: Record<string, unknown>,
   stage: string,
   firstChannel: "sms" | "email",
+  requires?: "no_email" | "no_phone",
 ): SkipReason | null {
   if (DEAD_STAGES.has(String(data.stage))) return "dead_or_declined";
   // Belt to the query's braces. The board filter above already excludes these,
@@ -277,6 +300,12 @@ function staticSkipReason(
   // sequence's candidate window on every pass forever (Codex review P1, round 2).
   if (firstChannel === "sms" && !hasPhone) return "no_contact_method";
   if (firstChannel === "email" && !hasEmail) return "no_contact_method";
+  // Audience narrowing, for stages served by more than one sequence. Permanent
+  // for a given lead+sequence, so it belongs with the other permanent guards
+  // rather than downstream — a lead it rejects must not consume a slot under
+  // the enrollment limit and starve the leads behind it.
+  if (requires === "no_email" && hasEmail) return "covered_by_other_channel";
+  if (requires === "no_phone" && hasPhone) return "covered_by_other_channel";
   return null;
 }
 
@@ -437,7 +466,7 @@ async function collectCandidates(
       }
       // Permanent guards are applied HERE so a rejected lead does not occupy a
       // slot under `want` and block the leads behind it forever.
-      const staticSkip = staticSkipReason(lead.data || {}, stage, firstChannel);
+      const staticSkip = staticSkipReason(lead.data || {}, stage, firstChannel, seq.trigger_filter?.requires);
       if (staticSkip) {
         noteSkip(staticSkip);
         continue;
