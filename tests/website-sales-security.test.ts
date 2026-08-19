@@ -26,5 +26,6 @@ assert(migration.includes("website_sales_commissions.deal_id = excluded.deal_id"
 assert(migration.includes("founder_not_authorized_for_tenant") && migration.includes("rep_not_agent_for_tenant") && migration.includes("rep_does_not_match_frozen_attribution"), "close validates tenant membership, founder authority, and frozen rep attribution inside the RPC");
 assert(migration.includes("deal_already_closed_mismatch"), "re-close cannot rewrite won economics or create a second accrual");
 assert(migration.includes("foreign key (tenant_id, deal_id) references public.website_deals(tenant_id, id)"), "financial and onboarding child rows enforce same-tenant deal parentage");
+assert(migration.includes("website_sales_interaction_request_uidx") && migration.includes("metadata->>'request_id'"), "rep lifecycle writes are idempotent by tenant and request ID");
 
 console.log("website-sales-security ok");

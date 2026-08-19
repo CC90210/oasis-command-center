@@ -31,9 +31,9 @@ const SECTIONS: PlaybookSection[] = [
   {
     href: "/playbook/script",
     title: "Sales Rep Script",
-    subtitle: "Cold call - qualify - automation segue - book CC or Adon",
+    subtitle: "Simple talk track - qualify - book CC or Adon",
     body:
-      "The live call sheet for every rep: track-specific openers, website-problem diagnosis, the $2,000 qualification gate, gatekeeper and voicemail lines, objection handling, booking language, and the founder close sequence.",
+      "A plain-language call guide for new appointment setters: 60-second preparation, a word-for-word opener, five qualification questions, easy objection responses, voicemail, booking, and the exact founder handoff.",
   },
   {
     href: "/playbook/deals",

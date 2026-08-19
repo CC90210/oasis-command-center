@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { resolveSessionContext } from "@/lib/api-auth";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { AUTOMATION_ADD_ONS, WEBSITE_PACKAGES, WEBSITE_SALES_STAGES, validateQuote, type WebsitePackageId } from "@/lib/website-sales";
+import { dispositionPatch, mayAgentBookFounder, mayAgentQualify, type RepDisposition } from "@/lib/website-sales-workflow";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
@@ -20,24 +21,37 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ le
   }
   const body = await req.json().catch(() => null) as Record<string,unknown>|null;
   if (!body || typeof body.action !== "string") return NextResponse.json({ok:false,error:"invalid_body"},{status:400});
+  const repAction = ["disposition","qualify","book_founder"].includes(body.action);
+  const requestId = typeof body.requestId === "string" && UUID.test(body.requestId) ? body.requestId : null;
+  if (repAction && !requestId) return NextResponse.json({ok:false,error:"request_id_required"},{status:400});
+  if (requestId) {
+    const prior = await db.from("lead_interactions").select("id,metadata").eq("tenant_id",session.tenantId).eq("lead_id",leadId).order("created_at",{ascending:false}).limit(50);
+    if (prior.error) return NextResponse.json({ok:false,error:"idempotency_check_failed",detail:prior.error.message,correlationId:requestId},{status:500});
+    const duplicate = (prior.data || []).some((row: { metadata?: unknown }) => {
+      const metadata = row.metadata as Record<string,unknown>|null;
+      return metadata?.request_id === requestId;
+    });
+    if (duplicate) return NextResponse.json({ok:true,idempotent:true});
+  }
   let patch: Record<string,unknown> = {};
   if (body.action === "disposition") {
     const disposition = String(body.disposition || "");
     const allowed = ["attempted", "voicemail", "connected", "lost"];
     if (!allowed.includes(disposition)) return NextResponse.json({ok:false,error:"invalid_disposition"},{status:400});
     if (!["assigned","attempting_contact","connected","qualified"].includes(String(current.stage || ""))) return NextResponse.json({ok:false,error:"invalid_stage_transition"},{status:409});
-    const nextStage = disposition === "connected" ? "connected" : disposition === "lost" ? "lost" : "attempting_contact";
     const nextActionAt = typeof body.nextActionAt === "string" && body.nextActionAt ? body.nextActionAt : null;
-    if ((disposition === "attempted" || disposition === "voicemail") && !nextActionAt) return NextResponse.json({ok:false,error:"next_action_required"},{status:400});
-    patch = { stage:nextStage, last_disposition:disposition, last_contact_at:new Date().toISOString(), next_action_at:nextActionAt, loss_reason:disposition === "lost" ? String(body.lossReason || "") : current.loss_reason };
+    try { patch = dispositionPatch(disposition as RepDisposition,nextActionAt,new Date().toISOString(),String(body.lossReason || "")); }
+    catch (error) { return NextResponse.json({ok:false,error:error instanceof Error ? error.message : "invalid_disposition"},{status:400}); }
   } else if (body.action === "qualify") {
-    if (current.stage !== "connected") return NextResponse.json({ok:false,error:"connect_before_qualifying"},{status:409});
+    if (!mayAgentQualify(current.stage)) return NextResponse.json({ok:false,error:"connect_before_qualifying"},{status:409});
     const q = body.qualification as Record<string,unknown>|undefined;
     if (!q || !["authorityConfirmed","websiteProblemConfirmed","timingConfirmed","minimumInvestmentConfirmed"].every(k => q[k] === true)) return NextResponse.json({ok:false,error:"qualification_incomplete"},{status:400});
     patch = { qualification:q, stage:"qualified", qualified_at:new Date().toISOString() };
   } else if (body.action === "book_founder") {
-    if (current.stage !== "qualified") return NextResponse.json({ok:false,error:"qualify_before_booking"},{status:409});
+    if (!mayAgentBookFounder(current.stage)) return NextResponse.json({ok:false,error:"qualify_before_booking"},{status:409});
     if (![body.founderUserId,body.meetingAt,body.promisedDemo].every(v => typeof v === "string" && v.length>0) || !UUID.test(String(body.founderUserId))) return NextResponse.json({ok:false,error:"invalid_handoff"},{status:400});
+    if (!Number.isFinite(Date.parse(String(body.meetingAt))) || Date.parse(String(body.meetingAt)) <= Date.now()) return NextResponse.json({ok:false,error:"meeting_must_be_in_future"},{status:400});
+    if (String(body.promisedDemo).trim().length > 500) return NextResponse.json({ok:false,error:"promised_demo_too_long"},{status:400});
     const founder = await db.from("user_profiles").select("id,is_owner,team_role").eq("tenant_id",session.tenantId).eq("auth_user_id",body.founderUserId).maybeSingle();
     if (!founder.data || (!founder.data.is_owner && !["owner","admin"].includes(String(founder.data.team_role)))) return NextResponse.json({ok:false,error:"founder_not_authorized"},{status:400});
     const existingRep = typeof current.attributed_rep_user_id === "string" && UUID.test(current.attributed_rep_user_id) ? current.attributed_rep_user_id : session.userId;
@@ -65,5 +79,23 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ le
   } else return NextResponse.json({ok:false,error:"unknown_action"},{status:400});
   const updated = await db.rpc("patch_tenant_record_data",{p_id:leadId,p_tenant_id:session.tenantId,p_patch:patch});
   if (updated.error) return NextResponse.json({ok:false,error:updated.error.message},{status:500});
+  if (repAction && requestId) {
+    const interaction = await db.from("lead_interactions").insert({
+      tenant_id:session.tenantId,
+      lead_id:leadId,
+      type:body.action === "disposition" ? "call_disposition" : body.action === "qualify" ? "qualification_completed" : "founder_handoff",
+      channel:"system",
+      direction:"outbound",
+      agent_source:"website_sales_pipeline",
+      subject:String(body.action).replaceAll("_"," "),
+      content:body.action === "disposition" ? `Call result: ${String(body.disposition || "unknown")}` : body.action === "qualify" ? "Four website-sales qualification gates confirmed." : `Founder meeting booked. Promised demo: ${String(body.promisedDemo || "")}`,
+      content_preview:String(body.action),
+      metadata:{ request_id:requestId, action:body.action, changed_by:session.userId, correlation_id:requestId },
+    });
+    if (interaction.error) {
+      if ((interaction.error as { code?: string }).code === "23505") return NextResponse.json({ok:true,idempotent:true});
+      return NextResponse.json({ok:false,error:"interaction_log_failed",detail:interaction.error.message,correlationId:requestId,stageUpdated:true},{status:500});
+    }
+  }
   return NextResponse.json({ok:true,data:updated.data});
 }

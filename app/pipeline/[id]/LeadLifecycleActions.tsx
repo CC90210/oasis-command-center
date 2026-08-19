@@ -29,7 +29,7 @@ export function LeadLifecycleActions({ leadId, currentStage, canManage }: { lead
   async function patch(body: Record<string, unknown>) {
     setBusy(true); setMessage(null);
     try {
-      const res = await fetch(`/api/website-sales/${leadId}`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+      const res = await fetch(`/api/website-sales/${leadId}`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ ...body, requestId: crypto.randomUUID() }) });
       const json = await res.json().catch(() => ({}));
       if (!res.ok || !json.ok) throw new Error(json.error || `update_${res.status}`);
       setMessage("Saved. The pipeline is up to date.");
