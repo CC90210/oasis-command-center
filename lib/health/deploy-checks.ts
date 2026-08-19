@@ -37,15 +37,25 @@ export const DEPLOY_CHECKS: DripCheck[] = [
       // No git identity at all is the WORST case, not a pass: it means a
       // local working tree was CLI-deployed with no repo metadata.
       if (!ref) return 1;
+      // A CLI deploy of a checkout WITH uncommitted changes claims its
+      // branch's name while serving contents that exist nowhere in git
+      // (Codex P1): Vercel stamps that case VERCEL_GIT_DIRTY=true. Only the
+      // literal "true" fails — the var is absent on GitHub-triggered builds.
+      if (process.env.VERCEL_GIT_DIRTY === "true") return 1;
       return ref === "main" ? 0 : 1;
     },
     describe: (r) => {
       const ref = process.env.VERCEL_GIT_COMMIT_REF;
       const sha = (process.env.VERCEL_GIT_COMMIT_SHA || "").slice(0, 8);
       if (r.observed === 0) return `production is serving main (${sha || "sha unknown"}).`;
+      const dirty = process.env.VERCEL_GIT_DIRTY === "true";
       return (
         `PRODUCTION IS NOT SERVING MAIN — this deployment was built from ` +
-        (ref ? `branch "${ref}"` : `a tree with NO git identity (CLI deploy of a local working tree)`) +
+        (ref
+          ? dirty
+            ? `a DIRTY checkout of "${ref}" (uncommitted changes — these contents exist nowhere in git)`
+            : `branch "${ref}"`
+          : `a tree with NO git identity (CLI deploy of a local working tree)`) +
         (sha ? ` at ${sha}` : "") +
         `. Whatever main shipped after that base is silently OFF prod right now ` +
         `(this exact condition removed the blocked-application alarm for 4.7h on 2026-08-18). ` +

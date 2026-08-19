@@ -70,6 +70,24 @@ const run = (async () => {
     },
   );
 
+  // ── Codex P1: a DIRTY main checkout claims ref=main but serves contents
+  // that exist nowhere in git — must fail, and the page must say dirty ──────
+  await withEnv(
+    { VERCEL_ENV: "production", VERCEL_GIT_COMMIT_REF: "main", VERCEL_GIT_DIRTY: "true", VERCEL_GIT_COMMIT_SHA: "deadbeef00" },
+    async () => {
+      const observed = await check!.observe(db, "tenant", Date.now());
+      assert.equal(observed, 1, "a dirty-tree CLI deploy claiming main MUST fail");
+      assert.match(check!.describe(evaluate(check!.id, check!.rule, observed, [])), /DIRTY checkout/);
+    },
+  );
+  // The var is absent on GitHub-triggered builds — absence must stay healthy.
+  await withEnv(
+    { VERCEL_ENV: "production", VERCEL_GIT_COMMIT_REF: "main", VERCEL_GIT_DIRTY: undefined },
+    async () => {
+      assert.equal(await check!.observe(db, "tenant", Date.now()), 0, "no dirty flag on a clean main build is healthy");
+    },
+  );
+
   // ── previews and local dev are exempt by design ──────────────────────────
   await withEnv(
     { VERCEL_ENV: "preview", VERCEL_GIT_COMMIT_REF: "apex/some-feature" },
