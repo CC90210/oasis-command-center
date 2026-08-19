@@ -254,6 +254,7 @@ export async function importLeadsForTenant(input: {
         ...(websiteCondition ? { website_condition: websiteCondition } : {}),
         ...(auditFindings ? { audit_findings: auditFindings } : {}),
         ...(icpTrack ? { icp_track: icpTrack } : {}),
+        ...((website || websiteCondition || auditFindings || icpTrack) ? { sales_program: "website_sales_v1" } : {}),
         ...(entityType ? { entity_type: entityType } : {}),
         ...(industry ? { industry } : {}),
         ...(title ? { title } : {}),

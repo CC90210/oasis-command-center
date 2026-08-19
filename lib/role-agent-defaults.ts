@@ -24,6 +24,7 @@ import type { TenantManifest } from "@/lib/manifest/schema";
 const SUNBIZ_BY_ROLE: Record<TeamRole, string[]> = {
   owner: ["solara", "helios"],
   admin: ["solara", "helios"],
+  agent: ["solara", "helios"],
   loan_officer: ["solara", "helios"],
   processor: ["solara"],
   read_only: ["solara"],
@@ -33,6 +34,7 @@ const SUNBIZ_BY_ROLE: Record<TeamRole, string[]> = {
 const OASIS_BY_ROLE: Record<TeamRole, string[]> = {
   owner: ["bravo", "atlas", "maven", "aura"],
   admin: ["bravo", "atlas", "maven", "aura"],
+  agent: ["bravo"],
   loan_officer: ["bravo"],
   processor: ["bravo"],
   read_only: ["bravo"],

@@ -32,6 +32,8 @@ import { LeadLifecycleActions } from "./LeadLifecycleActions";
 import { CollapsibleSection } from "@/components/leads/CollapsibleSection";
 import { MCAProfilePanel } from "@/components/leads/MCAProfilePanel";
 import { LeadActionToolbar } from "@/components/leads/LeadActionToolbar";
+import { resolveSessionContext } from "@/lib/api-auth";
+import { filterWebsiteSalesRows } from "@/lib/oasis-sales-pipeline-policy";
 
 export const dynamic = "force-dynamic";
 
@@ -60,7 +62,12 @@ export default async function PipelineLeadDetailPage({
     id,
   }).catch(() => null);
 
-  if (!record) {
+  const session = await resolveSessionContext();
+  const visibleRecord = record && session.ok
+    ? filterWebsiteSalesRows([record], { role: session.teamRole, userId: session.userId, isOwner: session.isTrueAdmin, adminAccess: session.adminAccess })[0]
+    : null;
+
+  if (!visibleRecord) {
     return (
       <div className="space-y-4 animate-fade-in">
         <PageHeader
@@ -86,11 +93,13 @@ export default async function PipelineLeadDetailPage({
     );
   }
 
+  const activeRecord = visibleRecord;
+
   const title =
-    (typeof record.data.name === "string" && record.data.name) ||
-    (typeof record.data.company === "string" && record.data.company) ||
+    (typeof activeRecord.data.name === "string" && activeRecord.data.name) ||
+    (typeof activeRecord.data.company === "string" && activeRecord.data.company) ||
     `Lead ${id.slice(0, 8)}`;
-  const metrics = await loadLeadDetailMetrics(tenantId, id, record.data, record.created_at);
+  const metrics = await loadLeadDetailMetrics(tenantId, id, activeRecord.data, activeRecord.created_at);
 
   return (
     <div className="space-y-4 animate-fade-in">
@@ -111,16 +120,16 @@ export default async function PipelineLeadDetailPage({
         title="Contact"
         storageKey="oasis.pipeline.contactBand.collapsed"
         defaultCollapsed={false}
-        collapsedPreview={renderContactPreview(record.data)}
+        collapsedPreview={renderContactPreview(activeRecord.data)}
       >
-        <LeadContactBand data={record.data} />
+        <LeadContactBand data={activeRecord.data} />
       </CollapsibleSection>
       <LeadMetricsBand metrics={metrics} />
       <LeadActionToolbar
         leadId={id}
-        leadName={typeof record.data.name === "string" ? record.data.name : null}
-        leadCompany={typeof record.data.company === "string" ? record.data.company : null}
-        leadEmail={typeof record.data.email === "string" ? record.data.email : null}
+        leadName={typeof activeRecord.data.name === "string" ? activeRecord.data.name : null}
+        leadCompany={typeof activeRecord.data.company === "string" ? activeRecord.data.company : null}
+        leadEmail={typeof activeRecord.data.email === "string" ? activeRecord.data.email : null}
         daysSinceLastTouch={metrics.daysSinceLastTouch}
         operatorEmail={profile?.email ?? null}
         operatorFullName={profile?.full_name ?? profile?.display_name ?? null}
@@ -128,21 +137,21 @@ export default async function PipelineLeadDetailPage({
           <>
             <ScoreLeadButton
               leadId={id}
-              existingScore={typeof record.data.ai_score === "number" ? record.data.ai_score : null}
-              existingReasoning={typeof record.data.ai_reasoning === "string" ? record.data.ai_reasoning : null}
-              existingScoredAt={typeof record.data.ai_scored_at === "string" ? record.data.ai_scored_at : null}
+              existingScore={typeof activeRecord.data.ai_score === "number" ? activeRecord.data.ai_score : null}
+              existingReasoning={typeof activeRecord.data.ai_reasoning === "string" ? activeRecord.data.ai_reasoning : null}
+              existingScoredAt={typeof activeRecord.data.ai_scored_at === "string" ? activeRecord.data.ai_scored_at : null}
             />
             <NextActionButton
               leadId={id}
-              existingAction={typeof record.data.ai_next_action === "string" ? record.data.ai_next_action : null}
-              existingRationale={typeof record.data.ai_next_action_rationale === "string" ? record.data.ai_next_action_rationale : null}
-              existingAt={typeof record.data.ai_next_action_at === "string" ? record.data.ai_next_action_at : null}
+              existingAction={typeof activeRecord.data.ai_next_action === "string" ? activeRecord.data.ai_next_action : null}
+              existingRationale={typeof activeRecord.data.ai_next_action_rationale === "string" ? activeRecord.data.ai_next_action_rationale : null}
+              existingAt={typeof activeRecord.data.ai_next_action_at === "string" ? activeRecord.data.ai_next_action_at : null}
             />
           </>
         }
       />
-      <LeadLifecycleActions leadId={id} currentStage={metrics.stageKey} />
-      <MCAProfilePanel data={record.data} />
+      <LeadLifecycleActions leadId={id} currentStage={metrics.stageKey} canManage={session.ok && session.isAdmin} />
+      <MCAProfilePanel data={activeRecord.data} />
       <LeadTimelinePanel leadId={id} />
       <CollapsibleSection
         title="Edit lead fields"
@@ -155,7 +164,7 @@ export default async function PipelineLeadDetailPage({
           entity={leadEntity}
           backPath="pipeline"
           backHref="/pipeline"
-          initial={record.data}
+          initial={activeRecord.data}
           editId={id}
         />
       </CollapsibleSection>

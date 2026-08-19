@@ -45,6 +45,7 @@ type Preview = {
 
 const ROLE_LABEL: Record<string, string> = {
   admin: "Admin",
+  agent: "Sales Agent",
   loan_officer: "Loan Officer",
   processor: "Processor",
   read_only: "Read-Only Viewer",

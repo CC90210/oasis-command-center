@@ -1,6 +1,6 @@
 const DRAFT_ACTIONS = ["approve", "edit_send", "reject", "pause", "resume", "handoff"] as const;
 export type SunbizDraftAction = (typeof DRAFT_ACTIONS)[number];
-const WRITE_ROLES = new Set(["owner", "admin", "member", "loan_officer", "processor"]);
+const WRITE_ROLES = new Set(["owner", "admin", "member", "agent", "loan_officer", "processor"]);
 export function canManageSunbizDraft(role: string | null | undefined): boolean {
   return WRITE_ROLES.has((role || "").trim().toLowerCase());
 }

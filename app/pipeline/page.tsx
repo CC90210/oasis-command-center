@@ -32,9 +32,10 @@ import { getActiveProfile } from "@/lib/queries";
 import { listRecords, type TenantRecord } from "@/lib/manifest/data";
 import { safe } from "@/lib/api-helpers";
 import { LeadPipelineView } from "@/components/manifest/LeadPipelineView";
-import { OASIS_LEAD_STAGES } from "@/lib/oasis-stage-meta";
 import { resolveSessionContext } from "@/lib/api-auth";
 import { getServiceSupabase } from "@/lib/supabase-server";
+import { filterWebsiteSalesRows, stagesForOasisRole } from "@/lib/oasis-sales-pipeline-policy";
+import { attachAssignedNames } from "@/lib/assigned-names";
 
 export const dynamic = "force-dynamic";
 
@@ -92,6 +93,7 @@ export default async function PipelinePage({
 
   const profile = await safe("pipeline.profile", getActiveProfile(), null);
   const tenantId = profile?.tenant_id || "";
+  const session = await resolveSessionContext();
 
   if (!tenantId) {
     return (
@@ -118,8 +120,17 @@ export default async function PipelinePage({
   // Optional ?q= filter — match across the operator-relevant fields.
   // Kept server-side so /pipeline?q=acme returns ~5 rows instead of
   // shipping 500 and filtering in the browser.
+  const namedRows = await attachAssignedNames(allRows, tenantId);
+  const scopedRows = session.ok
+    ? filterWebsiteSalesRows(namedRows, {
+        role: session.teamRole,
+        userId: session.userId,
+        isOwner: session.isTrueAdmin,
+        adminAccess: session.adminAccess,
+      })
+    : [];
   const rows = query
-    ? allRows.filter((r) => {
+    ? scopedRows.filter((r) => {
         const d = r.data;
         const hay = [
           d.name,
@@ -133,7 +144,10 @@ export default async function PipelinePage({
           .toLowerCase();
         return hay.includes(query.toLowerCase());
       })
-    : allRows;
+    : scopedRows;
+  const stages = session.ok
+    ? stagesForOasisRole(session.teamRole, session.isTrueAdmin, session.adminAccess)
+    : [];
 
   return (
     <div className="animate-fade-in">
@@ -141,13 +155,14 @@ export default async function PipelinePage({
         slug="oasis"
         entityName="lead"
         entityLabel="Lead"
-        stages={OASIS_LEAD_STAGES}
+        stages={stages}
         stageField="stage"
         rows={rows}
         stageFilter={stageFilter}
         query={query}
         basePath="/pipeline"
         variant="oasis"
+        canManage={session.ok && session.isAdmin}
       />
     </div>
   );

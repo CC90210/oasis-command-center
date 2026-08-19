@@ -16,10 +16,8 @@ export const dynamic = "force-dynamic";
 
 const ROLE_VALUES: TeamRole[] = [
   "admin",
-  "loan_officer",
-  "processor",
-  "read_only",
   "member",
+  "agent",
 ];
 
 export async function GET() {
