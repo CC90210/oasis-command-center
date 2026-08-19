@@ -36,6 +36,7 @@ import { resolveSessionContext } from "@/lib/api-auth";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { filterWebsiteSalesRows, stagesForOasisRole } from "@/lib/oasis-sales-pipeline-policy";
 import { attachAssignedNames } from "@/lib/assigned-names";
+import { OASIS_WEBSITE_TENANT_SLUG } from "@/lib/website-sales-workflow";
 
 export const dynamic = "force-dynamic";
 
@@ -51,7 +52,7 @@ export const dynamic = "force-dynamic";
  * empire dashboard's Pipeline tab. CC's empire nav (CC_NAV) uses /pipeline
  * as the canonical leads URL, so his slug belongs here.
  */
-const OASIS_PIPELINE_SLUGS = new Set(["oasis", "oasis-ai-cc"]);
+const OASIS_PIPELINE_SLUGS = new Set(["oasis", "oasis-ai-cc", OASIS_WEBSITE_TENANT_SLUG]);
 
 export default async function PipelinePage({
   searchParams,

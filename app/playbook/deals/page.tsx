@@ -15,17 +15,20 @@ export default function DealArchitecturePage() {
     </Card>
     <Card title="The pipeline — who does what" subtitle="Every stage has one owner, one required action, and one completion rule.">
       <div className="space-y-3">
-        <PipelineStep stage="Research" owner="CC / Adon / lead system" action="Validate contact details, capture the URL, website condition, audit finding, ICP track, and stamp the lead website_sales_v1." done="The lead is clean, deduplicated, and ready for assignment." />
+        <PipelineStep stage="Research" owner="APEX → Oasis Webdev" action="APEX scrapes and enriches the lead for the Oasis Webdev tenant. Promotion captures contact details, URL, website condition, audit finding, ICP track, and sales_program=website_sales_v1." done="The lead is deduplicated, has one useful call angle, and is ready for assignment. Import never triggers an automatic send." />
         <PipelineStep stage="Assigned" owner="Admin" action="Choose one Agent. Assignment uses the rep's account UUID and the lead shows their name." done="The lead appears in that Agent's queue and nobody else's." />
         <PipelineStep stage="Attempting" owner="Agent" action="Call the lead. Record No answer or Voicemail and schedule the next touch; never leave a lead without a next action." done="A disposition and follow-up time are saved, or the lead advances." />
         <PipelineStep stage="Connected" owner="Agent" action="Diagnose the visible website problem, its business consequence, authority, timing, and minimum $2,000 willingness." done="All four qualification gates are confirmed or the lead is marked Lost." />
-        <PipelineStep stage="Qualified" owner="Agent" action="Open the OASIS Google Meet calendar, select CC or Adon, schedule the meeting, and record the promised audit/demo angle." done="Send to founder pipeline freezes rep attribution and completes the rep handoff." />
+        <PipelineStep stage="Qualified" owner="Agent (appointment setter)" action="Open the OASIS Google Meet calendar, select CC or Adon, schedule the meeting, and record the promised audit/demo angle." done="Send to founder pipeline freezes rep attribution and completes the Agent's launch-V1 job. Agents do not close or negotiate." />
         <PipelineStep stage="Founder Meeting → Won/Lost" owner="CC or Adon" action="Review the handoff, run the audit/demo, select scope and package, send proposal, and collect the standard 50% setup deposit." done="Outcome, quote, closer, collected amount, and loss reason are recorded." />
         <PipelineStep stage="Onboarding → In Build → Client Review → Launched" owner="OASIS delivery" action="Collect assets and access, build from the website checklist, complete responsive/accessibility/SEO/forms QA, obtain approval, launch DNS and analytics." done="The live website, maintenance owner, backups, and monthly service start are verified." />
       </div>
     </Card>
     <Card title="Agent screen rules" subtitle="The five-stage view keeps the sales job narrow and prevents data leakage.">
       <ul className="list-disc pl-5 space-y-2 text-sm text-fg-muted"><li>Agents see only Assigned, Attempting Contact, Connected, Qualified, and Founder Meeting.</li><li>Agents see only records assigned to their own account.</li><li>Voicemail is a disposition inside Attempting Contact, not a stage.</li><li>Agents cannot quote, discount, promise delivery dates, confirm custom automation feasibility, mark payment, or move delivery stages.</li><li>Admins and members operating internally retain the complete tenant pipeline; only admins assign leads and control sensitive close/fulfilment actions.</li></ul>
+    </Card>
+    <Card title="Role growth path" subtitle="Launch V1 stays simple without boxing the company in.">
+      <p className="text-sm leading-relaxed text-fg-muted">Every new sales hire starts as an <b className="text-fg">Agent appointment setter</b>. Their scorecard is conversations, qualified meetings booked, show rate, and handoff quality. Later, a proven Agent may be promoted into a founder-approved closer track with separate permissions, training, compensation, and close controls. No one receives closing authority merely by working leads longer.</p>
     </Card>
     <div className="grid lg:grid-cols-3 gap-4">
       {packages.map((offer) => <Card key={offer.id}>
