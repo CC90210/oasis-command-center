@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { resolveSessionContext } from "@/lib/api-auth";
+import { isUniqueViolationError } from "@/lib/api-helpers";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { AUTOMATION_ADD_ONS, WEBSITE_PACKAGES, WEBSITE_SALES_STAGES, validateQuote, type WebsitePackageId } from "@/lib/website-sales";
 import { dispositionPatch, mayAgentBookFounder, mayAgentQualify, type RepDisposition } from "@/lib/website-sales-workflow";
@@ -93,7 +94,7 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ le
       metadata:{ request_id:requestId, action:body.action, changed_by:session.userId, correlation_id:requestId },
     });
     if (interaction.error) {
-      if ((interaction.error as { code?: string }).code === "23505") return NextResponse.json({ok:true,idempotent:true});
+      if (isUniqueViolationError(interaction.error)) return NextResponse.json({ok:true,idempotent:true});
       return NextResponse.json({ok:false,error:"interaction_log_failed",detail:interaction.error.message,correlationId:requestId,stageUpdated:true},{status:500});
     }
   }
