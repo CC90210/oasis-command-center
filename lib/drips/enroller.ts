@@ -37,7 +37,7 @@ import "server-only";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { checkTcpaWindow } from "@/lib/tcpa-window";
 import { ACCELERATED_FLAG, acceleratedSystemLive, hasActiveAcceleratedRun } from "@/lib/drips/accelerated";
-import type { DripStep } from "./types";
+import type { DripStep, DripTriggerFilter } from "./types";
 import { computeStep0DelayMinutes, enrollmentBufferForStage } from "./stage-buffer";
 import { isPaused, isReEntryEligible } from "./drip-rules-core";
 import { ensureInitialBrand } from "./brand-store";
@@ -140,27 +140,7 @@ type SequenceRow = {
   tenant_id: string;
   name: string;
   enabled: boolean;
-  trigger_filter: {
-    entity?: string;
-    field?: string;
-    to?: string;
-    from?: string;
-    /**
-     * Narrows the audience WITHIN the trigger stage.
-     *
-     * "no_email" means: only leads the email sequence on this same stage cannot
-     * reach. Needed because two sequences can share a stage — follow_up now has
-     * a Bluerise EMAIL sequence and an SMS one — and the enroller only skips on
-     * a MISSING contact method. Measured 2026-08-19, all 164 emailable
-     * follow_up leads also have a phone, so without this every one of them
-     * would enrol in both and be emailed AND texted for the same stage.
-     *
-     * Deliberately not the inverse of the channel check: a Live Sub who happens
-     * to have an email should still be texted, so this is opt-in per sequence
-     * rather than a global rule about SMS sequences.
-     */
-    requires?: "no_email" | "no_phone";
-  } | null;
+  trigger_filter: DripTriggerFilter | null;
   steps: unknown;
 };
 

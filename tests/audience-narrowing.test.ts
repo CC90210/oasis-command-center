@@ -15,6 +15,7 @@
 
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import { parseDripTriggerFilter } from "../lib/drips/types";
 
 const enroller = readFileSync(new URL("../lib/drips/enroller.ts", import.meta.url), "utf8");
 
@@ -56,11 +57,31 @@ assert.ok(
   "must not infer the narrowing from the channel; Live Subs would lose its emailable lead",
 );
 
-// ── Declared in the type, not smuggled through an untyped blob ────────────
-assert.ok(
-  /requires\?: "no_email" \| "no_phone";/.test(enroller),
-  "the key is declared on trigger_filter so a typo is a compile error",
-);
+// ── IT SURVIVES A ROUND TRIP THROUGH THE SEQUENCES API ────────────────────
+// parseDripTriggerFilter drops unknown keys. Declared only on the enroller's
+// local row shape, the first edit of this sequence in the UI would silently
+// strip `requires` — and 164 merchants would start getting an email from
+// Bluerise and a text from Matt for the same stage, with nothing failing.
+// Codex caught that; it is the difference between a guard and a decoration.
+{
+  const parsed = parseDripTriggerFilter({
+    to: "follow_up", field: "stage", entity: "lead", requires: "no_email",
+  });
+  assert.equal(parsed.requires, "no_email", "an edit must not strip the narrowing");
+  assert.equal(parsed.to, "follow_up");
+}
+// Absent stays absent — every existing sequence keeps working unchanged.
+assert.equal(parseDripTriggerFilter({ to: "follow_up" }).requires, undefined);
+
+// An unrecognised value FAILS rather than being dropped. A silently-ignored
+// narrowing is the same double-contact bug wearing a different hat.
+for (const bad of ["no_emails", "none", "", true, 1, null]) {
+  assert.throws(
+    () => parseDripTriggerFilter({ to: "follow_up", requires: bad }),
+    /requires/,
+    `${JSON.stringify(bad)} must be rejected, never ignored`,
+  );
+}
 
 // ── The skip is counted, so a silent mass-skip is visible in the run ──────
 // 164 leads quietly vanishing from a run with no counter is how you discover a

@@ -91,6 +91,21 @@ export type DripTriggerFilter = {
    *  for completeness so an operator can express
    *  "only when going from sent_application directly to declined"). */
   from?: string;
+  /**
+   * Narrows the audience WITHIN the trigger stage.
+   *
+   * "no_email" means: only leads the email sequence on this same stage cannot
+   * reach. follow_up carries a Bluerise EMAIL sequence and an SMS one, and the
+   * enroller only skips on a MISSING contact method — measured 2026-08-19, all
+   * 164 emailable follow_up leads also have a phone, so without this every one
+   * would be emailed AND texted for the same stage by two different brands.
+   *
+   * It lives on the SHARED type, not just the enroller's local row shape,
+   * because parseDripTriggerFilter drops unknown keys: declared only locally,
+   * the first edit through the sequences API would silently strip it and the
+   * double-contact would resume with nothing failing. Codex caught that.
+   */
+  requires?: "no_email" | "no_phone";
 };
 
 export type DripSequence = {
@@ -232,5 +247,14 @@ export function parseDripTriggerFilter(value: unknown): DripTriggerFilter {
   if (typeof value.field === "string") out.field = value.field;
   if (typeof value.to === "string") out.to = value.to;
   if (typeof value.from === "string") out.from = value.from;
+  // Validated against the allowed values rather than copied: an unrecognised
+  // narrowing must fail loudly at parse time, because the failure mode of a
+  // silently-dropped one is a merchant contacted on two channels at once.
+  if (value.requires !== undefined) {
+    if (value.requires !== "no_email" && value.requires !== "no_phone") {
+      throw new DripDefinitionError("$.trigger_filter.requires", 'expected "no_email" or "no_phone"');
+    }
+    out.requires = value.requires;
+  }
   return out;
 }
