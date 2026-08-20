@@ -29,6 +29,7 @@
  */
 
 import { createHash } from "node:crypto";
+import { AI_WIRE_REP_KEY, AI_WIRE_SERVICE } from "@/lib/drips/ai-wire-core";
 
 /** What the carrier ultimately did with a message. */
 export type CarrierStatus = "delivered" | "failed" | "pending" | "unknown";
@@ -315,4 +316,21 @@ export function deliveryRate(recent: ReceiptSample[]): number | null {
   const terminal = recent.filter((r) => isTerminal(r.status));
   if (terminal.length === 0) return null;
   return terminal.filter((r) => r.status === "delivered").length / terminal.length;
+}
+
+/**
+ * Which TextTorrent ACCOUNT owns the thread a receipt refers to.
+ *
+ * Derived from the receipt's own `rep_key`, which the executor stamps at send
+ * time, so the reconciler reads a thread with the same credentials that created
+ * it. Anything else is the main SunBiz account.
+ *
+ * Deliberately NOT a lookup that defaults by guessing: an unrecognised rep_key
+ * resolves to the main account, which is the historical behaviour and is
+ * correct for every wire except the AI one. If a third account is ever added,
+ * this is the single place that must learn about it — and the parity test in
+ * tests/receipt-wire-account.test.ts fails until it does.
+ */
+export function serviceForRepKey(repKey: string | null | undefined): string {
+  return repKey === AI_WIRE_REP_KEY ? AI_WIRE_SERVICE : "texttorrent";
 }

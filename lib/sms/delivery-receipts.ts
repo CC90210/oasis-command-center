@@ -19,10 +19,12 @@ import {
   matchThreadMessage,
   readReceiptFacts,
   isTerminal,
+  serviceForRepKey,
   type CarrierStatus,
 } from "./carrier-status";
 
 type Db = ReturnType<typeof getServiceSupabase>;
+
 
 export type OpenReceiptArgs = {
   tenantId: string;
@@ -79,6 +81,18 @@ export async function openReceipt(db: Db, args: OpenReceiptArgs): Promise<string
     return null;
   }
 }
+
+/** The open-receipt row shape the reconciler selects. Kept in step with the
+ *  `.select(...)` below — `rep_key` is load-bearing (it picks the account). */
+type OpenReceiptRow = {
+  id: string;
+  chat_id: string;
+  body_hash: string;
+  sent_at: string;
+  act_as_email: string | null;
+  rep_key: string | null;
+  check_attempts: number | null;
+};
 
 export type ReconcileResult = {
   examined: number;
@@ -149,7 +163,7 @@ export async function reconcileReceipts(
 
   const open = await db
     .from("sms_delivery_receipts")
-    .select("id, chat_id, body_hash, sent_at, act_as_email, check_attempts")
+    .select("id, chat_id, body_hash, sent_at, act_as_email, rep_key, check_attempts")
     .eq("tenant_id", tenantId)
     .is("resolved_at", null)
     .lt("sent_at", new Date(nowMs - MIN_AGE_MS).toISOString())
@@ -160,21 +174,45 @@ export async function reconcileReceipts(
     out.errors.push(`read open receipts: ${open.error.message}`);
     return out;
   }
-  const rows = open.data || [];
+  // Named explicitly rather than inferred: `open.data || []` widens to never[]
+  // when the adapter's row type is unresolved, which silently makes every
+  // downstream push a type error the moment the shape is used structurally.
+  const rows = (open.data || []) as OpenReceiptRow[];
   out.examined = rows.length;
   if (rows.length === 0) return out;
 
-  // One fetch per (chat, identity). The act-as identity matters: a thread is
-  // only visible to the sub-account that owns it.
-  const byThread = new Map<string, typeof rows>();
+  // One fetch per (account, chat, identity). BOTH halves of the identity
+  // matter, and for different reasons:
+  //
+  //   act-as   — a thread is only visible to the sub-account that owns it.
+  //   service  — which TextTorrent ACCOUNT (SID + public key) to authenticate
+  //              as. The AI Follow-Up wire is a sub-account of the LEGACY
+  //              parent and carries a different SID entirely.
+  //
+  // THE BUG THIS CLOSES (measured 2026-08-20). `service` was hardcoded to
+  // "texttorrent", so every AI-wire receipt was fetched with the main SunBiz
+  // SID, which cannot see a Legacy thread. The read threw, and the catch below
+  // deliberately does NOT spend an attempt — correct for a transient 429, fatal
+  // for a permanent mismatch. Result: all 15 AI-wire receipts sat at
+  // check_attempts=0 / carrier_status='unknown' forever.
+  //
+  // That is not a reporting gloss. It blinded the one wire that was actually
+  // sending: 3 of 11 Live Subs texts had FAILED at the carrier and nothing
+  // surfaced it, and because smsSendAllowed() reads these same receipts, the
+  // breaker could never open for the AI wire no matter how many sends died.
+  // A guard whose evidence never arrives is not a guard.
+  const byThread = new Map<string, { rows: typeof rows; actAsEmail: string; chatId: string; service: string }>();
   for (const r of rows) {
-    const k = `${r.act_as_email ?? ""}|${r.chat_id}`;
-    const list = byThread.get(k) ?? [];
-    list.push(r);
-    byThread.set(k, list);
+    const service = serviceForRepKey(r.rep_key);
+    // Keyed on the tuple rather than a delimited string so an act-as address
+    // containing the delimiter cannot collide two different threads.
+    const k = JSON.stringify([service, r.act_as_email ?? "", String(r.chat_id)]);
+    const g = byThread.get(k) ?? { rows: [], actAsEmail: r.act_as_email ?? "", chatId: String(r.chat_id), service };
+    g.rows.push(r);
+    byThread.set(k, g);
   }
 
-  for (const [k, group] of byThread) {
+  for (const [, group] of byThread) {
     if (outOfTime()) {
       // Stop cleanly and say so. The untouched receipts stay open and are
       // picked up next run; reporting a partial pass as complete is what turns
@@ -182,11 +220,11 @@ export async function reconcileReceipts(
       out.errors.push(`deadline reached with ${byThread.size} thread(s) queued; remainder deferred`);
       break;
     }
-    const [actAsEmail, chatId] = [k.slice(0, k.indexOf("|")), k.slice(k.indexOf("|") + 1)];
+    const { actAsEmail, chatId, rows: groupRows } = group;
     let messages: Awaited<ReturnType<typeof getThreadRaw>>;
     try {
       const creds = await getTextTorrentCredentials(tenantId, {
-        service: "texttorrent",
+        service: group.service,
         actAsEmail: actAsEmail || null,
       });
       messages = await getThreadRaw(creds, chatId);
@@ -197,12 +235,12 @@ export async function reconcileReceipts(
       // the batch as 'unknown', erasing exactly the evidence we are here to
       // collect. The absolute age cutoff above is what bounds these instead.
       out.errors.push(`chat ${chatId}: ${err instanceof Error ? err.message : String(err)}`.slice(0, 160));
-      out.stillOpen += group.length;
+      out.stillOpen += groupRows.length;
       const touch = await db
         .from("sms_delivery_receipts")
         .update({ last_checked_at: new Date(nowMs).toISOString() })
         .eq("tenant_id", tenantId)
-        .in("id", group.map((r) => r.id));
+        .in("id", groupRows.map((r) => r.id));
       if (touch.error) out.errors.push(`touch: ${touch.error.message}`.slice(0, 160));
       continue;
     }
@@ -217,7 +255,7 @@ export async function reconcileReceipts(
     const consumed = new Set<string>();
     const remaining = () => messages.filter((m) => !consumed.has(String(m.id ?? "")));
 
-    for (const r of [...group].sort((a, b) => Date.parse(a.sent_at) - Date.parse(b.sent_at))) {
+    for (const r of [...groupRows].sort((a, b) => Date.parse(a.sent_at) - Date.parse(b.sent_at))) {
       const hit = matchThreadMessage(remaining(), { bodyHash: r.body_hash });
       if (hit) consumed.add(String(hit.id ?? ""));
       if (!hit) {
