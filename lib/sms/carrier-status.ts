@@ -29,6 +29,7 @@
  */
 
 import { createHash } from "node:crypto";
+import { AI_WIRE_REP_KEY, AI_WIRE_SERVICE } from "@/lib/drips/ai-wire-core";
 
 /** What the carrier ultimately did with a message. */
 export type CarrierStatus = "delivered" | "failed" | "pending" | "unknown";
@@ -148,7 +149,24 @@ export function matchThreadMessage(
   let bestAt = Infinity;
   for (const m of messages) {
     if (String(m.direction ?? "").toLowerCase() !== "outbound") continue;
-    if (String(m.platform ?? "") !== "api") continue;
+    // ABSENT IS NOT "NOT API".
+    //
+    // This read `String(m.platform ?? "") !== "api"`, so a message object
+    // WITHOUT the field was rejected — and TextTorrent stopped returning
+    // `platform` on GET /inbox/{chatId}. Measured 2026-08-20: 47 receipts
+    // reached a real carrier verdict between 08-07 and 08-16 and then not one
+    // more; every receipt from 08-16 onward sat at 'unknown' while the body
+    // hash, the direction and the api_send_status were all present and correct
+    // on the message. A filter that excludes 100% of candidates does not look
+    // like a filter, it looks like a quiet provider.
+    //
+    // The filter's PURPOSE was to avoid matching a message a rep typed by hand
+    // in the TextTorrent UI. That still holds where the field exists, so it is
+    // enforced then — and where it does not, the body hash carries the
+    // identification, which is what it was built for. A human would have to
+    // retype our rendered copy byte for byte to collide.
+    const platform = m.platform == null ? "" : String(m.platform);
+    if (platform !== "" && platform !== "api") continue;
     if (hashBody(String(m.message ?? "")) !== target.bodyHash) continue;
     // Earliest first, so oldest-receipt-to-oldest-message pairing holds. An
     // unparseable timestamp sorts last rather than being discarded: a
@@ -315,4 +333,21 @@ export function deliveryRate(recent: ReceiptSample[]): number | null {
   const terminal = recent.filter((r) => isTerminal(r.status));
   if (terminal.length === 0) return null;
   return terminal.filter((r) => r.status === "delivered").length / terminal.length;
+}
+
+/**
+ * Which TextTorrent ACCOUNT owns the thread a receipt refers to.
+ *
+ * Derived from the receipt's own `rep_key`, which the executor stamps at send
+ * time, so the reconciler reads a thread with the same credentials that created
+ * it. Anything else is the main SunBiz account.
+ *
+ * Deliberately NOT a lookup that defaults by guessing: an unrecognised rep_key
+ * resolves to the main account, which is the historical behaviour and is
+ * correct for every wire except the AI one. If a third account is ever added,
+ * this is the single place that must learn about it — and the parity test in
+ * tests/receipt-wire-account.test.ts fails until it does.
+ */
+export function serviceForRepKey(repKey: string | null | undefined): string {
+  return repKey === AI_WIRE_REP_KEY ? AI_WIRE_SERVICE : "texttorrent";
 }

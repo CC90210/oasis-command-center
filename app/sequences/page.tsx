@@ -11,6 +11,7 @@ import { getSessionUser, getServiceSupabase } from "@/lib/supabase-server";
 import { safe, isMissingTableError } from "@/lib/api-helpers";
 import { SequencesTabs } from "@/components/sequences/SequencesTabs";
 import { recentDripActivity, dripFailureSummary } from "@/lib/drips/activity-queries";
+import { sequenceScoreboard } from "@/lib/drips/scoreboard";
 import { sequenceDailyVolume } from "@/lib/drips/sequence-volume";
 import { joinVolumeToSequences } from "@/lib/drips/sequence-volume-core";
 import { getChannelLimits } from "@/lib/drips/channel-limits";
@@ -82,7 +83,7 @@ export default async function SequencesPage() {
   // It is not a timeout: Promise.all still waits for the slowest read, so a slow
   // activity query does hold the whole page. Saying "cannot take the page down"
   // would be claiming a protection that is not here.
-  const [result, bridgeOnline, activityRes, volumeRes, smsVolumeRes, limits, pool, summaryRes] = await Promise.all([
+  const [result, bridgeOnline, activityRes, volumeRes, smsVolumeRes, limits, pool, summaryRes, scoreboardRes] = await Promise.all([
     loadSequences(tenantId),
     safe("sequences.bridge_online", getBridgeOnline(tenantId), false),
     // Wrapped so a read FAILURE is distinguishable from an empty window. `safe`
@@ -140,6 +141,17 @@ export default async function SequencesPage() {
         ? dripFailureSummary(tenantId).then((s) => ({ ...s, error: null as string | null }))
         : Promise.resolve({ ...EMPTY_SUMMARY, error: null as string | null }),
       { ...EMPTY_SUMMARY, error: "could not read the drip summary" },
+    ),
+    // Per-sequence rollup. Its OWN read with its OWN error, deliberately not
+    // folded into the activity read: the table is capped at 300 rows a half and
+    // this walks the whole window, so one being short must not mark the other
+    // unknown. A failed read here renders as UNKNOWN, never as an empty board.
+    safe(
+      "sequences.scoreboard",
+      tenantId
+        ? sequenceScoreboard(tenantId)
+        : Promise.resolve({ scores: [], days: 7, truncated: false, error: null }),
+      { scores: [], days: 7, truncated: false, error: "could not read per-sequence outcomes" },
     ),
   ]);
 
@@ -233,6 +245,7 @@ export default async function SequencesPage() {
           // good -- and the reverse.
           activityError={activityRes.error}
           summaryError={summaryRes.error}
+          scoreboard={scoreboardRes}
           volume={{
             // Joined here, on the server, so the client renders a decided list
             // rather than re-deriving the match and risking a different answer

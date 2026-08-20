@@ -22,8 +22,8 @@ assert.equal(steps[2].key, "contact");
 
 const row = buildOasisFunnelRow();
 assert.equal(row.slug, OASIS_FUNNEL_SLUG, "row slug = OASIS_FUNNEL_SLUG");
-assert.equal(row.on_complete_stage, OASIS_FUNNEL_ON_COMPLETE_STAGE, "row stage = new_contact");
-assert.equal(row.on_complete_stage, "new_contact", "stage is a valid OASIS lead stage");
+assert.equal(row.on_complete_stage, OASIS_FUNNEL_ON_COMPLETE_STAGE, "row stage = researched");
+assert.equal(row.on_complete_stage, "researched", "stage is a valid OASIS lead stage");
 assert.equal(row.enabled, true, "form enabled");
 
 // ---------------------------------------------------------------------------

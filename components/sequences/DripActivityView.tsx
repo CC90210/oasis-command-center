@@ -32,6 +32,8 @@ import {
   ShieldCheck,
 } from "lucide-react";
 import type { ActivityStatus } from "@/lib/drips/activity-core";
+import { SequenceScoreboard } from "./SequenceScoreboard";
+import type { ScoreboardResult } from "@/lib/drips/scoreboard-core";
 import { OPERATOR_TIME_ZONE } from "@/lib/dates";
 
 export type ActivityRow = {
@@ -119,6 +121,7 @@ export function DripActivityView({
   summary,
   readError = null,
   summaryError = null,
+  scoreboard = null,
 }: {
   rows: ActivityRow[];
   summary: ActivitySummary;
@@ -129,6 +132,9 @@ export function DripActivityView({
   /** Independent of readError. The tiles and the table come from two different
    *  queries; marking both unknown because one failed hides data that is fine. */
   summaryError?: string | null;
+  /** Per-sequence rollup. Its own read, so it carries its own error and
+   *  truncation rather than inheriting the table's. */
+  scoreboard?: ScoreboardResult | null;
 }) {
   const [channel, setChannel] = useState<"all" | "email" | "sms">("all");
   const [status, setStatus] = useState<"all" | ActivityStatus>("all");
@@ -180,6 +186,21 @@ export function DripActivityView({
             as a floor, not a total.
           </span>
         </div>
+      )}
+
+      {/* The rollup goes FIRST. "Is each sequence working" is the question
+          people open this tab with; the 24h tiles and the step table both
+          answer narrower ones. Selecting a card drives the same `sequence`
+          filter the dropdown does, so the two can never disagree. */}
+      {scoreboard && (
+        <SequenceScoreboard
+          scores={scoreboard.scores}
+          days={scoreboard.days}
+          truncated={scoreboard.truncated}
+          error={scoreboard.error}
+          selected={sequence === "all" ? null : sequence}
+          onSelect={(name) => setSequence(name ?? "all")}
+        />
       )}
 
       {/* Basic numbers only. Opens, clicks and per-variant performance live in

@@ -24,6 +24,7 @@ import { AgentDecisionsCard } from "@/components/AgentDecisionsCard";
 import { buildRecordResolver, projectEvent } from "@/lib/event-projection";
 import { WarmPoolPanel } from "@/components/WarmPoolPanel";
 import { BridgeCliPanel } from "@/components/BridgeCliPanel";
+import { requireSystemSurface } from "@/lib/role-surfaces-session";
 
 export const dynamic = "force-dynamic";
 
@@ -60,6 +61,9 @@ export default async function OperationsPage({
 }: {
   searchParams?: Promise<{ showOlder?: string }>;
 }) {
+  // System surface — the agent fleet, cron tape and bridge pairings. Not a
+  // contractor's screen. 404 before any read; see lib/role-surfaces.ts.
+  await requireSystemSurface();
   const profile = await safe("operations.profile", getActiveProfile(), null);
   const user = await getSessionUser().catch(() => null);
   const isOperator = isOperatorEmail(user?.email || undefined);

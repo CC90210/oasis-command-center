@@ -10,7 +10,7 @@
  *   https://oasisai.work/f/oasis-ai-cc/start
  *
  * Submissions ingest into the OASIS pipeline as `inbound` leads at
- * `new_contact` (see app/api/forms/submit/route.ts → initAnonymousLead), then
+ * `researched` (see app/api/forms/submit/route.ts → initAnonymousLead), then
  * fire a Telegram ping + a Claude-personalized welcome email (the OASIS
  * notification path keyed off OASIS_FUNNEL_SLUG).
  *
@@ -34,8 +34,9 @@ export const OASIS_FUNNEL_NAME = "Work with CC";
 export const OASIS_FUNNEL_DESCRIPTION =
   "CC's personal-brand lead funnel — AI automation, DJ bookings, brand coaching.";
 
-/** Leads land here on completion + at create time (single-stage funnel). */
-export const OASIS_FUNNEL_ON_COMPLETE_STAGE = "new_contact";
+/** Leads land here on completion + at create time (single-stage funnel).
+ *  First stage of the 14-stage OASIS lifecycle (lib/oasis-stage-meta.ts). */
+export const OASIS_FUNNEL_ON_COMPLETE_STAGE = "researched";
 
 export const OASIS_FUNNEL_BRANDING: FormBranding = {
   // CC-funnel brand: gold on near-black. primary drives the CTA + accents.
@@ -52,7 +53,7 @@ export const OASIS_FUNNEL_STEPS: FormStep[] = [
   {
     key: "interest",
     title: "What can I help you with?",
-    description: "Pick what you're into — I'll hook you up with something free.",
+    description: "Pick what you're into and tell me where to send it.",
     cta_label: "Continue",
     fields: [
       {
@@ -66,6 +67,21 @@ export const OASIS_FUNNEL_STEPS: FormStep[] = [
           { value: "music", label: "🎧 DJing & Music — book CC for your event" },
           { value: "brand", label: "🔥 Personal Brand — free 15-min strategy session" },
         ],
+      },
+      // Contact moved here from the old final step (2026-08-20). A lead row is
+      // minted on the FIRST submission, so collecting contact last meant anyone
+      // who abandoned early became a nameless, unreachable CRM row — one such
+      // row ("Lead b26e6c", no name, no email, no phone) had to be deleted by
+      // hand. Asking on step 0 means every lead that exists can be reached.
+      { name: "name", label: "Your name", type: "text", required: true, placeholder: "First + last" },
+      { name: "email", label: "Email", type: "email", required: true, placeholder: "you@email.com" },
+      {
+        name: "phone",
+        label: "Mobile number",
+        type: "phone",
+        required: true,
+        placeholder: "+1 …",
+        help: "So I can text you — most people never open the email.",
       },
     ],
   },
@@ -190,14 +206,11 @@ export const OASIS_FUNNEL_STEPS: FormStep[] = [
   },
   {
     key: "contact",
-    title: "Last step — where do I reach you?",
+    title: "Last step — anywhere else I should reach you?",
     description:
       "I'll personally follow up. No spam, no newsletter — just the free thing you asked for.",
     cta_label: "Send me my free stuff",
     fields: [
-      { name: "name", label: "Your name", type: "text", required: true, placeholder: "First + last" },
-      { name: "email", label: "Email", type: "email", required: true, placeholder: "you@email.com" },
-      { name: "phone", label: "Phone (optional)", type: "phone", placeholder: "+1 …" },
       {
         name: "instagram",
         label: "Instagram (optional)",

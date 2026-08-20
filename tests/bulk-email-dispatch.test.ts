@@ -29,7 +29,7 @@ const vercel = read("vercel.json");
 
 assert.match(
   bulkRoute,
-  /import \{ BULK_EMAIL_SOURCE \} from "@\/lib\/bulk-email\/dispatch"/,
+  /import \{ BULK_EMAIL_SOURCE(?:, runDispatchBulkEmail)? \} from "@\/lib\/bulk-email\/dispatch"/,
   "the queue writer and the drain must share one source tag",
 );
 assert.match(
@@ -49,8 +49,8 @@ assert.doesNotMatch(
 );
 assert.match(
   bulkRoute,
-  /const idCap = op === "email" \? MAX_EMAIL_IDS : MAX_IDS/,
-  "blast size must not be capped at the old per-id-loop bound; queueing is batched and cheap",
+  /const idCap = op === "email" \|\| op === "email_preflight" \? MAX_EMAIL_IDS : MAX_IDS/,
+  "blast size must not be capped at the old per-id-loop bound; queueing is batched and cheap. The preflight shares the cap so it can answer for the same selection the send accepts.",
 );
 assert.match(
   bulkRoute,

@@ -24,11 +24,27 @@ export function stagesForOasisRole(role: string, isOwner = false, adminAccess = 
 
 type PipelineRow = { id: string; data: Record<string, unknown> };
 
+/**
+ * Scope pipeline rows to what this viewer may see.
+ *
+ * `programScoped` (default true) drops anything not stamped
+ * sales_program=website_sales_v1. That is correct ONLY on the website-sales
+ * tenant. Applying it everywhere hid all 8 of CC's own oasis-ai-cc CRM leads
+ * behind an empty board — those rows predate the program and will never carry
+ * the flag. Callers that already constrained the program in the DB query pass
+ * `false` so the cap-then-filter bug can't strand rows either: on oasis-webdev
+ * the 53 real sales leads sit in a table with 31k raw prospects, so a 500-row
+ * fetch filtered afterwards in JS is one import away from returning nothing.
+ * Rep scoping (own leads, agent stages) applies regardless.
+ */
 export function filterWebsiteSalesRows<T extends PipelineRow>(
   rows: T[],
   viewer: { role: string; userId: string | null; isOwner?: boolean; adminAccess?: boolean },
+  options: { programScoped?: boolean } = {},
 ): T[] {
-  const programRows = rows.filter((row) => row.data.sales_program === OASIS_WEBSITE_SALES_PROGRAM);
+  const programRows = (options.programScoped ?? true)
+    ? rows.filter((row) => row.data.sales_program === OASIS_WEBSITE_SALES_PROGRAM)
+    : rows;
   if (isOasisPipelineAdmin(viewer.role, viewer.isOwner, viewer.adminAccess)) return programRows;
   if (!viewer.userId) return [];
   const userId = viewer.userId.toLowerCase();

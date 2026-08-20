@@ -8,6 +8,7 @@ import { catalogFor } from "@/lib/agent-catalog";
 import { getAgentStats } from "@/lib/agent-stats";
 import { getServiceSupabase, getSessionUser } from "@/lib/supabase-server";
 import { isOperatorEmail } from "@/lib/operator-credentials";
+import { requireSystemSurface } from "@/lib/role-surfaces-session";
 import { Clock, Cog, Download, Workflow } from "lucide-react";
 import Link from "next/link";
 
@@ -41,6 +42,10 @@ export const dynamic = "force-dynamic";
 const FRESHNESS_MS = 15 * 60 * 1000;
 
 export default async function AgentsPage() {
+  // System surface — the agent fleet, its integration health and provider keys.
+  // 404 for an outside contractor before any read. (The rep's own chat at
+  // /agent is a different route and is not gated here.)
+  await requireSystemSurface();
   const profile = await getActiveProfile();
   const user = await getSessionUser();
   const isAdmin = isOperatorEmail(user?.email);

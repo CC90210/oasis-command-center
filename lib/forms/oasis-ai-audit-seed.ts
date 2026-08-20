@@ -38,8 +38,9 @@ export const AI_AUDIT_NAME = "AI Automation Audit";
 export const AI_AUDIT_DESCRIPTION =
   "OASIS AI Solutions B2B qualification funnel — bottleneck, scale, budget, timeline.";
 
-/** Leads land at new_contact, same as the personal-brand funnel. */
-export const AI_AUDIT_ON_COMPLETE_STAGE = "new_contact";
+/** Leads land at researched (the 14-stage lifecycle's first stage),
+ *  same as the personal-brand funnel. */
+export const AI_AUDIT_ON_COMPLETE_STAGE = "researched";
 
 export const AI_AUDIT_BRANDING: FormBranding = {
   // Deliberately NOT the default blue/purple gradient. Gold on near-black is
@@ -56,8 +57,14 @@ export const AI_AUDIT_BRANDING: FormBranding = {
 
 export const AI_AUDIT_STEPS: FormStep[] = [
   // ── Step 1 — Identity & Business ──────────────────────────────────────────
-  // Cheapest possible step. Four fields, two required. Getting email early is
-  // what makes an abandoned form still worth something.
+  // Cheapest possible step. Getting contact details early is what makes an
+  // abandoned form still worth something — and phone belongs here for exactly
+  // the same reason email does. It used to sit on the LAST step, marked
+  // optional, which meant the people most worth chasing could never supply it:
+  // on 2026-08-20 every inbound funnel lead in the CRM had an email and a blank
+  // phone, and the one who abandoned at step 1 left nothing but an address that
+  // may never get answered. A phone number is the channel that actually gets a
+  // reply, so it is asked first and required.
   {
     key: "identity",
     title: "First — who am I talking to?",
@@ -78,6 +85,17 @@ export const AI_AUDIT_STEPS: FormStep[] = [
         required: true,
         placeholder: "you@company.com",
         help: "Where the audit lands. I don't add anyone to a newsletter.",
+      },
+      {
+        name: "phone",
+        label: "Mobile number",
+        // "phone", not "tel" — FormFieldType (lib/forms/types.ts:29) has no
+        // "tel" member. Caught by tsc, not by me: I had inferred the name from
+        // a grep of the renderer instead of reading the union.
+        type: "phone",
+        required: true,
+        placeholder: "+1 …",
+        help: "So I can text you the findings — most people never open the email.",
       },
       {
         name: "company",
@@ -234,16 +252,6 @@ export const AI_AUDIT_STEPS: FormStep[] = [
           { value: "audit_first", label: "Send the audit first, then we'll talk" },
         ],
         help: "Either is fine. The audit is free regardless.",
-      },
-      {
-        name: "phone",
-        label: "Phone (optional)",
-        // "phone", not "tel" — FormFieldType (lib/forms/types.ts:29) has no
-        // "tel" member. Caught by tsc, not by me: I had inferred the name from
-        // a grep of the renderer instead of reading the union.
-        type: "phone",
-        placeholder: "+1 …",
-        help: "Only used if you asked for a call.",
       },
     ],
   },

@@ -36,6 +36,7 @@ import { OutcomeChecksPanel } from "@/components/health/OutcomeChecksPanel";
 import { loadOutcomeChecks } from "@/lib/health/outcome-panel-data";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { resolveTenantId } from "@/lib/api-auth";
+import { requireSystemSurface } from "@/lib/role-surfaces-session";
 import { getTenantEnabledAgents } from "@/lib/manifest/tenant-scope";
 import { resolveClientProfileSlug } from "@/lib/client-profiles";
 import { getTenant } from "@/lib/queries";
@@ -193,6 +194,9 @@ async function loadHealth(tenantId: string, enabledAgents: string[]) {
 }
 
 export default async function HealthPage() {
+  // System surface. 404 for an outside contractor before any read runs — this
+  // page lists stuck lender threads and stalled leads across the tenant.
+  await requireSystemSurface();
   const tenantId = await resolveTenantId();
   if (!tenantId) redirect("/login");
   const enabledAgents = await getTenantEnabledAgents(tenantId);

@@ -14,6 +14,7 @@
 
 import { CC_NAV, type NavItem } from "../nav-config";
 import { HELIOS_TOOL_PALETTE } from "../chat-tool-palettes";
+import { OASIS_LEAD_STAGE_KEYS } from "../oasis-stage-meta";
 import {
   MANIFEST_SCHEMA_VERSION,
   type ManifestNavItem,
@@ -104,47 +105,24 @@ export const OASIS_SEED: TenantManifest = {
         { name: "email", type: "string" },
         { name: "phone", type: "string" },
         { name: "source", type: "enum", enum_values: ["referral", "inbound", "outbound", "event", "cold_outreach", "other"] },
-        // OASIS lead lifecycle (AI agency client funnel). 11 stages cover
-        // every state a prospect or client can be in — from first contact
-        // through active retainer and beyond. Stage metadata (colours,
-        // labels) lives in lib/oasis-stage-meta.ts → OASIS_LEAD_STAGES.
-        // Keep this enum in lock-step with that file; the StageRail reads
-        // the meta but the Supabase column validates against this enum.
+        // OASIS lead lifecycle (Website Sales Engine v2). 14 stages cover
+        // every state a prospect or client can be in — from researched lead
+        // through launched website. The canonical list (keys, labels,
+        // colours) lives in lib/oasis-stage-meta.ts → OASIS_LEAD_STAGES;
+        // this enum references it directly so the New Lead / edit-form
+        // dropdowns can never drift from the StageRail.
         //
-        //   new_contact    — fresh lead, no outreach sent
-        //   outreach       — first touch sent (cold email / DM / call)
-        //   discovery      — discovery call scheduled or completed
-        //   qualified      — replied with intent and confirmed as a fit
-        //   proposal       — SOW / proposal delivered, awaiting response
-        //   negotiation    — back-and-forth on scope, terms, or price
-        //   onboarding     — deal closed, client being onboarded
-        //   active_client  — live retainer / project in delivery
-        //   churned        — was an active client, now departed
-        //   lost           — never closed (passed, ghosted, not a fit)
-        //   archived       — permanently inactive (no follow-up expected)
+        //   researched → assigned → attempting_contact → connected →
+        //   qualified → founder_meeting_booked → demo_completed →
+        //   proposal_sent → won | lost → onboarding → in_build →
+        //   client_review → launched
         //
-        // Migration from the prior 7-stage shape (see
-        // database/047_oasis_lead_lifecycle_v2.sql for the SQL):
-        //   new        → new_contact
-        //   contacted  → outreach
-        //   won        → active_client
-        //   qualified / proposal / negotiation / lost → same key (no-op)
+        // Migration from the prior 11-stage shape:
+        // database/146 + database/turso/147_website_sales_engine.turso.sql.
         {
           name: "stage",
           type: "enum",
-          enum_values: [
-            "new_contact",
-            "outreach",
-            "discovery",
-            "qualified",
-            "proposal",
-            "negotiation",
-            "onboarding",
-            "active_client",
-            "churned",
-            "lost",
-            "archived",
-          ],
+          enum_values: [...OASIS_LEAD_STAGE_KEYS],
           required: true,
         },
         { name: "score", type: "number" },
