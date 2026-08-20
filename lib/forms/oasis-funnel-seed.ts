@@ -53,7 +53,7 @@ export const OASIS_FUNNEL_STEPS: FormStep[] = [
   {
     key: "interest",
     title: "What can I help you with?",
-    description: "Pick what you're into — I'll hook you up with something free.",
+    description: "Pick what you're into and tell me where to send it.",
     cta_label: "Continue",
     fields: [
       {
@@ -67,6 +67,21 @@ export const OASIS_FUNNEL_STEPS: FormStep[] = [
           { value: "music", label: "🎧 DJing & Music — book CC for your event" },
           { value: "brand", label: "🔥 Personal Brand — free 15-min strategy session" },
         ],
+      },
+      // Contact moved here from the old final step (2026-08-20). A lead row is
+      // minted on the FIRST submission, so collecting contact last meant anyone
+      // who abandoned early became a nameless, unreachable CRM row — one such
+      // row ("Lead b26e6c", no name, no email, no phone) had to be deleted by
+      // hand. Asking on step 0 means every lead that exists can be reached.
+      { name: "name", label: "Your name", type: "text", required: true, placeholder: "First + last" },
+      { name: "email", label: "Email", type: "email", required: true, placeholder: "you@email.com" },
+      {
+        name: "phone",
+        label: "Mobile number",
+        type: "phone",
+        required: true,
+        placeholder: "+1 …",
+        help: "So I can text you — most people never open the email.",
       },
     ],
   },
@@ -191,14 +206,11 @@ export const OASIS_FUNNEL_STEPS: FormStep[] = [
   },
   {
     key: "contact",
-    title: "Last step — where do I reach you?",
+    title: "Last step — anywhere else I should reach you?",
     description:
       "I'll personally follow up. No spam, no newsletter — just the free thing you asked for.",
     cta_label: "Send me my free stuff",
     fields: [
-      { name: "name", label: "Your name", type: "text", required: true, placeholder: "First + last" },
-      { name: "email", label: "Email", type: "email", required: true, placeholder: "you@email.com" },
-      { name: "phone", label: "Phone (optional)", type: "phone", placeholder: "+1 …" },
       {
         name: "instagram",
         label: "Instagram (optional)",
