@@ -111,7 +111,12 @@ const SUGA_PROFILE: ClientCommandCenterProfile = {
 };
 
 const WEBDEV_PROFILE: ClientCommandCenterProfile = {
-  id: "webdev",
+  // Must equal the CLIENT_PROFILES key below ("oasis-webdev") — the
+  // "ById" lookup (getClientCommandCenterProfileById) is really a by-KEY
+  // lookup into CLIENT_PROFILES, and an id/key mismatch degrades silently
+  // to DEFAULT_PROFILE instead of erroring. Canonical slug for this tenant
+  // per lib/website-sales-workflow.ts OASIS_WEBSITE_TENANT_SLUG.
+  id: "oasis-webdev",
   brand: "Oasis Web Studio",
   logo: "oasis",
   subtitle: "Agent Command Center",
