@@ -10,7 +10,7 @@
  */
 
 import assert from "node:assert/strict";
-import { resumePlan, nextRamp, RESTART_DAILY, RESTART_HOURLY } from "../lib/sms/resume-core";
+import { resumePlan, RESTART_DAILY, RESTART_HOURLY } from "../lib/sms/resume-core";
 import { lineVerdict, type CanaryAttempt } from "../lib/sms/canary-core";
 
 const at = (number: string, iso: string, status: string | null): CanaryAttempt =>
@@ -69,20 +69,38 @@ for (const [label, results] of [
   assert.deepEqual(p.lines, ["+1good"], "a refused line must never be handed back as sendable");
 }
 
-// ── It resumes SMALL, regardless of where volume was before ─────────────
-// Caps before the halt were 40/day and 7/hour. Going straight back would put a
-// full day of volume through lines with two data points each.
+// ── It resumes at the OPERATOR'S number, not a number I picked ──────────
+// Adon, 2026-08-20: "it should be at 40 a day."
+//
+// I had this at 10 and was overruled. Pinning 40 here rather than quietly
+// leaving my preference in the code, because the override is defensible and the
+// reason matters: on 2026-08-18 a low cap was the only thing between a bad line
+// and a burned cohort. It no longer is. A canary-refused line is excluded
+// outright, 3 consecutive failures bench a line, 5 halt a wire, landlines are
+// skipped before a message is spent, and receipts are verified again so all of
+// that actually fires. Those catch a fault in single digits of wasted messages
+// whatever the ceiling is, which is what a low cap was crudely substituting for.
 {
   const p = resumePlan([cleared("+1")]);
-  assert.ok(p.dailyCap <= 10, "restart volume must be small");
-  assert.ok(p.dailyCap < 40, "must not return to the pre-halt cap");
-  assert.match(p.reason, /10\/day/);
+  assert.equal(p.dailyCap, 40, "restart at the operator's target, not a lower one chosen for us");
+  assert.equal(p.hourlyCap, 7);
+  assert.match(p.reason, /40\/day/);
 }
 
-// ── The ramp is a ladder, and never skips ───────────────────────────────
-assert.equal(nextRamp(0), RESTART_DAILY);
-assert.equal(nextRamp(10), 25);
-assert.equal(nextRamp(25), 40);
-assert.equal(nextRamp(40), 40, "the ladder stops at the pre-halt volume rather than climbing forever");
+// The cap is still a CEILING, and an override must be able to move it without
+// touching this file.
+{
+  const p = resumePlan([cleared("+1")], { dailyCap: 25, hourlyCap: 4 });
+  assert.equal(p.dailyCap, 25);
+  assert.equal(p.hourlyCap, 4);
+}
+
+// ── A HIGHER CAP MUST NOT WEAKEN THE GATE ───────────────────────────────
+// The number only applies once evidence exists. Raising it changes the
+// ceiling, never the permission.
+{
+  assert.equal(resumePlan([failed("+1")], { dailyCap: 40 }).allowed, false);
+  assert.equal(resumePlan([], { dailyCap: 40 }).dailyCap, 0, "a blocked resume hands back no volume at all");
+}
 
 console.log("sms-resume.test.ts — all assertions passed");
