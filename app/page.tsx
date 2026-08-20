@@ -23,6 +23,7 @@
  * its own — it asks, then renders.
  */
 
+import Link from "next/link";
 import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
 import { Card, EmptyState, PageHeader } from "@/components/Card";
@@ -88,17 +89,45 @@ export default async function TodayPage() {
   const surface = await resolveViewerSurface();
   const viewerName = profile.display_name || profile.full_name || "Operator";
 
-  // No resolvable session context (no auth row, no tenant binding, or the
-  // OPERATOR_EMAIL dev fallback which deliberately has no session). Fail closed
-  // to the founder SHAPE without the money, and say why — a profile we cannot
-  // authorise is not a profile we hand revenue to.
+  /**
+   * NO RESOLVABLE SESSION CONTEXT — render NOTHING about the tenant.
+   *
+   * This branch first shipped rendering FounderToday with showFinancials={false},
+   * on the reasoning that an unauthorised session should lose the money. That
+   * was half a fix and therefore a bug: FounderToday's non-financial reads run
+   * unconditionally, so the page still issued priorityInbound (the company
+   * mailbox — real subjects and AI summaries), topOpenLead (a named lead with
+   * their phone number) and pipelineBreakdown (tenant-wide counts). Suppressing
+   * the MRR while serving the inbox is not failing closed.
+   *
+   * Who lands here is the part that makes it matter. getActiveProfile() falls
+   * back to an EMAIL lookup when the auth_user_id match returns nothing (its
+   * "post-migration link case"), while resolveSessionContext does not — so a
+   * user whose profile row is not linked by auth_user_id gets a truthy profile
+   * and a failed session. A freshly-invited contractor with a broken linkage is
+   * exactly that shape.
+   *
+   * So: no tenantId is passed anywhere, no query runs, and the screen says what
+   * happened. An unauthorised session gets an explanation, not a dashboard.
+   */
   if (!surface.ok) {
     return (
-      <FounderToday
-        profile={profile}
-        showFinancials={false}
-        financialsNote="This session could not be authorised against a workspace, so company revenue was not requested. Sign in again to restore the full dashboard."
-      />
+      <div className="space-y-6 animate-fade-in">
+        <PageHeader title="Today" subtitle="Session not verified" />
+        <Card title="We could not confirm your workspace">
+          <EmptyState
+            message="You are signed in, but this account is not currently linked to a workspace, so nothing has been loaded. This is an account-linking problem, not missing data. Sign out and back in — if it persists, send CC your account email and he can relink it."
+            cta={
+              <Link
+                href="/login"
+                className="inline-flex items-center rounded-lg border border-accent/30 bg-accent-soft px-3 py-2 text-xs font-bold uppercase tracking-wider text-accent transition-colors hover:bg-accent/15"
+              >
+                Sign in again
+              </Link>
+            }
+          />
+        </Card>
+      </div>
     );
   }
 
