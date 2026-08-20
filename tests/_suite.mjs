@@ -54,6 +54,7 @@ const TESTS = [
   // everyone runs, not only in the website-sales script.
   "tests/role-surfaces.test.ts",
   "tests/agent-api-scope.test.ts",
+  "tests/fetch-json.test.ts",
   "tests/fuzzy-match.test.ts",
   "tests/infer-result-text.test.ts",
   "tests/csv-combine.test.ts",
@@ -150,6 +151,7 @@ const TESTS = [
   // Beside it deliberately: the profile module decides WHO a client's replies
   // come from, and this covers the rules that decision must satisfy.
   "tests/reply-identity.test.ts",
+  // APEX's Web Leads browser (PR #242).
   "tests/web-leads-filters.test.ts",
   "tests/web-leads-queries.test.ts",
   "tests/web-leads-data.test.ts",

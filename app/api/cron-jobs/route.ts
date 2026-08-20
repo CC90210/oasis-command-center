@@ -14,7 +14,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getSessionUser, getServiceSupabase } from "@/lib/supabase-server";
 import { getSessionContext, canManageTeam } from "@/lib/team";
-import { isMissingTableError, missingTablePayload } from "@/lib/api-helpers";
+import { isMissingTableError, jsonRoute, missingTablePayload } from "@/lib/api-helpers";
 import { isOperatorEmail } from "@/lib/operator-credentials";
 import { getTenantEnabledAgents } from "@/lib/manifest/tenant-scope";
 import { classifyUrlForSsrf } from "@/lib/url-safety";
@@ -69,7 +69,10 @@ function isValidCron(expr: string): boolean {
   return parts.every((p) => CRON_FIELD.test(p));
 }
 
-export async function GET() {
+// Wrapped so a throw cannot escape as an empty body — see jsonRoute in
+// lib/api-helpers.ts for why the Automations tab kept reporting a JSON parser
+// error instead of the actual fault.
+export const GET = jsonRoute("api/cron-jobs GET", async () => {
   const user = await getSessionUser();
   if (!user) return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
   const db = getServiceSupabase();
@@ -123,7 +126,7 @@ export async function GET() {
   }
 
   return NextResponse.json({ ok: true, jobs: [...tenantJobs, ...empireJobs] });
-}
+});
 
 /**
  * Map a public.cron_jobs row to the UI's CronJob shape with `source: "empire"`.

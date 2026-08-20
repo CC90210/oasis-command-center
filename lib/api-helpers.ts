@@ -12,6 +12,43 @@ export function bad(status: number, error: string) {
 }
 
 /**
+ * Guarantee a route answers with JSON, even when it throws.
+ *
+ * A route handler returns a structured body on every path it anticipates, but a
+ * throw escapes all of them — a session lookup that fails, the Turso proxy, a
+ * driver hiccup mid-query — and an unhandled throw yields a response with NO
+ * BODY. The browser then calls .json() on an empty string and reports
+ * "Unexpected end of JSON input": a parser message standing in for the real
+ * fault, naming nothing anyone can act on. That is precisely how the
+ * Automations tab kept breaking with no usable diagnosis.
+ *
+ * Wrapping a handler converts any escape into a rendered error plus a server
+ * log that says what actually broke. Use it on read paths the UI depends on.
+ *
+ *   export const GET = jsonRoute("api/cron-jobs GET", async () => { ... });
+ */
+export function jsonRoute<A extends unknown[]>(
+  label: string,
+  handler: (...args: A) => Promise<NextResponse>,
+): (...args: A) => Promise<NextResponse> {
+  return async (...args: A) => {
+    try {
+      return await handler(...args);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.error(`[${label}] threw`, {
+        message,
+        stack: err instanceof Error ? err.stack : undefined,
+      });
+      return NextResponse.json(
+        { ok: false, error: "handler_threw", message, route: label },
+        { status: 500 },
+      );
+    }
+  };
+}
+
+/**
  * SHA-256 of a UTF-8 string, hex-encoded. Used to hash bridge tokens
  * + HMAC secrets before storage / lookup. Five routes (auth/pair,
  * auth/pair-code/redeem, bridge/ping, inbound/n8n, outbound/log) were
