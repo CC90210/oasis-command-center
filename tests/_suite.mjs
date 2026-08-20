@@ -54,6 +54,7 @@ const TESTS = [
   // everyone runs, not only in the website-sales script.
   "tests/role-surfaces.test.ts",
   "tests/agent-api-scope.test.ts",
+  "tests/fetch-json.test.ts",
   "tests/fuzzy-match.test.ts",
   "tests/infer-result-text.test.ts",
   "tests/csv-combine.test.ts",
@@ -148,6 +149,11 @@ const TESTS = [
   // Beside it deliberately: the profile module decides WHO a client's replies
   // come from, and this covers the rules that decision must satisfy.
   "tests/reply-identity.test.ts",
+  // And this covers whether those rules are actually WIRED IN. It builds a real
+  // libSQL database from migrations 148-150 in a temp dir and runs the real
+  // provision/activate/verify path through the real Turso adapter — no
+  // credentials, no network, nothing shared with another test.
+  "tests/client-automation-lifecycle.test.ts",
 ];
 
 const NODE_ARGS = ["--conditions=react-server", "--import", "tsx"];

@@ -31,6 +31,7 @@ import {
   Loader2,
 } from "lucide-react";
 import { friendlyDescription } from "@/lib/cron-descriptions";
+import { fetchJson } from "@/lib/fetch-json";
 
 type ActionType = "script_run" | "snapshot_run" | "agent_prompt" | "webhook_post";
 
@@ -199,8 +200,27 @@ export function CronJobsManager({ agentKeys }: Props) {
 
   async function refresh() {
     try {
-      const res = await fetch("/api/cron-jobs");
-      const j = await res.json();
+      // fetchJson reads the body as text before parsing, so a dead route
+      // surfaces its HTTP status instead of "Unexpected end of JSON input" —
+      // the parser error that stood in for every real failure on this tab.
+      const result = await fetchJson<{
+        ok?: boolean;
+        error?: string;
+        jobs?: CronJob[];
+        migration?: string;
+        how_to_apply?: string;
+        hint?: string;
+      }>("/api/cron-jobs", undefined, { retries: 2 });
+      if (!result.ok) {
+        // Three attempts have failed, so this is not a blip. Keep whatever jobs
+        // are already on screen rather than blanking the board — a stale list
+        // the operator can still read beats an empty one, and the banner says
+        // the list may be out of date.
+        setLoadError(result.error);
+        setMigrationGap(null);
+        return;
+      }
+      const j = result.data;
       if (!j.ok) {
         // Special-case the "migration not applied" 503 — the route emits
         // structured fields the UI uses to render an actionable message
@@ -216,7 +236,7 @@ export function CronJobsManager({ agentKeys }: Props) {
           setJobs([]);
           return;
         }
-        setLoadError(j.error || `http_${res.status}`);
+        setLoadError(j.error || `http_${result.status}`);
         setMigrationGap(null);
         return;
       }
