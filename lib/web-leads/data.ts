@@ -55,6 +55,47 @@ export const PAGE_SIZE = 50;
  */
 export const LEAD_READ_CAP = 50000;
 
+/**
+ * Viewer identity for lead-level visibility (PR #237, 26ecc31a). `agent` is
+ * the commission-only OUTSIDE CONTRACTOR role added for website sales --
+ * LEAD_SCOPING_ENABLED (lib/lead-scope.ts) defaults OFF to stage per-agent
+ * scoping for SunBiz's established roles without emptying their boards
+ * overnight, but a contractor sits fully inside the tenant, so a tenant
+ * check alone (session.tenantId === WEBDEV_TENANT_ID) does not stop them
+ * pulling all ~31K leads. #237 hardened the manifest records route so
+ * `agent` is ALWAYS scoped to its own records regardless of that flag; this
+ * reads the same tenant_records table through a different door and must
+ * enforce the identical rule, or it reopens the exact leak #237 closed.
+ */
+export type Viewer = { userId: string; teamRole: string; isAdmin: boolean };
+
+/** True for the commission-only outside-contractor role that must always be
+ *  scoped to its own leads -- see the Viewer doc comment above. */
+export function isScopedContractor(viewer: Viewer): boolean {
+  return !viewer.isAdmin && viewer.teamRole === "agent";
+}
+
+/**
+ * Whether `viewer` may see a lead whose raw `data.assigned_to` is
+ * `assignedTo`. Unscoped viewers (admins, and every non-`agent` role) see
+ * everything -- this mirrors lead-scope.ts's recordMatchesViewer exactly:
+ * admin sees all, everyone else in an established role is unrestricted, and
+ * only the outside-contractor role is locked down. A scoped viewer with no
+ * assignment sees nothing (fail closed) rather than everything -- nothing
+ * assigns web-leads territories yet, so a freshly added contractor is
+ * SUPPOSED to see zero leads until an admin assigns them one.
+ *
+ * Comparison is case-insensitive to match lead-scope.ts's convention:
+ * assigned_to is written from the territory's auth user id, already
+ * lowercased, but this must not silently start failing if that ever isn't
+ * true on some row.
+ */
+export function visibleToViewer(assignedTo: string | null, viewer: Viewer): boolean {
+  if (!isScopedContractor(viewer)) return true;
+  if (!assignedTo) return false;
+  return assignedTo.trim().toLowerCase() === viewer.userId.trim().toLowerCase();
+}
+
 export type WebLead = {
   id: string;
   name: string;
@@ -132,6 +173,7 @@ export async function fetchSheets(): Promise<Sheet[]> {
 export async function fetchLeads(
   f: WebLeadFilters,
   sheetIds: string[],
+  viewer: Viewer,
 ): Promise<{ leads: WebLead[]; total: number }> {
   if (sheetIds.length === 0) return { leads: [], total: 0 };
   const db = getServiceSupabase();
@@ -155,6 +197,16 @@ export async function fetchLeads(
   const wanted = new Set(sheetIds);
   const q = f.query.toLowerCase();
   const all = (data || [])
+    // Scope BEFORE mapping to WebLead: assigned_to lives on the raw row and
+    // is deliberately not surfaced on WebLead (see the Viewer doc comment on
+    // isScopedContractor -- a scoped viewer must never receive rows outside
+    // their own book, not just have them hidden client-side).
+    .filter((r: { id: string; data: Record<string, unknown> }) =>
+      visibleToViewer(
+        typeof r.data.assigned_to === "string" ? r.data.assigned_to : null,
+        viewer,
+      ),
+    )
     .map((r: { id: string; data: Record<string, unknown> }) => toWebLead(r))
     .filter((l) => l.territoryId && wanted.has(l.territoryId))
     .filter((l) => Boolean(l.phone))
@@ -166,7 +218,7 @@ export async function fetchLeads(
   return { leads: all.slice(start, start + PAGE_SIZE), total: all.length };
 }
 
-export async function fetchLead(id: string): Promise<WebLead | null> {
+export async function fetchLead(id: string, viewer: Viewer): Promise<WebLead | null> {
   const db = getServiceSupabase();
   const { data, error } = await db
     .from("tenant_records")
@@ -176,5 +228,75 @@ export async function fetchLead(id: string): Promise<WebLead | null> {
     .eq("id", id)
     .maybeSingle();
   if (error) throw new Error(`lead_read_failed: ${error.message}`);
-  return data ? toWebLead(data as { id: string; data: Record<string, unknown> }) : null;
+  if (!data) return null;
+  const row = data as { id: string; data: Record<string, unknown> };
+  // A lead outside the viewer's scope must read exactly like a lead that
+  // doesn't exist -- returning null here (not a distinguishable error) is
+  // what lets the route answer with a 404 instead of a 403, so a scoped
+  // contractor can't use this endpoint to probe which ids exist tenant-wide.
+  if (!visibleToViewer(typeof row.data.assigned_to === "string" ? row.data.assigned_to : null, viewer)) {
+    return null;
+  }
+  return toWebLead(row);
+}
+
+/**
+ * Sheet counters, re-derived from only the leads a SCOPED viewer can see.
+ *
+ * fetchSheets() returns the fast, tenant-wide denormalized counters -- fine
+ * for an unscoped viewer, but for a contractor locked to their own book
+ * those counters are themselves a leak: the rail confidently showing
+ * "Toronto 8,246" while the table renders zero rows tells that contractor
+ * exactly how big and where the rest of the tenant's book is, which is the
+ * same class of leak #237 closed on the manifest route (see the Viewer doc
+ * comment). This walks every lead once, keeps only the ones visible to this
+ * viewer, and re-tallies each sheet's four counters from that subset --
+ * same Sheet[] shape fetchSheets() returns, so buildFacets() can't tell the
+ * difference. Unscoped viewers never call this and keep the O(sheets)
+ * counter path in fetchSheets() -- this is the slow path, on purpose, only
+ * for the narrow audience that must never see the fast one's true numbers.
+ */
+export async function fetchSheetsScopedToViewer(viewer: Viewer): Promise<Sheet[]> {
+  const db = getServiceSupabase();
+  const { data, error } = await db
+    .from("tenant_records")
+    .select("id,data")
+    .eq("tenant_id", WEBDEV_TENANT_ID)
+    .eq("entity_type", "lead")
+    .limit(LEAD_READ_CAP);
+  if (error) throw new Error(`leads_read_failed: ${error.message}`);
+  if ((data || []).length >= LEAD_READ_CAP) {
+    throw new Error(
+      `leads_read_truncated: hit the ${LEAD_READ_CAP}-row cap, results would be silently incomplete`,
+    );
+  }
+
+  type Bucket = { total: number; callable: number; noSite: number; callableNoSite: number };
+  const counts = new Map<string, Bucket>();
+  for (const r of (data || []) as { id: string; data: Record<string, unknown> }[]) {
+    const assignedTo = typeof r.data.assigned_to === "string" ? r.data.assigned_to : null;
+    if (!visibleToViewer(assignedTo, viewer)) continue;
+    const lead = toWebLead(r);
+    if (!lead.territoryId) continue;
+    const bucket = counts.get(lead.territoryId) || { total: 0, callable: 0, noSite: 0, callableNoSite: 0 };
+    bucket.total += 1;
+    const callable = Boolean(lead.phone);
+    const noSite = !lead.websiteUrl;
+    if (callable) bucket.callable += 1;
+    if (noSite) bucket.noSite += 1;
+    if (callable && noSite) bucket.callableNoSite += 1;
+    counts.set(lead.territoryId, bucket);
+  }
+
+  const sheets = await fetchSheets();
+  return sheets.map((s) => {
+    const c = counts.get(s.id) || { total: 0, callable: 0, noSite: 0, callableNoSite: 0 };
+    return {
+      ...s,
+      leads_total: c.total,
+      leads_callable: c.callable,
+      leads_no_site: c.noSite,
+      leads_callable_no_site: c.callableNoSite,
+    };
+  });
 }

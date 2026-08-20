@@ -14,13 +14,28 @@
  * A failed facet read returns a 500 with the reason -- NOT an empty facet
  * list, because an empty rail reads as "there are no leads", which is a
  * different and false statement.
+ *
+ * A tenant check alone is NOT sufficient: `agent` is the commission-only
+ * outside-contractor role added for website sales, and it lives INSIDE this
+ * tenant. The fast fetchSheets() counters are tenant-wide, so serving them
+ * unscoped would show a contractor the true size and shape of a book they
+ * cannot open (e.g. "Toronto 8,246" beside a table of zero rows) -- the
+ * same class of leak #237 (26ecc31a) closed on the manifest records route.
+ * A scoped viewer gets fetchSheetsScopedToViewer() instead, which re-derives
+ * counts from only the leads visible to them (see lib/web-leads/data.ts).
  */
 
 import { NextResponse, type NextRequest } from "next/server";
 import { resolveSessionContext } from "@/lib/api-auth";
 import { parseFilters } from "@/lib/web-leads/filters";
 import { buildFacets } from "@/lib/web-leads/queries";
-import { fetchSheets, WEBDEV_TENANT_ID } from "@/lib/web-leads/data";
+import {
+  fetchSheets,
+  fetchSheetsScopedToViewer,
+  isScopedContractor,
+  WEBDEV_TENANT_ID,
+  type Viewer,
+} from "@/lib/web-leads/data";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -39,7 +54,10 @@ export async function GET(req: NextRequest) {
   }
 
   try {
-    const sheets = await fetchSheets();
+    const viewer: Viewer = { userId: session.userId, teamRole: session.teamRole, isAdmin: session.isAdmin };
+    // Keep the fast tenant-wide counter path for the normal (unscoped) case;
+    // only a scoped contractor pays for the per-lead re-derivation.
+    const sheets = isScopedContractor(viewer) ? await fetchSheetsScopedToViewer(viewer) : await fetchSheets();
     const filters = parseFilters(req.nextUrl.searchParams);
     return NextResponse.json(buildFacets(sheets, filters));
   } catch (err) {

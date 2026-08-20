@@ -110,4 +110,57 @@ assert.match(
   "fetchLeads must throw when the read hits LEAD_READ_CAP, not return a truncated list",
 );
 
+// ---------------------------------------------------------------------------
+// A TENANT CHECK ALONE IS NOT SUFFICIENT. #237 (26ecc31a) hardened the
+// manifest records route because `agent` is the commission-only OUTSIDE
+// CONTRACTOR role added for website sales -- it lives INSIDE the tenant, so
+// passing session.tenantId === WEBDEV_TENANT_ID is not proof a caller may
+// see every lead in it. This branch reads the same tenant_records table
+// through a different door (the Web Leads browser) and would reopen the
+// exact leak #237 closed if it didn't apply the identical role scoping.
+// These assertions require each route to actually WIRE the scoping through
+// (reference the role/viewer), and require the data layer to key off
+// assigned_to -- not just assert that a scoping FUNCTION exists somewhere
+// unused, which would pass even if no route called it.
+// ---------------------------------------------------------------------------
+for (const route of [
+  "app/api/web-leads/route.ts",
+  "app/api/web-leads/facets/route.ts",
+  "app/api/web-leads/[id]/route.ts",
+]) {
+  const src = read(route);
+  assert.match(
+    src,
+    /session\.teamRole/,
+    `${route} must reference session.teamRole -- tenant match alone does not exclude the outside-contractor role`,
+  );
+  assert.match(
+    src,
+    /session\.isAdmin/,
+    `${route} must reference session.isAdmin when building the viewer passed to the scoped data layer`,
+  );
+}
+assert.match(
+  data,
+  /assigned_to/,
+  "lib/web-leads/data.ts must reference assigned_to -- that is what an agent's lead scope is keyed on",
+);
+assert.match(
+  data,
+  /isScopedContractor|visibleToViewer/,
+  "lib/web-leads/data.ts must implement the agent-role scoping predicate, not just pin the tenant",
+);
+// Presence of visibleToViewer SOMEWHERE in the file is not enough -- it could
+// exist only in fetchLead or fetchSheetsScopedToViewer while fetchLeads (the
+// main list read, ~31K rows) stays unscoped. Isolate fetchLeads' own body
+// (top-level closing brace is unindented; every nested brace inside it is
+// not) and require the scoping call INSIDE it specifically.
+const fetchLeadsBody = code.match(/export async function fetchLeads\([\s\S]*?\n\}\n/);
+assert.ok(fetchLeadsBody, "must find fetchLeads() in lib/web-leads/data.ts");
+assert.match(
+  fetchLeadsBody[0],
+  /visibleToViewer/,
+  "fetchLeads must apply visibleToViewer scoping to each row -- tenant-pinning the read alone is not enough, an agent-role contractor sits INSIDE the tenant",
+);
+
 console.log("web-leads-guards ok");
