@@ -17,7 +17,7 @@
  * this is the present.
  */
 
-import { CC_NAV, SUN_NAV, SUGA_NAV, type NavItem } from "./nav-config";
+import { CC_NAV, SUN_NAV, SUGA_NAV, WEBDEV_NAV, type NavItem } from "./nav-config";
 import type { Tenant } from "./supabase";
 
 export const DEMO_CLIENT_PROFILE_COOKIE = "oasis_demo_client_profile";
@@ -110,10 +110,28 @@ const SUGA_PROFILE: ClientCommandCenterProfile = {
   nav: SUGA_NAV,
 };
 
+const WEBDEV_PROFILE: ClientCommandCenterProfile = {
+  id: "webdev",
+  brand: "Oasis Web Studio",
+  logo: "oasis",
+  subtitle: "Agent Command Center",
+  footerLabel: "Oasis Web Studio · Agent Command Center · v1.0",
+  footerTagline: "Sites that earn their keep.",
+  agentLabel: "Bravo",
+  primaryAgent: "bravo",
+  // Turso, like every client workspace. Never Supabase (retired 2026-08-09).
+  dataBackend: "turso",
+  deploymentMode: "shared",
+  nav: WEBDEV_NAV,
+  // No `sms` key. Nothing here is consented under CASL and the phone numbers
+  // being visible is not permission to text them.
+};
+
 const CLIENT_PROFILES: Record<string, ClientCommandCenterProfile> = {
   default: DEFAULT_PROFILE,
   sun: SUN_PROFILE,
   suga: SUGA_PROFILE,
+  "oasis-webdev": WEBDEV_PROFILE,
 };
 
 function _readTenantProfileSlug(
