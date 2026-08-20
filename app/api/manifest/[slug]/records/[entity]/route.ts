@@ -41,7 +41,7 @@ async function resolveContext(
   slug: string,
   entity: string
 ): Promise<
-  | { ok: true; tenant_id: string; is_admin: boolean }
+  | { ok: true; tenant_id: string; is_admin: boolean; team_role: string }
   | { ok: false; status: number; error: string }
 > {
   if (!SLUG_RE.test(slug)) return { ok: false, status: 400, error: "invalid_slug" };
@@ -77,7 +77,22 @@ async function resolveContext(
     ok: true,
     tenant_id: dataTenant,
     is_admin: isAdminProfile(profile),
+    team_role: profile.team_role || "read_only",
   };
+}
+
+/**
+ * `LEAD_SCOPING_ENABLED` defaults OFF, and the unscoped branch below hands the
+ * caller every lead in the tenant. That flag exists to stage scoping for
+ * SunBiz's established roles without emptying their boards overnight — but
+ * `agent` is the commission-only OUTSIDE contractor role added for website
+ * sales, and one URL against this route would have handed a contractor the
+ * whole tenant, defeating every page-level control. Agents are therefore always
+ * scoped to their own records regardless of the flag; SunBiz's roles keep their
+ * staged rollout untouched.
+ */
+function mustScopeRegardlessOfFlag(teamRole: string, isAdmin: boolean): boolean {
+  return !isAdmin && teamRole === "agent";
 }
 
 function handleRecordsError(err: unknown): NextResponse {
@@ -117,7 +132,10 @@ export async function GET(
   const entityName = entity.toLowerCase();
   try {
     let result;
-    if (SCOPED_ENTITIES.has(entityName) && leadScopingEnabled()) {
+    if (
+      SCOPED_ENTITIES.has(entityName) &&
+      (leadScopingEnabled() || mustScopeRegardlessOfFlag(r.team_role, r.is_admin))
+    ) {
       const scope = resolveAssignedScope(
         { isAdmin: r.is_admin, userId: user.id },
         { agent: sp.get("agent"), unassigned: sp.get("unassigned") === "1" },

@@ -53,6 +53,7 @@ const TESTS = [
   // marketing-founders-gate below — a security boundary belongs in the suite
   // everyone runs, not only in the website-sales script.
   "tests/role-surfaces.test.ts",
+  "tests/agent-api-scope.test.ts",
   "tests/fuzzy-match.test.ts",
   "tests/infer-result-text.test.ts",
   "tests/csv-combine.test.ts",
