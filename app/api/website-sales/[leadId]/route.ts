@@ -4,6 +4,7 @@ import { isUniqueViolationError } from "@/lib/api-helpers";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { WEBSITE_PACKAGES, WEBSITE_SALES_STAGES, isSellableAutomation, validateQuote, type WebsitePackageId } from "@/lib/website-sales";
 import { dispositionPatch, mayAgentBookFounder, mayAgentQualify, type RepDisposition } from "@/lib/website-sales-workflow";
+import { runStageTransitionHooks } from "@/lib/portals/stage-hooks";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
@@ -103,6 +104,24 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ le
   } else return NextResponse.json({ok:false,error:"unknown_action"},{status:400});
   const updated = await db.rpc("patch_tenant_record_data",{p_id:leadId,p_tenant_id:session.tenantId,p_patch:patch});
   if (updated.error) return NextResponse.json({ok:false,error:updated.error.message},{status:500});
+  // This route patches the record directly instead of going through
+  // updateRecord(), so nothing here fires the portal stage hooks on its own.
+  // That silence is why the qualified -> booking-link email never sent from a
+  // rep's own Qualify button — the one path that matters most. Run the hooks
+  // explicitly for a real stage change. runStageTransitionHooks swallows every
+  // hook error internally, so a reaction can still never fail the write.
+  const nextStage = typeof patch.stage === "string" ? patch.stage : null;
+  const priorStage = typeof current.stage === "string" ? current.stage : "";
+  if (nextStage && nextStage !== priorStage) {
+    await runStageTransitionHooks({
+      db,
+      tenantId: session.tenantId,
+      entity: "lead",
+      recordId: leadId,
+      data: { ...current, ...patch },
+      transitions: [{ field: "stage", from: priorStage, to: nextStage }],
+    });
+  }
   if (repAction && requestId) {
     const interaction = await db.from("lead_interactions").insert({
       tenant_id:session.tenantId,

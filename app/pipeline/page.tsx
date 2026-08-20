@@ -34,7 +34,7 @@ import { safe } from "@/lib/api-helpers";
 import { LeadPipelineView } from "@/components/manifest/LeadPipelineView";
 import { resolveSessionContext } from "@/lib/api-auth";
 import { getServiceSupabase } from "@/lib/supabase-server";
-import { filterWebsiteSalesRows, stagesForOasisRole } from "@/lib/oasis-sales-pipeline-policy";
+import { OASIS_WEBSITE_SALES_PROGRAM, filterWebsiteSalesRows, stagesForOasisRole } from "@/lib/oasis-sales-pipeline-policy";
 import { attachAssignedNames } from "@/lib/assigned-names";
 import { OASIS_WEBSITE_TENANT_SLUG } from "@/lib/website-sales-workflow";
 
@@ -63,6 +63,9 @@ export default async function PipelinePage({
   // tenant's leads view rather than seeing CC's OASIS personal stages.
   // Try/catch so an unexpected DB hiccup falls through to the OASIS
   // render — strictly no worse than the pre-redirect behavior.
+  // Captured for the query below: only the website-sales tenant filters rows
+  // down to the website_sales_v1 program.
+  let tenantSlug: string | null = null;
   try {
     const sessionResult = await resolveSessionContext();
     if (sessionResult.ok) {
@@ -73,6 +76,7 @@ export default async function PipelinePage({
         .eq("id", sessionResult.tenantId)
         .maybeSingle();
       const slug = (tenantRow.data as { slug: string | null } | null)?.slug;
+      tenantSlug = slug ?? null;
       if (slug && !OASIS_PIPELINE_SLUGS.has(slug)) {
         redirect(`/t/${slug}/leads`);
       }
@@ -112,9 +116,22 @@ export default async function PipelinePage({
   // exactly that. Query-filter is applied client-side in the component
   // via PageSearchBar; stage filter is applied server-side here so the
   // initial render doesn't ship rows we're going to discard.
+  // On oasis-webdev the program filter runs IN THE QUERY, not after the fetch:
+  // that tenant holds 31k+ raw prospect rows alongside the real sales leads, so
+  // capping at 500 and filtering in JS would silently drop working leads off the
+  // board. Other OASIS tenants (oasis-ai-cc) have no program stamp at all and
+  // must not be filtered, or their board renders empty.
+  const isWebsiteSalesTenant = tenantSlug === OASIS_WEBSITE_TENANT_SLUG;
   const allRows: TenantRecord[] = await safe(
     "pipeline.rows",
-    listRecords({ tenant_id: tenantId, entity: "lead", limit: 500 }).then((r) => r.rows),
+    listRecords({
+      tenant_id: tenantId,
+      entity: "lead",
+      limit: 500,
+      ...(isWebsiteSalesTenant
+        ? { where: { sales_program: OASIS_WEBSITE_SALES_PROGRAM } }
+        : {}),
+    }).then((r) => r.rows),
     [] as TenantRecord[],
   );
 
@@ -123,12 +140,17 @@ export default async function PipelinePage({
   // shipping 500 and filtering in the browser.
   const namedRows = await attachAssignedNames(allRows, tenantId);
   const scopedRows = session.ok
-    ? filterWebsiteSalesRows(namedRows, {
-        role: session.teamRole,
-        userId: session.userId,
-        isOwner: session.isTrueAdmin,
-        adminAccess: session.adminAccess,
-      })
+    ? filterWebsiteSalesRows(
+        namedRows,
+        {
+          role: session.teamRole,
+          userId: session.userId,
+          isOwner: session.isTrueAdmin,
+          adminAccess: session.adminAccess,
+        },
+        // The program constraint already ran in the DB query above.
+        { programScoped: false },
+      )
     : [];
   const rows = query
     ? scopedRows.filter((r) => {
