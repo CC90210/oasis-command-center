@@ -35,36 +35,71 @@ export function WebLeadsBrowser() {
   const [listError, setListError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
 
+  // Local draft for the search box, synced from the URL. See the search
+  // <input> below for why this exists instead of defaultValue.
+  const [queryDraft, setQueryDraft] = useState(filters.query);
+  useEffect(() => {
+    setQueryDraft(filters.query);
+  }, [filters.query]);
+
   const push = useCallback((f: WebLeadFilters) => {
     const qs = filtersToParams(f).toString();
     router.push(qs ? `/web-leads?${qs}` : "/web-leads", { scroll: false });
   }, [router]);
 
+  // `alive` guards against an out-of-order response: if filters change again
+  // before this fetch resolves, the effect's cleanup flips alive to false and
+  // the late .then()/.catch() becomes a no-op instead of overwriting fresher
+  // state with stale data. Same pattern WebLeadDetail.tsx already uses for
+  // its per-lead fetch.
   useEffect(() => {
+    let alive = true;
     const qs = filtersToParams({ ...filters, page: 1, leadId: null }).toString();
     fetch(`/api/web-leads/facets?${qs}`)
       .then(async (r) => {
         if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || `HTTP ${r.status}`);
-        setFacets(await r.json());
+        return r.json();
+      })
+      .then((body) => {
+        if (!alive) return;
+        setFacets(body);
         setFacetError(null);
       })
-      .catch((e) => setFacetError(e instanceof Error ? e.message : "failed"));
+      .catch((e) => {
+        if (!alive) return;
+        setFacetError(e instanceof Error ? e.message : "failed");
+      });
+    return () => {
+      alive = false;
+    };
   }, [filters]);
 
   useEffect(() => {
+    let alive = true;
     setLoading(true);
     const qs = filtersToParams({ ...filters, leadId: null }).toString();
     fetch(`/api/web-leads?${qs}`)
       .then(async (r) => {
         if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || `HTTP ${r.status}`);
-        const body = await r.json();
+        return r.json();
+      })
+      .then((body) => {
+        if (!alive) return;
         setLeads(body.leads);
         setTotal(body.total);
         setPageSize(body.pageSize);
         setListError(null);
       })
-      .catch((e) => setListError(e instanceof Error ? e.message : "failed"))
-      .finally(() => setLoading(false));
+      .catch((e) => {
+        if (!alive) return;
+        setListError(e instanceof Error ? e.message : "failed");
+      })
+      .finally(() => {
+        if (alive) setLoading(false);
+      });
+    return () => {
+      alive = false;
+    };
   }, [filters]);
 
   // Name the filter that emptied the list rather than saying a bare "0 results".
@@ -92,9 +127,17 @@ export function WebLeadsBrowser() {
         <div className="mb-4 flex flex-wrap items-center gap-2">
           <input
             type="search"
-            defaultValue={filters.query}
+            // Controlled + synced from filters.query (the effect above),
+            // rather than defaultValue: defaultValue only applies on mount,
+            // so browser back/forward -- which correctly changes the results
+            // via the URL -- left the box showing stale text. A local draft
+            // state keeps typing snappy (no URL push per keystroke, search
+            // still commits on Enter) while staying in sync whenever the URL
+            // itself changes the query from underneath the input.
+            value={queryDraft}
+            onChange={(e) => setQueryDraft(e.target.value)}
             placeholder="Search name or phone"
-            onKeyDown={(e) => { if (e.key === "Enter") push({ ...filters, query: (e.target as HTMLInputElement).value, page: 1 }); }}
+            onKeyDown={(e) => { if (e.key === "Enter") push({ ...filters, query: queryDraft, page: 1 }); }}
             className="w-64 rounded-md border border-slate-200 px-3 py-1.5 text-sm"
           />
           {chips.map((c) => (
