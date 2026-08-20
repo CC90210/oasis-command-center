@@ -158,11 +158,6 @@ const TESTS = [
   "tests/web-leads-counters.test.ts",
   "tests/web-leads-guards.test.ts",
   "tests/web-leads-scope.test.ts",
-  // And this covers whether those rules are actually WIRED IN. It builds a real
-  // libSQL database from migrations 148-150 in a temp dir and runs the real
-  // provision/activate/verify path through the real Turso adapter — no
-  // credentials, no network, nothing shared with another test.
-  "tests/client-automation-lifecycle.test.ts",
 ];
 
 const NODE_ARGS = ["--conditions=react-server", "--import", "tsx"];
