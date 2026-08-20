@@ -76,10 +76,38 @@ assert.match(
   /if \(!guard\.ok\) \{[\s\S]{0,400}?status: 400/,
   "a blocked message is refused, never silently sent",
 );
+// 🚨 Merge values are MERCHANT-SUPPLIED, so the copy that ships is not the copy
+// the pre-render guard saw. BOTH matchers must run on the final per-recipient
+// text: a business name can complete a broker phrase, or simply BE a lender's
+// name. Checking only the unrendered template leaves the load-bearing
+// "never name a lender" rule open.
+// (Codex review P1, 2026-08-20 round 5.)
 assert.match(
   bulkRoute,
-  /matchPositioningPhrases\(`\$\{subject\}\\n\\n\$\{rendered\}`\)/,
-  "the RENDERED text is re-checked, so a merge value can't smuggle a broker phrase past the pre-render guard",
+  /const finalText = `\$\{subject\}\\n\\n\$\{rendered\}`;/,
+  "the rendered per-recipient text is what gets checked",
+);
+assert.match(
+  bulkRoute,
+  /matchPositioningPhrases\(finalText\)\.length > 0 \|\|\s*\n\s*matchLenderNames\(finalText, lenders\.names\)\.length > 0/,
+  "positioning AND lender-name matchers both run on the rendered text",
+);
+// One lookup for the whole batch, not one per recipient.
+assert.match(
+  bulkRoute,
+  /const lenders = await getTenantLenderNames\(tenantId\);/,
+  "the lender list is fetched once, outside the loop",
+);
+assert.equal(
+  (bulkRoute.match(/getTenantLenderNames\(/g) || []).length,
+  1,
+  "exactly one call site, never one per row",
+);
+// A guard that passes when its data is missing is not a guard.
+assert.match(
+  bulkRoute,
+  /if \(!lenders\.checked\) \{[\s\S]{0,300}?status: 503/,
+  "an unverifiable lender list blocks the batch, fail-closed",
 );
 assert.match(
   bulkRoute,

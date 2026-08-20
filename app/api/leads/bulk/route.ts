@@ -35,8 +35,8 @@ import { assignLifecycleOwner } from "@/lib/lifecycle-assignment";
 import { BULK_EMAIL_SOURCE, runDispatchBulkEmail } from "@/lib/bulk-email/dispatch";
 import { classifyBulkRecipients, summarizeClassification, redactForResponse } from "@/lib/bulk-email/recipients";
 import { validateCustomMessage, renderCustomMessage } from "@/lib/bulk-email/compose";
-import { sanitizeBlastMessage } from "@/lib/integrations/blast-safety";
-import { stripDashes, matchPositioningPhrases } from "@/lib/integrations/blast-safety-core";
+import { sanitizeBlastMessage, getTenantLenderNames } from "@/lib/integrations/blast-safety";
+import { stripDashes, matchPositioningPhrases, matchLenderNames } from "@/lib/integrations/blast-safety-core";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -356,6 +356,23 @@ export async function POST(req: NextRequest) {
       };
     }
 
+    // The tenant's lender names, fetched ONCE so the per-recipient check below
+    // is pure regex rather than a query per row. FAIL CLOSED: an unverifiable
+    // list blocks the batch. "Never name a lender in merchant-facing copy" is
+    // load-bearing, and a guard that silently passes when its data is missing
+    // is not a guard.
+    const lenders = await getTenantLenderNames(tenantId);
+    if (!lenders.checked) {
+      return NextResponse.json(
+        {
+          ok: false,
+          error: "safety_check_failed",
+          message: "Couldn't verify the message is safe to send right now. Try again in a moment.",
+        },
+        { status: 503 },
+      );
+    }
+
     // One id per batch, so a send has a receipt an operator can open later and
     // a status the UI can poll while it drains.
     const batchId = randomUUID();
@@ -364,11 +381,19 @@ export async function POST(req: NextRequest) {
 
     for (const r of cls.eligible) {
       const { subject, body: rendered } = renderFor(r);
-      // Merge values are merchant-supplied data. A business name that happens
-      // to complete a broker-positioning phrase would slip past the pre-render
-      // guard, so the pure (no-DB, per-row cheap) matcher runs on the final
-      // text. A hit drops THAT recipient rather than the batch.
-      if (matchPositioningPhrases(`${subject}\n\n${rendered}`).length > 0) {
+      // Merge values are MERCHANT-SUPPLIED data, so the copy that actually goes
+      // out is not the copy the pre-render guard saw. A business name can
+      // complete a broker-positioning phrase, or simply BE a lender's name, and
+      // either would reach a merchant unchecked. Both matchers therefore run on
+      // the final per-recipient text (pure, no DB). A hit drops THAT recipient
+      // rather than the batch. Applies to templates too: pre-approved copy says
+      // nothing about the values merged into it.
+      // (Codex review P1, 2026-08-20 round 5.)
+      const finalText = `${subject}\n\n${rendered}`;
+      if (
+        matchPositioningPhrases(finalText).length > 0 ||
+        matchLenderNames(finalText, lenders.names).length > 0
+      ) {
         blockedAfterMerge += 1;
         continue;
       }
