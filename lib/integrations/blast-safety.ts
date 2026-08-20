@@ -20,10 +20,18 @@ export { stripDashes, matchLenderNames, matchPositioningPhrases } from "./blast-
  * Which of the tenant's lender names appear in `text`. `checked` is false if
  * the lookup failed — callers must treat that as fail-closed.
  */
-async function findLenderNamesInText(
+/**
+ * The tenant's lender names. Exported so a caller that must check MANY texts
+ * against the same list (per-recipient bulk copy, where merge values differ
+ * per row) can pay for the lookup once and then use the pure matcher, instead
+ * of either running a query per recipient or skipping the check.
+ *
+ * `checked: false` means the lookup could not run. Callers MUST treat that as
+ * fail-closed and block, never as "no lender names found".
+ */
+export async function getTenantLenderNames(
   tenantId: string,
-  text: string,
-): Promise<{ hits: string[]; checked: boolean }> {
+): Promise<{ names: string[]; checked: boolean }> {
   try {
     const db = getServiceSupabase();
     const r = await db
@@ -32,14 +40,23 @@ async function findLenderNamesInText(
       .eq("tenant_id", tenantId)
       .eq("entity_type", "lender")
       .limit(2000);
-    if (r.error) return { hits: [], checked: false };
+    if (r.error) return { names: [], checked: false };
     const names = (r.data || [])
       .map((row) => (typeof (row as { data?: Record<string, unknown> }).data?.name === "string" ? ((row as { data: Record<string, unknown> }).data.name as string) : ""))
       .filter(Boolean);
-    return { hits: matchLenderNames(text, names), checked: true };
+    return { names, checked: true };
   } catch {
-    return { hits: [], checked: false };
+    return { names: [], checked: false };
   }
+}
+
+async function findLenderNamesInText(
+  tenantId: string,
+  text: string,
+): Promise<{ hits: string[]; checked: boolean }> {
+  const { names, checked } = await getTenantLenderNames(tenantId);
+  if (!checked) return { hits: [], checked: false };
+  return { hits: matchLenderNames(text, names), checked: true };
 }
 
 export type BlastSanitizeResult =

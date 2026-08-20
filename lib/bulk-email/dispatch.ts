@@ -50,6 +50,7 @@
  */
 
 import "server-only";
+import { randomUUID } from "node:crypto";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { sendGmail } from "@/lib/integrations/submissions-gmail-send";
@@ -72,6 +73,76 @@ const STUCK_CLAIM_MINUTES = 15;
 /** Stop starting new sends after this much wall time so the tick always ends
  *  inside the route's maxDuration; the remainder stays queued for next tick. */
 const SOFT_TIME_BUDGET_MS = 45_000;
+
+/**
+ * 🚨 ONE drain at a time, estate-wide.
+ *
+ * The per-tick batch and the daily cap are computed per INVOCATION, before any
+ * row is claimed. The row-level CAS stops two runners delivering the SAME
+ * message, but it does nothing about two runners each sending a full budget:
+ * concurrent drains multiply the send RATE and can walk straight through the
+ * daily ceiling. That ceiling is not decorative — it holds 25% headroom under
+ * Google's 2,000/day hard cap on the shared submissions mailbox, and that
+ * mailbox also carries every form receipt and transactional message. Tripping
+ * Google's limits there breaks far more than bulk email.
+ *
+ * Concurrency became reachable on 2026-08-20, when queueing started kicking the
+ * drain immediately via after(): two operators sending at once, or any send
+ * overlapping the 5-minute cron, now races. So the lease lives HERE rather than
+ * at the kick site, which is the only place that covers cron-vs-kick as well as
+ * kick-vs-kick. (Codex review P1, 2026-08-20 round 8.)
+ *
+ * Correctness rests on the table's PRIMARY KEY (tenant_id, partition_key): the
+ * INSERT is the atomic gate, so exactly one racer can win. A crashed drain does
+ * not wedge the queue — the lease expires and the next runner clears it. TTL is
+ * comfortably above the route's maxDuration so a live drain never loses its own
+ * lease mid-tick.
+ */
+const DRAIN_LEASE_KEY = "bulk-email-drain";
+const DRAIN_LEASE_SECONDS = 120;
+
+/** @returns an owner token when the lease is ours, null when someone else holds it. */
+async function acquireDrainLease(db: SupabaseClient, tenantId: string): Promise<string | null> {
+  const owner = randomUUID();
+  const now = new Date().toISOString();
+  try {
+    // Clear an EXPIRED lease (a crashed runner's). Deliberately not a blind
+    // delete: an unexpired lease belongs to a live drain and must survive.
+    await db
+      .from("sunbiz_processing_leases")
+      .delete()
+      .eq("tenant_id", tenantId)
+      .eq("partition_key", DRAIN_LEASE_KEY)
+      .lt("expires_at", now);
+    // The gate. A conflicting row means another drain holds the lease.
+    const ins = await db.from("sunbiz_processing_leases").insert({
+      tenant_id: tenantId,
+      partition_key: DRAIN_LEASE_KEY,
+      owner_id: owner,
+      acquired_at: now,
+      heartbeat_at: now,
+      expires_at: new Date(Date.now() + DRAIN_LEASE_SECONDS * 1000).toISOString(),
+    });
+    return ins.error ? null : owner;
+  } catch {
+    // FAIL CLOSED: if we cannot prove we hold the lease, we do not send.
+    return null;
+  }
+}
+
+/** Best-effort release. A missed release costs at most one lease TTL of delay. */
+async function releaseDrainLease(db: SupabaseClient, tenantId: string, owner: string): Promise<void> {
+  try {
+    await db
+      .from("sunbiz_processing_leases")
+      .delete()
+      .eq("tenant_id", tenantId)
+      .eq("partition_key", DRAIN_LEASE_KEY)
+      .eq("owner_id", owner);
+  } catch {
+    /* the TTL is the backstop */
+  }
+}
 
 type Meta = Record<string, unknown>;
 
@@ -220,12 +291,42 @@ async function sentToday(db: SupabaseClient, cap: number): Promise<number> {
 }
 
 export async function runDispatchBulkEmail(): Promise<DispatchResult> {
-  const started = Date.now();
   const db = getServiceSupabase();
   const out: DispatchResult = {
     ok: true, sent: 0, failed: 0, suppressed: 0, expired: 0,
     requeued: 0, uncertain: 0, capRemaining: 0,
   };
+
+  // The lease is keyed on the tenant this drain serves. Resolving it up front
+  // also means a tenants lookup failure stops the tick BEFORE any send, rather
+  // than part-way through: fail closed, and let the next tick retry.
+  const sun = await db.from("tenants").select("id").eq("slug", "submissions").maybeSingle();
+  const leaseTenant = (sun.data as { id?: string } | null)?.id;
+  if (sun.error || !leaseTenant) {
+    console.error("[bulk-email.dispatch] tenant lookup failed — not draining", {
+      error: sun.error?.message,
+    });
+    return { ...out, ok: false, stoppedEarly: "tenant_lookup_failed" };
+  }
+
+  const lease = await acquireDrainLease(db, leaseTenant);
+  if (!lease) {
+    // NOT an error: another drain owns the queue and is working it. Returning
+    // ok:true keeps this out of the alerting path, which is reserved for
+    // conditions a human must act on.
+    return { ...out, stoppedEarly: "drain_already_running" };
+  }
+
+  try {
+    return await drain(db, out);
+  } finally {
+    await releaseDrainLease(db, leaseTenant, lease);
+  }
+}
+
+/** The tick itself. Only ever called while holding the drain lease. */
+async function drain(db: SupabaseClient, out: DispatchResult): Promise<DispatchResult> {
+  const started = Date.now();
 
   out.uncertain = await failStuckClaims(db);
 
