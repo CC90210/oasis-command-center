@@ -206,6 +206,7 @@ export function CronJobsManager({ agentKeys }: Props) {
       const result = await fetchJson<{
         ok?: boolean;
         error?: string;
+        message?: string;
         jobs?: CronJob[];
         migration?: string;
         how_to_apply?: string;
@@ -236,7 +237,13 @@ export function CronJobsManager({ agentKeys }: Props) {
           setJobs([]);
           return;
         }
-        setLoadError(j.error || `http_${result.status}`);
+        // Show the MESSAGE, not just the code. jsonRoute already sends the real
+        // exception text in `message`, but rendering only `error` reduced it to
+        // the bare token "handler_threw" — which is a category, not a cause, and
+        // leaves the operator exactly as stuck as the parser error it replaced.
+        setLoadError(
+          [j.error || `http_${result.status}`, j.message].filter(Boolean).join(": "),
+        );
         setMigrationGap(null);
         return;
       }
