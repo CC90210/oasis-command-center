@@ -55,6 +55,9 @@ const TESTS = [
   "tests/role-surfaces.test.ts",
   "tests/agent-api-scope.test.ts",
   "tests/fetch-json.test.ts",
+  // The Automations board crashed for weeks here: normalizeEmpireRow had no
+  // test and met a data layer that hands back objects where text was declared.
+  "tests/cron-empire-row.test.ts",
   "tests/fuzzy-match.test.ts",
   "tests/infer-result-text.test.ts",
   "tests/csv-combine.test.ts",
