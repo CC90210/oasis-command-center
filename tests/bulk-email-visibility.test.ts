@@ -16,6 +16,7 @@ import { readFileSync } from "node:fs";
 const read = (p: string) => readFileSync(new URL(`../${p}`, import.meta.url), "utf8");
 
 const bulkRoute = read("app/api/leads/bulk/route.ts");
+const dispatch = read("lib/bulk-email/dispatch.ts");
 const batchesRoute = read("app/api/leads/bulk/batches/route.ts");
 const dialog = read("components/leads/BulkEmailDialog.tsx");
 const history = read("components/leads/BulkSendHistory.tsx");
@@ -137,18 +138,64 @@ assert.match(
 // 7. The history endpoint is tenant-scoped and fails closed for a non-admin
 //    with no resolvable identity.
 // ---------------------------------------------------------------------------
-assert.match(batchesRoute, /\.eq\("tenant_id", sess\.tenantId\)/, "tenant-bound");
+assert.match(batchesRoute, /\.eq\("tenant_id", opts\.tenantId\)/, "tenant-bound");
 assert.match(
   batchesRoute,
-  /if \(!sess\.isAdmin && !sess\.userId\) \{\s*\n\s*return NextResponse\.json\(\{ ok: true, batches: \[\], rows: \[\] \}\);/,
+  /tenantId: sess\.tenantId,/,
+  "and the tenant comes from the SESSION, never from the request",
+);
+assert.match(
+  batchesRoute,
+  /if \(!sess\.isAdmin && !sess\.userId\) \{\s*\n\s*return NextResponse\.json\(\{ ok: true, batches: \[\], rows: \[\], truncated: false \}\);/,
   "no identity means no batches, never all of them",
 );
 assert.match(
   batchesRoute,
-  /if \(!sess\.isAdmin\) q = q\.eq\("metadata->>acted_by_user_id", sess\.userId\);/,
-  "a non-admin sees only their own sends",
+  /ownerId: sess\.isAdmin \? null : sess\.userId,/,
+  "a non-admin is pinned to their own sends",
+);
+assert.match(
+  batchesRoute,
+  /if \(opts\.ownerId\) q = q\.eq\("metadata->>acted_by_user_id", opts\.ownerId\);/,
+  "and that pin is applied to every page of the scan, not just the first",
 );
 assert.match(batchesRoute, /if \(!sess\.ok\) \{/, "authenticated");
+
+// 🚨 The drain rewrites a row's type from 'email_queued' to 'email_sent' on
+// success, so filtering the history on `type` silently drops every DELIVERED
+// recipient: successful batches vanish from history and the dialog polls a
+// batch that no longer matches until it times out. That is the exact
+// "it says nothing happened" failure this endpoint exists to end.
+// (Codex review P1, 2026-08-20; confirmed in production, where every one of
+// the 26 sent rows carries type='email_sent'.)
+assert.ok(
+  !/\.eq\("type",/.test(batchesRoute),
+  "history must NOT filter on type: the drain rewrites it to email_sent and the receipt would lose every successful send",
+);
+assert.match(
+  batchesRoute,
+  /\.eq\("agent_source", BULK_EMAIL_SOURCE\)/,
+  "bulk rows are identified by agent_source alone",
+);
+assert.match(
+  dispatch,
+  /type: "email_sent"/,
+  "this is the rewrite the filter above must tolerate; if the drain stops doing it, revisit the note in the batches route",
+);
+
+// A receipt that stops early is a receipt that lies. A batch may hold up to
+// MAX_EMAIL_IDS recipients, so the detail view reads to that depth, and the
+// list view says so out loud when its rolling window is exhausted.
+// (Codex review P2, 2026-08-20.)
+assert.match(batchesRoute, /const DETAIL_MAX = 10_000;/, "detail reads a full batch");
+assert.match(batchesRoute, /\.range\(from, from \+ take - 1\)/, "the read is paginated, not a single truncating limit");
+assert.match(
+  batchesRoute,
+  /return \{ rows, truncated: true \};/,
+  "hitting the ceiling is reported, never silently swallowed",
+);
+assert.match(batchesRoute, /max: wanted \? DETAIL_MAX : LIST_SCAN_MAX/, "detail and list use different depths on purpose");
+assert.match(history, /Showing the most recent sends only/, "and the operator is told when the window cut off");
 // Turso shim: object-containment (.contains) NEVER matches an object column.
 assert.ok(!/\.contains\(/.test(batchesRoute), "no .contains() — dead on the Turso adapter");
 assert.ok(!/\.contains\(/.test(bulkRoute), "no .contains() in the bulk route either");

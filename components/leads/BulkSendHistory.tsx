@@ -75,6 +75,7 @@ function when(iso: string | null): string {
 
 export function BulkSendHistory({ open, onClose }: { open: boolean; onClose: () => void }) {
   const [batches, setBatches] = useState<Batch[] | null>(null);
+  const [truncated, setTruncated] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [expanded, setExpanded] = useState<string | null>(null);
   const [rows, setRows] = useState<Record<string, Row[]>>({});
@@ -82,12 +83,18 @@ export function BulkSendHistory({ open, onClose }: { open: boolean; onClose: () 
   const load = useCallback(async () => {
     try {
       const r = await fetch("/api/leads/bulk/batches");
-      const body = (await r.json().catch(() => ({}))) as { ok?: boolean; batches?: Batch[]; error?: string };
+      const body = (await r.json().catch(() => ({}))) as {
+        ok?: boolean;
+        batches?: Batch[];
+        truncated?: boolean;
+        error?: string;
+      };
       if (!r.ok || !body.ok) {
         setError(body.error || "Couldn't load recent sends.");
         return;
       }
       setBatches(body.batches || []);
+      setTruncated(body.truncated === true);
       setError(null);
     } catch (e) {
       setError((e as Error).message || "network error");
@@ -160,6 +167,12 @@ export function BulkSendHistory({ open, onClose }: { open: boolean; onClose: () 
               <Loader2 className="h-3.5 w-3.5 animate-spin" />
               Loading…
             </div>
+          )}
+
+          {truncated && (
+            <p className="mb-2 rounded-md border border-amber-400/40 bg-amber-500/10 px-2.5 py-1.5 text-[11px] text-amber-100">
+              Showing the most recent sends only. Older ones are past this view.
+            </p>
           )}
 
           {batches?.length === 0 && (

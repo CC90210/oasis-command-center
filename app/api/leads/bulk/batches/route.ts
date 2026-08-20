@@ -17,10 +17,20 @@
  * Scope: tenant-bound always. An admin sees every batch on the tenant; anyone
  * else sees only batches they themselves sent (fail closed on an unresolved
  * identity — no identity means no batches, never all of them).
+ *
+ * 🚨 Rows are identified by agent_source ALONE, never by `type`. The drain
+ * rewrites a row's type from 'email_queued' to 'email_sent' on success
+ * (lib/bulk-email/dispatch.ts), so a type filter silently drops every
+ * DELIVERED recipient: history would omit successful batches entirely and the
+ * dialog would poll a vanishing batch until its timeout. That is the exact
+ * "it says nothing happened" failure this endpoint exists to end, so it is
+ * pinned by tests/bulk-email-visibility.test.ts. (Codex review P1, 2026-08-20;
+ * confirmed against production, where all 26 sent rows carry 'email_sent'.)
  */
 
 import { NextRequest, NextResponse } from "next/server";
 import { getServiceSupabase } from "@/lib/supabase-server";
+import type { SupabaseClient } from "@supabase/supabase-js";
 import { resolveSessionContext } from "@/lib/api-auth";
 import { BULK_EMAIL_SOURCE } from "@/lib/bulk-email/dispatch";
 
@@ -29,8 +39,19 @@ export const dynamic = "force-dynamic";
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-/** How many recent queue rows to aggregate for the history list. */
-const SCAN_LIMIT = 600;
+/** Rows per round-trip while paginating. */
+const PAGE = 500;
+/**
+ * A batch may hold up to MAX_EMAIL_IDS (10k) recipients, so a receipt reads to
+ * that depth: a per-recipient list that stops early is a receipt that lies.
+ */
+const DETAIL_MAX = 10_000;
+/**
+ * The list view aggregates a rolling window rather than the whole table. When
+ * the window is exhausted the response says so (`truncated`) instead of
+ * quietly reporting a short total. No silent caps.
+ */
+const LIST_SCAN_MAX = 3_000;
 /** How many batches to return in the list view. */
 const MAX_BATCHES = 25;
 
@@ -73,6 +94,40 @@ function emptyCounts(): Record<Status, number> {
   return { queued: 0, sending: 0, sent: 0, failed: 0, suppressed: 0, expired: 0 };
 }
 
+/**
+ * Page through this tenant's bulk rows, newest first, up to `max`.
+ * Returns `truncated` when the ceiling cut the scan short, so the caller can
+ * say so out loud rather than present a partial count as a complete one.
+ */
+async function fetchBulkRows(
+  db: SupabaseClient,
+  opts: { tenantId: string; ownerId: string | null; batchId: string | null; max: number },
+): Promise<{ rows: Row[]; truncated: boolean; error?: string }> {
+  const rows: Row[] = [];
+  let from = 0;
+  for (;;) {
+    const take = Math.min(PAGE, opts.max - rows.length);
+    if (take <= 0) return { rows, truncated: true };
+    let q = db
+      .from("lead_interactions")
+      .select("id, to_email, subject, created_at, sent_at, metadata")
+      .eq("tenant_id", opts.tenantId)
+      // agent_source ONLY — see the header note on the type column.
+      .eq("agent_source", BULK_EMAIL_SOURCE)
+      .order("created_at", { ascending: false })
+      .range(from, from + take - 1);
+    if (opts.batchId) q = q.eq("metadata->>batch_id", opts.batchId);
+    if (opts.ownerId) q = q.eq("metadata->>acted_by_user_id", opts.ownerId);
+
+    const res = await q;
+    if (res.error) return { rows, truncated: false, error: res.error.message };
+    const page = (res.data ?? []) as Row[];
+    rows.push(...page);
+    if (page.length < take) return { rows, truncated: false }; // exhausted
+    from += take;
+  }
+}
+
 export async function GET(req: NextRequest) {
   const sess = await resolveSessionContext();
   if (!sess.ok) {
@@ -87,31 +142,21 @@ export async function GET(req: NextRequest) {
   // Non-admins are restricted to their OWN sends. An unresolved identity gets
   // nothing rather than the tenant's whole outbound history.
   if (!sess.isAdmin && !sess.userId) {
-    return NextResponse.json({ ok: true, batches: [], rows: [] });
+    return NextResponse.json({ ok: true, batches: [], rows: [], truncated: false });
   }
 
-  const db = getServiceSupabase();
-  let q = db
-    .from("lead_interactions")
-    .select("id, to_email, subject, created_at, sent_at, metadata")
-    .eq("tenant_id", sess.tenantId)
-    .eq("agent_source", BULK_EMAIL_SOURCE)
-    .eq("type", "email_queued")
-    .order("created_at", { ascending: false })
-    .limit(SCAN_LIMIT);
-
-  if (wanted) q = q.eq("metadata->>batch_id", wanted);
-  if (!sess.isAdmin) q = q.eq("metadata->>acted_by_user_id", sess.userId);
-
-  const res = await q;
-  if (res.error) {
-    console.error("[leads.bulk.batches] fetch failed", { error: res.error.message });
+  const { rows, truncated, error } = await fetchBulkRows(getServiceSupabase(), {
+    tenantId: sess.tenantId,
+    ownerId: sess.isAdmin ? null : sess.userId,
+    batchId: wanted || null,
+    max: wanted ? DETAIL_MAX : LIST_SCAN_MAX,
+  });
+  if (error) {
+    console.error("[leads.bulk.batches] fetch failed", { error });
     return NextResponse.json({ ok: false, error: "fetch_failed" }, { status: 500 });
   }
 
-  const rows = (res.data ?? []) as Row[];
   const byBatch = new Map<string, BulkBatch>();
-
   for (const r of rows) {
     const meta = r.metadata || {};
     // Rows predating batch tagging (2026-08-20) still deserve a receipt; group
@@ -150,7 +195,7 @@ export async function GET(req: NextRequest) {
     .slice(0, MAX_BATCHES);
 
   if (!wanted) {
-    return NextResponse.json({ ok: true, batches });
+    return NextResponse.json({ ok: true, batches, truncated });
   }
 
   // Detail view: the per-recipient rows behind one batch, so an operator can
@@ -159,6 +204,7 @@ export async function GET(req: NextRequest) {
     ok: true,
     batches,
     batch: batches[0] ?? null,
+    truncated,
     rows: rows.map((r) => ({
       to_email: r.to_email,
       status: statusOf(r.metadata),
