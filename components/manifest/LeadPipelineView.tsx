@@ -15,6 +15,7 @@ import {
   CheckSquare,
   ChevronDown,
   ChevronRight,
+  History,
   Loader2,
   Mail,
   Plus,
@@ -32,6 +33,8 @@ import {
 import { PageSearchBar } from "@/components/manifest/PageSearchBar";
 import { AutofillDropzone } from "@/components/leads/AutofillDropzone";
 import { SendToDialerControl } from "@/components/leads/SendToDialerControl";
+import { BulkEmailDialog } from "@/components/leads/BulkEmailDialog";
+import { BulkSendHistory } from "@/components/leads/BulkSendHistory";
 import { pipelineRowHref } from "@/lib/pipeline-display";
 import { CopyButton } from "@/components/CopyButton";
 import { DealHoverCard } from "@/components/manifest/DealHoverCard";
@@ -197,6 +200,8 @@ export function LeadPipelineView({
   const router = useRouter();
   const [collapsedStages, setCollapsedStages] = useState<Record<string, boolean>>({});
   const [selectMode, setSelectMode] = useState(false);
+  const [emailDialogOpen, setEmailDialogOpen] = useState(false);
+  const [sendHistoryOpen, setSendHistoryOpen] = useState(false);
   // Quick-add modal (manual "add lead to Sent Application" — reps logging apps
   // they sent via TextTorrent/email; 2026-07-20).
   const [addLeadOpen, setAddLeadOpen] = useState(false);
@@ -694,6 +699,18 @@ export function LeadPipelineView({
         );
       })}
 
+      <BulkEmailDialog
+        open={emailDialogOpen}
+        onClose={() => {
+          setEmailDialogOpen(false);
+          setSelected(new Set());
+        }}
+        selectedIds={Array.from(selected)}
+        entityName={entityName}
+        onSent={() => router.refresh()}
+      />
+      <BulkSendHistory open={sendHistoryOpen} onClose={() => setSendHistoryOpen(false)} />
+
       {selectMode && selected.size > 0 && (
         <BulkActionBar
           count={selected.size}
@@ -719,7 +736,8 @@ export function LeadPipelineView({
                 }
               : undefined
           }
-          onEmail={(templateId) => runBulk({ op: "email", template_id: templateId, entity: entityName }, "queued")}
+          onOpenEmail={() => setEmailDialogOpen(true)}
+          onOpenHistory={() => setSendHistoryOpen(true)}
           onCcBlast={(templateId) => runBulk({ op: "cc_blast", template_id: templateId }, "sent")}
           onClear={() => setSelected(new Set())}
         />
@@ -746,7 +764,8 @@ function BulkActionBar({
   onAssign,
   onStage,
   onDecline,
-  onEmail,
+  onOpenEmail,
+  onOpenHistory,
   onCcBlast,
   onClear,
 }: {
@@ -762,13 +781,13 @@ function BulkActionBar({
   onAssign: (assignedTo: string | null) => void;
   onStage: (stageKey: string) => void;
   onDecline?: () => void;
-  onEmail: (templateId: string) => void;
+  onOpenEmail: () => void;
+  onOpenHistory: () => void;
   onCcBlast: (templateId: string) => void;
   onClear: () => void;
 }) {
   // Two-step confirm before a template blast — picking from the dropdown stages
   // the send; the operator must then confirm the exact count.
-  const [pendingEmail, setPendingEmail] = useState<{ id: string; label: string } | null>(null);
   const [pendingCc, setPendingCc] = useState<{ id: string; label: string } | null>(null);
   return (
     <div className="sticky bottom-3 z-20 mx-auto flex w-fit max-w-full flex-wrap items-center gap-3 rounded-xl border border-accent/40 bg-bg-elev/95 px-4 py-2.5 shadow-lg backdrop-blur">
@@ -836,68 +855,33 @@ function BulkActionBar({
         </select>
       </label>
 
-      {/* Bulk email — queue a personalized SunBiz template to every selected
-          record. send_gateway drains the queue with CASL/cooldown, so this is
-          the compliant path for a batch of commercial emails. Records with no
-          email on file are skipped server-side. */}
-      <label className="flex items-center gap-1.5 text-[11px] text-fg-muted">
+      {/* Bulk email. Opens the full composer (preflight + template or
+          write-your-own + live send status) rather than firing from a bare
+          dropdown. The old dropdown queued correctly but showed the operator
+          nothing afterwards, which is what made a working pipeline read as a
+          dead button (Adon, 2026-08-20). */}
+      <button
+        type="button"
+        onClick={onOpenEmail}
+        disabled={busy}
+        className="inline-flex items-center gap-1.5 rounded-md border border-bg-border bg-bg-deep px-2.5 py-1 text-[12px] text-fg hover:border-accent/50 disabled:opacity-60"
+        title="Write or pick an email for every selected record. You'll see how many can actually be emailed before anything sends."
+      >
         <Mail className="h-3.5 w-3.5 text-fg-dim" />
-        <select
-          defaultValue=""
-          disabled={busy}
-          onChange={(e) => {
-            const v = e.target.value;
-            e.currentTarget.selectedIndex = 0;
-            if (v) {
-              const t = SUNBIZ_BULK_SAFE_TEMPLATES.find((x) => x.id === v);
-              setPendingEmail({ id: v, label: t?.label || v });
-            }
-          }}
-          className="rounded-md border border-bg-border bg-bg-deep px-2 py-1 text-[12px] text-fg focus:border-accent focus:outline-none disabled:opacity-60"
-          title="Queue this email template (personalized per record) to every selected lead. Only outreach-safe templates appear here — stage-specific ones (offers, funded, renewals) are 1:1-only to avoid false claims in a batch."
-        >
-          <option value="">Email…</option>
-          {SUNBIZ_TEMPLATE_CATEGORIES.map((cat) => {
-            const items = SUNBIZ_BULK_SAFE_TEMPLATES.filter(
-              (t) => t.category === cat.category,
-            );
-            if (items.length === 0) return null;
-            return (
-              <optgroup key={cat.category} label={cat.label}>
-                {items.map((t) => (
-                  <option key={t.id} value={t.id}>
-                    {t.label}
-                  </option>
-                ))}
-              </optgroup>
-            );
-          })}
-        </select>
-      </label>
+        Email…
+      </button>
 
-      {pendingEmail && (
-        <div className="flex items-center gap-2 rounded-md border border-accent/40 bg-accent/10 px-2.5 py-1.5 text-[11px] text-fg">
-          <span>
-            Send <span className="font-semibold">&ldquo;{pendingEmail.label}&rdquo;</span> to {count}{" "}
-            {entityName === "application" ? "app" : "lead"}
-            {count === 1 ? "" : "s"}?
-          </span>
-          <button
-            type="button"
-            disabled={busy}
-            onClick={() => {
-              onEmail(pendingEmail.id);
-              setPendingEmail(null);
-            }}
-            className="rounded-md border border-accent/50 bg-accent/20 px-2 py-0.5 text-[11px] font-semibold text-fg hover:bg-accent/30 disabled:opacity-60"
-          >
-            {busy ? "Sending…" : "Confirm send"}
-          </button>
-          <button type="button" onClick={() => setPendingEmail(null)} className="text-[11px] text-fg-dim hover:text-fg">
-            Cancel
-          </button>
-        </div>
-      )}
+      {/* The durable receipt. Without somewhere to confirm a past send, an
+          operator has no way to answer "did that go out?" */}
+      <button
+        type="button"
+        onClick={onOpenHistory}
+        className="inline-flex items-center gap-1.5 rounded-md border border-bg-border bg-bg-deep px-2.5 py-1 text-[12px] text-fg-muted hover:border-accent/50 hover:text-fg"
+        title="See every bulk email you've sent, and whether each one landed."
+      >
+        <History className="h-3.5 w-3.5 text-fg-dim" />
+        Recent sends
+      </button>
 
       {/* Constant Contact bulk blast — leads only, admin-only (enforced server-side). */}
       {entityName === "lead" && (

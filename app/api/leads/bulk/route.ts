@@ -20,7 +20,8 @@
  * Response: { ok, op, updated, skipped, failed }.
  */
 
-import { NextRequest, NextResponse } from "next/server";
+import { NextRequest, NextResponse, after } from "next/server";
+import { randomUUID } from "node:crypto";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { resolveSessionContext } from "@/lib/api-auth";
 import { updateRecord, RecordsError } from "@/lib/manifest/data";
@@ -31,13 +32,19 @@ import { LEAD_PIPELINE_STAGES, OPPORTUNITY_PIPELINE_STAGES } from "@/lib/sunbiz-
 import { SUNBIZ_EMAIL_TEMPLATES, renderSunbizTemplate } from "@/lib/sunbiz-templates-library";
 import { runBlast, resolveLeadsAudience, renderTemplate, getDefaultSender } from "@/lib/integrations/constant-contact/blast";
 import { assignLifecycleOwner } from "@/lib/lifecycle-assignment";
-import { BULK_EMAIL_SOURCE } from "@/lib/bulk-email/dispatch";
+import { BULK_EMAIL_SOURCE, runDispatchBulkEmail } from "@/lib/bulk-email/dispatch";
+import { classifyBulkRecipients, summarizeClassification } from "@/lib/bulk-email/recipients";
+import { validateCustomMessage, renderCustomMessage } from "@/lib/bulk-email/compose";
+import { sanitizeBlastMessage } from "@/lib/integrations/blast-safety";
+import { stripDashes, matchPositioningPhrases } from "@/lib/integrations/blast-safety-core";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+/** The op="email" path kicks the queue drain via after(); give that work
+ *  room to finish inside the invocation (the drain self-caps at 45s). */
+export const maxDuration = 60;
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const MAX_IDS = 200;
 /**
  * The email op only QUEUES rows (the 5-min dispatch-bulk-email cron does the
@@ -68,6 +75,7 @@ export async function POST(req: NextRequest) {
     stage?: unknown;
     entity?: unknown;
     template_id?: unknown;
+    custom?: unknown;
   };
   try {
     body = (await req.json()) as typeof body;
@@ -76,7 +84,12 @@ export async function POST(req: NextRequest) {
   }
 
   const op =
-    body.op === "assign" || body.op === "stage" || body.op === "email" || body.op === "cc_blast" || body.op === "decline"
+    body.op === "assign" ||
+      body.op === "stage" ||
+      body.op === "email" ||
+      body.op === "email_preflight" ||
+      body.op === "cc_blast" ||
+      body.op === "decline"
       ? body.op
       : null;
   if (!op) {
@@ -89,7 +102,7 @@ export async function POST(req: NextRequest) {
   if (ids.length === 0) {
     return NextResponse.json({ ok: false, error: "no_valid_ids" }, { status: 400 });
   }
-  const idCap = op === "email" ? MAX_EMAIL_IDS : MAX_IDS;
+  const idCap = op === "email" || op === "email_preflight" ? MAX_EMAIL_IDS : MAX_IDS;
   if (ids.length > idCap) {
     return NextResponse.json({ ok: false, error: "too_many_ids", max: idCap }, { status: 400 });
   }
@@ -205,39 +218,29 @@ export async function POST(req: NextRequest) {
     return NextResponse.json(result, { status: result.ok ? 200 : result.status || 400 });
   }
 
-  if (op === "email") {
-    // Bulk email: queue a personalized template to each selected record. We QUEUE
-    // (status='queued') rather than auto-fire — the dispatch-bulk-email cron
-    // (lib/bulk-email/dispatch.ts) drains the queue through the encrypted
-    // submissions-mailbox App Password with suppression/throttle/daily-cap.
-    // The v2 agent_source keeps the legacy VPS send_gateway OFF these rows:
-    // its env-keyed GMAIL_APP_PASSWORD went stale after the 2026-08 rotation
-    // and terminally failed every row it claimed. No per-row event nudge —
-    // the cron IS the drain trigger.
-    const templateId = str(body.template_id);
-    const tpl = SUNBIZ_EMAIL_TEMPLATES.find((t) => t.id === templateId);
-    if (!tpl) {
-      return NextResponse.json({ ok: false, error: "invalid_template" }, { status: 400 });
-    }
-    // Server-side bulk-safety guard (defense in depth behind the UI filter).
-    // Stage/history-asserting templates (offers, funded, renewals, stips, etc.)
-    // are 1:1-only — blasting them to a batch would send false claims to leads
-    // they aren't true for. The bulk dropdown already hides them; reject here in
-    // case a stale or hand-crafted client POSTs one anyway.
-    if (tpl.bulkSafe === false) {
-      return NextResponse.json(
-        { ok: false, error: "template_not_bulk_safe" },
-        { status: 400 },
-      );
-    }
+  if (op === "email" || op === "email_preflight") {
+    // Bulk email, either a library template or an operator-authored message.
+    //
+    // We QUEUE (status='queued') rather than send inline — the drain
+    // (lib/bulk-email/dispatch.ts) owns suppression, throttle and the daily
+    // cap. Since 2026-08-20 the queue write also KICKS the drain via after(),
+    // so a send starts in seconds instead of waiting up to 5 minutes for the
+    // next cron tick. The cron remains the safety net, not the trigger: an
+    // operator who clicks send and sees nothing happen for six minutes
+    // reasonably concludes the button is broken, which is exactly how this
+    // feature was reported as "not sending at all" while every message was in
+    // fact being delivered (Adon, 2026-08-20).
+    //
+    // The v2 agent_source keeps the legacy VPS send_gateway OFF these rows.
     const emailEntity = body.entity === "application" ? "application" : "lead";
     const scoping = leadScopingEnabled();
     const viewer = { isAdmin: sess.isAdmin, userId: sess.userId };
+    const canAct = (data: Record<string, unknown>) => canViewLead(viewer, data, scoping, "isolate");
 
-    // Batched fetch → render → batched queue-insert. A blast is thousands of
-    // rows; one round-trip per lead would blow the request budget long before
-    // the queue was full.
-    const queueRows: Array<Record<string, unknown>> = [];
+    // Batched fetch. A blast is thousands of rows; one round-trip per lead
+    // would blow the request budget long before the queue was full.
+    const byId = new Map<string, { id: string; data?: Record<string, unknown> | null }>();
+    const unreadable = new Set<string>();
     for (let i = 0; i < ids.length; i += FETCH_CHUNK) {
       const chunk = ids.slice(i, i + FETCH_CHUNK);
       const fetched = await db
@@ -247,70 +250,195 @@ export async function POST(req: NextRequest) {
         .eq("entity_type", emailEntity)
         .in("id", chunk);
       if (fetched.error) {
-        out.failed += chunk.length;
+        // FAIL CLOSED and stay HONEST: an unreadable chunk is reported as
+        // failed, never folded into "not found". Telling an operator a lead
+        // vanished when the database hiccuped sends them to clean data that
+        // was never dirty.
+        for (const id of chunk) unreadable.add(id);
         continue;
       }
-      const byId = new Map(
-        ((fetched.data ?? []) as Array<{ id: string; data?: Record<string, unknown> }>).map(
-          (r) => [r.id, r],
-        ),
-      );
-      for (const id of chunk) {
-        const rec = byId.get(id);
-        if (!rec) {
-          out.skipped += 1;
-          continue;
-        }
-        const data = rec.data || {};
-        // Flag-aware owner-or-admin gate, identical to the stage op (no enumeration
-        // oracle — no-access folds into `skipped`).
-        if (!canViewLead(viewer, data, scoping, "isolate")) {
-          out.skipped += 1;
-          continue;
-        }
-        const toEmail = str(data.email) || str(data.contact_email);
-        if (!EMAIL_RE.test(toEmail)) {
-          out.skipped += 1; // no usable email on this record — skip, don't fail
-          continue;
-        }
-        // Per-record personalization (same fields the lead-drawer composer uses).
-        const firstName = str(data.contact_name) || str(data.owner_name) || str(data.name);
-        const businessName = str(data.business_name) || str(data.company) || str(data.name);
-        const { subject, body: rendered } = renderSunbizTemplate(tpl, { firstName, businessName });
-        queueRows.push({
-          tenant_id: tenantId,
-          lead_id: id,
-          type: "email_queued",
-          channel: "email",
-          direction: "outbound",
-          agent_source: BULK_EMAIL_SOURCE,
-          actor_user_id: sess.userId,
-          subject: subject.slice(0, 200),
-          content: rendered.slice(0, 32000),
-          content_preview: rendered.slice(0, 1024),
-          to_email: toEmail,
-          metadata: {
-            requested_by_email: sess.email,
-            acted_by_user_id: sess.userId,
-            status: "queued",
-            template_id: tpl.id,
-            entity_type: emailEntity,
-            bulk: true,
-          },
-        });
+      for (const r of (fetched.data ?? []) as Array<{ id: string; data?: Record<string, unknown> }>) {
+        byId.set(r.id, r);
       }
     }
+
+    const readableIds = ids.filter((id) => !unreadable.has(id));
+    const cls = classifyBulkRecipients(readableIds, byId, canAct);
+
+    // Preflight answers "what would happen", writes nothing, sends nothing.
+    // It runs the SAME classifier as the send below, so the count an operator
+    // approves is by construction the count that goes out.
+    if (op === "email_preflight") {
+      return NextResponse.json({
+        ok: true,
+        op,
+        counts: { ...cls.counts, unreadable: unreadable.size },
+        summary: summarizeClassification(cls, emailEntity),
+        skipped: cls.skipped,
+        sample: cls.eligible.slice(0, 3).map((r) => ({
+          id: r.id,
+          to_email: r.toEmail,
+          first_name: r.firstName,
+          business_name: r.businessName,
+        })),
+      });
+    }
+
+    // ---- resolve the message: library template OR operator-authored --------
+    const custom = body.custom;
+    const isCustom = !!custom && typeof custom === "object";
+    let renderFor: (r: { firstName: string; businessName: string }) => { subject: string; body: string };
+    let templateId: string | null = null;
+
+    if (isCustom) {
+      // Writing free-form merchant-facing copy is a CRM-write action. The
+      // template path is constrained to pre-approved copy; this one is not,
+      // so it carries the role gate the template path doesn't need.
+      if (!canWriteCrm(sess.teamRole)) {
+        return NextResponse.json(
+          { ok: false, error: "forbidden_role", message: "Read-only members can't send email." },
+          { status: 403 },
+        );
+      }
+      const valid = validateCustomMessage(custom as { subject?: unknown; body?: unknown });
+      if (!valid.ok) {
+        return NextResponse.json(
+          { ok: false, error: "invalid_message", problem: valid.problem, message: valid.message, tokens: valid.tokens },
+          { status: 400 },
+        );
+      }
+      // LOAD-BEARING: SunBiz positions AS the direct funder. Operator-authored
+      // copy is the first free-form merchant-facing text on the bulk path, so
+      // the positioning + lender-name guard runs BEFORE anything is queued and
+      // fails CLOSED (an unverifiable message is refused, never sent blind).
+      const guard = await sanitizeBlastMessage(
+        tenantId,
+        `${valid.value.subject}\n\n${valid.value.body}`,
+        { checkPositioning: true },
+      );
+      if (!guard.ok) {
+        return NextResponse.json(
+          {
+            ok: false,
+            error: "blocked_copy",
+            reason: guard.reason,
+            message: guard.message,
+            lender_hits: guard.lenderHits,
+            positioning_hits: guard.positioningHits,
+          },
+          { status: 400 },
+        );
+      }
+      const subject = stripDashes(valid.value.subject);
+      const bodyText = stripDashes(valid.value.body);
+      renderFor = (r) => renderCustomMessage({ subject, body: bodyText }, { firstName: r.firstName, businessName: r.businessName });
+    } else {
+      templateId = str(body.template_id);
+      const tpl = SUNBIZ_EMAIL_TEMPLATES.find((t) => t.id === templateId);
+      if (!tpl) {
+        return NextResponse.json({ ok: false, error: "invalid_template" }, { status: 400 });
+      }
+      // Server-side bulk-safety guard (defense in depth behind the UI filter).
+      // Stage/history-asserting templates (offers, funded, renewals, stips) are
+      // 1:1-only — blasting them would send false claims to leads they aren't
+      // true for. The dropdown already hides them; reject here in case a stale
+      // or hand-crafted client POSTs one anyway.
+      if (tpl.bulkSafe === false) {
+        return NextResponse.json({ ok: false, error: "template_not_bulk_safe" }, { status: 400 });
+      }
+      renderFor = (r) => {
+        const out = renderSunbizTemplate(tpl, { firstName: r.firstName, businessName: r.businessName });
+        return { subject: out.subject, body: out.body };
+      };
+    }
+
+    // One id per batch, so a send has a receipt an operator can open later and
+    // a status the UI can poll while it drains.
+    const batchId = randomUUID();
+    const queueRows: Array<Record<string, unknown>> = [];
+    let blockedAfterMerge = 0;
+
+    for (const r of cls.eligible) {
+      const { subject, body: rendered } = renderFor(r);
+      // Merge values are merchant-supplied data. A business name that happens
+      // to complete a broker-positioning phrase would slip past the pre-render
+      // guard, so the pure (no-DB, per-row cheap) matcher runs on the final
+      // text. A hit drops THAT recipient rather than the batch.
+      if (matchPositioningPhrases(`${subject}\n\n${rendered}`).length > 0) {
+        blockedAfterMerge += 1;
+        continue;
+      }
+      queueRows.push({
+        tenant_id: tenantId,
+        lead_id: r.id,
+        type: "email_queued",
+        channel: "email",
+        direction: "outbound",
+        agent_source: BULK_EMAIL_SOURCE,
+        actor_user_id: sess.userId,
+        subject: subject.slice(0, 200),
+        content: rendered.slice(0, 32000),
+        content_preview: rendered.slice(0, 1024),
+        to_email: r.toEmail,
+        metadata: {
+          requested_by_email: sess.email,
+          acted_by_user_id: sess.userId,
+          status: "queued",
+          template_id: templateId,
+          custom_message: isCustom,
+          batch_id: batchId,
+          entity_type: emailEntity,
+          bulk: true,
+        },
+      });
+    }
+
+    let queued = 0;
+    let insertFailed = 0;
     for (let i = 0; i < queueRows.length; i += INSERT_CHUNK) {
       const chunk = queueRows.slice(i, i + INSERT_CHUNK);
       try {
         const ins = await db.from("lead_interactions").insert(chunk);
-        if (ins.error) out.failed += chunk.length;
-        else out.updated += chunk.length;
+        if (ins.error) insertFailed += chunk.length;
+        else queued += chunk.length;
       } catch {
-        out.failed += chunk.length;
+        insertFailed += chunk.length;
       }
     }
-    return NextResponse.json({ ok: true, op, ...out });
+
+    // Start draining NOW, after the response is flushed. Best-effort by
+    // design: the row is already durable and the 5-minute cron re-drains
+    // anything this misses, so a failure here delays a send, never loses one.
+    if (queued > 0) {
+      after(async () => {
+        try {
+          await runDispatchBulkEmail();
+        } catch (err) {
+          console.error("[leads.bulk] post-queue drain kick failed", {
+            batch_id: batchId,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      });
+    }
+
+    out.updated = queued;
+    out.skipped = cls.skipped.length + blockedAfterMerge;
+    out.failed = insertFailed + unreadable.size;
+    return NextResponse.json({
+      ok: true,
+      op,
+      batch_id: batchId,
+      ...out,
+      counts: {
+        ...cls.counts,
+        queued,
+        blocked_copy: blockedAfterMerge,
+        unreadable: unreadable.size,
+        insert_failed: insertFailed,
+      },
+      summary: summarizeClassification(cls, emailEntity),
+    });
   }
 
   if (op === "decline") {
