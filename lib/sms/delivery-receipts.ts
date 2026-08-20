@@ -37,6 +37,13 @@ export type OpenReceiptArgs = {
   toPhone: string;
   body: string;
   sentAt?: Date;
+  /**
+   * 'drip' (default) or 'canary'. A canary is a line-commissioning test send;
+   * it deliberately shares this table so that clearing a line PROVES the
+   * receipt pipeline works, rather than proving it works in a private copy of
+   * the pipeline that the drips do not use.
+   */
+  purpose?: "drip" | "canary";
 };
 
 /**
@@ -66,6 +73,7 @@ export async function openReceipt(db: Db, args: OpenReceiptArgs): Promise<string
           body_hash: hashBody(args.body),
           sent_at: sentAt.toISOString(),
           carrier_status: "unknown",
+          purpose: args.purpose ?? "drip",
         },
         { onConflict: "tenant_id,chat_id,body_hash,sent_at" },
       )
