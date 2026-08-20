@@ -297,7 +297,9 @@ export async function getRecord(input: { tenant_id: string; entity: string; id: 
 const STAGES_NEEDING_APPLY_URL = new Set([
   "intent_inquiry_submitted",
   "hot_lead",
-  "new_contact",
+  "researched", // OASIS 14-stage first stage (2026-08: replaced new_contact)
+  "new_contact", // legacy OASIS key — rows predating the 14-stage migration
+
   "uw_sheet", // Live Subs — the first-touch drip texts the application link
   "missing_info",
   "follow_up",

@@ -38,8 +38,9 @@ export const AI_AUDIT_NAME = "AI Automation Audit";
 export const AI_AUDIT_DESCRIPTION =
   "OASIS AI Solutions B2B qualification funnel — bottleneck, scale, budget, timeline.";
 
-/** Leads land at new_contact, same as the personal-brand funnel. */
-export const AI_AUDIT_ON_COMPLETE_STAGE = "new_contact";
+/** Leads land at researched (the 14-stage lifecycle's first stage),
+ *  same as the personal-brand funnel. */
+export const AI_AUDIT_ON_COMPLETE_STAGE = "researched";
 
 export const AI_AUDIT_BRANDING: FormBranding = {
   // Deliberately NOT the default blue/purple gradient. Gold on near-black is

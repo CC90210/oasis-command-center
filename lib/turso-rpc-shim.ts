@@ -169,6 +169,224 @@ export async function approve_sunbiz_draft(client: Client, args: Record<string, 
   if (batchRs[0].rowsAffected === 1 && batchRs[1].rowsAffected === 1) return send_id;
   return null; // CAS lost: concurrent approval / state change — nothing usable was written
 }
+/**
+ * Port of public.close_website_deal — comp v2 shape
+ * (database/147_website_sales_comp_v2.sql; tables in
+ * database/turso/147_website_sales_engine.turso.sql).
+ *
+ * Rate keys on WHO CLOSED, not deal size: p_closed_by_rep=true means the
+ * attributed rep ran the close themselves (30%); false means the founder
+ * closed a rep-opened deal (20%). $2,000 collected-setup floor. Commission is
+ * ALWAYS inserted 'accrued' — rep-closed deals never auto-approve; the
+ * founder-gated accrued→approved→paid flow is untouched.
+ *
+ * The PG original's auth.role()='service_role' guard has no Turso equivalent:
+ * this shim is only reachable through getServiceSupabase()'s rpc proxy, which
+ * is the service surface by construction (same treatment as every other port).
+ *
+ * Atomicity note: money writes (deal + commission + onboarding) are one libsql
+ * batch = one transaction. The stage patch runs AFTER, via the ported
+ * patch_tenant_record_data. If the patch fails, re-issuing the identical close
+ * is safe: the idempotent re-close path no-ops the money writes and re-applies
+ * the patch.
+ */
+export async function close_website_deal(client: Client, args: Record<string, unknown>): Promise<unknown> {
+  const p_tenant_id = typeof args.p_tenant_id === "string" ? args.p_tenant_id : null;
+  const p_lead_id = typeof args.p_lead_id === "string" ? args.p_lead_id : null;
+  const p_rep_user_id = typeof args.p_rep_user_id === "string" ? args.p_rep_user_id : null;
+  const p_founder_user_id = typeof args.p_founder_user_id === "string" ? args.p_founder_user_id : null;
+  const p_package_id = typeof args.p_package_id === "string" ? args.p_package_id : null;
+  const p_currency = typeof args.p_currency === "string" ? args.p_currency : null;
+  const p_payment_reference =
+    typeof args.p_payment_reference === "string" && args.p_payment_reference.trim().length > 0
+      ? args.p_payment_reference
+      : null;
+  // p_closed_by_rep boolean DEFAULT false — an omitted arg is the founder path,
+  // exactly like the Postgres default. Anything not literally true is false.
+  const p_closed_by_rep = args.p_closed_by_rep === true;
+
+  // text[] arrives as a JS array from the route; a PostgREST-style JSON string
+  // is tolerated. coalesce(p_automation_ids, '{}') -> [].
+  let automationIds: string[] = [];
+  if (Array.isArray(args.p_automation_ids)) {
+    automationIds = args.p_automation_ids.map(String);
+  } else if (typeof args.p_automation_ids === "string") {
+    try {
+      const parsed = JSON.parse(args.p_automation_ids);
+      if (!Array.isArray(parsed)) throw new Error("not an array");
+      automationIds = parsed.map(String);
+    } catch {
+      throw new Error(`malformed array literal: "${args.p_automation_ids}"`);
+    }
+  }
+
+  const p_setup_amount = Number(args.p_setup_amount);
+  const p_monthly_amount = Number(args.p_monthly_amount);
+  if (!Number.isFinite(p_setup_amount) || !Number.isFinite(p_monthly_amount)) {
+    throw new Error("invalid input syntax for type numeric");
+  }
+
+  // NULL required params can never satisfy the PG guards — fail closed, loudly.
+  if (!p_tenant_id || !p_lead_id || !p_rep_user_id || !p_founder_user_id || !p_package_id || !p_currency || !p_payment_reference) {
+    throw new Error("close_website_deal: missing required argument");
+  }
+
+  const nowIso = new Date().toISOString();
+
+  // select data into v_lead_data from tenant_records where ... entity_type='lead'
+  // A row whose data is NULL raises lead_not_found in the PG source too
+  // (v_lead_data is null covers both no-row and null-data).
+  const leadRs = await client.execute({
+    sql: `SELECT data FROM tenant_records WHERE id = ? AND tenant_id = ? AND entity_type = 'lead'`,
+    args: [p_lead_id, p_tenant_id],
+  });
+  const leadDataText = leadRs.rows.length > 0 ? ((leadRs.rows[0]["data"] ?? null) as string | null) : null;
+  if (leadDataText === null) throw new Error("lead_not_found_or_wrong_tenant");
+  let leadData: Record<string, unknown> = {};
+  try {
+    const parsed = JSON.parse(leadDataText);
+    if (parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)) {
+      leadData = parsed as Record<string, unknown>;
+    }
+  } catch {
+    throw new Error(`close_website_deal: tenant_records.data is not valid JSON for id=${p_lead_id}`);
+  }
+
+  // Closer guard, adapted per 147: the owner/admin check applies only on the
+  // founder path. On the rep path the closer IS the rep, and authorization
+  // comes from the rep guards below (team_role='agent' + frozen attribution).
+  if (!p_closed_by_rep) {
+    const founderRs = await client.execute({
+      sql: `SELECT 1 FROM user_profiles
+            WHERE tenant_id = ? AND auth_user_id = ?
+              AND (is_owner = 1 OR team_role IN ('owner','admin'))
+            LIMIT 1`,
+      args: [p_tenant_id, p_founder_user_id],
+    });
+    if (founderRs.rows.length === 0) throw new Error("founder_not_authorized_for_tenant");
+  }
+
+  const repRs = await client.execute({
+    sql: `SELECT 1 FROM user_profiles WHERE tenant_id = ? AND auth_user_id = ? AND team_role = 'agent' LIMIT 1`,
+    args: [p_tenant_id, p_rep_user_id],
+  });
+  if (repRs.rows.length === 0) throw new Error("rep_not_agent_for_tenant");
+
+  // v_frozen_rep := coalesce(data->>'attributed_rep_user_id', data->>'assigned_to')
+  const frozenRaw = leadData.attributed_rep_user_id ?? leadData.assigned_to ?? null;
+  const frozenRep = typeof frozenRaw === "string" && frozenRaw.length > 0 ? frozenRaw : null;
+  if (frozenRep === null || frozenRep !== p_rep_user_id) {
+    throw new Error("rep_does_not_match_frozen_attribution");
+  }
+
+  if (p_setup_amount < 2000) throw new Error("collected setup below commission floor");
+
+  const v_closed_by = p_closed_by_rep ? p_rep_user_id : p_founder_user_id;
+  const v_rate = v_closed_by === p_rep_user_id ? 0.3 : 0.2;
+  // round(numeric, 2) — half-up on positive amounts, same as Math.round here.
+  const v_amount = Math.round(p_setup_amount * v_rate * 100) / 100;
+  const automationText = JSON.stringify(automationIds);
+
+  // select * into v_deal ... for update — SQLite's single-writer model plus the
+  // write batch below replaces the row lock. A concurrent first-close race is
+  // caught by UNIQUE(tenant_id, lead_id) failing the batch, never by silence.
+  const dealRs = await client.execute({
+    sql: `SELECT id, status, rep_user_id, founder_user_id, package_id, automation_ids,
+                 currency, setup_amount, monthly_amount, payment_reference, closed_by
+          FROM website_deals WHERE tenant_id = ? AND lead_id = ?`,
+    args: [p_tenant_id, p_lead_id],
+  });
+
+  let dealId: string;
+  let dealIsNew = false;
+  if (dealRs.rows.length > 0) {
+    // Idempotent re-close: an identical replay returns the existing deal; any
+    // drift — including a different closer, which would change the rate — is a
+    // hard 'deal_already_closed_mismatch', mirroring the PG OR-chain.
+    const d = dealRs.rows[0] as Record<string, unknown>;
+    const mismatch =
+      d.status !== "won" ||
+      d.rep_user_id !== p_rep_user_id ||
+      d.founder_user_id !== p_founder_user_id ||
+      d.package_id !== p_package_id ||
+      String(d.automation_ids ?? "[]") !== automationText ||
+      d.currency !== p_currency ||
+      Number(d.setup_amount) !== p_setup_amount ||
+      Number(d.monthly_amount) !== p_monthly_amount ||
+      d.payment_reference !== p_payment_reference ||
+      ((d.closed_by ?? null) as string | null) !== v_closed_by;
+    if (mismatch) throw new Error("deal_already_closed_mismatch");
+    dealId = String(d.id);
+  } else {
+    dealId = crypto.randomUUID();
+    dealIsNew = true;
+  }
+
+  const writes: Array<{ sql: string; args: Array<string | number | null> }> = [];
+  if (dealIsNew) {
+    writes.push({
+      sql: `INSERT INTO website_deals
+              (id, tenant_id, lead_id, rep_user_id, founder_user_id, closed_by, package_id,
+               automation_ids, currency, setup_amount, monthly_amount, proposal_status,
+               status, payment_reference, closed_at, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'accepted', 'won', ?, ?, ?, ?)`,
+      args: [
+        dealId, p_tenant_id, p_lead_id, p_rep_user_id, p_founder_user_id, v_closed_by,
+        p_package_id, automationText, p_currency, p_setup_amount, p_monthly_amount,
+        p_payment_reference, nowIso, nowIso, nowIso,
+      ],
+    });
+  }
+  // The 146/147 upsert trick, verbatim in SQLite: DO UPDATE is a self-assign
+  // no-op gated on deal_id = excluded.deal_id. Fresh insert and same-deal
+  // replay both RETURN the row; a payment_reference already owned by ANOTHER
+  // deal fails the WHERE, returns nothing, and we raise after the batch.
+  writes.push({
+    sql: `INSERT INTO website_sales_commissions
+            (id, tenant_id, deal_id, rep_user_id, payment_reference, entry_type,
+             collected_setup_amount, rate, amount, status, created_at, updated_at)
+          VALUES (?, ?, ?, ?, ?, 'accrual', ?, ?, ?, 'accrued', ?, ?)
+          ON CONFLICT ("tenant_id", "payment_reference", "entry_type")
+          DO UPDATE SET "updated_at" = "updated_at" WHERE "deal_id" = excluded."deal_id"
+          RETURNING id, amount`,
+    args: [
+      crypto.randomUUID(), p_tenant_id, dealId, p_rep_user_id, p_payment_reference,
+      p_setup_amount, v_rate, v_amount, nowIso, nowIso,
+    ],
+  });
+  writes.push({
+    sql: `INSERT INTO website_onboarding (id, tenant_id, deal_id, lead_id, created_at, updated_at)
+          VALUES (?, ?, ?, ?, ?, ?)
+          ON CONFLICT ("tenant_id", "deal_id") DO NOTHING`,
+    args: [crypto.randomUUID(), p_tenant_id, dealId, p_lead_id, nowIso, nowIso],
+  });
+
+  const batchRs = await client.batch(writes, "write");
+  const commissionRs = batchRs[dealIsNew ? 1 : 0];
+  const cRow = commissionRs.rows[0] as Record<string, unknown> | undefined;
+  if (!cRow) throw new Error("payment_reference_already_used_by_another_deal");
+
+  // perform patch_tenant_record_data(... 'stage','onboarding' ...) — through
+  // the ported CAS implementation later in this file (hoisted declaration).
+  await patch_tenant_record_data(client, {
+    p_id: p_lead_id,
+    p_tenant_id,
+    p_patch: {
+      stage: "onboarding",
+      stage_entered_at: nowIso,
+      closed_by: v_closed_by,
+      collected_setup_amount: p_setup_amount,
+      quoted_monthly_amount: p_monthly_amount,
+    },
+  });
+
+  // RETURNS jsonb — supabase-js callers receive this object as { data }.
+  return {
+    deal_id: dealId,
+    commission_id: String(cRow.id),
+    commission_amount: Number(cRow.amount),
+  };
+}
 export async function consume_texttorrent_rate_token(client: Client, args: Record<string, unknown>): Promise<unknown> {
   // Signature parity: p_bucket text, p_worker_id text (unused in SQL body), p_priority int,
   // p_limit int DEFAULT 60, p_window_seconds int DEFAULT 60. Returns boolean.
@@ -1585,6 +1803,7 @@ export async function signup_tenant(client: Client, args: Record<string, unknown
 /**
  * MANIFEST
  *   approve_sunbiz_draft               ported-unverified  writes=True  confidence=high
+ *   close_website_deal                 hand-ported (147 comp v2)  writes=True  confidence=high
  *   consume_texttorrent_rate_token     ported-unverified  writes=True  confidence=high
  *   find_similar_merchants             ported-unverified  writes=False  confidence=high
  *   force_materialize_today_plan       ported-unverified  writes=True  confidence=high
@@ -1601,6 +1820,7 @@ export async function signup_tenant(client: Client, args: Record<string, unknown
  */
 export const TURSO_RPC_SHIM: Record<string, (client: Client, args: Record<string, unknown>) => Promise<unknown>> = {
   approve_sunbiz_draft,
+  close_website_deal,
   consume_texttorrent_rate_token,
   find_similar_merchants,
   force_materialize_today_plan,

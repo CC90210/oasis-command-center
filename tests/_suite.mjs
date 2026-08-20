@@ -46,6 +46,13 @@ const TESTS = [
   "tests/forms-visibility.test.ts",
   "tests/oasis-funnel.test.ts",
   "tests/lead-scope.test.ts",
+  // Sits beside lead-scope deliberately: both defend "who may see which rows".
+  // lead-scope covers per-agent lead visibility; role-surfaces covers which
+  // whole SURFACE each persona gets, and proves the rep's Today never fetches
+  // company financials. Same class as portal-boundaries and
+  // marketing-founders-gate below — a security boundary belongs in the suite
+  // everyone runs, not only in the website-sales script.
+  "tests/role-surfaces.test.ts",
   "tests/fuzzy-match.test.ts",
   "tests/infer-result-text.test.ts",
   "tests/csv-combine.test.ts",
@@ -136,6 +143,7 @@ const TESTS = [
   "tests/channel-limits.test.ts",
   "tests/offboard-stages.test.ts",
   "tests/audience-narrowing.test.ts",
+  "tests/client-automation-profiles.test.ts",
 ];
 
 const NODE_ARGS = ["--conditions=react-server", "--import", "tsx"];

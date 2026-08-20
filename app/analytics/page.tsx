@@ -8,10 +8,16 @@ import {
   getActiveProfile,
 } from "@/lib/queries";
 import { safe } from "@/lib/api-helpers";
+import { requireSystemSurface } from "@/lib/role-surfaces-session";
 
 export const dynamic = "force-dynamic";
 
 export default async function AnalyticsPage() {
+  // FIRST STATEMENT, before any read. This page opens with Net MRR, and an
+  // outside sales contractor must not reach it. 404 rather than 403 — a 403
+  // would confirm the page exists. Hiding it from the sidebar is not enough:
+  // a sidebar is a suggestion and a URL is not.
+  await requireSystemSurface();
   const profile = await safe("analytics.profile", getActiveProfile(), null);
   const tenantId = profile?.tenant_id || "";
   const [mrr, history, pipeline] = await Promise.all([

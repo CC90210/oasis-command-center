@@ -196,7 +196,7 @@ async function loadLeadDetailMetrics(
   recordCreatedAt: string | null,
 ): Promise<LeadDetailMetrics> {
   const db = getServiceSupabase();
-  const stageKey = nonEmptyString(data.stage) || "new_contact";
+  const stageKey = nonEmptyString(data.stage) || "researched";
   const stageMeta = findOasisStage("lead", stageKey) || null;
   const [stageEvents, lastTouchEvent] = await Promise.all([
     db

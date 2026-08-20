@@ -31,6 +31,8 @@ import { foundersAllowlist } from "@/lib/founders/gate";
 import { isFounderTenant, shouldShowFoundersNav } from "@/lib/founders-marketing-core";
 import { FOUNDERS_NAV } from "@/lib/portals/registry";
 import type { NavItem } from "@/lib/nav-config";
+import { filterNavForPersona, type Persona } from "@/lib/role-surfaces";
+import { resolveViewerSurface } from "@/lib/role-surfaces-session";
 
 // Default metadata — tenant-neutral. Individual pages override via
 // generateMetadata (forms, leads, etc.) with their own titles. Keeping
@@ -94,6 +96,18 @@ export default async function RootLayout({
   // Resolved against the operator's OWN tenant so the persistent chat always
   // speaks as their own agent, even while previewing another tenant's shell.
   let chatProps: ChatShellProps | null = null;
+  /**
+   * Which persona's sidebar to render.
+   *
+   * `null` means "do not narrow" — the demo shells and any pre-auth render have
+   * no session to resolve, and a fail-closed default there would hand a SunBiz
+   * demo visitor a four-item contractor sidebar. Narrowing is only applied when
+   * a persona is POSITIVELY identified, which is safe precisely because the nav
+   * is cosmetic: every page a persona must not reach carries its own
+   * server-side gate (requireSystemSurface / the founders gate). If this line
+   * were the only defence it would be the wrong default.
+   */
+  let navPersona: Persona | null = null;
   if (!isFullBleed) {
     const cookieStore = await cookies();
     // Path-based tenant slug (Phase 1): `/t/<slug>/...` URLs anchor the shell to
@@ -224,7 +238,7 @@ export default async function RootLayout({
     // header dot, Settings page, and any future caller agree on what
     // "online" means (last_seen_at within 5 minutes, revoked_at IS NULL).
     const emptySnap: { data: { last_tick_at?: string | null } | null } = { data: null };
-    const [snapRes, bridgeOnlineResolved, chatPropsResolved] = await Promise.all([
+    const [snapRes, bridgeOnlineResolved, chatPropsResolved, surfaceResolved] = await Promise.all([
       safe(
         "layout.agent_state_snapshot",
         (async () => {
@@ -246,6 +260,9 @@ export default async function RootLayout({
         resolveChatShellProps({ profile, userEmail: profile?.email }),
         null,
       ),
+      // Persona for the sidebar. Batched with the other side-channel reads so
+      // scoping the nav costs no extra wall-clock time on any page render.
+      safe("layout.viewer_surface", resolveViewerSurface(), null),
     ]);
     const snap = snapRes.data;
     if (snap?.last_tick_at) {
@@ -254,6 +271,7 @@ export default async function RootLayout({
     }
     bridgeOnline = bridgeOnlineResolved;
     chatProps = chatPropsResolved;
+    navPersona = surfaceResolved?.ok ? surfaceResolved.persona : null;
     // tenantProfileSlug already resolved above so canPreviewTenantSlug
     // could use it on the path-override gate. Nothing more to do here.
   }
@@ -356,7 +374,24 @@ export default async function RootLayout({
               }
               logo={manifestLogoToSidebarLogo(manifest.brand.logo)}
               subtitle={manifest.brand.subtitle}
-              items={[...manifestNavToNavItems(manifest.nav), ...foundersNavItems]}
+              // Persona narrowing is the LAST step, applied to the fully
+              // assembled list, so it cannot be bypassed by a future nav source
+              // that forgets to filter itself. It REMOVES rows rather than
+              // disabling them: a greyed row still announces the surface exists,
+              // and `enabled: false` items have shipped visible here before.
+              //
+              // It also closes a real hole above. foundersNavItems is gated on
+              // TENANT identity (FOUNDERS_TENANT_IDS) and reps share OASIS's own
+              // workspace — so without this a contractor on oasis-webdev would
+              // get a Marketing tab into the founders portal. The gate in
+              // lib/founders/gate.ts is the wall; this is the sign on it.
+              //
+              // A null navPersona (demo shells, pre-auth) means "do not narrow";
+              // filterNavForPersona owns that case.
+              items={filterNavForPersona(
+                [...manifestNavToNavItems(manifest.nav), ...foundersNavItems],
+                navPersona,
+              )}
               operatorName={
                 demoMode
                   ? "Sun Demo Operator"

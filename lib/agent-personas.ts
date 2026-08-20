@@ -446,27 +446,29 @@ LEAD-STAGE TOOL (not a marker)
 When the operator describes a lead transition in natural language, call the advance_lead_stage TOOL directly. Do NOT use a dashboard-action marker for stage changes — markers fire AFTER the stream ends, but the tool fires DURING the stream so the operator's next message lands against the updated stage.
 
 Examples:
-  "Bennett just churned"                    → advance_lead_stage(lead_id=..., event_type="contract_ended")
+  "Bennett's contract ended"                → advance_lead_stage(lead_id=..., event_type="contract_ended")
   "Windsor signed the contract"             → event_type="contract_signed"
   "I got off the phone — Acme is qualified" → event_type="lead_qualified"
-  "Move Mississauga Plumbing to archived"   → event_type="manual_archive"
-  "Bennett came back, mark him active"      → event_type="onboarding_complete" (only works because Bennett is archived; bypass activates)
+  "Retire Mississauga Plumbing"             → event_type="manual_archive"
+  "Kickoff's done, start the build"         → event_type="onboarding_complete"
 
 Find the lead's id first via lookup_records or search_records, then call the tool.
 
-Event types and their target stages:
-  manual_outreach_started   → outreach        (from new_contact)
-  discovery_call_scheduled  → discovery       (from outreach)
-  lead_qualified            → qualified       (from outreach, discovery)
-  proposal_sent             → proposal        (from qualified, discovery)
-  proposal_viewed           → negotiation     (from proposal)
-  contract_signed           → onboarding      (from proposal, negotiation)
-  onboarding_complete       → active_client   (from onboarding)
-  lead_replied_negative     → lost            (any active stage)
-  contract_ended            → churned         (from active_client only)
-  manual_archive            → archived        (any non-archived stage)
+Event types and their target stages (14-stage Website Sales Engine lifecycle):
+  manual_outreach_started   → attempting_contact     (from researched, assigned)
+  discovery_call_scheduled  → founder_meeting_booked (from attempting_contact, connected, qualified)
+  lead_qualified            → qualified              (from attempting_contact, connected)
+  proposal_sent             → proposal_sent          (from founder_meeting_booked, demo_completed)
+  proposal_viewed           → proposal_sent          (from founder_meeting_booked, demo_completed — lag-repair; no-op if already there)
+  contract_signed           → won                    (from demo_completed, proposal_sent)
+  onboarding_complete       → in_build               (from onboarding)
+  lead_replied_negative     → lost                   (any pre-won sales stage)
+  contract_ended            → lost                   (from launched — a departed client; the reason code marks it as churn)
+  manual_archive            → lost                   (any non-lost stage — operator cleanup; reason code operator_archived_lead)
 
-Archived bypass: when a lead's current stage is "archived", the engine allows ANY event_type to fire (except manual_archive itself, which is a no-op). Use this for resurrection — "Mississauga came back wanting to sign" on an archived lead → event_type="contract_signed" works without going through new_contact first.`;
+There is no negotiation, active_client, churned, or archived stage in this lifecycle — lost is the only dead branch, distinguished on the timeline by reason code.
+
+Archived-row bypass (legacy): when a lead's current stage is the retired "archived" key, the engine allows ANY event_type to fire (except manual_archive itself). Use this for resurrection — "Mississauga came back wanting to sign" on a legacy archived lead → event_type="contract_signed" works without restarting the funnel.`;
 
 /**
  * Identity-lock overlay appended to every composed persona. Closes the
