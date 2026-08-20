@@ -178,8 +178,20 @@ async function main() {
     log(`   ${statements.steps.length} steps -> ${statementsKept.length} (dropping ${dropped} SMS)`);
     log("   email steps are left exactly as they are\n");
   } else {
+    // Removing these texts is a stated purpose of this migration, so a missing
+    // sequence is not a routine skip. Under --apply it is fatal: finishing and
+    // printing Done while the banned SMS steps sit untouched is exactly the
+    // "reported success, did half the job" failure this script keeps guarding
+    // against. (Codex review P1, round 5.)
     log("── 2. Signed application nag: NOT FOUND on this tenant.");
-    log("   If it should exist, stop and check the name before trusting this run.\n");
+    if (APPLY) {
+      throw new Error(
+        `sequence "${STATEMENTS}" not found (checked dash-insensitively across all of this tenant's ` +
+        `sequences). Refusing to --apply: its banned SMS steps and pending runs would be left live. ` +
+        `Check the name, then re-run.`,
+      );
+    }
+    log("   Dry run continues so you can see the rest; --apply would stop here.\n");
   }
 
   const targetIds = [chase.id, ...(statements ? [statements.id] : [])];
@@ -240,6 +252,7 @@ async function main() {
       .from("drip_runs")
       .update({ status: "cancelled", last_error: "sms removed from application chase (2026-08-20)" })
       .eq("id", r.id)
+      .eq("tenant_id", tenantId) // service role bypasses RLS; scope every write
       .eq("status", r.status); // CAS: never clobber a status that moved under us
     if (c.error) containmentErrors.push(`drip_runs ${r.id}: ${c.error.message}`);
     else cancelledRuns += 1;
@@ -300,6 +313,7 @@ async function main() {
       .from("sequence_state")
       .update({ status: "cancelled", last_error: "superseded by drip_runs; VPS runner contained (2026-08-20)" })
       .eq("id", r.id)
+      .eq("tenant_id", tenantId) // service role bypasses RLS; scope every write
       .eq("status", r.status);
     if (c.error) containmentErrors.push(`sequence_state ${r.id}: ${c.error.message}`);
     else cancelledState += 1;
