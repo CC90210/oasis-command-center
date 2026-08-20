@@ -34,6 +34,7 @@ import "server-only";
 import { randomUUID } from "node:crypto";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { checkPhoneOptOut, checkEmailSuppressed } from "@/lib/lead-interactions-queries";
+import { isTextable } from "@/lib/sms/destination-health";
 import { sanitizeBlastMessage, stripDashes } from "@/lib/integrations/blast-safety";
 import { writeAgentAlert } from "@/lib/notify/agent-alert";
 import { maybeMintApplicationUrl, updateRecord } from "@/lib/manifest/data";
@@ -922,6 +923,30 @@ async function processSmsStep(
   const supp = await checkPhoneOptOut(row.tenant_id, phone);
   if (supp.optedOut) return markPermanentFail(db, row, "opted_out (replied STOP)");
   if (supp.checkFailed) return markRetryOrFail(db, row, "suppression_check_failed");
+
+  // CAN THIS PHONE RECEIVE A TEXT AT ALL?
+  //
+  // Measured 2026-08-20, carrier verdicts split by where the number came from:
+  // looked-up numbers delivered 8 and failed 3; numbers merchants typed on
+  // their application delivered 0 and failed 53. A number written on a business
+  // application is usually the office line, and a landline physically cannot
+  // receive SMS.
+  //
+  // That is the whole of the "outage" that started 2026-08-19: nothing broke,
+  // the cohort changed. The exact refused message was later replayed from the
+  // same line to a mobile and delivered.
+  //
+  // Deliberately placed AFTER the opt-out check and BEFORE the lawful-basis
+  // one: an opt-out is a legal instruction and outranks everything, while this
+  // is a technical fact that should not consume a consent decision.
+  //
+  // A skip, not a failure. Nothing about this lead will change on its own, and
+  // the sequence's EMAIL steps should still run — that is how a merchant on a
+  // desk phone still hears from us.
+  {
+    const reach = await isTextable(row.tenant_id, phone);
+    if (!reach.textable) return skipStep(db, row, steps, `sms_unreachable: ${reach.reason}`);
+  }
 
   // LAWFUL BASIS TO TEXT. Email and SMS are not interchangeable in law: email
   // needs no prior permission, a marketing text does. $500 a message, $1,500 if
