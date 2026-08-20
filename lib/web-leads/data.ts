@@ -34,6 +34,27 @@ export const WEBDEV_TENANT_ID = "42423fde-be8b-454f-932a-750e8c9b743d";
 
 export const PAGE_SIZE = 50;
 
+/**
+ * Hard cap on rows read per fetchLeads() call. The tenant holds ~31K leads
+ * today, so 50,000 is headroom, not a working limit -- this is not meant to
+ * ever bind in normal operation.
+ *
+ * WHY THIS EXISTS: two independent reviewers flagged the missing `.limit()`
+ * on this read. The fix is not that the cap is generous -- it's that hitting
+ * it can never pass unnoticed. getServiceSupabase() (lib/supabase-server.ts)
+ * falls back to a REAL supabase-js client whenever EMPIRE_DATA_BACKEND is not
+ * "turso_cloud", and PostgREST enforces its own server-side max-rows cap on
+ * every request regardless of what this code asks for. If that fallback path
+ * is ever taken, an unbounded select comes back SILENTLY TRUNCATED -- no
+ * error, just fewer rows than exist. The filter rail would confidently show
+ * 10,872 while the table quietly showed whatever PostgREST's cap allowed,
+ * and nothing would say the number was wrong. A plausible-looking wrong
+ * number is the exact failure this feature exists to avoid. So fetchLeads
+ * treats "returned row count >= LEAD_READ_CAP" as proof the read may be
+ * incomplete and throws instead of returning a partial list -- see below.
+ */
+export const LEAD_READ_CAP = 50000;
+
 export type WebLead = {
   id: string;
   name: string;
@@ -118,8 +139,18 @@ export async function fetchLeads(
     .from("tenant_records")
     .select("id,data")
     .eq("tenant_id", WEBDEV_TENANT_ID)
-    .eq("entity_type", "lead");
+    .eq("entity_type", "lead")
+    .limit(LEAD_READ_CAP);
   if (error) throw new Error(`leads_read_failed: ${error.message}`);
+
+  // Hitting the cap means the read may be truncated (see LEAD_READ_CAP doc
+  // comment) -- a short list that LOOKS complete is worse than a loud
+  // failure, so refuse to serve a possibly-partial dataset.
+  if ((data || []).length >= LEAD_READ_CAP) {
+    throw new Error(
+      `leads_read_truncated: hit the ${LEAD_READ_CAP}-row cap, results would be silently incomplete`,
+    );
+  }
 
   const wanted = new Set(sheetIds);
   const q = f.query.toLowerCase();

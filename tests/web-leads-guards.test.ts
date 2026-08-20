@@ -90,4 +90,24 @@ for (const view of [
   assert.doesNotMatch(src, /No significant issues/, `${view} must not claim a clean audit`);
 }
 
+// ---------------------------------------------------------------------------
+// fetchLeads reads tenant_records with no server-side predicate on most
+// filters (territory lives inside a JSON blob) and previously had no
+// `.limit()` at all. getServiceSupabase() falls back to a real supabase-js
+// client whenever EMPIRE_DATA_BACKEND isn't "turso_cloud", and PostgREST
+// enforces its own server-side max-rows cap -- so an unbounded read on that
+// path comes back SILENTLY TRUNCATED, no error, just fewer rows. The filter
+// rail would confidently show a count the table couldn't back up, and
+// nothing would say the number was wrong. A read that can come back short
+// must fail loudly instead of returning a partial list that looks complete,
+// so this asserts both the cap and the throw exist, not just that a
+// `.limit(` call is present somewhere.
+// ---------------------------------------------------------------------------
+assert.match(data, /LEAD_READ_CAP/, "fetchLeads must reference LEAD_READ_CAP");
+assert.match(
+  code,
+  /if\s*\([\s\S]*?>=\s*LEAD_READ_CAP[\s\S]*?\)\s*{\s*throw/,
+  "fetchLeads must throw when the read hits LEAD_READ_CAP, not return a truncated list",
+);
+
 console.log("web-leads-guards ok");
