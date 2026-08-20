@@ -98,7 +98,7 @@ export async function GET(req: NextRequest) {
     .eq("agent_source", BULK_EMAIL_SOURCE)
     .eq("type", "email_queued")
     .order("created_at", { ascending: false })
-    .limit(wanted ? SCAN_LIMIT : SCAN_LIMIT);
+    .limit(SCAN_LIMIT);
 
   if (wanted) q = q.eq("metadata->>batch_id", wanted);
   if (!sess.isAdmin) q = q.eq("metadata->>acted_by_user_id", sess.userId);

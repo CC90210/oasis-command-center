@@ -57,6 +57,8 @@ type Row = {
   needs_operator_review: boolean;
 };
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 /** Local time, because the operator is reconciling against their own inbox. */
 function when(iso: string | null): string {
   if (!iso) return "";
@@ -107,6 +109,13 @@ export function BulkSendHistory({ open, onClose }: { open: boolean; onClose: () 
       }
       setExpanded(batchId);
       if (rows[batchId]) return;
+      // Rows queued before batch tagging shipped are grouped under a synthetic
+      // "legacy:<timestamp>" key, which the API rejects as a non-UUID. Show the
+      // rollup we already have rather than firing a request that 400s.
+      if (!UUID_RE.test(batchId)) {
+        setRows((cur) => ({ ...cur, [batchId]: [] }));
+        return;
+      }
       try {
         const r = await fetch(`/api/leads/bulk/batches?batch_id=${encodeURIComponent(batchId)}`);
         const body = (await r.json().catch(() => ({}))) as { ok?: boolean; rows?: Row[] };
@@ -226,6 +235,12 @@ export function BulkSendHistory({ open, onClose }: { open: boolean; onClose: () 
                         </div>
                       ) : (
                         <ul className="space-y-1">
+                          {rows[b.batch_id].length === 0 && (
+                            <li className="text-[11.5px] text-fg-dim">
+                              This send predates per-recipient tracking. The totals above are
+                              accurate.
+                            </li>
+                          )}
                           {rows[b.batch_id].map((r, i) => (
                             <li
                               key={`${r.to_email}-${i}`}

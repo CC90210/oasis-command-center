@@ -108,16 +108,29 @@ export function BulkEmailDialog({
 
   const noun = entityName === "application" ? "application" : "lead";
 
+  /** selectedIds is a fresh array on every parent render, so keying an effect
+   *  on its identity re-fires that effect forever. Key on the CONTENT. */
+  const idsKey = selectedIds.join(",");
+
+  /** onSent is an inline arrow from the parent, so it also changes identity on
+   *  every render. Holding it in a ref stops the poll interval being torn down
+   *  and rebuilt on each tick. */
+  const onSentRef = useRef(onSent);
+  useEffect(() => {
+    onSentRef.current = onSent;
+  }, [onSent]);
+
   // ---- preflight: run on open, and whenever the selection changes ----------
   useEffect(() => {
-    if (!open || selectedIds.length === 0) return;
+    if (!open || !idsKey) return;
+    const ids = idsKey.split(",");
     let cancelled = false;
     setPreflight(null);
     setPreflightError(null);
     fetch("/api/leads/bulk", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ op: "email_preflight", ids: selectedIds, entity: entityName }),
+      body: JSON.stringify({ op: "email_preflight", ids, entity: entityName }),
     })
       .then(async (r) => ({ ok: r.ok, body: await r.json().catch(() => ({})) }))
       .then(({ ok, body }) => {
@@ -134,7 +147,7 @@ export function BulkEmailDialog({
     return () => {
       cancelled = true;
     };
-  }, [open, selectedIds, entityName]);
+  }, [open, idsKey, entityName]);
 
   // Reset everything when the dialog closes so a second send never inherits
   // the first one's copy or status.
@@ -244,7 +257,7 @@ export function BulkEmailDialog({
         setStatus(body.batch);
         if (!body.batch.in_flight) {
           setPhase("done");
-          onSent?.();
+          onSentRef.current?.();
         }
       } catch {
         /* transient; the next tick retries */
@@ -254,7 +267,7 @@ export function BulkEmailDialog({
     const id = setInterval(() => {
       if (Date.now() - pollStarted.current > POLL_CEILING_MS) {
         setPhase("done");
-        onSent?.();
+        onSentRef.current?.();
         return;
       }
       void tick();
@@ -263,7 +276,7 @@ export function BulkEmailDialog({
       cancelled = true;
       clearInterval(id);
     };
-  }, [phase, status?.batch_id, onSent]);
+  }, [phase, status?.batch_id]);
 
   if (!open) return null;
   if (typeof document === "undefined") return null;
