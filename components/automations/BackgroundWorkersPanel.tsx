@@ -16,6 +16,7 @@
  */
 
 import { useEffect, useState } from "react";
+import { fetchJson } from "@/lib/fetch-json";
 import { Cpu, CheckCircle2, AlertCircle, MinusCircle, HelpCircle, Activity, Play, Square, RotateCw, Loader2 } from "lucide-react";
 
 const BRIDGE_BASE =
@@ -82,10 +83,17 @@ export function BackgroundWorkersPanel() {
 
   async function refresh() {
     try {
-      const res = await fetch("/api/automations/background-workers");
-      const j = (await res.json()) as ApiResponse;
+      // Same guard as the cron list: an empty body must report its HTTP status,
+      // not "Unexpected end of JSON input". A throw here used to leave this
+      // panel stuck on "Loading..." beside the other panel's error banner.
+      const result = await fetchJson<ApiResponse>("/api/automations/background-workers", undefined, { retries: 2 });
+      if (!result.ok) {
+        setError(result.error);
+        return;
+      }
+      const j = result.data;
       if (!j.ok) {
-        setError(j.error || `http_${res.status}`);
+        setError(j.error || `http_${result.status}`);
         return;
       }
       setData(j);

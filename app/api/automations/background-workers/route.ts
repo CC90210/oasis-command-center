@@ -37,6 +37,7 @@ import { getTenant } from "@/lib/queries";
 import { resolveClientProfileSlug } from "@/lib/client-profiles";
 import { bridgeControlEligibility } from "@/lib/bridge-proxy";
 import { SUNBIZ_WORKERS } from "@/lib/automations/sunbiz-workers";
+import { jsonRoute } from "@/lib/api-helpers";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -131,7 +132,9 @@ const EXPECTED_WORKERS: Array<{
   },
 ];
 
-export async function GET() {
+// Wrapped: this panel renders alongside the cron list, so a throw here left the
+// tab stuck on "Loading..." next to the other panel's error banner.
+export const GET = jsonRoute("api/automations/background-workers GET", async () => {
   const user = await getSessionUser();
   if (!user) return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
   const db = getServiceSupabase();
@@ -283,4 +286,4 @@ export async function GET() {
     remote_control: sunbizControl,
     workers,
   });
-}
+});
