@@ -1,0 +1,107 @@
+"use client";
+
+/**
+ * WebLeadDetail — right-side panel, following the existing LeadDetailDrawer
+ * convention reps already know: URL-driven (`?lead=<id>`) by the page that
+ * mounts it, one aggregated fetch, presentational body.
+ *
+ * Also carries the three a11y affordances LeadDetailDrawer
+ * (components/leads/LeadDetailDrawer.tsx) already fixed for this exact
+ * pattern (Codex pass-2 finding): Esc to close, body scroll lock, and focus
+ * on the close button on mount. Skipping them here would reintroduce the
+ * same keyboard-trap/scroll-bleed bug in a second drawer.
+ *
+ * Built as a section list so enrichment fields drop in later without a
+ * redesign. Today these leads carry directory data only.
+ */
+
+import { useEffect, useRef, useState } from "react";
+import { X, Phone, MapPin, Globe, Tag } from "lucide-react";
+import type { WebLead } from "@/lib/web-leads/data";
+
+function Row({ icon, label, value }: { icon: React.ReactNode; label: string; value: string | null }) {
+  return (
+    <div className="flex gap-3 py-2">
+      <div className="mt-0.5 text-slate-400">{icon}</div>
+      <div className="min-w-0 flex-1">
+        <p className="text-xs uppercase tracking-wide text-slate-500">{label}</p>
+        <p className="break-words text-sm text-slate-900">{value || "—"}</p>
+      </div>
+    </div>
+  );
+}
+
+export function WebLeadDetail({ leadId, onClose }: { leadId: string; onClose: () => void }) {
+  const [lead, setLead] = useState<WebLead | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const closeBtnRef = useRef<HTMLButtonElement>(null);
+
+  useEffect(() => {
+    let alive = true;
+    setLead(null);
+    setError(null);
+    fetch(`/api/web-leads/${encodeURIComponent(leadId)}`)
+      .then(async (r) => {
+        if (!alive) return;
+        if (r.status === 404) { setError("This lead no longer exists."); return; }
+        if (!r.ok) { setError("Could not load this lead."); return; }
+        setLead(await r.json());
+      })
+      .catch(() => { if (alive) setError("Could not load this lead."); });
+    return () => { alive = false; };
+  }, [leadId]);
+
+  // Esc to close + body scroll lock + focus the close button on mount,
+  // matching LeadDetailDrawer: without these, a drawer traps keyboard users
+  // and leaves the page scrolling behind the modal.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
+    document.addEventListener("keydown", onKey);
+    const prevOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    closeBtnRef.current?.focus();
+    return () => {
+      document.removeEventListener("keydown", onKey);
+      document.body.style.overflow = prevOverflow;
+    };
+  }, [onClose]);
+
+  return (
+    <>
+      <div className="fixed inset-0 z-40 bg-slate-900/20" onClick={onClose} />
+      <aside role="dialog" aria-modal="true" aria-label="Lead detail" className="fixed right-0 top-0 z-50 flex h-full w-full max-w-md flex-col overflow-y-auto border-l border-slate-200 bg-white shadow-xl">
+        <header className="sticky top-0 flex items-start justify-between gap-3 border-b border-slate-200 bg-white px-5 py-4">
+          <div className="min-w-0">
+            <h2 className="truncate text-base font-semibold text-slate-900">{lead?.name || (error ? "Unavailable" : "Loading…")}</h2>
+            {lead?.territoryName && <p className="truncate text-xs text-slate-500">{lead.territoryName}</p>}
+          </div>
+          <button ref={closeBtnRef} type="button" onClick={onClose} aria-label="Close lead detail" className="rounded p-1 text-slate-400 hover:bg-slate-100">
+            <X className="h-4 w-4" />
+          </button>
+        </header>
+
+        <div className="px-5 py-4">
+          {error && <p className="rounded border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">{error}</p>}
+          {lead && (
+            <>
+              {lead.phone && (
+                <a href={`tel:${lead.phone}`} className="mb-4 flex w-full items-center justify-center gap-2 rounded-md bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700">
+                  <Phone className="h-4 w-4" />Call {lead.phone}
+                </a>
+              )}
+              <div className="divide-y divide-slate-100">
+                <Row icon={<MapPin className="h-4 w-4" />} label="Address" value={[lead.address, lead.city, lead.province, lead.postal].filter(Boolean).join(", ") || null} />
+                <Row icon={<Tag className="h-4 w-4" />} label="Industry" value={lead.industry} />
+                <Row icon={<Globe className="h-4 w-4" />} label="Website" value={lead.websiteUrl} />
+                {/* VERBATIM — see spec section 2. */}
+                <Row icon={<Globe className="h-4 w-4" />} label="Website status" value={lead.websiteCondition} />
+                <Row icon={<Tag className="h-4 w-4" />} label="Research notes" value={lead.auditFindings} />
+                <Row icon={<Tag className="h-4 w-4" />} label="Directory category" value={lead.osmCategory} />
+              </div>
+            </>
+          )}
+        </div>
+      </aside>
+    </>
+  );
+}
