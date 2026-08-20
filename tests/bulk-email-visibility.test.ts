@@ -287,6 +287,26 @@ assert.match(
   "the reason a record can't be emailed is stated in plain language",
 );
 
+// 🚨 The server can queue FEWER recipients than the preflight promised: merging
+// per-recipient values can trip the lender/positioning guard, and an insert can
+// fail. Shipping a smaller batch than the operator approved without saying so
+// is this bug class all over again, one step later.
+// (Codex review P2, 2026-08-20 round 6.)
+assert.match(dialog, /blocked_copy\?: number; insert_failed\?: number/, "the send response's final counts are read");
+assert.match(dialog, /setNotes\(\{ blocked, insertFailed \}\);/, "and kept");
+assert.match(dialog, /\{notes\.blocked\} held back\./, "and shown to the operator");
+assert.match(dialog, /\{notes\.insertFailed\} couldn&apos;t be saved to the queue/, "including queue-write failures");
+// A dead end with no reason is what this dialog exists to replace.
+assert.ok(
+  !/setError\("Nothing was queued\."\)/.test(dialog),
+  "the empty-result message must name a cause, not just report emptiness",
+);
+assert.match(
+  dialog,
+  /all \$\{blocked\} were held back/,
+  "an all-blocked send says why",
+);
+
 // The preview must be produced by the SHARED renderers, never re-implemented.
 assert.ok(
   !/replace\(\/\\\{\\\{/.test(dialog),

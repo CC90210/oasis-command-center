@@ -84,6 +84,16 @@ type BatchStatus = {
  */
 type Phase = "compose" | "sending" | "done" | "background";
 
+/**
+ * Counts the SERVER produced at queue time, which can differ from what the
+ * preflight promised: rendering merge values per recipient can trip the
+ * lender-name or positioning guard, and an insert can fail. Surfacing these is
+ * not a nicety. Silently shipping a smaller batch than the operator approved
+ * is the same defect this whole dialog exists to remove, just moved one step
+ * later. (Codex review P2, 2026-08-20 round 6.)
+ */
+type SendNotes = { blocked: number; insertFailed: number };
+
 const POLL_MS = 2500;
 /** Stop WATCHING after this long. The send itself is unaffected: it lives in
  *  the queue and the cron keeps draining it. */
@@ -115,6 +125,7 @@ export function BulkEmailDialog({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState<BatchStatus | null>(null);
+  const [notes, setNotes] = useState<SendNotes | null>(null);
   const pollStarted = useRef(0);
 
   const noun = entityName === "application" ? "application" : "lead";
@@ -166,6 +177,7 @@ export function BulkEmailDialog({
     if (open) return;
     setPhase("compose");
     setStatus(null);
+    setNotes(null);
     setError(null);
     setBusy(false);
     setPreflight(null);
@@ -228,6 +240,7 @@ export function BulkEmailDialog({
         ok?: boolean;
         batch_id?: string;
         updated?: number;
+        counts?: { blocked_copy?: number; insert_failed?: number };
         error?: string;
         message?: string;
       };
@@ -236,8 +249,19 @@ export function BulkEmailDialog({
         setBusy(false);
         return;
       }
+      const blocked = body.counts?.blocked_copy ?? 0;
+      const insertFailed = body.counts?.insert_failed ?? 0;
+      setNotes({ blocked, insertFailed });
       if (!body.batch_id || !body.updated) {
-        setError("Nothing was queued.");
+        // Say WHY nothing went out. "Nothing was queued" with no reason is the
+        // dead-end this dialog exists to replace.
+        setError(
+          blocked > 0
+            ? `Nothing was sent. Filling in each recipient's details produced wording we're not allowed to send, so all ${blocked} were held back.`
+            : insertFailed > 0
+              ? `Nothing was sent. ${insertFailed} couldn't be saved to the queue. Try again in a moment.`
+              : "Nothing was sent.",
+        );
         setBusy(false);
         return;
       }
@@ -436,6 +460,7 @@ export function BulkEmailDialog({
               sent={sent}
               failed={failed}
               suppressed={suppressed}
+              notes={notes}
               noun={noun}
             />
           )}
@@ -666,6 +691,7 @@ function SendProgress({
   sent,
   failed,
   suppressed,
+  notes,
   noun,
 }: {
   status: BatchStatus;
@@ -673,6 +699,7 @@ function SendProgress({
   sent: number;
   failed: number;
   suppressed: number;
+  notes: SendNotes | null;
   noun: string;
 }) {
   const done = phase === "done";
@@ -711,6 +738,18 @@ function SendProgress({
         {failed > 0 && <span className="text-red-300">{failed} failed</span>}
         {remaining > 0 && <span>{remaining} still going</span>}
       </div>
+
+      {notes && notes.blocked > 0 && (
+        <p className="rounded-md border border-amber-400/40 bg-amber-500/10 px-2.5 py-1.5 text-[11px] text-amber-100">
+          {notes.blocked} held back. Filling in their details produced wording we&apos;re not allowed
+          to send, so they were left out of this batch.
+        </p>
+      )}
+      {notes && notes.insertFailed > 0 && (
+        <p className="rounded-md border border-red-400/40 bg-red-500/10 px-2.5 py-1.5 text-[11px] text-red-200">
+          {notes.insertFailed} couldn&apos;t be saved to the queue and were not sent.
+        </p>
+      )}
 
       {background ? (
         <p className="text-[11px] text-fg-dim">
