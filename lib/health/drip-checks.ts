@@ -338,6 +338,50 @@ export const DRIP_CHECKS: DripCheck[] = [
       `The cap is a ceiling, not a source: check working lines, enrolment, and the deal gate before raising it.`,
   },
   {
+    /**
+     * THE PHONE-LOOKUP QUEUE HAS A DRAINER, AND IT STOPS.
+     *
+     * Found 2026-08-20 while working out why texting cannot reach 40/day: the
+     * last completed lookup was 2026-08-05 and one job had been pending since
+     * 08-12, 197 hours. Nobody knew. The queue is FILLED in the cloud on a
+     * 10-minute cron but DRAINED by a worker on a single desktop, so the two
+     * halves fail independently and only the filling half is visible anywhere.
+     *
+     * This matters far beyond tidiness. 1,099 leads at SMS-relevant stages have
+     * never had a lookup, and the numbers those leads gave us are mostly office
+     * landlines (0 delivered / 53 failed). A working lookup queue is the only
+     * route from those leads to a textable mobile, so a dead drainer is a hard
+     * ceiling on drip volume that looks exactly like "not many leads today".
+     *
+     * Measured in HOURS since the oldest pending job was created, so a queue
+     * that is filling but not draining fails even while enrolment reports
+     * healthy. 24h is generous for a worker that normally turns a job around in
+     * minutes.
+     */
+    id: "leads.phone_lookup_stalled",
+    severity: "high",
+    rule: { kind: "must_be_below", ceiling: 24 },
+    observe: async (db, tenantId, endMs) => {
+      const r = await db
+        .from("phone_lookup_jobs")
+        .select("created_at")
+        .eq("tenant_id", tenantId)
+        .eq("status", "pending")
+        .order("created_at", { ascending: true })
+        .limit(1);
+      if (r.error) return null;
+      const oldest = r.data?.[0]?.created_at;
+      // An EMPTY queue is healthy, not unmeasurable: nothing is waiting.
+      if (!oldest) return 0;
+      const ms = endMs - Date.parse(oldest);
+      return Number.isFinite(ms) ? Math.round(ms / 3_600_000) : null;
+    },
+    describe: (r) =>
+      `the oldest un-drained phone lookup has been waiting ${r.observed}h. ` +
+      `The queue fills in the cloud but drains on one desktop worker, so this fails ` +
+      `silently and caps how many leads can ever become textable.`,
+  },
+  {
     // A backlog that stops draining is the shape of a stalled dispatcher, and
     // it is visible before output drops to zero.
     id: "drips.overdue_backlog",
