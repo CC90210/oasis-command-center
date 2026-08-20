@@ -192,3 +192,27 @@ export function resumeAllowed(results: LineResult[]): { ok: boolean; reason: str
   }
   return { ok: true, reason: `${cleared.length} cleared line(s): ${cleared.join(", ")}` };
 }
+
+/**
+ * The test message.
+ *
+ * Unmistakably a test to whoever receives it, and deliberately SHORT: a
+ * two-segment message costs double and varies the delivery path. The thing
+ * being measured is the line, so the message must not be a variable.
+ *
+ * IT MUST ALSO BE UNIQUE PER LINE, and that is not cosmetic. Observed
+ * 2026-08-20: TextTorrent keys a chat by DESTINATION, so two different sending
+ * numbers testing the same handset landed in the SAME thread (chat 1322896).
+ * The reconciler identifies our message by body hash within a thread, so an
+ * identical body from two lines is genuinely ambiguous — the delivered verdict
+ * from a good line could be paired to the receipt of a dead one, and the canary
+ * would clear a number that does not work.
+ *
+ * The last four digits of the SENDING number disambiguate it, are meaningless
+ * to a stranger, and keep the message inside one segment.
+ */
+export function canaryBody(now: Date, fromNumber = ""): string {
+  const tag = String(fromNumber).replace(/\D/g, "").slice(-4);
+  const suffix = tag ? ` (${tag})` : "";
+  return `SunBiz line test ${now.toISOString().slice(11, 16)} UTC${suffix}. No action needed.`;
+}

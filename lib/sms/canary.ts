@@ -17,7 +17,8 @@ import "server-only";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { getTextTorrentCredentials, sendSms } from "@/lib/integrations/texttorrent";
 import { openReceipt } from "./delivery-receipts";
-import { lineVerdict, type CanaryAttempt, type LineResult } from "./canary-core";
+import { lineVerdict, canaryBody, type CanaryAttempt, type LineResult } from "./canary-core";
+export { canaryBody } from "./canary-core";
 
 type Db = ReturnType<typeof getServiceSupabase>;
 
@@ -31,17 +32,6 @@ export type CanaryLine = {
   service: string;
 };
 
-/**
- * The test message.
- *
- * Written to be unmistakably a test to whoever receives it, and deliberately
- * SHORT: a two-segment message costs double and, more importantly, varies the
- * delivery path. The thing being measured is the line, so the message must not
- * be a variable.
- */
-export function canaryBody(now: Date): string {
-  return `SunBiz line test ${now.toISOString().slice(11, 16)} UTC. No action needed.`;
-}
 
 export type CanarySendResult = {
   line: CanaryLine;
@@ -66,10 +56,12 @@ export async function sendCanaries(
 ): Promise<CanarySendResult[]> {
   const db: Db = getServiceSupabase();
   const now = opts.now ?? new Date();
-  const body = canaryBody(now);
   const out: CanarySendResult[] = [];
 
   for (const line of lines) {
+    // Per-line body: see canaryBody. A shared body in a shared thread makes the
+    // verdict ambiguous, and an ambiguous canary can clear a dead number.
+    const body = canaryBody(now, line.number);
     try {
       const creds = await getTextTorrentCredentials(tenantId, {
         service: line.service,

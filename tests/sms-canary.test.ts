@@ -10,7 +10,7 @@
  */
 
 import assert from "node:assert/strict";
-import { lineVerdict, clearedLines, resumeAllowed, MIN_SPREAD_MS, type CanaryAttempt } from "../lib/sms/canary-core";
+import { lineVerdict, clearedLines, resumeAllowed, canaryBody, MIN_SPREAD_MS, type CanaryAttempt } from "../lib/sms/canary-core";
 
 const N = "+19703237557";
 const at = (iso: string, status: string | null, resolved = true): CanaryAttempt => ({
@@ -123,6 +123,47 @@ const at = (iso: string, status: string | null, resolved = true): CanaryAttempt 
   const r3 = resumeAllowed(good);
   assert.equal(r3.ok, true);
   assert.match(r3.reason, /\+19703237557/);
+}
+
+// ── THE BODY MUST BE UNIQUE PER LINE ─────────────────────────────────────
+// Observed live 2026-08-20, and it cost a whole canary round:
+//
+//   TextTorrent keys a chat by DESTINATION, so several sending numbers testing
+//   the same handset land in the SAME thread. Two consequences, both silent:
+//     1. the reconciler identifies our message by body hash within a thread, so
+//        an identical body from two lines is genuinely ambiguous — a delivered
+//        verdict could be paired to a DEAD line's receipt and clear it;
+//     2. openReceipt upserts on (tenant, chat, body_hash, sent_at), so those
+//        pairs COLLAPSED into one row and three lines' readings vanished
+//        entirely. Six sends produced three receipts.
+//
+// Tagging the body with the sending line's last four fixes both.
+{
+  const now = new Date("2026-08-20T21:05:00Z");
+  const a = canaryBody(now, "+19703237557");
+  const b = canaryBody(now, "+16505977482");
+  assert.notEqual(a, b, "two lines sending in the same second must not produce the same body");
+  assert.match(a, /7557/);
+  assert.match(b, /7482/);
+
+  // Still one segment. A 2-segment message costs double and changes the
+  // delivery path, which would make the message a variable in a test whose
+  // only variable is meant to be the line.
+  assert.ok(a.length <= 160, `canary body must fit one segment, got ${a.length}`);
+
+  // Unmistakably a test to whoever receives it.
+  assert.match(a, /test/i);
+  assert.match(a, /No action needed/);
+
+  // Degrades safely: no line given still yields a usable body rather than
+  // throwing mid-sweep.
+  assert.ok(canaryBody(now).length > 0);
+  assert.ok(canaryBody(now, "").length > 0);
+
+  // Every real line produces a distinct body in the same instant.
+  const LINES = ["+19703237557", "+16505977482", "+12396663668", "+16513602924", "+19162461315", "+13802350121"];
+  const bodies = new Set(LINES.map((n) => canaryBody(now, n)));
+  assert.equal(bodies.size, LINES.length, "all six lines must produce six distinct bodies");
 }
 
 console.log("sms-canary.test.ts — all assertions passed");
