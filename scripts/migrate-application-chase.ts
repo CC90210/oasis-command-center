@@ -87,6 +87,18 @@ let SUNBIZ_VIEWED_APPLICATION_STEPS: Array<{
 }>;
 
 const log = (s = "") => console.log(s);
+
+/**
+ * FAIL CLOSED on every read. A query error that falls through as `?? []` reads
+ * as "no rows", and every decision here is driven by row counts: no history
+ * means re-send the opener, no pending SMS means nothing to cancel. A transient
+ * database error would therefore mail merchants. (Codex review P1 x2.)
+ */
+function must<T>(res: { data: T | null; error: { message: string } | null }, what: string): T {
+  if (res.error) throw new Error(`${what} failed: ${res.error.message}`);
+  return (res.data ?? []) as T;
+}
+
 const parseSteps = (raw: unknown): Step[] => {
   if (Array.isArray(raw)) return raw as Step[];
   try { return JSON.parse(String(raw)) as Step[]; } catch { return []; }
@@ -116,11 +128,8 @@ async function main() {
     .select("id, name, steps")
     .eq("tenant_id", tenantId)
     .in("name", [CHASE, STATEMENTS]);
-  if (seqRes.error) {
-    console.error("FAIL: could not read sequences:", seqRes.error.message);
-    process.exit(1);
-  }
-  const seqs = (seqRes.data ?? []).map((r) => {
+  const seqRows = must(seqRes, "read drip_sequences");
+  const seqs = seqRows.map((r) => {
     const row = r as { id: string; name: string; steps: unknown };
     return { id: row.id, name: row.name, steps: parseSteps(row.steps) } as Seq;
   });
@@ -166,7 +175,10 @@ async function main() {
     .in("sequence_id", targetIds)
     .eq("channel", "sms")
     .in("status", LIVE_RUN);
-  const smsRows = (smsRuns.data ?? []) as Array<{ id: string; sequence_name: string; status: string }>;
+  // Fail closed: reading this as zero would report "nothing to cancel" and
+  // leave scheduled texts alive, which is the one thing this migration exists
+  // to stop. (Codex review P1.)
+  const smsRows = must(smsRuns, "read scheduled SMS runs") as Array<{ id: string; sequence_name: string; status: string }>;
   log("── 3. In-flight SMS (would text a merchant from the old shape) ────────");
   log(`   ${smsRows.length} row(s) to cancel in drip_runs\n`);
 
@@ -177,7 +189,7 @@ async function main() {
     .eq("tenant_id", tenantId)
     .in("sequence_id", targetIds)
     .in("status", LIVE_STATE);
-  const stateRows = (stateRes.data ?? []) as Array<{ id: string; status: string }>;
+  const stateRows = must(stateRes, "read sequence_state") as Array<{ id: string; status: string }>;
   log("── 4. Second engine containment (VPS sequence_state) ──────────────────");
   log(`   ${stateRows.length} non-terminal row(s) to cancel so it cannot double-send\n`);
 
@@ -196,12 +208,21 @@ async function main() {
   }
 
   // ---- writes --------------------------------------------------------------
+  // Everything below depends on the new step list being live. Cancelling a
+  // lead's SMS and enrolling them at new step 3 while the sequence is still the
+  // old two-step definition would fire the wrong copy at a merchant, or
+  // nothing at all. Abort rather than half-migrate. (Codex review P1.)
   const upd = await db
     .from("drip_sequences")
     .update({ steps: JSON.stringify(SUNBIZ_VIEWED_APPLICATION_STEPS), updated_at: new Date().toISOString() })
     .eq("id", chase.id)
     .eq("tenant_id", tenantId);
-  log(upd.error ? `   chase rewrite FAILED: ${upd.error.message}` : "   chase rewritten");
+  if (upd.error) {
+    throw new Error(
+      `chase rewrite failed: ${upd.error.message}. Nothing else was written; the sequence is unchanged and safe to retry.`,
+    );
+  }
+  log("   chase rewritten");
 
   if (statements && statementsKept.length !== statements.steps.length) {
     const u2 = await db
@@ -209,7 +230,8 @@ async function main() {
       .update({ steps: JSON.stringify(statementsKept), updated_at: new Date().toISOString() })
       .eq("id", statements.id)
       .eq("tenant_id", tenantId);
-    log(u2.error ? `   statements nag FAILED: ${u2.error.message}` : "   statements nag: SMS removed");
+    if (u2.error) throw new Error(`statements nag rewrite failed: ${u2.error.message}`);
+    log("   statements nag: SMS removed");
   }
 
   let cancelledRuns = 0;
@@ -276,15 +298,27 @@ async function findDormant(tenantId: string, sequenceId: string) {
     (r) => typeof r.data?.email === "string" && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(r.data.email as string),
   );
 
-  const runs = await db
+  const runsRes = await db
     .from("drip_runs")
     .select("lead_id, step_index, status, channel")
     .eq("tenant_id", tenantId)
     .eq("sequence_id", sequenceId);
+  // Fail closed: an error read as "no rows" makes every lead look like it has
+  // no history, and the backfill would mail the opener to people who already
+  // got it. (Codex review P1.)
+  const runRows = must(runsRes, "read drip_runs history") as Array<{
+    lead_id: string; step_index: number; status: string; channel: string;
+  }>;
   const byLead = new Map<string, { pending: boolean; emailsSeen: Set<number> }>();
-  for (const r of (runs.data ?? []) as Array<{ lead_id: string; step_index: number; status: string; channel: string }>) {
+  for (const r of runRows) {
     const cur = byLead.get(r.lead_id) || { pending: false, emailsSeen: new Set<number>() };
-    if (LIVE_RUN.includes(r.status)) cur.pending = true;
+    // A pending SMS does NOT count as being chased: this migration cancels
+    // every one of them. Counting it would exclude exactly those leads from the
+    // backfill and then cancel their only remaining contact, leaving them with
+    // nothing — the precise outcome this migration exists to prevent. Ignoring
+    // SMS here also keeps the dry run and the apply run in agreement, rather
+    // than depending on which ran first. (Codex review P1.)
+    if (LIVE_RUN.includes(r.status) && (r.channel || "email") === "email") cur.pending = true;
     // Count EMAILS RECEIVED, not the raw step index.
     //
     // The step numbering changed underneath these leads: the old sequence was
