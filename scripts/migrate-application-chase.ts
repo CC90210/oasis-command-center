@@ -71,7 +71,18 @@ const BACKFILL = backfillArg >= 0 ? parseInt(process.argv[backfillArg + 1] || "0
 
 const TENANT_SLUG = "submissions";
 const CHASE = "Viewed application nudge";
-const STATEMENTS = "Signed application — bank statements nag";
+/**
+ * The SAME sequence is spelled two ways in this estate: the live tenant row
+ * uses an em dash, lib/sunbiz-default-sequences.ts uses a hyphen. Matching one
+ * literal silently skips the other, which would leave the banned paperwork SMS
+ * live while the script reports the sequence "not found" and exits 0 - a
+ * migration that claims success having done half the job.
+ * (Codex review P1, round 4.)
+ */
+const STATEMENTS = "Signed application - bank statements nag";
+/** Dash-insensitive, case-insensitive, whitespace-collapsed name key. */
+const nameKey = (v: string) =>
+  v.replace(/[\u2010-\u2015\u2212]/g, "-").replace(/\s+/g, " ").trim().toLowerCase();
 /** Statuses that still represent pending work. */
 const LIVE_RUN = ["scheduled", "pending"];
 /**
@@ -132,15 +143,14 @@ async function main() {
   const seqRes = await db
     .from("drip_sequences")
     .select("id, name, steps")
-    .eq("tenant_id", tenantId)
-    .in("name", [CHASE, STATEMENTS]);
+    .eq("tenant_id", tenantId);
   const seqRows = must(seqRes, "read drip_sequences");
   const seqs = seqRows.map((r) => {
     const row = r as { id: string; name: string; steps: unknown };
     return { id: row.id, name: row.name, steps: parseSteps(row.steps) } as Seq;
   });
-  const chase = seqs.find((s) => s.name === CHASE);
-  const statements = seqs.find((s) => s.name === STATEMENTS);
+  const chase = seqs.find((x) => nameKey(x.name) === nameKey(CHASE));
+  const statements = seqs.find((x) => nameKey(x.name) === nameKey(STATEMENTS));
   if (!chase) {
     console.error(`FAIL: sequence "${CHASE}" not found on this tenant.`);
     process.exit(1);
@@ -168,7 +178,8 @@ async function main() {
     log(`   ${statements.steps.length} steps -> ${statementsKept.length} (dropping ${dropped} SMS)`);
     log("   email steps are left exactly as they are\n");
   } else {
-    log("── 2. Signed application nag: sequence not found, skipping\n");
+    log("── 2. Signed application nag: NOT FOUND on this tenant.");
+    log("   If it should exist, stop and check the name before trusting this run.\n");
   }
 
   const targetIds = [chase.id, ...(statements ? [statements.id] : [])];
