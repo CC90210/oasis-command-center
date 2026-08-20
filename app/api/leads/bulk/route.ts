@@ -438,6 +438,12 @@ export async function POST(req: NextRequest) {
     // Start draining NOW, after the response is flushed. Best-effort by
     // design: the row is already durable and the 5-minute cron re-drains
     // anything this misses, so a failure here delays a send, never loses one.
+    //
+    // Safe to fire unconditionally: runDispatchBulkEmail takes an estate-wide
+    // lease, so a kick that overlaps another kick or the cron returns
+    // immediately instead of running a second drain alongside it. Without that
+    // lease each runner would compute its own per-tick and daily budget and
+    // both would spend it, multiplying the send rate on a shared mailbox.
     if (queued > 0) {
       after(async () => {
         try {

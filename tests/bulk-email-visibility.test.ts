@@ -169,6 +169,49 @@ assert.match(
 );
 assert.match(bulkRoute, /export const maxDuration = 60;/, "the invocation has room for the drain");
 
+// 🚨 Kicking the drain from the request path made concurrent drains reachable
+// (kick vs kick, and kick vs cron). Per-tick and daily budgets are computed per
+// invocation, so two runners each spend a full budget: the row CAS prevents
+// duplicate DELIVERY but not a doubled send RATE on a mailbox that also carries
+// every transactional message. (Codex review P1, 2026-08-20 round 8.)
+assert.match(dispatch, /const DRAIN_LEASE_KEY = "bulk-email-drain";/, "the drain takes a lease");
+assert.match(
+  dispatch,
+  /const lease = await acquireDrainLease\(db, leaseTenant\);\s*\n\s*if \(!lease\) \{/,
+  "and refuses to run without it",
+);
+assert.match(
+  dispatch,
+  /stoppedEarly: "drain_already_running"/,
+  "losing the race is a normal outcome, not a failure",
+);
+assert.match(
+  dispatch,
+  /return \{ \.\.\.out, stoppedEarly: "drain_already_running" \};/,
+  "and returns ok:true so it never reaches the alerting path",
+);
+assert.match(
+  dispatch,
+  /\} finally \{\s*\n\s*await releaseDrainLease\(db, leaseTenant, lease\);/,
+  "the lease is released even when the tick throws",
+);
+assert.match(
+  dispatch,
+  /return \{ \.\.\.out, ok: false, stoppedEarly: "tenant_lookup_failed" \};/,
+  "an unresolvable tenant stops the tick before any send, not part-way through",
+);
+// The lease must outlive a full tick or a live drain could lose its own lease.
+assert.ok(
+  /const DRAIN_LEASE_SECONDS = 120;/.test(dispatch) && /const SOFT_TIME_BUDGET_MS = 45_000;/.test(dispatch),
+  "lease TTL comfortably exceeds the tick's own time budget",
+);
+// An unexpired lease belongs to a live drain and must survive the cleanup.
+assert.match(
+  dispatch,
+  /\.lt\("expires_at", now\)/,
+  "only EXPIRED leases are cleared, never a live one",
+);
+
 // ---------------------------------------------------------------------------
 // 6. Failure honesty: an unreadable chunk is reported as failed, never as
 //    "not found". Telling an operator a lead vanished when the database
