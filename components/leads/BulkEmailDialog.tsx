@@ -36,6 +36,7 @@ import {
   PencilLine,
   LayoutTemplate,
   Eye,
+  Clock,
 } from "lucide-react";
 import {
   SUNBIZ_BULK_SAFE_TEMPLATES,
@@ -72,10 +73,20 @@ type BatchStatus = {
   in_flight: boolean;
 };
 
-type Phase = "compose" | "sending" | "done";
+/**
+ * "background" is deliberately distinct from "done". The drain sends
+ * PER_TICK (20 by default) every 5 minutes, so a 100-recipient batch takes
+ * ~25 minutes and a large one takes hours. When we stop watching we must say
+ * "still going", never render a terminal "20 of 100 sent" for a batch the API
+ * still reports as in flight: a receipt that overstates completion is the same
+ * class of lie as the silence this whole dialog exists to replace.
+ * (Codex review P1, 2026-08-20 round 2.)
+ */
+type Phase = "compose" | "sending" | "done" | "background";
 
 const POLL_MS = 2500;
-/** Stop polling eventually so a wedged batch doesn't spin forever. */
+/** Stop WATCHING after this long. The send itself is unaffected: it lives in
+ *  the queue and the cron keeps draining it. */
 const POLL_CEILING_MS = 5 * 60_000;
 
 export function BulkEmailDialog({
@@ -266,7 +277,9 @@ export function BulkEmailDialog({
     void tick();
     const id = setInterval(() => {
       if (Date.now() - pollStarted.current > POLL_CEILING_MS) {
-        setPhase("done");
+        // Stop watching, but do NOT claim the batch finished. Whatever is
+        // still queued keeps draining on the cron.
+        setPhase("background");
         onSentRef.current?.();
         return;
       }
@@ -663,23 +676,31 @@ function SendProgress({
   noun: string;
 }) {
   const done = phase === "done";
+  const background = phase === "background";
   const pct = status.total > 0 ? Math.round(((sent + failed + suppressed) / status.total) * 100) : 0;
+  const remaining = status.counts.queued + status.counts.sending;
   return (
     <div className="space-y-2.5 rounded-lg border border-bg-border bg-bg-deep px-3 py-3">
       <div className="flex items-center gap-2 text-[13px] font-semibold text-fg">
         {done ? (
           <CheckCircle2 className="h-4 w-4 text-emerald-400" />
+        ) : background ? (
+          <Clock className="h-4 w-4 text-amber-300" />
         ) : (
           <Loader2 className="h-4 w-4 animate-spin text-accent" />
         )}
         {done
           ? `${sent} of ${status.total} sent`
-          : `Sending… ${sent} of ${status.total} ${noun}${status.total === 1 ? "" : "s"}`}
+          : background
+            ? `Still sending. ${sent} of ${status.total} done so far`
+            : `Sending… ${sent} of ${status.total} ${noun}${status.total === 1 ? "" : "s"}`}
       </div>
 
       <div className="h-1.5 w-full overflow-hidden rounded-full bg-bg-elev">
         <div
-          className={`h-full rounded-full transition-all duration-500 ${done ? "bg-emerald-400" : "bg-accent"}`}
+          className={`h-full rounded-full transition-all duration-500 ${
+            done ? "bg-emerald-400" : background ? "bg-amber-400" : "bg-accent"
+          }`}
           style={{ width: `${Math.max(pct, 4)}%` }}
         />
       </div>
@@ -688,17 +709,21 @@ function SendProgress({
         <span className="text-emerald-300">{sent} sent</span>
         {suppressed > 0 && <span className="text-amber-300">{suppressed} unsubscribed, skipped</span>}
         {failed > 0 && <span className="text-red-300">{failed} failed</span>}
-        {status.counts.queued + status.counts.sending > 0 && (
-          <span>{status.counts.queued + status.counts.sending} still going</span>
-        )}
+        {remaining > 0 && <span>{remaining} still going</span>}
       </div>
 
-      {!done && (
+      {background ? (
+        <p className="text-[11px] text-fg-dim">
+          A big batch goes out in waves rather than all at once, so this can take a while. It keeps
+          running whether or not this window is open. Open Recent sends any time for the current
+          count.
+        </p>
+      ) : !done ? (
         <p className="text-[11px] text-fg-dim">
           You can close this. The send keeps running, and you can check it any time under Recent
           sends.
         </p>
-      )}
+      ) : null}
       {done && failed > 0 && (
         <p className="text-[11px] text-fg-dim">
           Open Recent sends to see which addresses failed.

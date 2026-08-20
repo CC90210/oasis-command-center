@@ -211,6 +211,27 @@ assert.match(
 );
 assert.match(dialog, /if \(!body\.batch\.in_flight\) \{/, "polling stops on a terminal batch");
 assert.match(dialog, /POLL_CEILING_MS/, "polling has a ceiling so a wedged batch can't spin forever");
+
+// 🚨 Hitting that ceiling must NOT be reported as completion. The drain sends
+// PER_TICK (20) every 5 minutes, so a 100-recipient batch legitimately takes
+// ~25 minutes; declaring "20 of 100 sent" as a final result is the same class
+// of lie as the silence this dialog replaces.
+// (Codex review P1, 2026-08-20 round 2.)
+assert.match(
+  dialog,
+  /if \(Date\.now\(\) - pollStarted\.current > POLL_CEILING_MS\) \{[\s\S]{0,300}?setPhase\("background"\)/,
+  "the poll ceiling hands off to a background state, never to done",
+);
+assert.ok(
+  !/POLL_CEILING_MS\) \{\s*\n\s*setPhase\("done"\)/.test(dialog),
+  "the ceiling never sets phase=done",
+);
+assert.match(dialog, /Still sending\. \$\{sent\} of \$\{status\.total\} done so far/, "and says so plainly");
+assert.match(
+  dialog,
+  /It keeps\s*\n?\s*running whether or not this window is open/,
+  "the operator is told the send continues without the dialog",
+);
 assert.match(dialog, /renderSunbizTemplate|renderCustomMessage/, "preview uses the same renderers as the server");
 assert.match(
   dialog,
