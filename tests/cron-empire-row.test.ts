@@ -100,6 +100,31 @@ assert.equal(inferEmpireAgentKey("Inbound Email Sweep", "script_run"), "bravo");
 assert.equal(inferEmpireAgentKey(null, null), "bravo", "a null name must not throw");
 assert.equal(inferEmpireAgentKey({ a: 1 }, null), "bravo", "an object name must not throw");
 
+// Maven's content work, by the real empire job names. None of these carry an
+// agent prefix, so all four filed under Bravo and the board credited the CEO
+// lane with the CMO's automations.
+for (const jobName of [
+  "Marketing Publish Drain",
+  "Post Analytics Sync",
+  "Library Post Linker",
+  "Training Corpus Ingest",
+]) {
+  assert.equal(
+    inferEmpireAgentKey(jobName, "script_run"),
+    "maven",
+    `${jobName} is content work and belongs to Maven`,
+  );
+}
+
+// An explicit agent prefix still wins over a domain keyword, so a finance job
+// that merely mentions marketing spend stays with Atlas.
+assert.equal(inferEmpireAgentKey("Atlas — marketing spend reconcile", null), "atlas");
+assert.equal(inferEmpireAgentKey("Maven — anything", null), "maven");
+// And genuinely operational jobs stay with Bravo.
+assert.equal(inferEmpireAgentKey("Inbound Email Sweep", "script_run"), "bravo");
+assert.equal(inferEmpireAgentKey("Daily State DB Backup", "script_run"), "bravo");
+assert.equal(inferEmpireAgentKey("Bravo — Review Harvest", "script_run"), "bravo");
+
 // run_count arrives as INTEGER; a missing one must read 0, never NaN.
 assert.equal(normalizeEmpireRow(row({ run_count: null })).run_count, 0);
 assert.equal(normalizeEmpireRow(row({ run_count: 42 })).run_count, 42);
