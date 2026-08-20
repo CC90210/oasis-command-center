@@ -15,6 +15,7 @@ import { SequenceTemplatesView, type TemplatesViewRow } from "./SequenceTemplate
 import { DripActivityView, type ActivityRow, type ActivitySummary } from "./DripActivityView";
 import { SequenceVolumeView, type VolumeRow } from "./SequenceVolumeView";
 import type { ChannelLimits } from "@/lib/drips/channel-limits-core";
+import type { ScoreboardResult } from "@/lib/drips/scoreboard-core";
 
 /** Everything the Volume tab needs, resolved server-side. `error` is carried
  *  explicitly so a failed read renders as UNKNOWN rather than as an empty
@@ -49,6 +50,7 @@ export function SequencesTabs({
   activitySummary,
   activityError,
   summaryError,
+  scoreboard,
   volume,
   pool,
 }: {
@@ -57,6 +59,9 @@ export function SequencesTabs({
   activitySummary: ActivitySummary;
   activityError?: string | null;
   summaryError?: string | null;
+  /** Per-sequence rollup for the Activity tab. Its own read and its own error,
+   *  so a short activity table cannot mark these counts unknown or vice versa. */
+  scoreboard?: ScoreboardResult | null;
   volume: VolumeTabData;
   pool: PoolTemplate[];
 }) {
@@ -122,6 +127,7 @@ export function SequencesTabs({
           summary={activitySummary}
           readError={activityError ?? null}
           summaryError={summaryError ?? null}
+          scoreboard={scoreboard ?? null}
         />
       ) : tab === "volume" ? (
         <SequenceVolumeView
