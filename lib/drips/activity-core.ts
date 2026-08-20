@@ -111,10 +111,36 @@ export function summarizeFailures(rows: RunShape[]): FailureSummary {
  * look like an outage — which would train an operator to ignore the number.
  */
 export function isHeldForPolicy(lastError: unknown): boolean {
-  return /sms_no_lawful_basis|unreachable:|sms_channel_unavailable|email_channel_unavailable|sms_provider_not_wired|sms_no_sender_line/.test(
-    String(lastError ?? ""),
-  );
+  return POLICY_HOLD_RE.test(String(lastError ?? ""));
 }
+
+/**
+ * What counts as "the rules stopped this", as opposed to "this broke".
+ *
+ * WIDENED 2026-08-20 after reading the real vocabulary out of production. The
+ * original pattern covered lawful-basis and channel-availability only, so the
+ * three most common policy stops in the table were all being rendered as
+ * FAILURES: 45 rows of `suppressed (unsubscribed)`, 39 of `tcpa_unresolved_tz`,
+ * and ~90 of `email_volume_gate` / `email_window` / `quiet_hours`.
+ *
+ * That inverts the meaning of the failure tile. An operator looking at this tab
+ * saw a large red number that was mostly opt-outs being honoured correctly, and
+ * the fix for a large red number that does not mean anything is to stop reading
+ * it — which is exactly how the real failures underneath went unnoticed.
+ *
+ * Three groups, all "working as designed":
+ *   consent   — the merchant, or the law, said no.
+ *   channel   — we have no lawful way to reach them on this channel yet.
+ *   pacing    — OUR OWN ceiling deferred it. It will send later.
+ *
+ * Deliberately EXCLUDED, because they are real and must stay red:
+ *   sms_delivery_failed_after_retries, http_4xx/5xx, lead_not_found,
+ *   rate_limiter_unavailable, and sms_carrier_halt. The last one is the breaker
+ *   opening — a symptom of an outage, never a policy stop, and painting it
+ *   amber would hide precisely the condition it exists to announce.
+ */
+const POLICY_HOLD_RE =
+  /sms_no_lawful_basis|unreachable:|sms_channel_unavailable|email_channel_unavailable|sms_provider_not_wired|sms_no_sender_line|suppressed \(|unsubscribed|opted_out|tcpa_|quiet_hours|email_window|email_volume_gate|sms_hourly_cap|sms_daily_cap/;
 
 /**
  * The activity window, expressed on OUTCOME time rather than schedule time.
