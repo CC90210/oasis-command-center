@@ -86,11 +86,18 @@ const nameKey = (v: string) =>
 /** Statuses that still represent pending work. */
 const LIVE_RUN = ["scheduled", "pending"];
 /**
- * Statuses an SMS row can hold and still reach a merchant. Wider than LIVE_RUN
- * ON PURPOSE: a row the dispatcher has already claimed is "sending", and the
- * rewrite below changes what step 1 IS. See the ordering note in main().
+ * SMS rows this script may cancel: not yet claimed, so flipping the row to
+ * cancelled genuinely prevents the send.
  */
-const CANCELLABLE_SMS = ["scheduled", "pending", "sending", "claimed"];
+const CANCELLABLE_SMS = ["scheduled", "pending"];
+/**
+ * SMS rows already claimed by a dispatcher tick. These CANNOT be cancelled from
+ * here: dispatchDrips does not re-read the row status before calling the
+ * provider, so the in-memory worker sends regardless of what the row now says.
+ * Writing "cancelled" over them would report containment that did not happen.
+ * The only honest handling is to WAIT. (Codex review P1, round 6.)
+ */
+const IN_FLIGHT_SMS = ["sending", "claimed"];
 const LIVE_STATE = ["scheduled", "pending", "claimed"];
 
 type Step = { channel?: string; delay_minutes?: number; subject?: string; body?: string };
@@ -203,13 +210,16 @@ async function main() {
     .eq("tenant_id", tenantId)
     .in("sequence_id", targetIds)
     .eq("channel", "sms")
-    .in("status", CANCELLABLE_SMS);
+    .in("status", [...CANCELLABLE_SMS, ...IN_FLIGHT_SMS]);
   // Fail closed: reading this as zero would report "nothing to cancel" and
   // leave scheduled texts alive, which is the one thing this migration exists
   // to stop. (Codex review P1.)
-  const smsRows = must(smsRuns, "read scheduled SMS runs") as Array<{ id: string; sequence_name: string; status: string }>;
+  const allSms = must(smsRuns, "read scheduled SMS runs") as Array<{ id: string; sequence_name: string; status: string }>;
+  const smsRows = allSms.filter((r) => CANCELLABLE_SMS.includes(r.status));
+  const smsInFlight = allSms.filter((r) => IN_FLIGHT_SMS.includes(r.status));
   log("── 3. In-flight SMS (would text a merchant from the old shape) ────────");
-  log(`   ${smsRows.length} row(s) to cancel in drip_runs\n`);
+  log(`   ${smsRows.length} row(s) to cancel in drip_runs`);
+  log(`   ${smsInFlight.length} row(s) already claimed by a dispatcher tick (cannot be cancelled, must be waited out)\n`);
 
   // ---- 4. the second engine -----------------------------------------------
   const stateRes = await db
@@ -245,6 +255,15 @@ async function main() {
   // wakes up pointing at the NEW step 1 and immediately sends an email nobody
   // scheduled. So: cancel every cancellable SMS row FIRST, then re-read, and
   // refuse to rewrite while any is still live. (Codex review P1, round 3.)
+  if (smsInFlight.length) {
+    throw new Error(
+      `${smsInFlight.length} SMS run(s) are already claimed by a dispatcher tick. Cancelling the row ` +
+      `would NOT stop the worker (it does not re-read status before sending), so this run would report ` +
+      `containment that did not happen. Nothing was written. Wait for the tick to finish (a minute or ` +
+      `two) and re-run.`,
+    );
+  }
+
   const containmentErrors: string[] = [];
   let cancelledRuns = 0;
   for (const r of smsRows) {
@@ -272,7 +291,7 @@ async function main() {
       .eq("tenant_id", tenantId)
       .in("sequence_id", targetIds)
       .eq("channel", "sms")
-      .in("status", CANCELLABLE_SMS),
+      .in("status", [...CANCELLABLE_SMS, ...IN_FLIGHT_SMS]),
     "re-read SMS runs",
   ) as Array<{ id: string; status: string }>;
   if (leftover.length) {
@@ -397,9 +416,13 @@ async function findDormant(tenantId: string, sequenceId: string) {
   const runRows = must(runsRes, "read drip_runs history") as Array<{
     lead_id: string; step_index: number; status: string; channel: string;
   }>;
-  const byLead = new Map<string, { pending: boolean; emailsSeen: Set<number> }>();
+  // Only states where the merchant ACTUALLY RECEIVED the email. A failed or
+  // skipped step was never delivered, so it must not push a lead past a message
+  // they never saw: this migration exists to reach people who got nothing.
+  const DELIVERED = ["sent", "done"];
+  const byLead = new Map<string, { pending: boolean; emailsDelivered: Set<number> }>();
   for (const r of runRows) {
-    const cur = byLead.get(r.lead_id) || { pending: false, emailsSeen: new Set<number>() };
+    const cur = byLead.get(r.lead_id) || { pending: false, emailsDelivered: new Set<number>() };
     // A pending SMS does NOT count as being chased: this migration cancels
     // every one of them. Counting it would exclude exactly those leads from the
     // backfill and then cancel their only remaining contact, leaving them with
@@ -419,8 +442,27 @@ async function findDormant(tenantId: string, sequenceId: string) {
     // Counting delivered EMAILS instead is stable across the renumbering: the
     // old sequence had exactly one email, so a lead who received it resumes at
     // index 1 and gets every new message exactly once.
-    if ((r.status === "sent" || r.status === "done") && (r.channel || "email") === "email") {
-      cur.emailsSeen.add(r.step_index);
+    // COUNT the emails delivered; do not read position from step_index.
+    //
+    // Codex (round 6, P2) argued for deriving position from progression rather
+    // than a count, which is right in general. It is wrong HERE, because step
+    // indices in this sequence are not comparable across its own history. The
+    // sequence was reordered on 2026-07-19: before that date step 0 was the SMS
+    // and step 1 was the email (92 delivered emails sit at index 1, all older
+    // than 2026-07-19T20:19); after it, step 0 became the email and step 1 the
+    // SMS (116 delivered emails at index 0). Index 1 therefore identifies two
+    // different messages depending on when the lead was enrolled.
+    //
+    // What IS stable: every historical shape delivered at most ONE email per
+    // lead, and it was the same nudge copy either way. So "how far through the
+    // arc is this lead" is answered by how many emails they received, not by
+    // where those rows happened to sit. Using the index instead pushed 74 leads
+    // to step 2 and skipped new step 1, the strongest message in the arc.
+    //
+    // Going forward the indices are stable, and with failures excluded a count
+    // and a progression agree.
+    if (DELIVERED.includes(r.status) && (r.channel || "email") === "email") {
+      cur.emailsDelivered.add(r.step_index);
     }
     byLead.set(r.lead_id, cur);
   }
@@ -429,9 +471,11 @@ async function findDormant(tenantId: string, sequenceId: string) {
   for (const lead of leads) {
     const st = byLead.get(lead.id);
     if (st?.pending) continue; // already being chased
-    const emailsReceived = st ? st.emailsSeen.size : 0;
-    if (emailsReceived >= SUNBIZ_VIEWED_APPLICATION_STEPS.length) continue; // arc complete
-    out.push({ id: lead.id, resumeIndex: emailsReceived });
+    // One email received => resume at index 1, the first message they have
+    // never seen. None received => start at the opener.
+    const resumeIndex = st ? st.emailsDelivered.size : 0;
+    if (resumeIndex >= SUNBIZ_VIEWED_APPLICATION_STEPS.length) continue; // arc complete
+    out.push({ id: lead.id, resumeIndex });
   }
   return out;
 }
