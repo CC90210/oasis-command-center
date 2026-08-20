@@ -21,6 +21,7 @@ export type Sheet = {
   leads_total: number;
   leads_callable: number;
   leads_no_site: number;
+  leads_callable_no_site: number;
 };
 
 export type Facets = {
@@ -29,9 +30,19 @@ export type Facets = {
   totalCallable: number;
 };
 
-/** Callable leads on a sheet, or no-website-callable when that filter is on. */
+/**
+ * Callable leads on a sheet, or no-website-callable when that filter is on.
+ *
+ * WHY NOT Math.min(leads_callable, leads_no_site)?
+ * Two independent counts tell us nothing about their overlap. min() is an upper
+ * bound on the intersection, but the actual overlap is unknown — it could be far
+ * smaller. A live measurement against 1,579 sheets showed the rail returning 29,573
+ * (min-based) while the results table showed 10,872 (real intersection): a 2.7x
+ * overstatement on the single filter reps use most. leads_callable_no_site is the
+ * denormalized true intersection count.
+ */
 function weight(s: Sheet, f: WebLeadFilters): number {
-  return f.noSiteOnly ? Math.min(s.leads_callable, s.leads_no_site) : s.leads_callable;
+  return f.noSiteOnly ? s.leads_callable_no_site : s.leads_callable;
 }
 
 /**
