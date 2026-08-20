@@ -63,6 +63,18 @@ export type SequenceScore = {
   delivered: number | null;
   /** Carrier-failed, or the run itself failed before a provider took it. */
   failed: number;
+  /**
+   * The subset of `failed` that the CARRIER refused, as opposed to failing
+   * before any provider was reached.
+   *
+   * Split out because the two are not interchangeable in a rate: a carrier
+   * failure has ALREADY been counted in `sent` (it did reach the provider),
+   * while a pre-provider failure never was. Adding `sent + failed` therefore
+   * counts every carrier failure twice and deflates the failure rate — Codex
+   * review 2026-08-20: two failed and one delivered read as 40% instead of 67%,
+   * which is the difference between "Some failures" and "Failing" on the card.
+   */
+  carrierFailed: number;
   /** Sent, but no terminal carrier verdict yet. SMS only. */
   unconfirmed: number;
   /** Consent / no-channel holds. Policy working, not an error. */
@@ -133,7 +145,7 @@ export function scoreSequences(
       channel,
       enabled: enabledByName.has(sequenceName) ? !!enabledByName.get(sequenceName) : null,
       queued: 0, sent: 0, delivered: 0,
-      failed: 0, unconfirmed: 0, held: 0, skipped: 0, lastActivityAt: null,
+      failed: 0, carrierFailed: 0, unconfirmed: 0, held: 0, skipped: 0, lastActivityAt: null,
     };
 
     for (const r of rows) {
@@ -166,7 +178,7 @@ export function scoreSequences(
         smsSent++;
         const v = verdict(r);
         if (v === "delivered") score.delivered!++;
-        else if (v === "failed") score.failed++;
+        else if (v === "failed") { score.failed++; score.carrierFailed++; }
         else score.unconfirmed++;
         continue;
       }
@@ -224,14 +236,33 @@ export type ScoreboardResult = {
 };
 
 export function verdictFor(s: SequenceScore): ScoreVerdict {
-  const attempted = s.sent + s.failed;
-  if (attempted === 0) return s.queued > 0 ? "idle" : "idle";
+  // MUTUALLY EXCLUSIVE OUTCOMES ONLY. A carrier failure is already inside
+  // `sent`, so `sent + failed` would count it twice; only the failures that
+  // never reached a provider need adding back in. (Codex review 2026-08-20.)
+  const preProviderFailed = s.failed - s.carrierFailed;
+  const attempted = s.sent + preProviderFailed;
+  if (attempted === 0) return "idle";
+
   const failRate = s.failed / attempted;
   if (failRate >= 0.5) return "failing";
   if (s.failed > 0) return "degraded";
-  // Everything sent, nothing confirmed, and this is a channel that HAS
-  // receipts. That is not success — it is the blind spot that hid three
-  // carrier failures for two days.
-  if (s.delivered !== null && s.delivered === 0 && s.unconfirmed > 0) return "unconfirmed";
+
+  // Unknown is not success. `delivered === null` means the channel has no
+  // receipts to be missing (email), which is fine; a number means texts were
+  // sent and the carrier's answer is what decides.
+  if (s.delivered !== null && s.unconfirmed > 0) {
+    // Codex argued ANY unconfirmed should block `ok`. Not taken, deliberately:
+    // reconciliation is asynchronous (a receipt is not even looked at for 90
+    // seconds, and the cron runs every 15 minutes), so a healthy sequence
+    // ALWAYS has its most recent sends unconfirmed. A card that is permanently
+    // amber is a card people stop reading — the same failure this file exists
+    // to fix, just in the other colour.
+    //
+    // So the line is majority: unknown outweighing confirmed is a blind spot,
+    // a short unconfirmed tail behind a confirmed majority is just latency.
+    // Both of Codex's cases still trip it (0 delivered/11 unconfirmed, and
+    // 1 delivered/10 unconfirmed).
+    if (s.unconfirmed > (s.delivered ?? 0)) return "unconfirmed";
+  }
   return "ok";
 }

@@ -132,11 +132,87 @@ assert.equal(scoreSequences([sms({ sequence_name: "   " })]).length, 0);
 
 // ── verdictFor thresholds ─────────────────────────────────────────────────
 {
-  const base = { sequenceName: "s", channel: "sms" as const, enabled: true, queued: 0, held: 0, skipped: 0, lastActivityAt: null };
+  const base = {
+    sequenceName: "s", channel: "sms" as const, enabled: true,
+    queued: 0, held: 0, skipped: 0, carrierFailed: 0, lastActivityAt: null,
+  };
   assert.equal(verdictFor({ ...base, sent: 0, delivered: 0, failed: 0, unconfirmed: 0 }), "idle");
-  assert.equal(verdictFor({ ...base, sent: 1, delivered: 0, failed: 1, unconfirmed: 0 }), "failing", "50% is failing");
-  assert.equal(verdictFor({ ...base, sent: 9, delivered: 9, failed: 1, unconfirmed: 0 }), "degraded", "one failure is never ok");
   assert.equal(verdictFor({ ...base, sent: 9, delivered: 9, failed: 0, unconfirmed: 0 }), "ok");
+
+  // A pre-provider failure was never counted in `sent`, so it adds to the
+  // denominator.
+  assert.equal(
+    verdictFor({ ...base, sent: 1, delivered: 1, failed: 1, carrierFailed: 0, unconfirmed: 0 }),
+    "failing", "1 sent + 1 never-sent = 50%",
+  );
+  assert.equal(
+    verdictFor({ ...base, sent: 9, delivered: 9, failed: 1, carrierFailed: 0, unconfirmed: 0 }),
+    "degraded", "one failure is never ok",
+  );
+}
+
+// ── CODEX P2 #1: a carrier failure must not be counted twice ──────────────
+// It is already inside `sent`, so `sent + failed` inflates the denominator and
+// DEFLATES the failure rate — the difference between "Some failures" and
+// "Failing" on the card an operator is reading.
+{
+  const base = {
+    sequenceName: "s", channel: "sms" as const, enabled: true,
+    queued: 0, held: 0, skipped: 0, lastActivityAt: null,
+  };
+  // Codex's example: 2 carrier-failed, 1 delivered. Three texts reached the
+  // provider; two died. That is 67%, not 40%.
+  const s = { ...base, sent: 3, delivered: 1, failed: 2, carrierFailed: 2, unconfirmed: 0 };
+  assert.equal(verdictFor(s), "failing", "2 of 3 texts refused is FAILING, not merely degraded");
+
+  // And the rate is honest at the boundary: 1 of 3 is 33%, still degraded.
+  assert.equal(
+    verdictFor({ ...base, sent: 3, delivered: 2, failed: 1, carrierFailed: 1, unconfirmed: 0 }),
+    "degraded",
+  );
+
+  // Mixed causes: one never reached the provider, one the carrier refused.
+  // Denominator = 2 sent + 1 pre-provider = 3; failures = 2 → 67%.
+  assert.equal(
+    verdictFor({ ...base, sent: 2, delivered: 1, failed: 2, carrierFailed: 1, unconfirmed: 0 }),
+    "failing",
+  );
+}
+
+// ── CODEX P2 #2: a confirmed minority must not paint the card green ───────
+{
+  const base = {
+    sequenceName: "s", channel: "sms" as const, enabled: true,
+    queued: 0, held: 0, skipped: 0, carrierFailed: 0, lastActivityAt: null,
+  };
+  // Codex's example: 1 delivered, 10 unknown. Previously fell through to `ok`
+  // because `delivered !== 0`.
+  assert.equal(
+    verdictFor({ ...base, sent: 11, delivered: 1, failed: 0, unconfirmed: 10 }),
+    "unconfirmed", "mostly-unknown must never read as Delivering",
+  );
+  // Nothing confirmed at all — the original blind spot.
+  assert.equal(
+    verdictFor({ ...base, sent: 11, delivered: 0, failed: 0, unconfirmed: 11 }),
+    "unconfirmed",
+  );
+  // But a short unconfirmed TAIL behind a confirmed majority is reconciliation
+  // latency, not a blind spot: a receipt is not looked at for 90 seconds and
+  // the cron runs every 15 minutes, so a healthy sequence always has its most
+  // recent sends unconfirmed. Permanent amber is a card people stop reading.
+  assert.equal(
+    verdictFor({ ...base, sent: 10, delivered: 9, failed: 0, unconfirmed: 1 }),
+    "ok", "a recent unconfirmed tail behind a confirmed majority is latency",
+  );
+  assert.equal(
+    verdictFor({ ...base, sent: 10, delivered: 5, failed: 0, unconfirmed: 5 }),
+    "ok", "exactly half unconfirmed is the boundary and stays ok",
+  );
+  // Email has no receipts, so unconfirmed is structurally 0 and this never fires.
+  assert.equal(
+    verdictFor({ ...base, channel: "email" as never, sent: 10, delivered: null, failed: 0, unconfirmed: 0 }),
+    "ok",
+  );
 }
 
 // ── THE POLICY / FAILURE SPLIT, against REAL production strings ───────────
