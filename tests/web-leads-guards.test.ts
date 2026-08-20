@@ -155,7 +155,11 @@ assert.match(
 // main list read, ~31K rows) stays unscoped. Isolate fetchLeads' own body
 // (top-level closing brace is unindented; every nested brace inside it is
 // not) and require the scoping call INSIDE it specifically.
-const fetchLeadsBody = code.match(/export async function fetchLeads\([\s\S]*?\n\}\n/);
+// \r?\n rather than \n: lib/web-leads/data.ts is stored in git WITH CRLF, so a
+// bare \n\}\n never matched and this guard failed on every checkout — taking the
+// rest of the suite with it, since the runner stops at the first failure. The
+// assertion below is unchanged; only its line-ending assumption is.
+const fetchLeadsBody = code.match(/export async function fetchLeads\([\s\S]*?\r?\n\}\r?\n/);
 assert.ok(fetchLeadsBody, "must find fetchLeads() in lib/web-leads/data.ts");
 assert.match(
   fetchLeadsBody[0],
