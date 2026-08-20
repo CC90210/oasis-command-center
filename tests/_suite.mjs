@@ -140,6 +140,7 @@ const TESTS = [
   "tests/web-leads-queries.test.ts",
   "tests/web-leads-data.test.ts",
   "tests/web-leads-counters.test.ts",
+  "tests/web-leads-guards.test.ts",
 ];
 
 const NODE_ARGS = ["--conditions=react-server", "--import", "tsx"];
