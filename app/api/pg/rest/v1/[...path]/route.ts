@@ -29,7 +29,7 @@ import { createHash, timingSafeEqual } from "crypto";
 import { getTursoClient, tursoConfigured } from "@/lib/turso";
 import { createTursoPostgrest } from "@/lib/turso-postgrest";
 import { TEXTTORRENT_RPCS } from "@/lib/turso-rpc-texttorrent";
-import { consume_texttorrent_rate_token } from "@/lib/turso-rpc-shim";
+import { consume_texttorrent_rate_token, patch_tenant_record_data } from "@/lib/turso-rpc-shim";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -40,6 +40,28 @@ type RpcFn = (client: ReturnType<typeof getTursoClient>,
 const RPCS: Record<string, RpcFn> = {
   ...TEXTTORRENT_RPCS,
   consume_texttorrent_rate_token,
+  // TWO REGISTRIES EXISTED AND THEY DID NOT MATCH.
+  //
+  // lib/turso-rpc-shim.ts ports patch_tenant_record_data for the WEB APP, which
+  // calls it in-process. This bridge is what EXTERNAL callers reach, and it had
+  // its own much smaller list — so every JARVIS call came back with
+  // `501 rpc "patch_tenant_record_data" has no Turso port`.
+  //
+  // Measured 2026-08-20: the TPS phone-lookup worker looked a merchant up, found
+  // a mobile (type Wireless), and then could not write it onto the lead — it
+  // stamped `manual_review` and dropped the number. A pipeline that finds phones
+  // and cannot keep them is indistinguishable from one that finds nothing, and
+  // it was the last blocker between 1,099 landline-only leads and being
+  // textable.
+  //
+  // ONLY THIS ONE IS ADDED, deliberately. Spreading the whole shim here would
+  // expose 14 RPCs, 12 of them writes and all marked ported-unverified, to
+  // anyone holding a bridge token — a privilege change disguised as a
+  // convenience. This one is also strictly SAFER than the alternative a caller
+  // would otherwise use: it is a compare-and-set merge, where a
+  // read-modify-write over the same row through the PATCH endpoint would race
+  // and lose updates.
+  patch_tenant_record_data,
 };
 
 function bad(status: number, message: string) {
