@@ -74,6 +74,12 @@ const CHASE = "Viewed application nudge";
 const STATEMENTS = "Signed application — bank statements nag";
 /** Statuses that still represent pending work. */
 const LIVE_RUN = ["scheduled", "pending"];
+/**
+ * Statuses an SMS row can hold and still reach a merchant. Wider than LIVE_RUN
+ * ON PURPOSE: a row the dispatcher has already claimed is "sending", and the
+ * rewrite below changes what step 1 IS. See the ordering note in main().
+ */
+const CANCELLABLE_SMS = ["scheduled", "pending", "sending", "claimed"];
 const LIVE_STATE = ["scheduled", "pending", "claimed"];
 
 type Step = { channel?: string; delay_minutes?: number; subject?: string; body?: string };
@@ -174,7 +180,7 @@ async function main() {
     .eq("tenant_id", tenantId)
     .in("sequence_id", targetIds)
     .eq("channel", "sms")
-    .in("status", LIVE_RUN);
+    .in("status", CANCELLABLE_SMS);
   // Fail closed: reading this as zero would report "nothing to cancel" and
   // leave scheduled texts alive, which is the one thing this migration exists
   // to stop. (Codex review P1.)
@@ -208,10 +214,51 @@ async function main() {
   }
 
   // ---- writes --------------------------------------------------------------
-  // Everything below depends on the new step list being live. Cancelling a
-  // lead's SMS and enrolling them at new step 3 while the sequence is still the
-  // old two-step definition would fire the wrong copy at a merchant, or
-  // nothing at all. Abort rather than half-migrate. (Codex review P1.)
+  // ORDER MATTERS, and this specific order closes a real race.
+  //
+  // The rewrite changes what step 1 IS: SMS becomes an email. The executor
+  // trusts the step's channel at dispatch time (processRow -> resolveChannel),
+  // so if the dispatcher claims an old SMS row while we are rewriting, that row
+  // wakes up pointing at the NEW step 1 and immediately sends an email nobody
+  // scheduled. So: cancel every cancellable SMS row FIRST, then re-read, and
+  // refuse to rewrite while any is still live. (Codex review P1, round 3.)
+  const containmentErrors: string[] = [];
+  let cancelledRuns = 0;
+  for (const r of smsRows) {
+    const c = await db
+      .from("drip_runs")
+      .update({ status: "cancelled", last_error: "sms removed from application chase (2026-08-20)" })
+      .eq("id", r.id)
+      .eq("status", r.status); // CAS: never clobber a status that moved under us
+    if (c.error) containmentErrors.push(`drip_runs ${r.id}: ${c.error.message}`);
+    else cancelledRuns += 1;
+  }
+  log(`   cancelled ${cancelledRuns}/${smsRows.length} in-flight SMS run(s)`);
+  if (containmentErrors.length) {
+    throw new Error(
+      `SMS containment failed (${containmentErrors.length} error(s)); sequence NOT rewritten. ` +
+      `First error: ${containmentErrors[0]}`,
+    );
+  }
+
+  const leftover = must(
+    await db
+      .from("drip_runs")
+      .select("id, status")
+      .eq("tenant_id", tenantId)
+      .in("sequence_id", targetIds)
+      .eq("channel", "sms")
+      .in("status", CANCELLABLE_SMS),
+    "re-read SMS runs",
+  ) as Array<{ id: string; status: string }>;
+  if (leftover.length) {
+    throw new Error(
+      `${leftover.length} SMS run(s) still live (the dispatcher is mid-flight). ` +
+      `NOT rewriting the sequence, because doing so would turn one of those into an unscheduled email. ` +
+      `Wait for the tick to finish and re-run.`,
+    );
+  }
+
   const upd = await db
     .from("drip_sequences")
     .update({ steps: JSON.stringify(SUNBIZ_VIEWED_APPLICATION_STEPS), updated_at: new Date().toISOString() })
@@ -234,26 +281,8 @@ async function main() {
     log("   statements nag: SMS removed");
   }
 
-  // Containment must SUCCEED before anyone is enrolled. A rejected cancel leaves
-  // a scheduled text alive, or leaves the legacy VPS runner able to claim the
-  // sequence, and enrolling on top of either is exactly the harm this migration
-  // exists to prevent. A CAS miss (no error, row already claimed by the
-  // dispatcher) is fine and is NOT an error; a real database error is fatal.
-  // (Codex review P1, round 2.)
-  const containmentErrors: string[] = [];
-
-  let cancelledRuns = 0;
-  for (const r of smsRows) {
-    const c = await db
-      .from("drip_runs")
-      .update({ status: "cancelled", last_error: "sms removed from application chase (2026-08-20)" })
-      .eq("id", r.id)
-      .eq("status", r.status); // CAS: leave anything the dispatcher just claimed
-    if (c.error) containmentErrors.push(`drip_runs ${r.id}: ${c.error.message}`);
-    else cancelledRuns += 1;
-  }
-  log(`   cancelled ${cancelledRuns}/${smsRows.length} in-flight SMS run(s)`);
-
+  // The legacy VPS runner: cancel its claim on these sequences so it can never
+  // double-send if it is ever repaired. Must succeed before anyone is enrolled.
   let cancelledState = 0;
   for (const r of stateRows) {
     const c = await db
@@ -275,6 +304,7 @@ async function main() {
 
   if (BACKFILL > 0) {
     const tranche = dormant.slice(0, BACKFILL);
+    const backfillErrors: string[] = [];
     let enrolled = 0;
     for (const [i, lead] of tranche.entries()) {
       const step = SUNBIZ_VIEWED_APPLICATION_STEPS[lead.resumeIndex];
@@ -291,9 +321,19 @@ async function main() {
         scheduled_for: when,
         status: "scheduled",
       });
-      if (!ins.error) enrolled += 1;
+      if (ins.error) backfillErrors.push(`lead ${lead.id}: ${ins.error.message}`);
+      else enrolled += 1;
     }
     log(`   enrolled ${enrolled}/${tranche.length} dormant lead(s); ${dormant.length - tranche.length} still waiting`);
+    if (backfillErrors.length) {
+      // Reporting Done while leads stayed dormant is how a half-finished
+      // migration gets treated as complete. (Codex review P2, round 3.)
+      throw new Error(
+        `${backfillErrors.length} of ${tranche.length} enrolment(s) failed; those leads are still dormant. ` +
+        `The rewrite and containment ARE live, so re-running --backfill is safe and will retry only the stragglers. ` +
+        `First error: ${backfillErrors[0]}`,
+      );
+    }
   }
 
   log("\nDone.\n");

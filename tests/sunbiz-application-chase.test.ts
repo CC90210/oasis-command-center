@@ -4,6 +4,7 @@ import {
   APPLICATION_LINK_TOKEN,
 } from "../lib/drips/sunbiz-application-chase";
 import { matchPositioningPhrases, matchLenderNames } from "../lib/integrations/blast-safety-core";
+import { SUNBIZ_DEFAULT_SEQUENCES } from "../lib/sunbiz-default-sequences";
 
 /**
  * The Form 2 completion chase. Every assertion here corresponds to a rule that
@@ -130,5 +131,31 @@ for (const [i, step] of STEPS.slice(1).entries()) {
     `step ${i + 1} fires only ${step.delay_minutes} minutes after the previous one`,
   );
 }
+
+// ---------------------------------------------------------------------------
+// 7. The SEEDED defaults must agree. Removing the banned SMS only from the live
+//    database leaves the next seeded tenant, or any reconcile-from-defaults, to
+//    quietly reintroduce it. (Codex review P1, round 3.)
+// ---------------------------------------------------------------------------
+const APPLICATION_SEQUENCES = [
+  "Viewed application nudge",
+  "Signed application - bank statements nag",
+];
+for (const name of APPLICATION_SEQUENCES) {
+  const seq = SUNBIZ_DEFAULT_SEQUENCES.find((s) => s.name === name);
+  assert.ok(seq, `seeded sequence "${name}" not found — renamed? update this list, do not delete it`);
+  const sms = seq.steps.filter((s) => s.channel === "sms");
+  assert.equal(
+    sms.length,
+    0,
+    `seeded "${name}" still has ${sms.length} SMS step(s); no text may ask a merchant to complete or send application paperwork`,
+  );
+}
+// The chase seed must BE the shared definition, not a copy that can drift.
+assert.equal(
+  SUNBIZ_DEFAULT_SEQUENCES.find((s) => s.name === "Viewed application nudge")?.steps,
+  STEPS,
+  "the seed must reference the shared step list by identity, not duplicate it",
+);
 
 console.log(`ok sunbiz-application-chase (${STEPS.length} email steps, ${totalDays.toFixed(1)} days)`);
