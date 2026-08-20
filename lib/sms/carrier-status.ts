@@ -149,7 +149,24 @@ export function matchThreadMessage(
   let bestAt = Infinity;
   for (const m of messages) {
     if (String(m.direction ?? "").toLowerCase() !== "outbound") continue;
-    if (String(m.platform ?? "") !== "api") continue;
+    // ABSENT IS NOT "NOT API".
+    //
+    // This read `String(m.platform ?? "") !== "api"`, so a message object
+    // WITHOUT the field was rejected — and TextTorrent stopped returning
+    // `platform` on GET /inbox/{chatId}. Measured 2026-08-20: 47 receipts
+    // reached a real carrier verdict between 08-07 and 08-16 and then not one
+    // more; every receipt from 08-16 onward sat at 'unknown' while the body
+    // hash, the direction and the api_send_status were all present and correct
+    // on the message. A filter that excludes 100% of candidates does not look
+    // like a filter, it looks like a quiet provider.
+    //
+    // The filter's PURPOSE was to avoid matching a message a rep typed by hand
+    // in the TextTorrent UI. That still holds where the field exists, so it is
+    // enforced then — and where it does not, the body hash carries the
+    // identification, which is what it was built for. A human would have to
+    // retype our rendered copy byte for byte to collide.
+    const platform = m.platform == null ? "" : String(m.platform);
+    if (platform !== "" && platform !== "api") continue;
     if (hashBody(String(m.message ?? "")) !== target.bodyHash) continue;
     // Earliest first, so oldest-receipt-to-oldest-message pairing holds. An
     // unparseable timestamp sorts last rather than being discarded: a
