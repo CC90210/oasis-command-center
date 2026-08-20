@@ -138,6 +138,7 @@ const TESTS = [
   "tests/audience-narrowing.test.ts",
   "tests/web-leads-filters.test.ts",
   "tests/web-leads-queries.test.ts",
+  "tests/web-leads-data.test.ts",
 ];
 
 const NODE_ARGS = ["--conditions=react-server", "--import", "tsx"];
