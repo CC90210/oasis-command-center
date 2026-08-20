@@ -195,6 +195,17 @@ export const SUN_NAV: NavItem[] = [
 ];
 
 /**
+ * Oasis Web Studio — the web-design business. Separate entity from SunBiz
+ * (Adon 2026-08-20), sharing the portal and nothing else.
+ */
+export const WEBDEV_NAV: NavItem[] = [
+  { group: "Operations", href: "/", label: "Dashboard", icon: "LayoutDashboard" },
+  { group: "Pipeline", href: "/web-leads", label: "Leads", icon: "Users" },
+  { group: "System", href: "/team", label: "Team", icon: "UsersRound" },
+  { group: "System", href: "/settings", label: "Settings", icon: "Settings" },
+];
+
+/**
  * Suga Sean O'Malley nav — fan-ops + brand sidebar (Phase 1 scaffold).
  *
  * Placeholder routes that mostly point to /agent or generic stubs until the

@@ -150,6 +150,12 @@ const TESTS = [
   // Beside it deliberately: the profile module decides WHO a client's replies
   // come from, and this covers the rules that decision must satisfy.
   "tests/reply-identity.test.ts",
+  "tests/web-leads-filters.test.ts",
+  "tests/web-leads-queries.test.ts",
+  "tests/web-leads-data.test.ts",
+  "tests/web-leads-counters.test.ts",
+  "tests/web-leads-guards.test.ts",
+  "tests/web-leads-scope.test.ts",
 ];
 
 const NODE_ARGS = ["--conditions=react-server", "--import", "tsx"];
