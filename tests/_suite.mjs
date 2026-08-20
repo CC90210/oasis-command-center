@@ -125,6 +125,7 @@ const TESTS = [
   "tests/bulk-email-dispatch.test.ts",
   "tests/bulk-email-compose.test.ts",
   "tests/bulk-email-visibility.test.ts",
+  "tests/sunbiz-application-chase.test.ts",
   "tests/email-idempotency-marker.test.ts",
   "tests/watermark-large-pdf.test.ts",
   "tests/drip-activity.test.ts",

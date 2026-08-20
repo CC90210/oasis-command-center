@@ -24,6 +24,7 @@
  */
 
 import type { DripStep, DripTriggerFilter } from "./drips/types";
+import { SUNBIZ_VIEWED_APPLICATION_STEPS } from "./drips/sunbiz-application-chase";
 
 export type DefaultSequence = {
   name: string;
@@ -120,32 +121,23 @@ export const SUNBIZ_DEFAULT_SEQUENCES: DefaultSequence[] = [
   },
 
   // ─────────────────────────────────────────────────────────────────
-  // 2. Viewed application -> nudge : 2-touch
+  // 2. Viewed application -> Form 2 completion chase : 5 emails / ~5 days
+  //
+  // Rebuilt 2026-08-20. Was a 2-touch (one email, one SMS) that simply ran
+  // out: 234 leads sat in this stage with only 15 having any future contact
+  // booked. Now EMAIL ONLY (Adon: no SMS asking anyone to complete an
+  // application, "not even if it's a live sub") and long enough to actually
+  // land. The steps live in ./drips/sunbiz-application-chase so the seed, the
+  // live-tenant migration and the test all read ONE definition.
   // ─────────────────────────────────────────────────────────────────
   {
     name: "Viewed application nudge",
     description:
-      "Fires when a lead opens their personalized application link. Nudges them through the form.",
+      "Fires when a lead opens their personalized application link. Email-only chase to get Form 2 completed, ~5 days.",
     trigger_event: "BRAVO_RECORD_STATUS_CHANGED",
     trigger_filter: { entity: "lead", field: "stage", to: "viewed_application" },
     one_per_lead: true,
-    steps: [
-      {
-        channel: "email",
-        delay_minutes: 30,
-        from_label: "Solara",
-        subject: "Heads up on the application for {{lead.business_name}}",
-        body:
-          "Hi {{lead.contact_name}},\n\nWanted to follow up. Once you finish the application, my underwriters can review the file and come back with what we can do. The bank statements at step 3 are the gating piece; without them nothing can go into underwriting.\n\nIf anything's holding you up, reply here and I'll help.\n\nSolara, SunBiz Funding",
-      },
-      {
-        channel: "sms",
-        delay_minutes: 60 * 24, // 24h
-        from_label: "Solara",
-        body:
-          "Hi {{lead.contact_name}}, saw you opened the application. Anything I can clarify? It's 3 quick steps: basic info, the app itself, then 3 months of bank statements at the end.",
-      },
-    ],
+    steps: SUNBIZ_VIEWED_APPLICATION_STEPS,
   },
 
   // 2026-06-18 (CC): the "Submitted - underwriting wait" sequence was removed
@@ -289,7 +281,7 @@ export const SUNBIZ_DEFAULT_SEQUENCES: DefaultSequence[] = [
   // The form is 3-step: basic → app → bank statements. signed means
   // they finished steps 1+2; the bank-statements upload is the last
   // gate to underwriting. Without those statements underwriting can't
-  // price the deal. 12h SMS + 36h email.
+  // price the deal. Email only since 2026-08-20.
   // ─────────────────────────────────────────────────────────────────
   {
     name: "Signed application - bank statements nag",
@@ -307,13 +299,16 @@ export const SUNBIZ_DEFAULT_SEQUENCES: DefaultSequence[] = [
         body:
           "Hi {{lead.contact_name}},\n\nYour signed application is in. For my underwriters to review and price your file, I need 3 months of bank statements (PDF exports from your online banking work great).\n\nUpload at the same application link. Underwriting fires automatically once they land.\n\nSolara, SunBiz Funding",
       },
-      {
-        channel: "sms",
-        delay_minutes: 60 * 24 * 1.5, // ~36h
-        from_label: "Solara",
-        body:
-          "Nice, your application is signed. Last step is 3 months of bank statements (PDFs from your bank's online portal). Without them we can't price the deal. Upload at the same link.",
-      },
+      // SMS step removed 2026-08-20 (Adon): no text asking anyone to complete
+      // or send application paperwork, "not even if it's a live sub". Removing
+      // it HERE as well as on the live tenant matters — leaving it in the
+      // defaults means the next seeded tenant, or any reconcile-from-defaults,
+      // quietly reintroduces the exact message that was banned.
+      //
+      // It was also measurably pointless: of the 90 leads this sequence texted
+      // in the 30 days to 2026-08-20, ALL 90 already had their bank statements
+      // on file. It enrols on the stage change and never checks whether the
+      // documents arrived.
     ],
   },
 
