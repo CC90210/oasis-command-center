@@ -244,6 +244,26 @@ assert.match(
 );
 assert.match(batchesRoute, /max: wanted \? DETAIL_MAX : LIST_SCAN_MAX/, "detail and list use different depths on purpose");
 assert.match(history, /Showing the most recent sends only/, "and the operator is told when the window cut off");
+
+// 🚨 The send dialog tells the operator to come back here for the live count
+// while a batch drains. A view that loads once and freezes makes that
+// instruction false. (Codex review P2, 2026-08-20 round 7.)
+assert.match(
+  history,
+  /const anyInFlight = \(batches \|\| \[\]\)\.some\(\(b\) => b\.in_flight\);/,
+  "history knows when something is still draining",
+);
+assert.match(
+  history,
+  /if \(!open \|\| !anyInFlight\) return;\s*\n\s*const id = setInterval\(/,
+  "and polls only then, so a quiet history view costs nothing",
+);
+assert.match(
+  history,
+  /const openBatch = expandedRef\.current;\s*\n\s*if \(openBatch\) void loadRows\(openBatch\);/,
+  "an expanded in-flight batch refreshes its recipient rows too, not just the total",
+);
+assert.match(history, /return \(\) => clearInterval\(id\);/, "and the interval is cleaned up");
 // Turso shim: object-containment (.contains) NEVER matches an object column.
 assert.ok(!/\.contains\(/.test(batchesRoute), "no .contains() — dead on the Turso adapter");
 assert.ok(!/\.contains\(/.test(bulkRoute), "no .contains() in the bulk route either");

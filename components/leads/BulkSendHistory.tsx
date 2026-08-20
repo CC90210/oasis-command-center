@@ -13,7 +13,7 @@
  * non-admin only their own sends.
  */
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import {
   History,
@@ -58,6 +58,15 @@ type Row = {
 };
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * While a batch is draining, this view is the live count the send dialog tells
+ * the operator to come back to. Loading once and freezing would make that
+ * instruction false, which is the same "the screen does not reflect reality"
+ * defect this whole feature exists to remove.
+ * (Codex review P2, 2026-08-20 round 7.)
+ */
+const POLL_MS = 5000;
 
 /** Local time, because the operator is reconciling against their own inbox. */
 function when(iso: string | null): string {
@@ -108,6 +117,24 @@ export function BulkSendHistory({ open, onClose }: { open: boolean; onClose: () 
     void load();
   }, [open, load]);
 
+  /** Fetch (or re-fetch) one batch's per-recipient rows. */
+  const loadRows = useCallback(async (batchId: string) => {
+    // Rows queued before batch tagging shipped are grouped under a synthetic
+    // "legacy:<timestamp>" key, which the API rejects as a non-UUID. Show the
+    // rollup we already have rather than firing a request that 400s.
+    if (!UUID_RE.test(batchId)) {
+      setRows((cur) => ({ ...cur, [batchId]: [] }));
+      return;
+    }
+    try {
+      const r = await fetch(`/api/leads/bulk/batches?batch_id=${encodeURIComponent(batchId)}`);
+      const body = (await r.json().catch(() => ({}))) as { ok?: boolean; rows?: Row[] };
+      if (body?.ok) setRows((cur) => ({ ...cur, [batchId]: body.rows || [] }));
+    } catch {
+      /* the row list is a detail view; the rollup above is still accurate */
+    }
+  }, []);
+
   const toggle = useCallback(
     async (batchId: string) => {
       if (expanded === batchId) {
@@ -115,24 +142,33 @@ export function BulkSendHistory({ open, onClose }: { open: boolean; onClose: () 
         return;
       }
       setExpanded(batchId);
+      // Cached rows are fine to show immediately; the poll below re-fetches
+      // them for as long as the batch is still draining.
       if (rows[batchId]) return;
-      // Rows queued before batch tagging shipped are grouped under a synthetic
-      // "legacy:<timestamp>" key, which the API rejects as a non-UUID. Show the
-      // rollup we already have rather than firing a request that 400s.
-      if (!UUID_RE.test(batchId)) {
-        setRows((cur) => ({ ...cur, [batchId]: [] }));
-        return;
-      }
-      try {
-        const r = await fetch(`/api/leads/bulk/batches?batch_id=${encodeURIComponent(batchId)}`);
-        const body = (await r.json().catch(() => ({}))) as { ok?: boolean; rows?: Row[] };
-        if (body?.ok) setRows((cur) => ({ ...cur, [batchId]: body.rows || [] }));
-      } catch {
-        /* the row list is a detail view; the rollup above is still accurate */
-      }
+      await loadRows(batchId);
     },
-    [expanded, rows],
+    [expanded, rows, loadRows],
   );
+
+  /** Keep the interval out of the expand/collapse dependency chain. */
+  const expandedRef = useRef<string | null>(null);
+  useEffect(() => {
+    expandedRef.current = expanded;
+  }, [expanded]);
+
+  // Poll ONLY while something is actually in flight, so a quiet history view
+  // costs nothing. Refreshes the open batch's recipient rows too, otherwise an
+  // expanded in-flight batch shows a frozen list under a moving total.
+  const anyInFlight = (batches || []).some((b) => b.in_flight);
+  useEffect(() => {
+    if (!open || !anyInFlight) return;
+    const id = setInterval(() => {
+      void load();
+      const openBatch = expandedRef.current;
+      if (openBatch) void loadRows(openBatch);
+    }, POLL_MS);
+    return () => clearInterval(id);
+  }, [open, anyInFlight, load, loadRows]);
 
   if (!open || typeof document === "undefined") return null;
 
