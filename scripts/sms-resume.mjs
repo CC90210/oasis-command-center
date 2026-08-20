@@ -56,21 +56,42 @@ const caps = await db.from("drip_channel_limits").update({
 if (caps.error) { console.error(`FAILED to set caps: ${caps.error.message}`); process.exit(1); }
 console.log(`\ncaps set to ${plan.dailyCap}/day, ${plan.hourlyCap}/hour`);
 
-// 2. Re-enable the SMS-first sequences the halt disabled.
-const seqs = await db.from("drip_sequences").select("id, name, steps").eq("tenant_id", TENANT).eq("enabled", false);
-if (seqs.error) { console.error(`FAILED to read sequences: ${seqs.error.message}`); process.exit(1); }
+// 2. Re-enable ONLY what the halt turned off.
+//
+// The first cut asked "which SMS sequences are disabled?" and enabled all of
+// them. Run live on 2026-08-20 it switched on SIX, but the halt had disabled
+// four: "Submitted - underwriting wait" and "Inquiry Welcomer" were off by
+// Adon's decision long before any of this, and the resume silently reversed
+// that. I had to turn them back off by hand.
+//
+// Restoring a backup is not the same as turning everything on. A resume script
+// must not be able to start something a human deliberately stopped, so the list
+// is EXPLICIT and anything not named stays exactly as it is.
+const HALTED_BY_THE_2026_08_20_STOP = [
+  "Accelerated statement chase",
+  "Sent application - completion drip",
+  "Live Subs - broker intro (SMS)",
+  "Follow-up (phone only) - SMS",
+];
+const only = process.argv.includes("--sequences")
+  ? String(process.argv[process.argv.indexOf("--sequences") + 1] || "").split(",").map((x) => x.trim()).filter(Boolean)
+  : HALTED_BY_THE_2026_08_20_STOP;
+
 let enabled = 0;
-for (const s of seqs.data || []) {
-  const steps = typeof s.steps === "string" ? JSON.parse(s.steps) : s.steps;
-  if (!Array.isArray(steps) || steps[0]?.channel !== "sms") continue;
-  const up = await db.from("drip_sequences").update({ enabled: true }).eq("id", s.id).eq("tenant_id", TENANT);
+let alreadyOn = 0;
+for (const name of only) {
+  const cur = await db.from("drip_sequences").select("id, enabled").eq("tenant_id", TENANT).eq("name", name).maybeSingle();
+  if (cur.error) { console.error(`  FAILED to read ${name}: ${cur.error.message}`); continue; }
+  if (!cur.data) { console.error(`  NOT FOUND: ${name} (nothing enabled)`); continue; }
+  if (cur.data.enabled === true || cur.data.enabled === 1) { alreadyOn++; continue; }
+  const up = await db.from("drip_sequences").update({ enabled: true }).eq("id", cur.data.id).eq("tenant_id", TENANT);
   // The adapter RETURNS errors rather than throwing; ignoring this would report
   // a resume that never happened.
-  if (up.error) { console.error(`  FAILED to enable ${s.name}: ${up.error.message}`); continue; }
-  console.log(`  re-enabled: ${s.name}`);
+  if (up.error) { console.error(`  FAILED to enable ${name}: ${up.error.message}`); continue; }
+  console.log(`  re-enabled: ${name}`);
   enabled++;
 }
-console.log(`${enabled} SMS sequence(s) re-enabled`);
+console.log(`${enabled} SMS sequence(s) re-enabled, ${alreadyOn} already on. Nothing else was touched.`);
 
 // 3. Optionally re-queue the halted leads. Cancelled rows do not block
 //    re-enrolment (the enroller's prior-run check excludes 'cancelled'), so the
