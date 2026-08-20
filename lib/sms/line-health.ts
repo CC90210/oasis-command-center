@@ -13,6 +13,7 @@
 import "server-only";
 import { readRecentReceiptsByLine } from "./delivery-receipts";
 import { sendableLines, wireDecision, type LineDecision } from "./line-health-core";
+import { canaryStatus } from "./canary";
 import { sendTelegram } from "@/lib/notify/telegram";
 import { shouldAlert } from "@/lib/notify/alert-decay";
 import { getServiceSupabase } from "@/lib/supabase-server";
@@ -48,13 +49,45 @@ export async function sendablePool(
   const wire = samples === null ? null : wireDecision(samples);
   const { lines, blocked, reason } = sendableLines(pool, samples);
 
+  // THE CANARY ALLOW-LIST IS ENFORCED HERE, NOT AT RESUME (Codex P1,
+  // 2026-08-20).
+  //
+  // resumePlan() computes which lines cleared, but a resume script that merely
+  // raises the caps does not stop the executor picking a line the canary just
+  // refused — it would take three PRODUCTION failures per bad line to bench it,
+  // which on the six dead numbers is eighteen texts aimed at real merchants.
+  //
+  // Enforcing it here instead means the allow-list applies on every dispatch
+  // forever, not once at the moment someone runs a script, and there is no
+  // second copy of the truth to go stale.
+  //
+  // ONE canary failure is enough, where production needs three: a canary is
+  // sent to a handset we control, so a refusal is unambiguously about the LINE.
+  // A production failure could just as easily be a landline on the far end.
+  const canary = await canaryStatus(tenantId, { lines: pool });
+  if (canary.error) {
+    // Fail closed: we cannot tell which lines were cleared.
+    return { lines: [], blocked, wireHalted: false, reason: `canary history unreadable: ${canary.error}` };
+  }
+  const canaryFailed = new Set(canary.results.filter((r) => r.verdict === "failed").map((r) => r.number));
+  const allowed = lines.filter((n) => !canaryFailed.has(n));
+  for (const n of canaryFailed) {
+    if (blocked.some((b) => b.number === n)) continue;
+    blocked.push({ number: n, bench: true, consecutiveFailures: 0, sample: 0, reason: "refused a canary test send" });
+  }
+
   if (wire?.halt) {
     // A halted wire overrides the per-line result: five consecutive failures
     // across the route means the route is dead, and picking whichever line has
     // not personally reached three yet just burns it next.
     return { lines: [], blocked, wireHalted: true, reason: wire.reason };
   }
-  return { lines, blocked, wireHalted: false, reason };
+  return {
+    lines: allowed,
+    blocked,
+    wireHalted: false,
+    reason: canaryFailed.size > 0 ? `${reason}; ${canaryFailed.size} refused a canary` : reason,
+  };
 }
 
 function esc(s: string): string {

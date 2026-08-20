@@ -87,4 +87,63 @@ assert.ok(
   );
 }
 
+// ── CODEX P1: BOTH new mechanisms must have a PRODUCTION CALLER ──────────
+// Found in review 2026-08-20, and it is the same bug class the whole day was
+// spent on: a mechanism that exists, is correct, and is never invoked.
+{
+  const lh = readFileSync(new URL("../lib/sms/line-health.ts", import.meta.url), "utf8");
+
+  // 1. The canary allow-list is enforced at DISPATCH, not at resume.
+  //    resumePlan() knows which lines cleared, but a script that only raises
+  //    the caps cannot stop the executor picking a line the canary just
+  //    refused — it would take three PRODUCTION failures per bad line, which on
+  //    the six dead numbers is eighteen texts aimed at real merchants.
+  assert.ok(
+    lh.includes("const canary = await canaryStatus(tenantId, { lines: pool });"),
+    "the sending pool must consult canary verdicts on every dispatch",
+  );
+  assert.ok(
+    lh.includes('canary.results.filter((r) => r.verdict === "failed")'),
+    "a line that refused a canary must be excluded",
+  );
+  assert.ok(
+    lh.includes("const allowed = lines.filter((n) => !canaryFailed.has(n));"),
+    "and the filtered list must be what is returned, not the unfiltered one",
+  );
+  assert.ok(
+    lh.includes("return { lines: allowed,") || /lines: allowed,/.test(lh),
+    "the returned pool must be the canary-filtered one",
+  );
+  // Fail closed: an unreadable canary history must not mean "everything is fine".
+  assert.ok(
+    lh.includes("canary history unreadable"),
+    "an unreadable canary history must empty the pool, not pass it through",
+  );
+
+  // 2. Destination health must actually be materialised on a schedule.
+  //    refreshDestinationHealth had NO production caller, and a missing row
+  //    reads as textable by design, so the landline gate was a permanent no-op.
+  const cron = readFileSync(new URL("../app/api/cron/reconcile-sms/route.ts", import.meta.url), "utf8");
+  assert.ok(
+    cron.includes("await refreshDestinationHealth(t)"),
+    "the landline table must be refreshed by a scheduled job, or the gate never has data",
+  );
+  assert.ok(
+    /import \{ refreshDestinationHealth \} from "@\/lib\/sms\/destination-health";/.test(cron),
+    "and the import must exist",
+  );
+  // It must not be able to take down reconciliation, which is the load-bearing
+  // job on that route.
+  assert.ok(
+    cron.includes("refreshDestinationHealth(t).catch("),
+    "a refresh failure must not abort the reconcile run",
+  );
+  // It runs AFTER the verdicts land, or it recomputes from a staler picture
+  // than the one that exists at that instant.
+  assert.ok(
+    cron.indexOf("reconcileReceipts(t,") < cron.indexOf("refreshDestinationHealth(t)"),
+    "the refresh must run after reconciliation, not before",
+  );
+}
+
 console.log("line-health-wired.test.ts — all assertions passed");
