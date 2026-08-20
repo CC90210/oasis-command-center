@@ -1,0 +1,326 @@
+/**
+ * scripts/migrate-application-chase.ts — rebuild the Form 2 completion chase
+ * on the live tenant, and re-engage the leads it had abandoned.
+ *
+ * WHY (Adon, 2026-08-20). Leads who finish the interest form land in
+ * `viewed_application` and must complete their personalised full application
+ * (Form 2). The chase was two steps, one email then one SMS, and simply ran
+ * out: 234 leads in the stage, 232 previously enrolled, and only 15 with any
+ * future contact booked. ~217 people were parked there receiving nothing.
+ *
+ * The reported cause was different from the real one. The unique Form 2 link
+ * was never missing: every one of these emails has carried the per-lead link
+ * since 2026-08-15. The defect was that the sequence ended.
+ *
+ * WHAT THIS DOES
+ *   1. Rewrites "Viewed application nudge" to the 5-email, ~5-day chase in
+ *      lib/drips/sunbiz-application-chase.ts (ONE shared definition, also used
+ *      by the tenant seed and the test).
+ *   2. Strips the SMS step from that sequence AND from "Signed application —
+ *      bank statements nag". Adon: no SMS asking anyone to complete an
+ *      application, "not even if it's a live sub". Measured the same day: of
+ *      the 90 leads the statements nag texted in 30 days, ALL 90 already had
+ *      their statements on file. 127 texts, none necessary.
+ *   3. Cancels in-flight SMS rows so nobody receives a text tomorrow from the
+ *      old shape.
+ *   4. CONTAINS THE SECOND ENGINE. `drip_runs` (the Next.js cron) and
+ *      `sequence_state` (the VPS sunbiz-sequence-runner) both read
+ *      drip_sequences.steps. 383 leads are enrolled on BOTH for this sequence.
+ *      The VPS side does not double-send today only because it fails every row
+ *      (668 failures; it expects body_text where the steps store body). That
+ *      is a loaded gun: repair the VPS runner and every merchant gets the whole
+ *      chase twice. This cancels its non-terminal rows for the sequences we
+ *      touch, leaving drip_runs the only writer.
+ *   5. --backfill re-engages the dormant leads in paced tranches, starting each
+ *      one at the step AFTER the last one they actually received, so nobody
+ *      gets the opener twice.
+ *
+ * DRY-RUN BY DEFAULT. Prints everything and writes nothing. `--apply` performs
+ * steps 1 to 4. `--backfill N` additionally enrols N dormant leads and requires
+ * --apply. Cancels use a CAS on status so a row the dispatcher claimed mid-run
+ * is left to the dispatcher's own recheck; `cancelled` keeps the row's history.
+ *
+ * Run:
+ *   node --conditions=react-server --import tsx scripts/migrate-application-chase.ts
+ *   node --conditions=react-server --import tsx scripts/migrate-application-chase.ts --apply
+ *   node --conditions=react-server --import tsx scripts/migrate-application-chase.ts --apply --backfill 40
+ */
+
+import { readFileSync } from "node:fs";
+
+function loadEnvFile(path: string): void {
+  let text: string;
+  try {
+    text = readFileSync(path, "utf8");
+  } catch {
+    return;
+  }
+  for (const line of text.split(/\r?\n/)) {
+    const m = /^\s*([A-Za-z0-9_]+)\s*=\s*(.*)$/.exec(line);
+    if (!m) continue;
+    let v = m[2].trim();
+    if (v.startsWith('"') && v.endsWith('"')) v = v.slice(1, -1);
+    if (!process.env[m[1]]) process.env[m[1]] = v;
+  }
+}
+loadEnvFile("C:/Users/echel/JARVIS/.env.agents");
+
+const APPLY = process.argv.includes("--apply");
+const backfillArg = process.argv.indexOf("--backfill");
+const BACKFILL = backfillArg >= 0 ? parseInt(process.argv[backfillArg + 1] || "0", 10) : 0;
+
+const TENANT_SLUG = "submissions";
+const CHASE = "Viewed application nudge";
+const STATEMENTS = "Signed application — bank statements nag";
+/** Statuses that still represent pending work. */
+const LIVE_RUN = ["scheduled", "pending"];
+const LIVE_STATE = ["scheduled", "pending", "claimed"];
+
+type Step = { channel?: string; delay_minutes?: number; subject?: string; body?: string };
+type Seq = { id: string; name: string; steps: Step[] };
+
+/** Set by main() once the env is loaded; the module imports must not run at
+ *  import time or they read env that loadEnvFile has not populated yet. */
+let db: Awaited<ReturnType<typeof import("@/lib/supabase-server").getServiceSupabase>>;
+let SUNBIZ_VIEWED_APPLICATION_STEPS: Array<{
+  channel: string; delay_minutes: number; subject?: string; body: string;
+}>;
+
+const log = (s = "") => console.log(s);
+const parseSteps = (raw: unknown): Step[] => {
+  if (Array.isArray(raw)) return raw as Step[];
+  try { return JSON.parse(String(raw)) as Step[]; } catch { return []; }
+};
+
+// ---------------------------------------------------------------------------
+async function main() {
+  const supa = await import("@/lib/supabase-server");
+  const chaseMod = await import("@/lib/drips/sunbiz-application-chase");
+  db = supa.getServiceSupabase();
+  SUNBIZ_VIEWED_APPLICATION_STEPS = chaseMod.SUNBIZ_VIEWED_APPLICATION_STEPS as typeof SUNBIZ_VIEWED_APPLICATION_STEPS;
+
+  log(`\n${"=".repeat(70)}`);
+  log(`  Form 2 completion chase migration   ${APPLY ? "*** APPLY ***" : "(dry run)"}`);
+  log(`${"=".repeat(70)}\n`);
+
+  const t = await db.from("tenants").select("id, slug").eq("slug", TENANT_SLUG).maybeSingle();
+  const tenantId = (t.data as { id?: string } | null)?.id;
+  if (!tenantId) {
+    console.error(`FAIL: tenant '${TENANT_SLUG}' not found. Refusing to guess.`);
+    process.exit(1);
+  }
+  log(`tenant ${TENANT_SLUG} = ${tenantId}\n`);
+
+  const seqRes = await db
+    .from("drip_sequences")
+    .select("id, name, steps")
+    .eq("tenant_id", tenantId)
+    .in("name", [CHASE, STATEMENTS]);
+  if (seqRes.error) {
+    console.error("FAIL: could not read sequences:", seqRes.error.message);
+    process.exit(1);
+  }
+  const seqs = (seqRes.data ?? []).map((r) => {
+    const row = r as { id: string; name: string; steps: unknown };
+    return { id: row.id, name: row.name, steps: parseSteps(row.steps) } as Seq;
+  });
+  const chase = seqs.find((s) => s.name === CHASE);
+  const statements = seqs.find((s) => s.name === STATEMENTS);
+  if (!chase) {
+    console.error(`FAIL: sequence "${CHASE}" not found on this tenant.`);
+    process.exit(1);
+  }
+
+  // ---- 1. the chase rewrite ------------------------------------------------
+  log("── 1. Viewed application nudge ────────────────────────────────────────");
+  log(`   BEFORE  ${chase.steps.length} steps`);
+  chase.steps.forEach((s, i) =>
+    log(`     ${i} [${s.channel}] +${s.delay_minutes}m  ${(s.subject || "(no subject)").slice(0, 52)}`),
+  );
+  log(`   AFTER   ${SUNBIZ_VIEWED_APPLICATION_STEPS.length} steps`);
+  SUNBIZ_VIEWED_APPLICATION_STEPS.forEach((s, i) =>
+    log(`     ${i} [${s.channel}] +${s.delay_minutes}m  ${(s.subject || "").slice(0, 52)}`),
+  );
+  const days = SUNBIZ_VIEWED_APPLICATION_STEPS.reduce((n, s) => n + s.delay_minutes, 0) / 1440;
+  log(`   span    ~${days.toFixed(1)} days, email only\n`);
+
+  // ---- 2. statements nag: drop SMS only -----------------------------------
+  let statementsKept: Step[] = [];
+  if (statements) {
+    statementsKept = statements.steps.filter((s) => (s.channel || "email") !== "sms");
+    const dropped = statements.steps.length - statementsKept.length;
+    log("── 2. Signed application, bank statements nag ─────────────────────────");
+    log(`   ${statements.steps.length} steps -> ${statementsKept.length} (dropping ${dropped} SMS)`);
+    log("   email steps are left exactly as they are\n");
+  } else {
+    log("── 2. Signed application nag: sequence not found, skipping\n");
+  }
+
+  const targetIds = [chase.id, ...(statements ? [statements.id] : [])];
+
+  // ---- 3. in-flight SMS rows ----------------------------------------------
+  const smsRuns = await db
+    .from("drip_runs")
+    .select("id, tenant_id, lead_id, sequence_name, step_index, status")
+    .eq("tenant_id", tenantId)
+    .in("sequence_id", targetIds)
+    .eq("channel", "sms")
+    .in("status", LIVE_RUN);
+  const smsRows = (smsRuns.data ?? []) as Array<{ id: string; sequence_name: string; status: string }>;
+  log("── 3. In-flight SMS (would text a merchant from the old shape) ────────");
+  log(`   ${smsRows.length} row(s) to cancel in drip_runs\n`);
+
+  // ---- 4. the second engine -----------------------------------------------
+  const stateRes = await db
+    .from("sequence_state")
+    .select("id, sequence_id, lead_id, status")
+    .eq("tenant_id", tenantId)
+    .in("sequence_id", targetIds)
+    .in("status", LIVE_STATE);
+  const stateRows = (stateRes.data ?? []) as Array<{ id: string; status: string }>;
+  log("── 4. Second engine containment (VPS sequence_state) ──────────────────");
+  log(`   ${stateRows.length} non-terminal row(s) to cancel so it cannot double-send\n`);
+
+  // ---- 5. who is dormant ---------------------------------------------------
+  const dormant = await findDormant(tenantId, chase.id);
+  log("── 5. Dormant leads in viewed_application ─────────────────────────────");
+  log(`   ${dormant.length} lead(s) with an email and NO pending contact`);
+  log(`   resume points: ${summarizeResume(dormant)}`);
+  if (BACKFILL > 0) log(`   this run would enrol ${Math.min(BACKFILL, dormant.length)}`);
+  else log(`   (pass --backfill N to enrol a tranche; nothing enrolled this run)`);
+  log("");
+
+  if (!APPLY) {
+    log("DRY RUN. Nothing written. Re-run with --apply.\n");
+    return;
+  }
+
+  // ---- writes --------------------------------------------------------------
+  const upd = await db
+    .from("drip_sequences")
+    .update({ steps: JSON.stringify(SUNBIZ_VIEWED_APPLICATION_STEPS), updated_at: new Date().toISOString() })
+    .eq("id", chase.id)
+    .eq("tenant_id", tenantId);
+  log(upd.error ? `   chase rewrite FAILED: ${upd.error.message}` : "   chase rewritten");
+
+  if (statements && statementsKept.length !== statements.steps.length) {
+    const u2 = await db
+      .from("drip_sequences")
+      .update({ steps: JSON.stringify(statementsKept), updated_at: new Date().toISOString() })
+      .eq("id", statements.id)
+      .eq("tenant_id", tenantId);
+    log(u2.error ? `   statements nag FAILED: ${u2.error.message}` : "   statements nag: SMS removed");
+  }
+
+  let cancelledRuns = 0;
+  for (const r of smsRows) {
+    const c = await db
+      .from("drip_runs")
+      .update({ status: "cancelled", last_error: "sms removed from application chase (2026-08-20)" })
+      .eq("id", r.id)
+      .eq("status", r.status); // CAS: leave anything the dispatcher just claimed
+    if (!c.error) cancelledRuns += 1;
+  }
+  log(`   cancelled ${cancelledRuns}/${smsRows.length} in-flight SMS run(s)`);
+
+  let cancelledState = 0;
+  for (const r of stateRows) {
+    const c = await db
+      .from("sequence_state")
+      .update({ status: "cancelled", last_error: "superseded by drip_runs; VPS runner contained (2026-08-20)" })
+      .eq("id", r.id)
+      .eq("status", r.status);
+    if (!c.error) cancelledState += 1;
+  }
+  log(`   cancelled ${cancelledState}/${stateRows.length} VPS sequence_state row(s)`);
+
+  if (BACKFILL > 0) {
+    const tranche = dormant.slice(0, BACKFILL);
+    let enrolled = 0;
+    for (const [i, lead] of tranche.entries()) {
+      const step = SUNBIZ_VIEWED_APPLICATION_STEPS[lead.resumeIndex];
+      if (!step) continue;
+      // Spread across the hour so a tranche never lands as one burst.
+      const when = new Date(Date.now() + step.delay_minutes * 60_000 + i * 90_000).toISOString();
+      const ins = await db.from("drip_runs").insert({
+        tenant_id: tenantId,
+        lead_id: lead.id,
+        sequence_id: chase.id,
+        sequence_name: CHASE,
+        step_index: lead.resumeIndex,
+        channel: "email",
+        scheduled_for: when,
+        status: "scheduled",
+      });
+      if (!ins.error) enrolled += 1;
+    }
+    log(`   enrolled ${enrolled}/${tranche.length} dormant lead(s); ${dormant.length - tranche.length} still waiting`);
+  }
+
+  log("\nDone.\n");
+}
+
+/**
+ * Leads sitting in viewed_application with a usable email and NOTHING pending.
+ * `resumeIndex` is the step AFTER the highest one they actually received, so a
+ * re-engaged lead never gets the opener twice.
+ */
+async function findDormant(tenantId: string, sequenceId: string) {
+  const recs = await db
+    .from("tenant_records")
+    .select("id, data")
+    .eq("tenant_id", tenantId)
+    .eq("entity_type", "lead")
+    .eq("data->>stage", "viewed_application");
+  const leads = ((recs.data ?? []) as Array<{ id: string; data: Record<string, unknown> }>).filter(
+    (r) => typeof r.data?.email === "string" && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(r.data.email as string),
+  );
+
+  const runs = await db
+    .from("drip_runs")
+    .select("lead_id, step_index, status, channel")
+    .eq("tenant_id", tenantId)
+    .eq("sequence_id", sequenceId);
+  const byLead = new Map<string, { pending: boolean; emailsSeen: Set<number> }>();
+  for (const r of (runs.data ?? []) as Array<{ lead_id: string; step_index: number; status: string; channel: string }>) {
+    const cur = byLead.get(r.lead_id) || { pending: false, emailsSeen: new Set<number>() };
+    if (LIVE_RUN.includes(r.status)) cur.pending = true;
+    // Count EMAILS RECEIVED, not the raw step index.
+    //
+    // The step numbering changed underneath these leads: the old sequence was
+    // [0 email, 1 SMS], the new one is five emails. Resuming at
+    // maxSentIndex + 1 would put anyone who got the old SMS at new step 2 and
+    // skip new step 1 — which is the strongest message in the arc (the bank
+    // statements are the gating piece). Measured on the live data that was 176
+    // of 217 leads silently robbed of the best email.
+    //
+    // Counting delivered EMAILS instead is stable across the renumbering: the
+    // old sequence had exactly one email, so a lead who received it resumes at
+    // index 1 and gets every new message exactly once.
+    if ((r.status === "sent" || r.status === "done") && (r.channel || "email") === "email") {
+      cur.emailsSeen.add(r.step_index);
+    }
+    byLead.set(r.lead_id, cur);
+  }
+
+  const out: Array<{ id: string; resumeIndex: number }> = [];
+  for (const lead of leads) {
+    const st = byLead.get(lead.id);
+    if (st?.pending) continue; // already being chased
+    const emailsReceived = st ? st.emailsSeen.size : 0;
+    if (emailsReceived >= SUNBIZ_VIEWED_APPLICATION_STEPS.length) continue; // arc complete
+    out.push({ id: lead.id, resumeIndex: emailsReceived });
+  }
+  return out;
+}
+
+function summarizeResume(rows: Array<{ resumeIndex: number }>): string {
+  const counts = new Map<number, number>();
+  for (const r of rows) counts.set(r.resumeIndex, (counts.get(r.resumeIndex) || 0) + 1);
+  return [...counts.entries()].sort((a, b) => a[0] - b[0]).map(([i, n]) => `step ${i}: ${n}`).join(", ") || "none";
+}
+
+main().catch((err) => {
+  console.error(err instanceof Error ? err.message : err);
+  process.exitCode = 1;
+});
