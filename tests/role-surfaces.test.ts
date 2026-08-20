@@ -299,6 +299,41 @@ assert.ok(
   "the sales branch must return before the founder dashboard is reachable",
 );
 
+/**
+ * AN UNAUTHORISED SESSION GETS NO TENANT DATA AT ALL.
+ *
+ * Regression lock on a bug this file did not originally catch. The `!surface.ok`
+ * branch used to render FounderToday with showFinancials={false} — which
+ * suppresses the MRR but NOT priorityInbound (the company mailbox), topOpenLead
+ * (a named lead and their phone) or pipelineBreakdown. Failing closed on one
+ * class of data while serving another is not failing closed.
+ *
+ * The financial-reader scan above could never have caught it: those readers live
+ * in FounderToday, and the scan only checks that the DISPATCHER does not name
+ * them. What matters here is which component the unauthorised branch reaches.
+ */
+{
+  const guard = dispatcherCode.indexOf("if (!surface.ok)");
+  assert.ok(guard > -1, "app/page.tsx must handle an unresolvable session explicitly");
+  const nextReturn = dispatcherCode.indexOf("if (surface.persona", guard);
+  assert.ok(nextReturn > guard, "could not delimit the unauthorised branch — this assertion is not proving anything");
+  const branch = dispatcherCode.slice(guard, nextReturn);
+  // Positive control: prove the slice actually captured the branch BODY. Without
+  // this, a refactor that moved the guard could leave `branch` near-empty and
+  // every "does not contain" assertion below would pass while proving nothing.
+  assert.ok(
+    branch.includes("Session not verified"),
+    "the unauthorised branch slice did not capture the rendered screen — the assertions below would be vacuous",
+  );
+  for (const leak of ["FounderToday", "DeliveryToday", "RepToday", "surface.tenantId", "profile={profile}"]) {
+    assert.equal(
+      branch.includes(leak),
+      false,
+      `the unauthorised-session branch reaches ${leak} — a session we cannot authorise must trigger no tenant read whatsoever`,
+    );
+  }
+}
+
 /* ── POSITIVE CONTROLS. Without these the block above could pass by scanning
  *    empty strings, and a green result would mean nothing. ─────────────────── */
 assert.ok(founderToday.length > 2000, "FounderToday.tsx did not load — the scan above proves nothing");
