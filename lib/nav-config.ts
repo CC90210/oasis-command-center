@@ -195,14 +195,18 @@ export const SUN_NAV: NavItem[] = [
 ];
 
 /**
- * Oasis Web Studio — the web-design business. Separate entity from SunBiz
- * (Adon 2026-08-20), sharing the portal and nothing else.
+ * The web-design leads browser (Adon 2026-08-20). This is NOT a separate
+ * client portal — the leads and the operators who work them both live in
+ * the OASIS AI command-center tenant (slug `oasis-ai-cc`), the same tenant
+ * CC_NAV serves. So this is CC_NAV plus one Leads entry, not a standalone
+ * nav: binding that tenant to a WEBDEV_NAV-only profile would strip the 11
+ * tabs its operators already use every day. (An earlier version of this
+ * feature shipped as a 4-entry standalone nav bound to a zero-user tenant
+ * slug `oasis-webdev` — invisible to everyone, see lib/web-leads/data.ts.)
  */
 export const WEBDEV_NAV: NavItem[] = [
-  { group: "Operations", href: "/", label: "Dashboard", icon: "LayoutDashboard" },
-  { group: "Pipeline", href: "/web-leads", label: "Leads", icon: "Users" },
-  { group: "System", href: "/team", label: "Team", icon: "UsersRound" },
-  { group: "System", href: "/settings", label: "Settings", icon: "Settings" },
+  ...CC_NAV,
+  { group: "Leads", href: "/web-leads", label: "Leads", icon: "Users" },
 ];
 
 /**

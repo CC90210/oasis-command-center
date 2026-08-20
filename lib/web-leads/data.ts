@@ -29,8 +29,18 @@ import { getServiceSupabase } from "@/lib/supabase-server";
 import type { WebLeadFilters } from "./filters";
 import type { Sheet } from "./queries";
 
-/** Oasis Web Studio. NOT SunBiz (aa04fa1f...), which this feature never reads. */
-export const WEBDEV_TENANT_ID = "42423fde-be8b-454f-932a-750e8c9b743d";
+/**
+ * OASIS AI command-center tenant (slug `oasis-ai-cc`) — where the web-design
+ * leads AND the operators who work them both live. NOT SunBiz (aa04fa1f...),
+ * which this feature never reads.
+ *
+ * Was 42423fde-be8b-454f-932a-750e8c9b743d ("Oasis Web Studio", slug
+ * `oasis-webdev`) until 2026-08-20: that tenant had ZERO users, so nobody
+ * could ever log in and see this feature. Repointed once the underlying
+ * leadgen_territories / leadgen_businesses / tenant_records rows were
+ * migrated to carry this tenant_id instead.
+ */
+export const WEBDEV_TENANT_ID = "ef8d389e-3f15-43f2-ae00-3660f69a1452";
 
 export const PAGE_SIZE = 50;
 
