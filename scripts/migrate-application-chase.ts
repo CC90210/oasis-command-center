@@ -353,8 +353,13 @@ async function main() {
     for (const [i, lead] of tranche.entries()) {
       const step = SUNBIZ_VIEWED_APPLICATION_STEPS[lead.resumeIndex];
       if (!step) continue;
-      // Spread across the hour so a tranche never lands as one burst.
-      const when = new Date(Date.now() + step.delay_minutes * 60_000 + i * 90_000).toISOString();
+      // Schedule SOON, not step.delay_minutes from now. That delay means "wait
+      // this long after the PREVIOUS step", and for these leads the previous
+      // step was days or weeks ago, so it has already elapsed. Re-applying it
+      // would stall a re-engagement by another full day for no reason. The
+      // remaining steps still chain on their real delays once this one sends.
+      // Spread across the tranche so it never lands as one burst.
+      const when = new Date(Date.now() + i * 90_000).toISOString();
       const ins = await db.from("drip_runs").insert({
         tenant_id: tenantId,
         lead_id: lead.id,
